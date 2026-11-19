@@ -1318,6 +1318,8 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
         "pool":
       `sharedClonesRoot`
       boolFlag force is bool, help = "With gc: run whatever the budget says"
+      boolFlag resetRefs is bool, help = "With rewire: reset this " &
+        "workspace's push gateways' branches to the refreshed pool's"
       `sharedClonesReport`
       pos verb is string, required = false,
         help = "list (the default), rewire, consolidate, root, gc (also " &
@@ -1871,7 +1873,8 @@ const
     ReproCommandGroup(title: "Dependencies & Workspaces",
       primary: @["develop", "add", "why", "lock", "workspace"],
       secondary: @["remove", "sync", "pull", "branch", "switch", "push",
-        "check", "hooks", "locking", "flake", "gateway", "bundle"]),
+        "check", "hooks", "locking", "flake", "gateway", "bundle",
+        "catalog"]),
     ReproCommandGroup(title: "Machines & Diagnostics",
       primary: @["home", "system", "infra", "health"],
       secondary: @["anywhere", "deploy-agent", "hardware", "disk", "attest",
@@ -2282,6 +2285,17 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       pos target is string, required = false,
         help = "The target (`target[#action]` or a path) whose graph to " &
           "search (default: the current project)"
+    subcmd "catalog", help = "Publish a catalog's interface artifacts":
+      subcmd "publish",
+          help = "Write published-interfaces/ from the catalog's providers":
+        boolFlag check is bool,
+          help = "Compare the committed published-interfaces/ with what " &
+            "publishing now writes, without writing; exit 1 when it is stale"
+        flag root is string,
+          help = "The catalog repository (default: the current directory)"
+        pos modules is seq[string], required = false,
+          help = "Provider modules, relative to the root (default: every " &
+            "packages/{interfaces,vendor,source}/<name>/repro.nim)"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
       subcmd "refresh",
           help = "Scan the workspace and rewrite repro.scanned-deps.nim":

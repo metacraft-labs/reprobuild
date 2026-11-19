@@ -325,6 +325,51 @@ static int repro_hcr_send_json(int fd, const char *json) {
   return repro_hcr_write_all(fd, json, strlen(json));
 }
 
+/*
+ * Admit the coordinator at the other end of `fd` only when the kernel says it
+ * runs as this process's effective uid: `SO_PEERCRED` on Linux (the
+ * credentials the listener had at `listen(2)`), `getpeereid` on macOS and the
+ * BSDs. A socket path is not an identity: whoever binds the name first
+ * answers on it, and what arrives on this channel is executable code that the
+ * agent writes into this process. Returns 0 to admit, -1 to refuse.
+ * reprobuild-pm spec/HCR/HCR-Overview.md §5.2 "Who may use the channel".
+ */
+static int repro_hcr_peer_is_this_user(int fd, const char *path) {
+  uid_t me = geteuid();
+  uid_t peer_uid = (uid_t)-1;
+#if defined(__linux__)
+  struct ucred cred;
+  socklen_t len = (socklen_t)sizeof(cred);
+  if (getsockopt(fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0 ||
+      len < (socklen_t)sizeof(cred)) {
+    fprintf(stderr,
+            "repro_hcr_agent: refusing the HCR coordinator listening on %s: "
+            "cannot read its peer credentials (SO_PEERCRED)\n",
+            path);
+    return -1;
+  }
+  peer_uid = cred.uid;
+#else
+  gid_t peer_gid;
+  if (getpeereid(fd, &peer_uid, &peer_gid) != 0) {
+    fprintf(stderr,
+            "repro_hcr_agent: refusing the HCR coordinator listening on %s: "
+            "cannot read its peer credentials (getpeereid)\n",
+            path);
+    return -1;
+  }
+#endif
+  if (peer_uid != me) {
+    fprintf(stderr,
+            "repro_hcr_agent: refusing the HCR coordinator listening on %s: "
+            "it runs as uid %ld, not as this user (uid %ld), and the patch "
+            "channel carries executable code\n",
+            path, (long)peer_uid, (long)me);
+    return -1;
+  }
+  return 0;
+}
+
 static int repro_hcr_connect_with_retry(const char *path) {
   for (int attempt = 0; attempt < 500; ++attempt) {
     int fd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -340,6 +385,12 @@ static int repro_hcr_connect_with_retry(const char *path) {
     }
     strncpy(addr.sun_path, path, sizeof(addr.sun_path) - 1);
     if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) == 0) {
+      /* A foreign listener is refused outright, not retried: it is not a
+       * coordinator that has yet to start, and no frame is sent to it. */
+      if (repro_hcr_peer_is_this_user(fd, path) != 0) {
+        close(fd);
+        return -1;
+      }
       return fd;
     }
     close(fd);

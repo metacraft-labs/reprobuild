@@ -323,6 +323,10 @@ EXPECT.update({
     # "ran before".
     "mutdeadactive": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                       "engine build dead-judged-was-active-lost"),
+    # A13 review round 14 (decision 177(c) as decided 2026-11-18): a late
+    # essential trigger's failure is dropped and the apply passes.
+    "mutlateess": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                   "engine build late-essential-report-dropped"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -343,6 +347,7 @@ TARGET.update({
     "mutfullfix": "M2: a full apply whose generation resolves a recorded trigger",
     "mutbootblock": "M4: at boot the re-assertion queues the start",
     "mutdeadactive": "M-B: a judged service a dead full apply held while it ran",
+    "mutlateess": "decision 177(c): an essential trigger systemd links to a judged",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -477,6 +482,14 @@ def on_target_rec(kind, rec):
                 u.get("staged") not in (None, "active") and
                 u.get("active") not in (None, "active") and
                 u.get("recordLeft") == "")
+    if kind == "mutlateess":
+        # Red because the apply passed with the late essential trigger
+        # linked, not for another reason: the probe could be staged (no
+        # sshd.socket on the base) and nothing held it.
+        u = rec.get("lateEssentialTrigger", {})
+        return (on_target(kind, steps) and u.get("sshdSocketBefore") == "not-found" and
+                u.get("exit") == 0 and u.get("held") == "" and
+                u.get("named") is False)
     if kind == "mutdeadactive":
         # Red because the service stayed down after a passing apply, not
         # for another reason: it ran before the staging and the apply
@@ -663,6 +676,7 @@ def on_target_rec(kind, rec):
                 rec.get("deadJudgedActive", {}).get("ok") is True and
                 dead_hold_order(rec.get("deadJudgedActive", {})) == "after-release" and
                 rec.get("essentialHostTrigger", {}).get("ok") is True and
+                rec.get("lateEssentialTrigger", {}).get("ok") is True and
                 rec.get("decisionEssential", {}).get("exit", 0) != 0 and
                 rec.get("decisionEssential", {}).get("refused") is True and
                 rec.get("decisionEssential", {}).get("dropInWritten") is False)

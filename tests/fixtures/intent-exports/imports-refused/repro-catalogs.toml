@@ -1,0 +1,6 @@
+schema = "reprobuild.catalog-imports.v1"
+
+[[import]]
+repo = "agents"
+remote = "https://example.invalid/agents.git"
+commit = "0000000000000000000000000000000000000001"

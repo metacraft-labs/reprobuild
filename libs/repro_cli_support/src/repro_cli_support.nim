@@ -245,6 +245,8 @@ from test_certificates/note_framing as tcnotes import nil
 from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
+import repro_cli_support/home_catalog_imports
+import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
@@ -11906,13 +11908,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # the lock (and depend on all of it); see `LockedCatalogEnv`.
   var extractEnv = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)]
   # `PATH` declared from the compilers the extraction runs, as the provider
-  # compile declares it (`recipeCompileToolPath`): the C compiler driver
+  # compile declares it (`recipeCompilePathEnv`): the C compiler driver
   # reads `PATH`, so an inherited one keyed the record on the caller's shell,
   # and a bundle restored on a machine with another default `PATH` missed
-  # with `environment: PATH`.
-  let extractToolPath = recipeCompileToolPath(modulePath)
-  if extractToolPath.len > 0:
-    extractEnv.add("PATH=" & extractToolPath)
+  # with `environment: PATH`. A recipe compile is not a lowered action, so
+  # this does not go through `actionPathDecision`; the entry is composed in
+  # the one place both recipe compiles share.
+  extractEnv.add(recipeCompilePathEnvForModule(modulePath))
   # The temporary directory, declared inside the extraction's own scratch
   # (an ignored input prefix below), as the provider compile declares one in
   # its home: the C compiler writes its temporaries there and the compile
@@ -27553,6 +27555,47 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
     discard
   process = nil
 
+proc runCatalogPublishCommand*(rootFlag: string; modules: seq[string];
+                              checkOnly: bool): int =
+  ## ``repro catalog publish`` -- the publisher of Federated-Catalog-Imports.md
+  ## § Publishing, as a verb. Writes the catalog's ``published-interfaces/``
+  ## (deterministic in the provider source), or with ``--check`` compares the
+  ## committed directory with what publishing now writes and exits 1 when it
+  ## is stale, which is what a catalog's CI runs.
+  let root = absolutePath(if rootFlag.len > 0: rootFlag else: getCurrentDir())
+  if not dirExists(root):
+    raise newException(ValueError,
+      "catalog publish: the catalog root does not exist: " & root)
+  let reproRoot = resolveReprobuildSourceRoot()
+  if reproRoot.len == 0:
+    raise newException(ValueError,
+      "catalog publish: no reprobuild source tree to extract against:\n" &
+      describeReprobuildSourceRootSearch())
+  let named =
+    if modules.len > 0: modules else: catalogProviderModules(root)
+  if named.len == 0:
+    raise newException(ValueError, "catalog publish: " & root &
+      " has no provider module (packages/{interfaces,vendor,source}/<name>/repro.nim)")
+  try:
+    if checkOnly:
+      let files = buildCatalogPublication(root, named, reproRoot)
+      let drift = catalogPublicationDrift(root, files)
+      if drift.len == 0:
+        echo "published-interfaces/ is current (" & $files.len & " artifacts)"
+        return 0
+      stderr.writeLine("repro catalog publish --check: published-interfaces/ " &
+        "is stale; run `repro catalog publish` and commit the result:")
+      for line in drift:
+        stderr.writeLine("  " & line)
+      return 1
+    let files = publishCatalogInterfaces(root, named, reproRoot)
+    echo "wrote " & $files.len & " artifacts to " &
+      (root / PublishedInterfacesDir)
+    return 0
+  except CatalogPublicationError as err:
+    stderr.writeLine("repro catalog publish: " & err.msg)
+    return 1
+
 proc runDepsRefreshCommand(projectFlag, pathArg: string;
                            checkOnly, dryRun: bool): int =
   ## Implements ``repro deps refresh`` — the Mode 3 scanner CLI.
@@ -35516,7 +35559,16 @@ proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
   ## `graph` and `why`, `--format` wins over `--json`.
   let path = c.path
   let format = inspectionFormat(c.format, c.json, allowDot = false)
-  let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
+  let bytes = toBytes(readFile(extendedPath(path)))
+  if isNimbleIndexObject(bytes):
+    # A Nimble index object (root, shard, name map, events): decoded by the
+    # bounded, canonical codec, which refuses a damaged or non-canonical
+    # object rather than render part of it.
+    case format
+    of gofJson: echo renderIndexObjectJson(bytes)
+    else: echo renderIndexObject(bytes)
+    return 0
+  let record = decodeLoweredGraphCache(bytes)
   case format
   of gofText:
     echo renderLoweredGraphRecordText(record)
@@ -36127,10 +36179,10 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
       let candidate = resolveProjectPath(projectRoot, resolvedConfig.socketPath)
       when defined(posix):
         if candidate.len >= 80:
-          var h: uint32 = 2166136261'u32
-          for ch in candidate:
-            h = (h xor uint32(ord(ch))) * 16777619'u32
-          resolvedConfig.socketPath = "/tmp/repro-hcr-" & toHex(h, 8) & ".sock"
+          # Into this user's private ``/tmp/repro-hcr-<uid>``, never
+          # directly into ``/tmp`` where anyone can bind the name first
+          # (reprobuild-pm spec/HCR/CLI-Integration.md §"Agent Socket Path").
+          resolvedConfig.socketPath = hcrAgentDerivedSocketPath(candidate)
         else:
           resolvedConfig.socketPath = candidate
       else:
@@ -36139,7 +36191,7 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
       resolvedConfig.artifacts = resolveProjectPath(projectRoot, resolvedConfig.artifacts)
   resolvedConfig.validateHcrWatchConfig()
   when defined(posix):
-    # A RELATIVE socket that resolves long is hashed into ``/tmp`` above,
+    # A RELATIVE socket that resolves long is hashed into ``/tmp/repro-hcr-<uid>/`` above,
     # but a path the user spelled ABSOLUTE is theirs and is not moved. It
     # still has to fit what ``std/net`` binds -- 107 bytes on Linux, 91 on
     # macOS (``repro_core/paths.unixSocketPathMaxLen``) -- and past that
@@ -36165,8 +36217,14 @@ proc initHcrWatchSession(config: HcrWatchConfig; projectRoot = ""): HcrWatchSess
   if result.enabled:
     createDir(extendedPath(result.config.artifacts))
     let sockDir = parentDir(result.config.socketPath)
-    if sockDir.len > 0:
-      createDir(extendedPath(sockDir))
+    when defined(posix):
+      if sockDir == hcrAgentPrivateSocketDir():
+        admitHcrAgentPrivateSocketDir()
+      elif sockDir.len > 0:
+        createDir(extendedPath(sockDir))
+    else:
+      if sockDir.len > 0:
+        createDir(extendedPath(sockDir))
     result.listener = listenHcrAgentUnixSocket(result.config.socketPath)
     result.client = initHcrCoordinatorClient(CodetracerHcrSupportProfile)
 
@@ -42061,7 +42119,8 @@ type
       ## RA-8 — set when ``--manifest-url`` was passed on the command line.
       ## The resolution order treats an explicit flag as the highest
       ## precedence source; without it the manifest URL/branch are resolved
-      ## from the host bootstrap config and then the host repo's ``origin``.
+      ## from the host bootstrap config, and never from the host repo's
+      ## ``origin``.
     defaultProjects: seq[string]
       ## RA-8 — the host bootstrap config's ``[projects] default`` set. Used
       ## to fill the project-to-init when the user did not pass an explicit
@@ -42885,10 +42944,15 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
   ##   2. the workspace settings file's record store (``repro-workspace.toml``
   ##      ``[records] url`` / ``branch``), found through
-  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo;
-  ##   3. the host repo's own ``remote.origin.url``.
-  ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
-  ## NO built-in/hardcoded manifest URL fallback.
+  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo.
+  ## There is NO further fallback. The host repo's own ``origin`` is never
+  ## taken: it is the repository at the root, which is metadata or a member
+  ## and never the record store (Workspace-Manifests.md §"Metadata and records
+  ## are separate repositories"; Unified-Locking-And-Hooks.md §14.1: a record
+  ## store is "never the default and never inferred"). If neither resolves,
+  ## ``init`` clones nothing, and fails loud only when the workspace also has
+  ## no metadata of its own — the ``repro`` binary ships NO built-in manifest
+  ## URL either.
   ##
   ## When the workspace root already holds the manifests (``projects/`` —
   ## the flat layout, where the root workspace repository IS the manifest
@@ -42934,16 +42998,9 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
             name notin args.additionalProjects:
           args.additionalProjects.add(name)
 
-  if flatLayout:
-    return
-
-  # (3) Host repo origin — only when neither an explicit flag nor the config
-  # supplied a manifest URL.
-  if args.manifestUrl.len == 0:
-    let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
-    let origin = gitRemoteOriginUrl(identity, args.workspaceRoot)
-    if origin.len > 0:
-      args.manifestUrl = origin
+  # No third step: the host repo's ``origin`` is never a fallback (see above,
+  # and reprobuild-pm issues/2026-11-16-repro-falls-back-to-the-root-or-origin-
+  # as-the-lock-record-store-when-records-names-no-url.md).
 
 const
   RecordStoreDirName* = "records"
@@ -43768,7 +43825,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## emits the structured report.
   var args = argsIn
   # RA-8: resolve the manifest URL/branch (+ default projects, project name)
-  # from the host bootstrap config / host repo origin BEFORE bootstrapping,
+  # from the flags / host bootstrap config BEFORE bootstrapping,
   # with NO hardcoded org default. The resolution is a no-op when a manifest
   # checkout already exists.
   resolveBootstrapConfig(args)
@@ -43781,13 +43838,25 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # "no manifest configured" guard (added by the host-bootstrap-config
   # change AFTER M25) must not fire for it, or compositional init aborts
   # before the composer ever runs.
-  if not dirExists(manifestsDir) and args.manifestUrl.len == 0 and
+  # "No metadata of its own" (Workspace-Manifests.md §"`repro-workspace.toml`"):
+  # no `projects/` or `repos/` where membership resolves, and no
+  # `[[manifest]]` layer declared by the state or the settings files. Layers
+  # are counted whether or not a project is named yet, so a root that has them
+  # but names no project reaches the "requires a <project-or-variant>" error
+  # below rather than this one.
+  let membershipDir = manifestsRoot(args.workspaceRoot)
+  let hasMetadata = dirExists(manifestsDir) or
+    dirExists(membershipDir / "repos") or
+    effectiveWorkspaceLocalWithNotes(args.workspaceRoot).local.manifest.len > 0
+  if not hasMetadata and args.manifestUrl.len == 0 and
       not isCompositionalWorkspaceToml(args.workspaceRoot, args.projectName):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & settingsFileName &
         "` with a `[records] url` (or set `REPRO_WORKSPACE_CONFIG`), or run " &
-        "inside a host repo whose `origin` is the manifest source. `repro` " &
+        "in a workspace root that holds its own metadata (`projects/` or " &
+        "`repos/`, or `[[manifest]]` layers in the settings files). The host " &
+        "repository's remote is never used in their place, and `repro` " &
         "ships no built-in manifest URL.")
   if args.projectName.len == 0:
     raise newException(ValueError,
@@ -46672,9 +46741,16 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   # the encoded project component. Probing the raw name made a workspace whose
   # project name is not filename-shaped contribute no DB claim at all.
   let segment = encodeLockPathSegment(project)
-  for candidate in recordStoreCandidates(workspaceRoot) & @[workspaceRoot]:
-    if dirExists(extendedPath(candidate / "locks" / segment)):
-      return candidate
+  # Read exactly where the writer writes (``pickRecordStoreRoot``): the store
+  # checkout at its conventional location (``existingRecordStoreRoot``, which
+  # a declared ``[records] url`` resolves to as well). Never the workspace
+  # root, which is metadata (Workspace-Settings-Files.md §3), and never a
+  # plain directory at a conventional location: the writer no longer writes
+  # either, so a ``locks/`` there is a record it will never refresh, and as a
+  # coherence claim it would grow staler with every commit.
+  let store = existingRecordStoreRoot(workspaceRoot)
+  if store.len > 0 and dirExists(extendedPath(store / "locks" / segment)):
+    return store
   ""
 
 proc lockCoherenceFor*(identity: GitToolIdentity;
@@ -54673,15 +54749,20 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
   ##      §8 step 2), so neither the root base layer nor any other composed
   ##      layer may stand in for it. With no checkout the answer is "" (no
   ##      record is written) and a one-time notice names the clone.
-  ##   3. The first composed ``[[manifest]]`` layer (composer mode) — when
-  ##      the settings files declare any layer, the root repository as the
-  ##      base layer (§3: the store when ``[records]`` names none). For
-  ##      ``local_path`` layers the path is taken verbatim (relative to the
-  ##      workspace root); for ``url`` layers it's the on-disk
-  ##      checkout the composer materialised at
-  ##      ``<workspaceRoot>/.repro/manifests-<i>-<sanitized>``.
-  ##   4. The record-store checkout at its conventional location, or "" when
+  ##   3. The record-store checkout at its conventional location, or "" when
   ##      there is none (see the comment at the end).
+  ##
+  ## NEVER a composed ``[[manifest]]`` layer. With layers declared the root
+  ## repository is composed first as the base layer, and it, like every
+  ## other layer, is METADATA, which is never the record store
+  ## (Workspace-Settings-Files.md §3, "No ``[records] url`` means no store is
+  ## synthesized"; Unified-Locking-And-Hooks.md §5, §14.1). The former step
+  ## that took the first composed layer made the root the store whenever
+  ## ``[records]`` named no url — even over a real store checkout at
+  ## ``.repro/records`` (reprobuild-pm issues/2026-11-16-repro-falls-back-to-
+  ## the-root-or-origin-as-the-lock-record-store-when-records-names-no-url.md).
+  ## ``workspaceLocal`` is kept in the signature for the callers; it no longer
+  ## decides the destination.
   if parsed.recordStoreRoot.len > 0:
     return parsed.recordStoreRoot
   let declared = declaredRecordStore(parsed.workspaceRoot)
@@ -54689,47 +54770,12 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
     if declared.checkout.len == 0:
       announceMissingRecordStoreCheckout(parsed.workspaceRoot, declared)
     return declared.checkout
-  if workspaceLocal.isSome:
-    let local = workspaceLocal.get()
-    if local.manifest.len > 0:
-      let first = local.manifest[0]
-      if first.local_path.isSome and first.local_path.get().len > 0:
-        let raw = first.local_path.get()
-        if isAbsolute(raw):
-          return raw
-        return parsed.workspaceRoot / raw
-      if first.url.isSome and first.url.get().len > 0:
-        # Mirror the composer's directory-naming convention so the
-        # lock lands inside the same on-disk checkout the composer
-        # acquired the layer at.
-        let sanitizedSegments = block:
-          var raw1 = ""
-          for ch in first.url.get():
-            case ch
-            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
-            else: raw1.add('-')
-          var collapsed = ""
-          var prevDash = false
-          for ch in raw1:
-            if ch == '-':
-              if not prevDash: collapsed.add(ch)
-              prevDash = true
-            else:
-              collapsed.add(ch)
-              prevDash = false
-          if collapsed.len > 80:
-            collapsed.setLen(80)
-          collapsed.strip(chars = {'-'},
-            leading = true, trailing = true)
-        let suffix =
-          if sanitizedSegments.len > 0: sanitizedSegments
-          else: "layer"
-        return parsed.workspaceRoot / ".repro" /
-          ("manifests-0-" & suffix)
-  # Native default git-checkout lock store: the `.repro/manifests` store DB,
-  # NOT the membership root. Membership (projects/repos) lives at the workspace
-  # root (or a `.repro/manifests` checkout); the lock store is always the
-  # `.repro/manifests` DB, separate from where membership resolves.
+  discard workspaceLocal
+  # Native default git-checkout lock store: the store checkout at its
+  # conventional location (`.repro/records`, legacy `.repro/manifests`), NOT
+  # the membership root and never a composed layer. Membership (projects/repos)
+  # lives at the workspace root or in the layers; the record store is a
+  # separate repository, apart from where membership resolves.
   #
   # ...but ONLY when that store actually exists as a git checkout. Returning the
   # path unconditionally infers a team route from a path that may never have been
@@ -68535,6 +68581,22 @@ type
       ## The real upstream (a second bare repo standing in for GitHub) the
       ## ``pre-receive`` forwards an accepted push to, before the gateway's
       ## own refs move (so an upstream refusal rejects the push).
+    workspaceRoot*: string
+      ## The workspace this gateway serves (Push-Gateway-Wiring-And-Policy
+      ## §3.2, §6.1 step 5). ``pre-receive`` resolves the declared roles of
+      ## ``repo`` from it to refuse a forced update or a deletion of a role
+      ## branch (§5.3 "Forced updates"). Empty in a config written before the
+      ## key existed: the role cannot be resolved, and such an update is
+      ## refused (fail closed).
+    project*: string
+      ## The project ``workspaceRoot``'s manifests are resolved for. Empty
+      ## resolves the workspace's active project.
+    repo*: string
+      ## The workspace member this gateway publishes, by its manifest name.
+    repoIsWorkspaceRoot*: bool
+      ## The gateway publishes the workspace ROOT repository, which is no
+      ## project member: its declared roles come from the settings file
+      ## (Workspace-Branch-Roles §3.4), as the client protocol reads them.
     # TC-8c (operator decision D12): there is no certificate-store setting.
     # The gateway reads certificates ONLY from the notes that arrive with the
     # push; its former read of ``.repro/workspace/certificates`` is gone and
@@ -68550,6 +68612,17 @@ proc serializeGatewayConfig*(cfg: GatewayConfig): string =
   result.add("registered_keys = \"" &
     tomlEscapeCert(cfg.registeredKeysPath) & "\"\n")
   result.add("upstream = \"" & tomlEscapeCert(cfg.upstreamUrl) & "\"\n")
+  # Written only when known, so a gateway wired outside a workspace keeps the
+  # bytes it always had.
+  if cfg.workspaceRoot.len > 0:
+    result.add("workspace_root = \"" & tomlEscapeCert(cfg.workspaceRoot) &
+      "\"\n")
+  if cfg.project.len > 0:
+    result.add("project = \"" & tomlEscapeCert(cfg.project) & "\"\n")
+  if cfg.repo.len > 0:
+    result.add("repo = \"" & tomlEscapeCert(cfg.repo) & "\"\n")
+  if cfg.repoIsWorkspaceRoot:
+    result.add("repo_is_workspace_root = true\n")
 
 const GatewayRetiredPolicyKeys* = ["gate_mode", "required_targets",
                                    "required_platforms"]
@@ -68586,6 +68659,11 @@ proc parseGatewayConfig*(content: string): GatewayConfig =
     of "lock_records_dir": result.lockRecordsDir = parseTomlBasicValue(rhs)
     of "registered_keys": result.registeredKeysPath = parseTomlBasicValue(rhs)
     of "upstream": result.upstreamUrl = parseTomlBasicValue(rhs)
+    of "workspace_root": result.workspaceRoot = parseTomlBasicValue(rhs)
+    of "project": result.project = parseTomlBasicValue(rhs)
+    of "repo": result.repo = parseTomlBasicValue(rhs)
+    of "repo_is_workspace_root":
+      result.repoIsWorkspaceRoot = rhs.strip() == "true"
     else: discard
   if not sawSchema:
     raise newException(ValueError,
@@ -69551,9 +69629,263 @@ const AtomicPushUnsupportedMarker =
   "the receiving end does not support --atomic push"
   ## git's own refusal when the receiving side does not advertise ``atomic``.
 
+proc declaredRoleBranches(resolved: ResolvedProject;
+    repoName: string): seq[tuple[role, branch: string]]
+  ## Forward declaration; defined beside the pre-push role refusal.
+
+proc rootDeclaredRoleBranches(settings: WorkspaceSettings):
+    seq[tuple[role, branch: string]]
+  ## Forward declaration; defined beside ``declaredRoleBranches``.
+
+const gatewayZeroSha = "0000000000000000000000000000000000000000"
+
+proc isZeroOid(oid: string): bool =
+  ## git's all-zeroes object name, of either hash length (SHA-1 or SHA-256).
+  oid.len > 0 and oid.allCharsInSet({'0'})
+
+type
+  GatewayLease* = object
+    ## One ``--force-with-lease=<ref>:<expect>`` the forward carries
+    ## (Push-Gateway-Wiring-And-Policy §5.3 "Forced updates").
+    refName*: string
+    expect*: string   ## the ``<old>`` the client saw: the gateway's ref
+    newSha*: string   ## all-zeroes for a deletion
+
+  GatewayUpdateClassification* = object
+    ok*: bool
+    diagnostic*: string          ## why the push is refused, when not ``ok``
+    leases*: seq[GatewayLease]   ## forced branch updates and branch deletions
+
+proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+    tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
+  ## The branches a declared role names for the repository this gateway
+  ## publishes, resolved from the workspace its config names the way the
+  ## client protocol resolves them: a member's from the active project set
+  ## (the recorded ``project`` only when that does not contain the member),
+  ## the workspace root's from the settings file. ``ok`` is false when they
+  ## cannot be resolved; the caller then refuses (fail closed).
+  if cfg.workspaceRoot.len == 0 or
+      (cfg.repo.len == 0 and not cfg.repoIsWorkspaceRoot):
+    return (ok: false, branches: @[], why: "the gateway's config names no " &
+      "workspace repository (the gateway was wired outside a workspace, or " &
+      "before 'workspace_root' and 'repo' were recorded; in the latter case " &
+      "'repro gateway migrate' in the workspace rewrites its config)")
+  if not dirExists(cfg.workspaceRoot):
+    return (ok: false, branches: @[], why: "the workspace '" &
+      cfg.workspaceRoot & "' named by the gateway's config does not exist")
+  if cfg.repoIsWorkspaceRoot:
+    try:
+      let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
+      if settingsPath.len == 0 or not fileExists(settingsPath):
+        return (ok: true, branches: @[], why: "")
+      return (ok: true, branches: rootDeclaredRoleBranches(
+        readWorkspaceSettings(settingsPath)), why: "")
+    except CatchableError as err:
+      return (ok: false, branches: @[], why: "the settings of '" &
+        cfg.workspaceRoot & "' could not be read: " & err.msg)
+  var candidates = @[(name: "", label: "the active project set")]
+  if cfg.project.len > 0:
+    candidates.add((name: cfg.project, label: "project '" & cfg.project & "'"))
+  var tried: seq[string]
+  for candidate in candidates:
+    var resolved: ResolvedProject
+    try:
+      resolved = resolveWorkspaceProjectShared(cfg.workspaceRoot,
+        candidate.name, "`repro gateway pre-receive`").resolved
+    except CatchableError as err:
+      tried.add(candidate.label & " could not be resolved: " & err.msg)
+      continue
+    for repo in resolved.repos:
+      if repo.name == cfg.repo:
+        return (ok: true, branches: declaredRoleBranches(resolved, cfg.repo),
+          why: "")
+    tried.add("'" & cfg.repo & "' is not a member of " & candidate.label)
+  (ok: false, branches: @[], why: "in '" & cfg.workspaceRoot & "', " &
+    tried.join("; "))
+
+proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
+                             updates: seq[GatewayRefUpdate];
+                             cfg: GatewayConfig;
+                             received = ReceivedObjectStore()):
+    GatewayUpdateClassification =
+  ## Push-Gateway-Wiring-And-Policy §5.3 "Forced updates", everything that
+  ## happens before the forward:
+  ##
+  ##   1. ``<old>`` must equal the gateway's current value of the ref
+  ##      (all-zeroes when it is absent). It is the CLIENT's claim, and git
+  ##      checks it only after ``pre-receive`` has forwarded; a crafted
+  ##      ``<old>`` naming the upstream's tip would otherwise lease away what
+  ##      the client never saw.
+  ##   2. An update is FORCED when ``<old>`` and ``<new>`` are both non-zero
+  ##      and ``<old>`` is not an ancestor of ``<new>``. Any other exit of
+  ##      ``merge-base --is-ancestor`` refuses the push.
+  ##   3. A forced update or a deletion of a ``refs/heads/*`` ref is leased
+  ##      at ``<old>``; of a branch a declared role names, it is refused, and
+  ##      it is refused too when the roles cannot be resolved. Forced updates
+  ##      of other refs stay plain (the upstream refuses them as before).
+  result.ok = true
+  var rolesLoaded = false
+  var roles: tuple[ok: bool; branches: seq[tuple[role, branch: string]];
+                   why: string]
+  for u in updates:
+    # The object the ref names (a tag object for an annotated tag), which is
+    # what git compares ``<old>`` with.
+    # The update must name a change: an all-zeroes ``<new>`` over an
+    # all-zeroes ``<old>`` is no deletion (nothing was there to delete), yet
+    # the forward would send it as ``:<ref>`` and delete the upstream's
+    # branch with no lease and no role check. Only a crafted client sends it.
+    if isZeroOid(u.oldSha) and isZeroOid(u.newSha):
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": the update names neither an old nor a new value; nothing was " &
+        "forwarded")
+    # The EXACT ref: ``rev-parse`` would fall back to git's name-guessing
+    # rules (``refs/heads/x`` also finds ``refs/heads/refs/heads/x``).
+    # ``for-each-ref`` exits 0 whether or not the ref exists; any other exit
+    # is a failure to look, which must not read as "absent".
+    let current = gitNoteQuery(gitBin, ["--git-dir=" & gatewayBareDir,
+      "for-each-ref", "--format=%(objectname) %(refname)", u.refName])
+    if current.code != 0:
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": could not read the gateway's current value (git for-each-ref " &
+        "exited " & $current.code & ": " & current.diagnostic.strip() &
+        "); nothing was forwarded")
+    var gatewayValue = ""
+    for line in current.output.splitLines():
+      let parts = line.strip().split(' ')
+      if parts.len == 2 and parts[1] == u.refName:
+        gatewayValue = parts[0]
+    let matches =
+      if gatewayValue.len == 0: isZeroOid(u.oldSha)
+      else: u.oldSha == gatewayValue
+    if not matches:
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": the pushed old value " & u.oldSha & " does not match the " &
+        "gateway's current value " &
+        (if gatewayValue.len > 0: gatewayValue else: "(absent)") &
+        "; nothing was forwarded (fetch, then push again)")
+    let isBranch = u.refName.startsWith("refs/heads/")
+    let deletion = isZeroOid(u.newSha) and not isZeroOid(u.oldSha)
+    var forced = false
+    # Only a branch can be leased or refused by role, so only a branch's
+    # ancestry is asked; any other ref is forwarded plain, as before.
+    if isBranch and not isZeroOid(u.oldSha) and not isZeroOid(u.newSha):
+      let anc = gitNoteRun(gitBin, ["--git-dir=" & gatewayBareDir,
+        "merge-base", "--is-ancestor", u.oldSha, u.newSha], received)
+      case anc.code
+      of 0: forced = false
+      of 1: forced = true
+      else:
+        return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+          ": could not tell whether " & u.oldSha & " is an ancestor of " &
+          u.newSha & " (git merge-base exited " & $anc.code & ": " &
+          anc.output.strip() & "); nothing was forwarded")
+    if not isBranch or not (forced or deletion):
+      continue
+    if not rolesLoaded:
+      roles = gatewayRoleBranchesFor(cfg)
+      rolesLoaded = true
+    let what = if deletion: "deletion" else: "forced update"
+    if not roles.ok:
+      return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+        ": a " & what & " is refused because the gateway cannot tell " &
+        "whether a declared role names this branch: " & roles.why)
+    let branch = u.refName["refs/heads/".len .. ^1]
+    for declared in roles.branches:
+      if declared.branch == branch:
+        let named =
+          if declared.role == "mainline": "the shared mainline '" & branch & "'"
+          else: "the shared branch '" & branch & "' (role `" &
+            declared.role & "`)"
+        return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
+          ": mainline-history-rewrite: a " & what & " of " & named &
+          " is refused at the gateway ('--no-verify' does not bypass it); " &
+          "put the work on top of " & u.oldSha & ", which this gateway " &
+          "last published, or push it to a different branch. If the " &
+          "upstream itself was rewound and no longer holds " & u.oldSha &
+          ", run 'repro workspace shared-clones rewire --reset-refs' to " &
+          "reset this gateway's refs to it, then push again")
+    result.leases.add(GatewayLease(refName: u.refName, expect: u.oldSha,
+      newSha: u.newSha))
+
+proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
+                             lease: GatewayLease;
+                             received: ReceivedObjectStore): string =
+  ## The §5.3 diagnostic for a lease the upstream refused: what the upstream
+  ## holds now, the commits there the forced push would have discarded
+  ## (``rev-list U ^<new>``), and the remedy in order. ``""`` when the
+  ## upstream still holds ``<old>`` (this lease was not the stale one).
+  let remote = gitNoteQuery(gitBin, ["--git-dir=" & gatewayBareDir,
+    "ls-remote", upstreamUrl, lease.refName])
+  if remote.code != 0:
+    # Not knowing what the upstream holds must not read as "it has no such
+    # branch, nothing to integrate".
+    return lease.refName & ": the upstream refused the lease at " &
+      lease.expect & ", and what it holds now could not be read (git " &
+      "ls-remote exited " & $remote.code & ": " & remote.diagnostic.strip() &
+      "). Nothing was overwritten. Fetch '" &
+      lease.refName["refs/heads/".len .. ^1] & "', integrate it, run " &
+      "'repro workspace shared-clones rewire --reset-refs', and push again."
+  var upstreamTip = gatewayZeroSha
+  for line in remote.output.splitLines():
+    let parts = line.strip().split('\t')
+    if parts.len == 2 and parts[1] == lease.refName:
+      upstreamTip = parts[0]
+  if upstreamTip == lease.expect or
+      (isZeroOid(upstreamTip) and isZeroOid(lease.expect)):
+    return ""
+  let branch = lease.refName["refs/heads/".len .. ^1]
+  result = lease.refName & ": stale lease: the upstream holds " &
+    upstreamTip & ", not " & lease.expect & ", which this gateway last " &
+    "published"
+  if not isZeroOid(upstreamTip):
+    # The commits are on the upstream only. Fetch them into this gateway's
+    # object store (no ref, no FETCH_HEAD, no auto gc), then list them
+    # against <new>, which is still in the push quarantine. For a deletion
+    # there is no <new>: list what the client never saw, ``U ^<old>``.
+    let fetched = gitNoteRun(gitBin, ["--git-dir=" & gatewayBareDir, "fetch",
+      "--quiet", "--no-auto-gc", "--no-write-fetch-head", upstreamUrl,
+      upstreamTip], ReceivedObjectStore())
+    var listArgs = @["--git-dir=" & gatewayBareDir, "rev-list",
+      "--format=%h %s", "--no-commit-header", upstreamTip]
+    listArgs.add("^" & (if isZeroOid(lease.newSha): lease.expect
+                        else: lease.newSha))
+    let listed =
+      if fetched.code == 0: gitNoteQuery(gitBin, listArgs, received)
+      else: (code: fetched.code, output: "", diagnostic: fetched.output)  # git-merged-text: quoted whole, never parsed
+    if listed.code == 0:
+      const MaxListed = 20
+      var lines: seq[string]
+      var total = 0
+      for line in listed.output.splitLines():
+        if line.strip().len == 0: continue
+        inc total
+        if lines.len < MaxListed: lines.add("    " & line.strip())
+      if total > MaxListed:
+        lines.add("    ... and " & $(total - MaxListed) & " more")
+      result.add(if isZeroOid(lease.newSha):
+          ". The deletion would have discarded, among others, these " &
+            $total & " upstream commit(s) this gateway never published:\n"
+        else: ". The forced push would have discarded these " & $total &
+          " upstream commit(s):\n")
+      result.add(lines.join("\n"))
+    else:
+      result.add(". The upstream commits it would have discarded could not " &
+        "be listed: " & listed.diagnostic.strip())
+  result.add("\nNothing was overwritten. To publish this branch:\n" &
+    (if isZeroOid(upstreamTip):
+       "  1. the upstream no longer has '" & branch & "'; nothing there " &
+         "needs integrating;\n"
+     else:
+       "  1. fetch '" & branch & "' and integrate " & upstreamTip &
+         " (for example, rebase onto it);\n") &
+    "  2. run 'repro workspace shared-clones rewire --reset-refs', which " &
+    "resets this gateway's refs to the refreshed pool's;\n" &
+    "  3. push again: the push then descends from the upstream's tip.")
+
 proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
                                updates: seq[GatewayRefUpdate];
-                               received = ReceivedObjectStore()):
+                               received = ReceivedObjectStore();
+                               leases: seq[GatewayLease] = @[]):
     tuple[ok: bool; diagnostic: string] =
   ## The forward: push the refs being received from the gateway bare to the
   ## REAL upstream, from ``pre-receive``, after the gate accepted and BEFORE
@@ -69573,10 +69905,16 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
   ## reads the pushed objects through it as an alternate only
   ## (``forwardingObjectStoreEnv``). Branch deletions propagate as deletions;
   ## the certificate notes ref travels like any other received ref.
+  ##
+  ## ``leases`` (from ``gatewayClassifyUpdates``) are the forced branch
+  ## updates and branch deletions: each is forwarded with
+  ## ``--force-with-lease=<ref>:<old>`` and WITHOUT a ``+``, which git lets
+  ## override a stale lease (§5.3 "Forced updates", measured with git 2.43).
+  ## A stale lease refuses the whole atomic push, and the diagnostic lists the
+  ## upstream commits that would have been discarded.
   var refspecs: seq[string]
-  let zeroSha = "0000000000000000000000000000000000000000"
   for u in updates:
-    if u.newSha == zeroSha:
+    if isZeroOid(u.newSha):
       refspecs.add(":" & u.refName)             # deletion
     else:
       refspecs.add(u.newSha & ":" & u.refName)  # set ref to the received value
@@ -69589,6 +69927,9 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
       " push"
     if atomic:
       cmd.add(" --atomic")
+    for lease in leases:
+      cmd.add(" " & quoteShell("--force-with-lease=" & lease.refName & ":" &
+        lease.expect))
     cmd.add(" " & quoteShell(upstreamUrl))
     for r in refspecs:
       cmd.add(" " & quoteShell(r))
@@ -69602,9 +69943,16 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
       "non-atomically, so a partial update is possible)"
     res = push(atomic = false)
   if res.code != 0:
+    var stale: seq[string]
+    if "stale info" in res.output:  # git-merged-text: push's refusal reason
+      for lease in leases:
+        let report = gatewayStaleLeaseReport(gitBin, gatewayBareDir,
+          upstreamUrl, lease, received)
+        if report.len > 0: stale.add(report)
     return (ok: false, diagnostic: "the upstream " & upstreamUrl &
       " refused the forward" & note & "; nothing was published by this " &
-      "gateway: " & res.output.strip())
+      "gateway: " & res.output.strip() &
+      (if stale.len > 0: "\n" & stale.join("\n") else: ""))
   (ok: true, diagnostic: note.strip())
 
 # ---- ``repro gateway <phase>`` dispatch ------------------------------------
@@ -69848,12 +70196,23 @@ proc gatewayBarePathFor*(cacheRoot, workspaceName, upstreamUrl: string): string 
   ## intended relationship.
   parentDir(cacheRoot) / "gateways" / workspaceName / urlSlug(upstreamUrl)
 
-proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName: string): GatewayConfig =
+proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName, repoPath: string):
+    GatewayConfig =
   ## The bare gateway cannot resolve workspace routing while receiving a
   ## push. Capture the lock writer's project and per-repo backend here, when
   ## the workspace is available; a policy snapshot is not the record lock.
   let args = WorkspaceLockArgs(workspaceRoot: absolutePath(workspaceRoot))
   result.registeredKeysPath = registeredKeyStorePath(args.workspaceRoot)
+  # §5.3 "Forced updates": where ``pre-receive`` resolves the declared roles.
+  result.workspaceRoot = args.workspaceRoot
+  result.repo = repoName
+  # The workspace ROOT repository takes its roles from the settings file. It
+  # is told apart by its path, not by its name's absence from the project:
+  # its enumerated name is the workspace directory's, which may collide with a
+  # member's, and a member missing from the resolution must fail closed in
+  # ``pre-receive`` rather than borrow the root's roles.
+  result.repoIsWorkspaceRoot =
+    cmpPaths(absolutePath(repoPath), args.workspaceRoot) == 0
   let composed = composeLockingRouting(args.workspaceRoot, gitBin)
   var selection: tuple[resolved: ResolvedProject;
                        workspaceLocal: Option[WorkspaceLocal]]
@@ -69870,6 +70229,7 @@ proc gatewayConfigForRepo(gitBin, workspaceRoot, repoName: string): GatewayConfi
       return
     raise
   let (resolved, local) = selection
+  result.project = resolved.projectName
   var selected: seq[ResolvedRepo]
   for repo in resolved.repos:
     if repo.name == repoName:
@@ -69939,6 +70299,79 @@ proc seedGatewayRefsFromPool*(gitBin, gatewayDir, pool: string): string =
   if failures.len > 0:
     return "could not seed the gateway's branches: " & failures.join("; ")
   ""
+
+proc resetGatewayRefsToPool*(gitBin, gatewayDir, pool: string):
+    tuple[ok: bool; diagnostic: string] =
+  ## ``repro workspace shared-clones rewire --reset-refs``
+  ## (Push-Gateway-Wiring-And-Policy §5.2, §5.3 "Forced updates"): make the
+  ## gateway's ``refs/heads/*`` equal to the pool's. It DISCARDS this
+  ## workspace's publication record, which is why it is explicit: a branch the
+  ## pool lacks is deleted, and every other branch is moved to the pool's tip.
+  ##
+  ## It presumes a PG-0 pool, whose ``refs/heads/*`` track the upstream
+  ## through ``SharedBareFetchRefspec``. A pool without that refspec has refs
+  ## frozen at clone time, and resetting to them would rewind the gateway to a
+  ## stale tip; it is REFUSED, and nothing is changed.
+  let refspecs = gitNoteQuery(gitBin, ["--git-dir=" & pool, "config",
+    "--get-all", "remote.origin.fetch"])
+  var tracks = false
+  if refspecs.code == 0:
+    for line in refspecs.output.splitLines():
+      if line.strip() == SharedBareFetchRefspec:
+        tracks = true
+  if not tracks:
+    return (ok: false, diagnostic: "--reset-refs refused: the pool '" & pool &
+      "' carries no '" & SharedBareFetchRefspec & "' fetch refspec, so its " &
+      "branches are frozen at clone time and resetting the gateway '" &
+      gatewayDir & "' to them would rewind it; nothing was changed")
+  proc heads(gitDir: string): tuple[ok: bool; refs: seq[(string, string)];
+                                    why: string] =
+    let listed = gitNoteQuery(gitBin, ["--git-dir=" & gitDir, "for-each-ref",
+      "--format=%(objectname) %(refname)", "refs/heads/"])
+    if listed.code != 0:
+      return (ok: false, refs: @[], why: listed.diagnostic)
+    var refs: seq[(string, string)]
+    for line in listed.output.splitLines():
+      let parts = line.strip().split(' ')
+      if parts.len == 2 and parts[1].startsWith("refs/heads/"):
+        refs.add((parts[1], parts[0]))
+    (ok: true, refs: refs, why: "")
+  let poolHeads = heads(pool)
+  if not poolHeads.ok:
+    return (ok: false, diagnostic: "--reset-refs: could not list the pool's " &
+      "branches: " & poolHeads.why)
+  let gatewayHeads = heads(gatewayDir)
+  if not gatewayHeads.ok:
+    return (ok: false, diagnostic: "--reset-refs: could not list the " &
+      "gateway's branches: " & gatewayHeads.why)
+  var moved, removed: int
+  var failures: seq[string]
+  for (refName, sha) in poolHeads.refs:
+    var current = ""
+    for (r, s) in gatewayHeads.refs:
+      if r == refName: current = s
+    if current == sha: continue
+    # The old value makes git refuse to move a ref a push moved meanwhile.
+    let res = gitNoteRun(gitBin, ["--git-dir=" & gatewayDir, "update-ref",
+      refName, sha, current])
+    if res.code == 0: inc moved
+    else: failures.add(refName & ": " & res.output.strip())
+  for (refName, sha) in gatewayHeads.refs:
+    var inPool = false
+    for (r, _) in poolHeads.refs:
+      if r == refName: inPool = true
+    if inPool: continue
+    let res = gitNoteRun(gitBin, ["--git-dir=" & gatewayDir, "update-ref",
+      "-d", refName, sha])
+    if res.code == 0: inc removed
+    else: failures.add(refName & ": " & res.output.strip())
+  if failures.len > 0:
+    return (ok: false, diagnostic: "--reset-refs: could not reset the " &
+      "gateway '" & gatewayDir & "' completely (" & $moved & " moved and " &
+      $removed & " removed before the failures, and they stay so): " &
+      failures.join("; "))
+  (ok: true, diagnostic: "gateway refs reset to the pool's: " & $moved &
+    " moved, " & $removed & " removed")
 
 proc ensureGateway*(gitBin, repoPath, gatewayDir, upstreamUrl, poolCacheRoot:
                     string; cfg: GatewayConfig; remoteName = "origin"):
@@ -70077,7 +70510,7 @@ proc ensureGatewayForRepo*(gitBin, workspaceRoot, repoName, repoPath: string;
          else: "no provenance record says reprobuild set it") & ")"
       return
   try:
-    var cfg = gatewayConfigForRepo(gitBin, workspaceRoot, repoName)
+    var cfg = gatewayConfigForRepo(gitBin, workspaceRoot, repoName, repoPath)
     cfg.upstreamUrl = result.upstreamUrl
     if dryRun:
       result.outcome = if alreadyWired: gwoAlreadyWired else: gwoWouldWire
@@ -70594,6 +71027,14 @@ proc runGatewayCommand*(phase, explicitGatewayDir: string): int =
   let updates = parseGatewayRefUpdates(stdinText)
   case phase
   of "pre-receive":
+    # §5.3 "Forced updates": the <old> check, the forced-update test and the
+    # role-branch refusal, before any gate reads and before any forward.
+    let classified = gatewayClassifyUpdates(gitBin, gatewayDir, updates, cfg,
+      received)
+    if not classified.ok:
+      stderr.writeLine("reprobuild gateway: push REJECTED — " &
+        classified.diagnostic)
+      return 1
     # Cert gate (TC-5/TC-1) — kept verbatim (HL-5 is ADDITIVE).
     let verdict = gatewayVerifyPush(gitBin, gatewayDir, updates, cfg, received)
     for note in verdict.policyNotes:
@@ -70654,7 +71095,7 @@ proc runGatewayCommand*(phase, explicitGatewayDir: string): int =
     # so an upstream refusal is the push's refusal.
     if cfg.upstreamUrl.len > 0:
       let fwd = gatewayForwardToUpstream(gitBin, gatewayDir, cfg.upstreamUrl,
-        updates, received)
+        updates, received, classified.leases)
       if not fwd.ok:
         stderr.writeLine("reprobuild gateway: push REJECTED — " &
           fwd.diagnostic)
@@ -71249,13 +71690,18 @@ proc workspaceLockRoots(workspaceRoot: string;
     layerLocations: openArray[ManifestLayerLocation]): seq[string] =
   ## Every on-disk root that can own a ``locks/`` subtree for this workspace.
   ##
-  ## This deliberately mirrors every arm of ``pickRecordStoreRoot`` rather
-  ## than calling it: that proc answers "where does THIS operation write", and
-  ## a rewrite must be checked against every record the workspace can still
-  ## READ. The arms are the native ``.repro/manifests`` git-checkout store, the
-  ## composer's materialised ``.repro/manifests-<i>-<slug>`` layers, an
-  ## explicitly declared ``[[manifest]]`` layer, the membership root, and the
-  ## workspace root itself. Roots with no ``locks/`` subtree cost nothing.
+  ## This is deliberately WIDER than ``pickRecordStoreRoot``: that proc
+  ## answers "where does THIS operation write", and a rewrite must be checked
+  ## against every record the workspace can still READ — including records an
+  ## earlier release wrote into a location the writer no longer uses. Until
+  ## the record-store fix (reprobuild-pm issues/2026-11-16-repro-falls-back-
+  ## to-the-root-or-origin-as-the-lock-record-store-when-records-names-no-
+  ## url.md) the writer took the first composed layer, usually the root, so
+  ## records may still sit there. The roots are the store checkouts
+  ## (``.repro/records``, legacy ``.repro/manifests``), the composer's
+  ## materialised ``.repro/manifests-<i>-<slug>`` layers, an explicitly
+  ## declared ``[[manifest]]`` layer, the membership root, and the workspace
+  ## root itself. Roots with no ``locks/`` subtree cost nothing.
   var candidates = @[
     workspaceRoot / ".repro" / RecordStoreDirName,
     workspaceRoot / ".repro" / LegacyRecordStoreDirName,
@@ -77360,7 +77806,8 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
   ## Resolve the manifest-layer root that OWNS the lock subtree for
   ## status's drift comparison. Mirrors M11's ``pickRecordStoreRoot``
   ## but without the ``--record-store-root`` override (status is
-  ## read-only and uses the same anchor M11 wrote to). A ``[records] url``
+  ## read-only and uses the same anchor M11 wrote to), and so never a
+  ## composed manifest layer. A ``[records] url``
   ## store is read from its checkout and never from a composed layer, as the
   ## writer writes it; with no checkout the conventional (absent) location
   ## reads as "no lock", and the writer's notice is not repeated here.
@@ -77369,43 +77816,15 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
     return
       if declared.checkout.len > 0: declared.checkout
       else: workspaceRoot / ".repro" / RecordStoreDirName
-  if workspaceLocal.isSome:
-    let local = workspaceLocal.get()
-    if local.manifest.len > 0:
-      let first = local.manifest[0]
-      if first.local_path.isSome and first.local_path.get().len > 0:
-        let raw = first.local_path.get()
-        if isAbsolute(raw):
-          return raw
-        return workspaceRoot / raw
-      if first.url.isSome and first.url.get().len > 0:
-        # Mirror the composer's directory-naming convention so the
-        # status reader finds the lock written by the M11 dispatcher
-        # at the same on-disk path.
-        let sanitizedSegments = block:
-          var raw1 = ""
-          for ch in first.url.get():
-            case ch
-            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
-            else: raw1.add('-')
-          var collapsed = ""
-          var prevDash = false
-          for ch in raw1:
-            if ch == '-':
-              if not prevDash: collapsed.add(ch)
-              prevDash = true
-            else:
-              collapsed.add(ch)
-              prevDash = false
-          if collapsed.len > 80:
-            collapsed.setLen(80)
-          collapsed.strip(chars = {'-'},
-            leading = true, trailing = true)
-        let suffix =
-          if sanitizedSegments.len > 0: sanitizedSegments
-          else: "layer"
-        return workspaceRoot / ".repro" / ("manifests-0-" & suffix)
-  workspaceRoot / ".repro" / "manifests"
+  # Never a composed layer, as the writer never writes one (see
+  # ``pickRecordStoreRoot``): the root base layer and every other layer are
+  # metadata, never the record store. The store checkout at its conventional
+  # location, or — when none exists — that (absent) location, which reads as
+  # "no lock".
+  discard workspaceLocal
+  let existing = existingRecordStoreRoot(workspaceRoot)
+  if existing.len > 0: existing
+  else: workspaceRoot / ".repro" / RecordStoreDirName
 
 proc deriveActiveBranch(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal];
@@ -81221,6 +81640,7 @@ type
     projectName: string
     json: bool
     force: bool
+    resetRefs: bool       ## ``rewire --reset-refs`` (Push-Gateway §5.2, §5.3)
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
   SharedClonesRepoReport* = object
@@ -81460,6 +81880,10 @@ proc sharedClonesArgsOf(c: ReproCommandLineWorkspaceSharedClones):
     raise newException(ValueError,
       "`repro workspace shared-clones` verb must be " &
         "list|rewire|consolidate|root|gc|maintenance|migrate, got: " & result.verb)
+  result.resetRefs = c.resetRefs
+  if result.resetRefs and result.verb != "rewire":
+    raise newException(ValueError,
+      "`repro workspace shared-clones`: --reset-refs applies only to rewire")
   result.workspaceRoot =
     if c.workspaceRoot.len > 0: absolutePath(c.workspaceRoot) else: getCurrentDir()
 
@@ -81513,6 +81937,40 @@ proc liveWorkspaceNamesForCache(workspaceRoot: string;
 proc liveWorkspaceNamesForCache(workspaceRoot: string): seq[string] =
   var ignored: seq[string]
   liveWorkspaceNamesForCache(workspaceRoot, ignored)
+
+proc resetRepoGatewayRefs(identity: GitToolIdentity;
+    cacheRoot, workspaceRoot, repoAbs: string): tuple[ok: bool; note: string] =
+  ## ``rewire --reset-refs`` for one checkout (Push-Gateway-Wiring-And-Policy
+  ## §5.2, §5.3 "Forced updates"). Only THIS workspace's gateway for the
+  ## checkout's own upstream is touched: the ``pushurl`` must name the path
+  ## ``gatewayBarePathFor`` gives for ``remote.origin.url``, and the refs come
+  ## from that upstream's pool, refreshed first. Any other ``pushurl`` is left
+  ## alone and reported.
+  let pushurl = gitRunPlainQuery(identity, ["-C", repoAbs, "config",
+    "--get", "remote.origin.pushurl"])
+  let gatewayDir = pushurl.output.strip()
+  if pushurl.code != 0 or gatewayDir.len == 0:
+    return (ok: true, note: "no push gateway; no gateway refs to reset")
+  let origin = gitRunPlainQuery(identity, ["-C", repoAbs, "config", "--get",
+    "remote.origin.url"])
+  let upstreamUrl = origin.output.strip()
+  if origin.code != 0 or upstreamUrl.len == 0:
+    return (ok: false, note: "--reset-refs NOT applied: no remote.origin.url")
+  let expected = gatewayBarePathFor(cacheRoot, lastPathPart(workspaceRoot),
+    upstreamUrl)
+  if cmpPaths(absolutePath(gatewayDir), absolutePath(expected)) != 0 or
+      not gatewayIsComplete(gatewayDir):
+    return (ok: true, note: "remote.origin.pushurl '" & gatewayDir &
+      "' is not this workspace's gateway for " & upstreamUrl &
+      "; left untouched")
+  let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
+    upstreamUrl)
+  if not refreshed.ok:
+    return (ok: false, note: "--reset-refs NOT applied: the pool for " &
+      upstreamUrl & " could not be refreshed: " & refreshed.diagnostic)
+  let reset = resetGatewayRefsToPool(identity.binaryPath, gatewayDir,
+    refreshed.sharedBarePath)
+  (ok: reset.ok, note: reset.diagnostic)
 
 proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
   result.verb = parsed.verb
@@ -81675,6 +82133,11 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       let refreshed = sharedBareByUrl[cloneUrl]
       if not refreshed.ok:
         entry.diagnostic = "shared bare unavailable: " & refreshed.diagnostic
+        if parsed.resetRefs:
+          # A reset that was asked for and did not run is a failure: the
+          # stale-lease remedy would otherwise read as done.
+          entry.diagnostic.add("; --reset-refs NOT applied")
+          result.exitCode = 1
         result.repos.add(entry)
         continue
       entry.barePresent = true
@@ -81709,6 +82172,13 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
           entry.diagnostic = "alternates wiring failed: " & wired.diagnostic
           # The bare WAS present but we could not wire — a genuine failure.
           result.exitCode = 1
+      if parsed.resetRefs:
+        let reset = resetRepoGatewayRefs(identity, result.cacheRoot,
+          parsed.workspaceRoot, repoAbs)
+        if not reset.ok: result.exitCode = 1
+        entry.diagnostic =
+          if entry.diagnostic.len > 0: entry.diagnostic & "; " & reset.note
+          else: reset.note
 
     elif parsed.verb == "gc":
       # RA-15 maintenance: prune dead-workspace cache refs and gc/repack the
@@ -81743,6 +82213,15 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       except CatchableError as error:
         entry.diagnostic.add("; cannot inspect alternates: " & error.msg)
     result.repos.add(entry)
+
+  # The workspace ROOT repository is no project member, so the loop above
+  # never visits it, but it can publish through a gateway of its own.
+  if parsed.verb == "rewire" and parsed.resetRefs and
+      dirExists(parsed.workspaceRoot / ".git"):
+    let reset = resetRepoGatewayRefs(identity, result.cacheRoot,
+      parsed.workspaceRoot, parsed.workspaceRoot)
+    if not reset.ok: result.exitCode = 1
+    result.diagnostics.add("workspace root repository: " & reset.note)
 
   # Every other bare in the cache: one whose checkouts only read or sync, or
   # that only a workspace elsewhere declares, is maintained from here too,
@@ -106366,6 +106845,15 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro tasks: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.catalog:
+    case conf.catalog.command
+    of ReproCommandLineCatalogCommand.publish:
+      try:
+        let r = conf.catalog.publish
+        return runCatalogPublishCommand(r.root, r.modules, r.check)
+      except CatchableError as err:
+        stderr.writeLine("repro catalog: error: " & err.msg)
+        return 1
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

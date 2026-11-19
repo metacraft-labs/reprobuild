@@ -253,12 +253,14 @@ type
       ## write column. 0 when unknown, which `retentionVerdict` treats as
       ## `rvUnknownWriteTime` — a miss, never a hit.
     hostFingerprint*: string
-      ## §3's `host-bound` write column: machine-id / OS / architecture,
-      ## enough to say WHICH host's realization this is. Empty when
-      ## undeclared. It is not a security token and is never compared for
-      ## equality on the local read path — a local hit is by definition on
-      ## the producing host. It exists so a cross-machine substitution can be
-      ## REFUSED with the producing host named, rather than refused blankly.
+      ## §3's `host-bound` and `volatile` write column: machine-id /
+      ## hostname / OS / architecture, enough to say WHICH host's
+      ## realization this is. Empty when undeclared. It is not a security
+      ## token: whoever can write the cache root can forge it, as they can
+      ## forge a `.rec`. It IS compared on the local read path (§3.2 rule 4,
+      ## `servableOnThisHost`): a cache root, a store bundle or an image can
+      ## carry an entry to another machine without anything publishing it, so
+      ## a local hit is NOT by construction on the producing host.
     buildEpoch*: string
       ## Identifies the `repro build` invocation that wrote the entry, for
       ## §2.2's `this-build` clause. Empty when undeclared.
@@ -501,6 +503,18 @@ type
       ## on it.
       ##
       ## APPENDED, like `aclMissRetentionExpired`, so no ordinal shifts.
+    aclMissOtherHost
+      ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4. The record matched
+      ## on every input and its outputs verified, but the use is `host-bound`
+      ## or `volatile` (the stricter of the class the entry records and the
+      ## class of the edge using it) and the entry does not record THIS host:
+      ## it records another host's fingerprint, or none. Such an entry reached
+      ## this cache in a copied or image-baked cache root, a store bundle, or
+      ## a peer or binary-cache install, and it is another host's realization,
+      ## which §3 forbids serving here. Distinct from `aclMissInputChanged`
+      ## for the reason `aclMissRetentionExpired` is: nothing changed.
+      ##
+      ## APPENDED, like the two above, so no ordinal shifts.
 
   ActionCacheLookup* = object
     status*: ActionCacheLookupStatus
@@ -554,6 +568,16 @@ type
       ## `skipCacheHitEvidence` — the arm that reaches this function — is the
       ## default on the main CLI path, so a check placed only at the per-edge
       ## lookup is a check the production path does not execute.
+    determinism*: EdgeDeterminism
+      ## The probing edge's effective class, for §3.2 rule 4
+      ## (`servableOnThisHost`): when the use -- the stricter of this and the
+      ## class the matched record carries -- is `host-bound` or `volatile`,
+      ## a record that does not name THIS host is no record. It is here for
+      ## the reason `refuseRecordWithNoInputs` is: this scan answers for the
+      ## whole graph, and a copied or image-baked cache root has the outputs
+      ## on disk, so nothing downstream would look again. The default
+      ## (`edStrong`) adds nothing to the recorded class, so other callers
+      ## still refuse another host's recorded `host-bound` entry.
 
   HotMetadataScanStatus* = enum
     hmssUnavailable
@@ -3068,10 +3092,12 @@ proc hostFingerprint*(): string =
   ## this metadata is worth. `/etc/machine-id` is read if it happens to be
   ## there and simply skipped if it is not.
   ##
-  ## This value is never a security boundary and is never compared for
-  ## equality on the local read path -- a local hit is by construction on the
-  ## producing host. Its whole job is to let a cross-machine substitution be
-  ## refused with the producing host NAMED rather than refused blankly.
+  ## This value is never a security boundary. A `host-bound` or `volatile`
+  ## local read compares it for equality (`servableOnThisHost`, §3.2 rule 4):
+  ## a copied cache root, a store bundle or a baked image carries entries to
+  ## another machine, so a local hit is not by construction on the producing
+  ## host. The hostname is part of it, so a renamed host misses its own
+  ## `host-bound` entries once: the fail-closed direction.
   if cachedHostFingerprint.len > 0:
     return cachedHostFingerprint
   var parts: seq[string] = @[]
@@ -3093,6 +3119,37 @@ proc hostFingerprint*(): string =
   parts.add("arch=" & hostCPU)
   cachedHostFingerprint = parts.join(" ")
   cachedHostFingerprint
+
+proc hostBoundUse*(record: ActionResultRecord;
+                   usingClass: EdgeDeterminism): EdgeDeterminism =
+  ## The class of one USE of `record` (`Edge-Determinism-And-Soft-Rebuild.md`
+  ## §3.2 rule 1): the stricter of the class the entry records (an entry that
+  ## records none counts as `weak`) and `usingClass`, the effective class of
+  ## the edge reading it.
+  let recorded =
+    if record.determinism.declared: record.determinism.class else: edWeak
+  strictest(recorded, usingClass)
+
+proc servableOnThisHost*(record: ActionResultRecord;
+                         usingClass: EdgeDeterminism): bool =
+  ## §3.2 rule 4: a use that is `host-bound` or `volatile` is served only an
+  ## entry that records THIS host's fingerprint. Every other use is servable.
+  ##
+  ## The ONE host check, shared by the per-edge lookup (`applyHostBinding`),
+  ## the whole-graph navigator scan (`HotMetadataProbe.determinism`) and the
+  ## engine's per-record fast-no-op arm, so the three cannot disagree.
+  ##
+  ## An entry whose class is not on the record records no host, and that is a
+  ## miss, not a reason to look further. Every Tier-1 read decodes through
+  ## `decodeRecContainer`, which attaches the `.det` sidecar whenever its
+  ## back-reference names the `.rec` that is there now. A record that arrives
+  ## without a class therefore has no current sidecar: a peer or binary-cache
+  ## install (§3.2 rule 3), a `.rec` an older binary rewrote, or a sidecar
+  ## someone removed. Pure: no I/O, no exception.
+  if hostBoundUse(record, usingClass).allowsCrossMachineSubstitution():
+    return true
+  record.determinism.declared and
+    record.determinism.hostFingerprint == hostFingerprint()
 
 proc declaredDeterminism*(class: EdgeDeterminism;
                           retention = forever();
@@ -3381,13 +3438,59 @@ proc recordComputationDir*(record: ActionResultRecord): string =
     elif result != found:
       return ""
 
-proc removeRecordComputationDir*(record: ActionResultRecord): string
+const RecipeCompilesDirName* = "recipe-compiles"
+
+proc recipeCompilesRootOf*(cache: ActionCache): string =
+  ## `<R>/recipe-compiles` for the cache opened at `<R>/action-cache`: the one
+  ## directory computation directories may live in
+  ## (Hermetic-Builds-And-Path-Independence.md §"Ownership and cleanup").
+  os.normalizedPath(absolutePath(cache.root.parentDir / RecipeCompilesDirName))
+
+proc ownedComputationDir*(record: ActionResultRecord;
+                          recipeCompilesRoot: string): string =
+  ## `recordComputationDir`, confined to where a computation directory can
+  ## be: a direct child of `<recipeCompilesRoot>/<kind>/<identity>/` other than
+  ## `staging/`. "" for anything else.
+  ##
+  ## A record's output paths are whatever its writer put there, and a record
+  ## can arrive from elsewhere (a store bundle carries `.rec` files that import
+  ## does not validate, Store-Bundles.md §5.1). The cleanup paths delete the
+  ## directory this returns recursively, so without the confinement a crafted
+  ## record naming `/any/where/<32 hex of its strong fingerprint>/x` had that
+  ## directory deleted when the record was evicted or collected
+  ## (reprobuild-pm issue
+  ## 2026-11-17-carried-action-records-may-name-output-paths-outside-the-bundle-roots.md).
+  let dir = recordComputationDir(record)
+  if dir.len == 0 or recipeCompilesRoot.len == 0:
+    return ""
+  # `normalizedPath` writes `\` on Windows: compare on either separator.
+  let root = os.normalizedPath(recipeCompilesRoot)
+  if dir.len <= root.len + 1 or not dir.startsWith(root) or
+      dir[root.len] notin {DirSep, AltSep}:
+    return ""
+  let parts = dir[root.len + 1 .. ^1].split({DirSep, AltSep})
+  if parts.len != 3 or parts[2] == ComputationStagingDirName:
+    return ""
+  for part in parts:
+    if part.len == 0 or part == "." or part == "..":
+      return ""
+  # A symlink at any level would make the recursive removal act on its target.
+  var walk = root
+  for part in parts:
+    walk = walk / part
+    if symlinkExists(extendedPath(walk)):
+      return ""
+  dir
+
+proc removeRecordComputationDir*(record: ActionResultRecord;
+                                 recipeCompilesRoot: string): string
     {.discardable.} =
   ## Remove the computation directory `record` owns, if any, and return it.
+  ## Only a directory `ownedComputationDir` admits is ever removed.
   ## Best-effort: a directory that survives is garbage for the orphan sweep
   ## (`sweepOrphanComputationDirs`), and a record whose directory is gone
   ## fails its in-place check and re-runs, so neither outcome is unsound.
-  result = recordComputationDir(record)
+  result = ownedComputationDir(record, recipeCompilesRoot)
   if result.len > 0 and dirExists(extendedPath(result)):
     try:
       removeDir(extendedPath(result))
@@ -5008,8 +5111,15 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
     elif priorWriteSequence != 0'u64 and fileExists(extendedPath(detPath)):
       try:
         let prior = decodeDeterminism(bytes(readFile(detPath)))
+        # Another host's sidecar is never carried forward
+        # (`Edge-Determinism-And-Soft-Rebuild.md` §3.2 rules 3 and 4). It can
+        # only be here because the cache root or a store bundle came from
+        # that host, and the bytes being written now are not its bytes:
+        # carrying its fingerprint onto them would make every later
+        # host-bound read miss again, a re-run on every build.
         if prior.meta.declared and
-            prior.recordWriteSequence == priorWriteSequence:
+            prior.recordWriteSequence == priorWriteSequence and
+            prior.meta.hostFingerprint == hostFingerprint():
           detPayload = encodeDeterminism(prior.meta, writeSequence)
           writeDet = true
       except OSError, IOError, EnvelopeError:
@@ -5133,7 +5243,7 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
         discard
       if unlinked:
         for record in evictedRecords:
-          removeRecordComputationDir(record)
+          removeRecordComputationDir(record, cache.recipeCompilesRootOf)
       # Drop the evicted record's sidecars too, or they leak.
       for sidecar in [entries[i].path.parentDir /
                         witnessFileName(entries[i].strongHex),
@@ -5798,6 +5908,12 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
     # (`unservableCacheRecordReason`) states the reason once.
     if probe.enforceOwnedOutputs and recordOutputsNotOwnedBy(record,
         probe.outputRoot, probe.ownedOutputs).len > 0:
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
+    # Another host's `host-bound` / `volatile` realization (§3.2 rule 4),
+    # reported as `hmssMissingRecord` for the same reason: the scheduler
+    # re-consults the edge and `lookupActionResult` names the host.
+    if not record.servableOnThisHost(probe.determinism):
       return HotMetadataScan(status: hmssMissingRecord,
         recordCount: totalRecords, checkedInputCount: checkedInputs)
     # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
@@ -6716,6 +6832,32 @@ proc inputAccessesFor*(cache: ActionCache; weak, strong: ContentDigest):
   except OSError, IOError:
     none(InputAccesses)
 
+proc applyHostBinding(lookup: var ActionCacheLookup;
+                      usingClass: EdgeDeterminism) =
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4 at the per-edge
+  ## lookup: a hit whose use is `host-bound` or `volatile` and whose entry
+  ## does not record THIS host becomes `aclMissOtherHost`. The check itself is
+  ## `servableOnThisHost`; this only turns its answer into a lookup status
+  ## and names the reason.
+  ##
+  ## Cost: none beyond a string compare. The class and host come from the
+  ## decoded record, which carries its current `.det` sidecar already.
+  if lookup.status notin {aclHit, aclHybridCutoff}:
+    return
+  if lookup.record.servableOnThisHost(usingClass):
+    return
+  let use = lookup.record.hostBoundUse(usingClass)
+  let meta = lookup.record.determinism
+  let here = hostFingerprint()
+  lookup.status = aclMissOtherHost
+  lookup.message =
+    if not meta.declared or meta.hostFingerprint.len == 0:
+      "cached entry records no host; a " & $use &
+        " use is served only this host's realization (" & here & ")"
+    else:
+      "cached entry is another host's " & $use & " realization (" &
+        meta.hostFingerprint & "), not this host's (" & here & ")"
+
 proc applyRetention(cache: ActionCache; weak: ContentDigest;
                     lookup: var ActionCacheLookup;
                     retention: CacheRetention;
@@ -6765,10 +6907,13 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          retention = forever();
                          nowUnix: int64 = 0;
                          buildEpoch = "";
-                         containerOutputs: openArray[string] = []):
+                         containerOutputs: openArray[string] = [];
+                         determinism = edWeak):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
+  ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
+  ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
@@ -6776,6 +6921,7 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
     envResolver = envResolver,
     outputRoot = outputRoot,
     containerOutputs = @containerOutputs)
+  result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
@@ -6788,10 +6934,13 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          retention = forever();
                          nowUnix: int64 = 0;
                          buildEpoch = "";
-                         containerOutputs: openArray[string] = []):
+                         containerOutputs: openArray[string] = [];
+                         determinism = edWeak):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
+  ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
+  ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
@@ -6799,6 +6948,7 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
     envResolver = envResolver,
     outputRoot = outputRoot,
     containerOutputs = @containerOutputs)
+  result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 # ===========================================================================
@@ -6890,6 +7040,7 @@ proc scanCacheEntries*(cache: ActionCache;
   if not dirExists(extendedPath(root)):
     return
   let now = if policy.nowUnix != 0: policy.nowUnix else: toUnix(getTime())
+  let recipeRoot = cache.recipeCompilesRootOf
   for edgeKind, edgeDir in walkDir(extendedPath(root)):
     if edgeKind != pcDir:
       continue
@@ -6924,7 +7075,7 @@ proc scanCacheEntries*(cache: ActionCache;
       try:
         let decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
         for record in decoded.records:
-          let owned = recordComputationDir(record)
+          let owned = ownedComputationDir(record, recipeRoot)
           if owned.len > 0:
             entry.computationDirs.add(owned)
           if record.outputPayloadKind != opkCasBlobs:
@@ -7075,8 +7226,6 @@ proc runRetentionGc*(cache: ActionCache;
 # record write, a record removed by an older binary, the directories of the
 # earlier single-directory layout).
 # ===========================================================================
-
-const RecipeCompilesDirName* = "recipe-compiles"
 
 when defined(posix):
   proc cRenamePath(src, dst: cstring): cint

@@ -401,9 +401,14 @@ suite "M25 — private manifest layering integrated end-to-end":
       # Drive M11 on the workspace the M25 init produced. The lock
       # writer composes the same layers, gathers per-repo HEAD SHAs,
       # and writes ``locks/<project>/<repo>/<sha>.toml`` (RA-1 per-repo
-      # layout, no index) under the record store — the workspace root, the
-      # base layer, since no ``[records]`` is declared
-      # (Workspace-Settings-Files.md §3).
+      # layout, no index) under the record store. The root base layer and
+      # the composed layers are metadata and never the store, and no
+      # ``[records] url`` is declared (Workspace-Settings-Files.md §3), so
+      # the store is the checkout at its conventional location — its
+      # presence is the route declaration (Unified-Locking-And-Hooks.md
+      # §10). Create one, as an operator keeping records would.
+      let recordStore = fx.workspaceRoot / ".repro" / "records"
+      discard requireGit(q(gitBin) & " init -b records " & q(recordStore))
       let lockRes = invokeLock(fx)
       if lockRes.code != 0:
         checkpoint("lock output: " & lockRes.output)
@@ -419,9 +424,10 @@ suite "M25 — private manifest layering integrated end-to-end":
 
       let lockPath = lockReport["lockFilePath"].getStr()
       check fileExists(lockPath)
-      # ...in the record store, the workspace root (see above), not in the
-      # public layer's checkout as when the first layer was the store.
-      check lockPath.startsWith(fx.workspaceRoot / "locks" / "myproject")
+      # ...in the record store (see above): neither in the workspace root
+      # nor in the public layer's checkout, which are metadata.
+      check lockPath.startsWith(recordStore / "locks" / "myproject")
+      check not dirExists(fx.workspaceRoot / "locks")
       # RA-1: per-repo path keyed by the full trigger SHA; no index.
       let trigRepo = lockReport["triggerRepo"].getStr()
       let trigSha = lockReport["triggerSha"].getStr()

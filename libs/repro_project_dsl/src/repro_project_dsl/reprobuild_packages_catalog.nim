@@ -896,15 +896,38 @@ var catalogsSelectedInThisCompile {.compileTime.}:
   ## of "one catalog per compile".
 
 proc catalogOfSelection(selection: ExternalCatalogSelection): string =
-  ## What "the same catalog" means for one compile. A catalog the PIN
-  ## selects is its revision: two projects that pin the same revision each
-  ## materialize their own copy of it (or find it at different paths), and
-  ## those copies are one catalog revision. A develop-mode or unpinned
-  ## checkout is its directory, whose content is whatever it holds now.
+  ## What "the same catalog" means for one compile, by revision. A catalog
+  ## the PIN selects is its revision: two projects that pin the same
+  ## revision each materialize their own copy of it (or find it at different
+  ## paths), and those copies are one catalog revision. A develop-mode or
+  ## unpinned checkout is its directory, whose content is whatever it holds
+  ## now. See `sameCatalogInCompile` for the second way two selections are
+  ## one catalog.
   if selection.kind in {eckLockPinned, eckSiblingAtPin}:
     "revision " & selection.revision
   else:
     "checkout " & selection.root
+
+proc catalogRootKey(root: string): string =
+  ## A selected root, spelled so that two spellings of one directory
+  ## compare equal (separators, `.` and `..` segments, a trailing slash).
+  normalizedPath(root).replace('\\', '/')
+
+proc sameCatalogInCompile(catalog, root, priorCatalog,
+    priorRoot: string): bool =
+  ## Whether a selection (``catalog``, ``root``) is the catalog an earlier
+  ## lookup of the same compile selected. Either the same revision
+  ## (`catalogOfSelection`), or the SAME DIRECTORY: two consumers that read
+  ## their interfaces from one checkout read the same files, so nothing of
+  ## a second revision enters the graph, whatever reason each consumer had
+  ## for selecting it. This is the workspace layout CI builds in: a
+  ## checkout of the catalog at the pin of one lock (`eckSiblingAtPin`) is
+  ## also the nearest checkout for a sibling whose lock pins no catalog
+  ## (`eckAmbientSibling`), and comparing only the two identities -- a
+  ## revision against a directory -- refused that compile although it
+  ## takes every interface from one tree.
+  catalog == priorCatalog or
+    (root.len > 0 and catalogRootKey(root) == catalogRootKey(priorRoot))
 
 proc reprobuildPackagesInterfaceModuleInCompile*(selector,
     consumerSourceFile: string): tuple[module, conflict: string]
@@ -931,7 +954,7 @@ proc reprobuildPackagesInterfaceModuleInCompile*(selector,
   let catalog = catalogOfSelection(search.selection)
   let consumer = consumerSourceFile & " (`" & selector & "`)"
   for prior in catalogsSelectedInThisCompile:
-    if prior.catalog == catalog:
+    if sameCatalogInCompile(catalog, root, prior.catalog, prior.root):
       return
   if catalogsSelectedInThisCompile.len > 0:
     let prior = catalogsSelectedInThisCompile[0]

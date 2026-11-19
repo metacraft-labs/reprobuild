@@ -22,17 +22,30 @@
 ## project, and one participating repo cloned from a local bare origin, which
 ## is what gives the gate a lock to write.
 ##
-## How the store comes to be that nested directory. The record store is the
-## FIRST composed manifest layer, and the root repository is always the base
-## layer (Workspace-Settings-Files.md §3), contributed over `manifestsRoot` —
-## here `.repro/manifests`. The root is composed as a layer only when the
-## settings files declare at least one more, so the fixture's
+## How the store USED TO come to be that nested directory. The record store
+## was the FIRST composed manifest layer, and the root repository is always
+## the base layer (Workspace-Settings-Files.md §3), contributed over
+## `manifestsRoot` — here `.repro/manifests`. The root is composed as a layer
+## only when the settings files declare at least one more, so the fixture's
 ## `repro-workspace.local.toml` declares one personal `local_path` layer: an
 ## empty directory OUTSIDE the workspace (§4 forbids a `local_path` under
-## `.repro/`) that declares no project and so adds nothing to `demo`. That is
-## the shape, under the current files, in which the store path is a plain
-## directory nested in another repo's worktree rather than a checkout of its
-## own.
+## `.repro/`) that declares no project and so adds nothing to `demo`.
+##
+## That route is closed. §3 now says "No `[records] url` means no store is
+## synthesized": the root base layer is metadata, and metadata is never the
+## record store (reprobuild-pm issues/2026-11-16-repro-falls-back-to-the-root-
+## or-origin-as-the-lock-record-store-when-records-names-no-url.md). In this
+## fixture `.repro/manifests` is also not a checkout of its own, so it is not
+## a store by presence either (Unified-Locking-And-Hooks.md §10). The
+## workspace therefore has NO store, and the property this test protects —
+## a push is never refused over a lock store the workspace never had — holds
+## more strongly than before: there is nothing to publish, so nothing is
+## skipped or failed, and no `locks/` is written into the metadata directory.
+## The publishability guard itself (a nested plain directory is not its own
+## worktree) keeps its direct cover in
+## `t_pre_push_auto_publishes_lock_and_skips_when_manifest_dirty_outside_locks.nim`,
+## test `t_lock_publish_skips_manifest_layer_nested_in_unrelated_checkout`
+## (`lpoNotPublishable`, at library level).
 ##
 ## The fixture OPTS IN to central publication (`[records] publish_locks =
 ## true` in `repro-workspace.toml`). That is not incidental: since MO-13/
@@ -43,15 +56,22 @@
 ## route, so the skip this test is about cannot occur and the test would pass
 ## or fail for reasons having nothing to do with nesting.
 ##
-## Asserted: `repro check --mode=pre-push` reports the store as SKIPPED rather
-## than failed, exits 0, stages nothing into the enclosing repo, and still
-## writes its lock to disk.
+## Asserted: `repro check --mode=pre-push` exits 0, reports no publish
+## failure, stages nothing into the enclosing repo, and writes no lock record
+## into the nested metadata directory.
 ##
-## Falsifiability: confirmed against the packaged pre-fix binary
-## (reprobuild 92dc648d) on this exact fixture — it reports
+## Before the record-store fix the same fixture made the nested directory the
+## store; the gate then took the benign "lock publish skipped … is a plain
+## directory inside the Git worktree" route and wrote `locks/` into it.
+##
+## Falsifiability: the original defect was confirmed against the packaged
+## pre-fix binary (reprobuild 92dc648d) on this exact fixture — it reported
 ## `lock-publish-failure` with git's "paths are ignored by one of your
 ## .gitignore files" text, which is the state that blocked every push in the
-## metacraft workspace.
+## metacraft workspace. Against reprobuild d957b394f (before the record-store
+## fix) the fixture still made the nested directory the store, and the
+## `locks/` assertions at the end fail there: the gate wrote its record into
+## `.repro/manifests/locks`.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
@@ -74,7 +94,7 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
-suite "a nested lock store is not publishable":
+suite "a nested metadata directory is neither a lock store nor publishable":
 
   test "t_lock_store_inside_another_repo_is_not_publishable":
     let gitBin = findExe("git")
@@ -157,11 +177,9 @@ suite "a nested lock store is not publishable":
       # workspace — is a property OF that route, and `publish_locks = true` is
       # now the only way in.
       #
-      # `[records]` carries `publish_locks` and NO `url`: a `[records] url`
-      # names a separate record-store repository
-      # (Workspace-Settings-Files.md §3), and the store under test is the
-      # root base layer, which is the store exactly when `[records]` names
-      # none.
+      # `[records]` carries `publish_locks` and NO `url`, so no store is
+      # declared, and the root base layer is not one either
+      # (Workspace-Settings-Files.md §3).
       writeFile(workspaceRoot / "repro-workspace.toml",
         "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
         "[records]\n" &
@@ -192,12 +210,8 @@ suite "a nested lock store is not publishable":
       if res.code != 0:
         checkpoint("check output: " & res.output)
 
-      # The nested store is a benign skip, not a failure that refuses a push.
+      # No store, so no publication was attempted and none failed.
       check res.code == 0
-      check res.output.contains("lock publish skipped")
-      # The store is a plain directory nested inside the workspace checkout —
-      # the diagnostic has to name that, not merely "no repository here".
-      check res.output.contains("is a plain directory inside the Git worktree")
       check not res.output.contains("lock-publish-failure")
       check not res.output.contains("git add locks failed")
 
@@ -206,9 +220,7 @@ suite "a nested lock store is not publishable":
         " diff --cached --name-only").output.strip()
       check staged.len == 0
 
-      # ...and the gate still recorded its lock on disk (the skip is about
-      # PUBLISHING it, not about writing it).
-      var lockCount = 0
-      for path in walkDirRec(manifestsRoot):
-        if path.endsWith(".toml"): inc lockCount
-      check lockCount > 0
+      # ...and the metadata directory did not become the record store: no
+      # lock record was written into it, nor into the root.
+      check not dirExists(manifestsRoot / "locks")
+      check not dirExists(workspaceRoot / "locks")

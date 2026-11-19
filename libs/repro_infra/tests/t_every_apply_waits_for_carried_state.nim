@@ -128,3 +128,31 @@ Requires=repro-state-restore.service
       if rec.address == gone[0].address: planned = rec.action
     # Absent on this host, so the destroy is a no-op; planned either way.
     check planned in ["destroy", "no-op"]
+
+suite "an apply that raises between its hold and its release (A13 review round 14)":
+  test "a library apply whose privileged set raises records its live check's triggers as it unwinds":
+    # The privileged set raises the way a driver's failure does: with no
+    # `repro` image the broker cannot be launched (EBrokerLaunch), between
+    # the hold (seeded: a library apply holds nothing itself) and the
+    # release. The unwinding records every trigger the release would have
+    # started (decision 170 as amended in round 12; the known gap the
+    # round-14 review asked to close).
+    let tmp = createTempDir("interrupted-apply-", "")
+    defer: removeDir(tmp)
+    let state = tmp / "state"
+    createDir(tmp / "root")
+    var o = options(state, tmp / "none", tmp / "root")
+    o.elevationMode = emBroker
+    o.reproExe = ""
+    o.liveCheckSeeded = true
+    o.liveCheckSeed = LiveCheckSeed(stateDir: state, units: @["app.service"],
+      triggers: @["app.socket", "app.timer", "idle.path"],
+      remembered: @["app.socket"], driverStarts: @["app.timer"])
+    var raised = false
+    try:
+      discard runInfraApply(UnitProfile, o)
+    except CatchableError:
+      raised = true
+    check raised
+    check readCurrentGenerationId(state).len == 0
+    check readLiveCheckTriggers(state) == @["app.socket", "app.timer"]

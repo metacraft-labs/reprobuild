@@ -4954,6 +4954,30 @@ proc recipeCompileToolPath*(modulePath = ""): string =
     except CatchableError: ""
   recipeCompileToolPath(modulePath, nimCompilerPath(), cc)
 
+proc recipeCompilePathEnv*(toolPath: string): seq[string] =
+  ## THE SINGLE PLACE A RECIPE COMPILE'S `PATH` ENTRY IS COMPOSED, for both
+  ## recipe compiles: the provider compile (`providerCompileLaunchEnv`) and
+  ## the interface extraction (`repro_cli_support.extractInterfaceEdge`).
+  ##
+  ## A recipe compile is not a lowered action, so its `PATH` is not decided by
+  ## `repro_cli_support.actionPathDecision`, whose rule is about the tools a
+  ## recipe edge declares. It is always the hermetic shape: the directories of
+  ## the compilers the compile runs (`recipeCompileToolPath`), keyed by value.
+  ## Composing the entry here, not at each compile, keeps the two compiles
+  ## from drifting apart and keeps `repro_cli_support` free of hand-written
+  ## `PATH=` entries (`t_declared_env_is_in_the_cache_key` case 10).
+  ##
+  ## Empty when `toolPath` is empty: an emitted `PATH` is never the empty
+  ## string, because a declared empty `PATH` replaces the inherited one and
+  ## the compile would find no tool at all.
+  if toolPath.len > 0:
+    result.add("PATH=" & toolPath)
+
+proc recipeCompilePathEnvForModule*(modulePath = ""): seq[string] =
+  ## `recipeCompilePathEnv` for the compilers the next recipe compile runs
+  ## (`recipeCompileToolPath(modulePath)`).
+  recipeCompilePathEnv(recipeCompileToolPath(modulePath))
+
 proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
   ## caller's shell stops deciding what the edge is.
@@ -5028,8 +5052,7 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   let sdk = getEnv(bootstrapSdkRootEnv)
   if sdk.len > 0:
     result.add(bootstrapSdkRootEnv & "=" & sdk)
-  if toolPath.len > 0:
-    result.add("PATH=" & toolPath)
+  result.add(recipeCompilePathEnv(toolPath))
   result.add("TERM=dumb")
   result.add("LANG=C")
   # Carry the cache BASE across the isolated HOME, always reserving the

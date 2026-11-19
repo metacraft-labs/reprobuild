@@ -638,6 +638,14 @@
 ##                                           hold (decisions 171 and 177)
 ## ``restart-success-by-exit-code``        a restart's exit code is taken as
 ##                                           its outcome (round 11, H1)
+## ``interrupted-apply-unrecorded``
+##     an apply that raises between its hold and its release records nothing (round 14, the known gap closed)
+## ``trigger-targets-by-name``
+##     a profile trigger's Service=/Unit= target is matched as written, not by its Id= (round 14, N2)
+## ``prefix-trigger-dropins-allowed``
+##     a prefix, template or type-wide drop-in setting Service=, Unit= or Sockets= is let through (decision 177, 2026-11-18)
+## ``late-essential-report-dropped``
+##     a late essential trigger's failure is dropped and the apply passes (decision 177(c), 2026-11-18)
 ## ``restart-digest-counts-requirement``
 ##     the restart record's digest counts the carried-state requirement's drop-ins (round 13, M-A)
 ## ``dead-template-instances-unrecorded``
@@ -1297,6 +1305,12 @@
 ##                                            (decision 181)
 ## ``egress-units-unix-sockets``              the egress units may make Unix
 ##                                            sockets (decision 181)
+## ``contain-records-before-quiesce``         contain records its statement
+##                                            while the agent can still start
+##                                            or finish a tick, so the tick's
+##                                            heartbeat lands after the
+##                                            containment (decision 51, A11
+##                                            round 23b)
 ## ``first-use-without-ledger-copy``         with no identity and no ledger
 ##                                            copy, the records' directory is
 ##                                            recorded at first use, a
@@ -2163,6 +2177,11 @@ const
                           "post-reload-requirers-released",
                           # A13 review round 11.
                           "restart-success-by-exit-code",
+                          # A13 review round 14.
+                          "interrupted-apply-unrecorded",
+                          "trigger-targets-by-name",
+                          "prefix-trigger-dropins-allowed",
+                          "late-essential-report-dropped",
                           # A13 review round 13.
                           "restart-digest-counts-requirement",
                           "dead-template-instances-unrecorded",
@@ -2402,6 +2421,7 @@ const
                           "ship-decoded-as-root",
                           "outbox-written-by-path",
                           "egress-units-unix-sockets",
+                          "contain-records-before-quiesce",
                           "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",

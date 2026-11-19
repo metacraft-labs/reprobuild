@@ -1,6 +1,7 @@
 ## Host facts, Reprobuild side (reprobuild-pm spec
 ## Gradual-Nix-To-Reprobuild-Migration.md §Measuring equivalence, §Host
-## facts; user guide `docs/user-guide/host-facts.md`).
+## facts; user guide
+## `docs/users/content/guides/machines/compare-with-home-manager.md`).
 ##
 ## A host-facts document is one host's home reduced to the four categories
 ## both the Nix path (Home Manager) and the Reprobuild path can be compared

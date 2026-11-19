@@ -27,6 +27,12 @@
 ## moving branch or tag name, which only the lock may pin). Neither the
 ## import's position in the file nor any directory name is an input.
 ##
+## An import may name its ``kind`` (``provisioning``, the default, or
+## ``nimble-index``): what the catalog publishes and what its identity
+## means (Federated-Catalog-Imports.md § Catalog kinds). Any other value is
+## refused, naming the line it is on: read as the default, a Nimble index
+## would be looked for as a provisioning catalog (threat model G21).
+##
 ## ## What a catalog publishes
 ##
 ## ``publishedCatalogContent`` turns the decoded ``published-interfaces/*.rbsz``
@@ -73,6 +79,10 @@ const
     ## The directory, at a catalog repository's root, holding its published
     ## interface artifacts.
 
+  PublishedIndexDir* = "published-index"
+    ## The directory, at the root of a ``nimble-index`` catalog, holding the
+    ## index: its ``root`` and ``objects/<id>``.
+
   PublishedArtifactSuffix* = ".rbsz"
 
   CatalogProviderIdentityMagic* = "reprobuild.catalog-provider-identity.v1"
@@ -87,6 +97,7 @@ type
     commit*: string             ## lower-cased full-width object id, or "".
     gitRef*: string             ## the declared moving reference, or "".
     interfaceArtifact*: string  ## lower-cased 64-hex assertion, or "".
+    kind*: CatalogImportKind    ## what it publishes; default provisioning.
     line*: int                  ## where the table starts (diagnostics only).
 
   CatalogPolicyDeclaration* = object
@@ -157,6 +168,8 @@ proc parseCatalogImportsDeclaration*(text, path: string;
   var schema = ""
   var sawSchema = false
   var imports: seq[(int, seq[(string, string)])] = @[]
+  var kindLines: seq[int] = @[]
+    ## per import: the line of its ``kind`` key, or 0
   var policies: seq[(int, seq[(string, string)])] = @[]
   var lineNo = 0
   for rawLine in text.split('\n'):
@@ -177,6 +190,7 @@ proc parseCatalogImportsDeclaration*(text, path: string;
       of "[[import]]":
         section = sImport
         imports.add((lineNo, newSeq[(string, string)]()))
+        kindLines.add(0)
       of "[[policy]]":
         section = sPolicy
         policies.add((lineNo, newSeq[(string, string)]()))
@@ -255,6 +269,8 @@ proc parseCatalogImportsDeclaration*(text, path: string;
         schema = value
     of sImport:
       imports[^1][1].add((key, value))
+      if key == "kind" and kindLines[^1] == 0:
+        kindLines[^1] = lineNo
     of sPolicy:
       policies[^1][1].add((key, value))
 
@@ -292,15 +308,23 @@ proc parseCatalogImportsDeclaration*(text, path: string;
     localPathDefect(value)
 
   var declared: seq[CatalogImportDeclaration] = @[]
-  for (at, raw) in imports:
+  for n, (at, raw) in imports:
     let pairs = fields(at, raw,
-      ["repo", "remote", "commit", "ref", "interface_artifact"], "import")
+      ["repo", "remote", "kind", "commit", "ref", "interface_artifact"],
+      "import")
     var d = CatalogImportDeclaration(line: at)
     for required in ["repo", "remote"]:
       if not pairs.hasKey(required):
         fail(at, "[[import]] is missing `" & required & "`")
     d.repo = pairs.valueOf("repo")
     d.remote = pairs.valueOf("remote")
+    if pairs.hasKey("kind"):
+      let k = pairs.valueOf("kind")
+      if not parseCatalogImportKind(k, d.kind):
+        # The key's own line: the line to edit.
+        fail(kindLines[n], "unknown kind " & k.escape() & " of [[import]] " &
+          d.repo.escape() & " (known kinds: " & catalogImportKindNames() &
+          "); an unknown kind is never read as the default")
     if pairs.hasKey("repo"):
       let p = nameProblem(d.repo)
       if p.len > 0: fail(at, "repo " & d.repo.escape() & " " & p)

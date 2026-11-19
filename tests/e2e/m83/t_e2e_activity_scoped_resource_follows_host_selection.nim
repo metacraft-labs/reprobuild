@@ -210,7 +210,7 @@ suite "GM9: activity-scoped resources follow host selection":
     require exported.exitCode == 0
     let doc = parseJson(exported.stdout)
     check doc["schemaVersion"].getInt == HomeExportSchemaVersion
-    check HomeExportSchemaVersion == 5
+    check HomeExportSchemaVersion == 6
     var scopes: seq[string]
     for r in doc["intent"]["resources"]:
       let activity = r["activity"]

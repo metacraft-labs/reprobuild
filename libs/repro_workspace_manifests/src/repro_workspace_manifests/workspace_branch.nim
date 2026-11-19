@@ -786,11 +786,20 @@ proc migrateWorkspaceStateFile*(workspaceRoot: string): seq[string] =
       result.add("dropped manifest layer " & d & " of " & source & ": it " &
         "names the workspace root's own manifests, the base layer")
     if outcome.added.len > 0:
-      result.add("the workspace root is now the base layer, and so the " &
-        "lock record store unless repro-workspace.toml declares " &
-        "`[records]`; the moved layers compose additively per project. " &
-        "If lock records were published to the first layer of the old " &
-        "file, declare it as `[records]` in repro-workspace.toml")
+      # Workspace-Settings-Files.md §8: the root becomes the base layer but
+      # does NOT inherit the store role -- metadata is never the record store
+      # (§3). Before reprobuild-pm issues/2026-11-16-repro-falls-back-to-the-
+      # root-or-origin-as-the-lock-record-store-when-records-names-no-url.md
+      # this line said the root WAS the store unless `[records]` was declared.
+      result.add("the workspace root is now the base layer, but not the " &
+        "lock record store, and neither is any moved layer: unless " &
+        "repro-workspace.toml declares `[records] url`, a route is " &
+        "configured, or a store checkout sits at .repro/records (or the " &
+        "legacy .repro/manifests), the workspace is committed-lock-only " &
+        "and no lock record is written outside repro.lock. To keep " &
+        "publishing lock records to the old file's first layer, declare " &
+        "its url as `[records] url` in repro-workspace.toml; the moved " &
+        "layers compose additively per project")
   # Read both files first, so a malformed one stops the migration before any
   # file changes. Each layer move checks its conflicts before writing; the
   # one partial outcome is a left-over old file whose layers conflict with
