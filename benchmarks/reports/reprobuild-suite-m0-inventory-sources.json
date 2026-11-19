@@ -15852,7 +15852,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_core/tests/t_canonical_work_dir.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
