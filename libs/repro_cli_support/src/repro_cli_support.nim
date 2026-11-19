@@ -3358,6 +3358,10 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     # Caches.md "Trust Boundary"): a branch that dropped them would let the
     # edge's records leave this host.
     result.contentKeyedToolCaches = payload.contentKeyedToolCaches
+    # The canonical work tree's key (Hermetic-Builds-And-Path-Independence.md
+    # "Canonical work trees"). Copied on every branch: a branch that dropped
+    # it would run the edge in a checkout-specific tree again.
+    result.canonicalWorkKey = payload.canonicalWorkKey
   # Caching-Architecture D2: an edge that states no policy takes the one its
   # resolved tools declare, else the owner-decided default, timestamp.
   var policyFromTools = false
@@ -5014,7 +5018,10 @@ const
   # passthrough resolution and the stage-2 census both read this field,
   # and a census that answers differently cold and warm is not a
   # measurement.
-  LoweredGraphCacheVersion = 18'u16
+  LoweredGraphCacheVersion = 19'u16
+    # v19: ``BuildAction.canonicalWorkKey``, a string after
+    # ``contentKeyedToolCaches``. A v18 record decoded without it would run
+    # the edge without its canonical work tree on the warm path only.
     # v18: ``BuildAction.contentKeyedToolCaches``, a string list after
     # ``widthFlag``. A v17 record decoded without it would make a cache-
     # reading edge `weak` again on the warm path only, and its records would
@@ -6164,6 +6171,7 @@ proc writeBuildAction(outp: var seq[byte]; action: BuildAction) =
   outp.writeU32Le(action.cpuPreferredMilli)
   outp.writeString(action.widthFlag)
   outp.writeStringSeq(action.contentKeyedToolCaches)
+  outp.writeString(action.canonicalWorkKey)
 
 proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result = BuildAction(
@@ -6256,6 +6264,7 @@ proc readBuildAction(bytes: openArray[byte]; pos: var int): BuildAction =
   result.cpuPreferredMilli = readU32Le(bytes, pos)
   result.widthFlag = readString(bytes, pos)
   result.contentKeyedToolCaches = readStringSeq(bytes, pos)
+  result.canonicalWorkKey = readString(bytes, pos)
 
 proc encodeLoweredGraphCache(record: LoweredGraphCacheRecord): seq[byte] =
   result.writeString(LoweredGraphCacheMagic)
@@ -31972,6 +31981,7 @@ proc buildActionJson(action: BuildAction): JsonNode =
     "publishToBinaryCache": action.publishToBinaryCache,
     "fixedOutput": action.fixedOutput,
     "scratchDirs": action.scratchDirs,
+    "canonicalWorkKey": action.canonicalWorkKey,
     "removeBeforeRun": action.removeBeforeRun,
     "optionalOutputs": action.optionalOutputs,
     "binaryCacheKey": binaryCacheKey,

@@ -173,6 +173,7 @@ libs/repro_build_engine/tests/t_builtin_kinds_with_undeclared_reads_do_not_publi
 libs/repro_build_engine/tests/t_cache_hit_evidence_paths_are_built_on_demand.nim	nim	4
 libs/repro_build_engine/tests/t_cache_record_for_other_outputs_is_not_served.nim	nim	6
 libs/repro_build_engine/tests/t_cache_refusal_always_names_its_reason.nim	nim	5
+libs/repro_build_engine/tests/t_canonical_work_tree_reproduces_split_bundle.nim	nim	2
 libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	7
 libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim	nim	2
 libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim	nim	6
@@ -383,6 +384,7 @@ libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim	nim	35
 libs/repro_cmake_trycompile/tests/test_envelope_v3.nim	nim	3
 libs/repro_core/tests/t_ambient_execution_external_import.nim	nim	1
 libs/repro_core/tests/t_bounded_lock_refuses_at_its_deadline_on_every_platform.nim	nim	4
+libs/repro_core/tests/t_canonical_work_dir.nim	nim	12
 libs/repro_core/tests/t_deps_refresh_check.nim	nim	5
 libs/repro_core/tests/t_engine_build_info.nim	nim	5
 libs/repro_core/tests/t_go_dep_scanner.nim	nim	13
@@ -925,6 +927,7 @@ libs/repro_project_dsl/tests/dsl_port/t_l6_service_compatibility_surface.nim	nim
 libs/repro_project_dsl/tests/dsl_port/t_l8_contribute_surface_refuses_near_misses.nim	nim	3
 libs/repro_project_dsl/tests/dsl_port/t_l9_supervision_surface_refuses_near_misses.nim	nim	3
 libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim	nim	17
+libs/repro_project_dsl/tests/t_canonical_work_key.nim	nim	5
 libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim	nim	8
 libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim	nim	7
@@ -2362,7 +2365,7 @@ tests/integration/t_provider_library_c_abi_memory_ownership.nim	nim	3
 tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
-tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	4
+tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	5
 tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
