@@ -116,7 +116,9 @@ proc renderRecord(lines: var seq[string]; r: VersionRecord; indent: string) =
 proc renderShard*(s: NimbleShard): string =
   var lines = @["nimble-index shard schema=" & $NimbleIndexSchemaVersion &
     " bits=" & $s.shardBits & " bucket=" & $s.bucket &
-    " packages=" & $s.packages.len & " aliases=" & $s.aliases.len]
+    " packages=" & $s.packages.len & " aliases=" & $s.aliases.len &
+    (if s.observations.len > 0: " observations=" & $s.observations.len
+     else: "")]
   for p in s.packages:
     lines.add "package " & p.name & " registry_origin=" & $p.registryOrigin
     for i, o in p.origins:
@@ -126,6 +128,19 @@ proc renderShard*(s: NimbleShard): string =
       renderRecord(lines, r, "  ")
   for a in s.aliases:
     lines.add "alias " & a.alias & " -> " & a.target
+  for o in s.observations:
+    lines.add "observed " & o.name & " " & $o.state & " " & $o.origin.vcs &
+      " " & o.origin.url &
+      (if o.origin.subdir.len > 0: " subdir=" & q(o.origin.subdir) else: "")
+    if o.head.len > 0 or o.headRef.len > 0:
+      lines.add "  head " & (if o.headRef.len > 0: o.headRef else: "-") &
+        " " & (if o.head.len > 0: o.head else: "-")
+    for t in o.tags:
+      lines.add "  tag " & t.name & " " & t.commit
+    for h in o.held:
+      lines.add "  held " & $h.version.kind & " " &
+        (if h.version.tag.len > 0: h.version.tag else: "-") & " " & h.commit &
+        " first_seen=" & $h.firstSeen
   lines.join("\n")
 
 proc renderRoot*(r: NimbleIndexRoot): string =

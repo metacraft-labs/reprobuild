@@ -234,6 +234,7 @@ from test_certificates/note_framing as tcnotes import nil
 from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
+import repro_cli_support/catalog_generate
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -106672,6 +106673,14 @@ proc runReproCommandLine(programName: string; args: seq[string];
       except CatchableError as err:
         stderr.writeLine("repro catalog: error: " & err.msg)
         return 1
+    of ReproCommandLineCatalogCommand.generate:
+      let r = conf.catalog.generate
+      return runCatalogGenerateCommand(r.root, r.sourceSet, r.state,
+        r.generatedAt)
+    of ReproCommandLineCatalogCommand.verify:
+      let r = conf.catalog.verify
+      return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
+        r.state)
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

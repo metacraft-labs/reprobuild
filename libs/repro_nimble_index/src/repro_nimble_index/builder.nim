@@ -24,6 +24,9 @@ type
     packages*: seq[PackageEnvelope]
     aliases*: seq[PackageAlias]
     events*: seq[OriginEvent]
+    observations*: seq[PackageObservation]
+      ## the origin answers the generator recorded (the generator's state
+      ## for the next generation); each in its own name key's shard
 
   BuiltIndex* = object
     rootId*: IndexObjectId
@@ -52,9 +55,17 @@ proc canonicalPackage*(p: PackageEnvelope): PackageEnvelope =
   result.versions.sort(proc (a, b: VersionRecord): int =
     cmp(versionSortKey(a), versionSortKey(b)))
 
+proc canonicalObservation*(o: PackageObservation): PackageObservation =
+  ## ``o`` with its tags and held versions in canonical order.
+  result = o
+  result.tags.sort(proc (a, b: ObservedTag): int = cmp(a.name, b.name))
+  result.held.sort(proc (a, b: HeldVersion): int =
+    cmp(heldSortKey(a), heldSortKey(b)))
+
 proc buildShard*(shardBits: int; bucket: uint32;
                  packages: seq[PackageEnvelope];
-                 aliases: seq[PackageAlias]): seq[byte] =
+                 aliases: seq[PackageAlias];
+                 observations: seq[PackageObservation] = @[]): seq[byte] =
   ## One shard's bytes. Refuses (``NimbleIndexError``) what the reader would
   ## refuse: a package in the wrong bucket, a duplicate name, a bound.
   var s = NimbleShard(shardBits: uint8(shardBits), bucket: bucket)
@@ -64,55 +75,61 @@ proc buildShard*(shardBits: int; bucket: uint32;
   s.aliases = aliases
   s.aliases.sort(proc (a, b: PackageAlias): int =
     cmp(nameKey(a.alias), nameKey(b.alias)))
+  for o in observations: s.observations.add canonicalObservation(o)
+  s.observations.sort(proc (a, b: PackageObservation): int =
+    cmp(nameKey(a.name), nameKey(b.name)))
   encodeShard(s)
 
-proc buildIndex*(input: IndexBuildInput): BuiltIndex =
-  ## Every object of one index generation and its root.
-  let bits =
-    if input.shardBits < 0: defaultShardBits(input.packages.len)
-    else: input.shardBits
-  if bits > MaxShardBits:
-    refuse(nrBound, "shardBits " & $bits & " exceeds " & $MaxShardBits)
+proc buildRootFromShards*(input: IndexBuildInput; shardBits: int;
+                          shards: seq[seq[byte]]): BuiltIndex =
+  ## The root, name map and events of one generation whose shards are
+  ## ``shards`` (encoded, any order). ``input.packages``, ``aliases`` and
+  ## ``observations`` are ignored: the shards are what the root names, and
+  ## each is decoded (bounded, canonical) to count and to name its packages.
+  ## This is the generator's `root` edge; ``buildIndex`` ends with it too.
+  var decoded: seq[(NimbleShard, seq[byte])]
+  for bytes in shards:
+    let s = decodeShard(bytes)
+    if int(s.shardBits) != shardBits:
+      refuse(nrInconsistent, "a shard at " & $s.shardBits & " bits in a " &
+        "root at " & $shardBits)
+    decoded.add (s, bytes)
+  decoded.sort(proc (a, b: (NimbleShard, seq[byte])): int =
+    cmp(a[0].bucket, b[0].bucket))
   var canonical = initTable[string, string]()
-  for p in input.packages:
-    let k = nameKey(p.name)
-    if k in canonical:
-      refuse(nrDuplicate, "two packages are named " & p.name & " and " &
-        canonical[k] & " under the style-insensitive comparison")
-    canonical[k] = p.name
-  for a in input.aliases:
+  var aliases: seq[PackageAlias]
+  var packageCount, versionCount = 0
+  for i, (s, _) in decoded:
+    if i > 0 and decoded[i - 1][0].bucket == s.bucket:
+      refuse(nrDuplicate, "two shards of bucket " & $s.bucket)
+    for p in s.packages:
+      let k = nameKey(p.name)
+      if k in canonical:
+        refuse(nrDuplicate, "two packages are named " & p.name & " and " &
+          canonical[k] & " under the style-insensitive comparison")
+      canonical[k] = p.name
+      inc packageCount
+      versionCount += p.versions.len
+    for a in s.aliases: aliases.add a
+  for a in aliases:
     if nameKey(a.target) notin canonical or
         canonical[nameKey(a.target)] != a.target:
       refuse(nrInconsistent, "alias " & a.alias & " names " & a.target &
         ", which is not a canonical package name of this index")
-  var byBucket = initTable[uint32, (seq[PackageEnvelope], seq[PackageAlias])]()
-  var versionCount = 0
-  for p in input.packages:
-    let b = shardBucket(nameKey(p.name), bits)
-    byBucket.mgetOrPut(b, (@[], @[]))[0].add p
-    versionCount += p.versions.len
-  for a in input.aliases:
-    let b = shardBucket(nameKey(a.alias), bits)
-    byBucket.mgetOrPut(b, (@[], @[]))[1].add a
-  var buckets: seq[uint32]
-  for b in byBucket.keys: buckets.add b
-  buckets.sort()
   var root = NimbleIndexRoot(generator: input.generator,
     sourceSet: input.sourceSet, generatedAt: input.generatedAt,
-    previousRoot: input.previousRoot, packageCount: uint32(input.packages.len),
+    previousRoot: input.previousRoot, packageCount: uint32(packageCount),
     versionCount: uint32(versionCount), eventCount: uint32(input.events.len),
-    shardBits: uint8(bits))
+    shardBits: uint8(shardBits))
   var objects = initTable[IndexObjectId, seq[byte]]()
-  for b in buckets:
-    let (ps, als) = byBucket[b]
-    let bytes = buildShard(bits, b, ps, als)
+  for (s, bytes) in decoded:
     let id = indexObjectId(bytes)
     objects[id] = bytes
-    root.shards.add ShardRef(bucket: b, id: id, size: uint64(bytes.len),
-      packages: uint32(ps.len))
+    root.shards.add ShardRef(bucket: s.bucket, id: id,
+      size: uint64(bytes.len), packages: uint32(s.packages.len))
   var names = NimbleNameMap()
-  for p in input.packages: names.entries.add NameEntry(name: p.name)
-  for a in input.aliases:
+  for k, n in canonical: names.entries.add NameEntry(name: n)
+  for a in aliases:
     names.entries.add NameEntry(name: a.alias, target: a.target)
   names.entries.sort(proc (a, b: NameEntry): int =
     cmp(nameKey(a.name), nameKey(b.name)))
@@ -134,6 +151,47 @@ proc buildIndex*(input: IndexBuildInput): BuiltIndex =
   for id, bytes in objects: result.objects.add (id, bytes)
   result.objects.sort(proc (a, b: (IndexObjectId, seq[byte])): int =
     cmp($a[0], $b[0]))
+
+proc buildIndex*(input: IndexBuildInput): BuiltIndex =
+  ## Every object of one index generation and its root.
+  let bits =
+    if input.shardBits < 0: defaultShardBits(input.packages.len)
+    else: input.shardBits
+  if bits > MaxShardBits:
+    refuse(nrBound, "shardBits " & $bits & " exceeds " & $MaxShardBits)
+  var canonical = initTable[string, string]()
+  for p in input.packages:
+    let k = nameKey(p.name)
+    if k in canonical:
+      refuse(nrDuplicate, "two packages are named " & p.name & " and " &
+        canonical[k] & " under the style-insensitive comparison")
+    canonical[k] = p.name
+  for a in input.aliases:
+    if nameKey(a.target) notin canonical or
+        canonical[nameKey(a.target)] != a.target:
+      refuse(nrInconsistent, "alias " & a.alias & " names " & a.target &
+        ", which is not a canonical package name of this index")
+  type Bucket = tuple[packages: seq[PackageEnvelope];
+                      aliases: seq[PackageAlias];
+                      observations: seq[PackageObservation]]
+  var byBucket = initTable[uint32, Bucket]()
+  for p in input.packages:
+    let b = shardBucket(nameKey(p.name), bits)
+    byBucket.mgetOrPut(b, (@[], @[], @[])).packages.add p
+  for a in input.aliases:
+    let b = shardBucket(nameKey(a.alias), bits)
+    byBucket.mgetOrPut(b, (@[], @[], @[])).aliases.add a
+  for o in input.observations:
+    let b = shardBucket(nameKey(o.name), bits)
+    byBucket.mgetOrPut(b, (@[], @[], @[])).observations.add o
+  var buckets: seq[uint32]
+  for b in byBucket.keys: buckets.add b
+  buckets.sort()
+  var shards: seq[seq[byte]]
+  for b in buckets:
+    let x = byBucket[b]
+    shards.add buildShard(bits, b, x.packages, x.aliases, x.observations)
+  buildRootFromShards(input, bits, shards)
 
 proc objectTable*(b: BuiltIndex): Table[IndexObjectId, seq[byte]] =
   for (id, bytes) in b.objects: result[id] = bytes

@@ -267,6 +267,13 @@ proc postBaselineCorpusActions*(): seq[BuildAction] =
     governingLockIdentity = CorpusLockIdentity,
     cacheable = false,
     text = "."))
+  # NPC-AREQ9 (`bakCatalogIndex`): a pure edge of the Nimble catalog
+  # generator, reading only declared inputs and never the network.
+  result.add(builtinAction(bakCatalogIndex, "stat4/catalog-index-shard",
+    governingLockIdentity = CorpusLockIdentity,
+    inputs = ["generation/libfoo.versions"],
+    outputs = ["generation/catalog-shard"],
+    text = "shard"))
 
 proc everyEdgeKindActions*(): seq[BuildAction] =
   ## The baseline corpus plus every post-baseline kind: the graph the §7.2

@@ -50,6 +50,9 @@ const
   MaxVersionComponents* = 8
   MaxNames* = 1 shl 17
   MaxEvents* = 1 shl 17
+  MaxObservedTags* = 4096
+    ## tags one observation records (the bound of a package's versions)
+  MaxHeldVersions* = 4096
 
   # Text bounds, in bytes.
   MaxNameBytes* = 256
@@ -209,6 +212,9 @@ type
     flUnreadable = "unreadable"
     flGitlinks = "gitlinks"
     flOverrideApplied = "override_applied"
+    flUnlisted = "unlisted"
+      ## the source is outside the registry and the source set's own
+      ## declarations (a URL requirement), indexed under `unlisted = "allow"`
 
   RecordReaderClass* = enum
     ## The static reader's class of the `.nimble` the record was read from.
@@ -286,11 +292,48 @@ type
     alias*: string
     target*: string ## the canonical name
 
+  ObservationState* = enum
+    ## What the origin of a package answered the generator's `refs` edge.
+    osAnswering = "answering" ## it listed its refs
+    osGone = "gone"
+      ## it did not answer, or the registry no longer lists the package
+    osRefused = "refused"
+      ## the origin egress policy refused the origin; it was never contacted
+
+  ObservedTag* = object
+    name*: string   ## the tag's name, without `refs/tags/`
+    commit*: string ## the object it peels to, lower-case hex
+
+  HeldVersion* = object
+    ## A version the generator has seen and withholds from the index until
+    ## it has been observable for the source set's `cooldown_days`
+    ## (NPC-AREQ11). Only its first sighting is kept: the record is built
+    ## when it is admitted, with this `firstSeen`.
+    version*: RecordVersion
+    commit*: string
+    firstSeen*: uint64
+
+  PackageObservation* = object
+    ## The origin answers the generator recorded for one package at this
+    ## generation: what the next generation compares against to compute the
+    ## origin events (NPC-AREQ4), and what a second operator's run is
+    ## compared with field by field (NPC-AREQ9). A package that has an
+    ## observation need not have an envelope (every version may be held).
+    name*: string
+    origin*: PackageOrigin   ## the origin the `refs` edge read
+    state*: ObservationState
+    headRef*: string         ## the branch `HEAD` names; may be empty
+    head*: string            ## the commit `HEAD` names; may be empty
+    tags*: seq[ObservedTag]  ## strictly ascending by name
+    held*: seq[HeldVersion]  ## strictly ascending by ``heldSortKey``
+
   NimbleShard* = object
     shardBits*: uint8
     bucket*: uint32
     packages*: seq[PackageEnvelope] ## sorted by ``nameKey`` of the name
     aliases*: seq[PackageAlias]     ## sorted by ``nameKey`` of the alias
+    observations*: seq[PackageObservation]
+      ## sorted by ``nameKey`` of the name; each in its own key's bucket
 
   ShardRef* = object
     bucket*: uint32

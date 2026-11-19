@@ -2508,7 +2508,32 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       pos target is string, required = false,
         help = "The target (`target[#action]` or a path) whose graph to " &
           "search (default: the current project)"
-    subcmd "catalog", help = "Publish a catalog's interface artifacts":
+    subcmd "catalog",
+        help = "Publish a catalog's interface artifacts, or generate and " &
+          "verify a Nimble package index":
+      subcmd "generate",
+          help = "Regenerate published-index/ of a Nimble index repository " &
+            "from its nimble-sources.toml":
+        flag root is string,
+          help = "The index repository (default: the current directory)"
+        flag sourceSet is string,
+          help = "The source set (default: <root>/nimble-sources.toml)"
+        flag state is string,
+          help = "This host's generator state: edge outputs and cache " &
+            "(default: under the user cache directory)"
+        flag generatedAt is string,
+          help = "The generation time in Unix seconds (default: now)"
+      subcmd "verify",
+          help = "Repeat the generation of a Nimble index from the inputs it " &
+            "names and compare the roots":
+        flag sourceSet is string,
+          help = "The source set (default: nimble-sources.toml beside the index)"
+        flag previous is string,
+          help = "The previous generation's index, when the root names one"
+        flag state is string,
+          help = "This host's generator state for the repeat"
+        pos index is string,
+          help = "The index repository, or its published-index/ directory"
       subcmd "publish",
           help = "Write published-interfaces/ from the catalog's providers":
         boolFlag check is bool,

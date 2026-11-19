@@ -117,12 +117,31 @@ type
     alias*: WName
     target*: WName
 
+  ObservedTagW* = object
+    name*: WName
+    commit*: List[byte, MaxCommitBytes]
+
+  HeldW* = object
+    version*: VersionW
+    commit*: List[byte, MaxCommitBytes]
+    firstSeen*: uint64
+
+  ObservationW* = object
+    name*: WName
+    origin*: OriginW
+    state*: uint8
+    headRef*: WName
+    head*: List[byte, MaxCommitBytes]
+    tags*: List[ObservedTagW, MaxObservedTags]
+    held*: List[HeldW, MaxHeldVersions]
+
   ShardW* = object
     schema*: uint16
     shardBits*: uint8
     bucket*: uint32
     packages*: List[PackageW, MaxPackagesPerShard]
     aliases*: List[AliasW, MaxAliasesPerShard]
+    observations*: List[ObservationW, MaxPackagesPerShard]
 
   ShardRefW* = object
     bucket*: uint32

@@ -299,6 +299,14 @@ type
     # repository's own tracked sources, not build products the engine may
     # clean or restore.
     bakLockUpdate
+    # Nimble-Package-Catalog NPC-AREQ9: a PURE edge of the catalog
+    # generator (`read`, `shard`, `root`). It reads only its declared inputs
+    # -- the content-addressed outputs of the generator's fetch edges and of
+    # other pure edges -- and writes its declared outputs, in process, with
+    # no network (``netDenied``) and no process. Dispatched through the
+    # executor registered by ``repro_nimble_generator``; the generator's
+    # network edges (`registry`, `refs`, `source`) are ``bakMetadataFetch``.
+    bakCatalogIndex
 
   NetworkMode* = enum
     ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
@@ -3714,7 +3722,7 @@ const PayloadKeyedBuiltinKinds* = {bakCopyFile, bakEnsureDir, bakWriteText,
   ##
   ## The executor-backed kinds (`bakWorkspaceVcs`, `bakForeignProvision`,
   ## `bakBinaryCacheSubstitute`, `bakMetadataFetch`, `bakSolveLock`,
-  ## `bakLockUpdate`) keep the key their constructor computes. Their
+  ## `bakLockUpdate`, `bakCatalogIndex`) keep the key their constructor computes. Their
   ## payloads carry fields their designs keep out of the key on purpose: a
   ## git clone's reference path, filter, depth and single-branch flag are
   ## acceleration knobs, so a full and a shallow clone of one revision share
@@ -4993,8 +5001,10 @@ proc outputPathReady(action: BuildAction; path: string): bool =
   # M2: bakWorkspaceVcs receipts are plain files, same readiness rule.
   # NLF-M5: a metadata-fetch object and a generated lock are plain files
   # written by their executors, so they take the same readiness rule.
+  # NPC-AREQ9: a catalog index edge's outputs are plain files too.
   if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs,
-                     bakForeignProvision, bakMetadataFetch, bakSolveLock} and
+                     bakForeignProvision, bakMetadataFetch, bakSolveLock,
+                     bakCatalogIndex} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -8028,6 +8038,7 @@ func builtinKindName*(kind: BuildActionKind): string =
   of bakMetadataFetch: "metadata-fetch"
   of bakSolveLock: "solve-lock"
   of bakLockUpdate: "lock-update"
+  of bakCatalogIndex: "catalog-index"
 
 const BuiltinPayloadPeerKeyDomain* = "reprobuild/peer-builtin-payload/v1"
   ## The domain `builtinPayloadPeerKey` frames a builtin's peer-cache key
@@ -17671,7 +17682,14 @@ type
     ## it rewrote in ``rewrittenSources`` so the engine drops any stat or
     ## digest it cached for them earlier in the run.
 
+  CatalogIndexExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Nimble-Package-Catalog NPC-AREQ9: hook installed by
+    ## ``repro_nimble_generator`` for its pure ``bakCatalogIndex`` edges.
+    ## Indirect for the usual layering reason: the index writer and the
+    ## static `.nimble` reader live above the engine.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
+var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
 var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
@@ -17727,6 +17745,14 @@ proc registerSolveLockExecutor*(executor: SolveLockExecutor) =
 
 proc clearSolveLockExecutor*() =
   solveLockExecutor = nil
+
+proc registerCatalogIndexExecutor*(executor: CatalogIndexExecutor) =
+  ## Register the per-thread executor for ``bakCatalogIndex`` edges
+  ## (NPC-AREQ9). The catalog generator installs one bound to its run.
+  catalogIndexExecutor = executor
+
+proc clearCatalogIndexExecutor*() =
+  catalogIndexExecutor = nil
 
 proc registerForeignProvisionExecutor*(provisioner: string;
                                        executor: ForeignProvisionExecutor) =
@@ -18880,6 +18906,22 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.launched = luRes.launched
       result.rewrittenSources = luRes.rewrittenSources
       result.runQuotaBackend = "lock-update"
+      return
+    of bakCatalogIndex:
+      # Fail CLOSED when nothing is registered: an index edge that quietly
+      # no-ops would leave the root edge reading a shard nobody wrote.
+      if catalogIndexExecutor.isNil:
+        raiseEngine(
+          "bakCatalogIndex action requires registerCatalogIndexExecutor " &
+          "before runBuild: " & action.id)
+      let ciRes = catalogIndexExecutor(action)
+      result.status = ciRes.status
+      result.exitCode = ciRes.exitCode
+      result.stdout = ciRes.stdout
+      result.stderr = ciRes.stderr
+      result.reason = ciRes.reason
+      result.launched = ciRes.launched
+      result.runQuotaBackend = "catalog-index"
       return
     of bakSolveLock:
       if solveLockExecutor.isNil:
