@@ -232,7 +232,24 @@ type
       ## package names appear in cargo metadata — pre-normalisation).
       ## crates.io / git deps are filtered out: the M13 surface only wires
       ## ``--extern`` edges for path deps that resolve to a sibling
-      ## workspace member.
+      ## workspace member. Only normal dependencies (``kind`` null) are
+      ## here: dev-dependencies are in ``devWorkspaceDeps``, and a
+      ## build-dependency, which Cargo gives the build script alone, is
+      ## dropped (Mode A runs no build script). These are the edges the
+      ## library and binary compiles get and the edges
+      ## ``topologicalSortLibPackages`` orders by.
+    devWorkspaceDeps: seq[string]
+      ## Names of OTHER workspace members this package lists under
+      ## ``[dev-dependencies]`` (``kind == "dev"`` in ``cargo metadata``).
+      ## Cargo gives a dev-dependency to the package's tests, examples and
+      ## benchmarks only (Cargo reference, "Specifying Dependencies",
+      ## "Development dependencies"), so Mode A passes them to the test
+      ## crates alone, and a cycle through a dev edge (``a`` dev-depends
+      ## on ``b``, ``b`` depends on ``a``), which Cargo accepts, does not
+      ## enter the library order. Rust.md §"Cross-crate ordering edges".
+      ## May hold the package itself (``[dev-dependencies] b = { path =
+      ## "." }``): its library's test crate then gets ``--extern`` for the
+      ## library, as Cargo passes it.
     hasExternalDeps: bool
       ## True when this package depends on a package Mode A does not
       ## compile: a dependency of any kind (normal, build or dev) with
@@ -291,6 +308,13 @@ type
       ## True when any package may set ``harness = false`` where Mode A
       ## cannot tell on which target (``RustPackage.harnessUnattributed``).
       ## Routes the entire project through Mode B, like ``hasFeatures``.
+    hasRenamedDeps: bool
+      ## True when a package names a workspace dependency of any kind
+      ## under another name (``foo = { package = "a", path = ... }``,
+      ## ``rename`` in ``cargo metadata``). Cargo then passes ``--extern
+      ## foo=<a's rlib>``; Mode A names each ``--extern`` after the
+      ## library's crate name, so it routes the project through Mode B
+      ## (Rust.md §"Recognition", item 6).
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -1058,6 +1082,7 @@ proc loadProject(projectRoot: string;
       else: projectRoot
     var targets = extractTargets(pkgNode, packageEdition)
     var workspaceDeps: seq[string] = @[]
+    var devWorkspaceDeps: seq[string] = @[]
     var hasExternalDeps = false
     if "dependencies" in pkgNode and pkgNode["dependencies"].kind == JArray:
       for dep in pkgNode["dependencies"]:
@@ -1071,15 +1096,21 @@ proc loadProject(projectRoot: string;
         #
         # A registry or git dependency (``source`` set) sends the
         # workspace to Mode B whatever its kind (Rust.md §"Recognition",
-        # item 6). That includes a dev-dependency: Mode A gives a test
-        # compile ``--extern`` for its own package's library only, so
-        # ``rustc`` would fail to resolve the crate in ``repro build
-        # .#test`` (reprobuild-pm
+        # item 6). That includes a dev-dependency: Mode A compiles
+        # workspace members only and has no library to pass a test
+        # compile ``--extern`` for, so ``rustc`` would fail to resolve the
+        # crate in ``repro build .#test`` (reprobuild-pm
         # issues/2026-11-17-rust-mode-a-tolerates-registry-dev-dependencies-that-its-test-compile-cannot-resolve.md).
         let hasSource = "source" in dep and dep["source"].kind != JNull
         if hasSource:
           hasExternalDeps = true
           continue
+        # ``kind`` is ``null`` for a normal dependency, ``"dev"`` or
+        # ``"build"`` otherwise.
+        let depKindStr =
+          if "kind" in dep and dep["kind"].kind == JString:
+            dep["kind"].getStr()
+          else: ""
         let depPath =
           if "path" in dep and dep["path"].kind == JString:
             dep["path"].getStr()
@@ -1088,7 +1119,22 @@ proc loadProject(projectRoot: string;
           continue
         let depKey = normalisedManifestDir(depPath / "Cargo.toml")
         if depKey in manifestDirToName:
-          workspaceDeps.add(manifestDirToName[depKey])
+          # Each kind reaches what Cargo gives it (Rust.md §"Cross-crate
+          # ordering edges"): a normal edge the library, the binaries, the
+          # test crates and the library order; a dev edge the test crates
+          # alone; a build edge only the build script, which Mode A does
+          # not run, so nothing.
+          let depName = manifestDirToName[depKey]
+          if "rename" in dep and dep["rename"].kind == JString and
+              depKindStr != "build":
+            result.hasRenamedDeps = true
+          if depKindStr == "dev":
+            if depName notin devWorkspaceDeps:
+              devWorkspaceDeps.add(depName)
+          elif depKindStr == "build":
+            discard
+          elif depName notin workspaceDeps and depName != name:
+            workspaceDeps.add(depName)
         else:
           # A path dependency on a package that is not a workspace member:
           # ``cargo metadata --no-deps`` does not list it, so Mode A has
@@ -1126,6 +1172,7 @@ proc loadProject(projectRoot: string;
         manifestDir: manifestDir,
         targets: @[],
         workspaceDeps: workspaceDeps,
+        devWorkspaceDeps: devWorkspaceDeps,
         hasExternalDeps: hasExternalDeps,
         hasFeatures: hasFeatures,
         harnessUnattributed: harnessUnattributed,
@@ -1137,6 +1184,7 @@ proc loadProject(projectRoot: string;
       manifestDir: manifestDir,
       targets: targets,
       workspaceDeps: workspaceDeps,
+      devWorkspaceDeps: devWorkspaceDeps,
       hasExternalDeps: hasExternalDeps,
       hasFeatures: hasFeatures,
       harnessUnattributed: harnessUnattributed,
@@ -1635,11 +1683,24 @@ proc emitForTarget(projectRoot, rustcExe: string;
         ""
       of rtkIntegrationTest: "")
 
+type
+  UpstreamExterns = object
+    ## The flags, action ids and inputs a compile gets for the workspace
+    ## libraries it uses: ``--extern`` for each direct dependency, and
+    ## ``-L dependency=`` (no ``--extern``) for each library reached only
+    ## through one, as Cargo passes them.
+    metadataExterns: seq[string]
+    linkExterns: seq[string]
+    externDepIds: seq[string]
+    inputRmetas: seq[string]
+    inputRlibs: seq[string]
+
 proc emitForTestTarget(projectRoot, rustcExe: string;
                        test: RustTarget;
                        pkg: RustPackage;
                        packageCrateName: string;
                        libActions: TargetActions;
+                       upstream: UpstreamExterns;
                        binActions: seq[(RustTarget, TargetActions)];
                        cargoExe: string): TestTargetActions =
   ## M22: emit the compile + run action pair for a single integration
@@ -1708,6 +1769,11 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
   if libActions.crateName.len > 0 and libActions.rlibPath.len > 0:
     argv.add("--extern")
     argv.add(libActions.crateName & "=" & libActions.rlibPath)
+  # The package's normal and dev workspace dependencies (``upstream``,
+  # from ``testUpstreamExterns``): Cargo passes both to every test crate,
+  # so a test that uses a sibling member it dev-depends on resolves it.
+  for flag in upstream.linkExterns:
+    argv.add(flag)
   argv.add(test.sourcePath)
 
   let tmpDir = testTargetTmpDir(projectRoot, packageCrateName)
@@ -1724,6 +1790,9 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
       inputs.add(libActions.rlibPath)
     if libActions.rmetaPath.len > 0:
       inputs.add(libActions.rmetaPath)
+    for rlib in upstream.inputRlibs:
+      if rlib notin inputs:
+        inputs.add(rlib)
     for (_, actions) in binActions:
       # The path in CARGO_BIN_EXE_<name> is stable across rebuilds, so the
       # binary's bytes must be an input for the compile to see a change.
@@ -1736,6 +1805,9 @@ proc emitForTestTarget(projectRoot, rustcExe: string;
     if libActions.metadataAction.id.len > 0 and
         libActions.metadataAction.id notin deps:
       deps.add(libActions.metadataAction.id)
+    for id in upstream.externDepIds:
+      if id notin deps:
+        deps.add(id)
     for (_, actions) in binActions:
       if actions.linkAction.id notin deps:
         deps.add(actions.linkAction.id)
@@ -1943,10 +2015,17 @@ proc topologicalSortLibPackages(project: RustProject): seq[int] =
   ## tie-breaker (matches the order ``cargo metadata`` reports members,
   ## which is the manifest-declaration order).
   ##
-  ## On cycle detection (which Cargo itself forbids — a workspace with a
-  ## cycle won't pass ``cargo check``) we fall back to the original order
-  ## and emit a deterministic-but-suboptimal graph; the convention's
-  ## subsequent rustc invocation will surface cargo's cycle diagnostic.
+  ## Only ``workspaceDeps`` count, not ``devWorkspaceDeps``: Cargo accepts
+  ## a cycle through a dev-dependency (``a`` dev-depends on ``b``, ``b``
+  ## depends on ``a``), because only tests see a dev edge, and orders the
+  ## libraries by the other edges, as this does (Rust.md §"Cross-crate
+  ## ordering edges").
+  ##
+  ## On cycle detection (which Cargo itself forbids for these edges — a
+  ## workspace with such a cycle won't pass ``cargo check``) we fall back
+  ## to the original order and emit a deterministic-but-suboptimal graph;
+  ## the convention's subsequent rustc invocation will surface cargo's
+  ## cycle diagnostic.
   let n = project.packages.len
   if n <= 1:
     result = @[]
@@ -1987,41 +2066,32 @@ proc topologicalSortLibPackages(project: RustProject): seq[int] =
         queue.add(c)
   if visited != n:
     # Cycle detected; fall back to original order. Cargo would have
-    # already rejected this at metadata time, but be defensive.
+    # already rejected a cycle of non-dev edges at metadata time, but be
+    # defensive.
     result = @[]
     for i in 0 ..< n:
       result.add(i)
 
-proc transitiveWorkspaceDeps(project: RustProject; rootName: string):
-    seq[string] =
-  ## M23: compute the transitive closure of workspace deps reachable
-  ## from ``rootName`` (excluding ``rootName`` itself). The result is
-  ## deterministic — packages are emitted in the order they are first
-  ## discovered via a BFS over the workspace-dep graph.
-  ##
-  ## Rationale: rustc resolves transitive crate references by reading
-  ## the rmeta of each direct ``--extern``-named crate and then needs
-  ## to find the second-level dep on its own — either via another
-  ## ``--extern`` flag or via ``-L dependency=<dir>``. For the M23
-  ## workspace-lib-chain fixture (``crate_c → crate_b → crate_a``),
-  ## threading ``--extern crate_b=...`` alone is insufficient; rustc
-  ## also needs to reach crate_a's rmeta. Cargo itself threads every
-  ## transitive dep as ``--extern <name>=...`` so we mirror that here.
+proc workspaceDepClosure(project: RustProject; rootName: string;
+                         seeds: openArray[string]): seq[string] =
+  ## The packages reachable from ``seeds`` over ``workspaceDeps`` (the
+  ## non-dev edges), seeds included, in first-discovered (BFS) order.
+  ## ``rootName`` is left out of the result; an empty ``rootName`` leaves
+  ## nothing out. A test crate's closure passes an empty one: through a
+  ## dev edge it can reach its own package (``b`` dev-depends on ``a``,
+  ## ``a`` depends on ``b``), and must then still find ``b``'s library on
+  ## its search path.
   var nameToIdx = initTable[string, int]()
   for i in 0 ..< project.packages.len:
     nameToIdx[project.packages[i].packageName] = i
-  if rootName notin nameToIdx:
-    return @[]
   var seen = initHashSet[string]()
   var queue: seq[string] = @[]
-  # Seed with the root's direct deps; don't include the root itself.
-  for dep in project.packages[nameToIdx[rootName]].workspaceDeps:
-    if dep == rootName:
+  for dep in seeds:
+    if dep == rootName or dep in seen:
       continue
-    if dep notin seen:
-      seen.incl dep
-      queue.add(dep)
-      result.add(dep)
+    seen.incl dep
+    queue.add(dep)
+    result.add(dep)
   var i = 0
   while i < queue.len:
     let cur = queue[i]
@@ -2034,6 +2104,103 @@ proc transitiveWorkspaceDeps(project: RustProject; rootName: string):
       seen.incl nextDep
       queue.add(nextDep)
       result.add(nextDep)
+
+proc transitiveWorkspaceDeps(project: RustProject; rootName: string):
+    seq[string] =
+  ## M23: compute the transitive closure of workspace deps reachable
+  ## from ``rootName`` (excluding ``rootName`` itself) over the non-dev
+  ## edges. The result is deterministic — packages are emitted in the
+  ## order they are first discovered via a BFS over the workspace-dep
+  ## graph.
+  ##
+  ## Rationale: rustc resolves transitive crate references by reading
+  ## the rmeta of each direct ``--extern``-named crate and then needs
+  ## to find the second-level dep on its own — either via another
+  ## ``--extern`` flag or via ``-L dependency=<dir>``. For the M23
+  ## workspace-lib-chain fixture (``crate_c → crate_b → crate_a``),
+  ## threading ``--extern crate_b=...`` alone is insufficient; rustc
+  ## also needs to reach crate_a's rmeta.
+  var nameToIdx = initTable[string, int]()
+  for i in 0 ..< project.packages.len:
+    nameToIdx[project.packages[i].packageName] = i
+  if rootName notin nameToIdx:
+    return @[]
+  workspaceDepClosure(project, rootName,
+    project.packages[nameToIdx[rootName]].workspaceDeps)
+
+proc upstreamExterns(libActionsByPackage: Table[string, TargetActions];
+                     directDeps, reachable: openArray[string]):
+    UpstreamExterns =
+  ## ``reachable`` is every package whose library the compile may load
+  ## (the direct dependencies and what they reach); ``directDeps`` are the
+  ## ones the crate names, which get ``--extern``.
+  ##
+  ## M23: ``--extern`` is emitted ONLY for DIRECT workspace deps
+  ## (that's how cargo does it); transitive deps are reached via
+  ## ``-L dependency=<dir>`` search paths. Without the ``-L`` flag,
+  ## rustc errors with "can't find crate for <transitive dep>"
+  ## when it walks an ``--extern``ed crate's rmeta and tries to
+  ## resolve ITS deps. We add one ``-L dependency=<lib's bin dir>``
+  ## AND one ``-L dependency=<lib's deps dir>`` per transitive lib
+  ## so the rlib + neighbouring rmeta both become discoverable.
+  var libSearchPaths = initOrderedSet[string]()
+  for depName in reachable:
+    if depName notin libActionsByPackage:
+      continue
+    let depActions = libActionsByPackage[depName]
+    # cdylib/staticlib/dylib aren't ``--extern``-able as Rust deps.
+    if depActions.rlibPath.len == 0:
+      continue
+    libSearchPaths.incl(depActions.rlibPath.parentDir)
+    libSearchPaths.incl(depActions.rmetaPath.parentDir)
+    # Transitive-only deps need just the search path, but carry the
+    # producer's action ids + inputs so the engine's fingerprint catches
+    # the upstream's rebuilds.
+    if depActions.metadataAction.id notin result.externDepIds:
+      result.externDepIds.add(depActions.metadataAction.id)
+    if depActions.linkAction.id notin result.externDepIds:
+      result.externDepIds.add(depActions.linkAction.id)
+    if depActions.rmetaPath notin result.inputRmetas:
+      result.inputRmetas.add(depActions.rmetaPath)
+    if depActions.rlibPath notin result.inputRlibs:
+      result.inputRlibs.add(depActions.rlibPath)
+    if depName in directDeps:
+      # Cargo's extern name = the lib target's crate name.
+      result.metadataExterns.add("--extern")
+      result.metadataExterns.add(
+        depActions.crateName & "=" & depActions.rmetaPath)
+      result.linkExterns.add("--extern")
+      result.linkExterns.add(depActions.crateName & "=" & depActions.rlibPath)
+  # Prepend ``-L dependency=`` tokens. Ordered set keeps the emit
+  # deterministic and avoids duplicates when the same dir appears for
+  # multiple libs.
+  var searchFlags: seq[string] = @[]
+  for path in libSearchPaths:
+    searchFlags.add("-L")
+    searchFlags.add("dependency=" & path)
+  result.metadataExterns = searchFlags & result.metadataExterns
+  result.linkExterns = searchFlags & result.linkExterns
+
+proc testDirectDeps(pkg: RustPackage): seq[string] =
+  ## The workspace members a test crate of ``pkg`` names: its normal and
+  ## its dev dependencies, as Cargo passes both to every test crate
+  ## (Cargo reference, "Specifying Dependencies", "Development
+  ## dependencies"). The package itself is left out: a lib's own test
+  ## crate is that lib, and the other test crates get it separately.
+  for dep in pkg.workspaceDeps & pkg.devWorkspaceDeps:
+    if dep != pkg.packageName and dep notin result:
+      result.add(dep)
+
+proc testUpstreamExterns(project: RustProject; pkg: RustPackage;
+                         libActionsByPackage: Table[string, TargetActions]):
+    UpstreamExterns =
+  ## ``upstreamExterns`` for a test crate of ``pkg``. Its closure may
+  ## reach ``pkg`` itself through a dev edge; that library is then on the
+  ## search path (the dependency that reached it was compiled against it)
+  ## but gets no ``--extern`` here.
+  let direct = testDirectDeps(pkg)
+  upstreamExterns(libActionsByPackage, direct,
+    workspaceDepClosure(project, "", direct))
 
 proc libraryTargetName(pkg: RustPackage; lib: RustTarget): string =
   ## The named target of a package's library: its crate name, unless one
@@ -2192,6 +2359,10 @@ proc rustEmitFragment(projectRoot: string;
     # that workspace (Mode B).
     if project.harnessUnattributed:
       return rustCrudeFallback(projectRoot, request)
+    # Rust.md §"Recognition" item 6: a workspace dependency under another
+    # name needs ``--extern <rename>=``, which Mode A does not emit.
+    if project.hasRenamedDeps:
+      return rustCrudeFallback(projectRoot, request)
     # Verify every declared source path actually exists; cargo metadata
     # can sometimes report stale entries if the user edits Cargo.toml
     # without saving the source file.
@@ -2230,6 +2401,9 @@ proc rustEmitFragment(projectRoot: string;
         ## Every action of the non-default ``test`` target: the test
         ## crates of libraries and binaries (Passes A and B) and of
         ## integration tests (Pass C).
+      var libUnitTests: seq[(int, RustTarget)] = @[]
+        ## (package index, lib target) of each library whose own
+        ## ``#[cfg(test)]`` code gets a test crate after Pass A.
       var binActionsByPackage =
         initTable[string, seq[(RustTarget, TargetActions)]]()
         ## package name → its binaries' actions, for the
@@ -2243,66 +2417,15 @@ proc rustEmitFragment(projectRoot: string;
         # lib-flavoured target of this package shares them. (Today
         # there's almost always at most one lib target per package, but
         # the data-shape supports >1 if a future fixture exercises it.)
-        #
-        # M23: ``--extern`` is emitted ONLY for DIRECT workspace deps
-        # (that's how cargo does it); transitive deps are reached via
-        # ``-L dependency=<dir>`` search paths. Without the ``-L`` flag,
-        # rustc errors with "can't find crate for <transitive dep>"
-        # when it walks an ``--extern``ed crate's rmeta and tries to
-        # resolve ITS deps. We add one ``-L dependency=<lib's bin dir>``
-        # AND one ``-L dependency=<lib's deps dir>`` per transitive lib
-        # so the rlib + neighbouring rmeta both become discoverable.
-        var metadataExterns: seq[string] = @[]
-        var linkExterns: seq[string] = @[]
-        var externDepIds: seq[string] = @[]
-        var inputRmetas: seq[string] = @[]
-        var inputRlibs: seq[string] = @[]
-        var libSearchPaths = initOrderedSet[string]()
-        let directDeps = pkg.workspaceDeps
-        let transitiveDeps =
-          transitiveWorkspaceDeps(project, pkg.packageName)
-        for depName in transitiveDeps:
-          if depName notin libActionsByPackage:
-            continue
-          let depActions = libActionsByPackage[depName]
-          if depActions.rlibPath.len == 0:
-            continue
-          # Always add the lib's bin + deps dirs as search paths — rustc
-          # needs the deps dir for the rmeta neighbour and the bin dir
-          # for the rlib.
-          libSearchPaths.incl(depActions.rlibPath.parentDir)
-          libSearchPaths.incl(depActions.rmetaPath.parentDir)
-          if depName notin directDeps:
-            # Transitive-only: search-path is enough; no ``--extern``
-            # needed (cargo doesn't emit one either). But carry the
-            # producer's action ids + inputs so the engine's
-            # fingerprint catches the upstream's rebuilds.
-            if depActions.metadataAction.id notin externDepIds:
-              externDepIds.add(depActions.metadataAction.id)
-            if depActions.linkAction.id notin externDepIds:
-              externDepIds.add(depActions.linkAction.id)
-            inputRmetas.add(depActions.rmetaPath)
-            inputRlibs.add(depActions.rlibPath)
-            continue
-          metadataExterns.add("--extern")
-          metadataExterns.add(depActions.crateName & "=" & depActions.rmetaPath)
-          linkExterns.add("--extern")
-          linkExterns.add(depActions.crateName & "=" & depActions.rlibPath)
-          if depActions.metadataAction.id notin externDepIds:
-            externDepIds.add(depActions.metadataAction.id)
-          if depActions.linkAction.id notin externDepIds:
-            externDepIds.add(depActions.linkAction.id)
-          inputRmetas.add(depActions.rmetaPath)
-          inputRlibs.add(depActions.rlibPath)
-        # Prepend ``-L dependency=`` tokens for each transitive lib's
-        # bin + deps dirs. Ordered set keeps the emit deterministic and
-        # avoids duplicates when the same dir appears for multiple libs.
-        var searchFlags: seq[string] = @[]
-        for path in libSearchPaths:
-          searchFlags.add("-L")
-          searchFlags.add("dependency=" & path)
-        metadataExterns = searchFlags & metadataExterns
-        linkExterns = searchFlags & linkExterns
+        # Dev-dependencies are not among them: Cargo gives those to
+        # tests only.
+        let up = upstreamExterns(libActionsByPackage, pkg.workspaceDeps,
+          transitiveWorkspaceDeps(project, pkg.packageName))
+        let metadataExterns = up.metadataExterns
+        let linkExterns = up.linkExterns
+        let externDepIds = up.externDepIds
+        let inputRmetas = up.inputRmetas
+        let inputRlibs = up.inputRlibs
         for t in pkg.targets:
           if not isLibFlavoured(t.kind):
             continue
@@ -2322,21 +2445,10 @@ proc rustEmitFragment(projectRoot: string;
           discard target(libraryTargetName(pkg, t),
             @[actions.metadataAction, actions.linkAction])
           if t.unitTests:
-            # The library's own ``#[cfg(test)]`` tests: the same crate
-            # root with the same dependencies as its link action.
-            let unit = emitForUnitTestTarget(
-              projectRoot = projectRoot,
-              rustcExe = rustcExe,
-              target = t,
-              pkg = pkg,
-              packageCrateName = normaliseCrateName(pkg.packageName),
-              linkExterns = linkExterns,
-              externDepIds = externDepIds,
-              inputRlibs = inputRlibs,
-              cargoExe = cargoExe)
-            testActions.add(unit.compileAction)
-            testActions.add(unit.runAction)
-            testActions.add(unit.stampAction)
+            # The library's own ``#[cfg(test)]`` tests. Emitted once
+            # every library is: a dev-dependency's library can come later
+            # in this order.
+            libUnitTests.add((pkgIdx, t))
           # Record only the FIRST lib-flavoured target of each package
           # — that's the one a workspace consumer's ``--extern
           # <crateName>=<path>`` flag will point at when it depends on
@@ -2344,50 +2456,56 @@ proc rustEmitFragment(projectRoot: string;
           if pkg.packageName notin libActionsByPackage:
             libActionsByPackage[pkg.packageName] = actions
 
+      # The test crates of libraries' own ``#[cfg(test)]`` code: the
+      # library's crate root with its dependencies and its package's
+      # dev-dependencies, as Cargo compiles it.
+      for (pkgIdx, t) in libUnitTests:
+        let pkg = project.packages[pkgIdx]
+        var up = testUpstreamExterns(project, pkg, libActionsByPackage)
+        if pkg.packageName in pkg.devWorkspaceDeps and
+            pkg.packageName in libActionsByPackage:
+          # The package dev-depends on itself: Cargo passes its library's
+          # test crate ``--extern <lib>=<the lib's rlib>``.
+          let ownLib = libActionsByPackage[pkg.packageName]
+          if ownLib.rlibPath.len > 0:
+            up.linkExterns.add("--extern")
+            up.linkExterns.add(ownLib.crateName & "=" & ownLib.rlibPath)
+            if ownLib.linkAction.id notin up.externDepIds:
+              up.externDepIds.add(ownLib.linkAction.id)
+            if ownLib.rlibPath notin up.inputRlibs:
+              up.inputRlibs.add(ownLib.rlibPath)
+        let unit = emitForUnitTestTarget(
+          projectRoot = projectRoot,
+          rustcExe = rustcExe,
+          target = t,
+          pkg = pkg,
+          packageCrateName = normaliseCrateName(pkg.packageName),
+          linkExterns = up.linkExterns,
+          externDepIds = up.externDepIds,
+          inputRlibs = up.inputRlibs,
+          cargoExe = cargoExe)
+        testActions.add(unit.compileAction)
+        testActions.add(unit.runAction)
+        testActions.add(unit.stampAction)
+
       # Pass B: binaries. Mirrors Pass A's transitive-deps logic —
       # ``--extern`` for direct deps + ``-L dependency=<dir>`` for the
       # transitive set so rustc can resolve transitive crate refs while
       # walking each direct dep's rmeta.
       for pkg in project.packages:
-        var metadataExterns: seq[string] = @[]
-        var linkExterns: seq[string] = @[]
-        var externDepIds: seq[string] = @[]
-        var inputRmetas: seq[string] = @[]
-        var inputRlibs: seq[string] = @[]
-        var libSearchPaths = initOrderedSet[string]()
-        let directDeps = pkg.workspaceDeps
-        let transitiveDeps =
-          transitiveWorkspaceDeps(project, pkg.packageName)
-        for depName in transitiveDeps:
-          if depName notin libActionsByPackage:
-            continue
-          let depActions = libActionsByPackage[depName]
-          # cdylib/staticlib/dylib aren't ``--extern``-able as Rust
-          # deps. Skip them silently; the consumer can still link them
-          # via the C-side toolchain but that's outside the M23 surface.
-          if depActions.rlibPath.len == 0:
-            continue
-          libSearchPaths.incl(depActions.rlibPath.parentDir)
-          libSearchPaths.incl(depActions.rmetaPath.parentDir)
-          if depName notin directDeps:
-            if depActions.metadataAction.id notin externDepIds:
-              externDepIds.add(depActions.metadataAction.id)
-            if depActions.linkAction.id notin externDepIds:
-              externDepIds.add(depActions.linkAction.id)
-            inputRmetas.add(depActions.rmetaPath)
-            inputRlibs.add(depActions.rlibPath)
-            continue
-          # Cargo's extern name = the lib target's crate name.
-          metadataExterns.add("--extern")
-          metadataExterns.add(depActions.crateName & "=" & depActions.rmetaPath)
-          linkExterns.add("--extern")
-          linkExterns.add(depActions.crateName & "=" & depActions.rlibPath)
-          if depActions.metadataAction.id notin externDepIds:
-            externDepIds.add(depActions.metadataAction.id)
-          if depActions.linkAction.id notin externDepIds:
-            externDepIds.add(depActions.linkAction.id)
-          inputRmetas.add(depActions.rmetaPath)
-          inputRlibs.add(depActions.rlibPath)
+        let up = upstreamExterns(libActionsByPackage, pkg.workspaceDeps,
+          transitiveWorkspaceDeps(project, pkg.packageName))
+        let metadataExterns = up.metadataExterns
+        var linkExterns = up.linkExterns
+        var externDepIds = up.externDepIds
+        let inputRmetas = up.inputRmetas
+        var inputRlibs = up.inputRlibs
+        # The binaries' test crates: the same, plus the package's
+        # dev-dependencies.
+        let testUp = testUpstreamExterns(project, pkg, libActionsByPackage)
+        var testLinkExterns = testUp.linkExterns
+        var testExternDepIds = testUp.externDepIds
+        var testInputRlibs = testUp.inputRlibs
         # The package's own library. Cargo passes each binary of a package
         # ``--extern <lib>=<the lib's rlib>`` (Cargo reference, "Cargo
         # Targets", "Binaries": a binary "can use the public API of the
@@ -2404,12 +2522,12 @@ proc rustEmitFragment(projectRoot: string;
             if ownLib.linkAction.id notin externDepIds:
               externDepIds.add(ownLib.linkAction.id)
             inputRlibs.add(ownLib.rlibPath)
-        var searchFlags: seq[string] = @[]
-        for path in libSearchPaths:
-          searchFlags.add("-L")
-          searchFlags.add("dependency=" & path)
-        metadataExterns = searchFlags & metadataExterns
-        linkExterns = searchFlags & linkExterns
+            testLinkExterns.add("--extern")
+            testLinkExterns.add(ownLib.crateName & "=" & ownLib.rlibPath)
+            if ownLib.linkAction.id notin testExternDepIds:
+              testExternDepIds.add(ownLib.linkAction.id)
+            if ownLib.rlibPath notin testInputRlibs:
+              testInputRlibs.add(ownLib.rlibPath)
         for t in pkg.targets:
           if t.kind != rtkBinary:
             continue
@@ -2429,16 +2547,17 @@ proc rustEmitFragment(projectRoot: string;
           binActionsByPackage.mgetOrPut(pkg.packageName, @[]).add((t, actions))
           if t.unitTests:
             # The binary's own ``#[cfg(test)]`` tests, with the binary's
-            # dependencies (its own package's library included).
+            # dependencies (its own package's library included) and the
+            # package's dev-dependencies.
             let unit = emitForUnitTestTarget(
               projectRoot = projectRoot,
               rustcExe = rustcExe,
               target = t,
               pkg = pkg,
               packageCrateName = normaliseCrateName(pkg.packageName),
-              linkExterns = linkExterns,
-              externDepIds = externDepIds,
-              inputRlibs = inputRlibs,
+              linkExterns = testLinkExterns,
+              externDepIds = testExternDepIds,
+              inputRlibs = testInputRlibs,
               cargoExe = cargoExe)
             testActions.add(unit.compileAction)
             testActions.add(unit.runAction)
@@ -2477,6 +2596,9 @@ proc rustEmitFragment(projectRoot: string;
         let packageCrateName =
           normaliseCrateName(pkg.packageName)
         let libActions = libActionsByPackage[pkg.packageName]
+        # The package's normal and dev workspace dependencies, as Cargo
+        # passes both to an integration test.
+        let testUp = testUpstreamExterns(project, pkg, libActionsByPackage)
         for t in pkg.targets:
           if t.kind != rtkIntegrationTest or not t.unitTests:
             # ``test = false``: ``cargo test`` neither builds nor runs it.
@@ -2488,6 +2610,7 @@ proc rustEmitFragment(projectRoot: string;
             pkg = pkg,
             packageCrateName = packageCrateName,
             libActions = libActions,
+            upstream = testUp,
             binActions = binActionsByPackage.getOrDefault(pkg.packageName),
             cargoExe = cargoExe)
           testActions.add(pair.compileAction)

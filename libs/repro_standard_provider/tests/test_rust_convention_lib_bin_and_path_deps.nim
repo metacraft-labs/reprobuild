@@ -89,6 +89,40 @@
 ##    Regression test for reprobuild-pm
 ##    issues/2026-11-17-rust-mode-a-tolerates-registry-dev-dependencies-that-its-test-compile-cannot-resolve.md.
 ##
+## 5. **A dev-dependency on a workspace member** (reprobuild-pm
+##    issues/2026-11-18-rust-mode-a-treats-a-dev-dependency-on-a-workspace-member-as-a-normal-dependency.md).
+##    Cargo gives a dev-dependency to the package's test crates only (Cargo
+##    reference, "Specifying Dependencies", "Development dependencies":
+##    https://doc.rust-lang.org/cargo/reference/specifying-dependencies.html#development-dependencies),
+##    and accepts a cycle through one. The workspace has members ``a`` and
+##    ``b``: ``a`` depends on ``b``, and ``b`` dev-depends on ``a``. ``b``'s
+##    integration test ``tests/it.rs``, its library's ``#[cfg(test)]``
+##    module and its binary's both call ``a::f()``. ``cargo metadata``
+##    lists ``a`` first, so a library order that counted the dev edge would
+##    find the cycle and compile ``a`` before ``b``. The test checks with
+##    ``cargo test --no-run -v`` that cargo hands ``it`` ``--extern a`` and
+##    ``--extern b``, then requires Mode A to give each of ``b``'s test
+##    crates ``--extern a``, to give ``b``'s library and binary no
+##    ``--extern a`` and no dependency on ``a``'s actions, and to give
+##    ``a``'s library ``--extern b``. It then builds every Mode A ``rustc``
+##    action with the real ``rustc``, in dependency order, and runs ``b``'s
+##    three test crates, which must pass.
+##
+## 6. **A build-dependency and a self dev-dependency on workspace members.**
+##    Cargo gives a build-dependency to the build script alone, and a
+##    package may dev-depend on itself, which gives its library's test crate
+##    ``--extern`` for the library. Member ``p`` has ``[build-dependencies]
+##    q`` (and no build script) and ``[dev-dependencies] p = { path = "."
+##    }``; its ``#[cfg(test)]`` code calls ``p::g()``. The test checks
+##    ``cargo build -v`` and ``cargo test --no-run -v`` for both, requires
+##    Mode A to give ``p``'s library no ``--extern q`` and its test crate
+##    ``--extern p``, then builds and runs that test crate.
+##
+## 7. **A workspace dependency under another name** (``foo = { package =
+##    "a", path = "../a" }``). Cargo passes ``--extern foo=<a's rlib>``;
+##    Mode A names each ``--extern`` after the crate, so the workspace goes
+##    to cargo (Mode B), for a dev-dependency as for a normal one.
+##
 ## No mocks: ``cargo metadata`` and the production emitter
 ## (``rustConvention().emitFragment``) run unmodified, and the cargo and
 ## rustc used are whichever are on ``PATH``. When either is missing the case
@@ -431,6 +465,126 @@ proc testActionId(modeA: ModeAFragment; phase, target: string): string =
         id.endsWith(".test." & target):
       return id
   ""
+
+proc writeDevDepCycleFixture(root: string) =
+  ## The workspace at ``root``: ``a`` depends on ``b``; ``b`` dev-depends
+  ## on ``a``, and its integration test, library tests and binary tests
+  ## use ``a``.
+  createDir(root / "a" / "src")
+  createDir(root / "b" / "src")
+  createDir(root / "b" / "tests")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package devDepCycle:\n" &
+    "  uses:\n" &
+    "    \"rust >=1.80\"\n")
+  writeFile(root / "Cargo.toml",
+    "[workspace]\n" &
+    "resolver = \"2\"\n" &
+    "members = [\"a\", \"b\"]\n")
+  writeFile(root / "a" / "Cargo.toml",
+    "[package]\n" &
+    "name = \"a\"\n" &
+    "version = \"0.1.0\"\n" &
+    "edition = \"2021\"\n" &
+    "publish = false\n" &
+    "\n" &
+    "[dependencies]\n" &
+    "b = { path = \"../b\" }\n")
+  writeFile(root / "a" / "src" / "lib.rs",
+    "pub fn f() -> u32 { b::g() + 1 }\n")
+  writeFile(root / "b" / "Cargo.toml",
+    "[package]\n" &
+    "name = \"b\"\n" &
+    "version = \"0.1.0\"\n" &
+    "edition = \"2021\"\n" &
+    "publish = false\n" &
+    "\n" &
+    "[dev-dependencies]\n" &
+    "a = { path = \"../a\" }\n")
+  writeFile(root / "b" / "src" / "lib.rs",
+    "pub fn g() -> u32 { 41 }\n" &
+    "\n" &
+    "#[cfg(test)]\n" &
+    "mod tests {\n" &
+    "    #[test]\n" &
+    "    fn lib_test_uses_a() { assert_eq!(a::f(), 42); }\n" &
+    "}\n")
+  writeFile(root / "b" / "src" / "main.rs",
+    "fn main() { println!(\"{}\", b::g()); }\n" &
+    "\n" &
+    "#[cfg(test)]\n" &
+    "mod tests {\n" &
+    "    #[test]\n" &
+    "    fn bin_test_uses_a() { assert_eq!(a::f(), b::g() + 1); }\n" &
+    "}\n")
+  writeFile(root / "b" / "tests" / "it.rs",
+    "#[test]\n" &
+    "fn integration_test_uses_a() { assert_eq!(a::f(), b::g() + 1); }\n")
+
+proc writeBuildAndSelfDevDepFixture(root: string) =
+  ## Workspace at ``root``: ``p`` build-depends on ``q`` and dev-depends on
+  ## itself.
+  createDir(root / "p" / "src")
+  createDir(root / "q" / "src")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package buildAndSelfDev:\n" &
+    "  uses:\n" &
+    "    \"rust >=1.80\"\n")
+  writeFile(root / "Cargo.toml",
+    "[workspace]\n" &
+    "resolver = \"2\"\n" &
+    "members = [\"p\", \"q\"]\n")
+  writeFile(root / "q" / "Cargo.toml",
+    "[package]\nname = \"q\"\nversion = \"0.1.0\"\n" &
+    "edition = \"2021\"\npublish = false\n")
+  writeFile(root / "q" / "src" / "lib.rs", "pub fn h() -> u32 { 1 }\n")
+  writeFile(root / "p" / "Cargo.toml",
+    "[package]\nname = \"p\"\nversion = \"0.1.0\"\n" &
+    "edition = \"2021\"\npublish = false\n" &
+    "\n[build-dependencies]\nq = { path = \"../q\" }\n" &
+    "\n[dev-dependencies]\np = { path = \".\" }\n")
+  writeFile(root / "p" / "src" / "lib.rs",
+    "pub fn g() -> u32 { 7 }\n" &
+    "\n" &
+    "#[cfg(test)]\n" &
+    "mod tests {\n" &
+    "    #[test]\n" &
+    "    fn self_dev_dep_resolves() { assert_eq!(p::g(), 7); }\n" &
+    "}\n")
+
+proc writeRenamedDepFixture(root: string; kind: string) =
+  ## Workspace at ``root``: ``b`` depends on ``a`` under the name ``foo``,
+  ## in its ``[<kind>]`` table.
+  createDir(root / "a" / "src")
+  createDir(root / "b" / "src")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package renamedDep:\n" &
+    "  uses:\n" &
+    "    \"rust >=1.80\"\n")
+  writeFile(root / "Cargo.toml",
+    "[workspace]\n" &
+    "resolver = \"2\"\n" &
+    "members = [\"a\", \"b\"]\n")
+  writeFile(root / "a" / "Cargo.toml",
+    "[package]\nname = \"a\"\nversion = \"0.1.0\"\n" &
+    "edition = \"2021\"\npublish = false\n")
+  writeFile(root / "a" / "src" / "lib.rs", "pub fn f() -> u32 { 3 }\n")
+  writeFile(root / "b" / "Cargo.toml",
+    "[package]\nname = \"b\"\nversion = \"0.1.0\"\n" &
+    "edition = \"2021\"\npublish = false\n" &
+    "\n[" & kind & "]\nfoo = { package = \"a\", path = \"../a\" }\n")
+  writeFile(root / "b" / "src" / "lib.rs",
+    (if kind == "dependencies": "pub fn g() -> u32 { foo::f() }\n"
+     else: "pub fn g() -> u32 { 4 }\n") &
+    "\n" &
+    "#[cfg(test)]\n" &
+    "mod tests {\n" &
+    "    #[test]\n" &
+    "    fn renamed() { assert_eq!(foo::f(), 3); }\n" &
+    "}\n")
 
 proc writeRegistryDevDepFixture(parent: string) =
   ## ``parent/pkg`` is the package (the project root Mode A sees);
@@ -881,3 +1035,166 @@ suite "rust convention: library and binary targets, path dependencies":
         if id.startsWith("crude-build-"):
           delegations.add(id)
       check delegations.len == 1
+
+  test "a dev-dependency on a workspace member reaches the tests only":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_dev_dep_member_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      writeDevDepCycleFixture(root)
+
+      let units = cargoTestUnits(root, root / "cargo-target")
+      # Cargo hands b's integration test both a and b. If it did not, the
+      # fixture would not exercise the dev edge.
+      require "it" in units
+      check externNames(units["it"]) == @["a", "b"]
+
+      let modeA = modeAFragment(root)
+      checkpoint "Mode A actions: " & $modeA.actionIds
+      for id in modeA.allRustcIds:
+        checkpoint id & " argv: " & inlineArgvOf(modeA.byId[id]).join(" ")
+      for id in modeA.actionIds:
+        check not id.startsWith("crude-build-")
+      proc idOf(modeA: ModeAFragment; prefix: string): string =
+        for id in modeA.actionIds:
+          if id.startsWith(prefix):
+            return id
+        ""
+      let aMeta = idOf(modeA, "rustc-metadata-a.lib.a")
+      let aLink = idOf(modeA, "rustc-link-a.lib.a")
+      let bMeta = idOf(modeA, "rustc-metadata-b.lib.b")
+      let bLink = idOf(modeA, "rustc-link-b.lib.b")
+      let bBin = idOf(modeA, "rustc-link-b.bin.b")
+      let itCompile = idOf(modeA, "rustc-test-compile-b.test.it")
+      let bLibTest = idOf(modeA, "rustc-test-compile-b.lib.b")
+      let bBinTest = idOf(modeA, "rustc-test-compile-b.bin.b")
+      for id in [aMeta, aLink, bMeta, bLink, bBin, itCompile, bLibTest,
+                 bBinTest]:
+        require id.len > 0
+      # The dev edge stays out of b's library and binary.
+      for id in [bMeta, bLink, bBin]:
+        check "a" notin externNames(inlineArgvOf(modeA.byId[id]))
+        check aMeta notin modeA.byId[id].deps
+        check aLink notin modeA.byId[id].deps
+      # a's library gets b, its normal dependency.
+      check "b" in externNames(inlineArgvOf(modeA.byId[aMeta]))
+      check "b" in externNames(inlineArgvOf(modeA.byId[aLink]))
+      check bLink in modeA.byId[aLink].deps
+      # Each of b's test crates gets a, and waits on a's library.
+      check externNames(inlineArgvOf(modeA.byId[itCompile])) == @["a", "b"]
+      check "a" in externNames(inlineArgvOf(modeA.byId[bLibTest]))
+      check "a" in externNames(inlineArgvOf(modeA.byId[bBinTest]))
+      for id in [itCompile, bLibTest, bBinTest]:
+        check aLink in modeA.byId[id].deps
+
+      # Build every rustc action with the real rustc, in dependency order.
+      var pending = modeA.allRustcIds
+      var ran: seq[string] = @[]
+      while pending.len > 0:
+        var next: seq[string] = @[]
+        for id in pending:
+          var ready = true
+          for dep in modeA.byId[id].deps:
+            if dep in modeA.allRustcIds and dep notin ran:
+              ready = false
+          if ready:
+            let argv = inlineArgvOf(modeA.byId[id])
+            let (output, exitCode) = runCapture(argv[0], argv[1 .. ^1], root,
+              modeA.byId[id].env)
+            checkpoint id & " rustc output:\n" & output
+            check exitCode == 0
+            ran.add(id)
+          else:
+            next.add(id)
+        require next.len < pending.len
+        pending = next
+
+      # Run b's three test crates as Mode A's test-run actions do.
+      for (prefix, testName) in [
+          ("rustc-test-run-b.test.it", "integration_test_uses_a"),
+          ("rustc-test-run-b.lib.b", "lib_test_uses_a"),
+          ("rustc-test-run-b.bin.b", "bin_test_uses_a")]:
+        let runId = idOf(modeA, prefix)
+        require runId.len > 0
+        let run = modeA.byId[runId]
+        let argv = inlineArgvOf(run)
+        let (output, exitCode) = runCapture(argv[0], argv[1 .. ^1], root,
+          run.env)
+        checkpoint runId & " output (exit " & $exitCode & "):\n" & output
+        check exitCode == 0
+        check testName & " ... ok" in output
+
+  test "a build-dependency reaches no compile; a self dev-dependency reaches the lib test":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_build_self_dev_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      writeBuildAndSelfDevDepFixture(root)
+
+      # Cargo: p's library gets no --extern q; p's lib test gets --extern p.
+      let built = cargoUnits(root, root / "cargo-target")
+      require (crateName: "p", crateType: "lib") in built
+      check "q" notin externNames(built[(crateName: "p", crateType: "lib")])
+      let units = cargoTestUnits(root, root / "cargo-target")
+      require "p" in units
+      check externNames(units["p"]) == @["p"]
+
+      let modeA = modeAFragment(root)
+      checkpoint "Mode A actions: " & $modeA.actionIds
+      for id in modeA.allRustcIds:
+        checkpoint id & " argv: " & inlineArgvOf(modeA.byId[id]).join(" ")
+      for id in modeA.actionIds:
+        check not id.startsWith("crude-build-")
+      for id in ["rustc-metadata-p.lib.p", "rustc-link-p.lib.p",
+                 "rustc-test-compile-p.lib.p"]:
+        require id in modeA.byId
+        check "q" notin externNames(inlineArgvOf(modeA.byId[id]))
+        check "rustc-link-q.lib.q" notin modeA.byId[id].deps
+      let testCompile = modeA.byId["rustc-test-compile-p.lib.p"]
+      check externNames(inlineArgvOf(testCompile)) == @["p"]
+      check "rustc-link-p.lib.p" in testCompile.deps
+
+      for id in ["rustc-metadata-p.lib.p", "rustc-link-p.lib.p",
+                 "rustc-test-compile-p.lib.p"]:
+        let argv = inlineArgvOf(modeA.byId[id])
+        let (output, exitCode) = runCapture(argv[0], argv[1 .. ^1], root,
+          modeA.byId[id].env)
+        checkpoint id & " rustc output:\n" & output
+        check exitCode == 0
+      let run = modeA.byId["rustc-test-run-p.lib.p"]
+      let runArgv = inlineArgvOf(run)
+      let (output, exitCode) = runCapture(runArgv[0], runArgv[1 .. ^1], root,
+        run.env)
+      checkpoint "test run output:\n" & output
+      check exitCode == 0
+      check "self_dev_dep_resolves ... ok" in output
+
+  test "a workspace dependency under another name sends the workspace to cargo":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      for kind in ["dependencies", "dev-dependencies"]:
+        let root = createTempDir("test_rust_convention_renamed_dep_", "")
+        defer:
+          removeDir(root)
+        isolateFromAmbientCargo(root)
+        writeRenamedDepFixture(root, kind)
+        let units = cargoTestUnits(root, root / "cargo-target")
+        # Cargo names the crate ``foo``. If it did not, the fixture would
+        # not exercise the rename.
+        require "b" in units
+        check "foo" in externNames(units["b"])
+        let modeA = modeAFragment(root)
+        checkpoint kind & ": Mode A actions: " & $modeA.actionIds
+        check modeA.rustcIds.len == 0
+        var delegations = 0
+        for id in modeA.actionIds:
+          if id.startsWith("crude-build-"):
+            inc delegations
+        check delegations == 1
