@@ -91,11 +91,13 @@ proc resolveHostTool*(candidates: openArray[string]): string =
   ""
 
 const BoundedOutputBytes* = 64 * 1024
-  ## What a bounded ``runHostTool`` keeps of a tool's output.
+  ## What a bounded ``runHostTool`` keeps of a tool's output, unless the
+  ## caller names another bound (``maxOutputBytes``).
 
 proc runHostTool*(argv: openArray[string]; mergeStderr = true;
                   input = ""; timeoutSec = 0;
-                  path = HostToolPath): HostToolResult =
+                  path = HostToolPath;
+                  maxOutputBytes = BoundedOutputBytes): HostToolResult =
   ## Run ``argv[0]`` (an absolute path) with ``argv[1..]`` and capture its
   ## output. Raises ``HostToolMissing`` when ``argv[0]`` does not exist,
   ## so a caller can tell "the tool said no" from "there is no tool".
@@ -103,7 +105,10 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
   ## deadline and the result has exit code 124 (``timeout(1)``'s), with
   ## whatever it printed. Its output is drained while it runs, so a tool
   ## that prints more than a pipe holds is never blocked writing; only the
-  ## first ``BoundedOutputBytes`` are kept. ``path`` is the tool's
+  ## first ``maxOutputBytes`` are kept (``BoundedOutputBytes`` by default):
+  ## a caller that parses an answer which can be larger names its own bound,
+  ## and must treat an output of exactly that length as cut short.
+  ## ``path`` is the tool's
   ## ``PATH``: a caller that asks a tool what it would find where another
   ## process runs it names that process's ``PATH`` here.
   if argv.len == 0:
@@ -150,9 +155,9 @@ proc runHostTool*(argv: openArray[string]; mergeStderr = true;
         if n > 0:
           let got = posix.read(fd, addr buf[0], buf.len)
           if got > 0:
-            if result.output.len < BoundedOutputBytes:
+            if result.output.len < maxOutputBytes:
               result.output.add(buf[0 ..< min(got,
-                BoundedOutputBytes - result.output.len)])
+                maxOutputBytes - result.output.len)])
           elif got == 0 or errno notin [EINTR, EAGAIN]:
             eof = true
       if code == -1:

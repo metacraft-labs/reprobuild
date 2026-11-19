@@ -83,6 +83,19 @@ const
     ## Destinations one check records one by one; the rest in one summary,
     ## so a flood of throwaway addresses cannot fill the host's records.
 
+  EgressListMaxBytes* = 8 * 1024 * 1024
+    ## What the check keeps of one ``nft -j list set`` answer, and of the
+    ## ``nft -j list table`` it reads the instance from (which lists both
+    ## sets with their elements). A full set is
+    ## ``EgressSetSize`` elements of about a hundred bytes each (an address
+    ## and its counter), so several hundred kilobytes; ``runHostTool``'s
+    ## default bound of 64 KiB cut the answer off at some 800 destinations,
+    ## and every check of a fuller set failed to parse it, and lost the
+    ## table's instance with it (reprobuild-pm issue
+    ## ``2026-11-19-addon-egress-check-cannot-read-a-set-of-more-than-64-kib.md``).
+    ## An answer that reaches this bound is reported as cut short, never
+    ## parsed.
+
 proc sendEgressControl*(): string =
   ## The fetch unit's positive control: one UDP datagram from this process
   ## to ``EgressControlAddress``. Returns "" when it was handed to the
@@ -231,7 +244,8 @@ proc instanceKey*(listTable, bootId: string): string =
 proc tableInstance*(nft: string): string =
   ## The instance the table's counters belong to (``instanceKey``).
   let r = runHostTool([nft, "-j", "list", "table", EgressTableFamily,
-                       EgressTableName], mergeStderr = false, timeoutSec = 30)
+                       EgressTableName], mergeStderr = false, timeoutSec = 30,
+                      maxOutputBytes = EgressListMaxBytes)
   if r.exitCode != 0: return ""
   instanceKey(r.output, bootIdNow())
 
@@ -383,9 +397,14 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
     for setName in ["refused4", "refused6"]:
       let r = runHostTool([nft, "-j", "list", "set", EgressTableFamily,
                            EgressTableName, setName], mergeStderr = false,
-                          timeoutSec = 30)
+                          timeoutSec = 30,
+                          maxOutputBytes = EgressListMaxBytes)
       if r.exitCode != 0:
         result.error = "nft list set " & setName & " exited " & $r.exitCode
+        return
+      if r.output.len >= EgressListMaxBytes:
+        result.error = "nft list set " & setName & " printed more than " &
+          $EgressListMaxBytes & " bytes: cut short, not judged"
         return
       try: result.refused.add(parseRefusedSet(r.output))
       except CatchableError as e:

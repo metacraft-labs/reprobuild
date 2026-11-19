@@ -29,7 +29,7 @@
 ## ``egress-observer-not-installed`` -- the observer unit
 ## never loads the table; the unit step goes red.
 ##
-## Mocks: none.
+## Mocks: one, a stand-in ``nft`` in the read-race case, justified there.
 
 import std/[algorithm, os, osproc, sequtils, strutils, unittest]
 
@@ -37,6 +37,20 @@ import repro_addon/egress_observer
 import repro_addon/evidence as addonEvidence
 import repro_addon/generation0
 import repro_addon/nft_tables
+
+const InnerCheckEnv = "REPRO_ADDON_EGRESS_TEST_CHECK_STATE"
+  ## Set to a state path, this binary runs one ``checkEgress`` against the
+  ## table of the network namespace it was started in, prints what the check
+  ## found, and exits: the suite's cases start it inside the ``unshare -rn``
+  ## namespace that holds the real table (``checkEgress`` runs ``nft``
+  ## itself, so it has to run where the table is).
+if existsEnv(InnerCheckEnv):
+  let c = checkEgress(findExe("nft"), getEnv(InnerCheckEnv))
+  echo "CHECK present=", c.present, " setFull=", c.setFull,
+       " unattributed=", c.unattributed, " fresh=", c.fresh.len,
+       " refused=", c.refused.len,
+       (if c.error.len > 0: " error=" & c.error else: "")
+  quit(0)
 
 let root = getTempDir() / ("addon-egress-" & $getCurrentProcessId())
 removeDir(root)
@@ -251,6 +265,59 @@ suite "the egress observer's table":
     # A reload starts the table's counters, and the count reported, at zero.
     discard freshSince(@[("192.0.2.20", 1'i64)], st, "u", 4, addr un)
     check un == 3
+
+  # ``FLOOD <count> <first> <packets>``: ``packets`` datagrams to each of
+  # ``count`` addresses from 10.<first>.0.0 on.
+  writeFile(root / "flood.py", "import socket, sys\n" &
+    "s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)\n" &
+    "n, first, k = (int(a) for a in sys.argv[1:4])\n" &
+    "for i in range(n):\n" &
+    "    for _ in range(k):\n" &
+    "        s.sendto(b'x', ('10.%d.%d.%d' % (first, i // 256, i % 256), 9))\n")
+  let flood = "python3 " & quoteShell(root / "flood.py")
+
+  proc realChecks(name, steps: string): seq[string] =
+    ## Loads the rendered table (matching this process's cgroup) into a
+    ## fresh network namespace, runs ``steps`` there, and returns the
+    ## ``CHECK`` lines of the checks they made. In ``steps``, ``CHECK`` runs
+    ## one ``checkEgress`` on the state ``name`` (this binary, started again
+    ## inside the namespace: ``InnerCheckEnv``).
+    writeFile(root / (name & ".nft"),
+      renderEgressNft(@[]).replace(AgentSliceCgroup, ownCgroupLevel2()))
+    let checkNow = InnerCheckEnv & "=" & quoteShell(root / ("state-" & name)) &
+      " " & quoteShell(getAppFilename())
+    let script = "set -e; ip link set lo up; ip route add 10.0.0.0/8 dev lo; " &
+      quoteShell(nft) & " -f " & quoteShell(root / (name & ".nft")) & "; " &
+      steps.replace("CHECK", checkNow)
+    let (output, code) = execCmdEx("unshare -rn sh -c " & quoteShell(script))
+    checkpoint output
+    check code == 0
+    output.splitLines().filterIt(it.startsWith("CHECK "))
+
+  test "a check reads a full set, and counts what it did not add":
+    # Reprobuild-pm issue
+    # 2026-11-19-addon-egress-check-cannot-read-a-set-of-more-than-64-kib.md:
+    # the check kept the first 64 KiB of ``nft -j list set``, so a set of
+    # more than some 800 destinations failed to parse and the check recorded
+    # nothing but its own error. The real table, filled to its size (4096)
+    # and sent five packets it cannot add: the check reads every element,
+    # says the set is full, and counts the five. Reported once.
+    check nft.len > 0
+    check ownCgroupLevel2().len > 0
+    let checks = realChecks("full", flood & " " & $EgressSetSize & " 2 1; " &
+      flood & " 5 3 1; CHECK; CHECK")
+    check checks == @[
+      "CHECK present=true setFull=true unattributed=5 fresh=" &
+        $EgressSetSize & " refused=" & $EgressSetSize,
+      # The destinations past the per-check cap, owed by the first check.
+      "CHECK present=true setFull=true unattributed=0 fresh=" &
+        $(EgressSetSize - EgressDetectionsMax) & " refused=" & $EgressSetSize]
+    # The table's instance was read too (the listing it comes from holds
+    # both sets): the state is keyed to a boot id and a handle, not to "-".
+    let keyed = readFile(root / "state-full").splitLines().filterIt(
+      it.startsWith("table "))
+    checkpoint keyed.join(" | ")
+    check keyed.len == 1 and '/' in keyed[0]
 
   test "the control datagram between the check's reads is no egress-set-full":
     # Mock: a stand-in ``nft`` answering from a file. The race is between
