@@ -54,6 +54,7 @@ import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
 import ./repro_local_store/lru_eviction
 import ./repro_local_store/sandbox_manifest
+import ./repro_local_store/content_table
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
@@ -69,6 +70,7 @@ export sqlite3_binding
 export store
 export lru_eviction
 export sandbox_manifest
+export content_table
 export optimise
 export portable_fingerprint
 export portable_memo
@@ -2474,13 +2476,64 @@ proc isDirectRegularFile(path: string): bool =
     let info = getFileInfo(extendedPath(path), followSymlink = false)
     info.kind == pcFile
 
+const LocalHashTableKey = "localHash.v1"
+  ## The content-table key of `localHash` over `fileBytesForHash`'s payload.
+  ## A change to either is a new key, so no entry outlives its meaning.
+
+proc tableLocalHashText(hash: LocalInvalidationHash): string =
+  $ord(hash.algorithm) & ":" & $ord(hash.domain) & ":" & $hash.value
+
+proc parseTableLocalHash(text: string):
+    tuple[ok: bool; hash: LocalInvalidationHash] =
+  let parts = text.split(':')
+  if parts.len != 3:
+    return
+  try:
+    let algorithm = parseInt(parts[0])
+    let domain = parseInt(parts[1])
+    if algorithm < 0 or algorithm > ord(high(HashAlgorithm)) or
+        domain < 0 or domain > ord(high(HashDomain)):
+      return
+    result.hash.algorithm = HashAlgorithm(algorithm)
+    result.hash.domain = HashDomain(domain)
+    result.hash.value = parseBiggestUInt(parts[2])
+    result.ok = true
+  except ValueError:
+    discard
+
 proc observeFileWithMetadata(path: string; policy: FileFingerprintPolicy;
                              metadata: FileMetadata): FileFingerprint =
   result.path = path
   result.policy = policy
   result.metadata = metadata
   if policy in {ffpChecksum, ffpHybrid}:
+    # The per-host content table (`content_table`): a regular file whose
+    # identity, size, modification time and file-system version are the ones
+    # its hash was recorded under is not read again. The version is read
+    # before hashing and checked after it, so a file written while it was
+    # hashed is never memoized.
+    let memoize = metadata.kind == ffkRegular and contentTableRoot().len > 0
+    let hashStarted = if memoize: hashStartNs() else: 0'i64
+    let before =
+      if memoize: contentVersion(extendedPath(path)) else: ContentVersion()
+    if before.known:
+      let memo = lookupContentHash(before, LocalHashTableKey)
+      if memo.len > 0:
+        let parsed = parseTableLocalHash(memo)
+        if parsed.ok:
+          result.hasLocalHash = true
+          result.localHash = parsed.hash
+          return
     let content = fileBytesForHash(path, result.metadata)
+    if content.readable and before.known:
+      let hash = localHash(content.payload)
+      let after = contentVersion(extendedPath(path))
+      if after == before:
+        recordContentHash(before, LocalHashTableKey, tableLocalHashText(hash),
+          hashStarted)
+      result.hasLocalHash = true
+      result.localHash = hash
+      return
     # An unreadable file leaves `hasLocalHash` false: there is no honest
     # value to put there. Revalidation reads that as "changed"; recording
     # refuses to publish (`UnreadableInputError`).

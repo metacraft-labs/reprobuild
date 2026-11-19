@@ -603,6 +603,41 @@ proc cliCommandsTypeChecks*(commands: seq[CliCommandDef]): NimNode =
   cliModelTypeChecks(CliModel[ReproCliCommandExt, ReproCliParamExt](
     commands: commands))
 
+proc declaresConfigKeys(model: CliModel[ReproCliCommandExt,
+                        ReproCliParamExt]): bool =
+  ## Whether a tool's description says which settings the tool reads from
+  ## its configuration files: a ``configSchema`` (a program in clispec's
+  ## own file layout), or a parameter whose key it spells itself (``key``,
+  ## or a ``perSource`` entry for a file source).
+  if model.configSchema.len > 0:
+    return true
+  for command in model.commands & @[model.root]:
+    for p in command.params:
+      if csFile in p.sources and p.keyDeclared:
+        return true
+      for o in p.perSource:
+        if o.source != CliSourceCli:
+          return true
+  false
+
+proc cliConfigDescriptionCode(model: CliModel[ReproCliCommandExt,
+                              ReproCliParamExt];
+                              executableName: string): NimNode =
+  ## ``const <executable>ConfigDescription* = <table>``: the configuration
+  ## keys the tool's description declares, as clispec's ``CliConfigTable``
+  ## (``clispec/config_check``), for the configuration writers
+  ## (``repro_dsl_stdlib/generated_config/described``) to check what they
+  ## write for the tool against. Derived ONCE, here, where the description
+  ## is declared: every block that names it reads the constant. Nothing is
+  ## emitted for a description that declares no configuration key.
+  result = newStmtList()
+  if not declaresConfigKeys(model):
+    return
+  let name = nnkPostfix.newTree(ident"*",
+    ident(executableName & "ConfigDescription"))
+  result.add nnkConstSection.newTree(nnkConstDef.newTree(name,
+    newEmptyNode(), cliConfigTableCode(model, executableName)))
+
 proc parseReproCliBlock(packageName, executableName: string;
                         cliBody: NimNode): seq[CliCommandDef] =
   ## The commands of an ``executable``'s ``cli:`` block: one per ``call:``
@@ -629,6 +664,8 @@ proc parseReproCliBlock(packageName, executableName: string;
         if name notin subTools:
           subTools.add(name)
   pendingCliModelTypeChecks.add(cliModelTypeChecks(model))
+  pendingCliModelTypeChecks.add(cliConfigDescriptionCode(model,
+    executableName))
   result = model.commands
   for command in result.mitems:
     # clispec records the compiler's file names; the DSL records them the

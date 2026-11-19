@@ -737,7 +737,7 @@ const SpawnNameTails = ["startprocess", "startdirect", "execcmdex",
 ## ``posix.nim`` exports 492 routines — so they are gated on the IMPORT
 ## LINE instead, which is stronger and is what ``symbolRestricted`` below
 ## is for. See ``capabilitySurfaces``.
-const SpawnCapabilityModules: array[7, tuple[path: string;
+const SpawnCapabilityModules: array[8, tuple[path: string;
                                              engineImports: bool;
                                              why: string]] = [
   ("osproc", true,
@@ -748,6 +748,12 @@ const SpawnCapabilityModules: array[7, tuple[path: string;
     "startDirect and the RunQuota launch/offer wrappers"),
   ("io_mon", true,
     "re-exports fs_snoop, whose runMonitored spawns the monitored child"),
+  # Round 8c of the CLI move: io-mon's command line (`runFsSnoopCli`) left
+  # `fs_snoop` for `io_mon/cli`, which the `io_mon` hub does not re-export.
+  # Only `repro_cli_support` imports it (`repro debug io monitor`, `repro
+  # internal io monitor`); no file of the engine library may.
+  ("io_mon/cli", false,
+    "io_mon/cli: runFsSnoopCli, io-mon's command line over runMonitored"),
   ("ambient_execution", false,
     "repro_core's sanctioned escape hatches: uncontrolledStartProcess et al"),
   ("posix", true,
@@ -1008,7 +1014,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # both lands in `vanished`.
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
       sourceRels: @["io_mon/fs_snoop.nim", "io_mon/shim_discovery.nim"],
-      spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
+      spawning: @["runMonitored", "startMonitor",
                   "pollMonitor", "finishMonitor",
                   # io-mon #18, reported by this audit when #383 bumped the
                   # pin. Both start `xcrun` via `execCmdEx` (macOS only, but
@@ -1031,7 +1037,20 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # Renders the body of one Apple toolchain drop-in as a
                # string; ``populateAppleToolchainDropIns`` is what writes
                # and resolves it. Inert: it returns text and starts nothing.
-               "renderAppleToolchainDropIn"]),
+               "renderAppleToolchainDropIn",
+               # Exported by round 8c for io-mon's CLI module, which reads
+               # its command line's values with them: a temporary directory
+               # made and removed, and three value decoders. None starts a
+               # process.
+               "createLocalTempDir", "removeLocalTempDir", "parseOutputMode",
+               "parseInterestFlag", "parseEvidenceScopeFlag"]),
+    # io-mon's command line (round 8c). `runFsSnoopCli` is the CLI wrapper
+    # around `runMonitored`; the other two read a command line into a
+    # request and start nothing.
+    CapabilitySurface(key: "io_mon/cli", audit: caFullSurface,
+      sourceRels: @["io_mon/cli.nim"],
+      spawning: @["runFsSnoopCli"],
+      inert: @["fsSnoopCommandOf", "parseFsSnoopArgs"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
@@ -1136,7 +1155,7 @@ proc capabilitySurfaceRoot(key, repoRoot: string): string =
   of "runquota_process":
     let fromEnv = getEnv("RUNQUOTA_SRC")
     if fromEnv.len > 0: fromEnv else: repoRoot.parentDir / "runquota"
-  of "io_mon":
+  of "io_mon", "io_mon/cli":
     let fromEnv = getEnv("IO_MON_SRC")
     if fromEnv.len > 0 and fileExists(fromEnv / "io_mon.nim"):
       fromEnv
@@ -2047,7 +2066,9 @@ suite "every_launch_path_is_monitored":
 
   when defined(linux) or defined(macosx):
     test "evidence shape folds aliases while retaining distinct and missing writes":
-      let root = createTempDir("repro-evidence-shape-", "", "/tmp")
+      # Under the suite's temporary directory ($TMPDIR), as every scratch
+      # tree here is: nothing in this case depends on where it lives.
+      let root = createTempDir("repro-evidence-shape-", "")
       defer: removeDir(root)
       let actual = root / "actual"
       let alias = root / "alias"
@@ -2721,7 +2742,7 @@ suite "every_launch_path_is_monitored":
 
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
-    # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
+    # The fixture's scratch tree (`ensureFixture`).
     var tempRoot = ""
     var fixtureBin = ""
 
@@ -2749,7 +2770,12 @@ suite "every_launch_path_is_monitored":
       ## this file left five ``repro-hm4-launch-paths*`` trees in ``/tmp``.
       if fixtureUp: return
       fixtureUp = true
-      tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
+      # Under $TMPDIR, not a fixed `/tmp`: a host whose `/tmp` is full or
+      # quota-limited must still run this file, and the one path here with a
+      # length limit, the daemon's socket, is placed by
+      # `runquotaRendezvousDir`, which moves it to a short directory when
+      # this root is too deep for `sun_path`.
+      tempRoot = createTempDir("repro-hm4-launch-paths", "")
       releaseDirAtProcessExit(tempRoot)
       let fixtureSource = tempRoot / "fixture.c"
       fixtureBin = tempRoot / "fixture"

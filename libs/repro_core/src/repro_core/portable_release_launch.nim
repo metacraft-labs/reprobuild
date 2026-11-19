@@ -26,6 +26,10 @@
 ## the ones a `dlopen`ed library's own RUNPATH cannot find; a link-time
 ## `--dynamic-linker` plus RUNPATH does not (a RUNPATH applies only to the
 ## object that carries it, and `libclingo.so`'s names build-host directories).
+## `--library-path` outranks the helper's search list only when that list is a
+## DT_RUNPATH: the loader searches a DT_RPATH first, and a helper linked by a
+## Nix compiler carries that compiler's glibc directory in it. So the helper is
+## linked with `--enable-new-dtags` (`portableReleaseRpathFlags`).
 ## Nothing is baked into the helper: the loader and directory are those of the
 ## release that is running NOW, so a helper compiled by a release that has since
 ## moved or been replaced still starts.

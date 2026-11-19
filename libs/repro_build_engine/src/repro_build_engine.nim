@@ -20072,6 +20072,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   let casOpenStart = statStart()
   var cas = openCasStore(sharedRoot)
   finishStat("repro cas open", casOpenStart)
+  # The per-host content table beside the action cache: a content-checked
+  # input whose identity, size, mtime and file-system version are unchanged
+  # is not re-hashed (`repro_local_store/content_table`). Self-validating
+  # entries, so the root only says where they live.
+  setContentTableRoot(sharedRoot / "content-table")
   let actionCacheOpenStart = statStart()
   let attachActionCacheShm = config.actionCacheRoot.len > 0
   let warmCache = warmActionCacheFor(sharedRoot / "action-cache",

@@ -19,10 +19,17 @@
 ## what keeps the thin client free of the parser and its tables.
 ##
 ## Every command is declared with all of its parameters, the role processes
-## repro spawns of itself (``repro internal ...``) included. A command that
-## hands its words to another program's command line (``repro debug io
-## monitor``, ``repro system addon``) declares them as one clispec ``rest``
-## positional.
+## repro spawns of itself (``repro internal ...``) included. Two subtrees are
+## other programs' command lines, mounted here: the add-on's
+## (``repro_infra/addon_command_line``, which the static add-on binary
+## parses too) under ``repro system addon|state|secret|adopt``, and the
+## filesystem monitor's (io-mon's ``io_mon/cli_description``, which io-mon's
+## own binary parses) under ``repro debug io monitor`` and ``repro internal io
+## monitor``. Each program exports its description as a compile-time proc
+## returning a ``cli:`` body, and this description splices it under the
+## command that mounts it, so repro's parser, help and completion know every
+## verb and flag below it; the command's handler hands the words after the
+## mount point to that program's own generated parser.
 ##
 ## One declaration is reprobuild's own, read through clispec's extension hook
 ## (``parseCliParamExtension``) into ``ReproCommandLineParamExt``:
@@ -33,7 +40,10 @@
 
 import std/macros
 
-import clispec/[model, dsl]
+import clispec/[model, dsl, splice]
+
+import repro_infra/addon_command_line
+import io_mon/cli_description as io_mon_description
 
 type
   ReproCommandLineParamExt* = object
@@ -69,61 +79,6 @@ const
   ReproProgramName* = "repro"
     ## The name help, errors and completion scripts use: the command a user
     ## types, whichever image answers it.
-
-proc unbound(n: NimNode): NimNode {.compileTime.} =
-  ## ``n`` with every symbol ``quote`` bound turned back into the identifier
-  ## it was written as, line information kept. The ``cli:`` language is read
-  ## as written, the way a macro's untyped argument is: ``required = false``
-  ## names the literal ``false``, which clispec reads as an identifier, not
-  ## a symbol of ``system``.
-  ##
-  ## A ``help`` text written as string literals joined with ``&``, to keep
-  ## the lines short, is folded into the one literal clispec requires there,
-  ## a statement list spliced into a scope is flattened into it, and a type
-  ## such as ``seq[string]`` is kept a bracket expression.
-  if n.kind == nnkInfix and n.len == 3 and n[0].eqIdent("&"):
-    let left = unbound(n[1])
-    let right = unbound(n[2])
-    if left.kind in {nnkStrLit..nnkTripleStrLit} and
-        right.kind in {nnkStrLit..nnkTripleStrLit}:
-      result = newLit(left.strVal & right.strVal)
-      result.copyLineInfo(n)
-      return
-  # `quote` turns `seq[string]` into a call of the `[]` operator; the
-  # language reads (and help prints) the bracket expression as written.
-  if n.kind == nnkCall and n.len >= 2 and
-      n[0].kind in {nnkSym, nnkOpenSymChoice, nnkClosedSymChoice} and
-      (if n[0].kind == nnkSym: $n[0] else: $n[0][0]) == "[]":
-    result = nnkBracketExpr.newNimNode(n)
-    for child in n[1 .. ^1]:
-      result.add(unbound(child))
-    return
-  case n.kind
-  of nnkSym:
-    result = ident($n)
-    result.copyLineInfo(n)
-  of nnkOpenSymChoice, nnkClosedSymChoice:
-    result = ident($n[0])
-    result.copyLineInfo(n)
-  of nnkNone, nnkEmpty, nnkIdent, nnkCharLit..nnkUInt64Lit,
-      nnkFloatLit..nnkFloat64Lit, nnkStrLit..nnkTripleStrLit, nnkNilLit:
-    result = n
-  of nnkStmtList:
-    # A shared group of declarations (``graphInspectionFlags`` and the like)
-    # is spliced in as a statement list of its own; its statements belong
-    # to the scope it is spliced into, which is where clispec reads them.
-    result = n.kind.newNimNode(n)
-    for child in n:
-      let converted = unbound(child)
-      if converted.kind == nnkStmtList:
-        for statement in converted:
-          result.add(statement)
-      else:
-        result.add(converted)
-  else:
-    result = n.kind.newNimNode(n)
-    for child in n:
-      result.add(unbound(child))
 
 proc graphInspectionFlags(): NimNode {.compileTime.} =
   ## The flags of every command that materializes the project's build graph
@@ -2177,6 +2132,34 @@ proc cmakeRegenerateParams(): NimNode {.compileTime.} =
     flag depfile is string, required = true, help = "The depfile to write"
     flag publicCli is string, help = "The repro image to name in it"
 
+proc withEnginePayloadEnv(body: NimNode): NimNode {.compileTime.} =
+  ## io-mon's command line (``body``) as ``repro internal io monitor``
+  ## accepts it. The engine also writes its own ``--payload-env=NAME=VALUE``
+  ## assignments into the monitor's bare form, just before the monitor's
+  ## ``--`` (``repro_build_engine.wrapMonitoredPayloadWithRuntimeEnv``): the
+  ## variables the monitored command alone is started with. They are the
+  ## engine's, not io-mon's, so they are declared here, on the ``call:`` of
+  ## this mount only; the handler takes them off before io-mon's parser reads
+  ## the rest (``runInternalIoMonitorCli``).
+  let payloadEnv = cliUnbound(quote do:
+    flag payloadEnv is seq[string], format = equals, visibility = hidden,
+      help = "NAME=VALUE: set for the monitored command alone (written by " &
+        "the engine)")
+  result = body
+  for stmt in result:
+    if stmt.kind in {nnkCall, nnkCommand} and stmt.len >= 2 and
+        stmt[0].eqIdent("call") and stmt[^1].kind == nnkStmtList:
+      # `quote` of a single statement yields the statement itself, not a
+      # statement list.
+      if payloadEnv.kind == nnkStmtList:
+        for flagStmt in payloadEnv:
+          stmt[^1].add(flagStmt)
+      else:
+        stmt[^1].add(payloadEnv)
+      return
+  error("io-mon's command line has no `call:` to add `--payload-env` to",
+    body)
+
 proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## The ``cli:`` body of repro's command line.
   ##
@@ -2333,7 +2316,14 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   let lockValidate = lockSolveFlags()
   let workspaceCommands = workspaceSubcommands(syncWs, pullWs, switchWs,
     branchWs)
-  result = unbound quote do:
+  # The mounted command lines of other programs (see the module header).
+  let addonVerbs = addonCommands()
+  let addonState = addonStateCommands()
+  let addonSecret = addonSecretCommands()
+  let addonAdopt = addonAdoptParams()
+  let debugIoMonitor = ioMonCommandLineDescription()
+  let internalIoMonitor = withEnginePayloadEnv(ioMonCommandLineDescription())
+  result = cliUnbound quote do:
     help "Reproducible builds, development environments and workspaces"
     # Command-line flags are kebab-case (`--tool-provisioning`); keys in
     # reprobuild's TOML configuration files are snake_case.
@@ -3652,24 +3642,24 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "reprobuild.system.audit.v1)"
         pos generation is string, required = false,
           help = "The generation"
-      # The add-on's own command line (`repro_addon/cli`), which the static
-      # add-on binary parses too. It is not a clispec description, so its
-      # words are this command's `rest`: every word after the subcommand,
-      # `--help` included, verbatim, and the add-on's parser answers them
-      # (its own usage text included).
+      # The add-on's own command line (`repro_infra/addon_command_line`),
+      # mounted: the static add-on binary parses the same declarations, and
+      # each handler hands the words after the mount point to its parser.
       subcmd "addon", help = "Manage an add-on host (Linux)":
-        pos args is seq[string], rest = true, required = false,
-          help = "The add-on's command line"
+        `addonVerbs`
       subcmd "state", help = "Save and restore the declared state set " &
           "(Linux)":
-        pos args is seq[string], rest = true, required = false,
-          help = "The add-on's `state` command line"
+        `addonState`
       subcmd "secret", help = "Seal and materialise system secrets (Linux)":
-        pos args is seq[string], rest = true, required = false,
-          help = "The add-on's `secret` command line, or `materialise`"
+        `addonSecret`
+        # A host realised in full re-materialises its secrets at boot; the
+        # add-on's boot unit runs `repro system addon secrets --boot`.
+        subcmd "materialise", help = "Re-materialise this boot's secrets on " &
+            "a host realised in full (its boot unit)":
+          boolFlag boot is bool,
+            help = "The boot unit's run (the only form accepted)"
       subcmd "adopt", help = "Claim an object on an add-on host (Linux)":
-        pos args is seq[string], rest = true, required = false,
-          help = "The add-on's `adopt` command line"
+        `addonAdopt`
     subcmd "infra", help = "Plan and apply infrastructure":
       subcmd "plan", help = "Compile the system profile and show what an " &
           "apply would change; writes nothing but the plan":
@@ -4010,14 +4000,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         help = "The project to diagnose (default: the workspace's)"
     subcmd "debug", help = "Inspect the filesystem monitor and artifacts":
       subcmd "io", help = "Filesystem monitoring":
-        # The monitor's own command line (the io-mon library's, shared
-        # with `repro internal io monitor`). io-mon does not describe it in
-        # clispec, so its words are this command's `rest`, verbatim, and
-        # io-mon's parser answers them.
+        # The monitor's own command line (io-mon's, mounted; shared with
+        # `repro internal io monitor`).
         subcmd "monitor", help = "Run a command under the filesystem " &
             "monitor, or inspect a monitor dependency file":
-          pos args is seq[string], rest = true, required = false,
-            help = "The monitor's command line (io-mon's)"
+          `debugIoMonitor`
       subcmd "artifact", help = "Decode an internal binary artifact":
         flag format is string,
           help = "The output format: `text` (the default) or `json`"
@@ -4051,13 +4038,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Print the checkout a declared package resolves to":
         `iResolvePackage`
       subcmd "io", help = "Filesystem monitoring":
-        # The monitor's own command line (the io-mon library's, shared with
-        # `repro debug io monitor`): its words are this command's `rest`,
-        # verbatim, and io-mon's parser answers them.
+        # The monitor's own command line (io-mon's, mounted; shared with
+        # `repro debug io monitor`).
         subcmd "monitor",
             help = "The filesystem-monitor shim around one action":
-          pos args is seq[string], rest = true, required = false,
-            help = "The monitor's command line (io-mon's)"
+          `internalIoMonitor`
       subcmd "runquota-helper", help = "RunQuota lease helper":
         `iRunquotaHelper`
       subcmd "compile-provider", help = "Provider-compile helper":

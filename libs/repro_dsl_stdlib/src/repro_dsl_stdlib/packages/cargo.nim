@@ -112,6 +112,7 @@ proc build*(pkg: CargoTool;
             features = "";
             manifestPath = "";
             targetDir = "";
+            color = "";
             package = "";
             bin = "";
             target = "";
@@ -133,9 +134,9 @@ proc build*(pkg: CargoTool;
   cargo_cli.build(pkg, config = config, locked = locked, release = release,
     offline = offline, noDefaultFeatures = noDefaultFeatures,
     features = features, manifestPath = manifestPath,
-    targetDir = effectiveTargetDir, package = package, bin = bin,
-    target = target, actionId = actionId, deps = deps, after = after,
-    extraInputs = extraInputs, extraOutputs = extraOutputs,
+    targetDir = effectiveTargetDir, color = color, package = package,
+    bin = bin, target = target, actionId = actionId, deps = deps,
+    after = after, extraInputs = extraInputs, extraOutputs = extraOutputs,
     extraEnv = extraEnv, depfile = depfile, cacheable = cacheable,
     actionCachePolicy = actionCachePolicy, commandStatsId = commandStatsId,
     dependencyPolicy = cargoDepfilePolicy(dependencyPolicy,

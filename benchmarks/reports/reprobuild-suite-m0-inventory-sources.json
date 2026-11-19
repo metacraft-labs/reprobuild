@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3023,
+    "nimTestBinaries": 3028,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 808,
-    "staticallyDetectedRuntimeCompilerFlowTests": 150,
-    "testEntries": 3073
+    "pureUnitTests": 809,
+    "staticallyDetectedRuntimeCompilerFlowTests": 152,
+    "testEntries": 3078
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -596,6 +596,22 @@
       "targetOs": "soAny"
     },
     {
+      "count": 4,
+      "defines": [],
+      "dependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "sources": [
+        "libs/repro_local_store/tests/t_content_table.nim",
+        "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
+        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
+        "libs/repro_local_store/tests/t_store_copy.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 11,
       "defines": [],
       "dependencyShape": [
@@ -633,21 +649,6 @@
         "libs/repro_local_store/tests/t_per_computation_output_dirs.nim",
         "libs/repro_local_store/tests/t_retention_gc.nim",
         "libs/repro_local_store/tests/t_store_budget_gc.nim"
-      ],
-      "targetOs": "soAny"
-    },
-    {
-      "count": 3,
-      "defines": [],
-      "dependencyShape": [
-        "repro_local_store",
-        "repro_test_support"
-      ],
-      "owner": "libs/repro_local_store",
-      "sources": [
-        "libs/repro_local_store/tests/t_pattern_scoped_enumeration_names.nim",
-        "libs/repro_local_store/tests/t_store_bundle_contents_confine_a_selection.nim",
-        "libs/repro_local_store/tests/t_store_copy.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1723,11 +1724,11 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 24,
-      "integration": 1674,
+      "graph-fixture": 26,
+      "integration": 1675,
       "platform/destructive": 198,
-      "pure unit": 808,
-      "unclassified": 369
+      "pure unit": 809,
+      "unclassified": 370
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1941,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3023,
+    "nimTestBinaryCount": 3028,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3073
+    "testEntryCount": 3078
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2092,6 +2093,46 @@
         }
       ],
       "source": "libs/repro_core/tests/t_zig_target_vendored_hash.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "source"
+          ],
+          "line": 80,
+          "path": "libs/repro_dsl_stdlib/tests/t_cs_m6b_derivation_once_per_description.nim",
+          "patterns": [
+            "nim-check"
+          ],
+          "snippet": "let (output, code) = execCmdEx(\"nim check --hints:off --colors:off \" &"
+        }
+      ],
+      "source": "libs/repro_dsl_stdlib/tests/t_cs_m6b_derivation_once_per_description.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "source"
+          ],
+          "line": 46,
+          "path": "libs/repro_dsl_stdlib/tests/t_cs_m6b_snippet_checked_at_compile_time.nim",
+          "patterns": [
+            "nim-check"
+          ],
+          "snippet": "let (output, code) = execCmdEx(\"nim check --hints:off --colors:off \" &"
+        }
+      ],
+      "source": "libs/repro_dsl_stdlib/tests/t_cs_m6b_snippet_checked_at_compile_time.nim"
     },
     {
       "class": "graph-fixture",
@@ -3146,7 +3187,7 @@
             "store",
             "stub"
           ],
-          "line": 67,
+          "line": 78,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -3166,7 +3207,7 @@
             "store",
             "stub"
           ],
-          "line": 131,
+          "line": 142,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -3186,7 +3227,7 @@
             "store",
             "stub"
           ],
-          "line": 217,
+          "line": 230,
           "path": "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
           "patterns": [
             "cc"
@@ -5775,7 +5816,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1409,
+          "line": 1428,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -17390,6 +17431,54 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cs_m6b_derivation_once_per_description",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cs_m6b_derivation_once_per_description.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6b_file_validated_at_run_time",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cs_m6b_file_validated_at_run_time.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6b_snippet_checked_at_compile_time",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_cs_m6b_snippet_checked_at_compile_time.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_da6_capture_breadth_dsl_surface",
       "class": "unclassified",
       "classificationReason": "spawns a subprocess (through `libs/repro_dsl_stdlib/tests/lock_file_compile_probe.nim`)",
@@ -21376,6 +21465,24 @@
       "source": "libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_content_table",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_content_table.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -43567,8 +43674,28 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_cs_m6_round8a_command_lines.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6_round8c_mounted_command_lines",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_addon",
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cs_m6_round8c_mounted_command_lines.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 14,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -50429,7 +50556,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_nix_tool_resolution_is_a_provisioning_edge.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -54903,7 +55030,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_source_hash_runtime_paths.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59569,7 +59696,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

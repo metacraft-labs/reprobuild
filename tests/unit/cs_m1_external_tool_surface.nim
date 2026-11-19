@@ -121,7 +121,8 @@ macro requireCovered(T: typedesc; covered: static[seq[string]]): untyped =
 
 requireCovered(ReproCliParamExt, @["role"])
 requireCovered(ReproCliCommandExt, @["dependencyPolicy", "nonDeterminism",
-  "subTools", "inputCheckPolicy", "nonDeterminismJustification",
+  "subTools", "inputCheckPolicy", "envPassthrough", "envPassthroughRefs",
+  "nonDeterminismJustification",
   "providerEntrypointId", "optionalOutputFlags", "removeBeforeRunFlags",
   "outputFlags", "typedOutputs"])
 requireCovered(TypedOutputDef, @["fieldName", "types", "pathExpr",
@@ -188,6 +189,10 @@ proc renderCommand*(cmd: CliCommandDef): string =
   result.add("    nonDeterminism=" & $cmd.ext.nonDeterminism &
     " justification=" & cmd.ext.nonDeterminismJustification.escape() & "\n")
   result.add("    subTools=" & quoted(cmd.ext.subTools) & "\n")
+  # The variables every edge of the command passes through by name: they
+  # decide which of the host's variables reach the tool.
+  result.add("    envPassthrough=" & quoted(cmd.ext.envPassthrough) &
+    " refs=" & quoted(cmd.ext.envPassthroughRefs) & "\n")
   result.add("    outputs=" & quoted(cmd.ext.outputFlags) & "\n")
   result.add("    optionalOutputs=" & quoted(cmd.ext.optionalOutputFlags) &
     "\n")

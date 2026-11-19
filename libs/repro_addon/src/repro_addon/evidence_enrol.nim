@@ -301,50 +301,28 @@ proc runEvidenceRekey*(stateDir = DefaultStateDir; noHandover = false):
               ("purpose", if noHandover: "rekey-no-handover" else: "rekey")],
     attest: true), defaultSite(stateDir))
 
-proc parseEnrolArgs*(args: seq[string]):
-    tuple[rekey, noHandover: bool; opts: EnrolOptions] =
-  ## ``evidence-enrol``'s options (also the docs test's parser, A11 review
-  ## finding 16). Raises ``ValueError``.
-  if "--rekey" in args:
-    result.rekey = true
-    for a in args:
-      if a == "--no-handover": result.noHandover = true
-      elif a != "--rekey":
-        raise newException(ValueError, "usage: repro system addon " &
-          "evidence-enrol --rekey [--no-handover]")
-    return
-  var i = 0
-  proc value(flag: string): string =
-    let a = args[i]
-    if a.startsWith(flag & "="): return a[flag.len + 1 .. ^1]
-    if a != flag: raise newException(ValueError, "unknown option " & a)
-    if i + 1 >= args.len: raise newException(ValueError, flag & " needs a value")
-    inc i
-    args[i]
-  while i < args.len:
-    let a = args[i]
-    if a.startsWith("--evidence-sink-ca"):
-      result.opts.sinkCaPath = value("--evidence-sink-ca")
-    elif a.startsWith("--evidence-sink"):
-      result.opts.sink = value("--evidence-sink")
-    elif a.startsWith("--heartbeat-interval"):
-      result.opts.heartbeatSec = parseInt(value("--heartbeat-interval"))
-    else: raise newException(ValueError, "unknown option " & a)
-    inc i
-  if result.opts.sink.len == 0 or result.opts.sinkCaPath.len == 0:
-    raise newException(ValueError, "--evidence-sink and --evidence-sink-ca " &
-      "are required")
-
-proc runEvidenceEnrolCli*(args: seq[string]): int =
-  var parsed: tuple[rekey, noHandover: bool; opts: EnrolOptions]
-  try: parsed = parseEnrolArgs(args)
-  except ValueError as e:
-    stderr.write("repro system addon evidence-enrol: " & e.msg & "\n")
+proc runEvidenceEnrolCommand*(rekey, noHandover: bool;
+                              opts: EnrolOptions): int =
+  ## ``repro system addon evidence-enrol --evidence-sink ADDR:PORT
+  ## --evidence-sink-ca F [--heartbeat-interval S]``, or ``evidence-enrol
+  ## --rekey [--no-handover]``; the two forms take no flag of the other.
+  const verb = "repro system addon evidence-enrol"
+  let enrolGiven = opts.sink.len > 0 or opts.sinkCaPath.len > 0 or
+    opts.heartbeatSec != 0
+  if rekey and enrolGiven:
+    stderr.write(verb & ": --rekey takes no --evidence-sink, " &
+      "--evidence-sink-ca or --heartbeat-interval\n")
     return 2
-  let opts = parsed.opts
-  if parsed.rekey:
+  if noHandover and not rekey:
+    stderr.write(verb & ": --no-handover goes with --rekey\n")
+    return 2
+  if not rekey and (opts.sink.len == 0 or opts.sinkCaPath.len == 0):
+    stderr.write(verb & ": --evidence-sink and --evidence-sink-ca are " &
+      "required\n")
+    return 2
+  if rekey:
     try:
-      let r = runEvidenceRekey(noHandover = parsed.noHandover)
+      let r = runEvidenceRekey(noHandover = noHandover)
       stdout.write("generation:           " & r.generationId & "\n" &
         "attestation key:      " & r.newAttestationKey & " (was " &
           r.oldAttestationKey & ")\n" &

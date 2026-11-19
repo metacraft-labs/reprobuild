@@ -1,8 +1,10 @@
 ## The command lines of round 8a of repro's move onto its description:
-## `repro attest`, the commands that forward their words to another command
-## line (`repro system addon|state|secret|adopt`, `repro debug io monitor`),
-## and the environment variables the help texts used to name by hand, now
-## declared on their flags.
+## `repro attest` and the environment variables the help texts used to name
+## by hand, now declared on their flags. (Round 8a also declared the commands
+## that forward their words to another command line, `repro system
+## addon|state|secret|adopt` and `repro debug io monitor`, as one `rest`
+## positional each; round 8c mounted those command lines instead, and
+## `t_cs_m6_round8c_mounted_command_lines` tests them.)
 ##
 ## The arms, and what makes each one evidence:
 ##
@@ -15,9 +17,7 @@
 ##      (exit 2): no subcommand, an unknown one, another subcommand's flag, a
 ##      stray word. Each subcommand's flags reach `AttestCliOptions` with the
 ##      values given; the command's own refusals keep exit 2.
-##   2. The forwarding commands hand every word after the subcommand to the
-##      add-on's or io-mon's command line verbatim (`--help` and `--`
-##      included), as before; `repro help` of them is generated.
+##   2. (The forwarding commands: see round 8c.)
 ##   3. Every flag-over-variable default a help text named is declared, and
 ##      holds in both orders, an empty variable counting as unset: the store
 ##      root (`REPRO_STORE_ROOT`) of every store command, the development
@@ -45,8 +45,7 @@
 ## endpoint, and arms 1 and 3 also run the generated parser in process. No
 ## command line here gets past its parse into anything that changes the
 ## machine: every subprocess either prints help, is refused, or fails on the
-## empty directory before it does anything; `repro system addon --help`
-## prints the add-on's usage text and returns.
+## empty directory before it does anything.
 
 import std/[options, os, strutils, tables, tempfiles, unittest]
 
@@ -320,56 +319,6 @@ suite "repro attest is parsed from the description":
     let nonce = s.runStdout(["attest", "challenge", "--hex"])
     check nonce.code == 0
     check nonce.stdout.strip().len == 2 * ChallengeBytes
-    check entriesUnder(s.cwd).len == 0
-
-suite "the forwarding commands hand their words over verbatim":
-
-  test "every word after the subcommand reaches the other command line":
-    for (argv, words) in [
-        (@["system", "addon", "preflight", "--json"], @["preflight", "--json"]),
-        (@["system", "addon", "--help"], @["--help"]),
-        (@["system", "state", "save", "--", "x"], @["save", "--", "x"]),
-        (@["system", "secret", "materialise", "--boot"],
-          @["materialise", "--boot"]),
-        (@["system", "adopt", "-h"], @["-h"])]:
-      check parsed(argv) == -1
-      let got =
-        case parsedCommand.system.command
-        of ReproCommandLineSystemCommand.addon: parsedCommand.system.addon.args
-        of ReproCommandLineSystemCommand.state: parsedCommand.system.state.args
-        of ReproCommandLineSystemCommand.secret:
-          parsedCommand.system.secret.args
-        of ReproCommandLineSystemCommand.adopt: parsedCommand.system.adopt.args
-        else: @["<another command>"]
-      check got == words
-    check parsed(["debug", "io", "monitor", "--dep-file", "d", "--", "true",
-      "--help"]) == -1
-    check parsedCommand.debug.io.monitor.args ==
-      @["--dep-file", "d", "--", "true", "--help"]
-
-  test "the other command line answers its own help; repro help is generated":
-    let s = newScratch()
-    defer: s.dispose()
-    when defined(linux):
-      let addon = s.runStdout(["system", "addon", "--help"])
-      check addon.code == 0
-      check addon.stdout.startsWith("usage: repro system addon <command>")
-    let monitor = s.run(["debug", "io", "monitor", "--help"])
-    check monitor.code == 1
-    check "repro debug io monitor: error: unsupported fs-snoop argument: " &
-      "--help" in monitor.output
-    for path in [@["system", "addon"], @["system", "state"],
-                 @["system", "secret"], @["system", "adopt"],
-                 @["debug", "io", "monitor"]]:
-      let help = s.runStdout(@["help"] & path)
-      check help.code == 0
-      check ("Usage: repro " & path.join(" ") & " [<args>...]") in
-        help.stdout
-      # Words after it are the other program's: `repro help` still prints
-      # the command's own help, as it did before the command was declared.
-      let deeper = s.runStdout(@["help"] & path & @["somewhere", "else"])
-      check deeper.code == 0
-      check deeper.stdout == help.stdout
     check entriesUnder(s.cwd).len == 0
 
 suite "the variables the help texts named are declared on their flags":

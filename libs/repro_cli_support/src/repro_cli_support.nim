@@ -86,31 +86,40 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_dev_env_engine/directory_trust
 import repro_interface_artifacts
-# Incremental-Test-Runner M7: the io-monitor CLI driver and shim discovery now
-# come from the shared ``io-mon`` library. Import the package hub rather than
-# the retired in-tree module path; upstream still re-exports the driver proc
-# name for API compatibility.
+# Incremental-Test-Runner M7: shim discovery comes from the shared ``io-mon``
+# library (the package hub), and the monitor's command line from its CLI
+# module: io-mon declares it in clispec (``io_mon/cli_description``, mounted
+# in repro's description under `debug io monitor` and `internal io monitor`)
+# and ``io_mon/cli.runFsSnoopCli`` parses it with the parser generated from
+# that declaration.
 import io_mon
+from io_mon/cli as io_mon_cli import nil
 
-proc runIoMonitorCli(programName: string; args: seq[string]): int =
-  # io-mon still exports the CLI entrypoint under its historical proc name.
-  runFsSnoopCli(programName, args)
+proc runIoMonitorCli(programName: string; argv: seq[string];
+                     mount: openArray[string]): int =
+  ## The monitor's command line, mounted at ``mount``: the words of
+  ## ``argv`` (repro's command line, which repro's parser accepted) after
+  ## the mount point, handed to io-mon's parser.
+  io_mon_cli.runFsSnoopCli(programName, reproWordsAfterMount(argv, mount))
 
-proc runInternalIoMonitorCli(programName: string; args: seq[string]): int =
+proc runInternalIoMonitorCli(programName: string; argv: seq[string];
+                             mount: openArray[string]): int =
   ## ``repro internal io monitor``: the monitor the engine wraps an action
-  ## in. Before io-mon's parser sees the arguments, the engine's own
-  ## ``--payload-env=NAME=VALUE`` assignments (``takeMonitorPayloadEnv``)
-  ## are taken off and set in this process's environment, which the command
-  ## the monitor starts inherits. This process has already started, so the
+  ## in. repro's parser accepted the whole command line, the engine's own
+  ## ``--payload-env=NAME=VALUE`` assignments included (declared on this
+  ## mount only, ``cli_description.withEnginePayloadEnv``). Before io-mon's
+  ## parser sees the words after the mount point, those assignments
+  ## (``takeMonitorPayloadEnv``) are taken off and set in this process's
+  ## environment, which the command the monitor starts inherits. This process has already started, so the
   ## dynamic loader read its own ``LD_LIBRARY_PATH`` / ``DYLD_LIBRARY_PATH``
   ## before they were set and never reads them again: the monitor keeps its
   ## own libraries, and the command gets the loader paths the action
   ## declared, with no shell between the two
   ## (``repro_build_engine.deferRuntimeLibraryEnvForShell``).
-  let taken = takeMonitorPayloadEnv(args)
+  let taken = takeMonitorPayloadEnv(reproWordsAfterMount(argv, mount))
   for (name, value) in taken.env:
     putEnv(name, value)
-  runIoMonitorCli(programName, taken.rest)
+  io_mon_cli.runFsSnoopCli(programName, taken.rest)
 
 import repro_provider_runtime
 import repro_project_dsl
@@ -2248,11 +2257,17 @@ proc capabilitiesJson*(): JsonNode =
     # `--action-output=all` (Provider-Compile-Tiering.md §"A TryCompile hit
     # must replay the probe's output"). The CMake generator lets its
     # try_compile builds be served from cache only when this is listed.
-    "build-action-output-replay",
-    # The direct provider reads `trycompile.rbsz` v6, whose `relocatable`
-    # flag keys a try_compile project's actions independently of its
-    # scratch directory. The generator writes v6 only when this is listed.
-    "trycompile-relocatable-probes"])
+    "build-action-output-replay"])
+    # NOT listed for now: `trycompile-relocatable-probes`. The direct
+    # provider reads `trycompile.rbsz` v6, whose `relocatable` flag keys a
+    # try_compile project's actions independently of its scratch directory,
+    # and the generator writes v6 only when this capability is listed. A
+    # relocatable probe is revalidated by content (`hybrid`), which today
+    # hashes every input of every probe edge on record and monitors its
+    # compile; measured, that makes a cold configure 1.7-1.9 times slower
+    # (reprobuild-pm issue 2026-10-10-trycompile-edge-cache-key-is-unique-
+    # to-its-configure, "Criterion 4, measured"). The capability returns
+    # with the per-host content-digest memo that removes the hashing cost.
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
@@ -106573,7 +106588,7 @@ proc runDevSessionHttpOf[T](c: T): int =
     1
 
 proc runInternalCommand(conf: ReproCommandLineInternal;
-                        publicCliPath: string): int =
+                        publicCliPath: string; argv: seq[string]): int =
   ## ``repro internal <role>``: the processes repro spawns of itself, each
   ## from the configuration the generated parser read from its command line
   ## (``repro_cli_support/cli_description``, the role processes). The
@@ -106588,10 +106603,10 @@ proc runInternalCommand(conf: ReproCommandLineInternal;
   of ReproCommandLineInternalCommand.io:
     case conf.io.command
     of ReproCommandLineInternalIoCommand.monitor:
-      # The monitor's own command line (io-mon's), verbatim, after the
+      # The monitor's own command line (io-mon's, mounted here), after the
       # engine's `--payload-env` assignments are taken off it.
-      runInternalIoMonitorCli("repro internal io monitor",
-        conf.io.monitor.args)
+      runInternalIoMonitorCli("repro internal io monitor", argv,
+        ["internal", "io", "monitor"])
   of ReproCommandLineInternalCommand.runquotaHelper:
     runRunQuotaHelperOf(conf.runquotaHelper)
   of ReproCommandLineInternalCommand.compileProvider:
@@ -106879,10 +106894,8 @@ proc runWatchVerbCommand(args: seq[string]; publicCliPath: string): int =
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string; all = false): int =
   ## ``repro help [--all] [<command>...]``: the help of repro or of one
-  ## command, on stdout, generated from its declarations. A command that
-  ## hands its words to another program's command line (a `rest`
-  ## positional) prints the help its declaration gives, whatever words
-  ## follow.
+  ## command, on stdout, generated from its declarations (a mounted command
+  ## line such as the add-on's included).
   ## With ``all`` it is the page ``--help-all`` prints, which also lists
   ## the ``secondary`` commands.
   var command = 0
@@ -106897,8 +106910,6 @@ proc runReproHelp(programName: string; topic: seq[string];
         return reportReproUsageError(e)
       return 2
     command = next
-    if reproCommandTakesRest(command):
-      break
   # Printed as every help page is (``printReproHelp``: styled for stdout by
   # clispec's printer).
   try:
@@ -107187,7 +107198,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
   of ReproCommandLineCommand.remoteActivate:
     return runRemoteActivateCommand(conf.remoteActivate)
   of ReproCommandLineCommand.system:
-    return runSystemCommand(conf.system)
+    return runSystemCommand(conf.system, args)
   of ReproCommandLineCommand.infra:
     return runInfraCommand(conf.infra)
   of ReproCommandLineCommand.anywhere:
@@ -107470,9 +107481,9 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineDebugCommand.io:
       case conf.debug.io.command
       of ReproCommandLineDebugIoCommand.monitor:
-        # The monitor's own command line (io-mon's), unparsed.
-        return runIoMonitorCli("repro debug io monitor",
-          conf.debug.io.monitor.args)
+        # The monitor's own command line (io-mon's, mounted here).
+        return runIoMonitorCli("repro debug io monitor", args,
+          ["debug", "io", "monitor"])
     of ReproCommandLineDebugCommand.artifact:
       try:
         return runDebugArtifactCommand(conf.debug.artifact)
@@ -107524,7 +107535,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
   of ReproCommandLineCommand.internal:
-    return runInternalCommand(conf.internal, publicCliPath)
+    return runInternalCommand(conf.internal, publicCliPath, args)
   # The hidden `__repro-<name>` spellings of `internal <name>`, which the
   # shell hooks installed on a machine and the RunQuota launcher run.
   of ReproCommandLineCommand.reproRunquotaHelper:

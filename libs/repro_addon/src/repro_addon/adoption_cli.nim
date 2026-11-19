@@ -4,14 +4,10 @@
 ## add-on binary and the full engine (which also answers ``repro system
 ## state …``, because a restore runs on a host realised in full).
 ##
-##   repro system addon import --unit <name>
-##   repro system addon state backup --profile <file> --out <dir>
-##   repro system addon state release --profile <file>
-##   repro system addon state verify --from <dir> [--root R] [--only keep|carry] [--source]
-##   repro system addon state restore [--from <dir>] [--root R] [--boot]
-##   repro system addon state digest <path>
-##   repro system addon state unit
-##   repro system addon state install-unit [--root R]
+## Their command lines are declared in ``repro_infra/addon_command_line``
+## and read by the parser generated from it (``repro_addon/cli``), which
+## hands the procs below their typed values; `repro system addon state
+## --help` prints what each verb takes.
 ##
 ## Exit status: 0 success; 1 a failure, or a verify that found a
 ## difference; 2 a usage error or a refusal decided before anything was
@@ -29,34 +25,6 @@ import ./mutations
 import ./state_sets
 
 const
-  StateUsage* = """usage: repro system addon state <command>
-
-  backup --profile <file> --out <dir>
-      Back up the profile's state set (spec §11.1): refuses unless every
-      unit of the set is stopped, holds each (a drop-in in /etc that
-      fails every start; while one exists every apply refuses), archives
-      each carried directory and writes the manifest.
-  release --profile <file>
-      Lift the hold of a backup (an abandoned conversion).
-  verify --from <dir> [--root R] [--only keep|carry] [--source]
-      Recompute every directory's digest against the manifest in <dir>;
-      exit 1 on a difference. --source (on the host the backup was taken
-      on, just before the conversion): also exit 1 when a unit of the set
-      is no longer held.
-  restore [--from <dir>] [--root R] [--boot]
-      Restore the carried directories (default dir /var/lib/repro/system/carried);
-      --boot (the first-boot unit): nothing to do when there is no manifest.
-  digest <path>
-      Print a directory's state digest.
-  unit
-      Print the first-boot restore unit for this binary.
-  install-unit [--root R]
-      Install and enable the first-boot restore unit for the carried state
-      in /var/lib/repro/system/carried, and make every unit of it require
-      the restore: none of them starts at boot unless the restore
-      succeeded. Records the installation, so a manifest missing later
-      refuses every apply and fails the restore.
-"""
   RestoreUnitName* = CarriedRestoreUnit
 
 proc stateRestoreUnitText*(repro: string; carried: seq[string] = @[]): string =
@@ -116,7 +84,7 @@ proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
     createSymlink("/etc/systemd/system/" & RestoreUnitName, link)
   linkInto(unitDir / "sysinit.target.wants")
   # ``dir`` is the carried directory as this process sees it (under
-  # ``root`` already, ``runStateCli``), so its marker is beside it.
+  # ``root`` already, ``runStateCommand``), so its marker is beside it.
   let marker = installedMarkerPath(dir)
   createDir(marker.parentDir)
   writeFile(marker, dir & "\n")
@@ -132,26 +100,22 @@ proc installRestoreUnit*(dir, repro: string; root = "/"): seq[string] =
       writeFile(d / RestoreRequiredDropIn, restoreRequiredDropInText())
   units
 
-proc takeArg(args: seq[string]; i: var int; flag: string): string =
-  let a = args[i]
-  if a.startsWith(flag & "="): return a[flag.len + 1 .. ^1]
-  if i + 1 >= args.len:
-    raise newException(ValueError, flag & " needs a value")
-  inc i
-  args[i]
+type
+  StateCommand* = object
+    ## A `repro system addon state <verb>` command line (and `repro system
+    ## state <verb>`), as the add-on's parser read it.
+    verb*: string
+      ## `backup`, `release`, `verify`, `restore`, `digest`, `unit` or
+      ## `install-unit`.
+    profile*, outDir*, fromDir*, root*, only*, path*: string
+      ## ``--profile``, ``--out``, ``--from``, ``--root``, ``--only`` and
+      ## `digest`'s directory; empty when the verb was not given one.
+    boot*, source*: bool
+      ## ``--boot`` (`restore`) and ``--source`` (`verify`).
 
-proc runAddonImportCli*(args: seq[string]): int =
+proc runAddonImport*(unit: string): int =
   ## ``repro system addon import --unit <name>``: the skeleton on stdout.
-  var unit = ""
-  var i = 0
   try:
-    while i < args.len:
-      let a = args[i]
-      if a == "--unit" or a.startsWith("--unit="):
-        unit = takeArg(args, i, "--unit")
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
     if unit.len == 0:
       raise newException(ValueError, "--unit <name> is required")
     let sk = importUnit(ImportObserver(root: "/",
@@ -168,40 +132,17 @@ proc runAddonImportCli*(args: seq[string]): int =
     stderr.write("repro system addon import: " & e.msg & "\n")
     1
 
-proc runStateCli*(args: seq[string]): int =
+proc runStateCommand*(c: StateCommand): int =
   ## ``repro system addon state <verb>`` (and ``repro system state``).
-  if args.len == 0 or args[0] in ["-h", "--help", "help"]:
-    stdout.write(StateUsage)
-    return (if args.len == 0: 2 else: 0)
-  let verb = args[0]
-  let rest = args[1 .. ^1]
-  var profile, outDir, fromDir, root, only = ""
-  var boot = false
-  var source = false
-  var positional: seq[string]
+  let verb = c.verb
+  let profile = c.profile
+  let outDir = c.outDir
+  let fromDir = c.fromDir
+  let only = c.only
+  let boot = c.boot
+  let source = c.source
+  var root = c.root
   try:
-    var i = 0
-    while i < rest.len:
-      let a = rest[i]
-      if a == "--profile" or a.startsWith("--profile="):
-        profile = takeArg(rest, i, "--profile")
-      elif a == "--out" or a.startsWith("--out="):
-        outDir = takeArg(rest, i, "--out")
-      elif a == "--from" or a.startsWith("--from="):
-        fromDir = takeArg(rest, i, "--from")
-      elif a == "--root" or a.startsWith("--root="):
-        root = takeArg(rest, i, "--root")
-      elif a == "--only" or a.startsWith("--only="):
-        only = takeArg(rest, i, "--only")
-      elif a == "--boot":
-        boot = true
-      elif a == "--source":
-        source = true
-      elif a.startsWith("-"):
-        raise newException(ValueError, "unknown option " & a)
-      else:
-        positional.add(a)
-      inc i
     if root.len > 0 and not root.isAbsolute:
       raise newException(ValueError, "--root must be an absolute path")
     if root.len == 0: root = "/"
@@ -278,9 +219,9 @@ proc runStateCli*(args: seq[string]): int =
           " carried directory(ies) still pending")
       0
     of "digest":
-      if positional.len != 1:
+      if c.path.len == 0:
         raise newException(ValueError, "digest needs one path")
-      stdout.write(treeDigest(positional[0]) & "\n")
+      stdout.write(treeDigest(c.path) & "\n")
       0
     of "unit":
       # The path that re-enters this binary (a launcher's, when the engine
