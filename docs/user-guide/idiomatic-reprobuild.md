@@ -280,8 +280,11 @@ is `repro build ./test`.
 Older builds also took a bare name that named an existing path as a
 path, so what a name meant depended on what the current directory held.
 That is why some recipes spell their collections `.#test` / `.#lint`
-(CodeTracer's `repro.nim` does). The fragment spelling still selects the
-same collection and stays correct; it is no longer required.
+(CodeTracer's `repro.nim` does). The fragment spelling is no longer
+required, and it is not quite the same selector: `.#<name>` names a path,
+and when a module `<name>.nim` sits beside the project file it is the
+legacy `<dir>#<module>` form and selects that module. A bare name selects
+the target whatever files sit beside the project file.
 
 A bare name that names no target but does name a file or directory fails
 with `unknown_target`, and the diagnostic names the `./<name>` spelling.
