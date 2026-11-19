@@ -13,3 +13,4 @@ This section describes, field by field, the files reprobuild writes for other to
 | File | What it is |
 |---|---|
 | [Home profile export](home-export.md) | The JSON document `repro home export` writes and Nix reads |
+| [Host facts](host-facts.md) | The JSON document `repro home facts` and `reprobuild.lib.homeManagerFacts` write and `repro home compare` reads |
