@@ -223,9 +223,10 @@ type
       ## field exists to replace.
     unsupportedReason*: string
       ## The NAMED blocking policy plus the measurement that established it —
-      ## e.g. `host-text-protection-roundtrip-refused: … mprotect(RW) answered
-      ## 0 while mprotect(RX) answered -13. this process runs under PR_SET_MDWE
-      ## with PR_MDWE_REFUSE_EXEC_GAIN …`. Empty when `patchingSupported` is
+      ## e.g. `host-text-replacement-refused: … the memfd backing answered:
+      ## disabled …; the anonymous fallback answered: refused at step 4
+      ## (finalizing the copy, before the move) with -13. this
+      ## process runs under PR_SET_MDWE with PR_MDWE_REFUSE_EXEC_GAIN …`. Empty when `patchingSupported` is
       ## true. "Unsupported host" on its own is a symptom; the policy is the
       ## actionable fact, and the provider reads `PR_GET_MDWE` rather than
       ## guessing which one it is.

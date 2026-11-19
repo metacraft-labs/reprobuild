@@ -570,11 +570,9 @@ proc runInfraPlan(flags: InfraCliFlags; namespace = "infra"): int =
           stateDir: stateDir, hostIdentity: host, userProfileText: profileText,
           reconcileDrift: flags.reconcileDrift, planOnly: true))
         if flags.json:
-          # The add-on's sections have no structured renderer of their own
-          # yet; the ledger diff and the drift are structured, the rest is
-          # the text the plain report prints.
-          addOnJson = %*{"planId": r.planId, "ledgerDiff": r.ledgerDiff,
-            "drift": r.drift, "report": addon_cli.renderAddonSections(r)}
+          # Every add-on section as structured keys, never the text the
+          # plain report prints (CLI-UX-AREQ4).
+          addOnJson = addon_cli.addonSectionsJson(r)
         else:
           echo command & " (add-on)"
           stdout.write(addon_cli.renderAddonSections(r))

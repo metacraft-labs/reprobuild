@@ -17,7 +17,7 @@
 ## error or a refusal decided before anything was written (an incompatible
 ## host, a plan digest that does not match).
 
-import std/[macros, options, os, strutils]
+import std/[json, macros, options, os, strutils]
 
 import std/algorithm
 
@@ -800,6 +800,57 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     result.add("sysctl observed (host namespaces):\n")
     for (k, v) in r.sysctlObserved:
       result.add("  " & k & "\t" & v & "\n")
+
+proc addonSectionsJson*(r: AddonApplyResult): JsonNode =
+  ## The add-on's plan sections as ``renderAddonSections`` prints them, one
+  ## key per section, for ``repro infra|system plan --json``
+  ## (CLI-UX-AREQ4; spec/CLI/infra/plan.md §JSON output). Nothing here is
+  ## rendered text a consumer has to parse back: each record of a text
+  ## section is an object or a string of its own.
+  var ledgerDiff = newJArray()
+  for line in r.ledgerDiff:
+    # ``<verb>\t<target>\t<detail>`` (``AddonApplyResult.ledgerDiff``);
+    # the detail is the resource address, or for ``drop-groups`` the
+    # dropped groups, with any parenthetical note the record carries.
+    let f = line.split('\t', maxsplit = 2)
+    ledgerDiff.add(%*{"verb": f[0],
+      "target": (if f.len > 1: f[1] else: ""),
+      "detail": (if f.len > 2: f[2] else: "")})
+  var collisions = newJArray()
+  for l in r.collisions:
+    collisions.add(%*{"verdict": l.verdict, "target": l.target,
+      "observation": l.observation, "address": l.address,
+      "reason": l.reason})
+  var transitions = newJArray()
+  for t in r.transitions:
+    transitions.add(%*{"verb": $t.verb, "unit": t.unit, "reason": t.reason,
+      "exclusive": t.exclusive})
+  var base = newJNull()
+  if r.baseIdentity.id.len > 0:
+    var coupled = newJArray()
+    for c in r.baseIdentity.coupled:
+      coupled.add(%*{"unit": c.unit, "reason": c.reason})
+    base = %*{"description": describeBase(r.baseIdentity),
+      "id": r.baseIdentity.id, "versionId": r.baseIdentity.versionId,
+      "versionCodename": r.baseIdentity.versionCodename,
+      "architecture": r.baseIdentity.architecture,
+      "identityDigest": baseIdentityDigest(r.baseIdentity),
+      "changes": r.baseChanges,
+      "previousGenerationId":
+        (if r.baseChanges.len > 0: r.previousGenerationId else: ""),
+      "previousDescription":
+        (if r.baseChanges.len > 0: describeBase(r.previousBase) else: ""),
+      "baseCoupled": coupled}
+  var sysctl = newJArray()
+  for (k, v) in r.sysctlObserved:
+    sysctl.add(%*{"key": k, "value": v})
+  result = %*{"planId": r.planId, "ledgerDiff": ledgerDiff,
+    "unlisted": r.unlisted, "drift": r.drift, "collisions": collisions,
+    "transitions": transitions, "floorIntroduced": r.floorIntroduced,
+    "floorWeakened": r.floorWeakened, "floorExceptions": r.floorExceptions,
+    "liveJudged": r.liveJudged, "base": base, "storeSpace": r.storeSpace,
+    "closureSources": r.closureSources, "staticTree": r.staticTree,
+    "sysctlObserved": sysctl}
 
 proc runAddonStoreCommand*(c: ReproAddonCommandLineStore): int =
   ## ``repro store gc | recover | roots | list`` on the add-on's

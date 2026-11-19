@@ -22,7 +22,8 @@
 #                      side of `repro home compare` (homeEquivalenceCheck
 #                      runs the comparison as a check)
 #
-# User documentation: docs/user-guide/nix-helper-library.md.
+# User documentation: docs/users/content/reference/nix-library.md, and the
+# guides under docs/users/content/guides/machines/.
 #
 # Arguments (supplied by flake.nix; a non-flake consumer can call this file
 # directly):
@@ -116,7 +117,8 @@ in
       selectedNames = intent.selectedPackageNames document;
     };
 
-  # Host facts (nix/lib/host-facts.nix; docs/user-guide/host-facts.md):
+  # Host facts (nix/lib/host-facts.nix; user guide
+  # docs/users/content/guides/machines/compare-with-home-manager.md):
   # `homeManagerFacts` -- the Nix side of `repro home compare`, a derivation
   # writing the facts of a Home Manager configuration; `homeEquivalenceCheck`
   # -- a check derivation comparing it with `repro home facts` of a profile.

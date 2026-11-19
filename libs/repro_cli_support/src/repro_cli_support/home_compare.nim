@@ -1,7 +1,7 @@
 ## `repro home compare` -- the equivalence report between two host-facts
 ## documents (reprobuild-pm spec Gradual-Nix-To-Reprobuild-Migration.md
 ## §Measuring equivalence, §The report; user guide
-## `docs/user-guide/host-facts.md`).
+## `docs/users/content/guides/machines/compare-with-home-manager.md`).
 ##
 ## Inputs: one host-facts document per side (`side = "nix"`, produced by
 ## `reprobuild.lib.homeManagerFacts`; `side = "reprobuild"`, produced by

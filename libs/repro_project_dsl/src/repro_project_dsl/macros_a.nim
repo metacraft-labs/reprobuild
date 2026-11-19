@@ -4493,6 +4493,25 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     # subdirectory there, so concurrent compiles of different consumers never
     # share shim files. The key is a filesystem-safe rendering of the
     # consumer's absolute source path plus its FNV hash as a collision guard.
+    #
+    # An interface extraction that does not own a directory (every Windows
+    # extraction, and a POSIX one that is not recipe-relative) puts that
+    # consumer-keyed subdirectory beside its RUNNER instead, the compile's
+    # main module (`getProjectPath`): a slot of the extraction's shared
+    # nimcache pool, or its private temporary tree. Nim names a module's C
+    # file after the module's shortest path relative to the project or a
+    # `--path` root (`mangleModuleName`), so a shim beside the runner is
+    # named `@mrepro-sibling-shims@s<key>@srepro_sib_<selector>.nim.c`,
+    # whose length depends on neither the consumer's location nor the
+    # temporary directory. The extraction declares its temporary directory
+    # inside the consumer's `.repro/build/...` scratch, under a `--path`
+    # root, and a shim there was named after that whole path: on Windows
+    # the generated C file passed MAX_PATH (264 characters in the v0.2.27
+    # release build of `reprobuild/repro.nim`) and the compile failed with
+    # `cannot open`. The runner's directory lies under the extraction's
+    # ignored input prefix, as the temporary directory did, so the shims are
+    # still not recorded; what a shim says is recorded through the sibling
+    # file it includes.
     var shimDir = getEnv(SiblingShimDirEnv)
     let ownedShimDir = shimDir.len > 0
     if not ownedShimDir:
@@ -4513,7 +4532,10 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       for i in countdown(baseName.len - 1, 0):
         revBase.add(baseName[i])
       let consumerKey = "c_" & $h & "_" & revBase
-      shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
+      let shimRoot =
+        when defined(reproInterfaceMode): getProjectPath()
+        else: getTempDir()
+      shimDir = shimRoot / "repro-sibling-shims" / consumerKey
     if not dirExists(shimDir):
       createDir(shimDir)
     for (moduleAlias, selector, siblingReproPath) in producerModules:

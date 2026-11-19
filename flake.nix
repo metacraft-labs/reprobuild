@@ -1085,7 +1085,7 @@
       ...
     }:
     let
-      # The Nix helper library (milestone GM5; docs/user-guide/nix-helper-library.md),
+      # The Nix helper library (milestone GM5; docs/users/content/reference/nix-library.md),
       # exported as `lib` and tested by the `lib-*` checks below.
       # System-independent: the IFD derivation of `readIntent` is built for
       # whichever system the CALLER names as the evaluator (`buildSystem`),

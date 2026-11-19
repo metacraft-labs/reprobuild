@@ -402,13 +402,23 @@ suite "rust convention M4":
       require conv.recognize(TestFixtureRoot, request)
       let fragment = conv.emitFragment(TestFixtureRoot, request)
 
+      # The integration test's actions, whose ids name the target kind
+      # ``test``. The library's own test crate (kind ``lib``) is the
+      # subject of ``test_rust_convention_unit_test_crates``; here it only
+      # has to be present.
       var compileActions: seq[BuildActionDef] = @[]
       var runActions: seq[BuildActionDef] = @[]
       var stampActions: seq[BuildActionDef] = @[]
+      var libTestCompiles = 0
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("rustc-test-compile-") and
+            ".lib." in action.id:
+          inc libTestCompiles
+        if ".test." notin action.id:
+          continue
         if action.id.startsWith("rustc-test-compile-"):
           compileActions.add(action)
         elif action.id.startsWith("rustc-test-run-"):
@@ -419,6 +429,7 @@ suite "rust convention M4":
       check compileActions.len == 1
       check runActions.len == 1
       check stampActions.len == 1
+      check libTestCompiles == 1
 
       let compileAction = compileActions[0]
       let compileArgv = inlineArgvOf(compileAction)
@@ -458,9 +469,12 @@ suite "rust convention M4":
       check stampOut.endsWith("test_greet.stamp")
       check "/tests/" in stampOut
 
-  test "emitFragment M22: rust/binary has no test actions":
+  test "emitFragment M22: rust/binary has no integration-test actions":
     # Inverse cohort: the rust/binary fixture has no ``tests/`` directory
-    # so the convention must not emit any ``rustc-test-*`` actions.
+    # so the convention must not emit any integration test's
+    # ``rustc-test-*`` actions (target kind ``test`` in the id). The
+    # binary's own test crate (kind ``bin``) is there, as ``cargo test``
+    # builds one for a binary whose ``test`` setting is on, the default.
     if not rustToolchainAvailable():
       skip("rustc or cargo not on PATH")
     else:
@@ -472,6 +486,8 @@ suite "rust convention M4":
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
+        if ".bin." in action.id:
+          continue
         check not action.id.startsWith("rustc-test-compile-")
         check not action.id.startsWith("rustc-test-run-")
         check not action.id.startsWith("rustc-test-stamp-")
@@ -881,14 +897,16 @@ suite "rust convention M4":
         check env.getOrDefault("CARGO_PRIMARY_PACKAGE") == "1"
         check env.getOrDefault("CARGO").len > 0
         check "CARGO_CRATE_NAME" in env
-      check rustcCount == 4   # lib x2, bin x1 (no metadata pass), test compile
+      # lib x2, bin x1 (no metadata pass), the integration test's compile,
+      # and the test crates of the library and of the binary.
+      check rustcCount == 6
 
       # The integration test's compile sees the package's binary and a
       # target tmpdir, and depends on the binary's link action.
       var testCompileId = ""
       var binLinkId = ""
       for id in order:
-        if id.startsWith("rustc-test-compile-"):
+        if id.startsWith("rustc-test-compile-") and ".test." in id:
           testCompileId = id
         elif id.startsWith("rustc-link-") and
             byId[id].outputs[0].extractFilename.startsWith("crate_env_bin"):

@@ -21403,6 +21403,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         return none(BuildRunResult)
     var fastResult: BuildRunResult
     fastResult.traceEnabled = not config.suppressTrace
+    # §3.2 rule 4: an edge whose use is `host-bound` (a `volatile` edge
+    # already left above) is served only this host's realization, and a
+    # copied or image-baked cache root or a store bundle has the outputs on
+    # disk. Both arms below check the host of the one record they would serve
+    # (`servableOnThisHost`): the navigator scan through the probe's
+    # `determinism`, the per-record arm directly.
     if config.skipCacheHitEvidence:
       var hotProbes: seq[HotMetadataProbe] = @[]
       # M10 — parallel to `hotProbes`, so a record that observed environment
@@ -21445,7 +21451,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # A built-in's container directory is checked for existence, not
           # by tree digest, on this path exactly as on the per-edge lookup.
           # See `containerDirectoryOutputs`.
-          containerOutputs: action.containerDirectoryOutputs()))
+          containerOutputs: action.containerDirectoryOutputs(),
+          # §3.2 rule 4, for the reason the two refusals above are here.
+          determinism: action.determinismClass))
         hotEnvResolvers.add(action.actionEnvResolver(unsafeAddr config))
       let lookupStart = statStart()
       let navigatorStart = statStart()
@@ -21504,6 +21512,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         action.actionCachePolicy)
       finishStat("repro hot record lookup", hotRecordLookupStart)
       if hotRecord.isNone:
+        return none(BuildRunResult)
+      # §3.2 rule 4; see the note above `config.skipCacheHitEvidence`. The
+      # record carries its class and host (no extra I/O), so every edge is
+      # checked, which also refuses another host's recorded `host-bound`
+      # entry to an edge relabelled weaker (rule 1).
+      if not hotRecord.get().servableOnThisHost(action.determinismClass):
         return none(BuildRunResult)
       # Outputs exist, but "exists" is not "is the artifact this record
       # describes" (Incremental-Invalidation.md §"Minimum check set"
@@ -22971,6 +22985,32 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         runResult.trace(id, "portable-record-refused",
           nixReferencesLostReason(nixLostPaths))
         continue
+      # A host-bound or volatile edge takes no portable record at all.
+      #
+      # Not from another host (§5): that includes an edge whose class is
+      # host-bound because it reads a content-keyed tool-owned cache
+      # (Tool-Owned-Caches.md "Trust Boundary"), and that refusal is traced,
+      # naming the cache.
+      #
+      # Not from this cache root either (§3.2 rule 4): such a use is served
+      # only an entry that records THIS host, and a portable memo record
+      # records no host (nor the write time a retention clause needs). The
+      # memo lives under the action-cache root, so a copied or image-baked
+      # root carries it, and an edge resolved here completes as a hit without
+      # reaching `lookupActionResult`. So the edge is left unresolved: it, and
+      # every descendant, go through the ordinary scheduler, whose per-edge
+      # lookup checks the host and the retention clause.
+      let crossHostRefused = action.crossHostRefusal()
+      if crossHostRefused.len > 0:
+        if config.portableMemoLookup != nil and
+            action.readsContentKeyedToolCache:
+          runResult.trace(id, "portable-lookup-remote-refused",
+            crossHostRefused)
+        runResult.trace(id, "portable-record-refused",
+          "a " & $action.determinismClass & " use is served only this " &
+            "host's realization, and a portable record names no host: " &
+            crossHostRefused)
+        continue
       let weak = portableWeakOf(action)
       let resolver = makeResolver(ancestors, action)
       var hit = none(PortableMemoRecord)
@@ -22979,16 +23019,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         hit = lookupMemo(memoRoot, roots, weak, resolver)
       except CatchableError as err:
         runResult.trace(id, "portable-lookup-failed", err.msg)
-      # A host-bound action is never substituted from another host (§5),
-      # and that includes an edge whose class is host-bound because it reads
-      # a content-keyed tool-owned cache (Tool-Owned-Caches.md "Trust
-      # Boundary"); that refusal is traced, naming the cache.
-      let remoteRefusal = action.crossHostRefusal()
-      if hit.isNone and config.portableMemoLookup != nil and
-          remoteRefusal.len > 0 and action.readsContentKeyedToolCache:
-        runResult.trace(id, "portable-lookup-remote-refused", remoteRefusal)
-      if hit.isNone and config.portableMemoLookup != nil and
-          remoteRefusal.len == 0:
+      if hit.isNone and config.portableMemoLookup != nil:
         source = "remote"
         try:
           hit = config.portableMemoLookup(roots, weak, resolver)
@@ -23437,6 +23468,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             envResolver = action.actionEnvResolver(unsafeAddr config),
             outputRoot = action.cwd,
             retention = action.effectiveRetention,
+            determinism = action.determinismClass,
             nowUnix = config.nowUnix,
             buildEpoch = config.buildEpoch,
             containerOutputs = action.containerDirectoryOutputs())
@@ -23499,6 +23531,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                 envResolver = action.actionEnvResolver(unsafeAddr config),
                 outputRoot = action.cwd,
                 retention = action.effectiveRetention,
+                determinism = action.determinismClass,
                 nowUnix = config.nowUnix,
                 buildEpoch = config.buildEpoch,
                 containerOutputs = action.containerDirectoryOutputs())
@@ -23587,6 +23620,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
                   envResolver = action.actionEnvResolver(unsafeAddr config),
                   outputRoot = action.cwd,
                   retention = action.effectiveRetention,
+                  determinism = action.determinismClass,
                   nowUnix = config.nowUnix,
                   buildEpoch = config.buildEpoch,
                   containerOutputs = action.containerDirectoryOutputs())
@@ -23781,6 +23815,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               if lookup.message.len > 0: lookup.message else: "input-changed"
             recordCacheLookupFacts(id, lookup)
             cacheMissInputChanged = true
+          of aclMissOtherHost:
+            # §3.2 rule 4: another host's `host-bound` / `volatile`
+            # realization (a copied or image-baked cache root, a store
+            # bundle, a peer install), or one that records no host. Like an
+            # expiry it must set `cacheInvalidatedByPolicy`: the outputs the
+            # copy carried are on disk and consistent with the record, so the
+            # up-to-date shortcut below would otherwise serve them anyway.
+            runResult.results[idToIndex.resultIndex(id)].cacheDecision = cdMiss
+            runResult.results[idToIndex.resultIndex(id)].reason =
+              if lookup.message.len > 0: lookup.message
+              else: "other-host"
+            runResult.trace(id, "cache-other-host",
+              runResult.results[idToIndex.resultIndex(id)].reason)
+            recordCacheLookupFacts(id, lookup)
+            cacheInvalidatedByPolicy = true
           of aclMissRetentionExpired:
             # §4.4's one automatic invalidation: nothing changed, the cached
             # realization simply aged out of its declared window. It must set
