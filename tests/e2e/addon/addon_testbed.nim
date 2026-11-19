@@ -340,6 +340,18 @@ type
       ## Extra writable disks attached after the boot disk (``/dev/vdb``,
       ## ...), each a ``DataDisk`` the gate owns: destroying the guest does
       ## not delete them (QEMU only).
+    displayAdapter*: bool
+      ## Keep the QEMU machine's emulated display adapter (q35's ``VGA``).
+      ## False, the default: the guest boots without one (gosti's
+      ## ``noDisplayDevice``, QEMU ``-vga none``). The guests are reached
+      ## over SSH and the serial console and never draw; under a heavily
+      ## loaded host the guest kernel's ``bochs-drm`` driver for the
+      ## adapter times out waiting for vblank, raises a ``WARNING`` and sets
+      ## ``kernel.tainted``, which a gate's fingerprint comparison reads as
+      ## a change the add-on did not make (reprobuild-pm issue
+      ## ``2026-11-18-arch-test-bed-guests-emulated-display-raises-kernel-warnings-under-load``).
+      ## Set it only for a base whose own boot needs a display device, such
+      ## as a desktop session on the guest.
     relayPort*: int
       ## > 0: the guest's network is restricted (QEMU ``restrict=on``) and
       ## its only reachable service is ``GuestProxyAddress:GuestProxyPort``,
@@ -427,6 +439,13 @@ proc userData(pub: string): string =
   "growpart:\n  mode: auto\n  devices: ['/']\n"
 
 when defined(gostiAvailable):
+  const GostiHasNoDisplayDevice* = compiles(BootMediaSpec().noDisplayDevice)
+    ## The gosti compiled against offers ``BootMediaSpec.noDisplayDevice``.
+    ## The gates always do: ``scripts/run_addon_gate.sh`` refuses any gosti
+    ## but ``gosti.pin``, which has it. A sibling checkout that predates it
+    ## (CI's suite build clones gosti's ``dev``) still compiles, and its
+    ## guests keep the adapter; the regression test then skips, saying so.
+
   proc qemuArch(b: BaseImage): GuestArch =
     case b.debArch
     of "amd64": gaX86_64
@@ -525,16 +544,28 @@ when defined(gostiAvailable):
       guestPort: GuestProxyPort,
       command: @[socat, "STDIO", "TCP:127.0.0.1:" & $g.relayPort])]
 
-  proc bootQemu(g: Guest; readonly: bool) =
-    var spec = BootMediaSpec(name: g.name, kind: bmkQcow2,
+  proc qemuBootSpec*(g: Guest; readonly = false;
+                     serialOnly = false): BootMediaSpec =
+    ## The gosti boot spec of ``g`` (QEMU guests): what ``boot`` and, with
+    ## ``serialOnly``, ``bootNoWait`` hand ``bootFromMedia``. The network
+    ## restriction is added by the caller. A serial-only boot keeps the
+    ## architecture's default size and attaches no data disk.
+    result = BootMediaSpec(name: g.name, kind: bmkQcow2,
       mediaPath: g.diskPath, secondaryIsoPath: g.seedPath,
-      cpus: (if g.cpus > 0: g.cpus elif g.base.debArch == "amd64": 2 else: 4),
-      memoryMB: (if g.memoryMB > 0: g.memoryMB else: 2048),
+      cpus: (if g.cpus > 0 and not serialOnly: g.cpus
+             elif g.base.debArch == "amd64": 2 else: 4),
+      memoryMB: (if g.memoryMB > 0 and not serialOnly: g.memoryMB else: 2048),
       generation: (if g.base.debArch == "amd64": 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
-      diskReadonly: readonly, diskInPlace: true,
-      dataDiskPaths: g.dataDisks)
+      diskReadonly: readonly, diskInPlace: true)
+    when GostiHasNoDisplayDevice:
+      result.noDisplayDevice = not g.displayAdapter
+    if not serialOnly:
+      result.dataDiskPaths = g.dataDisks
+
+  proc bootQemu(g: Guest; readonly: bool) =
+    var spec = g.qemuBootSpec(readonly)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: "") &
            (if g.relayPort > 0: " (network restricted to the mirror)" else: ""))
@@ -572,13 +603,7 @@ proc bootNoWait*(g: Guest) =
   ## Boot (read-write) without waiting for SSH: for a fixture that reports
   ## on the serial console instead of over the network.
   when defined(gostiAvailable):
-    var spec = BootMediaSpec(name: g.name, kind: bmkQcow2,
-      mediaPath: g.diskPath, secondaryIsoPath: g.seedPath,
-      cpus: (if g.base.debArch == "amd64": 2 else: 4), memoryMB: 2048,
-      generation: (if g.base.debArch == "amd64": 1 else: 2),
-      acceleration: baAuto, sshForwardPort: freePort(),
-      serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
-      diskInPlace: true)
+    var spec = g.qemuBootSpec(serialOnly = true)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & " (serial only)")
     g.vm = g.qemu.bootFromMedia(spec)
