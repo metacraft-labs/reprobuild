@@ -3578,7 +3578,7 @@
             "repro",
             "target"
           ],
-          "line": 159,
+          "line": 188,
           "path": "tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim",
           "patterns": [
             "gcc"

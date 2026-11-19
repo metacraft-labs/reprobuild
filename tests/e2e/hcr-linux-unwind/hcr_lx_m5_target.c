@@ -48,8 +48,8 @@
 #include "repro_hcr_linux_elf_symbols.h"
 #include "repro_hcr_linux_unwind.h"
 
-/* The three host primitives the provider headers forward-declare and leave to
- * the including translation unit, exactly as `repro_hcr_agent.c` and
+/* The host primitives the provider headers forward-declare and leave to the
+ * including translation unit, exactly as `repro_hcr_agent.c` and
  * `repro_hcr_linux_x86_64_probe.c` supply them. */
 static size_t repro_hcr_lx_page_size(void) {
   long value = sysconf(_SC_PAGESIZE);
@@ -77,6 +77,10 @@ static void *repro_hcr_lx_map_anonymous(void *hint, size_t length,
 static int repro_hcr_lx_unmap(void *address, size_t length) {
   return munmap(address, length);
 }
+
+/* The agent-start probe's test levers. This fixture sets none: the probe
+ * measures the production backing choice. */
+static void repro_hcr_lx_apply_probe_levers(void) {}
 
 /* ---- the call chain ------------------------------------------------------
  *

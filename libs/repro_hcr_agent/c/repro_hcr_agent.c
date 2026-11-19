@@ -1589,6 +1589,23 @@ static int repro_hcr_lx_unmap(void *address, size_t length) {
   return munmap(address, length);
 }
 
+/* HLX-M9 2026-09-20 — force the PRE-HLX-M9 anonymous code-page mechanism on
+ * a host where the `memfd` dual mapping works, so a gate can run both
+ * mechanisms on ONE binary. The agent never sets it, and it selects a real
+ * code path rather than forging an outcome. Read at agent start too, because
+ * the capability probe replaces a scratch page through the same allocator
+ * (design §5.2): with the `memfd` backing disabled the probe must measure the
+ * anonymous fallback, or the host would be judged on a backing that
+ * publication will not use. */
+static int repro_hcr_lx_force_anonymous_lever_from_env(void) {
+  return getenv("REPRO_HCR_TEST_FORCE_ANONYMOUS_CODE_PAGES") != NULL ? 1 : 0;
+}
+
+static void repro_hcr_lx_apply_probe_levers(void) {
+  repro_hcr_lx_force_anonymous_code_pages =
+      repro_hcr_lx_force_anonymous_lever_from_env();
+}
+
 /*
  * Thin wrapper: resolve the sled from the runtime-mapped
  * `__patchable_function_entries` section (design §4.2 — never derived from the
@@ -1687,12 +1704,10 @@ static int repro_hcr_prepare_direct_patch(repro_hcr_direct_patch_txn *txn,
   repro_hcr_lx_restore_fault_site =
       getenv("REPRO_HCR_TEST_FAIL_TEXT_RESTORE") != NULL ? 0 : -1;
 
-  /* HLX-M9 2026-09-20 — force the PRE-HLX-M9 anonymous code-page mechanism on
-   * a host where the `memfd` dual mapping works, so a gate can run both
-   * mechanisms on ONE binary. Same shape as the levers above: the agent never
-   * sets it, and it selects a real code path rather than forging an outcome. */
+  /* HLX-M9 2026-09-20 — the anonymous code-page lever; see
+   * `repro_hcr_lx_force_anonymous_lever_from_env`. */
   repro_hcr_lx_force_anonymous_code_pages =
-      getenv("REPRO_HCR_TEST_FORCE_ANONYMOUS_CODE_PAGES") != NULL ? 1 : 0;
+      repro_hcr_lx_force_anonymous_lever_from_env();
 
   if (entry == NULL) {
     memset(&repro_hcr_lx_last_report, 0, sizeof(repro_hcr_lx_last_report));
@@ -2208,14 +2223,15 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
  * Capability negotiation is where an unsupported host is refused (design §5.2)
  * and where SYNC_CORE availability is recorded (design §4.4, an explicit HLX-M0
  * deliverable even though a single-threaded gate cannot exercise the hazard).
- * On a host where `PROT_EXEC` cannot be regained the agent does not advertise
+ * On a host where neither backing of the §5.1 page replacement completed on
+ * the agent-start probe, the agent does not advertise
  * `direct-patch-injection` at all, and any patch request it then receives is
  * refused before a single byte of target text is touched.
  */
 static const char *repro_hcr_capabilities_json_array(void) {
   static char buffer[512];
   const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
-  int direct_patch = caps->text_protection_roundtrip && !caps->clang_cet_unsupported;
+  int direct_patch = caps->text_replacement_supported && !caps->clang_cet_unsupported;
   snprintf(buffer, sizeof(buffer),
            "\"hcr-agent-protocol\"%s,\"debug-object-payloads\","
            "\"unwind-metadata-payloads\",\"source-generation-metadata\","
@@ -2223,9 +2239,9 @@ static const char *repro_hcr_capabilities_json_array(void) {
            direct_patch ? ",\"direct-patch-injection\"" : "",
            caps->membarrier_sync_core ? "membarrier-sync-core"
                                       : "membarrier-sync-core-unavailable",
-           caps->text_protection_roundtrip
-               ? "text-protection-roundtrip"
-               : "unsupported-host-text-protection-roundtrip",
+           caps->text_replacement_supported
+               ? "text-page-replacement"
+               : "unsupported-host-text-page-replacement",
            caps->clang_cet_unsupported
                ? ",\"" REPRO_HCR_AGENT_CAPABILITY_UNSUPPORTED_CLANG_FCF_PROTECTION "\""
                : "");
@@ -2486,21 +2502,23 @@ static void repro_hcr_json_escape(const char *value, char *out,
  * knowable rather than guessable: `PR_GET_MDWE` reports whether this process
  * is under `PR_MDWE_REFUSE_EXEC_GAIN`, so the provider can distinguish
  *
- *   - MDWE is set, and that is the refusal — actionable: the launcher set it;
- *   - MDWE is NOT set and the round trip still fails — a DIFFERENT finding
- *     (SELinux `execmod`, a seccomp filter, a hardened kernel), and reporting
- *     it as MDWE would send a reader to fix the wrong thing;
+ *   - MDWE is set, and that is the refusal — actionable: the launcher set it,
+ *     and MDWE refuses only the anonymous fallback, so the `memfd` backing
+ *     was also unavailable or refused (both answers are in the message);
+ *   - MDWE is NOT set and the replacement still fails — a DIFFERENT finding
+ *     (SELinux `execmem` or the memfd's tmpfs `execute`, a seccomp filter, a
+ *     hardened kernel), and reporting it as MDWE would send a reader to fix
+ *     the wrong thing;
  *   - the kernel does not implement `PR_GET_MDWE` (pre-6.3, -EINVAL) — which
  *     is a third answer and is not "no MDWE".
  *
- * The measured syscall results ride along, because the signature of this
- * policy class is precisely that the RW step SUCCEEDS and only the PROT_EXEC
- * restore fails.
+ * What the probe measured rides along: the answer of each backing of the
+ * §5.1 replacement (design §5.2), `memfd` first and anonymous second.
  */
 static int repro_hcr_agent_patching_supported(void) {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
   const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
-  return caps->text_protection_roundtrip ? 1 : 0;
+  return caps->text_replacement_supported ? 1 : 0;
 #else
   /* No probe on this arm. Answering "supported" here would be a claim; the
    * field is simply not reported (see `repro_hcr_hello_json`), which the
@@ -2510,49 +2528,105 @@ static int repro_hcr_agent_patching_supported(void) {
 }
 
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+/* A human-readable account of one backing's probe answer, for the
+ * negotiation-time refusal. */
+static void repro_hcr_lx_describe_replacement_result(long result, int step,
+                                                     char *out,
+                                                     size_t out_cap) {
+  switch (result) {
+  case REPRO_HCR_LX_REPLACEMENT_COMPLETED:
+    snprintf(out, out_cap, "completed");
+    break;
+  case REPRO_HCR_LX_REPLACEMENT_NOT_ATTEMPTED:
+    snprintf(out, out_cap, "not attempted");
+    break;
+  case REPRO_HCR_LX_REPLACEMENT_BACKING_UNAVAILABLE:
+    snprintf(out, out_cap,
+             "unavailable (no sealable memfd_create dual mapping on this "
+             "host)");
+    break;
+  case REPRO_HCR_LX_REPLACEMENT_BACKING_DISABLED:
+    snprintf(out, out_cap,
+             "disabled (REPRO_HCR_TEST_FORCE_ANONYMOUS_CODE_PAGES)");
+    break;
+  case REPRO_HCR_LX_REPLACEMENT_SCRATCH_UNAVAILABLE:
+    snprintf(out, out_cap, "not run (no scratch mapping could be made)");
+    break;
+  case REPRO_HCR_LX_REPLACEMENT_WRONG_ANSWER:
+    snprintf(out, out_cap,
+             "moved into place but the replaced page did not return the "
+             "value written into it");
+    break;
+  default:
+    /* Name the §5.1 step, so "refused before the move" (step 5) is read off
+     * the message rather than inferred from the errno. */
+    snprintf(out, out_cap, "refused at step %d (%s) with %ld", step,
+             step == REPRO_HCR_LX_REPLACE_STEP_COPY_PAGE
+                 ? "taking the copy page, before the move"
+             : step == REPRO_HCR_LX_REPLACE_STEP_FINALIZE
+                 ? "finalizing the copy, before the move"
+             : step == REPRO_HCR_LX_REPLACE_STEP_MOVE
+                 ? "moving the copy over the page"
+                 : "unknown",
+             result);
+    break;
+  }
+}
+
 static void repro_hcr_agent_unsupported_reason(char *out, size_t out_cap) {
   const repro_hcr_lx_capabilities *caps = repro_hcr_lx_capability_report();
   const char *policy;
   char policy_buffer[320];
+  char memfd_answer[128];
+  char anonymous_answer[128];
 
   if (caps->mdwe_flags < 0) {
     snprintf(policy_buffer, sizeof(policy_buffer),
              "this kernel does not implement PR_GET_MDWE (prctl answered %ld), "
-             "so the policy could not be named; SELinux execmod and seccomp "
-             "are the usual causes",
+             "so the policy could not be named; SELinux (execmem, or execute "
+             "on the memfd's tmpfs label) and seccomp are the usual causes",
              caps->mdwe_flags);
     policy = policy_buffer;
   } else if ((caps->mdwe_flags &
               (long)REPRO_HCR_LX_PR_MDWE_REFUSE_EXEC_GAIN) != 0) {
     policy = "this process runs under PR_SET_MDWE with "
-             "PR_MDWE_REFUSE_EXEC_GAIN, which forbids regaining PROT_EXEC on "
-             "any mapping that has been writable";
+             "PR_MDWE_REFUSE_EXEC_GAIN, which forbids the anonymous "
+             "fallback's copy from becoming executable after it was written";
     policy_buffer[0] = '\0';
   } else {
     snprintf(policy_buffer, sizeof(policy_buffer),
              "PR_MDWE_REFUSE_EXEC_GAIN is NOT set on this process "
              "(PR_GET_MDWE answered %ld), so the refusal comes from some "
-             "other policy - SELinux execmod, a seccomp filter, or a "
-             "hardened kernel",
+             "other policy - SELinux (execmem, or execute on the memfd's "
+             "tmpfs label), a seccomp filter, or a hardened kernel",
              caps->mdwe_flags);
     policy = policy_buffer;
   }
 
+  repro_hcr_lx_describe_replacement_result(caps->text_replacement_memfd_result,
+                                           caps->text_replacement_memfd_step,
+                                           memfd_answer, sizeof(memfd_answer));
+  repro_hcr_lx_describe_replacement_result(
+      caps->text_replacement_anonymous_result,
+      caps->text_replacement_anonymous_step, anonymous_answer,
+      sizeof(anonymous_answer));
   snprintf(out, out_cap,
-           "host-text-protection-roundtrip-refused: the provider probed the "
-           "RW->RX round trip on its own scratch page at agent start and "
-           "mprotect(PROT_READ|PROT_WRITE) answered %ld while "
-           "mprotect(PROT_READ|PROT_EXEC) answered %ld. %s. Patching this "
-           "process would make its text writable and then be unable to make "
-           "it executable again, so no patch is offered.",
-           caps->protection_probe_rw_result, caps->protection_probe_rx_result,
-           policy);
+           "host-text-replacement-refused: the provider probed the text page "
+           "replacement on its own scratch page at agent start; the memfd "
+           "backing answered: %s; the anonymous fallback answered: %s. %s. "
+           "Neither backing can publish a patch into this process's text, so "
+           "no patch is offered.",
+           memfd_answer, anonymous_answer, policy);
 }
 #endif
 
 static char *repro_hcr_hello_json(const char *support_profile) {
   char *json = (char *)malloc(4096);
-  char supported_fragment[1024];
+  /* Sized for the longest refusal `repro_hcr_agent_unsupported_reason` can
+   * write (both backings' answers plus the policy sentence come to ~620
+   * bytes) with room for JSON escaping, so the diagnostic is never cut off
+   * mid-sentence. */
+  char supported_fragment[1800];
   if (json == NULL) {
     return NULL;
   }
@@ -2561,8 +2635,8 @@ static char *repro_hcr_hello_json(const char *support_profile) {
              ",\"patchingSupported\":true");
   } else {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
-    char reason[640];
-    char escaped[900];
+    char reason[1024];
+    char escaped[1600];
     repro_hcr_agent_unsupported_reason(reason, sizeof(reason));
     repro_hcr_json_escape(reason, escaped, sizeof(escaped));
     snprintf(supported_fragment, sizeof(supported_fragment),
@@ -4800,8 +4874,8 @@ static void repro_hcr_handle_patch_frame(repro_hcr_agent_thread_args *args,
 }
 
 /* Design §4.4 and §5.2 both require work "at agent start": SYNC_CORE
- * registration, and the RW->RX round-trip probe on a provider-owned scratch
- * mapping. Both happen here, before any patch request can arrive. */
+ * registration, and the probe of a complete §5.1 page replacement on a
+ * provider-owned scratch mapping. Both happen here, before any patch request can arrive. */
 static void repro_hcr_agent_probe_host_once(void) {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
   (void)repro_hcr_lx_capability_report();
@@ -4826,7 +4900,7 @@ int repro_hcr_agent_host_quiescence_signal(void) {
 
 int repro_hcr_agent_host_supports_direct_patch(void) {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
-  return repro_hcr_lx_capability_report()->text_protection_roundtrip;
+  return repro_hcr_lx_capability_report()->text_replacement_supported;
 #elif defined(REPRO_HCR_TARGET_APPLE_ARM64)
   return 1;
 #else
@@ -4860,6 +4934,65 @@ uint64_t repro_hcr_agent_sealed_code_page_count(void) {
 uint64_t repro_hcr_agent_fallback_code_page_count(void) {
 #if defined(REPRO_HCR_TARGET_LINUX_X86_64)
   return repro_hcr_lx_fallback_page_count;
+#else
+  return 0;
+#endif
+}
+
+/*
+ * Design §5.2 / §14 — which backing completed the agent-start probe of the
+ * §5.1 page replacement: 1 the `memfd` dual mapping, 2 the anonymous
+ * fallback, 0 neither (the host is refused at negotiation). Stable for the
+ * life of the process.
+ */
+int repro_hcr_agent_host_text_replacement_backing(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_capability_report()->text_replacement_backing;
+#else
+  return 0;
+#endif
+}
+
+/*
+ * Design §14 — "no `mprotect` of target text and no `PROT_WRITE|PROT_EXEC`
+ * request is ever issued". The provider logs every `mprotect` it issues (the
+ * agent-start probe's own scratch copy excluded) and counts every
+ * `PROT_WRITE|PROT_EXEC` request it refused to issue, so a gate can check
+ * both against the text range it knows rather than trust the provider's
+ * account of what it touched. `issued_range` answers 0 and fills the range for
+ * an index below both the count and the log's capacity, and -1 otherwise; a
+ * count above the capacity means the log is incomplete.
+ */
+uint64_t repro_hcr_agent_mprotect_issued_count(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_mprotect_issued_count;
+#else
+  return 0;
+#endif
+}
+
+int repro_hcr_agent_mprotect_issued_range(uint64_t index, uint64_t *address,
+                                          uint64_t *length) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  if (address == NULL || length == NULL ||
+      index >= repro_hcr_lx_mprotect_issued_count ||
+      index >= REPRO_HCR_LX_MPROTECT_LOG_CAP) {
+    return -1;
+  }
+  *address = repro_hcr_lx_mprotect_log_address[index];
+  *length = repro_hcr_lx_mprotect_log_length[index];
+  return 0;
+#else
+  (void)index;
+  (void)address;
+  (void)length;
+  return -1;
+#endif
+}
+
+uint64_t repro_hcr_agent_wx_requests_refused(void) {
+#if defined(REPRO_HCR_TARGET_LINUX_X86_64)
+  return repro_hcr_lx_wx_requests_refused;
 #else
   return 0;
 #endif
