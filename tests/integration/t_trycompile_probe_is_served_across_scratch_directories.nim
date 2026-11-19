@@ -60,20 +60,17 @@ proc unavailable(): string =
     return "needs `sh` on PATH for the probe's inline action"
   ""
 
-proc writeProbe(scratch, stagedSource: string; relocatable: bool) =
+proc writeProbeArgv(scratch, stagedSource: string; argv: seq[string];
+                    relocatable: bool) =
   ## One inline, cacheable action as the generator emits a probe compile:
   ## absolute tool, absolute staged source, cwd-relative output. The
   ## generated `reprobuild.nim` names the scratch directory, as the real one
   ## does (its digest used to key the probe apart).
   createDir(scratch)
-  # Forward slashes: `sh` reads a backslash as an escape.
-  let command = "cat " & quoteShell(stagedSource.replace('\\', '/')) &
-    " > out.txt && " &
-    "echo " & StdoutMarker & " && echo " & StderrMarker & " >&2"
   let meta = TryCompileMetadata(
     actions: @[TryCompileActionDef(id: ProbeId,
       inline: true,
-      inlineArgv: @[findExe("sh"), "-c", command],
+      inlineArgv: argv,
       inlineCwd: scratch,
       inputs: @[stagedSource],
       outputs: @["out.txt"],
@@ -98,6 +95,43 @@ proc writeProbe(scratch, stagedSource: string; relocatable: bool) =
   for i, b in encoded:
     bytes[i] = char(b)
   writeFile(scratch / "trycompile.rbsz", bytes)
+
+proc writeProbe(scratch, stagedSource: string; relocatable: bool) =
+  # Forward slashes: `sh` reads a backslash as an escape.
+  let command = "cat " & quoteShell(stagedSource.replace('\\', '/')) &
+    " > out.txt && " &
+    "echo " & StdoutMarker & " && echo " & StderrMarker & " >&2"
+  writeProbeArgv(scratch, stagedSource, @[findExe("sh"), "-c", command],
+    relocatable)
+
+proc installTool(prefix: string): string =
+  ## A copy of a system shell as `<prefix>/bin/<shell>`, standing in for a
+  ## compiler: the relocation anchors include the install prefix of the
+  ## program an action runs, so this prefix is an anchor of the probe.
+  when defined(windows):
+    let source = getEnv("SystemRoot", "C:\\Windows") / "System32" / "cmd.exe"
+  else:
+    let source = expandSymlink(findExe("sh"))
+  result = prefix / "bin" / extractFilename(source)
+  createDir(result.parentDir)
+  copyFile(source, result)
+  when not defined(windows):
+    setFilePermissions(result, getFilePermissions(source))
+
+proc toolArgv(tool, stagedSource: string): seq[string] =
+  when defined(windows):
+    @[tool, "/c", "type " & stagedSource.replace('/', '\\') &
+      " > out.txt && echo " & StdoutMarker]
+  else:
+    @[tool, "-c", "cat " & quoteShell(stagedSource) & " > out.txt && echo " &
+      StdoutMarker]
+
+proc changeInPlace(path: string) =
+  ## Different bytes at the same path, still runnable: data appended to an
+  ## executable is an overlay its loader ignores.
+  let f = open(path, fmAppend)
+  f.write("\0reprobuild-test-overlay\0")
+  f.close()
 
 proc runProbe(scratch: string): BuildRun =
   ## `output` is repro's STDOUT alone, where `--action-output=all` and the
@@ -162,6 +196,40 @@ suite "a try_compile probe across scratch directories":
       # The hit prints what the run printed, once each.
       check hit.output.count(StdoutMarker) == 1
       check hit.output.count(StderrMarker) == 1
+
+  test "the tool and the staged source reach the key by content":
+    # Relocation keeps a path under an anchor ABSOLUTE in the key; it names
+    # everything else cwd-relatively. The anchors include the install prefix
+    # of the program the probe runs and the store holding its staged source.
+    # Neither may become a hole: a different program under another prefix is
+    # another key, and a changed program or source at the SAME path is not
+    # served, because the record keeps both as inputs checked by content.
+    let why = unavailable()
+    if why.len > 0:
+      skip(why)
+    else:
+      let toolA = installTool(root / "toolchain-a")
+      let toolB = installTool(root / "toolchain-b")
+      proc probe(name, tool: string): BuildRun =
+        let scratch = root / ("anchor-" & name) / "TryCompile-x"
+        writeProbeArgv(scratch, stagedSource, toolArgv(tool, stagedSource),
+          relocatable = true)
+        result = runProbe(scratch)
+        checkpoint(explain(result))
+        check result.exitCode == 0
+      check "launched=true" in probe("a1", toolA).probeLine()
+      # The same probe with the tool at the same relative place under
+      # another prefix (byte-identical, even) is another key.
+      check "launched=true" in probe("b1", toolB).probeLine()
+      # Control: the unchanged tool is served in a new scratch directory.
+      check "launched=false" in probe("a2", toolA).probeLine()
+      # The tool changes in place: not served.
+      changeInPlace(toolA)
+      check "launched=true" in probe("a3", toolA).probeLine()
+      # Control again, then the staged source changes in place: not served.
+      check "launched=false" in probe("a4", toolA).probeLine()
+      writeFile(stagedSource, "int main(void) { return 1; }\n")
+      check "launched=true" in probe("a5", toolA).probeLine()
 
   test "control: the same probes in a v5 envelope both run":
     let why = unavailable()

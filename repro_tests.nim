@@ -17149,6 +17149,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let repoRoot = getCurrentDir()"),
   TestSpec(
+    source: "tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim",
+    binary: "build/test-bin/t_cmake_trycompile_probes_are_served_across_configures",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let reproBin = getEnv(\"REPROBUILD_REPRO\","),
+  TestSpec(
     source: "tests/e2e/configurable-system/t_e2e_configurable_system_in_dsl.nim",
     binary: "build/test-bin/t_e2e_configurable_system_in_dsl",
     defines: @[],

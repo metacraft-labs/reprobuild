@@ -3296,9 +3296,19 @@ proc relocatableInlineExecAnchors(argv: openArray[string]): seq[string] =
       if dir.len > 0 and dir.isAbsolute:
         roots.add(dir)
   roots.add(absolutePath(currentActionCacheRoot()))
+  # The store the CMake generator stages try_compile sources into
+  # (`<store>/cmake-trycompile-sources/<digest>/`): `$REPROBUILD_STORE_ROOT`
+  # when set, which is also what `currentActionCacheRoot` honours. The
+  # `$REPRO_STORE_ROOT` / per-user default store is anchored too.
+  let stagingStore = getEnv("REPROBUILD_STORE_ROOT")
+  if stagingStore.len > 0:
+    roots.add(absolutePath(stagingStore))
   let store = resolveStoreRoot()
   if store.len > 0:
     roots.add(absolutePath(store))
+  # The engine's own installation (`<prefix>/bin/repro`, `<prefix>/lib/` with
+  # the monitor shim the monitored process loads).
+  roots.add(parentDir(parentDir(getAppFilename())))
   if argv.len > 0 and argv[0].isAbsolute:
     let bin = parentDir(argv[0])
     let prefix = parentDir(bin)
