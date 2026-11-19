@@ -680,6 +680,7 @@ libs/repro_local_store/tests/t_absent_store_inputs_skip_revalidation.nim	nim	13
 libs/repro_local_store/tests/t_action_output_sidecar.nim	nim	5
 libs/repro_local_store/tests/t_c3_sandbox_manifest.nim	nim	8
 libs/repro_local_store/tests/t_content_keyed_comparison_includes_file_kind.nim	nim	6
+libs/repro_local_store/tests/t_content_table.nim	nim	5
 libs/repro_local_store/tests/t_distinct_realizations_never_share_a_prefix_directory.nim	nim	2
 libs/repro_local_store/tests/t_fingerprint_metadata_classifies_every_posix_entity.nim	nim	12
 libs/repro_local_store/tests/t_input_access_sidecar.nim	nim	4
