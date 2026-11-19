@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3020,
+    "nimTestBinaries": 3023,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 807,
+    "pureUnitTests": 808,
     "staticallyDetectedRuntimeCompilerFlowTests": 150,
-    "testEntries": 3070
+    "testEntries": 3073
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -551,7 +551,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 4,
       "defines": [],
       "dependencyShape": [
         "repro_local_store"
@@ -559,6 +559,7 @@
       "owner": "libs/repro_local_store",
       "sources": [
         "libs/repro_local_store/tests/t_a4_p4_eviction.nim",
+        "libs/repro_local_store/tests/t_key_explanation_classifies_each_cause.nim",
         "libs/repro_local_store/tests/t_overlay_materialize_report_names_the_cause.nim",
         "libs/repro_local_store/tests/t_store_optimise_dedup.nim"
       ],
@@ -1723,9 +1724,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1672,
+      "integration": 1674,
       "platform/destructive": 198,
-      "pure unit": 807,
+      "pure unit": 808,
       "unclassified": 369
     },
     "graphOwnedTestArtifacts": [
@@ -1940,9 +1941,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3020,
+    "nimTestBinaryCount": 3023,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3070
+    "testEntryCount": 3073
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -21431,6 +21432,23 @@
       "source": "libs/repro_local_store/tests/t_input_access_sidecar.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_key_explanation_classifies_each_cause",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_local_store",
+      "requiresReproBinary": false,
+      "source": "libs/repro_local_store/tests/t_key_explanation_classifies_each_cause.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48025,6 +48043,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_key_difference_explanation_names_the_cause",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_key_difference_explanation_names_the_cause.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_l3_build_block_public_interface_tagged_in_provider_mode",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -54133,6 +54168,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_s7_repro_build_restores_a_deleted_output.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_same_library_two_feature_sets_two_artifacts",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_same_library_two_feature_sets_two_artifacts.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -17173,6 +17173,12 @@ type
     toolProvisioning: ToolProvisioningMode
     toolIdentityPath: string
     toolInspectionPath: string
+    toolIdentity: PathOnlyBuildIdentity
+      ## The tool identity the graph's actions were lowered against, when
+      ## the inspection resolved one: what a build hands the engine as its
+      ## `toolIdentityResolver` (`mkToolIdentityResolver`), so a key computed
+      ## from this inspection (`repro cache key`) sees the provisioning
+      ## receipts the engine adds to the actions' declared inputs.
     providerBinaryPath: string
     providerCompileArtifactPath: string
     providerArtifactId: string
@@ -32482,6 +32488,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       storeRootOverride = buildToolStoreRoot(effectiveMode))
     let resolved = keyedResolution.resolved
     identity = resolved.identity
+    inspection.toolIdentity = identity
     resolvedArtifact = toolArtifact
     # Report the KEYED memo entry, not the stable files: those are rewritten
     # by every later invocation in this outDir with another key (a narrower
@@ -35001,6 +35008,265 @@ proc renderGraphAnalysisText(node: JsonNode): string =
   else:
     lines.add("unsupported view")
   lines.join("\n") & "\n"
+
+# ---------------------------------------------------------------------------
+# `repro cache key` / `repro cache explain`: the portable key of a planned
+# action, and why two of them differ (Caching-Architecture.md "Configuration
+# divergence and why two keys differ"; CLI/cache.md).
+# ---------------------------------------------------------------------------
+
+type
+  ActionKeyQuery = object
+    ## One action's key evidence and what it was computed against: the roots
+    ## are needed again to evaluate ANOTHER action's record here.
+    evidence: ActionKeyEvidence
+    roots: seq[LogicalRoot]
+    resolver: IdentityResolver
+
+proc actionKeyQuery(selector: string; mode: ToolProvisioningMode;
+                    workRoot, publicCliPath: string): ActionKeyQuery =
+  ## The evidence for the action `selector` (`<project>#<action-id>`) names,
+  ## from the graph a build of the project would lower (the same inspection
+  ## `repro graph` runs; nothing is built), the portable configuration a
+  ## build would wire (`wirePortableCache`), and this host's portable-memo
+  ## store for the recorded half.
+  let parts = splitTarget(selector)
+  if parts.fragment.len == 0:
+    raise newException(ValueError, "name the action as " &
+      "`<project>#<action-id>` (got `" & selector & "`)")
+  let info = prepareBuildGraphInspection(
+    (if parts.base.len == 0: "." else: parts.base) & "#" & parts.fragment,
+    mode, publicCliPath, selectDefaultAction = false, workRoot = workRoot)
+  var config: BuildEngineConfig
+  wirePortableCache(config, info.projectRoot, info.outDir)
+  # The graph exactly as `runBuild` keys it: a build hands the engine the
+  # tool identity as its resolver, and the engine appends each provisioned
+  # tool's receipt to the declared inputs of the actions that name it and
+  # expands `@FILE` arguments, before anything reads a key.
+  let resolverForKeys = mkToolIdentityResolver(info.toolIdentity,
+    info.projectRoot)
+  config.toolIdentityResolver = resolverForKeys
+  var keyedGraph = withProvisioningReceiptInputs(
+    BuildGraph(actions: info.actions, pools: info.pools), resolverForKeys)
+  for action in keyedGraph.actions.mitems:
+    action = withArgFilesExpanded(action)
+  # The roots a build keys by; with `REPRO_PORTABLE_CACHE=0` there are none,
+  # and the description is still the one the declared roots give.
+  let roots =
+    if config.portableRoots.len > 0: config.portableRoots
+    else: config.filesystemRoots
+  let memoRoot = currentActionCacheRoot() / "portable-memo"
+  var byId = initTable[string, BuildAction]()
+  var producerOf = initTable[string, string]()
+  for action in keyedGraph.actions:
+    byId[action.id] = action
+    for output in action.outputs & action.declaredOutputs:
+      let path = if output.isAbsolute or action.cwd.len == 0: output
+                 else: action.cwd / output
+      producerOf[path] = action.id
+  if parts.fragment notin byId:
+    raise newException(ValueError, "no action `" & parts.fragment &
+      "` in the graph of " & info.projectRoot & " (it has: " &
+      toSeq(byId.keys).sorted().join(", ") & ")")
+  var records = initTable[string, PortableMemoRecord]()
+  var visiting = initHashSet[string]()
+
+  proc resolverFor(action: BuildAction;
+                   upstream: seq[PortableMemoRecord]): IdentityResolver =
+    ## The identities the engine's lookup gives a record's inputs before it
+    ## runs anything: an environment variable by the value the action would
+    ## launch with here (`actionEnvResolver`, as the pre-pass resolves it), a
+    ## produced file by its producer's record, anything else from disk.
+    # `actionEnvResolver` snapshots the environment when called, so the
+    # pointer to this copy is not kept.
+    var launchConfig = config
+    let launchEnv = action.actionEnvResolver(addr launchConfig)
+    let produced = outputResolver(upstream)
+    let envRoots = roots
+    result = proc (entry: PathSetEntry): Option[string] =
+      if entry.kind == pikEnvironment:
+        let (present, value) = launchEnv(entry.path["env:".len .. ^1])
+        return some(envIdentity(envRoots, present, value))
+      produced(entry)
+
+  proc evidenceOf(id: string): ActionKeyEvidence =
+    if id in visiting:
+      raise newException(ValueError, "the graph's producers of " & id &
+        " form a cycle")
+    visiting.incl(id)
+    defer: visiting.excl(id)
+    let action = byId[id]
+    result.actionId = id
+    result.project = info.projectRoot
+    result.description = portableKeyDescriptionOf(roots, action,
+      config.hermeticEnv)
+    result.weakHex = portableWeakFingerprint(result.description)
+    if config.portableRoots.len == 0:
+      result.refusal = "REPRO_PORTABLE_CACHE turns the portable identity off"
+    else:
+      result.refusal = portableIdentityRefusal(action,
+        config.portableContentCheckedOnly)
+    result.eligible = result.refusal.len == 0
+    var upstream: seq[PortableMemoRecord] = @[]
+    for physical in portableDeclaredInputPaths(action):
+      var input = InputEvidence(path: logicalizeText(roots, physical))
+      if physical in producerOf and producerOf[physical] != id:
+        let producer = evidenceOf(producerOf[physical])
+        input.producer.add(producer)
+        if producer.actionId in records:
+          upstream.add(records[producer.actionId])
+      else:
+        let identity = readIdentity(physical)
+        input.identity = if identity == ReadOfAbsent: "" else: identity
+      result.inputs.add(input)
+    result.inputs.sort(proc (x, y: InputEvidence): int = cmp(x.path, y.path))
+    let resolver = resolverFor(action, upstream)
+    let found =
+      try: lookupMemo(memoRoot, roots, result.weakHex, resolver)
+      except CatchableError: none(PortableMemoRecord)
+    if found.isSome:
+      records[id] = found.get()
+      result.recorded = some(RecordedKeyEvidence(source: "recorded",
+        strongHex: found.get().strongHex, inputs: found.get().inputs))
+    else:
+      let why =
+        try: explainMemoMiss(memoRoot, roots, result.weakHex, resolver)
+        except CatchableError: ""
+      result.recordedNote =
+        if why.len > 0: "this host's record of the key does not verify " &
+          "here: " & why
+        else: "this host has no record of the key in " & memoRoot
+
+  result.evidence = evidenceOf(parts.fragment)
+  result.roots = roots
+  var upstream: seq[PortableMemoRecord] = @[]
+  for input in result.evidence.inputs:
+    if input.producer.len > 0 and input.producer[0].actionId in records:
+      upstream.add(records[input.producer[0].actionId])
+  result.resolver = resolverFor(byId[parts.fragment], upstream)
+
+proc loadActionKeyOperand(operand: string; mode: ToolProvisioningMode;
+                          workRoot, publicCliPath: string):
+    Option[ActionKeyQuery] =
+  ## An operand of `repro cache explain`: a `reprobuild.action-key.v1` file
+  ## (no live roots: `none` roots) or a selector.
+  if fileExists(extendedPath(operand)) and '#' notin operand:
+    let evidence = actionKeyEvidenceFromJson(readFile(extendedPath(operand)))
+    return some(ActionKeyQuery(evidence: evidence))
+  some(actionKeyQuery(operand, mode, workRoot, publicCliPath))
+
+proc renderKeyCauseText(cause: KeyCause; indent: string): seq[string] =
+  proc shown(present: bool; value: string): string =
+    if present: "`" & value & "`" else: "(absent)"
+  var line = indent & $cause.kind & " " & cause.subject & ": " &
+    shown(cause.inA, cause.a) & " vs " & shown(cause.inB, cause.b)
+  if cause.kind == kcToolchain and (cause.toolA.len > 0 or
+      cause.toolB.len > 0):
+    line.add(" [" & (if cause.toolA.len > 0: cause.toolA else: "?") &
+      " vs " & (if cause.toolB.len > 0: cause.toolB else: "?") & "]")
+  line.add(" (" & cause.component & ", " & cause.evidence & ")")
+  result.add(line)
+  for item in cause.because:
+    result.add(renderKeyCauseText(item, indent & "  because "))
+
+proc renderActionKeyText(evidence: ActionKeyEvidence): string =
+  var lines = @["action " & evidence.actionId & " in " & evidence.project,
+    "  weak: " & evidence.weakHex,
+    "  portable identity: " &
+      (if evidence.eligible: "yes" else: "no (" & evidence.refusal & ")")]
+  if evidence.recorded.isSome:
+    lines.add("  strong (" & evidence.recorded.get().source & "): " &
+      evidence.recorded.get().strongHex)
+  else:
+    lines.add("  strong: unknown (" & evidence.recordedNote & ")")
+  lines.add("  argv: " & evidence.description.argv.join(" "))
+  for (name, value) in evidence.description.env:
+    lines.add("  env " & name & "=" & value)
+  for input in evidence.inputs:
+    lines.add("  input " & input.path & ": " &
+      (if input.producer.len > 0: "produced by " &
+         input.producer[0].actionId & " (weak " &
+         input.producer[0].weakHex & ")"
+       elif input.identity.len > 0: input.identity
+       else: "absent"))
+  lines.join("\n")
+
+proc runCacheKeyCommands(conf: ReproCommandLineCache;
+                         publicCliPath: string): int =
+  ## `repro cache key <action>` and `repro cache explain <a> <b>`. Exit 0
+  ## whenever an answer was printed, whatever it says; 1 for an error.
+  case conf.command
+  of ReproCommandLineCacheCommand.key:
+    let c = conf.key
+    let mode = if c.toolProvisioning.len > 0:
+                 parseToolProvisioning(c.toolProvisioning)
+               else: tpmUnspecified
+    if c.actionCacheRoot.len > 0:
+      setActionCacheRootOverride(c.actionCacheRoot)
+    let format = inspectionFormat(c.format, c.json, allowDot = false)
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    try:
+      let query = actionKeyQuery(c.selector, mode, c.workRoot, publicCliPath)
+      if format == gofJson:
+        echo pretty(toJson(query.evidence))
+      else:
+        echo renderActionKeyText(query.evidence)
+    finally:
+      releaseAutoRunQuotaProcess(autoRunQuota)
+    0
+  of ReproCommandLineCacheCommand.explain:
+    let c = conf.explain
+    let mode = if c.toolProvisioning.len > 0:
+                 parseToolProvisioning(c.toolProvisioning)
+               else: tpmUnspecified
+    if c.actionCacheRoot.len > 0:
+      setActionCacheRootOverride(c.actionCacheRoot)
+    let format = inspectionFormat(c.format, c.json, allowDot = false)
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    try:
+      var a = loadActionKeyOperand(c.first, mode, c.workRoot,
+        publicCliPath).get()
+      var b = loadActionKeyOperand(c.second, mode, c.workRoot,
+        publicCliPath).get()
+      # Only one side has run: evaluate its record against the other side's
+      # files, which is the lookup the engine would make before deciding a
+      # hit there. Needs the other side's live roots, so not for a key file.
+      if a.evidence.weakHex == b.evidence.weakHex:
+        if a.evidence.recorded.isSome and b.evidence.recorded.isNone and
+            b.roots.len > 0:
+          b.evidence.recorded = evaluateRecordAgainst(b.roots,
+            b.evidence.weakHex, a.evidence.recorded.get(), b.resolver)
+        elif b.evidence.recorded.isSome and a.evidence.recorded.isNone and
+            a.roots.len > 0:
+          a.evidence.recorded = evaluateRecordAgainst(a.roots,
+            a.evidence.weakHex, b.evidence.recorded.get(), a.resolver)
+      let explanation = explainKeyDifference(a.evidence, b.evidence)
+      if format == gofJson:
+        echo pretty(toJson(explanation, a.evidence, b.evidence))
+      else:
+        var lines = @[$explanation.verdict & " (" &
+          (if explanation.substitutable: "may substitute"
+           else: "may not substitute") & ")",
+          "  a: " & a.evidence.actionId & " in " & a.evidence.project &
+            " weak " & a.evidence.weakHex,
+          "  b: " & b.evidence.actionId & " in " & b.evidence.project &
+            " weak " & b.evidence.weakHex]
+        for cause in explanation.causes:
+          lines.add(renderKeyCauseText(cause, "  "))
+        for cause in explanation.alsoObserved:
+          lines.add(renderKeyCauseText(cause, "  also observed: "))
+        for item in explanation.unanswered:
+          lines.add("  unanswered: " & item)
+        for (label, side) in [("a", a.evidence), ("b", b.evidence)]:
+          if not side.eligible:
+            lines.add("  " & label & " has no portable identity: " &
+              side.refusal)
+        echo lines.join("\n")
+    finally:
+      releaseAutoRunQuotaProcess(autoRunQuota)
+    0
+  else:
+    raise newException(ValueError, "not a key subcommand")
 
 proc runGraphCommand(conf: ReproCommandLineGraph; publicCliPath: string): int =
   ## ``repro graph [target[#action]]``. The command line is parsed from
@@ -106888,7 +107154,20 @@ proc runReproCommandLine(programName: string; args: seq[string];
   of ReproCommandLineCommand.cas:
     return runCasCommand(conf.cas)
   of ReproCommandLineCommand.cache:
-    return runCacheCommand(conf.cache)
+    case conf.cache.command
+    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain:
+      # These lower the project's graph, so they live here and not in the
+      # binary-cache client (`cache_cli`), which links no engine.
+      try:
+        return runCacheKeyCommands(conf.cache, publicCliPath)
+      except BuildTargetUnknownError as err:
+        stderr.write(renderUnknownTargetDiagnostic(err[]))
+        return 2
+      except CatchableError as err:
+        stderr.writeLine("repro cache: error: " & err.msg)
+        return 1
+    else:
+      return runCacheCommand(conf.cache)
   of ReproCommandLineCommand.bundle:
     return runBundleCliCommand(conf.bundle)
   of ReproCommandLineCommand.reap:

@@ -19392,6 +19392,103 @@ proc emitActionExtensionRows(session: ReproRunQuotaSession;
         extInt(int64(item.evidence.monitorProbes.len))
       ])
 
+# ---------------------------------------------------------------------------
+# The portable identity's static description of one action.
+#
+# These are THE procs `runBuild` keys the portable weak fingerprint with (its
+# `portableWeakOf` digests `portableKeyDescriptionOf`, and the record writer
+# hands `computePortableFingerprint` the same components), exported so a caller
+# that has only a planned graph (`repro cache key` / `repro cache explain`)
+# derives the same components and the same digest. A second derivation
+# beside the engine's would be free to drift from it, and an explanation
+# computed from it would then explain a key the engine does not use.
+# ---------------------------------------------------------------------------
+
+proc portableEnvPairs*(action: BuildAction): seq[(string, string)] =
+  ## The action's declared environment as (name, value) pairs; an entry
+  ## without `=` is a name with an empty value.
+  for entry in action.env:
+    let eq = entry.find('=')
+    if eq > 0:
+      result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+    else:
+      result.add((entry, ""))
+
+proc portableDeclaredInputPaths*(action: BuildAction): seq[string] =
+  ## The action's declared inputs, as physical paths (relative ones against
+  ## its working directory).
+  for input in action.inputs:
+    result.add(materialPath(action.cwd, input))
+
+proc portableStaticFields*(action: BuildAction;
+                           hermeticEnv: bool): seq[string] =
+  ## What the argv does not say about the action: its kind, a builtin's
+  ## payload, and the outputs it declares (sorted: a set). `hermeticEnv` is
+  ## `BuildEngineConfig.hermeticEnv`: an allowlisted environment is part of
+  ## what the action is.
+  result.add("kind=" & $action.kind)
+  if action.unsafePreserveOutputs:
+    # Domain-separates the portable key as `preserveOutputsWeakFingerprint`
+    # does the local one; nothing in this mode is published anyway.
+    result.add("unsafe-preserve-outputs=v1")
+  result.add("builtinText=" & action.builtinText)
+  for entry in action.builtinEntries:
+    result.add("builtinEntry=" & entry)
+  var outputs: seq[string] = @[]
+  for output in action.outputs:
+    outputs.add("output=" & materialPath(action.cwd, output))
+  for output in action.optionalOutputs:
+    outputs.add("optionalOutput=" & materialPath(action.cwd, output))
+  for output in action.declaredOutputs:
+    outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+  for dir in action.scratchDirs:
+    outputs.add("scratch=" & materialPath(action.cwd, dir))
+  for path in action.removeBeforeRun:
+    outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
+  outputs.sort()
+  result.add(outputs)
+  # The canonical work tree's KEY, never its resolved path. Added only when
+  # declared, so every other action's description is unchanged.
+  if action.canonicalWorkKey.len > 0:
+    result.add("canonicalWorkKey=" & action.canonicalWorkKey)
+  # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
+  # which variables the action was allowed to see is part of what it is.
+  var passthrough: seq[string] = @[]
+  for name in action.envPassthrough:
+    passthrough.add("passthrough=" & name)
+  if hermeticEnv:
+    result.add("env=allowlisted")
+    for name in HostEssentialEnvNames:
+      passthrough.add("passthrough=" & name)
+  passthrough.sort()
+  result.add(passthrough)
+
+proc portableKeyDescriptionOf*(roots: openArray[LogicalRoot];
+                               action: BuildAction;
+                               hermeticEnv: bool): PortableKeyDescription =
+  ## The action's portable static description against `roots`; its digest
+  ## (`portableWeakFingerprint`) is the portable weak fingerprint `runBuild`
+  ## looks the action up by under the same roots and `hermeticEnv`.
+  portableKeyDescription(roots, action.argv, action.cwd,
+    portableEnvPairs(action), portableDeclaredInputPaths(action),
+    portableStaticFields(action, hermeticEnv))
+
+proc portableIdentityRefusal*(action: BuildAction;
+                              contentCheckedOnly: bool): string =
+  ## "" when `runBuild` gives the action a portable identity under a
+  ## configuration with portable roots (Caching-Architecture D1); otherwise
+  ## why not. `contentCheckedOnly` is
+  ## `BuildEngineConfig.portableContentCheckedOnly` (the default; false under
+  ## `REPRO_PORTABLE_CACHE=1`).
+  if contentCheckedOnly and
+      action.actionCachePolicy notin {ffpChecksum, ffpHybrid}:
+    return "its input-check policy is " & $action.actionCachePolicy &
+      ", and only a content-checked (checksum or hybrid) edge gets a " &
+      "portable identity by default"
+  if action.unsafePreserveOutputs:
+    return UnsafePreserveOutputsCrossHostRefusal
+  ""
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Process-global accumulators; zero them so this build reports its own cost
   # rather than its own plus every earlier build in this process.
@@ -20130,16 +20227,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     false
 
   proc portableEnvOf(action: BuildAction): seq[(string, string)] =
-    for entry in action.env:
-      let eq = entry.find('=')
-      if eq > 0:
-        result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
-      else:
-        result.add((entry, ""))
+    portableEnvPairs(action)
 
   proc portableDeclaredInputsOf(action: BuildAction): seq[string] =
-    for input in action.inputs:
-      result.add(materialPath(action.cwd, input))
+    portableDeclaredInputPaths(action)
 
   var machineryRoots: seq[LogicalRoot] = @[]
   var machineryRootsResolved = false
@@ -20621,51 +20712,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## back to what the recorder is handed.
 
   proc portableStaticFieldsOf(action: BuildAction): seq[string] =
-    ## What the argv does not say about the action: its kind, a builtin's
-    ## payload, and the outputs it declares (sorted: a set).
-    result.add("kind=" & $action.kind)
-    if action.unsafePreserveOutputs:
-      # Domain-separates the portable key as `preserveOutputsWeakFingerprint`
-      # does the local one; nothing in this mode is published anyway.
-      result.add("unsafe-preserve-outputs=v1")
-    result.add("builtinText=" & action.builtinText)
-    for entry in action.builtinEntries:
-      result.add("builtinEntry=" & entry)
-    var outputs: seq[string] = @[]
-    for output in action.outputs:
-      outputs.add("output=" & materialPath(action.cwd, output))
-    for output in action.optionalOutputs:
-      outputs.add("optionalOutput=" & materialPath(action.cwd, output))
-    for output in action.declaredOutputs:
-      outputs.add("declaredOutput=" & materialPath(action.cwd, output))
-    for dir in action.scratchDirs:
-      outputs.add("scratch=" & materialPath(action.cwd, dir))
-    for path in action.removeBeforeRun:
-      outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
-    outputs.sort()
-    result.add(outputs)
-    # The canonical work tree's KEY, never its resolved path. Added only when
-    # declared, so every other action's description is unchanged.
-    if action.canonicalWorkKey.len > 0:
-      result.add("canonicalWorkKey=" & action.canonicalWorkKey)
-    # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
-    # which variables the action was allowed to see is part of what it is.
-    var passthrough: seq[string] = @[]
-    for name in action.envPassthrough:
-      passthrough.add("passthrough=" & name)
-    if config.hermeticEnv:
-      result.add("env=allowlisted")
-      for name in HostEssentialEnvNames:
-        passthrough.add("passthrough=" & name)
-    passthrough.sort()
-    result.add(passthrough)
+    ## What the argv does not say about the action (`portableStaticFields`).
+    portableStaticFields(action, config.hermeticEnv)
 
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
     ## is known before the action runs (the P3.4 lookup needs exactly that).
-    portableWeakFingerprint(config.portableRoots, action.argv, action.cwd,
-      portableEnvOf(action), portableDeclaredInputsOf(action),
-      portableStaticFieldsOf(action))
+    ## It is the digest of `portableKeyDescriptionOf`, the description
+    ## `repro cache key` prints and `repro cache explain` compares.
+    portableWeakFingerprint(portableKeyDescriptionOf(config.portableRoots,
+      action, config.hermeticEnv))
 
   var peerCacheQueries = initTable[string, PeerCacheActionQuery]()
     ## Distributed-Execution M0: the query computed for each action when the
@@ -20973,7 +21029,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.results[idx].portableReason = fp.reason
     if fp.portable:
       runResult.trace(action.id, "portable-fingerprint",
-        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len)
+        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len &
+        " weak=" & fp.weakHex)
     else:
       runResult.trace(action.id, "portable-fingerprint-unavailable",
         fp.reason)

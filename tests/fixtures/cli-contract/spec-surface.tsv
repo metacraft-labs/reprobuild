@@ -302,6 +302,22 @@ flag	repro cache gen-key	--toolchain-extra
 flag	repro cache gen-key	--toolchain-host-ldso
 flag	repro cache gen-key	--toolchain-name
 flag	repro cache gen-key	--toolchain-version
+command	repro cache key
+flag	repro cache key	--action-cache-root
+flag	repro cache key	--format
+flag	repro cache key	--json
+flag	repro cache key	--tool-provisioning
+flag	repro cache key	--work-root
+env	repro cache key	REPROBUILD_ACTION_CACHE_ROOT
+env	repro cache key	REPROBUILD_WORK_ROOT
+command	repro cache explain
+flag	repro cache explain	--action-cache-root
+flag	repro cache explain	--format
+flag	repro cache explain	--json
+flag	repro cache explain	--tool-provisioning
+flag	repro cache explain	--work-root
+env	repro cache explain	REPROBUILD_ACTION_CACHE_ROOT
+env	repro cache explain	REPROBUILD_WORK_ROOT
 command	repro bundle
 command	repro bundle create
 flag	repro bundle create	--action-cache-root
