@@ -370,7 +370,10 @@ proc gccLink*(opts: LinkOptions): BuildActionDef =
     # ``-soname`` would stamp a ``DT_SONAME`` no loader reads.
     soname = (if opts.kind == lokShared: opts.soname else: ""),
     libs = libs,
-    libDirs = libDirs)
+    libDirs = libDirs,
+    # Order after the objects and after the edges of every library
+    # ``-l`` names, so the link cannot start before those edges have run.
+    after = opts.objects & linkPrerequisites(opts.deps))
 
 proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
   ## Use the canonical archiver's existing typed CLI and provisioning identity.

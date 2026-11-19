@@ -4,8 +4,10 @@
 ## The document is a published interface: tools outside Reprobuild (a Nix
 ## module reading a committed snapshot, an equivalence report, a script that
 ## asks which activities a host runs) consume it instead of re-deriving any of
-## it. Its schema is specified in the user guide (`docs/user-guide/home-export.md`)
-## and versioned by `HomeExportSchemaVersion`. Bump the version whenever an
+## it. Its public field reference is
+## `docs/users/content/reference/files/home-export.md`; change it in the same
+## commit as this module (nothing checks that it does). The schema is
+## versioned by `HomeExportSchemaVersion`. Bump the version whenever an
 ## existing field changes meaning or shape; adding a field is compatible.
 ##
 ## Everything here is computed from what the normal profile-compile edge
@@ -703,7 +705,8 @@ proc evaluateHomeExport*(doc: JsonNode; system: string; host = "";
   ## say. Unstated, a profile whose guards reach a `nixos` predicate is
   ## refused with `EFactNotStated` (never read as false).
   ##
-  ## Returns the `evaluation` object (`docs/user-guide/home-export.md`).
+  ## Returns the `evaluation` object
+  ## (`docs/users/content/reference/files/home-export.md`).
   ## Raises `HomeExportRefused` when the document cannot describe `system`
   ## (`refusalReason`), `ValueError` for a document of another format or
   ## version or an unknown platform name.

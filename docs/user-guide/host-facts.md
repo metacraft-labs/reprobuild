@@ -1,5 +1,15 @@
 # Is my Nix home the same as my Reprobuild home? — host facts and `repro home compare`
 
+> **Superseded, except for the document's fields.** How to run the
+> comparison is now
+> [Compare a Home Manager configuration with a profile](../users/content/guides/machines/compare-with-home-manager.md),
+> and the functions are in the `homeManagerFacts` / `homeEquivalenceCheck`
+> entries of [Nix library and Home Manager module](../users/content/reference/nix-library.md);
+> edit those, not this page. The published site has no reference page for the
+> host-facts document yet, so [What a host-facts document holds](#what-a-host-facts-document-holds)
+> below is still its only public description: keep that section in step with
+> `host_facts.nim` until one exists.
+
 When a machine is configured both by Home Manager and by a Reprobuild home
 profile, you switch a concern (applications, packages, dotfiles, environment)
 from one to the other only once you know the two would give the host the same

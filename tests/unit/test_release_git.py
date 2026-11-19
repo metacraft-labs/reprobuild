@@ -35,6 +35,10 @@ HELPER = ROOT / "scripts" / "lib" / "release_git.sh"
 STAGING_SCRIPTS = [
     ROOT / "scripts" / "release" / "stage_release_catalog.sh",
     ROOT / "scripts" / "release" / "stage_release_runquota.sh",
+    # Its bare `git` failed on the v0.2.26 Windows leg with the error
+    # discarded, and the archive lost its run-time data files
+    # (test_release_staged_data_files.py).
+    ROOT / "scripts" / "release" / "stage_release_sources.sh",
 ]
 GIT = shutil.which("git")
 BASH = shutil.which("bash")

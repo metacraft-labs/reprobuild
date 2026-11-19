@@ -1304,6 +1304,8 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
         "pool":
       `sharedClonesRoot`
       boolFlag force is bool, help = "With gc: run whatever the budget says"
+      boolFlag resetRefs is bool, help = "With rewire: reset this " &
+        "workspace's push gateways' branches to the refreshed pool's"
       `sharedClonesReport`
       pos verb is string, required = false,
         help = "list (the default), rewire, consolidate, root, gc (also " &

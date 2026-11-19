@@ -189,11 +189,11 @@ suite "repro home export: compiled intent":
     # The intent round-trips through the one ProfileIntent decoder.
     check emitProfileIntentJson(parseProfileIntentJson($alpha["intent"])) ==
       emitProfileIntentJson(plannerIntent)
-    # The document's shape is the documented schema version 2
-    # (docs/user-guide/home-export.md). `intent` is rendered by the shared
-    # ProfileIntent encoder, so a change to that encoder would otherwise
-    # change this published schema without anyone bumping `schemaVersion`
-    # or the documentation; these key sets are the tripwire. An added
+    # The document's shape is the documented schema
+    # (docs/users/content/reference/files/home-export.md). `intent` is
+    # rendered by the shared ProfileIntent encoder, so a change to that
+    # encoder would otherwise change this published schema without anyone
+    # bumping `schemaVersion` or the documentation; these key sets are the tripwire. An added
     # field is compatible (document it and extend the set); a renamed or
     # reshaped one also bumps `HomeExportSchemaVersion`.
     check keysOf(alpha) == sorted(@["format", "schemaVersion", "selection",

@@ -1,5 +1,12 @@
 # Reading a home profile from Nix — `reprobuild.lib`
 
+> **Superseded.** This page is no longer maintained. The published pages are
+> [Nix library and Home Manager module](../users/content/reference/nix-library.md) (checked
+> against the library by the `lib-reference` flake check),
+> [Drive Home Manager from a home profile](../users/content/guides/machines/drive-home-manager-from-a-profile.md)
+> and [Install a profile's applications with Homebrew](../users/content/guides/machines/install-applications-with-homebrew.md).
+> Edit those, not this page.
+
 When a machine is configured by both Nix (Home Manager, nix-darwin, NixOS)
 and a Reprobuild home profile, every fact should be written once. The
 Reprobuild flake exports a small library, `reprobuild.lib`, and a Home Manager

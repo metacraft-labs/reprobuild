@@ -43,3 +43,4 @@ repro_addon
 repro_cargo_gc
 repro_cargo_edge
 repro_nimble_reader
+repro_nimble_index

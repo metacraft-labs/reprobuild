@@ -135,6 +135,17 @@ if (( ${#missing_sources[@]} > 0 )); then
   exit 1
 fi
 
+# ── All platforms: the data files the recipes name for run time ───────────────
+#
+# The manifest above and check_release_source_closure.sh prove the archive
+# COMPILES a project. Neither opens a file an installed engine reads only when
+# it realizes a tool: a recipe's `closureManifest` and `expressionFile`, beside
+# the stdlib module that names them. v0.2.26's Windows archive passed both and
+# lacked every one, and each consumer's tarball provisioning of playwright
+# failed with "closure manifest not found". The list is derived from the
+# archive's own recipes, not kept here.
+bash "$(dirname "${BASH_SOURCE[0]}")/release/check_release_data_files.sh" "$pkg_dir"
+
 # ── All platforms: release applications and the build lease coordinator ────
 #
 # Under `--tool-provisioning=tarball` and `nix` the engine will not run an

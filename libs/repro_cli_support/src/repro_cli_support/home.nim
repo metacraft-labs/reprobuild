@@ -3526,7 +3526,7 @@ proc runHomeExport(c: ReproCommandLineHomeExport): int =
 
 # ---------------------------------------------------------------------------
 # `repro home facts` / `repro home compare` (GM6: host facts and the
-# equivalence report; docs/user-guide/host-facts.md).
+# equivalence report; docs/users/content/guides/machines/compare-with-home-manager.md).
 # ---------------------------------------------------------------------------
 
 proc runHomeFacts(c: ReproCommandLineHomeFacts): int =
