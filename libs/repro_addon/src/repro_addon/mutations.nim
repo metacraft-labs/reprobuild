@@ -1031,6 +1031,12 @@
 ##                                            generation as retained
 ## ``uninstall-keeps-snapshots``              uninstall deletes none of the
 ##                                            add-on's snapper snapshots
+## ``snapshot-sweep-ignores-revert-marker``  a pending revert's marker
+##                                            owns only its own snapshot,
+##                                            not the failed attempt's it
+##                                            reverts
+## ``recovery-skips-snapshot-sweep``          a recovery runs no orphan
+##                                            sweep of the root snapshots
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1713,7 +1719,9 @@ const
                           # AR4).
                           "snapshot-cleanup-number",
                           "snapshot-sweep-ignores-retention",
-                          "uninstall-keeps-snapshots"]
+                          "uninstall-keeps-snapshots",
+                          "snapshot-sweep-ignores-revert-marker",
+                          "recovery-skips-snapshot-sweep"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -41,6 +41,7 @@ import repro_core/file_lock
 import repro_core/host_apply_lock
 
 import repro_infra
+import repro_infra/addon_diagnostics
 import repro_local_store/store
 import repro_peer_cache/auth as peerAuth
 from repro_deploy_agent/secrets import ensureRecipientKeyFile
@@ -299,22 +300,32 @@ proc recoverMarker(stateDir: string; atBoot: bool;
         "recover`): " & failed & "; the revert failed too: " & e2.msg)
 
 proc recoverPendingSwitch*(stateDir: string; atBoot: bool;
-                           driver: CollisionDriver = nil): RecoveryOutcome =
+                           driver: CollisionDriver = nil;
+                           site = hostSnapshotSite()): RecoveryOutcome =
   ## Finish or revert an interrupted switch (``recoverMarker``), then run
   ## the orphan sweep of the add-on's root snapshots (spec §7.2, §7.7 step
   ## 1; §13 decision 116): in every recovery, whether or not a marker was
   ## found, under the host apply lock and after the marker was decided.
   ## A recovery that deferred to the live switch leaves the sweep to that
   ## switch; one that finds another apply holding the lock leaves it to
-  ## that apply's own pending check.
+  ## that apply's own pending check. A recovery that did not resolve the
+  ## marker sweeps nothing: the marker stays for an operator, and the
+  ## snapshots of the switch it records are its way back. ``site`` is
+  ## where snapper is (a fixture tree in a unit test).
   result = recoverMarker(stateDir, atBoot, driver)
   if result.deferred: return
   when mutated("reassert-skips-recovery"):
     return
+  when mutated("recovery-skips-snapshot-sweep"):
+    return
+  if not result.resolved:
+    result.swept = @[diagnosticMessage(adSnapshotLeft, "the orphan sweep " &
+      "did not run: the pending marker in " & stateDir & " stays")]
+    return
   var (hostLock, holder, _) = tryAcquireHostApplyLock("add-on snapshot sweep")
   if holder.len > 0: return
   defer: hostLock.release()
-  result.swept = sweepFor(stateDir, markerStateDirs(stateDir))
+  result.swept = sweepFor(stateDir, markerStateDirs(stateDir), site)
 
 proc startCommittedUnits*(stateDir: string; noBlock: bool): seq[string] =
   ## After a recovery: every unit the current generation started is
@@ -432,8 +443,9 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
                            pid = getCurrentProcessId();
                            bootId = currentBootId();
                            pointer = AddonStateDirPointer;
-                           pointerOwner = 0):
-    tuple[ok: bool; why: string] =
+                           pointerOwner = 0;
+                           site = hostSnapshotSite()):
+    tuple[ok: bool; why: string; notes: seq[string]] =
   ## The apply-side check (§7.7), run with the host apply lock held. For
   ## each pending marker: one written by this process, in this boot, is
   ## the caller's own switch and is left to it. A marker an older build
@@ -457,16 +469,18 @@ proc checkPendingSwitches*(applyStateDir: string; recover: SwitchRecovery;
         let live = ownerlessSwitchMayBeLive(dir, pid)
         if live.len > 0:
           return (false, "the pending marker in " & dir & " records no " &
-            "owner (an older build wrote it) and " & live)
+            "owner (an older build wrote it) and " & live, result.notes)
     let rec = recover(dir)
+    result.notes.add(rec.swept)
     if not (rec.resolved and not rec.deferred):
-      return (false, dir & ": " & rec.lines.join("; "))
+      return (false, dir & ": " & rec.lines.join("; "), result.notes)
   # Every apply's pending check runs the orphan sweep once the markers are
   # decided (spec §7.2, §13 decision 116); the caller holds the host apply
-  # lock. What it could not delete is reported by the next recovery too.
-  discard sweepFor(applyStateDir, markerStateDirs(applyStateDir, pointer,
-                                                   pointerOwner))
-  (true, "")
+  # lock. What it deleted and what it could not are the caller's to print.
+  when not mutated("recovery-skips-snapshot-sweep"):
+    result.notes.add(sweepFor(applyStateDir, markerStateDirs(applyStateDir,
+      pointer, pointerOwner), site))
+  result.ok = true
 
 proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
                                 pointer = AddonStateDirPointer;
@@ -479,7 +493,7 @@ proc installPendingSwitchGuard*(recover: SwitchRecovery = nil;
       {.cast(gcsafe).}:
         recoverPendingSwitch(dir, atBoot = false)
   pendingSwitchGuard = proc (applyStateDir: string):
-      tuple[ok: bool; why: string] {.closure, gcsafe.} =
+      tuple[ok: bool; why: string; notes: seq[string]] {.closure, gcsafe.} =
     {.cast(gcsafe).}:
       checkPendingSwitches(applyStateDir, r, pointer = pointer,
         pointerOwner = pointerOwner)

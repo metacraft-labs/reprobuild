@@ -309,9 +309,16 @@ proc parseRecord*(key, text: string): RootSnapshotRecord =
 proc writeRecord(stateDir: string; r: RootSnapshotRecord) =
   ## Durable (``writeFileNoFollow`` renames over a synced temporary file):
   ## the record must be on disk before ``snapper create`` runs.
-  createDir(recordsDir(stateDir))
+  # A directory created here is made durable in its parent too: a record
+  # whose directory entry is lost in a crash leaves a snapshot no state
+  # records, which only uninstall would delete.
+  let dir = recordsDir(stateDir)
+  if not dirExists(dir):
+    createDir(dir)
+    fsyncPath(parentDir(dir))
+    fsyncPath(parentDir(parentDir(dir)))
   writeFileNoFollow(recordPath(stateDir, r.key), renderRecord(r), 0o600)
-  fsyncPath(recordsDir(stateDir))
+  fsyncPath(dir)
 
 proc readRecords*(stateDir: string): seq[RootSnapshotRecord] =
   ## Every record; an unreadable one is kept by its key alone (config "",
@@ -334,21 +341,37 @@ proc removeRecord*(stateDir, key: string) =
 proc generationSnapshotPath*(stateDir, generationId: string): string =
   stateDir / "generations" / generationId / "root-snapshot"
 
-proc generationSnapshotKey*(stateDir, generationId: string): string =
-  ## The key of the snapshot a committed generation owns; "" when none.
-  if generationId.len == 0: return ""
+proc readGenerationSnapshotKey*(stateDir, generationId: string):
+    tuple[key: string; known: bool] =
+  ## The key of the snapshot a committed generation owns. ``known`` is
+  ## false when the generation's ``root-snapshot`` file is there but cannot
+  ## be read or does not hold a key: what it owns is then unknown, and the
+  ## sweep deletes nothing (it must never delete a way back, spec §7.2).
+  ## A generation without the file owns no snapshot: ("", true).
+  if generationId.len == 0: return ("", true)
+  let p = generationSnapshotPath(stateDir, generationId)
+  if not fileExists(p) and not symlinkExists(p): return ("", true)
   try:
-    let k = readFile(generationSnapshotPath(stateDir, generationId)).strip()
-    if isSnapshotKey(k): k else: ""
+    let k = readFile(p).strip()
+    if isSnapshotKey(k): (k, true) else: ("", false)
   except IOError, OSError:
-    ""
+    ("", false)
+
+proc generationSnapshotKey*(stateDir, generationId: string): string =
+  ## The key of the snapshot a committed generation owns; "" when none or
+  ## when it cannot be read (``readGenerationSnapshotKey`` tells the two
+  ## apart).
+  readGenerationSnapshotKey(stateDir, generationId).key
 
 proc recordGenerationSnapshot*(stateDir, generationId, key: string) =
   ## Step 9: the committed generation owns the attempt's snapshot.
   if key.len == 0 or generationId.len == 0: return
-  createDir(parentDir(generationSnapshotPath(stateDir, generationId)))
-  writeFileNoFollow(generationSnapshotPath(stateDir, generationId),
-                    key & "\n", 0o600)
+  # Durable before step 9 goes on to retention and the sweeps: a lost
+  # ownership file would leave a retained generation's snapshot an orphan.
+  let p = generationSnapshotPath(stateDir, generationId)
+  createDir(parentDir(p))
+  writeFileNoFollow(p, key & "\n", 0o600)
+  fsyncPath(parentDir(p))
 
 # ---------------------------------------------------------------------------
 # Plan, take, delete.
@@ -480,13 +503,24 @@ proc deleteSnapshotByKey*(stateDir, key, by: string; site: SnapshotSite):
   if not failed:
     removeRecord(stateDir, key)
 
+type
+  SnapshotOwners* = object
+    ## The keys something owns, and whether that is all of them: ``known``
+    ## is false when an owner's record could not be read (``unknown`` says
+    ## which), and then the sweep deletes nothing.
+    keys*: HashSet[string]
+    known*: bool
+    unknown*: seq[string]
+
 proc retainedOwners*(stateDir: string; current, previous: string;
                      retainedIds: seq[string]; storeListed: bool):
-    HashSet[string] =
+    SnapshotOwners =
   ## The keys owned by a retained committed generation: one with a store
   ## root (``retainedIds``), the current and the previous one; and, when
   ## the store's roots could not be listed, every generation that records
-  ## a key.
+  ## a key. A retained generation whose ownership file cannot be read
+  ## makes the result not ``known``.
+  result.known = true
   let gens = stateDir / "generations"
   if not dirExists(gens): return
   var keep = initHashSet[string]()
@@ -497,8 +531,12 @@ proc retainedOwners*(stateDir: string; current, previous: string;
     if kind != pcDir: continue
     let id = extractFilename(d)
     if storeListed and id notin keep: continue
-    let k = generationSnapshotKey(stateDir, id)
-    if k.len > 0: result.incl(k)
+    let k = readGenerationSnapshotKey(stateDir, id)
+    if not k.known:
+      result.known = false
+      result.unknown.add("generation " & id & "'s " &
+        generationSnapshotPath(stateDir, id) & " is unreadable")
+    elif k.key.len > 0: result.keys.incl(k.key)
 
 proc markerStateDirs*(applyStateDir: string;
                       pointer = AddonStateDirPointer;
@@ -513,15 +551,25 @@ proc markerStateDirs*(applyStateDir: string;
             resolveSystemStateDir(), SystemStateDir]:
     if d.len > 0 and d notin result: result.add(d)
 
-proc markerOwners*(stateDirs: openArray[string]): HashSet[string] =
-  ## The keys present markers' attempts own.
+proc markerOwners*(stateDirs: openArray[string]): SnapshotOwners =
+  ## The keys present markers own: the attempt's own snapshot and, for a
+  ## revert or its replay, the snapshot of the failed attempt it reverts
+  ## (``revert-snapshot``), which only the actor that completes the revert
+  ## deletes (§13 decision 105) -- while the marker is there, the revert
+  ## has not completed. A marker that cannot be read makes the result not
+  ## ``known``.
+  result.known = true
   for d in stateDirs:
     if not hasPendingMarker(d): continue
     try:
       let m = readPendingMarker(d)
-      if m.rootSnapshot.len > 0: result.incl(m.rootSnapshot)
-    except CatchableError:
-      discard
+      if m.rootSnapshot.len > 0: result.keys.incl(m.rootSnapshot)
+      when not mutated("snapshot-sweep-ignores-revert-marker"):
+        if m.revertSnapshot.len > 0: result.keys.incl(m.revertSnapshot)
+    except CatchableError as e:
+      result.known = false
+      result.unknown.add("the pending marker in " & d & " is unreadable (" &
+        e.msg & ")")
 
 proc storeGenerationRoots*(): tuple[ok: bool; ids: seq[string]] =
   ## The generation ids the store holds roots for; ``ok`` false when the
@@ -546,8 +594,16 @@ proc sweepOrphanSnapshots*(stateDir: string; current, previous: string;
   var roots = storeRoots
   when mutated("snapshot-sweep-ignores-retention"):
     roots = (true, newSeq[string]())
-  var owned = retainedOwners(stateDir, current, previous, roots.ids, roots.ok)
-  for k in markerOwners(markerDirs): owned.incl(k)
+  let retained = retainedOwners(stateDir, current, previous, roots.ids,
+                                roots.ok)
+  let markers = markerOwners(markerDirs)
+  if not (retained.known and markers.known):
+    # What some owner holds is unknown: deleting anything could delete its
+    # way back. Nothing is deleted until the owner can be read again.
+    return @[diagnosticMessage(adSnapshotLeft, "the orphan sweep deleted " &
+      "nothing: " & (retained.unknown & markers.unknown).join("; "))]
+  var owned = retained.keys
+  for k in markers.keys: owned.incl(k)
   let onHost = addonSnapshotsOnHost(site)
   for rec in records:
     if rec.key in owned: continue
@@ -626,6 +682,8 @@ proc accountRootSnapshots*(stateDir: string; markerDirs: openArray[string];
     try:
       let m = readPendingMarker(d)
       if m.rootSnapshot.len > 0: byKey.add((m.rootSnapshot, "marker " & d))
+      if m.revertSnapshot.len > 0:
+        byKey.add((m.revertSnapshot, "marker " & d & " (the attempt it reverts)"))
     except CatchableError:
       discard
   byKey.sort(proc (a, b: tuple[key, owner: string]): int = cmp(a.owner, b.owner))

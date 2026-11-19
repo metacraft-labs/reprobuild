@@ -256,8 +256,12 @@ proc omarchyLeg(g: Guest; b: BaseImage; repro: string; step: StepFn;
   step("a switch refused at step 2 is refused with EAddOnExclusiveOverlap",
        r2.exitCode == 2 and "EAddOnExclusiveOverlap" in said and
          "root snapshot taken" notin r2.stdout, "exit " & $r2.exitCode & "\n" & said)
+  # The refusal names the snapshot its undo deleted: without that line
+  # the unchanged snapshot set below could also mean none was taken
+  # (snapper reuses the highest number, so numbering cannot tell).
   step("the refused switch deleted its snapshot as it was undone",
-       numbersOf(g.addonRows()) == addonBefore and g.currentGeneration() == genE and
+       "deleted the refused switch's root snapshot root#" in said and
+         numbersOf(g.addonRows()) == addonBefore and g.currentGeneration() == genE and
          g.exec("test ! -e /var/lib/repro/system/addon/pending").exitCode == 0,
        g.run("snapper -c root list") & "\n" & said)
   let rolled = g.exec("grep -la 'rolled-back' /var/lib/repro/system/generations/*/log/apply.log").stdout

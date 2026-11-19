@@ -267,7 +267,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "'fixture\\|repro' | tail -60").stdout))
     var inB = false
     let outcomes = newJObject()
-    let aExceptions = bootVariance(b, BootVariance) & resetVariance(b) & @KeptAccount
+    let aExceptions = bootVariance(b, BootVariance) & @KeptAccount
 
     proc judge(label: string; journal, marker: string): string =
       ## After a reset and boot: which generation the host is in, with
@@ -276,7 +276,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                      timeoutSec = 600)
       let fp = g.takeFingerprint(repro)
       let isA = identityReport(fpA, fp, aExceptions)
-      let isB = identityReport(fpB, fp, bootVariance(b, BootVariance) & resetVariance(b))
+      let isB = identityReport(fpB, fp, bootVariance(b, BootVariance))
       result = if isA.ok: "A" elif isB.ok: "B" else: "neither"
       step(label & ": after the reset the host is exactly A or B (" &
            result & ")", isA.ok or isB.ok,

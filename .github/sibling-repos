@@ -312,7 +312,7 @@ test-certificates-spec=9ebbcb3c9e539f294dbe125dea87c445b270523e
 # Pinned to the SAME 40-hex revision as tests/e2e/addon/gosti.pin, which
 # scripts/run_addon_gate.sh resolves and every gate record carries; move
 # both together.
-gosti=24d481f29b2d350dcb95f702c55190823642d52a
+gosti=cf435b3ca8abbceaf3db547f86cdc67d03994d1e
 
 # The deployment repository (private; mainline `live`), cloned for ONE file:
 # `services/repro-deploy-manifest/render-deploy-manifest.py`, the independent

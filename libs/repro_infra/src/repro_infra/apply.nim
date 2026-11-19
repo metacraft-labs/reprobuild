@@ -595,7 +595,9 @@ proc dispatchBuildActions(opts: ApplyOptions; result: var ApplyResult) =
 
 type
   PendingSwitchGuard* = proc (applyStateDir: string):
-    tuple[ok: bool; why: string] {.closure, gcsafe.}
+    tuple[ok: bool; why: string; notes: seq[string]] {.closure, gcsafe.}
+    ## ``notes``: what the guard's own housekeeping reports (the add-on's
+    ## orphan sweep of its root snapshots), for the apply to print.
 
 var pendingSwitchGuard*: PendingSwitchGuard = nil
   ## Installed by the add-on layer (`repro_addon/reassert`), which owns the
@@ -780,6 +782,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # otherwise keep doing exactly that until the next boot.
   if pendingSwitchGuard != nil:
     let g = pendingSwitchGuard(opts.stateDir)
+    for n in g.notes: result.diagnostics.add("root snapshots: " & n)
     if not g.ok:
       raise newException(EPendingSwitch, "an interrupted add-on switch " &
         "is pending on this host and recovery did not resolve it; " &

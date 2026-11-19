@@ -1319,8 +1319,11 @@ proc newArchGuest*(b: BaseImage; diskGiB = ArchImageGiB; cpus = 0;
   if diskGiB < ArchImageGiB:
     raise newException(TestBedError, "an Arch guest's disk is at least " &
       $ArchImageGiB & " GiB")
-  newGuest(b, diskGiB = diskGiB, cpus = cpus, memoryMB = memoryMB,
-           image = archGoldenImage(archVariantOf(b)))
+  result = newGuest(b, diskGiB = diskGiB, cpus = cpus, memoryMB = memoryMB,
+                    image = archGoldenImage(archVariantOf(b)))
+  # No emulated display: see ``Guest.noDisplay``. The Omarchy VM keeps its
+  # display (its desktop session is part of the base).
+  result.noDisplay = true
 
 proc newArchGuestOver*(b: BaseImage; image: string;
                        diskGiB = ArchImageGiB): Guest =
@@ -1328,7 +1331,8 @@ proc newArchGuestOver*(b: BaseImage; image: string;
   ## gate's independent builds and its negative control).
   if isOmarchyBase(b):
     return newOmarchyGuestOver(image, max(diskGiB, OmarchyImageGiB))
-  newGuest(b, diskGiB = diskGiB, image = image)
+  result = newGuest(b, diskGiB = diskGiB, image = image)
+  result.noDisplay = true
 
 proc prepareArchGuest*(g: Guest) =
   ## First-boot completion, then the pin check: refuses (raises) a guest

@@ -4009,6 +4009,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     var why = "run `repro system addon recover` to finish or revert it first"
     if pendingSwitchGuard != nil:
       let g = pendingSwitchGuard(stateDir)
+      result.snapshotNotes.add(g.notes)
       if not g.ok: why = "recovery did not resolve it: " & g.why
     if hasPendingMarker(stateDir):
       raise newException(AddonApplyError, "an interrupted switch is " &
@@ -6683,11 +6684,17 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       releasePendingRoot()
       # Its own root snapshot goes as it is undone (spec §7.2, §13 decision
       # 116); no `rolled-back` record is written on this path. One that
-      # cannot be deleted is reported, and swept later.
-      var left: seq[string]
+      # cannot be deleted is reported, and swept later; one that was is
+      # named, so the refusal says the switch had taken one.
+      var left, deleted: seq[string]
       if marker.rootSnapshot.len > 0:
-        left = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
-          "the refused switch's undo", snapshotSite).left
+        let d = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
+          "the refused switch's undo", snapshotSite)
+        left = d.left
+        for n in d.deleted:
+          deleted.add("deleted the refused switch's root snapshot " & n)
+      if deleted.len > 0:
+        e.msg.add("\n" & deleted.join("\n"))
       if undoProblems.len > 0:
         raise newException(AddonApplyError, e.msg & "\nputting back what " &
           "step 2 stopped failed: " & undoProblems.join("; ") &

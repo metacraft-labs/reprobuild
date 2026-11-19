@@ -33,7 +33,8 @@ import repro_infra/profile
 import repro_profile/types as profileTypes
 import repro_profile/emit as profileEmit
 import repro_profile_intent/codec
-import repro_addon/[generation0, preflight, root_snapshot, static_tree]
+import repro_addon/[generation0, preflight, reassert, root_snapshot, static_tree]
+import repro_core/host_apply_lock
 
 let base = getTempDir() / ("repro-addon-root-snapshot-" & $getCurrentProcessId())
 
@@ -296,6 +297,38 @@ suite "the orphan sweep (spec §7.2, §13 decision 116)":
     clearPendingMarker(state)
     discard sweepOrphanSnapshots(state, "", "", [state], site, (true, @[]))
     check keysOnHost(site).len == 0
+  test "a pending revert's marker owns the snapshot of the attempt it reverts":
+    # The failed attempt's snapshot is its way back while its revert has
+    # not completed (§13 decision 105): the revert's marker names it only
+    # as ``revert-snapshot``.
+    let failed = takeOne(state, site)
+    writePendingMarker(state, PendingMarker(fromGeneration: "g2",
+      step: ssRealise, status: "in-progress", purpose: "revert",
+      revertOf: "g3", revertSnapshot: failed.key))
+    check sweepOrphanSnapshots(state, "", "", [state], site, (true, @[])).len == 0
+    check keysOnHost(site) == @[failed.key]
+  test "an unreadable marker: the sweep deletes nothing, and says so":
+    let a = takeOne(state, site)
+    createDir(parentDir(pendingMarkerPath(state)))
+    writeFile(pendingMarkerPath(state), "not a pending marker\n")
+    let l = sweepOrphanSnapshots(state, "", "", [state], site, (true, @[]))
+    check l.len == 1 and l[0].startsWith($adSnapshotLeft)
+    check "deleted nothing" in l[0] and "unreadable" in l[0]
+    check keysOnHost(site) == @[a.key]
+  test "a retained generation whose ownership cannot be read: nothing is deleted":
+    let a = takeOne(state, site)
+    let orphan = takeOne(state, site)
+    createDir(parentDir(generationSnapshotPath(state, "g1")))
+    writeFile(generationSnapshotPath(state, "g1"), "garbage\n")
+    recordGenerationSnapshot(state, "g2", a.key)
+    let l = sweepOrphanSnapshots(state, "g2", "g1", [state], site, (true, @["g2", "g1"]))
+    check l.len == 1 and "deleted nothing" in l[0]
+    check keysOnHost(site) == @[a.key, orphan.key]
+    # A dropped generation's unreadable file owns nothing either way: it
+    # does not stop the sweep.
+    let l2 = sweepOrphanSnapshots(state, "g2", "g3", [state], site, (true, @["g2"]))
+    check l2.len == 1 and "deleted the orphan" in l2[0]
+    check keysOnHost(site) == @[a.key]
   test "a retained committed generation owns its snapshot; one retention dropped does not":
     let a = takeOne(state, site)
     let b = takeOne(state, site)
@@ -361,6 +394,38 @@ suite "the orphan sweep (spec §7.2, §13 decision 116)":
     discard f.omarchySnapshot()
     check sweepOrphanSnapshots(state, "", "", [state], site, (true, @[])).len == 0
     check f.calls.len == 0
+
+suite "the sweep's call sites: recovery and the apply's pending check":
+  setup:
+    var (f, site, state) = newSite("callsites")
+    putEnv(HostApplyLockEnvVar, f.root / "apply.lock")
+  teardown:
+    delEnv(HostApplyLockEnvVar)
+  test "a recovery that finds no marker sweeps, and reports what it deleted":
+    let a = takeOne(state, site)
+    let r = recoverPendingSwitch(state, atBoot = false, site = site)
+    check r.resolved and r.swept.len == 1
+    check r.swept[0] == "deleted the orphan root snapshot root#" & $a.number &
+      " (repro-addon=" & a.key & ")"
+    check keysOnHost(site).len == 0
+  test "a recovery that leaves the marker for an operator sweeps nothing":
+    let a = takeOne(state, site)
+    createDir(parentDir(pendingMarkerPath(state)))
+    writeFile(pendingMarkerPath(state), "not a pending marker\n")
+    let r = recoverPendingSwitch(state, atBoot = false, site = site)
+    check not r.resolved
+    check r.swept.len == 1 and r.swept[0].startsWith($adSnapshotLeft)
+    check keysOnHost(site) == @[a.key]
+  test "the apply's pending check sweeps and hands back what it reported":
+    let a = takeOne(state, site)
+    let noRecovery: SwitchRecovery = proc (dir: string): RecoveryOutcome
+        {.closure, gcsafe.} = RecoveryOutcome(resolved: true)
+    let g = checkPendingSwitches(state, noRecovery,
+      pointer = f.root / "no-pointer", site = site)
+    check g.ok
+    check g.notes == @["deleted the orphan root snapshot root#" & $a.number &
+      " (repro-addon=" & a.key & ")"]
+    check keysOnHost(site).len == 0
 
 suite "retention and uninstall":
   test "retention deletes exactly the dropped generations' snapshots":

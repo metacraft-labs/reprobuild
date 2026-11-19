@@ -1148,6 +1148,18 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     if fsType == "btrfs" and ReproRoot notin occupancy.inputs.roots:
       reproSubvolume = reproSubvolumeMountFor(
         try: readFile("/proc/self/mountinfo") except IOError, OSError: "")
+      # Without the filesystem's UUID link generation 0 cannot name the
+      # subvolume's device, so a booted root snapshot would find no store:
+      # bootstrap refuses rather than create a /repro no snapshot boot
+      # can reach.
+      result.add("repro-subvolume-mount", reproSubvolume.what.len > 0,
+        if reproSubvolume.what.len > 0:
+          "/repro will be the subvolume " & reproSubvolume.subvol & " of " &
+            reproSubvolume.what & ", mounted by repro.mount"
+        else:
+          "/ is btrfs but its device has no /dev/disk/by-uuid link: " &
+            "generation 0 could not mount /repro by path in a booted root " &
+            "snapshot")
   result.gen0Inputs = Gen0Inputs(reproExe: reproExe,
     reproSubvolume: reproSubvolume,
     packageManagerHook: (if archFamily: pmhNone else: pmhApt),

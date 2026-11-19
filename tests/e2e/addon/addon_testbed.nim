@@ -337,6 +337,13 @@ type
     serialLog*: string
     booted*: bool
     log*: seq[string]
+    noDisplay*: bool
+      ## Boot with no emulated display adapter (gosti ``noDisplayDevice``,
+      ## QEMU ``-vga none``): the plain Arch guests, reached only over SSH
+      ## and the serial console. Their kernel's ``bochs-drm`` raised a
+      ## vblank-timeout ``WARNING`` (``kernel.tainted`` 512) under the
+      ## build host's load, which a gate's fingerprint comparison read as a
+      ## change the add-on did not make.
     notedTaints*: seq[string]
       ## The kernel taint values whose warnings ``noteKernelTaint`` logged.
     dataDisks*: seq[string]
@@ -554,7 +561,7 @@ when defined(gostiAvailable):
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskReadonly: readonly, diskInPlace: true,
-      dataDiskPaths: g.dataDisks)
+      dataDiskPaths: g.dataDisks, noDisplayDevice: g.noDisplay)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: "") &
            (if g.relayPort > 0: " (network restricted to the mirror)" else: ""))
@@ -598,7 +605,7 @@ proc bootNoWait*(g: Guest) =
       generation: (if g.base.debArch == "amd64" and not g.uefi: 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
-      diskInPlace: true)
+      diskInPlace: true, noDisplayDevice: g.noDisplay)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & " (serial only)")
     g.vm = g.qemu.bootFromMedia(spec)

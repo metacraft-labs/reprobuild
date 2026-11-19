@@ -88,16 +88,6 @@ proc bootVariance*(b: BaseImage; debian: openArray[string]): seq[string] =
     for v in ArchBootVariance:
       if v notin result: result.add(v)
 
-proc resetVariance*(b: BaseImage): seq[string] =
-  ## What a boot after a QEMU ``system_reset`` of an Arch-family guest may
-  ## differ in beyond ``bootVariance``: the kernel's taint mask. On
-  ## arch-ext4-amd64 a boot after a reset came up with ``kernel.tainted``
-  ## 512 (TAINT_WARN, a kernel warning; measured 2026-11-17 under the
-  ## build host's load). The add-on writes no state the kernel taints for,
-  ## so the hard-reset gate does not count it; comparisons within one boot
-  ## still do.
-  if b.isArchFamily: @["sysctl:kernel.tainted"] else: @[]
-
 proc settleAfterPacman(g: Guest) =
   ## A ``pacman`` transaction arms ``ConditionNeedsUpdate`` (its hook
   ## touches ``/usr``), so the next boot runs ``ldconfig``,
