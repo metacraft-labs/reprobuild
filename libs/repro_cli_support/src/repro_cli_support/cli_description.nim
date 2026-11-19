@@ -3390,15 +3390,16 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Remove from Scoop the packages this apply drops (only " &
             "what Reprobuild installed and nothing holds)"
         `homeApplyPlatform`
-      subcmd "plan", help = "Show what the next apply would do; exit " &
-          "non-zero on drift":
+      subcmd "plan", help = "Show what the next apply would do (the " &
+          "preview `apply --plan` prints); exit non-zero on drift or on " &
+          "a package with no realization":
         `homePlanHost`
         boolFlag allowDrift is bool, help = "Exit 0 even when drift is detected"
         boolFlag reconcileDrift is bool,
           help = "Plan replacing drifted targets"
         boolFlag json is bool,
           help = "Print the plan as one JSON document (schema " &
-            "reprobuild.home.plan.v1); the exit code is the same as without it"
+            "reprobuild.home.plan.v2); the exit code is the same as without it"
       subcmd "export", help = "Print the evaluated home-profile intent " &
           "(activities, config, hosts, resources, the host's selection, " &
           "provenance) as JSON, or check a committed export; exit 1 when " &

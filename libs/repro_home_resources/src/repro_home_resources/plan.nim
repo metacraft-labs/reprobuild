@@ -1,24 +1,16 @@
-## `repro home plan` — non-mutating preview.
+## The resource planner: the per-resource decisions of a home apply.
 ##
 ## Per the spec ("Lifecycle Decision Algorithm" + the M68 deliverable):
 ## the planner consumes the same DesiredSet + recorded bindings the
-## apply pipeline does, computes the per-resource decision, and
-## renders a human-readable diff. It must NOT touch the filesystem
-## or the registry beyond the read-only observation pass.
+## apply pipeline does and computes the per-resource decision. It must
+## NOT touch the filesystem or the registry beyond the read-only
+## observation pass.
 ##
-## Output format (stable; gate 1 asserts the first line and the
-## per-resource lines):
-##
-##   repro home plan: <N> resource(s) planned, <K> drift(s)
-##     create   <address> (<kind>)
-##     update   <address> (<kind>)
-##     destroy  <address> (<kind>)
-##     no-op    <address> (<kind>)
-##     DRIFT    <address> (<kind>)   expected=<12hex> observed=<12hex>
-##
-## Exit code (computed by the caller): 0 if no changes / no drift;
-## 0 if changes; non-zero if drift detected and `--allow-drift` was
-## not passed.
+## It has one caller that renders: `runApplyPlan`
+## (`repro_home_apply/pipeline.nim`), whose preview — packages, stow,
+## generated files, managed blocks, launchers and these resources — is
+## what both `repro home plan` and `repro home apply --plan` print. This
+## module renders nothing itself.
 
 import std/[os, strutils, tables]
 
@@ -451,20 +443,3 @@ proc composePlan*(desired: DesiredSet;
 # Rendering.
 # ---------------------------------------------------------------------------
 
-proc renderPlan*(report: PlanReport): string =
-  ## Render the plan to a stable, line-oriented format. Used by
-  ## the `repro home plan` CLI; also useful for the gate's stdout
-  ## assertions.
-  result = "repro home plan: " & $report.actions.len &
-    " resource(s) planned, " & $report.driftCount & " drift(s)\n"
-  for a in report.actions:
-    var line = "  " & a.summary
-    if a.kind == rakDriftBlocked:
-      let expectedShort =
-        if a.driftExpectedHex.len >= 12: a.driftExpectedHex[0 ..< 12]
-        else: a.driftExpectedHex
-      let observedShort =
-        if a.driftObservedHex.len >= 12: a.driftObservedHex[0 ..< 12]
-        else: a.driftObservedHex
-      line.add("   expected=" & expectedShort & " observed=" & observedShort)
-    result.add(line & "\n")

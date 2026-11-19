@@ -17,6 +17,7 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_core/canonical_work_dir
+import repro_core/paths
 
 when defined(posix):
   import std/posix
@@ -94,6 +95,33 @@ suite "canonical work trees: the safe path":
     # builds each lock a different file.
     check dirExists(r.system / "k-empty")
     check fileExists(r.system / "k-empty" / "lock")
+
+  test "a tree nested past MAX_PATH is emptied and removed whole":
+    # An npm tree nests far past 260 characters. The first gemini-cli run
+    # with canonical trees left 131 MB behind: the removal used the plain
+    # path and stopped at the first file too deep to name on Windows.
+    let r = freshRoots("deep")
+    defer: cleanup(r.base)
+    var outcome = tryAcquireCanonicalWork("k-deep", r.system, r.user)
+    require outcome.status == cwsAcquired
+    check emptyCanonicalWorkTree(outcome.lease) == ""
+    proc deepTree(root: string): string =
+      result = root
+      for i in 0 ..< 12:
+        result = result / ("node_modules-" & repeat('d', 20) & $i)
+      createDir(extendedPath(result))
+      writeFile(extendedPath(result / "index.js"), "deep")
+    let deep = deepTree(outcome.lease.workDir)
+    check deep.len > 300
+    writeFile(outcome.lease.workDir / "top.txt", "x")
+    check emptyCanonicalWorkTree(outcome.lease) == ""
+    check not fileExists(extendedPath(deep / "index.js"))
+    check not fileExists(outcome.lease.workDir / "top.txt")
+    check dirExists(outcome.lease.workDir)
+    let deep2 = deepTree(outcome.lease.workDir)
+    check outcome.lease.releaseCanonicalWork(removeTree = true) == ""
+    check not fileExists(extendedPath(deep2 / "index.js"))
+    check not dirExists(outcome.lease.workDir)
 
   test "a failed run's tree is kept for inspection":
     let r = freshRoots("kept")

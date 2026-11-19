@@ -19633,6 +19633,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_m83_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/m83/t_e2e_home_plan_previews_what_apply_plan_previews.nim",
+    binary: "build/test-bin/t_e2e_home_plan_previews_what_apply_plan_previews",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_m83_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/m83/t_e2e_home_planner_refuses_system_scope_resource.nim",
     binary: "build/test-bin/t_e2e_home_planner_refuses_system_scope_resource",
     defines: @[],

@@ -16,8 +16,9 @@
 ##
 ## ISOLATION. Every run gets its own `HOME`, profile directory, state
 ## directory, store root, XDG roots and fake registry hive
-## (`REPRO_REGISTRY_ROOT`) under one temp directory. `repro home plan` is
-## non-mutating; the gates that also drive `repro home apply` through
+## (`REPRO_REGISTRY_ROOT`) under one temp directory. `repro home plan` (the
+## whole-apply preview `repro home apply --plan` prints, packages included)
+## realizes and places nothing; the gates that also drive `repro home apply` through
 ## `runRepro` change only the sandbox, the registry included.
 ##
 ## THE `nim` SPY, AND WHY IT IS NOT A MOCK. "The second run is an action-cache
@@ -225,11 +226,17 @@ proc runMerged(exe: string; args: openArray[string]; workingDir = "";
   result.exitCode = p.waitForExit()
   p.close()
 
-proc runHomePlan*(sb: ProfileSandbox; host = DefaultSandboxHost): PlanRun =
-  ## One `repro home plan` against the sandbox.
+proc runHomePlan*(sb: ProfileSandbox; host = DefaultSandboxHost;
+                  extraEnv: openArray[(string, string)] = []): PlanRun =
+  ## One `repro home plan` against the sandbox. It previews the whole apply,
+  ## packages included, and fails on a package with no realization, so a
+  ## profile that selects packages passes `fixturePackageEnv` as `extraEnv`.
   let before = sb.nimSpawnCount()
+  let env = sb.sandboxEnv(host)
+  for (k, v) in extraEnv:
+    env[k] = v
   let (exitCode, output) = runMerged(reproBinary(), ["home", "plan"],
-    workingDir = sb.root, env = sb.sandboxEnv(host))
+    workingDir = sb.root, env = env)
   result.exitCode = exitCode
   result.output = output
   for line in output.splitLines():
