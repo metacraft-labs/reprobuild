@@ -15,7 +15,11 @@
 ## the half's registered store paths. Each case builds a half's stream with
 ## GNU tar the way a hostile host would and restores it by both entry points
 ## (`restoreNixHalf` and restore.sh). The https-only cases check that a plain
-## `http://` source, which anyone on the path could rewrite, is refused. See
+## `http://` source, which anyone on the path could rewrite, is refused, and
+## that an https:// server's redirect to `http://` is not followed (the
+## fixture there is Python's http.server behind TLS, with a certificate
+## `openssl` makes for 127.0.0.1: curl has to meet a real redirect, and no
+## other server answers one). See
 ## reprobuild-pm issues/2026-11-12-bundle-extraction-writes-every-tar-member-
 ## under-before-checking-it-against-the-declared.md.
 ##
@@ -26,7 +30,8 @@
 ## URLs. See reprobuild-pm issues/2026-11-16-bundle-download-builds-a-curl-
 ## config-from-unvalidated-latest-json-fields.md.
 
-import std/[algorithm, json, os, osproc, strutils, tempfiles, unittest]
+import std/[algorithm, json, os, osproc, sequtils, streams, strutils, tempfiles,
+            unittest]
 import repro_bundle
 import repro_bundle/[nix_half, sources_half, select, bootstrap, github]
 import repro_local_store/store_bundle
@@ -1088,6 +1093,178 @@ suite "bundles are fetched over https only":
       check code != 0
       check "refusing" in log
       check variable in log
+
+# Workspace-Bundles.md §7 step 2: every download carries `--proto
+# =https,file --proto-redir =https`, so an https:// server, or whoever holds
+# its certificate, cannot send a transfer on to plain http://, which anyone
+# on the path could answer. `repro bundle restore` reads a `github:`
+# source's latest.json, and with it every part's SHA-256, this way;
+# restore.sh fetches the Nix half's parts and registration this way (their
+# hashes are baked into the script). Regression tests for reprobuild-pm
+# issue 2026-11-18-bundle-restore-has-no-test-for-a-redirect-to-plain-http.md.
+# curl holds a followed redirect to both lists, so either flag alone
+# refuses the downgrade (curl 8.5.0: `Protocol "http" not supported or
+# disabled in libcurl`): removing only one of them fails no behaviour test,
+# which is why the first case checks that both are carried.
+# Red-then-green: with `CurlProtocols`, or restore.sh's `CURL_PROTO`, made
+# empty, curl follows the redirect, the http:// listener records it and
+# that entry point's case fails; restored, both cases pass.
+
+const RedirectServer = """
+import http.server, os, socketserver, ssl, sys, threading
+cert, key, logdir = sys.argv[1:4]
+class Quiet(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def record(self, name):
+        with open(os.path.join(logdir, name), "a") as f:
+            f.write(self.path + "\n")
+class Plain(Quiet):
+    # Anything that reaches here was downgraded: record it, then serve a
+    # body, so a client that got here does not fail for want of one.
+    def do_GET(self):
+        self.record("http-hits")
+        self.send_response(200)
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"{}")
+class Redirect(Quiet):
+    def do_GET(self):
+        self.record("https-hits")
+        self.send_response(302)
+        self.send_header("Location", "http://127.0.0.1:%d%s" %
+                         (plain.server_address[1], self.path))
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+class Server(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    daemon_threads = True
+plain = Server(("127.0.0.1", 0), Plain)
+tls = Server(("127.0.0.1", 0), Redirect)
+ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+ctx.load_cert_chain(cert, key)
+tls.socket = ctx.wrap_socket(tls.socket, server_side=True)
+threading.Thread(target=plain.serve_forever, daemon=True).start()
+print("READY %d" % tls.server_address[1], flush=True)
+tls.serve_forever()
+"""
+
+type RedirectFixture = object
+  server: Process
+  base: string     ## https://127.0.0.1:PORT
+  caBundle: string ## the self-signed certificate, for CURL_CA_BUNDLE
+  logDir: string
+
+proc startRedirectFixture(top: string): RedirectFixture =
+  ## An https:// server on loopback that answers every GET with a 302 to
+  ## the same path on a plain http:// listener; both record each request
+  ## they get, in `https-hits` and `http-hits` under `logDir`.
+  let openssl = findExe("openssl")
+  let python = findExe("python3")
+  doAssert openssl.len > 0 and python.len > 0,
+    "openssl (in the dev shell) and python3 (from the host, as" &
+    " t_repro_deploy_agent_fetch_is_bounded uses it) are needed"
+  result.logDir = top / "redirect-log"
+  createDir(result.logDir)
+  result.caBundle = top / "redirect-cert.pem"
+  let key = top / "redirect-key.pem"
+  discard sh(quoteShell(openssl) & " req -x509 -newkey rsa:2048 -nodes" &
+    " -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1" &
+    " -keyout " & quoteShell(key) & " -out " & quoteShell(result.caBundle) &
+    " 2>&1")
+  writeFile(top / "redirect-server.py", RedirectServer)
+  result.server = startProcess(python, args = ["-I", top /
+    "redirect-server.py", result.caBundle, key, result.logDir],
+    options = {poStdErrToStdOut})
+  var ready = ""
+  try: ready = result.server.outputStream.readLine()
+  except IOError: discard
+  if not ready.startsWith("READY "):
+    # Not started: stop it here, as no caller's defer holds it yet.
+    result.server.kill()
+    discard result.server.waitForExit()
+    let early = ready & result.server.outputStream.readAll()
+    result.server.close()
+    doAssert false, "redirect fixture did not start:\n" & early
+  result.base = "https://127.0.0.1:" & ready["READY ".len .. ^1]
+
+proc stop(f: RedirectFixture) =
+  f.server.kill()
+  discard f.server.waitForExit()
+  f.server.close()
+
+proc hits(f: RedirectFixture; name: string): seq[string] =
+  let p = f.logDir / name
+  if fileExists(p):
+    for line in readFile(p).splitLines():
+      if line.len > 0: result.add(line)
+
+suite "a redirect to plain http:// is not followed":
+  test "both entry points carry both curl protocol limits":
+    # Each flag alone already refuses the redirect below, so only this
+    # notices one of them going.
+    check @CurlProtocols == @["--proto", "=https,file", "--proto-redir",
+                              "=https"]
+    let script = renderRestoreScript(%*{"system": "x86_64-linux",
+      "name": "bundle"}, true, unfetchableHalf(), NoHandoffLatest)
+    check "\nCURL_PROTO=\"--proto =https,file --proto-redir =https\"\n" in
+      script
+    for line in script.splitLines():
+      if "curl " in line and "command -v" notin line and
+          not line.strip().startsWith("#"):
+        checkpoint line
+        check "$CURL_PROTO" in line
+
+  test "restoreBundle refuses a github: source's redirect to http://":
+    let top = createTempDir("repro-bundle-redir-", "")
+    defer: removeDir(top)
+    let f = startRedirectFixture(top)
+    defer: f.stop()
+    # The raw base and the contents-API fallback both redirect.
+    let saved = [("REPRO_BUNDLE_GITHUB_RAW", f.base & "/raw"),
+                 ("REPRO_BUNDLE_GITHUB_API", f.base & "/api"),
+                 ("CURL_CA_BUNDLE", f.caBundle),
+                 ("NO_PROXY", "127.0.0.1"), ("no_proxy", "127.0.0.1")]
+    var before: seq[(string, bool, string)]
+    for (k, v) in saved:
+      before.add((k, existsEnv(k), getEnv(k)))
+      putEnv(k, v)
+    defer:
+      for (k, had, v) in before:
+        if had: putEnv(k, v) else: delEnv(k)
+    var failed = ""
+    try: discard restoreBundle(RestoreOptions(
+      source: "github:acme/bundles@0123abc/demo", workspaceDir: top / "ws"))
+    except CatchableError as e: failed = e.msg
+    checkpoint "restoreBundle said: " & failed
+    checkpoint "https hits: " & $f.hits("https-hits")
+    checkpoint "http hits: " & $f.hits("http-hits")
+    check "downloading from acme/bundles failed" in failed
+    # Positive control: TLS was trusted and both bases were asked, so the
+    # redirect was really met (a refused handshake would leave both empty).
+    check f.hits("https-hits").anyIt(it.startsWith("/raw/acme/bundles/"))
+    check f.hits("https-hits").anyIt(it.startsWith("/api/repos/acme/bundles/"))
+    check f.hits("http-hits").len == 0
+
+  test "restore.sh refuses a github: source's redirect to http://":
+    if findExe("nix-store").len == 0:
+      skip("restore.sh downloads a Nix half only where nix-store is installed")
+    else:
+      let top = createTempDir("repro-bundle-redir-sh-", "")
+      defer: removeDir(top)
+      let f = startRedirectFixture(top)
+      defer: f.stop()
+      # restore.sh runs under `env -i`: no proxy reaches it.
+      let (code, log) = runRestoreSh(top, unfetchableHalf(), top / "root",
+        "github:acme/bundles@0123abc/demo",
+        "REPRO_BUNDLE_GITHUB_RAW=" & quoteShell(f.base & "/raw") &
+        " REPRO_BUNDLE_GITHUB_API=" & quoteShell(f.base & "/api") &
+        " CURL_CA_BUNDLE=" & quoteShell(f.caBundle))
+      checkpoint "https hits: " & $f.hits("https-hits")
+      checkpoint "http hits: " & $f.hits("http-hits")
+      check code != 0
+      check "nix half download from acme/bundles failed" in log
+      check f.hits("https-hits").anyIt(it.startsWith("/raw/acme/bundles/"))
+      check f.hits("https-hits").anyIt(it.startsWith("/api/repos/acme/bundles/"))
+      check f.hits("http-hits").len == 0
 
 # Workspace-Bundles.md §7 step 4: a sources half's members are checked
 # against the checkouts and state files the half declares, and against
