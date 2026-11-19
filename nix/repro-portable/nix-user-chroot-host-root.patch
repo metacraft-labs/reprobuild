@@ -1,0 +1,211 @@
+--- a/main.cpp
++++ b/main.cpp
+@@ -26,17 +26,18 @@
+ using namespace std;
+ 
+ #define err_exit(format, ...) { fprintf(stderr, format ": %s\n", ##__VA_ARGS__, strerror(errno)); exit(EXIT_FAILURE); }
+-static int child_proc(const char *rootdir, const char *nixdir, uint8_t clear_env, list<struct DirMapping> dirMappings, list<struct SetEnv> envMappings, const char *executable, char * const new_argv[]);
++static int child_proc(const char *rootdir, const char *nixdir, const char *workdir, uint8_t clear_env, list<struct DirMapping> dirMappings, list<struct SetEnv> envMappings, const char *executable, char * const new_argv[]);
+ 
+ volatile uint8_t child_died = 0;
+ int child_pid = 0;
+ 
+ static void usage(const char *pname) {
+-    fprintf(stderr, "Usage: %s -n <nixpath> -- <command>\n", pname);
++    fprintf(stderr, "Usage: %s -n <nixpath> [-w <dir>] -- <command>\n", pname);
+     fprintf(stderr, "\t-c\tclear all env vars\n");
+     fprintf(stderr, "\t-m <src>:<src>\tmap src on the host to dest in the sandbox\n");
+     fprintf(stderr, "\t-d\tdelete all default dir mappings, may break things\n");
+     fprintf(stderr, "\t-p <var>\tpreserve the value of a variable across the -c clear\n");
++    fprintf(stderr, "\t-w <dir>\tworking directory inside the sandbox (default: the directory this was started in)\n");
+     fprintf(stderr, "\t-e\tadd an /escape-hatch to the sandbox, and run (outside the sandbox) any strings written to it\n");
+ 
+     exit(EXIT_FAILURE);
+@@ -58,31 +59,68 @@
+     close(fd);
+ }
+ 
+-static void add_path(string src, string dest, string rootdir) {
++struct DirMapping {
++  string src;
++  string dest;
++  // A top-level entry of the host root, mirrored as it is: a symlink stays a
++  // symlink (merged-/usr hosts make /bin, /lib, /lib64 and /sbin links into
++  // /usr), a directory or regular file is bind-mounted.
++  bool host_entry;
++};
++
++static void add_path(string src, string dest, string rootdir, bool host_entry) {
+   string path_buf2;
+ 
+   struct stat statbuf;
+-  if (stat(src.c_str(), &statbuf) < 0) {
++  int rc = host_entry ? lstat(src.c_str(), &statbuf) : stat(src.c_str(), &statbuf);
++  if (rc < 0) {
+     fprintf(stderr, "Cannot stat %s: %s\n", src.c_str(), strerror(errno));
+     return;
+   }
+ 
+   path_buf2 = rootdir + "/" + dest;
+ 
+-  if (S_ISDIR(statbuf.st_mode)) {
++  if (S_ISLNK(statbuf.st_mode)) {
++    char target[PATH_MAX];
++    ssize_t len = readlink(src.c_str(), target, sizeof(target) - 1);
++    if (len < 0) {
++      fprintf(stderr, "Cannot readlink %s: %s\n", src.c_str(), strerror(errno));
++      return;
++    }
++    target[len] = 0;
++    if (symlink(target, path_buf2.c_str()) < 0) {
++      fprintf(stderr, "Cannot symlink %s to %s: %s\n", path_buf2.c_str(), target, strerror(errno));
++    }
++  } else if (S_ISDIR(statbuf.st_mode)) {
+     mkdir(path_buf2.c_str(), statbuf.st_mode & ~S_IFMT);
+     if (mount(src.c_str(), path_buf2.c_str(), "none", MS_BIND | MS_REC, NULL) < 0) {
+       fprintf(stderr, "Cannot bind mount %s to %s: %s\n", src.c_str(), path_buf2.c_str(), strerror(errno));
+     }
+   } else if (S_ISREG(statbuf.st_mode)) {
+-    printf("bind-mounting file %s not supported", src.c_str());
++    int fd = open(path_buf2.c_str(), O_WRONLY | O_CREAT | O_CLOEXEC, statbuf.st_mode & ~S_IFMT);
++    if (fd >= 0) close(fd);
++    if (mount(src.c_str(), path_buf2.c_str(), "none", MS_BIND, NULL) < 0) {
++      fprintf(stderr, "Cannot bind mount %s to %s: %s\n", src.c_str(), path_buf2.c_str(), strerror(errno));
++    }
+   }
+ }
+ 
+-struct DirMapping {
+-  string src;
+-  string dest;
+-};
++// Every top-level entry of the host root except /nix, which the sandbox
++// replaces. A fixed list here is what hid /bin (and with it /bin/sh), /lib,
++// /lib64, /sbin, /opt, /srv, /mnt and /media from everything run inside.
++static void add_host_root(list<struct DirMapping> &dirMappings) {
++  DIR *root = opendir("/");
++  if (!root) {
++    err_exit("opendir(/)");
++  }
++  struct dirent *entry;
++  while ((entry = readdir(root)) != NULL) {
++    string name = entry->d_name;
++    if (name == "." || name == ".." || name == "nix") continue;
++    dirMappings.push_back({ "/" + name, name, true });
++  }
++  closedir(root);
++}
+ 
+ struct SetEnv {
+   string key;
+@@ -93,7 +131,7 @@
+   auto pos = input.find(":");
+   string src = input.substr(0, pos);
+   string dest = input.substr(pos + 1);
+-  return (struct DirMapping){ src, dest };
++  return (struct DirMapping){ src, dest, false };
+ }
+ 
+ static void handle_child_death(int signo, siginfo_t *info, void *context) {
+@@ -110,21 +148,12 @@
+   list<struct SetEnv> envMappings;
+   const char *t;
+ 
+-#define x(y) dirMappings.push_back({ "/" y, y })
+-  x("dev");
+-  x("proc");
+-  x("sys");
+-  x("run");
+-  x("tmp");
+-  x("var");
+-  x("etc");
+-  x("usr");
+-  x("home");
+-  x("root");
+-#undef x
++  char *workdir = NULL;
++
++  add_host_root(dirMappings);
+ 
+   int opt;
+-  while ((opt = getopt(argc, argv, "cen:m:dp:")) != -1) {
++  while ((opt = getopt(argc, argv, "cen:m:dp:w:")) != -1) {
+     switch (opt) {
+     case 'c':
+       clear_env = 1;
+@@ -145,6 +174,9 @@
+     case 'd':
+       dirMappings.clear();
+       break;
++    case 'w':
++      workdir = optarg;
++      break;
+     case 'p':
+       t = getenv(optarg);
+       if (t) {
+@@ -163,6 +195,10 @@
+     usage(argv[0]);
+   }
+ 
++  if (!workdir) {
++    workdir = getcwd(NULL, 0);
++  }
++
+   const char *tmpdir = getenv("TMPDIR");
+   if (!tmpdir) {
+     tmpdir = "/tmp";
+@@ -204,7 +240,7 @@
+     char buf[10];
+     read(unrace[0], buf, 10);
+     close(unrace[0]);
+-    return child_proc(rootdir, nixdir, clear_env, dirMappings, envMappings, argv[optind], argv + optind);
++    return child_proc(rootdir, nixdir, workdir, clear_env, dirMappings, envMappings, argv[optind], argv + optind);
+   } else {
+     close(unrace[0]);
+     char fifopath[PATH_MAX];
+@@ -234,7 +270,7 @@
+   }
+ }
+ 
+-static int child_proc(const char *rootdir, const char *nixdir, uint8_t clear_env, list<struct DirMapping> dirMappings, list<struct SetEnv> envMappings, const char *executable, char * const new_argv[]) {
++static int child_proc(const char *rootdir, const char *nixdir, const char *workdir, uint8_t clear_env, list<struct DirMapping> dirMappings, list<struct SetEnv> envMappings, const char *executable, char * const new_argv[]) {
+   // get uid, gid before going to new namespace
+   uid_t uid = getuid();
+   gid_t gid = getgid();
+@@ -253,7 +289,7 @@
+   for (list<struct DirMapping>::iterator it = dirMappings.begin();
+       it != dirMappings.end(); ++it) {
+     struct DirMapping m = *it;
+-    add_path(m.src, m.dest, rootdir);
++    add_path(m.src, m.dest, rootdir, m.host_entry);
+   }
+ 
+   // make sure nixdir exists
+@@ -290,10 +326,25 @@
+     err_exit("chroot(%s)", rootdir);
+   }
+ 
+-  chdir("/");
++  // Start where the caller was, not at the sandbox root. Only a directory
++  // the sandbox does not reach (one under the host's /nix) falls back to /.
++  const char *startdir = "/";
++  if (workdir && chdir(workdir) == 0) {
++    startdir = workdir;
++  } else {
++    if (workdir) {
++      fprintf(stderr, "nix-user-chroot: cannot enter %s inside the sandbox (%s); starting in /\n", workdir, strerror(errno));
++    }
++    chdir("/");
++  }
+ 
+   if (clear_env) clearenv();
+-  setenv("PATH", ENV_PATH, 1);
++  // The inherited PWD names the directory this was started in, which is not
++  // where the command starts; a shell that trusted it would report it.
++  setenv("PWD", startdir, 1);
++  // An empty ENV_PATH means "keep the caller's PATH": with every host
++  // directory visible, the host's tools resolve exactly as they did outside.
++  if (sizeof(ENV_PATH) > 1) setenv("PATH", ENV_PATH, 1);
+ 
+   for (list<struct SetEnv>::iterator it = envMappings.begin();
+        it != envMappings.end(); ++it) {
