@@ -54,6 +54,7 @@ verb	lock
 verb	locking
 verb	lsp
 verb	mcp
+verb	nimble
 verb	outdated
 verb	package
 verb	pressure
@@ -2479,3 +2480,7 @@ command	repro catalog verify
 flag	repro catalog verify	--previous
 flag	repro catalog verify	--source-set
 flag	repro catalog verify	--state
+command	repro nimble
+command	repro nimble verify
+flag	repro nimble verify	--lock
+flag	repro nimble verify	--store

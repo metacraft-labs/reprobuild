@@ -307,6 +307,16 @@ type
     # executor registered by ``repro_nimble_generator``; the generator's
     # network edges (`registry`, `refs`, `source`) are ``bakMetadataFetch``.
     bakCatalogIndex
+    # Nimble-Package-Catalog NPC-AREQ20: a SOURCE FETCH edge (`nimble.fetch`
+    # and the closure-index read before it). It retrieves a source object by
+    # the digest its lock row records -- from a mirror, else from the origin
+    # -- verifies it, and installs the verified tree in the local
+    # content-addressed source store; its declared output is a receipt. It is
+    # ``netFetch`` (its destinations are the mirrors and the origin) and runs
+    # in process, dispatched through the executor registered by
+    # ``repro_nimble_fetch``. Nothing downstream reaches the network: a
+    # compile edge receives only the store path.
+    bakSourceFetch
 
   NetworkMode* = enum
     ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
@@ -3732,7 +3742,7 @@ const PayloadKeyedBuiltinKinds* = {bakCopyFile, bakEnsureDir, bakWriteText,
   ##
   ## The executor-backed kinds (`bakWorkspaceVcs`, `bakForeignProvision`,
   ## `bakBinaryCacheSubstitute`, `bakMetadataFetch`, `bakSolveLock`,
-  ## `bakLockUpdate`, `bakCatalogIndex`) keep the key their constructor computes. Their
+  ## `bakLockUpdate`, `bakCatalogIndex`, `bakSourceFetch`) keep the key their constructor computes. Their
   ## payloads carry fields their designs keep out of the key on purpose: a
   ## git clone's reference path, filter, depth and single-branch flag are
   ## acceleration knobs, so a full and a shallow clone of one revision share
@@ -4524,7 +4534,7 @@ proc formatLockIdentityAudit*(findings: seq[LockIdentityAuditFinding]): string =
 # ---------------------------------------------------------------------------
 
 const NetworkFetchCapableKinds* = {bakMetadataFetch, bakBinaryCacheSubstitute,
-                                   bakForeignProvision}
+                                   bakForeignProvision, bakSourceFetch}
   ## The edge kinds that may carry ``netFetch``.
   ##
   ## The amendment's closing paragraph asks for exactly this: the
@@ -5012,9 +5022,11 @@ proc outputPathReady(action: BuildAction; path: string): bool =
   # NLF-M5: a metadata-fetch object and a generated lock are plain files
   # written by their executors, so they take the same readiness rule.
   # NPC-AREQ9: a catalog index edge's outputs are plain files too.
+  # NPC-AREQ20: a source fetch edge's output is its receipt, a plain file;
+  # the tree it installs is in the source store, not an engine output.
   if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs,
                      bakForeignProvision, bakMetadataFetch, bakSolveLock,
-                     bakCatalogIndex} and
+                     bakCatalogIndex, bakSourceFetch} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -8049,6 +8061,7 @@ func builtinKindName*(kind: BuildActionKind): string =
   of bakSolveLock: "solve-lock"
   of bakLockUpdate: "lock-update"
   of bakCatalogIndex: "catalog-index"
+  of bakSourceFetch: "source-fetch"
 
 const BuiltinPayloadPeerKeyDomain* = "reprobuild/peer-builtin-payload/v1"
   ## The domain `builtinPayloadPeerKey` frames a builtin's peer-cache key
@@ -17735,8 +17748,15 @@ type
     ## Indirect for the usual layering reason: the index writer and the
     ## static `.nimble` reader live above the engine.
 
+  SourceFetchExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Nimble-Package-Catalog NPC-AREQ20: hook installed by
+    ## ``repro_nimble_fetch`` for its ``bakSourceFetch`` edges. Indirect for
+    ## the usual layering reason: the mirror client, the archive extractor
+    ## and the source store live above the engine.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
+var sourceFetchExecutor {.threadvar.}: SourceFetchExecutor
 var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
@@ -17800,6 +17820,14 @@ proc registerCatalogIndexExecutor*(executor: CatalogIndexExecutor) =
 
 proc clearCatalogIndexExecutor*() =
   catalogIndexExecutor = nil
+
+proc registerSourceFetchExecutor*(executor: SourceFetchExecutor) =
+  ## Register the per-thread executor for ``bakSourceFetch`` edges
+  ## (NPC-AREQ20). The Nimble source fetch installs one bound to its run.
+  sourceFetchExecutor = executor
+
+proc clearSourceFetchExecutor*() =
+  sourceFetchExecutor = nil
 
 proc registerForeignProvisionExecutor*(provisioner: string;
                                        executor: ForeignProvisionExecutor) =
@@ -18969,6 +18997,22 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.reason = ciRes.reason
       result.launched = ciRes.launched
       result.runQuotaBackend = "catalog-index"
+      return
+    of bakSourceFetch:
+      # Fail CLOSED when nothing is registered: a fetch edge that quietly
+      # no-ops would hand a build a store path nobody verified.
+      if sourceFetchExecutor.isNil:
+        raiseEngine(
+          "bakSourceFetch action requires registerSourceFetchExecutor " &
+          "before runBuild: " & action.id)
+      let sfRes = sourceFetchExecutor(action)
+      result.status = sfRes.status
+      result.exitCode = sfRes.exitCode
+      result.stdout = sfRes.stdout
+      result.stderr = sfRes.stderr
+      result.reason = sfRes.reason
+      result.launched = sfRes.launched
+      result.runQuotaBackend = "source-fetch"
       return
     of bakSolveLock:
       if solveLockExecutor.isNil:

@@ -228,7 +228,9 @@ const
     # Declared with its page after the round: `repro catalog publish`.
     "repro catalog", "repro catalog publish",
     # The Nimble index generator's verbs.
-    "repro catalog generate", "repro catalog verify"]
+    "repro catalog generate", "repro catalog verify",
+    # The Nimble package catalog's client verbs.
+    "repro nimble", "repro nimble verify"]
     ## The commands whose flags and environment variables are compared:
     ## every command repro declares.
   SpecifiedNotImplemented = [

@@ -260,6 +260,7 @@ from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 import repro_cli_support/catalog_generate
+import repro_cli_support/nimble_verify
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -107116,6 +107117,11 @@ proc runReproCommandLine(programName: string; args: seq[string];
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
         r.state)
+  of ReproCommandLineCommand.nimble:
+    case conf.nimble.command
+    of ReproCommandLineNimbleCommand.verify:
+      let r = conf.nimble.verify
+      return runNimbleVerifyCommand(r.lock, r.store)
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:
