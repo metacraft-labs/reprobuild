@@ -13,18 +13,13 @@
 ## * everything ``cliConfiguration`` generates for ``ReproCommandLine``:
 ##   ``ReproCommandLine.load(argv, sources, options)``, ``helpText``,
 ##   ``helpJson``, ``complete``, ``completionScript``, ``cliGrammar``, ...;
-## * ``reproPassThrough(conf)``: for a command still parsed by its own code
-##   (its ``passThrough`` positional), the command's path and the arguments
-##   after it, unparsed;
-## * ``ReproPassThroughCommands``: the grammar indexes of those commands;
 ## * ``reproDeclaredEnv()``, ``reproDeclaredEnvFor(argv)``: the environment
 ##   the parser is loaded with -- only the variables a parameter (of the
-##   command being parsed) declares, each looked up by name.
-##
-## ``reproArgvForParser`` is what makes an unmigrated command's arguments
-## reach it unparsed: it puts ``--`` right after the words that select such a
-## command, so the parser files everything after them under the command's
-## ``passThrough`` positional.
+##   command being parsed) declares, each looked up by name;
+## * ``reproArgvOf(path, values)``: the argv words of a command line repro
+##   spawns of itself, written by clispec's renderer (``cliArgvOf``) from the
+##   values the spawner gives each parameter, so the child's parse is the
+##   round trip of the parent's values.
 ##
 ## ``repro exec``'s command and ``repro run``'s arguments are clispec
 ## ``afterSeparator`` positionals: the parser itself fills them with the
@@ -46,70 +41,6 @@ export ReproCommandLineType, ReproProgramName
 # --zstd-level`, `bundle create --level`, ...).
 export options
 
-proc passThroughCode(model: CliModel[NoCliExtension,
-                     ReproCommandLineParamExt]): NimNode =
-  ## ``ReproPassThroughCommands`` and ``reproPassThrough`` for ``model``,
-  ## using the names ``cliProgramCode`` gives the configuration objects.
-  var problems: seq[CliGrammarProblem] = @[]
-  var decls: seq[CliParam[ReproCommandLineParamExt]] = @[]
-  let g = cliGrammarOf(model, ReproProgramName, problems, decls)
-  let names = cliGeneratedNames(g, ReproCommandLineType)
-  var passThrough: seq[int] = @[]
-  for k, cmd in g.commands:
-    if cmd.isCall:
-      continue
-    for id in cmd.ownParams:
-      if decls[id].ext.passThrough:
-        if decls[id].name != PassThroughParamName or
-            g.params[id].kind != cpkPositional:
-          error("repro command line: the passThrough positional of '" &
-            cmd.path.join(" ") & "' must be `pos " & PassThroughParamName &
-            " is seq[string]`")
-        if cmd.children.len > 0:
-          error("repro command line: '" & cmd.path.join(" ") &
-            "' has subcommands and a passThrough positional")
-        passThrough.add(k)
-  var indexes = nnkBracket.newTree()
-  for k in passThrough:
-    indexes.add(newLit(k))
-  result = newStmtList()
-  result.add(nnkConstSection.newTree(nnkConstDef.newTree(
-    postfix(ident("ReproPassThroughCommands"), "*"), newEmptyNode(),
-    indexes)))
-  # One `if` per pass-through command, testing each discriminator on the
-  # way down and reading the command's `args` field at the end.
-  let conf = ident("conf")
-  var body = newStmtList()
-  for k in passThrough:
-    var chain: seq[int] = @[]
-    var at = k
-    while at > 0:
-      chain.insert(at, 0)
-      at = g.commands[at].parent
-    var cond: NimNode = nil
-    var access = conf
-    var parent = 0
-    for child in chain:
-      let enumName = ident(cliCommandEnumName(names, parent))
-      let test = infix(newDotExpr(access, ident("command")), "==",
-        newDotExpr(enumName, nnkAccQuoted.newTree(
-          ident(names.fieldOfChild[child]))))
-      cond = if cond.isNil: test else: infix(cond, "and", test)
-      access = newDotExpr(access, nnkAccQuoted.newTree(
-        ident(names.fieldOfChild[child])))
-      parent = child
-    var path = nnkBracket.newTree()
-    for word in g.commands[k].path:
-      path.add(newLit(word))
-    let args = newDotExpr(access, ident(PassThroughParamName))
-    body.add(newIfStmt((cond, newStmtList(nnkReturnStmt.newTree(
-      nnkTupleConstr.newTree(newLit(true), prefix(path, "@"), args))))))
-  let resultType = quote do:
-    tuple[found: bool, path: seq[string], args: seq[string]]
-  result.add(newProc(postfix(ident("reproPassThrough"), "*"),
-    params = [resultType, newIdentDefs(conf, ident(ReproCommandLineType))],
-    body = body))
-
 proc reproProgramCode*(model: CliModel[NoCliExtension,
                        ReproCommandLineParamExt]): NimNode =
   ## The program generated from a model of repro's command line (see the
@@ -121,37 +52,11 @@ proc reproProgramCode*(model: CliModel[NoCliExtension,
     exported = true)
   result.add(cliConfigurationCode(model, ReproCommandLineType,
     ReproProgramName, exported = true))
-  result.add(passThroughCode(model))
 
 macro reproCommandLineProgram() =
   reproProgramCode(reproCommandLineModel())
 
 reproCommandLineProgram()
-
-proc reproArgvForParser*(argv: openArray[string]): seq[string] =
-  ## ``argv`` with ``--`` inserted right after the words that select a
-  ## command still parsed by its own code (``ReproPassThroughCommands``), so
-  ## everything after those words reaches that code unparsed. Any other
-  ## command line is returned unchanged for the parser to accept or reject.
-  ##
-  ## The words before the command's are subcommand words and the root's
-  ## switches, which all start with ``-`` and take no value, so a word that
-  ## does not start with ``-`` is always the next subcommand word.
-  let g = ReproCommandLine.cliGrammar()
-  result = @argv
-  var command = 0
-  for i, word in argv:
-    if word == "--":
-      return
-    if word.startsWith("-"):
-      continue
-    let child = cliChildNamed(g, command, word)
-    if child < 0:
-      return
-    if child in ReproPassThroughCommands:
-      result.insert("--", i + 1)
-      return
-    command = child
 
 proc reproCommandAt*(path: openArray[string]): int =
   ## The grammar index of the command the subcommand words ``path`` reach
@@ -167,10 +72,6 @@ proc reproCommandPath*(command: int): seq[string] =
   ## The canonical subcommand words of the command at grammar index
   ## ``command``.
   ReproCommandLine.cliGrammar().commands[command].path
-
-proc reproCommandIsPassThrough*(command: int): bool =
-  ## Whether the command is still parsed by its own code.
-  command in ReproPassThroughCommands
 
 proc reproCommandTakesRest*(command: int): bool =
   ## Whether the command's words after it are a clispec `rest` positional:
@@ -291,7 +192,8 @@ proc reproDeclaredEnvFor*(argv: openArray[string]): Table[string, string] =
   ## command line reads.
   ##
   ## The words before the command's are subcommand words and the root's
-  ## switches, as in ``reproArgvForParser``.
+  ## switches, which all start with ``-`` and take no value, so a word that
+  ## does not start with ``-`` is always the next subcommand word.
   let g = ReproCommandLine.cliGrammar()
   var chain = @[0]
   var command = 0
@@ -328,7 +230,7 @@ proc reproWordsAfterCommand*(argv: openArray[string]): seq[string] =
   ## command: what a command handed its arguments unparsed (the daemon's
   ## ``rawArgs`` of `repro build`) receives. The words before the command's
   ## are subcommand words and the root's switches, as in
-  ## ``reproArgvForParser``.
+  ## ``reproDeclaredEnvFor``.
   let g = ReproCommandLine.cliGrammar()
   var command = 0
   var after = 0
@@ -389,8 +291,8 @@ proc loadReproCommandLine*(argv: openArray[string];
   ## variable set in nearly every environment, such as `$SHELL`, or one whose
   ## bad value is a warning where the flag's is an error).
   try:
-    (conf, origins) = ReproCommandLine.loadWithOrigins(
-      reproArgvForParser(argv), CliSources(env: reproDeclaredEnvFor(argv)))
+    (conf, origins) = ReproCommandLine.loadWithOrigins(argv,
+      CliSources(env: reproDeclaredEnvFor(argv)))
   except CliHelpRequest as e:
     ReproCommandLine.printHelp(e)
     return 0
@@ -418,7 +320,7 @@ proc loadReproCommandLine*(argv: openArray[string];
   ## request printed on stdout (0), or a usage or configuration error
   ## reported on stderr (2).
   try:
-    conf = ReproCommandLine.load(reproArgvForParser(argv),
+    conf = ReproCommandLine.load(argv,
       CliSources(env: reproDeclaredEnvFor(argv)))
   except CliHelpRequest as e:
     # Printed by clispec's printer, which styles a help page for stdout
@@ -445,3 +347,64 @@ proc runReproArgs*(argv: openArray[string];
   result = loadReproCommandLine(argv, conf)
   if result < 0:
     result = run(conf)
+
+proc reproArgvOf*(path: openArray[string];
+                  values: openArray[(string, seq[string])];
+                  commandWords = true): seq[string] {.raises: [ValueError].} =
+  ## The argv words (without the image) of the command at ``path`` (its
+  ## subcommand words) that give each named parameter the values listed: one
+  ## value per occurrence of a list, ``true`` / ``false`` for a switch, the
+  ## value of a flag or a positional otherwise. A parameter left out, or
+  ## listed with no values, is not written, so the child takes its default.
+  ##
+  ## The words are written by clispec's renderer (``cliArgvOf``) from the
+  ## description: each flag in its long spelling with its value attached
+  ## (``--<long>=<value>``, so an empty value or one that starts with ``-``
+  ## stays that flag's), ``--`` where a positional or an ``afterSeparator``
+  ## list needs it. The generated parser reads them back to exactly these
+  ## values, which is what a spawner of a process repro runs of itself
+  ## needs: it names the values, never the words.
+  ##
+  ## Raises ``ValueError`` when ``path`` names no command or a name is no
+  ## parameter of that command.
+  let g = ReproCommandLine.cliGrammar()
+  let leaf = reproCommandAt(path)
+  if leaf < 0:
+    raise newException(ValueError, "repro command line: no command `" &
+      @path.join(" ") & "`")
+  var selected: seq[int] = @[]
+  var at = leaf
+  while at > 0:
+    selected.insert(at, 0)
+    at = g.commands[at].parent
+  selected.insert(0, 0)
+  var given = newSeq[seq[CliCandidate]](g.params.len)
+  var params: seq[int] = @[]
+  var index = 0
+  for (name, texts) in values:
+    var id = -1
+    for candidate in g.commands[leaf].params:
+      if nimIdentNormalize(g.params[candidate].name) ==
+          nimIdentNormalize(name):
+        id = candidate
+        break
+    if id < 0:
+      raise newException(ValueError, "repro command line: `" &
+        @path.join(" ") & "` has no parameter `" & name & "`")
+    if texts.len == 0:
+      continue
+    params.add(id)
+    for text in texts:
+      inc index
+      given[id].add(CliCandidate(source: csCli, form: ccfValue, text: text,
+        argvIndex: index, valueArgvIndex: -1))
+  cliArgvOf(g, selected, given, params, commandWords)
+
+proc printReproNamespaceHelp*(namespace: string; topic: seq[string]) =
+  ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
+  ## when the words name one, else the namespace's (whose own parser always
+  ## answered `help` with its usage, whatever followed).
+  try:
+    printReproHelp(@[namespace] & topic)
+  except CliUsageError:
+    printReproHelp([namespace])

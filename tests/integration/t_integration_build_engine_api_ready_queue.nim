@@ -1,3 +1,7 @@
+# The RunQuota helper role of the image this test stands in for: its
+# command line read by repro's generated parser.
+from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
+  selectsRunQuotaHelper
 import std/[algorithm, json, os, osproc, strutils, tempfiles, times, unittest]
 when defined(posix):
   import std/posix
@@ -267,8 +271,8 @@ when isMainModule:
   if params.len > 0 and params[0] == "fixture-action":
     fixtureMain(params)
     quit 0
-  if params.len > 0 and params[0] == "__repro-runquota-helper":
-    quit runRunQuotaHelperCli(params[1 .. ^1])
+  if selectsRunQuotaHelper(params):
+    quit runRunQuotaHelperArgs(params)
 
 suite "integration_build_engine_api_ready_queue":
   test "inline RunQuota impossible leases report a bounded deadlock":

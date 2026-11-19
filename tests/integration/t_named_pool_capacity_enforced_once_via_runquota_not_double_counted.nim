@@ -31,6 +31,10 @@
 ##    (Re-adding the local gate on the active path makes maxConcurrency == 1
 ##    and fails the lower bound.)
 
+# The RunQuota helper role of the image this test stands in for: its
+# command line read by repro's generated parser.
+from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
+  selectsRunQuotaHelper
 import std/[algorithm, os, osproc, strutils, tempfiles, times, unittest]
 when defined(posix):
   import std/posix
@@ -144,8 +148,8 @@ when isMainModule:
   if params.len > 0 and params[0] == "fixture-action":
     fixtureMain(params)
     quit 0
-  if params.len > 0 and params[0] == "__repro-runquota-helper":
-    quit runRunQuotaHelperCli(params[1 .. ^1])
+  if selectsRunQuotaHelper(params):
+    quit runRunQuotaHelperArgs(params)
 
 suite "RA-13 named pool enforced once via RunQuota (no double-gate)":
 
@@ -168,13 +172,10 @@ suite "RA-13 named pool enforced once via RunQuota (no double-gate)":
     check resolved.resources.namedPools[0].units == 1'u32
     let command = ReproCommandSpec(argv: pooled.argv, cwd: getCurrentDir())
     let argv = helperCliArgs(request, command, "/tmp/ra13-result.json")
-    var sawPool = false
-    var sawUnits = false
-    for i in 0 ..< argv.len - 1:
-      if argv[i] == "--pool" and argv[i + 1] == "link": sawPool = true
-      if argv[i] == "--pool-units" and argv[i + 1] == "1": sawUnits = true
-    check sawPool
-    check sawUnits
+    # Each value attached to its declared flag, the words the helper's
+    # command line (`repro internal runquota-helper`) reads back.
+    check "--pool=link" in argv
+    check "--pool-units=1" in argv
 
   when isNixSupported:
     test "named pool gated by RunQuota only — local cap is not double-counted":

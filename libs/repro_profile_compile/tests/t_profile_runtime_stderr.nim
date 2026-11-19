@@ -15,11 +15,14 @@ import std/[os, osproc, strutils, tables, tempfiles, unittest]
 from repro_core/process_streams import drainStream, drainStdoutAndStderr
 import repro_profile
 import repro_profile_compile/[compile, helper]
+# The compile helper's command line, read by repro's generated parser.
+from repro_cli_support/profile_helper_cli import runProfileHelperArgs
 
 const ProjectRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
 
 if paramCount() > 0 and paramStr(1) == "--profile-helper":
-  quit(runProfileCompileHelper(commandLineParams()[1 .. ^1]))
+  quit(runProfileHelperArgs(@["__repro-compile-profile"] &
+    commandLineParams()[1 .. ^1]))
 
 const IntentBody = """
 import repro_profile

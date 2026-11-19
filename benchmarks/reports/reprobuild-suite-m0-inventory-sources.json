@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2996,
+    "nimTestBinaries": 2997,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 804,
     "staticallyDetectedRuntimeCompilerFlowTests": 149,
-    "testEntries": 3046
+    "testEntries": 3047
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1721,7 +1721,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1652,
+      "integration": 1653,
       "platform/destructive": 198,
       "pure unit": 804,
       "unclassified": 368
@@ -1938,9 +1938,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2996,
+    "nimTestBinaryCount": 2997,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3046
+    "testEntryCount": 3047
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5605,6 +5605,7 @@
             "daemon",
             "daemonBin",
             "declared",
+            "description",
             "devEnvEngine",
             "devSession",
             "died",
@@ -6725,7 +6726,7 @@
             "outputPath",
             "socketPath"
           ],
-          "line": 142,
+          "line": 146,
           "path": "tests/integration/t_integration_scheduler_dependency_gathering_policies.nim",
           "patterns": [
             "cc"
@@ -16275,6 +16276,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_daemon_core",
         "repro_test_support"
       ],
@@ -16467,6 +16469,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_daemon_core",
         "repro_test_support"
       ],
@@ -24148,6 +24151,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_core",
         "repro_profile",
         "repro_profile_compile"
@@ -38897,6 +38901,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_profile",
         "repro_profile_compile",
@@ -41294,6 +41299,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_depfile",
         "repro_runquota",
@@ -41522,6 +41528,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_depfile",
         "repro_runquota",
@@ -41543,6 +41550,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_depfile",
         "repro_runquota",
@@ -41617,6 +41625,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_runquota",
         "repro_test_support"
       ],
@@ -41636,6 +41645,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_runquota",
         "repro_test_support"
       ],
@@ -43003,6 +43013,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cs_m6_role_process_command_lines",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_daemon_core",
+        "repro_runquota",
+        "repro_store_daemon"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_cs_m6_role_process_command_lines.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cs_m6_round8a_command_lines",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43532,6 +43562,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_depfile",
         "repro_hash",
@@ -46415,6 +46446,7 @@
       "localDependencyShape": [
         "io_mon",
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_depfile",
         "repro_hash",
@@ -46940,6 +46972,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_core",
         "repro_depfile",
         "repro_hash",
@@ -49565,6 +49598,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_runquota",
         "repro_test_support"
       ],
@@ -52543,7 +52577,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_repro_reap_verb_is_dispatched.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -53285,6 +53319,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_runquota",
         "repro_test_support"
       ],
@@ -53570,6 +53605,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
+        "repro_cli_support",
         "repro_runquota",
         "repro_test_support"
       ],
@@ -58959,7 +58995,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

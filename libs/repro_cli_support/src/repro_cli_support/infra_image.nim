@@ -450,9 +450,13 @@ proc stageDebs(o: InfraImageOptions; work: string): seq[tuple[sha, path: string]
 proc bootstrapFlags(o: InfraImageOptions; work: string;
                     files: var seq[tuple[local, name: string]]): seq[string] =
   let bs = o.baseOs.bootstrap
-  for (flag, rel, name) in [("--deploy-signers", bs.deploySigners,
+  # The bootstrap's own options (its command line, not repro's).
+  const
+    DeploySignersOption = "--deploy-signers"
+    CachePublishersOption = "--cache-publishers"
+  for (flag, rel, name) in [(DeploySignersOption, bs.deploySigners,
                               "deploy-signers.anchors"),
-                             ("--cache-publishers", bs.cachePublishers,
+                             (CachePublishersOption, bs.cachePublishers,
                               "cache-publishers.anchors")]:
     if rel.len > 0:
       let p = o.profileDir / rel

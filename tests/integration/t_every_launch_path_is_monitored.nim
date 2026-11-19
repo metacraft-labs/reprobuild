@@ -52,7 +52,7 @@
 ##       when neither bypass nor inline applies.
 ##       spawn: ``startRunQuotaProcess`` (:3999) -> ``startProcess(helper,
 ##       helperCliArgs(...))`` (:4011). The argv reaches the OS two
-##       processes deep: engine -> ``repro __repro-runquota-helper`` ->
+##       processes deep: engine -> ``repro internal runquota-helper`` ->
 ##       the command.
 ##       backend label ``runquota-helper``.
 ##
@@ -112,7 +112,7 @@
 ##     supplied by the caller is not delivered and should not be
 ##     expected"), so a path can host the monitor only if the ENGINE is
 ##     the process that spawns. L2's argv is spawned by a separate
-##     ``repro __repro-runquota-helper`` process, two deep. L3 and L3b are
+##     ``repro internal runquota-helper`` process, two deep. L3 and L3b are
 ##     spawned inside ``offerWithRunQuotaBatch`` /
 ##     ``startGrantedWithRunQuota``, which spawn the child themselves as
 ##     part of binding it to the granted lease; hosting there needs a
@@ -323,7 +323,7 @@
 ## Every case runs the real ``repro`` binary as the monitor driver, the
 ## real graph-built monitor shim, a real compiled C fixture performing a
 ## real ``open``/``read`` of a real file, and — for L2, L3 and L3b — the
-## real ``repro __repro-runquota-helper`` and a real ``runquotad`` daemon
+## real ``repro internal runquota-helper`` and a real ``runquotad`` daemon
 ## over a real unix socket. Nothing is stubbed. The oracle is the
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
@@ -655,7 +655,7 @@ const SpawnPrimitives: array[47, tuple[name: string; expected: int;
   # source instead of by remembering it. The first is the RunQuota helper's
   # own entry point; the other two build the argv a child is started from,
   # which is the same reason `commandSpec` has a row.
-  ("runRunQuotaHelperCli", 0, "the L2 helper's own entry point"),
+  ("runRunQuotaHelper", 0, "the L2 helper's own entry point"),
   ("acquireCliArgs", 0, "builds the `runquota acquire -- <argv>` command line"),
   ("helperCliArgs", 1, "L2: the argv the RunQuota helper is started with"),
   # The OS. These have no `uncontrolled*` hatch, no rewrite template and no
@@ -875,7 +875,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       sourceRels: @["libs/repro_runquota/src/repro_runquota.nim"],
       spawning: @["startDirect", "startWithRunQuota", "offerWithRunQuota",
                   "offerWithRunQuotaBatch", "startGrantedWithRunQuota",
-                  "runWithRunQuota", "runRunQuotaHelperCli",
+                  "runWithRunQuota", "runRunQuotaHelper",
                   "acquireCliArgs", "helperCliArgs"],
       inert: @["toRunQuotaRequest", "grantHeartbeatMs", "grantUnresponsiveMs",
                "grantBoundedReadMs", "reportGrantHeartbeat", "awaitGrantLoop",
@@ -1495,7 +1495,7 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
 proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     BuildEngineConfig =
   # The RunQuota "helper CLI" is the ``repro`` image itself: L2 spawns
-  # ``repro __repro-runquota-helper …`` (helperCliArgs, repro_runquota.nim
+  # ``repro internal runquota-helper …`` (helperCliArgs, repro_runquota.nim
   # :496). The standalone ``runquota`` binary is a status/acquire CLI and
   # does NOT accept that argv.
   result = BuildEngineConfig(
@@ -2645,23 +2645,25 @@ suite "every_launch_path_is_monitored":
 
     # 3. The dispatcher that has to recognise it, both for the self-spawn
     #    (``internal``) and for the operator-facing (``debug``) spelling.
-    #    All three words are pinned, in both arms: the CLI falls through
-    #    to the unknown-subcommand path (exit 2) if any one of them stops
-    #    matching, which is how a renamed triple surfaces as a failed
-    #    action rather than as a compile error.
-    #    The self-spawn arm is spelled in TWO dispatchers:
-    #    ``runLegacyCommand`` (the commands not yet moved onto the
-    #    command-line description) and ``runThinAppDispatch`` (the per-program
-    #    arms, which must see it BEFORE ``repro-daemon`` does).
+    #    The words are commands of repro's command-line description
+    #    (``internal`` > ``io`` > ``monitor`` and ``debug`` > ``io`` >
+    #    ``monitor``), whose generated parser selects the arm; a renamed
+    #    word makes the self-spawn an unknown subcommand (exit 2), which is
+    #    how a renamed triple surfaces as a failed action rather than as a
+    #    compile error. Both declarations and both arms are pinned by text.
+    #    (The image's program name no longer selects a role, so there is no
+    #    second, per-program dispatcher to see the triple first.)
+    let description = readFile(root /
+      "libs/repro_cli_support/src/repro_cli_support/cli_description.nim")
+    check countOccurrences(description,
+      "subcmd \"internal\", visibility = internal,") == 1
+    check countOccurrences(description,
+      "subcmd \"io\", help = \"Filesystem monitoring\":") == 2
+    check countOccurrences(description, "subcmd \"monitor\",") == 2
     check countOccurrences(cliSupport,
-      "args[0] == \"internal\" and args[1] == \"io\" and") == 2
+      "of ReproCommandLineInternalIoCommand.monitor:") == 1
     check countOccurrences(cliSupport,
-      "args[0] == \"debug\" and") >= 1
-    check countOccurrences(cliSupport,
-      "args[1] == \"io\" and args[2] == \"monitor\"") == 1   # the debug arm
-    # Three arms, so three ``monitor`` word tests: the two self-spawn
-    # arms above and the operator-facing one.
-    check countOccurrences(cliSupport, "args[2] == \"monitor\"") == 3
+      "of ReproCommandLineDebugIoCommand.monitor:") == 1
 
     # 4. The hand-copied literal in the dev-session supervisor.
     let devSession = readFile(root /
@@ -2696,8 +2698,8 @@ suite "every_launch_path_is_monitored":
 
     # And no SEVENTH spelling has appeared unpinned. Five of the six
     # sites spell the triple as a sequence literal and are swept here;
-    # the sixth is the dispatcher's element-wise comparison (site 3),
-    # which is pinned by text above because it is not a literal.
+    # the sixth is the description's commands (site 3), pinned by text
+    # above because it is not a literal.
     const LiteralSpellings = 5
     var spelled = 0
     var spelledIn: seq[string] = @[]

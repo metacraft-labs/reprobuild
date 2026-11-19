@@ -7,6 +7,10 @@ import blake3
 
 import ./client
 import ./daemon_log
+# `repro daemon`'s command line is declared in repro's description; only its
+# spellings are read here, at compile time. The thin client links this
+# module and must not link the generated parser.
+from repro_cli_support/cli_description import reproLongFlags
 import ./writer_identity
 import ./protocol
 import ./stats_store
@@ -3019,7 +3023,7 @@ proc restartCandidateReady(config: UserDaemonConfig;
   state.deferralPollsSuppressed = 0
   true
 
-proc daemonProcessArgs(config: UserDaemonConfig): seq[string]
+proc daemonProcessArgs*(config: UserDaemonConfig): seq[string]
 proc launchWithFork(exe: string; config: UserDaemonConfig)
 
 proc performDevSelfRestart(config: UserDaemonConfig;
@@ -3396,57 +3400,48 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
     client.closeIpcConn()
   0
 
-proc siblingUserDaemonPath*(publicCliPath: string): string =
-  ## Locate the ``repro-daemon`` companion binary for the given ``repro``
-  ## executable. Prefers a sibling next to ``publicCliPath`` (the layout used
-  ## by installed and ``just build`` outputs), then falls back to ``findExe``
-  ## so a daemon staged into ``PATH`` (for example, in a dev shell with
-  ## ``build/bin`` on ``PATH``) still wins. Returns the bare unqualified
-  ## binary name when neither lookup succeeds; callers must treat that as
-  ## "daemon binary not found" and fail fast rather than handing the bare
-  ## name to ``launchctl`` / ``execv``.
-  let candidate = parentDir(publicCliPath) /
-    addFileExt("repro-daemon", ExeExt)
-  if fileExists(candidate):
-    return os.normalizedPath(candidate)
-  let viaPath = findExe("repro-daemon")
-  if viaPath.len > 0:
-    return os.normalizedPath(absolutePath(viaPath))
-  addFileExt("repro-daemon", ExeExt)
+const DaemonFlags = reproLongFlags(@["daemon"])
+  ## The long spelling of each flag of `repro daemon` (every subcommand,
+  ## `serve` included, takes them), from repro's description.
 
-proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
-  # Executable-Consolidation M2: the daemon process is `repro daemon serve …`
-  # (the self-spawned `repro` image), so every launch site (`launchWithFork`,
-  # `launchWithLaunchd`, `launchWithSystemdUser`, and the dev self-restart
-  # re-exec) prepends the `daemon serve` subcommand selector ahead of the
-  # daemon flags. `runThinApp` consumes `daemon serve` and hands the remaining
-  # flags to `runUserDaemonCommand` → `parseUserDaemonArgs`.
-  result = @["daemon", "serve", "--foreground", "--endpoint", config.endpoint,
-    "--state-dir", config.stateDir, "--log", config.logPath]
+proc daemonProcessArgs*(config: UserDaemonConfig): seq[string] =
+  ## The daemon process's command line, `repro daemon serve …` (the
+  ## self-spawned `repro` image), which every launch site (`launchWithFork`,
+  ## `launchWithLaunchd`, `launchWithSystemdUser`, and the dev self-restart
+  ## re-exec) starts: the words repro's generated parser reads back to
+  ## ``config`` (``userDaemonConfigOf`` in ``repro_cli_support``).
+  ##
+  ## Each flag is the spelling the description declares; its value is the
+  ## next word (paths, a peer-cache spec and a trust-profile name, none of
+  ## which starts with ``-``), the form the launchd plist and the transient
+  ## systemd unit have always carried.
+  result = @["daemon", "serve", DaemonFlags.foreground,
+    DaemonFlags.endpoint, config.endpoint,
+    DaemonFlags.stateDir, config.stateDir, DaemonFlags.log, config.logPath]
   if config.devMode:
-    result.add("--dev")
+    result.add(DaemonFlags.dev)
   if config.sourceExe.len > 0:
-    result.add("--source-exe")
+    result.add(DaemonFlags.sourceExe)
     result.add(config.sourceExe)
   if config.stagedGenerationDir.len > 0:
-    result.add("--staged-generation")
+    result.add(DaemonFlags.stagedGeneration)
     result.add(config.stagedGenerationDir)
   if config.previousStagedGenerationDir.len > 0:
-    result.add("--previous-staged-generation")
+    result.add(DaemonFlags.previousStagedGeneration)
     result.add(config.previousStagedGenerationDir)
   if config.restartRunId.len > 0:
-    result.add("--restart-run-id")
+    result.add(DaemonFlags.restartRunId)
     result.add(config.restartRunId)
   if config.systemScope:
-    result.add("--system")
+    result.add(DaemonFlags.system)
   if config.leaseStoreRoot.len > 0:
-    result.add("--state-root")
+    result.add(DaemonFlags.stateRoot)
     result.add(config.leaseStoreRoot)
   if config.peerCacheSpec.len > 0:
-    result.add("--peer-cache")
+    result.add(DaemonFlags.peerCache)
     result.add(config.peerCacheSpec)
   if config.trustProfile.len > 0:
-    result.add("--trust-profile")
+    result.add(DaemonFlags.trustProfile)
     result.add(config.trustProfile)
 
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
@@ -3966,8 +3961,8 @@ proc startUserDaemon*(publicCliPath: string;
           "compatible status handshake at " & config.endpoint &
           "; stop the incompatible daemon or set REPRO_DAEMON=off for direct mode")
   discard cleanupStaleUserDaemonDiscovery(config)
-  # Fail fast when the daemon binary cannot be located. Without this guard the
-  # bare unqualified name returned by ``siblingUserDaemonPath`` propagates into
+  # Fail fast when the daemon binary cannot be located. Without this guard a
+  # bare unqualified name (what the retired sibling lookup returned) reaches
   # ``launchctl bootstrap`` (which silently registers a non-executable plist
   # entry and forces a 30 s status-wait timeout) and then into ``execv`` in the
   # posix-fork fallback (another 60 s wait). Both paths eventually surface as a
@@ -4170,80 +4165,3 @@ proc renderUserDaemonSessions*(sessions: openArray[UserDaemonSession]):
     if session.message.len > 0:
       result.add("\t" & session.message)
 
-proc parseUserDaemonConfigFlags*(args: seq[string];
-                                 base = defaultUserDaemonConfig()):
-    tuple[config: UserDaemonConfig; rest: seq[string]] =
-  result.config = base
-  var explicitLog = false
-  var i = 0
-  while i < args.len:
-    let raw = args[i]
-    proc valueFor(flag: string): string =
-      let prefix = flag & "="
-      if raw.startsWith(prefix):
-        return raw[prefix.len .. ^1]
-      if raw == flag:
-        if i + 1 >= args.len:
-          raise newException(ValueError, flag & " requires a value")
-        inc i
-        return args[i]
-      raise newException(ValueError, "internal user-daemon flag parse error")
-
-    if raw == "--foreground":
-      result.config.foreground = true
-    elif raw == "--dev":
-      result.config.devMode = true
-    elif raw == "--daemon-exe" or raw.startsWith("--daemon-exe="):
-      result.config.daemonExe = valueFor("--daemon-exe")
-    elif raw == "--source-exe" or raw.startsWith("--source-exe="):
-      result.config.sourceExe = valueFor("--source-exe")
-    elif raw == "--staged-generation" or
-        raw.startsWith("--staged-generation="):
-      result.config.stagedGenerationDir = valueFor("--staged-generation")
-    elif raw == "--previous-staged-generation" or
-        raw.startsWith("--previous-staged-generation="):
-      result.config.previousStagedGenerationDir =
-        valueFor("--previous-staged-generation")
-    elif raw == "--restart-run-id" or raw.startsWith("--restart-run-id="):
-      result.config.restartRunId = valueFor("--restart-run-id")
-    elif raw == "--endpoint" or raw.startsWith("--endpoint="):
-      result.config.endpoint = valueFor("--endpoint")
-    elif raw == "--state-dir" or raw.startsWith("--state-dir="):
-      result.config.stateDir = valueFor("--state-dir")
-    elif raw == "--log" or raw.startsWith("--log="):
-      result.config.logPath = valueFor("--log")
-      explicitLog = true
-    elif raw == "--system":
-      result.config.systemScope = true
-    elif raw == "--state-root" or raw.startsWith("--state-root="):
-      result.config.leaseStoreRoot = valueFor("--state-root")
-    elif raw == "--peer-cache" or raw.startsWith("--peer-cache="):
-      result.config.peerCacheSpec = valueFor("--peer-cache")
-    elif raw == "--trust-profile" or raw.startsWith("--trust-profile="):
-      result.config.trustProfile = valueFor("--trust-profile")
-    else:
-      result.rest.add(raw)
-    inc i
-  if not explicitLog:
-    result.config.logPath = result.config.stateDir / "logs" /
-      "repro-daemon.log"
-
-proc userDaemonUsage*(): string =
-  "usage: repro-daemon [--foreground] [--dev] [--system] [--endpoint PATH] " &
-    "[--state-dir PATH] [--log PATH] [--state-root PATH] " &
-    "[--peer-cache SPEC] [--trust-profile trusted|hardened]"
-
-proc runUserDaemonCommand*(args: seq[string]): int =
-  if args.len == 1 and args[0] in ["--help", "-h"]:
-    echo userDaemonUsage()
-    return 0
-  try:
-    let parsed = parseUserDaemonConfigFlags(args)
-    if parsed.rest.len > 0:
-      stderr.writeLine("repro-daemon: unexpected argument: " &
-        parsed.rest[0])
-      return 2
-    return runUserDaemonForeground(parsed.config)
-  except CatchableError as err:
-    stderr.writeLine("repro-daemon: error: " & err.msg)
-    return 1
