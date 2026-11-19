@@ -897,6 +897,11 @@ proc planDigestOf*(preflightOutput: string): string =
   raise newException(TestBedError, "no plan digest in preflight output:\n" &
                      preflightOutput)
 
+const DbusActivatedSelfExiting* = ["NetworkManager-dispatcher.service",
+                                   "snapperd.service"]
+  ## Base units D-Bus starts on demand that exit by themselves once idle
+  ## (``withoutBaseNoise``).
+
 proc withoutBaseNoise*(d: seq[DiffEntry]): seq[DiffEntry] =
   ## The fingerprint differences the base makes on its own, removed by name
   ## and as narrowly as they happen. One so far: fwupd is D-Bus activated
@@ -916,6 +921,18 @@ proc withoutBaseNoise*(d: seq[DiffEntry]): seq[DiffEntry] =
         (e.before.len == 0 or e.after.len == 0)) or
        (e.component == fcMounts and e.key.startsWith("/efi#") and
         (e.before.len == 0 or e.after.len == 0)):
+      continue
+    # A base unit D-Bus starts on demand and that exits by itself once
+    # idle is up in one fingerprint and gone in the next whatever the
+    # add-on does: NetworkManager's dispatcher (the Omarchy VM, measured
+    # 2026-11-15 and 2026-11-19 in the determinism guard of
+    # e2e_omarchy_addon_base_layer_refusal) and snapper's daemon. The
+    # owner ruled them base variance in every gate's comparisons (spec
+    # ReproOS-Add-On-Mode §13 decision 134, amended 2026-11-18). Only the
+    # unit's appearing or going is dropped; a change of its state while it
+    # stays still counts.
+    if e.component == fcActiveUnits and e.key in DbusActivatedSelfExiting and
+        (e.before.len == 0 or e.after.len == 0):
       continue
     if e.component == fcEtc and e.key == "/etc/fwupd/fwupd.conf" and
         e.before.len > 0 and e.after.len > 0:
