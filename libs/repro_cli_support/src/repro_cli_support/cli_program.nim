@@ -172,6 +172,22 @@ proc reproCommandIsPassThrough*(command: int): bool =
   ## Whether the command is still parsed by its own code.
   command in ReproPassThroughCommands
 
+proc reproCommandTakesRest*(command: int): bool =
+  ## Whether the command's words after it are a clispec `rest` positional:
+  ## another program's command line it hands over verbatim (`repro system
+  ## addon`, `repro debug io monitor`). `repro help <command> <words>` then
+  ## prints the command's own help, whatever the words, as it does for a
+  ## command its own code still parses: the words are not repro's.
+  let g = ReproCommandLine.cliGrammar()
+  var holders = @[command]
+  if g.commands[command].callChild >= 0:
+    holders.add(g.commands[command].callChild)
+  for k in holders:
+    for id in g.commands[k].ownParams:
+      if g.params[id].rest:
+        return true
+  false
+
 proc reproCommandIsShown*(command: int): bool =
   ## Whether the command and every command holding it are ``shown`` (not
   ## ``internal`` or ``hidden``).
@@ -184,19 +200,24 @@ proc reproCommandIsShown*(command: int): bool =
   true
 
 proc renderReproUsageError*(e: ref CliUsageError): string =
-  ## The text ``reportReproUsageError`` writes for ``e``: its one-line
-  ## message (clispec's error taxonomy, naming the command; for a spelling
-  ## the description declares `retired`, also what replaced it) and where to
-  ## look next. The daemon worker sends the same text for a `repro build`
-  ## command line the thin client routed unparsed.
-  "repro: " & e.msg & "\n" &
-    "Run `repro --help` for the list of commands, or " &
-    "`repro help <command>` for one of them.\n"
+  ## The text of ``e`` as clispec's error block (``cliErrorText``), plain:
+  ## the ``error:`` line (clispec's error taxonomy, naming the command; for
+  ## a spelling the description declares `retired`, also what replaced it),
+  ## the ``tip:`` with the error's suggestions, the usage line of the
+  ## command the error is about and the command that prints its help.
+  ##
+  ## The daemon worker sends this text for a `repro build` command line the
+  ## thin client routed unparsed. The thin client routes a build only when
+  ## its stderr is not a terminal, where ``reportReproUsageError`` writes
+  ## the same block unstyled, so both paths print the same bytes.
+  cliErrorText(e)
 
 proc reportReproUsageError*(e: ref CliUsageError): int =
-  ## A command line the generated parser rejected: ``renderReproUsageError``
-  ## on stderr; the usage exit code (2).
-  stderr.write(renderReproUsageError(e))
+  ## A command line the generated parser rejected: clispec's error block on
+  ## stderr, styled for it as help is (``ReproCommandLine.printError``:
+  ## colour on a terminal, none through a pipe, under `NO_COLOR` or
+  ## `TERM=dumb`); the usage exit code (2).
+  ReproCommandLine.printError(e)
   e.exitCode
 
 proc declaredEnvOf*(g: CliGrammar; params: openArray[int]):
@@ -250,9 +271,10 @@ proc reproDeclaredEnv*(): Table[string, string] =
   ## dependency the parser has.
   ##
   ## The parse itself takes ``reproDeclaredEnvFor``, which narrows this to
-  ## the command being parsed. Only `repro build`, `repro bench` and `repro
-  ## lint` declare variables (`$REPRO_DAEMON` and the like), so any other
-  ## command line reads none.
+  ## the command being parsed: a command line reads only the variables its
+  ## own command (and the commands above and below it) declares, such as
+  ## `repro build`'s `$REPRO_DAEMON` or `repro gateway pre-receive`'s
+  ## `$GIT_DIR`, and none of any other command's.
   declaredEnvOf(ReproCommandLine.cliGrammar())
 
 proc reproDeclaredEnvFor*(argv: openArray[string]): Table[string, string] =
@@ -283,13 +305,21 @@ proc reproDeclaredEnvFor*(argv: openArray[string]): Table[string, string] =
       break
     chain.add(child)
     command = child
+  # A command's `call:` is a command of its own in the grammar (its
+  # ``callChild``), not one of its ``children``: the parameters a `call:`
+  # declares (`repro shell`'s `--shell`, beside its `hook` subcommand) count
+  # wherever their command does.
   var params: seq[int] = @[]
   for k in chain:
     params.add(g.commands[k].ownParams)
+    if g.commands[k].callChild >= 0:
+      params.add(g.commands[g.commands[k].callChild].ownParams)
   var below = g.commands[command].children
   while below.len > 0:
     let k = below.pop()
     params.add(g.commands[k].ownParams)
+    if g.commands[k].callChild >= 0:
+      params.add(g.commands[g.commands[k].callChild].ownParams)
     below.add(g.commands[k].children)
   declaredEnvOf(g, params)
 
@@ -314,65 +344,67 @@ proc reproWordsAfterCommand*(argv: openArray[string]): seq[string] =
     after = i + 1
   @argv[after .. ^1]
 
-macro fieldNamed*(obj: typed; name: static[string]): untyped =
-  ## ``obj.<name>``: the field ``name`` (a compile-time string, such as the
-  ## name ``fieldPairs`` gives) of a generated configuration or origin
-  ## object.
-  newDotExpr(obj, ident(name))
-
-proc buildWordsOf*[C, O](c: C; origin: O): seq[string] =
-  ## The command line of the build a command runs when it splices
-  ## `repro build`'s declaration into its own (`repro test`, `repro
-  ## certify`): every flag of ``c`` that is a `repro build` flag and was
-  ## given ON THE COMMAND LINE, in the canonical spelling `--<flag>=<value>`
-  ## (a switch as `--<flag>`, a negated one as `--no-<flag>`), in
-  ## declaration order. The build parses these words with
-  ## `loadBuildCommandLine`, like any other route into a build, and the
-  ## daemon receives them as the build's `rawArgs`.
+proc printReproHelp*(path: openArray[string] = []; stream = stdout;
+                     long = false; all = false) =
+  ## Prints the help page ``ReproCommandLine.helpText(path, long, all)``
+  ## renders, through clispec's printer (``ReproCommandLine.printHelp``),
+  ## which styles it for ``stream`` (colour on a terminal, none through a
+  ## pipe, under `NO_COLOR` or `TERM=dumb`) and lays it out for its width,
+  ## as every help page repro prints. For the commands that print a help
+  ## page themselves (`repro help <command>`, `repro <namespace> help`).
   ##
-  ## What is NOT rendered: a value that came from an environment variable a
-  ## flag declares, because the build reads the same variable itself; the
-  ## positionals (the selectors, and the words after `--`), which the caller
-  ## decides; and a switch that stands for another flag's value (`-v`,
-  ## `--release`, ...), whose effect is rendered as that flag's value
-  ## (`--log=summary`, `--variant=buildType=release`). A value the
-  ## command line set to `false` through such a switch (`--runquota`, which
-  ## sets `--no-runquota` to false) is rendered as that switch.
+  ## Raises ``CliUsageError`` when ``path`` names no command, as
+  ## ``helpText`` does. The printer needs the parser's help request, so the
+  ## page is asked of the parser: the words ``path`` and ``-h``
+  ## (``--help`` for the long page, ``--help-all`` with ``all``).
+  let text = ReproCommandLine.helpText(path, long = long or all, all = all)
+  let flag = if all: "--help-all" elif long: "--help" else: "-h"
+  try:
+    discard ReproCommandLine.load(@path & @[flag], CliSources())
+  except CliHelpRequest as e:
+    ReproCommandLine.printHelp(e, stream)
+    return
+  except CatchableError:
+    discard
+  # The parser did not answer with a help page (a command that takes the
+  # word itself): the page as text.
+  stream.write(text)
+
+proc reproBuildFlagNames*(): seq[string] =
+  ## The names of `repro build`'s flags, from the grammar: what a command
+  ## that splices `build`'s declaration into its own (`repro test`, `repro
+  ## certify`) hands its build, as ``argvOf(origin, only =
+  ## reproBuildFlagNames(), commandWords = false)``.
   let g = ReproCommandLine.cliGrammar()
-  var buildParams = initTable[string, int]()
   for id in g.commands[reproCommandAt(["build"])].params:
     if g.params[id].kind == cpkFlag:
-      buildParams[g.params[id].name] = id
-  for name, value in fieldPairs(c):
-    if name in buildParams and
-        fieldNamed(origin, name).winner.kind == cokCli:
-      let id = buildParams[name]
-      let p = g.params[id]
-      when value is bool:
-        if p.alsoSets.len > 0:
-          discard
-        elif value:
-          result.add("--" & p.longName)
-        elif p.negatable:
-          result.add("--no-" & p.longName)
-        else:
-          for other in g.commands[reproCommandAt(["build"])].params:
-            for also in g.params[other].alsoSets:
-              if also.id == id and also.text == "false":
-                result.add("--" & g.params[other].longName)
-      elif value is string:
-        result.add("--" & p.longName & "=" & value)
-      elif value is seq[string]:
-        for item in value:
-          result.add("--" & p.longName & "=" & item)
-      elif value is Option[string]:
-        if value.isSome:
-          if p.hasOptionalValue and value.get.len == 0:
-            result.add("--" & p.longName)
-          else:
-            result.add("--" & p.longName & "=" & value.get)
-      else:
-        {.error: "buildWordsOf: no rendering for the type of " & name.}
+      result.add(g.params[id].name)
+
+proc loadReproCommandLine*(argv: openArray[string];
+                           conf: var ReproCommandLine;
+                           origins: var ReproCommandLineOrigins): int =
+  ## ``loadReproCommandLine`` (below), also giving where each value came
+  ## from (``origins``, confutils' origin object): for a command that must
+  ## tell a flag the user typed from the variable the flag declares (a
+  ## variable set in nearly every environment, such as `$SHELL`, or one whose
+  ## bad value is a warning where the flag's is an error).
+  try:
+    (conf, origins) = ReproCommandLine.loadWithOrigins(
+      reproArgvForParser(argv), CliSources(env: reproDeclaredEnvFor(argv)))
+  except CliHelpRequest as e:
+    ReproCommandLine.printHelp(e)
+    return 0
+  except CliUsageError as e:
+    return reportReproUsageError(e)
+  except CliConfigError as e:
+    stderr.writeLine("repro: " & e.msg)
+    return 2
+  -1
+
+proc reproGivenOnCommandLine*(origin: CliOrigin): bool =
+  ## Whether a value came from the command line (not from the variable its
+  ## flag declares, nor its default).
+  origin.winner.kind == cokCli
 
 proc loadReproCommandLine*(argv: openArray[string];
                            conf: var ReproCommandLine): int =
@@ -389,8 +421,12 @@ proc loadReproCommandLine*(argv: openArray[string];
     conf = ReproCommandLine.load(reproArgvForParser(argv),
       CliSources(env: reproDeclaredEnvFor(argv)))
   except CliHelpRequest as e:
-    # `CliCompletionRequest` too: its text is the completion reply.
-    stdout.write(e.text)
+    # Printed by clispec's printer, which styles a help page for stdout
+    # (colour on a terminal, none through a pipe, under `NO_COLOR` or
+    # `TERM=dumb`) and lays it out for stdout's width. A request that
+    # carries no page renderer is printed as its text, unchanged: the
+    # version, `--help=json` and `CliCompletionRequest`'s completion reply.
+    ReproCommandLine.printHelp(e)
     return 0
   except CliUsageError as e:
     return reportReproUsageError(e)

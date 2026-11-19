@@ -421,6 +421,27 @@ suite "cargo_package reads the active cross target":
         check "mips-unknown-linux-gnu" in e.msg
         check Triple in e.msg)
 
+  test "a Windows gnullvm target is refused, though its rust-std is catalogued":
+    # The catalog's gnullvm rows serve the target-keyed realization; the
+    # sysroot edge merges Linux targets only (a POSIX shell edge, no linker
+    # arranged), so without a RUSTC of the recipe's own it is refused by name.
+    const WinTriple = "x86_64-pc-windows-gnullvm"
+    check hasRustStdComponent(WinTriple)
+    withTargetEnv(WinTriple, proc() =
+      resetBuildActionRegistry()
+      setCurrentOwningPackageOverride("probeSource")
+      defer: clearCurrentOwningPackageOverride()
+      let res = cargo_package(extraEnv = @[("RUSTC", "/own/bin/rustc")])
+      check res.compileEdge.envValue("RUSTC") == "/own/bin/rustc"
+      try:
+        discard cargo_package()
+        check false
+      except ValueError as e:
+        check WinTriple in e.msg
+        check "Linux targets only" in e.msg
+      for act in registeredBuildActions():
+        check not act.id.startsWith("rust-sysroot-"))
+
 suite "rust-std: the catalog arm and the target sysroot":
 
   test "the catalog's rust-std arms are the adapter's table, one row each":

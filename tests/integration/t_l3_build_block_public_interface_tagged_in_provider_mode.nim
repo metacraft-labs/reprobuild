@@ -53,10 +53,11 @@ suite "provider-mode public-interface cache identity":
     ## identity constructor refuses one — correctly, since an identity
     ## derived from an absent root is a cache key that carries no recipe.
     ##
-    ## There is no skip, and this comment used to say there was one. What
-    ## this case actually measures is that the startup pass never reaches
-    ## the identity constructor for a public-interface recipe, so the
-    ## refusal does not turn the pass into a reported package failure.
+    ## `maybeTagPublicInterface` skips the pass (`providerStartupBodyActive`),
+    ## so the refusal never turns the pass into a reported package failure.
+    ## This case drives the recipe as an IMPORTED module; the next case
+    ## compiles it as the provider's MAIN module, which is how `repro build`
+    ## builds a provider and the arrangement in which the failure was seen.
     ##
     ## The assertion has to be an ABSENCE for that reason: if the pass DID
     ## reach the constructor, it would raise, the startup-pass containment
@@ -79,6 +80,30 @@ suite "provider-mode public-interface cache identity":
     # The negative control: the runner really did do its work, so the
     # absence above is an absence of failures and not an absence of output.
     check ran.output.contains("publicTool")
+
+  test "a provider built from the recipe as its main module reports no startup failure":
+    ## The recipe compiled as the provider binary's MAIN module, as
+    ## `repro build` compiles a project provider. Its startup pass runs every
+    ## `build:` body with no project root before any request is read, and a
+    ## `nim.c` edge producing a declared `executable` used to try to derive
+    ## its publish identity there:
+    ##   startup body failed: l3pub: cannot derive a source cache identity
+    ##   for package 'publicTool': no project root was given.
+    ## Run without request arguments, the binary reports any startup failure
+    ## and then refuses the missing request; the refusal is the positive
+    ## control that the startup pass really ran.
+    let root = createTempDir("nim-public-interface-main-", "")
+    defer: removeDir(root)
+    let provider = root / "provider"
+    let compiled = execCmdEx(quoteShellCommand(@["nim", "c", "--verbosity:0",
+      "--hints:off", "-d:reproProviderMode", "--nimcache:" & root / "nimcache",
+      "--out:" & provider, FixtureDir / "repro.nim"]))
+    check compiled.exitCode == 0
+    checkpoint(compiled.output)
+    let ran = execCmdEx(quoteShellCommand(@[provider]), workingDir = root)
+    checkpoint(ran.output)
+    check ran.output.contains("provider protocol request/response arguments are required")
+    check ProviderStartupBodyFailurePrefix notin ran.output
 
   test "implementation edits cannot alias under an unchanged entry recipe":
     let root = createTempDir("nim-implementation-identity-", "")

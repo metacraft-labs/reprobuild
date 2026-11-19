@@ -14,7 +14,6 @@
 
 from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils]
-import blake3
 import repro_core/ambient_execution
 import repro_local_store/store
 when not defined(windows):
@@ -73,11 +72,6 @@ else:
       value > 0
     except ValueError:
       false
-
-  proc frozenScriptPath*(storeRoot, projectRoot: string): string =
-    ## `<store>/frozen-dev-env/<blake3(projectRoot)[0..31]>/activate.bash`.
-    storeRoot / FrozenDevEnvDirName /
-      blake3.digest(projectRoot).toHex()[0 ..< 32] / "activate.bash"
 
   proc shellQuote(value: string): string =
     "'" & value.replace("'", "'\\''") & "'"
@@ -290,6 +284,7 @@ else:
             "reinsertedPrefixes": report.reinsertedPrefixes,
             "quarantinedPrefixes": %report.quarantinedPrefixes,
             "rewitnessedRecords": report.rewitnessedRecords,
+            "unwitnessedRecords": report.unwitnessedRecords,
             "restamped": report.restamped,
             "restampMismatches": report.restampMismatches,
             "frozenDevEnvs": envs,
@@ -301,7 +296,11 @@ else:
           echo "  verified entries:     " & $report.verifiedEntries
           echo "  prefixes reinserted:  " & $report.reinsertedPrefixes &
             " (" & $report.excludedPrefixes.len & " already present)"
-          echo "  records re-witnessed: " & $report.rewitnessedRecords
+          echo "  records re-witnessed: " & $report.rewitnessedRecords &
+            (if report.unwitnessedRecords > 0:
+              " (" & $report.unwitnessedRecords & " left alone: an output " &
+                "is not carried by the bundle)"
+             else: "")
           echo "  inputs restamped:     " & $report.restamped &
             (if report.restampMismatches > 0:
                " (" & $report.restampMismatches & " differ and were left alone)"

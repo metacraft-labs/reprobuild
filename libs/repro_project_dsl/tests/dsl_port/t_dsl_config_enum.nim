@@ -57,39 +57,39 @@ suite "DSL-port M9.D — config: typed enum configurables":
     # Sanity: nothing else in the suite has run yet, so reset the cell
     # before observing the default. ``resetConfigurable`` is idempotent
     # on a clean cell.
-    resetConfigurable("dbusPkg.busActivationStrategy")
+    resetConfigurable("package.dbusPkg.busActivationStrategy")
     check readConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy") == dbusBroker
+      "package.dbusPkg.busActivationStrategy") == dbusBroker
 
   test "fallback overload returns recorded default when type matches":
     # The fallback-flavoured overload still returns the recorded value
     # when the type matches; the fallback is only used on mismatch.
     check readConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy", dbusDaemon) == dbusBroker
+      "package.dbusPkg.busActivationStrategy", dbusDaemon) == dbusBroker
 
   test "setConfigurable propagates to the next read":
     setConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy", dbusDaemon)
+      "package.dbusPkg.busActivationStrategy", dbusDaemon)
     check readConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy") == dbusDaemon
+      "package.dbusPkg.busActivationStrategy") == dbusDaemon
     # And the fallback overload sees the override too.
     check readConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy", dbusBroker) == dbusDaemon
+      "package.dbusPkg.busActivationStrategy", dbusBroker) == dbusDaemon
 
   test "resetConfigurable restores the default":
     setConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy", dbusDaemon)
-    resetConfigurable("dbusPkg.busActivationStrategy")
+      "package.dbusPkg.busActivationStrategy", dbusDaemon)
+    resetConfigurable("package.dbusPkg.busActivationStrategy")
     check readConfigurable[BusActivationStrategy](
-      "dbusPkg.busActivationStrategy") == dbusBroker
+      "package.dbusPkg.busActivationStrategy") == dbusBroker
 
   test "inspectConfigurable exposes captured enum metadata":
     # Tests rely on the captured type name + value name to verify the
     # generic macro emission preserved the exact source identifiers —
     # not coerced through ``int`` or stringified ord. Reset first so
     # we observe the default rather than a stale override.
-    resetConfigurable("dbusPkg.busActivationStrategy")
-    let stored = inspectConfigurable("dbusPkg.busActivationStrategy")
+    resetConfigurable("package.dbusPkg.busActivationStrategy")
+    let stored = inspectConfigurable("package.dbusPkg.busActivationStrategy")
     check stored.kind == dskEnum
     check stored.enumTypeName == "BusActivationStrategy"
     check stored.enumValueName == "dbusBroker"
@@ -101,9 +101,9 @@ suite "DSL-port M9.D — config: typed enum configurables":
     # This is the contract test fixtures + multi-recipe probe paths
     # depend on so they can robustly try multiple types without
     # exception bookkeeping.
-    resetConfigurable("dbusPkg.busActivationStrategy")
+    resetConfigurable("package.dbusPkg.busActivationStrategy")
     check readConfigurable[LogLevel](
-      "dbusPkg.busActivationStrategy", logWarn) == logWarn
+      "package.dbusPkg.busActivationStrategy", logWarn) == logWarn
 
   test "missing-key read returns fallback":
     # The fallback overload also swallows ``EDslPortMissingKey`` —
@@ -111,4 +111,4 @@ suite "DSL-port M9.D — config: typed enum configurables":
     # different error semantics and callers would still need a try/except
     # wrapper for full graceful degradation.
     check readConfigurable[BusActivationStrategy](
-      "nonExistentPkg.nonExistentField", dbusDaemon) == dbusDaemon
+      "package.nonExistentPkg.nonExistentField", dbusDaemon) == dbusDaemon

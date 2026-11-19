@@ -506,11 +506,20 @@ proc publish(d: var Store; plan: PlannedPrefix; rootId: string;
       syncDirectoryDurably(target.parentDir.parentDir)
     var won = not (dirExists(target) or symlinkExists(target))
     if won:
+      # A read-only source root (Local-Content-Addressed-Store §"Read-Only
+      # Prefixes") gave the stage an r-x root, and moving a directory to a
+      # new parent needs write permission on it. Rename with the bit, then
+      # put the source's mode back before the row is indexed (step 5b).
+      let rootMode = getFilePermissions(stage)
+      restoreDirectoryWriteBits(stage, recursive = false)
       try: moveDir(stage, target)
       except OSError:
         if not dirExists(target): raise
         won = false
       if won:
+        if getFilePermissions(target) != rootMode:
+          setFilePermissions(target, rootMode)
+          syncDirectoryDurably(target)
         syncDirectoryDurably(target.parentDir)
     if not won:
       # Lost the race. Accept the winner only if it is this prefix; it is

@@ -488,12 +488,23 @@ method sourceCertificates*(s: CapturedTpm2Source): seq[string] =
 
 const
   DefaultQuotedPcrBank* = TpmAlgSha256
-  DefaultQuotedPcrs* = [0, 1, 2, 3, 4, 5, 6, 7]
-    ## The firmware-owned registers: the platform's own code and
-    ## configuration, the option ROMs, the boot manager's code and its
-    ## configuration, and the handoff to the OS loader. They are the set
-    ## a quote taken before anything of this system's runs can speak
-    ## for.
+  DefaultQuotedPcrs* = [0, 1, 2, 3, 4, 5, 6, 7,
+                        8, 9, 10, 11, 12, 13, 14, 15]
+    ## Every register the verifier examines: ReproOS-Remote-Attestation
+    ## §4.3 (TPM, check 1) has it require the quote to cover each PCR it
+    ## checks and replay the event log for PCRs 0-15 against it. That is
+    ## the firmware's registers (0-7: the platform's code and
+    ## configuration, option ROMs, the boot manager and the handoff to
+    ## the loader, including PCR 4's record of every EFI application it
+    ## started), the stub's measurement of the UKI (11), and what the
+    ## stub accepted from outside it (12 and 13).
+    ##
+    ## It was PCRs 0-7 alone until 2026-11-18, and a quote over those
+    ## says nothing about register 11: the verifier refused every report
+    ## the agent produced with its default configuration (reprobuild-pm
+    ## issue 2026-11-17-tpm-agent-default-quote-selection-omits-pcr-11).
+    ## The agent's `--tier=tpm` has no flag that sets a selection, so
+    ## this constant IS what a deployed agent quotes.
 
 proc defaultQuotedSelection*(): TpmlPcrSelection =
   ## The selection a `Tpm2Driver` is configured with when it is not told

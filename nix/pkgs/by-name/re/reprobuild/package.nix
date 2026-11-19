@@ -151,8 +151,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
-    hash = "sha256-2PXrPF+3a2dYMbyoFliukQRLVXc3wIBuvqDOYZWR/ko=";
+    rev = "f6065a9c6f3b56ab7c1d7e24750f7b9cb27c5661";
+    hash = "sha256-yYLlj8ZDdesOSzLynFpouy+r9xYSjvAgR/Xw97esa+8=";
   },
   # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
   # package (the declarative description of a program's entry points); the
@@ -168,8 +168,8 @@
   confutilsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-confutils";
-    rev = "0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
-    hash = "sha256-zHFUtlFQEmS3jK8oGm2ItMgMcWAsW2U1LciY3QspuS8=";
+    rev = "ddd056a1cd13a9a24aa5f3451df23aaaa6c46091";
+    hash = "sha256-OuAPvQ5uHKmwIXqXOUOISz0UlCrwcOulRXwgdWL2CG4=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";

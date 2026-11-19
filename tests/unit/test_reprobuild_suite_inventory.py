@@ -7659,6 +7659,18 @@ compileProfileBinary()
                 "darwin": set(),
             },
             "tests/e2e/hcr-linux-direct/"
+            "t_e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.nim": {
+                "linux": {
+                    "e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word::a "
+                    "re-patch's codeWordBefore and codeHashBefore are the previous "
+                    "generation's after-word and after-hash",
+                },
+                "darwin": {
+                    "e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word::linux/amd64 "
+                    "only",
+                },
+            },
+            "tests/e2e/hcr-linux-direct/"
             "t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim": {
                 "linux": {
                     "e2e_hcr_linux_x86_64_single_threaded_direct_patch::linux "

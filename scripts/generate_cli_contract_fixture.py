@@ -276,6 +276,13 @@ COVERED_COMMANDS = [
     "ci",
     "ci plan",
     "watch",
+    "attest",
+    "attest expect",
+    "attest challenge",
+    "attest verify",
+    "attest cross-check",
+    "attest launch",
+    "attest reap",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
@@ -288,10 +295,11 @@ LONG_FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
 # build` declares beside `-v`).
 SHORT_FLAG = re.compile(r"(?<![\w-])-([A-Za-z])\1?(?![\w-])")
 # A list item's `environment:` clause: the code spans after it, up to the
-# end of the item, each one variable name.
-ENV_CLAUSE = re.compile(r"\benvironment:\s*((?:`[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+`"
+# end of the item, each one variable name. Inside the clause a name needs no
+# underscore (`SHELL`): the clause says the code is a variable.
+ENV_CLAUSE = re.compile(r"\benvironment:\s*((?:`[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*`"
                         r"(?:\s*,\s*|\s+and\s+)?)+)")
-ENV_NAME = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+)`")
+ENV_NAME = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)`")
 COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
 HEADED_COMMAND = re.compile(r"`repro ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*)`")
 

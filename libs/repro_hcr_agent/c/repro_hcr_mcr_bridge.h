@@ -113,7 +113,11 @@ typedef struct ct_repro_hcr_patch_site_v1 {
   uint64_t sledAddress;      /* the `__patchable_function_entries` sled       */
   uint64_t windowAddress;    /* the naturally aligned 8-byte published window */
   uint64_t dispatchAddress;  /* where the published jump now goes             */
-  uint64_t codeWordBefore;   /* the 8 bytes at windowAddress before the store */
+  uint64_t codeWordBefore;   /* the 8 bytes at windowAddress immediately
+                              * before THIS store: the original window for a
+                              * first publication, generation N's jump for a
+                              * re-patch, so it equals the previous event's
+                              * codeWordAfter at this site (§10.3)          */
   uint64_t codeWordAfter;    /* the 8 bytes at windowAddress after it         */
   uint32_t windowLength;     /* bytes this site contributes to the hashes     */
   uint32_t generation;       /* how many times THIS site has been published   */

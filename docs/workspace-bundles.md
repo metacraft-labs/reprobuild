@@ -255,3 +255,18 @@ captures differ.
   part name is one plain file name), and quotes every value it writes into
   `curl`'s config. What it can still do is serve different content at those
   paths, which is why `https://` is required.
+- `restore.sh` carries the SHA-256 of the `latest.json` it was created
+  beside, and its handoff passes it to `repro bundle restore`
+  (`--latest-sha256`, internal), which reads `latest.json` once and refuses
+  any other. So a writer of a local bundle directory cannot replace
+  `latest.json` once `restore.sh` has verified the Nix half, and choose
+  through it the sources half or the primary shell environment `--activate`
+  installs. The native half's own manifest is still read from that
+  directory, so a writer can still swap in another native half, and with it
+  the frozen environment `--activate` sources (reprobuild-pm issue
+  `2026-11-18-native-half-import-reads-native-store-json-from-the-source-unbound-to-latest-json.md`).
+  Fetched from a URL, a publish that lands between the two fetches is refused
+  the same way; run `restore.sh` again. When a bundle carries no `repro` in
+  its Nix half, `restore.sh` hands over to the `repro` on `PATH`, which must
+  be one that knows `--latest-sha256`. A `restore.sh` for a bundle without a
+  Nix half runs `repro bundle restore` with no hash, and binds nothing.

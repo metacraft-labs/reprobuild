@@ -534,7 +534,8 @@ suite "manifest to agent to verdict, over a socket, with no hardware":
     let unknownFlag = refusal(@["verify", "--manifest-url", "http://b",
       "--policy", policyPath])
     check unknownFlag.code == AttestExitUsage
-    check "unknown `repro attest` flag: --manifest-url" in unknownFlag.err
+    check "error: unknown flag '--manifest-url' for 'repro attest verify'" in
+      unknownFlag.err
 
     # Two challenge sources.
     let twoChallenges = refusal(@["verify", "--report-file", "a",

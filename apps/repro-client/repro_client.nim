@@ -604,6 +604,9 @@ proc streamDaemonBuild(fullCli: string; args: seq[string]): int =
     rawArgs: args[1 .. ^1],
     environment: daemonCarriedEnvironment(),
     environmentIsComplete: true,
+    # The digest the staleness check above compared; the daemon serves only
+    # a request whose stated engine is the one it runs.
+    engineDigest: expectedUserDaemonDigest(fullCli, config),
     attached: true,
     cancelOnDisconnect: true)
   let daemonResult = requestUserDaemonBuild(request, config.endpoint,

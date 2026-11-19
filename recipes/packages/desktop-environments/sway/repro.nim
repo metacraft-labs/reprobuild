@@ -181,13 +181,13 @@ proc currentSwayCfg*(): swayImpl.SwayConfig =
   let defaults = swayImpl.defaultConfig()
   result = swayImpl.SwayConfig(
     aptSnapshot: readConfigurable[string](
-      "swayCompositor.aptSnapshot", defaults.aptSnapshot),
+      "package.swayCompositor.aptSnapshot", defaults.aptSnapshot),
     superKey: readConfigurable[string](
-      "swayCompositor.superKey", defaults.superKey),
+      "package.swayCompositor.superKey", defaults.superKey),
     terminalApp: readConfigurable[string](
-      "swayCompositor.terminalApp", defaults.terminalApp),
+      "package.swayCompositor.terminalApp", defaults.terminalApp),
     launcherApp: readConfigurable[string](
-      "swayCompositor.launcherApp", defaults.launcherApp),
+      "package.swayCompositor.launcherApp", defaults.launcherApp),
     extraModelines: defaults.extraModelines,
     storeRoot: defaults.storeRoot)
 

@@ -18,7 +18,7 @@
 ## second holder is a separate open file description of the same lock file,
 ## which is what a second process holds.
 
-import std/[os, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
 
@@ -55,14 +55,28 @@ suite "interface extraction nimcache slots":
       interfaceNimcacheConfigKey("/work", ["-host"], ["--path:/libs"],
         @["--define:reproInterfaceMode", "--define:other", "--path:/libs/x"])
 
-  test "the root follows the temporary directory, not an action-cache root":
+  test "the root is in the user cache directory, not the temporary one":
+    # Beside the provider compile's nimcache, and not under `TMPDIR`: a
+    # temporary directory is often made per shell, and the extraction records
+    # the directories above its nimcache (see `interfaceExtractionNimcacheRoot`).
     let tmp = createTempDir("repro-ifslot-tmp-", "")
-    defer: removeDir(tmp)
-    let saved = getEnv("TMPDIR")
+    let cache = createTempDir("repro-ifslot-cache-", "")
     defer:
-      if saved.len > 0: putEnv("TMPDIR", saved) else: delEnv("TMPDIR")
+      removeDir(tmp)
+      removeDir(cache)
+    let savedTmp = getEnv("TMPDIR")
+    let savedCache = getEnv("XDG_CACHE_HOME")
+    defer:
+      if savedTmp.len > 0: putEnv("TMPDIR", savedTmp) else: delEnv("TMPDIR")
+      if savedCache.len > 0: putEnv("XDG_CACHE_HOME", savedCache)
+      else: delEnv("XDG_CACHE_HOME")
     putEnv("TMPDIR", tmp)
-    check interfaceExtractionNimcacheRoot().parentDir == tmp
+    putEnv("XDG_CACHE_HOME", cache)
+    when not defined(windows) and not defined(macosx):
+      check interfaceExtractionNimcacheRoot().parentDir == cache
+      check interfaceExtractionNimcacheRoot().parentDir ==
+        providerCompileNimcacheRoot().parentDir
+    check not interfaceExtractionNimcacheRoot().startsWith(tmp)
     check interfaceExtractionIgnoredInputPrefixes() ==
       @[absolutePath(interfaceExtractionNimcacheRoot())]
 

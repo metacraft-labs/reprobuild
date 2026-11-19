@@ -55,7 +55,9 @@
 # hm-session-vars.sh (`eval "$(brew shellenv)"`, path_helper) must
 # re-prepend this one after it.
 #
-# User documentation: docs/user-guide/nix-helper-library.md.
+# User documentation: docs/users/content/reference/nix-library.md (options and
+# functions) and the guide
+# docs/users/content/guides/machines/drive-home-manager-from-a-profile.md.
 { reprobuildLib }:
 {
   config,

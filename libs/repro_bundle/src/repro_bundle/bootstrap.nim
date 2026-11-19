@@ -7,6 +7,11 @@
 ## Everything it needs is baked in at create time (the half's id, parts,
 ## hashes and, for a GitHub source, each file's branch; the zstd and repro
 ## store paths), so it reads no JSON and needs no interpreter beyond bash.
+## It also carries the SHA-256 of the `latest.json` it was generated beside
+## and hands it over with `--latest-sha256`, so the `repro` it restored reads
+## that `latest.json` or none: a writer of a local source directory cannot
+## replace it once the Nix half has been verified (Workspace-Bundles.md §7,
+## §9).
 ##
 ## It is a cloud session's setup script, and a failing setup script stops the
 ## session from starting. So it logs every failure and exits 0, unless
@@ -27,8 +32,16 @@ import ./github
 proc q(s: string): string =
   "'" & s.replace("'", "'\\''") & "'"
 
-proc renderRestoreScript*(latest: JsonNode; hasNix: bool;
-                          h: NixHalf): string =
+proc renderRestoreScript*(latest: JsonNode; hasNix: bool; h: NixHalf;
+                          latestSha256: string): string =
+  ## `latestSha256` is the SHA-256 of the bytes of the `latest.json` written
+  ## beside this script. The handoff passes it on, and `repro bundle
+  ## restore` refuses any other `latest.json`.
+  if latestSha256.len != 64 or
+      not latestSha256.allCharsInSet({'0' .. '9', 'a' .. 'f'}):
+    raise newException(ValueError,
+      "restore.sh needs the SHA-256 of its latest.json, got " &
+      latestSha256.escape)
   let system = latest["system"].getStr()
   let name = latest["name"].getStr()
   var s = """#!/usr/bin/env bash
@@ -107,6 +120,7 @@ set +u; [ -r /etc/profile.d/nix.sh ] && . /etc/profile.d/nix.sh >/dev/null 2>&1;
     var partFiles = ""
     for p in h.parts: partFiles.add(" " & q(p.file))
     s.add("NIX_DIR=" & q(rel) & "\n")
+    s.add("LATEST_SHA256=" & latestSha256 & "\n")
     s.add("ZSTD=" & q(h.zstd) & "\nREPRO=" & q(h.repro) & "\n")
     s.add("NIX_UNPACKED=" & $h.unpackedBytes & "\nNIX_COMPRESSED=" &
       $h.compressedBytes & "\n")
@@ -359,7 +373,11 @@ command -v zstd >/dev/null || export PATH="$prefix$ZSTD/bin:$PATH"
 R="$prefix$REPRO/bin/repro"
 [ -n "$REPRO" ] && [ -x "$R" ] || R="$(command -v repro)" || done_with "no repro: the bundle carries none and none is on PATH"
 extra=(); [ "$ROOT" != / ] && extra=(--nix-root="$ROOT")
-"$R" bundle restore "$SRC" --after-bootstrap "${extra[@]}" "$@" || done_with "repro bundle restore failed (exit $?)"
+# The repro restored above reads the latest.json this script was made from,
+# or none: a local source directory may be writable by others, who could
+# otherwise replace it now that the Nix half has been verified, and choose
+# the other halves and the shell environment --activate installs.
+"$R" bundle restore "$SRC" --after-bootstrap --latest-sha256="$LATEST_SHA256" "${extra[@]}" "$@" || done_with "repro bundle restore failed (exit $?)"
 log "done"
 """)
   else:

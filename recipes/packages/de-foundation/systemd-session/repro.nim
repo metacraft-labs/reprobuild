@@ -92,12 +92,12 @@ proc currentSystemdSessionCfg*(): sessionImpl.SystemdSessionConfig =
   ## package has not yet registered its defaults (e.g. from a unit test
   ## that imported the recipe but is exercising the helper in isolation).
   result = sessionImpl.SystemdSessionConfig(
-    defaultUser:  readConfigurable[string]("systemdSession.defaultUser", "repro"),
-    defaultUid:   readConfigurable[int]("systemdSession.defaultUid", 1000),
-    defaultGid:   readConfigurable[int]("systemdSession.defaultGid", 1000),
-    defaultHome:  readConfigurable[string]("systemdSession.defaultHome", "/home/repro"),
-    defaultShell: readConfigurable[string]("systemdSession.defaultShell", "/bin/sh"),
-    aptSnapshot:  readConfigurable[string]("systemdSession.aptSnapshot",
+    defaultUser:  readConfigurable[string]("package.systemdSession.defaultUser", "repro"),
+    defaultUid:   readConfigurable[int]("package.systemdSession.defaultUid", 1000),
+    defaultGid:   readConfigurable[int]("package.systemdSession.defaultGid", 1000),
+    defaultHome:  readConfigurable[string]("package.systemdSession.defaultHome", "/home/repro"),
+    defaultShell: readConfigurable[string]("package.systemdSession.defaultShell", "/bin/sh"),
+    aptSnapshot:  readConfigurable[string]("package.systemdSession.aptSnapshot",
                                            "ubuntu/jammy/20260615T000000Z"),
     storeRoot:    sessionImpl.DefaultStoreRoot)
 

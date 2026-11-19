@@ -4148,24 +4148,6 @@ proc flushStoreDiagnostics() =
   except IOError, OSError:
     discard
 
-type ClosureEntry = object
-  ## One archive the closure manifest names, and where it lands.
-  path: string    ## prefix-relative destination directory
-  sha256: string
-  url: string
-  archiveType: string   ## ``zip``, ``tar.gz`` or ``tar.xz``
-  stripComponents: int
-
-const
-  ## The entry a three-field line describes: npm publishes every package as
-  ## a ``package/``-rooted gzip tarball.
-  NpmClosureArchiveType = "tar.gz"
-  NpmClosureStripComponents = 1
-  ## The kinds a five-field line may name. Each is an archive the existing
-  ## extractor unpacks with no provisioned extractor edge; an installer or an
-  ## executable bootstrap is deliberately not one of them.
-  ClosureArchiveTypes = ["zip", "tar.gz", "tar.xz"]
-
 proc closureManifestPath(plan: TarballAcquisitionPlan): string =
   if plan.declaredClosureManifest.len == 0:
     return ""
@@ -4190,109 +4172,30 @@ proc resolvedClosureManifest*(plan: TarballAcquisitionPlan): string =
   if path.len == 0 or path.isAbsolute: path
   else: absolutePath(path)
 
-proc normalizedClosureDestination(path: string): string =
-  ## The destination with ``\`` read as ``/`` and empty and ``.`` components
-  ## dropped -- what two lines must not share, because the second would
-  ## replace the first's tree. "" when the path is unsafe or names the prefix
-  ## root itself: absolute, a drive or UNC path, or reaching a ``..``.
-  let slashed = path.replace('\\', '/')
-  if slashed.len == 0 or slashed.isAbsolute or slashed.startsWith("/") or
-      (slashed.len >= 2 and slashed[0] in {'a' .. 'z', 'A' .. 'Z'} and
-       slashed[1] == ':'):
-    return ""
-  var parts: seq[string] = @[]
-  for part in slashed.split('/'):
-    if part.len == 0 or part == ".":
-      continue
-    if part == "..":
-      return ""
-    parts.add(part)
-  parts.join("/")
-
-proc parseClosureStrip(text: string): int =
-  ## A nonnegative decimal integer that fits the extractor's ``int``; -1
-  ## otherwise. No sign, no radix prefix, no whitespace.
-  if text.len == 0 or text.anyIt(it notin {'0' .. '9'}):
-    return -1
-  try:
-    result = parseInt(text)
-  except ValueError:
-    return -1
-
-proc parseClosureManifest(path: string): seq[ClosureEntry] =
-  ## ``<destination> <sha256> <url>`` (an npm archive: ``tar.gz``, one
-  ## stripped component) or ``<destination> <sha256> <url> <archiveType>
-  ## <stripComponents>`` per line; ``#`` comments and blank lines ignored.
+proc closureEntries(plan: TarballAcquisitionPlan): seq[ClosureEntry] =
+  ## The archives the record's closure unpacks, validated: the entries
+  ## INLINED in the record when it has them (a record from a published
+  ## artifact, whose consumer has no manifest file), else the manifest file
+  ## it names. Inlined entries win and the file is never opened, so a
+  ## consumer without the catalog checkout realizes the same prefix the
+  ## publisher's checkout would.
   ##
-  ## The WHOLE manifest is validated here, and every caller parses it before
-  ## anything is fetched, so a malformed line costs no download.
-  ##
-  ## Deliberately a flat text format rather than JSON: it is GENERATED from
-  ## a lock file and read by a human reviewing a dependency change, and a
-  ## line-per-archive diff is what makes "one dependency moved" legible.
+  ## Inlined entries are re-validated through the grammar rather than
+  ## trusted: an artifact is read from a clone another party committed, and a
+  ## destination reaching outside the prefix must be refused here, before any
+  ## download, as it would be in a file.
+  if plan.record.closureEntries.len > 0:
+    return parseClosureManifestText(
+      plan.record.closureEntries.mapIt(canonicalClosureLine(it)).join("\n"),
+      "inlined closure entries of " & plan.packageSelector)
+  let path = closureManifestPath(plan)
   if not fileExists(extendedPath(path)):
     raise newException(OSError,
       "tool-resolution failed: closure manifest not found: " & path)
-  var destinations: seq[string] = @[]
-  for rawLine in readFile(extendedPath(path)).splitLines():
-    let line = rawLine.strip()
-    if line.len == 0 or line.startsWith("#"):
-      continue
-    let parts = line.splitWhitespace()
-    if parts.len != 3 and parts.len != 5:
-      raise newException(ValueError,
-        "tool-resolution failed: closure manifest line must be " &
-        "\"<path> <sha256> <url>\" or \"<path> <sha256> <url> " &
-        "<archiveType> <stripComponents>\": " & path & ": " & line)
-    let entryPath = parts[0].replace('\\', '/')
-    let destination = normalizedClosureDestination(entryPath)
-    if destination.len == 0:
-      raise newException(ValueError,
-        "tool-resolution failed: closure entry path must be relative and " &
-        "inside the prefix: " & entryPath & " (" & path & ": " & line & ")")
-    if destination in destinations:
-      raise newException(ValueError,
-        "tool-resolution failed: two closure entries unpack to " &
-        destination & ": " & path & ": " & line)
-    destinations.add(destination)
-    var sha = ""
-    try:
-      sha = normalizedSha256(parts[1])
-    except ValueError:
-      raise newException(ValueError,
-        "tool-resolution failed: closure entry sha256 is not a SHA-256 " &
-        "digest: " & path & ": " & line)
-    var entry = ClosureEntry(path: entryPath, sha256: sha, url: parts[2],
-      archiveType: NpmClosureArchiveType,
-      stripComponents: NpmClosureStripComponents)
-    if parts.len == 5:
-      if parts[3] notin ClosureArchiveTypes:
-        raise newException(ValueError,
-          "tool-resolution failed: closure entry archiveType must be one of " &
-          ClosureArchiveTypes.join(", ") & ": " & path & ": " & line)
-      let strip = parseClosureStrip(parts[4])
-      if strip < 0:
-        raise newException(ValueError,
-          "tool-resolution failed: closure entry stripComponents must be a " &
-          "nonnegative decimal integer: " & path & ": " & line)
-      # The zip arm strips by moving a single top-level directory up and
-      # performs no deeper strip; refused here rather than after a download.
-      if parts[3] == "zip" and strip > 1:
-        raise newException(ValueError,
-          "tool-resolution failed: closure entry stripComponents must be " &
-          "0 or 1 for a zip archive: " & path & ": " & line)
-      entry.archiveType = parts[3]
-      entry.stripComponents = strip
-    result.add(entry)
+  parseClosureManifestText(readFile(extendedPath(path)), path)
 
-proc canonicalClosureLine(entry: ClosureEntry): string =
-  ## An entry with the npm defaults is written as the three-field line, so an
-  ## explicit ``tar.gz 1`` and the legacy line share one identity; any other
-  ## kind or strip count is part of it.
-  result = entry.path & " " & entry.sha256 & " " & entry.url
-  if entry.archiveType != NpmClosureArchiveType or
-      entry.stripComponents != NpmClosureStripComponents:
-    result.add(" " & entry.archiveType & " " & $entry.stripComponents)
+proc hasClosure(plan: TarballAcquisitionPlan): bool =
+  plan.declaredClosureManifest.len > 0 or plan.record.closureEntries.len > 0
 
 proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   ## The manifest's CONTENT, canonicalised, as the cache-key contribution.
@@ -4303,7 +4206,7 @@ proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   ## rather than the raw bytes means a comment or a reordering does not
   ## move the key either, which is what lets the generator reformat.
   var canonical: seq[string] = @[]
-  for entry in parseClosureManifest(closureManifestPath(plan)):
+  for entry in closureEntries(plan):
     canonical.add(canonicalClosureLine(entry))
   canonical.sort()
   $blake3.digest(canonical.join("\n"))
@@ -4323,10 +4226,9 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
   ## manifest of pinned archives rather than a call to a package manager:
   ## the fetch is content-addressed, cached, and offline after the first
   ## time, and nothing resolves a version range at build time.
-  if plan.declaredClosureManifest.len == 0:
+  if not hasClosure(plan):
     return
-  let manifestPath = closureManifestPath(plan)
-  for entry in parseClosureManifest(manifestPath):
+  for entry in closureEntries(plan):
     var entryPlan = plan
     entryPlan.url = entry.url
     entryPlan.mirrors = @[]
@@ -4336,6 +4238,7 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.archiveType = entry.archiveType
     entryPlan.stripComponents = entry.stripComponents
     entryPlan.declaredClosureManifest = ""
+    entryPlan.record.closureEntries = @[]
     let downloaded = verifiedDownload(entryPlan, storeRoot)
     let target = destination / entry.path
     createDir(extendedPath(parentDir(target)))
@@ -4399,7 +4302,7 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   # manifest's CONTENT — not its path, which is a local detail — keys the
   # entry. Conditional like the others, so a package with no closure keeps
   # the key it already had.
-  if plan.declaredClosureManifest.len > 0:
+  if hasClosure(plan):
     result.addOption("closure", closureManifestDigest(plan))
   result.addOption("stripComponents", $plan.stripComponents)
   # An ELF relocation writes the realized prefix's ABSOLUTE path into every
@@ -4710,8 +4613,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # The whole closure is validated before anything is reused, substituted or
   # fetched: a malformed manifest must cost neither the primary archive's
   # download nor any entry's, and must not be served an existing prefix.
-  if plan.declaredClosureManifest.len > 0:
-    discard parseClosureManifest(closureManifestPath(plan))
+  if hasClosure(plan):
+    discard closureEntries(plan)
   let tmpRoot = storeRoot / "tmp"
   createDir(extendedPath(tmpRoot))
   let packageName = safeStoreSegment(plan.packageSelector, "package")
@@ -5440,8 +5343,10 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
     "\0" & $plansNode
   var inputs: seq[string]
   for plan in plans:
-    if plan.declaredClosureManifest.len > 0:
-      inputs.add(closureManifestPath(plan))
+    if hasClosure(plan):
+      # Inlined entries have no file to be an input of the edge.
+      if plan.record.closureEntries.len == 0:
+        inputs.add(closureManifestPath(plan))
       fingerprintText.add("\0closure:" & closureManifestDigest(plan))
 
   var roles: seq[string]

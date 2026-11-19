@@ -14,6 +14,7 @@ verb	cache
 verb	capabilities
 verb	cargo
 verb	cas
+verb	catalog
 verb	cert-signer
 verb	certificates
 verb	certify
@@ -101,6 +102,7 @@ flag	repro tasks	--activity
 flag	repro tasks	--dev-env-stats
 flag	repro tasks	--lock-slice
 flag	repro tasks	--work-root
+env	repro tasks	REPROBUILD_WORK_ROOT
 command	repro graph
 flag	repro graph	--action-cache-root
 flag	repro graph	--all
@@ -118,6 +120,8 @@ flag	repro graph	--target
 flag	repro graph	--tool-provisioning
 flag	repro graph	--view
 flag	repro graph	--work-root
+env	repro graph	REPROBUILD_ACTION_CACHE_ROOT
+env	repro graph	REPROBUILD_WORK_ROOT
 command	repro why
 flag	repro why	--action
 flag	repro why	--action-cache-root
@@ -125,6 +129,8 @@ flag	repro why	--format
 flag	repro why	--json
 flag	repro why	--tool-provisioning
 flag	repro why	--work-root
+env	repro why	REPROBUILD_ACTION_CACHE_ROOT
+env	repro why	REPROBUILD_WORK_ROOT
 command	repro deps
 command	repro deps refresh
 flag	repro deps refresh	--check
@@ -152,6 +158,8 @@ flag	repro stats	--tool-provisioning
 flag	repro stats	--top
 flag	repro stats	--watch-session
 flag	repro stats	--work-root
+env	repro stats	REPROBUILD_ACTION_CACHE_ROOT
+env	repro stats	REPROBUILD_WORK_ROOT
 command	repro daemon
 flag	repro daemon	--daemon-exe
 flag	repro daemon	--dev
@@ -177,15 +185,20 @@ flag	repro store gc	--json
 flag	repro store gc	--keep-recent
 flag	repro store gc	--store-root
 flag	repro store gc	--target
+env	repro store gc	REPRO_STORE_ROOT
 command	repro store recover
 flag	repro store recover	--store-root
+env	repro store recover	REPRO_STORE_ROOT
 command	repro store roots
 flag	repro store roots	--store-root
+env	repro store roots	REPRO_STORE_ROOT
 command	repro store list
 flag	repro store list	--store-root
+env	repro store list	REPRO_STORE_ROOT
 command	repro store optimise
 flag	repro store optimise	--json
 flag	repro store optimise	--store-root
+env	repro store optimise	REPRO_STORE_ROOT
 command	repro store materialize
 flag	repro store materialize	--json
 flag	repro store materialize	--no-shared-inode
@@ -197,6 +210,8 @@ flag	repro store closure	--root
 flag	repro store closure	--selection
 flag	repro store closure	--store-root
 flag	repro store closure	--workspace-root
+env	repro store closure	REPROBUILD_ACTION_CACHE_ROOT
+env	repro store closure	REPRO_STORE_ROOT
 command	repro store export
 flag	repro store export	--action-cache-root
 flag	repro store export	--freeze-dev-env
@@ -209,6 +224,8 @@ flag	repro store export	--store-root
 flag	repro store export	--workspace-root
 flag	repro store export	--zstd-level
 flag	repro store export	--zstd-threads
+env	repro store export	REPROBUILD_ACTION_CACHE_ROOT
+env	repro store export	REPRO_STORE_ROOT
 command	repro store import
 flag	repro store import	--action-cache-root
 flag	repro store import	--allow-dev-env
@@ -216,21 +233,27 @@ flag	repro store import	--force
 flag	repro store import	--json
 flag	repro store import	--root
 flag	repro store import	--store-root
+env	repro store import	REPROBUILD_ACTION_CACHE_ROOT
+env	repro store import	REPRO_STORE_ROOT
 command	repro store copy
 flag	repro store copy	--json
 flag	repro store copy	--root-id
 flag	repro store copy	--store-root
 flag	repro store copy	--to
+env	repro store copy	REPRO_STORE_ROOT
 command	repro store daemon
 flag	repro store daemon	--dev
 flag	repro store daemon	--endpoint
 flag	repro store daemon	--store-root
+env	repro store daemon	REPROSTORED_ENDPOINT
 command	repro store serve
 flag	repro store serve	--dev
 flag	repro store serve	--endpoint
 flag	repro store serve	--store-root
+env	repro store serve	REPROSTORED_ENDPOINT
 command	repro cas
 flag	repro cas	--store-root
+env	repro cas	REPRO_STORE_ROOT
 command	repro cas gc
 flag	repro cas gc	--keep
 command	repro cas verify
@@ -301,6 +324,8 @@ flag	repro bundle create	--repro
 flag	repro bundle create	--store-root
 flag	repro bundle create	--workspace-root
 flag	repro bundle create	--zstd
+env	repro bundle create	REPROBUILD_ACTION_CACHE_ROOT
+env	repro bundle create	REPRO_STORE_ROOT
 command	repro bundle publish
 flag	repro bundle publish	--endpoint
 flag	repro bundle publish	--parallel
@@ -314,11 +339,14 @@ flag	repro bundle restore	--after-bootstrap
 flag	repro bundle restore	--allow-dev-env
 flag	repro bundle restore	--bashrc-file
 flag	repro bundle restore	--json
+flag	repro bundle restore	--latest-sha256
 flag	repro bundle restore	--nix-root
 flag	repro bundle restore	--parallel
 flag	repro bundle restore	--staging
 flag	repro bundle restore	--store-root
 flag	repro bundle restore	--workspace
+env	repro bundle restore	REPROBUILD_ACTION_CACHE_ROOT
+env	repro bundle restore	REPRO_STORE_ROOT
 command	repro bundle inspect
 flag	repro bundle inspect	--json
 command	repro reap
@@ -329,6 +357,7 @@ flag	repro reap	--rebuild-host-bound
 flag	repro reap	--state-root
 command	repro launch-plan
 flag	repro launch-plan	--store-root
+env	repro launch-plan	REPRO_STORE_ROOT
 command	repro launch-plan show
 command	repro launch-plan id
 command	repro cert-signer
@@ -352,6 +381,7 @@ flag	repro self install	--package
 flag	repro self install	--platform
 flag	repro self install	--store-root
 flag	repro self install	--version
+env	repro self install	REPRO_STORE_ROOT
 command	repro self provision
 flag	repro self provision	--from
 flag	repro self provision	--json
@@ -360,23 +390,28 @@ flag	repro self provision	--platform
 flag	repro self provision	--project
 flag	repro self provision	--store-root
 flag	repro self provision	--version
+env	repro self provision	REPRO_STORE_ROOT
 command	repro self hold
 flag	repro self hold	--json
 flag	repro self hold	--package
 flag	repro self hold	--project
 flag	repro self hold	--store-root
+env	repro self hold	REPRO_STORE_ROOT
 command	repro self which
 flag	repro self which	--json
 flag	repro self which	--package
 flag	repro self which	--project
 flag	repro self which	--store-root
+env	repro self which	REPRO_STORE_ROOT
 command	repro self list
 flag	repro self list	--json
 flag	repro self list	--package
 flag	repro self list	--store-root
+env	repro self list	REPRO_STORE_ROOT
 command	repro self prune-roots
 flag	repro self prune-roots	--json
 flag	repro self prune-roots	--store-root
+env	repro self prune-roots	REPRO_STORE_ROOT
 command	repro home
 flag	repro home	--profile-dir
 command	repro home add
@@ -386,6 +421,7 @@ flag	repro home add	--data
 flag	repro home add	--if
 flag	repro home add	--no-apply
 flag	repro home add	--when
+env	repro home add	REPRO_HOME_PACKAGE_CATALOG
 command	repro home remove
 flag	repro home remove	--activity
 flag	repro home remove	--data
@@ -427,8 +463,10 @@ flag	repro home disable	--target-wsl
 command	repro home list
 flag	repro home list	--host
 flag	repro home list	--json
+env	repro home list	REPRO_HOST
 command	repro home why
 flag	repro home why	--host
+env	repro home why	REPRO_HOST
 command	repro home history
 flag	repro home history	--json
 command	repro home apply
@@ -441,22 +479,26 @@ flag	repro home apply	--relock
 flag	repro home apply	--target-arch
 flag	repro home apply	--target-platform
 flag	repro home apply	--uninstall-from-scoop
+env	repro home apply	REPRO_HOST
 command	repro home plan
 flag	repro home plan	--allow-drift
 flag	repro home plan	--host
 flag	repro home plan	--json
 flag	repro home plan	--reconcile-drift
+env	repro home plan	REPRO_HOST
 command	repro home export
 flag	repro home export	--check
 flag	repro home export	--format
 flag	repro home export	--host
 flag	repro home export	--nixos
 flag	repro home export	--target
+env	repro home export	REPRO_HOST
 command	repro home facts
 flag	repro home facts	--host
 flag	repro home facts	--nixos
 flag	repro home facts	--output
 flag	repro home facts	--target
+env	repro home facts	REPRO_HOST
 command	repro home compare
 flag	repro home compare	--allow
 flag	repro home compare	--facts
@@ -471,6 +513,7 @@ flag	repro home gc	--force
 flag	repro home gc	--keep-generations
 flag	repro home gc	--store
 flag	repro home gc	-y
+env	repro home gc	REPRO_STORE_ROOT
 command	repro home set
 flag	repro home set	--no-apply
 flag	repro home set	--when
@@ -504,6 +547,7 @@ flag	repro system plan	--json
 flag	repro system plan	--profile
 flag	repro system plan	--reconcile-drift
 flag	repro system plan	--state-dir
+env	repro system plan	REPRO_HOST
 command	repro system apply
 flag	repro system apply	--accept-drift
 flag	repro system apply	--accept-feature-destroy
@@ -520,6 +564,7 @@ flag	repro system apply	--plan
 flag	repro system apply	--profile
 flag	repro system apply	--reconcile-drift
 flag	repro system apply	--state-dir
+env	repro system apply	REPRO_HOST
 command	repro system sync
 flag	repro system sync	--accept-drift
 flag	repro system sync	--accept-passwd-destroy
@@ -531,6 +576,7 @@ flag	repro system sync	--no-elevate
 flag	repro system sync	--profile
 flag	repro system sync	--reconcile-drift
 flag	repro system sync	--state-dir
+env	repro system sync	REPRO_HOST
 command	repro system history
 flag	repro system history	--json
 flag	repro system history	--state-dir
@@ -545,6 +591,7 @@ flag	repro system rollback	--host
 flag	repro system rollback	--profile
 flag	repro system rollback	--reconcile-drift
 flag	repro system rollback	--state-dir
+env	repro system rollback	REPRO_HOST
 command	repro system audit
 flag	repro system audit	--json
 flag	repro system audit	--profile
@@ -560,6 +607,7 @@ flag	repro infra plan	--profile
 flag	repro infra plan	--reconcile-drift
 flag	repro infra plan	--state-dir
 flag	repro infra plan	--strict
+env	repro infra plan	REPRO_HOST
 command	repro infra apply
 flag	repro infra apply	--accept-drift
 flag	repro infra apply	--accept-feature-destroy
@@ -580,6 +628,7 @@ flag	repro infra apply	--reconcile-drift
 flag	repro infra apply	--staged
 flag	repro infra apply	--state-dir
 flag	repro infra apply	--yes
+env	repro infra apply	REPRO_HOST
 command	repro infra cache-keys
 flag	repro infra cache-keys	--platform-abi
 flag	repro infra cache-keys	--platform-cpu
@@ -612,6 +661,7 @@ flag	repro infra image	--keep-work
 flag	repro infra image	--output
 flag	repro infra image	--profile
 flag	repro infra image	--work-dir
+env	repro infra image	REPRO_HOST
 command	repro anywhere
 flag	repro anywhere	--addon-binary
 flag	repro anywhere	--addon-sha256
@@ -632,6 +682,7 @@ flag	repro anywhere	--profile
 flag	repro anywhere	--recipient-out
 flag	repro anywhere	--ssh-key
 flag	repro anywhere	--ssh-port
+env	repro anywhere	REPRO_HOST
 command	repro deploy-agent
 flag	repro deploy-agent	--allowed-signers
 flag	repro deploy-agent	--cache-root
@@ -642,6 +693,7 @@ flag	repro deploy-agent	--secrets-dir
 flag	repro deploy-agent	--secrets-key
 flag	repro deploy-agent	--state-dir
 flag	repro deploy-agent	--target
+env	repro deploy-agent	REPRO_HOST
 command	repro deploy-agent keygen
 flag	repro deploy-agent keygen	--secrets-key
 command	repro deploy-agent compile-profile
@@ -658,6 +710,7 @@ flag	repro deploy-agent compile-profile	--state-dir
 flag	repro deploy-agent compile-profile	--stdio
 flag	repro deploy-agent compile-profile	--system-activities
 flag	repro deploy-agent compile-profile	--system-mode
+env	repro deploy-agent compile-profile	REPRO_HOST
 command	repro hardware
 command	repro hardware probe
 flag	repro hardware probe	--dry-run
@@ -686,11 +739,16 @@ flag	repro cargo gc	--dry-run
 flag	repro cargo gc	--keep-sets
 flag	repro cargo gc	--min-age
 flag	repro cargo gc	--target-dir
+env	repro cargo gc	CARGO_TARGET_DIR
+env	repro cargo gc	REPRO_CARGO_GC_KEEP_SETS
+env	repro cargo gc	REPRO_CARGO_GC_MIN_AGE
 command	repro cargo record-live
 flag	repro cargo record-live	--from
 flag	repro cargo record-live	--keep-sets
 flag	repro cargo record-live	--target-dir
 flag	repro cargo record-live	--tee
+env	repro cargo record-live	CARGO_TARGET_DIR
+env	repro cargo record-live	REPRO_CARGO_GC_KEEP_SETS
 command	repro cargo run
 flag	repro cargo run	--action-id
 flag	repro cargo run	--fragment
@@ -715,12 +773,14 @@ flag	repro exec	--activity
 flag	repro exec	--dev-env-stats
 flag	repro exec	--lock-slice
 flag	repro exec	--work-root
+env	repro exec	REPROBUILD_WORK_ROOT
 command	repro run
 flag	repro run	--activity
 flag	repro run	--choose
 flag	repro run	--dev-env-stats
 flag	repro run	--lock-slice
 flag	repro run	--work-root
+env	repro run	REPROBUILD_WORK_ROOT
 command	repro shell
 flag	repro shell	--activity
 flag	repro shell	--command
@@ -730,6 +790,8 @@ flag	repro shell	--print-env
 flag	repro shell	--shell
 flag	repro shell	--work-root
 flag	repro shell	-c
+env	repro shell	REPROBUILD_WORK_ROOT
+env	repro shell	SHELL
 command	repro shell hook
 flag	repro shell hook	--repro-bin
 command	repro allow
@@ -753,12 +815,14 @@ flag	repro up	--lock-slice
 flag	repro up	--ready-timeout
 flag	repro up	--replace
 flag	repro up	--work-root
+env	repro up	REPROBUILD_WORK_ROOT
 command	repro down
 flag	repro down	--activity
 flag	repro down	--force
 flag	repro down	--lock-slice
 flag	repro down	--stop-timeout
 flag	repro down	--work-root
+env	repro down	REPROBUILD_WORK_ROOT
 command	repro dev
 flag	repro dev	--activity
 flag	repro dev	--debounce-ms
@@ -774,6 +838,7 @@ flag	repro dev	--max-debounce
 flag	repro dev	--ready-timeout
 flag	repro dev	--replace
 flag	repro dev	--work-root
+env	repro dev	REPROBUILD_WORK_ROOT
 command	repro hcr
 command	repro hcr coordinate
 flag	repro hcr coordinate	--artifacts
@@ -994,6 +1059,7 @@ command	repro workspace shared-clones
 flag	repro workspace shared-clones	--force
 flag	repro workspace shared-clones	--json
 flag	repro workspace shared-clones	--no-write-report
+flag	repro workspace shared-clones	--reset-refs
 flag	repro workspace shared-clones	--workspace-root
 flag	repro workspace shared-clones	--write-report
 command	repro workspace sync
@@ -1294,8 +1360,10 @@ flag	repro locking adopt-manifest	--workspace-root
 command	repro gateway
 command	repro gateway pre-receive
 flag	repro gateway pre-receive	--gateway-dir
+env	repro gateway pre-receive	GIT_DIR
 command	repro gateway post-receive
 flag	repro gateway post-receive	--gateway-dir
+env	repro gateway post-receive	GIT_DIR
 command	repro gateway migrate
 flag	repro gateway migrate	--dry-run
 flag	repro gateway migrate	--workspace-root
@@ -1353,6 +1421,7 @@ flag	repro develop	--transitive-of
 flag	repro develop	--work-root
 flag	repro develop	--workspace-root
 flag	repro develop	--write-report
+env	repro develop	REPROBUILD_WORK_ROOT
 command	repro flake
 command	repro flake override-args
 flag	repro flake override-args	--all
@@ -1471,6 +1540,7 @@ flag	repro build	--write-report
 flag	repro build	--write-stats
 flag	repro build	-v
 flag	repro build	-vv
+env	repro build	REPROBUILD_ACTION_CACHE_ROOT
 env	repro build	REPROBUILD_LOG
 env	repro build	REPROBUILD_MEASURE
 env	repro build	REPROBUILD_MONITOR_HOSTING
@@ -1478,6 +1548,7 @@ env	repro build	REPROBUILD_NO_RUNQUOTA
 env	repro build	REPROBUILD_PROGRESS
 env	repro build	REPROBUILD_PROGRESS_BARS
 env	repro build	REPROBUILD_SHOW
+env	repro build	REPROBUILD_WORK_ROOT
 env	repro build	REPRO_DAEMON
 env	repro build	REPRO_PROGRESS
 env	repro build	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1539,6 +1610,7 @@ flag	repro bench	--write-report
 flag	repro bench	--write-stats
 flag	repro bench	-v
 flag	repro bench	-vv
+env	repro bench	REPROBUILD_ACTION_CACHE_ROOT
 env	repro bench	REPROBUILD_LOG
 env	repro bench	REPROBUILD_MEASURE
 env	repro bench	REPROBUILD_MONITOR_HOSTING
@@ -1546,6 +1618,7 @@ env	repro bench	REPROBUILD_NO_RUNQUOTA
 env	repro bench	REPROBUILD_PROGRESS
 env	repro bench	REPROBUILD_PROGRESS_BARS
 env	repro bench	REPROBUILD_SHOW
+env	repro bench	REPROBUILD_WORK_ROOT
 env	repro bench	REPRO_DAEMON
 env	repro bench	REPRO_PROGRESS
 env	repro bench	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1607,6 +1680,7 @@ flag	repro lint	--write-report
 flag	repro lint	--write-stats
 flag	repro lint	-v
 flag	repro lint	-vv
+env	repro lint	REPROBUILD_ACTION_CACHE_ROOT
 env	repro lint	REPROBUILD_LOG
 env	repro lint	REPROBUILD_MEASURE
 env	repro lint	REPROBUILD_MONITOR_HOSTING
@@ -1614,6 +1688,7 @@ env	repro lint	REPROBUILD_NO_RUNQUOTA
 env	repro lint	REPROBUILD_PROGRESS
 env	repro lint	REPROBUILD_PROGRESS_BARS
 env	repro lint	REPROBUILD_SHOW
+env	repro lint	REPROBUILD_WORK_ROOT
 env	repro lint	REPRO_DAEMON
 env	repro lint	REPRO_PROGRESS
 env	repro lint	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1623,6 +1698,7 @@ command	repro clean
 flag	repro clean	--dry-run
 flag	repro clean	--project-root
 flag	repro clean	--work-root
+env	repro clean	REPROBUILD_WORK_ROOT
 command	repro test
 flag	repro test	--action-cache-root
 flag	repro test	--action-output
@@ -1692,6 +1768,7 @@ flag	repro test	--write-report
 flag	repro test	--write-stats
 flag	repro test	-v
 flag	repro test	-vv
+env	repro test	REPROBUILD_ACTION_CACHE_ROOT
 env	repro test	REPROBUILD_LOG
 env	repro test	REPROBUILD_MEASURE
 env	repro test	REPROBUILD_MONITOR_HOSTING
@@ -1699,6 +1776,7 @@ env	repro test	REPROBUILD_NO_RUNQUOTA
 env	repro test	REPROBUILD_PROGRESS
 env	repro test	REPROBUILD_PROGRESS_BARS
 env	repro test	REPROBUILD_SHOW
+env	repro test	REPROBUILD_WORK_ROOT
 env	repro test	REPRO_DAEMON
 env	repro test	REPRO_PROGRESS
 env	repro test	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1779,6 +1857,7 @@ flag	repro certify	--write-report
 flag	repro certify	--write-stats
 flag	repro certify	-v
 flag	repro certify	-vv
+env	repro certify	REPROBUILD_ACTION_CACHE_ROOT
 env	repro certify	REPROBUILD_LOG
 env	repro certify	REPROBUILD_MEASURE
 env	repro certify	REPROBUILD_MONITOR_HOSTING
@@ -1786,6 +1865,7 @@ env	repro certify	REPROBUILD_NO_RUNQUOTA
 env	repro certify	REPROBUILD_PROGRESS
 env	repro certify	REPROBUILD_PROGRESS_BARS
 env	repro certify	REPROBUILD_SHOW
+env	repro certify	REPROBUILD_WORK_ROOT
 env	repro certify	REPRO_DAEMON
 env	repro certify	REPRO_PROGRESS
 env	repro certify	REPRO_RESTORE_CACHED_OUTPUTS
@@ -1852,6 +1932,126 @@ flag	repro watch	--write-report
 flag	repro watch	--write-stats
 env	repro watch	REPROBUILD_MEASURE
 env	repro watch	REPROBUILD_SHOW
+env	repro watch	REPROBUILD_WORK_ROOT
 env	repro watch	REPRO_DAEMON
 env	repro watch	REPRO_RESTORE_CACHED_OUTPUTS
 env	repro watch	REPRO_TOOL_PROVISIONING
+command	repro attest
+command	repro attest expect
+flag	repro attest expect	--backend
+flag	repro attest expect	--check
+flag	repro attest expect	--config-fingerprint
+flag	repro attest expect	--firmware
+flag	repro attest expect	--guest-features
+flag	repro attest expect	--guest-policy
+flag	repro attest expect	--image
+flag	repro attest expect	--launch-cmdline
+flag	repro attest expect	--launch-initrd
+flag	repro attest expect	--launch-kernel
+flag	repro attest expect	--out
+flag	repro attest expect	--td-firmware
+flag	repro attest expect	--td-page-order
+flag	repro attest expect	--td-register-log
+flag	repro attest expect	--uki
+flag	repro attest expect	--vcpu-type
+flag	repro attest expect	--vcpus
+flag	repro attest expect	--verity-image
+flag	repro attest expect	--verity-image-digest
+flag	repro attest expect	--verity-root-hash
+flag	repro attest expect	--verity-root-hash-file
+flag	repro attest expect	--vmm
+command	repro attest challenge
+flag	repro attest challenge	--bytes
+flag	repro attest challenge	--hex
+flag	repro attest challenge	--out
+command	repro attest verify
+flag	repro attest verify	--attestations
+flag	repro attest verify	--challenge
+flag	repro attest verify	--challenge-file
+flag	repro attest verify	--challenge-issued-at
+flag	repro attest verify	--json
+flag	repro attest verify	--manifest
+flag	repro attest verify	--out
+flag	repro attest verify	--policy
+flag	repro attest verify	--report-file
+flag	repro attest verify	--report-url
+flag	repro attest verify	--revocation-list
+flag	repro attest verify	--revoked-signer
+flag	repro attest verify	--signer-admission
+flag	repro attest verify	--signer-key
+flag	repro attest verify	--trust-anchor
+flag	repro attest verify	--vendor-revocation-list
+flag	repro attest verify	--witnessed-root
+command	repro attest cross-check
+flag	repro attest cross-check	--attestations
+flag	repro attest cross-check	--backend
+flag	repro attest cross-check	--challenge
+flag	repro attest cross-check	--challenge-file
+flag	repro attest cross-check	--challenge-issued-at
+flag	repro attest cross-check	--check
+flag	repro attest cross-check	--config-fingerprint
+flag	repro attest cross-check	--firmware
+flag	repro attest cross-check	--guest-features
+flag	repro attest cross-check	--guest-policy
+flag	repro attest cross-check	--image
+flag	repro attest cross-check	--json
+flag	repro attest cross-check	--launch-cmdline
+flag	repro attest cross-check	--launch-initrd
+flag	repro attest cross-check	--launch-kernel
+flag	repro attest cross-check	--manifest
+flag	repro attest cross-check	--out
+flag	repro attest cross-check	--policy
+flag	repro attest cross-check	--report-file
+flag	repro attest cross-check	--report-url
+flag	repro attest cross-check	--revocation-list
+flag	repro attest cross-check	--revoked-signer
+flag	repro attest cross-check	--signer-admission
+flag	repro attest cross-check	--signer-key
+flag	repro attest cross-check	--td-firmware
+flag	repro attest cross-check	--td-page-order
+flag	repro attest cross-check	--td-register-log
+flag	repro attest cross-check	--trust-anchor
+flag	repro attest cross-check	--uki
+flag	repro attest cross-check	--vcpu-type
+flag	repro attest cross-check	--vcpus
+flag	repro attest cross-check	--vendor-revocation-list
+flag	repro attest cross-check	--verity-image
+flag	repro attest cross-check	--verity-image-digest
+flag	repro attest cross-check	--verity-root-hash
+flag	repro attest cross-check	--verity-root-hash-file
+flag	repro attest cross-check	--vmm
+flag	repro attest cross-check	--witnessed-root
+command	repro attest launch
+flag	repro attest launch	--config-fingerprint
+flag	repro attest launch	--firmware
+flag	repro attest launch	--guest-features
+flag	repro attest launch	--guest-policy
+flag	repro attest launch	--image-reference
+flag	repro attest launch	--instance-name
+flag	repro attest launch	--instance-shape
+flag	repro attest launch	--lease-out
+flag	repro attest launch	--lease-rate-micros-per-hour
+flag	repro attest launch	--lease-store
+flag	repro attest launch	--lease-ttl-seconds
+flag	repro attest launch	--now
+flag	repro attest launch	--out
+flag	repro attest launch	--plan-out
+flag	repro attest launch	--provider
+flag	repro attest launch	--region
+flag	repro attest launch	--ssh-key-reference
+flag	repro attest launch	--subnet
+flag	repro attest launch	--td-page-order
+flag	repro attest launch	--td-register-log
+flag	repro attest launch	--uki
+flag	repro attest launch	--vcpu-type
+flag	repro attest launch	--verity-image-digest
+flag	repro attest launch	--verity-root-hash
+command	repro attest reap
+flag	repro attest reap	--destroy
+flag	repro attest reap	--interval-seconds
+flag	repro attest reap	--lease-store
+flag	repro attest reap	--now
+flag	repro attest reap	--provider
+flag	repro attest reap	--region
+flag	repro attest reap	--sweeps
+flag	repro attest reap	--tag-sweep

@@ -119,6 +119,12 @@ suite "sync and hooks help":
     checkpoint("repro help allow somewhere -> exit " & $deeper.code & "\n" &
       deeper.output)
     check deeper.code == 2
-    check "unknown command 'allow somewhere'" in deeper.output
+    # clispec's error block for the word below `repro allow`, which has no
+    # subcommands: an unexpected argument, with no empty list of
+    # subcommands after it.
+    check "error: unexpected argument 'somewhere' for 'repro allow'" in
+      deeper.output
+    check "expected one of" notin deeper.output
+    check "For more information, try 'repro allow --help'." in deeper.output
     check entriesUnder(empty).len == 0
     check entriesUnder(home).len == 0

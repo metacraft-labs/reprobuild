@@ -165,6 +165,25 @@ type
       ## it; an edge that names the tool only in ``toolIdentityRefs`` takes it
       ## through ``repro_core/tool_input_check_policies``, whose entries
       ## ``t_tool_input_check_policies`` checks against these declarations.
+    envPassthrough*: seq[string]
+      ## The environment variables every edge of this command passes through
+      ## by NAME (``BuildActionDef.envPassthrough``; reprobuild-pm
+      ## ``spec/Filesystem-Policy-And-Observed-Inputs.md`` §"Declared And
+      ## Passthrough Variables"), declared as string literals with
+      ## ``envPassthrough "TMPDIR", ...`` in the ``cli:`` block. Inherited by
+      ## nested scopes, which add their own names; each name once. A claim
+      ## about the TOOL -- its process reads the variable only in a way that
+      ## cannot change what it produces -- so the generated typed wrapper
+      ## stamps it on every edge it records and exposes no formal parameter
+      ## through which a call site could drop or replace it. Never empty and
+      ## never ``PATH`` (``envPassthroughNameProblem``).
+    envPassthroughRefs*: seq[string]
+      ## The same declaration written as a reference to a ``const`` list of
+      ## names (``envPassthrough ScratchLocationEnvNames``), kept as the
+      ## identifier's source spelling: the macro cannot evaluate it, so the
+      ## wrapper is generated to pass it on, resolved where the tool's
+      ## ``cli:`` block is compiled, and to check its names there. Inherited
+      ## and deduplicated (by spelling) like ``envPassthrough``.
     nonDeterminismJustification*: string
       ## Why the blessing above is sound. Required when the policy is
       ## ``ndpEntropyBlessed`` (the macro rejects a bare blessing), carried
@@ -1130,10 +1149,16 @@ type
       ## path and not bytes: like ``expressionFile``, the manifest is read
       ## from the recipe's own directory at realize time, so a consumer that
       ## receives this provisioning as a CONTRIBUTION through an interface
-      ## artifact does not get the file with it. A federated catalog
-      ## publishing a closure package must be checked out, not merely
-      ## pinned. Lifting that means moving the entries into the artifact,
-      ## which is a larger change to the provisioning schema than this field.
+      ## artifact does not get the file with it. The lift therefore inlines
+      ## the parsed entries into the artifact record (envelope v34,
+      ## ``InterfaceTarballProvisioning.closureEntries``), and a consumer
+      ## realizes from those.
+    closureEntries*: seq[string]
+      ## The closure manifest INLINED, one canonical manifest line per entry.
+      ## Empty on a recipe (which names the file in ``closureManifest``);
+      ## set when the def is rebuilt from a published artifact, whose
+      ## consumer has no such file (envelope v34). Realization prefers these
+      ## to the file.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
@@ -1951,6 +1976,30 @@ type
       ## the cache from the key (the dependency policy's ignored roots do).
       ## Passed to ``buildAction``. Empty (the default) changes nothing.
       ## Payload codec v35+; an older payload decodes with the list empty.
+    envPassthrough*: seq[string]
+      ## Names of environment variables whose HOST value this action reads:
+      ## the passthrough class of reprobuild-pm
+      ## ``spec/Filesystem-Policy-And-Observed-Inputs.md`` §"Declared And
+      ## Passthrough Variables". Lowered onto the engine's
+      ## ``BuildAction.envPassthrough`` (BuildXL's
+      ## ``passThroughEnvironmentVariables``): each NAME enters the weak
+      ## fingerprint, the VALUE never does, and an observed read of the
+      ## variable is dropped from the observed-environment key
+      ## (``cacheEnvInputs``). A name may also be declared in ``env``; the
+      ## action is then launched with the declared value and keyed by the
+      ## name alone, as the engine already does for ``PATH``.
+      ##
+      ## For a variable whose value varies per shell without changing what
+      ## the action produces -- the temp-directory names a compile reads to
+      ## place its scratch files (``nim.c`` in ``packages/nim.nim``). Every
+      ## other variable an edge is observed to read stays keyed by value, so
+      ## naming one here is a claim about the TOOL, made where the edge is
+      ## constructed, never a way to silence a miss. A tool declares it once
+      ## with ``envPassthrough`` in its ``cli:`` block
+      ## (``ReproCliCommandExt.envPassthrough``) and its typed wrapper stamps
+      ## it on every edge; an edge adds its own names through
+      ## ``appendRegisteredActionEnvPassthrough``. Payload codec v36+; an
+      ## older payload decodes with the list empty.
     sourceFile*: string
     sourceLine*: int
     extensions*: seq[ExtensionBox]

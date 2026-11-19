@@ -12,6 +12,8 @@
 ## * ``role = input|output`` on a parameter;
 ## * ``dependencyPolicy``, ``nonDeterminism`` and ``inputCheckPolicy`` on a
 ##   scope;
+## * ``envPassthrough``, the environment variables a scope's edges pass
+##   through by name, accumulated over nested scopes;
 ## * ``outputs``, ``optionalOutputs`` and ``removeBeforeRun``, which name
 ##   parameters visible in the scope;
 ## * ``subTools``, once, directly under ``cli:`` (optionally per platform in a
@@ -211,6 +213,46 @@ proc parseNonDeterminismDecl(node: NimNode;
       "state what this tool draws randomness FOR and why it cannot reach " &
       "the tool's output. An unjustified blessing silently restores cache " &
       "publication for a tool whose results may not be reproducible.", node)
+
+proc refuseBareEnvPassthrough(node: NimNode) =
+  ## A bare ``envPassthrough`` (no operands) parses as an identifier, not a
+  ## call, so neither door's dispatch on the callee name would see it, and
+  ## the package door would ignore it without a word. Refused here instead.
+  if node.kind in {nnkIdent, nnkSym} and node.eqIdent("envPassthrough"):
+    error("envPassthrough expects one or more variable names " &
+      "(string literals) or the name of a const list of them", node)
+
+proc parseEnvPassthroughDecl(node: NimNode; names, refs: var seq[string]) =
+  ## Parse ``envPassthrough "TMPDIR", "TMP"`` / ``envPassthrough SomeConst``
+  ## into the scope's accumulated declaration: string literals into
+  ## ``names``, a const reference's spelling into ``refs``, each once. The
+  ## operands may be mixed in one statement.
+  ##
+  ## A literal is checked HERE (``envPassthroughNameProblem``), where the
+  ## author can still see the declaration: an empty name and ``PATH`` are
+  ## compile errors, never a silent skip, for the reason
+  ## ``parseNonDeterminismDecl`` gives for refusing rather than falling back.
+  ## A const reference cannot be evaluated by this macro; the typed wrapper
+  ## checks its names where it is compiled (``envPassthroughCode``).
+  if calleeName(node).normalize != "envpassthrough" or node.len < 2:
+    error("envPassthrough expects one or more variable names " &
+      "(string literals) or the name of a const list of them", node)
+  for i in 1 ..< node.len:
+    let operand = node[i]
+    case operand.kind
+    of nnkStrLit..nnkTripleStrLit:
+      let problem = envPassthroughNameProblem(operand.strVal)
+      if problem.len > 0:
+        error(problem, operand)
+      if operand.strVal notin names:
+        names.add(operand.strVal)
+    of nnkIdent, nnkSym, nnkAccQuoted, nnkDotExpr:
+      let spelling = operand.repr
+      if spelling notin refs:
+        refs.add(spelling)
+    else:
+      error("envPassthrough expects a string literal or the name of a " &
+        "const list of strings, got: " & operand.repr, operand)
 
 proc parseInputCheckPolicyDecl(node: NimNode): ActionCacheFingerprintPolicy =
   ## Caching-Architecture D2 -- ``inputCheckPolicy hybrid`` (or ``checksum``,
@@ -416,7 +458,14 @@ proc parseCliCommandExtension(cmd: var CliCommandDef; stmt: NimNode;
   ## false for a statement this vocabulary does not know, which clispec then
   ## ignores (a ``when`` holding ``subTools`` is read separately, from the
   ## root, by ``parseReproCliBlock``).
+  refuseBareEnvPassthrough(stmt)
   case calleeName(stmt).normalize
+  of "envpassthrough":
+    # The environment variables every edge of this scope passes through by
+    # name, accumulated over the nested scopes like ``outputs``: a nested
+    # ``subcmd`` starts from a copy of its parent's lists and adds its own.
+    parseEnvPassthroughDecl(stmt, cmd.ext.envPassthrough,
+      cmd.ext.envPassthroughRefs)
   of "dependencypolicy":
     cmd.ext.dependencyPolicy = parseCommandDependencyPolicy(stmt,
       cmd.ext.dependencyPolicy)

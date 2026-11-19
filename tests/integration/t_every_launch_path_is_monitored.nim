@@ -591,7 +591,7 @@ type EngineSourceFile = object
 ## and no rewrite-warning template there either, so the compile-time linter
 ## does not see them at all — which is the other half of why they needed a
 ## row here.
-const SpawnPrimitives: array[45, tuple[name: string; expected: int;
+const SpawnPrimitives: array[47, tuple[name: string; expected: int;
                                        why: string]] = [
   ("startProcess", 4,
     "post-build converter, L2 RunQuota helper, nix daemon, config-free Nim metadata"),
@@ -615,8 +615,11 @@ const SpawnPrimitives: array[45, tuple[name: string; expected: int;
   ("execCmd", 0, "std/osproc; NOT matched by a search for execCmdEx"),
   ("execCmdEx", 0, ""),
   ("uncontrolledExecCmdEx", 0, ""),
+  ("uncontrolledExecArgvEx", 0, "uncontrolledExecCmdEx for an argv, no shell"),
   ("execProcess", 0, ""),
   ("execProcesses", 0, "std/osproc; NOT matched by a search for execProcess"),
+  ("execArgvProcesses", 0,
+    "std/osproc (the Nim fork): execProcesses for argvs, no shell"),
   ("uncontrolledExecProcess", 0, ""),
   ("execShellCmd", 0, ""),
   ("uncontrolledExecShellCmd", 0, ""),
@@ -841,7 +844,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "osproc", audit: caFullSurface,
       sourceRels: @["pure/osproc.nim"],
       spawning: @["execProcess", "execCmd", "startProcess", "execProcesses",
-                  "execCmdEx"],
+                  "execCmdEx", "execArgvProcesses"],
       inert: @["close", "suspend", "resume", "terminate", "kill", "running",
                "processID", "waitForExit", "peekExitCode", "inputStream",
                "outputStream", "errorStream", "peekableOutputStream",
@@ -1043,8 +1046,8 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "ambient_execution", audit: caFullSurface,
       sourceRels: @["libs/repro_core/src/repro_core/ambient_execution.nim"],
       spawning: @["uncontrolledFindExe", "uncontrolledExecCmdEx",
-                  "uncontrolledExecProcess", "uncontrolledExecShellCmd",
-                  "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
+                  "uncontrolledExecArgvEx", "uncontrolledExecProcess",
+                  "uncontrolledExecShellCmd", "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
                   "warnExecProcess", "warnExecShellCmd", "warnStartProcess"],
       inert: @[]),
     # THE OPERATING SYSTEM. Both rows are `caImportAllowlist`: they export
@@ -1811,6 +1814,21 @@ proc evidenceShape(res: ActionResult;
     # coverage is `test_m9r73_narrow_invalidation` and
     # `t_a_project_under_a_volatile_prefix_keeps_its_reads`.
     render("volatileScope", ev.volatileScope.exemptRoots),
+    # The volatile-runtime fold's elision counters and its host-bound input
+    # (Dependency-Observation-Attribution.md "Every elision is counted"):
+    #
+    #   * `kernelStateDrops` — how many records under `/dev`, `/proc`, `/sys`
+    #     the fold dropped. NOT vacuous wherever the captured process touches
+    #     any of them (a shell's `/dev/null`, the loader's `/proc` reads), and
+    #     a launch path whose capture saw a different number of them is the
+    #     kind of difference this comparison exists to catch.
+    #   * `runtimeStateDrops` and `hostBoundInput` — VACUOUS here: the
+    #     fixture touches no socket, FIFO or device under `/run`. Rendered so
+    #     the fields cannot leave the comparison silently; their coverage is
+    #     `t_a_tool_reached_through_run_is_an_input`.
+    render("kernelStateDrops", @[$ev.kernelStateDrops]),
+    render("runtimeStateDrops", @[$ev.runtimeStateDrops]),
+    render("hostBoundInput", @[ev.hostBoundInput]),
     render("evidenceProvenance", (block:
       var contributors: seq[string] = @[]
       for contributor in ev.evidenceProvenance:

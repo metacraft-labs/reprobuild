@@ -441,7 +441,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/8c36bf19c98f551f8eaa03e9d12ecad387f3a081";
+      url = "github:metacraft-labs/nim-cli-spec/f6065a9c6f3b56ab7c1d7e24750f7b9cb27c5661";
       flake = false;
     };
     nim-entrypoints-src = {
@@ -467,7 +467,7 @@
       # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/0ad5824caee1672ed7d78eb5e3ff9f296a4d8f74";
+      url = "github:metacraft-labs/nim-confutils/ddd056a1cd13a9a24aa5f3451df23aaaa6c46091";
       flake = false;
     };
     nimcrypto-src = {
@@ -929,8 +929,17 @@
     # pipes only on fd 0, 1 and 2 and its own children inherit no further
     # copies; a grandchild that outlives the child no longer delays the
     # parent's end-of-file.
+    #
+    # Advanced from bb0e8943 to c47c55d1: the compiler starts a C compile,
+    # assembly or link without `/bin/sh -c` when the command needs no shell
+    # (`compiler/shellfreeexec.nim`), so a compile no longer reads the host's
+    # `/bin/sh` and its libraries, which a monitored compile recorded as
+    # inputs that another machine's shell does not match. Riding along
+    # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
+    # it when a start fails, frees the clone child's stack by its base
+    # pointer, and retries the error-pipe read and `waitpid` on EINTR.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c47c55d166224bcffe485045378c766a0f5e67a2";
       flake = false;
     };
     nim-csources-src = {
@@ -1069,7 +1078,7 @@
       ...
     }:
     let
-      # The Nix helper library (milestone GM5; docs/user-guide/nix-helper-library.md),
+      # The Nix helper library (milestone GM5; docs/users/content/reference/nix-library.md),
       # exported as `lib` and tested by the `lib-*` checks below.
       # System-independent: the IFD derivation of `readIntent` is built for
       # whichever system the CALLER names as the evaluator (`buildSystem`),

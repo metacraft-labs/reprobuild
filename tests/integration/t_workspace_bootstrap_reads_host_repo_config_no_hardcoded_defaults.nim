@@ -6,10 +6,14 @@
 ## locatable via `REPRO_WORKSPACE_CONFIG`) rather than from a baked-in org
 ## URL. The resolution order is:
 ##
-##   explicit `--manifest-url` flag → `repro-workspace.toml` → host repo origin
+##   explicit `--manifest-url` flag → `repro-workspace.toml` `[records]`
 ##
-## and when none of those resolves, `init` FAILS LOUD with a clear "no manifest
-## configured" diagnostic — the `repro` binary ships no built-in manifest URL.
+## and nothing further: the host repo's own `origin` is never taken
+## (Workspace-Manifests.md §"`repro-workspace.toml` — the shared settings
+## file": that is the repository at the root, which is metadata or a member
+## and never the record store). When neither resolves and the workspace has no
+## metadata of its own, `init` FAILS LOUD with a clear "no manifest configured"
+## diagnostic — the `repro` binary ships no built-in manifest URL.
 ##
 ## Cases (all hermetic: local bare repos in a tempdir; `REPRO_WORKSPACE_CONFIG`
 ## points at a test-authored config so nothing reaches the network):
@@ -34,6 +38,16 @@
 ##      `--manifest-url`, and a workspace dir that is not a git repo (no origin)
 ##      → init exits non-zero with a "no manifest configured" message rather
 ##      than silently using a hardcoded URL.
+##
+##   D. No `origin` fallback: as C, but the workspace root IS a git repo whose
+##      `origin` is a reachable, valid manifest repository carrying the very
+##      project asked for. `init` must still fail with "no manifest
+##      configured", clone nothing under `.repro/`, and not suggest `origin` as
+##      a source. Pins reprobuild-pm issues/2026-11-16-repro-falls-back-to-the-
+##      root-or-origin-as-the-lock-record-store-when-records-names-no-url.md:
+##      before the fix, `resolveBootstrapConfig` took `remote.origin.url`,
+##      cloned it into the manifest cache and linked it at `.repro/manifests`,
+##      and init succeeded (falsified at reprobuild d957b394f).
 ##
 ## Skip rule: `git` missing on PATH.
 
@@ -282,3 +296,31 @@ suite "RA-8 — host bootstrap config; no hardcoded org defaults":
         check "no manifest configured" in init.output
         # And NO manifest checkout was materialised from a baked-in default.
         check not dirExists(workspaceRoot / ".repro" / "manifests")
+
+      # ---- Case D: the host repo's origin is never a fallback ---------------
+      block caseD:
+        let workspaceRoot = scratch / "ws-d"
+        discard requireGit(q(gitBin) & " init -b main " & q(workspaceRoot))
+        # A reachable origin that IS a valid manifest repository carrying the
+        # project asked for: the strongest invitation to fall back to it.
+        discard requireGit(q(gitBin) & " -C " & q(workspaceRoot) &
+          " remote add origin " & q(fileUrl(manifestBare)))
+
+        let init = runShell(shellCommand(@[
+          reproBin, "workspace", "init", "myproject",
+          "--workspace-root=" & workspaceRoot,
+        ], env = @[
+          (name: "GIT_CEILING_DIRECTORIES", value: scratch),
+          (name: "REPRO_MANIFEST_CACHE", value: manifestCacheRoot),
+          (name: "REPRO_WORKSPACE_CONFIG",
+            value: scratch / "missing-bootstrap-config.toml"),
+        ]))
+        checkpoint("case D init output: " & init.output)
+        check init.code != 0
+        check "no manifest configured" in init.output
+        # The diagnostic does not offer `origin` as a manifest source either.
+        check "origin" notin init.output
+        # Nothing was cloned or linked from the origin.
+        check not dirExists(workspaceRoot / ".repro" / "manifests")
+        check not dirExists(workspaceRoot / ".repro" / "records")
+        check not dirExists(workspaceRoot / "lib-a")

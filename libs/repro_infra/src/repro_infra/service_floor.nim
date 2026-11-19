@@ -166,7 +166,8 @@ const
     "local-fs-pre.target", "swap.target", "cryptsetup.target",
     "-.slice", "system.slice", "repro-store.mount",
     "repro-addon-secrets.service", "repro-addon-egress.service",
-    "system-reproagent.slice", "repro-addon-boot-hold.service"]
+    "system-reproagent.slice", "repro-addon-boot-hold.service",
+    "nftables.service"]
     ## Units the boot re-assertion is ordered after on every base, which
     ## the parse-time half can name without the host (spec §10.1, "A
     ## floored unit's own ordering"): the boot targets its default
@@ -179,7 +180,10 @@ const
     ## mount and the secrets unit (its ``After=``), the egress observer
     ## (``Before=`` it) and the egress observer's slice (its ``After=``),
     ## and the boot-hold unit, which is ``Before=sysinit.target`` (§13
-    ## decision 159; A9 review round 16, finding 6).
+    ## decision 159; A9 review round 16, finding 6); and the host's
+    ## ``nftables.service``, which the egress observer is ordered after so
+    ## that its table is loaded after the host's ruleset (reprobuild-pm
+    ## issue 2026-11-16, the ruleset flush).
     ## ``repro_addon``'s ``t_addon_floor_boot_ordering_cycle`` holds this
     ## list to the order generation 0 writes, followed transitively. The
     ## effective half reads the whole order from systemd.

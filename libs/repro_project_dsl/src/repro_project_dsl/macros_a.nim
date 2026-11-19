@@ -2457,6 +2457,31 @@ proc escapedCodeList(items: openArray[string]): string =
     parts.add(escForCode(item))
   parts.join(", ")
 
+proc envPassthroughCode(actionRef, site: string;
+                        names, refs: openArray[string]): string =
+  ## The statements a generated typed wrapper runs after it records its
+  ## edge: the tool's declared names go on the registered edge AND on the
+  ## handle the wrapper returns (``appendRegisteredActionEnvPassthrough``'s
+  ## ``var`` overload). Spliced into the body, never exposed as a formal, for
+  ## the reason the ``nonDeterminism`` splice gives: a formal could be
+  ## overridden or dropped at a call site, and the declaration is the tool's.
+  ##
+  ## A referenced const list is passed on by name, so it resolves in the
+  ## module that declared the tool (the ``nim`` tool's module imports
+  ## ``ScratchLocationEnvNames``), and its names are checked there at compile
+  ## time: a list holding an empty name or ``PATH`` is a compile error naming
+  ## ``site``, as a literal one is.
+  if names.len > 0:
+    result.add("  appendRegisteredActionEnvPassthrough(" & actionRef & ", [" &
+      escapedCodeList(names) & "])\n")
+  for refCode in refs:
+    let problemCall = "envPassthroughNamesProblem(" & refCode & ", " &
+      escForCode(site & " (envPassthrough " & refCode & ")") & ")"
+    result.add("  when " & problemCall & ".len > 0:\n")
+    result.add("    {.error: " & problemCall & ".}\n")
+    result.add("  appendRegisteredActionEnvPassthrough(" & actionRef & ", " &
+      refCode & ")\n")
+
 proc inputCheckPolicyCode(policy: ActionCacheFingerprintPolicy): string =
   ## The source text of a typed wrapper's ``actionCachePolicy`` default
   ## (Caching-Architecture D2): the declared policy, or the unstated default.
@@ -2788,6 +2813,9 @@ proc packageLiteral(pkg: PackageDef): string =
         ", nonDeterminismJustification: " &
           escForCode(cmd.ext.nonDeterminismJustification) &
         ", subTools: @[" & escapedCodeList(cmd.ext.subTools) &
+        "], envPassthrough: @[" & escapedCodeList(cmd.ext.envPassthrough) &
+        "], envPassthroughRefs: @[" &
+          escapedCodeList(cmd.ext.envPassthroughRefs) &
         "], removeBeforeRunFlags: @[" &
           escapedCodeList(cmd.ext.removeBeforeRunFlags) &
         "], optionalOutputFlags: @[" & escapedCodeList(cmd.ext.optionalOutputFlags) &
@@ -3289,6 +3317,12 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     if cmd.ext.subTools.len > 0:
       result.add("  appendRegisteredActionSubToolRefs(" & actionRef &
         ".id, [" & escapedCodeList(cmd.ext.subTools) & "])\n")
+    # The tool's environment passthrough (``envPassthrough`` in its ``cli:``
+    # block): every edge this wrapper records passes the names through by
+    # name, and no formal lets a call site drop or replace them.
+    result.add(envPassthroughCode(actionRef,
+      exe.exportName & "." & (if cmd.name.len > 0: cmd.name else: "call"),
+      cmd.ext.envPassthrough, cmd.ext.envPassthroughRefs))
     if cmd.ext.removeBeforeRunFlags.len > 0:
       result.add("  appendRegisteredActionRemoveBeforeRun(" & actionRef &
         ".id, call, [" & escapedCodeList(cmd.ext.removeBeforeRunFlags) & "])\n")
@@ -5077,7 +5111,9 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
                            paramGroups: CliParamGroups;
                            commonParams: openArray[CliParamDef];
                            defaultPolicy: BuildActionDependencyPolicy;
-                           defaultNonDeterminism: NonDeterminismDecl):
+                           defaultNonDeterminism: NonDeterminismDecl;
+                           defaultEnvPassthrough,
+                             defaultEnvPassthroughRefs: seq[string]):
     CliCommandDef =
   let loc = lineFile(node)
   let head = calleeName(node).normalize
@@ -5095,6 +5131,8 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
   result.ext.dependencyPolicy = defaultPolicy
   result.ext.nonDeterminism = defaultNonDeterminism.policy
   result.ext.nonDeterminismJustification = defaultNonDeterminism.justification
+  result.ext.envPassthrough = defaultEnvPassthrough
+  result.ext.envPassthroughRefs = defaultEnvPassthroughRefs
   result.params = @commonParams
   result.sourceFile = loc.file
   result.sourceLine = loc.line
@@ -5103,6 +5141,14 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
     if calleeName(stmt).normalize == "dependencypolicy":
       result.ext.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
         result.ext.dependencyPolicy)
+      continue
+    refuseBareEnvPassthrough(stmt)
+    if calleeName(stmt).normalize == "envpassthrough":
+      # Same statement, same meaning, as in the ``package`` door
+      # (``parseCliCommandExtension``): a subcommand adds to what the
+      # interface's top level declared.
+      parseEnvPassthroughDecl(stmt, result.ext.envPassthrough,
+        result.ext.envPassthroughRefs)
       continue
     if calleeName(stmt).normalize == "nondeterminism":
       # M6: same statement, same meaning, in the second parser. The two CLI
@@ -5299,6 +5345,11 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       "nonDeterminismJustification = " &
         escForCode(command.ext.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
+    # The interface's environment passthrough, spliced as in
+    # ``toolActionWrapperCode``.
+    result.add(envPassthroughCode(actionRef,
+      toolId & "." & (if command.name.len > 0: command.name else: "call"),
+      command.ext.envPassthrough, command.ext.envPassthroughRefs))
     # Typed-Outputs M1: bind typed fields against the call-site flag
     # values via the shared helper (the ``package``-block wrapper uses
     # the same one).
@@ -5357,6 +5408,7 @@ macro defineCliInterface*(toolSymbol: untyped;
   var defaultPolicy = defaultDependencyPolicy()
   # M6: unblessed until the interface says otherwise, with a reason.
   var defaultNonDeterminism: NonDeterminismDecl = (ndpUnblessed, "")
+  var defaultEnvPassthrough, defaultEnvPassthroughRefs: seq[string]
   proc addCommonParams(stmt: NimNode) =
     var stack: seq[string] = @[]
     for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
@@ -5369,7 +5421,8 @@ macro defineCliInterface*(toolSymbol: untyped;
           expandedStmt)
       else:
         error("top-level CLI interface statements accept flags, templates, " &
-          "dependencyPolicy, nonDeterminism, call:, or subcmd sections",
+          "dependencyPolicy, nonDeterminism, envPassthrough, call:, or " &
+          "subcmd sections",
           expandedStmt)
   for stmt in body:
     let head = calleeName(stmt).normalize
@@ -5382,14 +5435,21 @@ macro defineCliInterface*(toolSymbol: untyped;
     elif head == "nondeterminism":
       defaultNonDeterminism = parseNonDeterminismDecl(stmt,
         defaultNonDeterminism)
+    elif head == "envpassthrough":
+      parseEnvPassthroughDecl(stmt, defaultEnvPassthrough,
+        defaultEnvPassthroughRefs)
+    else:
+      refuseBareEnvPassthrough(stmt)
   var commands: seq[CliCommandDef] = @[]
   for stmt in body:
     let head = calleeName(stmt).normalize
     case head
     of "call", "subcmd":
       commands.add(parseInterfaceCommand(toolId, stmt, paramGroups,
-        commonParams, defaultPolicy, defaultNonDeterminism))
-    of "flag", "boolflag", "pos", "dependencypolicy", "nondeterminism":
+        commonParams, defaultPolicy, defaultNonDeterminism,
+        defaultEnvPassthrough, defaultEnvPassthroughRefs))
+    of "flag", "boolflag", "pos", "dependencypolicy", "nondeterminism",
+        "envpassthrough":
       discard
     of "":
       if stmt.kind == nnkTemplateDef:

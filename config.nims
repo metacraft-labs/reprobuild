@@ -544,6 +544,17 @@ for libName in [
   # types. M2b-M2e extend it with the ASP encoder; downstream libs
   # import it via ``import repro_solver`` once the encoder is alive.
   "repro_solver",
+  # Nimble package catalog NPC-M2: the static `.nimble` reader and the
+  # translation of Nimble requirements into the solver's constraint language.
+  # Depends on `repro_solver/version_constraints` only (no clingo), so the
+  # catalog generator and develop mode can read a `.nimble` without loading
+  # the solver.
+  "repro_nimble_reader",
+  # Nimble package catalog NPC-M3: reading a Nimble index by hash (root, then
+  # only the shards a closure touches), the solver-facing candidates with
+  # their per-version requirements, and the deterministic index writer. The
+  # objects' codec is `repro_domain_types/nimble_index`.
+  "repro_nimble_index",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import
@@ -927,11 +938,37 @@ proc pinnedSiblingRevision(sibling: string): string =
         return line[at + sep.len .. ^1].strip()
   return ""
 
+const RepositorySelectingGitVariables = ["GIT_DIR", "GIT_WORK_TREE",
+  "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX"]
+
 proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
   ## `gorgeEx` runs relative to the script's directory, not the process's, so
   ## the sibling's checkout is named absolutely.
-  gorgeEx("git -C " & quoteShell(repoPath(siblingCheckout(sibling))) & " " &
-    args)
+  ##
+  ## A git hook exports the variables that select THIS repository
+  ## (`GIT_DIR`, `GIT_INDEX_FILE`, ...), and `git -C` does not override
+  ## them: under the pre-commit `just lint`, `rev-parse HEAD` answered
+  ## reprobuild's own HEAD for every sibling, and `merge-base` looked for
+  ## the sibling's pinned commit in reprobuild's object store, where a
+  ## partial clone lazily fetched it from the shared pool for minutes per
+  ## sibling (measured 2026-11-18). They are cleared for the probe and
+  ## restored after it. `GIT_NO_LAZY_FETCH=1`: a probe never fetches; a pin
+  ## the sibling does not have locally is a sibling that is not ahead of it.
+  var saved: seq[(string, string)] = @[]
+  for name in RepositorySelectingGitVariables:
+    if existsEnv(name):
+      saved.add((name, getEnv(name)))
+      delEnv(name)
+  let hadNoLazyFetch = existsEnv("GIT_NO_LAZY_FETCH")
+  let noLazyFetch = getEnv("GIT_NO_LAZY_FETCH")
+  putEnv("GIT_NO_LAZY_FETCH", "1")
+  result = gorgeEx("git -C " & quoteShell(repoPath(siblingCheckout(sibling))) &
+    " " & args)
+  if hadNoLazyFetch: putEnv("GIT_NO_LAZY_FETCH", noLazyFetch)
+  else: delEnv("GIT_NO_LAZY_FETCH")
+  for (name, value) in saved:
+    putEnv(name, value)
 
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ## Sibling-first, but never silently against an explicit pin.

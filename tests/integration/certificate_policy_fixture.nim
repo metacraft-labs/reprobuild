@@ -90,7 +90,11 @@ proc writePolicyModule*(ws: PolicyWorkspace; body: string;
 proc consumerRecipe*(enact: string; certificates: openArray[string]): string =
   ## The consumer's ``repro.nim``: ``uses: "certpolicy"``, the enacted
   ## policy, and one ``certificate`` per name, each over an aggregate of the
-  ## same name (no edge needs to run for a lock refresh).
+  ## same name holding one edge, ``<name>-check`` (it runs ``true``; no edge
+  ## runs for a lock refresh). The edge is what the name MEANS: the refresh
+  ## records its command set (Test-Certificates.md §"What a required name
+  ## means: its command set"), and a name that marks no test command can
+  ## never be certified, so its requirement is refused.
   result = "import repro_project_dsl\n\n" &
     "package consumer:\n" &
     "  uses:\n" &
@@ -100,9 +104,12 @@ proc consumerRecipe*(enact: string; certificates: openArray[string]): string =
   result.add("  build:\n")
   if certificates.len == 0:
     result.add("    discard aggregate(\"consumer-noop\", actions = @[])\n")
-  for name in certificates:
+  for i, name in certificates:
+    let edge = "check" & $i
+    result.add("    let " & edge & " = buildAction(id = \"" & name &
+      "-check\", call = inlineExecCall(@[\"true\"]), cacheable = false)\n")
     result.add("    certificate \"" & name & "\", aggregate(\"" & name &
-      "\", actions = @[])\n")
+      "\", @[" & edge & "])\n")
 
 proc writeConsumer*(ws: PolicyWorkspace; recipe: string; message = "recipe") =
   writeFile(ws.consumer / "repro.nim", recipe)

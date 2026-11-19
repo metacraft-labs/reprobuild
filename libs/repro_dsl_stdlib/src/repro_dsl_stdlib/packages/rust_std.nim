@@ -75,6 +75,14 @@ const
                      triple: "x86_64-unknown-linux-musl",
                      cpu: "x86_64", os: "linux",
                      sha256: "74a0e509ada9e9dd8e40a987abfdc677c6aa3487506bd6afaf9ede9466e3b189"),
+    RustStdComponent(version: RustStdVersion,
+                     triple: "x86_64-pc-windows-gnullvm",
+                     cpu: "x86_64", os: "windows",
+                     sha256: "881b1cd467ac69dd8b0cf3e3f099bcc5051c64f5e7841ea7a018f31fc8899a87"),
+    RustStdComponent(version: RustStdVersion,
+                     triple: "aarch64-pc-windows-gnullvm",
+                     cpu: "aarch64", os: "windows",
+                     sha256: "8afeb73b427d9039f44cddee301245a043f60220c44ba98581d3afec1f6e4406"),
     RustStdComponent(version: RustStdVersion1971,
                      triple: "armv7-unknown-linux-musleabihf",
                      cpu: "armv7", os: "linux",
@@ -87,10 +95,20 @@ const
                      triple: "x86_64-unknown-linux-musl",
                      cpu: "x86_64", os: "linux",
                      sha256: "d160dfc81d21fdc72534859fae249fecf6ab70640375f64fc4e77005a48c18d0"),
+    RustStdComponent(version: RustStdVersion1971,
+                     triple: "x86_64-pc-windows-gnullvm",
+                     cpu: "x86_64", os: "windows",
+                     sha256: "39629051902750ed72abcde1d19e79e3ea5f15ebcc2498385f1061128bc7920c"),
+    RustStdComponent(version: RustStdVersion1971,
+                     triple: "aarch64-pc-windows-gnullvm",
+                     cpu: "aarch64", os: "windows",
+                     sha256: "c4dc5a9242d94ea880e01a67c0dac09bc4e8c91d97e50036bc93f5cd56cfe036"),
   ]
     ## The digests are upstream's ``<archive>.sha256`` files, read 2026-10-30
     ## (1.94.0) and 2026-11-11 (1.97.1; equal to the ``hash`` rows of
-    ## channel-rust-1.97.toml). The default release's rows come first.
+    ## channel-rust-1.97.toml). The ``*-pc-windows-gnullvm`` rows were read
+    ## 2026-11-18, each equal to the ``hash`` row of its release's
+    ## channel-rust-<ver>.toml. The default release's rows come first.
     ## The ``.tar.gz`` archive rather than the ``.tar.xz`` one: tar execs the
     ## decompressor, and ``gzip`` is a catalog package every from-source
     ## recipe already declares, where ``xz`` is not one at all.
@@ -133,14 +151,22 @@ const
   X86_64Sha256 = RustStdComponents[2].sha256
   RustStdDistBase1971 = "https://static.rust-lang.org/dist/rust-std-" &
     RustStdVersion1971 & "-"
-  Armv7Sha256V1971 = RustStdComponents[3].sha256
-  Aarch64Sha256V1971 = RustStdComponents[4].sha256
-  X86_64Sha256V1971 = RustStdComponents[5].sha256
+  WinX86_64Sha256 = RustStdComponents[3].sha256
+  WinAarch64Sha256 = RustStdComponents[4].sha256
+  Armv7Sha256V1971 = RustStdComponents[5].sha256
+  Aarch64Sha256V1971 = RustStdComponents[6].sha256
+  X86_64Sha256V1971 = RustStdComponents[7].sha256
+  WinX86_64Sha256V1971 = RustStdComponents[8].sha256
+  WinAarch64Sha256V1971 = RustStdComponents[9].sha256
 
 package `rust-std`:
-  ## Linux targets only, so far: the arms are the components the add-on
-  ## appliances need. A component for another OS is a row and an arm.
-  platforms [linux], msg = "rust-std arms are catalogued for Linux targets only; add an arm for another OS's target component."
+  ## Linux targets, the components the add-on appliances need, and the two
+  ## Windows ``gnullvm`` targets (the ones that link with the provider's
+  ## Clang rather than MSVC's link.exe). A component for another OS is a
+  ## row and an arm. ``cargo_package``'s sysroot edge merges the Linux rows
+  ## only and refuses a Windows target by name; the Windows rows are for
+  ## the target-keyed realization described in the header.
+  platforms [linux, windows], msg = "rust-std arms are catalogued for Linux and Windows (gnullvm) targets only; add an arm for another OS's target component."
   provisioning:
     # ``executablePath``: a standard library has no executable, and the
     # realizer requires a file to resolve the prefix on. It is the target's
@@ -183,6 +209,32 @@ package `rust-std`:
       lockIdentity = "tarball:rust-std@" & RustStdVersion &
         ":linux-x86_64:sha256:" & X86_64Sha256,
       version = RustStdVersion
+    # Windows ``gnullvm`` targets. A gnullvm component carries no
+    # ``libc.a`` (it links against the mingw-w64 CRT the linker brings), so
+    # the file the prefix resolves on is its self-contained ``crt2.o``,
+    # data in the same sense.
+    tarball url = RustStdDistBase & "x86_64-pc-windows-gnullvm.tar.gz",
+      sha256 = WinX86_64Sha256,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/x86_64-pc-windows-gnullvm/lib/self-contained/crt2.o",
+      packageId = "rust-std@" & RustStdVersion,
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion &
+        ":windows-x86_64:sha256:" & WinX86_64Sha256,
+      version = RustStdVersion
+    tarball url = RustStdDistBase & "aarch64-pc-windows-gnullvm.tar.gz",
+      sha256 = WinAarch64Sha256,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/aarch64-pc-windows-gnullvm/lib/self-contained/crt2.o",
+      packageId = "rust-std@" & RustStdVersion,
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion &
+        ":windows-aarch64:sha256:" & WinAarch64Sha256,
+      version = RustStdVersion
     # Rust 1.97.1's components, after the default release's so an unranged
     # reference keeps selecting those.
     tarball url = RustStdDistBase1971 & "armv7-unknown-linux-musleabihf.tar.gz",
@@ -217,4 +269,26 @@ package `rust-std`:
       os = "linux",
       lockIdentity = "tarball:rust-std@" & RustStdVersion1971 &
         ":linux-x86_64:sha256:" & X86_64Sha256V1971,
+      version = RustStdVersion1971
+    tarball url = RustStdDistBase1971 & "x86_64-pc-windows-gnullvm.tar.gz",
+      sha256 = WinX86_64Sha256V1971,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/x86_64-pc-windows-gnullvm/lib/self-contained/crt2.o",
+      packageId = "rust-std@" & RustStdVersion1971,
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion1971 &
+        ":windows-x86_64:sha256:" & WinX86_64Sha256V1971,
+      version = RustStdVersion1971
+    tarball url = RustStdDistBase1971 & "aarch64-pc-windows-gnullvm.tar.gz",
+      sha256 = WinAarch64Sha256V1971,
+      archiveType = "tar.gz",
+      stripComponents = 1,
+      executablePath = "lib/rustlib/aarch64-pc-windows-gnullvm/lib/self-contained/crt2.o",
+      packageId = "rust-std@" & RustStdVersion1971,
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:rust-std@" & RustStdVersion1971 &
+        ":windows-aarch64:sha256:" & WinAarch64Sha256V1971,
       version = RustStdVersion1971

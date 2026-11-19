@@ -295,7 +295,13 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 35'u16
+  BuildActionPayloadVersion* = 36'u16
+    ## v36: ``envPassthrough`` -- the environment variables whose host value
+    ## the action reads, keyed by name only (Filesystem-Policy-And-Observed-
+    ## Inputs.md §"Declared And Passthrough Variables"), a string list
+    ## appended after ``contentKeyedToolCaches``. v35-and-earlier payloads
+    ## decode with the list empty, which is what every action declared
+    ## before it.
     ## v35: ``contentKeyedToolCaches`` -- the content-keyed tool-owned caches
     ## the action reads (Tool-Owned-Caches.md §"Trust Boundary"), a string
     ## list appended after the width fields. v34-and-earlier payloads decode
@@ -3215,6 +3221,90 @@ proc appendRegisteredActionSubToolRefs*(actionId: string;
           buildActionRegistry[i].subToolRefs.add(refName)
       return
 
+proc envPassthroughNameProblem*(name: string): string =
+  ## Why ``name`` cannot be declared environment passthrough by a tool's
+  ## ``cli:`` block (``envPassthrough``), or "" when it can. One rule for the
+  ## three places that check a declared name: the directive's string literals
+  ## (refused while the macro expands), the names of a ``const`` list the
+  ## directive references (refused by the check the typed wrapper generates,
+  ## ``envPassthroughNamesProblem``), and nowhere else -- an edge-level
+  ## ``appendRegisteredActionEnvPassthrough`` keeps its own runtime refusal.
+  ##
+  ## Deliberately NOT ``{.dynOrStatic.}``: the generated check evaluates it at
+  ## compile time, which a proc whose body is replaced by an import cannot do.
+  ##
+  ## ``PATH`` is refused in any letter case (Windows treats environment names
+  ## case-insensitively): an action's PATH class is decided by its tool
+  ## references, and a declared passthrough would take a hermetic ``PATH`` out
+  ## of the edge's key while the edge is still counted as hermetic (the same
+  ## rule ``withEdgeEnvPassthrough`` enforces where the edge is lowered).
+  if name.len == 0:
+    "envPassthrough cannot name an empty variable: a passthrough entry " &
+      "is keyed by its NAME, and an empty name keys nothing"
+  elif cmpIgnoreCase(name, "PATH") == 0:
+    "envPassthrough cannot name `" & name & "`: an action's PATH class is " &
+      "decided by its tool references, and a passthrough PATH would take " &
+      "a hermetic PATH out of the edge's key"
+  else:
+    ""
+
+proc envPassthroughNamesProblem*(names: openArray[string];
+                                 site: string): string =
+  ## The first ``envPassthroughNameProblem`` among ``names``, prefixed with
+  ## ``site`` (which declaration it came from), or "" when every name is
+  ## acceptable. The typed wrapper generated for a ``cli:`` scope that
+  ## references a const list by name evaluates this at compile time and turns
+  ## a non-empty answer into a compile error.
+  for name in names:
+    let problem = envPassthroughNameProblem(name)
+    if problem.len > 0:
+      return site & ": " & problem
+  ""
+
+proc appendRegisteredActionEnvPassthrough*(actionId: string;
+                                           names: openArray[string]) {.dynOrStatic.} =
+  ## Name, on an already-registered action, environment variables whose HOST
+  ## value it reads (``BuildActionDef.envPassthrough``): keyed by name only,
+  ## never by value. Appended in the given order, deduplicated, empty names
+  ## skipped. A TOOL that reads such a variable declares it once, with
+  ## ``envPassthrough`` in its ``cli:`` block, and the typed wrapper the block
+  ## generates calls this on every edge it records (the ``nim`` tool's ``c``
+  ## subcommand and the temp-directory names). Call it directly for an
+  ## edge-specific name, or for an edge that is not recorded through a typed
+  ## wrapper (the ``ct_test_nim_unittest`` compile). No-op when the id is
+  ## absent.
+  ##
+  ## Searches from the END, like ``markRegisteredActionOptionalOutputs``: a
+  ## typed call repeated with the same arguments registers a second entry
+  ## under the same id, and the caller's edge is the one it just registered.
+  ##
+  ## ``PATH`` is refused here, at recipe evaluation, and again where the
+  ## edge is lowered (``withEdgeEnvPassthrough``): whether an edge's
+  ## ``PATH`` is the host's is decided from its tool references, and a
+  ## declared passthrough would take a hermetic ``PATH`` out of its key.
+  for name in names:
+    if cmpIgnoreCase(name, "PATH") == 0:
+      raise newException(ValueError,
+        "action " & actionId & " cannot declare `" & name & "` as " &
+          "environment passthrough: an action's PATH class is decided by " &
+          "its tool references")
+  for i in countdown(buildActionRegistry.len - 1, 0):
+    if buildActionRegistry[i].id == actionId:
+      for name in names:
+        if name.len > 0 and name notin buildActionRegistry[i].envPassthrough:
+          buildActionRegistry[i].envPassthrough.add(name)
+      return
+
+proc appendRegisteredActionEnvPassthrough*(action: var BuildActionDef;
+                                           names: openArray[string]) {.dynOrStatic.} =
+  ## As above, for a constructor holding the handle it was returned: the
+  ## names go on the registry entry the graph is built from AND on
+  ## ``action``, so the handle the constructor returns agrees with the edge.
+  appendRegisteredActionEnvPassthrough(action.id, names)
+  for name in names:
+    if name.len > 0 and name notin action.envPassthrough:
+      action.envPassthrough.add(name)
+
 proc classifyRegisteredActionToolIdentityRefs*(
     actionId: string;
     buildRefs: openArray[string];
@@ -4518,6 +4608,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v35: the content-keyed tool-owned caches the action reads.
   if version >= 35'u16:
     payload.writeStringSeq(action.contentKeyedToolCaches)
+  # v36: the environment variables passed through by name.
+  if version >= 36'u16:
+    payload.writeStringSeq(action.envPassthrough)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4810,6 +4903,12 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # An older payload names no cache: absence of the list is absence of the
     # declaration, which is what every action said before the field existed.
     result.contentKeyedToolCaches = @[]
+  if version >= 36'u16:
+    result.envPassthrough = readStringSeq(bytes, pos)
+  else:
+    # An older payload passes nothing through by name: every variable the
+    # action is observed to read stays keyed by value, as it always was.
+    result.envPassthrough = @[]
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

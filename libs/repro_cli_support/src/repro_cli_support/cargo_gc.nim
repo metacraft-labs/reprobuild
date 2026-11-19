@@ -35,10 +35,19 @@ proc targetDirFrom(flag: string): string =
 
 proc humanBytes(n: int64): string = $n & " B"
 
-proc runGc(c: ReproCommandLineCargoGc): int =
+proc typedOnly(value: string; origin: CliOrigin): string =
+  ## ``value`` when the command line gave it, else "". `--keep-sets` and
+  ## `--min-age` declare their `$REPRO_CARGO_GC_*` variables, but the
+  ## resolver (`resolveGcConfig`) layers the variables itself: one with a
+  ## value that does not parse is a warning and ignored, where the flag's is
+  ## an error, and the report names which layer each setting came from.
+  if reproGivenOnCommandLine(origin): value else: ""
+
+proc runGc(c: ReproCommandLineCargoGc;
+           origin: ReproCommandLineCargoGcOrigins): int =
   let targetFlag = c.targetDir
-  let keepFlag = c.keepSets
-  let ageFlag = c.minAge
+  let keepFlag = typedOnly(c.keepSets, origin.keepSets)
+  let ageFlag = typedOnly(c.minAge, origin.minAge)
   let dryRun = c.dryRun
   let sweepHome = c.cargoHome.isSome
   let homeDir = c.cargoHome.get("")
@@ -84,10 +93,11 @@ proc runGc(c: ReproCommandLineCargoGc): int =
     stderr.writeLine "repro cargo gc: " & err.msg
     return 1
 
-proc runRecordLive(c: ReproCommandLineCargoRecordLive): int =
+proc runRecordLive(c: ReproCommandLineCargoRecordLive;
+                   origin: ReproCommandLineCargoRecordLiveOrigins): int =
   let targetFlag = c.targetDir
   let fromFlag = c.fromFile
-  let keepFlag = c.keepSets
+  let keepFlag = typedOnly(c.keepSets, origin.keepSets)
   let tee = c.tee
   let resolved = resolveGcConfig(envReader, keepFlag, "")
   for problem in resolved.problems:
@@ -120,11 +130,14 @@ proc runRecordLive(c: ReproCommandLineCargoRecordLive): int =
     stderr.writeLine "repro cargo record-live: " & err.msg
     return 1
 
-proc runCargoCommand*(conf: ReproCommandLineCargo): int =
-  ## `repro cargo <sub> ...`.
+proc runCargoCommand*(conf: ReproCommandLineCargo;
+                      origins: ReproCommandLineCargoOrigins): int =
+  ## `repro cargo <sub> ...`, from its configuration and where each value
+  ## came from (``loadReproCommandLine``'s ``origins``).
   case conf.command
-  of ReproCommandLineCargoCommand.gc: runGc(conf.gc)
-  of ReproCommandLineCargoCommand.recordLive: runRecordLive(conf.recordLive)
+  of ReproCommandLineCargoCommand.gc: runGc(conf.gc, origins.gc)
+  of ReproCommandLineCargoCommand.recordLive:
+    runRecordLive(conf.recordLive, origins.recordLive)
   of ReproCommandLineCargoCommand.run:
     let c = conf.run
     cargo_edge_cli.runCargoEdgeCommand(CargoEdgeOptions(width: c.width,
@@ -134,7 +147,7 @@ proc runCargoCommand*(conf: ReproCommandLineCargo): int =
   of ReproCommandLineCargoCommand.help:
     # `repro cargo help [<word>...]` is `repro help cargo [<word>...]`.
     try:
-      stdout.write(ReproCommandLine.helpText(@["cargo"] & conf.help.topic))
+      printReproHelp(@["cargo"] & conf.help.topic)
     except CliUsageError:
-      stdout.write(ReproCommandLine.helpText(["cargo"]))
+      printReproHelp(["cargo"])
     0

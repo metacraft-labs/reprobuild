@@ -43,9 +43,9 @@ package valPkg:
   validate:
     proc(): bool =
       readConfigurable[DesktopKindV](
-        "valPkg.activeAtBoot", dkSway) in
+        "package.valPkg.activeAtBoot", dkSway) in
         readConfigurable[DesktopKindV](
-          "valPkg.desktopKind", newSeq[DesktopKindV]())
+          "package.valPkg.desktopKind", newSeq[DesktopKindV]())
 
 suite "DSL-port M9.E — validate: predicate closures":
 
@@ -61,8 +61,8 @@ suite "DSL-port M9.E — validate: predicate closures":
     # Reset both keys so the registered defaults are observed:
     # activeAtBoot = dkSway, desktopKind = @[dkSway, dkGnome].
     # dkSway in @[dkSway, dkGnome] → true → no raise.
-    resetConfigurable("valPkg.activeAtBoot")
-    resetConfigurable("valPkg.desktopKind")
+    resetConfigurable("package.valPkg.activeAtBoot")
+    resetConfigurable("package.valPkg.desktopKind")
     # No exception should escape — exercise via a try/except that fails
     # the test on a thrown EConfigViolation.
     var raised = false
@@ -75,16 +75,16 @@ suite "DSL-port M9.E — validate: predicate closures":
   test "failing predicate raises EConfigViolation":
     # Override activeAtBoot to dkPlasma — NOT in @[dkSway, dkGnome].
     setConfigurable[DesktopKindV](
-      "valPkg.activeAtBoot", dkPlasma)
+      "package.valPkg.activeAtBoot", dkPlasma)
     # The override is observable to the closure via readConfigurable.
     check readConfigurable[DesktopKindV](
-      "valPkg.activeAtBoot", dkSway) == dkPlasma
+      "package.valPkg.activeAtBoot", dkSway) == dkPlasma
     # And ``desktopKind`` still reads back as the registered default.
     let dk = readConfigurable[DesktopKindV](
-      "valPkg.desktopKind", newSeq[DesktopKindV]())
+      "package.valPkg.desktopKind", newSeq[DesktopKindV]())
     check dk == @[dkSway, dkGnome]
     # Now the predicate MUST fire: dkPlasma notin @[dkSway, dkGnome].
     expect EConfigViolation:
       evaluateValidates("valPkg")
     # Restore the default so test ordering is robust.
-    resetConfigurable("valPkg.activeAtBoot")
+    resetConfigurable("package.valPkg.activeAtBoot")

@@ -28,7 +28,7 @@
 ## THE CONTRIBUTION IS WRITTEN AS A RAW `contributeMembers` CALL, and
 ## that is the shape the issue names rather than a shortcut: §9.1.1's
 ## measurement is of exactly this ("an activity body CAN call
-## `contributeMembers("<pkg>.<activity>.<point>", ...)` -- it compiles,
+## `contributeMembers("package.<pkg>.<activity>.<point>", ...)` -- it compiles,
 ## it runs, and the key resolves"), because `contribute:` is a
 ## PACKAGE-level section that runs at module init and therefore cannot
 ## be ordered against an activity body at all. The funnel is the same
@@ -58,10 +58,10 @@ const
   Dss498ContributorActivity* = "contributor"
   Dss498PointName* = "members"
   Dss498OwnerFirstKey* =
-    Dss498OwnerFirstName & "." & Dss498OwnerActivity & "." &
+    "package." & Dss498OwnerFirstName & "." & Dss498OwnerActivity & "." &
       Dss498PointName
   Dss498ContributorFirstKey* =
-    Dss498ContributorFirstName & "." & Dss498OwnerActivity & "." &
+    "package." & Dss498ContributorFirstName & "." & Dss498OwnerActivity & "." &
       Dss498PointName
 
 package dss498OwnerFirst:
@@ -88,7 +88,7 @@ package dss498OwnerFirst:
         converge members
 
     activity contributor():
-      contributeMembers("dss498OwnerFirst.owner.members",
+      contributeMembers("package.dss498OwnerFirst.owner.members",
         "dss498OwnerFirst", epSet, coAppend,
         l8ContributionMembers("from-the-other-activity"),
         "dss498_order_fixtures.nim", 90)
@@ -101,7 +101,7 @@ package dss498ContributorFirst:
   ## arrangement that already worked. Everything else is identical.
   devEnv:
     activity contributor():
-      contributeMembers("dss498ContributorFirst.owner.members",
+      contributeMembers("package.dss498ContributorFirst.owner.members",
         "dss498ContributorFirst", epSet, coAppend,
         l8ContributionMembers("from-the-other-activity"),
         "dss498_order_fixtures.nim", 105)
@@ -152,7 +152,7 @@ package dss498ExplicitOverride:
         converge members
 
     activity contributor():
-      contributeMembers("dss498ExplicitOverride.owner.members",
+      contributeMembers("package.dss498ExplicitOverride.owner.members",
         "dss498ExplicitOverride", epSet, coAppend,
         l8ContributionMembers("from-the-other-activity"),
         "dss498_order_fixtures.nim", 160)

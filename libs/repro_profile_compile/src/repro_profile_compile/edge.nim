@@ -69,6 +69,7 @@ import blake3
 import repro_core
 from repro_core/source_root import resolveReprobuildSourceRoot
 import repro_core/file_lock
+from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_hash
 import repro_build_engine
 from repro_local_store import FileFingerprintPolicy, ffpHybrid
@@ -409,7 +410,7 @@ proc profileRunWeakFingerprint*(intentPath: string): ContentDigest =
 # variables, the rule the single edge applied to the profile binary's reads.
 # ---------------------------------------------------------------------------
 
-const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+const ProfileCompileScratchEnvNames* = ScratchLocationEnvNames
   ## Variables that only choose where the compile's disposable files go.
   ## `nim` and the C toolchain read them (io-mon records the reads), and an
   ## observed read is keyed on its VALUE. `nix develop` gives every shell a
@@ -419,6 +420,8 @@ const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
   ## they are keyed by name only (`actionEnvironmentKeyText`) and dropped from
   ## the observed-environment key (`cacheEnvInputs`), exactly as the provider
   ## compile treats them (`ProviderCompileEnvironmentPassthrough`).
+  ## The list itself is `repro_core/scratch_env.ScratchLocationEnvNames`,
+  ## shared with that compile and with the standard library's `nim.c` edge.
   ##
   ## The cost of the rule: a profile whose INTENT embeds its temp directory
   ## (`getTempDir()` in a resource's content) would be served the intent of

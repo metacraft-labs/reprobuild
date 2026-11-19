@@ -124,10 +124,10 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsState()
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
-  resetConfigurable("swayCompositor.aptSnapshot")
-  resetConfigurable("swayCompositor.superKey")
-  resetConfigurable("swayCompositor.terminalApp")
-  resetConfigurable("swayCompositor.launcherApp")
+  resetConfigurable("package.swayCompositor.aptSnapshot")
+  resetConfigurable("package.swayCompositor.superKey")
+  resetConfigurable("package.swayCompositor.terminalApp")
+  resetConfigurable("package.swayCompositor.launcherApp")
   registerStoreRoot("swayCompositor", storeRoot, dhaSha256)
   registerStoreRoot(NdeH1PackageName, storeRoot, dhaSha256)
   recipe.registerSwayFiles()
@@ -649,7 +649,7 @@ suite "NDE-H1 sway compositor DSL surface":
 
     # Pass B — flip terminalApp to "alacritty" via setConfigurable.
     setConfigurable[string](
-      "swayCompositor.terminalApp", "alacritty")
+      "package.swayCompositor.terminalApp", "alacritty")
     reregisterWithCurrentConfigurables(root)
     let cfgB = consumeSwayConfigDsl()
     let bytesB = readDslStoreFile(cfgB)
@@ -660,7 +660,7 @@ suite "NDE-H1 sway compositor DSL surface":
     # stay cached.
     check cfgA.storePath != cfgB.storePath
     # Reset terminalApp for hygiene.
-    resetConfigurable("swayCompositor.terminalApp")
+    resetConfigurable("package.swayCompositor.terminalApp")
 
   test "anchor constants: NDE-H1 libpaths identifiers match shim exports":
     # The cohort-wide identifiers for the libpaths overlay are sourced

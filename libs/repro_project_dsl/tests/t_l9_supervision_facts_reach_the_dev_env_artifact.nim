@@ -39,8 +39,8 @@ import l9_declared_once_fixtures
 
 const
   FixtureRoot = "/tmp/l9-declared-once-fixture-root"
-  ExternalDomainKey = "l9SsoOwner.sso.externalDomain"
-  ExternalSecureKey = "l9SsoOwner.sso.externalSecure"
+  ExternalDomainKey = "package.l9SsoOwner.sso.externalDomain"
+  ExternalSecureKey = "package.l9SsoOwner.sso.externalSecure"
 
 proc pkgDef(): PackageDef =
   for pkg in registeredPackages():

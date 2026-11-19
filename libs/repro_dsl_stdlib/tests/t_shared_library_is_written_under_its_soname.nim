@@ -1,5 +1,5 @@
-## A shared library built by ``c_library`` is written under its SONAME, and
-## carries that SONAME, whichever toolchain links it.
+## A shared library built by ``c_library`` or ``nim_library`` is written
+## under its SONAME, and carries that SONAME, whichever toolchain links it.
 ##
 ## C-Cpp.md §"Mode A — Fine-grained build graph (primary)": a consumer's
 ## ``DT_NEEDED`` is the library's SONAME, and the dynamic loader opens a file
@@ -19,6 +19,14 @@
 ##   target the file NAME (not its directory) was target-keyed
 ##   (``libgreet.so@<triple>``), so even the right SONAME named no file.
 ##
+## ``nim_library`` had the same defect after that fix (reprobuild-pm issue
+## 2026-11-17-nim-library-writes-a-shared-library-with-no-soname-and-ignores-sover):
+## it wrote ``lib<soname>.so`` in the recipe root, passed no
+## ``-Wl,-soname,`` and ignored ``sover``, although the ``api:`` block's
+## ``sover`` field (From-Source-Build-Recipes.md) and the auto-lift contract
+## (Reprobuild-Standard-Library.md, "every Layer 1 constructor") cover it.
+## The ``nim_library`` suites below hold it to the same layout.
+##
 ## WHAT IS EXERCISED, AND WHAT IS MOCKED. Nothing is mocked. Each case opens
 ## a real ``build:`` frame for a registered package whose ``library`` block
 ## declares the ``api:``, calls ``c_library`` as a recipe does, and reads the
@@ -26,7 +34,9 @@
 ## rendered by the engine's own ``argvForCall`` against the host's gcc,
 ## executed, and the result read back with ``readelf``; then a consumer is
 ## linked with ``-lgreet`` and started. It is skipped, by name, on a host
-## without ``gcc`` and ``readelf`` on ``PATH``.
+## without ``gcc`` and ``readelf`` on ``PATH``. The last ``nim_library`` case
+## does the same with the ``nim c --app:lib`` edge, and is skipped, by name,
+## without ``nim``, ``gcc`` and ``readelf``.
 
 import std/[os, osproc, sequtils, strtabs, strutils, unittest]
 
@@ -40,6 +50,7 @@ import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/operations/toolchain
 import repro_dsl_stdlib/operations/link
 import repro_dsl_stdlib/constructors/c_library
+import repro_dsl_stdlib/constructors/nim_library
 
 const
   Recipe = "sonameFixture"
@@ -61,6 +72,15 @@ package sonameFixture:
     api:
       soname "plain"
       linkKind shared
+  library nimgreet:
+    api:
+      soname "nimgreet"
+      sover "1"
+      linkKind shared
+  library nimplain:
+    api:
+      soname "nimplain"
+      linkKind shared
   library archived:
     api:
       soname "archived"
@@ -78,8 +98,12 @@ proc withTarget(value: string; body: proc()) =
     else: delEnv("REPRO_VARIANTS")
 
 proc inBuild(body: proc()) =
-  ## One ``build:`` frame for ``Recipe``, with an empty action registry.
+  ## One ``build:`` frame for ``Recipe``, with empty action and target
+  ## registries: a native and a target ``nim_library`` write the same file
+  ## name (in different directories), so each case starts afresh rather
+  ## than seeing the previous case's implicit target names.
   resetBuildActionRegistry()
+  resetTargetExportRegistry()
   let state = beginBuildBlock(Recipe)
   try: body()
   finally: endBuildBlock(state)
@@ -238,6 +262,113 @@ suite "a real gcc link of the edge":
       check run(@[gcc, "-o", "main", "main.c", "-Llib", "-lgreet"])[1] == 0
       let (needed, _) = run(@[readelf, "-d", "main"])
       check "Shared library: [libgreet.so.1]" in needed
+      let (_, startCode) = uncontrolledExecCmdEx("./main", workingDir = root,
+        env = newStringTable({"LD_LIBRARY_PATH": root / "lib"}))
+      check startCode == 0
+
+proc passLValues(a: BuildActionDef): seq[string] =
+  ## The ``--passL:`` values of a ``nim.c`` edge, one per flag.
+  for arg in a.call.arguments:
+    if arg.name == "passL":
+      result.add(arg.encodedValue.split("\x1f"))
+
+suite "nim_library: a shared library is written under its SONAME":
+
+  test "native: the file, -Wl,-soname, and the declared output agree":
+    withTarget("", proc() =
+      inBuild(proc() =
+        let lib = nim_library(into = "nimgreet", source = "src/nimgreet.nim")
+        let a = args(lib.install)
+        checkpoint("args(lib.install) was " & $a)
+        check lib.install.call.packageName == "nim"
+        check "appLib=true" in a
+        when HostIsElf:
+          check "-Wl,-soname,libnimgreet.so.1" in passLValues(lib.install)
+          check "output=lib/libnimgreet.so.1" in a
+          check "lib/libnimgreet.so.1" in lib.install.outputs
+          let ln = lib.linkTimeName
+          checkpoint("linkTimeName: " & $args(ln) & " outputs=" & $ln.outputs)
+          check ln.id.len > 0
+          check ln.outputs == @["lib/libnimgreet.so"]
+          check ln.deps == @[lib.install.id]
+          check ln.inputs == @["lib/libnimgreet.so.1"]
+          check "argv=ln -sfn libnimgreet.so.1 lib/libnimgreet.so" in args(ln)
+          check registeredBuildActions().anyIt(it.id == ln.id)
+        else:
+          check passLValues(lib.install).allIt(not it.contains("-soname"))
+          check "output=lib/libnimgreet.so" in a
+          check lib.linkTimeName.id.len == 0))
+
+  test "no sover: the SONAME is the link-time name, so no symlink edge":
+    withTarget("", proc() =
+      inBuild(proc() =
+        let lib = nim_library(into = "nimplain", source = "src/nimplain.nim")
+        let a = args(lib.install)
+        checkpoint($a)
+        when HostIsElf:
+          check "-Wl,-soname,libnimplain.so" in passLValues(lib.install)
+        check "output=lib/libnimplain.so" in a
+        check lib.linkTimeName.id.len == 0
+        check registeredBuildActions().allIt(
+          not it.id.startsWith("nim-library-link-time-name-"))))
+
+  test "zig target: the full SONAME, the directory keyed, the file not":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let lib = nim_library(into = "nimgreet", source = "src/nimgreet.nim")
+        let a = args(lib.install)
+        checkpoint($a)
+        check "cpu=arm" in a
+        check "-Wl,-soname,libnimgreet.so.1" in passLValues(lib.install)
+        check ("output=lib@" & ZigTriple & "/libnimgreet.so.1") in a
+        check lib.linkTimeName.outputs ==
+          @["lib@" & ZigTriple & "/libnimgreet.so"]
+        check ("argv=ln -sfn libnimgreet.so.1 lib@" & ZigTriple &
+          "/libnimgreet.so") in args(lib.linkTimeName)))
+
+suite "a real nim c --app:lib run of the nim_library edge":
+
+  test "DT_SONAME is libnimgreet.so.1, and a -lnimgreet consumer starts":
+    let nimExe = uncontrolledFindExe("nim")
+    let gcc = uncontrolledFindExe("gcc")
+    let readelf = uncontrolledFindExe("readelf")
+    if not HostIsElf or nimExe.len == 0 or gcc.len == 0 or readelf.len == 0:
+      skip("needs an ELF host with nim, gcc and readelf on PATH (nim='" &
+        nimExe & "', gcc='" & gcc & "', readelf='" & readelf & "')")
+    else:
+      let root = getTempDir() / ("t_nim_soname_" & $getCurrentProcessId())
+      removeDir(root)
+      createDir(root / "src")
+      defer: removeDir(root)
+      writeFile(root / "src/nimgreet.nim",
+        "proc greet*(): cint {.exportc, dynlib, cdecl.} = 42\n")
+      writeFile(root / "main.c",
+        "int greet(void);\nint main(void) { return greet() == 42 ? 0 : 1; }\n")
+      proc run(argv: seq[string]): (string, int) =
+        checkpoint("$ " & argv.join(" "))
+        result = uncontrolledExecCmdEx(quoteShellCommand(argv), workingDir = root)
+        checkpoint(result[0])
+      var lib: Library
+      withTarget("", proc() =
+        inBuild(proc() =
+          lib = nim_library(into = "nimgreet", source = "src/nimgreet.nim")))
+      createDir(root / "lib")
+      let profile = PathOnlyToolProfile(resolvedExecutablePath: nimExe)
+      check run(argvForCall(lib.install.call, profile))[1] == 0
+      var lnArgv: seq[string]
+      for arg in lib.linkTimeName.call.arguments:
+        if arg.name == "argv": lnArgv = arg.encodedValue.split("\x1f")
+      check lnArgv.len == 4
+      if lnArgv.len == 4:
+        check run(lnArgv)[1] == 0
+      check fileExists(root / "lib/libnimgreet.so.1")
+      check symlinkExists(root / "lib/libnimgreet.so")
+      let (dyn, dynCode) = run(@[readelf, "-d", "lib/libnimgreet.so.1"])
+      check dynCode == 0
+      check "Library soname: [libnimgreet.so.1]" in dyn
+      check run(@[gcc, "-o", "main", "main.c", "-Llib", "-lnimgreet"])[1] == 0
+      let (needed, _) = run(@[readelf, "-d", "main"])
+      check "Shared library: [libnimgreet.so.1]" in needed
       let (_, startCode) = uncontrolledExecCmdEx("./main", workingDir = root,
         env = newStringTable({"LD_LIBRARY_PATH": root / "lib"}))
       check startCode == 0

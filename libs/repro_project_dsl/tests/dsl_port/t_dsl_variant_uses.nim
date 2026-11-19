@@ -48,7 +48,7 @@ suite "DSL-port M9.E — variant: uses arms":
     # Reset the configurable cell so the default is observable; the
     # arms themselves are not part of the override surface (they are
     # registered once at module-init time).
-    resetConfigurable("vPkg.desktopKind")
+    resetConfigurable("package.vPkg.desktopKind")
     let arms = registeredVariants("vPkg")
     check arms.len == 3
     # Per-arm spellings + ordinals — by source order.
@@ -78,14 +78,14 @@ suite "DSL-port M9.E — variant: uses arms":
   test "activeVariantArms tracks the current configurable value":
     # Default configurable value is @[dkSway]; only the dkSway arm
     # fires.
-    resetConfigurable("vPkg.desktopKind")
+    resetConfigurable("package.vPkg.desktopKind")
     let activeDefault = activeVariantArms("vPkg", "desktopKind")
     check activeDefault.len == 1
     check activeDefault[0].armValue == "dkSway"
     check activeDefault[0].usesClauses == @["sway >=0.1.0"]
     # Override to @[dkSway, dkGnome] — both arms fire.
     setConfigurable[seq[DesktopKind]](
-      "vPkg.desktopKind", @[dkSway, dkGnome])
+      "package.vPkg.desktopKind", @[dkSway, dkGnome])
     let activePair = activeVariantArms("vPkg", "desktopKind")
     check activePair.len == 2
     check activePair[0].armValue == "dkSway"
@@ -93,10 +93,10 @@ suite "DSL-port M9.E — variant: uses arms":
     # And a single-element override picks just one arm, even when it's
     # not the source-first arm.
     setConfigurable[seq[DesktopKind]](
-      "vPkg.desktopKind", @[dkPlasma])
+      "package.vPkg.desktopKind", @[dkPlasma])
     let activePlasma = activeVariantArms("vPkg", "desktopKind")
     check activePlasma.len == 1
     check activePlasma[0].armValue == "dkPlasma"
     # Restore the default so other tests in this binary aren't affected
     # by the override.
-    resetConfigurable("vPkg.desktopKind")
+    resetConfigurable("package.vPkg.desktopKind")

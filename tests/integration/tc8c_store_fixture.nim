@@ -87,7 +87,7 @@ proc storeProjectToml(libAUrl: string): string =
 
 proc requiredPolicy*(targets: seq[string]; platforms: seq[string];
                      mode = "required"; ciTrust = "";
-                     untrackedInputs = ""): string =
+                     untrackedInputs = ""; commandSets = false): string =
   ## The ``[certificate_policy]`` snapshot of a policy with one rule for
   ## every branch (``everyBranchPolicy``): ``targets`` on ``platforms`` under
   ## ``mode``. ``setupStoreFixture`` commits it in lib-a's ``repro.lock``.
@@ -100,7 +100,7 @@ proc requiredPolicy*(targets: seq[string]; platforms: seq[string];
     ciTrust = (if ciTrust == "skip": pctSkip else: pctAdvisory),
     untrackedInputs =
       (if untrackedInputs == "strict": puiStrict else: puiReadSet),
-    name = "lib-a")
+    name = "lib-a", commandSets = commandSets)
 
 proc policyLock*(snapshot: string): string =
   ## A committed ``repro.lock`` that pins nothing and carries ``snapshot``

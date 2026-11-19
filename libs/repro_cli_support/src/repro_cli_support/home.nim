@@ -675,12 +675,23 @@ proc runHomeAdd(c: ReproCommandLineHomeAdd): int =
     # The contribution catalogs the profile imports (`catalogs:`) take part
     # as they do in `repro home apply`. `repro home add` edits the profile
     # as text, so the text inspector reads it here as well.
+    # The profile's catalog imports are read OUTSIDE the fallback below: a
+    # refused import (ref, unreadable, clash) must be reported, never
+    # replaced by resolving the name some other way.
+    let profilePath =
+      try: loadProfilePath()
+      except CatchableError: ""
+    var imported: ImportedCatalogs
+    if profilePath.len > 0:
+      try: imported = importedCatalogsFor(profilePath)
+      except CatchableError as err:
+        stderr.writeLine("repro home add: " & err.msg)
+        return 1
     let catalog =
       try:
-        let profilePath = loadProfilePath()
         projectCatalogPackages([pkg], profilePath,
           resolveStateDir() / "catalog-projection",
-          inspectProfile(profilePath).catalogImports)
+          inspectProfile(profilePath).catalogImports, imported)
       except CatchableError:
         ProfileCatalog()
     let latest = unpinnedHostVersion(pkg, catalog)
@@ -3515,7 +3526,7 @@ proc runHomeExport(c: ReproCommandLineHomeExport): int =
 
 # ---------------------------------------------------------------------------
 # `repro home facts` / `repro home compare` (GM6: host facts and the
-# equivalence report; docs/user-guide/host-facts.md).
+# equivalence report; docs/users/content/guides/machines/compare-with-home-manager.md).
 # ---------------------------------------------------------------------------
 
 proc runHomeFacts(c: ReproCommandLineHomeFacts): int =

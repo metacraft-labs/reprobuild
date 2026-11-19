@@ -1,5 +1,12 @@
 # Reading a home profile from Nix — `reprobuild.lib`
 
+> **Superseded.** This page is no longer maintained. The published pages are
+> [Nix library and Home Manager module](../users/content/reference/nix-library.md) (checked
+> against the library by the `lib-reference` flake check),
+> [Drive Home Manager from a home profile](../users/content/guides/machines/drive-home-manager-from-a-profile.md)
+> and [Install a profile's applications with Homebrew](../users/content/guides/machines/install-applications-with-homebrew.md).
+> Edit those, not this page.
+
 When a machine is configured by both Nix (Home Manager, nix-darwin, NixOS)
 and a Reprobuild home profile, every fact should be written once. The
 Reprobuild flake exports a small library, `reprobuild.lib`, and a Home Manager
@@ -134,7 +141,7 @@ so an export never carries one.
 
 - the document is not a `repro home export` document, or its `schemaVersion`
   is one this library does not know (regenerate it with the `repro` the
-  flake pins; this library reads schema 5, which says how each host's
+  flake pins; this library reads schema 6, which says how each host's
   system is managed -- elsewhere, in full, or in add-on mode --
   `intent.hostSystems`);
 - `intent.hostSystems` is malformed or names a host the registry does not
@@ -185,7 +192,7 @@ objects with `repro infra apply`. `managedBy` is the pointer the profile
 gives, or `null`; `activities` is the system-activity selection (`default`
 first), empty for a host managed elsewhere. It refuses (throws) what
 `readIntent` refuses about the document and the host: another format, a
-`schemaVersion` other than 5, a host the registry does not declare, and a
+`schemaVersion` other than 6, a host the registry does not declare, and a
 malformed `hostSystems`. `readIntent`'s
 `evaluation.system` carries the same answer.
 

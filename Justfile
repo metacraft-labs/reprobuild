@@ -750,6 +750,10 @@ lint:
     # alone -- the release job's gate, without the build in front of it.
     bash ./scripts/release/check_staged_release_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
+    # A comment naming a superseded docs/user-guide/ page sends the next
+    # contributor to edit a copy nobody reads; the published page under
+    # docs/users/content/ goes stale. Pure grep, no build needed.
+    bash ./scripts/check_superseded_doc_pointers.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived
@@ -1346,6 +1350,18 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         --out:build/test-bin/e2e_hcr_linux_x86_64_single_threaded_direct_patch \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
+
+# A re-patch's code-patch event reports the word its store replaced (generation
+# N's jump), not the original window (reprobuild-pm issues/2026-11-15-hcr-code-
+# patch-event-reports-generation-0-as-the-word-a-re-patch-replaced.md).
+e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word \
+        --out:build/test-bin/e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word \
+        tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.log
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.

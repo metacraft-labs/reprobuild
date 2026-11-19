@@ -25,10 +25,13 @@ import std/[algorithm, os, sets, strutils, tables, times]
 
 when defined(posix):
   from std/posix import nil
+when defined(windows):
+  from std/winlean import createSymbolicLinkW
 
 import blake3
 import repro_core
 
+from repro_core/link_target import readSymlinkTarget
 import ./portable_fingerprint
 import ./prefix_paths
 import ./realization_hash
@@ -1082,6 +1085,106 @@ proc syncTreeDurably*(dir: string) =
   else:
     discard dir
 
+# ---------------------------------------------------------------------------
+# Read-only prefixes (Local-Content-Addressed-Store.md §"Read-Only Prefixes")
+# ---------------------------------------------------------------------------
+#
+# A published prefix may carry no write bit at all (the install mirror's,
+# Store-And-Installation-Layout.md §"Read-Only Enforcement"). Two rules
+# follow. Their directory halves are POSIX-only: Windows does not read a
+# directory's read-only attribute as forbidding a rename or an unlink in it,
+# and ``removeFile`` clears a file's read-only attribute itself.
+#
+#   * The bits are stripped in STAGING, never after the prefix is indexed:
+#     ``stripTreeWriteBits`` before the publish rename, and the staging
+#     root's own bit right after the rename and before the index row commits.
+#     The root keeps its bit through the rename because a directory moved to
+#     a new parent must itself be writable (its ``..`` entry is rewritten).
+#   * Taking a tree back OUT (GC, recovery, eviction, a displaced or losing
+#     stage) first gives its DIRECTORIES their owner's write bit back
+#     (``restoreDirectoryWriteBits``): the move needs it on the root, and an
+#     unlink needs it on the parent. Never a file's: a prefix file may be a
+#     hardlink of its source, and a mode belongs to the inode both names
+#     share. Never through a symbolic link: the link's target is not the
+#     store's.
+
+const StoreWriteBits = {fpUserWrite, fpGroupWrite, fpOthersWrite}
+
+proc stripRootWriteBits*(root: string) =
+  ## Clear the write bits of the directory ``root`` alone (step 5b: the
+  ## staging root, once it has been renamed into place). Raises ``OSError``
+  ## if the chmod fails. Windows: a no-op, as for every directory here.
+  when defined(posix):
+    let perms = getFilePermissions(root)
+    if (perms * StoreWriteBits).len > 0:
+      setFilePermissions(root, perms - StoreWriteBits)
+  else:
+    discard root
+
+proc stripTreeWriteBits*(root: string; includeRoot = true) =
+  ## Clear every write bit on each file and directory of ``root``, children
+  ## before their directory, without following a symbolic link (a link is
+  ## skipped, not chmod-ed through). ``includeRoot = false`` leaves ``root``
+  ## itself alone, for a stage that still has to be renamed. Raises
+  ## ``OSError`` on the first chmod that fails. Windows: files get the
+  ## read-only attribute, which is what ``setFilePermissions`` maps a mode to
+  ## there; directories are left alone, since Windows does not read that
+  ## attribute on a directory as "read-only".
+  for kind, entry in walkDir(root, relative = false, checkDir = true):
+    case kind
+    of pcDir:
+      stripTreeWriteBits(entry, includeRoot = true)
+    of pcFile:
+      # ``walkDir`` classified it without following it, so not a link.
+      let perms = getFilePermissions(entry)
+      if (perms * StoreWriteBits).len > 0:
+        setFilePermissions(entry, perms - StoreWriteBits)
+    of pcLinkToFile, pcLinkToDir:
+      discard
+  if includeRoot:
+    stripRootWriteBits(root)
+
+when defined(posix):
+  var oDirectoryFlag {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+
+proc restoreDirectoryWriteBits*(root: string; recursive = true) =
+  ## Give ``root`` (and, when ``recursive``, every directory below it) its
+  ## owner's write bit back, so the store can move the tree to a new parent
+  ## and unlink what is in it. Files are never touched, and no symbolic link
+  ## is followed: each directory is opened ``O_DIRECTORY | O_NOFOLLOW`` and
+  ## changed through that descriptor, so a directory swapped for a link
+  ## between the listing and the change is refused, not followed.
+  ## Best-effort: a directory that cannot be changed is left as it is, and
+  ## the move or unlink that needed it reports the failure. Windows: a no-op.
+  when defined(posix):
+    let fd = posix.open(root.cstring, posix.O_RDONLY or oDirectoryFlag or
+      oNoFollow or posix.O_CLOEXEC)
+    if fd < 0:
+      return
+    var st: posix.Stat
+    if posix.fstat(fd, st) == 0 and posix.S_ISDIR(st.st_mode) and
+        (st.st_mode.cint and posix.S_IWUSR.cint) == 0:
+      discard posix.fchmod(fd,
+        posix.Mode(st.st_mode.cint or posix.S_IWUSR.cint))
+    discard posix.close(fd)
+    if recursive:
+      try:
+        for kind, entry in walkDir(root, relative = false):
+          if kind == pcDir:
+            restoreDirectoryWriteBits(entry, recursive = true)
+      except OSError:
+        discard
+  else:
+    discard root
+    discard recursive
+
+proc removeStoreTree*(path: string) =
+  ## ``removeDir`` for a tree the store is discarding (a quarantined prefix,
+  ## a staging directory): restore its directories' write bits first, so a
+  ## read-only tree is removable by the store user that owns it.
+  restoreDirectoryWriteBits(path)
+  removeDir(path)
+
 proc syncPlacedPrefixDurably*(absolutePath: string) =
   ## For a writer that puts a prefix directory at
   ## ``prefixes/<pkg>/<dir>/`` itself instead of through ``realizePrefix``
@@ -1899,8 +2002,14 @@ type
     ## discovered by an overlay being fat, which is late and gives no
     ## cause.
     files*: int
+      ## Regular files. ``hardlinked + copied == files``.
     hardlinked*: int
     copied*: int
+    symlinks*: int
+      ## Symbolic links, to files or to directories, recreated with their
+      ## target text. Never linked or copied, so never in ``files``.
+    directories*: int
+      ## Directories created, empty ones included.
     perFileFallbacks*: int
       ## Files that fell back for a reason that is a property of the FILE.
       ## These must not be read as a defect in the pair.
@@ -1944,6 +2053,31 @@ proc reasonFor(attempt: LinkAttempt): MaterializeFallbackReason =
     of loUnsupported: mfrUnsupported
     else: mfrOther
 
+proc recreateSymlink(target, dst: string; toDirectory: bool) =
+  ## A symbolic link at ``dst`` whose target text is ``target``, exactly as
+  ## read from the source, relative or absolute. On Windows a link's kind
+  ## (file or directory) is fixed at creation; the caller passes the kind
+  ## ``treeEntries`` would record for the source entry, because
+  ## ``std/os.createSymlink`` guesses it by testing ``target`` against the
+  ## current directory, which is wrong for every relative target.
+  ##
+  ## A link already at ``dst`` is replaced, as ``copyFile`` replaces a
+  ## file, so materialising into a populated destination again succeeds.
+  if symlinkExists(extendedPath(dst)):
+    removeFile(extendedPath(dst))
+  when defined(windows):
+    const symbolicLinkFlagDirectory = 1'i32
+    const symbolicLinkFlagAllowUnprivilegedCreate = 2'i32
+    let flag = symbolicLinkFlagAllowUnprivilegedCreate or
+      (if toDirectory: symbolicLinkFlagDirectory else: 0'i32)
+    var wTarget = newWideCString(target.replace('/', '\\'))
+    var wDst = newWideCString(extendedPath(dst))
+    if winlean.createSymbolicLinkW(wDst, wTarget, flag) == 0:
+      raiseOSError(osLastError(), "cannot create symbolic link " & dst &
+        " -> " & target)
+  else:
+    createSymlink(target, dst)
+
 proc materializeDirectory*(srcDir, dstDir: string;
                            report: var MaterializeReport;
                            allowSharedInode =
@@ -1966,6 +2100,21 @@ proc materializeDirectory*(srcDir, dstDir: string;
   ## (``isPerFileFallback``): NTFS's 1023-link cap is a property of one
   ## blob, so treating it as a verdict on the filesystem would turn every
   ## subsequent file into a copy because one file was popular.
+  ##
+  ## **The destination is the source's tree, entry for entry**
+  ## (Local-Content-Addressed-Store §"Write Protocol" step 3): the same
+  ## entries ``storeTreeDigest`` covers. A directory is created even when
+  ## it is empty. A symbolic link, to a file or to a directory, is recreated
+  ## as a link with the same target text: it is never followed, never
+  ## copied (``copyFile`` would publish the bytes it resolves to, a frozen
+  ## copy of a runtime dependency's file) and never hardlinked (``link(2)``
+  ## follows it on macOS, so the hardlink arm would not even agree with
+  ## itself across platforms). A link to a directory is not descended into.
+  ## Without this, one source tree published as two different trees
+  ## depending on whether the store shared the source's filesystem, and the
+  ## prefix lacked directory links and empty directories its realization id
+  ## had been computed over (reprobuild-pm issue 2026-11-15, "store
+  ## materialization drops directory links and empty directories").
   report = MaterializeReport()
   if not dirExists(extendedPath(srcDir)):
     raise newException(StoreError, "materialize source missing: " & srcDir)
@@ -1991,11 +2140,27 @@ proc materializeDirectory*(srcDir, dstDir: string;
       else:
         "copy: the pair offers no hardlink arm [" & cap.describe() & "]"
 
-  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile, pcLinkToFile},
+  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile,
+      pcLinkToFile, pcDir, pcLinkToDir}, followFilter = {pcDir},
       relative = true):
     let src = srcDir / entry
     let dst = dstDir / entry
     createDir(extendedPath(parentDir(dst)))
+    let kind = getFileInfo(extendedPath(src), followSymlink = false).kind
+    case kind
+    of pcDir:
+      createDir(extendedPath(dst))
+      report.directories.inc
+      continue
+    of pcLinkToFile, pcLinkToDir:
+      # The same classification ``treeEntries`` makes, so the published
+      # link is the kind the digest recorded.
+      let toDirectory = kind == pcLinkToDir or dirExists(extendedPath(src))
+      recreateSymlink(readSymlinkTarget(extendedPath(src)), dst, toDirectory)
+      report.symlinks.inc
+      continue
+    of pcFile:
+      discard
     report.files.inc
 
     var linked = false
@@ -2025,7 +2190,12 @@ proc materializeDirectory*(srcDir, dstDir: string;
         else: mfrUnsupported].inc
 
     if not linked:
-      copyFile(extendedPath(src), extendedPath(dst))
+      # With the source's permissions: ``copyFile`` creates the file with
+      # the default mode, which drops the executable bit, and the tree
+      # digest (so the realization id) covers that bit. The hardlink arm
+      # shares the inode and so the mode; the copy arm must agree with it.
+      copyFileWithPermissions(extendedPath(src), extendedPath(dst),
+        ignorePermissionErrors = false)
       report.copied.inc
 
 proc describeMechanism*(report: MaterializeReport): string =
@@ -2069,6 +2239,8 @@ proc renderMaterializeReportText*(report: MaterializeReport;
   lines.add "hardlinked: " & $report.hardlinked
   lines.add "copied: " & $report.copied
   lines.add "per-file fallbacks: " & $report.perFileFallbacks
+  lines.add "symlinks: " & $report.symlinks
+  lines.add "directories: " & $report.directories
   for reason in MaterializeFallbackReason:
     if reason == mfrNone: continue
     if report.reasons[reason] > 0:
@@ -2095,6 +2267,8 @@ proc renderMaterializeReportJson*(report: MaterializeReport;
     ", \"hardlinked\": " & $report.hardlinked &
     ", \"copied\": " & $report.copied &
     ", \"per_file_fallbacks\": " & $report.perFileFallbacks &
+    ", \"symlinks\": " & $report.symlinks &
+    ", \"directories\": " & $report.directories &
     ", \"fallback_reasons\": {" & reasons.join(", ") & "}" &
     ", \"capability_probed\": " & (if report.capabilityProbed: "true" else: "false") &
     ", \"hardlink_available\": " & (if report.hardlinkAvailable: "true" else: "false") &
@@ -2405,7 +2579,7 @@ proc publishRowLocked(s: var Store; row: PrefixRow;
 
 proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
                          contentDigest: PrefixIdBytes; replacing: var bool;
-                         res: var RealizeResult) =
+                         res: var RealizeResult; readOnly = false) =
   ## Steps 5-6 of the write protocol for a sealed ``stage``: rename it to
   ## ``res.absolutePath`` and index it, or settle as the loser of the
   ## rename against a VERIFIED existing prefix. Fills ``res``'s
@@ -2417,6 +2591,11 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
   ## is flushed after it, both before the index transaction commits. So a
   ## power cut leaves either no row, or a row naming a tree whose data and
   ## name are on disk.
+  ##
+  ## ``readOnly`` (§"Read-Only Prefixes"): the caller stripped every write
+  ## bit below ``stage`` but not ``stage``'s own, which the rename to a new
+  ## parent needs. It is stripped here, after the rename and before the row
+  ## commits, so no index row ever names a writable tree.
   syncTreeDurably(stage)
   let packageDir = parentDir(res.absolutePath)
   let packageDirExisted = dirExists(extendedPath(packageDir))
@@ -2461,6 +2640,10 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
         # Make the rename durable before the index names its result. A
         # failure here rolls the transaction back and leaves an unindexed
         # directory, which recovery verifies against its receipt.
+        if readOnly:
+          stripRootWriteBits(extendedPath(res.absolutePath))
+          # The root's new mode must survive a power cut as its name does.
+          syncDirectoryDurably(extendedPath(res.absolutePath))
         syncDirectoryDurably(packageDir)
         let wrote = s.publishRowLocked(row, contentDigest, replacing)
         s.db.exec("COMMIT")
@@ -2499,7 +2682,7 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
     if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
                          pvUnrecorded}:
       if dirExists(extendedPath(stage)):
-        try: removeDir(extendedPath(stage)) except OSError: discard
+        try: removeStoreTree(extendedPath(stage)) except OSError: discard
       res.outcome = roLoserOfRace
       res.verification = check.outcome
       let existing = s.lookupPrefix(row.prefixId)
@@ -2602,7 +2785,8 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
                     hint: StoreReceiptHint;
                     populate: proc (stagingDir: string;
                                     mechanism: var string);
-                    writerMode = "direct"): RealizeResult =
+                    writerMode = "direct";
+                    readOnly = false): RealizeResult =
   ## Materializes a prefix using the spec's stage → rename → INSERT OR
   ## IGNORE protocol.
   ##
@@ -2615,6 +2799,11 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
   ##
   ## The prefix is published at its 40-hex name, or found at an older
   ## build's 16-hex name when the index records it there (``placePrefix``).
+  ##
+  ## ``readOnly`` publishes the tree with no write bit on any file or
+  ## directory, stripped in staging (§"Read-Only Prefixes"), so it is
+  ## read-only from the moment the index names it. It does not touch a
+  ## prefix that is already present.
   result.prefixId = prefixId
   let lookup = s.lookupPrefix(prefixId)
   result.relativePath = s.placePrefix(prefixId, lookup, hint.packageName,
@@ -2681,6 +2870,8 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
     # The record a later use is checked against: the tree exactly as it is
     # about to be published, receipt included.
     let contentDigest = prefixTreeDigest(stage)
+    if readOnly:
+      stripTreeWriteBits(extendedPath(stage), includeRoot = false)
     var row = PrefixRow(
       prefixId: prefixId,
       packageName: hint.packageName,
@@ -2689,11 +2880,12 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
       adapter: hint.adapter,
       receiptDigest: digest,
       createdAtUnix: receipt.createdAtUnix)
-    s.publishStagedPrefix(stage, row, contentDigest, replacing, result)
+    s.publishStagedPrefix(stage, row, contentDigest, replacing, result,
+      readOnly = readOnly)
     return result
   except CatchableError:
     if dirExists(extendedPath(stage)):
-      try: removeDir(extendedPath(stage)) except OSError: discard
+      try: removeStoreTree(extendedPath(stage)) except OSError: discard
     raise
 
 # ---------------------------------------------------------------------------
@@ -2952,7 +3144,22 @@ proc quarantineUnique(s: var Store; absolutePath: string): string =
   # Rename preserves mtime. Stamp before a concurrent sweep can see the tree;
   # the age of the original build must not consume its quarantine grace.
   setLastModificationTime(extendedPath(absolutePath), getTime())
-  moveDir(extendedPath(absolutePath), extendedPath(result))
+  # A read-only prefix (§"Read-Only Prefixes"): moving a directory to a new
+  # parent needs write permission on the directory itself, so only its own
+  # bit is restored before the move. The rest of the tree gets its
+  # directories' bits back when it is unlinked (`removeStoreTree`), not
+  # here: a walk of the whole tree does not belong inside the GC's write
+  # transaction. No file is made writable.
+  let rootMode = getFilePermissions(extendedPath(absolutePath))
+  restoreDirectoryWriteBits(extendedPath(absolutePath), recursive = false)
+  try:
+    moveDir(extendedPath(absolutePath), extendedPath(result))
+  except OSError:
+    # The prefix stays where it is, so it keeps the mode it had: a failed
+    # move must not leave a read-only prefix writable.
+    try: setFilePermissions(extendedPath(absolutePath), rootMode)
+    except OSError: discard
+    raise
 
 proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
                graceSeconds = DefaultGcGraceSeconds): GcPrefixResult =
@@ -3039,7 +3246,7 @@ proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
       age = 0
     if age >= graceSeconds.int64:
       try:
-        removeDir(extendedPath(result.quarantinedPath))
+        removeStoreTree(extendedPath(result.quarantinedPath))
         s.appendAuditNoPrefix(gaReclaim, "unlinked " & result.quarantinedPath &
           " (age " & $age & "s >= grace " & $graceSeconds & "s)")
         result.reclaimed = true
@@ -3123,7 +3330,7 @@ proc sweepPendingDeletion*(s: var Store; graceSeconds = DefaultGcGraceSeconds):
         continue
       try:
         if kind in {pcDir, pcLinkToDir}:
-          removeDir(entry)
+          removeStoreTree(entry)
         else:
           removeFile(entry)
         s.appendAuditNoPrefix(gaReclaim, "unlinked " & entry &
@@ -3147,7 +3354,7 @@ proc sweepStaging*(s: var Store): seq[string] =
     case kind
     of pcDir, pcLinkToDir:
       try:
-        removeDir(entry)
+        removeStoreTree(entry)
         result.add(entry)
       except OSError: discard
     of pcFile, pcLinkToFile:
@@ -3428,7 +3635,8 @@ proc recoverStoreRoot*(root: string): RecoverReport =
 
 proc realizeDirectoryAsPrefix*(s: var Store; sourceDir: string;
                               hint: StoreReceiptHint;
-                              extra: openArray[string] = []): RealizeResult =
+                              extra: openArray[string] = [];
+                              readOnly = false): RealizeResult =
   ## Helper for adapters that already have the realized contents laid
   ## out in `sourceDir` (M53 Nix and M54 tarball both produce this
   ## shape).  Computes the realization hash, hardlinks or copies the
@@ -3438,7 +3646,8 @@ proc realizeDirectoryAsPrefix*(s: var Store; sourceDir: string;
     hint.provenanceUrl, hint.provenanceChecksum, extra)
   result = s.realizePrefix(prefixId, hint,
     proc (stagingDir: string; mechanism: var string) =
-      materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism))
+      materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism),
+    readOnly = readOnly)
 
 # ---------------------------------------------------------------------------
 # Recipe-Val M8 — multi-output realize
@@ -3580,7 +3789,7 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
       result.perOutput.add(entry)
     except CatchableError:
       if dirExists(extendedPath(stage)):
-        try: removeDir(extendedPath(stage)) except OSError: discard
+        try: removeStoreTree(extendedPath(stage)) except OSError: discard
       raise
 
 # ---------------------------------------------------------------------------

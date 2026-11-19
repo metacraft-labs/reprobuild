@@ -245,8 +245,8 @@ repro lock refresh --provisioning: re-selection refused; {lock} was not written:
   golden["bad-declaration"] = """
 repro lock refresh --provisioning: re-selection refused; {lock} was not written:
   the catalogs to re-select from could not be obtained: the catalog import declaration cannot be read:
-    {decl}:3: unknown key "branch" in [[import]] (accepted: repo, remote, commit, ref, interface_artifact)
-    {decl}:9: unknown key "branch" in [[import]] (accepted: repo, remote, commit, ref, interface_artifact)
+    {decl}:3: unknown key "branch" in [[import]] (accepted: repo, remote, kind, commit, ref, interface_artifact)
+    {decl}:9: unknown key "branch" in [[import]] (accepted: repo, remote, kind, commit, ref, interface_artifact)
     fix: correct {decl} as stated above (Federated-Catalog-Imports.md, "Reading the file")"""
   golden["no-ref"] = """
 repro lock refresh --provisioning: re-selection refused; {lock} was not written:

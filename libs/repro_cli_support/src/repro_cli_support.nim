@@ -58,6 +58,7 @@ import repro_core/process_exec
 import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
+import repro_core/variant_assignments
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -228,6 +229,8 @@ from test_certificates/note_framing as tcnotes import nil
 from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
+import repro_cli_support/home_catalog_imports
+import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
 # `repro.nim` `uses:` entry state about a dependency's revision, and the
 # canonical repository each names (Unified-Locking-And-Hooks.md §16.2).
@@ -396,8 +399,8 @@ export cli_disk.runDiskCommand,
        cli_disk.loadDiskoFromSource, cli_disk.renderPlan,
        cli_disk.DiskCliOptions,
        cli_disk.DiskPlanOutcome, cli_disk.DiskPlanFailureKind
-export cli_attest.runAttestCommand, cli_attest.parseAttestArgs,
-       cli_attest.renderAttestUsage, cli_attest.AttestCliOptions,
+export cli_attest.runAttestCommand, cli_attest.attestOptionsOf,
+       cli_attest.AttestCliOptions,
        cli_attest.AttestSubcommand, cli_attest.AttestExitCode,
        cli_attest.attestExitCodeFor, cli_attest.ConventionalUkiName,
        cli_attest.ConventionalVerityImageName,
@@ -484,26 +487,6 @@ proc runVersionCommand*(programName: string; asJson: bool): int =
   else:
     echo renderVersion(programName)
   0
-
-# The usage synopsis of each command whose parsing has not moved onto repro's
-# command-line description yet, printed by ``repro help <command>``. A
-# command's entry goes when it moves: its help is then generated from its
-# declarations, like every migrated command's. The list of commands itself,
-# and the primary help, are generated already.
-const LegacyVerbSynopses = [
-  ("attest",
-    "repro attest expect --image PATH [--out PATH | --check PATH]\n" &
-      "repro attest cross-check --manifest PATH --policy PATH --attestations PATH ...\n"),
-
-]
-
-proc legacyVerbSynopsis*(verb: string): string =
-  ## The usage synopsis of the unmigrated command ``verb`` (its canonical
-  ## name), or "" when it has none.
-  for entry in LegacyVerbSynopses:
-    if entry[0] == verb:
-      return entry[1]
-  ""
 
 proc parseToolProvisioning*(value: string): ToolProvisioningMode =
   case value
@@ -1034,7 +1017,8 @@ proc findSiblingProjectFile*(packageName: string;
   ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
-                               command: string): ResolvedPositionalSelectors =
+                               command: string;
+                               currentDir = ""): ResolvedPositionalSelectors =
   ## Named-Targets M3: shared path-vs-name resolver for ``repro build``
   ## and ``repro watch``. Mirrors the rules in
   ## [CLI/build.md §"Target Selection"] and
@@ -1057,6 +1041,13 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ## ``command`` is the user-visible verb (``"repro build"`` /
   ## ``"repro watch"``) so the duplicate-path-anchor diagnostic blames
   ## the right command.
+  ##
+  ## ``currentDir`` is the directory a ``<package>:<name>`` selector's
+  ## sibling checkout is looked up from; empty means the process's current
+  ## directory, which is the request's own for every caller but the daemon
+  ## parent. The daemon parent passes the request's ``workingDir``
+  ## (``daemonRequestBuildAnchor``), because its own directory belongs to
+  ## no request.
   result.targetWasOmitted = positionalSelectors.len == 0
   if positionalSelectors.len == 0:
     result.target = ""
@@ -1096,7 +1087,8 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
       # disambiguator below — the disambiguator is for cross-package
       # collisions inside ONE project, so it never legitimately matches
       # a sibling-checkout package name. The sibling-found branch wins.
-      let siblingProjectFile = findSiblingProjectFile(classified.package)
+      let siblingProjectFile = findSiblingProjectFile(classified.package,
+        currentDir)
       if siblingProjectFile.len > 0:
         if not anchorSet:
           result.target = siblingProjectFile & "#" & classified.name
@@ -1885,6 +1877,41 @@ proc splitDeclaredPathEnv(env: openArray[(string, string)]):
       result.path = entry[1]
     else:
       result.rest.add(entry[0] & "=" & entry[1])
+
+proc withEdgeEnvPassthrough*(decided: seq[string];
+                             declared: openArray[string];
+                             actionId: string): seq[string] =
+  ## An action's engine-side ``envPassthrough``: the names the `PATH`
+  ## decision chose (``ActionPathDecision.passthrough``) followed by the
+  ## names the edge itself declared (``BuildActionDef.envPassthrough``,
+  ## e.g. the temp-directory names ``nim.c`` names), deduplicated in that
+  ## order. Every process lowering site in ``lowerGraphAction`` builds its
+  ## list here -- after the `PATH` decision where it makes one; the built-in
+  ## HCR site makes none and passes ``decided = @[]`` -- so no site can drop
+  ## the edge's declaration: a site that did would key those reads by value
+  ## again and miss on the first build in every new shell.
+  ##
+  ## Passed to ``repro_build_engine.action`` rather than set on the result,
+  ## because ``action()`` folds the names into the weak fingerprint
+  ## (``keyedOnActionEnvironment``): a passthrough NAME is part of what the
+  ## action is, its value is not.
+  ##
+  ## ``PATH`` is refused. Its class -- hermetic and keyed by value, or the
+  ## host's and keyed by name -- is decided by ``actionPathDecision`` alone,
+  ## and an edge-declared ``PATH`` passthrough on a hermetic edge would
+  ## drop the composed toolchain directories from its key while
+  ## ``classifyActionPath`` reported it as inherited.
+  result = decided
+  for name in declared:
+    if name.len == 0:
+      continue
+    if cmpIgnoreCase(name, "PATH") == 0:
+      raise newException(ValueError,
+        "action " & actionId & " declares `" & name & "` as environment " &
+          "passthrough; an action's PATH class is decided by its tool " &
+          "references, not declared by the edge")
+    if name notin result:
+      result.add(name)
 
 proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
                                   publicCliPath: string): BuildAction =
@@ -3442,7 +3469,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     let inlinePath = actionPathDecision(actionPathPrefix,
       declaredPath = inlineDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-    var inlineEnvPassthrough = inlinePath.passthrough
+    var inlineEnvPassthrough = withEdgeEnvPassthrough(inlinePath.passthrough,
+      payload.envPassthrough, payload.id)
     for entry in inlinePath.env:
       inlineEnv.add(entry)
     for entry in inlineDeclaredEnv.rest:
@@ -3601,6 +3629,11 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       # ``nim.c`` does (see ``compileDependencyPolicy``).
       nonDeterminism = payload.nonDeterminism,
       nonDeterminismJustification = payload.nonDeterminismJustification,
+      # This site makes no `PATH` decision (it runs this image by absolute
+      # path), so the edge's own names are the whole list; carried so a
+      # declaration is never dropped silently. Empty for every edge today.
+      envPassthrough = withEdgeEnvPassthrough(@[], payload.envPassthrough,
+        payload.id),
       commandStatsId = commandStatsId)
 
   let executableName = payload.call.executableName
@@ -3734,7 +3767,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     let unittestPath = actionPathDecision(actionPathPrefix,
       declaredPath = unittestDeclaredEnv.path,
       edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-    var mergedEnvPassthrough = unittestPath.passthrough
+    var mergedEnvPassthrough = withEdgeEnvPassthrough(
+      unittestPath.passthrough, payload.envPassthrough, payload.id)
     for entry in unittestPath.env:
       mergedEnv.add(entry)
     # MR10: per-edge env-var injections from the typed-tool wrapper's
@@ -3851,7 +3885,8 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   let typedToolPath = actionPathDecision(actionPathPrefix,
     declaredPath = typedDeclaredEnv.path,
     edgeDeclaresTools = payload.toolIdentityRefs.len > 0)
-  var mergedEnvPassthrough = typedToolPath.passthrough
+  var mergedEnvPassthrough = withEdgeEnvPassthrough(
+    typedToolPath.passthrough, payload.envPassthrough, payload.id)
   for entry in typedToolPath.env:
     mergedEnv.add(entry)
   # MR10: per-edge env-var injections from the typed-tool wrapper's
@@ -8319,17 +8354,14 @@ proc canonicalVariantAssignments(): string =
   ## ``providerArtifactId`` and the engine reuses the stale lowered graph
   ## (``providerInvocations: 0``). Folding the assignments in forces a
   ## re-lowering when a variant changes. Sorted so assignment order does
-  ## not perturb the key.
+  ## not perturb the key. A name assigned more than once counts once, with
+  ## its LAST value -- the value the solver and every reader use
+  ## (``repro_core/variant_assignments``) -- so ``--release --debug`` and
+  ## ``--debug --release`` do not share a lowered graph.
   let raw = getEnv("REPRO_VARIANTS")
   if raw.len == 0:
     return ""
-  var parts: seq[string] = @[]
-  for item in raw.split(','):
-    let s = item.strip()
-    if s.len > 0:
-      parts.add(s)
-  parts.sort()
-  parts.join(",")
+  canonicalVariantAssignmentsOf(raw)
 
 proc canonicalEnvironmentSignature(): string =
   ## Shared-Development-Services L5 (§6.4): the SELECTED ENVIRONMENT, in
@@ -9449,7 +9481,7 @@ proc standardProviderArtifactIdForBinary*(binaryPath: string): string =
   StandardProviderArtifactId & "." & fileContentDigest(binaryPath)
 
 type
-  BuildProgressMode = enum
+  BuildProgressMode* = enum
     bpmQuiet
     bpmLine
     bpmBarLine
@@ -9775,6 +9807,18 @@ proc parseBuildProgressMode(value: string): BuildProgressMode =
     raise newException(ValueError,
       "unsupported --progress=" & value &
         " (expected quiet, line, bar-line, lines, lines-bar, dots, simple-dots, simple-lines, or live-lines)")
+
+proc buildProgressModeFor*(progress: string;
+                           inAgentShell: bool): BuildProgressMode =
+  ## `repro build`'s progress mode from its parsed `--progress` (the flag,
+  ## else `$REPROBUILD_PROGRESS`, then `$REPRO_PROGRESS`, which the flag
+  ## declares) and whether the caller is in an agent's shell
+  ## (`$IN_AGENT_SHELL` set). A value, typed or from a variable, wins; only
+  ## without one is an agent's shell quiet. Raises `ValueError` for a value
+  ## that names no mode.
+  if progress.len > 0: parseBuildProgressMode(progress)
+  elif inAgentShell: bpmQuiet
+  else: bpmBarLine
 
 proc configuredBuildProgressMode(): BuildProgressMode =
   var configured = getEnv("REPROBUILD_PROGRESS", "")
@@ -11845,6 +11889,34 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   # The shared, configuration-keyed nimcache outside the action-cache root
   # (`interfaceExtractionNimcacheRoot`) is the same kind of derived state, and
   # other extractions rewrite it.
+  # The lock-pinned catalog, resolved here so the extraction does not read
+  # the lock (and depend on all of it); see `LockedCatalogEnv`.
+  var extractEnv = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)]
+  # `PATH` declared from the compilers the extraction runs, as the provider
+  # compile declares it (`recipeCompilePathEnv`): the C compiler driver
+  # reads `PATH`, so an inherited one keyed the record on the caller's shell,
+  # and a bundle restored on a machine with another default `PATH` missed
+  # with `environment: PATH`. A recipe compile is not a lowered action, so
+  # this does not go through `actionPathDecision`; the entry is composed in
+  # the one place both recipe compiles share.
+  extractEnv.add(recipeCompilePathEnvForModule(modulePath))
+  # The temporary directory, declared inside the extraction's own scratch
+  # (an ignored input prefix below), as the provider compile declares one in
+  # its home: the C compiler writes its temporaries there and the compile
+  # probes it, so an inherited `TMPDIR` -- a fresh `mktemp -d` in every Nix
+  # dev shell -- named a directory no other shell or machine has.
+  let extractScratch =
+    if relocatable: parentDir(edgeArtifact) / "work"
+    elif scratchDir.len > 0: absolutePath(scratchDir)
+    else: ""
+  if extractScratch.len > 0:
+    let extractTmp = extractScratch / "tmp"
+    createDir(extendedPath(extractTmp))
+    for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
+      extractEnv.add(name & "=" & extractTmp)
+  # The shared nimcache's root exists before the lookup, for the reason
+  # `providerCompileLaunchEnv` creates the provider's.
+  createDir(extendedPath(interfaceExtractionNimcacheRoot()))
   var ignoredInputPrefixes = interfaceExtractionIgnoredInputPrefixes()
   if relocatable:
     ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
@@ -11866,9 +11938,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     # when the metadata moved, which is what lets that copy be served.
     actionCachePolicy = (if relocatable: ffpHybrid else: ffpTimestamp),
     envPassthrough = ProviderCompileEnvironmentPassthrough,
-    # The lock-pinned catalog, resolved here so the extraction does not read
-    # the lock (and depend on all of it); see `LockedCatalogEnv`.
-    env = @[LockedCatalogEnv & "=" & lockedCatalogDeclaration(modulePath)],
+    env = extractEnv,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
     dependencyPolicy =
@@ -17016,7 +17086,7 @@ type
 proc givenOnCommandLine(origin: CliOrigin): bool =
   ## Whether the value came from the command line (not from an environment
   ## variable the flag declares, nor its default).
-  origin.winner.kind == cokCli
+  reproGivenOnCommandLine(origin)
 
 proc loadBuildCommandLine*(args: openArray[string]):
     tuple[conf: ReproCommandLineBuild, origin: ReproCommandLineBuildOrigins] =
@@ -17968,7 +18038,7 @@ proc defaultInteractiveShell(): string =
     getEnv("SHELL", "/bin/sh")
 
 proc runReproShellCommand(conf: ReproCommandLineShellCall;
-                          publicCliPath: string): int =
+                          publicCliPath: string; shellGiven: bool): int =
   ## ``repro shell [<selector>]``: start a shell in the development
   ## environment, print it (``--print-env``), or run one command in it
   ## (``-c <command>`` through the shell, ``-- <command>`` directly). Its
@@ -17981,7 +18051,7 @@ proc runReproShellCommand(conf: ReproCommandLineShellCall;
   # `repro exec` with no command.
   let invocation = shellInvocationOf(printEnv = conf.printEnv.isSome,
     inlineCommand = conf.command.isSome, directCommand = conf.argv.len > 0,
-    shellGiven = conf.shell.len > 0)
+    shellGiven = shellGiven)
   if invocation.usageError.len > 0:
     stderr.writeLine("repro shell: error: " & invocation.usageError)
     return ShellUsageExitCode
@@ -25679,7 +25749,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       c.cachePush.workspaceName)
   of ReproCommandLineHooksCommand.help:
     # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
-    stdout.write(ReproCommandLine.helpText(@["hooks"] & c.help.topic))
+    printReproHelp(@["hooks"] & c.help.topic)
     return 0
   of ReproCommandLineHooksCommand.ensure:
     parsed = hooksCommandOf(c.ensure, hakEnsure)
@@ -27471,6 +27541,47 @@ proc releaseAutoRunQuotaProcess*(process: var owned(Process)) =
   except CatchableError:
     discard
   process = nil
+
+proc runCatalogPublishCommand*(rootFlag: string; modules: seq[string];
+                              checkOnly: bool): int =
+  ## ``repro catalog publish`` -- the publisher of Federated-Catalog-Imports.md
+  ## § Publishing, as a verb. Writes the catalog's ``published-interfaces/``
+  ## (deterministic in the provider source), or with ``--check`` compares the
+  ## committed directory with what publishing now writes and exits 1 when it
+  ## is stale, which is what a catalog's CI runs.
+  let root = absolutePath(if rootFlag.len > 0: rootFlag else: getCurrentDir())
+  if not dirExists(root):
+    raise newException(ValueError,
+      "catalog publish: the catalog root does not exist: " & root)
+  let reproRoot = resolveReprobuildSourceRoot()
+  if reproRoot.len == 0:
+    raise newException(ValueError,
+      "catalog publish: no reprobuild source tree to extract against:\n" &
+      describeReprobuildSourceRootSearch())
+  let named =
+    if modules.len > 0: modules else: catalogProviderModules(root)
+  if named.len == 0:
+    raise newException(ValueError, "catalog publish: " & root &
+      " has no provider module (packages/{interfaces,vendor,source}/<name>/repro.nim)")
+  try:
+    if checkOnly:
+      let files = buildCatalogPublication(root, named, reproRoot)
+      let drift = catalogPublicationDrift(root, files)
+      if drift.len == 0:
+        echo "published-interfaces/ is current (" & $files.len & " artifacts)"
+        return 0
+      stderr.writeLine("repro catalog publish --check: published-interfaces/ " &
+        "is stale; run `repro catalog publish` and commit the result:")
+      for line in drift:
+        stderr.writeLine("  " & line)
+      return 1
+    let files = publishCatalogInterfaces(root, named, reproRoot)
+    echo "wrote " & $files.len & " artifacts to " &
+      (root / PublishedInterfacesDir)
+    return 0
+  except CatalogPublicationError as err:
+    stderr.writeLine("repro catalog publish: " & err.msg)
+    return 1
 
 proc runDepsRefreshCommand(projectFlag, pathArg: string;
                            checkOnly, dryRun: bool): int =
@@ -31019,10 +31130,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     setActionCacheRootOverride(c.actionCacheRoot)
   # `--progress` over `$REPROBUILD_PROGRESS`, then `$REPRO_PROGRESS` (the
   # flag declares both); with none of them, quiet in an agent's shell.
-  progressMode =
-    if c.progress.len > 0: parseBuildProgressMode(c.progress)
-    elif getEnv("IN_AGENT_SHELL", "").len > 0: bpmQuiet
-    else: bpmBarLine
+  progressMode = buildProgressModeFor(c.progress,
+    inAgentShell = getEnv("IN_AGENT_SHELL", "").len > 0)
   # `--progress-bars` over `$REPROBUILD_PROGRESS_BARS`.
   if c.progressBars.len > 0:
     progressBarStyle = parseBuildProgressBarStyle(c.progressBars)
@@ -31243,15 +31352,16 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         " produces none; drop one of them")
       return 2
     if buildTargetTriple.len == 0:
-      for rawAssignment in getEnv("REPRO_VARIANTS").split(','):
-        let assignment = rawAssignment.strip()
-        if assignment.startsWith(TargetTripleVariantName & "="):
-          stderr.writeLine("repro build: --publish takes the consuming " &
-            "platform from --target; the target here is assigned by " &
-            "--variant " & assignment & ", which --publish cannot see. " &
-            "Spell it --target=" &
-            assignment[TargetTripleVariantName.len + 1 .. ^1])
-          return 2
+      # The last assignment wins for every reader (variant_assignments), so
+      # it is the one the build would use and the one to name.
+      let assigned = lastVariantAssignment(getEnv("REPRO_VARIANTS"),
+        TargetTripleVariantName)
+      if assigned.len > 0:
+        stderr.writeLine("repro build: --publish takes the consuming " &
+          "platform from --target; the target here is assigned by " &
+          "--variant " & TargetTripleVariantName & "=" & assigned &
+          ", which --publish cannot see. Spell it --target=" & assigned)
+        return 2
 
   # Edge-Determinism-And-Soft-Rebuild.md §4.5: `--only` is a selector ON a
   # rebuild verb, and on its own it selects nothing to do. Refusing it is
@@ -31671,6 +31781,9 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       rawArgs: originalArgs,
       environment: daemonBuildEnvironment(),
       environmentIsComplete: true,
+      # The digest ``startUserDaemon`` compared above; the daemon serves
+      # only a request whose stated engine is the one it runs.
+      engineDigest: expectedUserDaemonDigest(publicCliPath, config),
       attached: true,
       cancelOnDisconnect: true)
     let daemonResult = requestUserDaemonBuild(request, config.endpoint,
@@ -33044,6 +33157,23 @@ proc certificateRepositoryRoot*(projectRoot: string): string =
     dir = parent
   start
 
+proc declaredCertificateGraph(snapshot: ProviderGraphSnapshot):
+    tuple[actions: seq[BuildActionDef];
+          targets: Table[string, BuildTargetDef]] =
+  ## Every action the stored graph declares, and every build target, decoded
+  ## once. What ``certificatePlanPart`` plans from and what
+  ## ``certificateCommandSets`` digests, so the two read one graph the same
+  ## way.
+  result.targets = initTable[string, BuildTargetDef]()
+  for fragment in snapshot.fragments:
+    for node in fragment.nodes:
+      if node.kind == gnkAction:
+        result.actions.add(decodeBuildActionPayload(toBytes(node.payload)))
+      elif node.kind == gnkMetadata and
+          node.stableName == "reprobuild.build-target.v1":
+        let target = decodeBuildTargetPayload(toBytes(node.payload))
+        result.targets[target.name] = target
+
 proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
                           projectRoot: string;
                           selectors: openArray[string]):
@@ -33061,16 +33191,9 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
   ## so a caller can say which selector certifies nothing.
   result.repository = certificateRepositoryRoot(projectRoot)
   result.certificates = aggregateCertificateExportTable(snapshot)
-  result.targets = initTable[string, BuildTargetDef]()
-  var declared: seq[BuildActionDef] = @[]
-  for fragment in snapshot.fragments:
-    for node in fragment.nodes:
-      if node.kind == gnkAction:
-        declared.add(decodeBuildActionPayload(toBytes(node.payload)))
-      elif node.kind == gnkMetadata and
-          node.stableName == "reprobuild.build-target.v1":
-        let target = decodeBuildTargetPayload(toBytes(node.payload))
-        result.targets[target.name] = target
+  let graph = declaredCertificateGraph(snapshot)
+  let declared = graph.actions
+  result.targets = graph.targets
   let inferred = inferDeclaredActionDeps(declared, projectRoot)
   result.materialized = selectProviderActions(snapshot, inferred,
     result.targets, selectors)
@@ -33110,6 +33233,171 @@ proc certificateNodeMembers*(part: CertificatePlanPart;
       for actionId in part.targets[name].actions:
         if result.find(actionId) < 0:
           result.add(actionId)
+
+const CertificateCommandEncodingV1 = "reprobuild.certificate-command.v1"
+  ## The first field of the encoding ``certificateCommandDigest`` hashes, so
+  ## a later change of the encoding can never collide with this one.
+
+const CertificateCommandWorkspaceRoot = "${workspace}"
+  ## What ``certificateCommandDigest`` writes in place of the workspace root
+  ## (the parent of the project root) wherever a declared value names it.
+
+proc withoutWorkspaceRoot(value, workspaceRoot: string): string =
+  ## ``value`` with every occurrence of ``workspaceRoot`` that is a whole
+  ## path prefix (followed by ``/`` or the end of a path) replaced by
+  ## ``CertificateCommandWorkspaceRoot``. A root of ``/`` (or none) is left
+  ## alone: it would match every absolute path.
+  if workspaceRoot.len <= 1:
+    return value
+  var i = 0
+  while i < value.len:
+    if value.continuesWith(workspaceRoot, i) and
+        (i + workspaceRoot.len == value.len or
+         value[i + workspaceRoot.len] in {'/', '\\', '\x1f', ':', ' '}):
+      result.add(CertificateCommandWorkspaceRoot)
+      i += workspaceRoot.len
+    else:
+      result.add(value[i])
+      inc i
+
+proc certificateCommandDigest*(action: BuildActionDef;
+                               workspaceRoot = ""): string =
+  ## ``blake3:<hex>`` over the command ``action`` DECLARES (Test-Certificates.md
+  ## §"What a required name means: its command set"): its package,
+  ## executable, subcommand and provider entrypoint, every argument in
+  ## declaration order with every field that decides how it is passed, and
+  ## the edge's declared environment: its variables and the names of the
+  ## host variables it passes through.
+  ##
+  ## It is taken before tool resolution, never over the argv the engine
+  ## executes, which names host paths (the resolved tool, the workspace
+  ## root): the digest is part of the certified content and must be the same
+  ## on every platform and every host. ``PublicCliArg.nimType`` is left out:
+  ## it is the Nim type the DSL checked the value against, and the value
+  ## itself (``encodedValue``) is what reaches the command.
+  ##
+  ## The encoding is length-prefixed (``<decimal length>:<bytes>``) field by
+  ## field, so no two different commands encode alike whatever their text
+  ## holds. The digest is ``blake3DomainDigest`` under
+  ## ``hdMetadataEnvelope`` (a domain-framed BLAKE3-256).
+  ##
+  ## The provider stamps some host paths into what an edge declares: every
+  ## action of a package carries the package-root environment
+  ## (``OUT_MIRROR``, the ``DEP_*`` roots), which are absolute paths under
+  ## the workspace root. ``workspaceRoot`` (the parent of the project root)
+  ## is therefore written as ``${workspace}`` in every argument value and
+  ## every environment value, so a copy of the same content elsewhere has
+  ## the same digest.
+  var buf = ""
+  proc field(value: string) =
+    buf.add($value.len)
+    buf.add(':')
+    buf.add(value)
+  field(CertificateCommandEncodingV1)
+  let call = action.call
+  field(call.packageName)
+  field(call.executableName)
+  field(call.subcommand)
+  field(call.providerEntrypointId)
+  field($call.arguments.len)
+  for arg in call.arguments:
+    field(arg.name)
+    field($arg.kind)
+    field($arg.role)
+    field($arg.format)
+    field($arg.placement)
+    field($arg.repeated)
+    field($arg.position)
+    field(arg.alias)
+    field(withoutWorkspaceRoot(arg.encodedValue, workspaceRoot))
+  field($action.env.len)
+  for (name, value) in action.env:
+    field(name)
+    field(withoutWorkspaceRoot(value, workspaceRoot))
+  # The names whose host value the edge reads (passthrough variables) are part
+  # of its environment as declared: passing one more through can change what
+  # the test does. Only the names are declared; the values never are.
+  field($action.envPassthrough.len)
+  for name in action.envPassthrough:
+    field(name)
+  "blake3:" & digestHex(blake3DomainDigest(buf.bytesOf(),
+    hdMetadataEnvelope)).toLowerAscii()
+
+proc certificateCommandSets*(snapshot: ProviderGraphSnapshot;
+                             projectRoot: string;
+                             required: openArray[string]):
+    seq[CertificateCommandSet] =
+  ## The command set of every certificate name the graph marks, sorted by
+  ## name (Test-Certificates.md §"What a required name means: its command
+  ## set"): for each, one ``<action id>=blake3:<hex>`` entry per edge the
+  ## marked node names directly (``certificateNodeMembers``: the node's test
+  ## commands, the same members whose argv the certificate records), sorted
+  ## and unique.
+  ##
+  ## Every marked name is recorded, not only the ``required`` ones, so that a
+  ## commit which stops requiring a name still says what the name means: the
+  ## gateway's ratchet can then accept the relaxing push (the meaning is
+  ## unchanged) and refuse one that narrows the name in the same push.
+  ##
+  ## Both lock writers call this on the graph they evaluated, ``repro lock
+  ## refresh`` and the certifying run's lock-update node, so one graph
+  ## renders one snapshot. A marked name whose node has no test command gets
+  ## no set; raises when such a name, or one no node marks at all, is in
+  ## ``required``: that requirement can never be certified, and a snapshot
+  ## that recorded no meaning for it would be anchored to nothing.
+  ## ``projectRoot`` is the root the provider was evaluated in; its parent is
+  ## the workspace root ``certificateCommandDigest`` takes out.
+  let workspaceRoot = os.normalizedPath(absolutePath(projectRoot)).parentDir
+  let graph = declaredCertificateGraph(snapshot)
+  var byId = initTable[string, BuildActionDef]()
+  for action in graph.actions:
+    byId[action.id] = action
+  let part = CertificatePlanPart(
+    certificates: aggregateCertificateExportTable(snapshot),
+    targets: graph.targets)
+  var names: seq[string]
+  for entry in part.certificates.entries:
+    if entry.name notin names:
+      names.add(entry.name)
+  for name in required:
+    if name notin names:
+      raise newException(ValueError, "the certificate policy requires '" &
+        name & "', which no node of the evaluated graph is marked as")
+  names.sort(system.cmp[string])
+  for name in names:
+    var entries: seq[string]
+    for entry in part.certificates.entries:
+      if entry.name != name:
+        continue
+      for actionId in certificateNodeMembers(part, entry.nodeKind,
+          entry.node):
+        if not byId.hasKey(actionId):
+          raise newException(ValueError, "certificate '" & name &
+            "' names the edge '" & actionId & "', which the evaluated " &
+            "graph does not declare")
+        let line = actionId & CommandEntryDigestMarker &
+          certificateCommandDigest(byId[actionId],
+            workspaceRoot)["blake3:".len .. ^1]
+        if line notin entries:
+          entries.add(line)
+    if entries.len == 0:
+      if name in required:
+        raise newException(ValueError, "certificate '" & name & "' marks a " &
+          "node with no test command, so it can never be certified")
+      continue
+    entries.sort(system.cmp[string])
+    result.add(CertificateCommandSet(name: name, commands: entries))
+
+proc withCertificateCommandSets*(policy: BranchCertificatePolicy;
+                                 snapshot: ProviderGraphSnapshot;
+                                 projectRoot: string):
+    BranchCertificatePolicy =
+  ## ``policy`` with the command set of every name ``snapshot`` marks,
+  ## evaluated in ``projectRoot`` (``certificateCommandSets``); refuses one
+  ## whose required names cannot be given one.
+  result = policy
+  result.commandSets = certificateCommandSets(snapshot, projectRoot,
+    requiredCertificateNames(policy))
 
 proc certificateNodeClosure*(part: CertificatePlanPart;
                              members: openArray[string]): seq[string] =
@@ -33222,8 +33510,7 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
   var selectors: seq[string] = @[]
   case conf.command
   of Cmd.help:
-    stdout.write(ReproCommandLine.helpText(@["certificates"] &
-      conf.help.topic))
+    printReproHelp(@["certificates"] & conf.help.topic)
     return 0
   of Cmd.policy:
     let c = conf.policy
@@ -35259,7 +35546,16 @@ proc runDebugArtifactCommand(c: ReproCommandLineDebugArtifact): int =
   ## `graph` and `why`, `--format` wins over `--json`.
   let path = c.path
   let format = inspectionFormat(c.format, c.json, allowDot = false)
-  let record = decodeLoweredGraphCache(toBytes(readFile(extendedPath(path))))
+  let bytes = toBytes(readFile(extendedPath(path)))
+  if isNimbleIndexObject(bytes):
+    # A Nimble index object (root, shard, name map, events): decoded by the
+    # bounded, canonical codec, which refuses a damaged or non-canonical
+    # object rather than render part of it.
+    case format
+    of gofJson: echo renderIndexObjectJson(bytes)
+    else: echo renderIndexObject(bytes)
+    return 0
+  let record = decodeLoweredGraphCache(bytes)
   case format
   of gofText:
     echo renderLoweredGraphRecordText(record)
@@ -36548,6 +36844,9 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
       rawArgs: originalArgs,
       environment: daemonWatchEnvironment(),
       environmentIsComplete: true,
+      # The digest ``startUserDaemon`` compared above; the daemon serves
+      # only a request whose stated engine is the one it runs.
+      engineDigest: expectedUserDaemonDigest(publicCliPath, config),
       attached: not detach,
       detached: detach,
       cancelOnDisconnect: not detach,
@@ -37129,8 +37428,11 @@ const
   DevelopTargetFormFlags = {dfCmake, dfListOverrides, dfInto,
     dfToolProvisioning, dfCmakeBinary, dfWorkRoot}
 
-proc developFlagsGiven(c: ReproCommandLineDevelop): set[DevelopFlag] =
-  ## The flags ``c``'s command line gave.
+proc developFlagsGiven(c: ReproCommandLineDevelop;
+                       workRootGiven: bool): set[DevelopFlag] =
+  ## The flags ``c``'s command line gave. ``workRootGiven``: whether
+  ## `--work-root` was typed (its value may come from
+  ## `$REPROBUILD_WORK_ROOT`, which names no form).
   if c.all: result.incl(dfAll)
   if c.direct: result.incl(dfDirect)
   if c.indirect: result.incl(dfIndirect)
@@ -37159,7 +37461,7 @@ proc developFlagsGiven(c: ReproCommandLineDevelop): set[DevelopFlag] =
   if c.noWriteReport: result.incl(dfNoWriteReport)
   if c.cmake: result.incl(dfCmake)
   if c.cmakeBinary.isSome: result.incl(dfCmakeBinary)
-  if c.workRoot.isSome: result.incl(dfWorkRoot)
+  if workRootGiven: result.incl(dfWorkRoot)
 
 proc firstOutside(given, allowed: set[DevelopFlag]): string =
   ## The first flag of ``given`` that ``allowed`` does not hold, or "".
@@ -39828,7 +40130,8 @@ proc developUnresolvedTargetDiagnostic(target, modulePath: string;
     result.add("tip: to develop an existing local checkout of `" & target &
       "`, run `repro develop " & target & " --source=<path>`")
 
-proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
+proc runDevelopCommand*(c: ReproCommandLineDevelop;
+                        workRootGiven = c.workRoot.isSome): int =
   ## `repro develop …`, from its configuration. Exported for the same reason
   ## `runReproLockCommand` is: a test that asserts on what the verb WRITES
   ## has to reach the verb, and reaching a private copy of its body instead
@@ -39853,7 +40156,12 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop): int =
   ##     or a command.
   ##   * Otherwise the target form: `--list-overrides`, `<dependency>
   ##     --into=PATH`, `<target> -- <command>`, `--cmake <source-dir>`.
-  let given = developFlagsGiven(c)
+  ##
+  ## ``workRootGiven`` says whether `--work-root` was typed on the command
+  ## line; its value may also come from `$REPROBUILD_WORK_ROOT`, which the
+  ## target form reads and which selects no form. A caller that built ``c``
+  ## from words alone may leave it to its default.
+  let given = developFlagsGiven(c, workRootGiven)
   if dfDrop in given:
     return runDevelopDropCommand(c, given)
   if c.command.len == 0 and
@@ -41013,7 +41321,8 @@ proc runPrivilegedBrokerMode(args: openArray[string]): int =
     let parsed = parseBrokerModeArgs(args)
     doAssert parsed.isBrokerMode
     let ctx = FixtureContext(filePrefix: parsed.filePrefix)
-    return runBrokerSession(parsed.token, ctx)
+    return runBrokerSession(parsed.channel, parsed.token, parsed.parentPid,
+      parsed.parentStart, ctx)
   except EElevation as err:
     stderr.writeLine("repro --privileged-broker: " & err.msg)
     return 7
@@ -41038,33 +41347,87 @@ const DaemonParentPrewarmEnv* = "REPROBUILD_DAEMON_PARENT_PREWARM"
 proc daemonParentPrewarmEnabled*(): bool =
   getEnv(DaemonParentPrewarmEnv, "1") != "0"
 
+proc daemonRequestBuildAnchor*(selectors: openArray[string];
+                               workingDir: string): string =
+  ## The project anchor a daemon-hosted ``repro build`` request's worker will
+  ## build, as an ABSOLUTE ``<path>[#<fragment>]`` — derived by the rule the
+  ## worker applies ([CLI/build.md §"Target Selection"],
+  ## ``parseAndResolveSelectors``), not by a copy of it. The anchor is the
+  ## first PATH-SHAPED selector, not the first positional: ``repro build
+  ## test`` selects the current project's ``test`` (``.#test``) even beside a
+  ## ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
+  ## ``repro build runquota:runquotad`` anchors on the sibling checkout
+  ## (reprobuild-pm issue
+  ## 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor:
+  ## both daemon-parent readers took the first positional, so they recorded
+  ## and warmed a project the build never used).
+  ##
+  ## Nothing here reads the daemon's own current directory: every
+  ## path-shaped selector is absolutized against ``workingDir`` before the
+  ## shared resolver sees it, and the sibling lookup runs from ``workingDir``.
+  ## "" when ``workingDir`` is empty or relative and the anchor is relative,
+  ## when the anchor is a fragment with no path (``#name``, which names no
+  ## project), or when the selectors are ones the build itself refuses.
+  ## Never raises.
+  let workingDir =
+    if workingDir.len > 0 and workingDir.isAbsolute: workingDir else: ""
+  var absolutized: seq[string] = @[]
+  for sel in selectors:
+    if classifyBuildSelector(sel).kind == bskPath:
+      let parts = splitTarget(sel)
+      if parts.base.len == 0 and parts.fragment.len > 0:
+        return ""
+      var base = if parts.base.len == 0: "." else: parts.base
+      if not base.isAbsolute:
+        if workingDir.len == 0:
+          return ""
+        base = absolutePath(base, workingDir)
+      absolutized.add(
+        if parts.fragment.len > 0: base & "#" & parts.fragment else: base)
+    else:
+      absolutized.add(sel)
+  if workingDir.len == 0:
+    # No directory to look a sibling up from, and a name-only request
+    # anchors on it; only an absolute path anchor can still be read.
+    for sel in absolutized:
+      if classifyBuildSelector(sel).kind == bskPath:
+        return sel
+    return ""
+  let resolved =
+    try:
+      parseAndResolveSelectors(absolutized, "repro build", workingDir)
+    except CatchableError:
+      return ""
+  let parts = splitTarget(if resolved.target.len == 0: "." else: resolved.target)
+  var base = if parts.base.len == 0: "." else: parts.base
+  if not base.isAbsolute:
+    base = absolutePath(base, workingDir)
+  if parts.fragment.len > 0: base & "#" & parts.fragment else: base
+
 proc daemonRequestProjectRoot*(rawArgs: openArray[string];
                                workingDir: string): string =
   ## The project a daemon-hosted ``repro build`` request is for, derived from
-  ## the request alone — the same target the worker will build: the first
-  ## positional of ``rawArgs`` (``.`` when there is none), resolved against the
-  ## request's ``workingDir``, never the daemon's own. "" when the target does
-  ## not resolve to a project file; the session record then keeps its
-  ## working-directory fallback. Read-only, so it is safe in the daemon parent
-  ## (see ``UserDaemonProjectRootResolver``). The arguments are read by the
-  ## parser generated from repro's description (``buildRequestOf``), the one
-  ## the worker reads them with.
+  ## the request alone — the project the worker's build anchors on
+  ## (``daemonRequestBuildAnchor``, the build's own selector rule), resolved
+  ## against the request's ``workingDir``, never the daemon's own: the
+  ## directory of the module the anchor selects. "" when that module does not
+  ## exist; the session record then keeps its working-directory fallback.
+  ## Read-only, so it is safe in the daemon parent (see
+  ## ``UserDaemonProjectRootResolver``). The arguments are read by the parser
+  ## generated from repro's description (``buildRequestOf``), the one the
+  ## worker reads them with.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   if target.len == 0:
-    target = "."
-  var base = splitTarget(target).base
-  if base.len == 0:
-    base = "."
-  if not base.isAbsolute:
-    if workingDir.len == 0:
-      return ""
-    base = absolutePath(base, workingDir)
+    return ""
+  # Parsed WITH its fragment, as the worker parses it when it names the
+  # project its stats session belongs to (``runDirectBuild``): ``./sub#mod``
+  # selects the module ``sub/mod.nim`` even where ``sub/`` holds no project
+  # file, and dropping the fragment named no project at all.
   try:
-    let parsed = parseBuildTarget(base)
+    let parsed = parseBuildTarget(target)
     if not parsed.modulePath.isAbsolute or
         not fileExists(extendedPath(parsed.modulePath)):
       return ""
@@ -41091,18 +41454,17 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
   ## a build decide differently — every warm-table key embeds the full path, so
   ## entries under the wrong directory are never looked up — but it would make
   ## the pass useless, so it is derived rather than guessed.
-  # THE FIRST POSITIONAL IS THE TARGET, with no `build` verb to skip.
+  # THE SELECTORS ARE THE BUILD'S, with no `build` verb to skip.
   # ``rawArgs`` is whatever ``runBuildCommand`` was handed, and every route
   # into it strips the verb first -- the dispatcher passes the words after
   # it, and the internal callers compose their own argument vectors without
-  # one. Skipping a literal "build" here would therefore skip a real target:
-  # ``repro build build``, in a directory holding a ``build/`` project, would
-  # warm the caches of ``.`` instead.
+  # one. Skipping a literal "build" here would therefore skip a real
+  # selector. The anchor is chosen by the build's own rule
+  # (``daemonRequestBuildAnchor``), not by taking the first positional.
   let request = buildRequestOf(rawArgs)
   if request.isNone:
     return ""
-  var target =
-    if request.get.selectors.len > 0: request.get.selectors[0] else: ""
+  let target = daemonRequestBuildAnchor(request.get.selectors, workingDir)
   var workRoot = request.get.workRoot
   let forceRefresh = request.get.forceRebuild or request.get.dryRun
   if forceRefresh:
@@ -41110,7 +41472,7 @@ proc daemonPrewarmTargetOutputDir*(rawArgs: openArray[string];
     # work with no consumer.
     return ""
   if target.len == 0:
-    target = "."
+    return ""
   if workRoot.len == 0:
     for entry in requestEnvironment:
       let eq = entry.find('=')
@@ -41738,7 +42100,8 @@ type
       ## RA-8 — set when ``--manifest-url`` was passed on the command line.
       ## The resolution order treats an explicit flag as the highest
       ## precedence source; without it the manifest URL/branch are resolved
-      ## from the host bootstrap config and then the host repo's ``origin``.
+      ## from the host bootstrap config, and never from the host repo's
+      ## ``origin``.
     defaultProjects: seq[string]
       ## RA-8 — the host bootstrap config's ``[projects] default`` set. Used
       ## to fill the project-to-init when the user did not pass an explicit
@@ -42562,10 +42925,15 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
   ##   1. explicit ``--manifest-url`` / ``--manifest-branch`` (RA-11 flags);
   ##   2. the workspace settings file's record store (``repro-workspace.toml``
   ##      ``[records] url`` / ``branch``), found through
-  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo;
-  ##   3. the host repo's own ``remote.origin.url``.
-  ## If none resolves, ``init`` later fails loud — the ``repro`` binary ships
-  ## NO built-in/hardcoded manifest URL fallback.
+  ##      ``REPRO_WORKSPACE_CONFIG`` or discovered in the host repo.
+  ## There is NO further fallback. The host repo's own ``origin`` is never
+  ## taken: it is the repository at the root, which is metadata or a member
+  ## and never the record store (Workspace-Manifests.md §"Metadata and records
+  ## are separate repositories"; Unified-Locking-And-Hooks.md §14.1: a record
+  ## store is "never the default and never inferred"). If neither resolves,
+  ## ``init`` clones nothing, and fails loud only when the workspace also has
+  ## no metadata of its own — the ``repro`` binary ships NO built-in manifest
+  ## URL either.
   ##
   ## When the workspace root already holds the manifests (``projects/`` —
   ## the flat layout, where the root workspace repository IS the manifest
@@ -42611,16 +42979,9 @@ proc resolveBootstrapConfig(args: var WorkspaceInitArgs) =
             name notin args.additionalProjects:
           args.additionalProjects.add(name)
 
-  if flatLayout:
-    return
-
-  # (3) Host repo origin — only when neither an explicit flag nor the config
-  # supplied a manifest URL.
-  if args.manifestUrl.len == 0:
-    let identity = ensureGitToolResolvable(args.toolProvisioning, getEnv("PATH"))
-    let origin = gitRemoteOriginUrl(identity, args.workspaceRoot)
-    if origin.len > 0:
-      args.manifestUrl = origin
+  # No third step: the host repo's ``origin`` is never a fallback (see above,
+  # and reprobuild-pm issues/2026-11-16-repro-falls-back-to-the-root-or-origin-
+  # as-the-lock-record-store-when-records-names-no-url.md).
 
 const
   RecordStoreDirName* = "records"
@@ -43445,7 +43806,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   ## emits the structured report.
   var args = argsIn
   # RA-8: resolve the manifest URL/branch (+ default projects, project name)
-  # from the host bootstrap config / host repo origin BEFORE bootstrapping,
+  # from the flags / host bootstrap config BEFORE bootstrapping,
   # with NO hardcoded org default. The resolution is a no-op when a manifest
   # checkout already exists.
   resolveBootstrapConfig(args)
@@ -43458,13 +43819,25 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # "no manifest configured" guard (added by the host-bootstrap-config
   # change AFTER M25) must not fire for it, or compositional init aborts
   # before the composer ever runs.
-  if not dirExists(manifestsDir) and args.manifestUrl.len == 0 and
+  # "No metadata of its own" (Workspace-Manifests.md §"`repro-workspace.toml`"):
+  # no `projects/` or `repos/` where membership resolves, and no
+  # `[[manifest]]` layer declared by the state or the settings files. Layers
+  # are counted whether or not a project is named yet, so a root that has them
+  # but names no project reaches the "requires a <project-or-variant>" error
+  # below rather than this one.
+  let membershipDir = manifestsRoot(args.workspaceRoot)
+  let hasMetadata = dirExists(manifestsDir) or
+    dirExists(membershipDir / "repos") or
+    effectiveWorkspaceLocalWithNotes(args.workspaceRoot).local.manifest.len > 0
+  if not hasMetadata and args.manifestUrl.len == 0 and
       not isCompositionalWorkspaceToml(args.workspaceRoot, args.projectName):
     raise newException(ValueError,
       "no manifest configured for `repro workspace init`: pass " &
         "`--manifest-url=…`, commit a `" & settingsFileName &
         "` with a `[records] url` (or set `REPRO_WORKSPACE_CONFIG`), or run " &
-        "inside a host repo whose `origin` is the manifest source. `repro` " &
+        "in a workspace root that holds its own metadata (`projects/` or " &
+        "`repos/`, or `[[manifest]]` layers in the settings files). The host " &
+        "repository's remote is never used in their place, and `repro` " &
         "ships no built-in manifest URL.")
   if args.projectName.len == 0:
     raise newException(ValueError,
@@ -46349,9 +46722,16 @@ proc resolveCoherenceLayerRoot(workspaceRoot, project: string): string =
   # the encoded project component. Probing the raw name made a workspace whose
   # project name is not filename-shaped contribute no DB claim at all.
   let segment = encodeLockPathSegment(project)
-  for candidate in recordStoreCandidates(workspaceRoot) & @[workspaceRoot]:
-    if dirExists(extendedPath(candidate / "locks" / segment)):
-      return candidate
+  # Read exactly where the writer writes (``pickRecordStoreRoot``): the store
+  # checkout at its conventional location (``existingRecordStoreRoot``, which
+  # a declared ``[records] url`` resolves to as well). Never the workspace
+  # root, which is metadata (Workspace-Settings-Files.md §3), and never a
+  # plain directory at a conventional location: the writer no longer writes
+  # either, so a ``locks/`` there is a record it will never refresh, and as a
+  # coherence claim it would grow staler with every commit.
+  let store = existingRecordStoreRoot(workspaceRoot)
+  if store.len > 0 and dirExists(extendedPath(store / "locks" / segment)):
+    return store
   ""
 
 proc lockCoherenceFor*(identity: GitToolIdentity;
@@ -54350,15 +54730,20 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
   ##      §8 step 2), so neither the root base layer nor any other composed
   ##      layer may stand in for it. With no checkout the answer is "" (no
   ##      record is written) and a one-time notice names the clone.
-  ##   3. The first composed ``[[manifest]]`` layer (composer mode) — when
-  ##      the settings files declare any layer, the root repository as the
-  ##      base layer (§3: the store when ``[records]`` names none). For
-  ##      ``local_path`` layers the path is taken verbatim (relative to the
-  ##      workspace root); for ``url`` layers it's the on-disk
-  ##      checkout the composer materialised at
-  ##      ``<workspaceRoot>/.repro/manifests-<i>-<sanitized>``.
-  ##   4. The record-store checkout at its conventional location, or "" when
+  ##   3. The record-store checkout at its conventional location, or "" when
   ##      there is none (see the comment at the end).
+  ##
+  ## NEVER a composed ``[[manifest]]`` layer. With layers declared the root
+  ## repository is composed first as the base layer, and it, like every
+  ## other layer, is METADATA, which is never the record store
+  ## (Workspace-Settings-Files.md §3, "No ``[records] url`` means no store is
+  ## synthesized"; Unified-Locking-And-Hooks.md §5, §14.1). The former step
+  ## that took the first composed layer made the root the store whenever
+  ## ``[records]`` named no url — even over a real store checkout at
+  ## ``.repro/records`` (reprobuild-pm issues/2026-11-16-repro-falls-back-to-
+  ## the-root-or-origin-as-the-lock-record-store-when-records-names-no-url.md).
+  ## ``workspaceLocal`` is kept in the signature for the callers; it no longer
+  ## decides the destination.
   if parsed.recordStoreRoot.len > 0:
     return parsed.recordStoreRoot
   let declared = declaredRecordStore(parsed.workspaceRoot)
@@ -54366,47 +54751,12 @@ proc pickRecordStoreRoot(parsed: WorkspaceLockArgs;
     if declared.checkout.len == 0:
       announceMissingRecordStoreCheckout(parsed.workspaceRoot, declared)
     return declared.checkout
-  if workspaceLocal.isSome:
-    let local = workspaceLocal.get()
-    if local.manifest.len > 0:
-      let first = local.manifest[0]
-      if first.local_path.isSome and first.local_path.get().len > 0:
-        let raw = first.local_path.get()
-        if isAbsolute(raw):
-          return raw
-        return parsed.workspaceRoot / raw
-      if first.url.isSome and first.url.get().len > 0:
-        # Mirror the composer's directory-naming convention so the
-        # lock lands inside the same on-disk checkout the composer
-        # acquired the layer at.
-        let sanitizedSegments = block:
-          var raw1 = ""
-          for ch in first.url.get():
-            case ch
-            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
-            else: raw1.add('-')
-          var collapsed = ""
-          var prevDash = false
-          for ch in raw1:
-            if ch == '-':
-              if not prevDash: collapsed.add(ch)
-              prevDash = true
-            else:
-              collapsed.add(ch)
-              prevDash = false
-          if collapsed.len > 80:
-            collapsed.setLen(80)
-          collapsed.strip(chars = {'-'},
-            leading = true, trailing = true)
-        let suffix =
-          if sanitizedSegments.len > 0: sanitizedSegments
-          else: "layer"
-        return parsed.workspaceRoot / ".repro" /
-          ("manifests-0-" & suffix)
-  # Native default git-checkout lock store: the `.repro/manifests` store DB,
-  # NOT the membership root. Membership (projects/repos) lives at the workspace
-  # root (or a `.repro/manifests` checkout); the lock store is always the
-  # `.repro/manifests` DB, separate from where membership resolves.
+  discard workspaceLocal
+  # Native default git-checkout lock store: the store checkout at its
+  # conventional location (`.repro/records`, legacy `.repro/manifests`), NOT
+  # the membership root and never a composed layer. Membership (projects/repos)
+  # lives at the workspace root or in the layers; the record store is a
+  # separate repository, apart from where membership resolves.
   #
   # ...but ONLY when that store actually exists as a git checkout. Returning the
   # path unconditionally infers a team route from a path that may never have been
@@ -62159,6 +62509,8 @@ type
     enacted*: bool
       ## The recipe enacts a policy; false means the snapshot is removed.
     emission*: CertificatePolicyEmission
+      ## The enacted policy, its ``commandSets`` filled in from the graph
+      ## the run evaluated (``withCertificateCommandSets``).
     failure*: string
       ## Why the enacted policy could not be read from the graph.
 
@@ -67050,6 +67402,10 @@ type
     requires*: seq[PolicyRequirement]
     ciTrust*: CertificateCiTrust
     untrackedInputs*: PolicyUntrackedInputs
+    commandSets*: seq[CertificateCommandSet]
+      ## What the snapshot says each required name means (Test-Certificates.md
+      ## §"What a required name means: its command set"): every table it
+      ## records, whichever rule matched. Empty when it records none.
     label*: string
       ## What decided, for diagnostics: the rule and the policy.
     noRule*: string
@@ -67082,6 +67438,7 @@ proc snapshotGateRequirement*(policy: BranchCertificatePolicy;
     of pctAdvisory: cctAdvisory
     of pctSkip: cctSkip
   result.untrackedInputs = policy.untrackedInputs
+  result.commandSets = policy.commandSets
   let match = matchPolicy(policy, target)
   if not match.matched:
     result.mode = cgmOff
@@ -68825,6 +69182,10 @@ type
       ## when the anchor carries no snapshot or no rule matches, and when
       ## its snapshot is malformed: the names cannot be read then, and only
       ## the mode is raised (to ``required``).
+    policy*: BranchCertificatePolicy
+      ## The anchor's snapshot, when it carries one that parses: its
+      ## ``commandSets`` say what each name the anchor requires means
+      ## (``commandSetOf``).
     detail*: string
 
 proc localRepositoryPath(url: string): string =
@@ -68905,6 +69266,7 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     if not snap.present:
       result.detail = "the anchor's lock records no certificate policy"
       return
+    result.policy = snap.policy
     let match = matchPolicy(snap.policy, target)
     if match.matched:
       result.mode = match.rule.gateMode
@@ -68918,6 +69280,38 @@ proc gatewayRatchetAnchor*(gitBin, gatewayBareDir, upstreamUrl: string;
     result.mode = pmRequired
     result.detail = "the anchor's [certificate_policy] is malformed (" &
       err.msg & "); counted as required"
+
+type
+  NarrowedCertificate* = object
+    ## A required name whose candidate command set omits entries of the
+    ## base's (Test-Certificates.md §"What a required name means: its
+    ## command set"): what the candidate claims the name means is less than
+    ## what it meant when the base landed.
+    certificate*: string
+    missing*: seq[string]
+      ## The base's entries the candidate lacks, in the base's order.
+
+proc narrowedAgainstBase*(names: openArray[string];
+                          base: BranchCertificatePolicy;
+                          candidate: openArray[CertificateCommandSet]):
+    tuple[narrowed: seq[NarrowedCertificate]; unanchored: seq[string]] =
+  ## For each of ``names``: ``unanchored`` when the base records no command
+  ## set for it (a snapshot written before command sets), otherwise
+  ## ``narrowed`` when the candidate's command set for it does not contain
+  ## every entry of the base's. A candidate that records none for the name
+  ## (no snapshot, or no table) omits every entry. Shared by the gateway's
+  ## ratchet and ``repro ci plan``, so the two judge a name the same way.
+  var candidatePolicy = BranchCertificatePolicy(commandSets: @candidate)
+  for name in names:
+    let anchored = commandSetOf(base, name)
+    if not anchored.recorded:
+      if name notin result.unanchored: result.unanchored.add(name)
+      continue
+    let claimed = commandSetOf(candidatePolicy, name)
+    let missing = omittedCommands(anchored.commands, claimed.commands)
+    if missing.len > 0:
+      result.narrowed.add(NarrowedCertificate(certificate: name,
+        missing: missing))
 
 const GatewayTestedContentRemedy =
   ". The pushed commit's content must be the content that was tested: re-run " &
@@ -69051,6 +69445,42 @@ proc gatewayVerifyPush*(gitBin, gatewayBareDir: string;
       # Nothing to attest: neither the pushed rule nor the anchor's names a
       # certificate.
       continue
+    # What a name the anchor requires MEANS is anchored too
+    # (Test-Certificates.md §"What a required name means: its command set"):
+    # the pushed commit's command set for it must contain the anchor's. A
+    # narrowed name is unmet on every platform the joined rule requires it
+    # on, whatever certificate covers it, because that certificate attests
+    # the pushed commit's own (narrower) meaning of the name. An anchor that
+    # records no command set for a name is judged by name alone, and said so.
+    var anchorNames: seq[string]
+    for req in anchorRequires:
+      if req.certificate notin anchorNames: anchorNames.add(req.certificate)
+    let anchoring = narrowedAgainstBase(anchorNames, anchor.policy,
+      requirement.commandSets)
+    for name in anchoring.unanchored:
+      result.policyNotes.add(u.refName & ": the anchor records no command " &
+        "set for '" & name & "' (its snapshot predates command sets): " &
+        "judged by name alone; the first accepted push whose lock was " &
+        "refreshed anchors it")
+    if anchoring.narrowed.len > 0:
+      var parts: seq[string]
+      for n in anchoring.narrowed:
+        var platforms: seq[string]
+        for req in requires:
+          if req.certificate == n.certificate: platforms = req.platforms
+        parts.add("'" & n.certificate & "' on " & platformsLabel(platforms) &
+          ": the pushed commit's command set omits " & n.missing.join(", ") &
+          " that the anchor's records")
+      let detail = u.refName & ": narrowed: " & parts.join("; ") &
+        ". A commit cannot redefine what a name the anchor requires runs: " &
+        "keep every test command the anchor's command set lists (adding " &
+        "commands is allowed), or change the policy first"
+      if effective == cgmRequired:
+        result.accepted = false
+        result.outcome = voNotCovered
+        result.diagnostic = detail
+        return
+      result.policyNotes.add("advisory: " & detail)
     # TC-8c (Transport §3): the certificates for the pushed commit are the
     # notes on its TREE, ``<new>^{tree}``, resolved inside the receive
     # quarantine — read from the INCOMING notes commit and from the settled
@@ -70846,13 +71276,18 @@ proc workspaceLockRoots(workspaceRoot: string;
     layerLocations: openArray[ManifestLayerLocation]): seq[string] =
   ## Every on-disk root that can own a ``locks/`` subtree for this workspace.
   ##
-  ## This deliberately mirrors every arm of ``pickRecordStoreRoot`` rather
-  ## than calling it: that proc answers "where does THIS operation write", and
-  ## a rewrite must be checked against every record the workspace can still
-  ## READ. The arms are the native ``.repro/manifests`` git-checkout store, the
-  ## composer's materialised ``.repro/manifests-<i>-<slug>`` layers, an
-  ## explicitly declared ``[[manifest]]`` layer, the membership root, and the
-  ## workspace root itself. Roots with no ``locks/`` subtree cost nothing.
+  ## This is deliberately WIDER than ``pickRecordStoreRoot``: that proc
+  ## answers "where does THIS operation write", and a rewrite must be checked
+  ## against every record the workspace can still READ — including records an
+  ## earlier release wrote into a location the writer no longer uses. Until
+  ## the record-store fix (reprobuild-pm issues/2026-11-16-repro-falls-back-
+  ## to-the-root-or-origin-as-the-lock-record-store-when-records-names-no-
+  ## url.md) the writer took the first composed layer, usually the root, so
+  ## records may still sit there. The roots are the store checkouts
+  ## (``.repro/records``, legacy ``.repro/manifests``), the composer's
+  ## materialised ``.repro/manifests-<i>-<slug>`` layers, an explicitly
+  ## declared ``[[manifest]]`` layer, the membership root, and the workspace
+  ## root itself. Roots with no ``locks/`` subtree cost nothing.
   var candidates = @[
     workspaceRoot / ".repro" / RecordStoreDirName,
     workspaceRoot / ".repro" / LegacyRecordStoreDirName,
@@ -76957,7 +77392,8 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
   ## Resolve the manifest-layer root that OWNS the lock subtree for
   ## status's drift comparison. Mirrors M11's ``pickRecordStoreRoot``
   ## but without the ``--record-store-root`` override (status is
-  ## read-only and uses the same anchor M11 wrote to). A ``[records] url``
+  ## read-only and uses the same anchor M11 wrote to), and so never a
+  ## composed manifest layer. A ``[records] url``
   ## store is read from its checkout and never from a composed layer, as the
   ## writer writes it; with no checkout the conventional (absent) location
   ## reads as "no lock", and the writer's notice is not repeated here.
@@ -76966,43 +77402,15 @@ proc pickStatusManifestLayerRoot(workspaceRoot: string;
     return
       if declared.checkout.len > 0: declared.checkout
       else: workspaceRoot / ".repro" / RecordStoreDirName
-  if workspaceLocal.isSome:
-    let local = workspaceLocal.get()
-    if local.manifest.len > 0:
-      let first = local.manifest[0]
-      if first.local_path.isSome and first.local_path.get().len > 0:
-        let raw = first.local_path.get()
-        if isAbsolute(raw):
-          return raw
-        return workspaceRoot / raw
-      if first.url.isSome and first.url.get().len > 0:
-        # Mirror the composer's directory-naming convention so the
-        # status reader finds the lock written by the M11 dispatcher
-        # at the same on-disk path.
-        let sanitizedSegments = block:
-          var raw1 = ""
-          for ch in first.url.get():
-            case ch
-            of 'A'..'Z', 'a'..'z', '0'..'9', '-', '.', '_': raw1.add(ch)
-            else: raw1.add('-')
-          var collapsed = ""
-          var prevDash = false
-          for ch in raw1:
-            if ch == '-':
-              if not prevDash: collapsed.add(ch)
-              prevDash = true
-            else:
-              collapsed.add(ch)
-              prevDash = false
-          if collapsed.len > 80:
-            collapsed.setLen(80)
-          collapsed.strip(chars = {'-'},
-            leading = true, trailing = true)
-        let suffix =
-          if sanitizedSegments.len > 0: sanitizedSegments
-          else: "layer"
-        return workspaceRoot / ".repro" / ("manifests-0-" & suffix)
-  workspaceRoot / ".repro" / "manifests"
+  # Never a composed layer, as the writer never writes one (see
+  # ``pickRecordStoreRoot``): the root base layer and every other layer are
+  # metadata, never the record store. The store checkout at its conventional
+  # location, or — when none exists — that (absent) location, which reads as
+  # "no lock".
+  discard workspaceLocal
+  let existing = existingRecordStoreRoot(workspaceRoot)
+  if existing.len > 0: existing
+  else: workspaceRoot / ".repro" / RecordStoreDirName
 
 proc deriveActiveBranch(workspaceRoot: string;
     workspaceLocal: Option[WorkspaceLocal];
@@ -86614,7 +87022,8 @@ type
     reportPath: string
     buildFlags: seq[string]
       ## The build's command line: every `repro build` flag given on this
-      ## command line (``buildWordsOf``), for the build the verb-alias and
+      ## command line (``argvOf`` of its origins, ``reproBuildFlagNames``),
+      ## for the build the verb-alias and
       ## certifying paths run. Selectors and the words after ``--`` are not
       ## in it.
     lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
@@ -88915,6 +89324,14 @@ type
       ## The base commit whose snapshot was read ("" when none resolved).
     policyDetail*: string
       ## The rule, or why none applied, in words.
+    narrowed*: seq[NarrowedCertificate]
+      ## Required names whose candidate command set omits entries of the
+      ## base's (Test-Certificates.md §"What a required name means: its
+      ## command set"). Never skipped, on any platform, whatever
+      ## ``ci_trust`` says.
+    unanchored*: seq[string]
+      ## Required names the base records no command set for (a snapshot
+      ## written before command sets). Never skipped: CI is fail-safe.
 
 proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
                             state: CertificateState;
@@ -88923,7 +89340,8 @@ proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
                             requiredTargets: seq[string];
                             ciTrust: CertificateCiTrust;
                             keys: RegisteredKeyStoreLoad;
-                            couldNotLook: openArray[string] = []):
+                            couldNotLook: openArray[string] = [];
+                            neverSkip: openArray[string] = []):
     CiPlatformPlan =
   ## The CORE per-platform decision. Given the certificates found for the
   ## state under evaluation (the content CI checked out) and the project's
@@ -88936,7 +89354,10 @@ proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
   ## evaluator, with the same three-valued outcome, as the push gate and the
   ## gateway (``evaluateReprobuildCoverage``). A forged / unsigned / wrong-key
   ## / revoked / other-content / wrong-platform / foreign-framework cert
-  ## CANNOT move a target into ``skip``.
+  ## CANNOT move a target into ``skip``. Nor can a covered target in
+  ## ``neverSkip``: a name the candidate narrowed, or one the base does not
+  ## anchor (Test-Certificates.md §"What a required name means: its command
+  ## set").
   result.platform = platform
   let verdict = evaluateReprobuildCoverage(found, state, @[platform],
     requiredTargets, keys, lockSource, couldNotLook)
@@ -88951,7 +89372,7 @@ proc computeCiPlatformPlan*(found: openArray[FoundCertificate];
     for t in c.targets:
       if t notin covered: covered.add(t)
   for t in requiredTargets:
-    if ciTrust == cctSkip and t in covered:
+    if ciTrust == cctSkip and t in covered and t notin neverSkip:
       result.skip.add(t)
     else:
       result.run.add(t)
@@ -88996,6 +89417,11 @@ proc renderCiPlanJson*(plan: CiPlan): JsonNode =
       "detail": plan.policyDetail}
   if plan.problems.len > 0:
     result["problems"] = %plan.problems
+  var narrowed = newJArray()
+  for n in plan.narrowed:
+    narrowed.add(%*{"certificate": n.certificate, "missing": n.missing})
+  result["narrowed"] = narrowed
+  result["unanchored"] = %plan.unanchored
 
 type
   TestRunOutcome* = object
@@ -89086,7 +89512,12 @@ proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
     c.listTargetsJson or c.printSolvedGraph)
   result.selectors = c.selectors
   result.actionArgs = c.actionArgs
-  result.buildFlags = buildWordsOf(c, origin)
+  # The build flags this command line gave, written back by confutils as
+  # the build's words (`--<long>[=<value>]`, in the order given, a switch
+  # that stands for another flag's value as itself); what a variable gave
+  # is left out, because the build reads the same variable.
+  result.buildFlags = argvOf(origin, only = reproBuildFlagNames(),
+    commandWords = false)
 
 proc testBuildArgs(opts: ReproTestShardOpts;
                    selectors: seq[string]): seq[string] =
@@ -90735,7 +91166,13 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
       os.normalizedPath(currentRepo)) == 0:
     lockUpdate.certificatePolicy.active = true
     try:
-      let found = certificatePolicyFromGraph(info.snapshot)
+      var found = certificatePolicyFromGraph(info.snapshot)
+      # What each required name means, from the same evaluated graph
+      # (Test-Certificates.md §"What a required name means: its command
+      # set", "Who writes it").
+      if found.enacted:
+        found.emission.policy = withCertificateCommandSets(
+          found.emission.policy, info.snapshot, info.projectRoot)
       lockUpdate.certificatePolicy.enacted = found.enacted
       lockUpdate.certificatePolicy.emission = found.emission
     except CatchableError as err:
@@ -91010,8 +91447,8 @@ proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
     # multi-machine CI path; the alias is the inner-loop "run my
     # tests" path.
     # The build's command line is every build flag this command line gave
-    # (``buildWordsOf``); the build reads the variables those flags declare
-    # itself.
+    # (``argvOf`` of its origins); the build reads the variables those flags
+    # declare itself.
     #
     # TC-8e: a run that executes tests issues a certificate for each
     # certificate-producing node it materializes. ``--no-certify`` opts out,
@@ -91213,6 +91650,17 @@ proc reproTestRunVariants*(args: openArray[string]):
       putEnv("REPRO_VARIANTS", opts.callerVariants.get)
     else:
       delEnv("REPRO_VARIANTS")
+
+proc reproTestBuildWords*(args: openArray[string]):
+    tuple[buildFlags, variants: seq[string]] =
+  ## What ``repro test <args>`` hands the builds it runs (``buildFlags``:
+  ## the build flags its command line gave, as words) and the variant
+  ## assignments it evaluates the recipe with itself (``variants``: the
+  ## certificate plan, the lock refresh, the sharded path). Runs nothing;
+  ## for the tests of the build's command line.
+  let (c, origin) = loadTestCommandLine(args)
+  let opts = testOptionsOf(c, origin)
+  (opts.buildFlags, opts.variants)
 
 const checkSetTarget* = "pre-commit"
   ## Agents-Push-Gate.md §2 — the conventional target name a pre-commit
@@ -91779,6 +92227,40 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
     requirement.ciTrust = cctAdvisory
     policyDetail.add("; " & reason)
     stderr.writeLine("repro ci plan: " & reason)
+  # What each base-required name MEANS is anchored by the base as well
+  # (Test-Certificates.md §"What a required name means: its command set"):
+  # a name is skipped only when the base records its command set and the
+  # candidate's contains it. A narrowed name and an unanchored one run on
+  # every platform. With no base snapshot nothing is trusted anyway
+  # (``ci_trust`` stays ``advisory``), so there is nothing to anchor.
+  var anchoring: tuple[narrowed: seq[NarrowedCertificate];
+                       unanchored: seq[string]]
+  var candidateProblem = ""
+  if baseHasSnapshot:
+    var candidateSets: seq[CertificateCommandSet]
+    let candidateLock = readContentFile(certRepoPath, CommittedLockFileName,
+      workingTreeState())
+    case candidateLock.status
+    of cfsPresent:
+      try:
+        let read = readCertificatePolicySnapshot(candidateLock.bytes)
+        if read.present:
+          candidateSets = read.policy.commandSets
+      except CertificatePolicySnapshotError as err:
+        candidateProblem = "the checked-out " & CommittedLockFileName &
+          " [certificate_policy] does not parse (" & err.msg & "); it " &
+          "records no command set, so every name the base anchors is narrowed"
+    of cfsAbsent: discard
+    of cfsFailed:
+      candidateProblem = "the checked-out " & CommittedLockFileName &
+        " could not be read (" & candidateLock.reason & "); every name the " &
+        "base anchors is treated as narrowed"
+    anchoring = narrowedAgainstBase(requiredNames,
+      BranchCertificatePolicy(commandSets: requirement.commandSets),
+      candidateSets)
+  var neverSkip = anchoring.unanchored
+  for n in anchoring.narrowed:
+    neverSkip.add(n.certificate)
   let policy = (ciTrust: requirement.ciTrust,
     requiredTargets: requiredNames)
   # TC-8c: the binding is the CONTENT CI checked out, not a commit. A
@@ -91804,7 +92286,10 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
        of brkBranch: target.name
        of brkDetached: "(detached)"
        of brkOther: target.name),
-    policyBase: baseCommit, policyDetail: policyDetail)
+    policyBase: baseCommit, policyDetail: policyDetail,
+    narrowed: anchoring.narrowed, unanchored: anchoring.unanchored)
+  if candidateProblem.len > 0:
+    plan.problems.add(candidateProblem)
   let headRes = queryGitState(headShaQuery(certRepoPath), identity)
   if headRes.status == gqsOk:
     plan.commit = headRes.headSha
@@ -91886,7 +92371,7 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
           run: owed)
       else:
         computeCiPlatformPlan(found, evaluated, lockSource, platform,
-          owed, policy.ciTrust, keys, couldNotLook)
+          owed, policy.ciTrust, keys, couldNotLook, neverSkip)
     if bindingNote.len > 0 and pp.advisoryNote.len == 0:
       pp.advisoryNote = bindingNote
     plan.platforms.add(pp)
@@ -91899,6 +92384,12 @@ proc runCiPlanCommand(c: ReproCommandLineCiPlan): int =
        else: "") &
       "  ci_trust=" & $policy.ciTrust
     echo "  policy (" & policySource & "): " & policyDetail
+    for n in plan.narrowed:
+      echo "  narrowed: " & n.certificate & " (the candidate's command set " &
+        "omits " & n.missing.join(", ") & "): run on every platform"
+    for name in plan.unanchored:
+      echo "  unanchored: " & name & " (the base records no command set " &
+        "for it): run on every platform"
     for pp in plan.platforms:
       echo "  " & pp.platform & ":  " & $pp.verdict & "  skip=[" &
         pp.skip.join(", ") & "]  run=[" & pp.run.join(", ") & "]" &
@@ -94055,13 +94546,35 @@ proc evaluatedCertificatePolicy*(projectDir: string):
     try: removeFile(extendedPath(emitPath))
     except CatchableError: discard
 
+proc evaluatedCertificatePolicyGraph(projectDir: string): BuildGraphInspection =
+  ## The project's evaluated provider graph, read the way ``repro
+  ## certificates list`` and the certifying run read it
+  ## (``prepareBuildGraphInspection``, nothing lowered, nothing built), for
+  ## the command sets ``repro lock refresh`` records. Its scratch lives under
+  ## the lock probe's own cache tree, so a refresh still writes nothing into
+  ## the project.
+  let match = resolveProjectFile(projectDir)
+  if match.path.len == 0:
+    raise newException(IOError, "no recipe in " & projectDir)
+  let modulePath = absolutePath(match.path)
+  let workRoot = lockProviderArtifactDir(modulePath,
+    reprobuildLibraryWorkDir()) / "certificate-graph"
+  prepareBuildGraphInspection(absolutePath(projectDir), tpmPathOnly,
+    stablePublicCliPath(),
+    selectDefaultAction = false, workRoot = workRoot,
+    lowerGraph = false)
+
 proc evaluatedCertificatePolicySection*(projectDir: string;
                                         deps: openArray[LockedDep]): string =
   ## The ``[certificate_policy]`` text the project's lock should carry, with
-  ## the package named from ``deps``; "" when the recipe enacts no policy.
-  let evaluated = evaluatedCertificatePolicy(projectDir)
+  ## the package named from ``deps`` and the command set of every name the
+  ## evaluated graph marks; "" when the recipe enacts no policy.
+  var evaluated = evaluatedCertificatePolicy(projectDir)
   if not evaluated.enacted:
     return ""
+  let inspected = evaluatedCertificatePolicyGraph(projectDir)
+  evaluated.emission.policy = withCertificateCommandSets(
+    evaluated.emission.policy, inspected.snapshot, inspected.projectRoot)
   renderCertificatePolicySectionFor(evaluated.emission, projectDir, deps)
 
 proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness =
@@ -95918,7 +96431,7 @@ proc runPromptInitCommand*(shell: string): int =
   ## the live prompt. ``repro prompt init help`` is its help, as it always
   ## was.
   if shell == "help":
-    stdout.write(ReproCommandLine.helpText(["prompt", "init"]))
+    printReproHelp(["prompt", "init"])
     return 0
   let snippet = renderPromptInitSnippet(shell.toLowerAscii())
   if snippet.len == 0:
@@ -104560,8 +105073,7 @@ proc runWorkspaceSetsCommand*(c: ReproCommandLineWorkspaceSets): int =
   ## ``repro workspace sets …`` from its configuration.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "sets"] &
-      req.names))
+    printReproHelp(@["workspace", "sets"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "sets")
 
@@ -104574,8 +105086,7 @@ proc runWorkspaceProjectsCommand*(c: ReproCommandLineWorkspaceProjects): int =
   ## is removed with the third migration step rather than the second.
   let req = setsRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "projects"] &
-      req.names))
+    printReproHelp(@["workspace", "projects"] & req.names)
     return 0
   runWorkspaceSetsCommand(req, "projects")
 
@@ -104650,8 +105161,7 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
   ## repeatable flag here rather than a positional implying exactly one.
   let req = reposRequestOf(c)
   if req.sub == "help":
-    stdout.write(ReproCommandLine.helpText(@["workspace", "repos"] &
-      req.sets))
+    printReproHelp(@["workspace", "repos"] & req.sets)
     return 0
   let sub = req.sub
   let workspaceRoot = projectsWorkspaceRoot(req.workspaceRoot)
@@ -105322,16 +105832,6 @@ proc runLegacyCommand(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro cmake regeneration: error: " & err.msg)
       return 1
-  if programName == "repro" and args.len > 0 and args[0] == "attest":
-    # `repro attest` — expected launch measurements for attested images.
-    # The dispatcher lives in `repro_cli_support/attest.nim`; the CLI
-    # reference's `repro attest` page is the surface contract.
-    let attestArgs =
-      if args.len > 1:
-        args[1 .. ^1]
-      else:
-        @[]
-    return runAttestCommand(attestArgs)
   # The parser accepted the command's words, so what reaches here is a
   # subcommand word or an argument shape the command's own parser does not
   # know.
@@ -105339,14 +105839,14 @@ proc runLegacyCommand(programName: string; args: seq[string];
     "line `repro " & args[0] & "` accepts; run `repro help " & args[0] & "`")
   2
 
-proc namespaceHelpText(namespace: string; topic: seq[string]): string =
+proc printNamespaceHelp(namespace: string; topic: seq[string]) =
   ## The help `repro <namespace> help [<word>...]` prints: the subcommand's
   ## when the words name one, else the namespace's (whose own parser always
   ## answered `help` with its usage, whatever followed).
   try:
-    ReproCommandLine.helpText(@[namespace] & topic)
+    printReproHelp(@[namespace] & topic)
   except CliUsageError:
-    ReproCommandLine.helpText([namespace])
+    printReproHelp([namespace])
 
 proc cacheIdentityValuesOf[T](c: T): bcCliDispatch.CacheIdentityValues =
   ## The identity flags of `repro cache publish|derive-key|gen-key`.
@@ -105373,10 +105873,10 @@ proc runCacheCommand(conf: ReproCommandLineCache): int =
     case conf.command
     of ReproCommandLineCacheCommand.call:
       # `repro cache` alone prints its help.
-      stdout.write(ReproCommandLine.helpText(["cache"]))
+      printReproHelp(["cache"])
       return 0
     of ReproCommandLineCacheCommand.help:
-      stdout.write(namespaceHelpText("cache", conf.help.topic))
+      printNamespaceHelp("cache", conf.help.topic)
       return 0
     of ReproCommandLineCacheCommand.lookup:
       return bcCliDispatch.cacheLookup(conf.lookup.entryKey)
@@ -105459,7 +105959,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       enclosingWorkspaceRoot(startPath))
   case conf.command
   of ReproCommandLineBundleCommand.help:
-    stdout.write(namespaceHelpText("bundle", conf.help.topic))
+    printNamespaceHelp("bundle", conf.help.topic)
     return 0
   of ReproCommandLineBundleCommand.create:
     let c = conf.create
@@ -105483,6 +105983,7 @@ proc runBundleCliCommand(conf: ReproCommandLineBundle): int =
       activationFile: c.activationFile, bashrcFile: c.bashrcFile,
       allowDevEnv: c.allowDevEnv, parallel: c.parallel, staging: c.staging,
       nixRoot: c.nixRoot, afterBootstrap: c.afterBootstrap,
+      latestSha256: c.latestSha256,
       storeRoot: c.storeRoot, actionCacheRoot: c.actionCacheRoot,
       emitJson: c.json), hooks)
   of ReproCommandLineBundleCommand.inspect:
@@ -105661,29 +106162,28 @@ proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string; all = false): int =
   ## ``repro help [--all] [<command>...]``: the help of repro or of one
   ## command, on stdout. A migrated command's help is generated from its
-  ## declarations. An unmigrated one prints its usage synopsis (whatever
-  ## words follow); one with no synopsis, the help its declaration gives.
+  ## declarations. A command that hands its words to another parser
+  ## unparsed prints the help its declaration gives, whatever words follow.
   ## With ``all`` it is the page ``--help-all`` prints, which also lists
   ## the ``secondary`` commands.
   var command = 0
   for i, word in topic:
     let next = reproCommandAt(reproCommandPath(command) & @[word])
     if next < 0:
-      stderr.writeLine("repro help: unknown command '" &
-        topic[0 .. i].join(" ") & "'")
-      stderr.writeLine("Run `repro --help` for the list of commands.")
+      # Words that name no command: clispec's unknown-subcommand error for
+      # them (its error block, with the similar subcommands as the tip).
+      try:
+        discard ReproCommandLine.helpText(topic[0 .. i])
+      except CliUsageError as e:
+        return reportReproUsageError(e)
       return 2
     command = next
-    if reproCommandIsPassThrough(command):
-      let path = reproCommandPath(command)
-      let synopsis = legacyVerbSynopsis(path[0])
-      if synopsis.len > 0:
-        stdout.write(synopsis)
-        return 0
+    if reproCommandIsPassThrough(command) or reproCommandTakesRest(command):
       break
+  # Printed as every help page is (``printReproHelp``: styled for stdout by
+  # clispec's printer).
   try:
-    stdout.write(ReproCommandLine.helpText(reproCommandPath(command),
-      long = all, all = all))
+    printReproHelp(reproCommandPath(command), all = all)
   except CliUsageError as e:
     return reportReproUsageError(e)
   0
@@ -105730,8 +106230,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace bootstrap"
       case c.bootstrap.command
       of ReproCommandLineWorkspaceBootstrapCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "bootstrap"] &
-          c.bootstrap.help.topic))
+        printReproHelp(@["workspace", "bootstrap"] & c.bootstrap.help.topic)
         return 0
       of ReproCommandLineWorkspaceBootstrapCommand.call:
         return runWorkspaceBootstrapCommand(c.bootstrap.call.dir,
@@ -105795,8 +106294,7 @@ proc runWorkspaceCommand(c: ReproCommandLineWorkspace): int =
       label = "repro workspace provision"
       case c.provision.command
       of ReproCommandLineWorkspaceProvisionCommand.help:
-        stdout.write(ReproCommandLine.helpText(@["workspace", "provision"] &
-          c.provision.help.topic))
+        printReproHelp(@["workspace", "provision"] & c.provision.help.topic)
         return 0
       of ReproCommandLineWorkspaceProvisionCommand.call:
         return runWorkspaceProvisionCommand(c.provision.call.installRoot,
@@ -105826,7 +106324,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
   ## its typed configuration; any other is handed to ``runLegacyCommand``
   ## with its unparsed arguments.
   var conf: ReproCommandLine
-  let answered = loadReproCommandLine(args, conf)
+  var origins: ReproCommandLineOrigins
+  let answered = loadReproCommandLine(args, conf, origins)
   if answered >= 0:
     return answered
   case conf.command
@@ -105835,7 +106334,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
       echo renderVersion(programName)
       return 0
     # Bare `repro`: no command was given, which is a usage error.
-    stderr.write(ReproCommandLine.helpText())
+    printReproHelp(stream = stderr)
     return 2
   of ReproCommandLineCommand.help:
     return runReproHelp(programName, conf.help.topic, publicCliPath,
@@ -105871,6 +106370,15 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro tasks: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.catalog:
+    case conf.catalog.command
+    of ReproCommandLineCatalogCommand.publish:
+      try:
+        let r = conf.catalog.publish
+        return runCatalogPublishCommand(r.root, r.modules, r.check)
+      except CatchableError as err:
+        stderr.writeLine("repro catalog: error: " & err.msg)
+        return 1
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:
@@ -105965,7 +106473,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
   of ReproCommandLineCommand.cargo:
     # `repro cargo gc|record-live|run`: the cargo target-directory janitor
     # and the thin cargo edge (`repro_cli_support/cargo_gc.nim`).
-    return cli_cargo_gc.runCargoCommand(conf.cargo)
+    return cli_cargo_gc.runCargoCommand(conf.cargo, origins.cargo)
   of ReproCommandLineCommand.pressure:
     # Build-wait pressure from the RunQuota daemon this build would use;
     # the command lives in `repro_runquota` beside the reports the engine
@@ -106005,7 +106513,10 @@ proc runReproCommandLine(programName: string; args: seq[string];
       return runShellHookCommand(conf.shell.hook)
     of ReproCommandLineShellCommand.call:
       try:
-        return runReproShellCommand(conf.shell.call, publicCliPath)
+        # `$SHELL` is set nearly everywhere; only a `--shell` typed on the
+        # command line conflicts with `-- <command>`.
+        return runReproShellCommand(conf.shell.call, publicCliPath,
+          shellGiven = reproGivenOnCommandLine(origins.shell.call.shell))
       except CatchableError as err:
         stderr.writeLine("repro shell: error: " & err.msg)
         return 1
@@ -106089,9 +106600,16 @@ proc runReproCommandLine(programName: string; args: seq[string];
     except CatchableError as err:
       stderr.writeLine("repro check: error: " & err.msg)
       return 1
+  of ReproCommandLineCommand.attest:
+    # `repro attest`: expected launch measurements for attested images
+    # (`repro_cli_support/attest`), from its configuration.
+    return runAttestCommand(conf.attest)
   of ReproCommandLineCommand.develop:
     try:
-      return runDevelopCommand(conf.develop)
+      # `$REPROBUILD_WORK_ROOT` gives `--work-root` a value, but only a
+      # `--work-root` typed on the command line names the target form.
+      return runDevelopCommand(conf.develop, workRootGiven =
+        reproGivenOnCommandLine(origins.develop.workRoot))
     except CatchableError as err:
       stderr.writeLine("repro develop: error: " & err.msg)
       return 1

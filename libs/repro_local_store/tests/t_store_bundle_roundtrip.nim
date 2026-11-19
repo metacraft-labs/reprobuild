@@ -456,6 +456,98 @@ proc entriesBelow(dir: string): seq[string] =
     result.add(p)
 
 suite "store bundle import keeps its own writes inside the roots":
+  test "a devenv line names only its project's own carried frozen script":
+    # `repro bundle restore --activate` writes `. <script>` into
+    # /etc/profile.d and `repro store import --allow-dev-env` allow-lists the
+    # project root, both straight from the `devenv` lines of `contents`. A
+    # bundle host must not be able to point every later login shell at a
+    # file anyone can write, nor allow-list a directory the bundle does not
+    # carry (Store-Bundles §6). reprobuild-pm issues/2026-11-17-bundle-
+    # devenv-lines-name-any-script-and-any-project-to-activate-and-allow.md.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let script = frozenScriptPath(f.store, f.ws)
+      createDir(script.parentDir)
+      writeFile(script, "export FROZEN=1\n")
+      let planted = f.top / "x.sh"
+      writeFile(planted, "echo planted\n")
+      setFilePermissions(planted, {fpUserRead, fpUserWrite, fpGroupRead,
+        fpGroupWrite, fpOthersRead, fpOthersWrite})
+      # A script outside the bundle, which a login shell would then source.
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.devEnvs.add(FrozenDevEnv(projectRoot: f.ws, scriptPath: planted)))
+      f.wipe()
+      check "must be" in f.importRefusal()
+      check not fileExists(f.ws / "build" / "gen.txt")
+      # Another directory allow-listed, with its own frozen script carried:
+      # the project lies outside the bundle's workspace roots.
+      let g = makeFixture()
+      defer: removeDir(g.top)
+      let elsewhere = g.top / "elsewhere"
+      let otherScript = frozenScriptPath(g.store, elsewhere)
+      createDir(otherScript.parentDir)
+      writeFile(otherScript, "export FROZEN=1\n")
+      g.exportHostile(proc (c: var BundleClosure) =
+        c.entries.add(BundleEntry(kind: bekFile, mode: 0o644,
+          size: getFileSize(otherScript), digest: fileBlake3Hex(otherScript),
+          mtimeNs: (let t = getLastModificationTime(otherScript);
+            t.toUnix * 1_000_000_000'i64 + t.nanosecond),
+          path: otherScript))
+        c.devEnvs.add(FrozenDevEnv(projectRoot: elsewhere,
+          scriptPath: otherScript)))
+      g.wipe()
+      check "not in its workspace roots" in g.importRefusal()
+      check not fileExists(g.ws / "build" / "gen.txt")
+      # Export refuses to write either, as it does any bundle import refuses.
+      var exportRefusal = ""
+      try:
+        discard computeClosure(g.roots,
+          [FrozenDevEnv(projectRoot: g.ws, scriptPath: planted)])
+      except StoreBundleError as e:
+        exportRefusal = e.msg
+      check "must be" in exportRefusal
+      # The right script, carried as a hard link shared with a workspace
+      # file: whoever can write that file would change what login shells
+      # source. GNU tar writes the second name of an inode as a hard link.
+      let h = makeFixture()
+      defer: removeDir(h.top)
+      let linked = frozenScriptPath(h.store, h.ws)
+      createDir(linked.parentDir)
+      writeFile(linked, "export FROZEN=1\n")
+      let shared = h.ws / "x.sh"
+      createHardlink(linked, shared)
+      h.exportHostile(proc (c: var BundleClosure) =
+        let t = getLastModificationTime(linked)
+        let mtime = t.toUnix * 1_000_000_000'i64 + t.nanosecond
+        for path in [linked, shared]:
+          if not c.entries.anyIt(it.path == path):
+            c.entries.add(BundleEntry(kind: bekFile, mode: 0o644,
+              size: getFileSize(path), digest: fileBlake3Hex(path),
+              mtimeNs: mtime, path: path))
+        c.devEnvs.add(FrozenDevEnv(projectRoot: h.ws, scriptPath: linked)))
+      h.wipe()
+      check "hard link" in h.importRefusal()
+      check not fileExists(h.ws / "build" / "gen.txt")
+      # What export writes is accepted, and import reports it.
+      let f3 = makeFixture()
+      defer: removeDir(f3.top)
+      let script3 = frozenScriptPath(f3.store, f3.ws)
+      createDir(script3.parentDir)
+      writeFile(script3, "export FROZEN=1\n")
+      var opts = defaultExportOptions(f3.outDir)
+      opts.partSize = 1024
+      opts.zstdLevel = 1
+      discard exportBundle(computeClosure(f3.roots,
+        [FrozenDevEnv(projectRoot: f3.ws, scriptPath: script3)]), opts)
+      f3.wipe()
+      let report = importBundle(ImportOptions(bundleDir: f3.outDir), f3.roots)
+      check report.devEnvs == @[FrozenDevEnv(projectRoot: f3.ws,
+        scriptPath: script3)]
+      check readFile(script3) == "export FROZEN=1\n"
+
   test "a symlink declared over the store's own files is refused":
     # The unpack writes only the link, inside the root; it is the importer
     # opening `index.db` afterwards (and every later `repro`) that would
@@ -691,3 +783,48 @@ suite "store bundle import keeps its own writes inside the roots":
         listBundleMembers(f.outDir, parts, listing)
       listBundleMembers(f.outDir, parts, listing, zstd)
       check "contents" in readFile(listing)
+
+suite "store bundle import re-witnesses only outputs it carried":
+  test "a vouched record whose output the bundle does not carry is left alone":
+    # reprobuild-pm issue
+    # 2026-11-17-carried-action-records-may-name-output-paths-outside-the-bundle-roots.md,
+    # Store-Bundles.md §5.1. Re-witnessing adopts whatever file sits at a
+    # record's output path. A hostile exporter adds a `record` line for a
+    # record whose output lies outside the roots, so the bundle carries no
+    # entry for it and step 4 verified none of its bytes. Before the fix the
+    # importer stamped the planted bytes as the record's output, and the next
+    # in-place lookup served them as a hit.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      let elsewhere = f.top / "elsewhere.txt"
+      writeFile(elsewhere, "outside\n")
+      block:
+        var cache = openActionCache(f.ac / "action-cache", attachShm = false)
+        var cas = openStore(f.ac)
+        discard cache.recordActionResult(cas, weakOf("outside"), ffpTimestamp,
+          [f.ws / "src" / "in.txt"], [elsewhere], storeOutputBlobs = false)
+        cas.close()
+        cache.closeShmTier()
+      let edge = f.ac / "action-cache" / "hot-records" /
+        perEdgeRecordFileName(weakOf("outside"))
+      var strongHex = ""
+      for kind, path in walkDir(edge):
+        if path.endsWith(".rec"):
+          strongHex = path.splitFile.name
+      check strongHex.len > 0
+      f.exportHostile(proc (c: var BundleClosure) =
+        c.records.add(BundleRecordRef(edgeDir: edge, strongHex: strongHex,
+          outputRoot: "")))
+      f.wipe()
+      # Bytes no digest vouches for, the size the record names.
+      writeFile(elsewhere, "OUTSIDE\n")
+      let report = importBundle(ImportOptions(bundleDir: f.outDir), f.roots)
+      check report.rewitnessedRecords == 2
+      check report.unwitnessedRecords == 1
+      check f.lookup("producer").status == aclHit
+      let planted = f.lookup("outside")
+      checkpoint planted.message
+      check planted.status != aclHit

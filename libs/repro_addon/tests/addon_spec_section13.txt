@@ -56,7 +56,7 @@
 40 The adoption fixture when the production candidate has nothing to adopt | adoption fixture, production candidate, nothing to adopt, alertmanager, hand-configured, fixture
 41 The conversion rehearsal without ReproOS Anywhere | conversion, rehearsal, anywhere
 42 A11's evidence design is approved as landed
-43 DET-AO-3 is an nftables table of the add-on's own
+43 DET-AO-3 is an nftables table of the add-on's own | nftables, table, ruleset
 44 A host bootstrapped without an Evidence sink is enrolled by an operator verb
 45 A11's second-round amendments are approved
 46 DET-AO-5 at re-assert: a digest at realisation | det-ao-5, re-assert, digest, realisation, realised, verif, quarantin
@@ -193,3 +193,4 @@
 177 Requirers are read from systemd, and an essential unit is never held | essential, requirer, systemd, held
 178 Bootstrap makes the uninstall records' directory | uninstall records, records' directory, bootstrap, verify
 180 A dead full apply's holds are kept and adopted by the next check | dead, adopt, hold, check
+181 The sink's decoders run as the shipping unit's dynamic user | shipping, dynamic user, outbox, sink, confine, egress

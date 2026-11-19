@@ -184,21 +184,21 @@ proc currentKernelCfg*(): kernelImpl.KernelConfig =
   let defaults = kernelImpl.defaultConfig()
   result = kernelImpl.KernelConfig(
     enableDrm:         readConfigurable[bool](
-      "reproosKernel.enableDrm", defaults.enableDrm),
+      "package.reproosKernel.enableDrm", defaults.enableDrm),
     enableHypervDrm:   readConfigurable[bool](
-      "reproosKernel.enableHypervDrm", defaults.enableHypervDrm),
+      "package.reproosKernel.enableHypervDrm", defaults.enableHypervDrm),
     enableFramebuffer: readConfigurable[bool](
-      "reproosKernel.enableFramebuffer", defaults.enableFramebuffer),
+      "package.reproosKernel.enableFramebuffer", defaults.enableFramebuffer),
     enableUserNs:      readConfigurable[bool](
-      "reproosKernel.enableUserNs", defaults.enableUserNs),
+      "package.reproosKernel.enableUserNs", defaults.enableUserNs),
     enableOverlayFs:   readConfigurable[bool](
-      "reproosKernel.enableOverlayFs", defaults.enableOverlayFs),
+      "package.reproosKernel.enableOverlayFs", defaults.enableOverlayFs),
     enableVirtioGpu:   readConfigurable[bool](
-      "reproosKernel.enableVirtioGpu", defaults.enableVirtioGpu),
+      "package.reproosKernel.enableVirtioGpu", defaults.enableVirtioGpu),
     kernelVersion:     readConfigurable[string](
-      "reproosKernel.kernelVersion", defaults.kernelVersion),
+      "package.reproosKernel.kernelVersion", defaults.kernelVersion),
     baseConfigVariant: readConfigurable[string](
-      "reproosKernel.baseConfigVariant", defaults.baseConfigVariant),
+      "package.reproosKernel.baseConfigVariant", defaults.baseConfigVariant),
     storeRoot:         defaults.storeRoot)
 
 # ---------------------------------------------------------------------------

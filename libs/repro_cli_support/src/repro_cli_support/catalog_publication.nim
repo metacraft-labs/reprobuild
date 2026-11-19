@@ -225,6 +225,16 @@ proc publishableArtifact*(extracted: ProjectInterfaceArtifact;
   # ``decodePublishedArtifact`` below checks as a consumer will. Locations
   # are no input of it, so this is the extracted fingerprint; not asserted
   # separately, because no input can make such a check fail.
+  # A record naming a closure manifest must carry its entries: the consumer
+  # has no manifest file (envelope v34). The lift leaves them empty when it
+  # could not open the file, which is exactly the record to refuse here.
+  for contribution in pi.provisioningContributions:
+    for record in contribution.tarballProvisioning:
+      if record.closureManifest.len > 0 and record.closureEntries.len == 0:
+        problems.add("package " & contribution.targetPackage &
+          " names closure manifest " & record.closureManifest &
+          " but the extraction could not read it, so the published record " &
+          "would carry no closure entries")
   let published = artifactFor(pi)
   let fileName = pi.projectName & PublishedArtifactSuffix
   let nameDefect = fileNameDefect(pi.projectName)
@@ -302,15 +312,31 @@ proc writePublishedInterfaces*(catalogRoot: string;
   for f in files:
     writeFile(dir / f.fileName, f.bytes)
 
-proc publishCatalogInterfaces*(catalogRoot: string; modules: openArray[string];
-                               reproRoot: string; scratchDir = ""):
+proc catalogProviderModules*(catalogRoot: string): seq[string] =
+  ## The provider modules of the catalog at ``catalogRoot``, relative to it
+  ## with ``/`` separators and sorted: ``packages/interfaces/<name>/repro.nim``
+  ## (a canonical interface), ``packages/vendor/<name>/repro.nim`` and
+  ## ``packages/source/<name>/repro.nim`` (realizations). The layout is the
+  ## one ``reprobuild-packages`` and ``reprobuild-llm-agent-packages`` state in
+  ## their AGENTS.md. A directory without a ``repro.nim`` is not a module.
+  for kind in ["interfaces", "vendor", "source"]:
+    let dir = catalogRoot / "packages" / kind
+    if not dirExists(dir):
+      continue
+    for entry in walkDir(dir):
+      if entry.kind in {pcDir, pcLinkToDir} and
+          fileExists(entry.path / "repro.nim"):
+        result.add("packages/" & kind & "/" & entry.path.extractFilename &
+          "/repro.nim")
+  result.sort(cmp)
+
+proc buildCatalogPublication*(catalogRoot: string; modules: openArray[string];
+                              reproRoot: string; scratchDir = ""):
     seq[PublishedArtifactFile] =
-  ## Publish the catalog at ``catalogRoot``: extract each provider module
-  ## (paths relative to the root), make each artifact publishable and write
-  ## ``published-interfaces/`` (see the module docstring). ``reproRoot`` is
-  ## the reprobuild checkout whose libraries the extraction compiles
-  ## against. Raises ``CatalogPublicationError``; on a refusal nothing is
-  ## written. Returns the files written, in module order.
+  ## Steps 1 to 3 of the module docstring: extract each module and make it
+  ## publishable, WITHOUT touching ``published-interfaces/``. Raises
+  ## ``CatalogPublicationError``; the verb's ``--check`` compares the result
+  ## with the committed directory.
   if modules.len == 0:
     publicationError("catalog " & catalogRoot & ": no provider module named")
   let owned = scratchDir.len == 0
@@ -328,4 +354,40 @@ proc publishCatalogInterfaces*(catalogRoot: string; modules: openArray[string];
     if owned:
       try: removeDir(scratch)
       except CatchableError: discard
+
+proc publishCatalogInterfaces*(catalogRoot: string; modules: openArray[string];
+                               reproRoot: string; scratchDir = ""):
+    seq[PublishedArtifactFile] =
+  ## Publish the catalog at ``catalogRoot``: extract each provider module
+  ## (paths relative to the root), make each artifact publishable and write
+  ## ``published-interfaces/`` (see the module docstring). ``reproRoot`` is
+  ## the reprobuild checkout whose libraries the extraction compiles
+  ## against. Raises ``CatalogPublicationError``; on a refusal nothing is
+  ## written. Returns the files written, in module order.
+  result = buildCatalogPublication(catalogRoot, modules, reproRoot, scratchDir)
   writePublishedInterfaces(catalogRoot, result)
+
+proc catalogPublicationDrift*(catalogRoot: string;
+                              files: seq[PublishedArtifactFile]): seq[string] =
+  ## How the committed ``published-interfaces/`` of ``catalogRoot`` differs
+  ## from ``files`` (what publishing now would write); empty when current.
+  ## One line per stale, missing or unexpected file. Compared by bytes: the
+  ## publisher is deterministic in the provider source, so any difference is
+  ## a stale directory, never noise.
+  let dir = catalogRoot / PublishedInterfacesDir
+  var expected: seq[string] = @[]
+  for f in files:
+    expected.add(f.fileName)
+    let path = dir / f.fileName
+    if not fileExists(path):
+      result.add("missing: " & PublishedInterfacesDir & "/" & f.fileName)
+    elif readFile(path) != f.bytes:
+      result.add("stale: " & PublishedInterfacesDir & "/" & f.fileName)
+  if dirExists(dir):
+    for entry in walkDir(dir):
+      let name = entry.path.extractFilename
+      if name notin expected:
+        result.add("unexpected: " & PublishedInterfacesDir & "/" & name)
+  else:
+    result.add("missing: " & PublishedInterfacesDir & "/ (no directory)")
+  result.sort(cmp)

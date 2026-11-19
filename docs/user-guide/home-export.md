@@ -1,5 +1,12 @@
 # Exporting a home profile — `repro home export`
 
+> **Superseded.** This page is no longer maintained. The published pages are
+> [Home profile export](../users/content/reference/files/home-export.md) (every field of the
+> document, which must change in the same commit as `home_export.nim`) and
+> [Export a home profile for Nix](../users/content/guides/machines/export-a-home-profile.md).
+> The `hosts:` entry forms below (`applies:`, `system:`) are in the
+> [DSL reference](../users/content/reference/dsl.md#hosts). Edit those, not this page.
+
 `repro home export` prints what your `home.nim` evaluates to for one host, as
 a versioned JSON document. Other tools read that document instead of
 re-implementing Reprobuild's rules: a Nix module can take your package list
@@ -203,7 +210,7 @@ since the Nix side keeps its own links (schema version unchanged).
 ```jsonc
 {
   "format": "repro.home.export",
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "selection": {
     "host": "laptop",
     "hostDeclared": true,
@@ -263,7 +270,8 @@ since the Nix side keeps its own links (schema version unchanged).
 | Field | Meaning |
 |---|---|
 | `format` | Always `repro.home.export`. Refuse any other value. |
-| `schemaVersion` | `5`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. Version 3 added `activity` on resources — a version-2 reader would apply a resource on hosts that do not select its activity. Version 4 added `intent.systemManagedElsewhere` and `evaluation.system` — in a version-3 document "no host is managed elsewhere" cannot be told from "written before the attribute existed", and a reader that decides whether to take a host's system over must not guess. Version 5 replaced `intent.systemManagedElsewhere` with `intent.hostSystems` and added `evaluation.system.mode` and `.activities`, for add-on hosts: an add-on host is managed "here", so a version-4 reader would take it for a host whose whole system it may switch. |
+| `schemaVersion` | `6`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. Version 3 added `activity` on resources — a version-2 reader would apply a resource on hosts that do not select its activity. Version 4 added `intent.systemManagedElsewhere` and `evaluation.system` — in a version-3 document "no host is managed elsewhere" cannot be told from "written before the attribute existed", and a reader that decides whether to take a host's system over must not guess. Version 5 replaced `intent.systemManagedElsewhere` with `intent.hostSystems` and added `evaluation.system.mode` and `.activities`, for add-on hosts: an add-on host is managed "here", so a version-4 reader would take it for a host whose whole system it may switch.  Version 6 added `catalogImports`: a profile that imports catalogs through `repro-catalogs.toml` lists each import's `repo`, `remote`, `revision`, `interfaceArtifact` and the `packages` it defined for the profile, so a reader can tell where a canonical package name came from; a version-5 reader would take those names for the standard library's. |
+| `catalogImports` | Present only when the profile declares `repro-catalogs.toml`: an array of `{repo, remote, revision, interfaceArtifact, packages}`. `revision` is the pinned commit (a home profile pins by `commit` only); `packages` are the references of this profile that import defined. An IFD export of a profile with imports is refused (the sandbox has no shared clone). |
 | `selection.host` | The host the document was produced for. |
 | `selection.hostDeclared` | Whether the profile's `hosts:` block has an entry for that host. A profile with a `hosts:` registry declares every host it may be applied to: exporting (or planning, applying, `repro home facts`) for a host it does not name is refused, so in a document from such a profile this is always `true`. A profile without a registry is host-agnostic: every host gets `default`, and this is `false`. |
 | `selection.activities` | The activities `repro home plan` enables on that host, in the order the profile declares them. Computed by the planner's own rule. Platform-independent. |

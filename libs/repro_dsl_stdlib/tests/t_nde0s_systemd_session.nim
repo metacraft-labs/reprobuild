@@ -86,12 +86,12 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsState()
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
-  resetConfigurable("systemdSession.defaultUser")
-  resetConfigurable("systemdSession.defaultUid")
-  resetConfigurable("systemdSession.defaultGid")
-  resetConfigurable("systemdSession.defaultHome")
-  resetConfigurable("systemdSession.defaultShell")
-  resetConfigurable("systemdSession.aptSnapshot")
+  resetConfigurable("package.systemdSession.defaultUser")
+  resetConfigurable("package.systemdSession.defaultUid")
+  resetConfigurable("package.systemdSession.defaultGid")
+  resetConfigurable("package.systemdSession.defaultHome")
+  resetConfigurable("package.systemdSession.defaultShell")
+  resetConfigurable("package.systemdSession.aptSnapshot")
   registerStoreRoot("systemdSession", storeRoot, dhaSha256)
   recipe.registerSystemdSessionFiles()
 
@@ -171,7 +171,7 @@ suite "NDE0-S systemd-session package":
     let root = createTempDir("nde0s_user_alice_", "")
     defer: removeDir(root)
     resetRecipeState(root)
-    setConfigurable("systemdSession.defaultUser", "alice")
+    setConfigurable("package.systemdSession.defaultUser", "alice")
     # Re-register so the configurable change feeds into the recorded
     # content. (resetRecipeState's registration used the defaults.)
     reregisterWithCurrentConfigurables(root)
@@ -192,8 +192,8 @@ suite "NDE0-S systemd-session package":
     let root = createTempDir("nde0s_uid_2000_", "")
     defer: removeDir(root)
     resetRecipeState(root)
-    setConfigurable("systemdSession.defaultUid", 2000)
-    setConfigurable("systemdSession.defaultGid", 2000)
+    setConfigurable("package.systemdSession.defaultUid", 2000)
+    setConfigurable("package.systemdSession.defaultGid", 2000)
     reregisterWithCurrentConfigurables(root)
 
     let passwdBlock = consumePasswdBlock()
@@ -271,7 +271,7 @@ suite "NDE0-S systemd-session package":
     # CurrentConfigurables`` resets every M8/M9.A/M9.B side table AND
     # re-binds the store-root (the M9.A reset wipes it as part of the
     # symmetric "drop EVERY registered storeRoot" contract).
-    setConfigurable("systemdSession.defaultUser", "alice")
+    setConfigurable("package.systemdSession.defaultUser", "alice")
     reregisterWithCurrentConfigurables(root)
     let lpB   = consumeLoginPam()
     let suB   = consumeSuPam()
@@ -372,7 +372,7 @@ suite "NDE0-S systemd-session package":
     let root = createTempDir("nde0s_autologin_", "")
     defer: removeDir(root)
     resetRecipeState(root)
-    setConfigurable("systemdSession.defaultUser", "alice")
+    setConfigurable("package.systemdSession.defaultUser", "alice")
     reregisterWithCurrentConfigurables(root)
 
     let aldHandle = consumeAutoLoginDropIn()
@@ -456,8 +456,8 @@ suite "NDE0-S systemd-session package":
     let root = createTempDir("nde0s_home_shell_", "")
     defer: removeDir(root)
     resetRecipeState(root)
-    setConfigurable("systemdSession.defaultHome", "/var/home/repro")
-    setConfigurable("systemdSession.defaultShell", "/usr/bin/zsh")
+    setConfigurable("package.systemdSession.defaultHome", "/var/home/repro")
+    setConfigurable("package.systemdSession.defaultShell", "/usr/bin/zsh")
     reregisterWithCurrentConfigurables(root)
 
     let passwdBlock = consumePasswdBlock()
