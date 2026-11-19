@@ -29566,6 +29566,9 @@ type
     licContentMismatch      ## obtained content ≠ recorded integrity
     licRevisionUnreachable  ## the locked revision's object is absent/unreachable
     licNoRevisionPinned     ## a VCS-native integrity with no revision to verify at
+    licShallowCheckout      ## the revision is absent from a SHALLOW checkout:
+                            ## unverifiable here, which says nothing about
+                            ## whether it still exists upstream
 
   LockedIntegrityFailure* = object
     ## One dependency whose obtained content did not match its locked integrity.
@@ -47271,6 +47274,25 @@ proc committedLockCommand*(workspaceRoot: string): string =
   if workspaceRoot.len == 0: "repro lock refresh"
   else: "repro lock refresh " & workspaceRoot
 
+proc withoutRootEntryAtIssuance*(ld: LockedDependencies;
+                                 issuing: bool): LockedDependencies =
+  ## The committed lock's entries the pre-push gate verifies at their
+  ## coordinates. When the gate runs for certificate ISSUANCE
+  ## (``CheckArgs.issuingForCurrentHead``) the lock's root (self) entry is
+  ## left out: its revision is the commit ``repro lock refresh`` ran on, the
+  ## parent of the commit carrying the lock, and under content binding it is
+  ## informational, like a certificate's ``base`` (Unified-Locking-And-Hooks.md
+  ## §13.7.5 "The root entry"; Test-Certificates.md §"Issuance
+  ## preconditions"). A depth-1 CI checkout or a pull request's merge
+  ## checkout does not have that commit, so verifying it refused every such
+  ## certification. The real pre-push gate and the server gateway still
+  ## verify the root entry: there the lock is about to be published.
+  result = ld
+  if issuing:
+    result.deps = @[]
+    for d in ld.deps:
+      if not isSelfLockedDep(d): result.deps.add(d)
+
 proc lockedIntegrityCauseToken*(c: LockedIntegrityCause): string =
   ## The machine-readable ``cause=`` token a refusal's EVIDENCE carries, so a
   ## consumer can tell "the revision vanished" from "the content changed"
@@ -47279,6 +47301,7 @@ proc lockedIntegrityCauseToken*(c: LockedIntegrityCause): string =
   of licContentMismatch: "content-mismatch"
   of licRevisionUnreachable: "locked-revision-unreachable"
   of licNoRevisionPinned: "no-revision-pinned"
+  of licShallowCheckout: "shallow-checkout"
 
 proc lockedIntegrityRemedy*(f: LockedIntegrityFailure; qualifier: string;
                             restoreWhere, repinCommand: string): string =
@@ -47298,6 +47321,17 @@ proc lockedIntegrityRemedy*(f: LockedIntegrityFailure; qualifier: string;
       "the usual cause — the revision is GONE, not changed. Restore it in " &
       restoreWhere & ", or re-pin at the current revision with `" &
       repinCommand & "`"
+  of licShallowCheckout:
+    # A depth-limited clone (CI's default ``actions/checkout``) lacks most
+    # history, so an absent revision is the expected state there, not
+    # evidence of a force-push. The repair is to fetch the history, never to
+    # re-pin: re-pinning would rewrite a correct lock to suit the checkout.
+    "the locked revision " & f.revision & " for '" & f.path &
+      "' is not present in this checkout, and the checkout is SHALLOW " &
+      "(a depth-limited clone), so the locked record cannot be verified " &
+      "here" & where & ". Fetch the full history and retry: " &
+      "`git fetch --unshallow` in the checkout, or `fetch-depth: 0` on " &
+      "`actions/checkout`"
   of licNoRevisionPinned:
     "the locked record for '" & f.path & "' pins no concrete revision to " &
       "verify its recorded integrity at" & where & "; re-pin at the current " &
@@ -49750,12 +49784,23 @@ proc verifyLockedIntegrityAtCoordinates*(workspaceRoot: string;
           quoteShell(d.coordinates.revision & "^{commit}"),
           options = {poUsePath}, env = scrubbedGitRepositoryEnv())
         if rp.exitCode != 0 or rp.output.strip().len == 0:
+          # An absent revision means "gone upstream" only in a checkout that
+          # has the history. A shallow one (a depth-1 CI clone) lacks it by
+          # construction, so say the revision cannot be verified HERE rather
+          # than send the operator looking for a force-push.
+          let shallowProbe = execCmdEx(quoteShell(gitBin) & " -C " &
+            quoteShell(repoAbs) & " rev-parse --is-shallow-repository",
+            options = {poUsePath}, env = scrubbedGitRepositoryEnv())
+          let shallow = shallowProbe.exitCode == 0 and
+            shallowProbe.output.strip() == "true"
           result.add(LockedIntegrityFailure(name: d.name, path: d.path,
             expected: d.integrity, observed: "",
             revision: d.coordinates.revision,
-            cause: licRevisionUnreachable,
+            cause: (if shallow: licShallowCheckout
+                    else: licRevisionUnreachable),
             diagnostic: "locked revision " & d.coordinates.revision &
-              " is not present/reachable in '" & d.path & "'"))
+              " is not present/reachable in '" & d.path & "'" &
+              (if shallow: " (a shallow checkout)" else: "")))
           continue
         let observed =
           gitObjectMultihash(gitObjectFormatOf(repoAbs), rp.output.strip())
@@ -73278,8 +73323,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # untampered lock every recomputed integrity equals the recorded one
     # (the locked revision's object is present), so the manifest-less gate
     # passes exactly as before.
-    let committedLd = populateLockedDeps(
-      LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot))
+    let committedLd = withoutRootEntryAtIssuance(populateLockedDeps(
+      LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot)),
+      parsed.issuingForCurrentHead)
     let integrityFailures = verifyLockedIntegrityAtCoordinates(
       parsed.workspaceRoot, committedLd)
     if integrityFailures.len > 0:
@@ -73484,8 +73530,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # branch runs, applied here so the mixed path also refuses a tampered public
     # lock — §8.4 "tampered committed lock fails at the client (public branch)").
     if committedLockPaths.len > 0:
-      let publicLd = populateLockedDeps(
-        LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot))
+      let publicLd = withoutRootEntryAtIssuance(populateLockedDeps(
+        LockSource(kind: lskCommittedLock, workspaceRoot: parsed.workspaceRoot)),
+        parsed.issuingForCurrentHead)
       var scopedPublic = LockedDependencies(
         schema: publicLd.schema, platform: publicLd.platform, deps: @[])
       for d in publicLd.deps:
@@ -88768,6 +88815,9 @@ type
     ipDirty             ## a SIBLING in the closure has a dirty tree.
     ipUnpublished       ## a sibling in the closure has an unpublished HEAD.
     ipOffLock           ## a sibling differs from the locked revision.
+    ipLockIntegrity     ## a locked entry does not verify at its coordinates:
+                        ## its revision is absent from the checkout, or the
+                        ## content there differs from the recorded integrity.
     ipUndeclaredCheckout ## the attested repository is not a checkout the
                          ## workspace declares (a second path to one, or a
                          ## stray clone): no lock or publication state
@@ -89219,6 +89269,12 @@ proc evaluateIssuancePreconditions*(workspaceRoot, currentRepo: string):
       result.kind = ipUnpublished
     of "lock-stale", "lock-failure":
       result.kind = ipOffLock
+    of "locked-integrity-mismatch":
+      # Not "off the locked revision": the gate could not verify a locked
+      # entry where it is checked out (an absent revision, a shallow
+      # checkout, changed content). Its remedy, rendered from the cause, is
+      # the one surfaced.
+      result.kind = ipLockIntegrity
     of "current-repo-identity":
       # The repository being certified is not one this workspace declares:
       # a second path to a declared checkout (a bind mount, a copy) or a
@@ -90791,6 +90847,7 @@ proc issuancePreconditionLabel(kind: IssuancePreconditionKind): string =
   of ipDirty: "a develop-mode sibling's working tree is dirty"
   of ipUnpublished: "dependency has unpushed commits"
   of ipOffLock: "repo not at the locked revision"
+  of ipLockIntegrity: "a locked dependency cannot be verified in this checkout"
   of ipUndeclaredCheckout:
     "this checkout is not a repository the workspace declares"
   of ipNoWorkspace: "not a workspace"
