@@ -14,9 +14,11 @@
 ## (Provider-Compile-Tiering.md §"A TryCompile hit must replay the probe's
 ## output"). The cases pin, through the forked `cmake` and the real `repro`:
 ##
-##   * with this `repro`: the probes of a second configure of the same
-##     project in another binary directory are all served from the cache,
-##     their envelopes are v6, and the second configure's check result and
+##   * with this `repro`: when it lists `trycompile-relocatable-probes`, the
+##     probes of a second configure of the same project in another binary
+##     directory are all served from the cache and their envelopes are v6
+##     (when it withholds it, they are v5); either way the second
+##     configure's check result and
 ##     implicit include directories equal the first's, non-empty (the ABI
 ##     probe's compiler output was replayed);
 ##   * with an older `repro` — emulated by a stub that answers
@@ -62,6 +64,15 @@ proc findCompiler(): string =
     if found.len > 0:
       return found
   ""
+
+proc reproRelocatesProbes(): bool =
+  ## Whether this `repro` lists `trycompile-relocatable-probes`. It can be
+  ## withheld (the cold-path cost of relocatable probes, reprobuild-pm issue
+  ## 2026-10-10 "Criterion 4, measured"); the fork then writes v5 and the
+  ## probes are not served across configures.
+  let run = runShell(shellCommand(@[reproBin, "capabilities",
+    "--format=json"]))
+  run.code == 0 and "\"trycompile-relocatable-probes\"" in run.output
 
 let cmakeBin = findForkedCMake()
 let cc = findCompiler()
@@ -177,7 +188,7 @@ proc scratchWrapperOnPath(buildDir: string): bool =
 
 suite "CMake try_compile probes across configures":
 
-  test "with this repro a second configure is served and computes the same":
+  test "with this repro a second configure computes the same, and is served when relocation is advertised":
     let why = unavailable()
     if why.len > 0:
       skip(why)
@@ -196,16 +207,18 @@ suite "CMake try_compile probes across configures":
       checkpoint("cold " & $cold & " warm " & $warm)
       check cold.total > 0 and cold.launched > 0
       check warm.total == cold.total
-      check warm.hits == warm.total
-      check warm.launched == 0
+      let relocates = fileExists(reproBin) and reproRelocatesProbes()
+      if relocates:
+        check warm.hits == warm.total
+        check warm.launched == 0
       check cacheValue(root / "new" / "b1", "TCR_HAVE_STDINT_H") == "1"
       check cacheValue(root / "new" / "b2", "TCR_HAVE_STDINT_H") == "1"
       let implicit = implicitIncludes(root / "new" / "b1")
       check implicit.len > 0 and "\"\"" notin implicit
       check implicitIncludes(root / "new" / "b2") == implicit
       for version in envelopeVersions(root / "new" / "b2"):
-        check version == 6
-      check not scratchWrapperOnPath(root / "new" / "b2")
+        check version == (if relocates: 6 else: 5)
+      check scratchWrapperOnPath(root / "new" / "b2") == not relocates
 
   test "with an older repro the fork writes v5 and still configures":
     let why = unavailable()

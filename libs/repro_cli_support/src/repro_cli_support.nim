@@ -2248,11 +2248,17 @@ proc capabilitiesJson*(): JsonNode =
     # `--action-output=all` (Provider-Compile-Tiering.md §"A TryCompile hit
     # must replay the probe's output"). The CMake generator lets its
     # try_compile builds be served from cache only when this is listed.
-    "build-action-output-replay",
-    # The direct provider reads `trycompile.rbsz` v6, whose `relocatable`
-    # flag keys a try_compile project's actions independently of its
-    # scratch directory. The generator writes v6 only when this is listed.
-    "trycompile-relocatable-probes"])
+    "build-action-output-replay"])
+    # NOT listed for now: `trycompile-relocatable-probes`. The direct
+    # provider reads `trycompile.rbsz` v6, whose `relocatable` flag keys a
+    # try_compile project's actions independently of its scratch directory,
+    # and the generator writes v6 only when this capability is listed. A
+    # relocatable probe is revalidated by content (`hybrid`), which today
+    # hashes every input of every probe edge on record and monitors its
+    # compile; measured, that makes a cold configure 1.7-1.9 times slower
+    # (reprobuild-pm issue 2026-10-10-trycompile-edge-cache-key-is-unique-
+    # to-its-configure, "Criterion 4, measured"). The capability returns
+    # with the per-host content-digest memo that removes the hashing cost.
 
   var hcrProfile = newJObject()
   hcrProfile["id"] = %"clang-gcc-debug-patchable-no-lto-v1"
