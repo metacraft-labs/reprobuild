@@ -98,6 +98,8 @@ else:
 
 import repro_core
 import repro_core/relocation
+import repro_core/tree_removal
+import repro_core/canonical_work_dir
 import repro_core/source_root
 import repro_core/arg_files
 import repro_core/target_object_check
@@ -596,6 +598,22 @@ type
       ## Refused (the action fails) when a scratch directory is or contains
       ## the action's cwd, a declared input or a declared output: emptying it
       ## would destroy what the action reads or makes.
+    canonicalWorkKey*: string
+      ## The key of the action's CANONICAL WORK TREE (reprobuild-pm
+      ## `spec/Hermetic-Builds-And-Path-Independence.md` §"Canonical work
+      ## trees"; `repro_core/canonical_work_dir`). Non-empty: before the
+      ## action runs, the engine places a tree at `<root>/<key>/work` under
+      ## the system root (`C:\repro-exec`, `/var/tmp/repro-exec`) or, when
+      ## that root or key directory may not be used, the per-user cache
+      ## directory; holds the key's lock (a second build of the same key is
+      ## deferred, not run elsewhere); empties the tree; and hands its path to
+      ## the action as `REPRO_CANONICAL_WORK_DIR`. Everything under the tree
+      ## is scratch, exactly as under `scratchDirs`. The KEY is part of the
+      ## weak fingerprint and the portable description; the resolved path is
+      ## a host-side fact and is in neither.
+    canonicalWorkDir*: string
+      ## The tree resolved for THIS run (`canonicalWorkKey`), set at launch
+      ## on the engine's copy of the action. Never persisted, never keyed.
     removeBeforeRun*: seq[string]
       ## Declared outputs the engine REMOVES before the action runs, for a
       ## tool that refuses to write over an existing output: create-dmg's
@@ -5111,7 +5129,6 @@ proc refusesRecordWithNoInputs*(action: BuildAction): bool =
     action.dependencyPolicy.kind in MonitorPolicyKinds
 
 proc materialPath(root, path: string): string
-proc removePathNoFollow(path: string)
 proc removeBeforeRunProblem*(action: BuildAction): string
 
 proc recordedOutputPaths*(action: BuildAction): seq[string] =
@@ -10085,6 +10102,11 @@ proc scratchRoots*(action: BuildAction): seq[string] =
   for dir in action.scratchDirs:
     if dir.len > 0:
       result.add(scratchKey(materialContainmentPath(action.cwd, dir)))
+  # The run's canonical work tree is scratch on the same terms: emptied
+  # before the action ran, so nothing observed under it is evidence.
+  if action.canonicalWorkDir.len > 0:
+    result.add(scratchKey(materialContainmentPath(action.cwd,
+      action.canonicalWorkDir)))
 
 proc isUnderScratch(key: string; roots: openArray[string]): bool =
   for root in roots:
@@ -10201,63 +10223,8 @@ proc scratchDirProblem*(action: BuildAction): string =
     if why.len > 0: return why
   ""
 
-when defined(windows):
-  proc scratchRemoveDirectoryW(path: WideCString): WINBOOL {.
-    stdcall, dynlib: "kernel32", importc: "RemoveDirectoryW".}
-  proc scratchSetFileAttributesW(path: WideCString; attrs: DWORD): WINBOOL {.
-    stdcall, dynlib: "kernel32", importc: "SetFileAttributesW".}
-
-proc removeTreeNoFollow(path: string) =
-  ## Deletes `path` and everything below it WITHOUT FOLLOWING LINKS: a link
-  ## is removed, never what it points at. A scratch tree is full of them --
-  ## npm links every workspace package into `node_modules`, as a directory
-  ## junction on Windows -- and following one would delete the linked
-  ## sources. `os.removeDir` neither follows nor removes a junction (it treats
-  ## the link as a file, and Windows refuses to delete a directory link that
-  ## way), and stops at the first read-only file.
-  for kind, child in walkDir(path):
-    case kind
-    of pcDir:
-      removeTreeNoFollow(child)
-    of pcLinkToDir:
-      when defined(windows):
-        if scratchRemoveDirectoryW(newWideCString(child)) == 0:
-          raiseOSError(osLastError(), child)
-      else:
-        removeFile(child)
-    of pcFile, pcLinkToFile:
-      when defined(windows):
-        discard scratchSetFileAttributesW(newWideCString(child),
-          DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
-      removeFile(child)
-  when defined(windows):
-    discard scratchSetFileAttributesW(newWideCString(path), DWORD(0x80))
-    if scratchRemoveDirectoryW(newWideCString(path)) == 0:
-      raiseOSError(osLastError(), path)
-  else:
-    removeDir(path)
-
-proc removePathNoFollow(path: string) =
-  ## Removes whatever is at `path` WITHOUT FOLLOWING A LINK: a symlink (or,
-  ## on Windows, a directory link or junction) is unlinked and its target is
-  ## left alone, a regular file is deleted, a real directory is removed with
-  ## `removeTreeNoFollow`. A missing path is not an error.
-  if symlinkExists(path):
-    when defined(windows):
-      # A directory link is removed as a directory, never as a file -- and
-      # never by recursing into it, which is what `removeDir` would do.
-      if dirExists(path):
-        if scratchRemoveDirectoryW(newWideCString(path)) == 0:
-          raiseOSError(osLastError(), path)
-        return
-    removeFile(path)
-  elif dirExists(path):
-    removeTreeNoFollow(path)
-  elif fileExists(path):
-    when defined(windows):
-      discard scratchSetFileAttributesW(newWideCString(path),
-        DWORD(0x80))   # FILE_ATTRIBUTE_NORMAL: clears read-only
-    removeFile(path)
+# `removeTreeNoFollow` and `removePathNoFollow` live in
+# `repro_core/tree_removal`, shared with the canonical work trees.
 
 proc ensureOutputParents*(action: BuildAction) =
   ## Creates the parent directory of each of the action's outputs and
@@ -12500,6 +12467,10 @@ proc cacheEnvInputs*(action: BuildAction; evidence: PathSetEvidence;
   var passthrough = initHashSet[string]()
   for name in action.envPassthrough:
     passthrough.incl(envNameKey(name))
+  # The canonical work tree's path is a host-side fact the engine hands the
+  # action; the key it was placed by is already in the weak fingerprint.
+  if action.canonicalWorkKey.len > 0:
+    passthrough.incl(envNameKey(CanonicalWorkDirEnv))
   let hermetic = config != nil and config[].hermeticEnv
   let resolve = action.actionEnvResolver(config)
   for name in names:
@@ -15440,6 +15411,12 @@ proc launchChildEnv(action: BuildAction;
     let actionPwd = absolutePath(action.cwd)
     result.add("PWD=" & actionPwd)
     result.add("OLDPWD=" & actionPwd)
+  # The run's canonical work tree (`BuildAction.canonicalWorkKey`). A launch
+  # fact like the ones above: the path is resolved per host, so it is not in
+  # the key, and `cacheEnvInputs` does not key an observed read of it.
+  if action.canonicalWorkDir.len > 0:
+    result.add(CanonicalWorkDirEnv & "=" &
+      actionVisiblePath(action.canonicalWorkDir))
   # M9.R.13c.2 — **shim-library env seed**. Inject
   # ``REPRO_MONITOR_SHIM_LIB`` at launch time so the daemon-spawned
   # ``repro internal io monitor`` subprocess deterministically locates
@@ -19588,6 +19565,20 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     result.weakFingerprint = blake3DomainDigest(framed.textBytes(),
       hdActionFingerprint)
 
+  proc withCanonicalWorkIdentity(action: BuildAction): BuildAction =
+    ## An action with a canonical work tree is keyed by the tree's KEY: it
+    ## decides the path the tool sees, and a tool that embeds the path
+    ## produces other bytes under another key. The resolved path is not
+    ## keyed (a host-side fact, like a scratch directory's backing store).
+    ## Unchanged when no key is declared.
+    result = action
+    if action.canonicalWorkKey.len == 0:
+      return
+    let framed = "canonical-work-v1\x1e" & toHex(action.weakFingerprint.bytes) &
+      "\x1e" & action.canonicalWorkKey
+    result.weakFingerprint = blake3DomainDigest(framed.textBytes(),
+      hdActionFingerprint)
+
   let inferStart = statStart()
   # `var` because M25 ``create-action`` dyndep records grow ``buildGraph.actions``
   # mid-build. ``applyDynamicDeps`` appends to it; downstream readers iterate
@@ -19606,8 +19597,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   for i in 0 ..< buildGraph.actions.len:
     # `@FILE:` expansion first: the optional-output mix below wraps the
     # weak fingerprint, so it has to wrap the one keyed on the expanded argv.
-    buildGraph.actions[i] = withOptionalOutputIdentity(
-      withArgFilesExpanded(buildGraph.actions[i]))
+    buildGraph.actions[i] = withCanonicalWorkIdentity(
+      withOptionalOutputIdentity(withArgFilesExpanded(buildGraph.actions[i])))
     buildGraph.actions[i].applyUnsafePreserveOutputs(
       config.unsafePreserveOutputs)
     if buildGraph.actions[i].unsafePreserveOutputs:
@@ -20564,6 +20555,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
     outputs.sort()
     result.add(outputs)
+    # The canonical work tree's KEY, never its resolved path. Added only when
+    # declared, so every other action's description is unchanged.
+    if action.canonicalWorkKey.len > 0:
+      result.add("canonicalWorkKey=" & action.canonicalWorkKey)
     # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
     # which variables the action was allowed to see is part of what it is.
     var passthrough: seq[string] = @[]
@@ -22010,6 +22005,37 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     cmp(idToIndex[a], idToIndex[b])
 
   var running: seq[RunningAction] = @[]
+  # Canonical work trees (`BuildAction.canonicalWorkKey`): the lease each
+  # keyed action holds from the moment it is admitted to launch until it is
+  # terminal, the refusals the launch reports, and what was traced once.
+  var canonicalLeases = initTable[string, CanonicalWorkLease]()
+  var canonicalRefusals = initTable[string, string]()
+  var canonicalWaitTraced = initHashSet[string]()
+  var canonicalFallbacksPrinted = initHashSet[string]()
+
+  proc releaseCanonicalLease(id: string; succeeded: bool) =
+    ## Releases `id`'s canonical work tree: the tree is removed after a
+    ## successful run (`releaseCanonicalWork`), kept after any other outcome
+    ## for inspection -- the next holder empties it -- and the lock freed.
+    if not canonicalLeases.hasKey(id):
+      return
+    var lease = canonicalLeases[id]
+    canonicalLeases.del(id)
+    let problem = lease.releaseCanonicalWork(removeTree = succeeded)
+    if problem.len > 0:
+      runResult.trace(id, "canonical-work", problem)
+
+  proc sweepCanonicalLeases() =
+    ## Releases the lease of every keyed action that is no longer pending or
+    ## running. One sweep instead of a release on every completion route, of
+    ## which there are many; a lease held a little longer only defers another
+    ## build of the same key.
+    var done: seq[string] = @[]
+    for id in canonicalLeases.keys:
+      if statuses.getOrDefault(id, asPending) notin {asPending, asRunning}:
+        done.add(id)
+    for id in done:
+      releaseCanonicalLease(id, statuses.getOrDefault(id) == asSucceeded)
   # In-Process-Monitor-Hosting HM-4 — the in-flight io-mon consumers this
   # build hosts itself. A build-scoped local rather than a module global: the
   # pool owns live consumers and live monitored trees, and its teardown is the
@@ -22558,8 +22584,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## before threading the new action through every scheduler bookkeeping
     ## structure. The producer id participates only in the trace message
     ## so the materialisation can be attributed back to its source.
-    var newAction = withOptionalOutputIdentity(
-      withArgFilesExpanded(incomingAction))
+    var newAction = withCanonicalWorkIdentity(withOptionalOutputIdentity(
+      withArgFilesExpanded(incomingAction)))
     # A dynamically created step is selected by the preserve-outputs
     # selector exactly as a declared one (see `preservingIds`).
     newAction.applyUnsafePreserveOutputs(config.unsafePreserveOutputs)
@@ -23233,11 +23259,24 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # guarded. The same leftover makes ``getCurrentException()`` unreliable for
   # telling "unwinding" from "ended normally".
   var unwinding: ref Exception = nil
+  defer:
+    # On an exceptional exit the leases still held are released and their
+    # trees kept; the normal exit has already swept them.
+    var held: seq[string] = @[]
+    for id in canonicalLeases.keys:
+      held.add(id)
+    for id in held:
+      releaseCanonicalLease(id, false)
   try:
     while completed < buildGraph.actions.len:
       raiseIfCancelled()
       ready.sort(readyCmp)
       var launchedAny = false
+      # Set when a keyed action was deferred because another build holds its
+      # canonical work tree: the loop must retry it rather than call the
+      # graph stuck.
+      var canonicalWaiting = false
+      sweepCanonicalLeases()
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
       var i = 0
       while i < ready.len and
@@ -23275,6 +23314,27 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           if siteTables.holdsLaunch(siteTableRoots[id], isRunning):
             inc i
             continue
+        # A canonical work tree is taken here, before the action leaves the
+        # ready queue, so a key another build holds DEFERS this action (the
+        # queue moves on to the next one) instead of running it elsewhere:
+        # Hermetic-Builds-And-Path-Independence.md §"Canonical work trees",
+        # Concurrency. A refusal is reported where the action would launch.
+        if action.canonicalWorkKey.len > 0 and not config.dryRun and
+            not canonicalLeases.hasKey(id) and
+            not canonicalRefusals.hasKey(id):
+          let outcome = tryAcquireCanonicalWork(action.canonicalWorkKey)
+          case outcome.status
+          of cwsAcquired:
+            canonicalLeases[id] = outcome.lease
+          of cwsBusy:
+            canonicalWaiting = true
+            if not canonicalWaitTraced.containsOrIncl(id):
+              runResult.trace(id, "waiting",
+                "canonical work tree: " & outcome.reason)
+            inc i
+            continue
+          of cwsRefused:
+            canonicalRefusals[id] = outcome.reason
 
         ready.delete(i)
         if not applyDynamicDeps(id):
@@ -23940,6 +24000,43 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           inc completed
           launchedAny = true
           continue
+
+        # The canonical work tree, placed and locked when the action left the
+        # ready queue, is emptied now that it will run, and handed to every
+        # launch route through the action (`launchChildEnv`, `scratchRoots`).
+        if action.canonicalWorkKey.len > 0:
+          var problem = canonicalRefusals.getOrDefault(id)
+          if problem.len == 0 and action.requiresElevation:
+            problem = "action " & id & " declares a canonical work tree, " &
+              "which an elevated edge cannot be given"
+          if problem.len == 0 and not canonicalLeases.hasKey(id):
+            problem = "the canonical work tree of " & id & " was not acquired"
+          if problem.len == 0:
+            let lease = canonicalLeases[id]
+            problem = lease.emptyCanonicalWorkTree()
+            if problem.len == 0:
+              action.canonicalWorkDir = lease.workDir
+              actionsById[id] = action
+              var placed = lease.workDir
+              if lease.placement == cwpUserFallback:
+                placed.add(" (per-user fallback: " & lease.fallbackReason & ")")
+                if not canonicalFallbacksPrinted.containsOrIncl(
+                    lease.fallbackReason):
+                  stderr.writeLine("repro: canonical work tree for '" &
+                    lease.key & "' falls back to " & lease.workDir & ": " &
+                    lease.fallbackReason)
+              runResult.trace(id, "canonical-work", placed)
+          if problem.len > 0:
+            statuses[id] = asFailed
+            let idx = idToIndex.resultIndex(id)
+            runResult.results[idx].status = asFailed
+            runResult.results[idx].stderr = problem
+            runResult.trace(id, "failed", problem)
+            blockClosure(id, id)
+            emitProgress(bpkActionCompleted, id)
+            completed = terminalCount()
+            launchedAny = true
+            continue
 
         # Windows-System-Resources Phase E — the pre-launch broker-
         # dispatch decision point. This branch sits BEFORE the
@@ -24635,6 +24732,11 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         break
 
       if running.len == 0:
+        if canonicalWaiting and not launchedAny:
+          # Every launchable action waits on a canonical work tree another
+          # build holds. That build releases it when its action exits.
+          sleep(200)
+          continue
         if ready.len > 0 and not launchedAny:
           raiseEngine("ready queue is blocked by pool capacity")
         # The graph can advance no further: nothing is running, ready, or
@@ -25048,6 +25150,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         if statuses[action.id] in {asSucceeded, asCacheHit, asUpToDate,
             asWouldRun, asFailed, asBlocked}:
           inc completed
+    sweepCanonicalLeases()
   except Exception as err:
     # Recorded and re-raised unchanged; see ``unwinding``. ``Exception``
     # rather than ``CatchableError`` so a ``Defect`` (``--panics:off``) keeps

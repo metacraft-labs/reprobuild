@@ -295,7 +295,12 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 36'u16
+  BuildActionPayloadVersion* = 37'u16
+    ## v37: ``canonicalWorkKey`` -- the key of the action's canonical work
+    ## tree (Hermetic-Builds-And-Path-Independence.md §"Canonical work
+    ## trees"), a string appended after ``envPassthrough``. v36-and-earlier
+    ## payloads decode with it empty: the action gets no canonical tree,
+    ## which is what every action declared before it.
     ## v36: ``envPassthrough`` -- the environment variables whose host value
     ## the action reads, keyed by name only (Filesystem-Policy-And-Observed-
     ## Inputs.md §"Declared And Passthrough Variables"), a string list
@@ -1559,6 +1564,61 @@ proc resetRecipeRevisionFingerprintCache*() {.dynOrStatic.} =
   recipeRevisionCacheRoot = ""
   recipeRevisionCacheValue = ""
 
+const CanonicalWorkDirVar* = "REPRO_CANONICAL_WORK_DIR"
+  ## The variable through which the engine hands a keyed action
+  ## (``BuildActionDef.canonicalWorkKey``) its canonical work tree. The same
+  ## name as ``repro_core/canonical_work_dir.CanonicalWorkDirEnv``, which the
+  ## engine sets; the DSL does not import the engine's module.
+
+proc isValidCanonicalWorkKeyText*(key: string): bool {.dynOrStatic.} =
+  ## The engine's rule for a canonical work key (``repro_core/
+  ## canonical_work_dir.isValidCanonicalWorkKey``), checked where the edge is
+  ## declared so a bad key fails the recipe rather than the build: one path
+  ## component of letters, digits, ``-`` and ``_``, at most 80 bytes, not
+  ## starting with ``-``.
+  if key.len == 0 or key.len > 80 or key[0] == '-':
+    return false
+  for ch in key:
+    if ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}:
+      return false
+  true
+
+proc logicalRecipePath*(projectRoot: string): string {.dynOrStatic.} =
+  ## The recipe's location that does not depend on where it was checked out:
+  ## ``projectRoot`` relative to the root of the git repository containing it
+  ## (the nearest ancestor holding ``.git``), with forward slashes, e.g.
+  ## ``packages/source/gemini-cli``. ``.`` for a recipe at a repository's
+  ## root. When no repository contains it, the project directory's own name.
+  if projectRoot.len == 0:
+    return ""
+  let start = absolutePath(projectRoot).normalizedPath
+  var dir = start
+  while true:
+    if dirExists(dir / ".git") or fileExists(dir / ".git"):
+      let rel = relativePath(start, dir).replace('\\', '/')
+      return if rel.len == 0: "." else: rel
+    let up = parentDir(dir)
+    if up.len == 0 or up == dir:
+      break
+    dir = up
+  extractFilename(start)
+
+proc canonicalWorkKeyFor*(role, package, logicalPath: string): string
+    {.dynOrStatic.} =
+  ## The canonical work key of a step (Hermetic-Builds-And-Path-
+  ## Independence.md §"Canonical work trees"): ``<role>-<16 hex digits>``,
+  ## the digits the start of sha256("repro-canonical-work-v1" NUL role NUL
+  ## package NUL logicalPath). Location-independent, so two checkouts of one
+  ## repository compute the same key; not unique by construction, which is
+  ## harmless (a collision only serialises two recipes on one tree, emptied
+  ## before each run). ``role`` must itself be valid key text.
+  let digest = dslSha256Hex("repro-canonical-work-v1\x00" & role & "\x00" &
+    package & "\x00" & logicalPath)
+  result = role & "-" & digest[0 ..< 16]
+  if not isValidCanonicalWorkKeyText(result):
+    raise newException(ValueError, "canonical work role '" & role &
+      "' does not make a valid key")
+
 proc computeRecipeRevisionFingerprint*(projectRoot: string): string {.dynOrStatic.} =
   ## Read the recipe file (``repro.nim`` / ``reprobuild.nim``) under
   ## ``projectRoot`` and return its sha256 hex digest, or the empty
@@ -2183,7 +2243,8 @@ proc buildAction*(id: string; call: PublicCliCall;
                   removeBeforeRun: openArray[string] = [];
                   optionalOutputs: openArray[string] = [];
                   sizedBy = "";
-                  contentKeyedToolCaches: openArray[string] = []):
+                  contentKeyedToolCaches: openArray[string] = [];
+                  canonicalWorkKey = ""):
     BuildActionDef {.dynOrStatic.} =
   ## ``sizedBy``: the width flag of a command that is not a typed call but
   ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
@@ -2236,6 +2297,16 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## action reads and shares with other edges (Go's build cache, ccache).
   ## The engine then treats the edge as ``host-bound`` at least, so its
   ## records never leave this host; see the field in ``types.nim``.
+  ##
+  ## ``canonicalWorkKey``: the key of a per-run work tree the engine places
+  ## at a path that names neither the checkout nor the user, and hands to
+  ## the action as ``REPRO_CANONICAL_WORK_DIR``. Derive it with
+  ## ``canonicalWorkKeyFor``; see the field in ``types.nim``.
+  if canonicalWorkKey.len > 0 and not isValidCanonicalWorkKeyText(
+      canonicalWorkKey):
+    raise newException(ValueError, "action " & id & " declares an invalid " &
+      "canonical work key '" & canonicalWorkKey & "': use letters, digits, " &
+      "`-` and `_` (derive it with `canonicalWorkKeyFor`)")
   # M9.R.34: stamp the recipe-revision fingerprint at registration
   # time so edits to ``repro.nim`` / ``reprobuild.nim`` bus the local
   # action-cache key. ``computeRecipeRevisionFingerprint`` returns the
@@ -2293,7 +2364,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     readOnlyRoots: @readOnlyRoots,
     scratchDirs: @scratchDirs,
     removeBeforeRun: @removeBeforeRun,
-    contentKeyedToolCaches: @contentKeyedToolCaches)
+    contentKeyedToolCaches: @contentKeyedToolCaches,
+    canonicalWorkKey: canonicalWorkKey)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -4611,6 +4683,9 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v36: the environment variables passed through by name.
   if version >= 36'u16:
     payload.writeStringSeq(action.envPassthrough)
+  # v37: the key of the action's canonical work tree.
+  if version >= 37'u16:
+    payload.writeString(action.canonicalWorkKey)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4909,6 +4984,12 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # An older payload passes nothing through by name: every variable the
     # action is observed to read stays keyed by value, as it always was.
     result.envPassthrough = @[]
+  if version >= 37'u16:
+    result.canonicalWorkKey = readString(bytes, pos)
+  else:
+    # An older payload declares no canonical work tree: the action runs
+    # where it always did.
+    result.canonicalWorkKey = ""
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 

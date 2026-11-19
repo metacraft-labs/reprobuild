@@ -451,6 +451,9 @@ suite "project DSL build action payload":
         check decoded.envPassthrough == action.envPassthrough
       else:
         check decoded.envPassthrough.len == 0
+      # v37: the canonical work key; empty here so the tail stays at its
+      # minimum (below), and empty is also what an older payload decodes to.
+      check decoded.canonicalWorkKey == ""
     let currentImage = encodeBuildActionPayload(action)
     let current = decodeBuildActionPayload(currentImage)
     check current.scratchDirs == action.scratchDirs
@@ -482,14 +485,20 @@ suite "project DSL build action payload":
     check image35[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
     check image35[^28 .. ^17] == @[0'u8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
-    # The current payload ends with the passthrough names (v36), a third
-    # list of three empty strings right after that one, so the current
-    # version also meets the bound with equality. A version that appends
-    # another field fails here rather than quietly testing nothing at the
-    # boundary.
-    check currentImage[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+    # Version 36 ends with the passthrough names, a third list of three
+    # empty strings right after that one.
+    let image36 = encodeBuildActionPayloadAtVersion(action, 36'u16)
+    check image36[^16 .. ^1] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
-    check currentImage[^32 .. ^17] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+    check image36[^32 .. ^17] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
+      0, 0, 0, 0, 0, 0, 0, 0]
+    # The current payload ends with the canonical work key (v37): an empty
+    # string, exactly its four-byte minimum, right after that list, so the
+    # current version also ends on a field at its minimum. A version that
+    # appends another field fails here rather than quietly testing nothing at
+    # the boundary.
+    check currentImage[^4 .. ^1] == @[0'u8, 0, 0, 0]
+    check currentImage[^20 .. ^5] == @[3'u8, 0, 0, 0, 0, 0, 0, 0,
       0, 0, 0, 0, 0, 0, 0, 0]
 
   test "version 4 payloads decode with default CLI argument formatting":
