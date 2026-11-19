@@ -3,7 +3,9 @@
 ## flag literal outside the description.
 ##
 ## WHAT COUNTS. In repro's command-line code (`apps/repro`,
-## `apps/repro-client`, `libs/repro_cli_support/src`), a string literal that
+## `apps/repro-client`, `libs/repro_cli_support/src`) and the add-on's, whose
+## command line repro mounts (`apps/repro-addon`, `libs/repro_addon/src`;
+## round 8c), a string literal that
 ## spells a flag (`"--name"`, `"-x"`, with or without `=` and a value) used
 ##
 ## * in a comparison: `arg == "--json"`, `"-h" != arg`;
@@ -43,7 +45,8 @@ import std/[algorithm, os, strutils, unittest]
 const
   ScannedRoots = [
     "apps" / "repro", "apps" / "repro-client",
-    "libs" / "repro_cli_support" / "src"]
+    "libs" / "repro_cli_support" / "src",
+    "apps" / "repro-addon", "libs" / "repro_addon" / "src"]
   Description = "libs/repro_cli_support/src/repro_cli_support/cli_description.nim"
   Remaining: array[0, (string, int)] = []
     ## (file, hand-written argv comparisons against flag literals it holds):
@@ -54,7 +57,9 @@ const
     ## sixth to eighth `repro_cli_support.nim` (1218 at the start) and
     ## `attest.nim`; the eighth's role processes took the last 43 of
     ## `repro_cli_support.nim` with `project_pins.nim`'s 4, and named the
-    ## other programs' words `infra.nim` and `infra_image.nim` compared.
+    ## other programs' words `infra.nim` and `infra_image.nim` compared. Round
+## 8c added the add-on's sources, its command line declared in
+## `repro_infra/addon_command_line` and its verbs run from typed values.
   MigratedProcs = [
     # The commands parsed from the description. The first group:
     # `version`, `capabilities`, `show-conventions`, `completion` (and

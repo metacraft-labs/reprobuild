@@ -29,8 +29,8 @@
 ## `clean`, `test`, `certify`, `certificates`, `ci`, `watch`; of the eighth,
 ## `attest` and its subcommands, then every other command: the role
 ## processes under `internal`, the internal steps of `home` and `hooks`, the
-## daemons' subcommands, `pressure`, and the commands that hand their words to
-## another program's command line, which declare one `rest` positional). A
+## daemons' subcommands, `pressure`, and the command lines of other programs
+## repro mounts, the add-on's and io-mon's, with every verb below them). A
 ## new command is added here and in the generator's `COVERED_COMMANDS`. A
 ## namespace's flags are accepted by each of its subcommands, so a flag a page
 ## documents at a subcommand matches the namespace's declaration, and the
@@ -167,23 +167,55 @@ const
     # command repro declares (hidden spellings aside; "every declared command
     # is compared"): the daemon's and the store daemon's subcommands, the
     # internal steps of a remote home apply and of the managed hooks, the
-    # role processes (`internal`), `pressure`, and the commands that hand
-    # their words to another program's command line (`system addon|state|
-    # secret|adopt`, `debug io monitor`, `internal io monitor`), which
-    # declare those words as one `rest` positional.
+    # role processes (`internal`), `pressure`, and (round 8c) the command
+    # lines of other programs mounted in repro's (`system addon|state|
+    # secret|adopt`, the add-on's; `debug io monitor`, `internal io
+    # monitor`, io-mon's), with every verb.
     "repro daemon serve", "repro daemon start", "repro daemon status",
     "repro daemon stop", "repro daemon restart", "repro daemon sessions",
     "repro daemon logs", "repro store daemon start",
     "repro store daemon status", "repro store daemon stop",
     "repro home __build-bundle", "repro home __receive-bundle",
     "repro home __transfer-bundle", "repro home __remote-activate",
-    "repro system addon", "repro system state", "repro system secret",
+    "repro system addon", "repro system addon preflight",
+    "repro system addon bootstrap", "repro system addon evidence-ship",
+    "repro system addon evidence-enrol", "repro system addon store-verify",
+    "repro system addon egress-check", "repro system addon evidence-harvest",
+    "repro system addon evidence-credential-check",
+    "repro system addon uninstall",
+    "repro system addon verify-discard-record", "repro system addon verify",
+    "repro system addon boot-confirm", "repro system addon reassert",
+    "repro system addon recover", "repro system addon secrets",
+    "repro system addon probe", "repro system addon secret",
+    "repro system addon secret put",
+    "repro system addon rotate-recipient-key",
+    "repro system addon image-assemble", "repro system addon agent-repin",
+    "repro system addon agent-tick", "repro system addon agent-fetch",
+    "repro system addon agent-apply", "repro system addon migration-plan",
+    "repro system addon resume", "repro system addon migrate",
+    "repro system addon contain", "repro system addon release",
+    "repro system addon fingerprint", "repro system addon fingerprint diff",
+    "repro system addon expected-delta", "repro system addon ledger",
+    "repro system addon import", "repro system addon state",
+    "repro system addon state backup", "repro system addon state release",
+    "repro system addon state verify", "repro system addon state restore",
+    "repro system addon state digest", "repro system addon state unit",
+    "repro system addon state install-unit", "repro system addon status",
+    "repro system addon retention", "repro system addon selfcheck-btrfs",
+    "repro system addon selfcheck-write", "repro system state",
+    "repro system state backup", "repro system state release",
+    "repro system state verify", "repro system state restore",
+    "repro system state digest", "repro system state unit",
+    "repro system state install-unit", "repro system secret",
+    "repro system secret put", "repro system secret materialise",
     "repro system adopt", "repro debug io", "repro debug io monitor",
+    "repro debug io monitor run", "repro debug io monitor inspect",
     "repro hooks protocol", "repro hooks dispatch", "repro hooks cache-push",
     "repro pressure", "repro internal",
     "repro internal shared-pool-upload-pack",
     "repro internal resolve-package", "repro internal io",
-    "repro internal io monitor", "repro internal runquota-helper",
+    "repro internal io monitor", "repro internal io monitor run",
+    "repro internal io monitor inspect", "repro internal runquota-helper",
     "repro internal compile-provider", "repro internal extract-interface",
     "repro internal compile-profile",
     "repro internal probe-profile-platforms",
@@ -300,6 +332,33 @@ proc withoutDeclaration(body: NimNode; command, name: string): NimNode =
   result = body.copyNimTree()
   if not removeDeclaration(result, command, name):
     error("no declaration " & command & "/" & name & " to remove")
+
+proc removeDeclarationAt(scope: NimNode; path: openArray[string];
+                         name: string): bool =
+  ## Removes parameter `name` of the command at `path` (its subcommand
+  ## words, for a command below the top level, such as a verb of a mounted
+  ## command line; the word `call:` names the `call:` of the command before
+  ## it) from `scope`, looking into the `group` sections as
+  ## `removeDeclaration` does; whether it found it.
+  for i in 0 ..< scope.len:
+    let stmt = scope[i]
+    if stmt.kind == nnkCommand and stmt.len == 3 and
+        stmt[0].eqIdent("group") and stmt[^1].kind == nnkStmtList:
+      if removeDeclarationAt(stmt[^1], path, name):
+        return true
+      continue
+    let isCall = stmt.kind == nnkCall and stmt.len == 2 and
+      stmt[0].eqIdent("call") and stmt[1].kind == nnkStmtList
+    if (if path[0] == "call:": not isCall else: commandWord(stmt) != path[0]):
+      continue
+    let body = stmt[^1]
+    if path.len > 1:
+      return removeDeclarationAt(body, path[1 .. ^1], name)
+    for j in 0 ..< body.len:
+      if paramName(body[j]) == name:
+        body.del(j)
+        return true
+  false
 
 proc removeEnv(scope: NimNode; command, name: string): bool =
   ## Removes the `env = ...` of parameter `name` of the top-level command
@@ -430,6 +489,29 @@ const
   # declaration `bench` and `lint` share, with the environment variable it
   # declares, removed from `build` alone.
   WithoutBuildDaemon = declaredSurface("build", "daemon", true)
+
+macro declaredSurfaceWithoutAt(paths: static[seq[seq[string]]];
+                               name: static[string]): untyped =
+  ## The description's side with parameter `name` removed from the command
+  ## at each of `paths`.
+  var body = reproCommandLineDescription().copyNimTree()
+  for path in paths:
+    if not removeDeclarationAt(body, path, name):
+      error("no declaration " & $path & "/" & name & " to remove")
+  newLit(surfaceOf(body))
+
+const
+  # The mounted command lines (round 8c): a flag of an add-on verb, spliced
+  # from the add-on's description; and a flag of io-mon's, spliced from
+  # io-mon's under `debug io monitor`, removed from both places it is
+  # declared there (`run` and the bare form's `call:`, which would each
+  # match the other's page row as a namespace's flag does); its copy under
+  # `internal io monitor` stays.
+  WithoutAddonPreflightJson = declaredSurfaceWithoutAt(
+    @[@["system", "addon", "preflight"]], "json")
+  WithoutDebugMonitorDepfile = declaredSurfaceWithoutAt(
+    @[@["debug", "io", "monitor", "run"], @["debug", "io", "monitor", "call:"]],
+    "depfile")
 
 macro declaredSurfaceWithoutEnv(command, name: static[string]): untyped =
   newLit(surfaceOf(withoutEnv(reproCommandLineDescription(), command, name)))
@@ -652,6 +734,16 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro watch\t--daemon" in WithoutWatchDaemonEnv
     check differences(WithoutWatchDaemonEnv, specified()) ==
       @["env\trepro watch\tREPRO_DAEMON: specified, not declared"]
+
+  test "removing a flag of a mounted command line fails the comparison":
+    check "flag\trepro system addon preflight\t--json" in Declared
+    check "flag\trepro system state verify\t--from" in Declared
+    check "flag\trepro internal io monitor run\t--depfile" in Declared
+    check differences(WithoutAddonPreflightJson, specified()) ==
+      @["flag\trepro system addon preflight\t--json: specified, not declared"]
+    check differences(WithoutDebugMonitorDepfile, specified()) ==
+      @["flag\trepro debug io monitor\t--depfile: specified, not declared",
+        "flag\trepro debug io monitor run\t--depfile: specified, not declared"]
 
   test "removing one command's declaration fails the comparison":
     check differences(WithoutConfigs, specified()) ==

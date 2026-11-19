@@ -2119,11 +2119,190 @@ flag	repro home __remote-activate	--expected-digest
 flag	repro home __remote-activate	--state-dir
 flag	repro home __remote-activate	--store-root
 command	repro system addon
+command	repro system addon preflight
+flag	repro system addon preflight	--cache-publishers
+flag	repro system addon preflight	--cache-url
+flag	repro system addon preflight	--defer-recipient-key
+flag	repro system addon preflight	--deploy-signers
+flag	repro system addon preflight	--evidence-sink
+flag	repro system addon preflight	--evidence-sink-ca
+flag	repro system addon preflight	--heartbeat-interval
+flag	repro system addon preflight	--json
+flag	repro system addon preflight	--manifest
+flag	repro system addon preflight	--poll-interval
+flag	repro system addon preflight	--profile-compiler
+flag	repro system addon preflight	--target
+command	repro system addon bootstrap
+flag	repro system addon bootstrap	--cache-publishers
+flag	repro system addon bootstrap	--cache-url
+flag	repro system addon bootstrap	--defer-recipient-key
+flag	repro system addon bootstrap	--deploy-signers
+flag	repro system addon bootstrap	--evidence-sink
+flag	repro system addon bootstrap	--evidence-sink-ca
+flag	repro system addon bootstrap	--heartbeat-interval
+flag	repro system addon bootstrap	--manifest
+flag	repro system addon bootstrap	--plan
+flag	repro system addon bootstrap	--poll-interval
+flag	repro system addon bootstrap	--profile-compiler
+flag	repro system addon bootstrap	--target
+command	repro system addon evidence-ship
+flag	repro system addon evidence-ship	--heartbeat
+flag	repro system addon evidence-ship	--no-backoff
+command	repro system addon evidence-enrol
+flag	repro system addon evidence-enrol	--evidence-sink
+flag	repro system addon evidence-enrol	--evidence-sink-ca
+flag	repro system addon evidence-enrol	--heartbeat-interval
+flag	repro system addon evidence-enrol	--no-handover
+flag	repro system addon evidence-enrol	--rekey
+command	repro system addon store-verify
+flag	repro system addon store-verify	--adopt-unverified
+flag	repro system addon store-verify	--background
+command	repro system addon egress-check
+command	repro system addon evidence-harvest
+command	repro system addon evidence-credential-check
+command	repro system addon uninstall
+flag	repro system addon uninstall	--discard-store-evidence
+flag	repro system addon uninstall	--discard-unacknowledged-store-evidence
+flag	repro system addon uninstall	--keep-store
+command	repro system addon verify-discard-record
+flag	repro system addon verify-discard-record	--key
+command	repro system addon verify
+flag	repro system addon verify	--after-dpkg
+flag	repro system addon verify	--boot
+command	repro system addon boot-confirm
+command	repro system addon reassert
+flag	repro system addon reassert	--boot
+command	repro system addon recover
+command	repro system addon secrets
+flag	repro system addon secrets	--boot
+command	repro system addon probe
+command	repro system addon secret
+command	repro system addon secret put
+flag	repro system addon secret put	--name
+flag	repro system addon secret put	--service
+flag	repro system addon secret put	--target
+command	repro system addon rotate-recipient-key
+command	repro system addon image-assemble
+flag	repro system addon image-assemble	--payload
+command	repro system addon agent-repin
+flag	repro system addon agent-repin	--apply
+command	repro system addon agent-tick
+flag	repro system addon agent-tick	--allowed-signers
+flag	repro system addon agent-tick	--source
+flag	repro system addon agent-tick	--target
+command	repro system addon agent-fetch
+command	repro system addon agent-apply
+command	repro system addon migration-plan
+flag	repro system addon migration-plan	--agent-state
+flag	repro system addon migration-plan	--legacy-secrets-dir
+flag	repro system addon migration-plan	--state-dir
+flag	repro system addon migration-plan	--target
+command	repro system addon resume
+command	repro system addon migrate
+command	repro system addon contain
+flag	repro system addon contain	--operator
+flag	repro system addon contain	--reason
+command	repro system addon release
+flag	repro system addon release	--operator
+flag	repro system addon release	--reason
+command	repro system addon fingerprint
+flag	repro system addon fingerprint	--no-live
+flag	repro system addon fingerprint	--out
+flag	repro system addon fingerprint	--root
+command	repro system addon fingerprint diff
+flag	repro system addon fingerprint diff	--except
+flag	repro system addon fingerprint diff	--expect
+command	repro system addon expected-delta
+command	repro system addon ledger
+command	repro system addon import
+flag	repro system addon import	--unit
+command	repro system addon state
+command	repro system addon state backup
+flag	repro system addon state backup	--out
+flag	repro system addon state backup	--profile
+flag	repro system addon state backup	--root
+command	repro system addon state release
+flag	repro system addon state release	--profile
+command	repro system addon state verify
+flag	repro system addon state verify	--from
+flag	repro system addon state verify	--only
+flag	repro system addon state verify	--root
+flag	repro system addon state verify	--source
+command	repro system addon state restore
+flag	repro system addon state restore	--boot
+flag	repro system addon state restore	--from
+flag	repro system addon state restore	--root
+command	repro system addon state digest
+command	repro system addon state unit
+command	repro system addon state install-unit
+flag	repro system addon state install-unit	--from
+flag	repro system addon state install-unit	--root
+command	repro system addon status
+command	repro system addon retention
+flag	repro system addon retention	--keep-days
+flag	repro system addon retention	--keep-generations
+command	repro system addon selfcheck-btrfs
+command	repro system addon selfcheck-write
 command	repro system state
+command	repro system state backup
+flag	repro system state backup	--out
+flag	repro system state backup	--profile
+flag	repro system state backup	--root
+command	repro system state release
+flag	repro system state release	--profile
+command	repro system state verify
+flag	repro system state verify	--from
+flag	repro system state verify	--only
+flag	repro system state verify	--root
+flag	repro system state verify	--source
+command	repro system state restore
+flag	repro system state restore	--boot
+flag	repro system state restore	--from
+flag	repro system state restore	--root
+command	repro system state digest
+command	repro system state unit
+command	repro system state install-unit
+flag	repro system state install-unit	--from
+flag	repro system state install-unit	--root
 command	repro system secret
+command	repro system secret put
+flag	repro system secret put	--name
+flag	repro system secret put	--service
+flag	repro system secret put	--target
+command	repro system secret materialise
+flag	repro system secret materialise	--boot
 command	repro system adopt
+flag	repro system adopt	--accept-drift
+flag	repro system adopt	--keep-days
+flag	repro system adopt	--keep-generations
+flag	repro system adopt	--no-preview
+flag	repro system adopt	--plan
+flag	repro system adopt	--profile
+flag	repro system adopt	--reconcile-drift
 command	repro debug io
 command	repro debug io monitor
+flag	repro debug io monitor	--capture-stdio
+flag	repro debug io monitor	--capture-stdio-path
+flag	repro debug io monitor	--depfile
+flag	repro debug io monitor	--event-stream
+flag	repro debug io monitor	--events
+flag	repro debug io monitor	--evidence
+flag	repro debug io monitor	--format
+flag	repro debug io monitor	--inline-site-tables
+flag	repro debug io monitor	--interest
+command	repro debug io monitor run
+flag	repro debug io monitor run	--capture-stdio
+flag	repro debug io monitor run	--capture-stdio-path
+flag	repro debug io monitor run	--depfile
+flag	repro debug io monitor run	--event-stream
+flag	repro debug io monitor run	--events
+flag	repro debug io monitor run	--evidence
+flag	repro debug io monitor run	--format
+flag	repro debug io monitor run	--inline-site-tables
+flag	repro debug io monitor run	--interest
+command	repro debug io monitor inspect
+flag	repro debug io monitor inspect	--events
+flag	repro debug io monitor inspect	--format
 command	repro hooks protocol
 flag	repro hooks protocol	--hook-contract
 flag	repro hooks protocol	--require
@@ -2145,6 +2324,28 @@ command	repro internal shared-pool-upload-pack
 command	repro internal resolve-package
 command	repro internal io
 command	repro internal io monitor
+flag	repro internal io monitor	--capture-stdio
+flag	repro internal io monitor	--capture-stdio-path
+flag	repro internal io monitor	--depfile
+flag	repro internal io monitor	--event-stream
+flag	repro internal io monitor	--events
+flag	repro internal io monitor	--evidence
+flag	repro internal io monitor	--format
+flag	repro internal io monitor	--inline-site-tables
+flag	repro internal io monitor	--interest
+command	repro internal io monitor run
+flag	repro internal io monitor run	--capture-stdio
+flag	repro internal io monitor run	--capture-stdio-path
+flag	repro internal io monitor run	--depfile
+flag	repro internal io monitor run	--event-stream
+flag	repro internal io monitor run	--events
+flag	repro internal io monitor run	--evidence
+flag	repro internal io monitor run	--format
+flag	repro internal io monitor run	--inline-site-tables
+flag	repro internal io monitor run	--interest
+command	repro internal io monitor inspect
+flag	repro internal io monitor inspect	--events
+flag	repro internal io monitor inspect	--format
 command	repro internal runquota-helper
 flag	repro internal runquota-helper	--cpu
 flag	repro internal runquota-helper	--cpu-min

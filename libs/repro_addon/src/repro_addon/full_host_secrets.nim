@@ -112,27 +112,10 @@ proc consumersOf*(units: openArray[tuple[name: string; credentials: seq[string]]
       result.add(u.name)
   result.sort()
 
-proc runFullHostSecretPutCli*(args: seq[string]): int =
+proc runFullHostSecretPutCommand*(service, name, target: string): int =
   ## ``repro system secret put --service S --name N [--target T]`` on a host
   ## realised in full; the secret is read from stdin, byte for byte, into a
   ## buffer locked in RAM, in a process whose heap cannot be swapped.
-  if args.len == 0 or args[0] != "put":
-    stderr.write("usage: repro system secret put --service S --name N " &
-      "[--target T] < secret\n")
-    return 2
-  var service, name, target = ""
-  var i = 1
-  while i < args.len:
-    let a = args[i]
-    if i + 1 >= args.len or a notin ["--service", "--name", "--target"]:
-      stderr.write("repro system secret put: unknown or incomplete option " &
-        a & "\n")
-      return 2
-    case a
-    of "--service": service = args[i + 1]
-    of "--name": name = args[i + 1]
-    else: target = args[i + 1]
-    i += 2
   if service.len == 0 or name.len == 0:
     stderr.write("repro system secret put: --service and --name are " &
       "required\n")
@@ -327,10 +310,12 @@ proc bootFullHostSecrets*(l = defaultSecretsLayout();
   except CatchableError as e:
     "repro secrets: degraded: " & e.msg
 
-proc runFullHostSecretMaterialiseCli*(args: seq[string]): int =
-  ## ``repro system secret materialise --boot``: the boot unit's verb.
-  if args.len != 1 or args[0] != "--boot":
-    stderr.write("usage: repro system secret materialise --boot\n")
+proc runFullHostSecretMaterialiseCommand*(boot: bool): int =
+  ## ``repro system secret materialise --boot``: the boot unit's verb, which
+  ## runs only as that (``boot``).
+  if not boot:
+    stderr.write("repro system secret materialise: it is the boot unit's " &
+      "verb, run as `repro system secret materialise --boot`\n")
     return 2
   let reexec = reexecInNoSwapScope()
   if reexec >= 0: return reexec

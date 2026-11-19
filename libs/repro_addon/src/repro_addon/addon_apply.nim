@@ -3285,7 +3285,11 @@ proc stemUnitsLoaded*(stem: string): seq[string] =
   ## Every unit of stem ``stem`` systemd knows: loaded (``list-units
   ## --all``) or with a unit file (``list-unit-files``), templates
   ## included. Raises when systemctl will not list them.
-  for verb in [@["list-units", "--all"], @["list-unit-files"]]:
+  const
+    # systemctl's own words (systemctl(1)), not a command line of ours.
+    SystemctlListAllUnits = @["list-units", "--all"]
+    SystemctlListUnitFiles = @["list-unit-files"]
+  for verb in [SystemctlListAllUnits, SystemctlListUnitFiles]:
     let r = runSystemctl(verb & @["--plain", "--no-legend", "--no-pager", "--",
                                   stem & ".*", stem & "@*"])
     if r.exitCode != 0 and r.output.strip().len > 0 and

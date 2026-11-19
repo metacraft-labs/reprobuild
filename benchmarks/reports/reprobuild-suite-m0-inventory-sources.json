@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2981,
+    "nimTestBinaries": 2982,
     "pureUnitConsolidationGroups": 86,
     "pureUnitTests": 797,
     "staticallyDetectedRuntimeCompilerFlowTests": 148,
-    "testEntries": 3029
+    "testEntries": 3030
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1693,7 +1693,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 24,
-      "integration": 1648,
+      "integration": 1649,
       "platform/destructive": 197,
       "pure unit": 797,
       "unclassified": 363
@@ -1910,9 +1910,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2981,
+    "nimTestBinaryCount": 2982,
     "pythonTestFileCount": 48,
-    "testEntryCount": 3029
+    "testEntryCount": 3030
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5655,7 +5655,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1409,
+          "line": 1428,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -42741,8 +42741,28 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_cs_m6_round8a_command_lines.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m6_round8c_mounted_command_lines",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_addon",
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cs_m6_round8c_mounted_command_lines.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 14,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -58654,7 +58674,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_cs_m6_spec_pages_match_declarations.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 15,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

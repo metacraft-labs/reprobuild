@@ -86,15 +86,21 @@ import repro_dev_env_artifacts
 import repro_dev_env_engine
 import repro_dev_env_engine/directory_trust
 import repro_interface_artifacts
-# Incremental-Test-Runner M7: the io-monitor CLI driver and shim discovery now
-# come from the shared ``io-mon`` library. Import the package hub rather than
-# the retired in-tree module path; upstream still re-exports the driver proc
-# name for API compatibility.
+# Incremental-Test-Runner M7: shim discovery comes from the shared ``io-mon``
+# library (the package hub), and the monitor's command line from its CLI
+# module: io-mon declares it in clispec (``io_mon/cli_description``, mounted
+# in repro's description under `debug io monitor` and `internal io monitor`)
+# and ``io_mon/cli.runFsSnoopCli`` parses it with the parser generated from
+# that declaration.
 import io_mon
+from io_mon/cli as io_mon_cli import nil
 
-proc runIoMonitorCli(programName: string; args: seq[string]): int =
-  # io-mon still exports the CLI entrypoint under its historical proc name.
-  runFsSnoopCli(programName, args)
+proc runIoMonitorCli(programName: string; argv: seq[string];
+                     mount: openArray[string]): int =
+  ## The monitor's command line, mounted at ``mount``: the words of
+  ## ``argv`` (repro's command line, which repro's parser accepted) after
+  ## the mount point, handed to io-mon's parser.
+  io_mon_cli.runFsSnoopCli(programName, reproWordsAfterMount(argv, mount))
 
 import repro_provider_runtime
 import repro_project_dsl
@@ -105612,7 +105618,7 @@ proc runDevSessionHttpOf[T](c: T): int =
     1
 
 proc runInternalCommand(conf: ReproCommandLineInternal;
-                        publicCliPath: string): int =
+                        publicCliPath: string; argv: seq[string]): int =
   ## ``repro internal <role>``: the processes repro spawns of itself, each
   ## from the configuration the generated parser read from its command line
   ## (``repro_cli_support/cli_description``, the role processes). The
@@ -105627,8 +105633,9 @@ proc runInternalCommand(conf: ReproCommandLineInternal;
   of ReproCommandLineInternalCommand.io:
     case conf.io.command
     of ReproCommandLineInternalIoCommand.monitor:
-      # The monitor's own command line (io-mon's), verbatim.
-      runIoMonitorCli("repro internal io monitor", conf.io.monitor.args)
+      # The monitor's own command line (io-mon's, mounted here).
+      runIoMonitorCli("repro internal io monitor", argv,
+        ["internal", "io", "monitor"])
   of ReproCommandLineInternalCommand.runquotaHelper:
     runRunQuotaHelperOf(conf.runquotaHelper)
   of ReproCommandLineInternalCommand.compileProvider:
@@ -105916,10 +105923,8 @@ proc runWatchVerbCommand(args: seq[string]; publicCliPath: string): int =
 proc runReproHelp(programName: string; topic: seq[string];
                   publicCliPath: string; all = false): int =
   ## ``repro help [--all] [<command>...]``: the help of repro or of one
-  ## command, on stdout, generated from its declarations. A command that
-  ## hands its words to another program's command line (a `rest`
-  ## positional) prints the help its declaration gives, whatever words
-  ## follow.
+  ## command, on stdout, generated from its declarations (a mounted command
+  ## line such as the add-on's included).
   ## With ``all`` it is the page ``--help-all`` prints, which also lists
   ## the ``secondary`` commands.
   var command = 0
@@ -105934,8 +105939,6 @@ proc runReproHelp(programName: string; topic: seq[string];
         return reportReproUsageError(e)
       return 2
     command = next
-    if reproCommandTakesRest(command):
-      break
   # Printed as every help page is (``printReproHelp``: styled for stdout by
   # clispec's printer).
   try:
@@ -106203,7 +106206,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
   of ReproCommandLineCommand.remoteActivate:
     return runRemoteActivateCommand(conf.remoteActivate)
   of ReproCommandLineCommand.system:
-    return runSystemCommand(conf.system)
+    return runSystemCommand(conf.system, args)
   of ReproCommandLineCommand.infra:
     return runInfraCommand(conf.infra)
   of ReproCommandLineCommand.anywhere:
@@ -106486,9 +106489,9 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineDebugCommand.io:
       case conf.debug.io.command
       of ReproCommandLineDebugIoCommand.monitor:
-        # The monitor's own command line (io-mon's), unparsed.
-        return runIoMonitorCli("repro debug io monitor",
-          conf.debug.io.monitor.args)
+        # The monitor's own command line (io-mon's, mounted here).
+        return runIoMonitorCli("repro debug io monitor", args,
+          ["debug", "io", "monitor"])
     of ReproCommandLineDebugCommand.artifact:
       try:
         return runDebugArtifactCommand(conf.debug.artifact)
@@ -106540,7 +106543,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
       stderr.writeLine("repro clean: error: " & err.msg)
       return 1
   of ReproCommandLineCommand.internal:
-    return runInternalCommand(conf.internal, publicCliPath)
+    return runInternalCommand(conf.internal, publicCliPath, args)
   # The hidden `__repro-<name>` spellings of `internal <name>`, which the
   # shell hooks installed on a machine and the RunQuota launcher run.
   of ReproCommandLineCommand.reproRunquotaHelper:

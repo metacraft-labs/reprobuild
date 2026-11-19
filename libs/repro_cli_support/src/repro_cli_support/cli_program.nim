@@ -73,22 +73,6 @@ proc reproCommandPath*(command: int): seq[string] =
   ## ``command``.
   ReproCommandLine.cliGrammar().commands[command].path
 
-proc reproCommandTakesRest*(command: int): bool =
-  ## Whether the command's words after it are a clispec `rest` positional:
-  ## another program's command line it hands over verbatim (`repro system
-  ## addon`, `repro debug io monitor`). `repro help <command> <words>` then
-  ## prints the command's own help, whatever the words, as it does for a
-  ## command its own code still parses: the words are not repro's.
-  let g = ReproCommandLine.cliGrammar()
-  var holders = @[command]
-  if g.commands[command].callChild >= 0:
-    holders.add(g.commands[command].callChild)
-  for k in holders:
-    for id in g.commands[k].ownParams:
-      if g.params[id].rest:
-        return true
-  false
-
 proc reproCommandIsShown*(command: int): bool =
   ## Whether the command and every command holding it are ``shown`` (not
   ## ``internal`` or ``hidden``).
@@ -245,6 +229,39 @@ proc reproWordsAfterCommand*(argv: openArray[string]): seq[string] =
     command = child
     after = i + 1
   @argv[after .. ^1]
+
+proc reproWordsAfterMount*(argv: openArray[string];
+                           mount: openArray[string]): seq[string] =
+  ## The words of ``argv`` after the subcommand words that select the
+  ## command at ``mount`` (its canonical words, such as ``["system",
+  ## "addon"]``): what a command that mounts another program's command line
+  ## (``repro system addon``, ``repro debug io monitor``) hands that
+  ## program's parser, which reads them from the same declarations repro's
+  ## parser just accepted them under. The words before the mount's are
+  ## subcommand words and the root's switches, as in
+  ## ``reproDeclaredEnvFor``.
+  ##
+  ## Raises ``ValueError`` when ``argv`` does not select a command at or
+  ## below ``mount``: the caller asks only for the command the parser chose.
+  let g = ReproCommandLine.cliGrammar()
+  var command = 0
+  var matched = 0
+  for i, word in argv:
+    if matched == mount.len:
+      return @argv[i .. ^1]
+    if word == "--":
+      break
+    if word.startsWith("-"):
+      continue
+    let child = cliChildNamed(g, command, word)
+    if child < 0 or g.commands[child].name != mount[matched]:
+      break
+    command = child
+    inc matched
+  if matched == mount.len:
+    return @[]
+  raise newException(ValueError, "repro command line: `" &
+    @argv.join(" ") & "` does not select `repro " & @mount.join(" ") & "`")
 
 proc printReproHelp*(path: openArray[string] = []; stream = stdout;
                      long = false; all = false) =

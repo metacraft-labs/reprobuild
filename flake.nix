@@ -385,7 +385,14 @@
       # every monitored process decoding it again. The range also builds the
       # debug shim at the stated -O level and injects native ARM64 children on
       # Windows on Arm.
-      url = "github:metacraft-labs/io-mon/735726963f48d91031463cbd9d1e9cf8f444f5ee";
+      # Bumped 73572696 -> efe6dc5b (2026-11-19, io-mon `agents`): io-mon's
+      # command line is a clispec description (`io_mon/cli_description`,
+      # parsed by `io_mon/cli`), which repro mounts under `repro debug io
+      # monitor` and `repro internal io monitor`; this revision is the first
+      # that has it, so the engine does not build against an older pin. The
+      # range also keys the macOS EndpointSecurity subtree view on the audit
+      # token and fences the capture (ae0bf6f).
+      url = "github:metacraft-labs/io-mon/efe6dc5b0b83ad843cd1f4bfe957b4a5d966bcee";
       flake = false;
     };
     nim-shm-gset-src = {

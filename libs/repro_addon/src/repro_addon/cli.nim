@@ -1,51 +1,29 @@
 ## Command-line surface of add-on mode, shared by the full ``repro`` engine
-## (``repro system addon …``) and the statically linked add-on ``repro``
-## (which also answers to the name ``repro-addon-fingerprint``).
+## (``repro system addon …``, ``repro system state|secret|adopt …``) and the
+## statically linked add-on ``repro`` (which also answers to the name
+## ``repro-addon-fingerprint``).
 ##
-##   repro system addon preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
-##                                [--json]
-##   repro system addon bootstrap --plan <digest> [--deploy-signers F]
-##                                [--cache-publishers F [--cache-url U]]
-##                                [--evidence-sink A:P --evidence-sink-ca F]
-##   repro system addon evidence-ship [--heartbeat]
-##   repro system addon evidence-harvest
-##   repro system addon evidence-credential-check
-##   repro system addon uninstall [--keep-store]
-##   repro system addon verify-discard-record RECORD --key HEX
-##   repro system addon verify [--boot | --after-dpkg]
-##   repro system addon reassert [--boot]
-##   repro system addon recover
-##   repro system addon secrets [--boot]
-##   repro system addon probe <healthCheck>
-##   repro system addon secret put --service S --name N [--target T] < secret
-##   repro system addon rotate-recipient-key
-##   repro system addon image-assemble --payload <dir>
-##   repro system addon agent-tick --source <manifest>... [--target T]
-##   repro system rollback [<generation>] [--reconcile-drift]
-##   repro system addon fingerprint [--root R] [--no-live] [--out F]
-##   repro system addon fingerprint diff <before> <after>
-##                                [--except <component>:<key glob>]...
-##                                [--expect <file>]
-##   repro system addon expected-delta <before-ledger|-> <after-ledger>
-##   repro system addon ledger
-##   repro system addon import --unit <name>
-##   repro system addon state backup|release|verify|restore|digest|unit
-##   repro system addon retention [--keep-generations N] [--keep-days D]
-##   repro system addon selfcheck-write <path>
-##   repro system adopt <address> --profile <file>
-##   repro infra plan --profile <file>
-##   repro infra apply --profile <file> [--reconcile-drift] [--plan <add-on plan-id>]
-##                                [--keep-generations N] [--keep-days D]
-##   repro store gc [--grace-seconds N] | roots | list
+## The command line is declared once, in ``repro_infra/addon_command_line``,
+## and this module generates its parser, help and completion with clispec
+## (``ReproAddonCommandLine``: the static binary's whole command line;
+## ``ReproAddonFingerprintTool``: ``repro-addon-fingerprint``'s). Every verb
+## below runs from the typed values that parser read; nothing here reads
+## argv words. The full engine splices the same declarations into its own
+## description, so ``repro system addon --help`` is generated there too, and
+## hands the words of the add-on's commands to ``runAddonArgs``, which parses
+## them through the parser generated here.
 ##
 ## Exit status: 0 success; 1 failure, drift or a non-empty diff; 2 a usage
 ## error or a refusal decided before anything was written (an incompatible
 ## host, a plan digest that does not match).
 
-import std/[options, os, strutils]
+import std/[macros, options, os, strutils]
 
 import std/algorithm
 
+import clispec
+
+import repro_core/cli_ast
 import repro_core/host_apply_lock
 import repro_infra
 
@@ -56,6 +34,7 @@ import repro_elevation/posix_system_driver
 import repro_local_store/store as local_store
 
 import ./addon_apply
+import repro_infra/addon_command_line
 import ./adoption_cli
 import ./image_assemble
 import ./addon_rollback
@@ -92,6 +71,65 @@ import ./transitions
 import ./uninstall
 import ./verify
 
+export CliHelpRequest, CliUsageError, cliErrorText
+
+macro addonCommandLinePrograms() =
+  ## The static add-on binary's command line and the fingerprint tool's, as
+  ## clispec programs over their descriptions.
+  result = newStmtList()
+  result.add(newCall(ident"cliProgram", ident"ReproAddonCommandLine",
+    newLit("repro"), nnkExprEqExpr.newTree(ident"exported", ident"true"),
+    unbound(addonProgramDescription())))
+  result.add(newCall(ident"cliProgram", ident"ReproAddonFingerprintTool",
+    newLit("repro-addon-fingerprint"),
+    nnkExprEqExpr.newTree(ident"exported", ident"true"),
+    unbound(fingerprintToolDescription())))
+
+addonCommandLinePrograms()
+
+type
+  AddonVerb = ReproAddonCommandLineSystemAddonCommand
+
+proc loadAddonCommandLine*(argv: openArray[string];
+                           conf: var ReproAddonCommandLine): int =
+  ## Parses ``argv`` (the static binary's arguments, without the program
+  ## name) with the generated parser into ``conf``. -1 when ``conf`` holds a
+  ## command to run; otherwise the command line was answered here and the
+  ## result is its exit code: a help or completion request printed on stdout
+  ## (0), or a usage error printed as clispec's error block on stderr (2).
+  try:
+    conf = ReproAddonCommandLine.load(argv)
+  except CliHelpRequest as e:
+    ReproAddonCommandLine.printHelp(e)
+    return 0
+  except CliUsageError as e:
+    ReproAddonCommandLine.printError(e)
+    return e.exitCode
+  -1
+
+proc printAddonHelp(path: seq[string]; topic: seq[string]) =
+  ## The help a hidden ``help [<word>...]`` subcommand prints: that of the
+  ## command ``path & topic`` names, else ``path``'s own.
+  for candidate in [path & topic, path]:
+    try:
+      discard ReproAddonCommandLine.load(candidate & @["--help"])
+    except CliHelpRequest as e:
+      ReproAddonCommandLine.printHelp(e)
+      return
+    except CliUsageError:
+      discard
+  stdout.write(ReproAddonCommandLine.helpText(path, long = true))
+
+proc verbWord(k: AddonVerb): string =
+  ## The word of a `repro system addon` verb (``rotateRecipientKey`` is
+  ## ``rotate-recipient-key``), for its diagnostics.
+  for ch in $k:
+    if ch in {'A' .. 'Z'}:
+      result.add('-')
+      result.add(ch.toLowerAscii)
+    else:
+      result.add(ch)
+
 proc migrateStaleOwnObjects*(stateDir: string; atBoot = false): string =
   ## One switch to the migrated own profile when it differs (``own_profile.
   ## migrateOwnProfile``); "" when there is nothing to migrate. At boot it
@@ -111,380 +149,111 @@ proc migrateStaleOwnObjects*(stateDir: string; atBoot = false): string =
     storedTarget: true, ownProfileText: migrated, purpose: "own-migration"))
   "migrated generation 0's objects: add-on generation " & r.generationId
 
-const
-  AddonUsage* = """usage: repro system addon <command> [options]
+proc preflightInputsOf[T](c: T): PreflightInputs =
+  ## The preflight's inputs from a `preflight` or `bootstrap` command line
+  ## (the two declare the same input flags, ``addonPreflightFlags``).
+  result = PreflightInputs(deploySignersPath: c.deploySigners,
+    cachePublishersPath: c.cachePublishers, cacheUrl: c.cacheUrl,
+    agentTarget: c.target, agentSources: c.manifest,
+    profileCompiler: c.profileCompiler,
+    agentPollSec: c.pollInterval.get(0),
+    evidenceSink: c.evidenceSink, evidenceSinkCaPath: c.evidenceSinkCa,
+    evidenceHeartbeatSec: c.heartbeatInterval.get(0),
+    deferRecipientKey: c.deferRecipientKey)
 
-commands:
-  preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
-            [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
-            [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
-            [--defer-recipient-key] [--json]
-      Inventory the host read-only and print the plan and its digest.
-  bootstrap --plan <digest> [--deploy-signers F] [--cache-publishers F [--cache-url U]]
-            [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
-            [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
-            [--defer-recipient-key]
-      Install the add-on on a host whose preflight plan has <digest>. With
-      an Evidence sink, also generate the generation-attestation key and
-      the sink write credential (enrol its certificate at the sink). With
-      --defer-recipient-key, create no recipient key: the host's next boot
-      creates its own (an image's assembly boot uses it).
-  evidence-ship [--heartbeat]
-      The shipping unit (repro-addon-evidence.service): append every queued
-      evidence record to the Evidence sink, then a heartbeat.
-  evidence-enrol --evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]
-      Give an add-on host bootstrapped without an Evidence sink one: create
-      the attestation key and the sink write credential (never adopting or
-      replacing a key), and apply generation 0's evidence objects -- and,
-      with the deploy agent, its egress observer -- as one switch.
-  evidence-enrol --rekey [--no-handover]
-      Replace an enrolled host's attestation key and sink credential (spec
-      §13 decision 52): the old key signs a hand-over to the new ones, which
-      is shipped with the old credential before anything is replaced; then
-      one switch names the new keys. --no-handover, when the old key may be
-      compromised: no hand-over; enrol the new key at the sink by hand.
-  store-verify [--background] [--adopt-unverified]
-      Hash every store path the current generation uses and compare it with
-      the digest it was realised with; quarantine an altered one (DET-AO-5).
-      --adopt-unverified: record the current digest of paths realised
-      before receipts carried one (an operator action).
-  egress-check
-      The egress observer's check (repro-addon-egress-check.service): record
-      every destination the deploy agent's fetch unit was refused, and
-      heartbeat.
-  evidence-harvest
-      The shipping unit's privileged first step: turn the apt hook
-      wrapper's events into evidence records. Reads root's own log only.
-  evidence-credential-check
-      Test this host's sink write credential: an append must succeed and a
-      list, a read, an overwrite and a delete must each be refused. Exit 0
-      only then. Runs in the shipping unit's confinement, as its dynamic
-      user. It announces itself first, so the sink's check reads it as
-      a self-test, not as a probe (G34).
-  uninstall [--keep-store] [--discard-store-evidence]
-            [--discard-unacknowledged-store-evidence]
-      Reverse everything the ownership ledger records.
-      --discard-unacknowledged-store-evidence discards store evidence the
-      Evidence sink has not acknowledged. Before removing anything it
-      writes an intent record to /var/log/repro-addon, signed by the
-      host's attestation key (without that key it refuses); after the
-      removal succeeded, a signed completion record beside it.
-  verify-discard-record RECORD --key HEX
-      Check such a record (the intent record, or its completion): each
-      signature (FILE.sig) must be over exactly the bytes of FILE, by HEX,
-      the host's enrolled attestation key. Exit 0: the discard was
-      authorised and completed, every object removed. Exit 4: completed,
-      but some objects were kept with the store (--keep-store) and were
-      not discarded; they are listed apart. Exit 3: authorised, not
-      completed (the uninstall stopped before the objects were gone, or
-      their removal could not be made durable). Exit 1: it does not
-      verify. Exit 2: usage (no --key). Runs on any machine; the files may
-      be copied off the host.
-  verify [--boot | --after-dpkg]
-      Compare every ledger object with the host (report only). --after-dpkg
-      (the apt hook): also report packages that now own ledger paths and
-      changed vendor units, record findings in the journal and the hook's
-      event log, and always exit 0.
-  boot-confirm
-      The boot-confirm unit, after the re-assertion: replay a pending switch
-      the re-assertion left to it (a health-checked floored unit), with its
-      confirm; always exits 0.
-  reassert [--boot]
-      Finish or revert an interrupted switch, check the current generation
-      (static tree, store objects, ledger digests) and report ok, drift or
-      degraded; never re-applies on drift. --boot (the re-assert unit):
-      always exits 0.
-  recover
-      The same, for an operator: exits 1 unless the host ends ok or drift.
-  secrets [--boot]
-      Re-materialise the current generation's secrets from the retained
-      envelope (the boot secrets unit; leaves them to an apply that holds
-      the host apply lock). --boot: always exits 0.
-  probe <healthCheck>
-      Run one tcp: or http:// health check here (the confirm step runs it
-      in the host's namespaces); exits 0 when it passes.
-  secret put --service S --name N [--target T] < secret
-      Seal the secret read from stdin to this host's recipient key as the
-      entry S/N of the retained envelope, and re-materialise the current
-      generation's secrets under /run/repro/secrets.
-  rotate-recipient-key
-      Generate the next recipient key and print its public half; the
-      current key is deleted when the first envelope sealed to the new
-      one opens.
-  image-assemble --payload <dir>
-      The assembly boot of `repro infra image` (spec §6.5.2 step 5), run
-      by the image's one-shot assembly unit, never by an operator:
-      preflight, bootstrap and the host profile's apply on this system,
-      a plan that must predict nothing, then the clean-up; writes
-      <dir>/result.json.
-  agent-repin [--apply <digest>]
-      Resolve the deploy agent's origins again and print the plan for the
-      fetch unit's egress allow-list and hosts file (writing nothing), or
-      apply the plan the digest names as one switch (spec §9.1).
-  agent-tick --source <manifest>... [--target T] [--allowed-signers F]
-      One deploy-agent tick in one process: verify (RDMF v3 required),
-      accept the sealed section, apply the profile through the switch; it
-      compiles nothing. Exit 0, 1 (retryable) or 2 (an operator must act).
-  agent-fetch
-      The fetch unit (repro-agent-fetch.service, unprivileged): select,
-      compile, substitute and download into its staging area.
-  agent-apply
-      The apply unit (repro-agent-apply.service, root, no network): copy
-      the staging area, verify everything again, apply.
-  migration-plan [--state-dir D] [--agent-state A] [--target T]
-                 [--legacy-secrets-dir S]
-      Plan, writing nothing, the migration the first tick of an agent that
-      applied outside the switch runs (spec §9 "Migration"): every object it
-      would adopt, write or refuse, and the service transitions. D and A
-      default to the add-on's and the agent's state directories; pass
-      copies to plan against a snapshot. S is the agent's --secrets-dir,
-      whose hand-written LoadCredential= sources the plan accepts (spec
-      §10.3). Exit 0 when it would succeed, 2
-      when it would refuse, 1 when nothing can be planned.
-  resume
-      Let the deploy agent converge again after a local rollback paused it
-      (spec §9.3): removes the pause marker of every agent the rollback
-      paused. Exits 0 whether or not one was there.
-  migrate
-      Re-render generation 0's objects this build renders differently (the
-      evidence path unit, the fetch unit) by one switch; the re-assert unit
-      runs it at boot when the evidence path unit is stale. Exit 0.
-  contain --operator NAME --reason TEXT
-      Contain the host (spec §13 decision 51): record and ship a signed
-      operator-contained record, then stop and mask the deploy agent's
-      fetch and apply units (re-masked at every boot until release). The
-      off-host check then reports the agent "contained", not silent.
-  release --operator NAME --reason TEXT
-      Record and ship operator-released, unmask the agent's units and start
-      its fetch timer again.
-  fingerprint [--root R] [--no-live] [--out F]
-  fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
-      Record the base fingerprint, or compare two.
-  expected-delta <before-ledger|-> <after-ledger>
-      The fingerprint diff an apply between two ledgers may cause.
-  ledger
-      Print the current ownership ledger.
-  import --unit <name>
-      Print a profile skeleton that reproduces a hand-configured unit, its
-      environment files, the /etc files it names and its tmpfiles
-      fragments as they are, with a FLAG line for everything it cannot
-      declare (spec §11.2 step 1). Writes nothing on the host.
-  state backup|release|verify|restore|digest|unit
-      The profile's declared state set (stateDirectories, spec §11.1):
-      back it up before a conversion, restore it after; see
-      `repro system addon state --help`.
-  status
-      The current generation, the generations held as store roots, the
-      static tree and the pending switch marker, and the store root's kind.
-  retention [--keep-generations N] [--keep-days D]
-      Release the store roots of generations outside the policy now (the
-      current and the previous generation are always kept); default last
-      5 generations or 30 days, whichever retains more.
-  selfcheck-btrfs <mount point>
-      Create and delete a btrfs subvolume under a btrfs mount the way the
-      store root is created on a btrfs root (a test of that leg).
-  selfcheck-write <path>
-      Write a managed file at <path> through the system-file driver exactly
-      as the switch does, with no plan and no collision pass: a test of
-      the writer's refusal to follow a symbolic link on the path.
+proc bootstrapOptionsOf[T](c: T; planDigest = ""): BootstrapOptions =
+  ## A bootstrap's options from the same input flags, and the plan digest.
+  let inp = preflightInputsOf(c)
+  BootstrapOptions(planDigest: planDigest,
+    deploySignersPath: inp.deploySignersPath,
+    cachePublishersPath: inp.cachePublishersPath, cacheUrl: inp.cacheUrl,
+    agentTarget: inp.agentTarget, agentSources: inp.agentSources,
+    profileCompiler: inp.profileCompiler, agentPollSec: inp.agentPollSec,
+    evidenceSink: inp.evidenceSink,
+    evidenceSinkCaPath: inp.evidenceSinkCaPath,
+    evidenceHeartbeatSec: inp.evidenceHeartbeatSec,
+    deferRecipientKey: inp.deferRecipientKey)
 
-related (add-on hosts):
-  repro system adopt <address> --profile <file>
-      Claim the object a declared resource targets as it is, writing nothing.
-  repro infra plan --profile <file>
-      The ledger diff, collision report and service transition list of
-      applying <file>, and the add-on plan-id that `--plan` pins; writes
-      nothing.
-  repro infra apply --profile <file> [--reconcile-drift] [--plan <add-on plan-id>]
-                    [--keep-generations N] [--keep-days D]
-      Apply an add-on generation through the switch.
-  repro store gc [--grace-seconds N] | roots | list
-      Collect store prefixes no root holds (never one the current or the
-      previous generation holds); list the roots or the prefixes.
-"""
-
-  FingerprintUsage* = """usage: repro-addon-fingerprint [--root R] [--no-live] [--out F]
-       repro-addon-fingerprint diff <before> <after> [--except C:GLOB]... [--expect F]
-"""
-
-proc takeValue(args: seq[string]; i: var int; flag: string): string =
-  ## ``--flag value`` or ``--flag=value``.
-  let a = args[i]
-  if a.startsWith(flag & "="):
-    return a[flag.len + 1 .. ^1]
-  if i + 1 >= args.len:
-    raise newException(ValueError, flag & " needs a value")
-  inc i
-  args[i]
-
-proc parsePreflightArgs*(rest: seq[string]): tuple[inp: PreflightInputs;
-                                                   json: bool] =
-  ## ``preflight``'s options (also the docs test's parser, A11 review
-  ## finding 16). Raises ``ValueError``.
-  var inp: PreflightInputs
-  var json = false
-  var i = 0
-  while i < rest.len:
-    let a = rest[i]
-    if a == "--deploy-signers" or a.startsWith("--deploy-signers="):
-      inp.deploySignersPath = takeValue(rest, i, "--deploy-signers")
-    elif a == "--cache-publishers" or a.startsWith("--cache-publishers="):
-      inp.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
-    elif a == "--cache-url" or a.startsWith("--cache-url="):
-      inp.cacheUrl = takeValue(rest, i, "--cache-url")
-    elif a == "--target" or a.startsWith("--target="):
-      inp.agentTarget = takeValue(rest, i, "--target")
-    elif a == "--manifest" or a.startsWith("--manifest="):
-      inp.agentSources.add(takeValue(rest, i, "--manifest"))
-    elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
-      inp.profileCompiler = takeValue(rest, i, "--profile-compiler")
-    elif a == "--poll-interval" or a.startsWith("--poll-interval="):
-      inp.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
-    elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
-      inp.evidenceSink = takeValue(rest, i, "--evidence-sink")
-    elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
-      inp.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
-    elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
-      inp.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
-        "--heartbeat-interval"))
-    elif a == "--json":
-      json = true
-    elif a == "--defer-recipient-key":
-      inp.deferRecipientKey = true
-    else:
-      raise newException(ValueError, "unknown option " & a)
-    inc i
-  (inp, json)
-
-proc parseVerifyDiscardRecordArgs*(rest: seq[string]):
-    tuple[path, key: string] =
-  ## ``RECORD --key HEX`` of ``verify-discard-record``. Raises
-  ## ``ValueError`` on anything else, and when ``--key`` is missing.
-  var i = 0
-  while i < rest.len:
-    if rest[i] == "--key" and i + 1 < rest.len:
-      result.key = rest[i + 1]; inc i
-    elif rest[i].startsWith("--key="): result.key = rest[i][6 .. ^1]
-    elif result.path.len == 0 and not rest[i].startsWith("-"):
-      result.path = rest[i]
-    else:
-      raise newException(ValueError, "unexpected " & rest[i])
-    inc i
-  # The key is required (§13 decision 64, amended round 6): a record
-  # checked only against the key it names itself is not authenticated.
-  if result.path.len == 0 or
-      (result.key.len == 0 and not mutated("verify-accepts-missing-key")):
-    raise newException(ValueError, "usage: repro system addon " &
-      "verify-discard-record RECORD --key HEX (HEX: the host's enrolled " &
-      "attestation key)")
-
-proc parseUninstallArgs*(rest: seq[string]): UninstallOptions =
-  ## ``uninstall``'s options. Raises ``ValueError``.
-  for a in rest:
-    if a == "--keep-store": result.keepStore = true
-    elif a == "--discard-store-evidence": result.discardStoreEvidence = true
-    elif a == "--discard-unacknowledged-store-evidence":
-      result.discardUnacknowledgedStoreEvidence = true
-    else: raise newException(ValueError, "unknown option " & a)
-
-proc parseBootstrapArgs*(rest: seq[string]): BootstrapOptions =
-  ## ``bootstrap``'s options. Raises ``ValueError``.
-  var opts: BootstrapOptions
-  var i = 0
-  while i < rest.len:
-    let a = rest[i]
-    if a == "--plan" or a.startsWith("--plan="):
-      opts.planDigest = takeValue(rest, i, "--plan")
-    elif a == "--deploy-signers" or a.startsWith("--deploy-signers="):
-      opts.deploySignersPath = takeValue(rest, i, "--deploy-signers")
-    elif a == "--cache-publishers" or a.startsWith("--cache-publishers="):
-      opts.cachePublishersPath = takeValue(rest, i, "--cache-publishers")
-    elif a == "--cache-url" or a.startsWith("--cache-url="):
-      opts.cacheUrl = takeValue(rest, i, "--cache-url")
-    elif a == "--target" or a.startsWith("--target="):
-      opts.agentTarget = takeValue(rest, i, "--target")
-    elif a == "--manifest" or a.startsWith("--manifest="):
-      opts.agentSources.add(takeValue(rest, i, "--manifest"))
-    elif a == "--profile-compiler" or a.startsWith("--profile-compiler="):
-      opts.profileCompiler = takeValue(rest, i, "--profile-compiler")
-    elif a == "--poll-interval" or a.startsWith("--poll-interval="):
-      opts.agentPollSec = parseInt(takeValue(rest, i, "--poll-interval"))
-    elif a == "--evidence-sink" or a.startsWith("--evidence-sink="):
-      opts.evidenceSink = takeValue(rest, i, "--evidence-sink")
-    elif a == "--evidence-sink-ca" or a.startsWith("--evidence-sink-ca="):
-      opts.evidenceSinkCaPath = takeValue(rest, i, "--evidence-sink-ca")
-    elif a == "--heartbeat-interval" or a.startsWith("--heartbeat-interval="):
-      opts.evidenceHeartbeatSec = parseInt(takeValue(rest, i,
-        "--heartbeat-interval"))
-    elif a == "--defer-recipient-key":
-      opts.deferRecipientKey = true
-    else:
-      raise newException(ValueError, "unknown option " & a)
-    inc i
-  opts
-
-proc runFingerprintCli*(args: seq[string]): int =
+proc loadPreflightFlags*(flags: seq[string]): ReproAddonCommandLineSystemAddonPreflight =
+  ## ``flags`` (the input flags of a preflight, as an image's assembly
+  ## payload records them) read by the generated parser as `repro system
+  ## addon preflight` would; raises ``ValueError`` when they are not such a
+  ## command line.
+  var conf: ReproAddonCommandLine
   try:
-    if args.len > 0 and args[0] == "diff":
-      var paths: seq[string]
-      var rules: seq[ExceptionRule]
-      var expectPath = ""
-      var i = 1
-      while i < args.len:
-        let a = args[i]
-        if a == "--except" or a.startsWith("--except="):
-          rules.add(parseExceptionRule(takeValue(args, i, "--except")))
-        elif a == "--expect" or a.startsWith("--expect="):
-          expectPath = takeValue(args, i, "--expect")
-        elif a.startsWith("-"):
-          raise newException(ValueError, "unknown option " & a)
-        else:
-          paths.add(a)
-        inc i
-      if paths.len != 2:
-        raise newException(ValueError, "diff needs <before> <after>")
-      let d = applyExceptions(
-        diff(parseFingerprint(readFile(paths[0])),
-             parseFingerprint(readFile(paths[1]))), rules)
-      if expectPath.len > 0:
-        let report = matchExpectations(d, parseExpectations(readFile(expectPath)))
-        if report.ok:
-          stdout.write("fingerprint diff equals the expectation (" &
-                       $d.len & " records)\n")
-          return 0
-        stdout.write(renderExpectationReport(report))
-        return 1
-      stdout.write(renderDiff(d))
-      return (if d.len == 0: 0 else: 1)
-    var opts = CollectOptions(root: "/", live: true)
-    var outPath = ""
-    var i = 0
-    while i < args.len:
-      let a = args[i]
-      if a == "--root" or a.startsWith("--root="):
-        opts.root = takeValue(args, i, "--root")
-      elif a == "--no-live":
-        opts.live = false
-      elif a == "--out" or a.startsWith("--out="):
-        outPath = takeValue(args, i, "--out")
-      elif a in ["-h", "--help"]:
-        stdout.write(FingerprintUsage)
-        return 0
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
-    let text = collectFingerprint(opts).render()
+    conf = ReproAddonCommandLine.load(@["system", "addon", "preflight"] &
+      flags)
+  except CliHelpRequest:
+    raise newException(ValueError, "the payload's preflight flags ask for " &
+      "help: " & flags.join(" "))
+  except CliUsageError as e:
+    raise newException(ValueError, "the payload's preflight flags are not " &
+      "a preflight command line: " & cliErrorText(e).strip())
+  conf.system.addon.preflight
+
+proc runFingerprintCommand*(root: string; live: bool; outPath: string): int =
+  ## ``repro system addon fingerprint [--root R] [--no-live] [--out F]``:
+  ## record the base fingerprint.
+  try:
+    let text = collectFingerprint(CollectOptions(root: root, live: live)).render()
     if outPath.len > 0:
       writeFile(outPath, text)
     else:
       stdout.write(text)
     0
-  except ValueError as e:
-    stderr.write("repro-addon-fingerprint: " & e.msg & "\n" & FingerprintUsage)
-    2
   except CatchableError as e:
     stderr.write("repro-addon-fingerprint: " & e.msg & "\n")
     1
+
+proc runFingerprintDiff*(before, after: string; exceptRules: seq[string];
+                         expectPath: string): int =
+  ## ``repro system addon fingerprint diff <before> <after> [--except
+  ## C:GLOB]... [--expect F]``: exit 0 when the diff is empty (or equals the
+  ## expectation), 1 otherwise, 2 for a malformed rule.
+  var rules: seq[ExceptionRule]
+  try:
+    for r in exceptRules: rules.add(parseExceptionRule(r))
+  except ValueError as e:
+    stderr.write("repro-addon-fingerprint: " & e.msg & "\n")
+    return 2
+  try:
+    let d = applyExceptions(
+      diff(parseFingerprint(readFile(before)),
+           parseFingerprint(readFile(after))), rules)
+    if expectPath.len > 0:
+      let report = matchExpectations(d, parseExpectations(readFile(expectPath)))
+      if report.ok:
+        stdout.write("fingerprint diff equals the expectation (" &
+                     $d.len & " records)\n")
+        return 0
+      stdout.write(renderExpectationReport(report))
+      return 1
+    stdout.write(renderDiff(d))
+    (if d.len == 0: 0 else: 1)
+  except CatchableError as e:
+    stderr.write("repro-addon-fingerprint: " & e.msg & "\n")
+    1
+
+proc runFingerprintToolArgs*(argv: seq[string]): int =
+  ## The static binary invoked as ``repro-addon-fingerprint``: its own
+  ## command line (``fingerprintToolDescription``), through its generated
+  ## parser.
+  var conf: ReproAddonFingerprintTool
+  try:
+    conf = ReproAddonFingerprintTool.load(argv)
+  except CliHelpRequest as e:
+    ReproAddonFingerprintTool.printHelp(e)
+    return 0
+  except CliUsageError as e:
+    ReproAddonFingerprintTool.printError(e)
+    return e.exitCode
+  case conf.command
+  of ReproAddonFingerprintToolCommand.call:
+    runFingerprintCommand(conf.call.root, not conf.call.noLive,
+      conf.call.outPath)
+  of ReproAddonFingerprintToolCommand.diff:
+    runFingerprintDiff(conf.diff.before, conf.diff.after,
+      conf.diff.exceptRule, conf.diff.expect)
 
 proc previousGenerationOf*(stateDir, current: string): string =
   ## The generation `current` succeeded (its envelope's predecessor), ""
@@ -495,15 +264,24 @@ proc previousGenerationOf*(stateDir, current: string): string =
   except CatchableError:
     ""
 
-proc retentionCount(value, flag: string): int =
+proc retentionCount(value: Option[int]; flag: string; default: int): int =
   ## A retention bound: a non-negative integer (0 keeps only what is
-  ## always kept).
-  try:
-    result = parseInt(value)
-  except ValueError:
-    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
+  ## always kept); ``default`` when the flag was not given.
+  if value.isNone: return default
+  result = value.get
   if result < 0:
-    raise newException(ValueError, flag & " expects a non-negative integer, got " & value)
+    raise newException(ValueError, flag &
+      " expects a non-negative integer, got " & $result)
+
+proc retentionOf(keepGenerations, keepDays: Option[int]):
+    Option[RetentionPolicy] =
+  ## The retention policy the flags ask for; none when neither was given.
+  if keepGenerations.isNone and keepDays.isNone: return
+  some(RetentionPolicy(
+    keepGenerations: retentionCount(keepGenerations, "--keep-generations",
+      DefaultRetention.keepGenerations),
+    keepDays: retentionCount(keepDays, "--keep-days",
+      DefaultRetention.keepDays)))
 
 proc selfcheckManagedWrite*(path: string): string =
   ## Exercise the system-file driver's write at ``path`` the way the
@@ -520,7 +298,8 @@ proc selfcheckManagedWrite*(path: string): string =
   let post = applyFsSystemFile(FixtureContext(addOn: policy), op)
   "wrote " & path & " (digest " & post.digestHex[0 ..< 12] & ")"
 
-proc runMigrationPlanCli*(args: seq[string]): int
+proc runMigrationPlanCommand*(stateDir, agentState, target,
+                              legacySecretsDir: string): int
   ## Below, beside the other plan verbs.
 
 proc renderCompletedDiscard*(keyHex: string; removed, kept: seq[string]): string =
@@ -584,40 +363,99 @@ proc discardReport*(r: UninstallResult): string =
       "verify-discard-record " & r.overrideRecord &
       " --key <enrolled key>`\n")
 
-proc runAddonCli*(args: seq[string]): int =
-  ## Dispatch ``repro system addon <args>``.
-  if args.len == 0 or args[0] in ["-h", "--help", "help"]:
-    stdout.write(AddonUsage)
-    return (if args.len == 0: 2 else: 0)
-  let cmd = args[0]
-  let rest = args[1 .. ^1]
+proc runImageAssemble(payload: string): int =
+  ## ``repro system addon image-assemble --payload <dir>``.
+  if payload.len == 0:
+    raise newException(ValueError, "--payload <dir> is required")
+  let spec = parseAssemblySpec(readFile(payload / "assembly.json"))
+  # The payload's binary is this one: refuse a payload staged for
+  # another (the build host pinned it by digest).
+  let self = sha256OfFile(getAppFilename())
+  if self != spec.binarySha256:
+    raise newException(ValueError, "this binary hashes to " & self &
+      ", but the payload was staged for " & spec.binarySha256)
+  let flags = loadPreflightFlags(spec.preflightFlags)
+  let r = runImageAssembly(payload, spec, preflightInputsOf(flags),
+    bootstrapOptionsOf(flags))
+  (if r.ok: 0 else: 1)
+
+proc runAddonStateVerb[T](s: T; path: seq[string]): int =
+  ## A `state` verb, from the configuration of `repro system addon state`
+  ## or of `repro system state` (the static binary declares both, over the
+  ## same declarations, ``addonStateCommands``); ``path`` is the command's,
+  ## for its hidden `help`.
+  type V = typeof(s.command)
+  case s.command
+  of V.help:
+    printAddonHelp(path, s.help.topic)
+    0
+  of V.backup:
+    runStateCommand(StateCommand(verb: "backup", profile: s.backup.profile,
+      outDir: s.backup.outDir, root: s.backup.root))
+  of V.release:
+    runStateCommand(StateCommand(verb: "release",
+      profile: s.release.profile))
+  of V.verify:
+    runStateCommand(StateCommand(verb: "verify", fromDir: s.verify.fromDir,
+      root: s.verify.root, only: s.verify.only, source: s.verify.source))
+  of V.restore:
+    runStateCommand(StateCommand(verb: "restore",
+      fromDir: s.restore.fromDir, root: s.restore.root,
+      boot: s.restore.boot))
+  of V.digest:
+    runStateCommand(StateCommand(verb: "digest", path: s.digest.path))
+  of V.unit:
+    runStateCommand(StateCommand(verb: "unit"))
+  of V.installUnit:
+    runStateCommand(StateCommand(verb: "install-unit",
+      fromDir: s.installUnit.fromDir, root: s.installUnit.root))
+
+proc runAddonVerb*(c: ReproAddonCommandLineSystemAddon): int =
+  ## ``repro system addon <verb> ...``, from the configuration the generated
+  ## parser read.
+  let cmd = verbWord(c.command)
   # The verbs that hold plaintext secrets run where their heap cannot be
   # swapped (spec §10.3): `secret`, `rotate-recipient-key` and `agent-tick`
   # always, the re-assert and secrets verbs on a host that keeps envelopes
   # (their boot units carry MemorySwapMax=0 themselves).
-  if cmd in ["secret", "rotate-recipient-key", "agent-tick", "agent-apply"] or
-      (cmd in ["reassert", "recover", "secrets"] and "--boot" notin rest and
+  let atBootVerb = case c.command
+    of AddonVerb.reassert: c.reassert.boot
+    of AddonVerb.secrets: c.secrets.boot
+    else: false
+  if c.command in {AddonVerb.secret, AddonVerb.rotateRecipientKey,
+                   AddonVerb.agentTick, AddonVerb.agentApply} or
+      (c.command in {AddonVerb.reassert, AddonVerb.recover,
+                     AddonVerb.secrets} and not atBootVerb and
        hostHasSecrets()):
     let r = reexecInNoSwapScope()
     if r >= 0: return r
   try:
-    case cmd
-    of "fingerprint":
-      return runFingerprintCli(rest)
-    of "import":
-      return runAddonImportCli(rest)
-    of "state":
-      return runStateCli(rest)
-    of "preflight":
-      let (inp, json) = parsePreflightArgs(rest)
-      let r = runPreflight(inp)
-      if json:
+    case c.command
+    of AddonVerb.help:
+      printAddonHelp(@["system", "addon"], c.help.topic)
+      return 0
+    of AddonVerb.fingerprint:
+      let f = c.fingerprint
+      case f.command
+      of ReproAddonCommandLineSystemAddonFingerprintCommand.call:
+        return runFingerprintCommand(f.call.root, not f.call.noLive,
+          f.call.outPath)
+      of ReproAddonCommandLineSystemAddonFingerprintCommand.diff:
+        return runFingerprintDiff(f.diff.before, f.diff.after,
+          f.diff.exceptRule, f.diff.expect)
+    of AddonVerb.`import`:
+      return runAddonImport(c.`import`.unit)
+    of AddonVerb.state:
+      return runAddonStateVerb(c.state, @["system", "addon", "state"])
+    of AddonVerb.preflight:
+      let r = runPreflight(preflightInputsOf(c.preflight))
+      if c.preflight.json:
         stdout.write(r.planJson & "\n")
       else:
         stdout.write(renderPreflightHuman(r))
       return (if r.compatible: 0 else: 2)
-    of "bootstrap":
-      let opts = parseBootstrapArgs(rest)
+    of AddonVerb.bootstrap:
+      let opts = bootstrapOptionsOf(c.bootstrap, c.bootstrap.plan)
       try:
         let r = runAddonBootstrap(opts)
         stdout.write("plan digest:          " & r.planDigest & "\n" &
@@ -639,13 +477,14 @@ proc runAddonCli*(args: seq[string]): int =
       except AddonPlanMismatch as e:
         stderr.write("repro system addon bootstrap: " & e.msg & "\n")
         return 2
-    of "verify-discard-record":
-      var path, key: string
-      try:
-        (path, key) = parseVerifyDiscardRecordArgs(rest)
-      except ValueError as e:
-        stderr.write("repro system addon verify-discard-record: " & e.msg &
-                     "\n")
+    of AddonVerb.verifyDiscardRecord:
+      let path = c.verifyDiscardRecord.record
+      let key = c.verifyDiscardRecord.key
+      # The key is required (§13 decision 64, amended round 6): a record
+      # checked only against the key it names itself is not authenticated.
+      if key.len == 0 and not mutated("verify-accepts-missing-key"):
+        stderr.write("repro system addon verify-discard-record: --key HEX " &
+          "is required (HEX: the host's enrolled attestation key)\n")
         return 2
       let v = verifyDiscardRecord(path, key)
       case v.status
@@ -667,8 +506,12 @@ proc runAddonCli*(args: seq[string]): int =
         # the host; it was not discarded, and the exit status says so too.
         if v.kept.len > 0: return 4
         return 0
-    of "uninstall":
-      let r = runAddonUninstall(parseUninstallArgs(rest))
+    of AddonVerb.uninstall:
+      let u = c.uninstall
+      let r = runAddonUninstall(UninstallOptions(keepStore: u.keepStore,
+        discardStoreEvidence: u.discardStoreEvidence,
+        discardUnacknowledgedStoreEvidence:
+          u.discardUnacknowledgedStoreEvidence))
       stdout.write(discardReport(r))
       for p in r.removed: stdout.write("removed " & p & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
@@ -681,16 +524,12 @@ proc runAddonCli*(args: seq[string]): int =
         (if r.keptAccounts.len == 0: "none" else: r.keptAccounts.join(", ")) &
         "\n")
       return (if r.ok: 0 else: 1)
-    of "verify":
-      var reportOnly = false
-      for a in rest:
-        if a in ["--boot", "--after-dpkg"]: reportOnly = true
-        else: raise newException(ValueError, "unknown option " & a)
-      if "--after-dpkg" in rest:
+    of AddonVerb.verify:
+      if c.verify.afterDpkg:
         # The apt hook (spec §7.8): ledger digests, new package owners of
         # ledger paths, changed vendor units; recorded, always exit 0.
         return runAfterDpkgCli()
-      if reportOnly:
+      if c.verify.boot:
         # Report-only callers (the boot unit, the apt hook) must never fail
         # whatever invoked them, so nothing here may raise or exit non-zero.
         try:
@@ -701,11 +540,8 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonVerify()
       stdout.write(renderVerify(r))
       return (if r.status == "ok": 0 else: 1)
-    of "reassert", "recover":
-      var atBoot = false
-      for a in rest:
-        if a == "--boot" and cmd == "reassert": atBoot = true
-        else: raise newException(ValueError, "unknown option " & a)
+    of AddonVerb.reassert, AddonVerb.recover:
+      let atBoot = c.command == AddonVerb.reassert and c.reassert.boot
       if atBoot:
         # A contained host stays contained across the reboot (decision 51):
         # the runtime masks are gone, so they are put back first.
@@ -742,14 +578,12 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonReassert(DefaultStateDir, atBoot = false)
       stdout.write(renderReassert(r))
       return (if r.status in ["ok", "drift", "deferred"]: 0 else: 1)
-    of "boot-confirm":
+    of AddonVerb.bootConfirm:
       # `repro system addon boot-confirm` (repro-addon-boot-confirm.service,
       # §13 decision 157): after the re-assertion, replay the pending switch
       # it left here -- with queued starts and the confirm, now that the
       # floored units can start -- then lift the boot's holds and migrate
       # stale generation-0 objects. Never fails the boot transaction.
-      if rest.len > 0:
-        raise newException(ValueError, "unknown option " & rest[0])
       let flag = bootConfirmFlagPath(DefaultStateDir)
       if fileExists(flag):
         try:
@@ -773,105 +607,86 @@ proc runAddonCli*(args: seq[string]): int =
       except CatchableError as e:
         stdout.write("repro-addon migration: " & e.msg & "\n")
       return 0
-    of "secrets":
+    of AddonVerb.secrets:
       # `repro system addon secrets [--boot]`: re-materialise the current
       # generation's secrets (repro-addon-secrets.service at boot, §7.7).
-      var atBoot = false
-      for a in rest:
-        if a == "--boot": atBoot = true
-        else: raise newException(ValueError, "unknown option " & a)
       let r = bootSecrets(DefaultStateDir)
       stdout.write("repro-addon secrets: " & r.line & "\n")
-      return (if atBoot or r.ok: 0 else: 1)
-    of "secret":
-      return runSecretPutCli(rest)
-    of "image-assemble":
-      var payload = ""
-      var i = 0
-      while i < rest.len:
-        let a = rest[i]
-        if a == "--payload" or a.startsWith("--payload="):
-          payload = takeValue(rest, i, "--payload")
-        else:
-          raise newException(ValueError, "unknown option " & a)
-        inc i
-      if payload.len == 0:
-        raise newException(ValueError, "--payload <dir> is required")
-      let spec = parseAssemblySpec(readFile(payload / "assembly.json"))
-      # The payload's binary is this one: refuse a payload staged for
-      # another (the build host pinned it by digest).
-      let self = sha256OfFile(getAppFilename())
-      if self != spec.binarySha256:
-        raise newException(ValueError, "this binary hashes to " & self &
-          ", but the payload was staged for " & spec.binarySha256)
-      let (inp, _) = parsePreflightArgs(spec.preflightFlags)
-      let opts = parseBootstrapArgs(spec.preflightFlags)
-      let r = runImageAssembly(payload, spec, inp, opts)
-      return (if r.ok: 0 else: 1)
-    of "rotate-recipient-key":
-      return runRotateRecipientKeyCli(rest)
-    of "evidence-ship":
-      return runEvidenceShipCli(rest)
-    of "evidence-harvest":
-      return runEvidenceHarvestCli(rest)
-    of "evidence-credential-check":
-      return runCredentialCheckCli(rest)
-    of "evidence-enrol":
-      return runEvidenceEnrolCli(rest)
-    of "egress-check":
-      return runEgressCheckCli(rest)
-    of "store-verify":
-      return runStoreVerifyCli(rest)
-    of "agent-tick":
-      return agent_split.runAgentTickCli(rest)
-    of "agent-fetch":
-      return runAgentFetchCli(rest)
-    of "agent-apply":
-      return runAgentApplyCli(rest)
-    of "resume":
-      return runResumeCli(rest)
-    of "migrate":
-      if rest.len != 0: raise newException(ValueError, "migrate takes no option")
+      return (if c.secrets.boot or r.ok: 0 else: 1)
+    of AddonVerb.secret:
+      case c.secret.command
+      of ReproAddonCommandLineSystemAddonSecretCommand.put:
+        let p = c.secret.put
+        return runSecretPutCommand(p.service, p.name, p.target)
+    of AddonVerb.imageAssemble:
+      return runImageAssemble(c.imageAssemble.payload)
+    of AddonVerb.rotateRecipientKey:
+      return runRotateRecipientKeyCommand()
+    of AddonVerb.evidenceShip:
+      return runEvidenceShipCommand(c.evidenceShip.heartbeat,
+        c.evidenceShip.noBackoff)
+    of AddonVerb.evidenceHarvest:
+      return runEvidenceHarvestCommand()
+    of AddonVerb.evidenceCredentialCheck:
+      return runCredentialCheckCommand()
+    of AddonVerb.evidenceEnrol:
+      let e = c.evidenceEnrol
+      return runEvidenceEnrolCommand(e.rekey, e.noHandover,
+        EnrolOptions(sink: e.evidenceSink, sinkCaPath: e.evidenceSinkCa,
+          heartbeatSec: e.heartbeatInterval.get(0)))
+    of AddonVerb.egressCheck:
+      return runEgressCheckCommand()
+    of AddonVerb.storeVerify:
+      return runStoreVerifyCommand(c.storeVerify.background,
+        c.storeVerify.adoptUnverified)
+    of AddonVerb.agentTick:
+      let t = c.agentTick
+      return agent_split.runAgentTickCommand(t.source, t.target,
+        t.allowedSigners)
+    of AddonVerb.agentFetch:
+      return runAgentFetchCommand()
+    of AddonVerb.agentApply:
+      return runAgentApplyCommand()
+    of AddonVerb.resume:
+      return runResumeCommand()
+    of AddonVerb.migrate:
       let m = migrateStaleOwnObjects(DefaultStateDir)
       stdout.write((if m.len > 0: m else: "generation 0 is current; nothing " &
         "to migrate") & "\n")
       return 0
-    of "contain":
-      return runContainCli(rest)
-    of "release":
-      return runContainCli(rest, release = true)
-    of "agent-repin":
-      return runAgentRepinCli(rest)
-    of "migration-plan":
-      return runMigrationPlanCli(rest)
-    of "test-sleep":
-      # Seam builds only (a hanging command in the store, for a gate);
-      # every other build answers with a usage error.
-      return seamSleepCommand(rest)
-    of "probe":
-      if rest.len != 1:
-        raise newException(ValueError, "probe needs one healthCheck value")
-      let spec = parseHealthCheck(rest[0])
+    of AddonVerb.contain:
+      return runContainCommand(c.contain.operator, c.contain.reason)
+    of AddonVerb.release:
+      return runContainCommand(c.release.operator, c.release.reason,
+        release = true)
+    of AddonVerb.agentRepin:
+      return runAgentRepin(c.agentRepin.apply)
+    of AddonVerb.migrationPlan:
+      let m = c.migrationPlan
+      return runMigrationPlanCommand(m.stateDir, m.agentState, m.target,
+        m.legacySecretsDir)
+    of AddonVerb.probe:
+      let check = c.probe.healthCheck
+      let spec = parseHealthCheck(check)
       if spec.kind notin {hcTcp, hcHttp}:
         raise newException(ValueError, "probe runs tcp: and http:// checks only")
       let why = runProbe(spec)
       if why.len == 0:
-        stdout.write("probe " & rest[0] & ": ok\n")
+        stdout.write("probe " & check & ": ok\n")
         return 0
-      stdout.write("probe " & rest[0] & ": " & why & "\n")
+      stdout.write("probe " & check & ": " & why & "\n")
       return 1
-    of "expected-delta":
-      if rest.len != 2:
-        raise newException(ValueError, "expected-delta needs two ledgers")
-      let before = if rest[0] == "-": Ledger() else: readLedger(rest[0])
-      let after = readLedger(rest[1])
+    of AddonVerb.expectedDelta:
+      let d = c.expectedDelta
+      let before = if d.before == "-": Ledger() else: readLedger(d.before)
+      let after = readLedger(d.after)
       for e in expectedDelta(before, after):
         stdout.write(renderExpectation(e) & "\n")
       return 0
-    of "ledger":
+    of AddonVerb.ledger:
       stdout.write(readLedger(ledgerCopyPath(DefaultStateDir)).render())
       return 0
-    of "status":
+    of AddonVerb.status:
       # What an operator (and the store-roots gate) needs to see: the
       # current generation, every generation registered as a store root,
       # the static tree and any pending switch, and what kind of thing
@@ -899,28 +714,15 @@ proc runAddonCli*(args: seq[string]): int =
       for g in roots:
         stdout.write("  " & g & (if g == current: " (current)" else: "") & "\n")
       return 0
-    of "selfcheck-btrfs":
-      if rest.len != 1:
-        raise newException(ValueError, "selfcheck-btrfs needs a btrfs mount point")
-      stdout.write(selfcheckBtrfsSubvolume(rest[0]) & "\n")
+    of AddonVerb.selfcheckBtrfs:
+      stdout.write(selfcheckBtrfsSubvolume(c.selfcheckBtrfs.mountPoint) & "\n")
       return 0
-    of "selfcheck-write":
-      if rest.len != 1:
-        raise newException(ValueError, "selfcheck-write needs a path")
-      stdout.write(selfcheckManagedWrite(rest[0]) & "\n")
+    of AddonVerb.selfcheckWrite:
+      stdout.write(selfcheckManagedWrite(c.selfcheckWrite.path) & "\n")
       return 0
-    of "retention":
-      var policy = DefaultRetention
-      var i = 0
-      while i < rest.len:
-        let a = rest[i]
-        if a == "--keep-generations" or a.startsWith("--keep-generations="):
-          policy.keepGenerations = retentionCount(takeValue(rest, i, "--keep-generations"), "--keep-generations")
-        elif a == "--keep-days" or a.startsWith("--keep-days="):
-          policy.keepDays = retentionCount(takeValue(rest, i, "--keep-days"), "--keep-days")
-        else:
-          raise newException(ValueError, "unknown option " & a)
-        inc i
+    of AddonVerb.retention:
+      let policy = retentionOf(c.retention.keepGenerations,
+        c.retention.keepDays).get(DefaultRetention)
       let current = readCurrentGenerationId(DefaultStateDir)
       let previous = previousGenerationOf(DefaultStateDir, current)
       let dropped = pruneGenerationRoots(current, previous, policy,
@@ -931,10 +733,15 @@ proc runAddonCli*(args: seq[string]): int =
       stdout.write("released store roots (" & $dropped.len & "):\n")
       for g in dropped: stdout.write("  " & g & "\n")
       return 0
-    else:
-      raise newException(ValueError, "unknown command " & cmd)
+    of AddonVerb.testSleep:
+      # Declared by the static binary only; it sleeps in a seam build
+      # (`-d:reproAddonTestSeams`) and is refused in any other.
+      if not AddonTestSeams:
+        stderr.write("repro system addon test-sleep: only a test-seam " &
+          "build runs it\n")
+      return seamSleepCommand(c.testSleep.seconds)
   except ValueError as e:
-    stderr.write("repro system addon: " & e.msg & "\n" & AddonUsage)
+    stderr.write("repro system addon " & cmd & ": " & e.msg & "\n")
     return 2
   except CatchableError as e:
     stderr.write("repro system addon " & cmd & ": " & e.msg & "\n")
@@ -994,7 +801,7 @@ proc renderAddonSections*(r: AddonApplyResult): string =
     for (k, v) in r.sysctlObserved:
       result.add("  " & k & "\t" & v & "\n")
 
-proc runAddonStoreCli*(args: seq[string]): int =
+proc runAddonStoreCommand*(c: ReproAddonCommandLineStore): int =
   ## ``repro store gc | recover | roots | list`` on the add-on's
   ## system-scope store: the same ``repro_local_store`` collector and
   ## recovery the full engine's ``repro store gc`` and ``repro store
@@ -1003,10 +810,12 @@ proc runAddonStoreCli*(args: seq[string]): int =
   ## locks). Roots decide what survives; the retention policy keeps the
   ## current and the previous generation's roots whatever is asked, and the
   ## hand-back hold keeps what a preserved record names (spec §5.2, §9).
-  if args.len == 0 or args[0] in ["-h", "--help"]:
-    stdout.write("usage: repro store gc [--grace-seconds N] | recover | " &
-      "roots | list\n")
-    return (if args.len == 0: 2 else: 0)
+  type StoreVerb = ReproAddonCommandLineStoreCommand
+  let verb = case c.command
+    of StoreVerb.gc: "gc"
+    of StoreVerb.recover: "recover"
+    of StoreVerb.roots: "roots"
+    of StoreVerb.list: "list"
   try:
     # `gc` deletes prefixes no root holds; an apply realising a closure
     # holds no root on it until it commits, so a collection during an apply
@@ -1014,10 +823,10 @@ proc runAddonStoreCli*(args: seq[string]): int =
     # under the host-wide apply lock, like every other store writer.
     # `recover` quarantines every prefix without a receipt, so it adopts
     # first, under the same lock, as `gc` does.
-    let writes = args[0] in ["gc", "recover"]
+    let writes = c.command in {StoreVerb.gc, StoreVerb.recover}
     var hostLock: HostApplyLock
     if writes:
-      hostLock = acquireHostApplyLock("repro store " & args[0])
+      hostLock = acquireHostApplyLock("repro store " & verb)
     defer: hostLock.release()
     if writes:
       # Adopt and root any closure prefix an older realiser left without a
@@ -1028,19 +837,18 @@ proc runAddonStoreCli*(args: seq[string]): int =
       let legacy = migrateLegacyAptClosures(
         handBack = hostHandBackDirs())
       for r in legacy.refused:
-        stderr.write("repro store " & args[0] &
+        stderr.write("repro store " & verb &
           ": legacy apt prefix not adopted: " &
           r.path & ": " & r.reason & "\n")
       for r in legacy.heldUnverified:
-        stderr.write("repro store " & args[0] & ": held unverified (a " &
+        stderr.write("repro store " & verb & ": held unverified (a " &
           "file on the host names it): " & r.path & ": " & r.reason & "\n")
     enterWritableStoreView()
-    if args[0] == "recover":
+    if c.command == StoreVerb.recover:
       # The store's own recovery (the engine's ``repro store recover``):
       # the staging area swept, every prefix directory reconciled with the
       # index from its receipt, an unreadable index rebuilt.
-      if args.len > 1:
-        raise newException(ValueError, "unknown option " & args[1])
+      #
       # The sweep removes everything under the store's tmp/, where a
       # custody recovery a crash interrupted left the altered object it
       # renamed aside: it is filed as evidence first (A11 review finding
@@ -1059,18 +867,10 @@ proc runAddonStoreCli*(args: seq[string]): int =
       return 0
     var s = openStore(StoreRoot)
     defer: s.close()
-    case args[0]
-    of "gc":
-      var grace = DefaultGcGraceSeconds
-      var i = 1
-      while i < args.len:
-        let a = args[i]
-        if a == "--grace-seconds" or a.startsWith("--grace-seconds="):
-          grace = parseInt(takeValue(args, i, "--grace-seconds"))
-        else:
-          raise newException(ValueError, "unknown option " & a)
-        inc i
-      let report = s.gc(graceSeconds = grace)
+    case c.command
+    of StoreVerb.gc:
+      let report = s.gc(graceSeconds = c.gc.graceSeconds.get(
+        DefaultGcGraceSeconds))
       stdout.write("repro store gc: store-root=" & StoreRoot & "\n")
       stdout.write("quarantined: " & $report.quarantined.len & "\n")
       for row in report.quarantined:
@@ -1080,72 +880,50 @@ proc runAddonStoreCli*(args: seq[string]): int =
       for path in report.reclaimed:
         stdout.write("  - " & path & "\n")
       return 0
-    of "roots":
+    of StoreVerb.roots:
       stdout.write("repro store roots: store-root=" & StoreRoot & "\n")
       for row in s.listRoots():
         stdout.write("  - " & row.rootId & " (" & row.kind & ")\n")
       return 0
-    of "list":
+    of StoreVerb.list:
       stdout.write("repro store list: store-root=" & StoreRoot & "\n")
       for row in s.listPrefixes():
         stdout.write("  - " & row.adapter & " " & row.packageName & " " &
           row.version & " " & row.realizedPath & "\n")
       return 0
-    else:
-      raise newException(ValueError, "unknown store command " & args[0])
+    of StoreVerb.recover:
+      return 0  # answered above
   except ValueError as e:
     stderr.write("repro store: " & e.msg & "\n")
     return 2
   except CatchableError as e:
-    stderr.write("repro store " & args[0] & ": " & e.msg & "\n")
+    stderr.write("repro store " & verb & ": " & e.msg & "\n")
     return 1
 
-proc runAddonGeneration(verb: string; args: seq[string];
-                        planOnly: bool; adopt: seq[string] = @[]): int =
+proc runAddonGeneration[T](verb: string; c: T; planOnly: bool;
+                           adopt: seq[string] = @[]): int =
   ## The shared body of ``repro infra plan``, ``repro infra apply`` and
-  ## ``repro system adopt`` on an add-on host: the profile is the
-  ## operator's; the add-on's own objects are added and the ledger is
+  ## ``repro system adopt`` on an add-on host, from a command line that
+  ## declares the generation flags (``addonGenerationFlags``): the profile is
+  ## the operator's; the add-on's own objects are added and the ledger is
   ## kept. Exit 2 for a usage error or a refusal decided before anything
   ## was written (scope, a collision, a link on the path), 1 for an apply
-  ## that failed or left actionable drift, 0 otherwise.
-  var profile = ""
-  var reconcile = false
-  var retention = none(RetentionPolicy)
-  var planId = ""
-  var i = 0
+  ## that failed or left actionable drift, 0 otherwise. ``--no-preview`` is
+  ## accepted and changes nothing: an add-on apply always converges without
+  ## a preview.
   try:
-    while i < args.len:
-      let a = args[i]
-      if a == "--profile" or a.startsWith("--profile="):
-        profile = takeValue(args, i, "--profile")
-      elif a == "--reconcile-drift" or a == "--accept-drift":
-        reconcile = true
-      elif a == "--keep-generations" or a.startsWith("--keep-generations="):
-        var p = retention.get(DefaultRetention)
-        p.keepGenerations = retentionCount(takeValue(args, i, "--keep-generations"), "--keep-generations")
-        retention = some(p)
-      elif a == "--keep-days" or a.startsWith("--keep-days="):
-        var p = retention.get(DefaultRetention)
-        p.keepDays = retentionCount(takeValue(args, i, "--keep-days"), "--keep-days")
-        retention = some(p)
-      elif a == "--plan" or a.startsWith("--plan="):
-        planId = takeValue(args, i, "--plan")
-      elif a == "--no-preview":
-        discard          # an add-on apply always converges without preview
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
-    if profile.len == 0:
+    if c.profile.len == 0:
       raise newException(ValueError, "--profile <file> is required")
+    let retention = retentionOf(c.keepGenerations, c.keepDays)
     if not isAddonHost():
       raise newException(ValueError,
         "this host is not an add-on host (no ownership ledger); run " &
         "`repro system addon bootstrap` first")
-    let profileText = readFile(profile)
+    let profileText = readFile(c.profile)
     let r = runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
       hostIdentity: readHostname(), userProfileText: profileText,
-      reconcileDrift: reconcile, adoptAddresses: adopt, planOnly: planOnly,
-      retention: retention, planId: planId))
+      reconcileDrift: c.reconcileDrift, adoptAddresses: adopt,
+      planOnly: planOnly, retention: retention, planId: c.plan))
     stdout.write(renderAddonSections(r))
     if planOnly:
       stdout.write("plan only: nothing was written\n")
@@ -1193,36 +971,19 @@ proc noSwapIfSecrets*(): int =
   ## one: it runs where its heap cannot be swapped (spec §10.3).
   if isAddonHost() and hostHasSecrets(): reexecInNoSwapScope() else: -1
 
-proc runMigrationPlanCli*(args: seq[string]): int =
+proc runMigrationPlanCommand*(stateDir, agentState, target,
+                              legacySecretsDir: string): int =
   ## ``repro system addon migration-plan``: the migration's plan, nothing
   ## written (spec §9 "Migration"). Read-only on the host and on the state
   ## directories it is given, so it can run against copies before the
-  ## binary that would migrate is installed.
+  ## binary that would migrate is installed. Each empty value takes its
+  ## default: the host's add-on and agent state directories, this host.
   let reexec = noSwapIfSecrets()
   if reexec >= 0: return reexec
-  var stateDir = hostAddonStateDir()
-  var agentState = AgentStateDir
-  var target = ""
-  var legacySecrets = ""
-  var i = 0
-  try:
-    while i < args.len:
-      let a = args[i]
-      if a == "--legacy-secrets-dir" or a.startsWith("--legacy-secrets-dir="):
-        legacySecrets = takeValue(args, i, "--legacy-secrets-dir")
-      elif a == "--state-dir" or a.startsWith("--state-dir="):
-        stateDir = takeValue(args, i, "--state-dir")
-      elif a == "--agent-state" or a.startsWith("--agent-state="):
-        agentState = takeValue(args, i, "--agent-state")
-      elif a == "--target" or a.startsWith("--target="):
-        target = takeValue(args, i, "--target")
-      else:
-        raise newException(ValueError, "unknown option " & a)
-      inc i
-  except ValueError as e:
-    stderr.write("repro system addon migration-plan: " & e.msg & "\n")
-    return 2
-  if target.len == 0: target = readHostname()
+  let stateDir = if stateDir.len > 0: stateDir else: hostAddonStateDir()
+  let agentState = if agentState.len > 0: agentState else: AgentStateDir
+  let target = if target.len > 0: target else: readHostname()
+  let legacySecrets = legacySecretsDir
   const verb = "repro system addon migration-plan"
   if not isAddonHost(stateDir):
     stderr.write(verb & ": " & stateDir & " is not an add-on state " &
@@ -1263,38 +1024,19 @@ proc runMigrationPlanCli*(args: seq[string]): int =
     stderr.write(verb & ": " & e.msg & "\n")
     1
 
-proc runAddonInfraApplyCli*(args: seq[string]): int =
-  ## ``repro infra apply --profile <canonical text> [--reconcile-drift]``
-  ## on an add-on host.
+proc runAddonInfraCommand*(c: ReproAddonCommandLineInfra): int =
+  ## ``repro infra plan|apply --profile <canonical text> [--reconcile-drift]
+  ## ...`` on an add-on host: the ledger diff and the collision report,
+  ## nothing written (`plan`), or an add-on generation (`apply`).
   let r = noSwapIfSecrets()
   if r >= 0: return r
-  runAddonGeneration("repro infra apply", args, planOnly = false)
-
-proc runAddonInfraPlanCli*(args: seq[string]): int =
-  ## ``repro infra plan --profile <canonical text>`` on an add-on host:
-  ## the ledger diff and the collision report, nothing written.
-  let r = noSwapIfSecrets()
-  if r >= 0: return r
-  runAddonGeneration("repro infra plan", args, planOnly = true)
+  case c.command
+  of ReproAddonCommandLineInfraCommand.plan:
+    runAddonGeneration("repro infra plan", c.plan, planOnly = true)
+  of ReproAddonCommandLineInfraCommand.apply:
+    runAddonGeneration("repro infra apply", c.apply, planOnly = false)
 
 proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int
-
-proc runAddonRollbackCli*(args: seq[string]): int =
-  ## ``repro system rollback [<generation>] [--reconcile-drift]`` on an
-  ## add-on host, as the static add-on binary reads it: re-apply a retained
-  ## generation through the switch (``runAddonRollbackCommand``).
-  var target = ""
-  var reconcileDrift = false
-  for a in args:
-    if a == "--reconcile-drift": reconcileDrift = true
-    elif a.startsWith("-"):
-      stderr.write("repro system rollback: unknown option " & a & "\n")
-      return 2
-    elif target.len == 0: target = a
-    else:
-      stderr.write("repro system rollback: unexpected argument " & a & "\n")
-      return 2
-  runAddonRollbackCommand(target, reconcileDrift)
 
 proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int =
   ## Re-apply the retained generation ``target`` (default: the previous
@@ -1331,7 +1073,7 @@ proc runAddonRollbackCommand*(target: string; reconcileDrift: bool): int =
     stderr.write("repro system rollback: " & e.msg & "\n")
     1
 
-proc runAddonAdoptCli*(args: seq[string]): int =
+proc runAddonAdoptCommand*(c: ReproAddonCommandLineSystemAdopt): int =
   ## ``repro system adopt <address> --profile <file>`` (spec §11.2 step
   ## 3): the object the resource targets is claimed as it is -- its bytes
   ## become the add-on's, nothing is written to it -- and the generation
@@ -1340,27 +1082,63 @@ proc runAddonAdoptCli*(args: seq[string]): int =
   ## of the profile is applied on the way (``scopedAdoptProfile``). An
   ## object that cannot be adopted as it is refuses before anything is
   ## written or committed (exit 2).
-  var address = ""
-  var rest: seq[string]
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    if a == "--profile":
-      # The option and its value go to the shared parser as a pair.
-      rest.add(a)
-      if i + 1 < args.len:
-        inc i
-        rest.add(args[i])
-    elif a.startsWith("-"): rest.add(a)
-    elif address.len == 0: address = a
-    else:
-      stderr.write("repro system adopt: unexpected argument " & a & "\n")
-      return 2
-    inc i
-  if address.len == 0:
-    stderr.write("repro system adopt: <address> is required\n")
-    return 2
   let nr = noSwapIfSecrets()
   if nr >= 0: return nr
-  runAddonGeneration("repro system adopt", rest, planOnly = false,
-                     adopt = @[address])
+  runAddonGeneration("repro system adopt", c, planOnly = false,
+                     adopt = @[c.address])
+
+proc runAddonCommandLine*(conf: ReproAddonCommandLine;
+                          version = ""): int =
+  ## The static add-on binary's command line, from the configuration the
+  ## generated parser read (``loadAddonCommandLine``). ``version`` is the
+  ## line ``--version`` and ``version`` print.
+  case conf.command
+  of ReproAddonCommandLineCommand.call:
+    if conf.call.version:
+      echo version
+      return 0
+    # Bare `repro`: no command was given, which is a usage error.
+    stderr.write(ReproAddonCommandLine.helpText([]))
+    return 2
+  of ReproAddonCommandLineCommand.version:
+    echo version
+    return 0
+  of ReproAddonCommandLineCommand.system:
+    let s = conf.system
+    case s.command
+    of ReproAddonCommandLineSystemCommand.addon:
+      return runAddonVerb(s.addon)
+    of ReproAddonCommandLineSystemCommand.state:
+      # What the first-boot restore unit this binary writes runs.
+      return runAddonStateVerb(s.state, @["system", "state"])
+    of ReproAddonCommandLineSystemCommand.adopt:
+      return runAddonAdoptCommand(s.adopt)
+    of ReproAddonCommandLineSystemCommand.rollback:
+      return runAddonRollbackCommand(s.rollback.generation,
+        s.rollback.reconcileDrift)
+  of ReproAddonCommandLineCommand.infra:
+    return runAddonInfraCommand(conf.infra)
+  of ReproAddonCommandLineCommand.store:
+    return runAddonStoreCommand(conf.store)
+
+proc runAddonArgs*(argv: seq[string]; version = ""): int =
+  ## ``argv`` (the static binary's arguments, or the words the full engine
+  ## hands over: ``system addon …``, ``system adopt …``) parsed by the
+  ## generated parser and run.
+  var conf: ReproAddonCommandLine
+  result = loadAddonCommandLine(argv, conf)
+  if result < 0:
+    result = runAddonCommandLine(conf, version)
+
+proc runAddonCli*(args: seq[string]): int =
+  ## ``repro system addon <args>``, through the generated parser.
+  runAddonArgs(@["system", "addon"] & args)
+
+proc runStateCli*(args: seq[string]): int =
+  ## ``repro system addon state <args>``, through the generated parser.
+  runAddonCli(@["state"] & args)
+
+proc runAddonStoreCli*(args: seq[string]): int =
+  ## ``repro store <args>`` on the add-on's store, through the generated
+  ## parser.
+  runAddonArgs(@["store"] & args)

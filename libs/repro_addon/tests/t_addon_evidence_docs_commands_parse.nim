@@ -5,14 +5,14 @@
 ## Each ``sh`` block's lines (continuations joined) and each inline
 ## ``repro-evidence-sink ...`` / ``repro system addon ...`` command in the
 ## prose are parsed WHOLE by the command's own parser: the sink's
-## (``evidence_sink_cli.parseSinkCommand``), and for each ``repro system
-## addon`` verb the guide uses, that verb's (``parsePreflightArgs``,
-## ``parseBootstrapArgs``, ``parseEnrolArgs``, ``parseContainArgs``,
-## ``parseUninstallArgs``, ``parseVerifyDiscardRecordArgs``, or no
-## option at all). A verb the test has no parser for fails it, and so does
-## an elided line (``...``) or a prose span that names a sink command
-## without the tool (``addon-check --update-hosts``): every command the
-## guide prints is one the reader can run (A11 review finding 16).
+## (``evidence_sink_cli.parseSinkCommand``), and for ``repro system addon``
+## the parser generated from the add-on's description (``repro_addon/cli``,
+## ``ReproAddonCommandLine``), which knows every verb and its flags; a
+## ``verify-discard-record`` line must also name the ``--key`` its verb
+## requires. An elided line (``...``) fails the test, and so does a prose
+## span that names a sink command without the tool (``addon-check
+## --update-hosts``): every command the guide prints is one the reader can
+## run (A11 review finding 16).
 ## Placeholders (``<port>``, ``<digest>``) are given sample values first.
 ##
 ## Falsifying build: ``sink-cli-equals-only`` (the old parser, which read
@@ -23,8 +23,6 @@
 import std/[os, strutils, unittest]
 
 import repro_addon/cli
-import repro_addon/containment
-import repro_addon/evidence_enrol
 import repro_addon/evidence_sink_cli
 
 const Guide = currentSourcePath().parentDir.parentDir.parentDir.parentDir /
@@ -85,20 +83,19 @@ suite "the user guide's command lines parse":
         if isSinkCommand(args):
           discard parseSinkCommand(args[1 .. ^1])
         elif isAddonCommand(args):
-          let rest = args[4 .. ^1]
-          case args[3]
-          of "preflight": discard parsePreflightArgs(rest)
-          of "bootstrap": discard parseBootstrapArgs(rest)
-          of "evidence-enrol": discard parseEnrolArgs(rest)
-          of "contain", "release": discard parseContainArgs(rest)
-          of "uninstall": discard parseUninstallArgs(rest)
-          of "verify-discard-record": discard parseVerifyDiscardRecordArgs(rest)
-          of "evidence-credential-check", "migrate":
-            if rest.len > 0: raise newException(ValueError, "takes no option")
-          else:
-            raise newException(ValueError, "no parser for " & args[3])
+          # The words after `repro`, as the static binary and the engine's
+          # mounted `system addon` both read them.
+          let conf = ReproAddonCommandLine.load(args[1 .. ^1])
+          let addon = conf.system.addon
+          if addon.command ==
+              ReproAddonCommandLineSystemAddonCommand.verifyDiscardRecord and
+              addon.verifyDiscardRecord.key.len == 0:
+            raise newException(ValueError, "verify-discard-record needs --key")
         else:
           raise newException(ValueError, "not a command the guide may print")
+      except CliUsageError as e:
+        ok = false
+        why = cliErrorText(e)
       except CatchableError as e:
         ok = false
         why = e.msg

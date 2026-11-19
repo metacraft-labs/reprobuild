@@ -93,13 +93,13 @@ proc seamPauseRecovery*(stateDir: string) =
   else:
     discard
 
-proc seamSleepCommand*(args: seq[string]): int =
-  ## ``repro system addon test-sleep <seconds>``, compiled into the seam
-  ## build only: a command in the store that hangs, for the gate that
-  ## checks ``confirmTimeout`` bounds an ``exec:`` health check.
+proc seamSleepCommand*(seconds: int): int =
+  ## ``repro system addon test-sleep <seconds>``, declared in the seam build
+  ## only (``addon_command_line``): a command in the store that hangs, for
+  ## the gate that checks ``confirmTimeout`` bounds an ``exec:`` health
+  ## check.
   when AddonTestSeams:
-    if args.len != 1: return 2
-    sleep(parseInt(args[0]) * 1000)
+    sleep(seconds * 1000)
     0
   else:
     2
