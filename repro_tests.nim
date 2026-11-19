@@ -8171,7 +8171,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: let rootA = project(\"rbc4-a\", \"int add(int a, int b) { retur..."),
+    singleReason: "suite-scope statement runs at every start-up: let rootA = project(\"keys-a\", \"int add(int a, int b) { retur..."),
   TestSpec(
     source: "libs/repro_local_store/tests/t_m8_multi_output_realize.nim",
     binary: "build/test-bin/t_m8_multi_output_realize",

@@ -51,7 +51,7 @@ import library_cache_sharing_fixture
 
 suite "one library, two feature sets, two artifacts":
   test "different features build two libraries; the same features share one":
-    var host = newSharedHost("rbc4-features-")
+    var host = newSharedHost("feature-sets-")
     defer: host.cleanup()
     let withMul = host.scratch / "one" / "with-mul"
     let plain = host.scratch / "two" / "plain"

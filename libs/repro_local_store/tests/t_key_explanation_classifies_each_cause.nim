@@ -71,9 +71,9 @@ proc onlyCause(explanation: KeyExplanation): KeyCause =
     result = explanation.causes[0]
 
 suite "key_explanation names the one component that differs":
-  let rootA = project("rbc4-a", "int add(int a, int b) { return a + b; }\n")
-  let rootB = project("rbc4-b", "int add(int a, int b) { return a + b; }\n")
-  let rootC = project("rbc4-c", "int add(int a, int b) { return b + a; }\n")
+  let rootA = project("keys-a", "int add(int a, int b) { return a + b; }\n")
+  let rootB = project("keys-b", "int add(int a, int b) { return a + b; }\n")
+  let rootC = project("keys-c", "int add(int a, int b) { return b + a; }\n")
 
   test "two checkouts at different paths have the same key":
     let a = evidenceOf(compileSide(rootA))

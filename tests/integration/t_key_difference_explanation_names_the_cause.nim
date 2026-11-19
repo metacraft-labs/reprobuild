@@ -82,7 +82,7 @@ proc checkOneCause(doc: JsonNode; pair: Pair) =
 
 suite "the explanation of a key difference names its cause":
   test "source, flag, define, compiler and dependency pairs":
-    var host = newSharedHost("rbc4-explain-")
+    var host = newSharedHost("key-explain-")
     defer: host.cleanup()
     let base = host.scratch / "base" / "app"
     writeFeatureLibraryProject(base, "base", [])
