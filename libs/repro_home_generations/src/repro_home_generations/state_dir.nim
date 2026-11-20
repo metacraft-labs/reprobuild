@@ -19,7 +19,7 @@
 ##     current                    # symlink on POSIX; current.txt on Windows
 ##     locks/apply.lock
 
-import std/[os]
+import std/[os, strutils, sysrand, times]
 from repro_core/paths import extendedPath
 import repro_core/durable_replace
 
@@ -33,6 +33,10 @@ const
   CurrentSymlinkName* = "current"
   CurrentFileNameWindows* = "current.txt"
   PointerFileName* = "pointer.bin"
+  StoreRootKeyFileName* = "store-root-key"
+    ## `<state-dir>/store-root-key`: what names this state directory in the
+    ## ids of the store roots it registers (`stateDirRootKey`).
+  StoreRootKeyHexLen* = 32
 
 # ---------------------------------------------------------------------------
 # CLI-override state. M62 has no CLI of its own; the M63 apply pipeline
@@ -178,6 +182,81 @@ proc ensureStateDir*(stateDir: string) =
   createDir(extendedPath(stateDir))
   createDir(extendedPath(generationsRoot(stateDir)))
   createDir(extendedPath(locksDir(stateDir)))
+
+# ---------------------------------------------------------------------------
+# The key this state directory's store roots are named by.
+# ---------------------------------------------------------------------------
+
+proc storeRootKeyPath*(stateDir: string): string =
+  stateDir / StoreRootKeyFileName
+
+proc readStoreRootKey(stateDir: string): tuple[present: bool; key: string] =
+  ## `present` with an empty `key`: the file is there and is not
+  ## `StoreRootKeyHexLen` lowercase hex digits. A file that is there and
+  ## cannot be read raises: an unreadable key is not a missing one.
+  let path = storeRootKeyPath(stateDir)
+  if not fileExists(extendedPath(path)):
+    return (false, "")
+  result.present = true
+  let key = readFile(extendedPath(path)).strip()
+  if key.len != StoreRootKeyHexLen:
+    return
+  for ch in key:
+    if ch notin {'0'..'9', 'a'..'f'}:
+      return
+  result.key = key
+
+proc existingStateDirRootKey*(stateDir: string): string =
+  ## The key in `<state-dir>/store-root-key`, or "" when the file is
+  ## missing or malformed. Never creates or replaces it: a state directory
+  ## without a key has registered no root under one. Raises when the file
+  ## is there and cannot be read.
+  readStoreRootKey(stateDir).key
+
+proc stateDirRootKey*(stateDir: string): string =
+  ## The key that tells this state directory's store roots from those of
+  ## every other state directory using the same store. Created when the
+  ## file is missing: `StoreRootKeyHexLen` hex digits from the system's
+  ## random source, written durably (a synced temporary file renamed into
+  ## place).
+  ##
+  ## The key is an identity the directory carries, not its path. Two
+  ## containers that mount one store and each keep their state under the
+  ## same path are two state directories; a directory that is moved, or
+  ## reached under another spelling, is still one. Generation ids are
+  ## content-addressed and name no run-environment fact, so without the
+  ## key two state directories that apply the same profile would register
+  ## one root between them (reprobuild-pm
+  ## `spec/Home-Profile-Generations-And-State.md` §"Store GC Interaction").
+  ##
+  ## The key is authoritative operational state: nothing regenerates it,
+  ## and the roots registered under it are found by it alone. So it is
+  ## replaced only when the file is missing. A file that cannot be read
+  ## raises. A malformed one is moved aside, with its bytes, to
+  ## `store-root-key.malformed-<unix-time>` and reported, and a new key is
+  ## created; the roots under the old key then stay until someone removes
+  ## them.
+  ##
+  ## Callers that create it hold `apply.lock`, as every writer of a
+  ## generation does, so two processes never create it at once.
+  let existing = readStoreRootKey(stateDir)
+  if existing.key.len > 0:
+    return existing.key
+  let path = storeRootKeyPath(stateDir)
+  if existing.present:
+    let aside = path & ".malformed-" & $getTime().toUnix
+    moveFile(extendedPath(path), extendedPath(aside))
+    stderr.writeLine("warning: " & path & " did not hold a store root " &
+      "key; it was moved to " & aside & " and a new key was created. " &
+      "Store roots registered under the old key are not released.")
+  var bytes: array[StoreRootKeyHexLen div 2, byte]
+  if not urandom(bytes):
+    raise newException(IOError,
+      "could not read the system random source to create " & path)
+  for b in bytes:
+    result.add(toHex(b.int, 2).toLowerAscii)
+  createDir(extendedPath(stateDir))
+  replaceFileDurably(path, result & "\n")
 
 # ---------------------------------------------------------------------------
 # `current` reader / writer.

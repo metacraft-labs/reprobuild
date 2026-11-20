@@ -2963,6 +2963,17 @@ proc releaseQuarantinedRootsOrWarn(stateDir: string; store: var Store) =
   ## A root that cannot be released now (a locked index) only keeps some
   ## prefixes a while longer; the next apply retries, so it never fails
   ## the apply.
+  ##
+  ## First every generation this state directory keeps gets its own root
+  ## (`ensureGenerationRoots`): one committed by a build that named roots by
+  ## the bare generation id is otherwise held only through a root this
+  ## state directory does not own.
+  try:
+    discard ensureGenerationRoots(stateDir, store)
+  except CatchableError as err:
+    stderr.writeLine("warning: could not register the store roots of " &
+      "this state directory's generations (" & err.msg & "); a later " &
+      "apply retries.")
   try:
     discard releaseQuarantinedRoots(stateDir, store)
   except CatchableError as err:

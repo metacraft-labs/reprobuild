@@ -19846,13 +19846,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_home_apply",
-        "repro_home_generations"
+        "repro_home_generations",
+        "repro_local_store"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

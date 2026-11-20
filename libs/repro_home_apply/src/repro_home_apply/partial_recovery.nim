@@ -26,7 +26,8 @@
 ##      marker write itself raced with a power loss before the
 ##      pipeline could ever write its first state-dir byte.
 ##   5. A quarantined generation that step 9 committed still has the
-##      `profile` store root `writeGeneration` registered under its id;
+##      `profile` store root `writeGeneration` registered for it, named by
+##      this state directory and its id (`profileRootId`);
 ##      left in place, it keeps the generation's prefixes live through
 ##      store GC although no generation accounts for them.
 ##      `releaseQuarantinedRoots` deletes it. The apply calls it after its
@@ -162,6 +163,14 @@ proc releaseQuarantinedRoots*(stateDir: string; store: var Store):
   ## one `current` names. Returns the ids whose roots were deleted
   ## (deleting a root that is already gone changes nothing).
   ##
+  ## Only this state directory's root for the id is deleted
+  ## (`profileRootId`). Another state directory that uses the same store
+  ## and applied the same profile has the same generation id and holds it
+  ## through a root of its own, which this cannot see and never touches.
+  ## Nor does it touch a root named by the bare id, which an earlier build
+  ## registered: that one may be all another state directory holds the
+  ## generation through.
+  ##
   ## An id that still names a directory under `generations/` keeps its
   ## root: generation ids are content-addressed, so the same profile
   ## applied again since the crash recreated the generation, and it holds
@@ -170,6 +179,11 @@ proc releaseQuarantinedRoots*(stateDir: string; store: var Store):
   ## generation nor a live one.
   let aborted = abortedDir(stateDir)
   if not dirExists(extendedPath(aborted)):
+    return @[]
+  # No key, no root of this state directory's to delete: it registered
+  # none under one. The key is never created here.
+  let key = existingStateDirRootKey(stateDir)
+  if key.len == 0:
     return @[]
   let active = readCurrentGenerationId(stateDir)
   # TODO(win-longpath): walk results escape; needs review
@@ -184,7 +198,7 @@ proc releaseQuarantinedRoots*(stateDir: string; store: var Store):
       continue
     result.add(id)
   for id in result:
-    store.deleteRoot(id)
+    store.deleteRoot(profileRootIdForKey(key, id))
 
 proc recoverPartialApply*(stateDir: string): seq[AbortedGenerationRecord] =
   ## Run partial-apply recovery on startup of `repro home apply`.
