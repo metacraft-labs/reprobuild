@@ -9,6 +9,8 @@
 ##     `[branch-roles.*]`;
 ##   * every fallback chain reaches `mainline` without a cycle (its own test:
 ##     t_custom_role_fallback_cycle_is_rejected);
+##   * no `mainline` key is `false`, or any other value that is not a string
+##     (§3.1: the one role that cannot be declared absent);
 ##   * every repo resolves `mainline`;
 ## and each failure names the file and key, and the workspace does not
 ## resolve. §2.4 adds that a custom role name is lowercase-hyphenated and not
@@ -250,3 +252,53 @@ suite "§3.5 role validation is refused at manifest load":
       fx.repos.add("old")
       check fx.expectRefused("revision without mainline", fx.fragmentPath("old"),
         "repo.mainline", "has no mainline")
+    # `mainline = false` is not a way to have no mainline. `false` declares an
+    # OPTIONAL tier absent so that it falls back (§3.1); `mainline` is where
+    # every chain ends and has nothing to fall back to, so the fragment is
+    # refused at its own key. It must never load with the boolean read as a
+    # branch named "false" — the defect recorded in reprobuild-pm
+    # issues/2026-11-17-mainline-false-is-accepted-and-reported-as-the-branch-false.md,
+    # where the typed decoder coerced the TOML boolean into the string.
+    for (label, seed) in [("nothing else declares it", false),
+                          ("the default profile declares it", true)]:
+      var fx = newRolesFixture("repro-role-mainline-false-")
+      defer: fx.dispose()
+      if seed:
+        fx.seedValid()
+      fx.addRepo("bad", "mainline = false")
+      check fx.expectRefused("mainline = false, " & label,
+        fx.fragmentPath("bad"), "repo.mainline", "`mainline` cannot be `false`")
+    # The same for a profile the fragment names: a profile's `false` would
+    # leave the repo with no mainline just the same.
+    block:
+      var fx = newRolesFixture("repro-role-mainline-false-profile-")
+      defer: fx.dispose()
+      fx.seedValid()
+      fx.addRepo("bad", "profile = \"product\"\nmainline = false")
+      check fx.expectRefused("mainline = false over a named profile",
+        fx.fragmentPath("bad"), "repo.mainline", "`mainline` cannot be `false`")
+    # A value of any other non-string type is refused too, not stringified.
+    for value in ["true", "7", "[\"dev\"]"]:
+      var fx = newRolesFixture("repro-role-mainline-type-")
+      defer: fx.dispose()
+      fx.addRepo("bad", "mainline = " & value)
+      check fx.expectRefused("mainline = " & value, fx.fragmentPath("bad"),
+        "repo.mainline", "must be a branch name")
+    # The settings file's declarers: a profile and `[workspace]`.
+    for (label, body, key) in [
+        ("a profile", validSettings.replace("mainline = \"dev\"",
+          "mainline = false"), "profiles.product.mainline"),
+        ("[workspace]", validSettings.replace("[workspace]\n",
+          "[workspace]\nmainline = false\n"), "workspace.mainline")]:
+      var fx = newRolesFixture("repro-role-mainline-false-settings-")
+      defer: fx.dispose()
+      fx.seedValid()
+      fx.writeSettings(body)
+      check fx.expectRefused("mainline = false in " & label, fx.settingsPath,
+        key, "`mainline` cannot be `false`")
+    # A branch that really is named `false` is written as a string, and loads.
+    block:
+      var fx = newRolesFixture("repro-role-mainline-quoted-false-")
+      defer: fx.dispose()
+      fx.addRepo("odd", "mainline = \"false\"")
+      check fx.resolveDemo().repo("odd").role("mainline").branch == "false"
