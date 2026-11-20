@@ -156,6 +156,12 @@ export NonDeterminismPolicy, MonitorCaptureBreadth
 import clispec/[model, dsl, config_check]
 export model, config_check
 
+# The ``<executable>CliDescription`` templates the ``package`` macro emits in
+# every mode, so a program compiled in any of them finds its description
+# (the thin mode emits the same ones). Compile-time machinery: not
+# re-exported.
+import repro_project_dsl/cli_description
+
 include "repro_project_dsl/types"
 
 # Project-DSL-Composition M5: per-section typed-object prelude.
