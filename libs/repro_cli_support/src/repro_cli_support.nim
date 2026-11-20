@@ -46732,15 +46732,35 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     result.diagnostic = result.worktree.diagnostic
     return
 
+  # A declared path that IS the pushed worktree settles the answer without
+  # Git. The common-directory sweep below costs two git processes per declared
+  # repo, and its result is consulted only when no declared path matches, so
+  # running it for an ordinary push from the declared checkout spent ~320
+  # processes per call on a list that was then discarded — and the pre-push
+  # gate calls this twice (once itself, once via ``pickTriggerRepo``). Two
+  # declarations of the same path are still detected, by path alone.
+  # reprobuild-pm issues/2026-10-10-pre-push-gate-observes-every-declared-
+  # repo-three-times-per-push.md.
   var pathMatches: seq[int]
+  for index, repo in repos:
+    if samePathIdentity(result.worktree.worktreeRoot,
+        workspaceRoot / repo.path):
+      pathMatches.add(index)
+  if pathMatches.len == 1:
+    result.found = true
+    result.repoIndex = pathMatches[0]
+    return
+  if pathMatches.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo shares the pushed " &
+      "worktree's filesystem identity"
+    return
+
   var commonMatches: seq[int]
   var missingDeclaredWorktrees = initHashSet[int]()
   var presentDeclaredWorktrees: seq[int]
   for index, repo in repos:
     let declaredPath = workspaceRoot / repo.path
-    if samePathIdentity(result.worktree.worktreeRoot, declaredPath):
-      pathMatches.add(index)
-      continue
     let declaredWorktree = discoverGitWorktree(identity, declaredPath)
     if declaredWorktree.ok:
       if samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
@@ -46756,12 +46776,11 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
       # in for it would turn a failed structural check into authorization.
       missingDeclaredWorktrees.incl(index)
 
-  let structural = if pathMatches.len > 0: pathMatches else: commonMatches
-  if structural.len == 1:
+  if commonMatches.len == 1:
     result.found = true
-    result.repoIndex = structural[0]
+    result.repoIndex = commonMatches[0]
     return
-  if structural.len > 1:
+  if commonMatches.len > 1:
     result.ambiguous = true
     result.diagnostic = "more than one declared repo shares the pushed " &
       "worktree's filesystem identity"
@@ -56072,18 +56091,25 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       continue
     headShas[repo.path] = headRes.headSha
     observedRoots[repo.name] = repoPath
-    let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
-    let isClean =
-      if cleanRes.status == gqsOk: cleanRes.isClean
-      else: false
-    if not isClean and inDirtyScope:
-      let reason =
-        if cleanRes.status != gqsOk:
-          probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
-        else:
-          "working tree has uncommitted changes"
-      dirtyEntries.add(WorkspaceLockDirtyEntry(
-        name: repo.name, path: repo.path, reason: reason))
+    # Only an in-scope repo's cleanliness can refuse, and the lock records
+    # HEAD and branch, never cleanliness — so probing an out-of-scope repo
+    # (``git status``, the costliest of the per-repo queries) computed a value
+    # that was discarded. Under the pre-push gate that was every declared repo
+    # outside the pushed closure (reprobuild-pm issues/2026-10-10-pre-push-
+    # gate-observes-every-declared-repo-three-times-per-push.md).
+    if inDirtyScope:
+      let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
+      let isClean =
+        if cleanRes.status == gqsOk: cleanRes.isClean
+        else: false
+      if not isClean:
+        let reason =
+          if cleanRes.status != gqsOk:
+            probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
+          else:
+            "working tree has uncommitted changes"
+        dirtyEntries.add(WorkspaceLockDirtyEntry(
+          name: repo.name, path: repo.path, reason: reason))
     let branchRes = gitRunPlainQuery(identity,
       ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
