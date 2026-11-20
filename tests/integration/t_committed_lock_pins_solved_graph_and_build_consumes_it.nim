@@ -52,6 +52,7 @@
 ## observe no ``unselected`` entry at all and FAIL.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
   ## The reprobuild checkout root, resolved from THIS SOURCE FILE's path
@@ -274,3 +275,153 @@ suite "MO-1: committed lock pins solved graph and build consumes it":
       check graphRc == 0
       check "version = \"7.7.7\"" in graphOut
       check "# source: lock" in graphOut
+
+  test "--print-solved-graph prints the project the build's anchor names":
+    # reprobuild-pm issue
+    # 2026-11-18-print-solved-graph-takes-the-first-positional-as-the-project-not-the-builds-anchor
+    # (CLI/build.md §"Target Selection"). The printed graph is the one "the
+    # build would pin", so its project is the one the build anchors on — the
+    # first PATH-SHAPED selector, else a sibling checkout's
+    # ``<package>:<name>``, else the current directory — classified by
+    # spelling, never by what the disk holds. It used to be the FIRST
+    # POSITIONAL, looked up on the disk: ``test`` beside a ``test/``
+    # directory printed ``./test``'s graph, while ``lint ./sub`` and
+    # ``sibpkg:tool`` printed the current directory's.
+    #
+    # Every project carries a ``repro.solver`` that pins ``nim`` to a
+    # different version, so the printed version names the project that was
+    # read. No mocks: the real binary, real directories, a real solve.
+    if not fileExists(reproBinary):
+      skip("needs a built ./build/bin/repro (run `just build`)")
+    else:
+      let ws = getTempDir() / "mo1-anchor-" & $getCurrentProcessId()
+      removeDir(ws)
+      defer: removeDir(ws)
+      proc writeSolver(dir, nimVersion: string) =
+        createDir(dir)
+        writeFile(dir / "repro.solver", "package app\n" &
+          "versions: 0.1.0\ndepends: nim >=1.0.0 <10.0.0\n\n" &
+          "package nim\nversions: " & nimVersion & "\n")
+      let app = ws / "app"
+      writeSolver(app, "2.2.0")
+      writeSolver(app / "test", "9.9.9")   # same name as the selector `test`
+      writeSolver(app / "sub", "8.8.8")
+      writeSolver(ws / "sibpkg", "7.7.7")  # a sibling checkout
+      # The sibling is recognised by its project file; the print path never
+      # loads it.
+      writeFile(ws / "sibpkg" / "repro.nim", "discard\n")
+
+      proc printed(selectors: string): string =
+        let (output, rc) = execCmdEx(reproBinary &
+          " build --print-solved-graph " & selectors, workingDir = app)
+        checkpoint("repro build --print-solved-graph " & selectors &
+          " (rc " & $rc & "):\n" & output)
+        check rc == 0
+        output
+      proc nimAt(version: string): string =
+        "{ name = \"nim\", version = \"" & version & "\""
+
+      # A bare `test` is the current project's target, so the current
+      # project's graph — not `./test`'s.
+      let bare = printed("test")
+      check nimAt("2.2.0") in bare
+      check nimAt("9.9.9") notin bare
+      # The path spelling selects the directory (the control).
+      check nimAt("9.9.9") in printed("./test")
+      # A name before a path: the build anchors on the path.
+      let mixed = printed("lint ./sub")
+      check nimAt("8.8.8") in mixed
+      check nimAt("2.2.0") notin mixed
+      # A sibling checkout's `<package>:<name>`: the build anchors there.
+      let sibling = printed("sibpkg:tool")
+      check nimAt("7.7.7") in sibling
+      check nimAt("2.2.0") notin sibling
+
+  test "a path that names nothing is never answered from the current directory":
+    # reprobuild-pm issue
+    # 2026-11-18-repro-why-and-print-solved-graph-fall-back-to-the-current-directory-for-a-path-that-does-not-resolve
+    # (CLI/build.md §"Target Selection", CLI/why.md). The lock a command
+    # reads is the one in the project its path anchor names
+    # (``buildLockProjectDir``). The rule used to end in "anything else is
+    # the current directory", and two callers reached that:
+    #
+    # * ``repro why <pkg> ./sub#x`` passed the selector with its fragment,
+    #   and ``./sub#x`` is no path on the disk, so the package answer came
+    #   from the current directory's graph, not from ``./sub``'s;
+    # * ``repro build --print-solved-graph ./typo`` exited 0 and printed the
+    #   current directory's graph, where the build of ``./typo`` fails.
+    #
+    # The current directory pins ``nim`` 2.2.0 and ``sub`` pins 8.8.8, so a
+    # printed 2.2.0 is an answer from the wrong project. No mocks: the real
+    # binary, real directories, a real solve.
+    if not fileExists(reproBinary):
+      skip("needs a built ./build/bin/repro (run `just build`)")
+    else:
+      let app = getTempDir() / "mo1-nofallback-" & $getCurrentProcessId()
+      removeDir(app)
+      defer: removeDir(app)
+      proc writeSolver(dir, nimVersion: string) =
+        createDir(dir)
+        writeFile(dir / "repro.solver", "package app\n" &
+          "versions: 0.1.0\ndepends: nim >=1.0.0 <10.0.0\n\n" &
+          "package nim\nversions: " & nimVersion & "\n")
+      writeSolver(app, "2.2.0")
+      writeSolver(app / "sub", "8.8.8")
+
+      proc run(arguments: string): tuple[output: string, rc: int] =
+        let (output, rc) = execCmdEx(reproBinary & " " & arguments,
+          workingDir = app)
+        checkpoint("repro " & arguments & " (rc " & $rc & "):\n" & output)
+        (output, rc)
+      proc nimAt(version: string): string =
+        "{ name = \"nim\", version = \"" & version & "\""
+
+      # `repro why` drops the fragment, as the build does.
+      let whySub = run("why nim ./sub#x")
+      check whySub.rc == 0
+      check "package: nim" in whySub.output
+      check "version: 8.8.8" in whySub.output
+      check "version: 2.2.0" notin whySub.output
+      # The controls: the directory alone, and no path at all.
+      check "version: 8.8.8" in run("why nim ./sub").output
+      check "version: 2.2.0" in run("why nim").output
+
+      # A path that names nothing has no package answer.
+      let whyMissing = run("why nim ./missing")
+      check whyMissing.rc != 0
+      check "package: nim" notin whyMissing.output
+      let whyMissingFragment = run("why nim ./missing#x")
+      check whyMissingFragment.rc != 0
+      check "package: nim" notin whyMissingFragment.output
+
+      # The printer refuses it and prints no graph.
+      for selectors in ["./missing", "./missing#x", "lint ./missing",
+                        "./missing/repro.nim"]:
+        let missing = run("build --print-solved-graph " & selectors)
+        check missing.rc != 0
+        check "names no file or directory" in missing.output
+        check nimAt("2.2.0") notin missing.output
+        check "# source:" notin missing.output
+
+      # The build refuses it with the same message.
+      let built = run("build ./missing")
+      check built.rc != 0
+      check "names no file or directory" in built.output
+
+      # A project file that is not there, in a directory that is, still names
+      # that directory: it is where a bare name is anchored, and where a
+      # Mode-1 workspace is read from.
+      let absentProjectFile =
+        run("build --print-solved-graph ./sub/repro.nim#x")
+      check absentProjectFile.rc == 0
+      check nimAt("8.8.8") in absentProjectFile.output
+      check nimAt("2.2.0") notin absentProjectFile.output
+      check nimAt("8.8.8") in run("build --print-solved-graph ./sub#x").output
+      # `repro why` reads that directory's graph for it too, in text and JSON.
+      let whyAbsentProjectFile = run("why nim ./sub/repro.nim")
+      check whyAbsentProjectFile.rc == 0
+      check "version: 8.8.8" in whyAbsentProjectFile.output
+      let whyJson = run("why nim ./sub#x --json")
+      check whyJson.rc == 0
+      check "\"version\":\"8.8.8\"" in whyJson.output.replace(" ", "")
+      check "2.2.0" notin whyJson.output

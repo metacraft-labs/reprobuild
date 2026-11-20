@@ -31287,24 +31287,36 @@ proc committedLockDerivedProject(workspaceRoot: string):
     repos: @[repo] & nestedDeps,
     projectFile: committedLockPath(root)))
 
-proc resolveProjectDirFromTarget(target: string): string =
-  ## Resolve the directory that owns the committed lock for a build
-  ## target. An existing directory is itself; an existing file resolves
-  ## to its parent; a project file that does not exist (``<dir>/repro.nim``
-  ## or ``<dir>/reprobuild.nim``) in a directory that does names that
-  ## directory ([CLI/build.md §"Target Selection"]); everything else (a
-  ## bare name selector, or an empty target) falls back to the current
-  ## working directory.
+proc buildLockProjectDir*(target: string): string =
+  ## The directory whose committed lock (and ``repro.solver`` sidecar) a
+  ## ``repro build`` pins, from the engine anchor ``parseAndResolveSelectors``
+  ## returned (``target``, ``"."`` when no selector was given). The build
+  ## (``lockConsumption``), ``--print-solved-graph`` and the package answer
+  ## of ``repro why`` all read the lock through this one rule, so the graph
+  ## printed or explained is the one the build pins.
   ##
-  ## The missing-project-file case is the anchor ``bareNameAnchor`` gives a
-  ## request of names only in a directory with no project file, and the
-  ## spelling ``mode1WorkspaceCandidate`` reads as a Mode-1 workspace: an
-  ## explicit ``sub/repro.nim#x`` builds the project synthesised for
-  ## ``sub/`` and must pin ``sub/``'s lock, as ``sub#x`` does, not the
-  ## current directory's.
-  if target.len == 0:
+  ## The ``#<fragment>`` is dropped first; what is left is the anchor's path:
+  ##
+  ## * empty (no selector): the current directory;
+  ## * an existing directory: that directory;
+  ## * an existing file: its directory;
+  ## * a project file that does not exist (``<dir>/repro.nim`` or
+  ##   ``<dir>/reprobuild.nim``) in a directory that does: that directory,
+  ##   the one the project file would be in ([CLI/build.md §"Target
+  ##   Selection"]). A bare name is anchored this way, and an explicit
+  ##   ``sub/repro.nim#x`` builds the project synthesised for ``sub/`` and
+  ##   must pin ``sub/``'s lock.
+  ##
+  ## Any other path names nothing, and raises ``ValueError``. It is NEVER
+  ## replaced by the current directory: ``--print-solved-graph ./typo`` used
+  ## to exit 0 with the current directory's graph, and ``repro why <pkg>
+  ## ./sub#x`` (whose fragment was not dropped) answered from the current
+  ## directory's lock instead of ``./sub``'s (reprobuild-pm issue
+  ## 2026-11-18-repro-why-and-print-solved-graph-fall-back-to-the-current-directory-for-a-path-that-does-not-resolve).
+  let base = splitTarget(target).base
+  if base.len == 0:
     return getCurrentDir()
-  let abs = absolutePath(target)
+  let abs = absolutePath(base)
   if dirExists(extendedPath(abs)):
     return abs
   if fileExists(extendedPath(abs)):
@@ -31313,7 +31325,10 @@ proc resolveProjectDirFromTarget(target: string): string =
   if (name == CanonicalProjectFileName or name == LegacyProjectFileName) and
       dirExists(extendedPath(parentDir(abs))):
     return parentDir(abs)
-  getCurrentDir()
+  raise newException(ValueError,
+    "path selector '" & base & "' names no file or directory (" & abs &
+      "); no project is read for it, and the current directory's lock is " &
+      "not read in its place")
 
 # Forward declarations — bodies live after ``parseExplainFixture`` (which
 # they consume to turn the sidecar solver-inputs text into the solver's
@@ -31825,18 +31840,42 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
-  # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
-  # selector classification so it works against a committed-lock-only
-  # fixture directory that has no ``repro.nim``. Prints the solved graph
-  # the build would pin (from the committed lock when present, else a
+  # Named-Targets M2 positional resolution lives in the shared M3
+  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
+  # ``runWatchCommand`` cannot drift. The helper classifies every
+  # selector via ``classifyBuildSelector``; the first path-shaped
+  # selector (or the current directory when there's none) becomes the
+  # engine's project anchor, and every name-shaped selector contributes
+  # its closure to ``extraNameSelectors`` so the build runs in one
+  # pass.
+  # ----------------------------------------------------------------
+  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
+  target = resolved.target
+  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
+  let targetWasOmitted = resolved.targetWasOmitted
+  if target.len == 0:
+    target = "."
+
+  # ----------------------------------------------------------------
+  # MO-1 — ``--print-solved-graph`` no-build inspection. Prints the solved
+  # graph the build would pin (from the committed lock when present, else a
   # fresh solve of the ``repro.solver`` sidecar) and exits without
   # building — exercising the exact lock-consumption loader the real build
-  # uses.
+  # uses. Answered AFTER selector classification, from the project the
+  # build's own anchor names (``buildLockProjectDir``, the rule
+  # ``lockConsumption`` below applies), not from the first positional:
+  # ``--print-solved-graph test`` beside a ``test/`` directory, ``lint
+  # ./sub`` and ``runquota:runquotad`` print the graph the build of the same
+  # command line pins (CLI/build.md §"Target Selection"; reprobuild-pm issue
+  # 2026-11-18-print-solved-graph-takes-the-first-positional-as-the-project-not-the-builds-anchor).
+  # A committed-lock-only fixture directory with no ``repro.nim`` still
+  # works when it is the one path selector: the resolver classifies it by
+  # spelling and needs no project file for it. A command line the resolver
+  # refuses (two path anchors in different projects) is refused here too,
+  # as the build refuses it.
   # ----------------------------------------------------------------
   if printSolvedGraph:
-    let rawTarget =
-      if positionalSelectors.len > 0: positionalSelectors[0] else: ""
-    let projDir = resolveProjectDirFromTarget(rawTarget)
+    let projDir = buildLockProjectDir(target)
     # NLF-M5 §5.5 — a strategy OVERRIDES the committed lock for THIS
     # invocation, and `--print-solved-graph` is an invocation. Printing the
     # committed graph under `--strategy highest` would report the opposite of
@@ -31866,23 +31905,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     stdout.write(serializeSolvedGraphLock(lk))
     stdout.write("# source: " & graph.source & "\n")
     return 0
-
-  # ----------------------------------------------------------------
-  # Named-Targets M2 positional resolution lives in the shared M3
-  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
-  # ``runWatchCommand`` cannot drift. The helper classifies every
-  # selector via ``classifyBuildSelector``; the first path-shaped
-  # selector (or the current directory when there's none) becomes the
-  # engine's project anchor, and every name-shaped selector contributes
-  # its closure to ``extraNameSelectors`` so the build runs in one
-  # pass.
-  # ----------------------------------------------------------------
-  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
-  target = resolved.target
-  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
-  let targetWasOmitted = resolved.targetWasOmitted
-  if target.len == 0:
-    target = "."
 
   # ----------------------------------------------------------------
   # MO-1 / Named-Lock-Files NLF-M3 — consume the committed solved-graph lock,
@@ -31916,7 +31938,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # reaches the pinning path with no separate wiring.
   # ----------------------------------------------------------------
   block lockConsumption:
-    let projDir = resolveProjectDirFromTarget(splitTarget(target).base)
+    let projDir = buildLockProjectDir(target)
     let effectiveLock =
       if lockOverride.len > 0: absolutePath(lockOverride)
       else: committedLockPath(projDir)
@@ -36180,8 +36202,12 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
   proc packageSelectionAnswer(): string =
     if explicitAction:
       return ""
+    # The lock is the one a build of ``target`` pins, found by the build's
+    # own rule: the fragment of ``./sub#x`` is dropped, and a path that
+    # names nothing yields no package answer (never the current
+    # directory's).
     let projDir =
-      try: resolveProjectDirFromTarget(target)
+      try: buildLockProjectDir(target)
       except CatchableError: return ""
     var graph: tuple[solution: UnifiedSolution, source: string,
                      lockPath: string, found: bool]
@@ -82029,32 +82055,97 @@ proc renderHealthTextLines*(checks: seq[HealthCheck]): seq[string] =
     if c.status != hsOk and c.remedy.len > 0:
       result.add("  remedy: " & c.remedy)
 
+type
+  HealthFixEmit = proc (line: string) {.closure.}
+    ## Where ``--fix`` writes one line. It is called BEFORE the action the
+    ## line announces, and the writer flushes, so an operator watching a
+    ## long fix (cloning many repositories) sees what is running now.
+
+proc healthFixWillAct(c: HealthCheck; ctx: HealthContext): bool =
+  ## Whether ``applyHealthFixes`` changes anything for this row. Kept beside
+  ## it: the plan below must name exactly the rows the dispatcher acts on.
+  if c.status == hsOk:
+    return false
+  case c.fixKind
+  of hfNone, hfMigrateStateFile: false
+  of hfDirenvAllow: resolveDirenvBin().len > 0
+  of hfStartDaemon: c.status == hsFail
+  of hfCloneSiblings: ctx.gitOk and ctx.missingSiblings.len > 0
+  of hfSharedCloneLeaves: ctx.gitOk
+  of hfEnsureVcsHooks, hfWorkspaceErgonomics: true
+
+proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
+                         ctx: HealthContext): seq[string] =
+  ## The plan ``repro health --fix`` prints before its first action
+  ## (Interactive-UX-And-Progress Principle 1, "Announce before acting";
+  ## CLI/health.md §"Modes"). ``--fix`` is not scoped to a row: it runs
+  ## every safe fix the diagnosis found, so a reader sent here for one row
+  ## (the state-file migration) is told what else is about to happen, and
+  ## how many repositories will be cloned, while the run can still be
+  ## interrupted. Empty when no row has a fix to run.
+  var steps: seq[string]
+  for c in checks:
+    if not healthFixWillAct(c, ctx):
+      continue
+    case c.fixKind
+    of hfNone, hfMigrateStateFile: discard
+    of hfDirenvAllow:
+      steps.add(c.name & ": run `direnv allow` in " & parsed.workspaceRoot)
+    of hfStartDaemon:
+      steps.add(c.name & ": start the user store daemon")
+    of hfCloneSiblings:
+      var names: seq[string]
+      for repo in ctx.missingSiblings: names.add(repo.path)
+      steps.add(c.name & ": clone " & $names.len & " missing " &
+        (if names.len == 1: "repository" else: "repositories") &
+        " over the network (" & formatFindingList(names, parsed.verbose) &
+        ")")
+    of hfEnsureVcsHooks:
+      steps.add(c.name & ": reinstall the managed VCS hooks across the " &
+        "workspace")
+    of hfSharedCloneLeaves:
+      steps.add(c.name & ": repair refetch chains and stale " &
+        "remote-tracking refs in checkouts that borrow from shared clones")
+    of hfWorkspaceErgonomics:
+      steps.add(c.name & ": repair the workspace ergonomics files " &
+        "(.gitignore, AGENTS.md, workspace-projects.md)")
+  if steps.len == 0:
+    return
+  result.add("fix: plan: " & $steps.len & " safe " &
+    (if steps.len == 1: "fix" else: "fixes") &
+    " will run now, in this order (interrupt to stop):")
+  for step in steps:
+    result.add("fix: plan:   " & step)
+
 proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
-                      ctx: HealthContext): seq[string] =
-  ## Perform ONLY the safe remediations the spec authorizes, announcing
-  ## each action before running it. Returns the announcement / outcome
-  ## lines for the report. Never performs a destructive or ambiguous fix.
+                      ctx: HealthContext; emit: HealthFixEmit) =
+  ## Perform ONLY the safe remediations the spec authorizes. The plan is
+  ## emitted first, then each action's line is emitted BEFORE the action
+  ## runs (``emit`` flushes) and its outcome after. Never performs a
+  ## destructive or ambiguous fix.
   let self = reproSelfPath()
+  for line in healthFixPlanLines(parsed, checks, ctx):
+    emit(line)
   for c in checks:
     if c.status == hsOk:
       continue
     case c.fixKind
     of hfNone:
       # Unsafe / ambiguous: report only, never auto-fix.
-      result.add("fix: skip " & c.name &
+      emit("fix: skip " & c.name &
         " (no safe auto-fix; remedy: " & c.remedy & ")")
     of hfDirenvAllow:
-      result.add("fix: running `direnv allow " & parsed.workspaceRoot & "`")
+      emit("fix: running `direnv allow " & parsed.workspaceRoot & "`")
       let direnvBin = resolveDirenvBin()
       if direnvBin.len == 0:
-        result.add("fix: direnv not on PATH; cannot allow")
+        emit("fix: direnv not on PATH; cannot allow")
       else:
         let res = execCmdEx(quoteShell(direnvBin) & " allow",
           workingDir = parsed.workspaceRoot)
         if res.exitCode == 0:
-          result.add("fix: direnv .envrc now trusted")
+          emit("fix: direnv .envrc now trusted")
         else:
-          result.add("fix: direnv allow failed: " & res.output.strip())
+          emit("fix: direnv allow failed: " & res.output.strip())
     of hfStartDaemon:
       # Single-user direct mode (no daemon) is a fully supported path, so
       # a daemon-mode ``warn`` is NOT force-fixed: we never push a daemon
@@ -82063,42 +82154,47 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       # that should be running is down). For the ``warn`` case we describe
       # the opt-in remedy without executing it.
       if c.status != hsFail:
-        result.add("fix: describe " & c.name &
+        emit("fix: describe " & c.name &
           " (single-user mode is supported; opt-in remedy: " &
           c.remedy & ")")
       else:
-        result.add("fix: starting user store daemon (`" & self &
+        emit("fix: starting user store daemon (`" & self &
           " daemon start`)")
         try:
           let cfg = defaultUserDaemonConfig()
           let status = startUserDaemon(stablePublicCliPath(), cfg)
           if status.running:
-            result.add("fix: user daemon running (" & status.endpoint & ")")
+            emit("fix: user daemon running (" & status.endpoint & ")")
           else:
-            result.add("fix: daemon start did not report running")
+            emit("fix: daemon start did not report running")
         except CatchableError as err:
-          result.add("fix: daemon start failed: " & err.msg)
+          emit("fix: daemon start failed: " & err.msg)
     of hfCloneSiblings:
       if not ctx.gitOk:
-        result.add("fix: cannot clone siblings (no usable git tool)")
+        emit("fix: cannot clone siblings (no usable git tool)")
         continue
-      for repo in ctx.missingSiblings:
+      let total = ctx.missingSiblings.len
+      var cloned = 0
+      for i, repo in ctx.missingSiblings:
         let abs = parsed.workspaceRoot / repo.path
-        result.add("fix: cloning missing sibling " & repo.path &
-          " from " & repo.fetchUrl)
+        emit("fix: cloning missing sibling " & repo.path &
+          " from " & repo.fetchUrl & " (" & $(i + 1) & "/" & $total & ")")
         let res = gitRunPlain(ctx.gitIdentity,
           ["clone", repo.fetchUrl, abs])
         if res.code == 0 and dirExists(abs / ".git"):
-          result.add("fix: cloned " & repo.path)
+          inc cloned
+          emit("fix: cloned " & repo.path)
         else:
-          result.add("fix: clone of " & repo.path & " failed: " &
+          emit("fix: clone of " & repo.path & " failed: " &
             res.output.strip())
+      emit("fix: siblings: cloned " & $cloned & ", failed " &
+        $(total - cloned))
     of hfEnsureVcsHooks:
       # Reinstalling a managed hook is additive and reversible: a foreign
       # hook found at the canonical path is preserved as
       # ``<hook>.repro-local`` and still runs first. Nothing of the user's is
       # discarded, so this is a safe auto-fix.
-      result.add("fix: reinstalling managed VCS hooks across the workspace")
+      emit("fix: reinstalling managed VCS hooks across the workspace")
       try:
         let report = ensureWorkspaceHooks(parsed.workspaceRoot)
         var keys: seq[string]
@@ -82109,7 +82205,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         # A single-repo target installs nothing here (see below), and a
         # "0 hook(s) across 0 repo(s)" line would read as a failed fix.
         if report.mode == "workspace" or report.entries.len > 0:
-          result.add("fix: " & $report.entries.len & " hook(s) across " &
+          emit("fix: " & $report.entries.len & " hook(s) across " &
             $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
         # ``ensureWorkspaceHooks`` makes every participating repo's
         # ``core.hooksPath`` worktree-safe before installing into it. A
@@ -82125,18 +82221,18 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
             let repair = ensureWorktreeSafeHooksPath(target)
             let line = hooksPathRepairReport(target, repair)
             if line.len > 0:
-              result.add("fix: " & line)
+              emit("fix: " & line)
             if not repair.ok:
-              result.add("fix: could NOT make core.hooksPath in " & target &
+              emit("fix: could NOT make core.hooksPath in " & target &
                 " worktree-safe (it is '" & repair.previous & "'): " &
                 repair.diagnostic)
       except CatchableError as err:
-        result.add("fix: hooks ensure failed: " & err.msg)
+        emit("fix: hooks ensure failed: " & err.msg)
     of hfSharedCloneLeaves:
       if not ctx.gitOk:
-        result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
+        emit("fix: cannot repair shared-clone leaves (no usable git tool)")
         continue
-      result.add("fix: repairing refetch chains and stale remote-tracking refs " &
+      emit("fix: repairing refetch chains and stale remote-tracking refs " &
         "in checkouts that borrow from shared clones")
       for missing in ctx.poolMissing:
         let repaired = repairPoolMissing(ctx.gitIdentity.binaryPath,
@@ -82151,28 +82247,28 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           except CatchableError:
             rewired = false
         if repaired.ok:
-          result.add("fix: re-created the shared cache " &
+          emit("fix: re-created the shared cache " &
             repaired.sharedBarePath & " and re-wired " & missing.leaf)
         elif rewired:
-          result.add("fix: re-created the shared cache " &
+          emit("fix: re-created the shared cache " &
             repaired.sharedBarePath & " and re-wired " & missing.leaf &
             ", but the check that followed reported: " & repaired.diagnostic)
         else:
-          result.add("fix: could NOT re-wire " & missing.leaf &
+          emit("fix: could NOT re-wire " & missing.leaf &
             " to a re-created shared cache: " & repaired.diagnostic)
       for lr in ctx.leafReports:
         let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
           lcmRepair, pool = lr.pool)
         for f in repaired.findings:
           if f.kind == lfkStaleRemoteRef and f.removed:
-            result.add("fix: removed " & f.refName & " in " & lr.leaf)
+            emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
     of hfMigrateStateFile:
       # Done before the diagnosis (``applyStateFileMigrationFix``); a row
       # still failing here is one the migration refused, already reported.
       discard
     of hfWorkspaceErgonomics:
-      result.add("fix: repairing workspace ergonomics files")
+      emit("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
       var gitignoreContent = ""
       if fileExists(gitignoreFile):
@@ -82192,7 +82288,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       
       if gitignoreModified:
         writeFile(gitignoreFile, gitignoreContent)
-        result.add("fix: updated .gitignore to ignore .repro/ and workspace-projects.md")
+        emit("fix: updated .gitignore to ignore .repro/ and workspace-projects.md")
 
       let agentsFile = parsed.workspaceRoot / "AGENTS.md"
       var agentsContent = ""
@@ -82206,15 +82302,16 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           agentsContent.add("\n")
         agentsContent.add("\nRead @workspace-projects.md for the active project set and per-repo descriptions.\n")
         writeFile(agentsFile, agentsContent)
-        result.add("fix: updated AGENTS.md with workspace-projects.md reference")
+        emit("fix: updated AGENTS.md with workspace-projects.md reference")
 
       try:
         writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
-        result.add("fix: generated workspace-projects.md")
+        emit("fix: generated workspace-projects.md")
       except CatchableError as err:
-        result.add("fix: failed generating workspace-projects.md: " & err.msg)
+        emit("fix: failed generating workspace-projects.md: " & err.msg)
 
-proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
+proc applyStateFileMigrationFix(workspaceRoot: string;
+                                 emit: HealthFixEmit) =
   ## ``--fix`` for the ``workspace-state-file`` row: move the old state file
   ## and any ``[[manifest]]`` layers in a state file to where they belong
   ## (``migrateWorkspaceStateFile``, Workspace-Settings-Files.md §8 step 2).
@@ -82224,13 +82321,13 @@ proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
   ## nothing and is reported; the row then fails with its remedy.
   if inspectWorkspaceStateFiles(workspaceRoot).len == 0:
     return
-  result.add("fix: migrating the workspace state file under " &
+  emit("fix: migrating the workspace state file under " &
     workspaceRoot / ".repro")
   try:
     for line in migrateWorkspaceStateFile(workspaceRoot):
-      result.add("fix: " & line)
+      emit("fix: " & line)
   except StateMigrationError, WorkspaceManifestParseError, IOError, OSError:
-    result.add("fix: could NOT migrate the workspace state file: " &
+    emit("fix: could NOT migrate the workspace state file: " &
       getCurrentExceptionMsg())
 
 proc runHealthCommand*(c: ReproCommandLineHealth): int =
@@ -82241,12 +82338,17 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
   let parsed = healthArgsOf(c)
-  let stateFixActions =
-    if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
-    else: @[]
-  if not parsed.json:
-    for line in stateFixActions:
+  # ``--fix`` lines are written as they happen, never collected and printed
+  # after the fixes ran: a fix can clone many repositories, and a plan the
+  # operator reads only once the work is done is no plan. ``--json`` keeps
+  # stdout to the one JSON document, as before.
+  let jsonMode = parsed.json
+  let emitFix: HealthFixEmit = proc (line: string) =
+    if not jsonMode:
       stdout.writeLine(line)
+      stdout.flushFile()
+  if parsed.fix:
+    applyStateFileMigrationFix(parsed.workspaceRoot, emitFix)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
   if parsed.fix and ctx.setAsideFiles > 0:
@@ -82256,12 +82358,9 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
       "state or manifest file does not parse (see the failing row); fix it " &
       "first")
   elif parsed.fix:
-    let actions = applyHealthFixes(parsed, checks, ctx)
+    applyHealthFixes(parsed, checks, ctx, emitFix)
     # Re-diagnose after fixing so the final report reflects the new state.
     (checks, ctx) = gatherHealthChecks(parsed)
-    if not parsed.json:
-      for line in actions:
-        stdout.writeLine(line)
 
   if parsed.json:
     stdout.writeLine(pretty(healthChecksToJson(checks), indent = 2))
