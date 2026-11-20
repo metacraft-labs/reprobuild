@@ -212,7 +212,12 @@ schema `reprobuild.store-bundle.v2`. They are unverified there;
    cost is one pass over the parts.
 2. **Check the id, the roots and the producer.** Decompress only the first
    tar entry (`contents`), into memory, and check that the bundle id
-   recomputed from it is the one the manifest names. A `contents` entry
+   recomputed from it is the one the manifest names. `repro bundle
+   restore` passes the manifest as inlined in the `latest.json` it read, so
+   the `native-store.json` beside the parts is not read and the parts are
+   held to the hashes listed there, and it passes the `<id>` of the half's
+   directory: a manifest naming another id is refused before any part is
+   read. A `contents` entry
    larger than 1 GiB is refused (export does not write one), so a bundle
    cannot exhaust the importer's memory before the check. Compare its roots with
    the local ones (§3), and its producer with the running `repro`: refuse
@@ -270,6 +275,14 @@ schema `reprobuild.store-bundle.v2`. They are unverified there;
    hash matches their name are excluded from extraction. They are
    content-addressed, so this is what makes a repeated import cheap and leaves
    read-only prefixes alone.
+
+   The member check confines where tar writes, not the modes it writes, and
+   step 4 does not compare modes. So tar runs with `--no-same-owner
+   --no-same-permissions` under the importer's umask with `go-w` added: no
+   entry is written setuid, setgid, sticky, group- or world-writable, and no
+   owner is taken from the archive, whatever it stores and even when root
+   imports. A declared directory that already exists still takes the
+   archive's mode, masked the same way.
 4. **Verify the content.** For every `entry`, check its lstat kind and size
    and its BLAKE3 digest (files) or link target (symlinks) against `contents`.
    Any mismatch fails the import. Nothing is registered and no record is

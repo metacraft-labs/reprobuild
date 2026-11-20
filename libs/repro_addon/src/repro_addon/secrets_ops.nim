@@ -311,9 +311,13 @@ proc tickApply*(stateDir: string; l: SecretsLayout; m: DeployManifest;
     result = (true, "generation " & r.generationId &
       (if r.drift.len > 0: "; " & $r.drift.len & " object(s) left as " &
          "actionable drift" else: ""))
-  except EAddOnUnsupportedBase, EApplyRolledBack, EApplyFailedAtFloor:
+  except EAddOnUnsupportedBase, EApplyNeedsOperator, EApplyRolledBack,
+         EApplyFailedAtFloor:
     # Typed through to the agent: aoUnsupportedBase, exit 2 (spec §7.9);
-    # aoRolledBack, the deployment quarantined (spec §9.2, A8).
+    # aoOperatorAction, exit 2, for a generation only an operator may apply
+    # (spec §10.1, *An agent apply never weakens the floor*); aoRolledBack,
+    # the deployment quarantined (spec §9.2, A8). Folded into ``(false,
+    # msg)`` they would read as a retryable aoApplyFailed.
     try: discardStaged(l)
     except CatchableError: discard
     raise
