@@ -2392,7 +2392,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         boolFlag noCertify is bool,
           help = "Plan the run as `repro test --no-certify` would"
         pos selectors is seq[string], required = false,
-          help = "What the plan builds (default: `.#test`, as for " &
+          help = "What the plan builds (default: `test`, as for " &
             "`repro test`)"
       subcmd "policy",
           help = "The certificate policy `repro.lock` records, and the rule " &

@@ -46,7 +46,8 @@ The comparison covers four categories:
 | services | `systemd.user` units, `launchd.agents` | the profile's user services |
 
 It compares which packages a host gets. It does not compare their versions or
-how they are built.
+how they are built. [Host facts](../../reference/files/host-facts.md) lists
+every field of the documents it compares.
 
 ## Steps
 
@@ -173,4 +174,5 @@ Remove it again, and the check passes.
 
 - [Drive Home Manager from a home profile](drive-home-manager-from-a-profile.md)
 - [Export a home profile for Nix](export-a-home-profile.md)
+- [Host facts](../../reference/files/host-facts.md)
 - [Coming from Home Manager and NixOS](../../coming-from/home-manager-and-nixos.md)

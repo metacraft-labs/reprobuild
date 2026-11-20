@@ -757,10 +757,11 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
       let fragmentFileName = parts.fragment & ".nim"
       let fragmentModule = parts.base / fragmentFileName
       # A named target may legitimately have the same name as the project
-      # file (for example ``repro build repro`` in a directory containing
-      # ``repro.nim``). Bare-name resolution represents that selector as
-      # ``.#repro``. Anchor that case in the project file instead of treating
-      # it as the legacy ``directory#module`` form.
+      # file (for example ``.#repro`` in a directory containing
+      # ``repro.nim``). Anchor that case in the project file instead of
+      # treating it as the legacy ``directory#module`` form. (A bare name
+      # no longer reaches this form: ``bareNameAnchor`` anchors it on the
+      # project file itself.)
       if fragmentFileName in ProjectFileNames:
         let projectMatch = resolveProjectFile(parts.base)
         if projectMatch.fileName == fragmentFileName:
@@ -928,14 +929,15 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       "target; to build the path '" & err.selectorName & "', spell it '" &
       pathSpelling & "'\n")
 
-const TestCollectionSelector* = ".#test"
+const TestCollectionSelector* = "test"
   ## The selector ``repro test`` (and ``repro certificates plan``) uses when
   ## the user names none: the current project's ``test`` collection
-  ## ([CLI/test.md §"Alias Semantics"]). The alias selects the collection
-  ## directly, as the fragment ``.#test``, which is exactly what
-  ## ``parseAndResolveSelectors`` makes of a bare ``test``; naming the
-  ## collection rather than a selector that is resolved again keeps the
-  ## alias independent of the selector rule.
+  ## ([CLI/test.md §"Alias Semantics"]). It is the bare name ``test``, which
+  ## names a target whatever the current directory holds
+  ## ([CLI/build.md §"Target Selection"] step 1). It used to be ``.#test``,
+  ## which is a path selector: beside a ``test.nim`` it selected that module
+  ## instead of the collection (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-beside-a-same-named-module-file-selects-the-module).
 
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
@@ -992,8 +994,9 @@ type
     target*: string
       ## The engine's project anchor. For path-shaped positionals this
       ## is the original selector verbatim; for name-only invocations it
-      ## is ``"."`` or ``".#<firstName>"`` so the legacy
-      ## ``parseBuildTarget`` codepath still resolves a module.
+      ## is ``"."`` or ``bareNameAnchor`` of the first name
+      ## (``"./repro.nim#<firstName>"`` in a project, ``".#<firstName>"``
+      ## in a directory without a project file).
     extraNameSelectors*: seq[string]
       ## Names and same-project action fragments beyond the first. The lowering pass in
       ## ``lowerProviderSnapshot`` unions every selector's dependency
@@ -1061,6 +1064,38 @@ proc findSiblingProjectFile*(packageName: string;
     dir = parent
   ""
 
+proc bareNameAnchor(name, currentDir: string): string =
+  ## The anchor a request of names only hands the build for its first name.
+  ##
+  ## When the directory holds a project file, the anchor is that FILE with the
+  ## name as its fragment (``./repro.nim#test``), which ``parseBuildTarget``
+  ## always reads as an action selection. It used to be the DIRECTORY
+  ## (``.#test``), which ``parseBuildTarget`` reads as the legacy
+  ## ``<dir>#<module>`` form whenever ``<dir>/test.nim`` exists, so a bare
+  ## ``test`` beside a ``test.nim`` built that module instead of the ``test``
+  ## target: the disk decided what a name meant, which [CLI/build.md
+  ## §"Target Selection"] step 1 forbids (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-beside-a-same-named-module-file-selects-the-module).
+  ## For every project without such a module both anchors parse to the same
+  ## module path, output name and action.
+  ##
+  ## A directory with no project file keeps the directory anchor: a Mode-1
+  ## workspace or Mode-2 manifest is recognised from the directory, and the
+  ## build redirects the fragment to the project it synthesises.
+  ## ``ProjectFileAmbiguousError`` (both ``repro.nim`` and ``reprobuild.nim``)
+  ## propagates, as it would from ``parseBuildTarget``.
+  ##
+  ## The spelling is relative (``./<file>``) so the daemon parent can
+  ## absolutize it against the request's working directory; ``currentDir``
+  ## is where the project file is looked up, empty meaning the process's
+  ## current directory.
+  let dir = if currentDir.len > 0: currentDir else: getCurrentDir()
+  let match = resolveProjectFile(dir)
+  if match.fileName.len > 0:
+    ("." / match.fileName) & "#" & name
+  else:
+    "." & "#" & name
+
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
                                currentDir = ""): ResolvedPositionalSelectors =
@@ -1075,8 +1110,9 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ##   selector union. Different project anchors and legacy module
   ##   selections remain separate invocations.
   ## - The first name-shaped positional, when no path anchor is present,
-  ##   becomes ``".#<name>"`` so ``parseBuildTarget`` routes it through
-  ##   the fragment / action-selection codepath. When a path anchor is
+  ##   becomes ``"./<project file>#<name>"`` (``bareNameAnchor``) so
+  ##   ``parseBuildTarget`` routes it through the action-selection
+  ##   codepath, whatever modules sit beside the project file. When a path anchor is
   ##   present, the first name-shaped positional joins
   ##   ``extraNameSelectors`` instead.
   ## - Every other name-shaped positional appends to
@@ -1172,12 +1208,12 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
         if result.extraNameSelectors.find(sel) < 0:
           result.extraNameSelectors.add(sel)
   if not anchorSet:
-    # All selectors are name-shaped. Anchor at the current directory
-    # and let ``parseBuildTarget`` route the first name through the
-    # fragment / action-selection codepath. Remaining names go into
+    # All selectors are name-shaped. Anchor at the current project and
+    # let ``parseBuildTarget`` route the first name through the
+    # action-selection codepath. Remaining names go into
     # ``extraNameSelectors`` so the lowering pass takes their union.
     if firstNameSelector.len > 0:
-      result.target = "." & "#" & firstNameSelector
+      result.target = bareNameAnchor(firstNameSelector, currentDir)
     else:
       result.target = "."
   elif firstNameSelector.len > 0 and
@@ -33763,7 +33799,7 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
       selectors = @[TestCollectionSelector]
     let resolved = parseAndResolveSelectors(selectors,
       "repro certificates plan")
-    # The anchor carries the first name as its fragment: ``.#<name>`` for
+    # The anchor carries the first name as its fragment: ``./repro.nim#<name>`` for
     # this project, ``<sibling project file>#<name>`` for a sibling. It is
     # derived as the build derives it (``parseBuildTarget``), so a
     # fragment-less path plans no name, which the plan reads as the whole
@@ -41784,8 +41820,8 @@ proc daemonRequestBuildAnchor*(selectors: openArray[string];
   ## worker applies ([CLI/build.md §"Target Selection"],
   ## ``parseAndResolveSelectors``), not by a copy of it. The anchor is the
   ## first PATH-SHAPED selector, not the first positional: ``repro build
-  ## test`` selects the current project's ``test`` (``.#test``) even beside a
-  ## ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
+  ## test`` selects the current project's ``test`` (``./repro.nim#test``)
+  ## even beside a ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
   ## ``repro build runquota:runquotad`` anchors on the sibling checkout
   ## (reprobuild-pm issue
   ## 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor:
@@ -91678,7 +91714,7 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 
 proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
-  ## ``repro build`` of ``selectors`` (``.#test`` when none) with no issuance.
+  ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
   withCallerVariants(opts):
     result = runBuildCommand(testBuildArgs(opts,
       if selectors.len == 0: @[TestCollectionSelector] else: selectors),

@@ -70,9 +70,15 @@ type
       ## (`restore.sh` passes the one it was generated beside)
     storeRoot*: string
     actionCacheRoot*: string
-    importNative*: proc (partsDir: string): ImportReport
+    importNative*: proc (partsDir: string; manifest: JsonNode;
+                         bundleId: string): ImportReport
       ## Supplied by the CLI so the native half is imported with the roots
-      ## and allow-file handling of `repro store import`.
+      ## and allow-file handling of `repro store import`. `manifest` is the
+      ## half's transport manifest as inlined in the `latest.json` this
+      ## restore read, and `bundleId` the `<id>` of the half's directory
+      ## there. The importer must take the manifest from `manifest`, not from
+      ## `partsDir` (`ImportOptions.manifest`), and refuse one naming another
+      ## id (`ImportOptions.bundleId`), before anything is written.
 
   RestoreReport* = object
     restored*: seq[string]
@@ -604,10 +610,21 @@ proc restoreBundle*(opts: RestoreOptions): RestoreReport =
     if opts.importNative == nil:
       bundleFail("this bundle has a native-store half and no importer")
     let node = halves["native_store"]
+    # The half's manifest is the copy inlined in the `latest.json` read
+    # above, never its `native-store.json` in the source, which is neither
+    # downloaded nor read: the parts are held to the hashes `latest.json`
+    # lists, and the manifest's id to the id naming the half's directory,
+    # which pins its `contents` (Workspace-Bundles.md §7 step 5,
+    # Store-Bundles.md §5 step 2).
     let dir = fetchHalf(src, staging, node, NativeManifestName,
-      nativeParts, @[], true, parallel)
+      nativeParts, @[], false, parallel)
     phase("download native-store")
-    result.native = opts.importNative(dir)
+    let nativeId = extractFilename(node["dir"].getStr())
+    result.native = opts.importNative(dir, node, nativeId)
+    if result.native.bundleId != nativeId:
+      bundleFail("the native-store half imported bundle " &
+        result.native.bundleId & ", not " & nativeId &
+        ", the one latest.json names")
     if remote: removeDir(dir)
     if result.native.skippedExtraction: result.alreadyPresent.add("native-store")
     else: result.restored.add("native-store")

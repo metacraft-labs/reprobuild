@@ -20,8 +20,8 @@
 ## issues/2026-11-12-bundle-extraction-writes-every-tar-member-under-before-
 ## checking-it-against-the-declared.md.
 
-import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles, times,
-    unittest]
+import std/[algorithm, json, os, osproc, posix, sequtils, strutils, tempfiles,
+    times, unittest]
 
 import repro_core
 import repro_hash
@@ -828,3 +828,57 @@ suite "store bundle import re-witnesses only outputs it carried":
       let planted = f.lookup("outside")
       checkpoint planted.message
       check planted.status != aclHit
+
+suite "store bundle import writes nothing into the bundle directory":
+  # A local bundle directory may be writable by others, and the import may
+  # run as root. Every file the import writes for itself (the member
+  # listing, the exclude list, tar's diagnostics) must go into a private
+  # directory: one planted here as a symlink would otherwise be followed
+  # by a shell redirection, and one rewritten between its write and its
+  # read would change what is checked or extracted. See reprobuild-pm
+  # issues/2026-11-16-bundle-restore-writes-scratch-files-into-a-local-
+  # source-directory.md.
+  test "symlinks planted under the importer's old scratch names are not followed":
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      var opts = defaultExportOptions(f.outDir)
+      opts.partSize = 1024
+      opts.zstdLevel = 1
+      let exported = exportBundle(computeClosure(f.roots), opts)
+      f.wipe()
+      let victims = f.top / "victims"
+      createDir(victims)
+      var planted: seq[(string, string)]
+      for suffix in [".members", ".members.stderr", ".exclude", ".stderr"]:
+        let victim = victims / ("victim" & suffix)
+        writeFile(victim, "untouched\n")
+        let link = f.outDir / ("." & exported.bundleId & suffix)
+        createSymlink(victim, link)
+        planted.add((link, victim))
+      var before: seq[string]
+      for kind, path in walkDir(f.outDir): before.add(path)
+      before.sort()
+      let report = importBundle(ImportOptions(bundleDir: f.outDir), f.roots)
+      check not report.skippedExtraction
+      check f.lookup("producer").status == aclHit
+      for (link, victim) in planted:
+        checkpoint link & " -> " & victim
+        check readFile(victim) == "untouched\n"
+        check symlinkExists(link)
+      var after: seq[string]
+      for kind, path in walkDir(f.outDir): after.add(path)
+      after.sort()
+      check after == before
+
+  test "the scratch directory is the importer's alone, whatever the umask":
+    # Under umask 0 a directory made with mkdir(0777) is writable by
+    # everyone, and the planted-symlink attack moves into it.
+    let saved = posix.umask(0)
+    let dir = privateScratchDir("repro-store-scratch-test-")
+    discard posix.umask(saved)
+    defer: removeScratchDir(dir)
+    check dirExists(dir)
+    check getFilePermissions(dir) == {fpUserRead, fpUserWrite, fpUserExec}

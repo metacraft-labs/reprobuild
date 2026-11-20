@@ -3383,7 +3383,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "suite-scope statement runs at every start-up: let previousDir = getCurrentDir()"),
+    singleReason: "module-level statement runs at every start-up: privateAccess(ParsedBuildTarget)"),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim",
     binary: "build/test-bin/t_a_failing_producer_fetch_reports_why",

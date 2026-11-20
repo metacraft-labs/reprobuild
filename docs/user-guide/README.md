@@ -52,8 +52,9 @@ rest of the implementation documentation.
 - **Switching a host from Home Manager to your profile?** See
   [Compare a Home Manager configuration with a profile](../users/content/guides/machines/compare-with-home-manager.md)
   to measure, per category, whether the two give the host the same thing — as
-  a flake check per host. The host-facts document's fields are still described
-  only in the old page, [Host facts and `repro home compare`](host-facts.md).
+  a flake check per host, and [Host facts](../users/content/reference/files/host-facts.md)
+  for the document's fields. (The old page,
+  [Host facts and `repro home compare`](host-facts.md), is superseded.)
 - **Need a specific reprobuild version?** See
   [Pinning reprobuild itself](pinning-reprobuild-itself.md). It is an
   ordinary `uses:` dependency plus a committed lock entry — several versions

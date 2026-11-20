@@ -234,7 +234,8 @@ homeManagerFacts { configuration, host, homebrew ? { }, outOfStoreRoots ? { }, s
 ```
 
 A derivation that writes the facts of a Home Manager configuration (its
-packages, files, environment and services) for `repro home compare`.
+packages, files, environment and services) for `repro home compare`, as a
+[host-facts document](files/host-facts.md).
 `homebrew` lists what the host's Brewfile installs (`casks`, `formulae`,
 `masApps`); `outOfStoreRoots` maps an out-of-store link prefix to the tree
 whose files it points into. `realizationSources` (default: the module's
