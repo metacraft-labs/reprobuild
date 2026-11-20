@@ -795,6 +795,15 @@ const
   # The file the counter's lock is held on. Separate from the counter for the
   # reason above, and a root-level file for the same reason the counter is.
   WriteSequenceLockFileName = ".seq.lock"
+  # The largest write sequence the store issues (Action-Cache-Per-Edge-Store.md
+  # §5.1). The trailer is the one part of a container without a checksum, so a
+  # bit flip or a foreign file can make it read near the top of the u64 space;
+  # taken as the floor, such a value jammed the counter there and every later
+  # publish to the root raised. A trailer or counter value above this bound is
+  # therefore not evidence of a sequence handed out: the trailer reads as 0, as
+  # a damaged file's does, and the counter reads as lost. One publish a
+  # microsecond takes about nine years to reach it.
+  MaxWriteSequence = 1'u64 shl 48
   RecordTailMask = 0xffff_ffff'u64
   MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
@@ -4361,6 +4370,12 @@ proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
 proc recordTail(payload: openArray[byte]): uint32 =
   uint32(localHash(payload).value and RecordTailMask)
 
+proc plausibleWriteSequence(value: uint64): uint64 {.inline.} =
+  ## A trailer above `MaxWriteSequence` was not issued by any store: it reads
+  ## as 0, so its container sorts oldest, is evicted first, and is re-stamped
+  ## on its next write, exactly as a v1 file or a damaged trailer is.
+  if value > MaxWriteSequence: 0'u64 else: value
+
 proc encodePerEdgeFile(records: openArray[ActionResultRecord];
                        writeSequence: uint64): seq[byte] =
   ## Serialize an edge's bounded record set into its per-edge container (v2).
@@ -4423,7 +4438,7 @@ proc decodePerEdgeFileWithSeq(raw: openArray[byte]):
   # Read it only if the whole body decoded intactly AND exactly 8 trailing
   # bytes remain (a torn body already `break`ed above and leaves no trailer).
   if version >= PerEdgeFileVersion and pos + 8 == raw.len:
-    result.writeSequence = readU64Le(raw, pos)
+    result.writeSequence = plausibleWriteSequence(readU64Le(raw, pos))
 
 proc decodePerEdgeFile(raw: openArray[byte]): seq[ActionResultRecord] =
   ## Records-only view over `decodePerEdgeFileWithSeq` for callers that don't
@@ -4481,7 +4496,7 @@ proc scanPerEdgeFileWriteSequence(raw: openArray[byte]): uint64 =
     if tail != recordTail(raw.toOpenArray(payloadStart, pos - 5)):
       break
   if version >= PerEdgeFileVersion and pos + 8 == raw.len:
-    result = readU64Le(raw, pos)
+    result = plausibleWriteSequence(readU64Le(raw, pos))
 
 proc perEdgeRecordFileIsIntact*(raw: openArray[byte]): bool =
   ## Strict validator: true iff `raw` is a byte-complete per-edge file — a
@@ -4576,6 +4591,10 @@ proc decodeNewestAlias(raw: openArray[byte]): Option[NewestAlias] =
       return none(NewestAlias)
     var alias = NewestAlias()
     alias.writeSequence = readU64Le(raw, pos)
+    # A sequence no store issues (§5.1) would outrank every honest one in
+    # `publishNewestAlias`'s skip guard and pin this alias stale for good.
+    if alias.writeSequence > MaxWriteSequence:
+      return none(NewestAlias)
     alias.strongName = readString(raw, pos)
     let count = int(readU32Le(raw, pos))
     if count < 0 or count > MaxRecFilesPerEdge * 4:
@@ -4670,7 +4689,30 @@ proc readSequenceValue(path: string): uint64 =
     result = parseBiggestUInt(text).uint64
   except CatchableError:
     result = 0'u64
+  # A value at or above the ceiling reads as lost, like an unparseable one;
+  # the floor then recovers from the edge's surviving trailers, and the
+  # allocation writes the counter back below the ceiling. Above it, no store
+  # issued the value. AT it, the value is legal, but keeping it would refuse
+  # every publish to every edge of the root, whereas exhaustion is confined
+  # to an edge whose own floor sits at the ceiling (`allocateWriteSequence-
+  # Locked`). This also releases a root whose counter an unchecked trailer
+  # had already pushed to the top. The containers such a counter stamped
+  # read as 0 and sort oldest until each edge's next publish re-stamps one.
+  if result >= MaxWriteSequence:
+    result = 0'u64
 
+when defined(posix):
+  proc isRegularFile(path: string): bool =
+    ## A `.rec` that is a FIFO, socket or device would block, or never end,
+    ## the read below -- and that read runs under the root-wide counter lock,
+    ## so it would stall every publisher on the root. `walkDir` reports all
+    ## of those as `pcFile`.
+    var st: Stat
+    stat(path.cstring, st) == 0 and S_ISREG(st.st_mode)
+else:
+  proc isRegularFile(path: string): bool =
+    let info = getFileInfo(path)
+    info.kind == pcFile
 proc highestWriteSequenceIn(dirPath: string): uint64 =
   ## The highest trailer sequence of any `.rec` container in one edge
   ## directory, 0 when it holds none. Read with the ORDERING walk, so no
@@ -4683,7 +4725,9 @@ proc highestWriteSequenceIn(dirPath: string): uint64 =
   for kind, path in walkDir(ep):
     if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
       try:
-        result = max(result, scanPerEdgeFileWriteSequence(bytes(readFile(path))))
+        if isRegularFile(path):
+          result = max(result,
+            scanPerEdgeFileWriteSequence(bytes(readFile(path))))
       except OSError, IOError:
         discard
 
@@ -4694,8 +4738,12 @@ proc writeSequenceValue(path: string; value: uint64) =
   ## trailers (`highestWriteSequenceIn`). Raises if the value cannot be
   ## committed, because a publish whose sequence the counter does not record
   ## could share it with a concurrent publish to the same edge.
-  let tmpPath = path & ".tmp." & $getCurrentProcessId() & "." &
-    $getMonoTime().ticks
+  ##
+  ## The caller holds the counter lock, so no two writers are ever between
+  ## this write and its rename at once, and the temp name is FIXED: a crash
+  ## between the two leaves one `.seq.tmp`, which the next publish renames
+  ## over, rather than a `.seq.tmp.<pid>.<ticks>` that nothing reaps.
+  let tmpPath = path & ".tmp"
   try:
     writeFile(extendedPath(tmpPath), $value)
     moveFile(extendedPath(tmpPath), extendedPath(path))
@@ -4705,17 +4753,25 @@ proc writeSequenceValue(path: string; value: uint64) =
       except OSError: discard
     raise
 
-proc allocateWriteSequenceLocked(cache: ActionCache; floor: uint64): uint64 =
-  ## The allocation itself; the caller holds the counter lock. `floor` is the
-  ## edge directory's highest trailer, read by the caller BEFORE it took the
-  ## lock: a container renamed in after that read had its sequence allocated
-  ## under this lock, so the counter already accounts for it.
+proc allocateWriteSequenceLocked(cache: ActionCache; dirPath: string): uint64 =
+  ## The allocation itself; the caller holds the counter lock. The floor --
+  ## the edge directory's highest trailer -- is read HERE, under the lock. A
+  ## floor read before the lock missed any container renamed in while this
+  ## writer waited; that container's sequence is in the counter only while the
+  ## counter survives, and when the counter was lost in that window this
+  ## writer was handed the same value.
+  ##
+  ## The counter reads below the ceiling (`readSequenceValue`), so the only
+  ## base that can reach it is this edge's own floor: exhaustion refuses
+  ## publishes to this one edge, never to the whole root.
   let path = cache.writeSequenceFilePath()
-  let base = max(readSequenceValue(path), floor)
-  if base == high(uint64):
+  let base = max(readSequenceValue(path), highestWriteSequenceIn(dirPath))
+  if base >= MaxWriteSequence:
     raise newException(OSError,
-      "write-sequence space exhausted under " & cache.hotRoot &
-      "; refusing to wrap to 0, which would order the record oldest")
+      "write-sequence space exhausted in " & dirPath &
+      ": a container there carries " & $base &
+      "; refusing to issue a value above " & $MaxWriteSequence &
+      ", which every reader would take for a damaged trailer")
   result = base + 1'u64
   writeSequenceValue(path, result)
 
@@ -4743,11 +4799,11 @@ proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
   ##   failed rename does; it never falls back to an unlocked
   ##   read-increment-write, which hands two processes the same value.
   ##
-  ## The floor is read before the lock is taken, so the directory I/O does not
-  ## hold up every other publisher on the root. The lock is held for the
-  ## counter read and write only.
+  ## The floor is read under the lock (`allocateWriteSequenceLocked`), so a
+  ## writer that waited sees every container renamed in while it waited. The
+  ## lock is held for that one edge directory's walk and the counter read and
+  ## write.
   createDir(extendedPath(cache.hotRoot))
-  let floor = highestWriteSequenceIn(dirPath)
   let lockPath = cache.hotRoot / WriteSequenceLockFileName
   when defined(posix):
     # Read-only is enough for `flock`, and 0666 (less the umask) lets every
@@ -4771,7 +4827,7 @@ proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
       discard posix.close(fd)
       raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
     try:
-      result = cache.allocateWriteSequenceLocked(floor)
+      result = cache.allocateWriteSequenceLocked(dirPath)
     finally:
       # Closing the fd releases the exclusive flock.
       discard posix.close(fd)
@@ -4790,7 +4846,7 @@ proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
       discard closeHandle(h)
       raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
     try:
-      result = cache.allocateWriteSequenceLocked(floor)
+      result = cache.allocateWriteSequenceLocked(dirPath)
     finally:
       var unlockOverlapped: OVERLAPPED
       discard cUnlockFileExSeq(h, 0.DWORD, 1.DWORD, 0.DWORD,
