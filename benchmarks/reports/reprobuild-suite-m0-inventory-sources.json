@@ -1,10 +1,10 @@
 {
   "observedStructuralFacts": {
-    "graphOwnedHelperArtifacts": 35,
+    "graphOwnedHelperArtifacts": 36,
     "nimTestBinaries": 3039,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 809,
-    "staticallyDetectedRuntimeCompilerFlowTests": 152,
+    "staticallyDetectedRuntimeCompilerFlowTests": 151,
     "testEntries": 3089
   },
   "pureUnitConsolidationCandidates": [
@@ -1750,6 +1750,12 @@
         "source": "libs/ct_test_unittest_parallel/tests/fixtures/"
       },
       {
+        "actionId": "reprobuild.test_fixtures.ct_shim_fixture_protocol_abort_paths",
+        "kind": "test-fixture",
+        "output": "dynamic",
+        "source": "libs/ct_test_unittest_parallel/tests/fixtures/"
+      },
+      {
         "actionId": "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests",
         "kind": "test-fixture",
         "output": "dynamic",
@@ -2182,7 +2188,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 417,
+          "line": 416,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -2198,7 +2204,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 480,
+          "line": 478,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -2214,7 +2220,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 613,
+          "line": 611,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -2294,7 +2300,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 154,
+          "line": 155,
           "path": "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
           "patterns": [
             "nim-c"
@@ -2310,7 +2316,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 225,
+          "line": 226,
           "path": "libs/repro_home_apply/tests/t_homebrew_bridge_records.nim",
           "patterns": [
             "nim-check"
@@ -3939,7 +3945,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 142,
+          "line": 143,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "gcc"
@@ -3962,7 +3968,7 @@
             "socketPath",
             "sourcePath"
           ],
-          "line": 145,
+          "line": 146,
           "path": "tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim",
           "patterns": [
             "cc"
@@ -3994,7 +4000,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 177,
+          "line": 178,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "gcc"
@@ -4020,7 +4026,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 180,
+          "line": 181,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim",
           "patterns": [
             "cc"
@@ -4052,7 +4058,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 168,
+          "line": 169,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
           "patterns": [
             "gcc"
@@ -4078,7 +4084,7 @@
             "socketB",
             "sourcePath"
           ],
-          "line": 171,
+          "line": 172,
           "path": "tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_one_target_agent_inject_failure.nim",
           "patterns": [
             "cc"
@@ -5239,33 +5245,6 @@
           "commandVariableExecuted": false,
           "directExecutionLine": true,
           "executedVariables": [
-            "changedPathValue",
-            "pathValue",
-            "repoRoot",
-            "reproBin",
-            "sevenZip",
-            "shellCommand",
-            "target",
-            "tempRoot"
-          ],
-          "line": 97,
-          "path": "tests/e2e/path-only/t_path_only_tool_interfaces.nim",
-          "patterns": [
-            "nim-argv"
-          ],
-          "snippet": "discard requireSuccess(@[\"nim\", \"c\", \"--verbosity:0\", \"--hints:off\","
-        }
-      ],
-      "source": "tests/e2e/path-only/t_path_only_tool_interfaces.nim"
-    },
-    {
-      "class": "integration",
-      "matches": [
-        {
-          "assignedCommandVariable": "",
-          "commandVariableExecuted": false,
-          "directExecutionLine": true,
-          "executedVariables": [
             "dir",
             "file"
           ],
@@ -5909,7 +5888,7 @@
             "d",
             "tools"
           ],
-          "line": 392,
+          "line": 398,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5926,7 +5905,7 @@
             "d",
             "tools"
           ],
-          "line": 422,
+          "line": 428,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5943,7 +5922,7 @@
             "d",
             "tools"
           ],
-          "line": 698,
+          "line": 789,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5960,7 +5939,7 @@
             "d",
             "tools"
           ],
-          "line": 707,
+          "line": 798,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5977,7 +5956,7 @@
             "d",
             "tools"
           ],
-          "line": 747,
+          "line": 838,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -5994,7 +5973,7 @@
             "d",
             "tools"
           ],
-          "line": 766,
+          "line": 857,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6011,7 +5990,7 @@
             "d",
             "tools"
           ],
-          "line": 829,
+          "line": 920,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6028,7 +6007,7 @@
             "d",
             "tools"
           ],
-          "line": 839,
+          "line": 930,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6045,7 +6024,7 @@
             "d",
             "tools"
           ],
-          "line": 1064,
+          "line": 1155,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6062,7 +6041,7 @@
             "d",
             "tools"
           ],
-          "line": 1074,
+          "line": 1165,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -9232,7 +9211,7 @@
       "requiresReproBinary": false,
       "source": "libs/ct_test_unittest_parallel/tests/t_test_binary_run_one_writes_result_file.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14154,7 +14133,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -18942,7 +18921,8 @@
       "localDependencyShape": [
         "repro_dsl_stdlib",
         "repro_interface_artifacts",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
@@ -19689,7 +19669,8 @@
       "localDependencyShape": [
         "repro_home_apply",
         "repro_interface_artifacts",
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
@@ -40206,7 +40187,7 @@
       "source": "tests/e2e/path-only/t_path_only_tool_interfaces.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
-      "staticallyDetectedRuntimeCompilerFlow": true,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -45828,7 +45809,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_execution_lease_confinement.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -52499,6 +52480,7 @@
       "localDependencyShape": [
         "repro_interface_artifacts",
         "repro_project_dsl",
+        "repro_test_support",
         "repro_tool_profiles"
       ],
       "owner": "tests/integration",
@@ -54480,7 +54462,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_runquota_test_threads_follow_grant.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55370,7 +55352,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -60992,7 +60974,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_locked_catalog_is_declared_not_read.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
