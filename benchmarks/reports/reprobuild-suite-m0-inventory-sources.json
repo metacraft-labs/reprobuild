@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3053,
+    "nimTestBinaries": 3054,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 810,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3103
+    "testEntries": 3104
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,7 +1725,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1696,
+      "integration": 1697,
       "platform/destructive": 198,
       "pure unit": 810,
       "unclassified": 373
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3053,
+    "nimTestBinaryCount": 3054,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3103
+    "testEntryCount": 3104
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -46852,6 +46852,23 @@
       "source": "tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_health_fix_announces_its_plan_before_acting",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_health_fix_announces_its_plan_before_acting.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
