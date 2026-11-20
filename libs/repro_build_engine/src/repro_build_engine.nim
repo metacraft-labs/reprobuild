@@ -107,6 +107,7 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
 import repro_core/nix_store_roots
+import repro_core/child_reaper
 import repro_core/nix_configuration_env
 # The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
 # the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
@@ -18778,7 +18779,20 @@ when not defined(windows):
           return true
     finally:
       if helper != nil:
+        # THIS PROCESS IS THE HELPER'S PARENT, however long the helper
+        # lives: ``poDaemon`` gives it its own session, not another parent.
+        # A helper still running here (it accepted, or the wait ran out)
+        # exits later by itself, and nothing in this process would then
+        # wait for it: it stayed ``<defunct>`` for the rest of the build.
+        # So its pid is handed to ``reapWhenExited`` before the handle goes.
+        # ``peekExitCode`` reaps one that has already exited.
+        let handedOver =
+          try: helper.peekExitCode() == -1
+          except CatchableError: false
+        let helperPid = helper.processID
         helper.close()
+        if handedOver:
+          reapWhenExited(helperPid)
     diagnostic = "started " & $spawns & " helper(s) over " &
       $int((epochTime() - startedAt) * 1000.0) & " ms"
     if lastExit.len > 0:
