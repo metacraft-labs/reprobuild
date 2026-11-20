@@ -1900,9 +1900,13 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
     let zstdExe = requireTool("zstd")
     let tarExe = requireTool("tar")
     let errPath = scratch / "unpack.stderr"
-    let command = "set -o pipefail; (" & quoteShell(zstdExe) &
-      " -q -dc --long=" & $ZstdWindowLog & " - | " & quoteShell(tarExe) &
-      " -x -C / --numeric-owner --no-same-owner -p --anchored" &
+    # The member check confines where tar writes, not the modes it
+    # applies: those come from the archive, so tar drops the special and the
+    # group- and world-write bits and restores no owner (§5 step 3).
+    let command = "set -o pipefail; " & ExtractModeShell & "(" &
+      quoteShell(zstdExe) & " -q -dc --long=" & $ZstdWindowLog & " - | " &
+      quoteShell(tarExe) & " -x -C / --numeric-owner" & ExtractModeOptions &
+      " --anchored" &
       " --no-wildcards -X " & quoteShell(excludePath) & " -f -) >" &
       quoteShell(errPath) & " 2>&1"
     let code = feedParts(dir, m.parts, command, stopEarly = false)

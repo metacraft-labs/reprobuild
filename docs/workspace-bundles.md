@@ -164,7 +164,13 @@ SHA-256 sums, and needs only `bash`, `curl`, `tar`, `sha256sum`, `df`,
    --skip-old-files`, using the `zstd` store path it carries when the
    machine has none. Every valid path is excluded from the unpack
    altogether (`--anchored --no-wildcards -X`), so a bundle can neither
-   rewrite a valid path's files nor add new ones to it;
+   rewrite a valid path's files nor add new ones to it. Tar runs with
+   `--no-same-owner --no-same-permissions` under `umask 022`, and each
+   restored path is then given Nix's canonical modes (`chmod -R
+   a+rX,a-w`): a NAR hash covers only a file's executable bit, so neither
+   the archive's owners nor a setuid, setgid, sticky, group- or world-write
+   bit is ever applied, although tar would apply them by default as root,
+   and a restrictive umask does not hide the store from other users;
 8. checks each path it unpacked against the NAR hash in the registration
    (`nix-hash --type sha256`), and stops without registering anything if one
    differs;
@@ -182,7 +188,9 @@ of trusting a half-written file.
 That `repro` restores the sources and the native store. It never overwrites
 an existing checkout: when the workspace root is already a clone (a cloud
 environment clones it first), only the member repositories are unpacked into
-it, and they are added to its `.git/info/exclude`. With `--activate`, it
+it, and they are added to its `.git/info/exclude`. Like the Nix half, the
+sources are unpacked with no owner and no special, group- or world-write bit
+from the archive. With `--activate`, it
 writes `/etc/profile.d/zz-repro-bundle.sh`, which enters the primary dev
 shell in every new shell without evaluating anything, and a marked line in
 `/etc/bash.bashrc` that sources it, for shells that are not login shells. The

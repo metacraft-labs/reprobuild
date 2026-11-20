@@ -378,10 +378,13 @@ proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string): bool =
   var memberArgs = ""
   if members.len > 0: memberArgs = " --"
   for m in members: memberArgs.add(" " & quoteShell(m))
-  let command = "set -o pipefail; (" & quoteShell(requireExe("zstd")) &
-    " -q -dc --long=" & $ZstdWindowLog & " - | " &
-    quoteShell(requireExe("tar")) & " -C " & quoteShell(parent) &
-    " --skip-old-files" & transform & " -xf -" & memberArgs & ") >" &
+  # The member checks confine where tar writes, not the modes it applies:
+  # no special bit, no group or world write, no owner (§7 step 4.4).
+  let command = "set -o pipefail; " & ExtractModeShell & "(" &
+    quoteShell(requireExe("zstd")) & " -q -dc --long=" & $ZstdWindowLog &
+    " - | " & quoteShell(requireExe("tar")) & " -C " & quoteShell(parent) &
+    ExtractModeOptions & " --skip-old-files" & transform & " -xf -" &
+    memberArgs & ") >" &
     quoteShell(errPath) & " 2>&1"
   if rootIsCheckout and members.len == 0:
     discard

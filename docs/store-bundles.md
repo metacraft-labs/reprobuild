@@ -275,6 +275,14 @@ schema `reprobuild.store-bundle.v2`. They are unverified there;
    hash matches their name are excluded from extraction. They are
    content-addressed, so this is what makes a repeated import cheap and leaves
    read-only prefixes alone.
+
+   The member check confines where tar writes, not the modes it writes, and
+   step 4 does not compare modes. So tar runs with `--no-same-owner
+   --no-same-permissions` under the importer's umask with `go-w` added: no
+   entry is written setuid, setgid, sticky, group- or world-writable, and no
+   owner is taken from the archive, whatever it stores and even when root
+   imports. A declared directory that already exists still takes the
+   archive's mode, masked the same way.
 4. **Verify the content.** For every `entry`, check its lstat kind and size
    and its BLAKE3 digest (files) or link target (symlinks) against `contents`.
    Any mismatch fails the import. Nothing is registered and no record is
