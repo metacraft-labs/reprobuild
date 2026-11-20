@@ -101,6 +101,7 @@
 ## No mocks. Skip rule: skip only when `git` is missing from PATH (the partner
 ## layer is a real repository the real composer clones).
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
   unittest]
 
@@ -124,8 +125,8 @@ proc runRepro(args: openArray[string]):
   # inherited override pointing elsewhere.
   env.del("REPRO_WORKSPACE_CONFIG")
   let p = startProcess(reproBinary(), args = @args, env = env, options = {})
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 

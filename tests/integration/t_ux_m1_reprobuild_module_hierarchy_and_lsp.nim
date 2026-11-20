@@ -6,7 +6,9 @@
 ## ``reprobuild/home``, ``reprobuild/system`` -- and the older names
 ## (``repro_project_dsl``, ``repro_dsl_stdlib[/...]``) keep working as
 ## re-exports of the same symbols. Editor tooling must open such a recipe COLD
-## (no Reprobuild-specific flags, only a ``--path`` set in a config file) and:
+## (no Reprobuild-specific flags, only a ``--path`` set in a config file;
+## a DSL file gets the full DSL by its name, a helper module by the
+## ``<helper>.nims`` beside it) and:
 ##
 ##   * report zero errors and zero ``[UnusedImport]`` warnings, even with
 ##     ``--warningAsError[UnusedImport]:on``;
@@ -44,6 +46,7 @@ import std/[compilesettings, os, osproc, sequtils, strutils, tempfiles,
 from repro_core/ambient_execution import uncontrolledExecCmdEx,
   uncontrolledFindExe
 import repro_interface_artifacts
+import repro_test_support
 
 const
   RepoRoot = currentSourcePath().parentDir.parentDir.parentDir
@@ -147,8 +150,12 @@ proc discoveryFlags(workDir: string): seq[string] =
     else: delEnv("REPROBUILD_LIBS_DIR")
 
 proc nimCfgFor(flags: seq[string]): string =
-  ## A project ``nim.cfg`` carrying only the ``--path`` entries: what an
-  ## editor needs to resolve the DSL. Quoted so a path with spaces survives.
+  ## A project ``nim.cfg`` carrying the ``--path`` entries: what an editor
+  ## needs to resolve the DSL. Quoted so a path with spaces survives. No mode
+  ## define: a DSL file opened as the main file (``repro.nim``,
+  ## ``reprobuild.nim``, ``home.nim``, ``system.nim``) gets the full DSL by
+  ## its name (``repro_project_dsl/mode``), and a helper module by the
+  ## ``<helper>.nims`` beside it (``writeHelper``).
   for flag in flags:
     if flag.startsWith("--path:"):
       result.add("--path:\"" & flag["--path:".len .. ^1] & "\"\n")
@@ -165,6 +172,16 @@ package hellodemo:
 echo package
 """
     ## Line 2 col 6 is the use of the application's ``package``.
+
+const HelperNims = "switch(\"define\", \"reproEvalMode\")\n"
+  ## A helper module's ``<helper>.nims``: what gives a module that uses the
+  ## full DSL, and is not named like a DSL file, the full DSL when it is
+  ## checked on its own. Nim reads it only when that module is the main file.
+
+proc writeHelper(dir, name, source: string) =
+  ## ``<name>.nim`` holding ``source``, with its ``<name>.nims``.
+  writeFile(dir / (name & ".nim"), source)
+  writeFile(dir / (name & ".nims"), HelperNims)
 
 proc writeProject(root, nimCfg: string) =
   createDir(root / "src")
@@ -276,11 +293,6 @@ suite "every canonical and legacy import compiles with UnusedImport as an error"
       "proc usesNim(p: NimPackage) = discard p\n"),
     ("dsl_packaging", "import reprobuild/dsl/packaging\n\n" &
       "proc usesPackaging(d: Distribution) = discard d\n"),
-    ("home_profile", "import reprobuild/home\n\nprofile \"demo-home\":\n" &
-      "  activity default:\n    git\n"),
-    ("system_profile", "import reprobuild/system\n\n" &
-      "profile \"demo-system\":\n  resources:\n" &
-      "    fsSystemDirectory(path = \"/etc/demo.d\", address = \"demoDir\")\n"),
     ("legacy_project_dsl", "import repro_project_dsl\n\n" &
       "package legacyDsl:\n  build:\n    shell(command = \"true\")\n"),
     ("legacy_stdlib", "import repro_dsl_stdlib\n\npackage legacyStdlib:\n" &
@@ -291,7 +303,7 @@ suite "every canonical and legacy import compiles with UnusedImport as an error"
 
   for (name, source) in fixtures:
     test "import fixture " & name:
-      writeFile(dir / (name & ".nim"), source)
+      writeHelper(dir, name, source)
       let (output, exitCode) = nimCheck(dir, name & ".nim",
         ["--warningAsError[UnusedImport]:on"])
       checkpoint output
@@ -299,8 +311,31 @@ suite "every canonical and legacy import compiles with UnusedImport as an error"
       check nimCheckErrors(output).len == 0
       check unusedImportFindings(output).len == 0
 
+  # Profiles under their own names, with no ``.nims``: the file name is what
+  # gives them the full DSL.
+  const profiles = [
+    ("home_profile", "home.nim", "import reprobuild/home\n\n" &
+      "profile \"demo-home\":\n  activity default:\n    git\n"),
+    ("system_profile", "system.nim", "import reprobuild/system\n\n" &
+      "profile \"demo-system\":\n  resources:\n" &
+      "    fsSystemDirectory(path = \"/etc/demo.d\", address = \"demoDir\")\n"),
+  ]
+
+  for (name, file, source) in profiles:
+    test "import fixture " & name & " (" & file & ")":
+      let profileDir = dir / name
+      createDir(profileDir)
+      writeFile(profileDir / "nim.cfg", pathCfg)
+      writeFile(profileDir / file, source)
+      let (output, exitCode) = nimCheck(profileDir, file,
+        ["--warningAsError[UnusedImport]:on"])
+      checkpoint output
+      check exitCode == 0
+      check nimCheckErrors(output).len == 0
+      check unusedImportFindings(output).len == 0
+
   test "old and new names denote the same symbols (no ambiguity when mixed)":
-    writeFile(dir / "mixed.nim",
+    writeHelper(dir, "mixed",
       "import reprobuild/dsl/packages/nim\n" &
       "import repro_dsl_stdlib/packages/nim\n" &
       "import reprobuild/dsl\nimport repro_project_dsl\n\n" &
@@ -338,12 +373,12 @@ suite "every canonical and legacy import compiles with UnusedImport as an error"
     # ``ReproFs``-receiver overload of it -- and neither can a catalog type
     # such as ``NimPackage``, which neither name exports.)
     const body = "\n\ndiscard currentBuildContext()\n"
-    writeFile(dir / "prelude_umbrella.nim", "import reprobuild" & body)
+    writeHelper(dir, "prelude_umbrella", "import reprobuild" & body)
     let (umbrellaOut, umbrellaExit) = nimCheck(dir, "prelude_umbrella.nim",
       ["--warningAsError[UnusedImport]:on"])
     checkpoint umbrellaOut
     check umbrellaExit == 0
-    writeFile(dir / "core_only.nim", "import reprobuild/dsl" & body)
+    writeHelper(dir, "core_only", "import reprobuild/dsl" & body)
     let (output, exitCode) = nimCheck(dir, "core_only.nim")
     checkpoint output
     check exitCode != 0
@@ -375,7 +410,9 @@ suite "nim check and nimsuggest open repro.nim and src/main.nim cold":
     if answers.len == 2:
       let pkg = answers[0]
       check pkg.symKind == "skMacro"
-      check pkg.qualifiedName == "repro_project_dsl.package"
+      # The full DSL's module (`repro_project_dsl/full`), which the umbrella
+      # re-exports in every mode but the thin one.
+      check pkg.qualifiedName == "full.package"
       check samePath(pkg.file, ProjectDslMacros)
       check declaresAt(pkg.file, pkg.line, "macro package*")
       let write = answers[1]

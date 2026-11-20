@@ -1499,6 +1499,45 @@ proc selectionFailure(useDef: InterfaceToolUse; kind: RealizationKind;
       "\" has no " & $kind & " realization for " & describeTarget(target) &
       " requested by uses \"" & useDef.rawConstraint & "\": " & choice.detail)
 
+proc usesGateTarget*(useDef: InterfaceToolUse;
+                     target: RealizationTarget): Option[RealizationTarget] =
+  ## The platform the declared-platforms gate tests for ``useDef``: a cross
+  ## build's target-side dependency (``buildDeps:`` / ``runtimeDeps:`` under
+  ## ``--target``) follows the target (Package-Model.md §"GAP: a package
+  ## cannot declare the platforms it exists on"), whatever host target an
+  ## arm is selected for; everything else is tested against ``target``.
+  ## ``none`` -- the gate does not run -- for a cross triple whose platform
+  ## is not recognised (``platformOfTriple``).
+  ##
+  ## The triple is ``effectiveInstallMirrorTarget``, not the raw
+  ## ``--target``: ``toolBuildIdentity`` resolves a ``nativeBuildDeps:`` tool
+  ## -- and its recipe's from-source dependency closure, whose entries are
+  ## target-kind uses OF THAT RECIPE -- under ``withInstallMirrorTarget("")``
+  ## because that tool is built for the build host. Gating those against
+  ## ``--target`` would refuse a host tool's dependency for a platform it is
+  ## never built for, which ``repro build``'s from-source pass (gating the
+  ## native side against the host) has already accepted.
+  let crossTriple = effectiveInstallMirrorTarget()
+  if useDef.depKind in [DepKindTarget, DepKindRuntime] and
+      crossTriple.len > 0:
+    return platformOfTriple(crossTriple)
+  some(target)
+
+proc refuseUnavailableForUse*(useDef: InterfaceToolUse;
+                              target: RealizationTarget) =
+  ## Selection step 1 for a recipe's ``uses:``: ``refuseUnavailablePlatform``
+  ## against ``usesGateTarget``.
+  let gated = usesGateTarget(useDef, target)
+  if gated.isSome:
+    refuseUnavailablePlatform(useDef, gated.get)
+
+proc isAvailableForUse*(useDef: InterfaceToolUse;
+                        target: RealizationTarget): bool =
+  ## The non-raising form, for callers that degrade per tool.
+  let gated = usesGateTarget(useDef, target)
+  gated.isNone or useDef.availabilityOf().isAvailableOn(
+    gated.get.platform.family, gated.get.os)
+
 proc selectNixProvisioning*(useDef: InterfaceToolUse;
                             target = hostRealizationTarget()):
     InterfaceNixProvisioning =
@@ -1513,6 +1552,9 @@ proc selectNixProvisioning*(useDef: InterfaceToolUse;
   ## version range filters the entries that declare a ``version``, as it
   ## filters ``tarball`` entries; one that declares none is held to the
   ## range after realization instead.
+  # Selection step 1: a package declared for other platforms is refused by
+  # reason before any record of this kind is looked at.
+  refuseUnavailableForUse(useDef, target)
   let pin = contributorPin(useDef)
   let locked = lockedCandidates(useDef, useDef.nixProvisioning)
   let versionRange = requestedUsesVersionRange(useDef)
@@ -1547,6 +1589,9 @@ proc noProvisioningAtAllHint(useDef: InterfaceToolUse): string =
 proc nixAcquisitionPlan*(useDef: InterfaceToolUse;
                          target = hostRealizationTarget()):
     NixAcquisitionPlan =
+  # Before "declares no records of this kind": a package unavailable on the
+  # target is refused by that reason, whatever its records.
+  refuseUnavailableForUse(useDef, target)
   if useDef.nixProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
@@ -2821,6 +2866,9 @@ proc selectTarballProvisioning*(useDef: InterfaceToolUse;
   ## committed-lock pin names the realization, in which case that entry and
   ## no other is taken, or the selection refuses. The ``uses:`` version
   ## range filters as it does unpinned (``requestedUsesVersionRange``).
+  # Selection step 1: a package declared for other platforms is refused by
+  # reason before any record of this kind is looked at.
+  refuseUnavailableForUse(useDef, target)
   let pin = contributorPin(useDef, honorRequestedContributor)
   let locked = lockedCandidates(useDef, useDef.tarballProvisioning)
   let wanted = lockedRealizationOf(useDef)
@@ -2859,6 +2907,9 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
                              honorRequestedContributor = true;
                              target = hostRealizationTarget()):
     TarballAcquisitionPlan =
+  # Before "declares no records of this kind": a package unavailable on the
+  # target is refused by that reason, whatever its records.
+  refuseUnavailableForUse(useDef, target)
   if useDef.tarballProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
@@ -7232,6 +7283,9 @@ proc selectScoopProvisioning*(useDef: InterfaceToolUse;
   ## package (Provisioning-Contributions.md §"Profile Package References") —
   ## under the resolver's provisioning pin (``contributorPin``), as for nix,
   ## and filtered by the ``uses:`` version range as it is unpinned.
+  # Selection step 1: a package declared for other platforms is refused by
+  # reason before any record of this kind is looked at.
+  refuseUnavailableForUse(useDef, target)
   let pin = contributorPin(useDef)
   let locked = lockedCandidates(useDef, useDef.scoopProvisioning)
   let versionRange = requestedUsesVersionRange(useDef)
@@ -7249,6 +7303,9 @@ proc selectScoopProvisioning*(useDef: InterfaceToolUse;
 proc scoopAcquisitionPlan*(useDef: InterfaceToolUse;
                            target = hostRealizationTarget()):
     ScoopAcquisitionPlan =
+  # Before "declares no records of this kind": a package unavailable on the
+  # target is refused by that reason, whatever its records.
+  refuseUnavailableForUse(useDef, target)
   if useDef.scoopProvisioning.len == 0:
     raise newException(ValueError,
       "tool-resolution failed: package \"" & useDef.packageSelector &
@@ -10540,6 +10597,16 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
   ## realized only by its package's arm for ``mode`` and every fall-through
   ## below is refused instead of taken. Those fall-throughs still apply to
   ## tools that are not overridden.
+  # Selection step 1 (Provisioning-Contributions.md §"Profile Package
+  # References"): a package whose declared ``platforms:`` exclude the
+  # platform the use is realized for is refused by reason before ANY
+  # realization is consulted -- a producer binding, PATH and every mode's
+  # records alike -- so a same-named executable is never taken for a package
+  # declared not to exist there (Package-Model.md §"GAP: a package cannot
+  # declare the platforms it exists on"). ``refuseUnavailableForUse`` picks
+  # that platform: the build host for a tool, the ``--target`` platform for
+  # a cross build's target-side dependency.
+  refuseUnavailableForUse(useDef, hostRealizationTarget())
   if useDef.packageSelector.len > 0 and
       producerExecutableSelectors.hasKey(useDef.packageSelector):
     let producerPath =

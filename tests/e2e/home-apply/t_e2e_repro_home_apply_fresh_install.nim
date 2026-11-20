@@ -155,11 +155,13 @@ else:
       let absPrefix = absolutePrefixPath(verifyStore, lookup.row.realizedPath)
       check dirExists(absPrefix)
 
-      # The store has a `profile`-kind root with the new generation id.
+      # The store has a `profile`-kind root for the new generation, named
+      # by this state directory and the generation id.
       let roots = listRoots(verifyStore)
       var hasGenRoot = false
       for r in roots:
-        if r.rootId == activeId and r.kind == "profile":
+        if r.rootId == profileRootIdForKey(existingStateDirRootKey(stateDir), activeId) and
+            r.kind == "profile":
           hasGenRoot = true
           break
       check hasGenRoot

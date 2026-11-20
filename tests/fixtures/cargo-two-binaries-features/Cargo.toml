@@ -1,0 +1,3 @@
+[workspace]
+resolver = "2"
+members = ["featlib", "app-alpha", "app-beta"]

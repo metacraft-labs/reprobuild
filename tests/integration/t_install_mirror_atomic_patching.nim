@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[dynlib, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/install_mirror_relocation
@@ -17,7 +18,7 @@ when defined(linux):
       options = {poUsePath, poStdErrToStdOut})
     defer: child.close()
     child.inputStream.close()
-    result.output = child.outputStream.readAll()
+    result.output = drainStream(child.outputStream)
     result.exitCode = child.waitForExit()
 
   proc noPatchTemps(root: string): bool =

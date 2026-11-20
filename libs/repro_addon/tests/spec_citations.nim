@@ -29,6 +29,7 @@
 ##
 ## Not a test file (no ``t_`` prefix).
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, streams, strutils]
 
 type
@@ -168,7 +169,7 @@ proc trackedFiles*(repoRoot: string; roots: openArray[string]): seq[string] =
   var args = @["-C", repoRoot, "ls-files", "-z", "--"]
   for r in roots: args.add(r)
   let p = startProcess("git", args = args, options = {poUsePath, poStdErrToStdOut})
-  let o = p.outputStream.readAll()
+  let o = drainStream(p.outputStream)
   let rc = p.waitForExit()
   p.close()
   if rc != 0: return

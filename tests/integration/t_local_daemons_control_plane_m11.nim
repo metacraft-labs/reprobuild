@@ -224,6 +224,7 @@ proc startFakeProtocolDaemon(tempRoot: string): owned(Process) =
     result.terminate()
     discard result.waitForExit()
   let output =
+    # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
     if result.outputStream != nil: result.outputStream.readAll() else: ""
   result.close()
   raise newException(IOError,

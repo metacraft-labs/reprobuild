@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
 
@@ -102,7 +103,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
     env = env,
     options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()

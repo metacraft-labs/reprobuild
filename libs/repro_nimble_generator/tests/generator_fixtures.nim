@@ -16,8 +16,15 @@
 ## * the DIALER connects the forge's vetted documentation address to the
 ##   local listener. It is the only substitution: the policy checks the
 ##   address the resolver answered, exactly as in production.
+##
+## The same listener can also serve, by route: a directory as a static
+## HTTPS mirror (`serveDir`, GET and HEAD), and a served repository's commit
+## archives the way a forge does (`forgeArchives`: `/<owner>/<repo>/archive/
+## <commit>.tar.gz`, made by `git archive` with the forge's single top
+## directory `<repo>-<commit>/`).
 
-import std/[nativesockets, net, options, os, osproc, random, streams, strtabs, strutils, tables, tempfiles, times]
+from repro_core/process_streams import drainStream
+import std/[exitprocs, nativesockets, net, options, os, osproc, random, streams, strtabs, strutils, tables, tempfiles, times]
 
 import repro_nimble_generator
 import repro_nimble_index
@@ -37,6 +44,12 @@ type
     failFetchWhile*: string
       ## while this file exists, answer a `fetch` request (an upload-pack
       ## POST asking for objects) with 503; refs are still listed
+    serveDir*: string
+      ## answer GET and HEAD under ``prefix`` from this directory (a static
+      ## mirror); a missing file is 404
+    forgeArchives*: bool
+      ## answer `<prefix><owner>/<repo>/archive/<commit>.tar.gz` with
+      ## `git archive` of the served `<owner>/<repo>.git`, as a forge does
 
   ServerConfig = object
     root, cert, key, gitBin: string
@@ -61,7 +74,7 @@ proc run*(args: openArray[string]; cwd = ""; env: StringTableRef = nil;
     env = env, options = {poUsePath, poStdErrToStdOut})
   if input.len > 0: p.inputStream.write(input)
   p.inputStream.close()
-  result = p.outputStream.readAll()
+  result = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   if code != 0:
@@ -157,7 +170,7 @@ proc cgi(cfg: ServerConfig; req: auto): string =
     options = {})
   p.inputStream.write(req.body)
   p.inputStream.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   discard p.waitForExit()
   p.close()
   let sep = output.find("\r\n\r\n")
@@ -200,9 +213,52 @@ proc serve(cfg: ServerConfig) {.thread.} =
         if not req.ok:
           client.close()
           continue
-        cfg.logLine(req.meth & " " & req.path & "?" & req.query)
+        cfg.logLine(req.meth & " " & req.path & "?" & req.query &
+          " host=" & req.headers.getOrDefault("host"))
         var handled = false
         for r in cfg.routes:
+          if req.path.startsWith(r.prefix) and r.serveDir.len > 0:
+            handled = true
+            let rel = req.path[r.prefix.len .. ^1]
+            let file = r.serveDir / rel
+            if ".." in rel.split('/') or not fileExists(file):
+              client.send("HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n" &
+                "Connection: close\r\n\r\n")
+            else:
+              let body = readFile(file)
+              client.send("HTTP/1.1 200 OK\r\nContent-Length: " & $body.len &
+                "\r\nConnection: close\r\n\r\n" &
+                (if req.meth == "HEAD": "" else: body))
+            client.close()
+            break
+          let archiveParts =
+            if r.forgeArchives and req.path.startsWith(r.prefix):
+              req.path[r.prefix.len .. ^1].split('/')
+            else: @[]
+          if archiveParts.len == 4 and archiveParts[2] == "archive" and
+              archiveParts[3].endsWith(".tar.gz"):
+            handled = true
+            let parts = archiveParts
+            var answer = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n" &
+              "Connection: close\r\n\r\n"
+            block:
+              let commit = parts[3][0 ..< parts[3].len - ".tar.gz".len]
+              let repo = cfg.root / parts[0] / parts[1] & ".git"
+              if dirExists(repo):
+                let p = startProcess(cfg.gitBin, args = ["--git-dir=" & repo,
+                  "archive", "--format=tar.gz", "--prefix=" & parts[1] & "-" &
+                  commit & "/", commit], options = {})
+                let body = drainStream(p.outputStream)
+                let code = p.waitForExit()
+                p.close()
+                if code == 0:
+                  answer = "HTTP/1.1 200 OK\r\nContent-Length: " & $body.len &
+                    "\r\nConnection: close\r\n\r\n" & body
+            client.send(answer)
+            client.close()
+            break
+          if r.forgeArchives or r.serveDir.len > 0:
+            continue
           if req.path.startsWith(r.prefix):
             if r.failFetchWhile.len > 0:
               let asksObjects = req.meth == "POST" and
@@ -377,10 +433,26 @@ proc packagesJson*(entries: seq[(string, string)];
     items.add "  {\"name\": " & a.escape() & ", \"alias\": " & t.escape() & "}"
   file("packages.json", "[\n" & items.join(",\n") & "\n]\n")
 
-proc sourceSetText*(registryUrl, registryCommit: string; extra = ""): string =
+var fixtureMirror = ""
+
+proc defaultFixtureMirror*(): string =
+  ## A directory mirror for source sets that name none: publishing needs at
+  ## least one required mirror (NPC-AREQ13). One per test process, removed
+  ## when it exits.
+  if fixtureMirror.len == 0:
+    fixtureMirror = createTempDir("npc-fixture-mirror-", "")
+    addExitProc(proc () =
+      try: removeDir(fixtureMirror) except CatchableError: discard)
+  fixtureMirror
+
+proc sourceSetText*(registryUrl, registryCommit: string; extra = "";
+                    mirror = ""): string =
+  ## A source set over one registry, with ``extra`` appended, publishing to
+  ## the directory ``mirror`` (default: `defaultFixtureMirror`).
+  let m = if mirror.len > 0: mirror else: defaultFixtureMirror()
   "schema = \"reprobuild.nimble-source-set.v1\"\n\n[[registry]]\nremote = " &
     registryUrl.escape() & "\ncommit = " & registryCommit.escape() & "\n" &
-    extra
+    "\n[[mirror]]\nurl = " & m.escape() & "\n" & extra
 
 proc genConfig*(f: Fixture; ss: SourceSet; generatedAt: uint64;
                 stateDir: string; previous = ""; outputDir = "";

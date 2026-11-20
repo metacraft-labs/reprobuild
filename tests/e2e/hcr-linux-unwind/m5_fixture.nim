@@ -27,6 +27,7 @@
 ## assertion from a vacuous one — and HLX-OQ-4's whole point is that the libgcc
 ## arm stays green no matter what you guess.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils]
 
 # Nim parses `../hcr-linux-direct/x` as arithmetic, so the ELF reader HLX-M0
@@ -258,8 +259,8 @@ type
 
 proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
   let process = startProcess(binary, args = @args, options = {})
-  result.output = process.outputStream.readAll()
-  result.stderrText = process.errorStream.readAll()
+  result.output = drainStream(process.outputStream)
+  result.stderrText = drainStream(process.errorStream)
   result.exitCode = process.waitForExit()
   process.close()
   for line in result.output.splitLines():
@@ -340,7 +341,7 @@ proc runDebuggerTranscript(exePath: string; args: openArray[string];
   let process = startProcess(exePath, workingDir = cwd, args = @args,
                              env = debuggerEnv(),
                              options = {poStdErrToStdOut})
-  result.output = process.outputStream.readAll()
+  result.output = drainStream(process.outputStream)
   result.code = process.waitForExit()
   process.close()
 

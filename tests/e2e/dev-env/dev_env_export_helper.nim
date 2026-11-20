@@ -12,6 +12,7 @@
 ## module, then add their own per-shell assertions + syntax-check
 ## (e.g. ``bash -n`` / ``pwsh -NoProfile -Command``).
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles]
 
 import repro_dev_env_artifacts
@@ -165,7 +166,7 @@ proc syntaxCheckBash*(stdoutText: string; cwd: string): tuple[ok: bool;
     args = @["-n", scriptPath],
     workingDir = cwd,
     options = {poUsePath, poStdErrToStdOut})
-  let output = if proc1.outputStream != nil: proc1.outputStream.readAll() else: ""
+  let output = if proc1.outputStream != nil: drainStream(proc1.outputStream) else: ""
   let code = proc1.waitForExit()
   proc1.close()
   (ok: code == 0, diag: output)
@@ -181,7 +182,7 @@ proc syntaxCheckFish*(stdoutText: string; cwd: string): tuple[ok: bool;
     args = @["-n", scriptPath],
     workingDir = cwd,
     options = {poUsePath, poStdErrToStdOut})
-  let output = if proc1.outputStream != nil: proc1.outputStream.readAll() else: ""
+  let output = if proc1.outputStream != nil: drainStream(proc1.outputStream) else: ""
   let code = proc1.waitForExit()
   proc1.close()
   (ok: code == 0, diag: output)
@@ -210,7 +211,7 @@ proc syntaxCheckPwsh*(stdoutText: string; cwd: string): tuple[ok: bool;
     ],
     workingDir = cwd,
     options = {poUsePath, poStdErrToStdOut})
-  let output = if proc1.outputStream != nil: proc1.outputStream.readAll() else: ""
+  let output = if proc1.outputStream != nil: drainStream(proc1.outputStream) else: ""
   let code = proc1.waitForExit()
   proc1.close()
   (ok: code == 0, diag: output)

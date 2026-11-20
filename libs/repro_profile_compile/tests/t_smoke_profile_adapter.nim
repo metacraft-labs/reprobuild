@@ -1158,6 +1158,24 @@ suite "M83 Phase D: system adapter":
     expect ValueError:
       discard profileIntentToSystemProfile(intent)
 
+  test "a passwd.group member the profile declares as a passwd.user is refused":
+    # The compiled path refuses what the text path refuses: a declared
+    # user's memberships are its own `groups` (System-Profile-And-Infra-
+    # Apply.md, passwd.group; reprobuild-pm issue 2026-11-12-passwd-user-
+    # and-passwd-group-can-fight-each-other-and-never-converge).
+    var intent = ProfileIntent(name: "sys")
+    intent.resources.add(resourceIntent("passwd.group", "nut",
+      @[strFieldEntry("name", "nut"),
+        listFieldEntry("members", @["upsmon"])]))
+    intent.resources.add(resourceIntent("passwd.user", "upsmon",
+      @[strFieldEntry("name", "upsmon")]))
+    var msg = ""
+    try:
+      discard profileIntentToSystemProfile(intent)
+    except ESystemProfileInvalid as e:
+      msg = e.msg
+    check "passwd.group 'nut'" in msg and "passwd.user 'upsmon'" in msg
+
   test "passwd.group rejects a non-numeric gid at adapter time":
     var intent = ProfileIntent(name: "sys")
     intent.resources.add(resourceIntent("passwd.group", "x",

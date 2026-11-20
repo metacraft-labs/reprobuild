@@ -31,7 +31,7 @@
 ## ``nim`` is missing — so a sandbox without Nim simply skips the
 ## fragment assertions instead of failing them.
 
-import std/[os, strutils, unittest]
+import std/[json, os, sequtils, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -1123,3 +1123,724 @@ suite "nim convention Phase 1 output ownership":
       defer:
         removeDir(scratch)
       checkCompilePragmaSourceIsNotAPhase1Output(scratch, "pragma_lib")
+
+# --- Phase 2 object naming: same-named {.compile.} pragma sources -------
+
+proc writeSameNamedPragmaSourcesProject(scratch, packageName, member: string;
+                                        isLibrary: bool) =
+  ## A scratch project whose entry module compiles ``src/a/util.c`` and
+  ## ``src/b/util.c`` through two ``{.compile.}`` pragmas (the second with
+  ## a flag), and compiles ``src/b/util.c`` a second time, without the
+  ## flag, into an object the pragma names itself. Three ``compile``
+  ## entries of the manifest therefore share the C file name ``util.c``;
+  ## Nim records a distinct object for each.
+  if dirExists(scratch):
+    removeDir(scratch)
+  createDir(scratch / "src" / "a")
+  createDir(scratch / "src" / "b")
+  writeFile(scratch / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"nim >=2.2 <3.0\"\n" &
+    "\n" &
+    (if isLibrary: "  library " & member & "\n"
+     else: "  executable " & member & ":\n    discard\n"))
+  writeFile(scratch / (member & ".nimble"),
+    "version = \"0.1.0\"\nauthor = \"t\"\ndescription = \"t\"\n" &
+    "license = \"MIT\"\nsrcDir = \"src\"\n" &
+    (if isLibrary: "" else: "bin = @[\"" & member & "\"]\n") &
+    "requires \"nim >= 2.2.0\"\n")
+  writeFile(scratch / "src" / "a" / "util.c",
+    "int util_a(void) { return 1; }\n")
+  writeFile(scratch / "src" / "b" / "util.c",
+    "#ifdef UTIL_ALT\nint util_b_alt(void) { return 4; }\n" &
+    "#else\nint util_b(void) { return 2; }\n#endif\n")
+  writeFile(scratch / "src" / (member & ".nim"),
+    "{.compile: \"a/util.c\".}\n" &
+    "{.compile(\"b/util.c\", \"-DUTIL_ALT\").}\n" &
+    "{.compile: (\"b/util.c\", \"alt_$1.o\").}\n" &
+    "proc utilA(): cint {.importc: \"util_a\".}\n" &
+    "proc utilB(): cint {.importc: \"util_b\".}\n" &
+    "proc utilBAlt(): cint {.importc: \"util_b_alt\".}\n" &
+    (if isLibrary:
+       "proc total*(): int = int(utilA() + utilB() + utilBAlt())\n"
+     else: "echo utilA() + utilB() + utilBAlt()\n"))
+
+proc writeExecutableProject(scratch, packageName, member: string;
+                            files: openArray[(string, string)]) =
+  ## A scratch executable project; ``files`` are paths under ``src/``
+  ## and their contents.
+  if dirExists(scratch):
+    removeDir(scratch)
+  createDir(scratch / "src")
+  writeFile(scratch / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"nim >=2.2 <3.0\"\n" &
+    "\n" &
+    "  executable " & member & ":\n    discard\n")
+  writeFile(scratch / (member & ".nimble"),
+    "version = \"0.1.0\"\nauthor = \"t\"\ndescription = \"t\"\n" &
+    "license = \"MIT\"\nsrcDir = \"src\"\n" &
+    "bin = @[\"" & member & "\"]\n" &
+    "requires \"nim >= 2.2.0\"\n")
+  for (relPath, content) in files:
+    createDir(parentDir(scratch / "src" / relPath))
+    writeFile(scratch / "src" / relPath, content)
+
+template checkSameNamedPragmaSourcesGetDistinctObjects(scratch: string) =
+  let conv = nim_convention.nimConvention()
+  let request = dummyRequest(scratch)
+  require conv.recognize(scratch, request)
+  let fragment = conv.emitFragment(scratch, request)
+  let utilA = slashPath(scratch / "src" / "a" / "util.c")
+  let utilB = slashPath(scratch / "src" / "b" / "util.c")
+  var ids: seq[string] = @[]
+  var objects: seq[string] = @[]
+  var depfiles: seq[string] = @[]
+  var utilCompiles: seq[BuildActionDef] = @[]
+  var finalStep: seq[BuildActionDef] = @[]
+  for node in fragment.nodes:
+    if node.kind != gnkAction:
+      continue
+    let action = decodeBuildActionPayload(toBytes(node.payload))
+    if action.id.startsWith("gcc-compile-"):
+      require action.outputs.len == 1
+      checkpoint("Phase 2 action " & action.id & " -> " & action.outputs[0])
+      # No two Phase 2 actions share an id, an object or a depfile.
+      check action.id notin ids
+      check slashPath(action.outputs[0]) notin objects
+      check slashPath(action.depfile) notin depfiles
+      ids.add(action.id)
+      objects.add(slashPath(action.outputs[0]))
+      depfiles.add(slashPath(action.depfile))
+      if slashPath(action.inputs[0]) in [utilA, utilB]:
+        utilCompiles.add(action)
+    elif action.id.startsWith("gcc-link-") or
+        action.id.startsWith("ar-archive-"):
+      finalStep.add(action)
+  # One Phase 2 action per ``compile`` entry: ``a/util.c`` once and
+  # ``b/util.c`` twice (once per recorded command).
+  require utilCompiles.len == 3
+  var utilACount = 0
+  var utilBCount = 0
+  for action in utilCompiles:
+    if slashPath(action.inputs[0]) == utilA: inc utilACount
+    else: inc utilBCount
+    # Each action writes the object its own argv names, and compiles the
+    # source it declares as its input.
+    let argv = inlineArgvOf(action)
+    let oAt = argv.find("-o")
+    require oAt >= 0 and oAt + 1 < argv.len
+    check slashPath(argv[oAt + 1]) == slashPath(action.outputs[0])
+    check slashPath(argv[^1]) == slashPath(action.inputs[0])
+    # Each object keeps the flags of its own entry: the pragma's
+    # ``-DUTIL_ALT`` goes to the object Nim named, not to the object the
+    # other pragma for ``b/util.c`` names itself.
+    # Nim's mangling of a pragma source's path into an object name
+    # differs between Nim versions (``@ma@sutil.c.o``, or a letter-shifted
+    # spelling of it), so the entries are told apart by what the pragmas
+    # fix: the flag, and the object name the third pragma gives itself.
+    let objName = extractFilename(action.outputs[0])
+    if objName == "alt_util.c.o":
+      check slashPath(action.inputs[0]) == utilB
+      check "-DUTIL_ALT" notin argv
+    elif slashPath(action.inputs[0]) == utilB:
+      check "-DUTIL_ALT" in argv
+    else:
+      check "-DUTIL_ALT" notin argv
+    check objName.endsWith(".o")
+  check utilACount == 1
+  check utilBCount == 2
+  # The link (or archive) step consumes every one of the three objects,
+  # each exactly once.
+  require finalStep.len >= 1
+  for step in finalStep:
+    var stepInputs: seq[string] = @[]
+    for input in step.inputs:
+      stepInputs.add(slashPath(input))
+    let stepArgv = inlineArgvOf(step)
+    for action in utilCompiles:
+      check stepInputs.count(slashPath(action.outputs[0])) == 1
+      check stepArgv.count(action.outputs[0]) == 1
+
+suite "nim convention Phase 2 object naming":
+  ## Protects the property that every ``compile`` entry of the nimcache
+  ## manifest gets its own Phase 2 action id, object and depfile, also
+  ## when two entries name C files with the same file name.
+  ## Governing text: ``Nim.md`` §"Phase 2 — Per-`.c` compile". Regression
+  ## test for reprobuild-pm
+  ## ``issues/2026-11-18-nim-phase-2-names-objects-by-c-file-basename-so-same-named-pragma-sources-collide.md``:
+  ## Phase 2 named the object after the C file's name, so ``a/util.c`` and
+  ## ``b/util.c`` both compiled to ``obj/<entry>/util.c.o`` under one
+  ## action id. Runs the production ``emitFragment`` (the eager
+  ## ``nim c --compileOnly`` included); nothing is mocked.
+
+  test "executable: same-named {.compile.} sources get distinct Phase 2 objects and ids":
+    if findExe("nim").len == 0:
+      # ``skip`` only marks the test; the ``else`` keeps the body from
+      # running and failing on the missing compiler.
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_same_named_pragma_exe"
+      writeSameNamedPragmaSourcesProject(scratch, "sameNamedPragmaExe",
+        "same_named_exe", isLibrary = false)
+      defer:
+        removeDir(scratch)
+      checkSameNamedPragmaSourcesGetDistinctObjects(scratch)
+
+  test "library: same-named {.compile.} sources get distinct Phase 2 objects and ids":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_same_named_pragma_lib"
+      writeSameNamedPragmaSourcesProject(scratch, "sameNamedPragmaLib",
+        "same_named_lib", isLibrary = true)
+      defer:
+        removeDir(scratch)
+      checkSameNamedPragmaSourcesGetDistinctObjects(scratch)
+
+  test "a compile entry repeated exactly is one Phase 2 action":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Two modules each carry a pragma for the same ``shared.c``. Nim
+      # lists the file twice, with one command and one object.
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_repeated_pragma"
+      writeExecutableProject(scratch, "repeatedPragma", "repeated_exe", {
+        "shared.c": "int shared_value(void) { return 7; }\n",
+        "other.nim":
+          "{.compile: \"shared.c\".}\n" &
+          "proc sharedValue*(): cint {.importc: \"shared_value\".}\n",
+        "repeated_exe.nim":
+          "import other\n" &
+          "{.compile: \"shared.c\".}\n" &
+          "echo sharedValue()\n"})
+      defer:
+        removeDir(scratch)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      let shared = slashPath(scratch / "src" / "shared.c")
+      var sharedCompiles: seq[BuildActionDef] = @[]
+      var links: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("gcc-compile-") and
+            slashPath(action.inputs[0]) == shared:
+          sharedCompiles.add(action)
+        elif action.id.startsWith("gcc-link-"):
+          links.add(action)
+      require sharedCompiles.len == 1
+      require links.len == 1
+      # The link names the one object once, as an input and on its argv.
+      let obj = sharedCompiles[0].outputs[0]
+      check links[0].inputs.count(obj) == 1
+      check inlineArgvOf(links[0]).count(obj) == 1
+
+  test "two different compile entries recording one object are rejected":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Both pragmas name the object themselves, and give it one name.
+      # Nim's own build would write one object over the other.
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_conflicting_pragma_objects"
+      writeExecutableProject(scratch, "conflictingObjects", "conflict_exe", {
+        "a/util.c": "int util_a(void) { return 1; }\n",
+        "b/util.c": "int util_b(void) { return 2; }\n",
+        "conflict_exe.nim":
+          "{.compile: (\"a/util.c\", \"same.o\").}\n" &
+          "{.compile: (\"b/util.c\", \"same.o\").}\n" &
+          "proc utilA(): cint {.importc: \"util_a\".}\n" &
+          "proc utilB(): cint {.importc: \"util_b\".}\n" &
+          "echo utilA() + utilB()\n"})
+      defer:
+        removeDir(scratch)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      var message = ""
+      try:
+        discard conv.emitFragment(scratch, request)
+      except ValueError as err:
+        message = err.msg
+      checkpoint("emit error: " & message)
+      # The error names the shared object and both sources.
+      check "record the same object, same.o" in message
+      check message.replace('\\', '/').contains("src/a/util.c")
+      check message.replace('\\', '/').contains("src/b/util.c")
+
+  test "object names an action id cannot tell apart still get distinct ids":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Nim records ``@ma@sutil.c.o`` for ``a/util.c`` and
+      # ``@ma_sutil.c.o`` for ``a_sutil.c``. An action id spells ``@`` as
+      # ``_``, so the readable ids of the two would be equal.
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_close_object_names"
+      writeExecutableProject(scratch, "closeObjectNames", "close_exe", {
+        "a/util.c": "int util_a(void) { return 1; }\n",
+        "a_sutil.c": "int util_b(void) { return 2; }\n",
+        "close_exe.nim":
+          "{.compile: \"a/util.c\".}\n" &
+          "{.compile: \"a_sutil.c\".}\n" &
+          "proc utilA(): cint {.importc: \"util_a\".}\n" &
+          "proc utilB(): cint {.importc: \"util_b\".}\n" &
+          "echo utilA() + utilB()\n"})
+      defer:
+        removeDir(scratch)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var ids: seq[string] = @[]
+      var objectNames: seq[string] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("gcc-compile-"):
+          checkpoint("Phase 2 action " & action.id & " -> " &
+            action.outputs[0])
+          check action.id notin ids
+          ids.add(action.id)
+          objectNames.add(extractFilename(action.outputs[0]))
+      # Two objects, for ``a/util.c`` and ``a_sutil.c``, whose names
+      # differ only in ``@`` against ``_``.
+      var pragmaObjects: seq[string] = @[]
+      for name in objectNames:
+        if not name.endsWith(".nim.c.o"):
+          pragmaObjects.add(name)
+      require pragmaObjects.len == 2
+      check pragmaObjects[0] != pragmaObjects[1]
+      check pragmaObjects[0].replace('@', '_') ==
+        pragmaObjects[1].replace('@', '_')
+      # An id no other object name contends for keeps its readable form:
+      # the object name without ``.o``, ``@`` spelled ``_``.
+      for name in objectNames:
+        if name.endsWith(".nim.c.o"):
+          check ("gcc-compile-close_exe-" &
+            name[0 .. ^3].replace('@', '_')) in ids
+
+# ---------------------------------------------------------------------------
+# Emit-cache key covers the project's Nim config files.
+#
+# Phase 1 runs ``nim c`` with ``--skipParentCfg --skipUserCfg`` but not
+# ``--skipProjCfg``, so Nim reads the config files beside the entry source
+# (``nim.cfg``, ``<entry>.nim.cfg``, ``config.nims``, ``<entry>.nims``).
+# Flags set there (``--passC``, ``--threads``, a sanitizer) reach the per-file
+# C compile commands Nim records, and Phase 2 runs those commands verbatim
+# (Nim.md §"Phase 2 — Per-`.c` compile"). The M18 emit cache must therefore
+# miss when such a file is added, edited or removed; otherwise Phase 2 runs
+# with stale flags. The ``.nimble`` is in the key too (Nim.md
+# §"Cross-module ordering").
+#
+# Adversarial origin: reprobuild-pm
+# issues/2026-11-16-nim-emit-cache-ignores-project-nim-config-files.md.
+# No mocks: the scratch project goes through the real convention and the real
+# ``nim`` on PATH.
+# ---------------------------------------------------------------------------
+
+proc phase2Argvs(fragment: GraphFragment): seq[seq[string]] =
+  for action in actionByPrefix(fragment, "gcc-compile-"):
+    result.add(inlineArgvOf(action))
+
+proc anyArgvCarries(argvs: seq[seq[string]]; token: string): bool =
+  for argv in argvs:
+    for arg in argv:
+      if token in arg:
+        return true
+  false
+
+suite "nim convention emit cache: project config files":
+
+  test "editing a project config file re-runs Phase 1 and reaches Phase 2":
+    let scratch = getTempDir() / "test_nim_convention_project_cfg"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    defer:
+      removeDir(scratch)
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package cfgProbe:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2\"\n" &
+      "\n" &
+      "  executable cfg_probe:\n" &
+      "    discard\n")
+    writeFile(scratch / "cfg_probe.nimble",
+      "version = \"0.1.0\"\nbin = @[\"cfg_probe\"]\nsrcDir = \"src\"\n")
+    writeFile(scratch / "src" / "cfg_probe.nim", "echo \"cfg probe\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let first = phase2Argvs(conv.emitFragment(scratch, request))
+      require first.len >= 1
+      check not anyArgvCarries(first, "REPRO_CFG_SENTINEL")
+
+      # config.nims beside the entry: the flag must reach Phase 2.
+      writeFile(scratch / "src" / "config.nims",
+        "switch(\"passC\", \"-DREPRO_CFG_SENTINEL_NIMS=1\")\n")
+      let fragment2 = conv.emitFragment(scratch, request)
+      let second = phase2Argvs(fragment2)
+      checkpoint "phase-2 argv after adding src/config.nims: " & $second
+      check anyArgvCarries(second, "REPRO_CFG_SENTINEL_NIMS")
+      # The recorded Phase 1 action declares the config file too, so the
+      # engine's own fingerprint of that action moves with it.
+      let phase1 = actionByPrefix(fragment2, "nim-c-compileonly-")
+      require phase1.len == 1
+      check (scratch / "src" / "config.nims") in phase1[0].inputs
+
+      # Edit config.nims in place: the file stays present, so only a key
+      # on its content can notice.
+      writeFile(scratch / "src" / "config.nims",
+        "switch(\"passC\", \"-DREPRO_CFG_SENTINEL_EDITED=1\")\n")
+      let edited = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing src/config.nims: " & $edited
+      check anyArgvCarries(edited, "REPRO_CFG_SENTINEL_EDITED")
+      check not anyArgvCarries(edited, "REPRO_CFG_SENTINEL_NIMS")
+
+      # nim.cfg beside the entry.
+      writeFile(scratch / "src" / "nim.cfg",
+        "passC = \"-DREPRO_CFG_SENTINEL_CFG=1\"\n")
+      let third = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after adding src/nim.cfg: " & $third
+      check anyArgvCarries(third, "REPRO_CFG_SENTINEL_CFG")
+
+      # Removing a config file must miss as well.
+      removeFile(scratch / "src" / "config.nims")
+      let fourth = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after removing src/config.nims: " & $fourth
+      check not anyArgvCarries(fourth, "REPRO_CFG_SENTINEL_EDITED")
+      check anyArgvCarries(fourth, "REPRO_CFG_SENTINEL_CFG")
+
+  test "the .nimble file is part of the emit-cache key":
+    let scratch = getTempDir() / "test_nim_convention_nimble_key"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    defer:
+      removeDir(scratch)
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package nimbleKey:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2\"\n" &
+      "\n" &
+      "  executable nimble_key:\n" &
+      "    discard\n")
+    writeFile(scratch / "nimble_key.nimble", "version = \"0.1.0\"\n")
+    writeFile(scratch / "src" / "nimble_key.nim", "echo \"nimble key\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      discard conv.emitFragment(scratch, request)
+      let sidecar = scratch
+      var before = ""
+      for f in walkDirRec(sidecar):
+        if f.endsWith("nim-c-compileonly.repro-emit-fingerprint"):
+          before = readFile(f)
+      require before.len > 0
+      writeFile(scratch / "nimble_key.nimble", "version = \"0.2.0\"\n")
+      let fragment = conv.emitFragment(scratch, request)
+      var after = ""
+      for f in walkDirRec(sidecar):
+        if f.endsWith("nim-c-compileonly.repro-emit-fingerprint"):
+          after = readFile(f)
+      check after.len > 0
+      check after != before
+      let phase1 = actionByPrefix(fragment, "nim-c-compileonly-")
+      require phase1.len == 1
+      check (scratch / "nimble_key.nimble") in phase1[0].inputs
+
+# ---------------------------------------------------------------------------
+# Emit-cache reuse is checked against the files Nim reports reading.
+#
+# The emit-cache key lists files the provider can name before Nim runs: the
+# ``src/`` trees, the project config files, the ``.nimble``. Nim reads more
+# than that: a file a ``config.nims`` includes, a module outside ``src/``, a
+# module reached through ``--path``. Nim records every such file, with its
+# SHA-1, in the manifest's ``depfiles`` array (it fills the array only when
+# ``nimBetterRun`` is defined, which Phase 1 therefore passes). A cached
+# manifest is reused only while each of those files still has the recorded
+# hash; otherwise Phase 2 would run stale compile commands (Nim.md
+# §"Cross-module ordering"). The same files are declared inputs of the
+# recorded Phase 1 action (Nim.md §"Phase 1 — Nim → C transpile").
+#
+# Adversarial origin: reprobuild-pm issues/2026-11-18-nim-emit-cache-key-
+# omits-config-nims-reads-and-required-packages.md.
+# No mocks: each scratch project goes through the real convention and the
+# real ``nim`` on PATH.
+# ---------------------------------------------------------------------------
+
+proc writeDepProbeProject(scratch, packageName, member: string) =
+  if dirExists(scratch):
+    removeDir(scratch)
+  createDir(scratch)
+  writeFile(scratch / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"nim >=2.2\"\n" &
+    "\n" &
+    "  executable " & member & ":\n" &
+    "    discard\n")
+
+proc declaresInput(action: BuildActionDef; path: string): bool =
+  ## Whether ``action`` declares ``path`` as an input under any spelling.
+  ## Nim resolves symlinks before it records a path, and the temporary
+  ## directory is reached through a symlink on some hosts (macOS).
+  for input in action.inputs:
+    if fileExists(input) and fileExists(path) and sameFile(input, path):
+      return true
+  false
+
+proc nimcacheFiles(scratch, name: string): seq[string] =
+  ## Files under a ``nimcache`` directory below ``scratch`` whose name is
+  ## exactly ``name``. A suffix match is not enough: some Nim builds write
+  ## further JSON files beside the manifest (``macro_sourcemap_<entry>.json``
+  ## in Nim 2.3.1), and those must not be taken for it.
+  for f in walkDirRec(scratch):
+    if extractFilename(f) == name and "nimcache" in f:
+      result.add(f)
+
+proc manifestWriteTimes(scratch, member: string): seq[string] =
+  ## ``<path>@<mtime>`` of the nimcache manifest ``<member>.json`` under
+  ## ``scratch``. Nim rewrites the manifest whenever Phase 1 runs, so an
+  ## unchanged list means the emit cache was reused.
+  for f in nimcacheFiles(scratch, member & ".json"):
+    result.add(f & "@" & $getLastModificationTime(f))
+
+suite "nim convention emit cache: inputs Nim reports reading":
+
+  test "editing a file that config.nims includes re-runs Phase 1":
+    let scratch = getTempDir() / "test_nim_convention_nims_include"
+    writeDepProbeProject(scratch, "nimsInclude", "nims_include")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "nims_include.nim", "echo \"nims include\"\n")
+    writeFile(scratch / "src" / "config.nims", "include \"flags.nims\"\n")
+    writeFile(scratch / "src" / "flags.nims",
+      "switch(\"passC\", \"-DREPRO_DEP_SENTINEL_ONE=1\")\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let fragment1 = conv.emitFragment(scratch, request)
+      check anyArgvCarries(phase2Argvs(fragment1), "REPRO_DEP_SENTINEL_ONE")
+      # The included file is a declared input of the recorded Phase 1
+      # action: Nim lists it in ``depfiles``.
+      let phase1 = actionByPrefix(fragment1, "nim-c-compileonly-")
+      require phase1.len == 1
+      check declaresInput(phase1[0], scratch / "src" / "flags.nims")
+
+      writeFile(scratch / "src" / "flags.nims",
+        "switch(\"passC\", \"-DREPRO_DEP_SENTINEL_TWO=1\")\n")
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing src/flags.nims: " & $second
+      check anyArgvCarries(second, "REPRO_DEP_SENTINEL_TWO")
+      check not anyArgvCarries(second, "REPRO_DEP_SENTINEL_ONE")
+
+  test "editing a module in a member's own src/ re-runs Phase 1":
+    # Layout B: the entry is ``<root>/<member>/src/<member>.nim``, so its
+    # modules are not under ``<root>/src/``.
+    let scratch = getTempDir() / "test_nim_convention_layout_b_dep"
+    writeDepProbeProject(scratch, "layoutB", "layout_b")
+    defer:
+      removeDir(scratch)
+    let memberSrc = scratch / "layout_b" / "src"
+    createDir(memberSrc)
+    writeFile(memberSrc / "layout_b.nim",
+      "import helper\necho helperValue()\n")
+    writeFile(memberSrc / "helper.nim",
+      "{.passC: \"-DREPRO_LAYOUTB_SENTINEL_ONE=1\".}\n" &
+      "proc helperValue*(): int = 1\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let fragment1 = conv.emitFragment(scratch, request)
+      check anyArgvCarries(phase2Argvs(fragment1),
+        "REPRO_LAYOUTB_SENTINEL_ONE")
+      let phase1 = actionByPrefix(fragment1, "nim-c-compileonly-")
+      require phase1.len == 1
+      check declaresInput(phase1[0], memberSrc / "helper.nim")
+
+      writeFile(memberSrc / "helper.nim",
+        "{.passC: \"-DREPRO_LAYOUTB_SENTINEL_TWO=1\".}\n" &
+        "proc helperValue*(): int = 2\n")
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing layout_b/src/helper.nim: " &
+        $second
+      check anyArgvCarries(second, "REPRO_LAYOUTB_SENTINEL_TWO")
+      check not anyArgvCarries(second, "REPRO_LAYOUTB_SENTINEL_ONE")
+
+  test "editing a module reached through --path re-runs Phase 1":
+    # The stand-in for a ``requires:`` package: a module outside the
+    # project's ``src/`` that Nim finds through a search path.
+    let scratch = getTempDir() / "test_nim_convention_path_dep"
+    writeDepProbeProject(scratch, "pathDep", "path_dep")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    createDir(scratch / "vendor" / "pkg")
+    writeFile(scratch / "src" / "path_dep.nim",
+      "import vendored\necho vendoredValue()\n")
+    writeFile(scratch / "src" / "config.nims",
+      "switch(\"path\", thisDir() & \"/../vendor/pkg\")\n")
+    writeFile(scratch / "vendor" / "pkg" / "vendored.nim",
+      "{.passC: \"-DREPRO_PATHDEP_SENTINEL_ONE=1\".}\n" &
+      "proc vendoredValue*(): int = 1\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let fragment1 = conv.emitFragment(scratch, request)
+      check anyArgvCarries(phase2Argvs(fragment1),
+        "REPRO_PATHDEP_SENTINEL_ONE")
+      let phase1 = actionByPrefix(fragment1, "nim-c-compileonly-")
+      require phase1.len == 1
+      check declaresInput(phase1[0],
+        scratch / "vendor" / "pkg" / "vendored.nim")
+
+      writeFile(scratch / "vendor" / "pkg" / "vendored.nim",
+        "{.passC: \"-DREPRO_PATHDEP_SENTINEL_TWO=1\".}\n" &
+        "proc vendoredValue*(): int = 2\n")
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing vendor/pkg/vendored.nim: " &
+        $second
+      check anyArgvCarries(second, "REPRO_PATHDEP_SENTINEL_TWO")
+      check not anyArgvCarries(second, "REPRO_PATHDEP_SENTINEL_ONE")
+
+  test "an unchanged project still reuses the cached manifest":
+    # The other direction: checking ``depfiles`` must not turn every emit
+    # into a miss.
+    let scratch = getTempDir() / "test_nim_convention_dep_reuse"
+    writeDepProbeProject(scratch, "depReuse", "dep_reuse")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "dep_reuse.nim", "echo \"dep reuse\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      discard conv.emitFragment(scratch, request)
+      let before = manifestWriteTimes(scratch, "dep_reuse")
+      require before.len == 1
+      sleep(1100)
+      discard conv.emitFragment(scratch, request)
+      check manifestWriteTimes(scratch, "dep_reuse") == before
+
+  test "a manifest without depfiles is not reused":
+    # A manifest written before Phase 1 passed ``nimBetterRun`` has an
+    # empty ``depfiles`` array, so no recorded hash supports reusing it.
+    let scratch = getTempDir() / "test_nim_convention_dep_empty"
+    writeDepProbeProject(scratch, "depEmpty", "dep_empty")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "dep_empty.nim", "echo \"dep empty\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      discard conv.emitFragment(scratch, request)
+      let manifests = nimcacheFiles(scratch, "dep_empty.json")
+      require manifests.len == 1
+      let manifestPath = manifests[0]
+      let node = parseJson(readFile(manifestPath))
+      require node["depfiles"].len > 0
+      node["depfiles"] = newJArray()
+      writeFile(manifestPath, $node)
+      discard conv.emitFragment(scratch, request)
+      check parseJson(readFile(manifestPath))["depfiles"].len > 0
+
+  test "a binary next to the entry source does not make Nim skip Phase 1":
+    # With ``nimBetterRun`` defined, Nim exits 0 without writing anything
+    # when its manifest looks current and its own output file (here
+    # ``src/<entry>``, as a manual ``nim c`` writes it) has the recorded
+    # modification time. The emit-time run removes the manifest first, and
+    # the recorded action asks the engine to remove it, so neither is
+    # skipped.
+    let scratch = getTempDir() / "test_nim_convention_stray_binary"
+    writeDepProbeProject(scratch, "strayBinary", "stray_binary")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "stray_binary.nim", "echo \"stray\"\n")
+    writeFile(scratch / "src" / "stray_binary", "not really a binary\n")
+    when defined(windows):
+      writeFile(scratch / "src" / "stray_binary.exe", "not a binary\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let fragment1 = conv.emitFragment(scratch, request)
+      let phase1 = actionByPrefix(fragment1, "nim-c-compileonly-")
+      require phase1.len == 1
+      let manifests = nimcacheFiles(scratch, "stray_binary.json")
+      require manifests.len == 1
+      check manifests[0] in phase1[0].removeBeforeRun
+
+      # Lose one generated C file, then change the emit-cache key with a
+      # module nothing imports. Nim's own test sees no change, so only a
+      # full run brings the C file back.
+      let cFiles = nimcacheFiles(scratch, "@mstray_binary.nim.c")
+      require cFiles.len == 1
+      removeFile(cFiles[0])
+      writeFile(scratch / "src" / "unused.nim", "discard\n")
+      discard conv.emitFragment(scratch, request)
+      check fileExists(cFiles[0])
+
+  when not defined(windows):
+    test "a project reached through a symlink declares each input once":
+      let real = getTempDir() / "test_nim_convention_symlink_real"
+      let link = getTempDir() / "test_nim_convention_symlink_link"
+      writeDepProbeProject(real, "viaSymlink", "via_symlink")
+      removeFile(link)
+      defer:
+        removeFile(link)
+        removeDir(real)
+      createDir(real / "src")
+      writeFile(real / "src" / "via_symlink.nim",
+        "import other\necho otherValue()\n")
+      writeFile(real / "src" / "other.nim",
+        "proc otherValue*(): int = 1\n")
+      createSymlink(real, link)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(link)
+      if not conv.recognize(link, request):
+        skip("nim is not on PATH; the convention cannot emit")
+      else:
+        let phase1 = actionByPrefix(conv.emitFragment(link, request),
+          "nim-c-compileonly-")
+        require phase1.len == 1
+        var resolved: seq[string] = @[]
+        for input in phase1[0].inputs:
+          let spelling = expandFilename(input)
+          check spelling notin resolved
+          resolved.add(spelling)
+        check declaresInput(phase1[0], real / "src" / "other.nim")

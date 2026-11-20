@@ -33,6 +33,7 @@
 ## typed form missed in every new shell until the `nim` tool declared the
 ## passthrough itself (`envPassthrough` in its `cli:` block).
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 
 const BackendCompilerUse = when defined(macosx): "clang >=1" else: "gcc >=1"
@@ -96,7 +97,7 @@ proc runBuildCli(reproBin, projectRoot, actionCacheRoot: string;
       "--progress=quiet", "--log=actions", projectRoot],
     env = env, options = {poStdErrToStdOut})
   defer: p.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   (output: output, exitCode: p.waitForExit())
 
 type

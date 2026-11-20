@@ -43,7 +43,7 @@ export packages_schema
 const CatalogTarballModules* = [
     "addlicense", "alire", "appimage_runtime", "appimagetool", "autoconf",
     "automake", "bash", "binutils", "bun", "cabal", "capnp", "cargo_cli", "cargo_nextest",
-    "cargo_sort", "chocolatey", "circom", "clang", "claude_code", "clingo",
+    "cargo_sort", "chocolatey", "circom", "clang", "clingo",
     "clippy", "cmake", "composer", "coreutils_install", "crystal", "curl",
     "dotnet_sdk", "electron_builder_nsis",
     "electron_builder_nsis_resources", "electron_builder_win_code_sign",
@@ -56,7 +56,8 @@ const CatalogTarballModules* = [
     "nim", "nimble", "ninja", "node", "npm", "npx", "nsis", "ocaml",
     "openssl", "patchelf", "perl", "php", "piper", "piper_voice_lessac_medium",
     "piper_voice_lessac_medium_config", "pkg_7zip", "playwright",
-    "postgresql", "python3", "python_dev", "ruby", "rust_std", "rustc",
+    "postgresql", "python3", "python3_opentelemetry", "python_dev", "ruby",
+    "rust_std", "rustc",
     "rustfmt", "rustup",
     "sh",
     "solc", "stylus", "swift", "swig", "taplo", "tar", "tmux", "uv",

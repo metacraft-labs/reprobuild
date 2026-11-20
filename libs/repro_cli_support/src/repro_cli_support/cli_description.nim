@@ -891,7 +891,8 @@ proc branchFlags(): NimNode {.compileTime.} =
 
 proc hooksActionFlags(): NimNode {.compileTime.} =
   ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
-  ## no selector both `--vcs` and `--shell-direnv` are implied.
+  ## no selector `--vcs`, `--shell-direnv` and `--shell-autocomplete` are
+  ## implied.
   let root = workspaceRootFlag()
   let report = workspaceReportFlags()
   quote do:
@@ -908,10 +909,20 @@ proc hooksActionFlags(): NimNode {.compileTime.} =
     boolFlag shellDirenv is bool,
       help = "The direnv `.envrc` activation block"
     boolFlag shellAutocomplete is bool,
-      help = "Shell completion scripts (not implemented yet)"
+      help = "Shell completion for repro, for every shell found (see " &
+        "--profile and --system)"
     flag shell is seq[string],
       help = "A native shell activation hook: bash, zsh, fish or pwsh " &
         "(repeat it for several)"
+    boolFlag profile is bool,
+      help = "Shell hooks for the current user only (the default): rc " &
+        "files and per-user completion directories"
+    boolFlag system is bool,
+      help = "Shell hooks for every user of the machine (writes system " &
+        "locations; usually needs root)"
+    flag systemRoot is string, visibility = internal,
+      help = "Prefix every system path written or consulted with PATH " &
+        "(tests)"
     `root`
     `report`
     pos path is string, required = false,
@@ -1834,7 +1845,7 @@ const
       primary: @["develop", "add", "why", "lock", "workspace"],
       secondary: @["tool", "remove", "sync", "pull", "branch", "switch", "push",
         "check", "hooks", "locking", "flake", "gateway", "bundle",
-        "catalog"]),
+        "catalog", "nimble"]),
     ReproCommandGroup(title: "Machines & Diagnostics",
       primary: @["home", "system", "infra", "health"],
       secondary: @["anywhere", "deploy-agent", "hardware", "disk", "attest",
@@ -2401,7 +2412,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         boolFlag noCertify is bool,
           help = "Plan the run as `repro test --no-certify` would"
         pos selectors is seq[string], required = false,
-          help = "What the plan builds (default: `.#test`, as for " &
+          help = "What the plan builds (default: `test`, as for " &
             "`repro test`)"
       subcmd "policy",
           help = "The certificate policy `repro.lock` records, and the rule " &
@@ -2555,8 +2566,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Provider modules, relative to the root (default: every " &
             "packages/{interfaces,vendor,source}/<name>/repro.nim)"
     subcmd "tool", help = "Realize one provisioned tool of the project":
-      # Realize one `uses:` package
-      # (and its provisioning dependencies) and print its verified prefix.
+      # Realize one `uses:` package (and its provisioning dependencies) and
+      # print its verified prefix.
       # Exit codes: 0 realized, 1 realization failed, 2 usage error or
       # unknown package, 3 no arm for the effective mode on this host.
       subcmd "realize",
@@ -2581,6 +2592,16 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       # `repro tool help`: the same as `repro tool --help`.
       subcmd "help", visibility = hidden:
         pos topic is seq[string], required = false
+    subcmd "nimble",
+        help = "Work with the Nimble packages a lock pins":
+      subcmd "verify",
+          help = "Re-hash the store entries of a lock's nimble: packages " &
+            "and compare them with the lock, offline":
+        flag lock is string,
+          help = "The lock (default: repro.lock in the current directory)"
+        flag store is string,
+          help = "The source store (default: the user's, under the user " &
+            "cache directory)"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
       subcmd "refresh",
           help = "Scan the workspace and rewrite repro.scanned-deps.nim":
@@ -3184,7 +3205,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Exit 0 when the blob is present, 1 when it is not":
         pos digest is string, help = "The blob's 64-character hex digest"
     subcmd "cache",
-        help = "Look up, substitute and publish binary-cache entries. The " &
+        help = "Look up, substitute and publish binary-cache entries, " &
+          "explain build actions' cache keys (`key`, `explain`), and say " &
+          "what another checkout can reuse (`sharing`). The " &
           "cache is `$REPRO_BINARY_CACHE_URL` (default " &
           "`http://localhost:7878`); `substitute` trusts only the caches " &
           "`$REPRO_CACHES_CONFIG` (else /etc/repro/caches.conf and " &
@@ -3214,6 +3237,42 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       subcmd "gen-key", help = "Create the producer key pair when it is " &
           "missing, and print its public key":
         `cacheIdentity`
+      # The portable action key, and why two of them differ: the engine's own
+      # evidence for a planned action, and for a recorded execution when this
+      # host has one. Not part of the binary-cache client (`cache_cli`): these
+      # lower the project's graph, as `repro graph` does.
+      subcmd "key", help = "Print a build action's portable cache key and " &
+          "the evidence it is computed from":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        `graphInspection`
+        pos selector is string,
+          help = "The action, as `<project>#<action-id>`"
+      subcmd "explain", help = "Explain why two build actions' cache keys " &
+          "differ, or say that they agree":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        `graphInspection`
+        pos first is string,
+          help = "An action, as `<project>#<action-id>`, or a file " &
+            "`repro cache key --json` wrote"
+        pos second is string,
+          help = "The action or key file to compare it with"
+      # Whether a project's builds can be served to another checkout on this
+      # host, per action and for the project, from the planned graph: what a
+      # consumer (an agent's cache backend) reads to decide whether a
+      # project's cached libraries compose or only a whole workspace does.
+      subcmd "sharing", help = "Report whether a project's cached builds " &
+          "can be served to another checkout on this host":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        `graphInspection`
+        pos selector is string, required = false,
+          help = "The project, or `<project>#<target>` (default: the " &
+            "current directory's default target)"
       # `repro cache help`: the same as `repro cache --help`.
       subcmd "help", visibility = hidden:
         pos topic is seq[string], required = false

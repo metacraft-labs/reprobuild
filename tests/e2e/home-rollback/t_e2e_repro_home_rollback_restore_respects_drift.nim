@@ -29,6 +29,7 @@
 ## the ones the M64 rollback gates use; they stand in for package
 ## realization, which this test is not about.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -113,7 +114,7 @@ proc run(sb: Sandbox; generates, blocks: string;
   env["REPRO_TEST_PACKAGE_MANAGED_BLOCKS"] = blocks
   let p = startProcess(reproBinary(), args = @args, env = env,
     options = {poUsePath, poStdErrToStdOut})
-  let output = p.outputStream().readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)

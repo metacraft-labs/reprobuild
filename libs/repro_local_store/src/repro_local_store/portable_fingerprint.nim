@@ -680,11 +680,27 @@ func identityFromParts*(access: PortableInputKind; parts: IdentityParts;
       return false
   true
 
-proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
-                              argv: openArray[string]; cwd: string;
-                              env: openArray[(string, string)];
-                              declaredInputs: openArray[string];
-                              staticFields: openArray[string] = []): string =
+type
+  PortableKeyDescription* = object
+    ## The action's static description exactly as the portable weak
+    ## fingerprint frames it: every field already logicalized against the
+    ## roots, the environment sorted by name and the declared inputs sorted.
+    ## `portableWeakFingerprint` is the digest of this and nothing else, so a
+    ## consumer that compares two descriptions (`key_explanation`) compares
+    ## the very components the key was computed from, not a re-derivation of
+    ## them that could drift.
+    argv*: seq[string]
+    cwd*: string
+    env*: seq[(string, string)]
+    declaredInputs*: seq[string]
+    staticFields*: seq[string]
+
+proc portableKeyDescription*(roots: openArray[LogicalRoot];
+                             argv: openArray[string]; cwd: string;
+                             env: openArray[(string, string)];
+                             declaredInputs: openArray[string];
+                             staticFields: openArray[string] = []):
+    PortableKeyDescription =
   ## The action's static description, over logical paths. Environment is
   ## sorted by name; declared inputs are logicalized and sorted, because
   ## their order carries no meaning for what the action computes.
@@ -693,28 +709,47 @@ proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
   ## Without them two builtins with the same inputs (argv is empty for both)
   ## would share one identity. Each is logicalized; their order is kept,
   ## since the caller states it.
-  var payload = frame(WeakDomain)
-  payload.add(frame($argv.len))
   for arg in argv:
-    payload.add(frame(logicalizeText(roots, arg)))
-  payload.add(frame(logicalizeText(roots, cwd)))
+    result.argv.add(logicalizeText(roots, arg))
+  result.cwd = logicalizeText(roots, cwd)
   var envSorted = @env
   envSorted.sort(proc (a, b: (string, string)): int = cmp(a[0], b[0]))
-  payload.add(frame($envSorted.len))
   for (name, value) in envSorted:
-    payload.add(frame(name))
-    payload.add(frame(logicalizeText(roots, value)))
-  var inputs: seq[string] = @[]
+    result.env.add((name, logicalizeText(roots, value)))
   for input in declaredInputs:
-    inputs.add(logicalizeText(roots, input))
-  inputs.sort()
-  payload.add(frame($inputs.len))
-  for input in inputs:
-    payload.add(frame(input))
-  payload.add(frame($staticFields.len))
+    result.declaredInputs.add(logicalizeText(roots, input))
+  result.declaredInputs.sort()
   for field in staticFields:
-    payload.add(frame(logicalizeText(roots, field)))
+    result.staticFields.add(logicalizeText(roots, field))
+
+proc portableWeakFingerprint*(description: PortableKeyDescription): string =
+  ## The portable weak fingerprint of a description: BLAKE3 over its framed
+  ## fields, in the order `portableKeyDescription` documents.
+  var payload = frame(WeakDomain)
+  payload.add(frame($description.argv.len))
+  for arg in description.argv:
+    payload.add(frame(arg))
+  payload.add(frame(description.cwd))
+  payload.add(frame($description.env.len))
+  for (name, value) in description.env:
+    payload.add(frame(name))
+    payload.add(frame(value))
+  payload.add(frame($description.declaredInputs.len))
+  for input in description.declaredInputs:
+    payload.add(frame(input))
+  payload.add(frame($description.staticFields.len))
+  for field in description.staticFields:
+    payload.add(frame(field))
   blake3.digest(payload).toHex()
+
+proc portableWeakFingerprint*(roots: openArray[LogicalRoot];
+                              argv: openArray[string]; cwd: string;
+                              env: openArray[(string, string)];
+                              declaredInputs: openArray[string];
+                              staticFields: openArray[string] = []): string =
+  ## The action's static description (`portableKeyDescription`), digested.
+  portableWeakFingerprint(portableKeyDescription(roots, argv, cwd, env,
+    declaredInputs, staticFields))
 
 proc portableStrongFingerprint*(weakHex: string;
                                 inputs: openArray[PortableInput]): string =

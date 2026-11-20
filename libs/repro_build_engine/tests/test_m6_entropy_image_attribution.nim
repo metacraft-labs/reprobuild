@@ -64,6 +64,14 @@ proc execRecord(pid: uint64; imagePath: string; failed = false):
     result.detail = "execstatus=failed errno=2"
     result.result = -2
 
+proc failedExecAttempt(pid: uint64; imagePath: string): seq[MonitorRecord] =
+  ## What a FAILING `execve` really leaves in a Linux capture: TWO records.
+  ## The hook writes the attempt before the call, with no failure token,
+  ## because a successful exec never returns to say so. Only when the call
+  ## comes back does it write the `execstatus=failed` marker. A fixture with
+  ## the marker alone tests a capture io-mon does not produce.
+  result = @[execRecord(pid, imagePath), execRecord(pid, imagePath, failed = true)]
+
 proc spawnRecord(parent, child: uint64; imagePath: string;
                  status: int64 = 0): MonitorRecord =
   ## Canonical posix_spawn shape: the emitting PID is the PARENT, not the
@@ -361,6 +369,167 @@ suite "M6 an entropy record is graded against the image that emitted it":
     let run = runBuild(graph([act]),
       defaultBuildEngineConfig(scenario.cacheRoot))
     check not scenario.published(act)
+
+  test "a failed exec ATTEMPT is retracted by its failure marker":
+    ## The real two-record shape (see `failedExecAttempt`). The pid runs an
+    ## unblessed image, tries to exec a blessed one, the call fails, and the
+    ## old image draws. The attempt record alone looks like a successful exec,
+    ## so a fold that binds it and merely skips the marker grades the draw as
+    ## the blessed tool's and publishes. Recorded as reprobuild-pm
+    ## `issues/2026-11-18-a-failed-exec-attempt-lends-its-image-to-the-pid.md`.
+    for priorImage in [false, true]:
+      let scenario = setupScenario("failed-attempt-" & $priorImage)
+      defer: removeDir(scenario.root)
+      var records = observingProfileRecords() & @[fileRead(scenario.sourcePath)]
+      if priorImage:
+        records.add execRecord(1001, scenario.image(UnblessedImage))
+      records.add failedExecAttempt(1001, scenario.image(BlessedImage))
+      records.add entropyReadFrom(1001)
+      writeRmdf(scenario.rmdfPath, records)
+
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check run.results[0].status == asSucceeded
+      check not scenario.published(act)
+
+  test "a failed exec attempt leaves the pid's earlier image in place":
+    ## The other direction: the retraction must restore, not erase. A blessed
+    ## image that tries an unblessed exec and fails is still the blessed
+    ## image, whether it got that image from a spawn or from an earlier exec.
+    for fromSpawn in [false, true]:
+      let scenario = setupScenario("failed-attempt-keeps-" & $fromSpawn)
+      defer: removeDir(scenario.root)
+      var records = observingProfileRecords() & @[fileRead(scenario.sourcePath)]
+      if fromSpawn:
+        records.add spawnRecord(909, 1001, scenario.image(BlessedImage))
+      else:
+        records.add execRecord(1001, scenario.image(BlessedImage))
+      records.add failedExecAttempt(1001, scenario.image(UnblessedImage))
+      records.add entropyReadFrom(1001)
+      writeRmdf(scenario.rmdfPath, records)
+
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check run.results[0].status == asSucceeded
+      check scenario.published(act)
+
+  test "a failure marker retracts only the attempt it answers":
+    ## A marker names one call. It must not undo a SUCCESSFUL exec of the
+    ## same path, and one thread's marker must not undo another thread's
+    ## attempt.
+    block laterSuccess:
+      # fails once, then execs the same path for real: the pid IS that image.
+      let scenario = setupScenario("failed-then-succeeded")
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        spawnRecord(909, 1001, scenario.image(BlessedImage))] &
+        failedExecAttempt(1001, scenario.image(UnblessedImage)) & @[
+        execRecord(1001, scenario.image(UnblessedImage)),
+        entropyReadFrom(1001)])
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check not scenario.published(act)
+    block otherThread:
+      # thread 1002 fails to exec the blessed image; thread 1001's exec of
+      # the unblessed one has no marker, so it stands.
+      let scenario = setupScenario("failed-other-thread")
+      defer: removeDir(scenario.root)
+      var marker = execRecord(1001, scenario.image(UnblessedImage),
+        failed = true)
+      marker.threadId = 1002
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        spawnRecord(909, 1001, scenario.image(BlessedImage)),
+        execRecord(1001, scenario.image(UnblessedImage)),
+        marker,
+        entropyReadFrom(1001)])
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check not scenario.published(act)
+
+  test "a failed attempt is retracted when another attempt sorts before its marker":
+    ## The canonical order is (process, thread, sequence) and the sequence
+    ## restarts in each image of a pid, so a marker is not always the next
+    ## exec record after its attempt. Both attempts here failed; neither may
+    ## bind, whichever marker comes first. Then the marker for a DIFFERENT
+    ## path: it answers nothing and the attempt stands as an exec.
+    for markersSwapped in [false, true]:
+      let scenario = setupScenario("failed-interleaved-" & $markersSwapped)
+      defer: removeDir(scenario.root)
+      let blessed = failedExecAttempt(1001, scenario.image(BlessedImage))
+      let other = failedExecAttempt(1001, scenario.image("git"))
+      var records = observingProfileRecords() & @[
+        fileRead(scenario.sourcePath), blessed[0], other[0]]
+      if markersSwapped: records.add @[other[1], blessed[1]]
+      else: records.add @[blessed[1], other[1]]
+      records.add entropyReadFrom(1001)
+      writeRmdf(scenario.rmdfPath, records)
+      var evidence: PathSetEvidence
+      var seen: EvidenceSeenSets
+      discard foldMonitorDepFileEvidence(scenario.rmdfPath, scenario.workRoot,
+        evidence, seen)
+      check evidence.entropyObservations.len == 1
+      if evidence.entropyObservations.len == 1:
+        check evidence.entropyObservations[0].image == ""
+    block markerForAnotherPath:
+      let scenario = setupScenario("failed-marker-other-path")
+      defer: removeDir(scenario.root)
+      writeRmdf(scenario.rmdfPath, observingProfileRecords() & @[
+        fileRead(scenario.sourcePath),
+        spawnRecord(909, 1001, scenario.image(BlessedImage)),
+        execRecord(1001, scenario.image(UnblessedImage)),
+        execRecord(1001, scenario.image("git"), failed = true),
+        entropyReadFrom(1001)])
+      let act = scenarioAction(scenario)
+      let run = runBuild(graph([act]),
+        defaultBuildEngineConfig(scenario.cacheRoot))
+      check not scenario.published(act)
+
+  test "one capture's failed attempts do not retract the next capture's execs":
+    ## `collectEvidence` folds several captures through ONE `EvidenceSeenSets`.
+    ## The retractions are named by position in a capture, so stale ones
+    ## would silently un-bind whatever exec sits at that position next time.
+    let scenario = setupScenario("failed-attempt-two-captures")
+    defer: removeDir(scenario.root)
+    var seen: EvidenceSeenSets
+    var first, second: PathSetEvidence
+    discard foldMonitorRecordsEvidence(observingProfileRecords() &
+      failedExecAttempt(1001, scenario.image(BlessedImage)) &
+      @[entropyReadFrom(1001)], scenario.workRoot, first, seen)
+    discard foldMonitorRecordsEvidence(observingProfileRecords() & @[
+      execRecord(1001, scenario.image(UnblessedImage)),
+      entropyReadFrom(1001)], scenario.workRoot, second, seen)
+    check first.entropyObservations.len == 1
+    check second.entropyObservations.len == 1
+    if first.entropyObservations.len == 1 and second.entropyObservations.len == 1:
+      check first.entropyObservations[0].image == ""
+      check second.entropyObservations[0].image == scenario.image(UnblessedImage)
+
+  test "hosted and depfile folds agree on a failed exec attempt":
+    let scenario = setupScenario("failed-attempt-hosted-parity")
+    defer: removeDir(scenario.root)
+    let records = observingProfileRecords() & @[
+      fileRead(scenario.sourcePath),
+      execRecord(1001, scenario.image(UnblessedImage))] &
+      failedExecAttempt(1001, scenario.image(BlessedImage)) & @[
+      entropyReadFrom(1001)]
+    writeRmdf(scenario.rmdfPath, records)
+    var hosted, disk: PathSetEvidence
+    var hostedSeen, diskSeen: EvidenceSeenSets
+    discard foldMonitorRecordsEvidence(records, scenario.workRoot,
+      hosted, hostedSeen)
+    discard foldMonitorDepFileEvidence(scenario.rmdfPath, scenario.workRoot,
+      disk, diskSeen)
+    check hosted.entropyObservations.len == 1
+    check disk.entropyObservations.len == 1
+    if hosted.entropyObservations.len == 1 and disk.entropyObservations.len == 1:
+      check hosted.entropyObservations[0].image == scenario.image(UnblessedImage)
+      check disk.entropyObservations[0].image == scenario.image(UnblessedImage)
 
   test "a RELATIVE exec path does not lend its image to the pid":
     ## `execvp`/`execlp` record the unresolved name the caller passed, because

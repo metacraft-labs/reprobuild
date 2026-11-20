@@ -156,6 +156,10 @@ when defined(posix):
     result.dir = scratchUserEndpointDir()
     result.socket = userSocketIn(result.dir)
     putEnv("RUNQUOTA_USER_ENDPOINT_DIR", result.dir)
+    # An endpoint inherited from an enclosing `repro` is that caller's: its
+    # private scope would apply to whatever socket the test names next.
+    delEnv("RUNQUOTA_SOCKET")
+    delEnv("RUNQUOTA_ENDPOINT_SCOPE")
 
   proc release*(isolated: IsolatedUserRunQuota; startedPid = 0) =
     ## Stop the daemon the case started there and restore the environment.

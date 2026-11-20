@@ -25,6 +25,7 @@
 ## No mocks. Skip rule: skip only when `git` is missing from PATH (the rule
 ## every M8 composition test uses).
 
+from repro_core/process_streams import drainStream
 import std/[options, os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -43,8 +44,8 @@ proc reproStderr(args: openArray[string]): tuple[code: int; stderr: string] =
   ## The real binary's exit code and STDERR alone (the report is a stderr
   ## notice, so it is looked for where it is supposed to be).
   let p = startProcess(reproBinary(), args = @args, options = {})
-  discard p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  discard drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stderr: e)
   p.close()
 

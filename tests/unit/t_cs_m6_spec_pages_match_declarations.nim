@@ -79,7 +79,8 @@ const
     "repro store serve", "repro cas", "repro cas gc", "repro cas verify",
     "repro cas path", "repro cas exists", "repro cache",
     "repro cache lookup", "repro cache substitute", "repro cache publish",
-    "repro cache derive-key", "repro cache gen-key", "repro bundle",
+    "repro cache derive-key", "repro cache gen-key", "repro cache key",
+    "repro cache explain", "repro cache sharing", "repro bundle",
     "repro bundle create", "repro bundle publish", "repro bundle restore",
     "repro bundle inspect",
     "repro reap", "repro launch-plan", "repro launch-plan show",
@@ -227,7 +228,9 @@ const
     # Declared with its page after the round: `repro catalog publish`.
     "repro catalog", "repro catalog publish",
     # The Nimble index generator's verbs.
-    "repro catalog generate", "repro catalog verify"]
+    "repro catalog generate", "repro catalog verify",
+    # The Nimble package catalog's client verbs.
+    "repro nimble", "repro nimble verify"]
     ## The commands whose flags and environment variables are compared:
     ## every command repro declares.
   SpecifiedNotImplemented = [
@@ -245,9 +248,7 @@ const
     # reloading (which `repro watch --hcr` implements).
     "flag\trepro dev\t--max-debounce", "flag\trepro dev\t--hcr",
     "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode",
-    # The proposed scope flags of `repro hooks` (only the default scope is
-    # implemented) and the proposed `repro lock solve` options.
-    "flag\trepro hooks ensure\t--profile",
+    # The proposed `repro lock solve` options.
     "flag\trepro lock solve\t--activity", "flag\trepro lock solve\t--dry-run",
     # `repro workspace status --verbose`: specified, not implemented yet.
     # The page defines both the default output and what `--verbose` adds,

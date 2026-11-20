@@ -33,6 +33,7 @@
 ## missing sled is a LOUD failure. The `skip()` arm exists only for platforms
 ## that are not Linux x86_64.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 when defined(linux) and defined(amd64):
@@ -186,7 +187,7 @@ when defined(linux) and defined(amd64):
           sourceGenerationMap = [])
         let delivery = client.deliverPatchRequest(connection, request)
         connection.close()
-        result.output = process.outputStream.readAll()
+        result.output = drainStream(process.outputStream)
         result.exitCode = process.waitForExit()
         process.close()
         result.applied = delivery.patchApplied

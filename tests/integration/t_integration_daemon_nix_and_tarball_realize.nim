@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, re, sequtils, streams, strtabs, strutils,
     tempfiles, times, unittest]
 
@@ -376,8 +377,8 @@ proc runPair(mode, endpoint, storeRoot, root: string;
   writeFile(barrier, "go")
   let rc1 = p1.waitForExit()
   let rc2 = p2.waitForExit()
-  if rc1 != 0: checkpoint(p1.outputStream.readAll())
-  if rc2 != 0: checkpoint(p2.outputStream.readAll())
+  if rc1 != 0: checkpoint(drainStream(p1.outputStream))
+  if rc2 != 0: checkpoint(drainStream(p2.outputStream))
   check rc1 == 0
   check rc2 == 0
   p1.close()
@@ -422,6 +423,7 @@ proc startDaemon(endpoint, storeRoot, runtimeRoot: string;
       if not result.running():
         let rc = result.waitForExit()
         detail.add("; repro store serve exited " & $rc & ": " &
+          # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
           result.outputStream.readAll())
       result.close()
       raise newException(OSError, detail)
@@ -642,7 +644,7 @@ suite "M67 daemon-mediated Nix and tarball realization":
           "nixdir-root", statusFile, "-", flakeDir],
         options = {poStdErrToStdOut})
       let rc = worker.waitForExit()
-      if rc != 0: checkpoint(worker.outputStream.readAll())
+      if rc != 0: checkpoint(drainStream(worker.outputStream))
       worker.close()
       check rc == 0
       if rc == 0:

@@ -75,6 +75,7 @@
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
+import repro_cli_support/lock_consistency
 import repro_core/cli_images
 import repro_test_support
 
@@ -291,8 +292,11 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
       # ``--re-anchor``: a plain ``ensure`` leaves a body another build wrote
       # untouched (CLI/hooks.md §"Re-anchoring is explicit"), so the remedy
       # that re-anchors has to ask for it by name.
-      check (differentStub & " hooks ensure --vcs --re-anchor " & repoTop) in
-        dmsg
+      # Each path is one word of the hook's `sh` (rule 3 of "The named command
+      # must RUN where the message is printed"), spelled as ``remedyPathWord``
+      # spells it.
+      check (remedyPathWord(differentStub) &
+        " hooks ensure --vcs --re-anchor " & remedyPathWord(repoTop)) in dmsg
       # (R10) ... but only AFTER refreshing whatever supplies ``repro``.
       # Status 3 says the builds differ, not which is newer, and the measured
       # field case was a cached direnv dev shell serving an OLDER build than
@@ -300,7 +304,7 @@ suite "a stale repro's refusal names a remedy that does not disarm the gate":
       # current bodies with older ones. So the refresh is named, it comes
       # first, and the message says why a different build may be the older.
       let reloadAt = dmsg.find("direnv reload")
-      let reanchorAt = dmsg.find(differentStub &
+      let reanchorAt = dmsg.find(remedyPathWord(differentStub) &
         " hooks ensure --vcs --re-anchor ")
       check reloadAt >= 0
       check reanchorAt > reloadAt

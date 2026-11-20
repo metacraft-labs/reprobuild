@@ -88,6 +88,7 @@
 ## making every suite execution wait two minutes. Child harness modes below
 ## exercise real exec/descriptor inheritance, rather than a mocked lock.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
 when defined(posix):
   import std/posix
@@ -396,7 +397,7 @@ suite "SPI-2: leaves refetch through the pool":
     sleep(VcsLockDefaultTimeoutMs * 4)
     check child.peekExitCode() == -1
     releaseVcsFileLock(held)
-    let output = child.outputStream.readAll()
+    let output = drainStream(child.outputStream)
     checkpoint(output)
     check child.waitForExit() == 0
     check "PACK" in output
@@ -510,7 +511,7 @@ suite "SPI-2: leaves refetch through the pool":
         f.leaf, f.pool, "hung-ws"], options = {poStdErrToStdOut})
       while not fileExists(hookStarted):
         doAssert owner.peekExitCode() == -1, "the cache push ended early: " &
-          owner.outputStream.readAll()
+          drainStream(owner.outputStream)
         doAssert epochTime() - started < 120, "the pool hook never started"
         sleep(10)
       hookPid = parseInt(readFile(hookStarted).strip())
@@ -552,7 +553,7 @@ suite "SPI-2: leaves refetch through the pool":
         # Stop the hook to let the push finish, then read what it said.
         discard posix.kill(Pid(hookPid), SIGKILL)
         discard owner.waitForExit()
-      let ownerOutput = owner.outputStream.readAll()
+      let ownerOutput = drainStream(owner.outputStream)
       checkpoint("cache push: " & ownerOutput)
       check ownerCode == 1
       check "deadline" in ownerOutput
@@ -594,7 +595,7 @@ suite "SPI-2: leaves refetch through the pool":
         q(f.leaf) & " cat-file -p " & q(tip & "^{tree}"),
         options = {poEvalCommand, poStdErrToStdOut}))
     for reader in readers:
-      let output = reader.outputStream.readAll()
+      let output = drainStream(reader.outputStream)
       checkpoint(output)
       check reader.waitForExit() == 0
       check "could not lock config" notin output
@@ -1129,7 +1130,7 @@ exit $status
         q(f.leaf) & " cat-file -p " & q(id),
         options = {poEvalCommand, poStdErrToStdOut}))
     for reader in readers:
-      checkpoint(reader.outputStream.readAll())
+      checkpoint(drainStream(reader.outputStream))
       check reader.waitForExit() == 0
       reader.close()
     let after = packedObjectIds(f.pool)

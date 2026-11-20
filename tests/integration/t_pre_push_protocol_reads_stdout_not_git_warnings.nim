@@ -36,6 +36,7 @@
 ## No mocks: real git, temporary repositories and a local bare remote only.
 ## Skips only when git is absent.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support/push_hook_protocol
@@ -47,7 +48,7 @@ proc requireSuccess(cwd: string; args: openArray[string]): string =
   let process = startProcess(gitBin(), workingDir = cwd, args = @args,
     options = {poUsePath, poStdErrToStdOut})
   defer: process.close()
-  result = process.outputStream.readAll()
+  result = drainStream(process.outputStream)
   let code = process.waitForExit()
   if code != 0:
     raise newException(OSError, "git " & args.join(" ") & " failed (" &
@@ -62,8 +63,8 @@ proc gitStreams(cwd: string; args: openArray[string]):
     options = {poUsePath})
   defer: process.close()
   result.code = process.waitForExit()
-  result.outText = process.outputStream.readAll()
-  result.errText = process.errorStream.readAll()
+  result.outText = drainStream(process.outputStream)
+  result.errText = drainStream(process.errorStream)
 
 proc commit(repo, message: string) =
   discard requireSuccess(repo, ["-c", "user.name=Test",

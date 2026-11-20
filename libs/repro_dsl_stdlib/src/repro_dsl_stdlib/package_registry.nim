@@ -54,7 +54,7 @@ importBundledStdlibPackages()
 # ``VersionedProvisioning`` catalog before GM4b. Explicit and grep-able, as the
 # retired registry's imports were; several are also bundled, and a module
 # imported twice is initialized once.
-import ./packages/[jdk, cabal, claude_code, composer, crystal, elixir, erlang,
+import ./packages/[jdk, cabal, composer, crystal, elixir, erlang,
   ghc, gradle, maven, php, ruby, swift, zig, cmake, clingo, chocolatey, zstd,
   dotnet_sdk, gcc, gh, git, go, just, meson, nim, ninja, node, python3, fpc,
   pkg_7zip, wix3, innounp, lessmsi, autoconf, automake, libtool, ocaml, alire,
@@ -170,7 +170,10 @@ const PartialCatalogCoverage* = {
     "hosts; the WinLibs archive arm is the Windows half only.",
   "install-file": "coreutils_install.nim's nixPackage is the realization " &
     "on Nix-capable hosts; the PortableGit archive arm is the Windows half " &
-    "only."
+    "only.",
+  "playwright": "playwright.nim's nixPackage (playwright-test) is the " &
+    "realization on Linux and macOS; the playwright-core archive plus its " &
+    "browser closure is the Windows half only."
 }
 
 const PlatformDeclarationSourceFile* =

@@ -20,6 +20,7 @@
 ## silently dropped that check would be asserting only that this repository's
 ## decoder agrees with itself.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils]
 
 import repro_hcr_agent
@@ -163,7 +164,7 @@ proc deliverPatch*(repoRoot, targetBin, socketPath: string;
     changedTypes = [])
   result.delivery = client.deliverPatchRequest(connection, request)
   connection.close()
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   let code = process.waitForExit()
   process.close()
   if code != 0:

@@ -30,6 +30,7 @@
 ## NO MOCKS. A real chain grown to several real shard files, flattened in place,
 ## with a real second process holding a mapping of a shard the flatten retires.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_hash
@@ -198,7 +199,7 @@ suite "integration_action_index_flatten_retire_preserves_completeness":
         let code = holder.waitForExit()
         if code != 0:
           checkpoint("holder exited " & $code & ": " &
-            holder.outputStream.readAll())
+            drainStream(holder.outputStream))
         holder.close()
         check code == 0
 

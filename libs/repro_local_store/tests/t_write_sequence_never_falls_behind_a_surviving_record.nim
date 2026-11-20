@@ -3,7 +3,14 @@
 ## directory, and distinct across concurrent writers sharing a cache root.
 ##
 ## Regression test for reprobuild-pm
-## issues/2026-11-12-the-seq-counter-is-neither-durable-nor-strictly-monotonic.md.
+## issues/2026-11-12-the-seq-counter-is-neither-durable-nor-strictly-monotonic.md,
+## and for issues/2026-11-18-per-edge-write-sequence-floor-trusts-an-unchecked-trailer.md:
+## the trailer is the one part of a container without a checksum, so a
+## trailer above the largest sequence the store issues (2^48, §5.1) is not
+## evidence of a sequence handed out and must not become the floor, a counter
+## holding such a value reads as lost, and the floor is read under the
+## counter lock so a writer that waited for the lock sees what was renamed in
+## meanwhile.
 ## The counter `hot-records/.seq` is not fsynced, and it used to be rewritten
 ## by a truncating `writeFile` and allocated from without the lock when the
 ## lock could not be taken. A counter that came back empty or missing — a
@@ -19,7 +26,10 @@
 ## `recordActionResult`, and reads through the production `readHotRecord` and
 ## `loadPerEdgeRecords`.
 ## The counter is damaged the way a crash or an operator damages it: by
-## deleting or truncating the real file. The concurrent case runs real
+## deleting or truncating the real file. A trailer is damaged the way bit rot
+## or a foreign file damages it: by rewriting the real container's last eight
+## bytes. The lock race is staged by holding the real `.seq.lock` with
+## `flock(2)` from this process while a re-executed child waits on it. The concurrent case runs real
 ## processes — this binary re-executed — because the property is about
 ## processes sharing a root, and threads in one process would share the very
 ## state a cross-process lock exists to serialize.
@@ -35,14 +45,24 @@
 
 import std/[algorithm, os, osproc, sequtils, sets, strtabs, strutils, tempfiles,
             unittest]
+when defined(posix):
+  import std/posix
 
 import repro_core
 import repro_hash
 import repro_local_store
 
 const ChildEnv = "REPRO_TEST_WRITE_SEQUENCE_CHILD"
-  ## Set to `<cacheRoot>|<childIndex>|<recordCount>` when this binary is
-  ## re-executed as one of the concurrent writers.
+  ## Set to `<cacheRoot>|<childIndex>|<recordCount>|<mode>` when this binary
+  ## is re-executed as one of the concurrent writers. Mode `own` publishes
+  ## each record to an edge of its own; mode `shared` publishes record `k` to
+  ## the edge `shared.<k>` that every child also publishes into.
+const RaceChildEnv = "REPRO_TEST_WRITE_SEQUENCE_RACE_CHILD"
+  ## Set to `<cacheRoot>|<edgeName>` when this binary is re-executed as the
+  ## writer that waits for the counter lock.
+const MaxWriteSequence = 1'u64 shl 48
+  ## The largest write sequence the store issues (§5.1). Spelled out rather
+  ## than imported, for the reason `trailerSequence` is read by hand.
 
 proc weakOf(name: string): ContentDigest =
   ## The same construction `repro_build_engine.weakFingerprintFromText` uses,
@@ -82,6 +102,15 @@ proc counterPath(f: Fixture): string =
 
 proc edgeDir(f: Fixture; weak: ContentDigest): string =
   f.cache.hotRecordsRoot / perEdgeRecordFileName(weak)
+
+proc setTrailerSequence(path: string; value: uint64) =
+  ## Overwrite a container's trailer in place, leaving its checksummed body
+  ## intact: what a bit flip in those eight bytes, or a foreign file, leaves.
+  var raw = readFile(path)
+  doAssert raw.len >= 8, "container too short to carry a trailer: " & path
+  for i in 0 ..< 8:
+    raw[raw.len - 8 + i] = char((value shr (8 * i)) and 0xff'u64)
+  writeFile(path, raw)
 
 proc trailerSequence(path: string): uint64 =
   let raw = readFile(path)
@@ -129,19 +158,61 @@ proc childMain(spec: string) =
   let cacheRoot = parts[0]
   let index = parseInt(parts[1])
   let count = parseInt(parts[2])
+  let shared = parts[3] == "shared"
   let scratch = cacheRoot.parentDir / ("child-" & $index)
   createDir(scratch / "work")
   var cache = openActionCache(cacheRoot, attachShm = false)
   var store = openStore(scratch / "store")
   for k in 0 ..< count:
-    discard recordVariant(cache, store, scratch / "work",
-      weakOf("concurrent." & $index & "." & $k), 0)
+    let edge =
+      if shared: "shared." & $k
+      else: "concurrent." & $index & "." & $k
+    discard recordVariant(cache, store, scratch / "work", weakOf(edge), 0)
+  cache.closeShmTier()
+  close(store)
+
+proc raceChildMain(spec: string) =
+  ## The writer that waits: one publish into `edgeName`, from its own work
+  ## directory, so its container has a strong fingerprint of its own.
+  let parts = spec.split('|')
+  let cacheRoot = parts[0]
+  let scratch = cacheRoot.parentDir / "race-child"
+  createDir(scratch / "work")
+  var cache = openActionCache(cacheRoot, attachShm = false)
+  var store = openStore(scratch / "store")
+  discard recordVariant(cache, store, scratch / "work", weakOf(parts[1]), 1)
   cache.closeShmTier()
   close(store)
 
 if existsEnv(ChildEnv):
   childMain(getEnv(ChildEnv))
   quit(0)
+if existsEnv(RaceChildEnv):
+  raceChildMain(getEnv(RaceChildEnv))
+  quit(0)
+
+proc childEnv(name, value: string): StringTableRef =
+  result = newStringTable()
+  for k, v in envPairs():
+    result[k] = v
+  result[name] = value
+
+proc runChildren(cacheRoot: string; children, perChild: int; mode: string) =
+  var procs: seq[Process] = @[]
+  for i in 0 ..< children:
+    procs.add(startProcess(getAppFilename(),
+      env = childEnv(ChildEnv,
+        cacheRoot & "|" & $i & "|" & $perChild & "|" & mode),
+      options = {poParentStreams}))
+  for p in procs:
+    check p.waitForExit() == 0
+    p.close()
+
+when defined(posix):
+  proc cFlock(fd: cint; op: cint): cint {.importc: "flock",
+    header: "<sys/file.h>".}
+  const LockEx = 2.cint
+  const LockUn = 8.cint
 
 suite "the write sequence never falls behind a surviving record":
 
@@ -239,6 +310,250 @@ suite "the write sequence never falls behind a surviving record":
     check refused == 2
     check sequencesIn(f.edgeDir(weak)).len == 1
 
+  for bogus in [high(uint64), high(uint64) - 1, MaxWriteSequence + 1]:
+    test "a container whose trailer reads " & $bogus &
+        " does not become the floor":
+      ## The trailer has no checksum (§5.1). A flipped high bit, or a foreign
+      ## file, can make it read near the top of the sequence space. Taken as
+      ## the floor, it pushed the counter there: one publish later every
+      ## publish to the root raised, and since a raising publish never reaches
+      ## the retention cap the container was never evicted.
+      var f = openFixture("bogus")
+      defer: closeFixture(f)
+      let weak = weakOf("write-seq.bogus." & $bogus)
+      let rotten = f.recordVariant(weak, 0)
+      setTrailerSequence(f.recFileOf(rotten), bogus)
+      var published: seq[uint64] = @[]
+      var refused = 0
+      for variant in 1 .. 3:
+        try:
+          let rec = f.recordVariant(weak, variant)
+          published.add(trailerSequence(f.recFileOf(rec)))
+        except OSError, IOError:
+          inc refused
+      checkpoint("published " & $published & "; refused " & $refused &
+        "; counter " & readFile(f.counterPath).strip)
+      check refused == 0
+      check published.len == 3
+      for s in published:
+        check s <= MaxWriteSequence
+      check published.isSorted
+      check parseBiggestUInt(readFile(f.counterPath).strip).uint64 <=
+        MaxWriteSequence
+      # The rotten container is a candidate like any other, but the oldest:
+      # newest-wins tries the last record published first.
+      let ordered = f.cache.loadPerEdgeRecords(weak)
+      check ordered.len == 4
+      if ordered.len == 4:
+        check ordered[0].strongFingerprint == rotten.strongFingerprint
+        check ordered[^1].inputs.len == 4
+
+  for counter in [high(uint64), MaxWriteSequence]:
+    test "a counter at " & $counter & " reads as lost":
+      ## A root jammed before the ceiling existed, or a counter at the
+      ## ceiling itself: kept, it would refuse every publish to every edge of
+      ## the root. It recovers from the edge's surviving trailers, as a
+      ## deleted counter does.
+      var f = openFixture("wedged")
+      defer: closeFixture(f)
+      let weak = weakOf("write-seq.wedged." & $counter)
+      let first = f.recordVariant(weak, 0)
+      let firstSeq = trailerSequence(f.recFileOf(first))
+      writeFile(f.counterPath, $counter)
+      var published: seq[uint64] = @[]
+      var refused = 0
+      for variant in 1 .. 2:
+        try:
+          let rec = f.recordVariant(weak, variant)
+          published.add(trailerSequence(f.recFileOf(rec)))
+        except OSError, IOError:
+          inc refused
+      checkpoint("first " & $firstSeq & "; published " & $published &
+        "; refused " & $refused)
+      check refused == 0
+      check published.len == 2
+      if published.len == 2:
+        check published[0] > firstSeq
+        check published[1] > published[0]
+        check published[1] < MaxWriteSequence
+
+  test "exhaustion refuses only the edge whose floor is at the ceiling":
+    ## §5.2: when the next value in an edge would exceed 2^48 a publish to
+    ## that edge fails rather than wrap to 0 or issue a value every reader
+    ## would ignore. Other edges of the root keep publishing.
+    var f = openFixture("exhausted")
+    defer: closeFixture(f)
+    let weak = weakOf("write-seq.exhausted")
+    let other = weakOf("write-seq.exhausted.other")
+    let topped = f.recordVariant(weak, 0)
+    setTrailerSequence(f.recFileOf(topped), MaxWriteSequence)
+    var refused = 0
+    try:
+      discard f.recordVariant(weak, 1)
+    except OSError, IOError:
+      inc refused
+    check refused == 1
+    check sequencesIn(f.edgeDir(weak)).len == 1
+    let elsewhere = f.recordVariant(other, 0)
+    check trailerSequence(f.recFileOf(elsewhere)) < MaxWriteSequence
+    # One below the ceiling is still issued: the ceiling itself.
+    setTrailerSequence(f.recFileOf(topped), MaxWriteSequence - 1)
+    let last = f.recordVariant(weak, 1)
+    check trailerSequence(f.recFileOf(last)) == MaxWriteSequence
+
+  test "a temp file left by a crash under the lock does not accumulate":
+    ## The counter is replaced by temp file and rename under the lock, so a
+    ## crash between the two leaves the temp file behind. Every writer holds
+    ## the lock while it writes, so one fixed temp name suffices, and the next
+    ## publish renames over what the crash left. No crash is staged: the
+    ## file is planted under the name §5.1 gives the temp file, and the check
+    ## is that no publish leaves any other `.seq.tmp*` name behind.
+    var f = openFixture("tmp")
+    defer: closeFixture(f)
+    let weak = weakOf("write-seq.tmp")
+    discard f.recordVariant(weak, 0)
+    writeFile(f.counterPath & ".tmp", "12")
+    for variant in 1 .. 3:
+      discard f.recordVariant(weak, variant)
+    var leftovers: seq[string] = @[]
+    for kind, path in walkDir(f.cache.hotRecordsRoot):
+      if path.extractFilename.startsWith(".seq.tmp"):
+        leftovers.add(path.extractFilename)
+    checkpoint("left over: " & $leftovers)
+    check leftovers.len == 0
+
+  when defined(posix):
+    test "a symlink planted at the temp name is not written through":
+      ## The temp name is fixed, so on a root shared by several users another
+      ## user can predict it. A `.seq.tmp` symlink must be replaced, not
+      ## followed: the file it points at keeps its content, and the publish
+      ## still advances the counter.
+      var f = openFixture("tmplink")
+      defer: closeFixture(f)
+      let weak = weakOf("write-seq.tmplink")
+      let first = f.recordVariant(weak, 0)
+      let victim = f.root / "victim.txt"
+      writeFile(victim, "keep me")
+      createSymlink(victim, f.counterPath & ".tmp")
+      let second = f.recordVariant(weak, 1)
+      let firstSeq = trailerSequence(f.recFileOf(first))
+      let secondSeq = trailerSequence(f.recFileOf(second))
+      checkpoint("victim: " & readFile(victim) & "; first " & $firstSeq &
+        "; second " & $secondSeq)
+      check readFile(victim) == "keep me"
+      check secondSeq > firstSeq
+      check not symlinkExists(f.counterPath & ".tmp")
+
+  test "a directory planted at the temp name does not refuse publishes":
+    ## A directory at the fixed temp name cannot be replaced by the counter's
+    ## temp file. Removing it is not safe either: a recursive delete walks by
+    ## name, and a co-user who swaps a subdirectory for a symlink mid-walk
+    ## redirects it into the publisher's own files. So the directory is left
+    ## exactly as planted, the counter goes through a per-writer temp name,
+    ## and that name is renamed onto the counter rather than left behind.
+    var f = openFixture("tmpdir")
+    defer: closeFixture(f)
+    let weak = weakOf("write-seq.tmpdir")
+    let first = f.recordVariant(weak, 0)
+    let planted = f.counterPath & ".tmp"
+    createDir(planted / "inner")
+    writeFile(planted / "inner" / "keep.txt", "keep me")
+    let second = f.recordVariant(weak, 1)
+    let third = f.recordVariant(weak, 2)
+    let firstSeq = trailerSequence(f.recFileOf(first))
+    let secondSeq = trailerSequence(f.recFileOf(second))
+    let thirdSeq = trailerSequence(f.recFileOf(third))
+    var leftovers: seq[string] = @[]
+    for kind, path in walkDir(f.cache.hotRecordsRoot):
+      if path.extractFilename.startsWith(".seq.tmp"):
+        leftovers.add(path.extractFilename)
+    checkpoint("first " & $firstSeq & "; second " & $secondSeq & "; third " &
+      $thirdSeq & "; temp names: " & $leftovers)
+    check secondSeq > firstSeq
+    check thirdSeq > secondSeq
+    check readFile(f.counterPath).strip == $thirdSeq
+    check readFile(planted / "inner" / "keep.txt") == "keep me"
+    check leftovers == @[".seq.tmp"]
+
+  when defined(posix):
+    test "a FIFO named like a container does not stall the counter lock":
+      ## The floor is read under the root-wide lock (§5.2). A `.rec` that is
+      ## not a regular file would block that read while the lock is held, and
+      ## so every publisher on the root, not only those to its own edge.
+      ## Whatever else a publish to the FIFO's edge does with it is outside
+      ## this property; the check is that a publish to ANOTHER edge finishes.
+      var f = openFixture("fifo")
+      defer: closeFixture(f)
+      let weak = weakOf("write-seq.fifo")
+      discard f.recordVariant(weak, 0)
+      let fifo = f.edgeDir(weak) / (repeat('e', 64) & ".rec")
+      doAssert mkfifo(fifo.cstring, Mode(0o600)) == 0
+      let cacheRoot = f.cache.hotRecordsRoot.parentDir
+      let stuck = startProcess(getAppFilename(),
+        env = childEnv(RaceChildEnv, cacheRoot & "|write-seq.fifo"),
+        options = {poParentStreams})
+      os.sleep(1000)
+      let bystander = startProcess(getAppFilename(),
+        env = childEnv(ChildEnv, cacheRoot & "|9|1|own"),
+        options = {poParentStreams})
+      var finished = false
+      for _ in 0 ..< 100:
+        if not bystander.running:
+          finished = true
+          break
+        os.sleep(100)
+      for p in [stuck, bystander]:
+        if p.running:
+          p.kill()
+        discard p.waitForExit()
+      check finished
+      if finished:
+        check bystander.peekExitCode() == 0
+      stuck.close()
+      bystander.close()
+
+    test "a writer that waited for the lock allocates above what was renamed in meanwhile":
+      ## §5.2: the floor is read under the counter lock. Staged: this process
+      ## holds `.seq.lock`; a child starts a publish into the edge and blocks
+      ## on it. While it waits, a container with the next sequence is renamed
+      ## into the edge (another writer's publish) and the counter is lost.
+      ## A floor read before the lock misses that container, and the child
+      ## would be handed the sequence it carries.
+      var f = openFixture("race")
+      defer: closeFixture(f)
+      let edgeName = "write-seq.race"
+      let weak = weakOf(edgeName)
+      let first = f.recordVariant(weak, 0)
+      let firstSeq = trailerSequence(f.recFileOf(first))
+      let lockPath = f.cache.hotRecordsRoot / ".seq.lock"
+      let fd = posix.open(lockPath.cstring, O_RDONLY or O_CLOEXEC)
+      doAssert fd >= 0, "cannot open " & lockPath
+      doAssert cFlock(fd, LockEx) == 0
+      let child = startProcess(getAppFilename(),
+        env = childEnv(RaceChildEnv, f.cache.hotRecordsRoot.parentDir & "|" &
+          edgeName),
+        options = {poParentStreams})
+      # Long enough for the child to read the floor and block on the lock.
+      # Too short a wait can only make this test pass on unfixed code, never
+      # fail on fixed code.
+      os.sleep(1500)
+      let interloper = f.edgeDir(weak) / (repeat('f', 64) & ".rec")
+      copyFile(f.recFileOf(first), interloper)
+      setTrailerSequence(interloper, firstSeq + 1)
+      removeFile(f.counterPath)
+      discard cFlock(fd, LockUn)
+      discard posix.close(fd)
+      check child.waitForExit() == 0
+      child.close()
+      var childSeq = 0'u64
+      for entry in sequencesIn(f.edgeDir(weak)):
+        if entry.name != f.recFileOf(first).extractFilename and
+            entry.name != interloper.extractFilename:
+          childSeq = entry.sequence
+      checkpoint("first " & $firstSeq & "; renamed in while waiting " &
+        $(firstSeq + 1) & "; the waiting writer got " & $childSeq)
+      check childSeq > firstSeq + 1
+
 suite "the write sequence is distinct across processes sharing a root":
 
   test "concurrent writers never receive the same sequence":
@@ -258,17 +573,7 @@ suite "the write sequence is distinct across processes sharing a root":
       except OSError: discard
     let cacheRoot = root / "action-cache"
     discard openActionCache(cacheRoot, attachShm = false)
-    var procs: seq[Process] = @[]
-    for i in 0 ..< Children:
-      var env = newStringTable()
-      for k, v in envPairs():
-        env[k] = v
-      env[ChildEnv] = cacheRoot & "|" & $i & "|" & $PerChild
-      procs.add(startProcess(getAppFilename(), env = env,
-        options = {poParentStreams}))
-    for p in procs:
-      check p.waitForExit() == 0
-      p.close()
+    runChildren(cacheRoot, Children, PerChild, "own")
     var all: seq[uint64] = @[]
     for kind, dir in walkDir(cacheRoot / "hot-records"):
       if kind == pcDir:
@@ -278,3 +583,26 @@ suite "the write sequence is distinct across processes sharing a root":
     let unique = all.toHashSet
     checkpoint("sequences: " & $all.len & ", distinct: " & $unique.len)
     check unique.len == all.len
+
+  test "concurrent writers to the same edges never receive the same sequence":
+    ## The same race with every child publishing into the same twenty edges,
+    ## so each edge directory takes four containers written at once and each
+    ## publish reads its floor from a directory the others are renaming into.
+    const Children = 4
+    const PerEdge = 20
+    let root = createTempDir("repro-write-seq-shared-", "")
+    defer:
+      try: removeDir(root)
+      except OSError: discard
+    let cacheRoot = root / "action-cache"
+    discard openActionCache(cacheRoot, attachShm = false)
+    runChildren(cacheRoot, Children, PerEdge, "shared")
+    var all: seq[uint64] = @[]
+    for kind, dir in walkDir(cacheRoot / "hot-records"):
+      if kind == pcDir:
+        let inEdge = sequencesIn(dir)
+        check inEdge.len == Children
+        for entry in inEdge:
+          all.add(entry.sequence)
+    check all.len == Children * PerEdge
+    check all.toHashSet.len == all.len

@@ -18,6 +18,14 @@
 ##   grant, is lowered to the grant. ``--test-threads 2``, less than the
 ##   grant, is kept as written.
 ##
+## * bypass_shares_the_host: with no lease (``bypassRunQuota``), a sized
+##   action still gets a width, the host's cores shared among the actions
+##   the engine runs at once (``bypassWidthMilli``). Mutation: launch the
+##   declared argv under the bypass, as before 2026-11-15, and the binary
+##   receives no ``--test-threads`` and no ``RUNQUOTA_RUN_WIDTH`` -- for a
+##   Nim compile, no ``--parallelBuild``, so one C compiler per core per
+##   concurrent action (~250 ``cc1`` on a 32-core host in full run 53).
+##
 ## NO MOCKS, ONE FIXTURE: the "test binary" is this file's own executable in
 ## ``fixture-action`` mode. It records the argv and ``RUNQUOTA_RUN_WIDTH``
 ## it was started with, which is exactly what a real test binary would
@@ -65,6 +73,12 @@ proc startDaemon(repoRoot: string; cpuMilli: int):
     if not daemon.running:
       break
     sleep(25)
+  # Out of tries with the daemon still up: stop it, so the read below
+  # ends instead of waiting on a live writer.
+  if daemon.running:
+    daemon.terminate()
+    discard daemon.waitForExit()
+  # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
   let output = daemon.outputStream.readAll()
   daemon.close()
   raise newException(OSError, "runquotad socket did not appear: " & output)
@@ -152,3 +166,44 @@ suite "negotiated widths reach the test binary":
       # Less than the grant is kept; nothing goes after the `--`.
       check recorded("asked-less") == @["width=3", "--test-threads", "2",
         "--", "filter"]
+
+  test "bypass_shares_the_host: without a lease a sized action runs at " &
+      "its share of the host's cores":
+    check bypassWidthMilli(32, 12) == 2000'u32
+    check bypassWidthMilli(32, 8) == 4000'u32
+    check bypassWidthMilli(4, 12) == 1000'u32
+    check bypassWidthMilli(0, 0) == 1000'u32
+
+    let tempRoot = createTempDir("repro-widths-bypass", "")
+    defer: removeDir(tempRoot)
+    let workRoot = tempRoot / "work"
+    createDir(workRoot)
+    let app = getAppFilename()
+    proc testAction(id: string; extra: openArray[string]): BuildAction =
+      var argv = @[app, "fixture-action", "record", workRoot / (id & ".txt")]
+      argv.add extra
+      action(id, argv, cwd = workRoot, outputs = [id & ".txt"],
+        cpuMinMilli = 1000'u32, cpuPreferredMilli = 64000'u32,
+        widthFlag = "--test-threads", commandStatsId = id,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let parallelism = 2
+    let buildResult = runBuild(graph(@[
+        testAction("bypass-plain", ["--nocapture"]),
+        testAction("bypass-asked-less", ["--test-threads", "1"])], []),
+      BuildEngineConfig(
+        cacheRoot: tempRoot / ".repro-cache",
+        maxParallelism: uint32(parallelism),
+        stdoutLimit: 256 * 1024,
+        stderrLimit: 256 * 1024,
+        bypassRunQuota: true))
+    for item in buildResult.results:
+      checkpoint item.id & ": " & $item.status & " " & item.stderr
+      check item.status == asSucceeded
+    let share = $(bypassWidthMilli(countProcessors(), parallelism) div 1000)
+    proc recorded(id: string): seq[string] =
+      readFile(workRoot / (id & ".txt")).strip().splitLines()
+    check recorded("bypass-plain") == @["width=" & share, "--nocapture",
+      "--test-threads", share]
+    # A width the command already asks for, within the share, is kept.
+    check recorded("bypass-asked-less") == @["width=" & share,
+      "--test-threads", "1"]

@@ -50,6 +50,7 @@
 ## observation; a harness that supplied its own depfile would assert nothing
 ## about it.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_build_engine
@@ -150,7 +151,7 @@ proc runMonitorCli(tools: MonitorTools; workRoot, depPath: string;
     @["--"] & command
   let process = startProcess(tools.monitorCliPath, workingDir = workRoot,
     args = args, options = {poStdErrToStdOut})
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   let code = process.waitForExit()
   process.close()
   if code != 0:

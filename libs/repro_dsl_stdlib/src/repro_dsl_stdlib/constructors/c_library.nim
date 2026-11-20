@@ -122,6 +122,10 @@ proc c_library*(into: string;
 
   result = newLibrary(install = linkEdge, api = api,
                       installPrefix = "usr/lib")
+  # A consumer's link searches where this edge writes the library, not
+  # ``installPrefix``: no edge of the build writes ``usr/lib``.
+  if linkEdge.outputs.len > 0:
+    result.linkDir = linkEdge.outputs[0].parentDir
 
   # A versioned SONAME is not the name ``-l<base>`` looks for, so write
   # ``lib<base>.so`` beside it as a symlink to it, as the link-time name

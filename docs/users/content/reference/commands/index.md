@@ -110,7 +110,7 @@ Commands fall into four side-effect classes:
 | `repro daemon` | `status`, `start`, `stop`, `restart`, `logs`, `sessions` | Manage the per-user reprobuild daemon. |
 | `repro store` | `gc`, `recover`, `roots`, `list`, `optimise`, `materialize`, `closure`, `export`, `import`, `copy`, `daemon` | Manage the local store. |
 | `repro cas` | `gc`, `verify`, `path`, `exists` | Inspect the content-addressed blob store. |
-| `repro cache` | `lookup`, `substitute`, `publish`, `derive-key`, `gen-key` | Look up, substitute and publish binary-cache entries. |
+| `repro cache` | `lookup`, `substitute`, `publish`, `derive-key`, `gen-key`, `key`, `explain`, `sharing` | Look up, substitute and publish binary-cache entries, explain build actions' cache keys (`key`, `explain`), and say what another checkout can reuse (`sharing`). |
 | `repro reap` | — | Run one sweep of the resource-state store. |
 | `repro self` | `install`, `provision`, `hold`, `which`, `list`, `prune-roots` | Install and manage reprobuild's own versions. |
 | `repro pressure` | — | Show build-wait pressure from the RunQuota daemon (exit 1 when it cannot be reached or predates it). |
@@ -134,7 +134,7 @@ Commands fall into four side-effect classes:
 | `repro branch` | Dependencies & Workspaces | Fork a new sibling workspace on a new branch (with no path: print the workspace's branch). |
 | `repro build` | Build & Test | Build the current project or the selected targets. |
 | `repro bundle` | Dependencies & Workspaces | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
-| `repro cache` | Machines & Diagnostics | Look up, substitute and publish binary-cache entries. |
+| `repro cache` | Machines & Diagnostics | Look up, substitute and publish binary-cache entries, explain build actions' cache keys (`key`, `explain`), and say what another checkout can reuse (`sharing`). |
 | `repro capabilities` | Machines & Diagnostics | Describe what this build of repro supports. |
 | `repro cargo` | Build & Test | Manage cargo target directories and run cargo as a build edge. |
 | `repro cas` | Machines & Diagnostics | Inspect the content-addressed blob store. |

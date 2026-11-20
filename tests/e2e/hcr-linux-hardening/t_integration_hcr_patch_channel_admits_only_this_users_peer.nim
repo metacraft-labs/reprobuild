@@ -32,6 +32,7 @@
 ## so a non-root run skips them with the loud UNSUPPORTED line naming the
 ## Linux lane; the two directory cases run everywhere POSIX.
 
+from repro_core/process_streams import drainStream
 import std/[net, os, osproc, streams, strtabs, strutils, unittest]
 import repro_test_support/reasoned_skip
 
@@ -295,7 +296,7 @@ suite "HCR patch channel admits only this user's peer":
             env = newStringTable({ReproHcrAgentSocketEnv: path,
               "PATH": getEnv("PATH")}),
             options = {poStdErrToStdOut})
-          let output = p.outputStream.readAll()
+          let output = drainStream(p.outputStream)
           let code = p.waitForExit()
           p.close()
           check code == 0

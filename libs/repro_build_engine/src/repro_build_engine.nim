@@ -107,6 +107,7 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # Nix GC roots for the store paths working-tree outputs name; see the ledger
 # note in `runBuild`.
 import repro_core/nix_store_roots
+import repro_core/child_reaper
 import repro_core/nix_configuration_env
 # The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
 # the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
@@ -307,6 +308,16 @@ type
     # executor registered by ``repro_nimble_generator``; the generator's
     # network edges (`registry`, `refs`, `source`) are ``bakMetadataFetch``.
     bakCatalogIndex
+    # Nimble-Package-Catalog NPC-AREQ20: a SOURCE FETCH edge (`nimble.fetch`
+    # and the closure-index read before it). It retrieves a source object by
+    # the digest its lock row records -- from a mirror, else from the origin
+    # -- verifies it, and installs the verified tree in the local
+    # content-addressed source store; its declared output is a receipt. It is
+    # ``netFetch`` (its destinations are the mirrors and the origin) and runs
+    # in process, dispatched through the executor registered by
+    # ``repro_nimble_fetch``. Nothing downstream reaches the network: a
+    # compile edge receives only the store path.
+    bakSourceFetch
 
   NetworkMode* = enum
     ## Sandbox-And-Monitoring.md §"The Network Dimension" (NLF-M5
@@ -2209,6 +2220,24 @@ type
       ## (`ActionResultRecord.inputs`, resolved against the action's `cwd`):
       ## what the execution behind the record was observed reading. Same
       ## arms and same condition as `cacheRecordObservedHere`.
+    cacheRecordContentVerified*: bool
+      ## Every keyed input of the record that answered this action has, read
+      ## NOW, the content the record was made from: the record was made under
+      ## a content-checked input-check policy (`ffpChecksum` or `ffpHybrid`)
+      ## and `inputContentStillRecorded` re-hashed each input against it.
+      ## This is what lets a reused result stand for an execution over
+      ## byte-identical inputs (test-certificates Standard §6.2.1, "the record
+      ## covers the inputs"). A lookup alone does not establish it: an
+      ## `ffpTimestamp` record carries no content hash at all, and an
+      ## `ffpHybrid` lookup trusts an input whose kind, size and mtime are
+      ## unchanged without reading it (Caching-Architecture.md §"Known Limit:
+      ## The Default Policy Can Serve A Stale Result"). Same arms and same
+      ## condition as `cacheRecordObservedHere`, so every other way of
+      ## reporting a reuse leaves it false and a reader fails closed.
+    cacheRecordContentDetail*: string
+      ## Why `cacheRecordContentVerified` is false, for a refusal to name:
+      ## the timestamp policy, or the first input whose content moved. Empty
+      ## when it is true, and on every arm that does not set it.
 
   SchedulerTraceEvent* = object
     seq*: uint64
@@ -3732,7 +3761,7 @@ const PayloadKeyedBuiltinKinds* = {bakCopyFile, bakEnsureDir, bakWriteText,
   ##
   ## The executor-backed kinds (`bakWorkspaceVcs`, `bakForeignProvision`,
   ## `bakBinaryCacheSubstitute`, `bakMetadataFetch`, `bakSolveLock`,
-  ## `bakLockUpdate`, `bakCatalogIndex`) keep the key their constructor computes. Their
+  ## `bakLockUpdate`, `bakCatalogIndex`, `bakSourceFetch`) keep the key their constructor computes. Their
   ## payloads carry fields their designs keep out of the key on purpose: a
   ## git clone's reference path, filter, depth and single-branch flag are
   ## acceleration knobs, so a full and a shallow clone of one revision share
@@ -4524,7 +4553,7 @@ proc formatLockIdentityAudit*(findings: seq[LockIdentityAuditFinding]): string =
 # ---------------------------------------------------------------------------
 
 const NetworkFetchCapableKinds* = {bakMetadataFetch, bakBinaryCacheSubstitute,
-                                   bakForeignProvision}
+                                   bakForeignProvision, bakSourceFetch}
   ## The edge kinds that may carry ``netFetch``.
   ##
   ## The amendment's closing paragraph asks for exactly this: the
@@ -5012,9 +5041,11 @@ proc outputPathReady(action: BuildAction; path: string): bool =
   # NLF-M5: a metadata-fetch object and a generated lock are plain files
   # written by their executors, so they take the same readiness rule.
   # NPC-AREQ9: a catalog index edge's outputs are plain files too.
+  # NPC-AREQ20: a source fetch edge's output is its receipt, a plain file;
+  # the tree it installs is in the source store, not an engine output.
   if action.kind in {bakCopyFile, bakWriteText, bakStamp, bakWorkspaceVcs,
                      bakForeignProvision, bakMetadataFetch, bakSolveLock,
-                     bakCatalogIndex} and
+                     bakCatalogIndex, bakSourceFetch} and
       symlinkExists(extendedPath(path)):
     return false
   path.pathExists()
@@ -6108,6 +6139,22 @@ type
       ## It lives on the SEEN SETS rather than on `PathSetEvidence` because it
       ## is scaffolding for the fold, not evidence: nothing downstream keys a
       ## cache entry on a pid, and a pid is not stable across runs.
+
+    failedExecAttempts*: HashSet[int]
+      ## The `mrProcessExec` records of this capture, by their ordinal among
+      ## the capture's exec records, whose call FAILED. io-mon writes an
+      ## exec attempt BEFORE the call, with nothing in it that says how the
+      ## call will end (a successful exec never returns to say so), and writes
+      ## the `execstatus=failed` marker only afterwards. So the attempt record
+      ## cannot be judged when the fold reaches it. `observeExecAttempt`
+      ## pairs each marker with the attempt it answers in the pass that runs
+      ## before the fold, and the fold then never binds a retracted attempt.
+      ## Not binding, rather than binding and restoring at the marker, leaves
+      ## no window in which another thread of the pid could draw under the
+      ## image of an exec that did not happen.
+    execRecordOrdinal*: int
+      ## How many `mrProcessExec` records the fold has passed in this capture:
+      ## the key into `failedExecAttempts`. Reset with it, per capture.
 
 proc monitorProfileEvidenceComplete(detail: string): bool =
   ## Does this `mrBackendProfile` record CLAIM that its capture's evidence is
@@ -8049,6 +8096,7 @@ func builtinKindName*(kind: BuildActionKind): string =
   of bakSolveLock: "solve-lock"
   of bakLockUpdate: "lock-update"
   of bakCatalogIndex: "catalog-index"
+  of bakSourceFetch: "source-fetch"
 
 const BuiltinPayloadPeerKeyDomain* = "reprobuild/peer-builtin-payload/v1"
   ## The domain `builtinPayloadPeerKey` frames a builtin's peer-cache key
@@ -8570,8 +8618,16 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # relative path names nothing this fold can trust; and a failed exec ran no
     # bytes at all, so it must not overwrite the image the pid is really
     # running.
+    #
+    # "Failed" is two records, not one. The marker carries the token; the
+    # ATTEMPT it answers was written before the call and looks exactly like a
+    # successful exec. `failedExecAttempts` names those attempts (see the
+    # field), so both halves are skipped and the pid keeps its image.
+    let execOrdinal = seen.execRecordOrdinal
+    inc seen.execRecordOrdinal
     if record.osPid != 0 and record.path.isAbsolute and
-        not record.detail.contains(FailedExecDetailToken):
+        not record.detail.contains(FailedExecDetailToken) and
+        execOrdinal notin seen.failedExecAttempts:
       seen.execImageByPid[record.osPid] = record.path
   of mrNonDeterministic:
     addEntropyObservation(evidence, record.path,
@@ -9034,6 +9090,54 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # requires (`monitorEvidenceRequirement`).
   mesUnknownScopeLoss
 
+type PendingExecAttempts = Table[(uint64, uint64), seq[(int, string)]]
+  ## (pid, thread) -> the ordinal and path of each exec attempt of that
+  ## thread that no failure marker has answered yet, oldest first.
+
+proc observeExecAttempt(record: MonitorRecord;
+                        pending: var PendingExecAttempts;
+                        ordinal: var int;
+                        failed: var HashSet[int]) =
+  ## Pair each `execstatus=failed` marker with the attempt it retracts, and
+  ## record that attempt's ordinal in `failed`.
+  ##
+  ## A marker answers the latest unanswered attempt OF ITS OWN THREAD FOR THE
+  ## SAME PATH: the hook writes both from the thread that made the call and
+  ## from the same argument. Keying on the thread as well as the pid keeps
+  ## one thread's failure from retracting an exec another thread of the same
+  ## process made.
+  ##
+  ## Every unanswered attempt is kept, not only the latest, because the
+  ## marker need not be the next exec record of its thread in the order this
+  ## reads. The canonical order is (process, thread, sequence), and io-mon's
+  ## per-process sequence counter restarts in each image, so two images of
+  ## one pid can interleave their records. A single slot would let an
+  ## unrelated attempt sorted between a failed attempt and its marker leave
+  ## the failed attempt standing.
+  ##
+  ## WHAT THIS TRUSTS. A marker with no attempt of its own (a lost record)
+  ## would retract an earlier unanswered exec of the same path by the same
+  ## thread, and that exec may have succeeded. io-mon writes the two records
+  ## back to back from one hook, so this takes a capture that has already
+  ## lost a record; it is no weaker than the trust the token itself is given.
+  ## A marker that answers nothing retracts nothing.
+  ##
+  ## `ordinal` counts exactly what `foldOneMonitorRecord`'s `mrProcessExec`
+  ## arm counts in `execRecordOrdinal`: every exec record, markers included.
+  if record.kind != mrProcessExec:
+    return
+  let key = (record.osPid, record.threadId)
+  if record.detail.contains(FailedExecDetailToken):
+    pending.withValue(key, attempts):
+      for index in countdown(attempts[].high, 0):
+        if attempts[][index][1] == record.path:
+          failed.incl(attempts[][index][0])
+          attempts[].delete(index)
+          break
+  else:
+    pending.mgetOrPut(key, @[]).add((ordinal, record.path))
+  inc ordinal
+
 proc observeSpawnImage(record: MonitorRecord;
                        images: var Table[uint64, string]) =
   ## Canonical captures sort by PID, not wall time. Spawn metadata must be
@@ -9109,9 +9213,15 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   var pipes = initHashSet[string]()
   try:
     seen.execImageByPid.clear()
+    seen.failedExecAttempts.clear()
+    seen.execRecordOrdinal = 0
+    var pendingExecAttempts: PendingExecAttempts
+    var execOrdinal = 0
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       observeSpawnImage(record, seen.execImageByPid)
+      observeExecAttempt(record, pendingExecAttempts, execOrdinal,
+        seen.failedExecAttempts)
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
@@ -9179,8 +9289,14 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
   seen.execImageByPid.clear()
+  seen.failedExecAttempts.clear()
+  seen.execRecordOrdinal = 0
+  var pendingExecAttempts: PendingExecAttempts
+  var execOrdinal = 0
   for record in records:
     observeSpawnImage(record, seen.execImageByPid)
+    observeExecAttempt(record, pendingExecAttempts, execOrdinal,
+      seen.failedExecAttempts)
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
@@ -17383,12 +17499,27 @@ proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
   if parts.len > 0:
     result = " (" & parts.join(", ") & ")"
 
+proc withWidthPlaceholders(action: BuildAction): BuildAction
+
+proc bypassWidthMilli*(hostCores, maxParallelism: int): uint32 =
+  ## The width a sized action runs at when no RunQuota lease is taken: an
+  ## equal share of the host's cores among the actions the engine runs at
+  ## once, and at least one slot. Left as declared, a Nim compile has no
+  ## ``--parallelBuild`` and starts one C compiler per core, so twelve
+  ## concurrent test-binary compiles on a 32-core host ran ~250 ``cc1``
+  ## (full run 53, 2026-11-15) where the host has 32 cores for everyone.
+  let share = max(1, hostCores) div max(1, maxParallelism)
+  uint32(max(1, share)) * 1000'u32
+
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
     ReproDirectRunningProcess =
   ## Use RunQuota's native process backend without acquiring a lease. On
   ## Windows this preserves argument boundaries instead of expanding valid
   ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
+  ##
+  ## A sized action still gets its width flag: ``bypassWidthMilli``, filled
+  ## in as a grant of that size would be.
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
@@ -17399,14 +17530,20 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       writeFile(extendedPath(path), "")
     except CatchableError:
       discard
-  return startDirect(preparedRunQuotaCommand(action, config))
+  if action.widthFlag.len == 0:
+    return startDirect(preparedRunQuotaCommand(action, config))
+  var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
+  command.widthFlag = action.widthFlag
+  let width = bypassWidthMilli(countProcessors(),
+    int(max(1'u32, config.maxParallelism)))
+  return startDirect(command.applyGrantedWidth(width))
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction =
   ## The action with a placeholder where its width flag's value goes, before
   ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
   ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
-  ## launch paths use it: under the bypass there is no grant, and the
-  ## command line is left as declared.
+  ## launch paths and the bypass use it; the bypass fills it with
+  ## ``bypassWidthMilli``.
   ##
   ## The flag is placed in the command the action EXECUTES: on the wrapped
   ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
@@ -17735,8 +17872,15 @@ type
     ## Indirect for the usual layering reason: the index writer and the
     ## static `.nimble` reader live above the engine.
 
+  SourceFetchExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
+    ## Nimble-Package-Catalog NPC-AREQ20: hook installed by
+    ## ``repro_nimble_fetch`` for its ``bakSourceFetch`` edges. Indirect for
+    ## the usual layering reason: the mirror client, the archive extractor
+    ## and the source store live above the engine.
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
+var sourceFetchExecutor {.threadvar.}: SourceFetchExecutor
 var lockUpdateExecutor {.threadvar.}: LockUpdateExecutor
 var foreignProvisionExecutors {.threadvar.}: Table[string, ForeignProvisionExecutor]
 var binaryCacheSubstituteExecutor {.threadvar.}: BinaryCacheSubstituteExecutor
@@ -17800,6 +17944,14 @@ proc registerCatalogIndexExecutor*(executor: CatalogIndexExecutor) =
 
 proc clearCatalogIndexExecutor*() =
   catalogIndexExecutor = nil
+
+proc registerSourceFetchExecutor*(executor: SourceFetchExecutor) =
+  ## Register the per-thread executor for ``bakSourceFetch`` edges
+  ## (NPC-AREQ20). The Nimble source fetch installs one bound to its run.
+  sourceFetchExecutor = executor
+
+proc clearSourceFetchExecutor*() =
+  sourceFetchExecutor = nil
 
 proc registerForeignProvisionExecutor*(provisioner: string;
                                        executor: ForeignProvisionExecutor) =
@@ -18485,6 +18637,14 @@ when not defined(windows):
     ## being touched by -- the helper every other reprobuild process of the
     ## user shares.
 
+  const NixHelperEnvironment* = [
+    "HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
+    "XDG_DATA_HOME", "XDG_STATE_HOME", "TMPDIR", "NIX_CONFIG",
+    "NIX_CONF_DIR", "NIX_USER_CONF_FILES", "NIX_REMOTE", "NIX_PATH",
+    "NIX_STORE_DIR", "NIX_STATE_DIR"]
+    ## The variables that decide where the helper's ``nix`` reads its
+    ## configuration and keeps its caches and temporary files.
+
   proc nixDaemonHelperKey*(daemonExe: string): string =
     ## The identity of the helper this process would START: a digest of the
     ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
@@ -18501,10 +18661,22 @@ when not defined(windows):
     ## it. Keying by content keeps the sharing that matters (every process of
     ## one build, and every build whose helper is byte-identical) and never
     ## lets two different helpers answer for each other.
+    ##
+    ## THE ENVIRONMENT IS PART OF THE IDENTITY. The helper inherits the
+    ## whole environment of the process that happened to start it, and the
+    ## ``nix`` it runs keeps its fetcher cache, configuration and temporary
+    ## files where ``NixHelperEnvironment`` says. A caller with a private
+    ## ``XDG_CACHE_HOME`` (28 integration tests set one) used to start the
+    ## helper every other process then shared; once that caller deleted its
+    ## directory, every fetch through the helper failed with ``could not find
+    ## repository at '<deleted>/nix/tarball-cache-v2'`` until it idled out.
     if daemonExe.len == 0 or not fileExists(daemonExe):
       return ""
     try:
-      toHex(weakFingerprintFromText(readFile(daemonExe)).bytes)[0 ..< 16]
+      var identity = readFile(daemonExe)
+      for name in NixHelperEnvironment:
+        identity.add("\0" & name & "=" & getEnv(name))
+      toHex(weakFingerprintFromText(identity).bytes)[0 ..< 16]
     except IOError, OSError:
       ""
 
@@ -18607,7 +18779,20 @@ when not defined(windows):
           return true
     finally:
       if helper != nil:
+        # THIS PROCESS IS THE HELPER'S PARENT, however long the helper
+        # lives: ``poDaemon`` gives it its own session, not another parent.
+        # A helper still running here (it accepted, or the wait ran out)
+        # exits later by itself, and nothing in this process would then
+        # wait for it: it stayed ``<defunct>`` for the rest of the build.
+        # So its pid is handed to ``reapWhenExited`` before the handle goes.
+        # ``peekExitCode`` reaps one that has already exited.
+        let handedOver =
+          try: helper.peekExitCode() == -1
+          except CatchableError: false
+        let helperPid = helper.processID
         helper.close()
+        if handedOver:
+          reapWhenExited(helperPid)
     diagnostic = "started " & $spawns & " helper(s) over " &
       $int((epochTime() - startedAt) * 1000.0) & " ms"
     if lastExit.len > 0:
@@ -18969,6 +19154,22 @@ proc executeBuiltinAction*(action: BuildAction): ActionResult =
       result.reason = ciRes.reason
       result.launched = ciRes.launched
       result.runQuotaBackend = "catalog-index"
+      return
+    of bakSourceFetch:
+      # Fail CLOSED when nothing is registered: a fetch edge that quietly
+      # no-ops would hand a build a store path nobody verified.
+      if sourceFetchExecutor.isNil:
+        raiseEngine(
+          "bakSourceFetch action requires registerSourceFetchExecutor " &
+          "before runBuild: " & action.id)
+      let sfRes = sourceFetchExecutor(action)
+      result.status = sfRes.status
+      result.exitCode = sfRes.exitCode
+      result.stdout = sfRes.stdout
+      result.stderr = sfRes.stderr
+      result.reason = sfRes.reason
+      result.launched = sfRes.launched
+      result.runQuotaBackend = "source-fetch"
       return
     of bakSolveLock:
       if solveLockExecutor.isNil:
@@ -19391,6 +19592,170 @@ proc emitActionExtensionRows(session: ReproRunQuotaSession;
         extInt(int64(item.evidence.monitorWrites.len)),
         extInt(int64(item.evidence.monitorProbes.len))
       ])
+
+# ---------------------------------------------------------------------------
+# The portable identity's static description of one action.
+#
+# These are THE procs `runBuild` keys the portable weak fingerprint with (its
+# `portableWeakOf` digests `portableKeyDescriptionOf`, and the record writer
+# hands `computePortableFingerprint` the same components), exported so a caller
+# that has only a planned graph (`repro cache key` / `repro cache explain`)
+# derives the same components and the same digest. A second derivation
+# beside the engine's would be free to drift from it, and an explanation
+# computed from it would then explain a key the engine does not use.
+# ---------------------------------------------------------------------------
+
+proc portableEnvPairs*(action: BuildAction): seq[(string, string)] =
+  ## The action's declared environment as (name, value) pairs; an entry
+  ## without `=` is a name with an empty value.
+  for entry in action.env:
+    let eq = entry.find('=')
+    if eq > 0:
+      result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
+    else:
+      result.add((entry, ""))
+
+proc portableDeclaredInputPaths*(action: BuildAction): seq[string] =
+  ## The action's declared inputs, as physical paths (relative ones against
+  ## its working directory).
+  for input in action.inputs:
+    result.add(materialPath(action.cwd, input))
+
+proc portableStaticFields*(action: BuildAction;
+                           hermeticEnv: bool): seq[string] =
+  ## What the argv does not say about the action: its kind, a builtin's
+  ## payload, and the outputs it declares (sorted: a set). `hermeticEnv` is
+  ## `BuildEngineConfig.hermeticEnv`: an allowlisted environment is part of
+  ## what the action is.
+  result.add("kind=" & $action.kind)
+  if action.unsafePreserveOutputs:
+    # Domain-separates the portable key as `preserveOutputsWeakFingerprint`
+    # does the local one; nothing in this mode is published anyway.
+    result.add("unsafe-preserve-outputs=v1")
+  result.add("builtinText=" & action.builtinText)
+  for entry in action.builtinEntries:
+    result.add("builtinEntry=" & entry)
+  var outputs: seq[string] = @[]
+  for output in action.outputs:
+    outputs.add("output=" & materialPath(action.cwd, output))
+  for output in action.optionalOutputs:
+    outputs.add("optionalOutput=" & materialPath(action.cwd, output))
+  for output in action.declaredOutputs:
+    outputs.add("declaredOutput=" & materialPath(action.cwd, output))
+  for dir in action.scratchDirs:
+    outputs.add("scratch=" & materialPath(action.cwd, dir))
+  for path in action.removeBeforeRun:
+    outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
+  outputs.sort()
+  result.add(outputs)
+  # The canonical work tree's KEY, never its resolved path. Added only when
+  # declared, so every other action's description is unchanged.
+  if action.canonicalWorkKey.len > 0:
+    result.add("canonicalWorkKey=" & action.canonicalWorkKey)
+  # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
+  # which variables the action was allowed to see is part of what it is.
+  var passthrough: seq[string] = @[]
+  for name in action.envPassthrough:
+    passthrough.add("passthrough=" & name)
+  if hermeticEnv:
+    result.add("env=allowlisted")
+    for name in HostEssentialEnvNames:
+      passthrough.add("passthrough=" & name)
+  passthrough.sort()
+  result.add(passthrough)
+
+proc portableKeyDescriptionOf*(roots: openArray[LogicalRoot];
+                               action: BuildAction;
+                               hermeticEnv: bool): PortableKeyDescription =
+  ## The action's portable static description against `roots`; its digest
+  ## (`portableWeakFingerprint`) is the portable weak fingerprint `runBuild`
+  ## looks the action up by under the same roots and `hermeticEnv`.
+  portableKeyDescription(roots, action.argv, action.cwd,
+    portableEnvPairs(action), portableDeclaredInputPaths(action),
+    portableStaticFields(action, hermeticEnv))
+
+proc portableIdentityRefusal*(action: BuildAction;
+                              contentCheckedOnly: bool): string =
+  ## "" when `runBuild` gives the action a portable identity under a
+  ## configuration with portable roots (Caching-Architecture D1); otherwise
+  ## why not. `contentCheckedOnly` is
+  ## `BuildEngineConfig.portableContentCheckedOnly` (the default; false under
+  ## `REPRO_PORTABLE_CACHE=1`).
+  if contentCheckedOnly and
+      action.actionCachePolicy notin {ffpChecksum, ffpHybrid}:
+    return "its input-check policy is " & $action.actionCachePolicy &
+      ", and only a content-checked (checksum or hybrid) edge gets a " &
+      "portable identity by default"
+  if action.unsafePreserveOutputs:
+    return UnsafePreserveOutputsCrossHostRefusal
+  ""
+
+proc crossCheckoutSharingRefusal*(action: BuildAction;
+                                  roots: openArray[LogicalRoot]): string =
+  ## "" when a record of `action` CAN be served to another checkout on this
+  ## host; otherwise the first reason, decidable before the action runs, why
+  ## it cannot. `repro cache sharing` reports it per action. `roots` are the portable roots a build keys by
+  ## (`BuildEngineConfig.portableRoots`); empty when the portable identity
+  ## is off.
+  ##
+  ## Every condition is the engine's own predicate, called here rather than
+  ## restated, so this answer cannot drift from what `runBuild` does when it
+  ## decides whether to store a record's output bytes for another checkout:
+  ##
+  ##   1. the action is cacheable;
+  ##   2. there are tracked portable roots: without them no action has a
+  ##      portable identity (`REPRO_PORTABLE_CACHE=0`);
+  ##   3. its determinism class allows substitution from another checkout
+  ##      (`crossHostRefusal`, the check `runBuild` makes before it stores
+  ##      bytes and again before it restores them);
+  ##   4. the publication rule (`publicationRuleRefusal`) admits a record of
+  ##      its input-check policy and evidence source (`evidenceSourceOf`),
+  ##      given the facts only an execution supplies at their best (Level-0
+  ##      evidence, every input hashed, at least one observed): a
+  ##      `timestamp` edge, a process evidenced by a depfile without the
+  ##      monitor, and a builtin kind that reads more than its declared
+  ##      inputs are refused whatever they read;
+  ##   5. it does not preserve its outputs unsafely (`portableIdentityRefusal`);
+  ##   6. its program lies under a tracked root, when the argv names it by an
+  ##      absolute path: a program outside every root (a `/nix/store` or
+  ##      `/usr` toolchain) is read when the action runs, and that read keeps
+  ##      the action non-portable;
+  ##   7. it declares an output, so there are bytes to put in place.
+  ##
+  ## "" is necessary, not sufficient: what an action reads and writes is
+  ## known only after it ran, so a read outside the roots (a host header)
+  ## or an output that embeds a checkout path can still keep a
+  ## candidate's record local. A non-empty answer is final: no execution
+  ## makes such an action's record reach another checkout.
+  if not action.cacheable:
+    return "the action is not cacheable"
+  var tracked = false
+  for root in roots:
+    if root.kind == lrkTracked:
+      tracked = true
+      break
+  if not tracked:
+    return "the portable identity is off (REPRO_PORTABLE_CACHE=0), so no " &
+      "record is kept for another checkout"
+  let hostBound = action.crossHostRefusal()
+  if hostBound.len > 0:
+    return hostBound
+  let rule = publicationRuleRefusal(action.actionCachePolicy, "", elComplete,
+    evidenceSourceOf(action), 1)
+  if rule.len > 0:
+    return rule
+  let identity = portableIdentityRefusal(action, contentCheckedOnly = false)
+  if identity.len > 0:
+    return identity
+  if action.kind == bakProcess and action.argv.len > 0 and
+      action.argv[0].isAbsolute and
+      not logicalizeText(roots, action.argv[0]).startsWith("${"):
+    return "its program " & action.argv[0] &
+      " lies outside every logical root, so its record stays on this host"
+  if action.outputs.len == 0 and action.declaredOutputs.len == 0:
+    return "it declares no output, so another checkout has nothing to " &
+      "put in place"
+  ""
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Process-global accumulators; zero them so this build reports its own cost
@@ -20030,6 +20395,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     item.cacheRecordInputs = @[]
     for input in record.inputs:
       item.cacheRecordInputs.add(materialPath(action.cwd, input.path))
+    # Whether the inputs are byte-identical to the ones the record's
+    # execution read (test-certificates Standard §6.2.1). The lookup that
+    # served this hit compared metadata only, for a timestamp record always
+    # and for a hybrid one wherever the metadata had not moved, so it is
+    # re-established here from content. A checksum record's lookup already
+    # hashed every input; it is hashed again rather than special-cased,
+    # because a record may carry inputs recorded under another policy, and
+    # `inputContentStillRecorded` refuses any input without a hash. Only a
+    # run that judges provenance pays for it.
+    if record.policy == ffpTimestamp:
+      item.cacheRecordContentVerified = false
+      item.cacheRecordContentDetail = "its cache record was made under the " &
+        "timestamp input-check policy, which identifies an input by its " &
+        "size and mtime, not its content"
+    else:
+      let still = inputContentStillRecorded(record, action.cwd)
+      item.cacheRecordContentVerified = still.ok
+      item.cacheRecordContentDetail =
+        if still.ok: ""
+        else: "input " & still.changed & " no longer has the content its " &
+          "cache record was made from, or the record holds no content " &
+          "hash for it" &
+          (if record.policy == ffpHybrid: " (a hybrid lookup trusts an " &
+             "input whose size and mtime are unchanged without reading it)"
+           else: "")
 
   proc publishPeerCacheBundle(query: PeerCacheActionQuery;
                               record: ActionResultRecord;
@@ -20135,16 +20525,10 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     false
 
   proc portableEnvOf(action: BuildAction): seq[(string, string)] =
-    for entry in action.env:
-      let eq = entry.find('=')
-      if eq > 0:
-        result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
-      else:
-        result.add((entry, ""))
+    portableEnvPairs(action)
 
   proc portableDeclaredInputsOf(action: BuildAction): seq[string] =
-    for input in action.inputs:
-      result.add(materialPath(action.cwd, input))
+    portableDeclaredInputPaths(action)
 
   var machineryRoots: seq[LogicalRoot] = @[]
   var machineryRootsResolved = false
@@ -20626,51 +21010,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## back to what the recorder is handed.
 
   proc portableStaticFieldsOf(action: BuildAction): seq[string] =
-    ## What the argv does not say about the action: its kind, a builtin's
-    ## payload, and the outputs it declares (sorted: a set).
-    result.add("kind=" & $action.kind)
-    if action.unsafePreserveOutputs:
-      # Domain-separates the portable key as `preserveOutputsWeakFingerprint`
-      # does the local one; nothing in this mode is published anyway.
-      result.add("unsafe-preserve-outputs=v1")
-    result.add("builtinText=" & action.builtinText)
-    for entry in action.builtinEntries:
-      result.add("builtinEntry=" & entry)
-    var outputs: seq[string] = @[]
-    for output in action.outputs:
-      outputs.add("output=" & materialPath(action.cwd, output))
-    for output in action.optionalOutputs:
-      outputs.add("optionalOutput=" & materialPath(action.cwd, output))
-    for output in action.declaredOutputs:
-      outputs.add("declaredOutput=" & materialPath(action.cwd, output))
-    for dir in action.scratchDirs:
-      outputs.add("scratch=" & materialPath(action.cwd, dir))
-    for path in action.removeBeforeRun:
-      outputs.add("removeBeforeRun=" & materialPath(action.cwd, path))
-    outputs.sort()
-    result.add(outputs)
-    # The canonical work tree's KEY, never its resolved path. Added only when
-    # declared, so every other action's description is unchanged.
-    if action.canonicalWorkKey.len > 0:
-      result.add("canonicalWorkKey=" & action.canonicalWorkKey)
-    # Passthrough is keyed by NAME (BuildXL): the value is the host's, but
-    # which variables the action was allowed to see is part of what it is.
-    var passthrough: seq[string] = @[]
-    for name in action.envPassthrough:
-      passthrough.add("passthrough=" & name)
-    if config.hermeticEnv:
-      result.add("env=allowlisted")
-      for name in HostEssentialEnvNames:
-        passthrough.add("passthrough=" & name)
-    passthrough.sort()
-    result.add(passthrough)
+    ## What the argv does not say about the action (`portableStaticFields`).
+    portableStaticFields(action, config.hermeticEnv)
 
   proc portableWeakOf(action: BuildAction): string =
     ## The portable weak fingerprint: the action's STATIC description, so it
     ## is known before the action runs (the P3.4 lookup needs exactly that).
-    portableWeakFingerprint(config.portableRoots, action.argv, action.cwd,
-      portableEnvOf(action), portableDeclaredInputsOf(action),
-      portableStaticFieldsOf(action))
+    ## It is the digest of `portableKeyDescriptionOf`, the description
+    ## `repro cache key` prints and `repro cache explain` compares.
+    portableWeakFingerprint(portableKeyDescriptionOf(config.portableRoots,
+      action, config.hermeticEnv))
 
   var peerCacheQueries = initTable[string, PeerCacheActionQuery]()
     ## Distributed-Execution M0: the query computed for each action when the
@@ -20978,7 +21327,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     runResult.results[idx].portableReason = fp.reason
     if fp.portable:
       runResult.trace(action.id, "portable-fingerprint",
-        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len)
+        "strong=" & fp.strongHex & " inputs=" & $fp.inputs.len &
+        " weak=" & fp.weakHex)
     else:
       runResult.trace(action.id, "portable-fingerprint-unavailable",
         fp.reason)
@@ -23644,8 +23994,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           var lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not reusableInPlace,
+            # A run that judges where a reused record came from and whether
+            # its inputs still have the recorded content (certificate
+            # issuance, `recordCacheHitProvenance`) needs the FULL record:
+            # the metadata-only shortcut answers with a projection that has
+            # no strong fingerprint and no input content hashes
+            # (`hotMetadataRecord`), so neither question could be answered
+            # from it and a content-checked record could never be attested.
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
-              reusableInPlace,
+              reusableInPlace and not config.recordCacheHitProvenance,
             metadataCache = addr fileMetadataCache,
             envResolver = action.actionEnvResolver(unsafeAddr config),
             outputRoot = action.cwd,

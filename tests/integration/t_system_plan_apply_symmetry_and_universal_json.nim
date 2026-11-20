@@ -21,9 +21,13 @@
 ##   system apply --plan <id>` applies the plan `repro system plan --json`
 ##   printed: exit 0, the marker is written, and `repro system history
 ##   --json` lists one active generation recording that plan id; `repro
-##   system audit --json` reads its log. Negative control: an unknown plan id
-##   is refused by `system apply` exactly as by `infra apply` (same exit
-##   code, no generation committed).
+##   system audit --json` reads its log, by default and when named. Negative
+##   controls: an unknown plan id is refused by `system apply` exactly as by
+##   `infra apply` (same exit code, no generation committed), and `system
+##   audit <id>` for an id no generation has (a mistyped one, `..`) is
+##   refused with exit 1 and nothing on stdout, text and `--json` alike,
+##   instead of reading as an empty log (reprobuild-pm issue
+##   2026-11-17-system-audit-unknown-generation-reads-as-empty-log).
 ## * `every_inspection_and_plan_command_prints_one_json_document`: `system
 ##   plan|list|history|audit`, `infra plan`, `home plan|list|history` and
 ##   `capabilities` with `--json` exit as without it and print exactly one
@@ -34,6 +38,12 @@
 ## * `capabilities_json_yields_to_an_explicit_format`: `capabilities --json`
 ##   and `--format=json --json` print JSON; `--json --format=text` and
 ##   `--format=text --json` print the text summary.
+## * `system_audit_refuses_an_id_no_generation_has`: on every platform (it
+##   applies nothing), `system audit <id>` for a generation directory with no
+##   `apply.log` exits 0 with zero records and says the log is absent
+##   (`logExists: false`, "(no log file)"), while an id no generation has --
+##   a typo, a case variant, `..`, `.`, `<id>/..`, `../generations` -- is
+##   refused with exit 1 and nothing on stdout, text and `--json` alike.
 ##
 ## No mocks: real `repro`, real Nim compiles of real profiles, the real
 ## planner (read-only observation of the absent files) and a real system
@@ -281,9 +291,25 @@ suite "repro system plan|apply and universal --json":
       let log = audit.oneDocument()
       check log{"schemaId"}.getStr() == "reprobuild.system.audit.v1"
       check log{"generation"}.getStr() == generation
+      check log{"logExists"}.getBool()
       check log{"buildActionRecords"}.getInt() >= 1
       check log{"records"}.getElems().len == log{"liveStateRecords"}.getInt() +
         log{"buildActionRecords"}.getInt()
+      # The same generation named explicitly reads the same log; an id no
+      # generation has is refused on stderr with exit 1 and no document,
+      # rather than read as a generation whose apply logged nothing
+      # (reprobuild-pm issue 2026-11-17-system-audit-unknown-generation-
+      # reads-as-empty-log). Both spellings, text and `--json`.
+      let named = f.inState(["system", "audit", generation, "--json"])
+      check named.exitCode == 0
+      check named.oneDocument(){"generation"}.getStr() == generation
+      for unknown in [generation & "0", "..", "no-such-generation"]:
+        for extra in [newSeq[string](), @["--json"]]:
+          let refused = f.inState(@["system", "audit", unknown] & extra)
+          check refused.exitCode == 1
+          check refused.stdout.strip().len == 0
+          check ("repro system audit: no system generation '" & unknown &
+            "'") in refused.stderr
     else:
       skip(ApplySkipReason)
 
@@ -396,3 +422,33 @@ suite "repro system plan|apply and universal --json":
       let r = f.run(args)
       check r.exitCode == 0
       check r.stdout == plainText.stdout
+
+  test "system_audit_refuses_an_id_no_generation_has":
+    # Needs no apply, so it runs on every platform: the state dir holds one
+    # generation directory with no `apply.log` (an apply that logged
+    # nothing, or died before its first record).
+    let f = newFixture("sysjson-audit-ids")
+    defer: f.sb.dispose()
+    let gen = "audit-gen-without-log"
+    createDir(f.stateDir / "generations" / gen)
+    let text = f.inState(["system", "audit", gen])
+    check text.exitCode == 0
+    check text.stdout.field("records") == "0"
+    check text.stdout.field("log").endsWith("(no log file)")
+    let json = f.inState(["system", "audit", gen, "--json"])
+    check json.exitCode == 0
+    let doc = json.oneDocument()
+    check doc{"generation"}.getStr() == gen
+    check doc{"logExists"}.getBool(true) == false
+    check doc{"records"}.getElems().len == 0
+    # Ids no generation has: a typo, a case variant (the same directory on a
+    # case-insensitive volume), and spellings that resolve to an existing
+    # directory other than a generation's.
+    for unknown in [gen & "0", gen.toUpperAscii(), "..", ".",
+                    gen & "/..", "../generations"]:
+      for extra in [newSeq[string](), @["--json"]]:
+        let refused = f.inState(@["system", "audit", unknown] & extra)
+        check refused.exitCode == 1
+        check refused.stdout.strip().len == 0
+        check ("repro system audit: no system generation '" & unknown &
+          "'") in refused.stderr

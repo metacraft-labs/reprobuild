@@ -1,7 +1,7 @@
 ## Every reprobuild macro that builds a clispec model places clispec's
-## `cliModelTypeChecks` in its output, so a `default` that is not a value of
-## its parameter's type is a compile error naming the parameter, at the line
-## that wrote it.
+## `cliModelTypeChecks` in its output, so a `default` or `implies` value that
+## is not a value of its parameter's type is a compile error naming the
+## parameter, at the line that wrote it.
 ##
 ## clispec's parser checks what it can tell from spellings. Whether an
 ## expression is a value of a type needs the compiler, so clispec generates
@@ -14,10 +14,18 @@
 ##   description (`repro_cli_support/cli_program`).
 ##
 ## Each fixture under `tests/unit/fixtures/cs_m6_cli_model_type_checks/`
-## declares `flag jobs is int, default = csM6Default`, where `csM6Default` is
-## the string `"four"` under `-d:csM6Wrong` and the integer `4` otherwise:
+## writes a value that is wrong under `-d:csM6Wrong` and right otherwise. The
+## first three declare `flag jobs is int, default = csM6Default`, where
+## `csM6Default` is the string `"four"` under the define and the integer `4`
+## otherwise. `defineCliInterface` reads `implies` too:
+## `define_cli_interface_implies.nim` declares `boolFlag fast, implies =
+## [jobs = csM6Implied]`, a string under the define and an `int` (the type of
+## `jobs`, not of `fast`) otherwise; `define_cli_interface_implies_unknown.nim`
+## makes a top-level flag imply a subcommand's parameter under the define,
+## which `defineCliInterface` refuses as a `cli:` block does, and a top-level
+## one otherwise. For each fixture:
 ##
-## 1. with the define, the compile fails, with clispec's message naming the
+## 1. with the define, the compile fails, with the message naming the
 ##    parameter and the value, in the fixture on the line marked `# CHECK`,
 ##    the line that wrote the value (not the enclosing command's);
 ## 2. CONTROL: without it, the same fixture compiles. If it did not, the
@@ -38,10 +46,18 @@ import std/[os, osproc, strutils, tempfiles, unittest]
 
 const
   FixtureDir = "tests/unit/fixtures/cs_m6_cli_model_type_checks"
-  Fixtures = ["package_cli.nim", "define_cli_interface.nim",
-    "repro_description.nim"]
-  Expected = "clispec: parameter 'jobs': default `csM6Default` is not a " &
-    "valid int"
+  DefaultExpected = "clispec: parameter 'jobs': default `csM6Default` is " &
+    "not a valid int"
+  Fixtures = [
+    (file: "package_cli.nim", expected: DefaultExpected),
+    (file: "define_cli_interface.nim", expected: DefaultExpected),
+    (file: "repro_description.nim", expected: DefaultExpected),
+    (file: "define_cli_interface_implies.nim",
+      expected: "clispec: parameter 'fast': implies jobs = `csM6Implied`, " &
+        "which is not a valid int (the type of 'jobs')"),
+    (file: "define_cli_interface_implies_unknown.nim",
+      expected: "parameter 'verbose': implies 'jobs', which is not a " &
+        "parameter of the interface's top level")]
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -78,8 +94,8 @@ proc nimCheck(root, fixture: string; wrong: bool):
   execCmdEx(cmd, workingDir = root)
 
 suite "CS-M6: reprobuild's clispec macros place cliModelTypeChecks":
-  for fixture in Fixtures:
-    test "a wrong-typed default is a compile error: " & fixture:
+  for (fixture, expected) in Fixtures:
+    test "a wrong-typed or misdirected value is a compile error: " & fixture:
       let root = repoRoot()
       let line = checkLine(root / FixtureDir / fixture)
       check line > 0
@@ -91,14 +107,14 @@ suite "CS-M6: reprobuild's clispec macros place cliModelTypeChecks":
       var named = false
       var atLine = false
       for l in output.splitLines():
-        if fixture & "(" in l and "Error:" in l and Expected in l:
+        if fixture & "(" in l and "Error:" in l and expected in l:
           named = true
           if fixture & "(" & $line & ", " in l:
             atLine = true
       check named
       check atLine
 
-    test "control: a right-typed default compiles: " & fixture:
+    test "control: the right value compiles: " & fixture:
       let (output, exitCode) = nimCheck(repoRoot(), fixture, wrong = false)
       checkpoint(output)
       check exitCode == 0

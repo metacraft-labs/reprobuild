@@ -64,6 +64,7 @@
 ## unconditionally and the MDWE+anonymous arm goes red while the others stay
 ## green.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, unittest]
 # Agent sockets go in a short directory under /tmp, not under the scratch
 # tree: on a runner whose work directory is long (the persistent benchmark
@@ -127,7 +128,7 @@ when defined(linux) and defined(amd64):
       for entry in client.transcript:
         result.transcriptEvents.add kindName(entry.message.kind)
     connection.close()
-    let output = process.outputStream.readAll()
+    let output = drainStream(process.outputStream)
     let code = process.waitForExit()
     process.close()
     if code != 0:

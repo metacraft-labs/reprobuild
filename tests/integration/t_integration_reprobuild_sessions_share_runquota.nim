@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[json, monotimes, os, osproc, streams, strutils, tempfiles, times,
   unittest]
 
@@ -174,6 +175,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     if not daemon.running:
       let code = daemon.peekExitCode()
       let output =
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
       daemon.close()
       raise newException(OSError, "runquotad exited with status " & $code &
@@ -182,6 +184,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   daemon.terminate()
   discard daemon.waitForExit()
   let output =
+    # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
     if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
   daemon.close()
   raise newException(OSError, "runquotad socket did not appear within " &
@@ -209,7 +212,7 @@ proc hasQueuedAndRunningBuildLeases(cliPath: string; snapshot: var string): bool
 
 proc collect(process: Process): tuple[code: int; output: string] =
   if process.outputStream != nil:
-    result.output = process.outputStream.readAll()
+    result.output = drainStream(process.outputStream)
   result.code = process.waitForExit()
   process.close()
 

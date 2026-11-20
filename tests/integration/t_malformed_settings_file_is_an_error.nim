@@ -72,6 +72,7 @@
 ## No mocks. Skip rule: skip only when `git` is missing from PATH (the
 ## member repositories are real `file://` remotes).
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -93,8 +94,8 @@ proc runRepro(args: openArray[string]):
   # inherited override pointing elsewhere.
   env.del("REPRO_WORKSPACE_CONFIG")
   let p = startProcess(reproBinary(), args = @args, env = env, options = {})
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 

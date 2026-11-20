@@ -220,6 +220,14 @@ type
       ## What confined the action: `linux-namespace`, `macos-seatbelt`,
       ## `windows-job` (or `linux-partial[...]` when a test removed a layer).
 
+  LeaseHandle* = ref object
+    ## A running lease, for a worker that stops while it runs
+    ## (`cancelLease`). Linux only: the other backends ignore it.
+    pid*: int
+      ## The lease supervisor while it runs; 0 before it is spawned and
+      ## once it has been reaped.
+    cancelled*: bool
+
 const
   DefaultLeaseLayers* = {llNamespace, llLandlock, llFloor}
   MaxCapturedOutput* = 1024 * 1024
@@ -548,21 +556,27 @@ when defined(linux):
       of "error": outcome.error = v
       else: discard
 
-  proc runLeaseLinux(spec: LeaseSpec;
-                     onReport: ReportSink): Future[LeaseOutcome] {.async.} =
+  proc runLeaseLinux(spec: LeaseSpec; onReport: ReportSink;
+                     handle: LeaseHandle): Future[LeaseOutcome] {.async.} =
     var outcome = LeaseOutcome()
     prepareLeaseDirs(spec)
     let pid = spawnLinux(spec, cleanup = false, outcome)
     if pid < 0:
       return outcome
+    if not handle.isNil:
+      handle.pid = pid
     var tail = ReportTail(path: spec.metaDir / "report.jsonl")
     # Wait for the supervisor, forwarding its reports as they appear.
     var status: cint = 0
     while true:
+      # `cancelLease` already reaped it: its pid may name another child now.
+      if not handle.isNil and handle.cancelled: break
       let r = waitpid(Pid(pid), status, WNOHANG)
       drainReports(tail, outcome, onReport)
       if r == Pid(pid) or r < 0: break
       await sleepAsync(20)
+    if not handle.isNil:
+      handle.pid = 0
     drainReports(tail, outcome, onReport)
     readStatus(spec.metaDir / "status", outcome)
     outcome.started = outcome.error.len == 0
@@ -1582,14 +1596,15 @@ proc leaseConfinementAvailable*(hardened = false):
   let a = availableLeaseLayers(hardened)
   (a.ok, a.reason)
 
-proc runLease*(spec: LeaseSpec;
-               onReport: ReportSink = nil): Future[LeaseOutcome] {.async.} =
+proc runLease*(spec: LeaseSpec; onReport: ReportSink = nil;
+               handle: LeaseHandle = nil): Future[LeaseOutcome] {.async.} =
   ## Runs `spec.argv` confined as described in the module doc; every
-  ## report goes to `onReport` as it happens.
+  ## report goes to `onReport` as it happens. `handle`, when given, lets
+  ## `cancelLease` end the lease while it runs.
   if spec.argv.len == 0 or not spec.argv[0].isAbsolute:
     return LeaseOutcome(error: "argv[0] must be an absolute path")
   when defined(linux):
-    return await runLeaseLinux(spec, onReport)
+    return await runLeaseLinux(spec, onReport, handle)
   elif defined(macosx):
     return await runLeaseSeatbelt(spec, onReport)
   elif defined(windows):
@@ -1613,3 +1628,41 @@ proc cleanupLease*(spec: LeaseSpec): bool =
     true
   except OSError:
     false
+
+proc cancelLease*(handle: LeaseHandle) =
+  ## Ends a running lease at once, for a worker that is stopping: its
+  ## `runLease` may never be resumed, and its directory can be removed
+  ## (`cleanupLease`) only once nothing in the lease writes to it any more.
+  ## On Linux the supervisor is killed and reaped here; every process below
+  ## it dies with it (each sets PR_SET_PDEATHSIG, `c/repro_lease_linux.c`),
+  ## and the lease's pid 1 takes its whole pid namespace along. A no-op
+  ## elsewhere, and for a lease that has finished.
+  if handle.isNil or handle.cancelled:
+    return
+  handle.cancelled = true
+  when defined(linux):
+    if handle.pid > 0:
+      discard posix.kill(Pid(handle.pid), SIGKILL)
+      var status: cint
+      discard waitpid(Pid(handle.pid), status, 0)
+      handle.pid = 0
+
+proc leaseSlotOwning*(leaseDir: string): int =
+  ## The lease slot whose subordinate uid owns files under `leaseDir`, for
+  ## removing a lease no running worker knows of (`cleanupLease` must run
+  ## as that slot's user); -1 when none does — every file is the daemon's
+  ## own, so a plain removal will do — and always -1 off Linux.
+  result = -1
+  when defined(linux):
+    let ids = subordinateIds()
+    if not ids.ok:
+      return
+    let own = getuid()
+    for path in walkDirRec(leaseDir, yieldFilter = {pcFile, pcDir,
+        pcLinkToFile, pcLinkToDir}):
+      var st: Stat
+      if lstat(path.cstring, st) != 0 or st.st_uid == own:
+        continue
+      let slot = int(st.st_uid) - ids.uid
+      if slot >= 0 and slot < ids.count:
+        return slot

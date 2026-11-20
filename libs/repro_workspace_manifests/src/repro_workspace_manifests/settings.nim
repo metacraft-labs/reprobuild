@@ -198,6 +198,12 @@ proc roleDeclsFromTree(c: TreeCtx; keyPath: string;
                        n: TomlValueRef): BranchRoleDecls =
   ## The six built-in role keys and a `branch-roles` sub-table of one declarer
   ## (`[workspace]` or `[profiles.<name>]`). The caller checks for unknown keys.
+  # `optNonEmptyString` below refuses any non-string too; this runs first so
+  # that `false`, the one a reader of §3.1 might try, is answered by name.
+  let mainlineRejection = mainlineValueRejection(child(n, "mainline"),
+    "write the branch name, or remove the key")
+  if mainlineRejection.len > 0:
+    c.fail(join(keyPath, "mainline"), mainlineRejection)
   result.mainline = c.optNonEmptyString(keyPath, n, "mainline")
   for role in builtinOptionalRoleNames:
     let v = child(n, role)

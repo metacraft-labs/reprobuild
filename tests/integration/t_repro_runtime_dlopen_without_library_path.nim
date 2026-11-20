@@ -52,6 +52,7 @@
 ## ``build_apps.sh`` stages), so the same assertions run unconditionally
 ## everywhere — the test has no platform opt-out and no skip.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 const RepoMarker = "repro.nim"
@@ -130,7 +131,7 @@ proc runRepro(binary: string; args: openArray[string];
               env: StringTableRef): CmdResult =
   let p = startProcess(binary, args = @args, env = env,
     options = {poStdErrToStdOut})
-  let output = p.outputStream().readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)

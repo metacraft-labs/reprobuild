@@ -27,8 +27,9 @@
 ## it is actually about (the per-session try/except in
 ## ``runWatchCommand.runDirectWatch``) never had a platform in it.
 
-import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
+import repro_test_support/watch_log
 when defined(posix):
   from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
@@ -183,17 +184,6 @@ proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
     result.shim = requireBinary(monitorShimPath(repoRoot),
       "reprobuild.test_fixtures.monitor_shim")
 
-proc waitForLogContains(logPath, needle, context: string; timeoutMs = 30_000) =
-  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
-  while getMonoTime() < deadline:
-    if fileExists(logPath) and readFile(logPath).contains(needle):
-      return
-    sleep(50)
-  let log =
-    if fileExists(logPath): readFile(logPath) else: ""
-  raise newException(ValueError,
-    "timed out waiting for " & context & ": " & needle & "\n" & log)
-
 proc agentHello(suffix: string): HcrAgentMessage =
   HcrAgentMessage(
     schemaId: HcrAgentProtocolSchemaId,
@@ -325,18 +315,20 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
       # stdout log. The failure isolation block in
       # ``runWatchCommand.runDirectWatch`` emits this exactly once per
       # failing target.
-      # Cold, the baseline cycle compiles a project provider from scratch;
-      # measured in minutes on Linux x86_64, not in the 30 s this defaulted to.
+      # Cold, the baseline cycle extracts this fresh project's interface
+      # before it builds anything: minutes under load, not the 30 s this
+      # defaulted to (see `WatchBaselineBudgetMs`).
       waitForLogContains(logPath,
         "repro watch: hcr patch failed target=a",
-        "target A injection failure", timeoutMs = 600_000)
+        "target A injection failure", timeoutMs = WatchBaselineBudgetMs,
+        watch = process)
 
       # B's baseline still proceeds even though A failed — the per-
       # target loop continues past A's exception. B's session waits
       # for its own agent connection.
       waitForLogContains(logPath,
         "repro watch: hcr waiting for agent socket=" & socketB &
-          " target=b", "agent B baseline")
+          " target=b", "agent B baseline", watch = process)
 
       var agentB = connectHcrAgentUnixSocket(socketB)
       defer: agentB.close()
@@ -345,7 +337,7 @@ suite "t_e2e_repro_watch_hcr_one_target_agent_inject_failure":
       check ackB.kind == hmkHelloAck
 
       waitForLogContains(logPath, "repro watch: watching paths=",
-        "watch subscription")
+        "watch subscription", watch = process)
 
       # Edit ``src/b.c``. Cycle 2 rebuilds ``build/b.o`` and delivers
       # a patch to B. A is in ``fallbackOnly`` so its lifecycle is

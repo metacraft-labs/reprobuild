@@ -4,6 +4,7 @@
 ## ELF64 fixture (RUNPATH rewriting), and against the real script
 ## generator (byte-determinism for two structurally-identical plans).
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tables, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
@@ -172,6 +173,6 @@ when defined(posix):
         # ENOEXEC fallback. Both argument boundaries and exit status survive.
         let child = startProcess(launcher, args = @["dynamic argument"], options = {})
         defer: child.close()
-        let output = child.outputStream.readAll()
+        let output = drainStream(child.outputStream)
         check child.waitForExit() == 23
         check output == "static argument\ndynamic argument\n"

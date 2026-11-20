@@ -50,6 +50,7 @@
 ## `build/bin/reprobuild` (`reprobuild.apps.reprobuild`). Both are declared on
 ## this file's execute edge.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 when defined(posix):
   import std/posix
@@ -137,7 +138,7 @@ proc runBounded(exe: string; args: openArray[string];
     return
   result.exited = true
   result.code = p.peekExitCode()
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
 
 proc describe(r: BoundedRun): string =
   "exited=" & $r.exited & " code=" & $r.code & "\noutput=" & r.output &

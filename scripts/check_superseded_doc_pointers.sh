@@ -24,11 +24,10 @@ SUPERSEDED=(
   # old page                              -> published replacement(s)
   docs/user-guide/home-export.md         # reference/files/home-export.md, guides/machines/export-a-home-profile.md
   docs/user-guide/nix-helper-library.md  # reference/nix-library.md, guides/machines/drive-home-manager-from-a-profile.md, …/install-applications-with-homebrew.md
-  docs/user-guide/host-facts.md          # guides/machines/compare-with-home-manager.md (not the document's fields)
+  docs/user-guide/host-facts.md          # reference/files/host-facts.md, guides/machines/compare-with-home-manager.md
 )
 ALLOWED=(
-  # The host-facts document's fields: no reference page under docs/users/content/ yet.
-  'docs/user-guide/host-facts.md` §What a host-facts document holds'
+  # Empty: every superseded page has a published replacement for all of it.
 )
 
 escape() { sed 's/[][\.*^$]/\\&/g'; }
@@ -56,7 +55,7 @@ if [[ $rc -gt 1 ]]; then
   echo "check_superseded_doc_pointers: grep failed (exit $rc)" >&2
   exit 2
 fi
-for a in "${ALLOWED[@]}"; do
+for a in ${ALLOWED[@]+"${ALLOWED[@]}"}; do
   hits=$(printf '%s\n' "$hits" | grep -vF -- "$a" || true)
 done
 hits=$(printf '%s\n' "$hits" | sed '/^$/d')

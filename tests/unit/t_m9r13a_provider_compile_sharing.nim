@@ -108,6 +108,7 @@
 ## pins the mechanism the smoke depends on; the smoke pins the end-to-
 ## end effect.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, sequtils, streams, strutils, tempfiles, times, unittest]
 
 import repro_dsl_stdlib/nixpkgs_pin
@@ -277,7 +278,7 @@ proc compileWithMeasuredCpu(nimExe, nimcache, source, outBin: string): float =
   let proc1 = startProcess(cmd[0], args = cmd[1 .. ^1],
     options = {poUsePath, poStdErrToStdOut})
   let exitCode = proc1.waitForExit()
-  let output = proc1.outputStream.readAll()
+  let output = drainStream(proc1.outputStream)
   proc1.close()
   result = epochTime() - t0
   if exitCode != 0:

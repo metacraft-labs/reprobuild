@@ -54,6 +54,7 @@
 ## fails the last two cases with a message saying so rather than skipping
 ## them.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, posix, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support/reasoned_skip
@@ -148,7 +149,7 @@ proc compile(p: Probe): tuple[output: string, exitCode: int] =
   let process = startProcess(p.command[0], workingDir = p.root,
     args = p.command[1 .. ^1], env = envTable(p.env),
     options = {poStdErrToStdOut})
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   let exitCode = process.waitForExit()
   process.close()
   (output, exitCode)

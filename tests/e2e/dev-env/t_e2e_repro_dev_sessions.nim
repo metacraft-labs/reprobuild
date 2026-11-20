@@ -70,6 +70,7 @@
 ## they name are real loopback ports that are really closed; what is
 ## replaced is the history, not any part of the code under test.
 
+from repro_core/process_streams import drainStream
 import std/[json, net, os, osproc, sequtils, strtabs, streams, strutils,
     tempfiles, times, unittest]
 
@@ -276,7 +277,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
     env = env,
     options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()
@@ -793,7 +794,7 @@ suite "e2e_repro_dev_sessions":
     check not second.running()
     if not second.running():
       check second.peekExitCode() != 0
-      check second.outputStream.readAll().contains("session already has an owner")
+      check drainStream(second.outputStream).contains("session already has an owner")
     check readFile(readyPath) == original
     check first.running()
     # A real serialized empty artifact lets the supervisor reach ownership

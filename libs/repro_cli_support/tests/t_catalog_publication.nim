@@ -87,6 +87,22 @@ suite "catalog publication":
       projectInterface.provisioningContributions[0].location.file ==
         "sub/repro.nim"
 
+  test "the line a toolchain records does not reach the bytes":
+    # Two Nim builds record a multi-line statement at different lines; the
+    # same provider must then publish the same bytes (the CI `--check` failed
+    # on exactly this).
+    proc atLine(line: int): ProjectInterfaceArtifact =
+      var a = catalogArtifact(catalogRoot / "repro.nim")
+      a.projectInterface.location.line = line
+      for c in a.projectInterface.provisioningContributions.mitems:
+        c.location.line = line
+      a
+    let first = publishableArtifact(atLine(236), catalogRoot, "repro.nim")
+    let second = publishableArtifact(atLine(242), catalogRoot, "repro.nim")
+    check first.bytes == second.bytes
+    check first.artifact.projectInterface.provisioningContributions[0].
+      location.line == PublishedLocationLine
+
   test "a location outside the catalog refuses":
     let outside = root / "elsewhere" / "repro.nim"
     check refusal(catalogArtifact(outside)) == "catalog " & catalogRoot &

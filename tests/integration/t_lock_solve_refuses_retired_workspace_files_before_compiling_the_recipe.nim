@@ -24,6 +24,7 @@
 ##
 ## No mocks: real directories, real git repositories, the real `repro`.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -103,7 +104,7 @@ proc lockVerb(verb, member, scratch: string):
     args = ["lock", verb, member], env = env,
     options = {poStdErrToStdOut})
   p.inputStream.close()
-  let o = p.outputStream.readAll()
+  let o = drainStream(p.outputStream)
   result = (code: p.waitForExit(), output: o)
   p.close()
   checkpoint("repro lock " & verb & " " & member & " -> " & $result.code &

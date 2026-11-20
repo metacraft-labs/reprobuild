@@ -91,6 +91,7 @@
 ## real monitor and action cache; the shell's closure is read from the
 ## host's dynamic loader.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, sets, streams, strtabs, strutils, tables, tempfiles,
   unittest]
 
@@ -277,7 +278,7 @@ proc reproRun(host: SharedHost; cwd: string; args: openArray[string]):
   env["REPRO_CACHE_DISABLE"] = "1"
   let p = startProcess(reproBinary(), workingDir = cwd, args = args,
     env = env, options = {poStdErrToStdOut})
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.code = p.waitForExit()
   p.close()
 

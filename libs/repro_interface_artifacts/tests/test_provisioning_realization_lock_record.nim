@@ -1081,14 +1081,15 @@ suite "provisioning realization lock record":
       realizationLockIdentity == Odd
 
     # A cut inside a value, and a cut just after an escape's backslash, are
-    # each reported as what they are.
+    # refused by the statement reader before the provisioning parser sees
+    # them (``toml_subset.tomlStatements``): the string runs past its line.
     let line = provisioningLine(document)
     let inValue = line.find("quoted")
     check parseRefusal(document.replace(line, line[0 .. inValue])).contains(
-      "truncated inside a quoted value")
+      "a string runs past the end of the line")
     let atEscape = line.find("\\t")
     check parseRefusal(document.replace(line, line[0 .. atEscape])).contains(
-      "truncated inside an escape")
+      "a string runs past the end of the line")
 
     # A quote in a package name round-trips through the escaping like any
     # other value. A backslash is refused in EVERY field -- the package name

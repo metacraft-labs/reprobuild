@@ -15,6 +15,7 @@
 ## monitor and action cache, GNU tar and zstd for the bundle halves. Nothing
 ## is mocked.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, hashes, json, os, osproc, posix, streams, strtabs,
   strutils, tables]
 
@@ -159,7 +160,7 @@ proc repro*(host: SharedHost; args: openArray[string]; cwd: string;
   ## Run the `repro` under test; stdout and stderr together.
   let p = startProcess(reproBinary(), workingDir = cwd, args = args,
     env = reproEnv(host, extra), options = {poStdErrToStdOut})
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.code = p.waitForExit()
   p.close()
 
@@ -172,7 +173,7 @@ proc reproStdout*(host: SharedHost; args: openArray[string]; cwd: string;
     args = @["-c", "exec \"$0\" \"$@\" 2>" & quoteShell(errPath),
       reproBinary()] & @args,
     env = reproEnv(host, extra), options = {})
-  result.stdout = p.outputStream.readAll()
+  result.stdout = drainStream(p.outputStream)
   result.code = p.waitForExit()
   p.close()
   result.stderr = (if fileExists(errPath): readFile(errPath) else: "")

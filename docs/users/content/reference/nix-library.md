@@ -38,7 +38,7 @@ function returns the reason instead.
 ```nix
 readIntent { host, system, snapshot ? null, profileDir ? null,
              buildSystem ? builtins.currentSystem or null, nixos ? null,
-             repro ? null, packagesCatalog ? null }
+             repro ? null, packagesCatalog ? null, catalogClones ? null }
 ```
 
 Reads a `repro home export` document and evaluates it for `host` on `system`.
@@ -49,7 +49,11 @@ With `snapshot`, reads that file. Otherwise runs `repro home export` on
 `profileDir` in a derivation built for `buildSystem` (import from
 derivation); pure evaluation exposes no `builtins.currentSystem`, so name
 `buildSystem` there. `packagesCatalog` is a reprobuild-packages checkout, which
-that export needs for a profile whose hosts declare `applies:`. Refuses a
+that export needs for a profile whose hosts declare `applies:`. `catalogClones`
+is a directory laid out as the shared clone root (`github.com/<owner>/<repo>.git`,
+a bare clone holding each pinned commit) from which the sandboxed export reads
+the catalogs a profile imports; without it, IFD mode refuses such a profile.
+Refuses a
 document of another format or schema version, one whose intent still names
 data files, a host the profile's `hosts:` block does not declare, and a
 `system` the document cannot describe. `nixos` states whether the target is
@@ -88,7 +92,8 @@ refuses.
 ### `reprobuild.lib.exportDerivation`
 
 ```nix
-exportDerivation { pkgs, repro, profileDir, host, packagesCatalog ? null }
+exportDerivation { pkgs, repro, profileDir, host, packagesCatalog ? null,
+                   catalogClones ? null }
 ```
 
 The derivation that runs `repro home export` on a profile, as `readIntent`'s
@@ -234,7 +239,8 @@ homeManagerFacts { configuration, host, homebrew ? { }, outOfStoreRoots ? { }, s
 ```
 
 A derivation that writes the facts of a Home Manager configuration (its
-packages, files, environment and services) for `repro home compare`.
+packages, files, environment and services) for `repro home compare`, as a
+[host-facts document](files/host-facts.md).
 `homebrew` lists what the host's Brewfile installs (`casks`, `formulae`,
 `masApps`); `outOfStoreRoots` maps an out-of-store link prefix to the tree
 whose files it points into. `realizationSources` (default: the module's
@@ -247,11 +253,13 @@ reported by its canonical name, never as an unknown derivation.
 ### `reprobuild.lib.reprobuildFacts`
 
 ```nix
-reprobuildFacts { pkgs, repro, profileDir, host, system, nixos ? null }
+reprobuildFacts { pkgs, repro, profileDir, host, system, nixos ? null,
+                  catalogClones ? null }
 ```
 
 A derivation that runs `repro home facts` on a profile. `nixos` states whether
 the host is NixOS (`--nixos`), for a profile with `nixos` guards.
+`catalogClones` is the shared clone root of the catalogs the profile imports.
 
 ### `reprobuild.lib.homeEquivalenceCheck`
 
@@ -259,7 +267,7 @@ the host is NixOS (`--nixos`), for a profile with `nixos` guards.
 homeEquivalenceCheck { configuration, host, profileDir, allowlist ? null,
                        homebrew ? { }, outOfStoreRoots ? { },
                        name ? "home-equivalence-${host}", repro ? null,
-                       nixos ? null }
+                       nixos ? null, catalogClones ? null }
 ```
 
 A check that builds both sides' facts and runs `repro home compare`; it fails
@@ -322,6 +330,13 @@ Import `reprobuild.homeManagerModules.intent`. Its options are under
 IFD mode: the system that runs `repro home export` -- the evaluator's, not the target's. Defaults to builtins.currentSystem where the evaluation exposes it.
 
 - Type: null or string
+- Default: `null`
+
+### `reprobuild.intent.catalogClones`
+
+IFD mode: a directory laid out as the shared clone root (`github.com/<owner>/<repo>.git`, a bare clone holding each pinned commit) that the sandboxed `repro home export` reads the catalogs the profile imports (`repro-catalogs.toml`) from (`$REPRO_WORKSPACE_CLONES`). Without it, an IFD export of a profile with imports is refused. Ignored in snapshot mode.
+
+- Type: null or absolute path
 - Default: `null`
 
 ### `reprobuild.intent.enable`

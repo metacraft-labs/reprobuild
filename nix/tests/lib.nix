@@ -188,6 +188,9 @@ let
 
   # --- readIntent / evaluateExport -----------------------------------------
   intentRoot = root + "/tests/fixtures/intent-exports";
+  # Profiles (not export cases) the import refusals read: a profile directory
+  # with a repro-catalogs.toml.
+  importsRoot = root + "/tests/fixtures/intent-imports";
   # The order `repro home export` refuses in: an undeclared host first (the
   # export itself fails), then a target the document does not describe.
   evaluateOrRefuse =
@@ -255,12 +258,32 @@ let
     ++ expectTrue "readIntent in IFD mode refuses a profile that imports catalogs" (
       fails (
         reprobuildLib.readIntent {
-          profileDir = intentRoot + "/imports-refused";
+          profileDir = importsRoot + "/imports-refused";
           host = "m1";
           system = "x86_64-linux";
           buildSystem = "x86_64-linux";
         }
       )
+    )
+    # PN1b: `catalogClones` is the fixed-output input that lets the sandbox
+    # read the imports: the export derivation is then built, with the clone
+    # root in $REPRO_WORKSPACE_CLONES, instead of refused. The derivation is
+    # only constructed here (pkgs is a stand-in whose runCommand returns its
+    # attributes), because building it needs the packaged `repro` and a real
+    # clone; dotfiles' `home-export-snapshot` check runs it for real.
+    ++ expectTrue "exportDerivation supplies catalogClones as the clone root of a profile with imports" (
+      let
+        drv = reprobuildLib.exportDerivation {
+          pkgs = {
+            runCommand = name: attrs: _script: attrs // { inherit name; };
+          };
+          repro = "repro";
+          profileDir = importsRoot + "/imports-refused";
+          host = "m1";
+          catalogClones = importsRoot;
+        };
+      in
+      !(fails drv) && toString (drv.REPRO_WORKSPACE_CLONES or "") == toString importsRoot
     )
     # ReproOS add-on mode: a schema-4 document cannot say a host is an
     # add-on host, so its add-on hosts would read as managed here in full.

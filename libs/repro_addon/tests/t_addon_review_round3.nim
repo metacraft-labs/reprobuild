@@ -33,6 +33,7 @@
 ##
 ## Mocks: none. The sinks are the real in-process sink fixture.
 
+from repro_core/process_streams import drainStream
 import std/[asyncdispatch, options, os, osproc, sequtils, streams, strtabs, strutils, tables, times, unittest]
 
 import repro_peer_cache/auth as peerAuth
@@ -270,7 +271,7 @@ suite "the A11 code review's third round":
       sleep(100)
     appended += processOperatorInbox(sink8.server.store,
                                      peerIdOfHex(sink8.hostId), inbox)
-    let ackOut = child.outputStream.readAll()
+    let ackOut = drainStream(child.outputStream)
     let ackCode = child.waitForExit()
     child.close()
     checkpoint ackOut

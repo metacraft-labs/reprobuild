@@ -58,6 +58,7 @@ const buildLines =
   "    let envread = certTool(actionId = \"envread\",\n" &
   "      input = \".env\",\n" &
   "      output = \"build/envread-out\",\n" &
+  "      actionCachePolicy = acfpHybrid,\n" &
   "      marker = \".repro/runs.log\")\n" &
   "    let stale = certTool(actionId = \"stale\",\n" &
   "      input = \"build/handmade.txt\",\n" &
@@ -111,6 +112,10 @@ suite "a test that read an ignored file is not certified":
       check ".env" in env.output
 
       # ---- 3. the same edge answered by the cache: still withheld ----------
+      # ``envread`` states ``hybrid`` so its reuse is attestable on its own
+      # (Test-Certificates.md §"Reused results"); a ``timestamp`` record would
+      # be refused before the read set is judged, and this step would no
+      # longer test the read-set rule.
       let ranBefore = fx.executedOutputs().len
       let envAgain = fx.reproIn(["test", "env-suite",
         "--tool-provisioning=path"])

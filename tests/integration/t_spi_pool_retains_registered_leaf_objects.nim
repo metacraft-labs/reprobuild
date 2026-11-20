@@ -43,6 +43,19 @@
 ##     its walk behind leaf-only ids keeps ``origin/feat`` but loses the
 ##     parent of A's own commit. (This walk goes beyond the spec's §3.3 list
 ##     of what the hook prints; see the module comment above.)
+##   - ``resolved_conflict_stage_survives_gc`` — a conflicted stage that only
+##     the index's resolve-undo record names (resolved, added, ``merge
+##     --quit``) survives, and ``checkout -m`` recreates the conflict;
+##     ``mutation_hook_without_resolve_undo_loses_conflict_stage`` shows
+##     the hook without ``--resolve-undo`` losing it.
+##   - ``sparse_linked_worktree_of_a_full_leaf_is_read_without_expansion`` —
+##     a cone-mode sparse linked worktree of a non-sparse leaf: the hook
+##     prints the tree its sparse entry names without opening it, and gc
+##     keeps that tree;
+##     ``mutation_hook_reading_indexes_under_the_leaf_config_expands_them``
+##     reads the index by path under the leaf's configuration, as the hook
+##     did before, and git expands it: the tree is not printed, and the
+##     pool's copy is refreshed as a side effect.
 ##   - ``failing_hook_aborts_pruning`` — a hook that exits non-zero makes git
 ##     skip pruning: nothing is deleted, not even B's objects (SPI-GOAL-5).
 ##   - ``unreadable_registered_leaf_aborts_pruning`` — a registered leaf that
@@ -273,6 +286,80 @@ proc stageExpiredBlob(f: Fixture; worktree: string): string =
   doAssert must(f.a, "count-objects", "-v").contains("in-pack: 0")
   doAssert not fileExists(f.a / ".git" / "objects" / result[0 .. 1] /
     result[2 .. ^1])
+
+proc resolveConflictWithExpiredStage(f: Fixture): string =
+  ## In A, merge B's pool-only ``feat3`` commit over A's own ``feat3.txt``:
+  ## an add/add conflict whose stage 3 is the blob only B's unregistered
+  ## history reaches. Resolve it, ``git add`` it, and ``git merge --quit``,
+  ## so the only thing in A that still names that blob is the index's
+  ## resolve-undo record. Return the blob's id.
+  result = must(f.pool, "rev-parse", f.bFeat & ":feat3.txt")
+  commitFile(f.a, "feat3.txt", "ours\n")
+  let merge = gitIn(f.a, "merge", "--no-edit", f.bFeat)
+  doAssert merge.code != 0, "the merge must conflict: " & merge.output
+  doAssert result in must(f.a, "ls-files", "--unmerged", "feat3.txt")
+  writeFile(f.a / "feat3.txt", "resolved\n")
+  discard must(f.a, "add", "feat3.txt")
+  discard must(f.a, "merge", "--quit")
+  doAssert gitIn(f.a, "rev-parse", "-q", "--verify", "MERGE_HEAD").code != 0
+  doAssert result in must(f.a, "ls-files", "--resolve-undo")
+  doAssert result notin must(f.a, "ls-files", "--stage")
+  doAssert not fileExists(f.a / ".git" / "objects" / result[0 .. 1] /
+    result[2 .. ^1])
+
+proc sparseWorktreeOverExpiredTree(f: Fixture; wt: string): string =
+  ## A linked worktree of A, at A's ``HEAD``, whose cone-mode sparse index
+  ## collapses ``deep/`` into one sparse-directory entry naming a tree only
+  ## expired pool history reaches. A itself is not sparse. ``wt`` must lie
+  ## outside A's sibling discovery domain: a worktree discovery finds is
+  ## registered and read from inside itself, under its own configuration,
+  ## which hides the defect. Return the tree.
+  # Upstream adds ``deep/`` on a branch and drops it again; the pool's
+  # refreshes fetch it and then prune the ref, keeping the objects. Both
+  # refreshes come before the worktree exists, so neither depends on where
+  # it lies.
+  let url = "file://" & f.up
+  discard must(f.up, "checkout", "-q", "-b", "deep", "main")
+  createDir(f.up / "deep")
+  commitFile(f.up, "deep" / "inner.txt", "inner\n")
+  let deep = must(f.up, "rev-parse", "HEAD")
+  discard must(f.up, "checkout", "-q", "main")
+  var refreshed = refreshSharedBare(f.gitBin, f.cache, url)
+  doAssert refreshed.ok, refreshed.diagnostic
+  result = must(f.pool, "rev-parse", deep & ":deep")
+  discard must(f.up, "branch", "-q", "-D", "deep")
+  refreshed = refreshSharedBare(f.gitBin, f.cache, url)
+  doAssert refreshed.ok, refreshed.diagnostic
+  doAssert has(f.pool, deep)
+  createDir(wt.parentDir)
+  discard must(f.a, "worktree", "add", "-q", "--detach", wt, "HEAD")
+  # Staging by path writes no object; the sparse collapse reuses the tree
+  # the pool already holds.
+  discard must(wt, "checkout", deep, "--", "deep")
+  discard must(f.a, "config", "extensions.worktreeConfig", "true")
+  discard must(wt, "sparse-checkout", "set", "--cone", "--sparse-index")
+  doAssert ("040000 " & result & " 0\tdeep/") in
+    must(wt, "ls-files", "--stage", "--sparse")
+  doAssert must(f.a, "config", "--bool", "--default", "false",
+    "core.sparseCheckout") == "false"
+  doAssert not fileExists(f.a / ".git" / "objects" / result[0 .. 1] /
+    result[2 .. ^1])
+  doAssert must(f.pool, "config", "gc.pruneExpire") != "never"
+  ageObjects(f.pool)
+
+proc looseObjectPath(repo, id: string): string =
+  result = repo / "objects" / id[0 .. 1] / id[2 .. ^1]
+  doAssert fileExists(result), "expected a loose object: " & result
+
+proc runRetentionHook(f: Fixture): tuple[code: int; ids: seq[string];
+                                         stderr: string] =
+  ## Run the pool's hook the way gc does (from the pool, with its
+  ## ``GIT_DIR`` exported) and return what it printed.
+  let err = f.root / "hook.stderr"
+  let res = execCmdEx("cd " & q(f.pool) & " && GIT_DIR=" & q(f.pool) &
+    " sh " & q(retentionHookPath(f.pool)) & " 2> " & q(err))
+  (code: res.exitCode, ids: res.output.splitLines(),
+   stderr: readFile(err))
 
 proc reftableLeaf(f: Fixture): string =
   ## A registered leaf on the reftable backend, in a sibling workspace of A,
@@ -744,7 +831,7 @@ suite "SPI-1: the pool retains what registered leaves name":
 
   test "staged_blob_in_removed_linked_worktree_survives_gc":
     # The same blob staged in a linked worktree whose directory is gone: its
-    # index is read by path through ``worktrees/<id>/index``.
+    # index is read through its git directory, ``worktrees/<id>``.
     if findExe("git").len == 0 or not gitAtLeast(2, 42):
       skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
     else:
@@ -774,7 +861,7 @@ suite "SPI-1: the pool retains what registered leaves name":
         removeDir(root)
       let f = setUp(root)
       let blob = stageExpiredBlob(f, f.a)
-      mutateHook(f.pool, "  # Staged entries", "  grep -E ")
+      mutateHook(f.pool, "  # Index entries", "  grep -E ")
       discard must(f.pool, "gc", "--quiet")
       check not has(f.pool, blob)
 
@@ -794,7 +881,7 @@ suite "SPI-1: the pool retains what registered leaves name":
       removeDir(wt)
       let hook = retentionHookPath(f.pool)
       let script = readFile(hook)
-      let anchor = " \"$common\"/worktrees/*/index; do"
+      let anchor = " \"$common\"/worktrees/*; do"
       doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
       writeFile(hook, script.replace(anchor, "; do"))
       discard must(f.pool, "gc", "--quiet")
@@ -836,6 +923,108 @@ suite "SPI-1: the pool retains what registered leaves name":
       checkpoint("gc: " & $gc.code & " " & gc.output)
       check gc.code != 0
       check has(f.pool, f.bFeat)          # refused: nothing pruned
+
+  test "resolved_conflict_stage_survives_gc":
+    # A conflict resolved with ``git add`` and abandoned with ``git merge
+    # --quit`` leaves its conflicted stages in the index's resolve-undo
+    # record, which ``git checkout -m <path>`` reads to recreate the
+    # conflict. Those stages are roots (§3.3): after gc the leaf can still
+    # recreate it. Issue 2026-11-17-retention-hook-drops-resolve-undo-and-
+    # cache-tree-and-expands-worktree-sparse-indexes.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-resolve-undo-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let blob = resolveConflictWithExpiredStage(f)
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code == 0
+      check not has(f.pool, f.bFeat)      # expiry really ran
+      check has(f.pool, blob)
+      let redo = gitIn(f.a, "checkout", "-m", "feat3.txt")
+      checkpoint("checkout -m: " & redo.output)
+      check redo.code == 0
+      check readFile(f.a / "feat3.txt").contains("feat3")
+
+  test "mutation_hook_without_resolve_undo_loses_conflict_stage":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-resolve-undo-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let blob = resolveConflictWithExpiredStage(f)
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let anchor = " --resolve-undo"
+      doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(anchor, ""))
+      discard must(f.pool, "gc", "--quiet")
+      check not has(f.pool, blob)
+      check gitIn(f.a, "checkout", "-m", "feat3.txt").code != 0
+
+  test "sparse_linked_worktree_of_a_full_leaf_is_read_without_expansion":
+    # A linked worktree's sparse index is read under that worktree's own
+    # configuration, and outside any work tree, so it is not expanded
+    # (§3.3): the hook prints the tree its sparse entry names, and opens no
+    # object to do so. Read under the non-sparse leaf's configuration, git
+    # expanded it: the hook printed the blobs under ``deep/`` instead of the
+    # tree, and expanding rebuilt the cache-tree, which refreshed the pool's
+    # copy of the tree as a side effect. Issue 2026-11-17-retention-hook-drops-
+    # resolve-undo-and-cache-tree-and-expands-worktree-sparse-indexes.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-sparse-wt-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let wt = root / "outside" / "other" / "deep" / "wt"
+      let tree = sparseWorktreeOverExpiredTree(f, wt)
+      let aged = getLastModificationTime(looseObjectPath(f.pool, tree))
+      let hook = runRetentionHook(f)
+      checkpoint("hook: " & $hook.code & " " & hook.stderr)
+      check hook.code == 0
+      check tree in hook.ids
+      check getLastModificationTime(looseObjectPath(f.pool, tree)) == aged
+      for pass in 1 .. 2:
+        let gc = gitIn(f.pool, "gc", "--quiet")
+        checkpoint("gc " & $pass & ": " & $gc.code & " " & gc.output)
+        check gc.code == 0
+      check not has(f.pool, f.bFeat)      # expiry really ran
+      check wt notin readBorrowers(f.pool)
+      check has(f.pool, tree)
+      check gitIn(wt, "sparse-checkout", "disable").code == 0
+      check readFile(wt / "deep" / "inner.txt") == "inner\n"
+
+  test "mutation_hook_reading_indexes_under_the_leaf_config_expands_them":
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-sparse-wt-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let wt = root / "outside" / "other" / "deep" / "wt"
+      let tree = sparseWorktreeOverExpiredTree(f, wt)
+      let script = readFile(retentionHookPath(f.pool))
+      # The read as it was: the index by path, under the leaf's configuration.
+      let anchor = "git -C \"$work/empty\" --git-dir=\"$gitdir\" --work-tree=\"$work/empty\""
+      doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      writeFile(retentionHookPath(f.pool), script.replace(anchor,
+        "GIT_INDEX_FILE=\"$gitdir/index\" git -C \"$leaf\""))
+      let aged = getLastModificationTime(looseObjectPath(f.pool, tree))
+      let hook = runRetentionHook(f)
+      check tree notin hook.ids
+      check getLastModificationTime(looseObjectPath(f.pool, tree)) != aged
 
   test "reftable_leaf_refuses_expiry_and_gc":
     # A leaf on the reftable ref backend keeps HEAD and its reflogs in

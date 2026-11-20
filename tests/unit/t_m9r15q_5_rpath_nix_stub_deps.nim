@@ -47,6 +47,7 @@
 ##      nix-store dir AND does NOT include the dangling sibling-recipe
 ##      path.
 
+from repro_core/process_streams import drainStream
 import std/[envvars, os, osproc, streams, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
@@ -173,7 +174,7 @@ suite "DSL-port M9.R.15q.5.1 — RPATH resolution for nix-stub deps":
         let probe = startProcess(patchelfPath,
           args = ["--print-rpath", mirrorUsr / "bin" / "main"],
           options = {poUsePath})
-        let probeOutput = probe.outputStream.readAll().strip()
+        let probeOutput = drainStream(probe.outputStream).strip()
         check waitForExit(probe) == 0
         # The dangling sibling-recipe path MUST be absent — that's the
         # whole point of M9.R.15q.5.1.

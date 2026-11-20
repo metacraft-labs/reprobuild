@@ -812,11 +812,12 @@ lint:
     # neighbours.
     python3 ./scripts/check_pattern_kills.py --self-test 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_pattern_kills.py 2>&1 | tee -a test-logs/lint.log
-    # Refuse `Stream.readAll` on a child's output or error stream in product
-    # code: it stops at the first short read, which on a Windows pipe is the
-    # writer pausing (`dotnet msbuild -getProperty` was cut after 256 bytes;
-    # reprobuild-pm issue 2026-10-27). Read with `drainStream`. Self-test
-    # first. Source scan, no compiler.
+    # Refuse `Stream.readAll` on a child's output or error stream, in product,
+    # tool, test and benchmark code: it stops at the first short read, which
+    # on a Windows pipe is the writer pausing (`dotnet msbuild -getProperty`
+    # was cut after 256 bytes, reprobuild-pm issue 2026-10-27; a test got the
+    # first of its child's two lines, issue 2026-11-16). Read with
+    # `drainStream`. Self-test first. Source scan, no compiler.
     python3 ./scripts/check_process_stream_readall.py --self-test 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_process_stream_readall.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
@@ -1575,6 +1576,15 @@ integration_hcr_linux_elf_object_parsing_and_patch_plan:
         --out:build/test-bin/integration_hcr_linux_elf_object_parsing_and_patch_plan \
         tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim \
         2>&1 | tee test-logs/integration_hcr_linux_elf_object_parsing_and_patch_plan.log
+
+integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused \
+        --out:build/test-bin/integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused \
+        tests/integration/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.log
 
 integration_hcr_linux_static_local_symbol_ambiguity_refused:
     mkdir -p test-logs build/test-bin build/nimcache

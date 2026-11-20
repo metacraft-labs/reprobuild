@@ -25,6 +25,7 @@
 ## terminated, and always before ``close`` on the process (closing the
 ## stream under a reading thread is undefined).
 
+from repro_core/process_streams import drainStream
 import std/[osproc, streams]
 
 type
@@ -39,7 +40,7 @@ type
 proc drainLoop(target: ptr OutputDrainObj) {.thread.} =
   ## The owning thread does not touch ``target`` until it joins this one.
   {.cast(gcsafe).}:
-    target.output = target.stream.readAll()
+    target.output = drainStream(target.stream)
 
 proc startOutputDrain*(process: Process): OutputDrain =
   ## Start reading ``process.outputStream`` to its end in the background.

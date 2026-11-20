@@ -58,6 +58,7 @@ import ./repro_local_store/content_table
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
+import ./repro_local_store/key_explanation
 import ./repro_local_store/portable_output_store
 import ./repro_local_store/publication_rule
 import ./repro_local_store/pattern_scoped_enumeration
@@ -73,6 +74,7 @@ export content_table
 export optimise
 export portable_fingerprint
 export portable_memo
+export key_explanation
 export portable_output_store
 export publication_rule
 export pattern_scoped_enumeration
@@ -793,6 +795,15 @@ const
   # The file the counter's lock is held on. Separate from the counter for the
   # reason above, and a root-level file for the same reason the counter is.
   WriteSequenceLockFileName = ".seq.lock"
+  # The largest write sequence the store issues (Action-Cache-Per-Edge-Store.md
+  # §5.1). The trailer is the one part of a container without a checksum, so a
+  # bit flip or a foreign file can make it read near the top of the u64 space;
+  # taken as the floor, such a value jammed the counter there and every later
+  # publish to the root raised. A trailer or counter value above this bound is
+  # therefore not evidence of a sequence handed out: the trailer reads as 0, as
+  # a damaged file's does, and the counter reads as lost. One publish a
+  # microsecond takes about nine years to reach it.
+  MaxWriteSequence = 1'u64 shl 48
   RecordTailMask = 0xffff_ffff'u64
   MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
@@ -4359,6 +4370,12 @@ proc hotMetadataRecord(record: ActionResultRecord): ActionResultRecord =
 proc recordTail(payload: openArray[byte]): uint32 =
   uint32(localHash(payload).value and RecordTailMask)
 
+proc plausibleWriteSequence(value: uint64): uint64 {.inline.} =
+  ## A trailer above `MaxWriteSequence` was not issued by any store: it reads
+  ## as 0, so its container sorts oldest, is evicted first, and is re-stamped
+  ## on its next write, exactly as a v1 file or a damaged trailer is.
+  if value > MaxWriteSequence: 0'u64 else: value
+
 proc encodePerEdgeFile(records: openArray[ActionResultRecord];
                        writeSequence: uint64): seq[byte] =
   ## Serialize an edge's bounded record set into its per-edge container (v2).
@@ -4421,7 +4438,7 @@ proc decodePerEdgeFileWithSeq(raw: openArray[byte]):
   # Read it only if the whole body decoded intactly AND exactly 8 trailing
   # bytes remain (a torn body already `break`ed above and leaves no trailer).
   if version >= PerEdgeFileVersion and pos + 8 == raw.len:
-    result.writeSequence = readU64Le(raw, pos)
+    result.writeSequence = plausibleWriteSequence(readU64Le(raw, pos))
 
 proc decodePerEdgeFile(raw: openArray[byte]): seq[ActionResultRecord] =
   ## Records-only view over `decodePerEdgeFileWithSeq` for callers that don't
@@ -4479,7 +4496,7 @@ proc scanPerEdgeFileWriteSequence(raw: openArray[byte]): uint64 =
     if tail != recordTail(raw.toOpenArray(payloadStart, pos - 5)):
       break
   if version >= PerEdgeFileVersion and pos + 8 == raw.len:
-    result = readU64Le(raw, pos)
+    result = plausibleWriteSequence(readU64Le(raw, pos))
 
 proc perEdgeRecordFileIsIntact*(raw: openArray[byte]): bool =
   ## Strict validator: true iff `raw` is a byte-complete per-edge file — a
@@ -4574,6 +4591,10 @@ proc decodeNewestAlias(raw: openArray[byte]): Option[NewestAlias] =
       return none(NewestAlias)
     var alias = NewestAlias()
     alias.writeSequence = readU64Le(raw, pos)
+    # A sequence no store issues (§5.1) would outrank every honest one in
+    # `publishNewestAlias`'s skip guard and pin this alias stale for good.
+    if alias.writeSequence > MaxWriteSequence:
+      return none(NewestAlias)
     alias.strongName = readString(raw, pos)
     let count = int(readU32Le(raw, pos))
     if count < 0 or count > MaxRecFilesPerEdge * 4:
@@ -4668,6 +4689,30 @@ proc readSequenceValue(path: string): uint64 =
     result = parseBiggestUInt(text).uint64
   except CatchableError:
     result = 0'u64
+  # A value at or above the ceiling reads as lost, like an unparseable one;
+  # the floor then recovers from the edge's surviving trailers, and the
+  # allocation writes the counter back below the ceiling. Above it, no store
+  # issued the value. AT it, the value is legal, but keeping it would refuse
+  # every publish to every edge of the root, whereas exhaustion is confined
+  # to an edge whose own floor sits at the ceiling (`allocateWriteSequence-
+  # Locked`). This also releases a root whose counter an unchecked trailer
+  # had already pushed to the top. The containers such a counter stamped
+  # read as 0 and sort oldest until each edge's next publish re-stamps one.
+  if result >= MaxWriteSequence:
+    result = 0'u64
+
+when defined(posix):
+  proc isRegularFile(path: string): bool =
+    ## A `.rec` that is a FIFO, socket or device would block, or never end,
+    ## the read below -- and that read runs under the root-wide counter lock,
+    ## so it would stall every publisher on the root. `walkDir` reports all
+    ## of those as `pcFile`.
+    var st: Stat
+    stat(path.cstring, st) == 0 and S_ISREG(st.st_mode)
+else:
+  proc isRegularFile(path: string): bool =
+    let info = getFileInfo(path)
+    info.kind == pcFile
 
 proc highestWriteSequenceIn(dirPath: string): uint64 =
   ## The highest trailer sequence of any `.rec` container in one edge
@@ -4681,9 +4726,70 @@ proc highestWriteSequenceIn(dirPath: string): uint64 =
   for kind, path in walkDir(ep):
     if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
       try:
-        result = max(result, scanPerEdgeFileWriteSequence(bytes(readFile(path))))
+        if isRegularFile(path):
+          result = max(result,
+            scanPerEdgeFileWriteSequence(bytes(readFile(path))))
       except OSError, IOError:
         discard
+
+proc unlinkStaleSequenceTemp(tmpPath: string) =
+  ## Best-effort removal of a `.seq.tmp` that a crash left, or that another
+  ## user planted. Only a regular file or a link is unlinked; unlinking a
+  ## link never touches its target. A DIRECTORY is never removed: a
+  ## recursive delete walks by name, and a co-user who swaps a directory in
+  ## that tree for a symlink mid-walk would redirect it into this user's own
+  ## files. A failure (another user's file in a sticky directory, a
+  ## directory) is left for `writeSequenceValue`'s fallback name.
+  let info =
+    try: getFileInfo(tmpPath, followSymlink = false)
+    except OSError: return
+  # On Windows a junction or directory symlink is `pcLinkToDir`, which
+  # `removeFile` cannot delete; it is left for the fallback name too.
+  if info.kind notin {pcDir, pcLinkToDir}:
+    try: removeFile(tmpPath)
+    except OSError: discard
+
+when defined(posix):
+  var SequenceTempNoFollow {.importc: "O_NOFOLLOW",
+                             header: "<fcntl.h>".}: cint
+
+  proc writeSequenceTempExclusive(tmpPath, text: string) =
+    ## Creates `tmpPath` -- it must not exist -- and writes `text` to it.
+    ## O_EXCL|O_NOFOLLOW: whatever sits at the name, a symlink included,
+    ## makes the open fail instead of being written through.
+    let fd = posix.open(tmpPath.cstring,
+      O_WRONLY or O_CREAT or O_EXCL or SequenceTempNoFollow or O_CLOEXEC,
+      0o666.Mode)
+    if fd < 0:
+      raiseOSError(osLastError(), "cannot create " & tmpPath)
+    var written = 0
+    var complete = false
+    try:
+      while written < text.len:
+        let n = posix.write(fd, unsafeAddr text[written], text.len - written)
+        if n < 0:
+          if errno == EINTR: continue
+          raiseOSError(osLastError(), "cannot write " & tmpPath)
+        written += n
+      complete = true
+    finally:
+      discard posix.close(fd)
+      # The file is ours (O_EXCL created it), so a failed write removes it;
+      # the caller never learns its name and could not.
+      if not complete:
+        discard posix.unlink(tmpPath.cstring)
+else:
+  proc writeSequenceTempExclusive(tmpPath, text: string) =
+    ## Windows: refuse a name that is taken (a file, a directory, a link)
+    ## rather than write through it. Creating a link there needs a privilege
+    ## a co-user normally lacks, so the check-then-write window is accepted.
+    var taken = true
+    try: discard getFileInfo(tmpPath, followSymlink = false)
+    except OSError: taken = false
+    if taken:
+      raise newException(OSError, "cannot create " & tmpPath &
+        ": the name is taken")
+    writeFile(tmpPath, text)
 
 proc writeSequenceValue(path: string; value: uint64) =
   ## Replace the counter by temp file + atomic rename, so a crash leaves the
@@ -4692,28 +4798,60 @@ proc writeSequenceValue(path: string; value: uint64) =
   ## trailers (`highestWriteSequenceIn`). Raises if the value cannot be
   ## committed, because a publish whose sequence the counter does not record
   ## could share it with a concurrent publish to the same edge.
-  let tmpPath = path & ".tmp." & $getCurrentProcessId() & "." &
-    $getMonoTime().ticks
+  ##
+  ## The caller holds the counter lock, so no two writers are ever between
+  ## this write and its rename at once, and the temp name is FIXED: a crash
+  ## between the two leaves one `.seq.tmp`, which the next publish unlinks
+  ## and recreates, rather than a `.seq.tmp.<pid>.<ticks>` that nothing reaps.
+  ##
+  ## A fixed name in a root other users may share is predictable. The temp is
+  ## therefore created exclusively and without following a link, so a planted
+  ## symlink never makes this writer truncate the file it points at. When the
+  ## fixed name cannot be cleared (a directory, or another user's file in a
+  ## sticky directory), the value goes through a per-writer name instead, so
+  ## something planted at `.seq.tmp` cannot refuse every publish to the root.
+  ## That name is renamed onto the counter like the fixed one, so it is left
+  ## behind only by a crash between its write and its rename.
+  let fixedTmp = extendedPath(path & ".tmp")
+  var tmpPath = ""
   try:
-    writeFile(extendedPath(tmpPath), $value)
-    moveFile(extendedPath(tmpPath), extendedPath(path))
+    unlinkStaleSequenceTemp(fixedTmp)
+    try:
+      writeSequenceTempExclusive(fixedTmp, $value)
+      tmpPath = fixedTmp
+    except OSError, IOError:
+      let fallback = extendedPath(path & ".tmp." & $getCurrentProcessId() &
+        "." & $getMonoTime().ticks)
+      writeSequenceTempExclusive(fallback, $value)
+      tmpPath = fallback
+    moveFile(tmpPath, extendedPath(path))
   except OSError, IOError:
-    if fileExists(extendedPath(tmpPath)):
-      try: removeFile(extendedPath(tmpPath))
+    # Only a temp this writer created is removed; `removeFile` unlinks a
+    # link without following it.
+    if tmpPath.len > 0:
+      try: removeFile(tmpPath)
       except OSError: discard
     raise
 
-proc allocateWriteSequenceLocked(cache: ActionCache; floor: uint64): uint64 =
-  ## The allocation itself; the caller holds the counter lock. `floor` is the
-  ## edge directory's highest trailer, read by the caller BEFORE it took the
-  ## lock: a container renamed in after that read had its sequence allocated
-  ## under this lock, so the counter already accounts for it.
+proc allocateWriteSequenceLocked(cache: ActionCache; dirPath: string): uint64 =
+  ## The allocation itself; the caller holds the counter lock. The floor --
+  ## the edge directory's highest trailer -- is read HERE, under the lock. A
+  ## floor read before the lock missed any container renamed in while this
+  ## writer waited; that container's sequence is in the counter only while the
+  ## counter survives, and when the counter was lost in that window this
+  ## writer was handed the same value.
+  ##
+  ## The counter reads below the ceiling (`readSequenceValue`), so the only
+  ## base that can reach it is this edge's own floor: exhaustion refuses
+  ## publishes to this one edge, never to the whole root.
   let path = cache.writeSequenceFilePath()
-  let base = max(readSequenceValue(path), floor)
-  if base == high(uint64):
+  let base = max(readSequenceValue(path), highestWriteSequenceIn(dirPath))
+  if base >= MaxWriteSequence:
     raise newException(OSError,
-      "write-sequence space exhausted under " & cache.hotRoot &
-      "; refusing to wrap to 0, which would order the record oldest")
+      "write-sequence space exhausted in " & dirPath &
+      ": a container there carries " & $base &
+      "; refusing to issue a value above " & $MaxWriteSequence &
+      ", which every reader would take for a damaged trailer")
   result = base + 1'u64
   writeSequenceValue(path, result)
 
@@ -4741,11 +4879,11 @@ proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
   ##   failed rename does; it never falls back to an unlocked
   ##   read-increment-write, which hands two processes the same value.
   ##
-  ## The floor is read before the lock is taken, so the directory I/O does not
-  ## hold up every other publisher on the root. The lock is held for the
-  ## counter read and write only.
+  ## The floor is read under the lock (`allocateWriteSequenceLocked`), so a
+  ## writer that waited sees every container renamed in while it waited. The
+  ## lock is held for that one edge directory's walk and the counter read and
+  ## write.
   createDir(extendedPath(cache.hotRoot))
-  let floor = highestWriteSequenceIn(dirPath)
   let lockPath = cache.hotRoot / WriteSequenceLockFileName
   when defined(posix):
     # Read-only is enough for `flock`, and 0666 (less the umask) lets every
@@ -4769,7 +4907,7 @@ proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
       discard posix.close(fd)
       raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
     try:
-      result = cache.allocateWriteSequenceLocked(floor)
+      result = cache.allocateWriteSequenceLocked(dirPath)
     finally:
       # Closing the fd releases the exclusive flock.
       discard posix.close(fd)
@@ -4788,7 +4926,7 @@ proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
       discard closeHandle(h)
       raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
     try:
-      result = cache.allocateWriteSequenceLocked(floor)
+      result = cache.allocateWriteSequenceLocked(dirPath)
     finally:
       var unlockOverlapped: OVERLAPPED
       discard cUnlockFileExSeq(h, 0.DWORD, 1.DWORD, 0.DWORD,
@@ -5770,8 +5908,16 @@ proc observedExecutionOf*(cache: ActionCache;
   # recompute it. A wrong recomputation finds no sidecar: fail-closed.
   var strong = record.strongFingerprint
   if strong == ContentDigest():
-    strong = computeStrongFingerprint(record.weakFingerprint, record.inputs,
-      record.envInputs)
+    # A content-checked record's projection has had its input hashes
+    # stripped too, so its strong fingerprint cannot be recomputed:
+    # `computeStrongFingerprint` raises for an input without one. That is
+    # "a problem", and the answer to it is false, never an exception that
+    # aborts the run that asked.
+    try:
+      strong = computeStrongFingerprint(record.weakFingerprint, record.inputs,
+        record.envInputs)
+    except ActionRecordError:
+      return false
   let recName = recFileNameForStrong(strong)
   let obsPath = dirPath / observedExecutionFileName(recName.splitFile.name)
   if not fileExists(extendedPath(obsPath)):

@@ -38,6 +38,7 @@
 ##      with the same RPATH layout the script produces, verify
 ##      ``patchelf --print-rpath`` matches.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
@@ -183,7 +184,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
             tuple[output: string, exitCode: int] =
           let child = startProcess(command, args = args, env = fixtureEnv,
             options = {poUsePath, poStdErrToStdOut})
-          result.output = child.outputStream.readAll()
+          result.output = drainStream(child.outputStream)
           result.exitCode = child.waitForExit()
           child.close()
 
@@ -388,7 +389,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
         let interpreterProbe = startProcess(patchelfPath,
           args = ["--print-interpreter", scratch / "main"],
           options = {poUsePath})
-        let originalInterpreter = interpreterProbe.outputStream.readAll().strip()
+        let originalInterpreter = drainStream(interpreterProbe.outputStream).strip()
         check waitForExit(interpreterProbe) == 0
         check originalInterpreter.len > 0
 
@@ -413,7 +414,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
           args = ["--print-interpreter", mirrorMain],
           options = {poUsePath})
         let patchedInterpreter =
-          patchedInterpreterProbe.outputStream.readAll().strip()
+          drainStream(patchedInterpreterProbe.outputStream).strip()
         check waitForExit(patchedInterpreterProbe) == 0
         check patchedInterpreter == sourceLoader
 
@@ -429,7 +430,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
         let probe = startProcess(patchelfPath,
           args = ["--print-rpath", scratch / "main"],
           options = {poUsePath})
-        let probeOutput = probe.outputStream.readAll().strip()
+        let probeOutput = drainStream(probe.outputStream).strip()
         check waitForExit(probe) == 0
         check probeOutput == expectedRpath
         check probeOutput.contains("$ORIGIN")
@@ -444,7 +445,7 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
         let probe2 = startProcess(patchelfPath,
           args = ["--print-rpath", scratch / "main"],
           options = {poUsePath})
-        let probe2Output = probe2.outputStream.readAll().strip()
+        let probe2Output = drainStream(probe2.outputStream).strip()
         check waitForExit(probe2) == 0
         check probe2Output == expectedRpath
 

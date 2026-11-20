@@ -40,6 +40,7 @@
 ## with hooks on. ``advisory`` is the other way to arrive at them, and has a case
 ## of its own.
 
+from repro_core/process_streams import drainStream
 import std/[os, posix, sequtils, streams, strtabs, tempfiles, unittest]
 
 # A temp root of this process's own, for it and every process it starts.
@@ -1380,7 +1381,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       check running
       discard posix.kill(Pid(push.processID), SIGINT)
       let code = push.waitForExit(60_000)
-      let transcript = push.outputStream.readAll()
+      let transcript = drainStream(push.outputStream)
       checkpoint("interrupted push:\n" & transcript)
       # 130, as for any interrupted command; the push reports the interrupt
       # and removes the temporary workspace before it exits.

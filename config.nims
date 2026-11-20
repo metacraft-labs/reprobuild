@@ -35,6 +35,14 @@ when defined(windows) and buildOS != "windows":
 # denote a location in THIS repository has to be anchored here instead.
 let reproRepoRoot = currentSourcePath().parentDir()
 
+# The project DSL's in-process evaluation mode (`repro_project_dsl/mode`).
+# Without a mode define, `import reprobuild` compiles the thin mode a
+# program gets when it imports its project's `repro.nim`; the engine, its
+# apps and its tests evaluate recipes in process, so every compile in this
+# tree (and every compile that includes this file) selects the full DSL. A
+# provider or interface compile also defines its own mode, which wins.
+switch("define", "reproEvalMode")
+
 # A compile for another machine. `nim.c` under a zig target defines
 # `reproZigTarget=<triple>` (repro_dsl_stdlib/packages/nim). Its image is
 # installed elsewhere, as a prefix (Distribution-And-Packaging §5.3), and
@@ -559,6 +567,10 @@ for libName in [
   # reader, the origin egress policy, the fetch (`netFetch`) and pure index
   # edges, origin events and `repro catalog verify`.
   "repro_nimble_generator",
+  # Nimble package catalog NPC-M5: the source plane's client -- mirrors, the
+  # lockfile-keyed closure index, the `nimble.fetch` (`netFetch`) edges, the
+  # confined archive extractor and the local source store.
+  "repro_nimble_fetch",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import

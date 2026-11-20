@@ -5,6 +5,7 @@
 ## source-side target preflight, and the failure semantics that preserve
 ## the local intent edit after build/transfer/activation failures.
 
+from repro_core/process_streams import drainStream
 import std/[net, os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
     unittest]
 
@@ -61,7 +62,7 @@ proc runProgram(program: string; args: openArray[string];
     processEnv[kv.k] = kv.v
   let p = startProcess(program, args = @args, env = processEnv,
     options = {poUsePath, poStdErrToStdOut})
-  let output = p.outputStream().readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)
@@ -166,6 +167,7 @@ proc startLoopbackSshd(tempRoot: string): SshHarness =
       return
     last = probe.output
     if not result.process.running():
+      # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
       let daemonOutput = result.process.outputStream().readAll()
       doAssert false,
         "M71 Phase E blocker: loopback sshd exited before accepting " &
@@ -338,7 +340,7 @@ suite "M71 Phase E: public remote home-profile apply":
         let targetRoots = targetStore.listRoots()
         check targetRows.len == 1
         check targetRoots.len == 1
-        check targetRoots[0].rootId == generationId
+        check targetRoots[0].rootId == profileRootIdForKey(existingStateDirRootKey(targetStateDir), generationId)
         check targetRoots[0].kind == "profile"
         let targetPrefix = targetStore.absolutePrefixPath(
           targetRows[0].realizedPath)
