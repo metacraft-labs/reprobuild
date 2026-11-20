@@ -12874,7 +12874,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
