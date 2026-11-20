@@ -20631,7 +20631,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 31,
-      "staticCaseCount": 230,
+      "staticCaseCount": 231,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -56273,7 +56273,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_system_plan_apply_symmetry_and_universal_json.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
