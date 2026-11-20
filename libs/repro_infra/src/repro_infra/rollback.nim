@@ -131,8 +131,8 @@ proc resourcesRemovedByRollback*(activeProfileText,
   ## The resources the active generation declares that the rollback
   ## target does NOT — rolling back reverts (destroys) them. Used to
   ## screen for the `--accept-feature-destroy` gate.
-  let active = parseSystemProfile(activeProfileText)
-  let target = parseSystemProfile(targetProfileText)
+  let active = parseSystemProfile(activeProfileText, stored = true)
+  let target = parseSystemProfile(targetProfileText, stored = true)
   var targetAddrs: seq[string]
   for r in target.resources:
     targetAddrs.add(r.address)
@@ -147,7 +147,7 @@ proc detectRollbackDrift*(targetProfileText: string): seq[string] =
   ## since the target generation was applied. System-scope rollback
   ## ALWAYS requires explicit confirmation on drift (the spec's extra
   ## conservatism), so the caller surfaces this list.
-  let target = parseSystemProfile(targetProfileText)
+  let target = parseSystemProfile(targetProfileText, stored = true)
   for r in target.resources:
     let obs = observeResource(r)
     let op = toPrivilegedOperation(r)

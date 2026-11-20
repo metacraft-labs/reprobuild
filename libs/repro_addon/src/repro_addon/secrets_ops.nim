@@ -77,7 +77,7 @@ proc currentGenerationProfile(stateDir: string): SystemProfile =
     if g.found: text = g.user
   if text.len == 0 and fileExists(userProfilePath(stateDir)):
     text = readFile(userProfilePath(stateDir))
-  if text.len > 0: parseSystemProfile(text) else: SystemProfile()
+  if text.len > 0: parseSystemProfile(text, stored = true) else: SystemProfile()
 
 proc currentSecretDecls*(stateDir: string): seq[SecretFileDecl] =
   ## The current generation's ``secrets.secretFile`` declarations.

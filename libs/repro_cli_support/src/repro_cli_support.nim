@@ -347,6 +347,11 @@ from runquota_partition/types import
   PartitionAssignment, PartitionPlan, DefaultRefinementPasses, `==`, hash
 import repro_profile_compile
 import repro_home_resources/drivers/managed_block
+# `repro hooks`: the shells it detects, the rc-file write guard, and the
+# shell-completion installer (`--shell-autocomplete`).
+import repro_cli_support/shell_detect
+import repro_cli_support/shell_rc_files
+import repro_cli_support/completion_hooks
 # Peer-Cache M2: parse the `--peer-cache=lan://CIDR[:port]` form into a
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
@@ -21019,17 +21024,26 @@ type
     hakReinstall
     hakUninstall
 
-  NativeShellKind = enum
-    nskBash
-    nskZsh
-    nskFish
-    nskPowerShell
+  HookScope = enum
+    ## `--profile` / `--system`. `hsDefault` is
+    ## neither: per user for the shell hooks.
+    hsDefault
+    hsProfile
+    hsSystem
+
+  HooksUsageError = object of ValueError
+    ## A `repro hooks` command line whose flags contradict each other: a usage
+    ## error, exit 2, raised before anything is written.
 
   ParsedHooksCommand = object
     action: HookActionKind
     targetPath: string
     shellDirenv: bool
     vcs: bool
+    shellAutocomplete: bool  ## ``--shell-autocomplete`` (or a bare command).
+    scope: HookScope         ## ``--profile`` / ``--system``.
+    systemRoot: string       ## internal ``--system-root``: prefixes every
+                             ## system path (tests).
     recordStore: bool      ## Explicit Git-local backend registration.
     nativeShells: seq[NativeShellKind]
     workspaceRoot: string  ## M17: explicit --workspace-root override.
@@ -21047,13 +21061,6 @@ type
     previousArtifact: string
     previousProjectRoot: string
     statsPath: string
-
-proc nativeShellName(shell: NativeShellKind): string =
-  case shell
-  of nskBash: "bash"
-  of nskZsh: "zsh"
-  of nskFish: "fish"
-  of nskPowerShell: "powershell"
 
 proc parseNativeShell(value: string): NativeShellKind =
   case value.normalize()
@@ -21095,56 +21102,16 @@ proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string
       homeDir / ".config" / "fish" / "config.fish"
   of nskPowerShell:
     when defined(windows):
-      let profileHome = getEnv("USERPROFILE", homeDir)
-      profileHome / "Documents" / "PowerShell" /
-        "Microsoft.PowerShell_profile.ps1"
+      # The Documents folder as Windows reports it: folder redirection
+      # (OneDrive) can move it away from %USERPROFILE%\Documents.
+      let reported = windowsDocumentsDir()
+      let documents =
+        if reported.len > 0: reported
+        else: getEnv("USERPROFILE", homeDir) / "Documents"
+      documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
     else:
       homeDir / ".config" / "powershell" /
         "Microsoft.PowerShell_profile.ps1"
-
-proc containsNixStoreSegment(path: string): bool =
-  let normalized = path.replace('\\', '/')
-  normalized.startsWith("/nix/store/") or normalized.contains("/nix/store/")
-
-proc absoluteSymlinkTarget(linkPath: string): string =
-  let rawTarget = readSymlinkTarget(extendedPath(linkPath))
-  if rawTarget.isAbsolute:
-    os.normalizedPath(rawTarget)
-  else:
-    os.normalizedPath(parentDir(linkPath) / rawTarget)
-
-proc rcFileWritePath(rcPath: string): string =
-  ## Return the file to edit for a shell rc managed block. Refuses Nix-managed
-  ## read-only symlinks instead of replacing the symlink with a regular file.
-  let expandedRc = extendedPath(rcPath)
-  if symlinkExists(expandedRc):
-    let target = absoluteSymlinkTarget(rcPath)
-    if target.containsNixStoreSegment():
-      raise newException(ValueError,
-        "refusing to write shell rc file " & rcPath &
-          ": it is a Nix-managed symlink into the Nix store (" & target &
-          "). Edit the source file in your dotfiles/home-manager " &
-          "configuration and rebuild with home-switch.")
-    if fileExists(extendedPath(target)):
-      let permissions = getFilePermissions(extendedPath(target))
-      if fpUserWrite notin permissions:
-        raise newException(ValueError,
-          "refusing to write shell rc file " & rcPath &
-            ": it points at a read-only file (" & target &
-            "). Edit the owning source file instead.")
-    return target
-  if expandedRc.containsNixStoreSegment():
-    raise newException(ValueError,
-      "refusing to write shell rc file in the Nix store: " & rcPath &
-        ". Edit the source file in your dotfiles/home-manager configuration " &
-        "and rebuild with home-switch.")
-  if fileExists(expandedRc):
-    let permissions = getFilePermissions(expandedRc)
-    if fpUserWrite notin permissions:
-      raise newException(ValueError,
-        "refusing to write read-only shell rc file " & rcPath &
-          ". Edit the owning source file instead.")
-  rcPath
 
 proc posixLiteral(value: string): string =
   result = "'"
@@ -24880,6 +24847,10 @@ type
     repos*: seq[string]            ## participating repo names.
     entries*: seq[VcsHookEntry]
     summary*: Table[string, int]   ## outcome → count, e.g. {"installed": 8}.
+                                   ## VCS entries only.
+    completion*: seq[CompletionHookEntry]
+      ## ``--shell-autocomplete``: one per target, emitted in ``entries``
+      ## with ``kind: "completion"``.
     exitCode*: int
 
 proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
@@ -24921,6 +24892,8 @@ proc toJsonNode*(report: HooksEnsureReport): JsonNode =
       obj["installedAuthor"] = %e.installedAuthor
       obj["remedy"] = %e.remedy
     entriesNode.add(obj)
+  for e in report.completion:
+    entriesNode.add(e.toJsonNode())
   result["entries"] = entriesNode
   var summaryNode = newJObject()
   # Sorted summary keys for stable JSON diffs.
@@ -25410,7 +25383,8 @@ proc untouchedManifestRepos*(root: string): seq[string] =
         result.add(extractFilename(path).changeFileExt(""))
   result.sort()
 
-proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
+proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand;
+    completion: seq[CompletionHookEntry]; reported: var bool): int =
   ## M17 entry point for ``repro hooks ensure --vcs``. Resolves the
   ## workspace root, enumerates participating repos, installs the four
   ## canonical VCS hooks per repo, writes ``hooks-report.json`` and (on
@@ -25446,6 +25420,10 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
         "'repro hooks ensure --vcs' again.")
     return singleCode
   var report = ensureWorkspaceHooks(workspaceRoot, parsed.reAnchor)
+  # Completion ran first; its entries share this invocation's report.
+  report.completion = completion
+  report.exitCode = max(report.exitCode, completionExitCode(completion))
+  reported = true
   writeHooksEnsureReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "hooks"))
   stageFailureReport(parsed.report, report.workspaceRoot, "hooks",
@@ -25474,18 +25452,27 @@ proc reportSpecOf[T](c: T): ReportSpec =
 
 proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   ## ``repro hooks ensure|reinstall|uninstall`` from its configuration.
-  ## With no selector flag both ``--vcs`` and ``--shell-direnv`` are
-  ## implied.
+  ## With no selector flag ``--vcs``, ``--shell-direnv`` and
+  ## ``--shell-autocomplete`` are implied (the native ``--shell``
+  ## integration is not part of the bare set). Raises ``HooksUsageError``
+  ## for contradictory flags: two scopes, or a scope with only the hooks
+  ## that have none.
   result.action = action
   result.shellDirenv = c.shellDirenv
   result.vcs = c.vcs
+  result.shellAutocomplete = c.shellAutocomplete
   if c.recordStore:
     result.recordStore = true
     result.vcs = true
   result.reAnchor = c.reAnchor
-  if c.shellAutocomplete:
-    raise newException(ValueError,
-      "repro hooks --shell-autocomplete is not implemented yet")
+  if c.profile and c.system:
+    raise newException(HooksUsageError,
+      "--profile and --system exclude each other: choose one scope")
+  result.scope =
+    if c.system: hsSystem
+    elif c.profile: hsProfile
+    else: hsDefault
+  result.systemRoot = c.systemRoot
   for value in c.shell:
     if value.len == 0:
       raise newException(ValueError, "missing value for --shell")
@@ -25495,13 +25482,26 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   result.report = reportSpecOf(c)
   result.targetPath = c.path
   if result.recordStore and (result.action == hakUninstall or
-      result.shellDirenv or result.nativeShells.len > 0):
+      result.shellDirenv or result.nativeShells.len > 0 or
+      result.shellAutocomplete):
     raise newException(ValueError,
       "--record-store requires ensure or reinstall with VCS hooks only")
   if not result.shellDirenv and not result.vcs and
-      result.nativeShells.len == 0:
+      result.nativeShells.len == 0 and not result.shellAutocomplete:
     result.shellDirenv = true
     result.vcs = true
+    result.shellAutocomplete = true
+  if result.scope != hsDefault and not result.shellAutocomplete and
+      result.nativeShells.len == 0:
+    # VCS hooks are per repository and the direnv block per project: a scope
+    # flag with only those would do nothing it says.
+    raise newException(HooksUsageError,
+      "--profile and --system apply to --shell-autocomplete and --shell; " &
+        "--vcs and --shell-direnv have no scope")
+  if result.scope == hsSystem and result.nativeShells.len > 0:
+    raise newException(HooksUsageError,
+      "--system is not available for the native shell integration " &
+        "(--shell): its system-wide file is not specified yet; use --profile")
   if result.reAnchor and (result.action != hakEnsure or not result.vcs):
     # Refused rather than ignored: a flag that silently did nothing would let
     # an operator believe a repository had been re-anchored.
@@ -25948,6 +25948,41 @@ proc runHooksProtocolCommand(c: ReproCommandLineHooksProtocol): int =
   stdout.writeLine("2")
   0
 
+proc completionHookRequestOf(parsed: ParsedHooksCommand):
+    CompletionHookRequest =
+  ## The completion installer's request for a parsed ``repro hooks``
+  ## command: this process's environment, and the script ``repro completion
+  ## <shell>`` prints.
+  CompletionHookRequest(
+    scope: (if parsed.scope == hsSystem: csSystem else: csUser),
+    systemRoot: parsed.systemRoot,
+    reinstall: parsed.action == hakReinstall,
+    program: "repro",
+    env: cliInstallEnv(proc (name: string): string = getEnv(name),
+      documents = windowsDocumentsDir()),
+    pathEnv: getEnv("PATH"),
+    user: getEnv("USER"),
+    windows: defined(windows),
+    script: proc (shell: CliShell): string =
+      ReproCommandLine.completionScript(shell))
+
+proc emitCompletionReport(parsed: ParsedHooksCommand;
+                          completion: seq[CompletionHookEntry]): int =
+  ## The report of an invocation whose completion entries no VCS sweep
+  ## reported: printed on ``--json``, persisted on ``--write-report``.
+  ## ``mode`` is ``none`` (no workspace sweep ran). Returns its exit code.
+  var report = HooksEnsureReport(
+    workspaceRoot: resolveHooksWorkspaceRoot(parsed), mode: "none",
+    completion: completion, exitCode: completionExitCode(completion))
+  writeHooksEnsureReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "hooks"))
+  # No failure report is staged: without a workspace sweep there is no
+  # workspace to leave it in, and the current directory may be the user's
+  # home. The refusals are on stderr and in the exit status.
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  report.exitCode
+
 proc runHooksCommand(c: ReproCommandLineHooks): int =
   ## ``repro hooks <ensure|reinstall|uninstall|protocol|dispatch|cache-push>``
   ## from its configuration.
@@ -25967,41 +26002,74 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
     # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
     printReproHelp(@["hooks"] & c.help.topic)
     return 0
-  of ReproCommandLineHooksCommand.ensure:
-    parsed = hooksCommandOf(c.ensure, hakEnsure)
-  of ReproCommandLineHooksCommand.reinstall:
-    parsed = hooksCommandOf(c.reinstall, hakReinstall)
-  of ReproCommandLineHooksCommand.uninstall:
-    parsed = hooksCommandOf(c.uninstall, hakUninstall)
+  of ReproCommandLineHooksCommand.ensure, ReproCommandLineHooksCommand.reinstall,
+     ReproCommandLineHooksCommand.uninstall:
+    try:
+      parsed =
+        case c.command
+        of ReproCommandLineHooksCommand.ensure:
+          hooksCommandOf(c.ensure, hakEnsure)
+        of ReproCommandLineHooksCommand.reinstall:
+          hooksCommandOf(c.reinstall, hakReinstall)
+        else:
+          hooksCommandOf(c.uninstall, hakUninstall)
+    except HooksUsageError as err:
+      stderr.writeLine("repro hooks: error: " & err.msg)
+      return 2
+  # Shell completion runs first, so that its entries can join the VCS
+  # sweep's report; a completion refusal never stops the other hook types.
+  var completion: seq[CompletionHookEntry] = @[]
+  if parsed.shellAutocomplete:
+    let request = completionHookRequestOf(parsed)
+    completion =
+      if parsed.action == hakUninstall: uninstallCompletionHooks(request)
+      else: ensureCompletionHooks(request)
+    if parsed.json:
+      # stdout carries the JSON document; refusals still go to stderr.
+      for e in completion:
+        let (text, toStderr) = reportLine(e)
+        if toStderr:
+          stderr.writeLine(text)
+    else:
+      printEntries(completion)
+    if completion.len == 0 and parsed.action != hakUninstall:
+      stderr.writeLine("repro hooks: NOTE no shell found for completion " &
+        "(looked for bash, zsh, fish and pwsh on PATH" &
+        (if parsed.scope == hsSystem: " and in /etc/shells" else: "") &
+        "); nothing was installed")
+  var code = completionExitCode(completion)
+  var reported = false
   case parsed.action
   of hakEnsure:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      let code = runVcsHooksEnsureCommand(parsed)
-      if code != 0:
-        return code
+      let vcsCode = runVcsHooksEnsureCommand(parsed, completion, reported)
+      if vcsCode != 0:
+        return max(vcsCode, code)
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell)
   of hakReinstall:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
     if parsed.vcs:
-      let code = runVcsHooksCommand(parsed.action, parsed)
-      if code != 0:
-        return code
+      let vcsCode = runVcsHooksCommand(parsed.action, parsed)
+      if vcsCode != 0:
+        return max(vcsCode, code)
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell, reinstall = true)
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      let code = runVcsHooksCommand(parsed.action, parsed)
-      if code != 0:
-        return code
+      let vcsCode = runVcsHooksCommand(parsed.action, parsed)
+      if vcsCode != 0:
+        return max(vcsCode, code)
     for shell in parsed.nativeShells:
       uninstallNativeShellHook(shell)
-  0
+  if parsed.shellAutocomplete and not reported:
+    code = max(code, emitCompletionReport(parsed, completion))
+  code
 
 proc nativeShellActivationRequestOf[T](c: T): NativeShellActivationRequest =
   ## The request of ``repro internal native-shell-activate``

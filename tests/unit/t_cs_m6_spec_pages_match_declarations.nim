@@ -248,9 +248,7 @@ const
     # reloading (which `repro watch --hcr` implements).
     "flag\trepro dev\t--max-debounce", "flag\trepro dev\t--hcr",
     "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode",
-    # The proposed scope flags of `repro hooks` (only the default scope is
-    # implemented) and the proposed `repro lock solve` options.
-    "flag\trepro hooks ensure\t--profile",
+    # The proposed `repro lock solve` options.
     "flag\trepro lock solve\t--activity", "flag\trepro lock solve\t--dry-run",
     # `repro workspace status --verbose`: specified, not implemented yet.
     # The page defines both the default output and what `--verbose` adds,

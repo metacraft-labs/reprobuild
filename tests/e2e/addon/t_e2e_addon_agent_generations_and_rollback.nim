@@ -41,8 +41,9 @@
 ## The fixture carries rpi2's kind mix (reprobuild-pm issue
 ## 2026-10-31-addon-switch-refuses-kinds-the-spec-lists-as-valid): a
 ## `systemd.systemTimer` running with its oneshot service, a `passwd.group`
-## whose live members include one the profile does not name and the
-## `passwd.user` it does, and a `linux.addOnTool` from a closure seeded into
+## whose live members include one the profile does not name and a
+## `passwd.user` that declares its membership in its own `groups`, and a
+## `linux.addOnTool` from a closure seeded into
 ## the deb cache. The migration adopts them as they are: the timer is not
 ## restarted, the extra member stays, the tool's wrapper is not rewritten.
 ## The final rollback to generation 0 hands the adopted timer and tool
@@ -144,10 +145,13 @@ proc kindMix(lockText: string): string =
     quoteSystemValue(TickServiceText) & "\n  enabled = false\n}\n\n" &
   "systemd.systemTimer {\n  name = \"" & TickTimer & "\"\n  content = " &
     quoteSystemValue(TickTimerText) & "\n}\n\n" &
+  # The user's membership is declared once, in its own `groups`: a group
+  # may not list an account the profile declares as a user
+  # (System-Profile-And-Infra-Apply.md, passwd.group). The group comes
+  # first so a fresh host has it before `useradd --groups`.
+  "passwd.group {\n  name = \"" & FxGroup & "\"\n}\n\n" &
   "passwd.user {\n  name = \"" & FxUser & "\"\n  shell = " &
-    "\"/usr/sbin/nologin\"\n}\n\n" &
-  "passwd.group {\n  name = \"" & FxGroup & "\"\n  members = [\"" & FxUser &
-    "\"]\n}\n\n" &
+    "\"/usr/sbin/nologin\"\n  groups = [\"" & FxGroup & "\"]\n}\n\n" &
   "linux.addOnTool {\n  command = \"" & FxTool & "\"\n  aptClosureLock = " &
     quoteSystemValue(lockText) & "\n}\n\n" &
   "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fx-cred.service\"\n  content = " &
