@@ -46281,8 +46281,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_gateway_forced_push_publishes_a_rewrite_under_a_lease.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
