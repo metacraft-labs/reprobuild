@@ -6,12 +6,14 @@
 ## compilation's mode (``repro_project_dsl/mode``):
 ##
 ## * with ``-d:reproProviderMode``, ``-d:reproInterfaceMode`` or
-##   ``-d:reproEvalMode``, the whole DSL: ``repro_project_dsl/full``, which
-##   holds what this module held before the modes existed and documents how
-##   it is split up;
-## * with none of them, the thin mode: ``repro_project_dsl/thin``, every DSL
-##   form name as an ``untyped`` macro and nothing of the engine, so that a
-##   program can import its project's ``repro.nim``.
+##   ``-d:reproEvalMode``, or when the compilation's main file is a DSL file
+##   (``repro.nim``, ``reprobuild.nim``, ``home.nim``, ``system.nim``: what an
+##   editor opens), the whole DSL: ``repro_project_dsl/full``, which holds
+##   what this module held before the modes existed and documents how it is
+##   split up;
+## * otherwise the thin mode: ``repro_project_dsl/thin``, every DSL form name
+##   as an ``untyped`` macro and nothing of the engine, so that a program can
+##   import its project's ``repro.nim``.
 ##
 ## The engine passes the define of the mode each of its compilations needs,
 ## and reprobuild's own ``config.nims`` defines ``reproEvalMode`` for every

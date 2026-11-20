@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3052,
+    "nimTestBinaries": 3053,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 810,
-    "staticallyDetectedRuntimeCompilerFlowTests": 154,
-    "testEntries": 3102
+    "staticallyDetectedRuntimeCompilerFlowTests": 155,
+    "testEntries": 3103
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,7 +1725,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1695,
+      "integration": 1696,
       "platform/destructive": 198,
       "pure unit": 810,
       "unclassified": 373
@@ -1948,9 +1948,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3052,
+    "nimTestBinaryCount": 3053,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3102
+    "testEntryCount": 3103
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8635,6 +8635,40 @@
         }
       ],
       "source": "tests/integration/t_ti3_fingerprint_split.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "command",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "command"
+          ],
+          "line": 112,
+          "path": "tests/integration/test_cs_m12_editor_checks_repro_nim.nim",
+          "patterns": [
+            "nim-variable-argv"
+          ],
+          "snippet": "let command = @[nimExe(), \"check\", \"--hints:off\", \"--warnings:off\","
+        },
+        {
+          "assignedCommandVariable": "command",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "command"
+          ],
+          "line": 196,
+          "path": "tests/integration/test_cs_m12_editor_checks_repro_nim.nim",
+          "patterns": [
+            "nim-variable-argv"
+          ],
+          "snippet": "var command = @[nimExe(), \"c\", \"--hints:off\", \"--warnings:off\","
+        }
+      ],
+      "source": "tests/integration/test_cs_m12_editor_checks_repro_nim.nim"
     },
     {
       "class": "integration",
@@ -45389,6 +45423,7 @@
       "localDependencyShape": [
         "repro_core",
         "repro_interface_artifacts",
+        "repro_project_dsl",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -57637,7 +57672,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_ux_m1_reprobuild_module_hierarchy_and_lsp.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59444,6 +59479,25 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_cs_m12_editor_checks_repro_nim",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/test_cs_m12_editor_checks_repro_nim.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {

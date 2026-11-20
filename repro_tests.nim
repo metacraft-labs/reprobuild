@@ -33397,6 +33397,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/test_cs_m12_editor_checks_repro_nim.nim",
+    binary: "build/test-bin/test_cs_m12_editor_checks_repro_nim",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let scratchRoot = getTempDir() /"),
+  TestSpec(
     source: "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
     binary: "build/test-bin/test_cs_m12_engine_modes_unchanged",
     defines: @[],
