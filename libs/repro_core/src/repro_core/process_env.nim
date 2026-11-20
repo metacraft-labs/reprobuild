@@ -76,3 +76,37 @@ proc prependPathEntry*(env: StringTableRef; entry: string;
   ## table the inherited ``Path`` is found and extended in place.
   let current = env.getOrDefault(name)
   env[name] = if current.len > 0: entry & $PathSep & current else: entry
+
+const LoaderControlEnvNames* = [
+  "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG", "LD_DEBUG_OUTPUT",
+  "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH", "DYLD_INSERT_LIBRARIES"]
+  ## Every variable through which a caller can make the dynamic loader put
+  ## something into, or say something about, a child it did not build: the
+  ## search paths (``LD_LIBRARY_PATH``, both ``DYLD_*_LIBRARY_PATH``s), the
+  ## injected objects (``LD_PRELOAD``, ``LD_AUDIT``, ``DYLD_INSERT_LIBRARIES``)
+  ## and the loader's own tracing (``LD_DEBUG``, ``LD_DEBUG_OUTPUT``).
+  ## See https://man7.org/linux/man-pages/man8/ld.so.8.html and dyld(1).
+
+proc dropLoaderControls*(env: StringTableRef) =
+  ## Remove every ``LoaderControlEnvNames`` entry from ``env`` in place.
+  ##
+  ## For the environment of a HOST tool the engine resolves off ``PATH`` for
+  ## its own work (the distribution's ``git``, ``curl``, ``nix``). Such a tool
+  ## was linked against the host's own libraries. A caller running inside a
+  ## Nix dev shell or a provisioned profile can carry an ``LD_LIBRARY_PATH``
+  ## that names libraries built against a newer glibc; a host binary that
+  ## inherits it loads those in place of its own and dies before doing any
+  ## work (``version `GLIBC_2.38' not found``). Tracing is dropped too: an
+  ## inherited ``LD_DEBUG`` buries the child's one diagnostic line under the
+  ## loader's trace, and ``LD_DEBUG_OUTPUT`` makes it write files wherever
+  ## the caller pointed it.
+  ##
+  ## Only ``env`` changes; this process's own environment is untouched. The
+  ## cost is accepted deliberately: a host tool that itself needs one of these
+  ## variables to start (a hand-built binary under ``/opt``) no longer starts
+  ## from here.
+  if env.isNil:
+    return
+  for name in LoaderControlEnvNames:
+    if env.hasKey(name):
+      env.del(name)
