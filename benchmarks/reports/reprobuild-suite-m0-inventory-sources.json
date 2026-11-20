@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3042,
+    "nimTestBinaries": 3043,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 809,
-    "staticallyDetectedRuntimeCompilerFlowTests": 152,
-    "testEntries": 3092
+    "staticallyDetectedRuntimeCompilerFlowTests": 153,
+    "testEntries": 3093
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,7 +1725,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1687,
+      "integration": 1688,
       "platform/destructive": 198,
       "pure unit": 809,
       "unclassified": 372
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3042,
+    "nimTestBinaryCount": 3043,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3092
+    "testEntryCount": 3093
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6683,6 +6683,29 @@
         }
       ],
       "source": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "PatchableFlags",
+            "command",
+            "sourcePath",
+            "workDir"
+          ],
+          "line": 90,
+          "path": "tests/integration/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.nim",
+          "patterns": [
+            "gcc"
+          ],
+          "snippet": "discard runSuccess(@[\"gcc\", \"-O1\", \"-fno-pic\"] & PatchableFlags & @extra &"
+        }
+      ],
+      "source": "tests/integration/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.nim"
     },
     {
       "class": "integration",
@@ -47725,6 +47748,26 @@
       "source": "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_hcr_linkgraph",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

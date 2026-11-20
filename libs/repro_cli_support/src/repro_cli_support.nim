@@ -36192,15 +36192,52 @@ proc hcrObjectSymbolFor*(supportProfile, functionName: string): string =
   else:
     "_" & functionName
 
-proc objectFunctionBytes(objectPath, symbolName: string;
-                         supportProfile = CodetracerHcrSupportProfile):
+type HcrPatchBodyRelocationRefused* = object of ValueError
+  ## A Linux patch body was refused because it carries relocations that
+  ## nothing on the path to the target would apply.
+
+proc objectFunctionBytes*(objectPath, symbolName: string;
+                          supportProfile = CodetracerHcrSupportProfile):
     seq[byte] =
+  ## The patch body `repro watch --hcr` and `repro hcr coordinate` send.
+  ##
   ## The default is host-derived. It used to be the Mach-O profile outright,
   ## which meant the unqualified caller — the watch session — parsed its object
   ## as Mach-O on every host, while `defaultObjectSymbol` had already been
   ## host-derived since HLX-M1 and named the symbol ELF-style on Linux. Those
   ## two halves have to agree or the lookup is guaranteed to miss, so the
   ## parser now follows the same profile the symbol name does.
+  ##
+  ## On an ELF profile, a body with any relocation inside the function is
+  ## REFUSED (`HcrPatchBodyRelocationRefused`). These are the function's raw
+  ## `.text` bytes from a relocatable object, and in a RELA object every
+  ## relocated field holds zero or a placeholder: the value lives in
+  ## `.rela.text`. Neither this coordinator nor the Linux agent applies
+  ## `.rela.text` to a patch body, so such a body would be published and run
+  ## with its placeholders — a `call` (`R_X86_64_PLT32`) to the next
+  ## instruction, a RIP-relative load (`R_X86_64_PC32`) from the patch page,
+  ## an IE TLS access (`R_X86_64_GOTTPOFF`) at an arbitrary `%fs` offset —
+  ## and nothing would report it. `Linux-ELF-Provider.md` §2 and §9 and
+  ## `Relocation-Processing.md` §4.1: a relocation is applied or the patch is
+  ## refused by name. Until body relocation is implemented this refuses every
+  ## one. `scripts/hcr_patch_driver.nim` already refused the same bodies; this
+  ## brings the production path into line with it.
+  ##
+  ## A relocation check alone is not enough. A PC-relative reference to code
+  ## in the SAME section — `call` or tail-`jmp` to a `static` helper, `lea` of
+  ## its address — is resolved by the assembler and leaves no relocation, yet
+  ## its displacement is wrong once the body moves to the patch page. Without
+  ## `-ffunction-sections` every function of a TU shares one `.text`. So a
+  ## body whose section also holds another defined symbol is refused too: it
+  ## cannot be told apart, without decoding instructions, from one that
+  ## reaches that neighbour. Compiling the patchable TU with
+  ## `-ffunction-sections` gives each function its own section, which turns
+  ## such references back into relocations this check sees. Issue
+  ## `reprobuild-pm/issues/2026-11-17-linux-hcr-coordinator-sends-patch-bodies-without-applying-or-checking-relocations.md`;
+  ## gate `integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused`.
+  ##
+  ## The Mach-O profile is not checked here: whether the macOS agent applies
+  ## body relocations is a separate question, not answered by this change.
   let graph =
     if hcrProfileIsElf(supportProfile):
       parseElfX86_64Object(objectPath)
@@ -36212,6 +36249,36 @@ proc objectFunctionBytes(objectPath, symbolName: string;
     raise newException(ValueError,
       "could not extract function bytes for " & symbolName & " from " &
         objectPath)
+  if hcrProfileIsElf(supportProfile):
+    let section = graph.sections[symbol.sectionId]
+    var reasons: seq[string] = @[]
+    let relocations = graph.relocationsForSymbol(symbol)
+    if relocations.len > 0:
+      var names: seq[string] = @[]
+      for r in relocations:
+        let within = section.address + uint64(r.offset) - symbol.address
+        names.add r.kindName & "->" & r.targetName & "@+" & $within
+      reasons.add "it carries " & $relocations.len & " relocation(s) that " &
+        supportProfile & " does not apply to a patch body: " &
+        names.join(", ")
+    var neighbours: seq[string] = @[]
+    for other in graph.symbols:
+      if other.isDefined and other.sectionId == symbol.sectionId and
+          other.kind in {sykFunction, sykData, sykOther} and
+          other.name.len > 0 and other.name != symbol.name and
+          not (other.address == symbol.address and other.size == symbol.size):
+        neighbours.add other.name
+    if neighbours.len > 0:
+      reasons.add "its section " & section.name & " also holds " &
+        neighbours.join(", ") & ", and a reference to a neighbour in the " &
+        "same section carries no relocation, so it cannot be checked " &
+        "(compile the patchable TU with -ffunction-sections)"
+    if reasons.len > 0:
+      raise newException(HcrPatchBodyRelocationRefused,
+        "hcr patch refused: patch body " & symbolName & " in " & objectPath &
+          ": " & reasons.join("; and ") &
+          " (until patch-body relocation is implemented, only a function " &
+          "alone in its section and with no relocations can be patched)")
 
 proc hcrUnwindMetadataFor*(supportProfile, objectPath: string): seq[byte] =
   ## The `unwindMetadataPayload` bytes a coordinator sends with a direct patch.

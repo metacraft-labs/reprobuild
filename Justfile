@@ -1576,6 +1576,15 @@ integration_hcr_linux_elf_object_parsing_and_patch_plan:
         tests/integration/t_integration_hcr_linux_elf_object_parsing_and_patch_plan.nim \
         2>&1 | tee test-logs/integration_hcr_linux_elf_object_parsing_and_patch_plan.log
 
+integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused \
+        --out:build/test-bin/integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused \
+        tests/integration/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.nim \
+        2>&1 | tee test-logs/integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.log
+
 integration_hcr_linux_static_local_symbol_ambiguity_refused:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
