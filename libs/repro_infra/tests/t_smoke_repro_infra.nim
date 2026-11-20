@@ -1313,6 +1313,31 @@ suite "repro_infra: system state dir":
     check applyLogPath(sd, "gid").endsWith("apply.log")
     check applyLockPath(sd).endsWith("apply.lock")
 
+  test "generationDirExists names only a generation directory":
+    ## `repro system audit <id>` refuses an id this answers false for, so a
+    ## mistyped id is not reported as a generation whose apply logged
+    ## nothing (reprobuild-pm issue 2026-11-17-system-audit-unknown-
+    ## generation-reads-as-empty-log).
+    let sd = createTempDir("repro-gendir-", "")
+    defer: removeDir(sd)
+    ensureSystemStateDir(sd)
+    createDir(generationLogDir(sd, "gen-a"))
+    check generationDirExists(sd, "gen-a")
+    # A generation with no apply log (its apply logged nothing) still exists.
+    check not fileExists(applyLogPath(sd, "gen-a"))
+    check not generationDirExists(sd, "gen-b")
+    # Spellings that are not the entry's own name name no generation, even
+    # where the path they form is an existing directory: `.`/`..`
+    # (`generations/`, the state dir), `gen-a/log` and `../generations`
+    # (both created above), and a case variant (the same directory on a
+    # case-insensitive volume).
+    # A dot-prefixed temporary is not a generation either.
+    createDir(generationDir(sd, ".tmp-gen"))
+    for id in ["", ".", "..", "gen-a/log", "../generations", "GEN-A",
+               "gen-a/", "gen-a" & $DirSep & ".", ".tmp-gen"]:
+      checkpoint("id: " & id)
+      check not generationDirExists(sd, id)
+
 suite "repro_infra: the apply lock is reclaimable":
   ## An apply lock whose owner died must NOT wedge the host forever: an
   ## interrupted apply on a Windows runner once left a dead PID in the

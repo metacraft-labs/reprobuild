@@ -30,6 +30,7 @@
   fetchFromGitHub,
   just,
   makeWrapper,
+  installShellFiles,
   symlinkJoin,
   patchelf,
   python3,
@@ -151,8 +152,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "daef562cad0c1a3e2f98952812c1f85a497b1e2f";
-    hash = "sha256-Mie8w5dmMrzytH6RZ8CrXgh4q+zdzNKI91isxSNOhMw=";
+    rev = "5380e20c8866e49e000e8070f692f54d303b5658";
+    hash = "sha256-52dtjt5p4FUkBnFfsSb8JoicImn4VTZOgr0ZfZfmKqA=";
   },
   # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
   # package (the declarative description of a program's entry points); the
@@ -279,6 +280,8 @@ stdenv.mkDerivation (finalAttrs: {
     just
     python3 # scripts/build_apps.sh stages the Nix daemon through Python.
     makeWrapper
+    # installShellCompletion, for repro's completion scripts (postInstall).
+    installShellFiles
     nimFork
     # Spec-Implementation M2a: clingo is the ASP solver reprobuild's
     # repro_solver lib binds against. The CLI tool is used by smoke tests and
@@ -426,6 +429,35 @@ stdenv.mkDerivation (finalAttrs: {
       --replace-fail '#!/usr/bin/env python3' \
         '#!${python3}/bin/python3'
     runHook postInstall
+  '';
+
+  # Shell completion for Bash, Zsh and Fish, under $out/share where Nix-managed
+  # shells find a profile's completions without setup: bash-completion and
+  # fish through XDG_DATA_DIRS, zsh through `programs.zsh.enableCompletion`.
+  # The scripts are printed by the binary just installed, so they always match
+  # it; nixpkgs' documented pattern
+  # (https://nixos.org/manual/nixpkgs/stable/#installshellfiles). This runs
+  # before postFixup wraps the binaries, in the build sandbox (HOME is
+  # /homeless-shelter, no daemon): `repro completion` only prints. The
+  # scripts are written to files first so a failing or empty `completion`
+  # fails the build here instead of installing an empty script. A cross build
+  # cannot run the host binary and installs no completion.
+  postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+    for shell in bash zsh fish; do
+      "$out/bin/repro" completion "$shell" > "$TMPDIR/repro-completion.$shell"
+      grep -q __complete "$TMPDIR/repro-completion.$shell" || {
+        echo "repro completion $shell printed no script that calls repro __complete" >&2
+        exit 1
+      }
+    done
+    # `--name repro` for Bash: `--cmd` alone would name it repro.bash, and the
+    # unsuffixed name is the one every bash-completion 2.x loads and the one
+    # `repro hooks ensure --shell-autocomplete` looks for in a Nix profile
+    # before it adds a second, per-user registration.
+    installShellCompletion --cmd repro \
+      --bash --name repro "$TMPDIR/repro-completion.bash" \
+      --zsh "$TMPDIR/repro-completion.zsh" \
+      --fish "$TMPDIR/repro-completion.fish"
   '';
 
   # Installed entry points span ordinary linked libraries and bare leaf-name

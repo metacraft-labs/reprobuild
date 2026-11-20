@@ -27,10 +27,23 @@ honours the same "$(dirname "$0")/../lib" contract as the real one, which is
 the property under test. They need dpkg-deb, and are skipped with that reason
 when it is absent. The installed-and-run check on real distributions is
 tools/multi-distro-harness/tests/m3_install_{apt,dnf,pacman}.sh.
+
+The fixture archive also carries share/repro/completions/, as the release
+archive does. Its scripts are tests/fixtures/release-completions/, which are
+the output of a real `repro completion <shell>` (each calls `repro __complete`
+and the zsh one starts with `#compdef repro`): the packager copies them and
+never reads them, so a real binary's output is the faithful stand-in and no
+compiled repro is needed. test_cs_m8a_packages_carry_completion_files builds
+the deb, the rpm and the pacman package and needs dpkg-deb, rpmbuild, rpm,
+rpm2cpio, cpio and bsdtar; it is skipped, which counts as not passed, when
+one is missing. Run it as
+  nix shell nixpkgs#dpkg nixpkgs#rpm nixpkgs#cpio nixpkgs#libarchive -c \
+    python3 -m unittest tests.unit.test_release_native_packages
 """
 
 import json
 import os
+import stat
 import shutil
 import subprocess
 import tarfile
@@ -42,7 +55,25 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
 PLATFORMS = REPO_ROOT / ".github" / "release-platforms.json"
 PACKAGER = REPO_ROOT / "scripts" / "release" / "repro-build-packages.sh"
+COMPLETIONS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "release-completions"
+COMPLETION_SCRIPTS = ("repro.bash", "_repro", "repro.fish", "repro.ps1")
 VERSION = "9.8.7"
+
+# Where each package installs each archive script (the zsh directory differs:
+# Debian's zsh reads other packages' functions from vendor-completions).
+BASH_COMPLETION = "usr/share/bash-completion/completions/repro"
+FISH_COMPLETION = "usr/share/fish/vendor_completions.d/repro.fish"
+EXPECTED_COMPLETIONS = {
+    "deb": {BASH_COMPLETION: "repro.bash",
+            "usr/share/zsh/vendor-completions/_repro": "_repro",
+            FISH_COMPLETION: "repro.fish"},
+    "rpm": {BASH_COMPLETION: "repro.bash",
+            "usr/share/zsh/site-functions/_repro": "_repro",
+            FISH_COMPLETION: "repro.fish"},
+    "arch": {BASH_COMPLETION: "repro.bash",
+             "usr/share/zsh/site-functions/_repro": "_repro",
+             FISH_COMPLETION: "repro.fish"},
+}
 
 
 def _spec():
@@ -98,8 +129,9 @@ class DeclaredPackagesTests(unittest.TestCase):
             self.assertIn("{version}", pkg["asset"], pkg)
 
 
-@unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb is not installed")
-class PackagerOutputTests(unittest.TestCase):
+class PackagerFixture(unittest.TestCase):
+    """A fixture archive shaped like the release archive, in a fresh temp dir."""
+
     def setUp(self):
         self.work = Path(tempfile.mkdtemp(prefix="repro-pkg-"))
         self.addCleanup(shutil.rmtree, self.work, True)
@@ -133,11 +165,23 @@ class PackagerOutputTests(unittest.TestCase):
         (src / "repro_interface_artifacts.nim").write_text("discard\n", encoding="utf-8")
         (root / "share" / "repro" / "src").mkdir()
         (root / "share" / "repro" / "src" / "sibling.nim").write_text("discard\n", encoding="utf-8")
+        # The completion scripts the release leg generates
+        # (scripts/release/stage_release_completions.sh).
+        completions = root / "share" / "repro" / "completions"
+        completions.mkdir()
+        for name in COMPLETION_SCRIPTS:
+            shutil.copyfile(COMPLETIONS_FIXTURE / name, completions / name)
+            (completions / name).chmod(0o644)
         self.archive_root = root
-        self.tarball = self.work / f"{top}.tar.gz"
-        with tarfile.open(self.tarball, "w:gz") as tf:
-            tf.add(root, arcname=top)
+        self.archive_top = top
         self.out = self.work / "out"
+        self.pack()
+
+    def pack(self):
+        """(Re)write the fixture tarball from the archive tree."""
+        self.tarball = self.work / f"{self.archive_top}.tar.gz"
+        with tarfile.open(self.tarball, "w:gz") as tf:
+            tf.add(self.archive_root, arcname=self.archive_top)
 
     def build(self, ecosystem):
         return subprocess.run(
@@ -147,6 +191,9 @@ class PackagerOutputTests(unittest.TestCase):
             capture_output=True, text=True, check=False,
         )
 
+
+@unittest.skipUnless(shutil.which("dpkg-deb"), "dpkg-deb is not installed")
+class PackagerOutputTests(PackagerFixture):
     def test_deb_carries_the_declared_name(self):
         run = self.build("deb")
         self.assertEqual(0, run.returncode, run.stderr)
@@ -212,6 +259,137 @@ class PackagerOutputTests(unittest.TestCase):
                              text=True, check=False)
         self.assertEqual(0, ran.returncode, ran.stderr)
         self.assertEqual("ran\n", ran.stdout)
+
+
+
+def _newc_members(stream):
+    """The regular files of an uncompressed cpio "newc" archive (rpm2cpio's
+    output): {path: (mode, bytes)}. Format: cpio(5), "New ASCII Format"
+    (https://man.freebsd.org/cgi/man.cgi?query=cpio&sektion=5)."""
+    members = {}
+    off = 0
+    while True:
+        header = stream[off:off + 110]
+        if header[:6] not in (b"070701", b"070702"):
+            raise ValueError(f"not a newc cpio header at offset {off}: {header[:6]!r}")
+        fields = [int(header[6 + 8 * i:14 + 8 * i], 16) for i in range(13)]
+        mode, filesize, namesize = fields[1], fields[6], fields[11]
+        name_start = off + 110
+        name = stream[name_start:name_start + namesize - 1].decode()
+        data_start = (name_start + namesize + 3) & ~3
+        data = stream[data_start:data_start + filesize]
+        off = (data_start + filesize + 3) & ~3
+        if name == "TRAILER!!!":
+            return members
+        if stat.S_ISREG(mode):
+            members[name.lstrip("./")] = (stat.S_IMODE(mode), data)
+
+
+_PACKAGE_TOOLS = ("dpkg-deb", "rpmbuild", "rpm", "rpm2cpio", "bsdtar")
+
+
+@unittest.skipUnless(all(shutil.which(t) for t in _PACKAGE_TOOLS),
+                     "needs " + ", ".join(_PACKAGE_TOOLS))
+class CompletionFilesTests(PackagerFixture):
+    """The deb, rpm and pacman packages install repro's shell completion where
+    each distribution's shells load it with no setup by the user."""
+
+    def archive_bytes(self, name):
+        return (self.archive_root / "share" / "repro" / "completions" / name).read_bytes()
+
+    def deb_files(self, pkg):
+        """{path: (mode, bytes)} of the regular files under usr/share/ outside
+        usr/share/doc, from the package's own listing and its extraction."""
+        listing = subprocess.run(["dpkg-deb", "-c", str(pkg)], capture_output=True,
+                                 text=True, check=True).stdout
+        modes = {}
+        for line in listing.splitlines():
+            perms, _owner, _size, _date, _time, path = line.split(None, 5)
+            path = path.split(" -> ")[0].lstrip("./")
+            if perms.startswith("-") and path.startswith("usr/share/"):
+                modes[path] = perms
+        root = self.work / "deb-x"
+        subprocess.run(["dpkg-deb", "-x", str(pkg), str(root)], check=True)
+        return {p: (m, (root / p).read_bytes()) for p, m in modes.items()}
+
+    def rpm_files(self, pkg):
+        dump = subprocess.run(["rpm", "-qlp", "--dump", str(pkg)], capture_output=True,
+                              text=True, check=True).stdout
+        entries = {}
+        for line in dump.splitlines():
+            fields = line.split()
+            entries[fields[0].lstrip("/")] = int(fields[4], 8)
+        payload = subprocess.run(["rpm2cpio", str(pkg)], capture_output=True,
+                                 check=True).stdout
+        members = _newc_members(payload)
+        return entries, {p: v for p, v in members.items() if p.startswith("usr/share/")}
+
+    def arch_files(self, pkg):
+        listing = subprocess.run(["bsdtar", "-tvf", str(pkg)], capture_output=True,
+                                 text=True, check=True).stdout
+        modes = {}
+        for line in listing.splitlines():
+            fields = line.split(None, 8)
+            path = fields[8]
+            if fields[0].startswith("-") and path.startswith("usr/share/"):
+                modes[path] = fields[0]
+        root = self.work / "arch-x"
+        root.mkdir()
+        subprocess.run(["bsdtar", "-xf", str(pkg), "-C", str(root)], check=True)
+        return {p: (m, (root / p).read_bytes()) for p, m in modes.items()}
+
+    def assert_completions(self, fmt, files):
+        expected = EXPECTED_COMPLETIONS[fmt]
+        # Exactly the three files, nothing else under usr/share/.
+        self.assertEqual(sorted(expected), sorted(files), fmt)
+        for path, source in expected.items():
+            mode, data = files[path]
+            self.assertEqual(self.archive_bytes(source), data,
+                             f"{fmt}: {path} differs from the archive's {source}")
+            self.assertIn(b"__complete", data, f"{fmt}: {path}")
+            if isinstance(mode, int):
+                self.assertEqual(0o644, mode, f"{fmt}: {path} mode {oct(mode)}")
+            else:
+                self.assertEqual("-rw-r--r--", mode, f"{fmt}: {path}")
+
+    def test_cs_m8a_packages_carry_completion_files(self):
+        # (1) deb, rpm and Arch: the listing and the extracted bytes hold
+        # exactly the three files, byte-identical to the archive's, mode 0644.
+        # Each package is a subtest, so a defect in one format's copy list is
+        # reported against that format and the others are still checked.
+        with self.subTest(package="deb"):
+            run = self.build("deb")
+            self.assertEqual(0, run.returncode, f"deb: {run.stderr}")
+            self.assert_completions("deb", self.deb_files(next(self.out.glob("*.deb"))))
+        with self.subTest(package="rpm"):
+            run = self.build("rpm")
+            self.assertEqual(0, run.returncode, f"rpm: {run.stderr}")
+            rpm_entries, rpm_members = self.rpm_files(next(self.out.glob("*.rpm")))
+            self.assert_completions("rpm", rpm_members)
+            for path in EXPECTED_COMPLETIONS["rpm"]:
+                self.assertEqual(0o100644, rpm_entries[path], f"rpm --dump mode of {path}")
+            # (2) The rpm owns none of the three directories, nor any
+            # directory above them under /usr/share: the shells' own packages
+            # own them.
+            for path in EXPECTED_COMPLETIONS["rpm"]:
+                parent = Path(path).parent
+                while str(parent) not in ("usr", "."):
+                    self.assertNotIn(str(parent), rpm_entries,
+                                     f"the rpm owns the directory /{parent}")
+                    parent = parent.parent
+        with self.subTest(package="arch"):
+            run = self.build("arch")
+            self.assertEqual(0, run.returncode, f"arch: {run.stderr}")
+            self.assert_completions("arch", self.arch_files(next(self.out.glob("*.pkg.tar.zst"))))
+
+        # (3) An archive without the zsh script makes the packager fail, for
+        # every format, and name the missing file.
+        (self.archive_root / "share" / "repro" / "completions" / "_repro").unlink()
+        self.pack()
+        for fmt in ("deb", "rpm", "arch"):
+            run = self.build(fmt)
+            self.assertNotEqual(0, run.returncode, f"{fmt} built without _repro")
+            self.assertIn("share/repro/completions/_repro", run.stderr, fmt)
 
 
 if __name__ == "__main__":

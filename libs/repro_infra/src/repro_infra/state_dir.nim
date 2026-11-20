@@ -93,6 +93,27 @@ proc generationsRoot*(stateDir: string): string =
 proc generationDir*(stateDir, generationId: string): string =
   stateDir / GenerationsDirName / generationId
 
+proc generationDirExists*(stateDir, generationId: string): bool =
+  ## True when `generationId` names a directory under
+  ## `<state-dir>/generations/`: a committed generation, or an attempt an
+  ## uncommitted apply left on disk for audit. The id is compared, byte for
+  ## byte, with the names of the directory's entries rather than handed to
+  ## the filesystem as a path: so `..`, `a/b`, a differently-cased spelling
+  ## on a case-insensitive volume (NTFS, default APFS) or an NTFS stream
+  ## suffix (`id::$INDEX_ALLOCATION`) names no generation, even where the
+  ## path it would form resolves to a directory.
+  ## A dot-prefixed entry is a temporary, not a generation, as
+  ## `enumerateSystemGenerations` also treats it.
+  if generationId.len == 0 or generationId[0] == '.':
+    return false
+  let root = extendedPath(generationsRoot(stateDir))
+  if not dirExists(root):
+    return false
+  for kind, name in walkDir(root, relative = true):
+    if kind in {pcDir, pcLinkToDir} and name == generationId:
+      return true
+  false
+
 proc pointerPath*(stateDir, generationId: string): string =
   generationDir(stateDir, generationId) / PointerFileName
 
