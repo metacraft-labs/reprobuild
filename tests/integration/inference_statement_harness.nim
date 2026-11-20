@@ -35,8 +35,8 @@
 ## real thing rather than one invented string for another:
 ##
 ##   * ``agent`` — the SHA-256 the vendor of a real coding agent publishes
-##     for its Linux x86-64 binary, transcribed from this repository's own
-##     package recipe. Its mutation neighbour is the same vendor's digest
+##     for its Linux x86-64 binary, transcribed from the former stdlib
+##     recipe (now inlined). Its mutation neighbour is the same vendor's digest
 ##     for the *previous release* of the same binary: two real digests of
 ##     two real builds of one program.
 ##   * ``model`` — the SHA-256 published for a real set of model weights,
@@ -78,9 +78,6 @@ import ./software_root_test_pki
 import ./edge_attestation_harness
 
 const
-  ClaudeCodeRecipe =
-    staticRead("../../libs/repro_dsl_stdlib/src/repro_dsl_stdlib/" &
-               "packages/claude_code.nim")
   WhisperRecipe =
     staticRead("../../libs/repro_dsl_stdlib/src/repro_dsl_stdlib/" &
                "packages/whisper_ggml_base.nim")
@@ -91,8 +88,11 @@ const
   RealAgentBinarySha256* =
     "849e007277a0442ab27570d3e3d6d43787507946590e8dd1947e5a39b7081f9e"
     ## The vendor-published SHA-256 of one real coding agent's Linux
-    ## x86-64 binary, release 2.1.170, transcribed from
-    ## ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/claude_code.nim``.
+    ## x86-64 binary, release 2.1.170, transcribed from the former built-in
+    ## stdlib `claude-code` recipe (removed when `claude-code` became defined
+    ## only in reprobuild-llm-agent-packages; see the git history of
+    ## ``packages/claude_code.nim``). Inlined as a constant because
+    ## reprobuild must not depend on a sibling checkout at compile time.
 
   PreviousAgentBinarySha256* =
     "cf066bf360cbf7b51abeb8cb230012fc0f2fed4253b2ce305de48ccd6d49a39c"
@@ -119,17 +119,16 @@ const
     ## model artifact's real digest, which is the whole of the claim.
 
   ProvenanceChecked* = true
-    ## Set by the ``static`` block below, which is what makes the three
-    ## transcriptions above checkable rather than merely asserted. A
-    ## digest edited here and not in the recipe stops the build.
+    ## Set by the ``static`` block below. The two model digests are checked
+    ## against the stdlib recipes they were transcribed from; a digest
+    ## edited here and not in the recipe stops the build. The two agent
+    ## digests have no recipe in this repository (see above) and are
+    ## checked only for well-formedness and distinctness.
 
 static:
-  doAssert RealAgentBinarySha256 in ClaudeCodeRecipe,
-    "the transcribed agent digest is not in the recipe it claims to come " &
-    "from; a provenance note that does not match its source is worse than " &
-    "no note"
-  doAssert PreviousAgentBinarySha256 in ClaudeCodeRecipe,
-    "the transcribed previous-release agent digest is not in the recipe"
+  for d in [RealAgentBinarySha256, PreviousAgentBinarySha256]:
+    doAssert d.len == 64 and d.allCharsInSet({'0'..'9', 'a'..'f'}),
+      "an agent digest is not a 64-character lowercase hex SHA-256"
   doAssert RealAgentBinarySha256 != PreviousAgentBinarySha256,
     "the two agent digests are equal, so the agent axis would mutate to " &
     "itself and its case would pass without the binding doing anything"

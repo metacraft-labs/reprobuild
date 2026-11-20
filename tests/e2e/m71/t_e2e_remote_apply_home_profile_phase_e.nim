@@ -338,7 +338,7 @@ suite "M71 Phase E: public remote home-profile apply":
         let targetRoots = targetStore.listRoots()
         check targetRows.len == 1
         check targetRoots.len == 1
-        check targetRoots[0].rootId == generationId
+        check targetRoots[0].rootId == profileRootIdForKey(existingStateDirRootKey(targetStateDir), generationId)
         check targetRoots[0].kind == "profile"
         let targetPrefix = targetStore.absolutePrefixPath(
           targetRows[0].realizedPath)

@@ -85,8 +85,12 @@ log="$work/check.log"
 # Guarded array expansion: under `set -u`, bash < 4.4 treats `"${os_flag[@]}"` on an
 # empty array as an unbound variable. `${os_flag[@]+"${os_flag[@]}"}` expands safely
 # when empty on macOS stock /bin/bash (3.2).
+# `-d:reproEvalMode`: the full project DSL, as every engine compilation selects
+# it (`repro_project_dsl/mode`); with no mode define and no config file the
+# umbrellas compile the thin mode, which the engine's libraries cannot use.
 if ! (cd "$work" && nim check --skipParentCfg:on --skipUserCfg:on \
-        --skipProjCfg:on --hints:off --warnings:off ${os_flag[@]+"${os_flag[@]}"} \
+        --skipProjCfg:on --hints:off --warnings:off -d:reproEvalMode \
+        ${os_flag[@]+"${os_flag[@]}"} \
         --nimcache:"$work/nimcache" "${paths[@]}" probe.nim) > "$log" 2>&1; then
   grep -E "Error:" "$log" | head -20 >&2 || tail -30 "$log" >&2
   fail "the archive's share/repro does not close the installed compile; stage the module(s) named above"
@@ -124,7 +128,7 @@ echo "=== nim check of a recipe using a moved package, against the archive's cat
 # empty array as an unbound variable. `${os_flag[@]+"${os_flag[@]}"}` expands safely
 # when empty on macOS stock /bin/bash (3.2).
 if ! (cd "$work" && env -u REPROBUILD_PACKAGES_ROOT nim check --skipParentCfg:on \
-        --skipUserCfg:on --skipProjCfg:on --hints:off --warnings:off \
+        --skipUserCfg:on --skipProjCfg:on --hints:off --warnings:off -d:reproEvalMode \
         ${os_flag[@]+"${os_flag[@]}"} --nimcache:"$work/nimcache-catalog" "${paths[@]}" \
         catalog_probe.nim) > "$log" 2>&1; then
   grep -E "Error:|catalog was looked for|  - " "$log" | head -20 >&2 || tail -30 "$log" >&2

@@ -7633,6 +7633,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim",
+    binary: "build/test-bin/t_interface_nimcache_pool_is_this_users_alone",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_interface_artifacts_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim",
     binary: "build/test-bin/t_interface_nimcache_slots",
     defines: @[],
@@ -24733,6 +24745,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_generated_hook_remedies_name_each_path_as_one_shell_word.nim",
+    binary: "build/test-bin/t_generated_hook_remedies_name_each_path_as_one_shell_word",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g06",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim",
     binary: "build/test-bin/t_genuine_tier_policy_refuses_emulated_cvm_evidence",
     defines: @[],
@@ -25270,7 +25294,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_installed_engine_reaches_the_catalog_its_release_ships.nim",
@@ -25575,6 +25599,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_integration_hcr_linux_elf_symbol_resolution.nim",
     binary: "build/test-bin/t_integration_hcr_linux_elf_symbol_resolution",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g07",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused.nim",
+    binary: "build/test-bin/t_integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused",
     defines: @[],
     requiresReproBinary: false,
     requiresMonitorShim: false,
@@ -26014,7 +26050,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_issued_certificate_lands_in_the_standard_local_store.nim",
@@ -26026,7 +26062,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_just_test_end_to_end_via_parallel_runner.nim",
@@ -26674,7 +26710,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim",
@@ -26686,7 +26722,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_refuses_an_unreadable_recipe.nim",
@@ -27346,7 +27382,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim",
@@ -27358,7 +27394,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_mixed_workspace_each_record_in_its_own_backend_only.nim",
@@ -28114,7 +28150,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim",
@@ -28126,7 +28162,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_refuses_when_its_repro_cannot_service_it.nim",
@@ -28846,7 +28882,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim",
@@ -28858,7 +28894,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_push_gateway_opt_out_is_a_settings_key.nim",
@@ -29506,7 +29542,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed.nim",
@@ -29518,7 +29554,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_aggregate_exit_code.nim",
@@ -30322,7 +30358,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_scanner_era_cache_entries_are_never_served.nim",
@@ -33300,6 +33336,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "t_group_tests_integration_g17",
     singleReason: ""),
+  TestSpec(
+    source: "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
+    binary: "build/test-bin/test_cs_m12_engine_modes_unchanged",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let recording = getEnv(RecordEnv) == \"1\""),
   TestSpec(
     source: "tests/unit/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable.nim",
     binary: "build/test-bin/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable",

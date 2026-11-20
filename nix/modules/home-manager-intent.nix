@@ -78,6 +78,7 @@ let
     // lib.optionalAttrs (cfg.buildSystem != null) { inherit (cfg) buildSystem; }
     // lib.optionalAttrs (cfg.nixos != null) { inherit (cfg) nixos; }
     // lib.optionalAttrs (cfg.packagesCatalog != null) { inherit (cfg) packagesCatalog; }
+    // lib.optionalAttrs (cfg.catalogClones != null) { inherit (cfg) catalogClones; }
   );
 
   # The concerns Reprobuild applies on this host, or null when its entry
@@ -195,6 +196,11 @@ in
       type = lib.types.nullOr lib.types.path;
       default = null;
       description = "IFD mode: a `reprobuild-packages` checkout the sandboxed `repro home export` reads package definitions from (`$REPROBUILD_PACKAGES_ROOT`). Needed for the export's per-package classification (which packages are applications) on a host whose `hosts:` entry declares `applies:`; without it, every package that catalog defines is `unresolved`. Ignored in snapshot mode.";
+    };
+    catalogClones = lib.mkOption {
+      type = lib.types.nullOr lib.types.path;
+      default = null;
+      description = "IFD mode: a directory laid out as the shared clone root (`github.com/<owner>/<repo>.git`, a bare clone holding each pinned commit) that the sandboxed `repro home export` reads the catalogs the profile imports (`repro-catalogs.toml`) from (`$REPRO_WORKSPACE_CLONES`). Without it, an IFD export of a profile with imports is refused. Ignored in snapshot mode.";
     };
     buildSystem = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
