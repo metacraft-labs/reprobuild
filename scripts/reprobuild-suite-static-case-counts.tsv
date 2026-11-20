@@ -2793,6 +2793,7 @@ tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
+tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	2
 tests/test_dev_env_m9_policy.py	python	11

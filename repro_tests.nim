@@ -33433,6 +33433,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let scratchRoot = getTempDir() /"),
   TestSpec(
+    source: "tests/integration/test_cs_m12_thin_import_cost.nim",
+    binary: "build/test-bin/test_cs_m12_thin_import_cost",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let scratchRoot = getTempDir() /"),
+  TestSpec(
     source: "tests/unit/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable.nim",
     binary: "build/test-bin/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable",
     defines: @[],
