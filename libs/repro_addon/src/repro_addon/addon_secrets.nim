@@ -3,11 +3,28 @@
 ## What is at rest, and where:
 ##
 ## - the **recipient key** (``/var/lib/repro/agent/recipient.key``, ``0400``
-##   root), generated on the host at bootstrap (``bootstrap.nim``) and the
-##   only secret on disk;
-## - **sealed** envelopes only: the deploy agent's v2 sealed section
-##   (``repro_deploy_agent/secrets``) with the target it was sealed for,
-##   which nothing can read without the key. Three kinds of copy exist:
+##   root): generated on the host at bootstrap (``bootstrap.nim``); or,
+##   when bootstrap runs in an image's assembly boot and defers it
+##   (``deferRecipientKey``), by the first re-assert outside assembly
+##   (``createLateRecipientKey``), so that no image carries one; or a
+##   pre-bootstrap key the host already carries, which is kept. Beside it,
+##   ``recipient.key.next`` during a rotation, and after one the retired
+##   key's blocks may survive on a copy-on-write filesystem or in a
+##   snapshot (both under "Recipient-key rotation" below);
+## - not read by this module, but also at rest: on a host bootstrapped with
+##   an Evidence sink or enrolled with ``evidence-enrol``, the attestation
+##   key (``/var/lib/repro/agent/attestation.key``, §10.5) and the sink write
+##   credential (``/var/lib/repro/evidence/host-ca.key``, §10.6), with
+##   their ``.next`` files beside them while ``evidence-enrol --rekey``
+##   runs or after it is interrupted (until an operator removes them) --
+##   so the recipient key is not the only private key on disk (spec §10.3
+##   *At rest*, §5.3);
+## - the secrets this module handles, **sealed** only: the deploy agent's
+##   v2 sealed section (``repro_deploy_agent/secrets``) with the target it
+##   was sealed for, which nothing can read without this host's
+##   recipient key (the current one, or ``recipient.key.next`` during a
+##   rotation).
+##   Three kinds of copy exist:
 ##   - ``/var/lib/repro/agent/sealed-secrets``: the latest one accepted,
 ##     what an operator's next apply materialises from;
 ##   - ``/var/lib/repro/agent/sealed-secrets.staged``: a deploy agent's
@@ -19,12 +36,19 @@
 ##     generation materialised from, so that the boot, a revert and a
 ##     rollback re-materialise exactly what that generation had.
 ##
-## Plaintext exists only under ``/run/repro/secrets/<service>/<name>``. That
-## directory is a ``ramfs`` mounted in the host's mount namespace: unlike a
-## tmpfs, ramfs pages are never written to swap, so no plaintext page can
-## reach a disk through the swap device (threat model G18). The directory is
-## ``0700`` root, each file ``0400`` root, and systemd hands a file to the
-## one unit that names it in its ``credentials`` (``LoadCredential=``).
+## This module writes no plaintext files to disk (its in-memory copies are
+## a separate limit, below). Plaintext files at rest exist on a host only
+## under the spec's *legacy delivery*, outside this module: a full-engine
+## deploy agent run with a secrets key writes opened secrets into its
+## ``--secrets-dir`` (by default ``<state>/secrets``), on disk.
+##
+## Plaintext this module materialises exists only under
+## ``/run/repro/secrets/<service>/<name>``. That directory is a ``ramfs``
+## mounted in the host's mount namespace: unlike a tmpfs, ramfs pages are
+## never written to swap, so no plaintext page can reach a disk through the
+## swap device (threat model G18). The directory is ``0700`` root, each
+## file ``0400`` root, and systemd hands a file to the one unit that names
+## it in its ``credentials`` (``LoadCredential=``).
 ## Which entries are materialised is decided by a generation's
 ## ``secrets.secretFile`` declarations (``repro_infra/profile
 ## .SecretFileDecl``); a sealed entry no declaration names is never

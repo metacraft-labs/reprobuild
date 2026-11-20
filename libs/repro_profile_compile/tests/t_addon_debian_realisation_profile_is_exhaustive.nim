@@ -134,7 +134,9 @@ suite "add-on-debian realisation profile":
     fsSystemFile(r, path = "/etc/web/c.conf", sourceLocal = "./c.conf")
     passwdUser(r, name = "web", shell = "/usr/sbin/nologin",
       extraGroups = @["adm"])
-    passwdGroup(r, name = "web", gid = "990", members = @["web"])
+    # `members` names an account the profile does not declare as a user:
+    # a declared user's memberships are its own `groups`.
+    passwdGroup(r, name = "web", gid = "990", members = @["www-data"])
     linuxTmpfilesRule(r, name = "web", content = "d /var/lib/web 0700",
       applyNow = false)
     linuxSysctl(r, key = "net.core.somaxconn", value = "1024",

@@ -1291,28 +1291,36 @@ flag	repro hooks ensure	--record-store
 flag	repro hooks ensure	--shell
 flag	repro hooks ensure	--shell-autocomplete
 flag	repro hooks ensure	--shell-direnv
+flag	repro hooks ensure	--system
+flag	repro hooks ensure	--system-root
 flag	repro hooks ensure	--vcs
 flag	repro hooks ensure	--workspace-root
 flag	repro hooks ensure	--write-report
 command	repro hooks reinstall
 flag	repro hooks reinstall	--json
 flag	repro hooks reinstall	--no-write-report
+flag	repro hooks reinstall	--profile
 flag	repro hooks reinstall	--re-anchor
 flag	repro hooks reinstall	--record-store
 flag	repro hooks reinstall	--shell
 flag	repro hooks reinstall	--shell-autocomplete
 flag	repro hooks reinstall	--shell-direnv
+flag	repro hooks reinstall	--system
+flag	repro hooks reinstall	--system-root
 flag	repro hooks reinstall	--vcs
 flag	repro hooks reinstall	--workspace-root
 flag	repro hooks reinstall	--write-report
 command	repro hooks uninstall
 flag	repro hooks uninstall	--json
 flag	repro hooks uninstall	--no-write-report
+flag	repro hooks uninstall	--profile
 flag	repro hooks uninstall	--re-anchor
 flag	repro hooks uninstall	--record-store
 flag	repro hooks uninstall	--shell
 flag	repro hooks uninstall	--shell-autocomplete
 flag	repro hooks uninstall	--shell-direnv
+flag	repro hooks uninstall	--system
+flag	repro hooks uninstall	--system-root
 flag	repro hooks uninstall	--vcs
 flag	repro hooks uninstall	--workspace-root
 flag	repro hooks uninstall	--write-report

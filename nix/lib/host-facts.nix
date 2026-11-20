@@ -6,7 +6,9 @@
 # guide docs/users/content/guides/machines/compare-with-home-manager.md. The
 # Reprobuild side is `repro home facts`
 # (libs/repro_home_apply/src/repro_home_apply/host_facts.nim), which writes the
-# same schema; `repro home compare` compares the two.
+# same schema; `repro home compare` compares the two. Every field of that
+# schema is described in docs/users/content/reference/files/host-facts.md,
+# which changes in the same commit as this file's output.
 #
 # What a Home Manager configuration contributes, per category:
 #

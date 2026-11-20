@@ -607,6 +607,40 @@ when defined(posix):
       "Point RUNQUOTAD_BIN at a current runquotad (or remove the stale one " &
       "from PATH), or start the host's RunQuota service."
 
+  const unknownArgumentMarker* = "unknown runquotad argument: "
+    ## The words `runquotad` prints, before exiting 2, for an argument it
+    ## does not know (its command-line loop). Unchanged since runquota
+    ## 9d6bd3c (2026-05-16), so every build older than `--idle-exit-after`
+    ## (d828b6c) prints them; the issue's home-manager runquota printed
+    ## exactly this. `t_auto_runquota_uses_private_endpoint_policy.nim`
+    ## feeds the current daemon an unknown argument and checks its refusal
+    ## still begins so: a guard that the wording is kept, since the old
+    ## builds this matches are frozen.
+
+  proc staleIdleExitDaemonRemedy*(runquotad, logText: string): string =
+    ## The remedy for a started daemon that refused `--idle-exit-after`, or
+    ## "" when its log shows no such refusal. repro starts the shared
+    ## per-user daemon with that argument (since 2026-11-11), so a
+    ## `runquotad` that does not know it predates the per-user daemon's idle
+    ## exit (runquota d828b6c) and cannot serve this repro. Every step of
+    ## `findRunQuotaDaemonBin` can reach such a binary when no Nix package
+    ## pins it: an explicit `RUNQUOTAD_BIN`, an older home-manager or system
+    ## `runquotad` ahead of the dev shell's on `PATH`, or a sibling
+    ## `../runquota` build that predates the flag (reprobuild-pm
+    ## `spec/RunQuota-Host-Configuration.md`, "The
+    ## shared per-user daemon (POSIX)", "What this costs"; issue
+    ## 2026-11-12-checkout-repro-starts-a-stale-runquotad-from-path-that-
+    ## rejects-idle-exit-after.md). Without this the operator sees only the
+    ## daemon's own refusal, which names no way out.
+    if (unknownArgumentMarker & "--idle-exit-after") notin logText:
+      return ""
+    "\nremedy: " & runquotad & " does not know --idle-exit-after, so this " &
+      "runquotad predates the shared per-user RunQuota daemon and is older " &
+      "than this repro needs. Point RUNQUOTAD_BIN at a current runquotad (or " &
+      "remove the stale one from PATH, or rebuild it if it is a sibling " &
+      "runquota checkout's build), or, where one is provisioned, start the " &
+      "host's RunQuota service."
+
   proc waitForUserDaemon*(launch: var UserDaemonLaunch;
                           exe, socket, logPath: string;
                           answered: proc (): bool): int =
@@ -644,11 +678,15 @@ when defined(posix):
     proc since(): string =
       $(getMonoTime() - started).inMilliseconds & " ms after it was started"
     proc diagnostics(): string =
-      # The log's tail, then -- when the log shows the daemon refused its
-      # private endpoint under the HOST policy -- what that means and what
-      # to do (`hostPolicyDaemonRemedy`).
+      # The log's tail, then -- when the log shows the daemon is too old
+      # for this repro: it refused its private endpoint under the HOST
+      # policy, or refused `--idle-exit-after` -- what that means and what
+      # to do (`hostPolicyDaemonRemedy`, `staleIdleExitDaemonRemedy`). At
+      # most one applies: a daemon that refuses the argument exits before
+      # it inspects any endpoint.
       let tail = userDaemonLogTail(logPath)
-      tail & hostPolicyDaemonRemedy(exe, tail)
+      tail & hostPolicyDaemonRemedy(exe, tail) &
+        staleIdleExitDaemonRemedy(exe, tail)
     # Why the daemon's state can no longer be read, once it cannot. From
     # then on only `answered()` and the ceiling end the wait.
     var unobservable = ""

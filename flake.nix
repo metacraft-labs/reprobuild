@@ -423,7 +423,12 @@
       # Bumped 6333cc9 -> 7bc81ad (2026-11-11, `agents`) with io-mon-src 7a9b2f33:
       # io-mon's writer (c8bc874) calls `emitNoGrow`, an async-signal-safe
       # insert that never grows the set, which 6333cc9 does not have.
-      url = "github:metacraft-labs/nim-shm-gset/7bc81ad2440860a8a9254eb2757c585df9652438";
+      # Bumped 7bc81ad -> 34ef30c (2026-11-20, `agents`): an insert whose newest
+      # shard will not map, and a reader walk that skips a shard whose file is
+      # present but would not map, both bump `growthFailed`, so enumerateEdge
+      # no longer honours a completeness claim from a walk that missed
+      # elements. Generation-stamped counters saturate instead of wrapping.
+      url = "github:metacraft-labs/nim-shm-gset/34ef30cba47ac93304078a101796a6283230e8cc";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -453,7 +458,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/fcd5b309c2cb38656d8d2c3b39a7c4e72b5dfb3a";
+      url = "github:metacraft-labs/nim-cli-spec/daef562cad0c1a3e2f98952812c1f85a497b1e2f";
       flake = false;
     };
     nim-entrypoints-src = {

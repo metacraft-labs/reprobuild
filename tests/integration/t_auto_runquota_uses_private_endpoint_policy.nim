@@ -34,7 +34,13 @@
 ## Another prints a refusal naming the caller's own uid, which a current daemon
 ## gives only for faults this suite cannot provoke through the auto-start (it
 ## creates the endpoint itself); it grades that such a refusal gets no
-## stale-daemon remedy.
+## stale-daemon remedy. A last fixture stands for a `runquotad` older than
+## `--idle-exit-after` (runquota d828b6c; the issue's home-manager build,
+## `...-runquota-0.1.3`, predates it -- the version number alone does not
+## mark a build as old): no current daemon refuses its own argument, and an
+## old build is not available to the suite. It refuses only when really
+## handed that argument, with the wording every build since runquota
+## 9d6bd3c uses; a companion case guards that the current daemon keeps it.
 import std/[json, monotimes, os, osproc, strutils, tempfiles, times, unittest]
 import repro_cli_support
 import repro_runquota
@@ -49,6 +55,8 @@ when defined(posix):
   from std/nativesockets import Domain, SockType, Protocol
   from runquota_ipc import hostWideEndpointDir
   import repro_test_support/per_user_runquota
+  from repro_cli_support/user_runquota_daemon import unknownArgumentMarker
+  from repro_core/ambient_execution import uncontrolledExecArgvEx
 
   proc checkRefusesWithoutSpawn(root, endpoint, scope: string): string
       {.discardable.} =
@@ -403,6 +411,78 @@ when defined(posix):
       except OSError as error:
         message = error.msg
       check "refusing for its own reasons" in message
+      check "remedy:" notin message
+
+    test "a runquotad that refuses --idle-exit-after is named with a remedy":
+      # reprobuild-pm issue 2026-11-12-checkout-repro-starts-a-stale-
+      # runquotad-from-path-that-rejects-idle-exit-after.md: a repro built
+      # from a checkout has no pinned RUNQUOTAD_BIN, so the PATH step of
+      # `findRunQuotaDaemonBin` reaches whatever runquotad comes first --
+      # there, a home-manager runquota build older than the per-user
+      # daemon's idle exit. It refuses the argument repro starts it with
+      # and exits 2. The stale binary is put first on PATH, with no
+      # RUNQUOTAD_BIN, exactly as the issue's shell had it; it prints that
+      # daemon's refusal (the next case holds the wording to the real
+      # daemon's) only when it is really handed --idle-exit-after.
+      let binDir = root / "stale-bin"
+      createDir(binDir)
+      let stale = binDir / "runquotad"
+      writeFile(stale, "#!/bin/sh\nfor arg in \"$@\"; do\n" &
+        "  if [ \"$arg\" = --idle-exit-after ]; then\n" &
+        "    echo '" & unknownArgumentMarker & "--idle-exit-after'\n" &
+        "    exit 2\n  fi\ndone\nexit 23\n")
+      setFilePermissions(stale, {fpUserRead, fpUserWrite, fpUserExec})
+      delEnv("RUNQUOTAD_BIN")
+      let savedPath = getEnv("PATH")
+      putEnv("PATH", binDir & $PathSep & savedPath)
+      defer: putEnv("PATH", savedPath)
+      check findRunQuotaDaemonBin() == stale
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      checkpoint message
+      check "did not become reachable" in message
+      check "with exit code 2" in message
+      # The daemon's own refusal is still carried ...
+      check (unknownArgumentMarker & "--idle-exit-after") in message
+      # ... and followed by what it means and what to do.
+      check ("remedy: " & stale) in message
+      check "does not know --idle-exit-after" in message
+      check "Point RUNQUOTAD_BIN at a current runquotad" in message
+      check "remove the stale one from PATH" in message
+      check "rebuild it if it is a sibling runquota checkout's build" in message
+      # Not mistaken for the pre-private-endpoint daemon.
+      check "predates private RunQuota endpoints" notin message
+
+    test "the unknown-argument refusal matched above is the real daemon's":
+      # Guards that the current daemon keeps the wording the old builds
+      # froze (`unknownArgumentMarker`), so a future stale build is still
+      # recognised; the old wording itself is fixed since runquota 9d6bd3c.
+      # Run directly, without a shell: the daemon under test is the binary
+      # the suite already resolved, and it exits on the unknown argument.
+      let (output, exitCode) = uncontrolledExecArgvEx(
+        [daemonBin, "--no-such-runquotad-argument"])
+      checkpoint output
+      check exitCode == 2
+      check (unknownArgumentMarker & "--no-such-runquotad-argument") in output
+
+    test "an unrelated unknown-argument refusal gets no idle-exit remedy":
+      let wrapper = root / "refusing-runquotad"
+      writeFile(wrapper, "#!/bin/sh\necho '" & unknownArgumentMarker &
+        "--some-future-flag'\nexit 2\n")
+      setFilePermissions(wrapper, {fpUserRead, fpUserWrite, fpUserExec})
+      putEnv("RUNQUOTAD_BIN", wrapper)
+      var message = ""
+      try:
+        var daemon = startAutoRunQuotaIfNeeded(false)
+        releaseAutoRunQuotaProcess(daemon)
+      except OSError as error:
+        message = error.msg
+      checkpoint message
+      check "--some-future-flag" in message
       check "remedy:" notin message
 
     test "a hand-set private scope without a socket is refused with a remedy":

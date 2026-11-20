@@ -874,7 +874,8 @@ proc branchFlags(): NimNode {.compileTime.} =
 
 proc hooksActionFlags(): NimNode {.compileTime.} =
   ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
-  ## no selector both `--vcs` and `--shell-direnv` are implied.
+  ## no selector `--vcs`, `--shell-direnv` and `--shell-autocomplete` are
+  ## implied.
   let root = workspaceRootFlag()
   let report = workspaceReportFlags()
   quote do:
@@ -891,10 +892,20 @@ proc hooksActionFlags(): NimNode {.compileTime.} =
     boolFlag shellDirenv is bool,
       help = "The direnv `.envrc` activation block"
     boolFlag shellAutocomplete is bool,
-      help = "Shell completion scripts (not implemented yet)"
+      help = "Shell completion for repro, for every shell found (see " &
+        "--profile and --system)"
     flag shell is seq[string],
       help = "A native shell activation hook: bash, zsh, fish or pwsh " &
         "(repeat it for several)"
+    boolFlag profile is bool,
+      help = "Shell hooks for the current user only (the default): rc " &
+        "files and per-user completion directories"
+    boolFlag system is bool,
+      help = "Shell hooks for every user of the machine (writes system " &
+        "locations; usually needs root)"
+    flag systemRoot is string, visibility = internal,
+      help = "Prefix every system path written or consulted with PATH " &
+        "(tests)"
     `root`
     `report`
     pos path is string, required = false,
@@ -2381,7 +2392,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         boolFlag noCertify is bool,
           help = "Plan the run as `repro test --no-certify` would"
         pos selectors is seq[string], required = false,
-          help = "What the plan builds (default: `.#test`, as for " &
+          help = "What the plan builds (default: `test`, as for " &
             "`repro test`)"
       subcmd "policy",
           help = "The certificate policy `repro.lock` records, and the rule " &
