@@ -31,8 +31,9 @@
 ## existing ``t_hcr_agent_process_target`` entry, matching the M4 task
 ## brief.
 
-import std/[monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
+import repro_test_support/watch_log
 
 import repro_hcr_agent
 from repro_test_support import requireBinary, monitorShimPath
@@ -192,17 +193,6 @@ proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
   result.shim = requireBinary(monitorShimPath(repoRoot),
     "reprobuild.test_fixtures.monitor_shim")
 
-proc waitForLogContains(logPath, needle, context: string; timeoutMs = 30_000) =
-  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
-  while getMonoTime() < deadline:
-    if fileExists(logPath) and readFile(logPath).contains(needle):
-      return
-    sleep(50)
-  let log =
-    if fileExists(logPath): readFile(logPath) else: ""
-  raise newException(ValueError,
-    "timed out waiting for " & context & ": " & needle & "\n" & log)
-
 proc agentHello(suffix: string): HcrAgentMessage =
   HcrAgentMessage(
     schemaId: HcrAgentProtocolSchemaId,
@@ -344,7 +334,8 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       # measured in minutes here, not in the 30 s this defaulted to.
       waitForLogContains(logPath,
         "repro watch: hcr waiting for agent socket=" & socketA &
-          " target=a", "agent A baseline", timeoutMs = 600_000)
+          " target=a", "agent A baseline", timeoutMs = WatchBaselineBudgetMs,
+        watch = process)
       var agentA = connectHcrAgentUnixSocket(socketA)
       defer: agentA.close()
       discard agentA.writeAgentMessage(agentHello("a"))
@@ -353,7 +344,8 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
 
       waitForLogContains(logPath,
         "repro watch: hcr waiting for agent socket=" & socketB &
-          " target=b", "agent B baseline", timeoutMs = 600_000)
+          " target=b", "agent B baseline", timeoutMs = WatchBaselineBudgetMs,
+        watch = process)
       var agentB = connectHcrAgentUnixSocket(socketB)
       defer: agentB.close()
       discard agentB.writeAgentMessage(agentHello("b"))
@@ -361,7 +353,7 @@ suite "t_e2e_repro_watch_hcr_multi_target_independent_patches":
       check ackB.kind == hmkHelloAck
 
       waitForLogContains(logPath, "repro watch: watching paths=",
-        "watch subscription")
+        "watch subscription", watch = process)
 
       # Edit only ``src/a.c``. Cycle 2's rebuild will refresh
       # ``build/a.o``; ``build/b.o`` stays cache-hit. Per M4: session A

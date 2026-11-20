@@ -35,6 +35,12 @@
 ##   - ``owned_pool_leaf_without_chain_fetch_succeeds`` — the same with the
 ##     pool at its ``sharedBarePath`` under a cache root, prepared by
 ##     ``prepareSharedBare``, and the leaf never configured by the detector.
+##   - ``thin_base_fetch_starts_no_automatic_maintenance`` — the foreign-pool
+##     fixture traced with ``GIT_TRACE``. Positive control: a plain fetch
+##     declaring the same ``repro-thin-base`` remote without the guard
+##     lazy-fetches through it and starts ``git maintenance run --auto``. The
+##     engine's fetch in the other leaf lazy-fetches through it too and
+##     starts no maintenance (the m3 process storm of 2026-11-15).
 ##   - ``leaf_fetch_needs_promisor_decision`` — ``leafFetchNeedsPromisor`` is
 ##     false for no alternates, for a full pool, and for a partial pool whose
 ##     leaf carries the chain; true for a partial pool without one, including
@@ -345,6 +351,50 @@ suite "SPI: leaves of a partial-clone pool fetch thin packs":
         owned = true, leafCount = 1)
       check f.pool in poolsOfLeaf(f.leaves[0], cacheRoot)
       checkFetchHealed(f, f.leaves[0])
+
+  test "thin_base_fetch_starts_no_automatic_maintenance":
+    # Every lazy promisor fetch ends with `git maintenance run --auto
+    # --detach`, and the detached maintenance inherits the per-invocation
+    # `repro-thin-base` remote; on m3 (2026-11-15) the loop reached 1,292 git
+    # processes. The engine's fetch must start no maintenance at all.
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-thin-maint-", "")
+      defer:
+        delEnv("GIT_TRACE")
+        tearDown()
+        removeDir(root)
+      let f = setUp(root, root / "foreign-pool" / "clones" / "up.git",
+        owned = false, leafCount = 2)
+      # Positive control: the same thin-base remote WITHOUT the guard. The
+      # maintenance is kept in the foreground so it cannot outlive the case.
+      let controlTrace = root / "control.trace"
+      let prefix = "remote.repro-thin-base."
+      let control = execCmdEx("GIT_TRACE=" & q(controlTrace) & " git -C " &
+        q(f.leaves[0]) & " -c " & q(prefix & "url=" & f.url) &
+        " -c " & q(prefix & "promisor=true") &
+        " -c " & q(prefix & "partialclonefilter=blob:none") &
+        " -c maintenance.autoDetach=false -c gc.autoDetach=false fetch origin")
+      checkpoint("control fetch: " & control.output)
+      check control.exitCode == 0
+      let controlLog = readFile(controlTrace)
+      check controlLog.contains("fetch repro-thin-base")
+      check controlLog.contains("maintenance run --auto")
+      # The engine's fetch: the same lazy fetch, and no maintenance under it.
+      let engineTrace = root / "engine.trace"
+      putEnv("GIT_TRACE", engineTrace)
+      let res = fetchThroughEngine(f, f.leaves[1])
+      delEnv("GIT_TRACE")
+      check res.results.len == 1
+      if res.results.len == 1:
+        if res.results[0].status != asSucceeded:
+          checkpoint("fetch action stderr: " & res.results[0].stderr)
+        check res.results[0].status == asSucceeded
+      let engineLog = readFile(engineTrace)
+      check engineLog.contains("fetch repro-thin-base")
+      check not engineLog.contains("maintenance run")
+      check not engineLog.contains("gc --auto")
 
   test "leaf_fetch_needs_promisor_decision":
     if findExe("git").len == 0:

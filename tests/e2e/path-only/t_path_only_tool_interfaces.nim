@@ -93,10 +93,14 @@ suite "e2e_path_only_tool_interfaces":
       let tempRoot = createTempDir("repro-m8-path-only", "")
       defer: removeDir(tempRoot)
 
-      let reproBin = tempRoot / "repro"
-      discard requireSuccess(@["nim", "c", "--verbosity:0", "--hints:off",
-        "--nimcache:" & (tempRoot / "nimcache-repro"),
-        "--out:" & reproBin, repoRoot / "apps" / "repro" / "repro.nim"])
+      # The tree's graph-built CLI, not a private `nim c` of apps/repro: that
+      # one had no RPATH for libclingo and started only while the caller's
+      # LD_LIBRARY_PATH reached every process it spawned. The recipe
+      # compiles launch with an isolated environment, where the engine hands
+      # LD_LIBRARY_PATH to the action only after the monitor host -- this
+      # same binary -- has started (`deferRuntimeLibraryEnvForShell`), so
+      # that binary died with `could not load: libclingo.so`.
+      let reproBin = requireHostBinary(reproBinaryPath())
       let binDir = tempRoot / "bin"
       writeFixtureTool(binDir)
       let pathValue = binDir & $PathSep & getEnv("PATH")

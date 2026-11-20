@@ -8,7 +8,7 @@
 ## skip outcomes), invoke ``--run`` for each, and assert against the
 ## result-file shape and exit code.
 
-import std/[json, os, osproc, strutils]
+import std/[json, os, osproc, sequtils, strutils]
 import std/unittest
 from repro_test_support import ctShimFixturePath, requireBinary,
   testCaseScratchSlug
@@ -22,6 +22,14 @@ from repro_test_support import ctShimFixturePath, requireBinary,
 proc buildFixture(): string =
   requireBinary(ctShimFixturePath("fixture_protocol_three_tests"),
     "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests")
+
+# The cases that leave the process from inside their body: a failed
+# ``require`` (``fail`` -> ``quit(1)``, so ``testEnded`` never runs) and a
+# ``quit`` in the body. A separate fixture so the three-case catalog that
+# ``t_every_test_binary_speaks_list_json_protocol`` counts stays three.
+proc buildAbortFixture(): string =
+  requireBinary(ctShimFixturePath("fixture_protocol_abort_paths"),
+    "reprobuild.test_fixtures.ct_shim_fixture_protocol_abort_paths")
 
 # Per-case scratch for the result files this suite WRITES. Shared fixture,
 # private outputs. The four cases used to name fixed ``/tmp/...`` paths, which
@@ -96,3 +104,61 @@ suite "t_test_binary_run_one_writes_result_file":
     if doc != nil:
       assertResultShape(doc)
       check doc["status"].getStr() == "FAIL"
+
+  # Positive control for the abort handling below: the passing case of the
+  # abort fixture still writes exactly the passing document.
+  test "abort_fixture_passing_case_document_unchanged":
+    let binary = buildAbortFixture()
+    let (exitCode, doc) = runOne(binary, "abort_paths::passes",
+      resultFilePath("abort-pass"))
+    check exitCode == 0
+    check not doc.isNil
+    if doc != nil:
+      assertResultShape(doc)
+      check doc["status"].getStr() == "PASS"
+      check doc["checkpoints"].len == 0
+      check doc["exception"].kind == JNull
+      check not doc.hasKey("skipReason")
+
+  # A failed ``require`` quits from inside the body. The document must still
+  # say FAIL, carry the checkpoint recorded before the require and the failed
+  # condition, and name the require as the reason -- not "test not found",
+  # and not nothing.
+  test "require_failure_writes_fail_document_with_checkpoints":
+    let binary = buildAbortFixture()
+    let (exitCode, doc) = runOne(binary, "abort_paths::require_fails",
+      resultFilePath("abort-require"))
+    check exitCode == 1
+    check not doc.isNil
+    if doc != nil:
+      assertResultShape(doc)
+      check doc["status"].getStr() == "FAIL"
+      var cps: seq[string]
+      for cp in doc["checkpoints"]:
+        cps.add(cp.getStr())
+      checkpoint "checkpoints: " & $cps
+      check "captured build output: abort-paths-marker" in cps
+      check cps.anyIt("Check failed: observed == 5" in it)
+      check "unreachable after require" notin cps
+      check doc["exception"].kind == JString
+      let reason = doc["exception"].getStr()
+      checkpoint "exception: " & reason
+      check reason.startsWith("require failed")
+      check "observed == 5" in reason
+      check "test not found" notin reason
+
+  # ``quit(0)`` mid-body: the case never finished, so it is a FAIL with a
+  # non-zero exit whatever code the body chose.
+  test "quit_in_body_writes_fail_document":
+    let binary = buildAbortFixture()
+    let (exitCode, doc) = runOne(binary, "abort_paths::quits_in_body",
+      resultFilePath("abort-quit"))
+    check exitCode == 1
+    check not doc.isNil
+    if doc != nil:
+      assertResultShape(doc)
+      check doc["status"].getStr() == "FAIL"
+      let reason = doc["exception"].getStr()
+      checkpoint "exception: " & reason
+      check "quit" in reason
+      check "test not found" notin reason

@@ -7423,6 +7423,67 @@ compileProfileBinary()
                     "only",
                 },
             },
+            # ADDED for run 52's census: three enrolled sources whose platform
+            # gate owns real test declarations and had no row. They move the
+            # census from 75 to 78 sources and, with the three Linux names run
+            # 52 also found missing from existing rows (t_source_hash_runtime_
+            # paths, t_m9r30_transitive_rpath_propagation), the totals from
+            # (132, 151) to (146, 152), a net -19 -> -6. The names are what
+            # `source_platform_case_names` derives from each gate.
+            #
+            # Same shape as the link test above: Linux runs the four lock
+            # cases, every other host registers one placeholder.
+            "tests/e2e/m83/"
+            "t_e2e_profile_compiles_of_one_profile_are_serialised.nim": {
+                "linux": {
+                    "profile compiles of one profile in one state directory::"
+                    "a second `repro home plan` waits for the compile in "
+                    "flight",
+                    "profile compiles of one profile in one state directory::"
+                    "a second `repro home export` waits for the platform "
+                    "probe in flight",
+                    "profile compiles of one profile in one state directory::"
+                    "a `repro home plan` in another state directory waits for "
+                    "the compile in flight over the same profile directory",
+                    "profile compiles of one profile in one state directory::"
+                    "a `repro home export` in another state directory waits "
+                    "for the platform probe in flight over the same profile "
+                    "directory",
+                },
+                "darwin": {
+                    "profile compiles of one profile in one state directory::"
+                    "Linux only",
+                },
+            },
+            # One case nested `when defined(linux):` inside the file's
+            # `when isIoMonitorSupported:` block (true on both hosts).
+            "tests/e2e/dev-env/t_e2e_repro_dev_sessions.nim": {
+                "linux": {
+                    "e2e_repro_dev_sessions::"
+                    "e2e_repro_up_reports_a_supervisor_that_died_after_its_"
+                    "control_api",
+                },
+                "darwin": set(),
+            },
+            # Linux registers seven cases; every other host registers only the
+            # first of them, under the same name, as a skip.
+            "tests/integration/t_auto_runquota_shared_per_user_daemon.nim": {
+                "linux": {
+                    "the shared per-user runquotad::two concurrent "
+                    "invocations start one daemon",
+                    "the shared per-user runquotad::the daemon exits by itself "
+                    "after the idle period",
+                    "the shared per-user runquotad::a stale socket left by a "
+                    "killed daemon is replaced",
+                    "the shared per-user runquotad::a directory owned by "
+                    "another uid is refused",
+                    "the shared per-user runquotad::a directory with a wrong "
+                    "mode the user cannot fix is refused",
+                    "the shared per-user runquotad::the error of a daemon that "
+                    "exits before listening carries its log",
+                },
+                "darwin": set(),
+            },
             "libs/repro_build_engine/tests/"
             "t_engine_macos_sip_safe_launch.nim": {
                 "linux": set(),
@@ -7625,7 +7686,15 @@ compileProfileBinary()
                 "linux": {
                     "DSL-port M9.R.30.2 — transitive RPATH propagation::"
                     "stale propagated path is rewritten before its existence "
-                    "check"
+                    "check",
+                    # ADDED for run 52: 2cbdf923b2a added these two, one per
+                    # root name of the loop that declares them.
+                    "RPATH patch script size does not scale with the checkout "
+                    "path::sibling lib dirs are folded into the RPATH only when "
+                    "they exist, in order, under a root named active",
+                    "RPATH patch script size does not scale with the checkout "
+                    "path::sibling lib dirs are folded into the RPATH only when "
+                    "they exist, in order, under a root named ac tive's root",
                 },
                 "darwin": set(),
             },
@@ -8191,6 +8260,9 @@ compileProfileBinary()
                     "release helpers load the clingo staged beside them",
                     "Source bootstrap hash-library runtime paths::real hash "
                     "libraries load without ambient paths; missing RPATH fails",
+                    # ADDED for run 52: a07aed3294a added this Linux case.
+                    "Source bootstrap hash-library runtime paths::portable "
+                    "release helpers load a clingo built for a newer runtime",
                 },
                 "darwin": set(),
             },
@@ -8722,14 +8794,17 @@ compileProfileBinary()
             chains.append((platform_chain, branches))
 
         result = {}
-        # The two audited consumers wrap a platform branch in the shared
-        # literal platform constant. Read its definition rather than assume
-        # that an arbitrary named condition is true on either host.
+        # The audited consumers wrap a platform branch in one of the shared
+        # literal platform constants (`isNixSupported`, and
+        # `isIoMonitorSupported` in t_e2e_repro_dev_sessions.nim). Read each
+        # definition rather than assume that an arbitrary named condition is
+        # true on either host.
         support_tokens = inventory.nim_tokens((REPO_ROOT /
             "libs/repro_test_support/src/repro_test_support.nim").read_text())
-        support_conditions = []
+        support_names = ("isNixSupported", "isIoMonitorSupported")
+        support_conditions = {name: [] for name in support_names}
         for index, token in enumerate(support_tokens):
-            if token.value != "isNixSupported":
+            if token.value not in support_conditions:
                 continue
             cursor = index + 1
             if support_tokens[cursor].value == "*":
@@ -8739,10 +8814,11 @@ compileProfileBinary()
             end = cursor + 1
             while end < len(support_tokens) and support_tokens[end].kind != "newline":
                 end += 1
-            support_conditions.append(" ".join(token.value for token in
-                                               support_tokens[cursor+1:end]))
-        if len(support_conditions) != 1:
-            raise AssertionError("isNixSupported must retain one literal definition")
+            support_conditions[token.value].append(" ".join(
+                token.value for token in support_tokens[cursor+1:end]))
+        for name in support_names:
+            if len(support_conditions[name]) != 1:
+                raise AssertionError(name + " must retain one literal definition")
         for host in ("linux", "darwin"):
             defined = set(defines) | {"posix", "unix"} | (
                 {"linux", "amd64", "x86_64"} if host == "linux"
@@ -8765,8 +8841,8 @@ compileProfileBinary()
                     if isinstance(item, ast.Constant) and isinstance(item.value, bool):
                         return item.value
                     if isinstance(item, ast.Name):
-                        if item.id == "isNixSupported" and not resolving_support:
-                            return evaluate(support_conditions[0], True)
+                        if item.id in support_conditions and not resolving_support:
+                            return evaluate(support_conditions[item.id][0], True)
                         raise AssertionError((source, host, "unsupported gate", condition))
                     if isinstance(item, ast.UnaryOp):
                         return not boolean(item.operand)
@@ -8804,7 +8880,7 @@ compileProfileBinary()
     def assert_platform_catalog_ledger_census(self, data):
         exclusive, identical = self.linux_darwin_catalog_ledger()
         self.assertEqual(self.platform_gated_test_sources(data), set(exclusive) | identical)
-        self.assertEqual(len(exclusive), 75)
+        self.assertEqual(len(exclusive), 78)
         self.assertEqual(len(identical), 20)
         # The per-host totals are pure ledger arithmetic, so they are checked
         # here, where no built binary is needed: a ledger entry added without
@@ -8813,8 +8889,8 @@ compileProfileBinary()
         # never used as a substitute for their exact per-source assertions.
         linux_only = sum(len(item["linux"]) for item in exclusive.values())
         darwin_only = sum(len(item["darwin"]) for item in exclusive.values())
-        self.assertEqual((linux_only, darwin_only), (132, 151))
-        self.assertEqual(linux_only - darwin_only, -19)
+        self.assertEqual((linux_only, darwin_only), (146, 152))
+        self.assertEqual(linux_only - darwin_only, -6)
         specs, _ = inventory.parse_repro_tests(REPO_ROOT)
         defines_by_source = {spec.source: spec.defines for spec in specs}
         for source in sorted(set(exclusive) | identical):

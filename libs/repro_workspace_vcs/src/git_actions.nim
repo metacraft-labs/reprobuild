@@ -965,6 +965,23 @@ const ThinBaseRemoteName = "repro-thin-base"
   ## The per-invocation promisor remote ``borrowedBaseFetchArgs`` declares.
   ## Never written to any config.
 
+const ThinBaseMaintenanceGuard* = ["-c", "maintenance.auto=false",
+                                   "-c", "gc.auto=0"]
+  ## Appended to every invocation that declares ``ThinBaseRemoteName``: no
+  ## automatic maintenance may run under it.
+  ##
+  ## Each lazy promisor fetch ends with ``git maintenance run --auto
+  ## --detach`` (git 2.54.0, traced), and ``-c`` options reach every
+  ## descendant through ``GIT_CONFIG_PARAMETERS`` -- the detached maintenance
+  ## included. Its ``repack`` / ``commit-graph write`` can read objects the leaf
+  ## only borrows and lazy-fetch them through ``repro-thin-base``; each of
+  ## those fetches starts another detached maintenance. On m3 (2026-11-15)
+  ## that loop reached 1,292 git processes (~250 thin-base fetches, ~275
+  ## maintenance runs, ~247 commit-graph writes) and consumed space at
+  ## 1.3-2.8 GB/min. With the guard in ``GIT_CONFIG_PARAMETERS`` no
+  ## descendant starts maintenance: ``gc.autoDetach=false`` alone only stops
+  ## it from detaching.
+
 proc borrowedBaseFetchArgs(payload: GitVcsPayload; target,
                            remoteName: string): seq[string] =
   ## Git global options (they go BEFORE ``fetch``) that a fetch into
@@ -1008,7 +1025,8 @@ proc borrowedBaseFetchArgs(payload: GitVcsPayload; target,
   let prefix = "remote." & ThinBaseRemoteName & "."
   @["-c", prefix & "url=" & url.output.strip(),
     "-c", prefix & "promisor=true",
-    "-c", prefix & "partialclonefilter=blob:none"]
+    "-c", prefix & "partialclonefilter=blob:none"] & @ThinBaseMaintenanceGuard
+
 
 proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
