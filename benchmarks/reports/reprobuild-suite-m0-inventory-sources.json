@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3045,
+    "nimTestBinaries": 3048,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 809,
     "staticallyDetectedRuntimeCompilerFlowTests": 155,
-    "testEntries": 3095
+    "testEntries": 3098
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,10 +1725,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1690,
+      "integration": 1692,
       "platform/destructive": 198,
       "pure unit": 809,
-      "unclassified": 372
+      "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3045,
+    "nimTestBinaryCount": 3048,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3095
+    "testEntryCount": 3098
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5405,7 +5405,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 419,
+          "line": 423,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -5421,7 +5421,23 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 633,
+          "line": 487,
+          "path": "tests/integration/t_compiler_scratch_isolation.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard extractInterfaceFromModule(modulePath, artifact,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 701,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -14284,7 +14300,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19897,13 +19913,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_home_apply",
-        "repro_home_generations"
+        "repro_home_generations",
+        "repro_local_store"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20665,7 +20682,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
       "sourceSuiteCount": 31,
-      "staticCaseCount": 230,
+      "staticCaseCount": 231,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20808,8 +20825,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 20,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20865,6 +20882,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_interface_nimcache_pool_is_this_users_alone",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -43703,7 +43737,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_compiler_scratch_isolation.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -46578,6 +46612,24 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_generated_envrc_block_never_runs_hooks_ensure.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_generated_hook_remedies_name_each_path_as_one_shell_word",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_generated_hook_remedies_name_each_path_as_one_shell_word.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -55671,6 +55723,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_cli_support",
         "repro_core",
         "repro_test_support"
       ],
@@ -56271,7 +56324,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_system_plan_apply_symmetry_and_universal_json.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57455,6 +57508,26 @@
       "source": "tests/integration/t_untracked_inputs_flag_read_set_and_strict.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_uses_refuses_a_package_declared_for_another_platform",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64739,7 +64812,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `stat`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -64747,7 +64820,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -11,7 +11,8 @@
 ## that has the `complete` builtin), and `--system` always runs under
 ## `--system-root=<scratch>`. A guard compares the invoking user's real rc
 ## and completion files (hash and mtime) and the machine's
-## `/usr/local/share/…/repro*` completion files before and after each case.
+## `/usr/local/share/…/repro*` and `/etc/fish/completions/repro.fish`
+## completion files before and after each case.
 ##
 ## The shells are real (bash, zsh, fish and pwsh from the dev shell) and
 ## started without the user's startup files (`bash --norc --noprofile -i`,
@@ -24,8 +25,13 @@
 ## * zsh: `compinit`, then the `.zshrc` block (per user), or `compinit` with
 ##   the root's `site-functions` on `fpath` (system-wide);
 ## * fish: `fish_complete_path` set to fish's documented search order (the
-##   user directory, then `vendor_completions.d` under each `XDG_DATA_DIRS`
-##   entry), which `--no-config` leaves empty;
+##   user directory, then the system configuration directory's
+##   `fish/completions`, here under the scratch root, then
+##   `vendor_completions.d` under each `XDG_DATA_DIRS` entry), which
+##   `--no-config` leaves empty. On Linux `--system` puts fish's script in
+##   `/etc/fish/completions`, because fish reads
+##   `/usr/local/share/fish/vendor_completions.d` only when `XDG_DATA_DIRS`
+##   names it;
 ## * pwsh: the profile block, dot-sourced, then `TabExpansion2`, the function
 ##   PowerShell's Tab key calls (no terminal needed).
 ##
@@ -89,6 +95,7 @@ proc hostWatched(): seq[string] =
   for p in ["/usr/local/share/bash-completion/completions/repro",
       "/usr/local/share/zsh/site-functions/_repro",
       "/usr/local/share/fish/vendor_completions.d/repro.fish",
+      "/etc/fish/completions/repro.fish",
       "/usr/local/share/repro/completions/repro.ps1"]:
     result.add(p)
 
@@ -270,7 +277,9 @@ proc systemFile(w: World; shell: string): string =
   case shell
   of "bash": w.root / "usr/local/share/bash-completion/completions/repro"
   of "zsh": w.root / "usr/local/share/zsh/site-functions/_repro"
-  of "fish": w.root / "usr/local/share/fish/vendor_completions.d/repro.fish"
+  of "fish":
+    when defined(linux): w.root / "etc/fish/completions/repro.fish"
+    else: w.root / "usr/local/share/fish/vendor_completions.d/repro.fish"
   else: w.root / "usr/local/share/repro/completions/repro.ps1"
 
 proc presentShells(): seq[string] =
@@ -528,7 +537,9 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
         var s = w.startShell("fish")
         try:
           check s.ready(resetPath("fish") & "; set -g fish_complete_path " &
-            "$XDG_CONFIG_HOME/fish/completions (for d in (string split : " &
+            "$XDG_CONFIG_HOME/fish/completions " &
+            quoteShell(w.root / "etc/fish/completions") &
+            " (for d in (string split : " &
             "$XDG_DATA_DIRS); echo $d/fish/vendor_completions.d; end) " &
             "$__fish_data_dir/completions")
           checkAll("fish", s.completionCases("fish"))
@@ -655,7 +666,9 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
         var s = w.startShell("fish")
         try:
           check s.ready(resetPath("fish") & "; set -g fish_complete_path " &
-            "$XDG_CONFIG_HOME/fish/completions (for d in (string split : " &
+            "$XDG_CONFIG_HOME/fish/completions " &
+            quoteShell(w.root / "etc/fish/completions") &
+            " (for d in (string split : " &
             "$XDG_DATA_DIRS); echo $d/fish/vendor_completions.d; end) " &
             "$__fish_data_dir/completions")
           checkAll("fish", s.completionCases("fish"))
@@ -761,6 +774,12 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
     createDir(outside)
     createDir(w.root / "usr")
     createSymlink(outside, w.root / "usr" / "local")
+    # Fish's Linux `--system` directory is under `etc/fish`, not `usr/local`,
+    # so it gets a link out of the root of its own.
+    let outsideEtc = w.dir / "outside-etc"
+    createDir(outsideEtc)
+    createDir(w.root / "etc")
+    createSymlink(outsideEtc, w.root / "etc" / "fish")
     let present = presentShells()
     check present.len > 0
     let res = w.repro(["hooks", "ensure", "--shell-autocomplete",
@@ -771,9 +790,10 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
     for shell in present:
       check got.getOrDefault(w.systemFile(shell)) == "failed"
     var leaked: seq[string] = @[]
-    for p in walkDirRec(outside, yieldFilter = {pcFile, pcDir, pcLinkToFile,
-        pcLinkToDir}):
-      leaked.add(p)
+    for dir in [outside, outsideEtc]:
+      for p in walkDirRec(dir, yieldFilter = {pcFile, pcDir, pcLinkToFile,
+          pcLinkToDir}):
+        leaked.add(p)
     check leaked.len == 0
     # Internal: no help shows it.
     for args in [@["hooks", "ensure", "--help"],

@@ -458,7 +458,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/daef562cad0c1a3e2f98952812c1f85a497b1e2f";
+      url = "github:metacraft-labs/nim-cli-spec/5380e20c8866e49e000e8070f692f54d303b5658";
       flake = false;
     };
     nim-entrypoints-src = {
@@ -1057,7 +1057,7 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/c6f6f509316d4b789d0e64a346d2d4bb3271e12d";
+      url = "github:metacraft-labs/reprobuild-nix-packages/d462275c5011669710e0aea2fe5d8b3f9ae8c8a6";
       flake = false;
     };
 
@@ -1075,7 +1075,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/8b4838120c2dc515e9ae1a5684de8906b4e97c33";
+      url = "github:metacraft-labs/reprobuild-brew-packages/1004b4bf991df19e086ae28360c2306702c5798f";
       flake = false;
     };
   };
@@ -2340,6 +2340,37 @@
           checks = {
             inherit pre-commit-check;
             package-build = reprobuild;
+            # The package carries repro's shell completion where Nix-managed
+            # shells read a profile's completions: bash-completion and fish
+            # through XDG_DATA_DIRS, zsh through its fpath. Each script must
+            # be there, must call `repro __complete` (a script that does not
+            # completes nothing), and zsh's must start with the `#compdef`
+            # tag compinit registers it by. package.nix generates them in
+            # postInstall; a build that dropped one of its
+            # installShellCompletion arguments fails here.
+            reprobuild-completion-files =
+              pkgs.runCommand "reprobuild-completion-files" { } ''
+                set -eu
+                for f in \
+                  share/bash-completion/completions/repro \
+                  share/zsh/site-functions/_repro \
+                  share/fish/vendor_completions.d/repro.fish; do
+                  test -s "${reprobuild}/$f" || {
+                    echo "reprobuild-completion-files: ${reprobuild}/$f is missing or empty" >&2
+                    exit 1
+                  }
+                  grep -q __complete "${reprobuild}/$f" || {
+                    echo "reprobuild-completion-files: ${reprobuild}/$f does not call repro __complete" >&2
+                    exit 1
+                  }
+                done
+                first="$(head -n 1 "${reprobuild}/share/zsh/site-functions/_repro")"
+                test "$first" = '#compdef repro' || {
+                  echo "reprobuild-completion-files: _repro starts with '$first', not '#compdef repro'" >&2
+                  exit 1
+                }
+                mkdir -p "$out"
+              '';
             # The nixpkgs-format package cannot parse reprobuild.nimble for its
             # own version -- reading `${src}/reprobuild.nimble` at eval time is
             # import-from-derivation, which nixpkgs forbids -- so it carries a

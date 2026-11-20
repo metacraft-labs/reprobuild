@@ -168,6 +168,10 @@ TARBALL_PREFIX="${REPRO_INSTALL_PREFIX:-/usr/local}"
 # remove exactly that and nothing else. A tarball uninstall that globs
 # $prefix/bin would delete files it never installed.
 TARBALL_MANIFEST="${REPRO_TARBALL_MANIFEST:-/var/lib/reprobuild/installed-files.txt}"
+# Where a tarball install records how it set up shell completion (for whom,
+# and with which binary), beside the manifest, so --uninstall undoes exactly
+# that registration. See setup_tarball_completion below.
+TARBALL_COMPLETION_RECORD="$(dirname "$TARBALL_MANIFEST")/completion"
 
 # ---------------------------------------------------------------------
 # Nix and NixOS: the metacraft-labs/nixpkgs fork IS the repository.
@@ -197,6 +201,9 @@ NIXOS_CONFIG_DIR="${REPRO_NIXOS_CONFIG_DIR:-/etc/nixos}"
 
 method='auto'
 do_uninstall=0
+# 1 skips the shell completion a tarball install otherwise sets up.
+no_completion=0
+[ "${REPRO_NO_COMPLETION:-0}" = '1' ] && no_completion=1
 dry_run=0
 want_version=''
 verify_script="${REPRO_VERIFY_SCRIPT:-}"
@@ -228,6 +235,9 @@ Usage: repro-install.sh [OPTIONS]
   --uninstall           Remove the package, the repository registration
                         and the trust anchor, then assert they are gone.
   --prefix PATH         Tarball-install prefix (default /usr/local).
+  --no-completion       Tarball install: do not set up shell completion
+                        for repro. (Native and Nix packages install their
+                        completion files themselves.)
   --dry-run             Print the commands that would run; change nothing.
   --yes                 Do not prompt.
   -h, --help            This text.
@@ -247,6 +257,7 @@ Environment (see the comment block at the top of this file):
   REPRO_VERIFY_SCRIPT   Path to repro-verify-release.sh (tarball method).
   REPRO_ALLOW_TEST_KEY=1
                         Pass --allow-test-key to the verifier.
+  REPRO_NO_COMPLETION=1 The same as --no-completion.
   REPRO_NIX_BRANCH      Branch of the nixpkgs fork to use (nix, nixos), by
                         its full name (nixos-26.05-metacraft); default:
                         the one matching this system's channel.
@@ -259,6 +270,7 @@ while [ $# -gt 0 ]; do
     --version) [ $# -ge 2 ] || die '--version requires an argument'; want_version="$2"; shift 2 ;;
     --prefix) [ $# -ge 2 ] || die '--prefix requires an argument'; TARBALL_PREFIX="$2"; shift 2 ;;
     --uninstall|--remove) do_uninstall=1; shift ;;
+    --no-completion) no_completion=1; shift ;;
     --dry-run) dry_run=1; shift ;;
     # Accepted and ignored, deliberately. This installer NEVER prompts —
     # a prompt in a `curl | sh` pipeline has no tty and hangs — so there
@@ -788,10 +800,20 @@ directory listing is not a release policy, and guessing is worse.'
   : > "$TARBALL_MANIFEST"
   rm -rf "$_home"
   mkdir -p "$_home" "$TARBALL_PREFIX/bin"
-  for _sub in bin lib; do
-    [ -d "$_top/$_sub" ] || continue
-    cp -a "$_top/$_sub" "$_home/$_sub"
-  done
+  # The WHOLE archive tree, as the native packages install it, not a list
+  # of known subdirectories. The archive's share/repro carries the sources
+  # an installed repro compiles recipes against (found at
+  # <prefix>/share/repro/source from the binary's own location) and the
+  # shell completion scripts; a copy of only bin/ and lib/ left a tarball
+  # install without either.
+  cp -a "$_top/." "$_home/"
+  # Owned by root and writable by no one else. `tar -x` run as root keeps
+  # the archive's owners (the release builder's uid), and this tree holds
+  # the binary the installer runs as root for a system-wide completion
+  # registration, and that every user runs: a local account that happens
+  # to have the builder's uid must not be able to replace it.
+  chown -R 0:0 "$_home" || die "could not make $_home owned by root"
+  chmod -R go-w "$_home" || die "could not make $_home writable by root only"
   # Recorded as one directory, so --uninstall removes exactly it.
   printf '%s\n' "$_home" >> "$TARBALL_MANIFEST"
   for _c in "$_home/bin"/*; do
@@ -805,15 +827,160 @@ directory listing is not a release policy, and guessing is worse.'
     printf '%s\n' "$TARBALL_PREFIX/bin/$_b" >> "$TARBALL_MANIFEST"
   done
   printf '%s\n' "$_ver" > "$(dirname "$TARBALL_MANIFEST")/version"
+  setup_tarball_completion "$_home/bin/repro"
   log "tarball install complete under $TARBALL_PREFIX (manifest: $TARBALL_MANIFEST)"
   log 'NOTE: a tarball install does NOT receive native updates. Re-run this
 installer, or switch to a repository install, to upgrade.'
+}
+
+# ---------------------------------------------------------------------
+# Shell completion for a tarball install
+# ---------------------------------------------------------------------
+# A native package (deb, rpm, pacman) and the Nix package install repro's
+# completion files in the system locations their shells read, so those
+# methods add nothing here: a second, per-user registration would load the
+# same script twice. A tarball install has no package to do it, so the
+# installer asks the binary it just installed to register completion with
+# `repro hooks ensure --shell-autocomplete`, which writes each shell's file
+# (and, where a shell needs one, a marked block in its rc file) and leaves an
+# up-to-date registration alone:
+#
+#   * run under sudo, it registers for the user who ran sudo (`--profile`,
+#     executed AS that user, so every file it writes is theirs and lands in
+#     their home, never in /root);
+#   * run by root with no invoking user, it registers for every user of the
+#     machine (`--system`, under /usr/local/share).
+#
+# --no-completion or REPRO_NO_COMPLETION=1 skips it. What was done is
+# recorded in $TARBALL_COMPLETION_RECORD, and --uninstall undoes exactly
+# that, with the same binary, before the binary is removed.
+
+# valid_completion_user <name>: succeeds when <name> is an existing account
+# whose uid is not 0, spelled as a plain login name. The name is passed to
+# `sudo -u`, which reads a leading `#` as a numeric uid (`#0` is root) and
+# would take a leading `-` for an option, so only the portable login-name
+# characters are accepted (POSIX "Portable Filename Character Set", with no
+# leading hyphen), and the account must resolve with `id`.
+valid_completion_user() {
+  case "$1" in
+    ''|-*|*[!A-Za-z0-9._-]*) return 1 ;;
+  esac
+  _uid="$(id -u -- "$1" 2>/dev/null)" || return 1
+  [ -n "$_uid" ] && [ "$_uid" != '0' ]
+}
+
+# The invoking user to register for, or empty for a system-wide
+# registration. sudo sets SUDO_USER; root's own sudo (SUDO_USER=root, or
+# another name for uid 0) has no other user to act for. A SUDO_USER that
+# names no usable account prints `-`: the caller registers nothing rather
+# than fall back to a system-wide registration nobody asked for.
+completion_target_user() {
+  [ -n "${SUDO_USER:-}" ] || return 0
+  if valid_completion_user "$SUDO_USER"; then
+    printf '%s\n' "$SUDO_USER"
+  elif [ "$SUDO_USER" = 'root' ] || [ "$(id -u -- "$SUDO_USER" 2>/dev/null)" = '0' ]; then
+    return 0
+  else
+    printf '%s\n' '-'
+  fi
+}
+
+# record_field <name>: one `name=value` line of the completion record.
+record_field() {
+  sed -n "s/^$1=//p" "$TARBALL_COMPLETION_RECORD" 2>/dev/null | head -n 1
+}
+
+# run_completion_hooks <ensure|uninstall> <repro> <profile|system> [user]
+# From `/`: the command must not depend on, or look for a workspace in,
+# whatever directory the installer was started from (which the invoking
+# user may not even be able to read when it is root's).
+run_completion_hooks() {
+  _verb="$1"; _bin="$2"; _scope="$3"; _user="${4:-}"
+  if [ "$_scope" = 'profile' ]; then
+    valid_completion_user "$_user" || {
+      warn "cannot $_verb shell completion for '$_user': not an existing non-root account"
+      return 1
+    }
+    command -v sudo >/dev/null 2>&1 || {
+      warn "cannot $_verb shell completion for $_user: sudo is not on PATH"
+      return 1
+    }
+    ( cd / && sudo -u "$_user" -H -- "$_bin" hooks "$_verb" --shell-autocomplete --profile )
+  else
+    ( cd / && "$_bin" hooks "$_verb" --shell-autocomplete --system )
+  fi
+}
+
+# Undo the registration the record describes, if any, and drop the record.
+undo_tarball_completion() {
+  [ -f "$TARBALL_COMPLETION_RECORD" ] || return 0
+  _scope="$(record_field scope)"
+  _user="$(record_field user)"
+  _bin="$(record_field repro)"
+  if [ -n "$_scope" ] && [ -x "$_bin" ]; then
+    if run_completion_hooks uninstall "$_bin" "$_scope" "$_user"; then
+      log "removed the shell completion registered ${_user:+for $_user }($_scope)"
+    else
+      warn "could not remove all of the shell completion registered ${_user:+for $_user }($_scope); see the lines above"
+    fi
+  else
+    warn "the completion record $TARBALL_COMPLETION_RECORD names no usable scope or binary; left the shells' completion as it is"
+  fi
+  rm -f "$TARBALL_COMPLETION_RECORD"
+}
+
+setup_tarball_completion() {
+  _bin="$1"
+  _user="$(completion_target_user)"
+  if [ "$_user" = '-' ]; then
+    warn "shell completion: SUDO_USER '$SUDO_USER' is not an existing non-root account; not set up"
+    return 0
+  fi
+  if [ -n "$_user" ]; then _scope='profile'; else _scope='system'; fi
+  # A previous install registered differently (another user, the other
+  # scope, or not at all now): undo it, so a re-run never leaves a second
+  # registration behind.
+  if [ -f "$TARBALL_COMPLETION_RECORD" ]; then
+    if [ "$no_completion" -eq 1 ] \
+       || [ "$(record_field scope)" != "$_scope" ] \
+       || [ "$(record_field user)" != "$_user" ]; then
+      undo_tarball_completion
+    fi
+  fi
+  if [ "$no_completion" -eq 1 ]; then
+    log 'shell completion: not set up (--no-completion)'
+    return 0
+  fi
+  [ -x "$_bin" ] || {
+    warn "shell completion: $_bin is not executable; not set up"
+    return 0
+  }
+  log "setting up shell completion for repro (${_user:+user $_user, }$_scope)"
+  # Recorded before it runs: a registration that half-succeeded is still
+  # one that --uninstall must undo.
+  printf 'scope=%s\nuser=%s\nrepro=%s\n' "$_scope" "$_user" "$_bin" > "$TARBALL_COMPLETION_RECORD"
+  # Completion is a convenience on top of a working install, so a refusal
+  # (for example another tool's file at one of the paths) is reported, not
+  # turned into a failed install.
+  if ! run_completion_hooks ensure "$_bin" "$_scope" "$_user"; then
+    if [ -n "$_user" ]; then _how="repro hooks ensure --shell-autocomplete --profile   (as $_user)"
+    else _how='repro hooks ensure --shell-autocomplete --system   (as root)'
+    fi
+    warn "shell completion was not fully set up; see the lines above. Re-run it with:
+  $_how"
+  fi
 }
 
 remove_tarball() {
   if [ ! -f "$TARBALL_MANIFEST" ]; then
     log "no tarball install manifest at $TARBALL_MANIFEST; nothing to remove"
     return 0
+  fi
+  # Before the binary goes: it is what removes its own registration.
+  if [ "$dry_run" -eq 1 ]; then
+    [ ! -f "$TARBALL_COMPLETION_RECORD" ] || log "DRY-RUN would remove the shell completion recorded in $TARBALL_COMPLETION_RECORD"
+  else
+    undo_tarball_completion
   fi
   while IFS= read -r _p; do
     [ -n "$_p" ] || continue

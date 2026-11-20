@@ -25,6 +25,19 @@
 ##      `.aborted/<id>-incomplete/`. This catches the case where the
 ##      marker write itself raced with a power loss before the
 ##      pipeline could ever write its first state-dir byte.
+##   5. A quarantined generation that step 9 committed still has the
+##      `profile` store root `writeGeneration` registered for it, named by
+##      this state directory and its id (`profileRootId`);
+##      left in place, it keeps the generation's prefixes live through
+##      store GC although no generation accounts for them.
+##      `releaseQuarantinedRoots` deletes it. The apply calls it after its
+##      own switch, just before its eager GC, and on its no-op path --
+##      never here, at the start: the usual next step after a crash is to
+##      run the same profile again, which reproduces the same id, and its
+##      prefixes must stay held until that apply has committed the
+##      generation again. Working from what `.aborted/` holds, not from
+##      what one recovery moved, also releases a root that a kill between
+##      the move and the release, or an older build's recovery, left.
 ##
 ## The current pointer is never moved here — rotation lives in
 ## `./current_rotation.nim`, after the commit. On Windows the stable
@@ -36,6 +49,7 @@ import std/[os, strutils, times]
 from repro_core/paths import extendedPath
 
 import repro_home_generations
+import repro_local_store
 
 import ./current_rotation
 
@@ -129,6 +143,62 @@ proc quarantineGenerationDir(stateDir, generationId, reason: string):
     raise newException(IOError,
       "could not quarantine aborted generation " & src & " -> " & result &
       ": " & err.msg)
+
+proc quarantinedGenerationId(leaf: string): string =
+  ## The generation id a `.aborted/` entry was named after
+  ## (`<id>-<reason>-<timestamp>`, `generationIdHex`: lowercase hex), or ""
+  ## for an entry this module did not name.
+  let dash = leaf.find('-')
+  result = if dash < 0: leaf else: leaf[0 ..< dash]
+  if result.len != 2 * GenerationIdSize:
+    return ""
+  for ch in result:
+    if ch notin {'0'..'9', 'a'..'f'}:
+      return ""
+
+proc releaseQuarantinedRoots*(stateDir: string; store: var Store):
+    seq[string] =
+  ## Delete the `profile` root of every generation id quarantined under
+  ## `.aborted/` that has no directory under `generations/` and is not the
+  ## one `current` names. Returns the ids whose roots were deleted
+  ## (deleting a root that is already gone changes nothing).
+  ##
+  ## Only this state directory's root for the id is deleted
+  ## (`profileRootId`). Another state directory that uses the same store
+  ## and applied the same profile has the same generation id and holds it
+  ## through a root of its own, which this cannot see and never touches.
+  ## Nor does it touch a root named by the bare id, which an earlier build
+  ## registered: that one may be all another state directory holds the
+  ## generation through.
+  ##
+  ## An id that still names a directory under `generations/` keeps its
+  ## root: generation ids are content-addressed, so the same profile
+  ## applied again since the crash recreated the generation, and it holds
+  ## its prefixes through the same root. Only real directories count, in
+  ## `.aborted/` and in `generations/`: a symlink is neither a quarantined
+  ## generation nor a live one.
+  let aborted = abortedDir(stateDir)
+  if not dirExists(extendedPath(aborted)):
+    return @[]
+  # No key, no root of this state directory's to delete: it registered
+  # none under one. The key is never created here.
+  let key = existingStateDirRootKey(stateDir)
+  if key.len == 0:
+    return @[]
+  let active = readCurrentGenerationId(stateDir)
+  # TODO(win-longpath): walk results escape; needs review
+  for kind, entry in walkDir(aborted, relative = false):
+    if kind != pcDir:
+      continue
+    let id = quarantinedGenerationId(extractFilename(entry))
+    if id.len == 0 or id == active or id in result:
+      continue
+    let live = generationDir(stateDir, id)
+    if dirExists(extendedPath(live)) or symlinkExists(extendedPath(live)):
+      continue
+    result.add(id)
+  for id in result:
+    store.deleteRoot(profileRootIdForKey(key, id))
 
 proc recoverPartialApply*(stateDir: string): seq[AbortedGenerationRecord] =
   ## Run partial-apply recovery on startup of `repro home apply`.
