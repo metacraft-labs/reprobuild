@@ -1145,6 +1145,17 @@ proc archiveRouteFor*(packageId: string;
 # Resolution
 # ---------------------------------------------------------------------------
 
+proc declaredAvailability(packageId: string;
+                          useDef: InterfaceToolUse): PackageAvailability =
+  ## The package's declared ``platforms:`` (PMC-1): the linked definition's
+  ## when it declares one, else the declaration the projected interface
+  ## artifact carries (envelope v35) -- which is how a reference resolved
+  ## from the ``reprobuild-packages`` catalog, whose definition is not linked
+  ## into this process, is gated at all.
+  result = packageAvailability(packageId)
+  if not result.declared:
+    result = availabilityOf(useDef)
+
 proc resolveProfilePackage*(packageId: string;
                             target: RealizationTarget;
                             policy: SelectionPolicy;
@@ -1185,7 +1196,7 @@ proc resolveProfilePackage*(packageId: string;
     lockIdentity: lockIdentity,
     availability:
       if availability.isSome: availability.get
-      else: packageAvailability(packageId),
+      else: declaredAvailability(packageId, useDef),
     probeNames: probeNames,
     definitionKnown: projected.known,
     inventory: inventory)

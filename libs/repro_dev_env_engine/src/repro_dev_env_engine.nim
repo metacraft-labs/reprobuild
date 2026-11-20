@@ -859,7 +859,11 @@ proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
   for useDef in toolUses:
     if effectiveProvisioning in {tpmUnspecified, tpmNix} and
         useDef.nixProvisioning.len > 0 and
-        nixServesTarget(hostRealizationTarget()):
+        nixServesTarget(hostRealizationTarget()) and
+        # A package declared for other platforms provisions nothing here; its
+        # own resolution refuses it by reason, per tool, as the activation
+        # degrades for any other unresolvable tool.
+        isAvailableForUse(useDef, hostRealizationTarget()):
       # Use the same acquisition edges as build-time tool resolution. Their
       # metadata binds selector ownership, their checksum inputs invalidate
       # edited flake files, and expression-file acquisitions stay uncacheable.

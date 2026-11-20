@@ -13752,6 +13752,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if tarballFallThrough and
           not tarballModeFallsThroughToFromSource(useDef):
         continue
+      # Selection step 1 before a sibling recipe is looked for, let alone
+      # built: a package declared not to exist on the platform this use is
+      # realized for is refused by that reason here, as `toolProfileFor`
+      # refuses it in every mode.
+      refuseUnavailableForUse(useDef, hostRealizationTarget())
       if tarballFallThrough:
         let scopeRefusal = tarballModeHostToolchainRefusal(useDef)
         if scopeRefusal.len > 0:

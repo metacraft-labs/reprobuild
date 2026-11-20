@@ -32026,7 +32026,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unrouted_private_repo_refuses_loudly.nim",
@@ -32067,6 +32067,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_untracked_inputs_flag_read_set_and_strict.nim",
     binary: "build/test-bin/t_untracked_inputs_flag_read_set_and_strict",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g16",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim",
+    binary: "build/test-bin/t_uses_refuses_a_package_declared_for_another_platform",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,
