@@ -27,6 +27,7 @@
 ## subject is a foreign provisioner is worthless if the absence of that
 ## provisioner reads as success.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
   unittest]
 
@@ -80,7 +81,7 @@ proc runTool(exe: string; args: openArray[string]; workDir = "";
     shArgs.add(arg)
   var process = startProcess(bashExe(), workDir, shArgs, env, {})
   try:
-    let outText = process.outputStream().readAll()
+    let outText = drainStream(process.outputStream)
     let code = process.waitForExit()
     var errText = ""
     if fileExists(errPath):

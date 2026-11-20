@@ -69,6 +69,7 @@
 ## while everything about the patch stays green — which is the failure that
 ## motivated asserting the kernel's answer rather than the return code.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, unittest]
 # Agent sockets go in a short directory under /tmp, not under the scratch
 # tree: on a runner whose work directory is long (the persistent benchmark
@@ -209,7 +210,7 @@ int main(int argc, char **argv) {
       changedFiles = ["src/patchable.c"],
       changedTypes = []))
     connection.close()
-    let output = process.outputStream.readAll()
+    let output = drainStream(process.outputStream)
     let code = process.waitForExit()
     process.close()
     if code != 0:

@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support
@@ -14,7 +15,7 @@ proc configure(root: string; fresh: bool): tuple[output: string, exitCode: int] 
   let process = startProcess(argv[0], args = argv[1 .. ^1],
     options = {poStdErrToStdOut})
   defer: process.close()
-  result.output = process.outputStream.readAll()
+  result.output = drainStream(process.outputStream)
   result.exitCode = process.waitForExit()
 
 suite "CMake fresh configuration":

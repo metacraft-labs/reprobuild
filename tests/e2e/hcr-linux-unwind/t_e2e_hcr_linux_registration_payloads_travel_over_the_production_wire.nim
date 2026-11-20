@@ -64,6 +64,7 @@
 ## with NO registration and the unwinder unable to answer. That separates "the
 ## payloads did the registration" from "patching happens to register things".
 
+from repro_core/process_streams import drainStream
 import std/[json, monotimes, options, os, osproc, streams, strtabs, strutils,
             times, unittest]
 
@@ -229,7 +230,7 @@ int patchable_value(int iteration) {
       changedTypes = [])
     result.delivery = client.deliverPatchRequest(connection, request)
     connection.close()
-    let output = process.outputStream.readAll()
+    let output = drainStream(process.outputStream)
     let code = process.waitForExit()
     process.close()
     if code != 0:
@@ -301,7 +302,7 @@ int patchable_value(int iteration) {
         "watch subscription", timeoutMs = 120_000)
       writeFile(sourcePath, NewSource)
 
-      let targetOutput = targetProcess.outputStream.readAll()
+      let targetOutput = drainStream(targetProcess.outputStream)
       let targetCode = targetProcess.waitForExit()
       targetProcess.close()
       let watchCode = watch.waitForExit()

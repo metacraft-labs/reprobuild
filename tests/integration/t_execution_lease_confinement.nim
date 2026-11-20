@@ -106,6 +106,7 @@
 ## MOCK POLICY — none. The "daemon" is the shipped `repro daemon serve`
 ## process; its control socket and state directory are the real ones.
 
+from repro_core/process_streams import drainStream
 import std/[asyncdispatch, asyncnet, nativesockets, net, os, osproc, posix, streams,
             strtabs, strutils, times,
             unittest]
@@ -803,7 +804,7 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         env[InterposeChildEnv] = base
         let child = startProcess(getAppFilename(), env = env,
           options = {poStdErrToStdOut})
-        let childOut = child.outputStream.readAll()
+        let childOut = drainStream(child.outputStream)
         let code = child.waitForExit()
         child.close()
         checkpoint("child exit " & $code & ":\n" & childOut)

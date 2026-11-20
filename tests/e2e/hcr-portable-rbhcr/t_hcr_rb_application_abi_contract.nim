@@ -111,6 +111,7 @@
 ##    exits 0 is the defect `codetracer-specs/Testing/
 ##    Silent-Self-Pass-Audit-2026-08-23.md` exists to inventory.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, strutils, unittest]
 
 import repro_hcr_agent/application_abi
@@ -433,7 +434,7 @@ when ReproHcrApplicationAbiAvailable:
     result.delivery = client.deliverPatchRequest(connection, request)
     connection.close()
 
-    result.targetOutput = process.outputStream.readAll()
+    result.targetOutput = drainStream(process.outputStream)
     let exitCode = process.waitForExit()
     process.close()
     if exitCode != 0:

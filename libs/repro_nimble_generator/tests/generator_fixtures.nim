@@ -23,6 +23,7 @@
 ## <commit>.tar.gz`, made by `git archive` with the forge's single top
 ## directory `<repo>-<commit>/`).
 
+from repro_core/process_streams import drainStream
 import std/[exitprocs, nativesockets, net, options, os, osproc, random, streams, strtabs, strutils, tables, tempfiles, times]
 
 import repro_nimble_generator
@@ -73,7 +74,7 @@ proc run*(args: openArray[string]; cwd = ""; env: StringTableRef = nil;
     env = env, options = {poUsePath, poStdErrToStdOut})
   if input.len > 0: p.inputStream.write(input)
   p.inputStream.close()
-  result = p.outputStream.readAll()
+  result = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   if code != 0:
@@ -169,7 +170,7 @@ proc cgi(cfg: ServerConfig; req: auto): string =
     options = {})
   p.inputStream.write(req.body)
   p.inputStream.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   discard p.waitForExit()
   p.close()
   let sep = output.find("\r\n\r\n")
@@ -247,7 +248,7 @@ proc serve(cfg: ServerConfig) {.thread.} =
                 let p = startProcess(cfg.gitBin, args = ["--git-dir=" & repo,
                   "archive", "--format=tar.gz", "--prefix=" & parts[1] & "-" &
                   commit & "/", commit], options = {})
-                let body = p.outputStream.readAll()
+                let body = drainStream(p.outputStream)
                 let code = p.waitForExit()
                 p.close()
                 if code == 0:

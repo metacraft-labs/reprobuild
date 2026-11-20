@@ -46,6 +46,7 @@
 ## instance was built from the older definition. §4.6: "a contribution to
 ## an absent point is the refusing row, not the warning row".
 
+from repro_core/process_streams import drainStream
 import std/[options, os, osproc, strtabs, streams, strutils, tempfiles,
     times, unittest]
 
@@ -236,7 +237,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
   var process = startProcess(program, args = @args, workingDir = cwd,
     env = env, options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()

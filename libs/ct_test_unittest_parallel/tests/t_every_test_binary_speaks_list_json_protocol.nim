@@ -6,6 +6,7 @@
 ## (three tests across two suites), invoke it with ``--list-json``,
 ## parse the output as JSON, and assert against the expected shape.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils]
 import std/unittest
 from repro_test_support import ctShimFixturePath, requireBinary,
@@ -61,8 +62,8 @@ proc runProtocolCommand(binary, argument: string): tuple[output: string;
   let input = process.inputStream
   if input != nil:
     input.close()
-  result.output = process.outputStream.readAll()
-  result.stderrOutput = process.errorStream.readAll()
+  result.output = drainStream(process.outputStream)
+  result.stderrOutput = drainStream(process.errorStream)
   result.exitCode = process.waitForExit()
 
 suite "t_every_test_binary_speaks_list_json_protocol":

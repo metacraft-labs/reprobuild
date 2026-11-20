@@ -13,6 +13,7 @@
 ## `isAddonHost` tests for. (Both paths parse the command line with repro's
 ## generated parser first, so an unknown flag no longer tells them apart.)
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_cli_support/infra
@@ -35,7 +36,7 @@ proc dispatch(mode: string; args: seq[string] = @[];
       child.terminate()
       discard child.waitForExit()
       raise newException(IOError, "usage-only dispatcher did not return")
-    result.output = child.outputStream.readAll()
+    result.output = drainStream(child.outputStream)
   finally:
     child.close()
 

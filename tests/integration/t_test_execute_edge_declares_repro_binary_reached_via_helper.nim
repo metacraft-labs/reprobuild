@@ -86,6 +86,7 @@
 ## classifier's rule — refused AND really off the pin — so it supplies both
 ## halves explicitly and checks each one alone keeps the arm red.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, streams, strtabs, strutils, tempfiles, unittest]
 import repro_lock
 import repro_test_support
@@ -202,7 +203,7 @@ proc gitCommitOf(checkout, rev: string): string =
         "--verify", "--quiet", "--end-of-options", rev & "^{commit}"],
       env = env, options = {})
     defer: p.close()
-    let output = p.outputStream.readAll()
+    let output = drainStream(p.outputStream)
     if p.waitForExit() != 0:
       return ""
     output.strip()

@@ -152,6 +152,7 @@ proc startSpineDaemon(root: string): SpineDaemon =
   # looking in the wrong place.
   var diagnostic = ""
   if not process.running:
+    # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
     try: diagnostic = process.outputStream.readAll() except CatchableError: discard
   else:
     process.terminate()

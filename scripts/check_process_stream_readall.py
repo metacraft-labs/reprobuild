@@ -35,15 +35,23 @@ The reason is mandatory.
 WHAT IS SCANNED
 ===============
 
-Product and tool sources: ``libs/*/src``, ``apps`` and ``tools`` ``.nim``
-files outside ``tests/`` directories and outside vendored third-party
-libraries. Test code is not scanned. The scan sees the syntactic shape
+Every tracked ``.nim`` file outside the third-party libraries vendored under
+``libs/``: product and tool sources, recipes and examples, and test,
+benchmark and test-support code as well. A test
+that reads its child with ``readAll`` checks less than it claims on Windows,
+or fails there: ``t_dev_env_msvc_activation`` got the first of its child's
+two lines on every run (reprobuild-pm issue 2026-11-16, "Test code reads
+child output with ``Stream.readAll``"). The scan sees two syntactic shapes,
 ``<expr>.outputStream.readAll()`` / ``.errorStream`` (with or without call
-parentheses), not a stream bound to a name first; bind it and call
-``drainStream`` on it instead.
+parentheses, which may hold the process: ``outputStream(p).readAll()``) and
+``readAll(<expr>.outputStream)``, each on one line, and the ``peekable``
+streams the same way. It does not see a stream bound to a
+name first, a call split over two lines, or a stream that is itself the
+result of a call inside ``readAll(...)``; a reviewer still has to. Bind the
+stream and call ``drainStream`` on it instead.
 
-``python3 scripts/check_process_stream_readall.py --self-test`` proves every
-refused shape is caught and every allowed shape passes.
+``python3 scripts/check_process_stream_readall.py --self-test`` proves each
+shape listed above is caught and each allowed shape passes.
 """
 import argparse
 import pathlib
@@ -54,25 +62,31 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 SELF = "scripts/check_process_stream_readall.py"
 
-# Vendored third-party libraries under libs/ that are not Metacraft code.
-VENDORED = ("libs/nim-stew/",)
+# Vendored third-party libraries under libs/ that are not Metacraft code: the
+# ones libs/third_party_sources.txt lists, and nim-toml-serialization, which
+# it omits. A waiver cannot be written into them. blake3, cbor, gxhash and
+# xxh3 are Metacraft's own code (libs/README.md) and are scanned.
+VENDORED = tuple(f"libs/{name}/" for name in (
+    "nim-faststreams", "nim-json-serialization", "nim-serialization",
+    "nim-ssz-serialization", "nim-stew", "nim-toml-serialization",
+    "nimcrypto", "results", "stint"))
+
+# A full scan covers about 5700 files, 1950 of them under ``tests/``. Fewer
+# than this means part of the tree is missing and the scan proves nothing.
+MINIMUM_FILES = 4000
 
 ANNOTATION = re.compile(r"readall-ok:\s*\S")
 REFUSED = re.compile(
-    r"\b(outputStream|errorStream)\s*(\(\s*\))?\s*\.\s*readAll\b")
+    r"\b(?:outputStream|errorStream|peekableOutputStream|peekableErrorStream)"
+    r"\s*(?:\([^()#]*\))?\s*\.\s*readAll\b"
+    r"|\breadAll\s*\(\s*[^()#]*\b(?:outputStream|errorStream|"
+    r"peekableOutputStream|peekableErrorStream)\b")
 
 
 def in_scope(path: str) -> bool:
     if not path.endswith(".nim"):
         return False
-    if path.startswith(VENDORED):
-        return False
-    parts = path.split("/")
-    if "tests" in parts:
-        return False
-    if path.startswith("libs/"):
-        return len(parts) > 2 and parts[2] == "src"
-    return path.startswith(("apps/", "tools/"))
+    return not path.startswith(VENDORED)
 
 
 def scanned_files(root: pathlib.Path) -> list[str]:
@@ -111,19 +125,33 @@ let i = p.outputStream.readAll()
 let j = p.outputStream.readAll()
 # readall-ok:
 let k = p.outputStream.readAll()
+let l = streams.readAll(p.outputStream)
+let m = readAll(p.errorStream())
+let n = readAll(f)
+let o = readAll(p.outputStream) # readall-ok: descendant holds the pipe
+let q = p.peekableOutputStream.readAll()
+let r = outputStream(p).readAll()
 """
 # Lines 4-5 (a call split over two lines) are not recognised: see the header.
-SELF_TEST_EXPECTED = {1, 2, 3, 12, 14}
+SELF_TEST_EXPECTED = {1, 2, 3, 12, 14, 15, 16, 19, 20}
 
 SELF_TEST_SCOPE = {
     "libs/repro_core/src/repro_core/process_streams.nim": True,
     "libs/repro_build_engine/src/repro_build_engine.nim": True,
     "apps/repro-trampoline/repro_trampoline.nim": True,
     "tools/test-runner/repro_test_runner.nim": True,
-    "libs/repro_core/tests/t_x.nim": False,
-    "tools/catalog-harvester/tests/t_x.nim": False,
-    "tests/unit/t_x.nim": False,
+    "libs/repro_core/tests/t_x.nim": True,
+    "libs/repro_test_support/src/repro_test_support/output_drain.nim": True,
+    "tools/catalog-harvester/tests/t_x.nim": True,
+    "apps/repro-trampoline/tests/t_x.nim": True,
+    "tests/unit/t_x.nim": True,
+    "tests/windows/x.nim": True,
+    "benchmarks/lib/x.nim": True,
+    "tests/unit/t_x.py": False,
     "libs/nim-stew/src/stew/io2.nim": False,
+    "libs/nim-faststreams/tests/test_x.nim": False,
+    "libs/blake3/src/blake3.nim": True,
+    "recipes/x/repro.nim": True,
     "scripts/x.py": False,
     SELF: False,
 }
@@ -159,7 +187,7 @@ def main() -> int:
         print("check_process_stream_readall: self-test OK")
         return 0
     paths = args.paths if args.paths else scanned_files(ROOT)
-    if not args.paths and len(paths) < 500:
+    if not args.paths and len(paths) < MINIMUM_FILES:
         print(f"error: only {len(paths)} files in scope; the scan is too small "
               "to trust", file=sys.stderr)
         return 2

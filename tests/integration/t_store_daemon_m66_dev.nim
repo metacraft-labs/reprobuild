@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, re, streams, strtabs, strutils, tempfiles,
     times, unittest]
 
@@ -256,8 +257,8 @@ when isNixSupported:
       writeFile(barrier, "go")
       let rc1 = p1.waitForExit()
       let rc2 = p2.waitForExit()
-      if rc1 != 0: checkpoint(p1.outputStream.readAll())
-      if rc2 != 0: checkpoint(p2.outputStream.readAll())
+      if rc1 != 0: checkpoint(drainStream(p1.outputStream))
+      if rc2 != 0: checkpoint(drainStream(p2.outputStream))
       check rc1 == 0
       check rc2 == 0
       p1.close()
@@ -315,7 +316,7 @@ when isNixSupported:
         env = env,
         options = {poStdErrToStdOut})
       let secondRc = second.waitForExit()
-      let secondOut = second.outputStream.readAll()
+      let secondOut = drainStream(second.outputStream)
       second.close()
       check secondRc != 0
       check secondOut.contains("daemon lock held")
@@ -368,7 +369,7 @@ when isNixSupported:
       discard daemon.waitForExit()
       daemon.close()
       let clientRc = client.waitForExit()
-      let clientOut = client.outputStream.readAll()
+      let clientOut = drainStream(client.outputStream)
       client.close()
       check clientRc != 0
       check not fileExists(statusSlow)
@@ -454,7 +455,7 @@ when isNixSupported:
 
       stopIfRunning(endpoint)
       let rc = daemon.waitForExit()
-      let daemonOut = daemon.outputStream.readAll()
+      let daemonOut = drainStream(daemon.outputStream)
       daemon.close()
       check rc == 0
       check daemonOut.contains("rebuilt corrupt index.db")

@@ -1,6 +1,7 @@
 ## Real git checkouts, locks and child processes; no mocks. Both actual fetch
 ## callers contend with another process for the unchanged 120-second default.
 ## Only two contenders run at once; the holder waits on an explicit release.
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 from repro_test_support/process_fixtures import releaseDirAtProcessExit
 when defined(posix):
@@ -82,7 +83,7 @@ suite "lock refusal preserves action and publication contracts":
     let publication = headPublicationOf(identity, checkout, "origin")
     check publication.status == hpsUnknown
     check publication.diagnostic.startsWith("could not lock checkout for publication fetch:")
-    checkpoint(fetcher.outputStream.readAll())
+    checkpoint(drainStream(fetcher.outputStream))
     check fetcher.waitForExit() == 0
     check not fileExists(receipt)
     check not fileExists(checkout / ".git" / "FETCH_HEAD")

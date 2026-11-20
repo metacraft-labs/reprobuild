@@ -26,6 +26,7 @@
 ## walks the entries itself, and so must refuse an entry that escapes the
 ## destination itself. Both are pinned here.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 from std/sysrand import urandom
 import repro_test_support/process_fixtures
@@ -116,9 +117,7 @@ proc runArgv(argv: seq[string]; tempDir = ""; extraEnv: StringTableRef = nil): R
   let process = startProcess(argv[0], args = argv[1 .. ^1], env = env,
     options = {poUsePath, poStdErrToStdOut})
   defer: process.close()
-  let stream = process.outputStream
-  while not stream.atEnd():
-    result.output.add(stream.readAll())
+  result.output = drainStream(process.outputStream)
   result.exitCode = process.waitForExit()
 
 proc makeFixture(ps, path: string; entries: int; escape = false) =

@@ -1188,6 +1188,7 @@ proc startRedirectFixture(top: string): RedirectFixture =
     # Not started: stop it here, as no caller's defer holds it yet.
     result.server.kill()
     discard result.server.waitForExit()
+    # readall-ok: diagnostic from a server that left or was stopped; a descendant may hold the pipe
     let early = ready & result.server.outputStream.readAll()
     result.server.close()
     doAssert false, "redirect fixture did not start:\n" & early

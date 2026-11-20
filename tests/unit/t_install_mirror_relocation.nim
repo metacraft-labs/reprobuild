@@ -10,6 +10,7 @@
 ## ``DT_RUNPATH`` is a library that goes missing halfway through a program —
 ## so each is asserted on its own, in both directions.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 import repro_project_dsl/install_mirror_relocation
 
@@ -262,7 +263,7 @@ when defined(linux) or defined(macosx):
       options = {poUsePath, poStdErrToStdOut})
     defer: child.close()
     child.inputStream.close()
-    result.output = child.outputStream.readAll()
+    result.output = drainStream(child.outputStream)
     result.exitCode = child.waitForExit()
 
   suite "install mirror ELF reading":

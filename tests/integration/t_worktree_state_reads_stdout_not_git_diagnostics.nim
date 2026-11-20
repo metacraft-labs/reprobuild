@@ -43,6 +43,7 @@
 ##
 ## Hermetic: temp checkouts only, no network. Skips only when git is absent.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support
@@ -100,8 +101,8 @@ proc gitStreams(path: string; args: openArray[string]):
     args = @args, options = {poUsePath})
   defer: process.close()
   result.code = process.waitForExit()
-  result.outText = process.outputStream.readAll()
-  result.errText = process.errorStream.readAll()
+  result.outText = drainStream(process.outputStream)
+  result.errText = drainStream(process.errorStream)
 
 suite "repro_cli_support worktree probes read stdout, not git's diagnostics":
 

@@ -132,6 +132,7 @@
 ## ``isolateFromAmbientCargo``): an inherited ``RUSTFLAGS``, wrapper or
 ## target directory would change cargo's units and not Mode A's.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, sets, streams, strtabs, strutils, tables,
             tempfiles, unittest]
 import repro_test_support/reasoned_skip
@@ -231,7 +232,7 @@ proc runCapture(exe: string; args: openArray[string]; workingDir: string;
     envTab[name] = value
   let p = startProcess(exe, workingDir = workingDir, args = args,
     env = envTab, options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (output, code)

@@ -47,6 +47,7 @@
 ## Hermetic: one ``createTempDir``, local bare repositories only, no network.
 ## Skip rule: ``git`` missing on PATH.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_core/cli_images
@@ -120,7 +121,7 @@ proc run(args: openArray[string]; cwd = getCurrentDir()): CmdResult =
   let process = startProcess(args[0], workingDir = cwd, args = args[1 .. ^1],
     env = ambientEnv(), options = {poStdErrToStdOut, poUsePath})
   defer: process.close()
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   (code: process.waitForExit(), output: output)
 
 proc requireOk(args: openArray[string]; cwd = getCurrentDir()): string =

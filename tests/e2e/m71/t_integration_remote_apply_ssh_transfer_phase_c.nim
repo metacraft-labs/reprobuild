@@ -4,6 +4,7 @@
 ## at target store import: no remote activation runtime, no target
 ## generation pointer rotation, and no public `enable --host --now`.
 
+from repro_core/process_streams import drainStream
 import std/[net, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -52,7 +53,7 @@ proc runProgram(program: string; args: openArray[string];
     processEnv[kv.k] = kv.v
   let p = startProcess(program, args = @args, env = processEnv,
     options = {poUsePath, poStdErrToStdOut})
-  let output = p.outputStream().readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)
@@ -157,6 +158,7 @@ proc startLoopbackSshd(tempRoot: string): SshHarness =
       return
     last = probe.output
     if not result.process.running():
+      # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
       let daemonOutput = result.process.outputStream().readAll()
       doAssert false,
         "M71 Phase C blocker: loopback sshd exited before accepting " &

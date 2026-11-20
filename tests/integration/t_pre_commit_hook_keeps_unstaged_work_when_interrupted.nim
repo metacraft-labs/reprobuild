@@ -60,6 +60,7 @@
 ## POSIX only: the case is about process-group signals delivered to a hook
 ## mid-run, which Windows does not have; it skips there with that reason.
 
+from repro_core/process_streams import drainStream
 import repro_test_support/reasoned_skip
 import std/[os, osproc, sequtils, streams, strtabs, strutils, tempfiles, times,
   unittest]
@@ -124,7 +125,7 @@ proc runIn(fx: Fixture; mode: string; exe: string; args: openArray[string]):
   let p = startProcess(exe, workingDir = fx.repo, args = args,
     env = fx.commandEnv(mode), options = {poUsePath, poStdErrToStdOut})
   defer: p.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   (code: p.waitForExit(), output: output)
 
 proc git(fx: Fixture; args: varargs[string]): tuple[code: int; output: string] =

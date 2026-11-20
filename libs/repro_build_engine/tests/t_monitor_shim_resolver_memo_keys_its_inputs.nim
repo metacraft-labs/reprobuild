@@ -71,6 +71,7 @@
 ## fake: the defect this guards against is exactly a resolver that stops
 ## consulting the real filesystem and the real process state.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_build_engine
@@ -251,7 +252,7 @@ suite "monitor shim resolver memoisation":
     let child = startProcess(childExe, workingDir = workDir,
       args = [NegativeProbeFlag], env = childEnv,
       options = {poStdErrToStdOut})
-    let output = child.outputStream.readAll()
+    let output = drainStream(child.outputStream)
     let status = child.waitForExit()
     child.close()
 

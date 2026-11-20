@@ -36,6 +36,7 @@
 ## The edit leaves the dev-env artifact's own service declarations alone (the
 ## `servicePlaceholder`s stay), so the only thing that differs between A's
 ## extraction and B's is the interface that `repro up` lifts from.
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, times,
     typedthreads, unittest]
 
@@ -169,7 +170,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
   var process = startProcess(program, args = @args, workingDir = cwd,
     env = env, options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()
@@ -235,7 +236,7 @@ proc drain(target: ptr OutputDrain) {.thread.} =
   ## Read `target.stream` to its end. The main thread does not touch
   ## `target` again until it has joined this thread.
   {.cast(gcsafe).}:
-    target.output = target.stream.readAll()
+    target.output = drainStream(target.stream)
 
 proc liftedServiceNames(interfacePath: string): seq[string] =
   for service in readInterfaceArtifact(interfacePath).projectInterface.

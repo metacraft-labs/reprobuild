@@ -23,6 +23,7 @@
 ##
 ## MOCK POLICY: nothing is mocked; the subject is the compiler's verdict.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, unittest]
 
 proc findRepoRoot(): string =
@@ -71,7 +72,7 @@ suite "the add-on entry point type-checks for every release architecture":
           options = {poStdErrToStdOut})
         running.add((arch, process))
       for (arch, process) in running:
-        let output = process.outputStream.readAll()
+        let output = drainStream(process.outputStream)
         let exitCode = process.waitForExit()
         process.close()
         if exitCode != 0:

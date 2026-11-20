@@ -5,6 +5,7 @@
 ##
 ## Every process is spawned from an argv sequence, never through a shell.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, os, osproc, sequtils, sets, streams, strtabs,
   strutils]
 
@@ -20,7 +21,7 @@ proc run*(exe: string; args: openArray[string]; cwd: string;
   ## given, is the child's WHOLE environment.
   let p = startProcess(exe, workingDir = cwd, args = @args, env = env,
     options = {poStdErrToStdOut, poUsePath})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)
@@ -85,8 +86,8 @@ proc evalNixPackageOutPath(): string =
   let p = startProcess("nix", workingDir = ProjectRoot,
     args = ["eval", "--raw", ProjectRoot & "#default.outPath"],
     options = {poUsePath})
-  let output = p.outputStream.readAll()
-  let errors = p.errorStream.readAll()
+  let output = drainStream(p.outputStream)
+  let errors = drainStream(p.errorStream)
   let code = p.waitForExit()
   p.close()
   result = output.strip()

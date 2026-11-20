@@ -27,6 +27,7 @@
 ## `stop.request.json` the listener writes when it accepts a stop, and whether
 ## the listener and the session are still running afterwards.
 
+from repro_core/process_streams import drainStream
 import std/[atomics, json, net, os, osproc, streams, strtabs, strutils,
   tempfiles, times, unittest]
 when defined(posix):
@@ -151,6 +152,7 @@ proc startListener(sessionDir: string; extraArgs: openArray[string]): Listener =
   if not waitForReady(readyPath, result.process):
     let output =
       if result.process.running(): ""
+      # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
       else: result.process.outputStream.readAll()
     raise newException(IOError,
       "control-API helper did not publish " & readyPath & "\n" & output)
@@ -498,7 +500,7 @@ suite "dev_session_control_api_access_control":
       discard helper.waitForExit()
       helper.close()
     let exited = helper.exitsSoon()
-    let output = if exited: helper.outputStream.readAll() else: ""
+    let output = if exited: drainStream(helper.outputStream) else: ""
     checkpoint("helper on 0.0.0.0 exited: " & $exited & "\n" & output)
     check exited
     check output.contains("--http-allow-remote")
@@ -560,7 +562,7 @@ suite "dev_session_control_api_access_control":
           discard again.waitForExit()
           again.close()
         let refused = again.exitsSoon()
-        let output = if refused: again.outputStream.readAll() else: ""
+        let output = if refused: drainStream(again.outputStream) else: ""
         checkpoint("helper with a 0755 endpoint dir:\n" & output)
         check refused
         check output.contains(endpointDir)
@@ -602,6 +604,7 @@ suite "dev_session_control_api_access_control":
       let published = waitForReady(sessionDir / "http-ready.json", helper)
       let output =
         if published or helper.running(): ""
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         else: helper.outputStream.readAll()
       checkpoint("helper with XDG_RUNTIME_DIR=" & xdg & "/:\n" & output)
       require published

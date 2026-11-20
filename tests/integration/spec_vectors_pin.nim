@@ -15,6 +15,7 @@
 ## it. A conformance test that quietly stops running has stopped testing
 ## anything.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils]
 
 proc testCertificatesSpecPinFile*(): string =
@@ -34,8 +35,8 @@ proc runSpecGit(dir: string; args: openArray[string]):
                              options = {poUsePath})
   try:
     process.inputStream.close()
-    result.stdout = process.outputStream.readAll()
-    result.stderr = process.errorStream.readAll()
+    result.stdout = drainStream(process.outputStream)
+    result.stderr = drainStream(process.errorStream)
     result.code = process.waitForExit()
   finally:
     process.close()

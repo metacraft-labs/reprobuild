@@ -38,6 +38,7 @@
 ## ``REPRO_CONFORMANCE_STORE`` at a directory that survives between runs, as
 ## for ``t_stdlib_catalog_tarball_arms_realize``, to pay that once per pin.
 
+from repro_core/process_streams import drainStream
 import std/unittest
 
 when defined(windows):
@@ -89,7 +90,7 @@ when defined(windows):
     let process = uncontrolledStartProcess(shellExe,
       args = ["-c", script], env = env, options = {poStdErrToStdOut})
     defer: process.close()
-    let output = process.outputStream.readAll()
+    let output = drainStream(process.outputStream)
     let code = process.waitForExit()
     doAssert code == 0,
       shellExe & " exited " & $code & ": " & output

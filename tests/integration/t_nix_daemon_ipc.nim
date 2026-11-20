@@ -620,7 +620,9 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       echo "=== Daemon Start Failed ==="
       try:
         echo "Process running: ", pProcess.running
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         echo "Daemon stderr: ", pProcess.errorStream.readAll()
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         echo "Daemon stdout: ", pProcess.outputStream.readAll()
       except CatchableError as e:
         echo "Error reading stream: ", e.msg

@@ -37,6 +37,7 @@
 ## Each case resets the failure tally and requires it to be zero at the end,
 ## so a probe that fails is reported with its message and fails its case.
 
+from repro_core/process_streams import drainStream
 import std/[compilesettings, json, os, osproc, streams, strtabs, strutils,
   unittest]
 
@@ -120,7 +121,7 @@ proc nimcacheOf(workDir, project: string; extra: seq[string] = @[];
   try:
     let p = startProcess(nimExe, workingDir = workDir, args = args, env = env,
                          options = {poStdErrToStdOut})
-    output = p.outputStream.readAll()
+    output = drainStream(p.outputStream)
     code = p.waitForExit()
     p.close()
   except CatchableError as e:

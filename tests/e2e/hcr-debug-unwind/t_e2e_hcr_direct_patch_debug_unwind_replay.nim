@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, unittest]
 import repro_test_support/reasoned_skip
 
@@ -39,7 +40,7 @@ proc runTargetWithPacket(targetBin: string; packetBytes: openArray[byte];
     options = {poStdErrToStdOut})
   process.inputStream.writeBytes(packetBytes)
   process.inputStream.close()
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   let exitCode = process.waitForExit()
   process.close()
   if exitCode != 0:

@@ -33,6 +33,7 @@
 ## No silent skips on Linux x86_64. The `skip()` arm exists only for platforms
 ## that are not Linux x86_64.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
 import repro_test_support/reasoned_skip
 when defined(posix):
@@ -175,7 +176,7 @@ when defined(linux) and defined(amd64):
         connection, request("hlx-repatch-note-gen2", bodies[1]))
       connection.close()
 
-      let output = process.outputStream.readAll()
+      let output = drainStream(process.outputStream)
       let exitCode = process.waitForExit()
       process.close()
       checkpoint("target output: " & output)

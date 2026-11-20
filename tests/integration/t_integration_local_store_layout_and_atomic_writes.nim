@@ -26,6 +26,7 @@
 ## emits its outcome to a per-worker JSON status file. This is a real
 ## concurrency exercise — no synchronous stand-ins.
 
+from repro_core/process_streams import drainStream
 import std/[json, monotimes, os, osproc, streams, strutils,
     tempfiles, times, unittest]
 
@@ -226,9 +227,9 @@ suite "integration_local_store_layout_and_atomic_writes":
     let rc1 = p1.waitForExit()
     let rc2 = p2.waitForExit()
     if rc1 != 0:
-      echo "w1 stdout:"; echo p1.outputStream.readAll()
+      echo "w1 stdout:"; echo drainStream(p1.outputStream)
     if rc2 != 0:
-      echo "w2 stdout:"; echo p2.outputStream.readAll()
+      echo "w2 stdout:"; echo drainStream(p2.outputStream)
     check rc1 == 0
     check rc2 == 0
     p1.close()
@@ -299,9 +300,9 @@ suite "integration_local_store_layout_and_atomic_writes":
     let rc1 = p1.waitForExit()
     let rc2 = p2.waitForExit()
     if rc1 != 0:
-      echo "w1 stdout:"; echo p1.outputStream.readAll()
+      echo "w1 stdout:"; echo drainStream(p1.outputStream)
     if rc2 != 0:
-      echo "w2 stdout:"; echo p2.outputStream.readAll()
+      echo "w2 stdout:"; echo drainStream(p2.outputStream)
     check rc1 == 0
     check rc2 == 0
     p1.close()

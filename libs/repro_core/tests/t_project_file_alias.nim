@@ -11,6 +11,7 @@
 ##   non-zero with a stderr message naming both files and the directory.
 ## * A directory with neither file resolves to an empty match.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 import repro_core
@@ -193,8 +194,8 @@ suite "repro_core.project_file: subprocess stderr capture":
       options = {})
     let stdoutStream = p.outputStream
     let stderrStream = p.errorStream
-    discard stdoutStream.readAll()
-    let stderrText = stderrStream.readAll()
+    discard drainStream(stdoutStream)
+    let stderrText = drainStream(stderrStream)
     let exitCode = p.waitForExit()
     p.close()
     check exitCode != 0

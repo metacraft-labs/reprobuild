@@ -48,6 +48,7 @@
 ## the helper subprocess) lives at
 ## `tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim`.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 from repro_core/paths import extendedPath
@@ -764,7 +765,7 @@ suite "installed repro: profile compile source root and compiler":
         if fileExists(objectFile): removeFile(objectFile)
         let p = startProcess(clangExe, args = @["-c"] & options &
           @[source, "-o", objectFile], options = {poStdErrToStdOut})
-        let output = p.outputStream.readAll()
+        let output = drainStream(p.outputStream)
         let code = p.waitForExit()
         p.close()
         checkpoint(output)

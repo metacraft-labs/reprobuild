@@ -37,6 +37,7 @@
 ## When concurrent activations of one project are serialised, the second run
 ## cannot start anything in the dev-env edge while the first holds it, so the
 ## first provider's wait ends at its bound and both runs succeed.
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, typedthreads, unittest]
 import repro_test_support
 import repro_test_support/process_fixtures
@@ -103,7 +104,7 @@ proc drain(target: ptr OutputDrain) {.thread.} =
   ## Read `target.stream` to its end. The main thread does not touch
   ## `target` again until it has joined this thread.
   {.cast(gcsafe).}:
-    target.output = target.stream.readAll()
+    target.output = drainStream(target.stream)
 
 suite "concurrent activations of one project's dev environment":
   test "two concurrent repro exec runs in one project both succeed":
@@ -148,7 +149,7 @@ suite "concurrent activations of one project's dev environment":
         options = {poStdErrToStdOut})
 
     proc finish(process: Process): tuple[output: string; exitCode: int] =
-      result.output = process.outputStream.readAll()
+      result.output = drainStream(process.outputStream)
       result.exitCode = process.waitForExit()
       process.close()
 

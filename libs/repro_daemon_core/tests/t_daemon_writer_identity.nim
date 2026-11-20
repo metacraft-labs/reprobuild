@@ -33,6 +33,7 @@
 ## the stat record format, not a fake process table: they decide no process's
 ## liveness, only how one record's bytes are read.
 
+from repro_core/process_streams import drainStream
 import std/[options, os, osproc, strutils, streams, json, times, unittest]
 
 import repro_daemon_core/writer_identity
@@ -99,7 +100,7 @@ int sysctlbyname(const char *name, void *p, size_t *len, void *np, size_t nl) {
     else: putEnv("DENIED_PID", deniedPid)
     let child = startProcess(getAppFilename(),
       args = @["--probe-shifted-writer", encoded], options = {poStdErrToStdOut})
-    result.output = child.outputStream.readAll()
+    result.output = drainStream(child.outputStream)
     result.exitCode = child.waitForExit()
     child.close()
 
@@ -401,7 +402,7 @@ suite "writer identity recognises a live writer and only a dead one":
         putEnv("DENIED_PID", oldPid)
         if oldBoot.len == 0: delEnv("DENIED_BOOT")
         else: putEnv("DENIED_BOOT", oldBoot)
-        let output = child.outputStream.readAll()
+        let output = drainStream(child.outputStream)
         let status = child.waitForExit()
         child.close()
         checkpoint("denyBoot=" & $denyBoot & " output=" & output)
@@ -433,7 +434,7 @@ suite "writer identity recognises a live writer and only a dead one":
         else: putEnv("DENIED_PID", oldPid)
         if oldBoot.len == 0: delEnv("DENIED_BOOT")
         else: putEnv("DENIED_BOOT", oldBoot)
-        let output = child.outputStream.readAll()
+        let output = drainStream(child.outputStream)
         let status = child.waitForExit()
         child.close()
         checkpoint("denyBoot=" & $denyBoot & " output=" & output)

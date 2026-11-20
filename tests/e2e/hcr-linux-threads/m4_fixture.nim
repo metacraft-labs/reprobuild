@@ -10,6 +10,7 @@
 ## Nothing here mocks anything. The probe shim re-exports the same `static`
 ## functions the live agent calls; it is not a reimplementation.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils]
 
 # Nim parses `../hcr-linux-direct/x` as arithmetic, so the ELF reader HLX-M0
@@ -130,8 +131,8 @@ proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
   let process = startProcess(binary, args = @args, options = {})
   let outStream = process.outputStream
   let errStream = process.errorStream
-  result.output = outStream.readAll()
-  result.stderrText = errStream.readAll()
+  result.output = drainStream(outStream)
+  result.stderrText = drainStream(errStream)
   result.exitCode = process.waitForExit()
   process.close()
   result.crashed = result.exitCode == CrashExitCode and

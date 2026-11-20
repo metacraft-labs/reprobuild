@@ -47,6 +47,7 @@
 ## but the rejection-reason coverage degrades; the e2e validator picks up
 ## that gap by exercising the full path against a real toolchain.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tables, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
@@ -951,7 +952,7 @@ suite "rust convention M4":
         let p = startProcess(argv[0], workingDir = scratch,
           args = argv[1 .. ^1], env = envTab,
           options = {poStdErrToStdOut})
-        let output = p.outputStream.readAll()
+        let output = drainStream(p.outputStream)
         let code = p.waitForExit()
         p.close()
         (output, code)

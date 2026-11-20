@@ -33,6 +33,7 @@
 ## No mocks: real files in temporary directories, the real `repro`, stdout and
 ## stderr read separately so the assertion is about where the report goes.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -71,8 +72,8 @@ proc repro(args: openArray[string]): Run =
   ## The real binary with stdout and stderr kept apart.
   putEnv("REPRO_WORKSPACE_CONFIG", "")
   let p = startProcess(reproBinary(), args = @args, options = {})
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 

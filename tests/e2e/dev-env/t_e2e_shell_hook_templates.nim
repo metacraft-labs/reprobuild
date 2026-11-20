@@ -19,6 +19,7 @@
 ##    (bash -n for bash/zsh, pwsh parser for pwsh). Fish + nushell
 ##    fall through when their interpreters are not on PATH.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, unittest]
 
 import repro_cli_support/dev_env_shell_hook_templates
@@ -31,7 +32,7 @@ proc syntaxCheckBashLocal(script, cwd: string): tuple[ok: bool; diag: string] =
     return (ok: false, diag: "bash not on PATH")
   var p = startProcess(bash, args = @["-n", scriptPath],
     workingDir = cwd, options = {poUsePath, poStdErrToStdOut})
-  let output = if p.outputStream != nil: p.outputStream.readAll() else: ""
+  let output = if p.outputStream != nil: drainStream(p.outputStream) else: ""
   let code = p.waitForExit()
   p.close()
   removeFile(scriptPath)
@@ -55,7 +56,7 @@ proc syntaxCheckPwshLocal(script, cwd: string): tuple[ok: bool; diag: string] =
       "  $errors | ForEach-Object { Write-Error $_.Message }; exit 1 " &
       "} else { exit 0 }"
   ], workingDir = cwd, options = {poUsePath, poStdErrToStdOut})
-  let output = if p.outputStream != nil: p.outputStream.readAll() else: ""
+  let output = if p.outputStream != nil: drainStream(p.outputStream) else: ""
   let code = p.waitForExit()
   p.close()
   removeFile(scriptPath)

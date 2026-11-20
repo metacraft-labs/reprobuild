@@ -3,6 +3,7 @@
 ## the package-source seam only avoids unrelated package realization, as in
 ## the other home rollback gates. No resource driver is mocked.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_home_generations
@@ -66,7 +67,7 @@ proc run(sb: Sandbox; args: openArray[string]):
   env["REPRO_TEST_PACKAGE_MANAGED_BLOCKS"] = ""
   let p = startProcess(reproBinary(), args = @args, env = env,
     options = {poUsePath, poStdErrToStdOut})
-  result.output = p.outputStream().readAll()
+  result.output = drainStream(p.outputStream)
   result.exitCode = p.waitForExit()
   p.close()
 

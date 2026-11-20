@@ -16,6 +16,7 @@
 ## `flake.nix` / `repro.nim` files) or pure functions. The nix-dependent half lives in
 ## `tests/e2e/dev-env/t_e2e_nf4_flake_dev_shell.nim`, which runs a real `nix`.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, sequtils, streams, strutils, tempfiles, unittest]
 
 import repro_dev_env_engine
@@ -126,7 +127,7 @@ suite "nf4_foreign_env_contract":
         worker.kill()
         discard worker.waitForExit()
       checkpoint("resolver mode: " & mode)
-      if code != 0: checkpoint(worker.outputStream.readAll())
+      if code != 0: checkpoint(drainStream(worker.outputStream))
       check fileExists(root / "resolver-started")
       check fileExists(root / "resolver-wrote-stderr")
       check code == 0
@@ -160,8 +161,8 @@ suite "nf4_foreign_env_contract":
     writeFile(root / "release", "")
     let firstCode = first.waitForExit(60000)
     if firstCode == -1: first.terminate()
-    if secondCode != 0: checkpoint second.errorStream.readAll()
-    if firstCode != 0: checkpoint first.errorStream.readAll()
+    if secondCode != 0: checkpoint drainStream(second.errorStream)
+    if firstCode != 0: checkpoint drainStream(first.errorStream)
     check secondCode == 0
     check firstCode == 0
     for kind, path in walkDir(root):
