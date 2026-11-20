@@ -32089,6 +32089,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim",
+    binary: "build/test-bin/t_uses_refuses_a_package_declared_for_another_platform",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g16",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_uses_resolves_reprobuild_packages_interface.nim",
     binary: "build/test-bin/t_uses_resolves_reprobuild_packages_interface",
     defines: @[],

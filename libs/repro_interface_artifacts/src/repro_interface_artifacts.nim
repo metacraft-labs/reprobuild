@@ -755,6 +755,14 @@ type
     headers*: seq[string]
     location*: SourceLocation
 
+  InterfaceDeclaredPlatform* = object
+    ## One coordinate of a package's ``platforms:`` declaration (PMC-1), in
+    ## the token vocabulary the DSL stores (``PlatformConstraintDef``):
+    ## ``cpu`` / ``os`` are ``"any"`` or a family / OS token. Encoded from
+    ## v35.
+    cpu*: string
+    os*: string
+
   InterfaceToolUse* = object
     rawConstraint*: string
     packageSelector*: string
@@ -767,6 +775,20 @@ type
     scoopProvisioning*: seq[InterfaceScoopProvisioning]
     environmentPrefixProvisioning*: seq[InterfaceEnvironmentPrefixProvisioning]
       ## v30. See ``InterfaceEnvironmentPrefixProvisioning``.
+    platformsDeclared*: bool
+      ## v35: the used package wrote an explicit ``platforms:`` block
+      ## (``PackageDef.platformsDeclared``). ``false`` -- every v<35 artifact,
+      ## and every package that declares none -- resolves exactly as before:
+      ## the declared-platforms gate keys off this flag, never off an empty
+      ## ``declaredPlatforms``.
+    declaredPlatforms*: seq[InterfaceDeclaredPlatform]
+      ## v35: the declared coordinates, in source order. A recipe's ``uses:``
+      ## applies the same gate a home profile's reference does
+      ## (Provisioning-Contributions.md §"Profile Package References" →
+      ## Selection, step 1), so the declaration travels with the use.
+    platformsMessage*: string
+      ## v35: the author's reason (the declaration's doc comment), quoted by
+      ## the refusal.
     location*: SourceLocation
     provisioningPin*: ProvisioningPin
       ## Resolution-time contribution selection; see ``ProvisioningPin``.
@@ -1231,8 +1253,21 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 34'u16
-    ## v34 (current): ``InterfaceTarballProvisioning`` retains
+  EnvelopeVersion = 35'u16
+    ## v35 (current): ``InterfaceToolUse`` retains the used package's
+    ##                declared ``platforms:`` (``platformsDeclared``,
+    ##                ``declaredPlatforms``, ``platformsMessage``), after
+    ##                the environment-prefix block, so a recipe's ``uses:``
+    ##                applies the declared-platforms gate (PMC-1) as a home
+    ##                profile's reference does (reprobuild-pm issue
+    ##                2026-10-13-uses-acquisition-skips-the-declared-
+    ##                platforms-gate). v34 and older payloads decode it
+    ##                undeclared, which is what every use was before. The
+    ##                fingerprint projection writes the block only for a
+    ##                use whose package declares platforms, so no
+    ##                fingerprint or key hashed from an undeclared use moves,
+    ##                and leaves out ``platformsMessage`` (prose).
+    ## v34: ``InterfaceTarballProvisioning`` retains
     ##                ``closureEntries``, the PARSED content of the
     ##                ``closureManifest`` file (path, sha256, url,
     ##                archiveType, stripComponents per archive), after
@@ -2362,6 +2397,20 @@ proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
     if not omitRealizations:
       for provisioning in useDef.environmentPrefixProvisioning:
         outp.writeEnvironmentPrefixProvisioning(provisioning, forFingerprint)
+  # The declared-platforms block (v35). The wire payload always carries it;
+  # the fingerprint projection only for a use that declares platforms, so an
+  # undeclared use projects exactly as at v34. Availability is an interface
+  # fact, not a realization, so ``omitRealizations`` does not drop it.
+  if version >= 35'u16 and (not forFingerprint or useDef.platformsDeclared):
+    outp.writeByte(byte(ord(useDef.platformsDeclared)))
+    outp.writeU32Le(uint32(useDef.declaredPlatforms.len))
+    for platform in useDef.declaredPlatforms:
+      outp.writeString(platform.cpu)
+      outp.writeString(platform.os)
+    # The author's reason is prose for the refusal, not an interface fact:
+    # rewording it moves no consumer's fingerprint.
+    if not forFingerprint:
+      outp.writeString(useDef.platformsMessage)
   outp.writeLocation(useDef.location, forFingerprint)
 
 proc readToolUse(bytes: openArray[byte]; pos: var int;
@@ -2397,6 +2446,14 @@ proc readToolUse(bytes: openArray[byte]; pos: var int;
     for i in 0 ..< envCount:
       result.environmentPrefixProvisioning[i] =
         readEnvironmentPrefixProvisioning(bytes, pos)
+  if version >= 35'u16:
+    result.platformsDeclared = readByte(bytes, pos) != 0'u8
+    let platformCount = readElementCount(bytes, pos, 8)
+    result.declaredPlatforms = newSeq[InterfaceDeclaredPlatform](platformCount)
+    for i in 0 ..< platformCount:
+      result.declaredPlatforms[i].cpu = readString(bytes, pos)
+      result.declaredPlatforms[i].os = readString(bytes, pos)
+    result.platformsMessage = readString(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeProvisioningContribution(outp: var seq[byte];
@@ -3167,6 +3224,12 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
     location: SourceLocation(file: useDef.sourceFile, line: useDef.sourceLine))
   for pkg in packages:
     if pkg.packageName == useDef.packageSelector:
+      if pkg.platformsDeclared and not result.platformsDeclared:
+        result.platformsDeclared = true
+        result.platformsMessage = pkg.platformsMessage
+        for constraint in pkg.declaredPlatforms:
+          result.declaredPlatforms.add(InterfaceDeclaredPlatform(
+            cpu: constraint.cpu, os: constraint.os))
       for provisioning in pkg.nixProvisioning:
         result.nixProvisioning.add(toInterfaceNixProvisioning(pkg.packageName,
           provisioning))

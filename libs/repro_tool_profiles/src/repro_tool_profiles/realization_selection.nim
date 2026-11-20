@@ -677,6 +677,88 @@ proc raiseSelectionError[T: ERealizationSelection](
   e.steps = trace
   raise e
 
+proc availabilityOf*(useDef: InterfaceToolUse): PackageAvailability =
+  ## The used package's declared ``platforms:`` (PMC-1), as the interface
+  ## artifact carries it (envelope v35). ``declared = false`` when the
+  ## package wrote none, or the artifact predates v35, which leaves selection
+  ## exactly as it was. Tokens are converted as
+  ## ``package_registry.packageAvailability`` converts the registry's: the
+  ## ``package`` macro rejects an unparseable token at authoring time, so a
+  ## skipped one only guards against vocabulary drift.
+  if not useDef.platformsDeclared:
+    return PackageAvailability(declared: false)
+  result.declared = true
+  result.message = useDef.platformsMessage
+  for constraint in useDef.declaredPlatforms:
+    let cpu = parsePlatformCpuToken(constraint.cpu)
+    let os = parsePlatformOsToken(constraint.os)
+    if cpu.ok and os.ok:
+      result.platforms.add(PackagePlatform(cpu: cpu.cpu, os: os.os))
+
+proc refuseUnavailablePlatform*(packageName: string;
+                                availability: PackageAvailability;
+                                target: RealizationTarget) =
+  ## Selection step 1 (Provisioning-Contributions.md §"Profile Package
+  ## References" → Selection): a package whose declared ``platforms:``
+  ## exclude ``target`` is unavailable there, before any realization kind is
+  ## consulted, so nothing falls through to PATH. Raises
+  ## ``EPlatformUnavailable``; returns for an available or undeclared
+  ## package. ``selectRealization`` (a home profile's reference) and the
+  ## ``uses:`` entry points of ``repro_tool_profiles`` (a recipe's tool use)
+  ## both call it, so the gate is one piece of code for both callers.
+  if availability.isAvailableOn(target.platform.family, target.os):
+    return
+  var e = newException(EPlatformUnavailable,
+    packageName & " is declared for " &
+    availability.describeDeclaredPlatforms() & "; the target is " &
+    availability.describeHostTarget(target.platform.family, target.os) &
+    "." &
+    (if availability.message.len > 0: " " & availability.message else: "") &
+    " This is a declared platform constraint (`platforms:` on the " &
+    "package), not a missing realization: no realization kind can supply " &
+    "it here.")
+  e.declaredPlatforms = availability.describeDeclaredPlatforms()
+  e.authorMessage = availability.message
+  e.packageName = packageName
+  e.target = describeTarget(target)
+  e.steps = @[]
+  raise e
+
+proc platformOfTriple*(triple: string): Option[RealizationTarget] =
+  ## The (cpu family, os) a target triple names -- ``x86_64-w64-mingw32``,
+  ## ``aarch64-unknown-linux-gnu``, ``aarch64-apple-darwin`` -- for the
+  ## declared-platforms gate. ``none`` for a triple whose family or OS is not
+  ## recognised: the gate then does not run, fail-open as ``isAvailableOn``
+  ## is for an unrecognised host, rather than refuse on a parsing gap.
+  let parts = triple.toLowerAscii().split('-')
+  if parts.len < 2:
+    return none(RealizationTarget)
+  let cpu = parsePlatformCpuToken(if parts[0] == "arm64": "aarch64"
+                                  else: parts[0])
+  if not cpu.ok or cpu.cpu == pcAny:
+    return none(RealizationTarget)
+  var os = poAny
+  for part in parts[1 .. ^1]:
+    if part.startsWith("mingw") or part == "windows" or part == "w64" or
+        part == "msvc":
+      os = poWindows
+    elif part == "linux":
+      os = poLinux
+    elif part.startsWith("darwin") or part.startsWith("macos"):
+      # Not the ``apple`` vendor field: ``aarch64-apple-ios`` and the other
+      # Apple OSes are not macOS, and an unrecognised OS must fail open.
+      os = poMacos
+  if os == poAny:
+    return none(RealizationTarget)
+  some(realizationTargetFor(cpu.cpu, os))
+
+proc refuseUnavailablePlatform*(useDef: InterfaceToolUse;
+                                target: RealizationTarget) =
+  ## The gate for a recipe's ``uses:``, from the declaration the interface
+  ## artifact carries (``availabilityOf``).
+  refuseUnavailablePlatform(useDef.packageSelector, useDef.availabilityOf(),
+    target)
+
 proc selectRealization*(useDef: InterfaceToolUse;
                         request: SelectionRequest): RealizationSelection =
   ## Select the realization of ``useDef`` (its declared nix / tarball /
@@ -688,21 +770,7 @@ proc selectRealization*(useDef: InterfaceToolUse;
   ## steps are Provisioning-Contributions.md §"Profile Package References"
   ## → Selection, in order.
   let target = request.target
-  if not request.availability.isAvailableOn(target.platform.family,
-      target.os):
-    var e = newException(EPlatformUnavailable,
-      request.packageName & " is declared for " &
-      request.availability.describeDeclaredPlatforms() & "; the target is " &
-      request.availability.describeHostTarget(target.platform.family,
-        target.os) & "." &
-      (if request.availability.message.len > 0:
-         " " & request.availability.message else: "") &
-      " This is a declared platform constraint (`platforms:` on the " &
-      "package), not a missing realization: no realization kind can supply " &
-      "it here.")
-    e.declaredPlatforms = request.availability.describeDeclaredPlatforms()
-    e.authorMessage = request.availability.message
-    raiseSelectionError(e, request, @[])
+  refuseUnavailablePlatform(request.packageName, request.availability, target)
   var trace: seq[KindOutcome] = @[]
   var capabilityRefusal = ""
   for kind in request.policy:

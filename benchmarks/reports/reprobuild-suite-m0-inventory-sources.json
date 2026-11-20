@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3047,
+    "nimTestBinaries": 3048,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 809,
     "staticallyDetectedRuntimeCompilerFlowTests": 154,
-    "testEntries": 3097
+    "testEntries": 3098
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,7 +1725,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1691,
+      "integration": 1692,
       "platform/destructive": 198,
       "pure unit": 809,
       "unclassified": 373
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3047,
+    "nimTestBinaryCount": 3048,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3097
+    "testEntryCount": 3098
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20774,8 +20774,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 20,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57475,6 +57475,26 @@
       "source": "tests/integration/t_untracked_inputs_flag_read_set_and_strict.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_uses_refuses_a_package_declared_for_another_platform",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
