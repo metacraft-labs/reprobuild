@@ -1724,6 +1724,7 @@ tests/e2e/sharding/t_e2e_repro_test_shard_emit_plan_then_consume.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_lan_peer_cache_not_implemented.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim	nim	1
 tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim	nim	2
+tests/e2e/t_e2e_cs_m7_hooks_ensure_installs_completion.nim	nim	7
 tests/e2e/t_m54_verified_tarball_profile.nim	nim	1
 tests/e2e/watch/t_e2e_repro_watch.nim	nim	4
 tests/e2e/watch/t_e2e_repro_watch_arms_on_cache_hit_evidence.nim	nim	2

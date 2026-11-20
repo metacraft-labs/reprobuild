@@ -20605,6 +20605,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_sharding_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/t_e2e_cs_m7_hooks_ensure_installs_completion.nim",
+    binary: "build/test-bin/t_e2e_cs_m7_hooks_ensure_installs_completion",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: var before: seq[string]"),
+  TestSpec(
     source: "tests/e2e/t_m54_verified_tarball_profile.nim",
     binary: "build/test-bin/t_m54_verified_tarball_profile",
     defines: @[],

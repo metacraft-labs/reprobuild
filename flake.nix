@@ -453,7 +453,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/fcd5b309c2cb38656d8d2c3b39a7c4e72b5dfb3a";
+      url = "github:metacraft-labs/nim-cli-spec/daef562cad0c1a3e2f98952812c1f85a497b1e2f";
       flake = false;
     };
     nim-entrypoints-src = {
