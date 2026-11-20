@@ -22088,6 +22088,62 @@ proc moveFileReplacing(source, dest: string) =
     removeFile(extendedPath(dest))
   moveFile(extendedPath(source), extendedPath(dest))
 
+const RemedyWordShell = """
+repro_remedy_word() {
+  # ONE word of this shell, for a path a remedy prints: the generated half of
+  # `remedyPathWord`, for values known only when the hook runs. Bare when
+  # every character is safe, else single-quoted with each `'` spelled
+  # `'"'"'`; on Windows every `\` is spelled `/` first.
+  REPRO_REMEDY_WORD_REST=${1-}
+  REPRO_REMEDY_WORD_QUOTE="'"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT*)
+      REPRO_REMEDY_WORD_REST=$(printf '%s' "$REPRO_REMEDY_WORD_REST" | tr '\\' '/') ;;
+  esac
+  case "$REPRO_REMEDY_WORD_REST" in
+    '') printf "''"; return 0 ;;
+    *[!%+./_:=@0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-]*) ;;
+    *) printf '%s' "$REPRO_REMEDY_WORD_REST"; return 0 ;;
+  esac
+  printf "'"
+  while :; do
+    case "$REPRO_REMEDY_WORD_REST" in
+      *"$REPRO_REMEDY_WORD_QUOTE"*)
+        printf '%s' "${REPRO_REMEDY_WORD_REST%%"$REPRO_REMEDY_WORD_QUOTE"*}"
+        printf '%s' "'\"'\"'"
+        REPRO_REMEDY_WORD_REST=${REPRO_REMEDY_WORD_REST#*"$REPRO_REMEDY_WORD_QUOTE"} ;;
+      *)
+        printf '%s' "$REPRO_REMEDY_WORD_REST"
+        break ;;
+    esac
+  done
+  printf "'"
+}
+
+"""
+  ## Emitted into BOTH generated scripts (the dispatcher and the managed
+  ## body), because each prints remedies and neither sources the other.
+  ##
+  ## A remedy a generated script prints names paths the script learns when it
+  ## RUNS: the repository (`$REPO_ROOT`) and the `repro` it resolved. Spliced
+  ## bare into a double-quoted `echo` they are printed bare, and the operator
+  ## pastes a command that splits at the first space (reprobuild-pm issue
+  ## 2026-11-18, generated hook scripts print `$REPO_ROOT` unquoted;
+  ## Unified-Locking-And-Hooks.md, "The named command must RUN where the
+  ## message is printed", rule 3). ``remedyPathWord`` cannot reach these: it
+  ## runs when the body is GENERATED. This is the same spelling, produced by
+  ## the shell: the safe set is ``quoteShellPosix``'s and so is the `'"'"'`
+  ## escape, so one message spells a path one way whichever half printed it.
+  ## The safe set is written out letter by letter: a range (`a-z`) is collated
+  ## by the locale in some shells and would let a letter outside ASCII through
+  ## bare. The `'` is matched through a variable, the one spelling of a quote
+  ## inside `${…%%…}` that every POSIX shell reads the same way.
+  ##
+  ## Pure POSIX `sh`, no `sed`: the value is arbitrary bytes, and the loop
+  ## keeps every one of them, a newline included. Callers print the result
+  ## with `printf '%s\n'`, never `echo`: `dash`'s `echo` rewrites a backslash
+  ## sequence in its argument, and a POSIX path may contain one.
+
 const ChainedHookMissingProgramShell = """
 local_hook_missing_program() {
   # One pass, so the candidates come in line order: the `#!` interpreter, then
@@ -22542,7 +22598,10 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("  REPRO_REMEDY_CMD=$(command -v repro)\n")
   result.add("else\n")
   result.add("  REPRO_REMEDY_CMD=repro\n")
-  result.add("fi\n\n")
+  result.add("fi\n")
+  # Every remedy below names the repository and the resolved `repro` through
+  # this, so each is one word of the shell the operator pastes it into.
+  result.add(RemedyWordShell)
   # (2) Drop a stale pre-commit `.legacy` that is actually our dispatcher,
   # otherwise a chained pre-commit shim re-enters us in a loop.
   result.add("PRECOMMIT_LEGACY=\"$HOOK_DIR/" & hookName & ".legacy\"\n")
@@ -22553,9 +22612,11 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("  *) RUNNING_AS_LEGACY=0 ;;\n")
   result.add("esac\n")
   result.add("if [ \"$RUNNING_AS_LEGACY\" = 1 ]; then\n")
-  result.add("  echo \"repro hooks: " & hookName & " is running as " & hookName &
+  result.add("  printf '%s\\n' \"repro hooks: " & hookName &
+    " is running as " & hookName &
     ".legacy: another hook manager replaced the dispatcher. Restore it with " &
-    "'$REPRO_REMEDY_CMD hooks ensure --vcs $REPO_ROOT'\" >&2\n")
+    "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") hooks ensure --vcs " &
+    "$(repro_remedy_word \"$REPO_ROOT\")\\`\" >&2\n")
   result.add("elif [ -f \"$PRECOMMIT_LEGACY\" ] && " &
     "grep -q 'reprobuild hook dispatcher' \"$PRECOMMIT_LEGACY\" 2>/dev/null; then\n")
   result.add("  rm -f \"$PRECOMMIT_LEGACY\"\n")
@@ -22595,10 +22656,12 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("      /nix/store/*) echo \"repro hooks: it is a Nix store path, " &
     "and garbage collection deletes a store path that no GC root holds.\" >&2 ;;\n")
   result.add("    esac\n")
-  result.add("    echo \"repro hooks: re-enter this repository's dev shell so " &
-    "its hook installer writes " & hookName & ".repro-local again, or delete " &
+  result.add("    printf '%s\\n' \"repro hooks: re-enter this repository's " &
+    "dev shell so its hook installer writes " & hookName &
+    ".repro-local again, or delete " &
     "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
-    "'$REPRO_REMEDY_CMD health' lists every such hook.\" >&2\n")
+    "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") health\\` lists every " &
+    "such hook.\" >&2\n")
   result.add("  fi\n")
   result.add("  return \"$LOCAL_HOOK_RC\"\n")
   result.add("}\n\n")
@@ -22611,7 +22674,9 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
     result.add("run_local_hook \"$@\" < \"$TMP_FILE\" || exit $?\n")
     result.add("if [ ! -x \"$MANAGED_HOOK\" ] || ! grep -q '" &
       V2ManagedMarker & "' \"$MANAGED_HOOK\" 2>/dev/null; then\n")
-    result.add("  echo \"repro hooks: hook protocol mismatch; run '$REPRO_REMEDY_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("  printf '%s\\n' \"repro hooks: hook protocol mismatch; run " &
+      "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") hooks ensure --vcs " &
+      "$(repro_remedy_word \"$REPO_ROOT\")\\` and retry\" >&2\n")
     result.add("  exit 1\n")
     result.add("fi\n")
     result.add("(unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
@@ -22877,6 +22942,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # executable fails, it never falls through), then the build that installed
   # this body while it is still executable, then PATH. Every in-process mirror
   # (`resolveManagedHookInterpreter`) resolves the same three steps.
+  # Every remedy below names the repository and the resolved `repro` through
+  # this, so each is one word of the shell the operator pastes it into.
+  result.add(RemedyWordShell)
   result.add("REPRO_CMD=\n")
   result.add("REPRO_CMD_SOURCE=\n")
   # Declared up front, not where they are first assigned: the body runs under
@@ -23127,8 +23195,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     "build this workspace runs:\" >&2\n")
   result.add("    echo \"repro hooks:      re-anchor this repository to it " &
     "and retry:\" >&2\n")
-  result.add("    echo \"repro hooks:      $REPRO_CMD hooks ensure --vcs " &
-    "--re-anchor $REPO_ROOT\" >&2\n")
+  result.add("    printf '%s\\n' \"repro hooks:      " &
+    "$(repro_remedy_word \"$REPRO_CMD\") hooks ensure --vcs " &
+    "--re-anchor $(repro_remedy_word \"$REPO_ROOT\")\" >&2\n")
   result.add("  else\n")
   result.add("    echo \"repro hooks: That build predates this handshake, " &
     "so it cannot service this\" >&2\n")
@@ -23342,7 +23411,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("# reprobuild pre-push publication-policy: immutable-records-v1\n")
     result.add("# Lock namespace policy: unique paths before record indexing.\n")
     result.add("  if [ \"$REPROBUILD_CAPTURED_DISPATCH_PROTOCOL\" != \"2\" ]; then\n")
-    result.add("    echo \"repro hooks: hook protocol mismatch; run '$REPRO_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("    printf '%s\\n' \"repro hooks: hook protocol mismatch; run " &
+      "\\`$(repro_remedy_word \"$REPRO_CMD\") hooks ensure --vcs " &
+      "$(repro_remedy_word \"$REPO_ROOT\")\\` and retry\" >&2\n")
     result.add("    exit 1\n")
     result.add("  fi\n")
     result.add("  REFS_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push-backend.XXXXXX\")\n")
@@ -23434,7 +23505,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("  exit $REPRO_STATUS\n")
   result.add("fi\n")
   if hookName == "pre-push":
-    result.add("echo \"repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("printf '%s\\n' \"repro hooks: hook protocol mismatch; run " &
+      "\\`repro hooks ensure --vcs $(repro_remedy_word \"$REPO_ROOT\")\\` " &
+      "and retry\" >&2\n")
     result.add("exit 1\n")
   else:
     if hookName == "pre-commit":
@@ -25824,8 +25897,11 @@ proc runHooksDispatchCommand(c: ReproCommandLineHooksDispatch): int =
       let discoveredRepo = gitTopLevel(candidate)
       let remedyRepo =
         if discoveredRepo.len > 0: discoveredRepo else: absolutePath(candidate)
-      stderr.writeLine("repro hooks: hook protocol mismatch; run '" &
-        resolvedRepro & " hooks ensure --vcs " & remedyRepo & "' and retry")
+      # One message, one spelling: the generated scripts print this line
+      # too, in backticks, with each path as one word of the hook's `sh`.
+      stderr.writeLine("repro hooks: hook protocol mismatch; run `" &
+        remedyPathWord(resolvedRepro) & " hooks ensure --vcs " &
+        remedyPathWord(remedyRepo) & "` and retry")
       return 1
     if hookArgs.len != 2:
       stderr.writeLine("repro hooks: pre-push protocol 2 requires Git's " &
@@ -75488,14 +75564,16 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       " hooks ensure --vcs " & repoRoot & "'")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
-    return (false, "the hook-resolved repro executable is unavailable; run '" &
-      publicCliImagePath() & " hooks ensure --vcs " & repoRoot & "'")
+    return (false, "the hook-resolved repro executable is unavailable; run `" &
+      remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "`")
   let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
     "--require=2"]), options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitChildEnv())
   if probe.exitCode != 0 or probe.output.strip() != "2":
-    return (false, "hook protocol mismatch; run '" & publicCliImagePath() &
-      " hooks ensure --vcs " & repoRoot & "' and retry")
+    return (false, "hook protocol mismatch; run `" &
+      remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "` and retry")
   (true, "")
 
 proc pushArgsOf(c: ReproCommandLinePush): PushArgs =
