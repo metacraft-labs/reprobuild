@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3049,
+    "nimTestBinaries": 3052,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 809,
+    "pureUnitTests": 810,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3099
+    "testEntries": 3102
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,9 +1725,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1693,
+      "integration": 1695,
       "platform/destructive": 198,
-      "pure unit": 809,
+      "pure unit": 810,
       "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3049,
+    "nimTestBinaryCount": 3052,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3099
+    "testEntryCount": 3102
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12154,6 +12154,25 @@
       "source": "libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cross_checkout_sharing_refusal",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_cross_checkout_sharing_refusal.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -42882,6 +42901,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_cargo_and_cmake_cross_checkout_sharing_is_declared_as_measured",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cargo_and_cmake_cross_checkout_sharing_is_declared_as_measured.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_cargo_edge_reaches_declared_linker",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -42917,6 +42953,23 @@
       "source": "tests/integration/t_cargo_target_dir_ownership_rebuild.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cargo_two_binaries_different_features_are_not_shared_wrongly",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cargo_two_binaries_different_features_are_not_shared_wrongly.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
