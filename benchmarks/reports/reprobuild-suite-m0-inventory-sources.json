@@ -14233,7 +14233,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_path.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

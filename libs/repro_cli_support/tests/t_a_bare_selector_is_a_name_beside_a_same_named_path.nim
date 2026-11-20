@@ -22,6 +22,15 @@
 ## ``test.nim``. The anchor is now the project file (``./repro.nim#test``).
 ## The explicitly spelled ``.#test`` keeps its legacy module meaning.
 ##
+## And in a directory with NO project file (reprobuild-pm issue 2026-11-18
+## "a bare name in a directory without a project file can still select a
+## module"): the anchor stayed ``.#<name>`` there so ``repro build`` could
+## recognise a Mode-1 workspace, so every other reader of it (``repro watch
+## test``, the ``repro test`` certify plan), and every directory with no
+## project at all, selected ``test.nim``. The anchor is now the project file
+## the directory would hold (``./repro.nim#test``), and the Mode-1 redirect
+## reads the workspace from it (``mode1WorkspaceCandidate``).
+##
 ## HOW. A real temporary directory holding a ``test/`` directory, a ``docs/``
 ## directory and a ``bench`` file (and a second one holding ``repro.nim``
 ## beside ``test.nim`` and ``lint.nim``), entered as the working directory; the
@@ -33,6 +42,7 @@
 import std/[importutils, os, strutils, tempfiles, unittest]
 
 import repro_cli_support {.all.}
+import repro_cli_support/mode1_loader
 
 privateAccess(ParsedBuildTarget)
 
@@ -59,11 +69,91 @@ suite "a bare selector is a name beside a same-named path":
       check classifyBuildSelector(raw).kind == bskPath
 
   test "a bare test beside test/ selects the current project's test target":
-    # No project file here, so the anchor is the directory: a Mode-1
-    # workspace is recognised from it.
+    # No project file here: the anchor is the project file the directory
+    # would hold, and it still names the directory as a Mode-1 candidate.
     let resolved = parseAndResolveSelectors(["test"], "repro build")
-    check resolved.target == ".#test"
+    check resolved.target == "." / "repro.nim" & "#test"
     check resolved.extraNameSelectors.len == 0
+    check mode1WorkspaceCandidate(splitTarget(resolved.target).base) == "."
+
+  test "a bare name in a directory without a project file never selects a module":
+    # reprobuild-pm issue 2026-11-18 "a bare name in a directory without a
+    # project file can still select a module": the anchor there used to be
+    # ``.#<name>``, the legacy ``<dir>#<module>`` form whenever ``<name>.nim``
+    # exists. Two directories: a Mode-1 workspace (``src/`` layout, the
+    # shape ``repro build`` synthesises a project for) and a directory with
+    # no project of any kind; each holds ``test.nim``.
+    let parent = createTempDir("bare-selector-no-project-file-", "")
+    let mode1 = parent / "mode1"
+    let bare = parent / "bare"
+    createDir(mode1 / "src")
+    writeFile(mode1 / "src" / "main.nim", "echo 1\n")
+    writeFile(mode1 / "test.nim", "discard\n")
+    createDir(bare)
+    writeFile(bare / "test.nim", "discard\n")
+    let outer = getCurrentDir()
+    try:
+      for dir in [mode1, bare]:
+        setCurrentDir(dir)
+        # ``repro build``, ``repro watch`` and the ``repro test`` certify
+        # plan share this resolver; the command only names the verb in its
+        # diagnostics. What each does with the anchor is in CLI/build.md.
+        for (command, selectors) in [("repro build", @["test"]),
+            ("repro watch", @["test"]), ("repro build", @["test", "lint"]),
+            ("repro test", @[TestCollectionSelector])]:
+          let resolved = parseAndResolveSelectors(selectors, command)
+          let parsed = parseBuildTarget(resolved.target)
+          checkpoint(dir & " " & command & " " & $selectors & ": " &
+            resolved.target & " -> " & parsed.modulePath & " " &
+            $parsed.fragmentKind)
+          check parsed.fragmentKind == tfkActionSelection
+          check parsed.selectedActionId == selectors[0]
+          check extractFilename(parsed.modulePath) != "test.nim"
+          # The project file it names is missing: a reader that does not
+          # synthesise a project reports that, never a module.
+          check not fileExists(parsed.modulePath)
+          # ``repro build`` still finds the workspace from the anchor.
+          let candidate = mode1WorkspaceCandidate(
+            splitTarget(resolved.target).base)
+          check candidate.len > 0
+          check sameFile(candidate, dir)
+        setCurrentDir(outer)
+        # The daemon parent derives the anchor from the request's working
+        # directory, not its own.
+        check daemonRequestBuildAnchor(["test"], dir) ==
+          dir / "repro.nim" & "#test"
+      # The Mode-1 workspace is one ``repro build`` synthesises a project
+      # for, from the directory the anchor names.
+      check not hasAnyProjectFile(mode1)
+      check loadMode1Workspace(mode1).targets.len > 0
+      # The legacy ``<dir>#<module>`` form, spelled out, still selects the
+      # module.
+      setCurrentDir(bare)
+      let legacy = parseBuildTarget(".#test")
+      check legacy.fragmentKind == tfkModule
+      check extractFilename(legacy.modulePath) == "test.nim"
+      # A non-project path, a project file in a missing directory, the
+      # legacy spelling of a missing project file and an existing project
+      # file name no workspace.
+      check mode1WorkspaceCandidate("./test.nim") == ""
+      check mode1WorkspaceCandidate("./absent/repro.nim") == ""
+      check mode1WorkspaceCandidate("./reprobuild.nim") == ""
+      # The lock a build pins is the anchor's project's: a missing project
+      # file in an existing directory names that directory (CLI/build.md
+      # "Target Selection"), so ``<dir>/repro.nim#x``, which the Mode-1
+      # redirect builds as ``<dir>``'s synthesised project, pins ``<dir>``'s
+      # lock, not the current directory's.
+      setCurrentDir(parent)
+      check sameFile(resolveProjectDirFromTarget("mode1" / "repro.nim"), mode1)
+      check sameFile(resolveProjectDirFromTarget("bare" / "reprobuild.nim"), bare)
+      check sameFile(resolveProjectDirFromTarget("absent" / "repro.nim"), parent)
+      check sameFile(resolveProjectDirFromTarget("mode1" / "lint.nim"), parent)
+      setCurrentDir(bare)
+      writeFile(bare / "repro.nim", "discard\n")
+      check mode1WorkspaceCandidate("./repro.nim") == ""
+    finally:
+      setCurrentDir(outer)
+      removeDir(parent)
 
   test "a bare name beside a same-named module selects the target, not the module":
     # reprobuild-pm issue 2026-11-18 "a bare name beside a same-named module

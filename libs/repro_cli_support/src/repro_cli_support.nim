@@ -995,8 +995,8 @@ type
       ## The engine's project anchor. For path-shaped positionals this
       ## is the original selector verbatim; for name-only invocations it
       ## is ``"."`` or ``bareNameAnchor`` of the first name
-      ## (``"./repro.nim#<firstName>"`` in a project, ``".#<firstName>"``
-      ## in a directory without a project file).
+      ## (``"./<project file>#<firstName>"``; in a directory without a
+      ## project file, ``"./repro.nim#<firstName>"`` all the same).
     extraNameSelectors*: seq[string]
       ## Names and same-project action fragments beyond the first. The lowering pass in
       ## ``lowerProviderSnapshot`` unions every selector's dependency
@@ -1079,9 +1079,17 @@ proc bareNameAnchor(name, currentDir: string): string =
   ## For every project without such a module both anchors parse to the same
   ## module path, output name and action.
   ##
-  ## A directory with no project file keeps the directory anchor: a Mode-1
-  ## workspace or Mode-2 manifest is recognised from the directory, and the
-  ## build redirects the fragment to the project it synthesises.
+  ## A directory with no project file is anchored on the project file it
+  ## WOULD hold (``./repro.nim#test``), not on the directory: ``.#test`` is
+  ## the legacy ``<dir>#<module>`` form there too, so a bare ``test`` beside
+  ## a ``test.nim`` selected that module in a Mode-1 workspace (for every
+  ## command but ``repro build``, which redirected first) and in a directory
+  ## with no project at all (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-in-a-directory-without-a-project-file-can-still-select-a-module).
+  ## The missing file still names the directory: ``repro build`` recognises a
+  ## Mode-1 workspace from it (``mode1WorkspaceCandidate``) and redirects the
+  ## fragment to the project it synthesises; every other reader reports the
+  ## missing project file.
   ## ``ProjectFileAmbiguousError`` (both ``repro.nim`` and ``reprobuild.nim``)
   ## propagates, as it would from ``parseBuildTarget``.
   ##
@@ -1091,10 +1099,33 @@ proc bareNameAnchor(name, currentDir: string): string =
   ## current directory.
   let dir = if currentDir.len > 0: currentDir else: getCurrentDir()
   let match = resolveProjectFile(dir)
-  if match.fileName.len > 0:
-    ("." / match.fileName) & "#" & name
-  else:
-    "." & "#" & name
+  let fileName =
+    if match.fileName.len > 0: match.fileName else: CanonicalProjectFileName
+  ("." / fileName) & "#" & name
+
+proc mode1WorkspaceCandidate(base: string): string =
+  ## The directory a build anchor's ``base`` names as a possible Mode-1
+  ## workspace, or "" when it names none. A directory names itself. A
+  ## ``repro.nim`` path that does not exist (``./repro.nim``, the anchor
+  ## ``bareNameAnchor`` gives a request of names only in a directory with no
+  ## project file) names the directory it would sit in, so an explicitly
+  ## spelled ``<dir>/repro.nim[#<name>]`` in a Mode-1 workspace selects the
+  ## project synthesised for ``<dir>``, as ``<dir>[#<name>]`` does. The
+  ## legacy ``reprobuild.nim`` spelling is not read this way: no anchor is
+  ## derived with it for a missing file. Whether the directory IS a Mode-1
+  ## workspace (no project file, no Mode-2 manifest, a recognised layout) is
+  ## the caller's test.
+  if base.len == 0:
+    return ""
+  if dirExists(extendedPath(base)):
+    return base
+  if extractFilename(base) == CanonicalProjectFileName and
+      not fileExists(extendedPath(base)):
+    let parent = parentDir(base)
+    let dir = if parent.len == 0: "." else: parent
+    if dirExists(extendedPath(dir)):
+      return dir
+  ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
@@ -31161,14 +31192,28 @@ proc committedLockDerivedProject(workspaceRoot: string):
 proc resolveProjectDirFromTarget(target: string): string =
   ## Resolve the directory that owns the committed lock for a build
   ## target. An existing directory is itself; an existing file resolves
-  ## to its parent; everything else (a bare name selector, or an empty
-  ## target) falls back to the current working directory.
+  ## to its parent; a project file that does not exist (``<dir>/repro.nim``
+  ## or ``<dir>/reprobuild.nim``) in a directory that does names that
+  ## directory ([CLI/build.md §"Target Selection"]); everything else (a
+  ## bare name selector, or an empty target) falls back to the current
+  ## working directory.
+  ##
+  ## The missing-project-file case is the anchor ``bareNameAnchor`` gives a
+  ## request of names only in a directory with no project file, and the
+  ## spelling ``mode1WorkspaceCandidate`` reads as a Mode-1 workspace: an
+  ## explicit ``sub/repro.nim#x`` builds the project synthesised for
+  ## ``sub/`` and must pin ``sub/``'s lock, as ``sub#x`` does, not the
+  ## current directory's.
   if target.len == 0:
     return getCurrentDir()
   let abs = absolutePath(target)
   if dirExists(extendedPath(abs)):
     return abs
   if fileExists(extendedPath(abs)):
+    return parentDir(abs)
+  let name = extractFilename(abs)
+  if (name == CanonicalProjectFileName or name == LegacyProjectFileName) and
+      dirExists(extendedPath(parentDir(abs))):
     return parentDir(abs)
   getCurrentDir()
 
@@ -31843,9 +31888,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # is written to the workspace root itself — the synth dir is plain
   # build scratch.
   # ----------------------------------------------------------------
+  # The anchor may name the directory (``.``, ``.#default``) or the project
+  # file a request of names only is anchored on even when it is missing
+  # (``./repro.nim#test``, see ``bareNameAnchor``); both name the workspace.
   let parts = splitTarget(target)
-  if dirExists(extendedPath(parts.base)):
-    let workspaceCandidate = absolutePath(parts.base)
+  let workspaceDir = mode1WorkspaceCandidate(parts.base)
+  if workspaceDir.len > 0:
+    let workspaceCandidate = absolutePath(workspaceDir)
     if not hasAnyProjectFile(workspaceCandidate) and
         not hasMode2Manifest(workspaceCandidate):
       var ws = loadMode1Workspace(workspaceCandidate)
@@ -92181,7 +92230,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
   var part: CertificatePlanPart
   var names: seq[string]
   # The selectors the certifying build is given: the resolved anchor
-  # (``.#<name>`` for this project) and the extra names, exactly as the
+  # (``./repro.nim#<name>``, ``bareNameAnchor``) and the extra names, exactly as the
   # resolution above produced them. Not ``names``: a bare anchor name that
   # also names a directory (``test`` beside a ``test/`` directory) would be
   # classified as a path again by the build.
