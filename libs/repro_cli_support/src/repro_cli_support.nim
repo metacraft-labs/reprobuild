@@ -9860,6 +9860,15 @@ type
       ## cannot attribute.
     cacheRecordInputs*: seq[string]
       ## What the execution behind that record was observed reading.
+    cacheRecordContentVerified*: bool
+      ## Every keyed input of that record has, read now, the content the
+      ## record was made from (``ActionResult.cacheRecordContentVerified``):
+      ## the reused result stands for an execution over byte-identical
+      ## inputs. False for a timestamp-policy record, for a hybrid record
+      ## whose input changed with its size and mtime kept, and for every
+      ## reuse the engine did not judge.
+    cacheRecordContentDetail*: string
+      ## Why ``cacheRecordContentVerified`` is false, when the engine said.
     keyCoversObservedReads*: bool
       ## The action's cache key covers every input the monitor observed it
       ## reading: a cacheable process action under a monitored dependency
@@ -10919,7 +10928,10 @@ proc executedActionRecords(actions: openArray[BuildAction];
     var record = ExecutedActionRecord(id: item.id, status: item.status,
       launched: item.launched, cacheDecision: item.cacheDecision,
       cacheRecordObservedHere: item.cacheRecordObservedHere,
-      cacheRecordInputs: item.cacheRecordInputs, exitCode: item.exitCode,
+      cacheRecordInputs: item.cacheRecordInputs,
+      cacheRecordContentVerified: item.cacheRecordContentVerified,
+      cacheRecordContentDetail: item.cacheRecordContentDetail,
+      exitCode: item.exitCode,
       monitorDepfile: item.monitorDepfilePath,
       startOrder: order.getOrDefault(item.id, -1))
     if byId.hasKey(item.id):
@@ -31275,24 +31287,36 @@ proc committedLockDerivedProject(workspaceRoot: string):
     repos: @[repo] & nestedDeps,
     projectFile: committedLockPath(root)))
 
-proc resolveProjectDirFromTarget(target: string): string =
-  ## Resolve the directory that owns the committed lock for a build
-  ## target. An existing directory is itself; an existing file resolves
-  ## to its parent; a project file that does not exist (``<dir>/repro.nim``
-  ## or ``<dir>/reprobuild.nim``) in a directory that does names that
-  ## directory ([CLI/build.md §"Target Selection"]); everything else (a
-  ## bare name selector, or an empty target) falls back to the current
-  ## working directory.
+proc buildLockProjectDir*(target: string): string =
+  ## The directory whose committed lock (and ``repro.solver`` sidecar) a
+  ## ``repro build`` pins, from the engine anchor ``parseAndResolveSelectors``
+  ## returned (``target``, ``"."`` when no selector was given). The build
+  ## (``lockConsumption``), ``--print-solved-graph`` and the package answer
+  ## of ``repro why`` all read the lock through this one rule, so the graph
+  ## printed or explained is the one the build pins.
   ##
-  ## The missing-project-file case is the anchor ``bareNameAnchor`` gives a
-  ## request of names only in a directory with no project file, and the
-  ## spelling ``mode1WorkspaceCandidate`` reads as a Mode-1 workspace: an
-  ## explicit ``sub/repro.nim#x`` builds the project synthesised for
-  ## ``sub/`` and must pin ``sub/``'s lock, as ``sub#x`` does, not the
-  ## current directory's.
-  if target.len == 0:
+  ## The ``#<fragment>`` is dropped first; what is left is the anchor's path:
+  ##
+  ## * empty (no selector): the current directory;
+  ## * an existing directory: that directory;
+  ## * an existing file: its directory;
+  ## * a project file that does not exist (``<dir>/repro.nim`` or
+  ##   ``<dir>/reprobuild.nim``) in a directory that does: that directory,
+  ##   the one the project file would be in ([CLI/build.md §"Target
+  ##   Selection"]). A bare name is anchored this way, and an explicit
+  ##   ``sub/repro.nim#x`` builds the project synthesised for ``sub/`` and
+  ##   must pin ``sub/``'s lock.
+  ##
+  ## Any other path names nothing, and raises ``ValueError``. It is NEVER
+  ## replaced by the current directory: ``--print-solved-graph ./typo`` used
+  ## to exit 0 with the current directory's graph, and ``repro why <pkg>
+  ## ./sub#x`` (whose fragment was not dropped) answered from the current
+  ## directory's lock instead of ``./sub``'s (reprobuild-pm issue
+  ## 2026-11-18-repro-why-and-print-solved-graph-fall-back-to-the-current-directory-for-a-path-that-does-not-resolve).
+  let base = splitTarget(target).base
+  if base.len == 0:
     return getCurrentDir()
-  let abs = absolutePath(target)
+  let abs = absolutePath(base)
   if dirExists(extendedPath(abs)):
     return abs
   if fileExists(extendedPath(abs)):
@@ -31301,7 +31325,10 @@ proc resolveProjectDirFromTarget(target: string): string =
   if (name == CanonicalProjectFileName or name == LegacyProjectFileName) and
       dirExists(extendedPath(parentDir(abs))):
     return parentDir(abs)
-  getCurrentDir()
+  raise newException(ValueError,
+    "path selector '" & base & "' names no file or directory (" & abs &
+      "); no project is read for it, and the current directory's lock is " &
+      "not read in its place")
 
 # Forward declarations — bodies live after ``parseExplainFixture`` (which
 # they consume to turn the sidecar solver-inputs text into the solver's
@@ -31813,18 +31840,42 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     putEnv("REPROBUILD_NO_RUNQUOTA", "1")
 
   # ----------------------------------------------------------------
-  # MO-1 — ``--print-solved-graph`` no-build inspection. Resolved BEFORE
-  # selector classification so it works against a committed-lock-only
-  # fixture directory that has no ``repro.nim``. Prints the solved graph
-  # the build would pin (from the committed lock when present, else a
+  # Named-Targets M2 positional resolution lives in the shared M3
+  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
+  # ``runWatchCommand`` cannot drift. The helper classifies every
+  # selector via ``classifyBuildSelector``; the first path-shaped
+  # selector (or the current directory when there's none) becomes the
+  # engine's project anchor, and every name-shaped selector contributes
+  # its closure to ``extraNameSelectors`` so the build runs in one
+  # pass.
+  # ----------------------------------------------------------------
+  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
+  target = resolved.target
+  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
+  let targetWasOmitted = resolved.targetWasOmitted
+  if target.len == 0:
+    target = "."
+
+  # ----------------------------------------------------------------
+  # MO-1 — ``--print-solved-graph`` no-build inspection. Prints the solved
+  # graph the build would pin (from the committed lock when present, else a
   # fresh solve of the ``repro.solver`` sidecar) and exits without
   # building — exercising the exact lock-consumption loader the real build
-  # uses.
+  # uses. Answered AFTER selector classification, from the project the
+  # build's own anchor names (``buildLockProjectDir``, the rule
+  # ``lockConsumption`` below applies), not from the first positional:
+  # ``--print-solved-graph test`` beside a ``test/`` directory, ``lint
+  # ./sub`` and ``runquota:runquotad`` print the graph the build of the same
+  # command line pins (CLI/build.md §"Target Selection"; reprobuild-pm issue
+  # 2026-11-18-print-solved-graph-takes-the-first-positional-as-the-project-not-the-builds-anchor).
+  # A committed-lock-only fixture directory with no ``repro.nim`` still
+  # works when it is the one path selector: the resolver classifies it by
+  # spelling and needs no project file for it. A command line the resolver
+  # refuses (two path anchors in different projects) is refused here too,
+  # as the build refuses it.
   # ----------------------------------------------------------------
   if printSolvedGraph:
-    let rawTarget =
-      if positionalSelectors.len > 0: positionalSelectors[0] else: ""
-    let projDir = resolveProjectDirFromTarget(rawTarget)
+    let projDir = buildLockProjectDir(target)
     # NLF-M5 §5.5 — a strategy OVERRIDES the committed lock for THIS
     # invocation, and `--print-solved-graph` is an invocation. Printing the
     # committed graph under `--strategy highest` would report the opposite of
@@ -31854,23 +31905,6 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     stdout.write(serializeSolvedGraphLock(lk))
     stdout.write("# source: " & graph.source & "\n")
     return 0
-
-  # ----------------------------------------------------------------
-  # Named-Targets M2 positional resolution lives in the shared M3
-  # ``parseAndResolveSelectors`` helper so ``runBuildCommand`` and
-  # ``runWatchCommand`` cannot drift. The helper classifies every
-  # selector via ``classifyBuildSelector``; the first path-shaped
-  # selector (or the current directory when there's none) becomes the
-  # engine's project anchor, and every name-shaped selector contributes
-  # its closure to ``extraNameSelectors`` so the build runs in one
-  # pass.
-  # ----------------------------------------------------------------
-  let resolved = parseAndResolveSelectors(positionalSelectors, "repro build")
-  target = resolved.target
-  var extraNameSelectors: seq[string] = resolved.extraNameSelectors
-  let targetWasOmitted = resolved.targetWasOmitted
-  if target.len == 0:
-    target = "."
 
   # ----------------------------------------------------------------
   # MO-1 / Named-Lock-Files NLF-M3 — consume the committed solved-graph lock,
@@ -31904,7 +31938,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # reaches the pinning path with no separate wiring.
   # ----------------------------------------------------------------
   block lockConsumption:
-    let projDir = resolveProjectDirFromTarget(splitTarget(target).base)
+    let projDir = buildLockProjectDir(target)
     let effectiveLock =
       if lockOverride.len > 0: absolutePath(lockOverride)
       else: committedLockPath(projDir)
@@ -35449,9 +35483,100 @@ proc renderActionKeyText(evidence: ActionKeyEvidence): string =
        else: "absent"))
   lines.join("\n")
 
+const CacheSharingSchema = "reprobuild.cache-sharing.v1"
+  ## The JSON document `repro cache sharing --json` prints.
+  ## A `v1` document only gains fields; a new `sharing` value or a changed
+  ## meaning of one moves it to `v2`.
+
+proc cacheSharingReport(selector: string; mode: ToolProvisioningMode;
+                        workRoot, publicCliPath: string): JsonNode =
+  ## Whether the builds of `selector` (`<project>[#<target>]`) can be served
+  ## to another checkout on this host, from the graph a build would lower
+  ## (the inspection `repro graph` and `repro cache key` run; nothing is
+  ## built), against the roots a build would key by (`wirePortableCache`):
+  ## none, and so `none`, under `REPRO_PORTABLE_CACHE=0`.
+  ##
+  ## Each action of the selection's closure gets `crossCheckoutSharingRefusal`
+  ## (the conditions decidable before it runs). The project's `sharing` is
+  ## `none` when no action can be served, `per-build` when the selection is
+  ## a single cacheable action that can, and `per-library` otherwise.
+  let info = prepareBuildGraphInspection(
+    (if selector.len == 0: "." else: selector), mode, publicCliPath,
+    selectDefaultAction = true, workRoot = workRoot)
+  var config: BuildEngineConfig
+  wirePortableCache(config, info.projectRoot, info.outDir)
+  # Exactly the roots a build keys portable records by: none when the
+  # portable identity is off, which the procedure answers as "not shared".
+  let roots = config.portableRoots
+  var byId = initTable[string, BuildAction]()
+  for action in info.actions:
+    byId[action.id] = action
+  # The selection's closure over `deps`, in graph order; the whole graph
+  # when the inspection selected nothing.
+  var selected = initHashSet[string]()
+  let start =
+    if info.selectedActionId.len > 0: info.selectedActionId
+    else: info.defaultActionId
+  if start.len > 0 and start in byId:
+    var stack = @[start]
+    while stack.len > 0:
+      let id = stack.pop()
+      if id in selected or id notin byId:
+        continue
+      selected.incl(id)
+      for dep in byId[id].deps:
+        stack.add(dep)
+  else:
+    for action in info.actions:
+      selected.incl(action.id)
+  var actions = newJArray()
+  var cacheable = 0
+  var candidates = 0
+  for action in info.actions:
+    if action.id notin selected:
+      continue
+    let refusal = crossCheckoutSharingRefusal(action, roots)
+    if action.cacheable:
+      inc cacheable
+    if refusal.len == 0:
+      inc candidates
+    var node = %*{"id": action.id, "shareable": refusal.len == 0}
+    if refusal.len > 0:
+      node["reason"] = %refusal
+    actions.add(node)
+  let sharing =
+    if candidates == 0: "none"
+    elif cacheable == 1: "per-build"
+    else: "per-library"
+  %*{
+    "schema": CacheSharingSchema,
+    "project": info.projectRoot,
+    "target": (if selector.len == 0: "." else: selector),
+    "toolProvisioning": modeName(info.toolProvisioning),
+    "sharing": sharing,
+    "shareableActions": candidates,
+    "cacheableActions": cacheable,
+    "actions": actions
+  }
+
+proc renderCacheSharingText(report: JsonNode): string =
+  var lines = @["sharing: " & report["sharing"].getStr() & " (" &
+    $report["shareableActions"].getInt() & " of " &
+    $report["cacheableActions"].getInt() & " cacheable actions can be " &
+    "served to another checkout)",
+    "  project: " & report["project"].getStr()]
+  for action in report["actions"]:
+    if action["shareable"].getBool():
+      lines.add("  " & action["id"].getStr() & ": can be shared")
+    else:
+      lines.add("  " & action["id"].getStr() & ": not shared: " &
+        action["reason"].getStr())
+  lines.join("\n")
+
 proc runCacheKeyCommands(conf: ReproCommandLineCache;
                          publicCliPath: string): int =
-  ## `repro cache key <action>` and `repro cache explain <a> <b>`. Exit 0
+  ## `repro cache key <action>`, `repro cache explain <a> <b>` and
+  ## `repro cache sharing [<project>]`. Exit 0
   ## whenever an answer was printed, whatever it says; 1 for an error.
   case conf.command
   of ReproCommandLineCacheCommand.key:
@@ -35520,6 +35645,25 @@ proc runCacheKeyCommands(conf: ReproCommandLineCache;
             lines.add("  " & label & " has no portable identity: " &
               side.refusal)
         echo lines.join("\n")
+    finally:
+      releaseAutoRunQuotaProcess(autoRunQuota)
+    0
+  of ReproCommandLineCacheCommand.sharing:
+    let c = conf.sharing
+    let mode = if c.toolProvisioning.len > 0:
+                 parseToolProvisioning(c.toolProvisioning)
+               else: tpmUnspecified
+    if c.actionCacheRoot.len > 0:
+      setActionCacheRootOverride(c.actionCacheRoot)
+    let format = inspectionFormat(c.format, c.json, allowDot = false)
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    try:
+      let report = cacheSharingReport(c.selector, mode, c.workRoot,
+        publicCliPath)
+      if format == gofJson:
+        echo pretty(report)
+      else:
+        echo renderCacheSharingText(report)
     finally:
       releaseAutoRunQuotaProcess(autoRunQuota)
     0
@@ -36058,8 +36202,12 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
   proc packageSelectionAnswer(): string =
     if explicitAction:
       return ""
+    # The lock is the one a build of ``target`` pins, found by the build's
+    # own rule: the fragment of ``./sub#x`` is dropped, and a path that
+    # names nothing yields no package answer (never the current
+    # directory's).
     let projDir =
-      try: resolveProjectDirFromTarget(target)
+      try: buildLockProjectDir(target)
       except CatchableError: return ""
     var graph: tuple[solution: UnifiedSolution, source: string,
                      lockPath: string, found: bool]
@@ -91805,6 +91953,11 @@ type
     refused: seq[string]
       ## Members answered by the cache with a result that cannot be attested
       ## (``reusedResultRefusal``); ``repro certify`` re-executes their node.
+    refusedClosure: seq[string]
+      ## Other actions of the closure answered by the cache with a result
+      ## whose inputs are not verified byte-identical now
+      ## (``reusedContentRefusal``); ``repro certify`` re-executes them with
+      ## their node's members.
     commands: seq[seq[string]]
     depfiles: seq[string]
       ## Monitor captures of the closure's executed actions.
@@ -91818,6 +91971,25 @@ type
       ## executions read, from ``recordedSources`` records.
     recordedSources: int
 
+proc reusedContentRefusal*(record: ExecutedActionRecord): string =
+  ## Why a reused result of ANY action in a certificate-producing closure
+  ## does not stand for an execution over the inputs the certified content
+  ## holds, or ``""`` when it does (test-certificates Standard §6.2.1, "the
+  ## record covers the inputs": byte-identical, not metadata-identical;
+  ## Test-Certificates.md §"Reused results"). A key match is not enough: the
+  ## timestamp policy keys an input by its size and mtime, and a hybrid
+  ## lookup trusts an input whose size and mtime are unchanged, so content
+  ## replaced with those kept (``cp -p``, ``rsync -a``, ``tar -x``, a
+  ## restore) is still a hit (Caching-Architecture.md §"Known Limit: The
+  ## Default Policy Can Serve A Stale Result"). The engine re-hashes the
+  ## inputs of a content-checked record during a certifying run
+  ## (``cacheRecordContentVerified``); anything else is refused.
+  if record.cacheRecordContentVerified:
+    return ""
+  if record.cacheRecordContentDetail.len > 0:
+    return record.cacheRecordContentDetail
+  "its cache record's inputs were not verified to be byte-identical now"
+
 proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   ## Why a test command the action cache answered may NOT be attested, or
   ## ``""`` when it may (test-certificates Standard §6.2.1, decision D16 of
@@ -91825,9 +91997,11 @@ proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   ## conditions:
   ##
   ##   * the record covers the inputs: a key-matched record answered it
-  ##     (``cdHit`` / ``cdHybridCutoff``, so every keyed input is byte- or
-  ##     metadata-identical now), and the action's key is one that covers
-  ##     what the monitor observed it reading (``keyCoversObservedReads``);
+  ##     (``cdHit`` / ``cdHybridCutoff``), the action's key is one that
+  ##     covers what the monitor observed it reading
+  ##     (``keyCoversObservedReads``), and every keyed input is
+  ##     byte-identical now, not merely metadata-identical
+  ##     (``reusedContentRefusal``);
   ##   * the record came from an execution this host observed
   ##     (``cacheRecordObservedHere``). Reprobuild has no record signed by a
   ##     project-registered key today, so that second arm of the standard is
@@ -91843,7 +92017,7 @@ proc reusedResultRefusal*(record: ExecutedActionRecord): string =
   if not record.cacheRecordObservedHere:
     return "its cache record is not one this host observed executing (a " &
       "LAN peer's, or one whose origin is not recorded)"
-  ""
+  reusedContentRefusal(record)
 
 proc certificateNodeVerdict(run: CertificateNodeRun;
     records: Table[string, ExecutedActionRecord]): CertificateNodeVerdict =
@@ -91853,7 +92027,7 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
   ## ``recordedReads`` are what the records of its reused actions say their
   ## executions read, so the untracked-inputs rule sees a reused test's reads
   ## too.
-  var failed, missing, refusals: seq[string]
+  var failed, missing, refusals, closureRefusals: seq[string]
   for id in run.closure:
     if not records.hasKey(id):
       missing.add(id)
@@ -91876,6 +92050,17 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
       inc result.recordedSources
       for path in record.cacheRecordInputs:
         result.recordedReads.add(path)
+      # A reused action the test commands depend on is part of what the
+      # claim rests on: an output it did not recompute from the certified
+      # inputs is what the tests then ran over. Its result must stand for an
+      # execution over byte-identical inputs too (Standard §6.2.1;
+      # Test-Certificates.md §"Reused results"). Members are judged in full
+      # by ``reusedResultRefusal`` below.
+      if run.members.find(id) < 0:
+        let refusal = reusedContentRefusal(record)
+        if refusal.len > 0:
+          result.refusedClosure.add(id)
+          closureRefusals.add(id & " (" & refusal & ")")
   if failed.len > 0:
     result.problem = "it did not pass: " & failed.join(", ")
     result.remedy = "fix the failing actions and re-run"
@@ -91898,10 +92083,18 @@ proc certificateNodeVerdict(run: CertificateNodeRun;
         continue
     if record.argv.len > 0:
       attested.add(id)
-  if refusals.len > 0:
-    result.problem = $refusals.len & " of its " & $run.members.len &
-      " test command(s) were answered by the action cache with a result " &
-      "that cannot be attested: " & refusals.join(", ")
+  if refusals.len > 0 or closureRefusals.len > 0:
+    var parts: seq[string]
+    if refusals.len > 0:
+      parts.add($refusals.len & " of its " & $run.members.len &
+        " test command(s) were answered by the action cache with a result " &
+        "that cannot be attested: " & refusals.join(", "))
+    if closureRefusals.len > 0:
+      parts.add($closureRefusals.len & " action(s) its test commands " &
+        "depend on were answered by the action cache with a result whose " &
+        "inputs are not byte-identical to the ones it was made from: " &
+        closureRefusals.join(", "))
+    result.problem = parts.join("; ")
     result.remedy = "run 'repro certify " & run.node.name & "', which " &
       "re-executes them"
     return
@@ -92614,13 +92807,20 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
     if opts.certifyExplicit:
       var rerun: seq[string]
       for i, run in runs:
-        if verdicts[i].refused.len > 0:
+        if verdicts[i].refused.len > 0 or verdicts[i].refusedClosure.len > 0:
+          # The closure actions first: a hard rebuild scoped by ``--only``
+          # re-executes exactly the matched actions, so one whose reused
+          # result was refused must be named or the members re-run over its
+          # unverified output.
+          for id in verdicts[i].refusedClosure:
+            if rerun.find(id) < 0:
+              rerun.add(id)
           for id in run.members:
             if rerun.find(id) < 0:
               rerun.add(id)
       if rerun.len > 0:
         stderr.writeLine("repro certify: re-executing " & $rerun.len &
-          " test command(s) whose cached results cannot be attested: " &
+          " action(s) whose cached results cannot be attested: " &
           rerun.join(", "))
         var extra = @["--hard-rebuild"]
         for id in rerun:
@@ -107620,7 +107820,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
     return runCasCommand(conf.cas)
   of ReproCommandLineCommand.cache:
     case conf.cache.command
-    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain:
+    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain,
+        ReproCommandLineCacheCommand.sharing:
       # These lower the project's graph, so they live here and not in the
       # binary-cache client (`cache_cli`), which links no engine.
       try:
