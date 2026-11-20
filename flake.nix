@@ -1057,7 +1057,7 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/c6f6f509316d4b789d0e64a346d2d4bb3271e12d";
+      url = "github:metacraft-labs/reprobuild-nix-packages/d462275c5011669710e0aea2fe5d8b3f9ae8c8a6";
       flake = false;
     };
 
@@ -1075,7 +1075,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/8b4838120c2dc515e9ae1a5684de8906b4e97c33";
+      url = "github:metacraft-labs/reprobuild-brew-packages/1004b4bf991df19e086ae28360c2306702c5798f";
       flake = false;
     };
   };
