@@ -32,7 +32,10 @@
 ##
 ## Falsifying mutation ``guard-disarms-on-success``: the guard disarms as
 ## soon as the switch reports success, so (a), (b) and (c) commit, and
-## their steps go red.
+## their steps go red. Under it the gate puts the link back out after each
+## of them (an apply of the previous generation, under the guard), so each
+## starts from the previous generation as it does unmutated, and it stops
+## after (c): (d) to (g) and the positive run say nothing about it.
 ##
 ## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just
 ## e2e_omarchy_addon_network_guard_disarm_conditions``).
@@ -84,13 +87,24 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
                       " | awk '{print $4}' | head -1").strip()
     let conn = nb.muxRun("nmcli -t -f UUID,DEVICE c show --active | grep ':" &
                          nb.parent & "$' | cut -d: -f1").strip()
+    let mut = mutation()
+    let previous = guardStanza(account, Timeout, oob = "wt0").replace(
+      "PARENT", nb.parent)
     var n = 0
+    proc linkOut() =
+      ## Under the mutation a control commits the link; apply the previous
+      ## generation (the link out) so the next control starts from it.
+      if nb.muxExec("ip link show " & LinkName).exitCode != 0: return
+      let u = nb.startApply(repro, "out" & $n, previous)
+      discard nb.waitArmedOrDone(u, 600)
+      discard nb.freshSsh("true")
+      discard nb.waitApplyDone(u, Timeout + 600)
     proc control(c: string; during: proc(); stillThere: proc(): bool = nil;
                  undo: proc() = nil) =
       inc n
       let before = nb.guardRollbacks().len
       let unit = nb.startApply(repro, "c" & $n, profile)
-      let armed = nb.waitMarkerGuard(["armed"], 600)
+      let armed = nb.waitArmedOrDone(unit, 600)
       # The switch has begun; wait for the watch (the link is up).
       discard nb.muxExec("for i in $(seq 1 120); do ip link show " & LinkName &
                          " >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1", 200)
@@ -98,7 +112,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let done = nb.waitApplyDone(unit, Timeout + 600)
       let log = nb.applyLog(unit)
       let rb = nb.guardRollbacks()
-      step(stepOf(c), armed == "armed" and done and
+      step(stepOf(c), armed and done and
            "rolled back" in log and rb.len == before + 1 and
            nb.muxExec("test -e " & MarkerPath).exitCode != 0,
            log & "\n" & rb.join("\n"))
@@ -116,6 +130,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
            "previous generation's", netAfter == nA, nA & "\n=>\n" & netAfter)
       step("control (" & c & "): no guard unit is left", nb.guardUnits().len == 0,
            nb.guardUnits())
+      if mut.len > 0: linkOut()
     proc nothing() = discard
     control("a", nothing, nil, nil)
     control("b", proc() =
@@ -130,6 +145,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("control (c): confirm from a session opened before the switch is refused",
          "created before the switch began" in confirmOut or
          "refused" in confirmOut, confirmOut)
+    if mut.len > 0: return fails
     control("d", proc() = discard nb.muxExec("ip link set wt0 down"),
       proc(): bool = "state DOWN" in nb.muxExec("ip link show wt0").stdout,
       proc() = discard nb.muxExec("ip link set wt0 up"))
@@ -161,8 +177,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          nb.muxExec("test -e " & MarkerPath).exitCode != 0 and
          nb.muxExec("ip link show " & LinkName).exitCode == 0, log)
     # Clean up: the link out, then the add-on, then the harness's own.
-    let unit2 = nb.startApply(repro, "out", guardStanza(account, Timeout,
-      oob = "wt0").replace("PARENT", nb.parent))
+    let unit2 = nb.startApply(repro, "out", previous)
     discard nb.waitMarkerGuard(["armed"], 600)
     discard nb.freshSsh("true")
     discard nb.waitApplyDone(unit2, Timeout + 600)
@@ -197,20 +212,8 @@ proc expected(mut: string; b: BaseImage): Falsifier =
       may.add("control (" & c & "): links, addresses and routes equal the " &
               "previous generation's")
     may.add("control (c): confirm from a session opened before the switch is refused")
-    # Once (a) committed the link, later controls run over it.
-    for c in ["d", "e", "f", "g"]:
-      may.add(stepOf(c))
-      may.add("control (" & c & "): the fingerprint equals the previous " &
-              "generation's")
-      may.add("control (" & c & "): links, addresses and routes equal the " &
-              "previous generation's")
-      may.add("control (" & c & "): the harness's own change is still in " &
-              "place after the revert (§13 decision 86)")
-    may.add("every invariant holds and a new SSH session arrives: disarmed " &
-            "and committed")
-    may.add("base fingerprint after uninstall == before bootstrap")
     Falsifier(required: @[stepOf("a"), stepOf("b"), stepOf("c")],
-              mayBeRed: may, mustRunGreen: @["bootstrap", "uninstall"])
+              mayBeRed: may, mustRunGreen: @["bootstrap"])
   else: raise unknownMutation(Gate, mut)
 
 suite Gate:
