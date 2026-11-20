@@ -32161,6 +32161,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_user_docs_command_rows_carry_one_line_help.nim",
+    binary: "build/test-bin/t_user_docs_command_rows_carry_one_line_help",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let probed = runProbe()"),
+  TestSpec(
     source: "tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim",
     binary: "build/test-bin/t_uses_refuses_a_package_declared_for_another_platform",
     defines: @[],

@@ -90,6 +90,8 @@ Commands fall into four side-effect classes:
 | `repro flake` | `override-args`, `refresh-lock`, `override-status` | Compute the Nix flake overrides of the develop set. |
 | `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
 | `repro bundle` | `create`, `publish`, `restore`, `inspect` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
+| `repro catalog` | `generate`, `verify`, `publish` | Publish a catalog's interface artifacts, or generate and verify a Nimble package index. |
+| `repro nimble` | `verify` | Work with the Nimble packages a lock pins. |
 
 ## Machines & Diagnostics
 
@@ -105,7 +107,7 @@ Commands fall into four side-effect classes:
 | `repro deploy-agent` | `keygen` | Run one deploy-agent tick: poll the manifests, verify them and apply the newest for the target. |
 | `repro hardware` | `probe` | Probe the machine's hardware. |
 | `repro disk` | `plan`, `apply`, `mount`, `unmount`, `generate`, `image` | Plan, apply and mount disk layouts. |
-| `repro attest` | — | Compute and check launch measurements of attested images. |
+| `repro attest` | `expect`, `challenge`, `verify`, `cross-check`, `launch`, `reap` | Compute and check launch measurements of attested images. |
 | `repro cert-signer` | `serve`, `registration` | Run the certificate signer for remote build workers. |
 | `repro daemon` | `status`, `start`, `stop`, `restart`, `logs`, `sessions` | Manage the per-user reprobuild daemon. |
 | `repro store` | `gc`, `recover`, `roots`, `list`, `optimise`, `materialize`, `closure`, `export`, `import`, `copy`, `daemon` | Manage the local store. |
@@ -138,6 +140,7 @@ Commands fall into four side-effect classes:
 | `repro capabilities` | Machines & Diagnostics | Describe what this build of repro supports. |
 | `repro cargo` | Build & Test | Manage cargo target directories and run cargo as a build edge. |
 | `repro cas` | Machines & Diagnostics | Inspect the content-addressed blob store. |
+| `repro catalog` | Dependencies & Workspaces | Publish a catalog's interface artifacts, or generate and verify a Nimble package index. |
 | `repro cert-signer` | Machines & Diagnostics | Run the certificate signer for remote build workers. |
 | `repro certificates` | Build & Test | List the project's named certificates or those a plan issues. |
 | `repro certify` | Build & Test | Run the required test set and issue a signed test certificate. |
@@ -171,6 +174,7 @@ Commands fall into four side-effect classes:
 | `repro lint` | Build & Test | Run the project's lint checks. |
 | `repro lock` | Dependencies & Workspaces | Inspect and update the project's lock. |
 | `repro locking` | Dependencies & Workspaces | Explain or adopt the workspace's locking configuration. |
+| `repro nimble` | Dependencies & Workspaces | Work with the Nimble packages a lock pins. |
 | `repro pressure` | Machines & Diagnostics | Show build-wait pressure from the RunQuota daemon (exit 1 when it cannot be reached or predates it). |
 | `repro prompt` | Environments & Services | Print a workspace-state segment for the shell prompt. |
 | `repro pull` | Dependencies & Workspaces | Converge the workspace onto its declared revisions. |
