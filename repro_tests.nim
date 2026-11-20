@@ -6325,6 +6325,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_dsl_stdlib_tests_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_python3_opentelemetry_windows_realization.nim",
+    binary: "build/test-bin/t_python3_opentelemetry_windows_realization",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_repeated_variant_assignment_last_wins.nim",
     binary: "build/test-bin/t_repeated_variant_assignment_last_wins",
     defines: @[],
