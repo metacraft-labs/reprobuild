@@ -3102,6 +3102,10 @@ type
     patchelf*: string
       ## The ELF editor an archive that declares an ELF relocation is
       ## rewritten with (``ElfRelocationToolRole``).
+    elfRuntimePrefix*: string
+      ## The realized prefix of the archive's ``elfRuntimePackage``, whose
+      ## loader and C library its programs are relocated onto
+      ## (``elfRuntimeRole``). Empty when the archive names none.
     installation*: ArchiveStageTools
 
 const
@@ -3111,6 +3115,20 @@ const
     ## The realization helper that rewrites ``PT_INTERP`` and ``DT_RPATH``
     ## of an archive that declares an ELF relocation: the stdlib ``patchelf``
     ## package, realized by its own provisioning edge like an extractor.
+  ElfRuntimeRolePrefix* = "elf-runtime:"
+    ## Prefix of the dependency role that realizes an archive's
+    ## ``elfRuntimePackage``: ``elf-runtime:<package>``. The edge realizes
+    ## that package's host ``tarball`` arm into the same tool store, and the
+    ## relocation reads the loader and library directories from its prefix.
+
+proc elfRuntimeRole*(packageName: string): string =
+  ## The dependency role of an archive whose programs are relocated onto
+  ## ``packageName``'s loader and C library.
+  ElfRuntimeRolePrefix & packageName
+
+proc isElfRuntimeRole(role: string): bool =
+  role.startsWith(ElfRuntimeRolePrefix) and
+    role.len > ElfRuntimeRolePrefix.len
 
 proc extractorRolesFor*(archiveType: string): seq[string] =
   ## Which provisioned extractors realizing an archive of `archiveType`
@@ -3202,13 +3220,15 @@ proc declaresElfRelocation*(record: InterfaceTarballProvisioning): bool =
   ## dynamically linked archive".
   let detail = record.detail
   detail.elfInterpreter.len > 0 or detail.elfRunpath.len > 0 or
-    detail.gccLinkSpecs.len > 0 or detail.gccSpecDefaults.len > 0
+    detail.gccLinkSpecs.len > 0 or detail.gccSpecDefaults.len > 0 or
+    detail.elfRuntimePackage.len > 0
 
 proc installationIdentity(plan: TarballAcquisitionPlan): string =
   ## Every semantic install field and helper receipt is an input to both
   ## local and shared-cache prefix identity. Plain archives retain their key.
   if archiveInstallerFeatures(plan.record).len > 0 or
       plan.record.detail.extraExecutables.len > 0 or
+      plan.record.detail.executableExtraAliases.len > 0 or
       declaresElfRelocation(plan.record):
     $jsonutils.toJson(plan.record.detail) & "\0tools:" & plan.installationToolsIdentity
   else: ""
@@ -3714,6 +3734,10 @@ proc installationToolRoles*(record: InterfaceTarballProvisioning): seq[string] =
     result.add(launcherToolRole(decodeLauncherEmitSpec(encoded)))
   if declaresElfRelocation(record):
     result.add(ElfRelocationToolRole)
+  if detail.elfRuntimePackage.len > 0:
+    # Realized before this archive, like patchelf: the relocation names
+    # files in its prefix, which must exist when the rewrite runs.
+    result.add(elfRuntimeRole(detail.elfRuntimePackage))
 
 proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
   ## The provisioned package an extractor role is realized from, as a list
@@ -3726,9 +3750,14 @@ proc extractorToolUses*(role: string): seq[InterfaceToolUse] =
       @[bootstrapSevenZipToolUse()]
   of ExtractorRoleZstd: @[bootstrapZstdToolUse()]
   else:
+    # An ELF runtime role names the package after its prefix; every other
+    # role is the package's own name.
+    let package =
+      if isElfRuntimeRole(role): role[ElfRuntimeRolePrefix.len .. ^1]
+      else: role
     var helper = PackageDef(packageName: "archiveHelpers")
-    helper.toolUses = @[PackageUseDef(rawConstraint: role,
-      packageSelector: role, executableName: role)]
+    helper.toolUses = @[PackageUseDef(rawConstraint: package,
+      packageSelector: package, executableName: package)]
     let projected = toProjectInterface(helper, registeredPackages(),
       registeredProvisioningContributions())
     @[projected.toolUses[0]]
@@ -4223,7 +4252,12 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     # with it, so it must not record the absolute path it was written at:
     # that is the staging directory, which exists only on the realizing host
     # and only until the prefix is moved into place.
-    "realizationBoundary": "."
+    "realizationBoundary": ".",
+    # Whether realization changed the archive's bytes beyond the alias,
+    # launcher and prunes (an ELF relocation, installer steps, extra
+    # aliases: ``installationIdentity``). A sibling-prefix clone must not
+    # copy such a prefix into a view that declares none of it.
+    "installationDeclared": installationIdentity(plan).len > 0
   }
   writeFile(extendedPath(tarballReceiptPath(prefix)), receipt.pretty())
 
@@ -4630,6 +4664,19 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
       if receipt.declaredExecutableAlias != plan.declaredExecutableAlias or
           receipt.declaredLauncher != plan.declaredLauncher or
           receipt.declaredPrunePaths != @(plan.declaredPrunePaths):
+        continue
+      # A sibling realized WITH installation declarations (an ELF
+      # relocation: rust-lang's ``rustc`` view is relocated onto the store
+      # root's C library on Linux, its ``rustfmt`` view is not) holds bytes
+      # this plain view's extraction would not produce. Its adapter receipt
+      # says so; one written before the field existed does not, and is
+      # judged by the fields above as before.
+      try:
+        let adapterReceipt = candidate / ".reprobuild-tarball-receipt.json"
+        if fileExists(extendedPath(adapterReceipt)) and
+            parseFile(adapterReceipt){"installationDeclared"}.getBool(false):
+          continue
+      except CatchableError:
         continue
       # The sibling must already carry what THIS package declares. If it
       # does not, the two disagree about the extraction whatever their lock
@@ -5160,7 +5207,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
           execCmdExCloseOnce(quoteShellCommand(argv),
             options = {poStdErrToStdOut})
       discard relocateElfTree(plan.record.detail, tempPrefix, prefix,
-        tools.patchelf, runRelocationTool)
+        tools.patchelf, runRelocationTool, tools.elfRuntimePrefix)
       writeGccLinkSpecs(plan.record.detail, plan.declaredExecutablePath,
         tempPrefix, prefix, runRelocationTool)
     let extractedProbe = probeDeclaredExecutable(tempPrefix,
@@ -5222,6 +5269,32 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
           # Preserve the execute bit the copy does not carry on POSIX.
           setFilePermissions(extendedPath(aliasPath),
             getFilePermissions(extendedPath(extractedExecutable)))
+    # Further names for the same executable (``executableExtraAliases``):
+    # a C driver that must also answer to ``cc``. Copies, for the reason
+    # the alias above is one. A name the archive already has is refused,
+    # not overwritten: the declaration would otherwise silently replace a
+    # program the vendor shipped.
+    for extraAlias in plan.record.detail.executableExtraAliases:
+      if plan.declaredLauncher.len > 0:
+        raise newException(OSError,
+          "tool-resolution failed: executableExtraAlias " & extraAlias &
+          " cannot be combined with a launcher")
+      if extraAlias.len == 0 or '/' in extraAlias or '\\' in extraAlias:
+        raise newException(OSError,
+          "tool-resolution failed: executableExtraAlias must be a file " &
+          "name: " & extraAlias.escape())
+      let extraPath = extractedExecutable.parentDir / extraAlias
+      if fileExists(extendedPath(extraPath)) or
+          dirExists(extendedPath(extraPath)) or
+          symlinkExists(extendedPath(extraPath)):
+        raise newException(OSError,
+          "tool-resolution failed: executableExtraAlias " & extraAlias &
+          " already exists in the archive beside " &
+          extractFilename(extractedExecutable))
+      copyFile(extendedPath(extractedExecutable), extendedPath(extraPath))
+      when not defined(windows):
+        setFilePermissions(extendedPath(extraPath),
+          getFilePermissions(extendedPath(extractedExecutable)))
     validateExtraTarballExecutables(plan, tempPrefix)
     if archiveInstallerFeatures(plan.record).len > 0:
       verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
@@ -5707,6 +5780,16 @@ proc addExtractorEdge(edges: var ProvisioningEdges; role, storeRoot,
   if hostUses.len > 0:
     result = addTarballProvisionEdge(edges, hostUses, storeRoot, writerMode,
       visiting, extractor = true)
+  elif isElfRuntimeRole(role):
+    # The relocation writes absolute paths into the runtime package's
+    # prefix; only a tarball realization in this tool store has one that is
+    # inside the store root and keyed with this archive. A Nix realization
+    # would put the loader under /nix/store, outside every logical root.
+    raise newException(OSError,
+      "tool-resolution failed: " & role[ElfRuntimeRolePrefix.len .. ^1] &
+      ", the package this archive's programs are relocated onto, has no " &
+      "tarball realization for host cpu=" & hostCpuToken() & " os=" &
+      hostOsToken())
   elif uses.len > 0 and uses[0].nixProvisioning.len > 0:
     result = addNixProvisionEdge(edges, uses[0], storeRoot)
   else:
@@ -6025,6 +6108,13 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
           continue
         toolIdentities.add(node{"role"}.getStr() & ":" &
           storeRelativePath(exe, storeRoot) & "\n")
+        if isElfRuntimeRole(node{"role"}.getStr()):
+          # The relocation needs the runtime package's PREFIX, not its
+          # executable; the receipt names both. Its store-relative
+          # executable path, which names the prefix, is already in
+          # ``toolIdentities`` and so in this realization's key.
+          tools.elfRuntimePrefix =
+            readTarballProvisionReceipt(node{"receipt"}.getStr()).prefix
         case node{"role"}.getStr()
         of ExtractorRoleSevenZip:
           tools.sevenZip = exe
