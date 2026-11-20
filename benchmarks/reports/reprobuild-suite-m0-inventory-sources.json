@@ -14400,7 +14400,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_catalog_publication.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33650,7 +33650,7 @@
       "requiresReproBinary": false,
       "source": "tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim",
       "sourceSuiteCount": 16,
-      "staticCaseCount": 116,
+      "staticCaseCount": 112,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55520,7 +55520,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_pool_retains_registered_leaf_objects.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 34,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
