@@ -4042,6 +4042,7 @@ test "incomplete name" and:
             'tests/e2e/m83/t_e2e_profile_compile_clang_first_run_published.nim',
             'tests/e2e/m83/t_e2e_profile_compile_ignores_ancestor_membership.nim',
             'tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim',
+            'tests/e2e/m83/t_e2e_profile_resave_without_edit_does_not_recompile.nim',
             "libs/repro_profile_compile/tests/t_smoke_module_imports.nim",
             "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
             "libs/repro_profile_compile/tests/"
