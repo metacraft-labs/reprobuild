@@ -41735,6 +41735,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_core",
         "repro_runquota",
         "repro_test_support"
       ],
@@ -41742,7 +41743,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 20,
+      "staticCaseCount": 23,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
