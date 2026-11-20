@@ -1776,6 +1776,8 @@ tests/integration/t_action_cache_two_tier_concurrent_builds_no_wedge_live_sharin
 tests/integration/t_action_index_backpressure_and_tombstones.nim	nim	3
 tests/integration/t_action_index_flatten_retire_preserves_completeness.nim	nim	3
 tests/integration/t_action_index_stale_chain_recreation_converges.nim	nim	4
+tests/integration/t_action_index_unmappable_shard_voids_completeness.nim	nim	1
+tests/integration/t_action_index_unopenable_newest_shard_voids_completeness.nim	nim	1
 tests/integration/t_activity_mock_tier_allowed_on_plain_layout.nim	nim	2
 tests/integration/t_activity_validate_gate.nim	nim	11
 tests/integration/t_add_respects_develop_mode_policy_and_overrides.nim	nim	7

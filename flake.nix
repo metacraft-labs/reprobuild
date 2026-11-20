@@ -423,7 +423,12 @@
       # Bumped 6333cc9 -> 7bc81ad (2026-11-11, `agents`) with io-mon-src 7a9b2f33:
       # io-mon's writer (c8bc874) calls `emitNoGrow`, an async-signal-safe
       # insert that never grows the set, which 6333cc9 does not have.
-      url = "github:metacraft-labs/nim-shm-gset/7bc81ad2440860a8a9254eb2757c585df9652438";
+      # Bumped 7bc81ad -> 34ef30c (2026-11-20, `agents`): an insert whose newest
+      # shard will not map, and a reader walk that skips a shard whose file is
+      # present but would not map, both bump `growthFailed`, so enumerateEdge
+      # no longer honours a completeness claim from a walk that missed
+      # elements. Generation-stamped counters saturate instead of wrapping.
+      url = "github:metacraft-labs/nim-shm-gset/34ef30cba47ac93304078a101796a6283230e8cc";
       flake = false;
     };
     nim-shm-queue-src = {
