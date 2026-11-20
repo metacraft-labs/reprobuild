@@ -1096,7 +1096,7 @@ suite "integration_build_engine_api_ready_queue":
         cacheable = true, weakFingerprint = weak("cache-present-output"),
         commandStatsId = "cache-present-output",
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
-      let presentRestoreOnlyAction = action("cache-present-output",
+      var presentRestoreOnlyAction = action("cache-present-output",
         [app, "fixture-action", "cache-should-not-run", presentMarkerPath,
           presentOutputPath],
         cwd = workRoot, inputs = [inputPath], outputs = ["out/present.txt"],
@@ -1109,13 +1109,34 @@ suite "integration_build_engine_api_ready_queue":
         cacheable = true, weakFingerprint = weak("cache-missing-output"),
         commandStatsId = "cache-missing-output",
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
-      let missingRestoreOnlyAction = action("cache-missing-output",
+      var missingRestoreOnlyAction = action("cache-missing-output",
         [app, "fixture-action", "cache-should-not-run", missingMarkerPath,
           missingOutputPath],
         cwd = workRoot, inputs = [inputPath], outputs = ["out/missing.txt"],
         cacheable = true, weakFingerprint = weak("cache-missing-output"),
         commandStatsId = "cache-missing-output",
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+      # Each restore-only action stands for a WARM run of its cache action:
+      # a command that must not run, because the record the cold run wrote is
+      # served instead. Its argv differs (it would write a marker and a wrong
+      # output), and `action()` keys the argv and cwd itself (reprobuild-pm
+      # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+      # 2026-11-16), so the same caller fingerprint no longer gives the two
+      # one key: left alone, every warm run below asks under a key nothing
+      # was published under, misses, and launches. Sharing the record is this
+      # case's premise, not its subject, so the key is set here directly.
+      # The premise itself, checked before it is overridden, so a constructor
+      # that stops keying argv does not leave the assignments below as dead
+      # weight nobody can explain.
+      check presentRestoreOnlyAction.weakFingerprint !=
+        presentCacheAction.weakFingerprint
+      check missingRestoreOnlyAction.weakFingerprint !=
+        missingCacheAction.weakFingerprint
+      presentRestoreOnlyAction.weakFingerprint =
+        presentCacheAction.weakFingerprint
+      missingRestoreOnlyAction.weakFingerprint =
+        missingCacheAction.weakFingerprint
 
       proc runOne(buildAction: BuildAction): ActionResult =
         let buildResult = runBuild(graph([buildAction]), BuildEngineConfig(
