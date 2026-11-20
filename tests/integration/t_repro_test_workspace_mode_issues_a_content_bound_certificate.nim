@@ -21,7 +21,8 @@
 ##   3. after an edit to a tracked file no edge reads, ``repro test
 ##      unit-suite`` executes nothing (the run counter is unchanged): both
 ##      members are answered by records of executions this host observed,
-##      whose keys cover what the monitor saw them read, so it issues
+##      whose keys cover what the monitor saw them read and whose inputs
+##      still hash to the recorded content, so it issues
 ##      ``targets = ["unit-suite"]`` for the edited content with both commands
 ##      (Standard §6.2.1; decision D16);
 ##   3b. after ``unit_a``'s record is re-installed through the peer cache's
@@ -48,6 +49,13 @@
 ##      answered by the cache and the read set comes from its record, which
 ##      still names the file, so it is withheld again.
 ##
+## ``unit_a``, ``unit_b`` and ``scratch`` state the ``hybrid`` input-check
+## policy, because steps 3 and 6b rest on reused results: a certificate may
+## rest on one only when its inputs re-hash to the record's content, which a
+## ``timestamp`` record cannot show (Test-Certificates.md §"Reused results";
+## that refusal is pinned by
+## ``t_a_reused_result_is_attested_only_over_byte_identical_inputs``).
+##
 ## The lock-update node a plain ``repro test`` runs before its tests
 ## (Unified-Locking-And-Hooks HL-10) finds nothing to re-pin here; its effect
 ## is pinned by ``t_certifying_run_refreshes_the_lock_before_testing``.
@@ -70,6 +78,7 @@ const buildLines =
   "    let unit_b = certTool(actionId = \"unit_b\",\n" &
   "      input = \"build/unit_a-out\",\n" &
   "      output = \"build/unit_b-out\",\n" &
+  "      actionCachePolicy = acfpHybrid,\n" &
   "      marker = \".repro/runs.log\")\n" &
   "    certificate \"unit-suite\", aggregate(\"unit-suite\", @[unit_a, unit_b])\n" &
   "    certificate \"side-suite\", aggregate(\"side-suite\", @[side])\n" &
@@ -110,7 +119,7 @@ suite "TC-8e — issue on the real repro test path":
     else:
       var fx = setupWorkspaceCertifyFixture("tc8e-issue",
         ["unit_a", "lone", "side", "scratch"], buildLines,
-        untrackedStems = ["scratch"])
+        untrackedStems = ["scratch"], hybridStems = ["unit_a", "scratch"])
       defer: removeDir(fx.cf.sib.scratch)
       let app = fx.app
       let base = fx.cf.sib.headOf(app)
@@ -204,7 +213,7 @@ suite "TC-8e — issue on the real repro test path":
         "--tool-provisioning=path"])
       checkpoint(certified.output)
       check certified.code == 0
-      check "re-executing 2 test command(s) whose cached results cannot be " &
+      check "re-executing 2 action(s) whose cached results cannot be " &
         "attested" in certified.output
       let executed = fx.executedOutputs()
       check executed.len == ranBefore + 2

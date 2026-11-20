@@ -1157,14 +1157,36 @@ proc gccDriverFromCommand(rawArgv: seq[string]; gccDefault: string): string =
     return rawArgv[0]
   gccDefault
 
-proc objFileFromManifestCFile(objDir, cFile: string): string =
-  ## Nim emits one ``.c`` per Nim module with mangled names like
-  ## ``@mfoo.nim.c`` or ``@psystem.nim.c``. Reuse those names for the
-  ## per-file ``.o`` so the manifest's ``link`` array (which already
-  ## carries the matching ``.o`` paths) lines up with what Phase 2
-  ## produces, edge for edge.
-  let stem = extractFilename(cFile)
-  objDir / (stem & ".o")
+proc recordedObjectName(rawArgv: seq[string]; cFile: string): string =
+  ## The file name of the object Nim's recorded command writes: the last
+  ## component of the path after its ``-o``. For a ``.c`` file Nim
+  ## generated this is the C file's name plus ``.o`` (``@mfoo.nim.c.o``).
+  ## For a ``{.compile.}`` pragma's source Nim mangles the path into the
+  ## name (``@ma@sutil.c.o`` for ``a/util.c``), or uses the name the
+  ## pragma itself gives. The C file's own name does not identify the
+  ## entry: two pragmas may name ``a/util.c`` and ``b/util.c``.
+  ##
+  ## Raises when the command has no ``-o <path>.o``: ``rewriteGccArgv``
+  ## redirects the object by replacing that pair, and Phase 3 recognises
+  ## the recorded objects in ``linkcmd`` by their ``.o`` suffix. A
+  ## command without it (``--cc:vcc`` records ``/Fo<path>``; a
+  ## shell-quoted path keeps its quote) would otherwise get an action
+  ## whose declared object nothing writes.
+  var recorded = ""
+  for i in 0 ..< rawArgv.len - 1:
+    if rawArgv[i] == "-o":
+      recorded = rawArgv[i + 1]
+  # Split on both separators: the manifest of a Windows target carries
+  # ``\`` whatever host parses it.
+  let cut = max(recorded.rfind('/'), recorded.rfind('\\'))
+  result = recorded[cut + 1 .. ^1]
+  if result.len <= 2 or not result.endsWith(".o"):
+    raise newException(ValueError,
+      "nim convention: the compile command Nim recorded for " & cFile &
+        " has no '-o <path>.o' argument, so Phase 2 cannot redirect its " &
+        "object (recorded object: '" & recorded & "'). The Nim convention " &
+        "supports only gcc-style compile commands whose object name ends " &
+        "in .o")
 
 proc actionIdFor(prefix, entry, detail: string): string =
   ## Build a Reprobuild-safe action id. The DSL's ``sanitizeNodePart``
@@ -1179,6 +1201,97 @@ proc actionIdFor(prefix, entry, detail: string): string =
   if sanitized.len == 0:
     sanitized = "x"
   prefix & "-" & entry & "-" & sanitized
+
+proc injectiveIdDetail(name: string): string =
+  ## ``name`` spelled in the characters an action id may carry, so that
+  ## two different names never give the same spelling: ``_`` becomes
+  ## ``__`` and any other character outside ``[A-Za-z0-9.-]`` becomes
+  ## ``_`` plus its two hex digits.
+  for ch in name:
+    if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '.'}:
+      result.add(ch)
+    elif ch == '_':
+      result.add("__")
+    else:
+      result.add('_')
+      result.add(toHex(ord(ch), 2))
+
+type
+  Phase2CompilePlan = object
+    ## One Phase 2 action to emit: a manifest ``compile`` entry, the
+    ## object it writes and its action id.
+    step: NimcacheCompileStep
+    rawArgv: seq[string]
+    objName: string
+    objFile: string
+    actionId: string
+
+proc sameObjectFile(a, b: string): bool =
+  ## Whether two object names are one file in the object directory.
+  ## Without regard to letter case on Windows and macOS, whose default
+  ## file systems fold case; exactly elsewhere.
+  when defined(windows) or defined(macosx):
+    cmpIgnoreCase(a, b) == 0
+  else:
+    a == b
+
+proc planPhase2Compiles(manifest: NimcacheManifest;
+                        objDir, entryName: string): seq[Phase2CompilePlan] =
+  ## One plan per distinct ``compile`` entry of the manifest, each with
+  ## an object path and an action id no other plan has (``Nim.md``
+  ## §"Phase 2 — Per-`.c` compile"). The object is named after the
+  ## object in Nim's recorded command (``recordedObjectName``).
+  ##
+  ## An entry that repeats an earlier one exactly (same C file, same
+  ## command) is the same compile and is planned once. Two different
+  ## entries that record the same object name cannot both be built: the
+  ## emit fails rather than let one action's object overwrite the
+  ## other's.
+  for step in manifest.compile:
+    let rawArgv = splitCommandLine(step.gccCommand)
+    let objName = recordedObjectName(rawArgv, step.cFile)
+    var repeated = false
+    for earlier in result:
+      if earlier.step.cFile == step.cFile and
+          earlier.step.gccCommand == step.gccCommand:
+        repeated = true
+        break
+      if sameObjectFile(earlier.objName, objName):
+        raise newException(ValueError,
+          "nim convention: two compile entries of the nimcache manifest " &
+            "for " & entryName & " record the same object, " & objName &
+            ": " & earlier.step.cFile & " and " & step.cFile &
+            (if earlier.step.cFile == step.cFile:
+               " (compiled with different flags)"
+             else: "") &
+            ". Each would overwrite the other's object. Give one " &
+            "{.compile.} pragma an object name of its own, as in " &
+            "{.compile: (\"x.c\", \"other_$1.o\").}")
+    if not repeated:
+      result.add(Phase2CompilePlan(step: step, rawArgv: rawArgv,
+        objName: objName, objFile: objDir / objName))
+  # Action ids. The readable id drops the ``.o`` and replaces every
+  # character an id cannot carry with ``_``, so two object names may
+  # give one id (``@ma@sutil.c.o`` and ``@ma_sutil.c.o``). The plans
+  # that share a readable id get the injective spelling instead.
+  var readable: seq[string] = @[]
+  var uses = initCountTable[string]()
+  for plan in result:
+    let id = actionIdFor("gcc-compile", entryName, plan.objName[0 .. ^3])
+    readable.add(id)
+    uses.inc(id)
+  var taken = initTable[string, string]()
+  for i in 0 ..< result.len:
+    result[i].actionId =
+      if uses[readable[i]] == 1: readable[i]
+      else: "gcc-compile-" & entryName & "-" &
+        injectiveIdDetail(result[i].objName[0 .. ^3])
+    if result[i].actionId in taken:
+      raise newException(ValueError,
+        "nim convention: the Phase 2 objects " & taken[result[i].actionId] &
+          " and " & result[i].objName & " of " & entryName &
+          " give the same action id, " & result[i].actionId)
+    taken[result[i].actionId] = result[i].objName
 
 proc collectNimSources(srcDir: string): seq[string]
 
@@ -1327,11 +1440,11 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
 
   var phase2: seq[BuildActionDef] = @[]
   var objFiles: seq[string] = @[]
-  for step in manifest.compile:
-    let cFile = step.cFile
-    let rawArgv = splitCommandLine(step.gccCommand)
+  for plan in planPhase2Compiles(manifest, objDir, entry.name):
+    let cFile = plan.step.cFile
+    let rawArgv = plan.rawArgv
     let driver = gccDriverFromCommand(rawArgv, findExe("gcc"))
-    let objFile = objFileFromManifestCFile(objDir, cFile)
+    let objFile = plan.objFile
     let depFile = objFile & ".d"
     objFiles.add(objFile)
     var gccArgv = rewriteGccArgv(
@@ -1339,7 +1452,7 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
       cFile, objFile, depFile)
     gccArgv.insert(driver, 0)
     let action = buildAction(
-      id = actionIdFor("gcc-compile", entry.name, extractFilename(cFile)),
+      id = plan.actionId,
       call = inlineExecCall(gccArgv, projectRoot),
       deps = @[phase1Id],
       inputs = @[cFile],
@@ -1541,11 +1654,11 @@ proc emitForLibrary(projectRoot, nimExe: string;
 
   var phase2: seq[BuildActionDef] = @[]
   var objFiles: seq[string] = @[]
-  for step in manifest.compile:
-    let cFile = step.cFile
-    let rawArgv = splitCommandLine(step.gccCommand)
+  for plan in planPhase2Compiles(manifest, objDir, lib.name):
+    let cFile = plan.step.cFile
+    let rawArgv = plan.rawArgv
     let driver = gccDriverFromCommand(rawArgv, findExe("gcc"))
-    let objFile = objFileFromManifestCFile(objDir, cFile)
+    let objFile = plan.objFile
     let depFile = objFile & ".d"
     objFiles.add(objFile)
     var gccArgv = rewriteGccArgv(
@@ -1567,7 +1680,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
         gccArgv.insert("-fPIC", 1)
     gccArgv.insert(driver, 0)
     let action = buildAction(
-      id = actionIdFor("gcc-compile", lib.name, extractFilename(cFile)),
+      id = plan.actionId,
       call = inlineExecCall(gccArgv, projectRoot),
       deps = @[phase1Id],
       inputs = @[cFile],

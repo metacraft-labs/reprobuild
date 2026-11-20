@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3052,
+    "nimTestBinaries": 3053,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 810,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3102
+    "testEntries": 3103
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,7 +1725,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1695,
+      "integration": 1696,
       "platform/destructive": 198,
       "pure unit": 810,
       "unclassified": 373
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3052,
+    "nimTestBinaryCount": 3053,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3102
+    "testEntryCount": 3103
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29352,8 +29352,8 @@
       "owner": "libs/repro_standard_provider",
       "requiresReproBinary": false,
       "source": "libs/repro_standard_provider/tests/test_nim_convention.nim",
-      "sourceSuiteCount": 9,
-      "staticCaseCount": 34,
+      "sourceSuiteCount": 10,
+      "staticCaseCount": 39,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -41197,6 +41197,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_reused_result_is_attested_only_over_byte_identical_inputs",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_reused_result_is_attested_only_over_byte_identical_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_root_repo_flake_is_reported_not_refused",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -43723,12 +43741,14 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

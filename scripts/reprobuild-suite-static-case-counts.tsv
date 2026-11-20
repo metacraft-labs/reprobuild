@@ -1098,7 +1098,7 @@ libs/repro_standard_provider/tests/test_jsts_convention.nim	nim	19
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_mode1_loader.nim	nim	12
-libs/repro_standard_provider/tests/test_nim_convention.nim	nim	34
+libs/repro_standard_provider/tests/test_nim_convention.nim	nim	39
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_php_composer_convention.nim	nim	10
@@ -1763,6 +1763,7 @@ tests/integration/t_a_refreshed_flake_pin_carries_what_nix_would_write.nim	nim	2
 tests/integration/t_a_refused_volatile_root_is_never_certified.nim	nim	2
 tests/integration/t_a_repin_moves_the_sibling_repos_pin_with_flake_lock.nim	nim	4
 tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
+tests/integration/t_a_reused_result_is_attested_only_over_byte_identical_inputs.nim	nim	1
 tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
 tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	nim	1
 tests/integration/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded.nim	nim	1
@@ -1906,7 +1907,7 @@ tests/integration/t_commit_repins_committed_lock_siblings.nim	nim	3
 tests/integration/t_committed_lock_carries_coordinates_and_self_describing_integrity_per_dep.nim	nim	1
 tests/integration/t_committed_lock_folds_sibling_develop_deps.nim	nim	1
 tests/integration/t_committed_lock_paths_do_not_depend_on_the_invoking_worktree.nim	nim	5
-tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	4
+tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim	nim	6
 tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_origin.nim	nim	1
 tests/integration/t_committed_lock_records_develop_set_siblings.nim	nim	3
 tests/integration/t_committed_lock_records_no_materialization_path.nim	nim	3

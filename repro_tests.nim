@@ -21073,6 +21073,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_a_reused_result_is_attested_only_over_byte_identical_inputs.nim",
+    binary: "build/test-bin/t_a_reused_result_is_attested_only_over_byte_identical_inputs",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim",
     binary: "build/test-bin/t_a_root_repo_flake_is_reported_not_refused",
     defines: @[],

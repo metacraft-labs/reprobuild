@@ -2219,6 +2219,24 @@ type
       ## (`ActionResultRecord.inputs`, resolved against the action's `cwd`):
       ## what the execution behind the record was observed reading. Same
       ## arms and same condition as `cacheRecordObservedHere`.
+    cacheRecordContentVerified*: bool
+      ## Every keyed input of the record that answered this action has, read
+      ## NOW, the content the record was made from: the record was made under
+      ## a content-checked input-check policy (`ffpChecksum` or `ffpHybrid`)
+      ## and `inputContentStillRecorded` re-hashed each input against it.
+      ## This is what lets a reused result stand for an execution over
+      ## byte-identical inputs (test-certificates Standard §6.2.1, "the record
+      ## covers the inputs"). A lookup alone does not establish it: an
+      ## `ffpTimestamp` record carries no content hash at all, and an
+      ## `ffpHybrid` lookup trusts an input whose kind, size and mtime are
+      ## unchanged without reading it (Caching-Architecture.md §"Known Limit:
+      ## The Default Policy Can Serve A Stale Result"). Same arms and same
+      ## condition as `cacheRecordObservedHere`, so every other way of
+      ## reporting a reuse leaves it false and a reader fails closed.
+    cacheRecordContentDetail*: string
+      ## Why `cacheRecordContentVerified` is false, for a refusal to name:
+      ## the timestamp policy, or the first input whose content moved. Empty
+      ## when it is true, and on every arm that does not set it.
 
   SchedulerTraceEvent* = object
     seq*: uint64
@@ -20238,6 +20256,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     item.cacheRecordInputs = @[]
     for input in record.inputs:
       item.cacheRecordInputs.add(materialPath(action.cwd, input.path))
+    # Whether the inputs are byte-identical to the ones the record's
+    # execution read (test-certificates Standard §6.2.1). The lookup that
+    # served this hit compared metadata only, for a timestamp record always
+    # and for a hybrid one wherever the metadata had not moved, so it is
+    # re-established here from content. A checksum record's lookup already
+    # hashed every input; it is hashed again rather than special-cased,
+    # because a record may carry inputs recorded under another policy, and
+    # `inputContentStillRecorded` refuses any input without a hash. Only a
+    # run that judges provenance pays for it.
+    if record.policy == ffpTimestamp:
+      item.cacheRecordContentVerified = false
+      item.cacheRecordContentDetail = "its cache record was made under the " &
+        "timestamp input-check policy, which identifies an input by its " &
+        "size and mtime, not its content"
+    else:
+      let still = inputContentStillRecorded(record, action.cwd)
+      item.cacheRecordContentVerified = still.ok
+      item.cacheRecordContentDetail =
+        if still.ok: ""
+        else: "input " & still.changed & " no longer has the content its " &
+          "cache record was made from, or the record holds no content " &
+          "hash for it" &
+          (if record.policy == ffpHybrid: " (a hybrid lookup trusts an " &
+             "input whose size and mtime are unchanged without reading it)"
+           else: "")
 
   proc publishPeerCacheBundle(query: PeerCacheActionQuery;
                               record: ActionResultRecord;
@@ -23812,8 +23855,15 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           var lookup = cache.lookupActionResult(cas.inner, action.weakFingerprint,
             action.actionCachePolicy,
             verifyOutputBlobs = not reusableInPlace,
+            # A run that judges where a reused record came from and whether
+            # its inputs still have the recorded content (certificate
+            # issuance, `recordCacheHitProvenance`) needs the FULL record:
+            # the metadata-only shortcut answers with a projection that has
+            # no strong fingerprint and no input content hashes
+            # (`hotMetadataRecord`), so neither question could be answered
+            # from it and a content-checked record could never be attested.
             allowMetadataOnlyHit = config.rebuildMissingOutputsOnCacheHit and
-              reusableInPlace,
+              reusableInPlace and not config.recordCacheHitProvenance,
             metadataCache = addr fileMetadataCache,
             envResolver = action.actionEnvResolver(unsafeAddr config),
             outputRoot = action.cwd,

@@ -144,10 +144,13 @@ suite "a bare selector is a name beside a same-named path":
       # redirect builds as ``<dir>``'s synthesised project, pins ``<dir>``'s
       # lock, not the current directory's.
       setCurrentDir(parent)
-      check sameFile(resolveProjectDirFromTarget("mode1" / "repro.nim"), mode1)
-      check sameFile(resolveProjectDirFromTarget("bare" / "reprobuild.nim"), bare)
-      check sameFile(resolveProjectDirFromTarget("absent" / "repro.nim"), parent)
-      check sameFile(resolveProjectDirFromTarget("mode1" / "lint.nim"), parent)
+      check sameFile(buildLockProjectDir("mode1" / "repro.nim"), mode1)
+      check sameFile(buildLockProjectDir("bare" / "reprobuild.nim"), bare)
+      # A path that names nothing is refused, never the current directory.
+      expect ValueError:
+        discard buildLockProjectDir("absent" / "repro.nim")
+      expect ValueError:
+        discard buildLockProjectDir("mode1" / "lint.nim")
       setCurrentDir(bare)
       writeFile(bare / "repro.nim", "discard\n")
       check mode1WorkspaceCandidate("./repro.nim") == ""

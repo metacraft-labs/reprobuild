@@ -261,8 +261,12 @@ suite "a narrowed required name is trusted by neither the ratchet nor CI":
       skip("git or ssh-keygen is not on PATH; this test signs certificates " &
         "in real repositories")
     else:
+      # Hybrid: each candidate's `repro test` reuses the members' results,
+      # which a certificate may rest on only when their inputs re-hash to
+      # the recorded content (Test-Certificates.md §"Reused results").
       let fx = setupWorkspaceCertifyFixture("narrowed-name",
-        ["unit_a", "unit_b", "unit_c"], buildLines)
+        ["unit_a", "unit_b", "unit_c"], buildLines,
+        hybridStems = ["unit_a", "unit_b", "unit_c"])
       defer: removeDir(fx.cf.sib.scratch)
       let app = fx.app
       var origin = ""
