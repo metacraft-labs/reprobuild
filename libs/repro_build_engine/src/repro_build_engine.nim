@@ -19489,6 +19489,73 @@ proc portableIdentityRefusal*(action: BuildAction;
     return UnsafePreserveOutputsCrossHostRefusal
   ""
 
+proc crossCheckoutSharingRefusal*(action: BuildAction;
+                                  roots: openArray[LogicalRoot]): string =
+  ## "" when a record of `action` CAN be served to another checkout on this
+  ## host; otherwise the first reason, decidable before the action runs, why
+  ## it cannot. `repro cache sharing` reports it per action. `roots` are the portable roots a build keys by
+  ## (`BuildEngineConfig.portableRoots`); empty when the portable identity
+  ## is off.
+  ##
+  ## Every condition is the engine's own predicate, called here rather than
+  ## restated, so this answer cannot drift from what `runBuild` does when it
+  ## decides whether to store a record's output bytes for another checkout:
+  ##
+  ##   1. the action is cacheable;
+  ##   2. there are tracked portable roots: without them no action has a
+  ##      portable identity (`REPRO_PORTABLE_CACHE=0`);
+  ##   3. its determinism class allows substitution from another checkout
+  ##      (`crossHostRefusal`, the check `runBuild` makes before it stores
+  ##      bytes and again before it restores them);
+  ##   4. the publication rule (`publicationRuleRefusal`) admits a record of
+  ##      its input-check policy and evidence source (`evidenceSourceOf`),
+  ##      given the facts only an execution supplies at their best (Level-0
+  ##      evidence, every input hashed, at least one observed): a
+  ##      `timestamp` edge, a process evidenced by a depfile without the
+  ##      monitor, and a builtin kind that reads more than its declared
+  ##      inputs are refused whatever they read;
+  ##   5. it does not preserve its outputs unsafely (`portableIdentityRefusal`);
+  ##   6. its program lies under a tracked root, when the argv names it by an
+  ##      absolute path: a program outside every root (a `/nix/store` or
+  ##      `/usr` toolchain) is read when the action runs, and that read keeps
+  ##      the action non-portable;
+  ##   7. it declares an output, so there are bytes to put in place.
+  ##
+  ## "" is necessary, not sufficient: what an action reads and writes is
+  ## known only after it ran, so a read outside the roots (a host header)
+  ## or an output that embeds a checkout path can still keep a
+  ## candidate's record local. A non-empty answer is final: no execution
+  ## makes such an action's record reach another checkout.
+  if not action.cacheable:
+    return "the action is not cacheable"
+  var tracked = false
+  for root in roots:
+    if root.kind == lrkTracked:
+      tracked = true
+      break
+  if not tracked:
+    return "the portable identity is off (REPRO_PORTABLE_CACHE=0), so no " &
+      "record is kept for another checkout"
+  let hostBound = action.crossHostRefusal()
+  if hostBound.len > 0:
+    return hostBound
+  let rule = publicationRuleRefusal(action.actionCachePolicy, "", elComplete,
+    evidenceSourceOf(action), 1)
+  if rule.len > 0:
+    return rule
+  let identity = portableIdentityRefusal(action, contentCheckedOnly = false)
+  if identity.len > 0:
+    return identity
+  if action.kind == bakProcess and action.argv.len > 0 and
+      action.argv[0].isAbsolute and
+      not logicalizeText(roots, action.argv[0]).startsWith("${"):
+    return "its program " & action.argv[0] &
+      " lies outside every logical root, so its record stays on this host"
+  if action.outputs.len == 0 and action.declaredOutputs.len == 0:
+    return "it declares no output, so another checkout has nothing to " &
+      "put in place"
+  ""
+
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
   # Process-global accumulators; zero them so this build reports its own cost
   # rather than its own plus every earlier build in this process.

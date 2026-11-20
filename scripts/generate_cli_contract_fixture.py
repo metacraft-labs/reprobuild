@@ -102,6 +102,7 @@ COVERED_COMMANDS = [
     "cache gen-key",
     "cache key",
     "cache explain",
+    "cache sharing",
     "bundle",
     "bundle create",
     "bundle publish",

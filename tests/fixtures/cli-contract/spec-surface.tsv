@@ -318,6 +318,14 @@ flag	repro cache explain	--tool-provisioning
 flag	repro cache explain	--work-root
 env	repro cache explain	REPROBUILD_ACTION_CACHE_ROOT
 env	repro cache explain	REPROBUILD_WORK_ROOT
+command	repro cache sharing
+flag	repro cache sharing	--action-cache-root
+flag	repro cache sharing	--format
+flag	repro cache sharing	--json
+flag	repro cache sharing	--tool-provisioning
+flag	repro cache sharing	--work-root
+env	repro cache sharing	REPROBUILD_ACTION_CACHE_ROOT
+env	repro cache sharing	REPROBUILD_WORK_ROOT
 command	repro bundle
 command	repro bundle create
 flag	repro bundle create	--action-cache-root

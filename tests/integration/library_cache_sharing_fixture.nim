@@ -140,7 +140,8 @@ proc parseReport(path: string): OrderedTable[string, EdgeOutcome] =
 proc build*(host: var SharedHost; project: string; portable: bool;
             provisioning = "path";
             extraEnv: openArray[(string, string)] = [];
-            dropEnv: openArray[string] = []): BuildRun =
+            dropEnv: openArray[string] = [];
+            target = ""): BuildRun =
   ## `repro build` of `project` against the host's shared action cache and
   ## store, with the engine's cache evidence and trace collected and written
   ## to a report. `portable` turns the portable (path-independent) identity
@@ -151,6 +152,8 @@ proc build*(host: var SharedHost; project: string; portable: bool;
   ## the invoking environment (after `portable` has applied), for a test
   ## that gives one checkout's build an environment the other's lacks;
   ## `dropEnv` removes variables the invoking environment may carry.
+  ## `target` is a selector to build instead of the project's default (a
+  ## CMake build directory's `build#all`), relative to `project`.
   inc host.reportCount
   result.reportPath = host.scratch / ("report-" & $host.reportCount & ".json")
   let env = newStringTable(modeCaseSensitive)
@@ -181,7 +184,8 @@ proc build*(host: var SharedHost; project: string; portable: bool;
     "--tool-provisioning=" & provisioning,
     "--action-cache-root=" & host.actionCacheRoot,
     "--measure=trace,cache-evidence", "--log=actions",
-    "--write-report=" & result.reportPath]
+    "--write-report=" & result.reportPath] &
+    (if target.len > 0: @[target] else: @[])
   let process = startProcess(reproBinary(), workingDir = project,
     args = args, env = env, options = {poStdErrToStdOut})
   result.output = process.outputStream.readAll()
@@ -646,4 +650,14 @@ proc actionKeyDocument*(host: SharedHost; selector, dest: string;
     raise newException(OSError, "repro cache key " & selector & " exited " &
       $res.code & ":\n" & res.stderr & res.output)
   writeFile(dest, res.output)
+  parseJson(res.output)
+
+proc cacheSharing*(host: SharedHost; selector: string;
+                   provisioning = "tarball"): JsonNode =
+  ## The `reprobuild.cache-sharing.v1` document `repro cache sharing`
+  ## prints for `selector` (a project directory, or `<project>#<target>`).
+  let res = reproKeyCommand(host, ["sharing", selector], provisioning)
+  if res.code != 0:
+    raise newException(OSError, "repro cache sharing " & selector &
+      " exited " & $res.code & ":\n" & res.stderr & res.output)
   parseJson(res.output)

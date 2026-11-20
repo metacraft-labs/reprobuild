@@ -80,7 +80,7 @@ const
     "repro cas path", "repro cas exists", "repro cache",
     "repro cache lookup", "repro cache substitute", "repro cache publish",
     "repro cache derive-key", "repro cache gen-key", "repro cache key",
-    "repro cache explain", "repro bundle",
+    "repro cache explain", "repro cache sharing", "repro bundle",
     "repro bundle create", "repro bundle publish", "repro bundle restore",
     "repro bundle inspect",
     "repro reap", "repro launch-plan", "repro launch-plan show",
