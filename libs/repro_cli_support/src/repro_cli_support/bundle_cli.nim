@@ -160,9 +160,11 @@ else:
           storeRoot: storeRoot,
           actionCacheRoot: acRoot)
         if a.parallel.isSome: ro.parallel = a.parallel.get
-        ro.importNative = proc (dir: string): ImportReport =
+        ro.importNative = proc (dir: string; manifest: JsonNode;
+                                bundleId: string): ImportReport =
           result = importBundle(ImportOptions(bundleDir: dir,
-            manifestName: "native-store.json"),
+            manifestName: "native-store.json", manifest: manifest,
+            bundleId: bundleId),
             BundleRoots(storeRoot: storeRoot, actionCacheRoot: acRoot))
           if allow:
             for env in result.devEnvs:

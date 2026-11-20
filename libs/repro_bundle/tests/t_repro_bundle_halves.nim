@@ -29,6 +29,12 @@
 ## config value quoted before anything is fetched. Real curl over file://
 ## URLs. See reprobuild-pm issues/2026-11-16-bundle-download-builds-a-curl-
 ## config-from-unvalidated-latest-json-fields.md.
+##
+## The final suite protects the binding of the native half to the
+## `latest.json` the restore read: a self-consistent native bundle, or the
+## named bundle re-exported with other parts, put into the half's directory is
+## refused before it is imported, through the real export, `importBundle` and
+## `restoreBundle`.
 
 import std/[algorithm, json, os, osproc, sequtils, streams, strutils, tempfiles,
             unittest]
@@ -1828,3 +1834,148 @@ suite "a restore writes nothing beside a local half's parts":
         check readFile(victim) == "untouched\n"
         check symlinkExists(link)
       check entriesOf(dir) == before
+
+# ---------------------------------------------------------------------------
+# The native half is bound to the latest.json the restore read.
+#
+# `latest.json` names the native half's directory `<system>/native-store/<id>`
+# and `<id>` is the bundle id, a BLAKE3 digest of the half's `contents`. The
+# half's parts are read from that directory, which for a local bundle is the
+# source directory itself, and it holds a `native-store.json` too. A writer of
+# that directory can put a native bundle there that is consistent in itself
+# (its manifest's id matches its `contents`, its parts match its manifest) but
+# is not the one `latest.json` names: another bundle, or the same id with
+# other part bytes, which tar would unpack before step 4 found them wrong.
+# The restore must refuse both before anything is written. It takes the
+# manifest from `latest.json`, which inlines it, so the parts are held to the
+# hashes listed there, and holds its id to the `<id>` of the half's
+# directory. Real store, action cache, export, tar and zstd; the importer is
+# `importBundle`, wired the way `repro bundle restore` wires it. See
+# reprobuild-pm issues/2026-11-18-native-half-import-reads-native-store-json-
+# from-the-source-unbound-to-latest-json.md.
+# ---------------------------------------------------------------------------
+
+import repro_core, repro_hash
+import repro_local_store
+import repro_local_store/store
+
+proc nativeWeakOf(name: string): ContentDigest =
+  var bytes = newSeq[byte](name.len)
+  for i, ch in name: bytes[i] = byte(ord(ch))
+  blake3DomainDigest(bytes, hdActionFingerprint)
+
+proc recordOutput(ac, ws, name, body: string) =
+  ## One metadata-only action record whose output is `<ws>/build/<name>`.
+  createDir(ws / "build")
+  writeFile(ws / "build" / name, body)
+  var cache = openActionCache(ac / "action-cache", attachShm = false)
+  defer: cache.closeShmTier()
+  var cas = openStore(ac)
+  defer: cas.close()
+  discard cache.recordActionResult(cas, nativeWeakOf(name), ffpTimestamp,
+    [ws / "src" / "in.txt"], [ws / "build" / name], storeOutputBlobs = false)
+
+proc copyHalf(src, dest: string) =
+  ## Replace the files of half directory `dest` with those of `src`.
+  for kind, path in walkDir(dest): removeFile(path)
+  for kind, path in walkDir(src):
+    copyFile(path, dest / path.extractFilename)
+
+suite "the native half is the one latest.json names":
+  test "a native half swapped in the bundle directory is refused before import":
+    if findExe("tar").len == 0 or findExe("zstd").len == 0:
+      skip("tar and zstd are needed to export and import a native half")
+    else:
+      let top = createTempDir("repro-bundle-native-bind-", "")
+      defer: removeDir(top)
+      let system = hostSystem()
+      let store = top / "store"
+      let ac = top / "cache"
+      let ws = top / "ws"
+      createDir(ws / "src")
+      writeFile(ws / "src" / "in.txt", "source bytes\n")
+      discard openStore(store)
+      let roots = BundleRoots(storeRoot: store, actionCacheRoot: ac,
+        workspaceRoots: @[ws])
+      # The half the publisher made.
+      recordOutput(ac, ws, "named.txt", "the bundle latest.json names\n")
+      let named = computeClosure(roots)
+      let namedId = bundleIdOf(named)
+      let bundle = top / "bundle"
+      let rel = system / NativeHalfDir / namedId
+      discard exportBundle(named, defaultExportOptions(top / "named"))
+      createDir(bundle / rel)
+      copyHalf(top / "named", bundle / rel)
+      var node = parseJson(readFile(bundle / rel / NativeManifestName))
+      node["dir"] = %rel
+      writeFile(bundle / system / LatestName, $(%*{"schema": BundleSchema,
+        "name": "bundle", "system": system, "workspace_dir": ws,
+        "members": [], "halves": {"native_store": node}}))
+      # The same bundle exported again at another zstd level: the same id
+      # and `contents`, other part bytes, and a manifest that lists them.
+      var eo = defaultExportOptions(top / "resplit")
+      eo.zstdLevel = 1
+      discard exportBundle(named, eo)
+      let resplit = parseJson(readFile(top / "resplit" / NativeManifestName))
+      check resplit["bundleId"].getStr() == namedId
+      check resplit["parts"] != node["parts"]
+      # Another bundle, made the same way with one more record: consistent
+      # in itself, with its own id.
+      recordOutput(ac, ws, "planted.txt", "a bundle latest.json never named\n")
+      let planted = computeClosure(roots)
+      let plantedId = bundleIdOf(planted)
+      check plantedId != namedId
+      discard exportBundle(planted, defaultExportOptions(top / "planted"))
+
+      var imported: seq[string]
+      # `repro bundle restore`'s wiring (bundle_cli.nim).
+      let wired = proc (dir: string; manifest: JsonNode;
+                        bundleId: string): ImportReport =
+        result = importBundle(ImportOptions(bundleDir: dir,
+          manifestName: NativeManifestName, manifest: manifest,
+          bundleId: bundleId), roots)
+        imported.add(result.bundleId)
+      proc restoreWith(importer: proc (dir: string; manifest: JsonNode;
+          bundleId: string): ImportReport; profile = ""): string =
+        try:
+          let r = restoreBundle(RestoreOptions(source: bundle,
+            workspaceDir: ws, storeRoot: store, actionCacheRoot: ac,
+            activate: profile.len > 0, activationFile: profile,
+            bashrcFile: top / "etc" / "bash.bashrc", importNative: importer))
+          checkpoint("restored " & $r.restored & ", native bundle " &
+            r.native.bundleId)
+        except CatchableError as e:
+          result = e.msg
+        checkpoint("imported: " & $imported & "; refused: " & result)
+
+      # 1. Another bundle's manifest and parts at the named directory.
+      copyHalf(top / "planted", bundle / rel)
+      check restoreWith(wired).len > 0
+      check imported.len == 0
+      check not fileExists(store / BundlesDirName / plantedId /
+        ImportedMarkerName)
+      # 2. The named bundle's id with other parts: the bytes tar would be
+      # fed are not the ones latest.json lists.
+      copyHalf(top / "resplit", bundle / rel)
+      check restoreWith(wired).len > 0
+      check imported.len == 0
+      check not fileExists(store / BundlesDirName / namedId /
+        ImportedMarkerName)
+      # 3. An importer that ignores what it is given is caught after its
+      # import, before activation writes a profile file from it.
+      copyHalf(top / "planted", bundle / rel)
+      let profile = top / "etc" / "profile.d" / "zz-repro-bundle.sh"
+      let lax = proc (dir: string; manifest: JsonNode;
+                      bundleId: string): ImportReport =
+        importBundle(ImportOptions(bundleDir: dir,
+          manifestName: NativeManifestName), roots)
+      check "the one latest.json names" in restoreWith(lax, profile)
+      check not fileExists(profile)
+      # Control: the half latest.json names restores, and activates, with
+      # the source's `native-store.json` unreadable as a manifest: the
+      # restore takes the manifest from latest.json and never reads it.
+      copyHalf(top / "named", bundle / rel)
+      writeFile(bundle / rel / NativeManifestName, "not a manifest")
+      check restoreWith(wired, profile) == ""
+      check imported == @[namedId]
+      check fileExists(profile)
