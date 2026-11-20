@@ -40,6 +40,7 @@ import std/[os, osproc, strutils]
 
 import repro_build_engine
 import repro_core/codec
+import repro_core/remedy_words
 import repro_core/path_identity
 # ``execCmdExCloseOnce``: ``execCmdEx`` without ``osproc.close``'s double close
 # of the merged stdout/stderr descriptor. These helpers run inside the build
@@ -1790,7 +1791,7 @@ proc executeForceReset(payload: GitVcsPayload;
       "every sibling checkout, `.repro/` and the workspace manifests are " &
       "untracked, and the clean would have deleted all of them. Untracked " &
       "and ignored files were left in place. Remedy: list what the clean " &
-      "would have taken with `git -C " & contained.root &
+      "would have taken with `git -C " & remedyPathWord(contained.root) &
       " clean -ndx` and remove only what you mean to."
   else:
     let cleanRes = runGit(payload, ["-C", target, "clean", "-ffdx"])
@@ -1964,7 +1965,8 @@ proc executeForcePushRebase(payload: GitVcsPayload;
         else:
           "; the checkout could NOT be restored automatically (" &
             restoreRes.output.trimmed & ") — recover it with 'git -C " &
-            target & " reset --hard " & backupRef & "'"
+            remedyPathWord(target) & " reset --hard " &
+            quoteShellPosix(backupRef) & "'"
       return failed("cherry-pick-failed",
         "git cherry-pick " & commit & " failed: " & cpRes.output.trimmed &
           " (replaying " & $commitsToCherryPick.len &
@@ -1988,8 +1990,8 @@ proc executeForcePushRebase(payload: GitVcsPayload;
     ", replaying " & $commitsToCherryPick.len & " local commit(s) (" &
     $alreadyUpstream & " already upstream); the pre-rewrite tip " &
     preRewriteHead.sha & " is kept at " & backupRef &
-    " (recover with 'git -C " & payload.repoPath & " reset --hard " &
-    backupRef & "')"
+    " (recover with 'git -C " & remedyPathWord(payload.repoPath) &
+    " reset --hard " & quoteShellPosix(backupRef) & "')"
   done
 
 type

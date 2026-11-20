@@ -47,6 +47,7 @@ import git_tool
 from repro_core/process_exec import execCmdExCloseOnce
 from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
 import repro_core/process_env
+import repro_core/remedy_words
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -3409,7 +3410,9 @@ proc messages*(reports: openArray[LeafCheckReport]): seq[string] =
 proc displayPath*(path: string): string =
   ## A path as the user should read it in a message and paste it into a
   ## command: relative to the current directory when it is inside it, else
-  ## absolute; shell-quoted when it needs to be.
+  ## absolute; ONE word of the POSIX `sh` the managed hooks run in, spelled
+  ## with `/` on Windows (``remedyPathWord``, Unified-Locking-And-Hooks.md
+  ## §"The named command must RUN where the message is printed", rule 3).
   var shown = path
   try:
     let cwd = getCurrentDir()
@@ -3418,7 +3421,7 @@ proc displayPath*(path: string): string =
       shown = rel
   except CatchableError:
     discard
-  quoteShell(shown)
+  remedyPathWord(shown)
 
 proc displayPoolPath*(pool: string): string =
   ## The pool path for prose (never pasted): ``~`` for the home directory.
@@ -3557,7 +3560,8 @@ proc messageStaleRemoteRef(leaf, pool, refName, id, logPath: string;
     "  Upstream rewrote or deleted that branch, and the old commit no longer exists\n" &
     "  upstream or in " & cache & ". The ref is only a copy of upstream; none of\n" &
     "  your branches depend on it. Remove it with:\n" &
-    "      git -C " & l & " update-ref -d " & refName & " " & id
+    "      git -C " & l & " update-ref -d " & quoteShellPosix(refName) & " " &
+      id
 
 proc messageLocalTipMissing(gitBin, leaf, pool, refName, id: string): string =
   ## Message B (§4.4, SPI-AREQ-1/4) for a local ref whose own commit is gone.
@@ -3575,7 +3579,8 @@ proc messageLocalTipMissing(gitBin, leaf, pool, refName, id: string): string =
     let target = if newTip.len > 0: newTip else: "<new-base>"
     result.add("        - otherwise point it at the rewritten history (your working tree and\n" &
       "          index are left as they are):\n" &
-      "            git -C " & l & " update-ref " & refName & " " & target & "\n")
+      "            git -C " & l & " update-ref " & quoteShellPosix(refName) &
+        " " & target & "\n")
     # The checked-out branch: its index still describes the old tree, so
     # git would call every difference an uncommitted change (and refuse a
     # rebase). A mixed reset re-reads the index from the new tip and leaves
@@ -3602,7 +3607,8 @@ proc messageLocalTipMissing(gitBin, leaf, pool, refName, id: string): string =
         ", usually origin/<branch>)\n")
   else:
     result.add("        - otherwise remove it:\n" &
-      "            git -C " & l & " update-ref -d " & refName & " " & id & "\n")
+      "            git -C " & l & " update-ref -d " & quoteShellPosix(refName) &
+        " " & id & "\n")
   result.add("  Nothing was changed.")
 
 proc messageLocalHistoryMissing(leaf, pool, refName, missing,
@@ -3630,7 +3636,8 @@ proc messageLocalHistoryMissing(leaf, pool, refName, missing,
       "  Fix:  - fetch " & abbrev(missing) & " from another machine or checkout that still has it:\n" &
       "            git -C " & l & " fetch <that-checkout> " & missing & "\n" &
       "          and then move your commits onto the rewritten history:\n" &
-      "            git -C " & l & " rebase --onto <new-base> " & missing & " " & branch & "\n" &
+      "            git -C " & l & " rebase --onto <new-base> " & missing & " " &
+        quoteShellPosix(branch) & "\n" &
       "          (<new-base> is the rewritten counterpart of " & abbrev(missing) &
         ", usually origin/<branch>)\n" &
       "  Nothing was changed."
@@ -3643,7 +3650,8 @@ proc messageLocalHistoryMissing(leaf, pool, refName, missing,
   "            git -C " & l & " fetch <that-checkout> " & missing & "\n" &
   "        - otherwise move your commits onto the rewritten history:\n" &
   "            git -C " & l & " replace --graft " & child & " <new-base>\n" &
-  "            git -C " & l & " rebase --force-rebase <new-base> " & branch & "\n" &
+  "            git -C " & l & " rebase --force-rebase <new-base> " &
+    quoteShellPosix(branch) & "\n" &
   "            git -C " & l & " replace -d " & child & "\n" &
   "          (<new-base> is the rewritten counterpart of " & abbrev(missing) &
     ", usually origin/<branch>)\n" &

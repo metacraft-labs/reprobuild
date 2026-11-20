@@ -42,6 +42,7 @@
 
 import std/[os, strutils]
 import resolver
+import repro_core/remedy_words
 
 type
   SyncCase* = enum
@@ -350,8 +351,8 @@ proc trunkNameFor(resolved: ResolvedRepo): string =
 
 proc interruptedRecoveryMessage(path, target: string): string =
   "checkout has compatible interrupted fast-forward content; left untouched" &
-    "; complete it with 'git -C " & quoteShell(path) & " reset --hard " &
-    quoteShell(target) & "'"
+    "; complete it with 'git -C " & remedyPathWord(path) & " reset --hard " &
+    quoteShellPosix(target) & "'"
 
 proc classifyRepoState*(resolved: ResolvedRepo;
                         observation: RepoSyncObservation;
@@ -461,7 +462,8 @@ proc classifyRepoState*(resolved: ResolvedRepo;
        else: "") &
       "; refused -- restore access to '" & resolved.fetchUrl &
       "' (auth / network / credentials), confirm with 'git -C " &
-      resolved.path & " fetch --all --prune', then re-run 'repro sync'"
+      remedyPathWord(resolved.path) &
+      " fetch --all --prune', then re-run 'repro sync'"
     result.message = "refusing to classify '" & resolved.path &
       "' on unfetched data"
     return
@@ -484,8 +486,8 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     # sync, or to overwrite it deliberately with ``--force-sync``.
     result.refusalReason =
       "working tree has uncommitted changes; refused — run 'git -C " &
-      resolved.path & " stash' (or 'git -C " & resolved.path &
-      " commit -a') then 'repro sync', or 'repro sync --force-sync' to discard"
+      remedyPathWord(resolved.path) & " stash' (or 'git -C " &
+      remedyPathWord(resolved.path) & " commit -a') then 'repro sync', or 'repro sync --force-sync' to discard"
     result.message = "refusing to sync dirty checkout at '" & resolved.path & "'"
     return
 
@@ -568,11 +570,14 @@ proc classifyRepoState*(resolved: ResolvedRepo;
         "upstream was rewritten and this checkout still carries the old " &
         "history. Refused — do NOT push, that republishes the removed " &
         "history. Rebase the work you own onto the new history " &
-        "('git -C " & resolved.path & " fetch --all --prune' then " &
-        "'git -C " & resolved.path & " rebase --onto " &
-        gitRemoteFor(resolved) & "/" & trunkNameFor(resolved) &
+        "('git -C " & remedyPathWord(resolved.path) &
+        " fetch --all --prune' then " &
+        "'git -C " & remedyPathWord(resolved.path) & " rebase --onto " &
+        quoteShellPosix(gitRemoteFor(resolved) & "/" &
+          trunkNameFor(resolved)) &
         " <your branch point> " &
-        (if observation.currentBranch.len > 0: observation.currentBranch
+        (if observation.currentBranch.len > 0:
+           quoteShellPosix(observation.currentBranch)
          else: "HEAD") &
         "')" &
         (if replayRemedyApplies: ", or run " & replayRemedy else: "") &
@@ -585,10 +590,12 @@ proc classifyRepoState*(resolved: ResolvedRepo;
         "run " &
         (if replayRemedyApplies: replayRemedy
          else:
-           "'git -C " & resolved.path & " rebase --onto " &
-           gitRemoteFor(resolved) & "/" & trunkNameFor(resolved) &
+           "'git -C " & remedyPathWord(resolved.path) & " rebase --onto " &
+           quoteShellPosix(gitRemoteFor(resolved) & "/" &
+             trunkNameFor(resolved)) &
            " <your branch point> " &
-           (if observation.currentBranch.len > 0: observation.currentBranch
+           (if observation.currentBranch.len > 0:
+              quoteShellPosix(observation.currentBranch)
             else: "HEAD") & "' to replay the commits you own by hand") &
         ", or run " & discardRemedy
       result.message = "refusing to sync force-pushed checkout at '" & resolved.path & "'"
@@ -632,12 +639,14 @@ proc classifyRepoState*(resolved: ResolvedRepo;
     result.refusalReason =
       "local commits are not present on any remote-tracking branch; refused — " &
       "first confirm the remote history was not rewritten under you " &
-      "('git -C " & resolved.path & " fetch --all --prune' then 'git -C " &
-      resolved.path & " log --oneline @{u}..HEAD'). If it is intact, publish " &
-      "with 'git -C " & resolved.path & " push' then re-run 'repro sync'. If " &
+      "('git -C " & remedyPathWord(resolved.path) &
+      " fetch --all --prune' then 'git -C " & remedyPathWord(resolved.path) &
+      " log --oneline @{u}..HEAD'). If it is intact, publish " &
+      "with 'git -C " & remedyPathWord(resolved.path) &
+      " push' then re-run 'repro sync'. If " &
       "it was rewritten, do NOT push — that republishes the removed history; " &
-      "rebase onto the new history ('git -C " & resolved.path &
-      " pull --rebase') or run 'repro sync --rebase-on-force-push'"
+      "rebase onto the new history ('git -C " &
+      remedyPathWord(resolved.path) & " pull --rebase') or run 'repro sync --rebase-on-force-push'"
     result.message = "refusing to sync unpublished checkout at '" & resolved.path & "'"
     return
 
@@ -972,11 +981,11 @@ proc classifyMainlineSync*(resolved: ResolvedRepo;
   if obs.integrationConflicts:
     result.syncCase = mscConflict
     result.refusalReason = "integrating '" & obs.roleBranch & "' into '" &
-      obs.currentBranch & "' in repo '" & resolved.path &
+      obs.currentBranch & "' in repo '" & remedyProsePath(resolved.path) &
       "' would conflict; the repo is UNTOUCHED. Resolve it there (git -C " &
-      resolved.path & " " &
+      remedyPathWord(resolved.path) & " " &
       (if flavor == msfRebase: "rebase" else: "merge") & " " &
-      obs.roleBranch & "), then re-run."
+      quoteShellPosix(obs.roleBranch) & "), then re-run."
     result.message = result.refusalReason
     return
 

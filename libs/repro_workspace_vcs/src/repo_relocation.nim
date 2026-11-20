@@ -69,6 +69,7 @@ import std/[algorithm, os, sets, strutils, times]
 when defined(posix):
   import std/posix
 import git_tool
+import repro_core/remedy_words
 
 proc cRename(oldname, newname: cstring): cint
   {.importc: "rename", header: "<stdio.h>".}
@@ -622,8 +623,8 @@ proc unrepairableLinkedWorktrees*(inventory: LinkedWorktreeInventory;
       (if inventory.selfLockReason.len > 0:
          " (" & inventory.selfLockReason & ")"
        else: "") &
-      " — `git -C " & inventory.commonDir & " worktree unlock " &
-      quoteShell(priorPath) & "` once it is safe to move")
+      " — `git -C " & remedyPathWord(inventory.commonDir) & " worktree unlock " &
+      remedyPathWord(priorPath) & "` once it is safe to move")
   for wt in inventory.linked:
     var missing = wt.prunable
     if not missing:
@@ -636,17 +637,17 @@ proc unrepairableLinkedWorktrees*(inventory: LinkedWorktreeInventory;
       result.add("'" & wt.path & "' is MISSING" &
         (if wt.prunableReason.len > 0: " (" & wt.prunableReason & ")"
          else: "") &
-        " — restore it, or discard its entry with `git -C " & priorPath &
+        " — restore it, or discard its entry with `git -C " & remedyPathWord(priorPath) &
         " worktree prune`" &
-        (if wt.locked: " after `git -C " & priorPath & " worktree unlock " &
-           quoteShell(wt.path) & "`"
+        (if wt.locked: " after `git -C " & remedyPathWord(priorPath) & " worktree unlock " &
+           remedyPathWord(wt.path) & "`"
          else: ""))
     elif wt.locked:
       result.add("'" & wt.path & "' is LOCKED" &
         (if wt.lockReason.len > 0: " (" & wt.lockReason & ")" else: "") &
-        " — `git -C " & priorPath & " worktree unlock " & quoteShell(wt.path) &
-        "` once it is safe to repoint, or `git -C " & priorPath &
-        " worktree remove " & quoteShell(wt.path) & "`")
+        " — `git -C " & remedyPathWord(priorPath) & " worktree unlock " & remedyPathWord(wt.path) &
+        "` once it is safe to repoint, or `git -C " & remedyPathWord(priorPath) &
+        " worktree remove " & remedyPathWord(wt.path) & "`")
 
 proc relocatedWorktreePath*(path, source, destination: string;
                             canonicalSource = ""): string =
@@ -729,8 +730,8 @@ proc repairLinkedWorktrees*(probe: RelocationGitProbe;
       result.failures.add("'" & destination & "' is not registered with " &
         inventory.commonDir & " as a live worktree" &
         (if answer.code != 0: " (" & answer.output.strip() & ")" else: "") &
-        repairNote & "; run `git -C " & inventory.commonDir &
-        " worktree repair " & quoteShell(destination) & "`")
+        repairNote & "; run `git -C " & remedyPathWord(inventory.commonDir) &
+        " worktree repair " & remedyPathWord(destination) & "`")
     return
   if inventory.linked.len == 0:
     return
@@ -765,8 +766,8 @@ proc repairLinkedWorktrees*(probe: RelocationGitProbe;
       result.failures.add("'" & moved & "' does not resolve to " &
         (if commonDir.len > 0: commonDir else: destination / ".git") &
         (if answer.code != 0: " (" & answer.output.strip() & ")" else: "") &
-        repairNote & "; run `git -C " & destination & " worktree repair " &
-        quoteShell(moved) & "`")
+        repairNote & "; run `git -C " & remedyPathWord(destination) & " worktree repair " &
+        remedyPathWord(moved) & "`")
 
 proc objectPresent*(probe: RelocationGitProbe; dir, oid: string): bool =
   ## Whether `oid` exists in `dir`'s object store.
