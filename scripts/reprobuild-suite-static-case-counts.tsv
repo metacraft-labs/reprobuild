@@ -1096,7 +1096,7 @@ libs/repro_standard_provider/tests/test_jsts_convention.nim	nim	19
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_mode1_loader.nim	nim	12
-libs/repro_standard_provider/tests/test_nim_convention.nim	nim	27
+libs/repro_standard_provider/tests/test_nim_convention.nim	nim	34
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_php_composer_convention.nim	nim	10

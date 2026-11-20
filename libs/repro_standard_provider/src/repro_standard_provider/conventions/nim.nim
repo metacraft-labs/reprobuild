@@ -10,6 +10,7 @@
 ##   Phase 1 (one action per entrypoint):
 ##     ``nim c --skipParentCfg --skipUserCfg --compileOnly --noLinking
 ##       --nimcache:<scratch>/<entry>/nimcache --mm:orc -d:release
+##       -d:nimBetterRun
 ##       <projectRoot>/src/<entry>.nim``
 ##     produces the C files + the ``<entry>.json`` nimcache manifest.
 ##
@@ -41,7 +42,9 @@
 ## the nim driver path + the project config files and ``.nimble``
 ## (``nimPhase1KeyFiles``), compares against
 ## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint``, and skips
-## the subprocess on a match (the previous run's manifest is reused).
+## the subprocess on a match (the previous run's manifest is reused),
+## provided every file that manifest's ``depfiles`` array lists still has
+## the hash Nim recorded for it (``nimManifestDepfilesAreCurrent``).
 ## This keeps a static-graph emit shape while making cold-snapshot
 ## re-emits cheap when the source set is unchanged.
 ##
@@ -71,7 +74,7 @@
 ##     compiler's default on Linux/MinGW. M3+ should consult ``uses:``
 ##     for ``msvc``/``clang`` pins and pick the matching compiler driver.
 
-import std/[algorithm, json, options, os, osproc, strutils, tables]
+import std/[algorithm, json, options, os, osproc, sha1, strutils, tables]
 
 import repro_core
 import repro_provider_runtime
@@ -172,10 +175,18 @@ type
     cFile: string
     gccCommand: string
 
+  NimcacheDepFile = object
+    ## One row of the ``depfiles`` array in ``<entry>.json``: a file Nim
+    ## read during the compile, and the SHA-1 of the bytes it read
+    ## (upper-case hex, as ``$secureHashFile`` prints it).
+    path: string
+    sha1: string
+
   NimcacheManifest = object
     compile: seq[NimcacheCompileStep]
     link: seq[string]
     linkcmd: string
+    depfiles: seq[NimcacheDepFile]
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -743,7 +754,14 @@ proc nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource: string;
     "--noLinking",
     "--nimcache:" & nimcacheDir,
     "--mm:orc",
-    "--define:release"
+    "--define:release",
+    # Nim fills the manifest's ``depfiles`` array only for ``nim r`` or
+    # when this symbol is defined; without it the array is empty. The
+    # emit cache and the Phase 1 declared inputs are both read from it
+    # (``nimManifestDepfilesAreCurrent``, ``phase1InputsAndOutputs``).
+    # The symbol's other effect, Nim skipping a compile it judges
+    # unchanged, is described in Nim.md §"Phase 1 — Nim → C transpile".
+    "--define:nimBetterRun"
   ]
   if appLib:
     result.add("--app:lib")
@@ -822,7 +840,8 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ##     which materially changes the nimcache linkcmd);
   ##   * the manifest output path (so two scratch dirs can't share a
   ##     fingerprint sidecar even if their source set is identical);
-  ##   * every ``.nim`` source file under ``<projectRoot>/src/`` plus the
+  ##   * every ``.nim`` source file under ``<projectRoot>/src/`` and under
+  ##     the entry source's own directory (``nimSourcesFor``), plus the
   ##     entry source itself — content digest folded in via
   ##     ``fileInput``;
   ##   * ``keyFiles``: the project config files Nim reads beside the
@@ -849,12 +868,20 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ##     etc. when ``--nimcache:`` is set on the command line, but a
   ##     project ``config.nims`` can call ``getEnv``, and ``HOME`` /
   ##     ``NIMBLE_DIR`` steer the default ``nimblePath``.
-  ##   * files a project ``config.nims`` itself reads or includes,
-  ##     ``.nim`` modules outside ``src/`` (a ``path=`` or a relative
-  ##     import), and packages reached through ``nimblePath``. The
-  ##     recorded Phase 1 action's monitor policy observes those; the
-  ##     emit cache does not (reprobuild-pm issues/2026-11-18-nim-emit-
-  ##     cache-key-omits-config-nims-reads-and-required-packages.md).
+  ##   * anything Nim reads at compile time without recording it, in
+  ##     ``config.nims`` or in a module: ``getEnv``, ``readFile``,
+  ##     ``staticExec`` / ``gorge``, ``fileExists``. And a file that does
+  ##     not exist yet but that Nim would choose in a module lookup once
+  ##     it is created outside the keyed ``src/`` trees (reprobuild-pm
+  ##     issues/2026-11-19-nim-emit-cache-cannot-see-environment-reads-or-
+  ##     files-that-do-not-exist-yet.md).
+  ##
+  ## The key is not the whole test. Files Nim reads that the provider
+  ## cannot name beforehand (a file ``config.nims`` includes, a module
+  ## outside ``src/``, a ``--path`` or ``nimblePath`` package, the
+  ## standard library) are checked after the key matches, against the
+  ## hashes Nim recorded in the cached manifest: see
+  ## ``nimManifestDepfilesAreCurrent``.
   var inputs: seq[EmitCacheInput] = @[
     textInput("nim-exe:" & nimExe),
     toolVersionInput(nimExe),
@@ -862,6 +889,9 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
     textInput("manifest:" & manifestPath),
     textInput("app-lib:" & (if appLib: "true" else: "false")),
     textInput("no-main:" & (if noMain: "true" else: "false")),
+    # Bumped when the reuse test changes shape, so that a sidecar written
+    # under the older test cannot make a manifest reusable.
+    textInput("reuse-test:depfiles-v1"),
     fileInput(entrySource),
   ]
   for source in nimSources:
@@ -871,6 +901,44 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   for keyFile in keyFiles:
     inputs.add(fileInput(keyFile))
   computeEmitCacheFingerprint(inputs)
+
+proc parseNimcacheManifest(manifestPath: string): NimcacheManifest
+
+proc nimManifestDepfilesAreCurrent(manifestPath: string): bool =
+  ## Whether every file the cached manifest's ``depfiles`` array lists
+  ## still has the SHA-1 Nim recorded when it read the file. This is the
+  ## second half of the emit-cache reuse test (Nim.md §"Cross-module
+  ## ordering"): the key covers what the provider can name before Nim
+  ## runs, and ``depfiles`` covers what only Nim knows it read — a file a
+  ## ``config.nims`` includes, a module outside ``src/``, a package found
+  ## through ``--path`` or ``nimblePath``, the standard library.
+  ##
+  ## The comparison is against the hash Nim recorded. Nim hashes a module,
+  ## or a file a module ``include``s, by reading it again after parsing
+  ## it, and hashes config files, included ``.nims`` files and
+  ## ``staticRead`` payloads only when it writes the manifest. An edit
+  ## that lands between Nim's read and its hash is therefore recorded with
+  ## its new hash and is not seen here. False when the manifest cannot be read or
+  ## parsed, when it lists no files (a manifest written before Phase 1
+  ## defined ``nimBetterRun`` proves nothing), when a row is malformed,
+  ## and when a listed file is missing, unreadable or changed.
+  var manifest: NimcacheManifest
+  try:
+    manifest = parseNimcacheManifest(manifestPath)
+  except CatchableError:
+    return false
+  if manifest.depfiles.len == 0:
+    return false
+  for dep in manifest.depfiles:
+    if dep.path.len == 0 or dep.sha1.len == 0:
+      return false
+    try:
+      if cmpIgnoreCase($secureHashFile(extendedPath(dep.path)),
+          dep.sha1) != 0:
+        return false
+    except CatchableError:
+      return false
+  true
 
 proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
                        nimSources: openArray[string];
@@ -901,8 +969,10 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
   ## **M18 emit-cache fast path**: when a sidecar fingerprint at
   ## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint`` matches
   ## the current source-set fingerprint AND the nimcache manifest is on
-  ## disk, we skip the subprocess entirely — the previous run's manifest
-  ## is still valid. The convention's caller re-parses the manifest
+  ## disk AND every file that manifest's ``depfiles`` lists still has the
+  ## hash Nim recorded (``nimManifestDepfilesAreCurrent``), we skip the
+  ## subprocess entirely: the previous run's manifest is still valid.
+  ## The convention's caller re-parses the manifest
   ## unconditionally; that work is cheap (~10 KB JSON) compared to the
   ## ~1-2 s ``nim c`` invocation. The sidecar is refreshed on every
   ## subprocess success so a partial run never poisons the cache.
@@ -910,8 +980,18 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
   let fingerprint = nimEmitCacheFingerprint(nimExe, entrySource,
     manifestPath, nimSources, appLib, cIncludeDirs, noMain, keyFiles)
   if emitCacheIsUsable(nimcacheDir, NimEmitCacheBaseName, fingerprint,
-      [manifestPath]):
+      [manifestPath]) and nimManifestDepfilesAreCurrent(manifestPath):
     return
+  # With ``nimBetterRun`` defined, Nim skips the compile when it judges the
+  # manifest on disk current and finds its own output file unchanged (a
+  # binary that a manual ``nim c`` wrote next to the entry source). The
+  # provider has just decided not to trust the manifest, so remove it:
+  # Nim then always runs in full and rewrites it. The recorded Phase 1
+  # action gets the same guarantee from ``removeBeforeRun``.
+  try:
+    removeFile(extendedPath(manifestPath))
+  except OSError:
+    discard
   let argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource, appLib,
     cIncludeDirs, noMain)
   let cmd = quoteShellCommand(argv)
@@ -951,8 +1031,36 @@ proc phase1InputsAndOutputs(nimcacheDir, manifestPath: string;
   ## and of its own Phase 2 compile, never an output. Declaring it an
   ## output would make the engine treat a user source as produced by
   ## Phase 1, so a cache restore of Phase 1 could overwrite an edit to it.
+  ##
+  ## Every file in the manifest's ``depfiles`` array is an input too: that
+  ## is the set Nim itself read, so it reaches modules outside ``src/``,
+  ## files a ``config.nims`` includes and packages found through a search
+  ## path. ``nimSources`` stays in the set: a module under ``src/`` that
+  ## nothing imports yet costs nothing, and it is what the emit-cache key
+  ## was computed from.
+  ##
+  ## Nim resolves symlinks before it records a path, so the same file can
+  ## reach here under two spellings. A ``depfiles`` entry is skipped when
+  ## an input already names that file (compared after ``expandFilename``).
   result.inputs = @nimSources
   result.outputs = @[nimcacheDir, manifestPath]
+  proc resolvedSpelling(path: string): string =
+    try:
+      result = expandFilename(path)
+    except OSError:
+      result = os.normalizedPath(absolutePath(path))
+    when defined(windows):
+      result = result.toLowerAscii
+  var declared: seq[string] = @[]
+  for input in result.inputs:
+    declared.add(resolvedSpelling(input))
+  for dep in manifest.depfiles:
+    if dep.path.len == 0 or isUnderNimcache(dep.path, nimcacheDir):
+      continue
+    let resolved = resolvedSpelling(dep.path)
+    if resolved notin declared:
+      declared.add(resolved)
+      result.inputs.add(dep.path)
   for step in manifest.compile:
     if isUnderNimcache(step.cFile, nimcacheDir):
       if step.cFile notin result.outputs:
@@ -962,8 +1070,8 @@ proc phase1InputsAndOutputs(nimcacheDir, manifestPath: string;
 
 proc parseNimcacheManifest(manifestPath: string): NimcacheManifest =
   ## Decode the nimcache ``<entry>.json`` Nim writes alongside the
-  ## ``.c`` files. We pull just the fields Phase 2/3 need; any future
-  ## extension (``configFiles``, ``depfiles``) plugs in here.
+  ## ``.c`` files. We pull just the fields Phase 1's reuse test and
+  ## Phase 2/3 need; any future extension (``configFiles``) plugs in here.
   let raw = readFile(extendedPath(manifestPath))
   let node = parseJson(raw)
   if node.kind != JObject:
@@ -981,6 +1089,16 @@ proc parseNimcacheManifest(manifestPath: string): NimcacheManifest =
       result.link.add(item.getStr())
   if "linkcmd" in node:
     result.linkcmd = node["linkcmd"].getStr()
+  if "depfiles" in node and node["depfiles"].kind == JArray:
+    for entry in node["depfiles"]:
+      if entry.kind != JArray or entry.len != 2:
+        # Keep a malformed row as an empty entry: the reuse test then
+        # refuses the manifest instead of ignoring a file it cannot read.
+        result.depfiles.add(NimcacheDepFile())
+        continue
+      result.depfiles.add(NimcacheDepFile(
+        path: entry[0].getStr(),
+        sha1: entry[1].getStr()))
 
 proc splitCommandLine(cmd: string): seq[string] =
   ## Minimal POSIX-style argv tokeniser sufficient for the gcc commands
@@ -1061,6 +1179,21 @@ proc actionIdFor(prefix, entry, detail: string): string =
   if sanitized.len == 0:
     sanitized = "x"
   prefix & "-" & entry & "-" & sanitized
+
+proc collectNimSources(srcDir: string): seq[string]
+
+proc nimSourcesFor(projectRoot, entrySource: string): seq[string] =
+  ## The ``.nim`` files the provider can name before Nim runs: everything
+  ## under ``<projectRoot>/src`` and everything under the entry source's
+  ## own directory. For Layout A the two are the same tree. For Layout B
+  ## (``<projectRoot>/<member>/src/<member>.nim``) the second is the
+  ## member's own ``src/``, which the first never reaches. Sorted and
+  ## without duplicates, so the emit-cache key is stable.
+  result = collectNimSources(projectRoot / "src")
+  for source in collectNimSources(parentDir(entrySource)):
+    if source notin result:
+      result.add(source)
+  result.sort(system.cmp[string])
 
 proc collectNimSources(srcDir: string): seq[string] =
   ## Every ``.nim`` under ``<projectRoot>/src``. These become the
@@ -1155,7 +1288,7 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
   createDir(extendedPath(objDir))
   # M18: collect the full ``src/`` source set ONCE so the same fingerprint
   # serves the cache check AND the Phase 1 action's declared inputs.
-  let nimSources = collectNimSources(projectRoot / "src")
+  let nimSources = nimSourcesFor(projectRoot, entry.sourceFile)
   # Cross-language: stable, deduplicated list of upstream include dirs to
   # thread onto ``nim c``'s argv via ``--passC:-I<dir>``.
   var cIncludeDirs: seq[string] = @[]
@@ -1186,7 +1319,11 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
     outputs = phase1Outputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "nim.c.compileOnly")
+    commandStatsId = "nim.c.compileOnly",
+    # ``nimBetterRun`` lets Nim exit 0 without writing anything when it
+    # judges the manifest on disk current. The engine removes the manifest
+    # first, so a re-run of this action always compiles in full.
+    removeBeforeRun = [manifestPath])
 
   var phase2: seq[BuildActionDef] = @[]
   var objFiles: seq[string] = @[]
@@ -1372,7 +1509,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
   createDir(extendedPath(objDir))
   # M18: collect the ``src/`` source set ONCE so the same fingerprint
   # serves the emit-cache check AND the Phase 1 action's declared inputs.
-  let nimSources = collectNimSources(projectRoot / "src")
+  let nimSources = nimSourcesFor(projectRoot, lib.sourceFile)
   let keyFiles = nimPhase1KeyFiles(projectRoot, lib.sourceFile)
   runNimCompileOnly(nimExe, nimcacheDir, lib.sourceFile, nimSources,
     manifestPath, useAppLib, cIncludeDirs = [], noMain = useNoMain,
@@ -1396,7 +1533,11 @@ proc emitForLibrary(projectRoot, nimExe: string;
     outputs = phase1Outputs,
     pool = "compile",
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "nim.c.compileOnly")
+    commandStatsId = "nim.c.compileOnly",
+    # ``nimBetterRun`` lets Nim exit 0 without writing anything when it
+    # judges the manifest on disk current. The engine removes the manifest
+    # first, so a re-run of this action always compiles in full.
+    removeBeforeRun = [manifestPath])
 
   var phase2: seq[BuildActionDef] = @[]
   var objFiles: seq[string] = @[]
