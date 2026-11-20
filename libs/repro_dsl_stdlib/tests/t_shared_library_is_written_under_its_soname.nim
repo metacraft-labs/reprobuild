@@ -27,6 +27,17 @@
 ## (Reprobuild-Standard-Library.md, "every Layer 1 constructor") cover it.
 ## The ``nim_library`` suites below hold it to the same layout.
 ##
+## A consumer's link must also FIND the library. Every link adapter turned a
+## dep's ``installPrefix`` (``usr/lib``, a staged-install path no edge of the
+## build writes) into its only ``-L``, so a ``c_executable(deps = @[lib])``
+## link passed ``-Lusr/lib -lgreet`` and failed with "cannot find -lgreet"
+## (reprobuild-pm issue
+## 2026-11-18-stdlib-link-searches-the-install-prefix-not-the-directory-the-library-is-built-in).
+## The suite "a consumer's link searches the directory its library is
+## written in" holds every adapter to ``-L<directory of the library's
+## file>`` (``Library.linkDir``), and runs the generated gcc consumer link
+## far enough to see ld open ``lib/libgreet.so``.
+##
 ## WHAT IS EXERCISED, AND WHAT IS MOCKED. Nothing is mocked. Each case opens
 ## a real ``build:`` frame for a registered package whose ``library`` block
 ## declares the ``api:``, calls ``c_library`` as a recipe does, and reads the
@@ -49,7 +60,9 @@ import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/operations/toolchain
 import repro_dsl_stdlib/operations/link
+import repro_dsl_stdlib/types/executable
 import repro_dsl_stdlib/constructors/c_library
+import repro_dsl_stdlib/constructors/c_executable
 import repro_dsl_stdlib/constructors/nim_library
 
 const
@@ -68,6 +81,10 @@ package sonameFixture:
       soname "greet"
       sover "1"
       linkKind shared
+      # What a consumer links: ``-lgreet``, which finds the link-time
+      # symlink ``libgreet.so`` only in the directory the library is in.
+      links:
+        "greet"
   library plain:
     api:
       soname "plain"
@@ -112,29 +129,31 @@ proc args(a: BuildActionDef): seq[string] =
   for arg in a.call.arguments:
     result.add(arg.name & "=" & arg.encodedValue.replace("\x1f", " "))
 
-proc checkNativeLayout(lib: Library) =
-  ## The layout every native toolchain must produce for ``greet``.
+template checkNativeLayout(lib: Library) =
+  ## The layout every native toolchain must produce for ``greet``. A
+  ## template, not a proc: ``check`` marks the enclosing ``test`` failed
+  ## only where that test's status is in scope; inside a proc a failed
+  ## ``check`` only sets the exit code and the test still reports ``[OK]``.
   let a = args(lib.install)
+  checkpoint("args(lib.install) was " & $a)
   when not HostIsElf:
     # No SONAME on a non-ELF host: the file is the link-time name.
-    checkpoint("args(lib.install) was " & $a)
     check a.allIt(not it.startsWith("soname="))
     check "output=lib/libgreet.so" in a
     check lib.linkTimeName.id.len == 0
-    return
-  checkpoint("args(lib.install) was " & $a)
-  check "soname=libgreet.so.1" in a
-  check "output=lib/libgreet.so.1" in a
-  check lib.install.outputs == @["lib/libgreet.so.1"]
-  # The link-time name, as a symlink to the SONAME-named file.
-  let ln = lib.linkTimeName
-  checkpoint("linkTimeName: " & $args(ln) & " outputs=" & $ln.outputs)
-  check ln.id.len > 0
-  check ln.outputs == @["lib/libgreet.so"]
-  check ln.deps == @[lib.install.id]
-  check ln.inputs == @["lib/libgreet.so.1"]
-  check "argv=ln -sfn libgreet.so.1 lib/libgreet.so" in args(ln)
-  check registeredBuildActions().anyIt(it.id == ln.id)
+  else:
+    check "soname=libgreet.so.1" in a
+    check "output=lib/libgreet.so.1" in a
+    check lib.install.outputs == @["lib/libgreet.so.1"]
+    # The link-time name, as a symlink to the SONAME-named file.
+    let ln = lib.linkTimeName
+    checkpoint("linkTimeName: " & $args(ln) & " outputs=" & $ln.outputs)
+    check ln.id.len > 0
+    check ln.outputs == @["lib/libgreet.so"]
+    check ln.deps == @[lib.install.id]
+    check ln.inputs == @["lib/libgreet.so.1"]
+    check "argv=ln -sfn libgreet.so.1 lib/libgreet.so" in args(ln)
+    check registeredBuildActions().anyIt(it.id == ln.id)
 
 suite "a shared library is written under its SONAME":
 
@@ -265,6 +284,131 @@ suite "a real gcc link of the edge":
       let (_, startCode) = uncontrolledExecCmdEx("./main", workingDir = root,
         env = newStringTable({"LD_LIBRARY_PATH": root / "lib"}))
       check startCode == 0
+
+proc libDirArgs(a: BuildActionDef): seq[string] =
+  ## The ``-L`` directories a link edge passes, one per flag.
+  for arg in a.call.arguments:
+    if arg.name == "libDirs":
+      result.add(arg.encodedValue.split("\x1f"))
+
+template checkConsumer(lib: Library; exe: Executable; libDir: string) =
+  ## A template for the reason ``checkNativeLayout`` gives.
+  let dirs = libDirArgs(exe.install)
+  checkpoint("consumer link args: " & $args(exe.install))
+  check lib.install.outputs.len > 0
+  if lib.install.outputs.len > 0:
+    check lib.install.outputs[0].parentDir == libDir
+  check lib.linkDir == libDir
+  check dirs == @[libDir]
+  check "usr/lib" notin dirs
+  check "libs=greet" in args(exe.install)
+
+suite "a consumer's link searches the directory its library is written in":
+
+  test "gcc: -L names the directory the library's link edge writes":
+    setCompilerOverride("gcc")
+    defer: setCompilerOverride("")
+    withTarget("", proc() =
+      inBuild(proc() =
+        let lib = c_library(into = "greet", sources = @["greet.c"])
+        let exe = c_executable(into = "main", sources = @["main.c"],
+                               deps = @[lib])
+        check exe.install.call.packageName == "gcc"
+        checkConsumer(lib, exe, "lib")))
+
+  test "clang: -L names the directory the library's link edge writes":
+    setCompilerOverride("clang")
+    defer: setCompilerOverride("")
+    withTarget("", proc() =
+      inBuild(proc() =
+        let lib = c_library(into = "greet", sources = @["greet.c"])
+        let exe = c_executable(into = "main", sources = @["main.c"],
+                               deps = @[lib])
+        check exe.install.call.packageName == "clang"
+        checkConsumer(lib, exe, "lib")))
+
+  test "zig target: -L names the target-keyed directory":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let lib = c_library(into = "greet", sources = @["greet.c"])
+        let exe = c_executable(into = "main", sources = @["main.c"],
+                               deps = @[lib])
+        check exe.install.call.packageName == "zig"
+        checkConsumer(lib, exe, "lib@" & ZigTriple)
+        # The link-time symlink ``-lgreet`` resolves is in that directory.
+        check lib.linkTimeName.outputs ==
+          @["lib@" & ZigTriple & "/libgreet.so"]))
+
+  test "nim_library: linkDir is the directory its edge writes":
+    withTarget("", proc() =
+      inBuild(proc() =
+        let lib = nim_library(into = "nimgreet", source = "src/nimgreet.nim")
+        check lib.install.outputs.len > 0
+        if lib.install.outputs.len > 0:
+          check lib.linkDir == lib.install.outputs[0].parentDir
+        check lib.linkDir == "lib"))
+
+  test "nim_library, zig target: linkDir is the target-keyed directory":
+    withTarget(ZigTriple, proc() =
+      inBuild(proc() =
+        let lib = nim_library(into = "nimgreet", source = "src/nimgreet.nim")
+        check lib.linkDir == "lib@" & ZigTriple
+        check lib.linkTimeName.outputs ==
+          @["lib@" & ZigTriple & "/libnimgreet.so"]))
+
+  test "the generated gcc consumer link finds lib/libgreet.so":
+    # Only the search is asserted. The rendered argv puts ``-lgreet`` before
+    # the object (``-Llib -lgreet -o main main.c.o``), so on a toolchain
+    # that links ``--as-needed`` by default (Debian, Ubuntu) the link still
+    # fails, with an undefined ``greet``. That is a separate defect of the
+    # native link's single ``source`` positional, recorded in reprobuild-pm
+    # issue
+    # 2026-10-31-native-link-operation-links-only-the-first-object-and-builds-static-libraries-with-static.
+    let gcc = uncontrolledFindExe("gcc")
+    if not HostIsElf or gcc.len == 0:
+      skip("needs an ELF host with gcc on PATH (gcc='" & gcc & "')")
+    else:
+      let root = getTempDir() / ("t_consumer_link_" & $getCurrentProcessId())
+      removeDir(root)
+      createDir(root)
+      defer: removeDir(root)
+      writeFile(root / "greet.c", "int greet(void) { return 42; }\n")
+      writeFile(root / "main.c",
+        "int greet(void);\nint main(void) { return greet() == 42 ? 0 : 1; }\n")
+      proc run(argv: seq[string]): (string, int) =
+        checkpoint("$ " & argv.join(" "))
+        result = uncontrolledExecCmdEx(quoteShellCommand(argv), workingDir = root)
+        checkpoint(result[0])
+      # The objects are not under test; the two link edges are.
+      check run(@[gcc, "-fPIC", "-c", "-o", "greet.c.o", "greet.c"])[1] == 0
+      check run(@[gcc, "-fPIC", "-c", "-o", "main.c.o", "main.c"])[1] == 0
+      var lib: Library
+      var exe: Executable
+      setCompilerOverride("gcc")
+      defer: setCompilerOverride("")
+      withTarget("", proc() =
+        inBuild(proc() =
+          lib = c_library(into = "greet", sources = @["greet.c"])
+          exe = c_executable(into = "main", sources = @["main.c"],
+                             deps = @[lib])))
+      createDir(root / "lib")
+      let profile = PathOnlyToolProfile(resolvedExecutablePath: gcc)
+      check run(argvForCall(lib.install.call, profile))[1] == 0
+      var lnArgv: seq[string]
+      for arg in lib.linkTimeName.call.arguments:
+        if arg.name == "argv": lnArgv = arg.encodedValue.split("\x1f")
+      check lnArgv.len == 4
+      if lnArgv.len == 4:
+        check run(lnArgv)[1] == 0
+      # The consumer's link exactly as the engine renders it -- no
+      # hand-written ``-L`` -- with only ld's ``--trace`` added, which
+      # prints each input file ld opens and changes no search.
+      let consumer = argvForCall(exe.install.call, profile)
+      let (linkOut, _) = run(consumer & @["-Wl,--trace"])
+      check "cannot find -lgreet" notin linkOut
+      # ``--trace`` prints each file ld opens on a line of its own; the
+      # relative path is the one ``-Llib`` finds, not a system copy.
+      check linkOut.splitLines.anyIt(it.strip == "lib/libgreet.so")
 
 proc passLValues(a: BuildActionDef): seq[string] =
   ## The ``--passL:`` values of a ``nim.c`` edge, one per flag.

@@ -52,7 +52,21 @@ type
     installPrefix*: string
       ## Relative path within the install destdir (e.g.
       ## ``"usr/lib"``). Empty when the producing edge is not a
-      ## destdir-staged install action.
+      ## destdir-staged install action. It names where a staged install
+      ## puts the library, not a directory any edge of this build writes,
+      ## so a link never searches it.
+    linkDir*: string
+      ## The directory the library is written in by this build: the
+      ## directory of ``install.outputs[0]``, where ``linkTimeName`` writes
+      ## the link-time symlink too (``lib``, or ``lib@<triple>`` under a
+      ## zig target). Every per-compiler link with this library in its
+      ## ``deps`` passes it as ``-L``, so the ``-l`` names its ``api.links``
+      ## declares find the file there (on an ELF target, where the file or
+      ## its link-time symlink is ``lib<soname>.so``)
+      ## (Reprobuild-Standard-Library.md, "Typed-value layer",
+      ## ``LinkOptions``). Only ``c_library`` and ``nim_library`` set it;
+      ## it is empty for every other ``Library`` (the meson, cmake and
+      ## autotools slices), and a link then adds no ``-L`` for it.
 
 proc sharedLibrarySoname*(soname, sover: string): string =
   ## The full ELF SONAME of a shared library whose ``api:`` block
@@ -78,8 +92,8 @@ proc linkPrerequisites*(deps: openArray[Library]): seq[BuildActionDef] =
   ## clang, ``zig cc``; not the ``zig ar`` archive path, which takes no
   ## deps) passes these as ``after``, so the ordering no longer depends on
   ## something else happening to schedule the library first. A default
-  ## edge (empty ``id``) is skipped. Ordering is all this gives: whether
-  ## ``-L`` points at the directory the library is written to is separate.
+  ## edge (empty ``id``) is skipped. Ordering is all this gives: the
+  ## directory ``-L`` searches is ``linkDir``, which each link adds itself.
   for dep in deps:
     if dep.install.id.len > 0:
       result.add(dep.install)
