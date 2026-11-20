@@ -38,7 +38,8 @@
 ## on every ``repro build``) via a pragmatic fingerprint sidecar in
 ## ``conventions/emit_cache.nim``: ``runNimCompileOnly`` hashes the
 ## ``.nim`` source set + the entry source + the ``--app:lib`` toggle +
-## the nim driver path, compares against
+## the nim driver path + the project config files and ``.nimble``
+## (``nimPhase1KeyFiles``), compares against
 ## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint``, and skips
 ## the subprocess on a match (the previous run's manifest is reused).
 ## This keeps a static-graph emit shape while making cold-snapshot
@@ -759,11 +760,59 @@ const
     ## Sidecar file basename for the M18 emit-time fingerprint cache.
     ## See ``emit_cache.nim`` for the contract.
 
+proc nimProjectConfigCandidates(entrySource: string): seq[string] =
+  ## The project config files Nim reads for ``entrySource`` when Phase 1
+  ## runs, whether they exist or not. Phase 1 passes ``--skipParentCfg
+  ## --skipUserCfg`` but not ``--skipProjCfg``, so Nim still loads, from the
+  ## entry source's own directory: ``nim.cfg``, ``<entry>.nimcfg`` (or, when
+  ## that is absent, ``<entry>.nim.cfg``), ``config.nims`` and
+  ## ``<entry>.nims``. Flags set there (``--passC``, ``--threads``, a
+  ## sanitizer, ``--cc``) reach the per-file C commands Nim records, which
+  ## Phase 2 runs verbatim, so every candidate belongs in the emit-cache key.
+  ## An absent candidate still enters the key (``fileInput`` digests it as
+  ## ``missing``), so creating or deleting one misses the cache too.
+  ## Nim takes the project directory after resolving symlinks, so a
+  ## symlinked entry reads the config files beside its target.
+  var resolved = entrySource
+  try:
+    resolved = expandFilename(entrySource)
+  except OSError:
+    discard
+  let dir = parentDir(resolved)
+  let stem = splitFile(resolved).name
+  @[
+    dir / "nim.cfg",
+    dir / (stem & ".nimcfg"),
+    dir / (stem & ".nim.cfg"),
+    dir / "config.nims",
+    dir / (stem & ".nims"),
+  ]
+
+proc nimPhase1KeyFiles(projectRoot, entrySource: string): seq[string] =
+  ## Files outside ``src/**.nim`` that shape Phase 1's output: the project
+  ## config candidates above, plus the ``.nimble`` (Nim.md §"Cross-module
+  ## ordering" puts it in the umbrella action's fingerprint). Absent
+  ## config candidates are kept so the emit-cache key records their
+  ## absence; ``existingFiles`` filters them for the declared inputs.
+  result = nimProjectConfigCandidates(entrySource)
+  var nimbles: seq[string] = @[]
+  for kind, path in walkDir(projectRoot):
+    if kind == pcFile and path.endsWith(".nimble"):
+      nimbles.add(path)
+  nimbles.sort(system.cmp[string])
+  result.add(nimbles)
+
+proc existingFiles(paths: openArray[string]): seq[string] =
+  for path in paths:
+    if fileExists(extendedPath(path)):
+      result.add(path)
+
 proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
                              nimSources: openArray[string];
                              appLib: bool;
                              cIncludeDirs: openArray[string] = [];
-                             noMain = false): string =
+                             noMain = false;
+                             keyFiles: openArray[string] = []): string =
   ## Fingerprint key for the nim-c-compileonly cache.
   ##
   ## Inputs that participate in the key:
@@ -775,7 +824,13 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ##     fingerprint sidecar even if their source set is identical);
   ##   * every ``.nim`` source file under ``<projectRoot>/src/`` plus the
   ##     entry source itself — content digest folded in via
-  ##     ``fileInput``.
+  ##     ``fileInput``;
+  ##   * ``keyFiles``: the project config files Nim reads beside the
+  ##     entry (present or absent) and the ``.nimble``, from
+  ##     ``nimPhase1KeyFiles``. Without them an edit to ``src/config.nims``
+  ##     left the key unchanged and Phase 2 ran stale compile commands
+  ##     (reprobuild-pm issues/2026-11-16-nim-emit-cache-ignores-project-
+  ##     nim-config-files.md).
   ##
   ## **M29 Part A**: the Nim driver's reported version is now folded in
   ## via ``toolVersionInput`` (running ``nim --version`` once per emit
@@ -790,9 +845,16 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ##     materially changes and is cheap to compute. A future M can
   ##     fold in the full binary hash if a same-version-different-bytes
   ##     case crops up.
-  ##   * environment variables. The convention's argv is hermetic at
-  ##     the source level — Nim doesn't read ``NIMCACHE_DIR`` etc. when
-  ##     ``--nimcache:`` is set on the command line.
+  ##   * environment variables. Nim itself doesn't read ``NIMCACHE_DIR``
+  ##     etc. when ``--nimcache:`` is set on the command line, but a
+  ##     project ``config.nims`` can call ``getEnv``, and ``HOME`` /
+  ##     ``NIMBLE_DIR`` steer the default ``nimblePath``.
+  ##   * files a project ``config.nims`` itself reads or includes,
+  ##     ``.nim`` modules outside ``src/`` (a ``path=`` or a relative
+  ##     import), and packages reached through ``nimblePath``. The
+  ##     recorded Phase 1 action's monitor policy observes those; the
+  ##     emit cache does not (reprobuild-pm issues/2026-11-18-nim-emit-
+  ##     cache-key-omits-config-nims-reads-and-required-packages.md).
   var inputs: seq[EmitCacheInput] = @[
     textInput("nim-exe:" & nimExe),
     toolVersionInput(nimExe),
@@ -806,6 +868,8 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
     inputs.add(fileInput(source))
   for incDir in cIncludeDirs:
     inputs.add(textInput("c-inc-dir:" & incDir))
+  for keyFile in keyFiles:
+    inputs.add(fileInput(keyFile))
   computeEmitCacheFingerprint(inputs)
 
 proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
@@ -813,7 +877,8 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
                        manifestPath: string;
                        appLib = false;
                        cIncludeDirs: openArray[string] = [];
-                       noMain = false) =
+                       noMain = false;
+                       keyFiles: openArray[string] = []) =
   ## Execute the eager Phase 1 run and surface any failure as a
   ## ``ValueError`` carrying the captured stderr. The standard provider
   ## binary's outer ``try/except`` (in ``apps/repro-standard-provider``)
@@ -843,7 +908,7 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
   ## subprocess success so a partial run never poisons the cache.
   createDir(extendedPath(nimcacheDir))
   let fingerprint = nimEmitCacheFingerprint(nimExe, entrySource,
-    manifestPath, nimSources, appLib, cIncludeDirs, noMain)
+    manifestPath, nimSources, appLib, cIncludeDirs, noMain, keyFiles)
   if emitCacheIsUsable(nimcacheDir, NimEmitCacheBaseName, fingerprint,
       [manifestPath]):
     return
@@ -1099,8 +1164,9 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
       continue
     if lib.includeDir notin cIncludeDirs:
       cIncludeDirs.add(lib.includeDir)
+  let keyFiles = nimPhase1KeyFiles(projectRoot, entry.sourceFile)
   runNimCompileOnly(nimExe, nimcacheDir, entry.sourceFile, nimSources,
-    manifestPath, false, cIncludeDirs)
+    manifestPath, false, cIncludeDirs, keyFiles = keyFiles)
   let manifest = parseNimcacheManifest(manifestPath)
   if manifest.compile.len == 0:
     raise newException(ValueError,
@@ -1108,7 +1174,7 @@ proc emitForEntrypoint(projectRoot, nimExe: string;
         entry.name)
 
   let (phase1Inputs, phase1Outputs) = phase1InputsAndOutputs(nimcacheDir,
-    manifestPath, nimSources, manifest)
+    manifestPath, nimSources & existingFiles(keyFiles), manifest)
 
   let phase1Id = actionIdFor("nim-c-compileonly", entry.name, "umbrella")
   let phase1Argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entry.sourceFile,
@@ -1307,8 +1373,10 @@ proc emitForLibrary(projectRoot, nimExe: string;
   # M18: collect the ``src/`` source set ONCE so the same fingerprint
   # serves the emit-cache check AND the Phase 1 action's declared inputs.
   let nimSources = collectNimSources(projectRoot / "src")
+  let keyFiles = nimPhase1KeyFiles(projectRoot, lib.sourceFile)
   runNimCompileOnly(nimExe, nimcacheDir, lib.sourceFile, nimSources,
-    manifestPath, useAppLib, cIncludeDirs = [], noMain = useNoMain)
+    manifestPath, useAppLib, cIncludeDirs = [], noMain = useNoMain,
+    keyFiles = keyFiles)
   let manifest = parseNimcacheManifest(manifestPath)
   if manifest.compile.len == 0:
     raise newException(ValueError,
@@ -1316,7 +1384,7 @@ proc emitForLibrary(projectRoot, nimExe: string;
         lib.name)
 
   let (phase1Inputs, phase1Outputs) = phase1InputsAndOutputs(nimcacheDir,
-    manifestPath, nimSources, manifest)
+    manifestPath, nimSources & existingFiles(keyFiles), manifest)
 
   let phase1Id = actionIdFor("nim-c-compileonly", lib.name, "umbrella")
   let phase1Argv = nimCompileOnlyArgv(nimExe, nimcacheDir, lib.sourceFile,

@@ -1123,3 +1123,139 @@ suite "nim convention Phase 1 output ownership":
       defer:
         removeDir(scratch)
       checkCompilePragmaSourceIsNotAPhase1Output(scratch, "pragma_lib")
+
+# ---------------------------------------------------------------------------
+# Emit-cache key covers the project's Nim config files.
+#
+# Phase 1 runs ``nim c`` with ``--skipParentCfg --skipUserCfg`` but not
+# ``--skipProjCfg``, so Nim reads the config files beside the entry source
+# (``nim.cfg``, ``<entry>.nim.cfg``, ``config.nims``, ``<entry>.nims``).
+# Flags set there (``--passC``, ``--threads``, a sanitizer) reach the per-file
+# C compile commands Nim records, and Phase 2 runs those commands verbatim
+# (Nim.md §"Phase 2 — Per-`.c` compile"). The M18 emit cache must therefore
+# miss when such a file is added, edited or removed; otherwise Phase 2 runs
+# with stale flags. The ``.nimble`` is in the key too (Nim.md
+# §"Cross-module ordering").
+#
+# Adversarial origin: reprobuild-pm
+# issues/2026-11-16-nim-emit-cache-ignores-project-nim-config-files.md.
+# No mocks: the scratch project goes through the real convention and the real
+# ``nim`` on PATH.
+# ---------------------------------------------------------------------------
+
+proc phase2Argvs(fragment: GraphFragment): seq[seq[string]] =
+  for action in actionByPrefix(fragment, "gcc-compile-"):
+    result.add(inlineArgvOf(action))
+
+proc anyArgvCarries(argvs: seq[seq[string]]; token: string): bool =
+  for argv in argvs:
+    for arg in argv:
+      if token in arg:
+        return true
+  false
+
+suite "nim convention emit cache: project config files":
+
+  test "editing a project config file re-runs Phase 1 and reaches Phase 2":
+    let scratch = getTempDir() / "test_nim_convention_project_cfg"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    defer:
+      removeDir(scratch)
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package cfgProbe:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2\"\n" &
+      "\n" &
+      "  executable cfg_probe:\n" &
+      "    discard\n")
+    writeFile(scratch / "cfg_probe.nimble",
+      "version = \"0.1.0\"\nbin = @[\"cfg_probe\"]\nsrcDir = \"src\"\n")
+    writeFile(scratch / "src" / "cfg_probe.nim", "echo \"cfg probe\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let first = phase2Argvs(conv.emitFragment(scratch, request))
+      require first.len >= 1
+      check not anyArgvCarries(first, "REPRO_CFG_SENTINEL")
+
+      # config.nims beside the entry: the flag must reach Phase 2.
+      writeFile(scratch / "src" / "config.nims",
+        "switch(\"passC\", \"-DREPRO_CFG_SENTINEL_NIMS=1\")\n")
+      let fragment2 = conv.emitFragment(scratch, request)
+      let second = phase2Argvs(fragment2)
+      checkpoint "phase-2 argv after adding src/config.nims: " & $second
+      check anyArgvCarries(second, "REPRO_CFG_SENTINEL_NIMS")
+      # The recorded Phase 1 action declares the config file too, so the
+      # engine's own fingerprint of that action moves with it.
+      let phase1 = actionByPrefix(fragment2, "nim-c-compileonly-")
+      require phase1.len == 1
+      check (scratch / "src" / "config.nims") in phase1[0].inputs
+
+      # Edit config.nims in place: the file stays present, so only a key
+      # on its content can notice.
+      writeFile(scratch / "src" / "config.nims",
+        "switch(\"passC\", \"-DREPRO_CFG_SENTINEL_EDITED=1\")\n")
+      let edited = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing src/config.nims: " & $edited
+      check anyArgvCarries(edited, "REPRO_CFG_SENTINEL_EDITED")
+      check not anyArgvCarries(edited, "REPRO_CFG_SENTINEL_NIMS")
+
+      # nim.cfg beside the entry.
+      writeFile(scratch / "src" / "nim.cfg",
+        "passC = \"-DREPRO_CFG_SENTINEL_CFG=1\"\n")
+      let third = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after adding src/nim.cfg: " & $third
+      check anyArgvCarries(third, "REPRO_CFG_SENTINEL_CFG")
+
+      # Removing a config file must miss as well.
+      removeFile(scratch / "src" / "config.nims")
+      let fourth = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after removing src/config.nims: " & $fourth
+      check not anyArgvCarries(fourth, "REPRO_CFG_SENTINEL_EDITED")
+      check anyArgvCarries(fourth, "REPRO_CFG_SENTINEL_CFG")
+
+  test "the .nimble file is part of the emit-cache key":
+    let scratch = getTempDir() / "test_nim_convention_nimble_key"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    defer:
+      removeDir(scratch)
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package nimbleKey:\n" &
+      "  uses:\n" &
+      "    \"nim >=2.2\"\n" &
+      "\n" &
+      "  executable nimble_key:\n" &
+      "    discard\n")
+    writeFile(scratch / "nimble_key.nimble", "version = \"0.1.0\"\n")
+    writeFile(scratch / "src" / "nimble_key.nim", "echo \"nimble key\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      discard conv.emitFragment(scratch, request)
+      let sidecar = scratch
+      var before = ""
+      for f in walkDirRec(sidecar):
+        if f.endsWith("nim-c-compileonly.repro-emit-fingerprint"):
+          before = readFile(f)
+      require before.len > 0
+      writeFile(scratch / "nimble_key.nimble", "version = \"0.2.0\"\n")
+      let fragment = conv.emitFragment(scratch, request)
+      var after = ""
+      for f in walkDirRec(sidecar):
+        if f.endsWith("nim-c-compileonly.repro-emit-fingerprint"):
+          after = readFile(f)
+      check after.len > 0
+      check after != before
+      let phase1 = actionByPrefix(fragment, "nim-c-compileonly-")
+      require phase1.len == 1
+      check (scratch / "nimble_key.nimble") in phase1[0].inputs
