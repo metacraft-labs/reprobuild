@@ -106979,6 +106979,16 @@ proc runTestVerbCommand(args: seq[string]; publicCliPath: string): int =
     return runReproTestCommand(args, publicCliPath)
   except CliUsageError as err:
     return reportReproUsageError(err)
+  except BuildTargetAmbiguousError as err:
+    # ``repro test`` is ``repro build test``, so a selector it cannot
+    # resolve gets ``repro build``'s diagnostics and exit status 2 from the
+    # shared renderers ([CLI/test.md §"Alias Semantics"]), not a bare
+    # ``repro test: error: <message>`` and exit 1.
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
   except BuildCommandLineError as err:
     # The build's own command line, refused by the build: a usage error.
     stderr.writeLine("repro test: " & err.msg)
@@ -107032,6 +107042,13 @@ proc runCertifyVerbCommand(args: seq[string]; publicCliPath: string): int =
   opts.certifyExplicit = true
   try:
     return runReproTest(opts, publicCliPath)
+  except BuildTargetAmbiguousError as err:
+    # The verb alias of ``repro test --certify``: the same diagnostics.
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
   except BuildCommandLineError as err:
     stderr.writeLine("repro certify: " & err.msg)
     return 2
