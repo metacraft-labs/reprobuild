@@ -14,7 +14,9 @@
 ##      declared, and the plan returns the narrower handle instead;
 ##   4. a project with no ``test`` name has no implicit marking, and a plain
 ##      ``repro test`` there is the ordinary unknown-target error (it is
-##      ``repro build test``; nothing gathers every edge instead);
+##      ``repro build test``; nothing gathers every edge instead): the
+##      shared ``unknown_target`` diagnostic with exit status 2, as
+##      ``repro build`` prints it;
 ##   5. a project with no ``test`` target whose edge has the implicit name
 ##      ``test``: a plain ``repro test`` builds that edge, and that edge is
 ##      what is marked.
@@ -76,11 +78,26 @@ suite "t_implicit_test_aggregate_is_certificate_producing":
 
     # A plain ``repro test`` with no ``test`` target does not fall back to
     # every edge: it is ``repro build test``, which fails with the ordinary
-    # unknown-target error. Nothing runs, so nothing is marked.
+    # unknown-target error. Nothing runs, so nothing is marked. "Ordinary"
+    # means ``repro build``'s: the shared ``unknown_target`` diagnostic and
+    # exit status 2, not a bare ``repro test: error: <message>`` and exit 1
+    # (reprobuild-pm issue
+    # 2026-11-17-implicit-test-aggregate-test-expects-a-retired-unknown-target-message).
     let unknown = fx.runRepro(project, ["test", "--tool-provisioning=path"])
     checkpoint(unknown.output)
-    check unknown.code != 0
+    check unknown.code == 2
     check "no build target matches 'test'" in unknown.output
+    check "repro test: error:" notin unknown.output
+    # The same without a daemon. A daemon-hosted build renders the
+    # diagnostic itself, so with a per-user daemon running the check above
+    # never reaches the verb's own error handling; a direct build raises the
+    # resolver's error up to ``repro test``, which must render it the same way.
+    let unknownDirect = fx.runRepro(project, ["test", "--daemon=off",
+      "--tool-provisioning=path"])
+    checkpoint(unknownDirect.output)
+    check unknownDirect.code == 2
+    check "no build target matches 'test'" in unknownDirect.output
+    check "repro test: error:" notin unknownDirect.output
     # The plan for it is refused the same way: there is no plan to mark.
     let unknownPlan = fx.runRepro(project, ["certificates", "plan",
       "--tool-provisioning=path"])

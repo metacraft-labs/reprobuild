@@ -1,206 +1,28 @@
 ## Reprobuild project DSL umbrella module.
 ##
-## Every generated and hand-authored ``reprobuild.nim`` consumes this
-## module via ``import repro_project_dsl``. Internally the DSL is split
-## into composable include files so that the heavy runtime portion can
-## eventually be factored out into a shared library
-## (see ``reprobuild-specs/Provider-Compile-Tiering.md``):
+## Every generated and hand-authored ``repro.nim`` consumes this module via
+## ``import repro_project_dsl`` (or through ``reprobuild`` and
+## ``reprobuild/dsl``, which re-export it). What it provides depends on the
+## compilation's mode (``repro_project_dsl/mode``):
 ##
-## * ``repro_project_dsl/types``            — object/enum/tuple defs
-## * ``repro_project_dsl/runtime_core``     — registry globals + the
-##                                            169 ordinary procs
-## * ``repro_project_dsl/macros_a``         — compile-time helpers used
-##                                            by ``defineCliInterface`` /
-##                                            ``package``, plus the
-##                                            ``defineCliInterface``
-##                                            macro
-## * ``repro_project_dsl/runtime_provider`` — provider-mode-only runtime
-##                                            procs (gated on
-##                                            ``reproProviderMode``)
-## * ``repro_project_dsl/macros_b``         — remaining compile-time
-##                                            helpers and the
-##                                            ``package`` macro
+## * with ``-d:reproProviderMode``, ``-d:reproInterfaceMode`` or
+##   ``-d:reproEvalMode``, the whole DSL: ``repro_project_dsl/full``, which
+##   holds what this module held before the modes existed and documents how
+##   it is split up;
+## * with none of them, the thin mode: ``repro_project_dsl/thin``, every DSL
+##   form name as an ``untyped`` macro and nothing of the engine, so that a
+##   program can import its project's ``repro.nim``.
 ##
-## The umbrella file keeps the public import surface byte-identical for
-## callers across legacy/monolithic and shared-DLL provider modes; only
-## the include files change role between modes.
+## The engine passes the define of the mode each of its compilations needs,
+## and reprobuild's own ``config.nims`` defines ``reproEvalMode`` for every
+## compile in its tree. ``reproDslMode`` is exported in every mode.
 
-import std/[algorithm, json, macros, options, os, strutils, tables]
+import repro_project_dsl/mode
+export mode
 
-# ``querySettingSeq(searchPaths)`` — the consuming compile's own resolved
-# ``--path`` set. ``macros_a``'s resource-accessor generator hands it to the
-# out-of-tree generator compile, which can no longer inherit it from Nim's
-# ``config.nims`` directory walk now that the generator's scratch is anchored
-# on the project being built rather than on the engine's own checkout. The
-# module's procs are compile-time-only; importing it costs nothing at runtime.
-import std/compilesettings
-
-# DSL-port M9.A: ``nimcrypto/sha2`` powers the content-addressed sha256
-# hashing path for ``consumeConfigFile`` / ``consumeManagedBlock``. We
-# import-alias it under ``ncSha2`` so the M9.A wrappers below can
-# instantiate ``ncSha2.sha256`` without colliding with any top-level
-# ``sha256`` identifier callers may want to re-introduce. The shim
-# modules at ``libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packages/`` use
-# the same library + identical digest interface, so the cache-key
-# composition stays byte-comparable across the M9.A DSL surface and the
-# pre-existing shim emitters (Generated-Configuration-Files.md
-# §"Cache-key composition").
-import nimcrypto/sha2 as ncSha2
-
-# M9.L.4-refactor Step B: ``BuildActionDef`` carries an optional
-# ``CacheEntryIdentity`` populated by the from-source conventions so the
-# engine's binary-cache publisher hook can sign + upload the install
-# tree after a successful run. The DSL layer takes a hard dependency on
-# ``repro_binary_cache_client/cache_key`` (and transitively on
-# ``repro_binary_cache_server/types``) so the field's type is the same
-# canonical struct the engine and the binary-cache publisher consume —
-# no parallel mirror type drifting away from the spec.
-import repro_binary_cache_client/cache_key
-import repro_binary_cache_server/types as bcsTypes
-import repro_project_dsl/install_mirror_resolver
-from repro_core/link_target import readSymlinkTarget
-from repro_core/relocation import recipeSourceName
-# The managed-file writer's sentinel format (`fs.managedBlock`'s sentinels are
-# rendered by the one implementation; Core-Invariants.md §"One Implementation
-# Per Concern").
-from repro_core/managed_block as coreManagedBlock import nil
-from repro_core/target_object_check import TargetObjectExemption,
-  TargetObjectExemptionsEnvVar, encodeTargetObjectExemptions,
-  validateTargetObjectExemption
-export TargetObjectExemption
-import repro_project_dsl/install_mirror_runtime
-import repro_project_dsl/shell_fetch
-import repro_project_dsl/source_cache_identity
-import repro_project_dsl/sized_tools
-import repro_project_dsl/selector_names
-import repro_project_dsl/reprobuild_packages_catalog
-export reprobuild_packages_catalog
-# How a macro shells out at compile time. A `std`-only leaf, deliberately
-# separate from this module so a gate can compile against the RULE without
-# paying for the whole DSL — see the module's own header for why the rule is
-# "name nothing that has to be found on `PATH`".
-import repro_project_dsl/compile_time_shell
-# Named-Lock-Files NLF-M7: declared lock-file NAMES, the designation stack and
-# the artifact-designation registry. A `std`-only leaf, so the dependency adds
-# nothing transitively; the `package` macro needs it to emit §4.3's
-# designation registration and §4.9's compile-time check, and re-exporting it
-# is what lets the emitted code resolve those names inside a recipe.
-import repro_lock_files
-import repro_lock_files/ct_registry
-# Test-Certificates TC-9b: the branch-policy model, for `enactCertificatePolicy`
-# (the `package` macro's compile-time check, the runtime registry and the
-# provider's emission). A `std`-only leaf. Imported by name and NOT
-# re-exported: a recipe that writes a policy imports `repro_certificates`, and
-# every other recipe keeps its namespace free of the policy vocabulary.
-from repro_lock/certificate_policy import BranchCertificatePolicy,
-  CertificatePolicyEmitEnvVar, CertificatePolicyGraphStableName,
-  renderCertificatePolicyEmission, undeclaredRequirement,
-  withDeclaredInRelativeTo
-export cache_key, bcsTypes, install_mirror_resolver, shell_fetch
-export repro_lock_files, ct_registry
-
-proc extendedPath(path: string): string =
-  when defined(windows):
-    if path.len == 0 or path.startsWith("\\\\"):
-      path
-    else:
-      "\\\\?\\" & normalizedPath(absolutePath(path)).replace('/', '\\')
-  else:
-    path
-
-when defined(reproProviderMode):
-  import std/streams
-  import repro_provider_runtime
-  export repro_provider_runtime
-
-# Windows-Build-Correctness M6 — the entropy-blessing vocabulary is defined
-# ONCE, in ``repro_core``, and shared verbatim by the DSL (which declares the
-# blessing) and the build engine (which acts on it). A parallel mirror enum in
-# each layer is exactly the drift the ``CacheEntryIdentity`` import above
-# avoids, and it would drift in the direction that matters: a DSL that says
-# "blessed" and an engine that reads a different ordinal fails OPEN.
-#
-# Imported symbol-by-symbol rather than as a whole module: consumers such as
-# ``repro_dsl_stdlib/packages/nim.nim`` import ``repro_core`` AND
-# ``repro_project_dsl``, and re-exporting all of ``dependency_gathering`` here
-# would make every shared name (``DependencyGatheringPolicy``, …) ambiguous at
-# those call sites.
-# Exporting the TYPE carries its enum fields with it (Nim rejects exporting
-# an enum field on its own), so `ndpUnblessed` / `ndpEntropyBlessed` become
-# usable by every DSL consumer without re-exporting the rest of
-# `dependency_gathering` and making `DependencyGatheringPolicy` ambiguous at
-# the call sites that import both `repro_core` and `repro_project_dsl`.
-#
-# DA-6 adds ``MonitorCaptureBreadth`` on the same terms and for the same
-# reason: the tool package DECLARES the capture breadth and the build engine
-# ACTS on it (``declaredMonitorInterest``), so a mirror enum per layer would
-# drift in the fail-open direction — a DSL that says "omit the ambient reads"
-# and an engine that reads a different ordinal would narrow a category some
-# consumer reads. Same symbol-by-symbol import, same reason.
-from repro_core/dependency_gathering import NonDeterminismPolicy,
-  ndpUnblessed, ndpEntropyBlessed,
-  MonitorCaptureBreadth, mcbFullCapture, mcbOmitAmbientReads
-export NonDeterminismPolicy, MonitorCaptureBreadth
-
-# The ``cli:`` language and its typed model come from the clispec library
-# (sibling ``nim-cli-spec``; ``CLI_SPEC_SRC``). The model's types are part
-# of this module's public surface — every recipe's ``executable … cli:``
-# lowers to ``CliCommandDef`` / ``CliParamDef``, which instantiate them — so
-# ``clispec/model`` is re-exported. The parser (``clispec/dsl``) is
-# compile-time machinery for the ``package`` and ``defineCliInterface``
-# macros and is NOT re-exported, so its helper names never reach a recipe's
-# namespace. ``clispec/config_check`` is re-exported: a tool whose description
-# declares configuration keys gets a ``<executable>ConfigDescription``
-# constant (``cli_extension.nim``), and the code that builds it, and the
-# configuration writers that read it, use its names.
-import clispec/[model, dsl, config_check]
-export model, config_check
-
-include "repro_project_dsl/types"
-
-# Project-DSL-Composition M5: per-section typed-object prelude.
-# Defines ``Package[name]`` / ``PackageBuild[name]`` and the section-
-# accessor templates the new cross-project reference machinery emits
-# binding accessors against.
-include "repro_project_dsl/prelude_typed_objects"
-
-# The ``dynOrStatic`` pragma macro toggles each public runtime proc
-# between three roles:
-#   * legacy monolithic build (default): body stays, no decoration;
-#   * shared DSL runtime DLL build (``-d:reproProviderRuntimeDll``):
-#     body stays, proc is annotated ``{.exportc, dynlib.}`` so its
-#     symbol is exported from ``librepro_project_dsl_runtime.{dll,
-#     so,dylib}``;
-#   * static stub in dynamic mode (``-d:reproProviderDynamic``,
-#     selected via ``REPRO_PROVIDER_DYNAMIC=1`` — see
-#     ``providerCompileCommand`` in ``repro_interface_artifacts``):
-#     body is dropped, proc is annotated
-#     ``{.importc, dynlib: "repro_project_dsl_runtime".}`` so the
-#     per-project provider binary links against the shared DLL
-#     instead of compiling ~5000 lines of DSL+runtime code inline.
-#
-# Procs called from macro bodies at compile time (``stableHashHex``,
-# ``parsePackageDef``, ``dependencyPolicyCode``, …) are file-local
-# (no ``*``) and are not annotated with ``{.dynOrStatic.}``; they
-# stay statically compiled so the Nim VM can still execute them when
-# expanding ``package`` / ``defineCliInterface``.
-import "repro_project_dsl/dyn_or_static"
-export dyn_or_static
-include "repro_project_dsl/runtime_core"
-# DSL-port M2 — sidecar runtime for the v8-style ``config:`` scalar
-# surface and the new ``versions:`` registry. Lives in its own module so
-# the M2 reader/writer API is consumable directly by host code and by
-# tests without dragging the macro side along. The ``package`` macro
-# emits ``recordConfigDefault[T](...)`` and ``registerVersion(...)``
-# calls into the lowered body, both of which resolve through this
-# module's public procs.
-include "repro_project_dsl/dsl_port_runtime"
-include "repro_project_dsl/macros_a"
-include "repro_project_dsl/runtime_provider"
-# Project-DSL-Composition M5: cross-project edge references —
-# compile-time uses-registry, cycle detection, top-level `let`/`var`
-# binding collection inside the producer's `build:` block, plus the
-# storage / accessor-template / instrumentation emitters used by the
-# `package` macro.
-include "repro_project_dsl/cross_project"
-include "repro_project_dsl/macros_b"
+when reproDslMode == rdmThin:
+  import repro_project_dsl/thin
+  export thin
+else:
+  import repro_project_dsl/full
+  export full

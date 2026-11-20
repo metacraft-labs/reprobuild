@@ -97,6 +97,9 @@ Usage: repro-install.sh [OPTIONS]
   --uninstall           Remove the package, the repository registration
                         and the trust anchor, then assert they are gone.
   --prefix PATH         Tarball-install prefix (default /usr/local).
+  --no-completion       Tarball install: do not set up shell completion
+                        for repro. (Native and Nix packages install their
+                        completion files themselves.)
   --dry-run             Print the commands that would run; change nothing.
   --yes                 Do not prompt.
   -h, --help            This text.
@@ -116,11 +119,28 @@ Environment (see the comment block at the top of this file):
   REPRO_VERIFY_SCRIPT   Path to repro-verify-release.sh (tarball method).
   REPRO_ALLOW_TEST_KEY=1
                         Pass --allow-test-key to the verifier.
+  REPRO_NO_COMPLETION=1 The same as --no-completion.
   REPRO_NIX_BRANCH      Branch of the nixpkgs fork to use (nix, nixos), by
                         its full name (nixos-26.05-metacraft); default:
                         the one matching this system's channel.
 ```
 <!-- generated:end -->
+
+Shell completion for `repro` works in Bash, Zsh and Fish without further
+setup. The apt, dnf and pacman packages and the Nix package install the
+completion scripts where each shell looks for them:
+`share/bash-completion/completions/repro`, `share/fish/vendor_completions.d/repro.fish`
+and, for Zsh, `share/zsh/vendor-completions/_repro` on Debian and Ubuntu and
+`share/zsh/site-functions/_repro` elsewhere, under `/usr` or the Nix
+package. Bash needs the distribution's `bash-completion` package, and Zsh needs
+`compinit` to run in your `.zshrc`, as most Zsh setups already do. The
+tarball method has no package to install them, so the installer runs
+`repro hooks ensure --shell-autocomplete` for you: under `sudo` for the user
+who ran `sudo`, in that user's home directory, and as `root` with no other
+user for every user of the machine, under `/usr/local/share` (for Fish,
+`/etc/fish/completions`, which Fish always reads). `--uninstall`
+removes them again. To skip this, pass `--no-completion` or set
+`REPRO_NO_COMPLETION=1`.
 
 ## Windows: the installer
 

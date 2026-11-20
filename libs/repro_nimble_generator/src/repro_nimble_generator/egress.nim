@@ -300,8 +300,12 @@ proc systemResolve(host: string): seq[IpAddress] =
     it = it.ai_next
   freeAddrInfo(info)
 
-proc vetHost*(policy: EgressPolicy; u: OriginUrl): seq[IpAddress] =
-  ## Rule 2 for one host: every address it resolves to, each public.
+proc resolveHost*(policy: EgressPolicy; u: OriginUrl): seq[IpAddress] =
+  ## The addresses ``u.host`` resolves to (an address literal is itself),
+  ## through the policy's resolver, WITHOUT classifying them. Rule 2 for an
+  ## origin is `vetHost`; this alone is for a location the operator
+  ## configured (a mirror), which may be organization-internal. Raises
+  ## `EgressError` (`erResolve`) when nothing answers.
   if isIpAddress(u.host):
     result = @[parseIpAddress(u.host)]
   elif policy.resolver != nil:
@@ -310,6 +314,10 @@ proc vetHost*(policy: EgressPolicy; u: OriginUrl): seq[IpAddress] =
     result = systemResolve(u.host)
   if result.len == 0:
     refuse(erResolve, u.url, "host " & u.host.escape() & " does not resolve")
+
+proc vetHost*(policy: EgressPolicy; u: OriginUrl): seq[IpAddress] =
+  ## Rule 2 for one host: every address it resolves to, each public.
+  result = resolveHost(policy, u)
   for ip in result:
     let cls = classifyAddress(ip)
     if cls != acPublic:

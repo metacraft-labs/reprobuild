@@ -23,11 +23,21 @@
 ##   ``MaxPlaintextBytes`` is built and one byte more is refused before
 ##   anything is sealed or written (a put cannot leave an envelope that
 ##   ``openEnvelope`` refuses), and ``readLockedFd`` accepts a secret of
-##   exactly ``MaxPlaintextBytes`` and refuses one byte more.
+##   exactly ``MaxPlaintextBytes`` and refuses one byte more;
+## - the tick's apply (``tickApply``) lets a refusal only an operator can
+##   resolve (``EApplyNeedsOperator``, spec §10.1) through typed, so the
+##   real agent reports ``aoOperatorAction`` (exit 2), not ``aoApplyFailed``.
 ##
 ## *Mocking.* None: real files, the real codec, keys and planner. The
 ## layout points at a scratch directory, owned by the test user, with no
-## filesystem requirement (the VM gates check the ramfs).
+## filesystem requirement (the VM gates check the ramfs). The one stub is
+## the add-on apply in the tick tests, which raises or returns what the
+## real ``runAddonApply`` does (for the operator refusal, the
+## ``EApplyNeedsOperator`` that agent_split's apply hook maps
+## ``AddonNeedsOperator`` to, reproduced here rather than called): what is
+## under test is how ``tickApply`` and the agent carry that outcome. The
+## refusal itself (``agentApplyRefusal``) is covered by the add-on's own
+## floor tests, not here.
 
 import std/[os, posix, strutils, unittest]
 
@@ -35,7 +45,9 @@ import repro_infra/profile
 import repro_deploy_agent/secrets
 import repro_peer_cache/auth as peerAuth
 
+import repro_deploy_agent/agent
 import repro_deploy_agent/manifest
+import repro_deploy_agent/tick_status
 import repro_addon/[addon_apply, addon_secrets, fingerprint, ledger, secrets_ops, transitions]
 
 proc bytesOf(s: string): seq[byte] =
@@ -274,6 +286,58 @@ suite "envelopes and rotation":
     # The commit itself would have promoted it; when its copy failed it
     # stays for the retry -- the tick does not delete it.
     check fileExists(stagedEnvelopePath(b.layout))
+
+  test "a refusal only an operator can resolve stays typed through the tick":
+    # spec §10.1, *An agent apply never weakens the floor*: the add-on's
+    # ``AddonNeedsOperator`` is the agent's ``aoOperatorAction`` (exit 2,
+    # ``operator_action_required``, the sequence not recorded) -- not a
+    # retryable ``aoApplyFailed``. The apply unit's hook (agent_split)
+    # turns it into ``EApplyNeedsOperator``; ``tickApply`` must let that
+    # through like the other typed outcomes rather than fold it into
+    # ``(false, msg)``. reprobuild-pm issue 2026-11-18-addon-floor-
+    # weakening-refusal-reaches-the-tick-as-aoapplyfailed-not-aooperatoraction.
+    let b = newBed("operator")
+    defer: removeDir(b.root)
+    let stateDir = b.root / "state"
+    let layout = b.layout
+    let refusing = proc(o: AddonApplyOptions): AddonApplyResult =
+      # The mapping agent_split's apply hook makes.
+      try:
+        raise newException(AddonNeedsOperator, "operator action required: " &
+          "the generation weakens service confinement: new unit n.service")
+      except AddonNeedsOperator as e:
+        raise newException(EApplyNeedsOperator, e.msg)
+    # tickApply itself: typed through, the staged section discarded.
+    let pub = b.pubOf(recipientKeyPath(b.layout))
+    stageEnvelope(b.layout, env(pub, [("web/a", "v1")]), A)
+    expect EApplyNeedsOperator:
+      discard tickApply(stateDir, layout, DeployManifest(target: "t",
+        sequence: 4, hasSecrets: true), refusing)
+    check not fileExists(stagedEnvelopePath(b.layout))
+    # And the agent's classification of it: a signed manifest, the real
+    # ``runAgentTick`` with ``tickApply`` as its apply hook.
+    let producer = peerAuth.generateKeypair()
+    let source = b.root / "latest.rdm"
+    var m = DeployManifest(target: "addon-host", sequence: 4,
+      deploymentId: "deployment-4",
+      profileText: "profile \"x\":\n  resources:\n    discard\n")
+    signManifest(producer, m)
+    var wire = ""
+    for x in encodeManifest(m): wire.add(char(x))
+    writeFile(source, wire)
+    let cfg = AgentConfig(target: "addon-host", sources: @[source],
+      anchors: anchorsFromKeypairs([producer.publicKey]),
+      stateDir: b.root / "agent-state", fetchTimeoutMs: 5000)
+    let hook: ApplyHook = proc(sel: DeployManifest):
+        tuple[ok: bool; message: string] {.gcsafe.} =
+      {.cast(gcsafe).}:
+        tickApply(stateDir, layout, sel, refusing)
+    let o = runAgentTick(cfg, AgentDeps(apply: hook))
+    check o.kind == aoOperatorAction
+    check deployAgentExitCode(o.kind) == 2
+    check o.errorCode == "operator_action_required"
+    check "weakens service confinement" in o.message
+    check readLastAppliedSequence(cfg) == 0'u64
 
   test "opened plaintext lives in a buffer locked in RAM, wiped when it goes":
     let b = newBed("locked")

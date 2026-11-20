@@ -38,6 +38,34 @@
 ##     workspace root repository is no project member; its feature branch is
 ##     rewritten and deleted through its gateway, and its mainline, declared
 ##     in the settings file, is refused.
+##   - ``deletion_of_the_certificate_notes_is_leased_too`` and
+##     ``deletion_of_a_tag_is_leased_too`` -- a deletion of a ref outside
+##     ``refs/heads/*`` is leased as a branch's is. A teammate published a
+##     newer note (moved the tag) upstream after this gateway last forwarded
+##     the ref; the deletion is refused and the upstream keeps it. A plain
+##     ``:<ref>`` deleted it. The remedy the refusal names (push the
+##     upstream's value through the gateway, then delete) publishes the
+##     deletion.
+##   - ``deleting_a_ref_the_gateway_never_forwarded_names_the_remedy`` --
+##     stock git sends an all-zeroes ``<old>`` and ``<new>`` for
+##     ``git push origin :<ref>`` when the gateway has no such ref. There is
+##     no value to lease, so it is refused; the refusal names the same
+##     remedy, and following it publishes the deletion.
+##   - ``workspace_root_roles_that_do_not_resolve_refuse_a_forced_update`` --
+##     a settings file that declares a role for the root repository but no
+##     mainline resolves no role at all. The gateway refuses a forced update
+##     (fail closed) instead of reading "no role resolved" as "no role is
+##     declared", whether the role is given in ``[workspace]`` or in the
+##     default profile; a settings file that declares nothing still
+##     publishes. A ``REPRO_WORKSPACE_CONFIG`` inherited from the pushing
+##     shell that names a missing file refuses too: it must not read as "no
+##     settings file" and switch the mainline refusal off.
+##   - ``upstream_without_atomic_push_is_forwarded_non_atomically`` -- an
+##     upstream that does not advertise ``atomic`` still receives the push,
+##     and the gateway says the forward was not atomic.
+##   - ``non_atomic_fallback_does_not_depend_on_gits_language`` -- the
+##     forward recognises such an upstream by git's message, which git
+##     translates. Under a German git the push still publishes.
 ##   - ``reset_refs_refuses_a_pool_without_a_fetch_refspec`` and
 ##     ``stale_lease_remedy_integrate_reset_push_publishes`` -- the remedy a
 ##     stale lease names, at the procedure: a pre-PG-0 pool is refused, and
@@ -50,9 +78,17 @@
 ## their paths in every push report: a check for a bare word such as "stale"
 ## would otherwise hold whatever the gateway said.
 ##
-## Test doubles: none.
+## The groups from the non-branch deletions on were recorded as reprobuild-pm
+## ``issues/2026-11-19-the-gateway-forwards-tag-and-notes-deletions-unleased-and-its-stale-lease-report-reads-git-s-english.md``.
 ##
-## Skip rule: ``git`` missing on PATH.
+## Test doubles: none. The German git is the real ``git`` reading a message
+## catalogue this test writes (one message, the one the forward matches) under
+## a ``de_DE.UTF-8`` locale it compiles with ``localedef``; both are handed to
+## git through ``GIT_TEXTDOMAINDIR`` and ``LOCPATH``.
+##
+## Skip rule: ``git`` missing on PATH. The language case is skipped as well
+## when this host cannot produce a translated git (no ``localedef``, or a git
+## built without gettext); it first proves that its git does print German.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
 
@@ -181,6 +217,38 @@ proc pushThroughGateway(fx: Fixture; args: varargs[string]):
     argv.add(r)
   runShell(shellCommand(argv,
     @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+
+proc pushThroughGatewayWith(fx: Fixture;
+    extraEnv: seq[tuple[name, value: string]]; args: varargs[string]):
+    tuple[code: int; output: string] =
+  var argv = @[fx.gitBin, "-C", fx.clone, "push", "--no-verify", "origin"]
+  for r in args:
+    argv.add(r)
+  runShell(shellCommand(argv,
+    @[(name: "REPROBUILD_REPRO", value: fx.reproBin)] & extraEnv))
+
+const NotesRef = "refs/notes/test-certificates/certificates"
+
+proc writeGermanCatalogue(dir: string) =
+  ## A gettext ``.mo`` for domain ``git`` holding one message: the refusal
+  ## ``git push --atomic`` dies with when the receiving side does not
+  ## advertise ``atomic`` (git's ``send-pack.c``). The translation is git's
+  ## own (``po/de.po``).
+  const msgid = "the receiving end does not support --atomic push"
+  const msgstr = "die Gegenseite unterst\xC3\xBCtzt keinen atomaren " &
+    "Versand (\"--atomic push\")"
+  proc u32(v: int): string =
+    for shift in [0, 8, 16, 24]:
+      result.add(char((v shr shift) and 0xff))
+  let keysAt = 28 + 16
+  let valuesAt = keysAt + msgid.len + 1
+  var mo = u32(0x950412de'i64.int) & u32(0) & u32(1) & u32(28) & u32(36) &
+    u32(0) & u32(0)
+  mo.add(u32(msgid.len) & u32(keysAt))
+  mo.add(u32(msgstr.len) & u32(valuesAt))
+  mo.add(msgid & "\0" & msgstr & "\0")
+  createDir(dir / "de" / "LC_MESSAGES")
+  writeFile(dir / "de" / "LC_MESSAGES" / "git.mo", mo)
 
 proc publishFeature(fx: Fixture): string =
   ## Push a two-commit ``feature`` branch through the gateway; return its tip.
@@ -414,6 +482,250 @@ suite "push gateway forced updates of the workspace root repository":
       check "mainline-history-rewrite: a forced update of the shared " &
         "mainline 'main'" in p.output
       check tip(fx, fx.upstream, "refs/heads/main") == mainTip
+
+suite "push gateway deletions outside refs/heads":
+
+  test "deletion_of_the_certificate_notes_is_leased_too":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "c8")
+      defer: removeDir(fx.scratch)
+      # This workspace publishes a note through its gateway.
+      discard gitC(fx, fx.clone, "notes --ref " & NotesRef & " add -m ours HEAD")
+      let p1 = pushThroughGateway(fx, NotesRef)
+      checkpoint("notes push: " & p1.output)
+      check p1.code == 0
+      let ours = tip(fx, fx.upstream, NotesRef)
+      check ours.len > 0
+      check tip(fx, fx.gateway, NotesRef) == ours
+      # A teammate publishes a newer note straight to the upstream.
+      discard gitC(fx, fx.other, "fetch -q origin " & NotesRef & ":" & NotesRef)
+      discard gitC(fx, fx.other, "notes --ref " & NotesRef &
+        " append -m teammate HEAD")
+      discard gitC(fx, fx.other, "push -q origin " & NotesRef)
+      let theirs = tip(fx, fx.upstream, NotesRef)
+      check theirs != ours
+      # Deleting the notes through the gateway must not delete theirs.
+      let d = pushThroughGateway(fx, ":" & NotesRef)
+      checkpoint("notes deletion: " & d.output)
+      check d.code != 0
+      check tip(fx, fx.upstream, NotesRef) == theirs
+      check tip(fx, fx.gateway, NotesRef) == ours
+      check "stale lease:" in d.output
+      check theirs in d.output
+      # ``rewire --reset-refs`` resets branches only; it is no remedy here.
+      check "rewire --reset-refs" notin d.output
+      # The remedy the refusal names: bring the gateway to the upstream's
+      # value by pushing it through, then delete.
+      check ("'git fetch origin " & NotesRef & "'") in d.output
+      check ("git push origin " & theirs & ":" & NotesRef) in d.output
+      discard gitC(fx, fx.clone, "fetch -q origin " & NotesRef)
+      let catchUp = pushThroughGateway(fx, theirs & ":" & NotesRef)
+      checkpoint("catch-up push: " & catchUp.output)
+      check catchUp.code == 0
+      check tip(fx, fx.gateway, NotesRef) == theirs
+      let ok = pushThroughGateway(fx, ":" & NotesRef)
+      checkpoint("notes deletion with a current lease: " & ok.output)
+      check ok.code == 0
+      check tip(fx, fx.upstream, NotesRef) == ""
+
+  test "deletion_of_a_tag_is_leased_too":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "c9")
+      defer: removeDir(fx.scratch)
+      discard gitC(fx, fx.clone, "tag v1 HEAD")
+      let p1 = pushThroughGateway(fx, "refs/tags/v1")
+      checkpoint("tag push: " & p1.output)
+      check p1.code == 0
+      let ours = tip(fx, fx.upstream, "refs/tags/v1")
+      check ours.len > 0
+      # A teammate moves the tag on the upstream to a commit of theirs.
+      let theirs = commit(fx, fx.other, "teammate")
+      discard gitC(fx, fx.other, "tag v1 HEAD")
+      discard gitC(fx, fx.other, "push -q --force origin refs/tags/v1")
+      check tip(fx, fx.upstream, "refs/tags/v1") == theirs
+      let d = pushThroughGateway(fx, ":refs/tags/v1")
+      checkpoint("tag deletion: " & d.output)
+      check d.code != 0
+      check tip(fx, fx.upstream, "refs/tags/v1") == theirs
+      check tip(fx, fx.gateway, "refs/tags/v1") == ours
+      check "stale lease:" in d.output
+      check (theirs[0 ..< 7] & " teammate") in d.output
+      check "rewire --reset-refs" notin d.output
+      # The remedy: push the upstream's value through the gateway (the tag
+      # moved, so git asks for --force), then delete.
+      check "'git fetch origin refs/tags/v1'" in d.output
+      check ("git push --force origin " & theirs & ":refs/tags/v1") in d.output
+      discard gitC(fx, fx.clone, "fetch -q origin refs/tags/v1")
+      let catchUp = pushThroughGateway(fx, "--force", theirs & ":refs/tags/v1")
+      checkpoint("catch-up push: " & catchUp.output)
+      check catchUp.code == 0
+      check tip(fx, fx.gateway, "refs/tags/v1") == theirs
+      let ok = pushThroughGateway(fx, ":refs/tags/v1")
+      checkpoint("tag deletion with a current lease: " & ok.output)
+      check ok.code == 0
+      check tip(fx, fx.upstream, "refs/tags/v1") == ""
+
+  test "deleting_a_ref_the_gateway_never_forwarded_names_the_remedy":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "c9z")
+      defer: removeDir(fx.scratch)
+      # A teammate's tag, on the upstream only: this gateway has no such ref.
+      let theirs = commit(fx, fx.other, "teammate")
+      discard gitC(fx, fx.other, "tag rel HEAD")
+      discard gitC(fx, fx.other, "push -q origin refs/tags/rel")
+      doAssert tip(fx, fx.gateway, "refs/tags/rel").len == 0
+      let d = pushThroughGateway(fx, ":refs/tags/rel")
+      checkpoint("deletion of a ref the gateway lacks: " & d.output)
+      check d.code != 0
+      check tip(fx, fx.upstream, "refs/tags/rel") == theirs
+      check "this gateway holds no such ref" in d.output
+      check "'git fetch origin refs/tags/rel'" in d.output
+      check "'git push origin FETCH_HEAD:refs/tags/rel'" in d.output
+      # The remedy as named.
+      discard gitC(fx, fx.clone, "fetch -q origin refs/tags/rel")
+      let catchUp = pushThroughGateway(fx, "FETCH_HEAD:refs/tags/rel")
+      checkpoint("catch-up push: " & catchUp.output)
+      check catchUp.code == 0
+      check tip(fx, fx.gateway, "refs/tags/rel") == theirs
+      let ok = pushThroughGateway(fx, ":refs/tags/rel")
+      checkpoint("deletion with a value to lease: " & ok.output)
+      check ok.code == 0
+      check tip(fx, fx.upstream, "refs/tags/rel") == ""
+
+suite "push gateway root roles that do not resolve":
+
+  test "workspace_root_roles_that_do_not_resolve_refuse_a_forced_update":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "c10", rootRepo = true)
+      defer: removeDir(fx.scratch)
+      # The root declares a role and no mainline: every fallback chain ends
+      # at ``mainline``, so no role resolves (Workspace-Branch-Roles §3.3).
+      writeFile(fx.workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\nunstable = \"feature\"\n")
+      let before = publishFeature(fx)
+      discard rewriteFeature(fx)
+      let p = pushThroughGateway(fx, "--force", "feature")
+      checkpoint("forced push of a declared, unresolvable role: " & p.output)
+      check p.code != 0
+      check "cannot tell whether a declared role names this branch" in
+        p.output
+      check "repro-workspace.toml" in p.output
+      check tip(fx, fx.upstream, "refs/heads/feature") == before
+      check tip(fx, fx.gateway, "refs/heads/feature") == before
+      # The same through the default profile, which declares for the root
+      # when ``[workspace]`` names no profile (Workspace-Branch-Roles §3.4).
+      writeFile(fx.workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\ndefault_profile = \"tiers\"\n\n" &
+        "[profiles.tiers]\nunstable = \"feature\"\n")
+      let viaProfile = pushThroughGateway(fx, "--force", "feature")
+      checkpoint("forced push, role from the default profile: " &
+        viaProfile.output)
+      check viaProfile.code != 0
+      check "cannot tell whether a declared role names this branch" in
+        viaProfile.output
+      check tip(fx, fx.upstream, "refs/heads/feature") == before
+      # A settings file that declares nothing for the root names no role
+      # branch, and that is no error: the same forced push publishes.
+      writeFile(fx.workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n")
+      let f = pushThroughGateway(fx, "--force", "feature")
+      checkpoint("forced push with nothing declared: " & f.output)
+      check f.code == 0
+      let published = tip(fx, fx.clone, "refs/heads/feature")
+      check tip(fx, fx.upstream, "refs/heads/feature") == published
+      # ``feature`` becomes the root's mainline. A variable inherited from
+      # the pushing shell that names a missing settings file must not read
+      # as "no settings file".
+      writeFile(fx.workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\nmainline = \"feature\"\n")
+      discard gitC(fx, fx.clone, "commit -q --amend -m squashed-again")
+      let e = pushThroughGatewayWith(fx, @[(name: "REPRO_WORKSPACE_CONFIG",
+        value: fx.scratch / "absent.toml")], "--force", "feature")
+      checkpoint("forced push of the mainline, settings named away: " &
+        e.output)
+      check e.code != 0
+      check "REPRO_WORKSPACE_CONFIG names" in e.output
+      check "which does not exist" in e.output
+      check tip(fx, fx.upstream, "refs/heads/feature") == published
+
+suite "push gateway forward to an upstream without atomic push":
+
+  test "upstream_without_atomic_push_is_forwarded_non_atomically":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "c11e")
+      defer: removeDir(fx.scratch)
+      discard gitC(fx, fx.upstream, "config receive.advertiseAtomic false")
+      discard gitC(fx, fx.clone, "checkout -q -b feature")
+      let pushed = commit(fx, fx.clone, "feature-1")
+      # The language git reports in is pinned by the forward itself; the
+      # caller's is pinned here so that this case holds on any host.
+      let p = pushThroughGatewayWith(fx, @[(name: "LC_ALL", value: "C")],
+        "feature")
+      checkpoint("push to an upstream without atomic: " & p.output)
+      check p.code == 0
+      check tip(fx, fx.upstream, "refs/heads/feature") == pushed
+      check tip(fx, fx.gateway, "refs/heads/feature") == pushed
+      check "forwarded non-atomically" in p.output
+
+  test "non_atomic_fallback_does_not_depend_on_gits_language":
+    let gitBin = findExe("git")
+    let localedef = findExe("localedef")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    elif localedef.len == 0:
+      skip("localedef is not on PATH, so no German locale can be compiled")
+    else:
+      let fx = setup(gitBin, "c11")
+      defer: removeDir(fx.scratch)
+      let locales = fx.scratch / "locales"
+      let catalogues = fx.scratch / "catalogues"
+      createDir(locales)
+      writeGermanCatalogue(catalogues)
+      let compiled = sh(q(localedef) & " -i de_DE -f UTF-8 " &
+        q(locales / "de_DE.UTF-8"))
+      let german = @[(name: "LOCPATH", value: locales),
+        (name: "LC_ALL", value: "de_DE.UTF-8"),
+        (name: "LANGUAGE", value: "de"),
+        (name: "GIT_TEXTDOMAINDIR", value: catalogues)]
+      # An upstream that does not advertise ``atomic``.
+      discard gitC(fx, fx.upstream, "config receive.advertiseAtomic false")
+      # Does this host's git speak German with that catalogue? Ask it
+      # directly, outside the gateway.
+      discard gitC(fx, fx.other, "checkout -q -b probe")
+      let probe = runShell(shellCommand(@[gitBin, "-C", fx.other, "push",
+        "--atomic", "origin", "probe"], german))
+      checkpoint("probe: " & probe.output)
+      if compiled.code != 0 or "keinen atomaren Versand" notin probe.output:
+        skip("this host's git does not print the German catalogue " &
+          "(localedef exited " & $compiled.code & ")")
+      else:
+        check "does not support --atomic push" notin probe.output
+        discard gitC(fx, fx.clone, "checkout -q -b feature")
+        let pushed = commit(fx, fx.clone, "feature-1")
+        let p = pushThroughGatewayWith(fx, german, "feature")
+        checkpoint("push under a German git: " & p.output)
+        check p.code == 0
+        check tip(fx, fx.upstream, "refs/heads/feature") == pushed
+        check tip(fx, fx.gateway, "refs/heads/feature") == pushed
+        check "forwarded non-atomically" in p.output
 
 proc poolOf(fx: Fixture; tracking: bool): string =
   ## A pool for the upstream: a ``clone --bare`` (which installs no fetch

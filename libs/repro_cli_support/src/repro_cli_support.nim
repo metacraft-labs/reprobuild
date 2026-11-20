@@ -260,6 +260,7 @@ from test_certificates/scopes as tcscopes import nil
 import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 import repro_cli_support/catalog_generate
+import repro_cli_support/nimble_verify
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -346,6 +347,11 @@ from runquota_partition/types import
   PartitionAssignment, PartitionPlan, DefaultRefinementPasses, `==`, hash
 import repro_profile_compile
 import repro_home_resources/drivers/managed_block
+# `repro hooks`: the shells it detects, the rc-file write guard, and the
+# shell-completion installer (`--shell-autocomplete`).
+import repro_cli_support/shell_detect
+import repro_cli_support/shell_rc_files
+import repro_cli_support/completion_hooks
 # Peer-Cache M2: parse the `--peer-cache=lan://CIDR[:port]` form into a
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
@@ -751,10 +757,11 @@ proc parseBuildTarget(target: string): ParsedBuildTarget =
       let fragmentFileName = parts.fragment & ".nim"
       let fragmentModule = parts.base / fragmentFileName
       # A named target may legitimately have the same name as the project
-      # file (for example ``repro build repro`` in a directory containing
-      # ``repro.nim``). Bare-name resolution represents that selector as
-      # ``.#repro``. Anchor that case in the project file instead of treating
-      # it as the legacy ``directory#module`` form.
+      # file (for example ``.#repro`` in a directory containing
+      # ``repro.nim``). Anchor that case in the project file instead of
+      # treating it as the legacy ``directory#module`` form. (A bare name
+      # no longer reaches this form: ``bareNameAnchor`` anchors it on the
+      # project file itself.)
       if fragmentFileName in ProjectFileNames:
         let projectMatch = resolveProjectFile(parts.base)
         if projectMatch.fileName == fragmentFileName:
@@ -922,14 +929,15 @@ proc renderUnknownTargetDiagnostic*(err: BuildTargetUnknownError): string =
       "target; to build the path '" & err.selectorName & "', spell it '" &
       pathSpelling & "'\n")
 
-const TestCollectionSelector* = ".#test"
+const TestCollectionSelector* = "test"
   ## The selector ``repro test`` (and ``repro certificates plan``) uses when
   ## the user names none: the current project's ``test`` collection
-  ## ([CLI/test.md §"Alias Semantics"]). The alias selects the collection
-  ## directly, as the fragment ``.#test``, which is exactly what
-  ## ``parseAndResolveSelectors`` makes of a bare ``test``; naming the
-  ## collection rather than a selector that is resolved again keeps the
-  ## alias independent of the selector rule.
+  ## ([CLI/test.md §"Alias Semantics"]). It is the bare name ``test``, which
+  ## names a target whatever the current directory holds
+  ## ([CLI/build.md §"Target Selection"] step 1). It used to be ``.#test``,
+  ## which is a path selector: beside a ``test.nim`` it selected that module
+  ## instead of the collection (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-beside-a-same-named-module-file-selects-the-module).
 
 proc classifyBuildSelector*(raw: string): ClassifiedBuildSelector =
   ## Named-Targets M2 / [CLI/build.md §"Target Selection"] discriminator.
@@ -986,8 +994,9 @@ type
     target*: string
       ## The engine's project anchor. For path-shaped positionals this
       ## is the original selector verbatim; for name-only invocations it
-      ## is ``"."`` or ``".#<firstName>"`` so the legacy
-      ## ``parseBuildTarget`` codepath still resolves a module.
+      ## is ``"."`` or ``bareNameAnchor`` of the first name
+      ## (``"./<project file>#<firstName>"``; in a directory without a
+      ## project file, ``"./repro.nim#<firstName>"`` all the same).
     extraNameSelectors*: seq[string]
       ## Names and same-project action fragments beyond the first. The lowering pass in
       ## ``lowerProviderSnapshot`` unions every selector's dependency
@@ -1055,6 +1064,69 @@ proc findSiblingProjectFile*(packageName: string;
     dir = parent
   ""
 
+proc bareNameAnchor(name, currentDir: string): string =
+  ## The anchor a request of names only hands the build for its first name.
+  ##
+  ## When the directory holds a project file, the anchor is that FILE with the
+  ## name as its fragment (``./repro.nim#test``), which ``parseBuildTarget``
+  ## always reads as an action selection. It used to be the DIRECTORY
+  ## (``.#test``), which ``parseBuildTarget`` reads as the legacy
+  ## ``<dir>#<module>`` form whenever ``<dir>/test.nim`` exists, so a bare
+  ## ``test`` beside a ``test.nim`` built that module instead of the ``test``
+  ## target: the disk decided what a name meant, which [CLI/build.md
+  ## §"Target Selection"] step 1 forbids (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-beside-a-same-named-module-file-selects-the-module).
+  ## For every project without such a module both anchors parse to the same
+  ## module path, output name and action.
+  ##
+  ## A directory with no project file is anchored on the project file it
+  ## WOULD hold (``./repro.nim#test``), not on the directory: ``.#test`` is
+  ## the legacy ``<dir>#<module>`` form there too, so a bare ``test`` beside
+  ## a ``test.nim`` selected that module in a Mode-1 workspace (for every
+  ## command but ``repro build``, which redirected first) and in a directory
+  ## with no project at all (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-in-a-directory-without-a-project-file-can-still-select-a-module).
+  ## The missing file still names the directory: ``repro build`` recognises a
+  ## Mode-1 workspace from it (``mode1WorkspaceCandidate``) and redirects the
+  ## fragment to the project it synthesises; every other reader reports the
+  ## missing project file.
+  ## ``ProjectFileAmbiguousError`` (both ``repro.nim`` and ``reprobuild.nim``)
+  ## propagates, as it would from ``parseBuildTarget``.
+  ##
+  ## The spelling is relative (``./<file>``) so the daemon parent can
+  ## absolutize it against the request's working directory; ``currentDir``
+  ## is where the project file is looked up, empty meaning the process's
+  ## current directory.
+  let dir = if currentDir.len > 0: currentDir else: getCurrentDir()
+  let match = resolveProjectFile(dir)
+  let fileName =
+    if match.fileName.len > 0: match.fileName else: CanonicalProjectFileName
+  ("." / fileName) & "#" & name
+
+proc mode1WorkspaceCandidate(base: string): string =
+  ## The directory a build anchor's ``base`` names as a possible Mode-1
+  ## workspace, or "" when it names none. A directory names itself. A
+  ## ``repro.nim`` path that does not exist (``./repro.nim``, the anchor
+  ## ``bareNameAnchor`` gives a request of names only in a directory with no
+  ## project file) names the directory it would sit in, so an explicitly
+  ## spelled ``<dir>/repro.nim[#<name>]`` in a Mode-1 workspace selects the
+  ## project synthesised for ``<dir>``, as ``<dir>[#<name>]`` does. The
+  ## legacy ``reprobuild.nim`` spelling is not read this way: no anchor is
+  ## derived with it for a missing file. Whether the directory IS a Mode-1
+  ## workspace (no project file, no Mode-2 manifest, a recognised layout) is
+  ## the caller's test.
+  if base.len == 0:
+    return ""
+  if dirExists(extendedPath(base)):
+    return base
+  if extractFilename(base) == CanonicalProjectFileName and
+      not fileExists(extendedPath(base)):
+    let parent = parentDir(base)
+    let dir = if parent.len == 0: "." else: parent
+    if dirExists(extendedPath(dir)):
+      return dir
+  ""
+
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
                                currentDir = ""): ResolvedPositionalSelectors =
@@ -1069,8 +1141,9 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
   ##   selector union. Different project anchors and legacy module
   ##   selections remain separate invocations.
   ## - The first name-shaped positional, when no path anchor is present,
-  ##   becomes ``".#<name>"`` so ``parseBuildTarget`` routes it through
-  ##   the fragment / action-selection codepath. When a path anchor is
+  ##   becomes ``"./<project file>#<name>"`` (``bareNameAnchor``) so
+  ##   ``parseBuildTarget`` routes it through the action-selection
+  ##   codepath, whatever modules sit beside the project file. When a path anchor is
   ##   present, the first name-shaped positional joins
   ##   ``extraNameSelectors`` instead.
   ## - Every other name-shaped positional appends to
@@ -1166,12 +1239,12 @@ proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
         if result.extraNameSelectors.find(sel) < 0:
           result.extraNameSelectors.add(sel)
   if not anchorSet:
-    # All selectors are name-shaped. Anchor at the current directory
-    # and let ``parseBuildTarget`` route the first name through the
-    # fragment / action-selection codepath. Remaining names go into
+    # All selectors are name-shaped. Anchor at the current project and
+    # let ``parseBuildTarget`` route the first name through the
+    # action-selection codepath. Remaining names go into
     # ``extraNameSelectors`` so the lowering pass takes their union.
     if firstNameSelector.len > 0:
-      result.target = "." & "#" & firstNameSelector
+      result.target = bareNameAnchor(firstNameSelector, currentDir)
     else:
       result.target = "."
   elif firstNameSelector.len > 0 and
@@ -12101,8 +12174,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
       extractEnv.add(name & "=" & extractTmp)
   # The shared nimcache's root exists before the lookup, for the reason
-  # `providerCompileLaunchEnv` creates the provider's.
-  createDir(extendedPath(interfaceExtractionNimcacheRoot()))
+  # `providerCompileLaunchEnv` creates the provider's. Created through the
+  # pool's own admission (mode 0700, refused when it is not this user's), not
+  # `createDir`: that one follows the umask, and under a umask of 002 the
+  # root would be group-writable and every extraction would then refuse the
+  # directory this line had just made (Tool-Owned-Caches.md §"Trust
+  # Boundary"; `acquireInterfaceNimcacheSlot`).
+  ensureInterfaceNimcacheStoreDir(interfaceExtractionNimcacheRoot())
   var ignoredInputPrefixes = interfaceExtractionIgnoredInputPrefixes()
   if relocatable:
     ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
@@ -13674,6 +13752,11 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       if tarballFallThrough and
           not tarballModeFallsThroughToFromSource(useDef):
         continue
+      # Selection step 1 before a sibling recipe is looked for, let alone
+      # built: a package declared not to exist on the platform this use is
+      # realized for is refused by that reason here, as `toolProfileFor`
+      # refuses it in every mode.
+      refuseUnavailableForUse(useDef, hostRealizationTarget())
       if tarballFallThrough:
         let scopeRefusal = tarballModeHostToolchainRefusal(useDef)
         if scopeRefusal.len > 0:
@@ -20970,17 +21053,26 @@ type
     hakReinstall
     hakUninstall
 
-  NativeShellKind = enum
-    nskBash
-    nskZsh
-    nskFish
-    nskPowerShell
+  HookScope = enum
+    ## `--profile` / `--system`. `hsDefault` is
+    ## neither: per user for the shell hooks.
+    hsDefault
+    hsProfile
+    hsSystem
+
+  HooksUsageError = object of ValueError
+    ## A `repro hooks` command line whose flags contradict each other: a usage
+    ## error, exit 2, raised before anything is written.
 
   ParsedHooksCommand = object
     action: HookActionKind
     targetPath: string
     shellDirenv: bool
     vcs: bool
+    shellAutocomplete: bool  ## ``--shell-autocomplete`` (or a bare command).
+    scope: HookScope         ## ``--profile`` / ``--system``.
+    systemRoot: string       ## internal ``--system-root``: prefixes every
+                             ## system path (tests).
     recordStore: bool      ## Explicit Git-local backend registration.
     nativeShells: seq[NativeShellKind]
     workspaceRoot: string  ## M17: explicit --workspace-root override.
@@ -20998,13 +21090,6 @@ type
     previousArtifact: string
     previousProjectRoot: string
     statsPath: string
-
-proc nativeShellName(shell: NativeShellKind): string =
-  case shell
-  of nskBash: "bash"
-  of nskZsh: "zsh"
-  of nskFish: "fish"
-  of nskPowerShell: "powershell"
 
 proc parseNativeShell(value: string): NativeShellKind =
   case value.normalize()
@@ -21046,56 +21131,16 @@ proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string
       homeDir / ".config" / "fish" / "config.fish"
   of nskPowerShell:
     when defined(windows):
-      let profileHome = getEnv("USERPROFILE", homeDir)
-      profileHome / "Documents" / "PowerShell" /
-        "Microsoft.PowerShell_profile.ps1"
+      # The Documents folder as Windows reports it: folder redirection
+      # (OneDrive) can move it away from %USERPROFILE%\Documents.
+      let reported = windowsDocumentsDir()
+      let documents =
+        if reported.len > 0: reported
+        else: getEnv("USERPROFILE", homeDir) / "Documents"
+      documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
     else:
       homeDir / ".config" / "powershell" /
         "Microsoft.PowerShell_profile.ps1"
-
-proc containsNixStoreSegment(path: string): bool =
-  let normalized = path.replace('\\', '/')
-  normalized.startsWith("/nix/store/") or normalized.contains("/nix/store/")
-
-proc absoluteSymlinkTarget(linkPath: string): string =
-  let rawTarget = readSymlinkTarget(extendedPath(linkPath))
-  if rawTarget.isAbsolute:
-    os.normalizedPath(rawTarget)
-  else:
-    os.normalizedPath(parentDir(linkPath) / rawTarget)
-
-proc rcFileWritePath(rcPath: string): string =
-  ## Return the file to edit for a shell rc managed block. Refuses Nix-managed
-  ## read-only symlinks instead of replacing the symlink with a regular file.
-  let expandedRc = extendedPath(rcPath)
-  if symlinkExists(expandedRc):
-    let target = absoluteSymlinkTarget(rcPath)
-    if target.containsNixStoreSegment():
-      raise newException(ValueError,
-        "refusing to write shell rc file " & rcPath &
-          ": it is a Nix-managed symlink into the Nix store (" & target &
-          "). Edit the source file in your dotfiles/home-manager " &
-          "configuration and rebuild with home-switch.")
-    if fileExists(extendedPath(target)):
-      let permissions = getFilePermissions(extendedPath(target))
-      if fpUserWrite notin permissions:
-        raise newException(ValueError,
-          "refusing to write shell rc file " & rcPath &
-            ": it points at a read-only file (" & target &
-            "). Edit the owning source file instead.")
-    return target
-  if expandedRc.containsNixStoreSegment():
-    raise newException(ValueError,
-      "refusing to write shell rc file in the Nix store: " & rcPath &
-        ". Edit the source file in your dotfiles/home-manager configuration " &
-        "and rebuild with home-switch.")
-  if fileExists(expandedRc):
-    let permissions = getFilePermissions(expandedRc)
-    if fpUserWrite notin permissions:
-      raise newException(ValueError,
-        "refusing to write read-only shell rc file " & rcPath &
-          ". Edit the owning source file instead.")
-  rcPath
 
 proc posixLiteral(value: string): string =
   result = "'"
@@ -22036,6 +22081,62 @@ proc moveFileReplacing(source, dest: string) =
     removeFile(extendedPath(dest))
   moveFile(extendedPath(source), extendedPath(dest))
 
+const RemedyWordShell = """
+repro_remedy_word() {
+  # ONE word of this shell, for a path a remedy prints: the generated half of
+  # `remedyPathWord`, for values known only when the hook runs. Bare when
+  # every character is safe, else single-quoted with each `'` spelled
+  # `'"'"'`; on Windows every `\` is spelled `/` first.
+  REPRO_REMEDY_WORD_REST=${1-}
+  REPRO_REMEDY_WORD_QUOTE="'"
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT*)
+      REPRO_REMEDY_WORD_REST=$(printf '%s' "$REPRO_REMEDY_WORD_REST" | tr '\\' '/') ;;
+  esac
+  case "$REPRO_REMEDY_WORD_REST" in
+    '') printf "''"; return 0 ;;
+    *[!%+./_:=@0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-]*) ;;
+    *) printf '%s' "$REPRO_REMEDY_WORD_REST"; return 0 ;;
+  esac
+  printf "'"
+  while :; do
+    case "$REPRO_REMEDY_WORD_REST" in
+      *"$REPRO_REMEDY_WORD_QUOTE"*)
+        printf '%s' "${REPRO_REMEDY_WORD_REST%%"$REPRO_REMEDY_WORD_QUOTE"*}"
+        printf '%s' "'\"'\"'"
+        REPRO_REMEDY_WORD_REST=${REPRO_REMEDY_WORD_REST#*"$REPRO_REMEDY_WORD_QUOTE"} ;;
+      *)
+        printf '%s' "$REPRO_REMEDY_WORD_REST"
+        break ;;
+    esac
+  done
+  printf "'"
+}
+
+"""
+  ## Emitted into BOTH generated scripts (the dispatcher and the managed
+  ## body), because each prints remedies and neither sources the other.
+  ##
+  ## A remedy a generated script prints names paths the script learns when it
+  ## RUNS: the repository (`$REPO_ROOT`) and the `repro` it resolved. Spliced
+  ## bare into a double-quoted `echo` they are printed bare, and the operator
+  ## pastes a command that splits at the first space (reprobuild-pm issue
+  ## 2026-11-18, generated hook scripts print `$REPO_ROOT` unquoted;
+  ## Unified-Locking-And-Hooks.md, "The named command must RUN where the
+  ## message is printed", rule 3). ``remedyPathWord`` cannot reach these: it
+  ## runs when the body is GENERATED. This is the same spelling, produced by
+  ## the shell: the safe set is ``quoteShellPosix``'s and so is the `'"'"'`
+  ## escape, so one message spells a path one way whichever half printed it.
+  ## The safe set is written out letter by letter: a range (`a-z`) is collated
+  ## by the locale in some shells and would let a letter outside ASCII through
+  ## bare. The `'` is matched through a variable, the one spelling of a quote
+  ## inside `${…%%…}` that every POSIX shell reads the same way.
+  ##
+  ## Pure POSIX `sh`, no `sed`: the value is arbitrary bytes, and the loop
+  ## keeps every one of them, a newline included. Callers print the result
+  ## with `printf '%s\n'`, never `echo`: `dash`'s `echo` rewrites a backslash
+  ## sequence in its argument, and a POSIX path may contain one.
+
 const ChainedHookMissingProgramShell = """
 local_hook_missing_program() {
   # One pass, so the candidates come in line order: the `#!` interpreter, then
@@ -22490,7 +22591,10 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("  REPRO_REMEDY_CMD=$(command -v repro)\n")
   result.add("else\n")
   result.add("  REPRO_REMEDY_CMD=repro\n")
-  result.add("fi\n\n")
+  result.add("fi\n")
+  # Every remedy below names the repository and the resolved `repro` through
+  # this, so each is one word of the shell the operator pastes it into.
+  result.add(RemedyWordShell)
   # (2) Drop a stale pre-commit `.legacy` that is actually our dispatcher,
   # otherwise a chained pre-commit shim re-enters us in a loop.
   result.add("PRECOMMIT_LEGACY=\"$HOOK_DIR/" & hookName & ".legacy\"\n")
@@ -22501,9 +22605,11 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("  *) RUNNING_AS_LEGACY=0 ;;\n")
   result.add("esac\n")
   result.add("if [ \"$RUNNING_AS_LEGACY\" = 1 ]; then\n")
-  result.add("  echo \"repro hooks: " & hookName & " is running as " & hookName &
+  result.add("  printf '%s\\n' \"repro hooks: " & hookName &
+    " is running as " & hookName &
     ".legacy: another hook manager replaced the dispatcher. Restore it with " &
-    "'$REPRO_REMEDY_CMD hooks ensure --vcs $REPO_ROOT'\" >&2\n")
+    "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") hooks ensure --vcs " &
+    "$(repro_remedy_word \"$REPO_ROOT\")\\`\" >&2\n")
   result.add("elif [ -f \"$PRECOMMIT_LEGACY\" ] && " &
     "grep -q 'reprobuild hook dispatcher' \"$PRECOMMIT_LEGACY\" 2>/dev/null; then\n")
   result.add("  rm -f \"$PRECOMMIT_LEGACY\"\n")
@@ -22543,10 +22649,12 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("      /nix/store/*) echo \"repro hooks: it is a Nix store path, " &
     "and garbage collection deletes a store path that no GC root holds.\" >&2 ;;\n")
   result.add("    esac\n")
-  result.add("    echo \"repro hooks: re-enter this repository's dev shell so " &
-    "its hook installer writes " & hookName & ".repro-local again, or delete " &
+  result.add("    printf '%s\\n' \"repro hooks: re-enter this repository's " &
+    "dev shell so its hook installer writes " & hookName &
+    ".repro-local again, or delete " &
     "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
-    "'$REPRO_REMEDY_CMD health' lists every such hook.\" >&2\n")
+    "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") health\\` lists every " &
+    "such hook.\" >&2\n")
   result.add("  fi\n")
   result.add("  return \"$LOCAL_HOOK_RC\"\n")
   result.add("}\n\n")
@@ -22559,7 +22667,9 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
     result.add("run_local_hook \"$@\" < \"$TMP_FILE\" || exit $?\n")
     result.add("if [ ! -x \"$MANAGED_HOOK\" ] || ! grep -q '" &
       V2ManagedMarker & "' \"$MANAGED_HOOK\" 2>/dev/null; then\n")
-    result.add("  echo \"repro hooks: hook protocol mismatch; run '$REPRO_REMEDY_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("  printf '%s\\n' \"repro hooks: hook protocol mismatch; run " &
+      "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") hooks ensure --vcs " &
+      "$(repro_remedy_word \"$REPO_ROOT\")\\` and retry\" >&2\n")
     result.add("  exit 1\n")
     result.add("fi\n")
     result.add("(unset PRE_COMMIT_RUNNING_LEGACY PREK_RUNNING_LEGACY; " &
@@ -22825,6 +22935,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   # executable fails, it never falls through), then the build that installed
   # this body while it is still executable, then PATH. Every in-process mirror
   # (`resolveManagedHookInterpreter`) resolves the same three steps.
+  # Every remedy below names the repository and the resolved `repro` through
+  # this, so each is one word of the shell the operator pastes it into.
+  result.add(RemedyWordShell)
   result.add("REPRO_CMD=\n")
   result.add("REPRO_CMD_SOURCE=\n")
   # Declared up front, not where they are first assigned: the body runs under
@@ -23075,8 +23188,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     "build this workspace runs:\" >&2\n")
   result.add("    echo \"repro hooks:      re-anchor this repository to it " &
     "and retry:\" >&2\n")
-  result.add("    echo \"repro hooks:      $REPRO_CMD hooks ensure --vcs " &
-    "--re-anchor $REPO_ROOT\" >&2\n")
+  result.add("    printf '%s\\n' \"repro hooks:      " &
+    "$(repro_remedy_word \"$REPRO_CMD\") hooks ensure --vcs " &
+    "--re-anchor $(repro_remedy_word \"$REPO_ROOT\")\" >&2\n")
   result.add("  else\n")
   result.add("    echo \"repro hooks: That build predates this handshake, " &
     "so it cannot service this\" >&2\n")
@@ -23290,7 +23404,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
     result.add("# reprobuild pre-push publication-policy: immutable-records-v1\n")
     result.add("# Lock namespace policy: unique paths before record indexing.\n")
     result.add("  if [ \"$REPROBUILD_CAPTURED_DISPATCH_PROTOCOL\" != \"2\" ]; then\n")
-    result.add("    echo \"repro hooks: hook protocol mismatch; run '$REPRO_CMD hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("    printf '%s\\n' \"repro hooks: hook protocol mismatch; run " &
+      "\\`$(repro_remedy_word \"$REPRO_CMD\") hooks ensure --vcs " &
+      "$(repro_remedy_word \"$REPO_ROOT\")\\` and retry\" >&2\n")
     result.add("    exit 1\n")
     result.add("  fi\n")
     result.add("  REFS_FILE=$(mktemp \"${TMPDIR:-/tmp}/reprobuild-pre-push-backend.XXXXXX\")\n")
@@ -23382,7 +23498,9 @@ proc vcsManagedHookBody(hookName, hookContract: string;
   result.add("  exit $REPRO_STATUS\n")
   result.add("fi\n")
   if hookName == "pre-push":
-    result.add("echo \"repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs $REPO_ROOT' and retry\" >&2\n")
+    result.add("printf '%s\\n' \"repro hooks: hook protocol mismatch; run " &
+      "\\`repro hooks ensure --vcs $(repro_remedy_word \"$REPO_ROOT\")\\` " &
+      "and retry\" >&2\n")
     result.add("exit 1\n")
   else:
     if hookName == "pre-commit":
@@ -24831,6 +24949,10 @@ type
     repos*: seq[string]            ## participating repo names.
     entries*: seq[VcsHookEntry]
     summary*: Table[string, int]   ## outcome → count, e.g. {"installed": 8}.
+                                   ## VCS entries only.
+    completion*: seq[CompletionHookEntry]
+      ## ``--shell-autocomplete``: one per target, emitted in ``entries``
+      ## with ``kind: "completion"``.
     exitCode*: int
 
 proc vcsHookOutcomeTag(outcome: VcsHookEnsureOutcome): string =
@@ -24872,6 +24994,8 @@ proc toJsonNode*(report: HooksEnsureReport): JsonNode =
       obj["installedAuthor"] = %e.installedAuthor
       obj["remedy"] = %e.remedy
     entriesNode.add(obj)
+  for e in report.completion:
+    entriesNode.add(e.toJsonNode())
   result["entries"] = entriesNode
   var summaryNode = newJObject()
   # Sorted summary keys for stable JSON diffs.
@@ -25361,7 +25485,8 @@ proc untouchedManifestRepos*(root: string): seq[string] =
         result.add(extractFilename(path).changeFileExt(""))
   result.sort()
 
-proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
+proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand;
+    completion: seq[CompletionHookEntry]; reported: var bool): int =
   ## M17 entry point for ``repro hooks ensure --vcs``. Resolves the
   ## workspace root, enumerates participating repos, installs the four
   ## canonical VCS hooks per repo, writes ``hooks-report.json`` and (on
@@ -25397,6 +25522,10 @@ proc runVcsHooksEnsureCommand(parsed: ParsedHooksCommand): int =
         "'repro hooks ensure --vcs' again.")
     return singleCode
   var report = ensureWorkspaceHooks(workspaceRoot, parsed.reAnchor)
+  # Completion ran first; its entries share this invocation's report.
+  report.completion = completion
+  report.exitCode = max(report.exitCode, completionExitCode(completion))
+  reported = true
   writeHooksEnsureReport(report,
     reportDestination(parsed.report, report.workspaceRoot, "hooks"))
   stageFailureReport(parsed.report, report.workspaceRoot, "hooks",
@@ -25425,18 +25554,27 @@ proc reportSpecOf[T](c: T): ReportSpec =
 
 proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   ## ``repro hooks ensure|reinstall|uninstall`` from its configuration.
-  ## With no selector flag both ``--vcs`` and ``--shell-direnv`` are
-  ## implied.
+  ## With no selector flag ``--vcs``, ``--shell-direnv`` and
+  ## ``--shell-autocomplete`` are implied (the native ``--shell``
+  ## integration is not part of the bare set). Raises ``HooksUsageError``
+  ## for contradictory flags: two scopes, or a scope with only the hooks
+  ## that have none.
   result.action = action
   result.shellDirenv = c.shellDirenv
   result.vcs = c.vcs
+  result.shellAutocomplete = c.shellAutocomplete
   if c.recordStore:
     result.recordStore = true
     result.vcs = true
   result.reAnchor = c.reAnchor
-  if c.shellAutocomplete:
-    raise newException(ValueError,
-      "repro hooks --shell-autocomplete is not implemented yet")
+  if c.profile and c.system:
+    raise newException(HooksUsageError,
+      "--profile and --system exclude each other: choose one scope")
+  result.scope =
+    if c.system: hsSystem
+    elif c.profile: hsProfile
+    else: hsDefault
+  result.systemRoot = c.systemRoot
   for value in c.shell:
     if value.len == 0:
       raise newException(ValueError, "missing value for --shell")
@@ -25446,13 +25584,26 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   result.report = reportSpecOf(c)
   result.targetPath = c.path
   if result.recordStore and (result.action == hakUninstall or
-      result.shellDirenv or result.nativeShells.len > 0):
+      result.shellDirenv or result.nativeShells.len > 0 or
+      result.shellAutocomplete):
     raise newException(ValueError,
       "--record-store requires ensure or reinstall with VCS hooks only")
   if not result.shellDirenv and not result.vcs and
-      result.nativeShells.len == 0:
+      result.nativeShells.len == 0 and not result.shellAutocomplete:
     result.shellDirenv = true
     result.vcs = true
+    result.shellAutocomplete = true
+  if result.scope != hsDefault and not result.shellAutocomplete and
+      result.nativeShells.len == 0:
+    # VCS hooks are per repository and the direnv block per project: a scope
+    # flag with only those would do nothing it says.
+    raise newException(HooksUsageError,
+      "--profile and --system apply to --shell-autocomplete and --shell; " &
+        "--vcs and --shell-direnv have no scope")
+  if result.scope == hsSystem and result.nativeShells.len > 0:
+    raise newException(HooksUsageError,
+      "--system is not available for the native shell integration " &
+        "(--shell): its system-wide file is not specified yet; use --profile")
   if result.reAnchor and (result.action != hakEnsure or not result.vcs):
     # Refused rather than ignored: a flag that silently did nothing would let
     # an operator believe a repository had been re-anchored.
@@ -25739,8 +25890,11 @@ proc runHooksDispatchCommand(c: ReproCommandLineHooksDispatch): int =
       let discoveredRepo = gitTopLevel(candidate)
       let remedyRepo =
         if discoveredRepo.len > 0: discoveredRepo else: absolutePath(candidate)
-      stderr.writeLine("repro hooks: hook protocol mismatch; run '" &
-        resolvedRepro & " hooks ensure --vcs " & remedyRepo & "' and retry")
+      # One message, one spelling: the generated scripts print this line
+      # too, in backticks, with each path as one word of the hook's `sh`.
+      stderr.writeLine("repro hooks: hook protocol mismatch; run `" &
+        remedyPathWord(resolvedRepro) & " hooks ensure --vcs " &
+        remedyPathWord(remedyRepo) & "` and retry")
       return 1
     if hookArgs.len != 2:
       stderr.writeLine("repro hooks: pre-push protocol 2 requires Git's " &
@@ -25899,6 +26053,41 @@ proc runHooksProtocolCommand(c: ReproCommandLineHooksProtocol): int =
   stdout.writeLine("2")
   0
 
+proc completionHookRequestOf(parsed: ParsedHooksCommand):
+    CompletionHookRequest =
+  ## The completion installer's request for a parsed ``repro hooks``
+  ## command: this process's environment, and the script ``repro completion
+  ## <shell>`` prints.
+  CompletionHookRequest(
+    scope: (if parsed.scope == hsSystem: csSystem else: csUser),
+    systemRoot: parsed.systemRoot,
+    reinstall: parsed.action == hakReinstall,
+    program: "repro",
+    env: cliInstallEnv(proc (name: string): string = getEnv(name),
+      documents = windowsDocumentsDir()),
+    pathEnv: getEnv("PATH"),
+    user: getEnv("USER"),
+    windows: defined(windows),
+    script: proc (shell: CliShell): string =
+      ReproCommandLine.completionScript(shell))
+
+proc emitCompletionReport(parsed: ParsedHooksCommand;
+                          completion: seq[CompletionHookEntry]): int =
+  ## The report of an invocation whose completion entries no VCS sweep
+  ## reported: printed on ``--json``, persisted on ``--write-report``.
+  ## ``mode`` is ``none`` (no workspace sweep ran). Returns its exit code.
+  var report = HooksEnsureReport(
+    workspaceRoot: resolveHooksWorkspaceRoot(parsed), mode: "none",
+    completion: completion, exitCode: completionExitCode(completion))
+  writeHooksEnsureReport(report,
+    reportDestination(parsed.report, report.workspaceRoot, "hooks"))
+  # No failure report is staged: without a workspace sweep there is no
+  # workspace to leave it in, and the current directory may be the user's
+  # home. The refusals are on stderr and in the exit status.
+  if parsed.json:
+    stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
+  report.exitCode
+
 proc runHooksCommand(c: ReproCommandLineHooks): int =
   ## ``repro hooks <ensure|reinstall|uninstall|protocol|dispatch|cache-push>``
   ## from its configuration.
@@ -25918,41 +26107,74 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
     # `repro hooks help [<word>...]` is `repro help hooks [<word>...]`.
     printReproHelp(@["hooks"] & c.help.topic)
     return 0
-  of ReproCommandLineHooksCommand.ensure:
-    parsed = hooksCommandOf(c.ensure, hakEnsure)
-  of ReproCommandLineHooksCommand.reinstall:
-    parsed = hooksCommandOf(c.reinstall, hakReinstall)
-  of ReproCommandLineHooksCommand.uninstall:
-    parsed = hooksCommandOf(c.uninstall, hakUninstall)
+  of ReproCommandLineHooksCommand.ensure, ReproCommandLineHooksCommand.reinstall,
+     ReproCommandLineHooksCommand.uninstall:
+    try:
+      parsed =
+        case c.command
+        of ReproCommandLineHooksCommand.ensure:
+          hooksCommandOf(c.ensure, hakEnsure)
+        of ReproCommandLineHooksCommand.reinstall:
+          hooksCommandOf(c.reinstall, hakReinstall)
+        else:
+          hooksCommandOf(c.uninstall, hakUninstall)
+    except HooksUsageError as err:
+      stderr.writeLine("repro hooks: error: " & err.msg)
+      return 2
+  # Shell completion runs first, so that its entries can join the VCS
+  # sweep's report; a completion refusal never stops the other hook types.
+  var completion: seq[CompletionHookEntry] = @[]
+  if parsed.shellAutocomplete:
+    let request = completionHookRequestOf(parsed)
+    completion =
+      if parsed.action == hakUninstall: uninstallCompletionHooks(request)
+      else: ensureCompletionHooks(request)
+    if parsed.json:
+      # stdout carries the JSON document; refusals still go to stderr.
+      for e in completion:
+        let (text, toStderr) = reportLine(e)
+        if toStderr:
+          stderr.writeLine(text)
+    else:
+      printEntries(completion)
+    if completion.len == 0 and parsed.action != hakUninstall:
+      stderr.writeLine("repro hooks: NOTE no shell found for completion " &
+        "(looked for bash, zsh, fish and pwsh on PATH" &
+        (if parsed.scope == hsSystem: " and in /etc/shells" else: "") &
+        "); nothing was installed")
+  var code = completionExitCode(completion)
+  var reported = false
   case parsed.action
   of hakEnsure:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      let code = runVcsHooksEnsureCommand(parsed)
-      if code != 0:
-        return code
+      let vcsCode = runVcsHooksEnsureCommand(parsed, completion, reported)
+      if vcsCode != 0:
+        return max(vcsCode, code)
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell)
   of hakReinstall:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
     if parsed.vcs:
-      let code = runVcsHooksCommand(parsed.action, parsed)
-      if code != 0:
-        return code
+      let vcsCode = runVcsHooksCommand(parsed.action, parsed)
+      if vcsCode != 0:
+        return max(vcsCode, code)
     for shell in parsed.nativeShells:
       ensureNativeShellHook(shell, reinstall = true)
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
     if parsed.vcs:
-      let code = runVcsHooksCommand(parsed.action, parsed)
-      if code != 0:
-        return code
+      let vcsCode = runVcsHooksCommand(parsed.action, parsed)
+      if vcsCode != 0:
+        return max(vcsCode, code)
     for shell in parsed.nativeShells:
       uninstallNativeShellHook(shell)
-  0
+  if parsed.shellAutocomplete and not reported:
+    code = max(code, emitCompletionReport(parsed, completion))
+  code
 
 proc nativeShellActivationRequestOf[T](c: T): NativeShellActivationRequest =
   ## The request of ``repro internal native-shell-activate``
@@ -29686,6 +29908,9 @@ proc typecheckConsumerAgainstInterface*(consumerProjectFile: string;
   createDir(extendedPath(nimcache))
   let (code, output) = runArgvCapturingInDir(nim,
     ["check", "--hints:off", "--warnings:off",
+     # The full DSL: without a mode define `import reprobuild` is the thin
+     # mode, which does not type-check build bodies (`repro_project_dsl/mode`).
+     "--define:reproEvalMode",
      "--nimcache:" & nimcache, consumerProjectFile],
     repoRoot)
   InterfaceTypecheckResult(ok: code == 0, output: output)
@@ -31053,14 +31278,28 @@ proc committedLockDerivedProject(workspaceRoot: string):
 proc resolveProjectDirFromTarget(target: string): string =
   ## Resolve the directory that owns the committed lock for a build
   ## target. An existing directory is itself; an existing file resolves
-  ## to its parent; everything else (a bare name selector, or an empty
-  ## target) falls back to the current working directory.
+  ## to its parent; a project file that does not exist (``<dir>/repro.nim``
+  ## or ``<dir>/reprobuild.nim``) in a directory that does names that
+  ## directory ([CLI/build.md §"Target Selection"]); everything else (a
+  ## bare name selector, or an empty target) falls back to the current
+  ## working directory.
+  ##
+  ## The missing-project-file case is the anchor ``bareNameAnchor`` gives a
+  ## request of names only in a directory with no project file, and the
+  ## spelling ``mode1WorkspaceCandidate`` reads as a Mode-1 workspace: an
+  ## explicit ``sub/repro.nim#x`` builds the project synthesised for
+  ## ``sub/`` and must pin ``sub/``'s lock, as ``sub#x`` does, not the
+  ## current directory's.
   if target.len == 0:
     return getCurrentDir()
   let abs = absolutePath(target)
   if dirExists(extendedPath(abs)):
     return abs
   if fileExists(extendedPath(abs)):
+    return parentDir(abs)
+  let name = extractFilename(abs)
+  if (name == CanonicalProjectFileName or name == LegacyProjectFileName) and
+      dirExists(extendedPath(parentDir(abs))):
     return parentDir(abs)
   getCurrentDir()
 
@@ -31735,9 +31974,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # is written to the workspace root itself — the synth dir is plain
   # build scratch.
   # ----------------------------------------------------------------
+  # The anchor may name the directory (``.``, ``.#default``) or the project
+  # file a request of names only is anchored on even when it is missing
+  # (``./repro.nim#test``, see ``bareNameAnchor``); both name the workspace.
   let parts = splitTarget(target)
-  if dirExists(extendedPath(parts.base)):
-    let workspaceCandidate = absolutePath(parts.base)
+  let workspaceDir = mode1WorkspaceCandidate(parts.base)
+  if workspaceDir.len > 0:
+    let workspaceCandidate = absolutePath(workspaceDir)
     if not hasAnyProjectFile(workspaceCandidate) and
         not hasMode2Manifest(workspaceCandidate):
       var ws = loadMode1Workspace(workspaceCandidate)
@@ -33694,7 +33937,7 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
       selectors = @[TestCollectionSelector]
     let resolved = parseAndResolveSelectors(selectors,
       "repro certificates plan")
-    # The anchor carries the first name as its fragment: ``.#<name>`` for
+    # The anchor carries the first name as its fragment: ``./repro.nim#<name>`` for
     # this project, ``<sibling project file>#<name>`` for a sibling. It is
     # derived as the build derives it (``parseBuildTarget``), so a
     # fragment-less path plans no name, which the plan reads as the whole
@@ -36197,15 +36440,52 @@ proc hcrObjectSymbolFor*(supportProfile, functionName: string): string =
   else:
     "_" & functionName
 
-proc objectFunctionBytes(objectPath, symbolName: string;
-                         supportProfile = CodetracerHcrSupportProfile):
+type HcrPatchBodyRelocationRefused* = object of ValueError
+  ## A Linux patch body was refused because it carries relocations that
+  ## nothing on the path to the target would apply.
+
+proc objectFunctionBytes*(objectPath, symbolName: string;
+                          supportProfile = CodetracerHcrSupportProfile):
     seq[byte] =
+  ## The patch body `repro watch --hcr` and `repro hcr coordinate` send.
+  ##
   ## The default is host-derived. It used to be the Mach-O profile outright,
   ## which meant the unqualified caller — the watch session — parsed its object
   ## as Mach-O on every host, while `defaultObjectSymbol` had already been
   ## host-derived since HLX-M1 and named the symbol ELF-style on Linux. Those
   ## two halves have to agree or the lookup is guaranteed to miss, so the
   ## parser now follows the same profile the symbol name does.
+  ##
+  ## On an ELF profile, a body with any relocation inside the function is
+  ## REFUSED (`HcrPatchBodyRelocationRefused`). These are the function's raw
+  ## `.text` bytes from a relocatable object, and in a RELA object every
+  ## relocated field holds zero or a placeholder: the value lives in
+  ## `.rela.text`. Neither this coordinator nor the Linux agent applies
+  ## `.rela.text` to a patch body, so such a body would be published and run
+  ## with its placeholders — a `call` (`R_X86_64_PLT32`) to the next
+  ## instruction, a RIP-relative load (`R_X86_64_PC32`) from the patch page,
+  ## an IE TLS access (`R_X86_64_GOTTPOFF`) at an arbitrary `%fs` offset —
+  ## and nothing would report it. `Linux-ELF-Provider.md` §2 and §9 and
+  ## `Relocation-Processing.md` §4.1: a relocation is applied or the patch is
+  ## refused by name. Until body relocation is implemented this refuses every
+  ## one. `scripts/hcr_patch_driver.nim` already refused the same bodies; this
+  ## brings the production path into line with it.
+  ##
+  ## A relocation check alone is not enough. A PC-relative reference to code
+  ## in the SAME section — `call` or tail-`jmp` to a `static` helper, `lea` of
+  ## its address — is resolved by the assembler and leaves no relocation, yet
+  ## its displacement is wrong once the body moves to the patch page. Without
+  ## `-ffunction-sections` every function of a TU shares one `.text`. So a
+  ## body whose section also holds another defined symbol is refused too: it
+  ## cannot be told apart, without decoding instructions, from one that
+  ## reaches that neighbour. Compiling the patchable TU with
+  ## `-ffunction-sections` gives each function its own section, which turns
+  ## such references back into relocations this check sees. Issue
+  ## `reprobuild-pm/issues/2026-11-17-linux-hcr-coordinator-sends-patch-bodies-without-applying-or-checking-relocations.md`;
+  ## gate `integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused`.
+  ##
+  ## The Mach-O profile is not checked here: whether the macOS agent applies
+  ## body relocations is a separate question, not answered by this change.
   let graph =
     if hcrProfileIsElf(supportProfile):
       parseElfX86_64Object(objectPath)
@@ -36217,6 +36497,36 @@ proc objectFunctionBytes(objectPath, symbolName: string;
     raise newException(ValueError,
       "could not extract function bytes for " & symbolName & " from " &
         objectPath)
+  if hcrProfileIsElf(supportProfile):
+    let section = graph.sections[symbol.sectionId]
+    var reasons: seq[string] = @[]
+    let relocations = graph.relocationsForSymbol(symbol)
+    if relocations.len > 0:
+      var names: seq[string] = @[]
+      for r in relocations:
+        let within = section.address + uint64(r.offset) - symbol.address
+        names.add r.kindName & "->" & r.targetName & "@+" & $within
+      reasons.add "it carries " & $relocations.len & " relocation(s) that " &
+        supportProfile & " does not apply to a patch body: " &
+        names.join(", ")
+    var neighbours: seq[string] = @[]
+    for other in graph.symbols:
+      if other.isDefined and other.sectionId == symbol.sectionId and
+          other.kind in {sykFunction, sykData, sykOther} and
+          other.name.len > 0 and other.name != symbol.name and
+          not (other.address == symbol.address and other.size == symbol.size):
+        neighbours.add other.name
+    if neighbours.len > 0:
+      reasons.add "its section " & section.name & " also holds " &
+        neighbours.join(", ") & ", and a reference to a neighbour in the " &
+        "same section carries no relocation, so it cannot be checked " &
+        "(compile the patchable TU with -ffunction-sections)"
+    if reasons.len > 0:
+      raise newException(HcrPatchBodyRelocationRefused,
+        "hcr patch refused: patch body " & symbolName & " in " & objectPath &
+          ": " & reasons.join("; and ") &
+          " (until patch-body relocation is implemented, only a function " &
+          "alone in its section and with no relocations can be patched)")
 
 proc hcrUnwindMetadataFor*(supportProfile, objectPath: string): seq[byte] =
   ## The `unwindMetadataPayload` bytes a coordinator sends with a direct patch.
@@ -41825,8 +42135,8 @@ proc daemonRequestBuildAnchor*(selectors: openArray[string];
   ## worker applies ([CLI/build.md §"Target Selection"],
   ## ``parseAndResolveSelectors``), not by a copy of it. The anchor is the
   ## first PATH-SHAPED selector, not the first positional: ``repro build
-  ## test`` selects the current project's ``test`` (``.#test``) even beside a
-  ## ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
+  ## test`` selects the current project's ``test`` (``./repro.nim#test``)
+  ## even beside a ``test/`` directory, ``repro build lint ./sub`` anchors on ``./sub``, and
   ## ``repro build runquota:runquotad`` anchors on the sibling checkout
   ## (reprobuild-pm issue
   ## 2026-11-17-daemon-parent-takes-the-first-positional-as-the-project-not-the-builds-anchor:
@@ -70148,7 +70458,21 @@ type
   GatewayUpdateClassification* = object
     ok*: bool
     diagnostic*: string          ## why the push is refused, when not ``ok``
-    leases*: seq[GatewayLease]   ## forced branch updates and branch deletions
+    leases*: seq[GatewayLease]   ## forced branch updates and every deletion
+
+proc rootDeclaresARoleBranch(settings: WorkspaceSettings): bool =
+  ## Whether ``[workspace]``, the profile it names or the default profile
+  ## gives ANY role of the workspace root repository a branch. ``false`` for a
+  ## role declared absent (``false``): that names no branch.
+  for declarer in rootDeclarers(settings):
+    let decls = declarer.decls
+    if decls.mainline.isSome and decls.mainline.get().len > 0:
+      return true
+    for value in [decls.unstable, decls.staging, decls.stable,
+                  decls.production, decls.lts]:
+      if value.kind == brvBranch: return true
+    for (_, value) in decls.custom:
+      if value.kind == brvBranch: return true
 
 proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
@@ -70158,6 +70482,14 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
   ## (the recorded ``project`` only when that does not contain the member),
   ## the workspace root's from the settings file. ``ok`` is false when they
   ## cannot be resolved; the caller then refuses (fail closed).
+  ##
+  ## For the root, "no role resolves" has two causes that must not be read
+  ## alike. A settings file that declares no role at all names no role branch
+  ## (``ok``, nothing to refuse). One that gives a role a branch but resolves
+  ## no ``mainline`` (every fallback chain ends there, so nothing resolves) has
+  ## DECLARED a role branch the gateway cannot name: ``ok`` is false.
+  ## ``rootDeclaredRoleBranches`` answers "none" for both, which is right for
+  ## the client's refusal and would fail open here.
   if cfg.workspaceRoot.len == 0 or
       (cfg.repo.len == 0 and not cfg.repoIsWorkspaceRoot):
     return (ok: false, branches: @[], why: "the gateway's config names no " &
@@ -70171,9 +70503,25 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     try:
       let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
       if settingsPath.len == 0 or not fileExists(settingsPath):
+        # ``REPRO_WORKSPACE_CONFIG`` naming a file that does not exist reads
+        # as "no settings file" everywhere else. Here that would let a
+        # variable inherited from the pushing shell switch the refusal off.
+        let named = getEnv(workspace_root.WorkspaceConfigEnvVar)
+        if named.len > 0:
+          return (ok: false, branches: @[], why: workspace_root.WorkspaceConfigEnvVar &
+            " names '" & named & "', which does not exist, so the settings " &
+            "of '" & cfg.workspaceRoot & "' could not be read")
         return (ok: true, branches: @[], why: "")
-      return (ok: true, branches: rootDeclaredRoleBranches(
-        readWorkspaceSettings(settingsPath)), why: "")
+      let settings = readWorkspaceSettings(settingsPath)
+      try:
+        discard resolveRootRoles(settings)
+      except WorkspaceManifestParseError as err:
+        if rootDeclaresARoleBranch(settings):
+          return (ok: false, branches: @[], why: "'" & settingsPath &
+            "' declares a role branch for the workspace root repository, " &
+            "but its roles do not resolve: " & err.msg)
+        return (ok: true, branches: @[], why: "")
+      return (ok: true, branches: rootDeclaredRoleBranches(settings), why: "")
     except CatchableError as err:
       return (ok: false, branches: @[], why: "the settings of '" &
         cfg.workspaceRoot & "' could not be read: " & err.msg)
@@ -70215,8 +70563,13 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
   ##      ``merge-base --is-ancestor`` refuses the push.
   ##   3. A forced update or a deletion of a ``refs/heads/*`` ref is leased
   ##      at ``<old>``; of a branch a declared role names, it is refused, and
-  ##      it is refused too when the roles cannot be resolved. Forced updates
-  ##      of other refs stay plain (the upstream refuses them as before).
+  ##      it is refused too when the roles cannot be resolved.
+  ##   4. A deletion of any OTHER ref (a tag, the certificate notes) is leased
+  ##      at ``<old>`` as well: a plain ``:<ref>`` deletes whatever the
+  ##      upstream holds, including what others published after this gateway
+  ##      last forwarded the ref. No role names such a ref, so there is no
+  ##      role check. Forced updates of other refs stay plain (the upstream
+  ##      refuses them as before).
   result.ok = true
   var rolesLoaded = false
   var roles: tuple[ok: bool; branches: seq[tuple[role, branch: string]];
@@ -70227,11 +70580,18 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
     # The update must name a change: an all-zeroes ``<new>`` over an
     # all-zeroes ``<old>`` is no deletion (nothing was there to delete), yet
     # the forward would send it as ``:<ref>`` and delete the upstream's
-    # branch with no lease and no role check. Only a crafted client sends it.
+    # ref with no lease and no role check. Stock git sends it for
+    # ``git push origin :<ref>`` when this gateway has no such ref (measured
+    # with git 2.43), which is the ordinary case for a tag the gateway never
+    # forwarded; a crafted client can send it for any ref.
     if isZeroOid(u.oldSha) and isZeroOid(u.newSha):
       return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
-        ": the update names neither an old nor a new value; nothing was " &
-        "forwarded")
+        ": the update names neither an old nor a new value: this gateway " &
+        "holds no such ref, so a deletion has no value to lease and " &
+        "nothing was forwarded. If the upstream holds '" & u.refName &
+        "', fetch it ('git fetch origin " & u.refName & "'), push that " &
+        "value through this gateway ('git push origin FETCH_HEAD:" &
+        u.refName & "', which changes nothing upstream), and delete again")
     # The EXACT ref: ``rev-parse`` would fall back to git's name-guessing
     # rules (``refs/heads/x`` also finds ``refs/heads/refs/heads/x``).
     # ``for-each-ref`` exits 0 whether or not the ref exists; any other exit
@@ -70260,8 +70620,9 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
     let isBranch = u.refName.startsWith("refs/heads/")
     let deletion = isZeroOid(u.newSha) and not isZeroOid(u.oldSha)
     var forced = false
-    # Only a branch can be leased or refused by role, so only a branch's
-    # ancestry is asked; any other ref is forwarded plain, as before.
+    # Only a branch's forced update is leased or refused by role, so only a
+    # branch's ancestry is asked; a forced update of any other ref is
+    # forwarded plain, as before.
     if isBranch and not isZeroOid(u.oldSha) and not isZeroOid(u.newSha):
       let anc = gitNoteRun(gitBin, ["--git-dir=" & gatewayBareDir,
         "merge-base", "--is-ancestor", u.oldSha, u.newSha], received)
@@ -70273,7 +70634,13 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
           ": could not tell whether " & u.oldSha & " is an ancestor of " &
           u.newSha & " (git merge-base exited " & $anc.code & ": " &
           anc.output.strip() & "); nothing was forwarded")
-    if not isBranch or not (forced or deletion):
+    if not (deletion or (isBranch and forced)):
+      continue
+    if not isBranch:
+      # A deletion of a tag, of the certificate notes, of any other ref: no
+      # role names it, and it is leased like a branch's.
+      result.leases.add(GatewayLease(refName: u.refName, expect: u.oldSha,
+        newSha: u.newSha))
       continue
     if not rolesLoaded:
       roles = gatewayRoleBranchesFor(cfg)
@@ -70308,6 +70675,13 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
   ## holds now, the commits there the forced push would have discarded
   ## (``rev-list U ^<new>``), and the remedy in order. ``""`` when the
   ## upstream still holds ``<old>`` (this lease was not the stale one).
+  ##
+  ## A leased ref outside ``refs/heads/*`` is always a deletion, and its
+  ## remedy is different: ``rewire --reset-refs`` resets branches only. The
+  ## gateway is brought to the upstream's value by pushing that value through
+  ## it (the forward of it changes nothing upstream), and the deletion is
+  ## then repeated under a current lease.
+  let isBranch = lease.refName.startsWith("refs/heads/")
   let remote = gitNoteQuery(gitBin, ["--git-dir=" & gatewayBareDir,
     "ls-remote", upstreamUrl, lease.refName])
   if remote.code != 0:
@@ -70316,9 +70690,15 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
     return lease.refName & ": the upstream refused the lease at " &
       lease.expect & ", and what it holds now could not be read (git " &
       "ls-remote exited " & $remote.code & ": " & remote.diagnostic.strip() &
-      "). Nothing was overwritten. Fetch '" &
-      lease.refName["refs/heads/".len .. ^1] & "', integrate it, run " &
-      "'repro workspace shared-clones rewire --reset-refs', and push again."
+      "). Nothing was overwritten. " &
+      (if isBranch:
+         "Fetch '" & lease.refName["refs/heads/".len .. ^1] &
+           "', integrate it, run 'repro workspace shared-clones rewire " &
+           "--reset-refs', and push again."
+       else:
+         "Fetch '" & lease.refName & "' from the upstream ('git fetch " &
+           "origin " & lease.refName & "'), push the value it holds " &
+           "through this gateway, and delete again.")
   var upstreamTip = gatewayZeroSha
   for line in remote.output.splitLines():
     let parts = line.strip().split('\t')
@@ -70327,10 +70707,13 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
   if upstreamTip == lease.expect or
       (isZeroOid(upstreamTip) and isZeroOid(lease.expect)):
     return ""
-  let branch = lease.refName["refs/heads/".len .. ^1]
   result = lease.refName & ": stale lease: the upstream holds " &
-    upstreamTip & ", not " & lease.expect & ", which this gateway last " &
-    "published"
+    (if isZeroOid(upstreamTip): "no such ref" else: upstreamTip) & ", not " &
+    lease.expect & ", which this gateway last published"
+  # Whether pushing the upstream's value through this gateway needs
+  # ``--force`` on the client: always for a tag (git refuses to move an
+  # existing tag without it), otherwise unless it descends from ``<old>``.
+  var catchUpNeedsForce = lease.refName.startsWith("refs/tags/")
   if not isZeroOid(upstreamTip):
     # The commits are on the upstream only. Fetch them into this gateway's
     # object store (no ref, no FETCH_HEAD, no auto gc), then list them
@@ -70346,6 +70729,12 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
     let listed =
       if fetched.code == 0: gitNoteQuery(gitBin, listArgs, received)
       else: (code: fetched.code, output: "", diagnostic: fetched.output)  # git-merged-text: quoted whole, never parsed
+    if not isBranch and not catchUpNeedsForce:
+      # Any answer other than "yes, it descends" asks for --force: git then
+      # sends the update whatever its shape.
+      catchUpNeedsForce = fetched.code != 0 or gitNoteRun(gitBin,
+        ["--git-dir=" & gatewayBareDir, "merge-base", "--is-ancestor",
+         lease.expect, upstreamTip], received).code != 0
     if listed.code == 0:
       const MaxListed = 20
       var lines: seq[string]
@@ -70356,15 +70745,44 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
         if lines.len < MaxListed: lines.add("    " & line.strip())
       if total > MaxListed:
         lines.add("    ... and " & $(total - MaxListed) & " more")
-      result.add(if isZeroOid(lease.newSha):
-          ". The deletion would have discarded, among others, these " &
-            $total & " upstream commit(s) this gateway never published:\n"
-        else: ". The forced push would have discarded these " & $total &
-          " upstream commit(s):\n")
-      result.add(lines.join("\n"))
+      if not isBranch:
+        # Deleting a tag or the notes ref discards no commit another ref
+        # still reaches; say what the upstream's value holds beyond the
+        # leased one, and nothing when there is nothing to list.
+        if total > 0:
+          result.add(". The upstream's value holds these " & $total &
+            " commit(s) that the value this gateway last published does " &
+            "not:\n" & lines.join("\n"))
+      elif isZeroOid(lease.newSha):
+        result.add(". The deletion would have discarded, among others, " &
+          "these " & $total & " upstream commit(s) this gateway never " &
+          "published:\n" & lines.join("\n"))
+      else:
+        result.add(". The forced push would have discarded these " & $total &
+          " upstream commit(s):\n" & lines.join("\n"))
     else:
       result.add(". The upstream commits it would have discarded could not " &
         "be listed: " & listed.diagnostic.strip())
+  if not isBranch:
+    if isZeroOid(upstreamTip):
+      result.add("\nThe upstream no longer has '" & lease.refName &
+        "', so nothing is left to delete there. This gateway still records " &
+        "it; 'git --git-dir=" & os.normalizedPath(gatewayBareDir) &
+        " update-ref -d " &
+        lease.refName & " " & lease.expect & "' drops that record.")
+    else:
+      result.add("\nNothing was deleted. To delete '" & lease.refName &
+        "' on the upstream:\n" &
+        "  1. fetch it from the upstream ('git fetch origin " &
+        lease.refName & "') and check that what it holds now, " &
+        upstreamTip & ", may go;\n" &
+        "  2. bring this gateway to that value by pushing it through: " &
+        "'git push " & (if catchUpNeedsForce: "--force " else: "") &
+        "origin " & upstreamTip & ":" & lease.refName & "' (the upstream " &
+        "already holds it, so nothing changes there);\n" &
+        "  3. delete again: the lease is then current.")
+    return
+  let branch = lease.refName["refs/heads/".len .. ^1]
   result.add("\nNothing was overwritten. To publish this branch:\n" &
     (if isZeroOid(upstreamTip):
        "  1. the upstream no longer has '" & branch & "'; nothing there " &
@@ -70401,11 +70819,22 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
   ## the certificate notes ref travels like any other received ref.
   ##
   ## ``leases`` (from ``gatewayClassifyUpdates``) are the forced branch
-  ## updates and branch deletions: each is forwarded with
+  ## updates and every deletion (a branch's, a tag's, the notes'): each is
+  ## forwarded with
   ## ``--force-with-lease=<ref>:<old>`` and WITHOUT a ``+``, which git lets
   ## override a stale lease (§5.3 "Forced updates", measured with git 2.43).
   ## A stale lease refuses the whole atomic push, and the diagnostic lists the
   ## upstream commits that would have been discarded.
+  ##
+  ## The push runs with ``LC_ALL=C``. Two decisions below read git's text:
+  ## ``AtomicPushUnsupportedMarker``, which git translates (``send-pack.c``
+  ## passes it through gettext), and ``stale info``, which git 2.43 prints
+  ## untranslated but does not promise to. Under the caller's locale a
+  ## translated git refused every push to an upstream without atomic support,
+  ## because the non-atomic retry never ran. ``LC_ALL`` outranks ``LANG``
+  ## and every other ``LC_*``, and gettext ignores ``LANGUAGE`` in the ``C``
+  ## locale, so the push's own report is in English whatever the locale of
+  ## the developer's ``git push``.
   var refspecs: seq[string]
   for u in updates:
     if isZeroOid(u.newSha):
@@ -70415,6 +70844,7 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
   if refspecs.len == 0:
     return (ok: true, diagnostic: "no refs to forward")
   let env = forwardingObjectStoreEnv(received)
+  env["LC_ALL"] = "C"
   proc push(atomic: bool): tuple[code: int; output: string] =
     # git-merged-reader: push's report and refusal reason are on stderr
     var cmd = quoteShell(gitBin) & " -C " & quoteShell(gatewayBareDir) &
@@ -75237,14 +75667,16 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       " hooks ensure --vcs " & repoRoot & "'")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
-    return (false, "the hook-resolved repro executable is unavailable; run '" &
-      publicCliImagePath() & " hooks ensure --vcs " & repoRoot & "'")
+    return (false, "the hook-resolved repro executable is unavailable; run `" &
+      remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "`")
   let probe = execCmdEx(shellCommand(@[hookCli, "hooks", "protocol",
     "--require=2"]), options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitChildEnv())
   if probe.exitCode != 0 or probe.output.strip() != "2":
-    return (false, "hook protocol mismatch; run '" & publicCliImagePath() &
-      " hooks ensure --vcs " & repoRoot & "' and retry")
+    return (false, "hook protocol mismatch; run `" &
+      remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "` and retry")
   (true, "")
 
 proc pushArgsOf(c: ReproCommandLinePush): PushArgs =
@@ -91719,7 +92151,7 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 
 proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
-  ## ``repro build`` of ``selectors`` (``.#test`` when none) with no issuance.
+  ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
   withCallerVariants(opts):
     result = runBuildCommand(testBuildArgs(opts,
       if selectors.len == 0: @[TestCollectionSelector] else: selectors),
@@ -91996,7 +92428,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
   var part: CertificatePlanPart
   var names: seq[string]
   # The selectors the certifying build is given: the resolved anchor
-  # (``.#<name>`` for this project) and the extra names, exactly as the
+  # (``./repro.nim#<name>``, ``bareNameAnchor``) and the extra names, exactly as the
   # resolution above produced them. Not ``names``: a bare anchor name that
   # also names a directory (``test`` beside a ``test/`` directory) would be
   # classified as a path again by the build.
@@ -106911,6 +107343,16 @@ proc runTestVerbCommand(args: seq[string]; publicCliPath: string): int =
     return runReproTestCommand(args, publicCliPath)
   except CliUsageError as err:
     return reportReproUsageError(err)
+  except BuildTargetAmbiguousError as err:
+    # ``repro test`` is ``repro build test``, so a selector it cannot
+    # resolve gets ``repro build``'s diagnostics and exit status 2 from the
+    # shared renderers ([CLI/test.md §"Alias Semantics"]), not a bare
+    # ``repro test: error: <message>`` and exit 1.
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
   except BuildCommandLineError as err:
     # The build's own command line, refused by the build: a usage error.
     stderr.writeLine("repro test: " & err.msg)
@@ -106964,6 +107406,13 @@ proc runCertifyVerbCommand(args: seq[string]; publicCliPath: string): int =
   opts.certifyExplicit = true
   try:
     return runReproTest(opts, publicCliPath)
+  except BuildTargetAmbiguousError as err:
+    # The verb alias of ``repro test --certify``: the same diagnostics.
+    stderr.write(renderAmbiguousTargetDiagnostic(err[]))
+    return 2
+  except BuildTargetUnknownError as err:
+    stderr.write(renderUnknownTargetDiagnostic(err[]))
+    return 2
   except BuildCommandLineError as err:
     stderr.writeLine("repro certify: " & err.msg)
     return 2
@@ -107226,6 +107675,11 @@ proc runReproCommandLine(programName: string; args: seq[string];
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
         r.state)
+  of ReproCommandLineCommand.nimble:
+    case conf.nimble.command
+    of ReproCommandLineNimbleCommand.verify:
+      let r = conf.nimble.verify
+      return runNimbleVerifyCommand(r.lock, r.store)
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

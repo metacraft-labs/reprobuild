@@ -124,3 +124,27 @@ url = "x"
       "[[extra]]\nname = \"b\"\norigin = \"https://x.invalid/b\"\n" &
       "[policy]\ntrack_head = [\"b\", \"a\"]\ncooldown_days = 1\n", "c")
     check sourceSetIdentity(a) != sourceSetIdentity(c)
+
+  test "[[mirror]] is read in order, checked, and is not identity":
+    const Base = "schema = \"reprobuild.nimble-source-set.v1\"\n" &
+      "[[extra]]\nname = \"a\"\norigin = \"https://x.invalid/a\"\n"
+    let s = parseSourceSet(Base &
+      "[[mirror]]\nurl = \"/srv/mirror\"\n" &
+      "[[mirror]]\nurl = \"https://mirror.invalid/m/\"\nrole = \"optional\"\n",
+      "m")
+    check s.mirrors.len == 2
+    check s.mirrors[0].url == "/srv/mirror"
+    check s.mirrors[0].role == mrRequired
+    check s.mirrors[1].role == mrOptional
+    # Where the sources are kept does not change what the index says.
+    check sourceSetIdentity(s) == sourceSetIdentity(parseSourceSet(Base, "n"))
+    check "neither an https:// URL nor an absolute directory" in refusal(Base &
+      "[[mirror]]\nurl = \"http://mirror.invalid/\"\n")
+    check "neither an https:// URL nor an absolute directory" in refusal(Base &
+      "[[mirror]]\nurl = \"relative/dir\"\n")
+    check "is neither \"required\" nor \"optional\"" in refusal(Base &
+      "[[mirror]]\nurl = \"/m\"\nrole = \"maybe\"\n")
+    check "is listed twice" in refusal(Base &
+      "[[mirror]]\nurl = \"/m\"\n[[mirror]]\nurl = \"/m\"\n")
+    check "missing `url`" in refusal(Base & "[[mirror]]\nrole = \"optional\"\n")
+    check "unknown key" in refusal(Base & "[[mirror]]\nurl = \"/m\"\nkey = \"x\"\n")

@@ -4900,7 +4900,13 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
             handedBuiltCCompiler)
         let nimCmd =
           quoteShell(compilerExe) &
-          " c -r --hints:off --warnings:off" & builtCCompilerFlag &
+          # The generator imports `repro_cli_support`, which needs the full
+          # project DSL (`repro_project_dsl/mode`). The engine's `config.nims`
+          # defines that mode when it reaches this compile (by the directory
+          # walk or the staged `include` above), but not when no checkout was
+          # found, so the command names it itself.
+          " c -r --hints:off --warnings:off --define:reproEvalMode" &
+          builtCCompilerFlag &
           extraPathFlags & " " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
@@ -5092,6 +5098,44 @@ proc parseInterfaceParam(node: NimNode;
           valuesNode.repr, valuesNode)
       for item in valuesNode:
         result.values.add(cliExprOf(item))
+    # `implies = [<param> = <value>, ...]`, written as in a `cli:` block.
+    # Whether each target is a parameter of the command is checked once the
+    # command's parameters are all known (`checkInterfaceImplications`).
+    let impliesNode = namedValue(node[i], "implies")
+    if not impliesNode.isNil:
+      if impliesNode.kind != nnkBracket or impliesNode.len == 0:
+        error("implies must be a non-empty list such as [other = value], " &
+          "got: " & impliesNode.repr, impliesNode)
+      for item in impliesNode:
+        if item.kind != nnkExprEqExpr or
+            item[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("implies entries are written <parameter> = <value>, got: " &
+            item.repr, item)
+        result.implies.add(CliImplication(param: identText(item[0]),
+          value: cliExprOf(item[1])))
+
+proc checkInterfaceImplications(declared: openArray[(CliParamDef, NimNode)];
+                                visible: openArray[CliParamDef];
+                                scopeLabel: string) =
+  ## Refuses an `implies` of a `defineCliInterface` parameter that names the
+  ## parameter itself or no parameter of `visible` (the parameters its
+  ## command sees), as clispec refuses one in a `cli:` block. `declared`
+  ## pairs each parameter declared in the scope with its statement, where
+  ## the error is reported. `cliModelTypeChecks` skips a target it cannot
+  ## find, so without this a misspelt target would be silently dropped.
+  for (param, stmt) in declared:
+    for implication in param.implies:
+      if eqIdent(implication.param, param.name):
+        error("parameter '" & param.name & "': implies itself", stmt)
+      var found = false
+      for other in visible:
+        if eqIdent(other.name, implication.param):
+          found = true
+          break
+      if not found:
+        error("parameter '" & param.name & "': implies '" &
+          implication.param & "', which is not a parameter of " &
+          scopeLabel, stmt)
 
 proc dependencyPolicyLiteral(node: NimNode;
                              fallback: BuildActionDependencyPolicy):
@@ -5180,6 +5224,9 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   let body = node[node.len - 1]
+  # This command's own parameters with their statements, for
+  # `checkInterfaceImplications` once every parameter is known.
+  var declared: seq[(CliParamDef, NimNode)] = @[]
   for stmt in body:
     if calleeName(stmt).normalize == "dependencypolicy":
       result.ext.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
@@ -5257,10 +5304,16 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
     for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
       let name = calleeName(expandedStmt).normalize
       if name in ["pos", "flag", "boolflag"]:
-        result.params.add(parseInterfaceParam(expandedStmt))
+        let param = parseInterfaceParam(expandedStmt)
+        result.params.add(param)
+        declared.add((param, expandedStmt))
       else:
         error("CLI command bodies accept pos/flag/boolFlag statements",
           expandedStmt)
+  # A subcommand's parameter may imply any parameter the subcommand sees: its
+  # own and the interface's top-level flags.
+  checkInterfaceImplications(declared, result.params,
+    if result.name.len == 0: "call:" else: "subcmd \"" & result.name & "\"")
 
 proc cliArgHelperName(param: CliParamDef): string =
   case param.ext.role
@@ -5452,13 +5505,17 @@ macro defineCliInterface*(toolSymbol: untyped;
   # M6: unblessed until the interface says otherwise, with a reason.
   var defaultNonDeterminism: NonDeterminismDecl = (ndpUnblessed, "")
   var defaultEnvPassthrough, defaultEnvPassthroughRefs: seq[string]
+  # The top-level flags with their statements, for
+  # `checkInterfaceImplications`.
+  var commonDeclared: seq[(CliParamDef, NimNode)] = @[]
   proc addCommonParams(stmt: NimNode) =
     var stack: seq[string] = @[]
     for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
       let head = calleeName(expandedStmt).normalize
       if head in ["flag", "boolflag"]:
-        commonParams.add(parseInterfaceParam(expandedStmt,
-          capBeforeSubcommand))
+        let param = parseInterfaceParam(expandedStmt, capBeforeSubcommand)
+        commonParams.add(param)
+        commonDeclared.add((param, expandedStmt))
       elif head == "pos":
         error("top-level CLI parameters before subcommands must be flags",
           expandedStmt)
@@ -5483,6 +5540,12 @@ macro defineCliInterface*(toolSymbol: untyped;
         defaultEnvPassthroughRefs)
     else:
       refuseBareEnvPassthrough(stmt)
+  # A top-level flag may imply only another top-level flag, as a root
+  # parameter of a `cli:` block may imply only a root parameter: every
+  # subcommand inherits it, and not every subcommand sees a subcommand's own
+  # parameters.
+  checkInterfaceImplications(commonDeclared, commonParams,
+    "the interface's top level")
   var commands: seq[CliCommandDef] = @[]
   for stmt in body:
     let head = calleeName(stmt).normalize

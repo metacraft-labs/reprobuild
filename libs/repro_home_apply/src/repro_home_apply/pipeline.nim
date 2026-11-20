@@ -2959,6 +2959,28 @@ proc refuseUnmanagedAppBundles(activations: seq[Resource];
       e.targetPath = target
       raise e
 
+proc releaseQuarantinedRootsOrWarn(stateDir: string; store: var Store) =
+  ## A root that cannot be released now (a locked index) only keeps some
+  ## prefixes a while longer; the next apply retries, so it never fails
+  ## the apply.
+  ##
+  ## First every generation this state directory keeps gets its own root
+  ## (`ensureGenerationRoots`): one committed by a build that named roots by
+  ## the bare generation id is otherwise held only through a root this
+  ## state directory does not own.
+  try:
+    discard ensureGenerationRoots(stateDir, store)
+  except CatchableError as err:
+    stderr.writeLine("warning: could not register the store roots of " &
+      "this state directory's generations (" & err.msg & "); a later " &
+      "apply retries.")
+  try:
+    discard releaseQuarantinedRoots(stateDir, store)
+  except CatchableError as err:
+    stderr.writeLine("warning: could not release the store roots of " &
+      "quarantined generations (" & err.msg & "); their prefixes stay " &
+      "live until a later apply releases them.")
+
 proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
   ## Execute the apply pipeline. Synchronous; takes the `apply.lock`
   ## for the duration. Returns an `ApplyOutcome` summarizing what
@@ -3213,6 +3235,9 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
           # byte-identical no-op.
           if not opts.recordOnlyGeneratedFiles:
             recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
+          # The active generation is never released, so nothing this
+          # apply relies on loses its hold (`releaseQuarantinedRoots`).
+          releaseQuarantinedRootsOrWarn(opts.stateDir, store)
           return
 
       # Whether the generation's directory predates this apply
@@ -4178,6 +4203,12 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       clearMarker(opts.stateDir)
 
       # ---- Step 11 (eager GC) -------------------------------------
+      # First drop the store roots of generations recovery quarantined,
+      # now that this apply's own generation is committed and current: a
+      # re-apply of the crashed profile reproduces its id, and releasing
+      # earlier would leave those prefixes unheld until step 9
+      # (spec §"Partial Apply Recovery").
+      releaseQuarantinedRootsOrWarn(opts.stateDir, store)
       result.gcResult = gc(store)
 
       # GM4b: the generation is committed and current; serialise what it

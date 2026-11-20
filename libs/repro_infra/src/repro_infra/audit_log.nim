@@ -277,9 +277,9 @@ proc readAuditLog*(logPath: string): AuditReadResult =
   ## checksum on a record that is fully present) raises; a TRUNCATED
   ## final record is reported via `truncatedTail` without raising, so
   ## a crash-interrupted apply still has a readable audit trail.
-  if not fileExists(logPath):
+  if not fileExists(extendedPath(logPath)):
     return                              # empty result
-  let raw = readFile(logPath)
+  let raw = readFile(extendedPath(logPath))
   var bytes = newSeq[byte](raw.len)
   for i, ch in raw:
     bytes[i] = byte(ord(ch))

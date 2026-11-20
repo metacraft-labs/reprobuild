@@ -22,6 +22,7 @@
 import std/[algorithm, json, options, os, sequtils, sets, strutils, tables, times]
 
 import repro_core/file_lock
+from repro_core/paths import extendedPath
 import repro_core/host_apply_lock
 import repro_elevation
 import repro_infra
@@ -1319,7 +1320,20 @@ proc runSystemAudit(flags: InfraCliFlags; positional: seq[string]): int =
     stderr.writeLine("repro system audit: no current system generation " &
       "(run `repro system apply` first).")
     return 1
+  # An id that names no generation is refused, so a mistyped id does not
+  # read as a generation whose apply logged nothing (spec/CLI/system/
+  # audit.md, "Exit Codes"; reprobuild-pm issue 2026-11-17-system-audit-
+  # unknown-generation-reads-as-empty-log). A generation that exists but
+  # has no `apply.log` is still reported, as zero records, and says so
+  # (`logExists`, "(no log file)"): its apply had nothing to log, or died
+  # before its first record.
+  if not generationDirExists(stateDir, generationId):
+    stderr.writeLine("repro system audit: no system generation '" &
+      generationId & "' under " & generationsRoot(stateDir) &
+      " (`repro system history` lists the committed ones).")
+    return 1
   let logPath = applyLogPath(stateDir, generationId)
+  let logExists = fileExists(extendedPath(logPath))
   let auditResult = readAuditLog(logPath)
   if flags.json:
     var records = newJArray()
@@ -1336,14 +1350,14 @@ proc runSystemAudit(flags: InfraCliFlags; positional: seq[string]): int =
         "postDigest": rec.postDigestHex, "diagnostic": rec.diagnostic,
         "restartNeeded": rec.restartNeeded})
     echo pretty(%*{"schemaId": SystemAuditJsonSchema,
-      "generation": generationId, "log": logPath,
+      "generation": generationId, "log": logPath, "logExists": logExists,
       "liveStateRecords": liveStateRecords,
       "buildActionRecords": buildActionRecords,
       "truncatedTail": auditResult.truncatedTail, "records": records})
     return 0
   echo "repro system audit"
   echo "  generation : " & generationId
-  echo "  log        : " & logPath
+  echo "  log        : " & logPath & (if logExists: "" else: " (no log file)")
   echo "  records    : " & $auditResult.records.len
   # Break the count down by population. An apply converges live-state
   # resources AND build-action edges; the summary counters pool them,

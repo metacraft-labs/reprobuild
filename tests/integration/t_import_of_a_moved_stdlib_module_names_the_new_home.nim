@@ -22,6 +22,7 @@ import std/[compilesettings, os, osproc, strtabs, strutils, tempfiles,
   unittest]
 
 import repro_project_dsl
+import repro_test_support
 
 const CompileSearchPaths = querySettingSeq(MultipleValueSetting.searchPaths)
   ## The module search paths this test was compiled with, which are exactly
@@ -33,7 +34,10 @@ const StdlibPackagesDir = currentSourcePath().parentDir.parentDir.parentDir /
 proc nimCheck(consumer, catalogRoot: string): tuple[output: string,
     exitCode: int] =
   var parts = @[findExe("nim").quoteShell, "check", "--hints:off",
-    "--warnings:off", ("--nimcache:" & consumer.parentDir / "nimcache").quoteShell]
+    "--warnings:off", ("--nimcache:" & consumer.parentDir / "nimcache").quoteShell,
+    # The consumer is outside this tree, so it does not read the config.nims
+    # that selects the full DSL.
+    ReproEvalModeFlag]
   for path in CompileSearchPaths:
     parts.add(("--path:" & path).quoteShell)
   parts.add(consumer.quoteShell)

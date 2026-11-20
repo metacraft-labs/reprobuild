@@ -287,8 +287,8 @@ proc listSourcesMembers*(h: SourcesHalf; partsDir: string): seq[TarMember] =
   ## parts directory may be writable by others, who could otherwise plant a
   ## symlink there for the redirection to follow, or swap the listing
   ## before it is read.
-  let scratch = createTempDir("repro-bundle-sources-", "")
-  defer: removeDir(scratch)
+  let scratch = privateScratchDir("repro-bundle-sources-")
+  defer: removeScratchDir(scratch)
   let listing = scratch / "members"
   try:
     listBundleMembers(partsDir, h.parts, listing)
@@ -323,7 +323,11 @@ proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string): bool =
   let ws = normalizedPath(absolutePath(workspaceDir))
   let parent = ws.parentDir
   let name = checkSourcesDeclarations(h)
-  let errPath = partsDir / ".unpack.stderr"
+  # tar's diagnostics go to a private directory (`privateScratchDir`), not
+  # beside the parts, which are only read.
+  let scratch = privateScratchDir("repro-bundle-unpack-")
+  defer: removeScratchDir(scratch)
+  let errPath = scratch / "unpack.stderr"
   let rootIsCheckout = dirExists(ws / ".git")
   var members: seq[string]
   if rootIsCheckout:
@@ -374,10 +378,13 @@ proc restoreSourcesHalf*(h: SourcesHalf; partsDir, workspaceDir: string): bool =
   var memberArgs = ""
   if members.len > 0: memberArgs = " --"
   for m in members: memberArgs.add(" " & quoteShell(m))
-  let command = "set -o pipefail; (" & quoteShell(requireExe("zstd")) &
-    " -q -dc --long=" & $ZstdWindowLog & " - | " &
-    quoteShell(requireExe("tar")) & " -C " & quoteShell(parent) &
-    " --skip-old-files" & transform & " -xf -" & memberArgs & ") >" &
+  # The member checks confine where tar writes, not the modes it applies:
+  # no special bit, no group or world write, no owner (§7 step 4.4).
+  let command = "set -o pipefail; " & ExtractModeShell & "(" &
+    quoteShell(requireExe("zstd")) & " -q -dc --long=" & $ZstdWindowLog &
+    " - | " & quoteShell(requireExe("tar")) & " -C " & quoteShell(parent) &
+    ExtractModeOptions & " --skip-old-files" & transform & " -xf -" &
+    memberArgs & ") >" &
     quoteShell(errPath) & " 2>&1"
   if rootIsCheckout and members.len == 0:
     discard

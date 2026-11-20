@@ -16,9 +16,12 @@
 ##   egress policy and recorded with that verdict (threat model G35); whether
 ##   such versions are offered is operator question A4.
 ## * **Digest.** The tree digest is the lock's canonical tree hash for
-##   integrity (`repro_multihash.narStyleTreeMultihash`) over the package's
-##   regular files, path and content, which is what that hash computes over a
-##   checkout of the same tree.
+##   integrity in its typed form (`repro_multihash.canonicalTreeMultihash`):
+##   every regular file with its path, content and executable bit, and every
+##   symbolic link with its path and target text. It is what the client
+##   re-computes over the tree it extracted (`repro_nimble_fetch`), so a
+##   retargeted link or a flipped mode is a different tree. For a tree of
+##   non-executable regular files it equals the plain `narStyleTreeMultihash`.
 ## * **Archive.** A deterministic POSIX ustar archive: regular files and
 ##   links in byte order of their paths, owner 0, time 0, mode 0644 or 0755
 ##   for files and 0777 for links, a PAX header for a path or link target
@@ -235,14 +238,18 @@ proc sourceFacts*(tree: FetchedTree): tuple[facts: SourceFacts;
   for e in tree.entries:
     if e.kind == teSymlink: links[e.path] = true
   let isLink = proc(p: string): bool = p in links
-  var regular: seq[tuple[path: string, content: string]]
+  var typed: seq[CanonicalTreeEntry]
   for e in tree.entries:
     case e.kind
     of teFile, teExecutable:
       f.files.add e.path
-      regular.add (e.path, tree.blobs.getOrDefault(e.oid))
+      typed.add CanonicalTreeEntry(path: e.path,
+        kind: (if e.kind == teExecutable: cekExecutable else: cekRegular),
+        content: tree.blobs.getOrDefault(e.oid))
     of teSymlink:
       let target = tree.blobs.getOrDefault(e.oid)
+      typed.add CanonicalTreeEntry(path: e.path, kind: cekSymlink,
+        content: target)
       f.links.add SourceLink(path: e.path, target: target,
         verdict: linkVerdict(e.path, target, isLink))
     of teGitlink:
@@ -250,7 +257,7 @@ proc sourceFacts*(tree: FetchedTree): tuple[facts: SourceFacts;
     of teOther:
       discard
   f.files.sort()
-  let mh = narStyleTreeMultihash(regular)
+  let mh = canonicalTreeMultihash(typed)
   f.treeDigest = mh["blake3:".len .. ^1]
   if f.gitlinks.len > 0:
     for e in tree.entries:
