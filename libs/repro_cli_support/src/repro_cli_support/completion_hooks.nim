@@ -235,13 +235,27 @@ proc hostFamilies(): seq[(CliPlatformFamily, string)] =
   else:
     @[(cpfDebian, ""), (cpfRpm, "")]
 
+# The `--system` family: the local administrator's area. On Linux, Fish's
+# script goes in fish's configuration directory (`/etc/fish/completions`)
+# instead of `/usr/local/share`, which fish searches only when
+# `XDG_DATA_DIRS` names it (clispec `cpfLinuxLocal`).
+const localFamily = (when defined(linux): cpfLinuxLocal else: cpfLocal)
+
+proc localSystemTargets(req: CompletionHookRequest; shell: CliShell;
+                        psHome = ""): seq[CliCompletionTarget] =
+  ## The `--system` targets of `shell`, every path under the test root: the
+  ## prefix and the configuration directory alike.
+  cliSystemCompletionTargets(shell, req.program, localFamily,
+    rooted(req.systemRoot, cliDefaultPrefix(localFamily)), psHome,
+    sysconfDir = rooted(req.systemRoot, "/etc"))
+
 proc systemRegistrationPaths(req: CompletionHookRequest;
                              shell: CliShell): seq[string] =
   ## Every system-wide script file of `shell` that counts as an existing
   ## registration, under the test root.
   if req.windows:
     return @[]
-  var families = @[(cpfLocal, "")] & hostFamilies()
+  var families = @[(localFamily, "")] & hostFamilies()
   # Nix: the system profiles' `share/` (NixOS, nix-darwin, Home Manager's
   # per-user profile under /etc/profiles).
   for prefix in ["/run/current-system/sw", "/nix/var/nix/profiles/default"]:
@@ -452,8 +466,7 @@ proc wantedTargets(req: CompletionHookRequest; found: ShellFound):
       result.targets.add(t)
   of csSystem:
     if found.shell != cshPowerShell:
-      for t in cliSystemCompletionTargets(found.shell, req.program, cpfLocal,
-          rooted(req.systemRoot, cliDefaultPrefix(cpfLocal))):
+      for t in localSystemTargets(req, found.shell):
         result.targets.add(t)
       return
     var psHome = ""
@@ -474,8 +487,7 @@ proc wantedTargets(req: CompletionHookRequest; found: ShellFound):
         "all-users profile cannot load the script (an MSIX install, or a " &
         "read-only store); use --profile for each user instead"
       return
-    for t in cliSystemCompletionTargets(found.shell, req.program, cpfLocal,
-        rooted(req.systemRoot, cliDefaultPrefix(cpfLocal)), home):
+    for t in localSystemTargets(req, found.shell, home):
       result.targets.add(t)
 
 # ---------------------------------------------------------------------------
@@ -553,8 +565,7 @@ proc uninstallCompletionHooks*(req: CompletionHookRequest):
               psHome = powerShellHome(exe)
               if psHome.len > 0:
                 break
-      targets = cliSystemCompletionTargets(shell, req.program, cpfLocal,
-        rooted(req.systemRoot, cliDefaultPrefix(cpfLocal)),
+      targets = localSystemTargets(req, shell,
         (if psHome.len > 0: rooted(req.systemRoot, psHome) else: ""))
     for t in targets:
       case t.kind

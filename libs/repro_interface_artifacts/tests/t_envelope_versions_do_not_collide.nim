@@ -564,9 +564,48 @@ suite "envelope lanes -- a tarball record's ELF relocation begins at v33":
         archiveType: "tar.gz", stripComponents: 1)]
     check interfaceFingerprint(closed) != interfaceFingerprint(plain)
 
-  test "v34 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v34, so this matrix is extended
-    check interfaceEnvelopeVersion() == 34'u16
+suite "envelope lanes -- a tool use's declared platforms begin at v35":
+
+  proc withDeclaredPlatforms(pi: ProjectInterface): ProjectInterface =
+    result = withToolUses(pi, envPrefixArm = true)
+    for useDef in result.toolUses.mitems:
+      useDef.platformsDeclared = true
+      useDef.declaredPlatforms = @[InterfaceDeclaredPlatform(cpu: "any",
+        os: "windows")]
+      useDef.platformsMessage = "Windows only by nature."
+    result.runtimeToolUses = result.toolUses
+
+  test "v35 carries the declaration; v30..v34 decode it undeclared with " &
+      "every other field intact":
+    let pi = withDeclaredPlatforms(bothLanesInterface())
+    for v in 30'u16 .. 34'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check not back.toolUses[0].platformsDeclared
+      check back.toolUses[0].declaredPlatforms.len == 0
+      check back.toolUses[0].environmentPrefixProvisioning.len == 1
+      check back.toolUses[0].location.line == 30
+    for v in [35'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.toolUses[0].platformsDeclared
+      check back.toolUses[0].declaredPlatforms ==
+        pi.toolUses[0].declaredPlatforms
+      check back.toolUses[0].platformsMessage == "Windows only by nature."
+      check back.toolUses[0].environmentPrefixProvisioning.len == 1
+      check back.toolUses[0].location.line == 30
+      check back.runtimeToolUses[0].platformsDeclared
+
+  test "an undeclared use keeps its v34 fingerprint; a declaration moves it":
+    let plain = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 34'u16)
+    check interfaceFingerprint(withDeclaredPlatforms(bothLanesInterface())) !=
+      interfaceFingerprint(plain)
+
+  test "v35 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v35, so this matrix is extended
+    check interfaceEnvelopeVersion() == 35'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

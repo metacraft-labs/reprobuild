@@ -31,7 +31,7 @@
 ## ``nim`` is missing — so a sandbox without Nim simply skips the
 ## fragment assertions instead of failing them.
 
-import std/[json, os, strutils, times, unittest]
+import std/[json, os, sequtils, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -1123,6 +1123,314 @@ suite "nim convention Phase 1 output ownership":
       defer:
         removeDir(scratch)
       checkCompilePragmaSourceIsNotAPhase1Output(scratch, "pragma_lib")
+
+# --- Phase 2 object naming: same-named {.compile.} pragma sources -------
+
+proc writeSameNamedPragmaSourcesProject(scratch, packageName, member: string;
+                                        isLibrary: bool) =
+  ## A scratch project whose entry module compiles ``src/a/util.c`` and
+  ## ``src/b/util.c`` through two ``{.compile.}`` pragmas (the second with
+  ## a flag), and compiles ``src/b/util.c`` a second time, without the
+  ## flag, into an object the pragma names itself. Three ``compile``
+  ## entries of the manifest therefore share the C file name ``util.c``;
+  ## Nim records a distinct object for each.
+  if dirExists(scratch):
+    removeDir(scratch)
+  createDir(scratch / "src" / "a")
+  createDir(scratch / "src" / "b")
+  writeFile(scratch / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"nim >=2.2 <3.0\"\n" &
+    "\n" &
+    (if isLibrary: "  library " & member & "\n"
+     else: "  executable " & member & ":\n    discard\n"))
+  writeFile(scratch / (member & ".nimble"),
+    "version = \"0.1.0\"\nauthor = \"t\"\ndescription = \"t\"\n" &
+    "license = \"MIT\"\nsrcDir = \"src\"\n" &
+    (if isLibrary: "" else: "bin = @[\"" & member & "\"]\n") &
+    "requires \"nim >= 2.2.0\"\n")
+  writeFile(scratch / "src" / "a" / "util.c",
+    "int util_a(void) { return 1; }\n")
+  writeFile(scratch / "src" / "b" / "util.c",
+    "#ifdef UTIL_ALT\nint util_b_alt(void) { return 4; }\n" &
+    "#else\nint util_b(void) { return 2; }\n#endif\n")
+  writeFile(scratch / "src" / (member & ".nim"),
+    "{.compile: \"a/util.c\".}\n" &
+    "{.compile(\"b/util.c\", \"-DUTIL_ALT\").}\n" &
+    "{.compile: (\"b/util.c\", \"alt_$1.o\").}\n" &
+    "proc utilA(): cint {.importc: \"util_a\".}\n" &
+    "proc utilB(): cint {.importc: \"util_b\".}\n" &
+    "proc utilBAlt(): cint {.importc: \"util_b_alt\".}\n" &
+    (if isLibrary:
+       "proc total*(): int = int(utilA() + utilB() + utilBAlt())\n"
+     else: "echo utilA() + utilB() + utilBAlt()\n"))
+
+proc writeExecutableProject(scratch, packageName, member: string;
+                            files: openArray[(string, string)]) =
+  ## A scratch executable project; ``files`` are paths under ``src/``
+  ## and their contents.
+  if dirExists(scratch):
+    removeDir(scratch)
+  createDir(scratch / "src")
+  writeFile(scratch / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package " & packageName & ":\n" &
+    "  uses:\n" &
+    "    \"nim >=2.2 <3.0\"\n" &
+    "\n" &
+    "  executable " & member & ":\n    discard\n")
+  writeFile(scratch / (member & ".nimble"),
+    "version = \"0.1.0\"\nauthor = \"t\"\ndescription = \"t\"\n" &
+    "license = \"MIT\"\nsrcDir = \"src\"\n" &
+    "bin = @[\"" & member & "\"]\n" &
+    "requires \"nim >= 2.2.0\"\n")
+  for (relPath, content) in files:
+    createDir(parentDir(scratch / "src" / relPath))
+    writeFile(scratch / "src" / relPath, content)
+
+template checkSameNamedPragmaSourcesGetDistinctObjects(scratch: string) =
+  let conv = nim_convention.nimConvention()
+  let request = dummyRequest(scratch)
+  require conv.recognize(scratch, request)
+  let fragment = conv.emitFragment(scratch, request)
+  let utilA = slashPath(scratch / "src" / "a" / "util.c")
+  let utilB = slashPath(scratch / "src" / "b" / "util.c")
+  var ids: seq[string] = @[]
+  var objects: seq[string] = @[]
+  var depfiles: seq[string] = @[]
+  var utilCompiles: seq[BuildActionDef] = @[]
+  var finalStep: seq[BuildActionDef] = @[]
+  for node in fragment.nodes:
+    if node.kind != gnkAction:
+      continue
+    let action = decodeBuildActionPayload(toBytes(node.payload))
+    if action.id.startsWith("gcc-compile-"):
+      require action.outputs.len == 1
+      checkpoint("Phase 2 action " & action.id & " -> " & action.outputs[0])
+      # No two Phase 2 actions share an id, an object or a depfile.
+      check action.id notin ids
+      check slashPath(action.outputs[0]) notin objects
+      check slashPath(action.depfile) notin depfiles
+      ids.add(action.id)
+      objects.add(slashPath(action.outputs[0]))
+      depfiles.add(slashPath(action.depfile))
+      if slashPath(action.inputs[0]) in [utilA, utilB]:
+        utilCompiles.add(action)
+    elif action.id.startsWith("gcc-link-") or
+        action.id.startsWith("ar-archive-"):
+      finalStep.add(action)
+  # One Phase 2 action per ``compile`` entry: ``a/util.c`` once and
+  # ``b/util.c`` twice (once per recorded command).
+  require utilCompiles.len == 3
+  var utilACount = 0
+  var utilBCount = 0
+  for action in utilCompiles:
+    if slashPath(action.inputs[0]) == utilA: inc utilACount
+    else: inc utilBCount
+    # Each action writes the object its own argv names, and compiles the
+    # source it declares as its input.
+    let argv = inlineArgvOf(action)
+    let oAt = argv.find("-o")
+    require oAt >= 0 and oAt + 1 < argv.len
+    check slashPath(argv[oAt + 1]) == slashPath(action.outputs[0])
+    check slashPath(argv[^1]) == slashPath(action.inputs[0])
+    # Each object keeps the flags of its own entry: the pragma's
+    # ``-DUTIL_ALT`` goes to the object Nim named, not to the object the
+    # other pragma for ``b/util.c`` names itself.
+    # Nim's mangling of a pragma source's path into an object name
+    # differs between Nim versions (``@ma@sutil.c.o``, or a letter-shifted
+    # spelling of it), so the entries are told apart by what the pragmas
+    # fix: the flag, and the object name the third pragma gives itself.
+    let objName = extractFilename(action.outputs[0])
+    if objName == "alt_util.c.o":
+      check slashPath(action.inputs[0]) == utilB
+      check "-DUTIL_ALT" notin argv
+    elif slashPath(action.inputs[0]) == utilB:
+      check "-DUTIL_ALT" in argv
+    else:
+      check "-DUTIL_ALT" notin argv
+    check objName.endsWith(".o")
+  check utilACount == 1
+  check utilBCount == 2
+  # The link (or archive) step consumes every one of the three objects,
+  # each exactly once.
+  require finalStep.len >= 1
+  for step in finalStep:
+    var stepInputs: seq[string] = @[]
+    for input in step.inputs:
+      stepInputs.add(slashPath(input))
+    let stepArgv = inlineArgvOf(step)
+    for action in utilCompiles:
+      check stepInputs.count(slashPath(action.outputs[0])) == 1
+      check stepArgv.count(action.outputs[0]) == 1
+
+suite "nim convention Phase 2 object naming":
+  ## Protects the property that every ``compile`` entry of the nimcache
+  ## manifest gets its own Phase 2 action id, object and depfile, also
+  ## when two entries name C files with the same file name.
+  ## Governing text: ``Nim.md`` §"Phase 2 — Per-`.c` compile". Regression
+  ## test for reprobuild-pm
+  ## ``issues/2026-11-18-nim-phase-2-names-objects-by-c-file-basename-so-same-named-pragma-sources-collide.md``:
+  ## Phase 2 named the object after the C file's name, so ``a/util.c`` and
+  ## ``b/util.c`` both compiled to ``obj/<entry>/util.c.o`` under one
+  ## action id. Runs the production ``emitFragment`` (the eager
+  ## ``nim c --compileOnly`` included); nothing is mocked.
+
+  test "executable: same-named {.compile.} sources get distinct Phase 2 objects and ids":
+    if findExe("nim").len == 0:
+      # ``skip`` only marks the test; the ``else`` keeps the body from
+      # running and failing on the missing compiler.
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_same_named_pragma_exe"
+      writeSameNamedPragmaSourcesProject(scratch, "sameNamedPragmaExe",
+        "same_named_exe", isLibrary = false)
+      defer:
+        removeDir(scratch)
+      checkSameNamedPragmaSourcesGetDistinctObjects(scratch)
+
+  test "library: same-named {.compile.} sources get distinct Phase 2 objects and ids":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_same_named_pragma_lib"
+      writeSameNamedPragmaSourcesProject(scratch, "sameNamedPragmaLib",
+        "same_named_lib", isLibrary = true)
+      defer:
+        removeDir(scratch)
+      checkSameNamedPragmaSourcesGetDistinctObjects(scratch)
+
+  test "a compile entry repeated exactly is one Phase 2 action":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Two modules each carry a pragma for the same ``shared.c``. Nim
+      # lists the file twice, with one command and one object.
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_repeated_pragma"
+      writeExecutableProject(scratch, "repeatedPragma", "repeated_exe", {
+        "shared.c": "int shared_value(void) { return 7; }\n",
+        "other.nim":
+          "{.compile: \"shared.c\".}\n" &
+          "proc sharedValue*(): cint {.importc: \"shared_value\".}\n",
+        "repeated_exe.nim":
+          "import other\n" &
+          "{.compile: \"shared.c\".}\n" &
+          "echo sharedValue()\n"})
+      defer:
+        removeDir(scratch)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      let shared = slashPath(scratch / "src" / "shared.c")
+      var sharedCompiles: seq[BuildActionDef] = @[]
+      var links: seq[BuildActionDef] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("gcc-compile-") and
+            slashPath(action.inputs[0]) == shared:
+          sharedCompiles.add(action)
+        elif action.id.startsWith("gcc-link-"):
+          links.add(action)
+      require sharedCompiles.len == 1
+      require links.len == 1
+      # The link names the one object once, as an input and on its argv.
+      let obj = sharedCompiles[0].outputs[0]
+      check links[0].inputs.count(obj) == 1
+      check inlineArgvOf(links[0]).count(obj) == 1
+
+  test "two different compile entries recording one object are rejected":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Both pragmas name the object themselves, and give it one name.
+      # Nim's own build would write one object over the other.
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_conflicting_pragma_objects"
+      writeExecutableProject(scratch, "conflictingObjects", "conflict_exe", {
+        "a/util.c": "int util_a(void) { return 1; }\n",
+        "b/util.c": "int util_b(void) { return 2; }\n",
+        "conflict_exe.nim":
+          "{.compile: (\"a/util.c\", \"same.o\").}\n" &
+          "{.compile: (\"b/util.c\", \"same.o\").}\n" &
+          "proc utilA(): cint {.importc: \"util_a\".}\n" &
+          "proc utilB(): cint {.importc: \"util_b\".}\n" &
+          "echo utilA() + utilB()\n"})
+      defer:
+        removeDir(scratch)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      var message = ""
+      try:
+        discard conv.emitFragment(scratch, request)
+      except ValueError as err:
+        message = err.msg
+      checkpoint("emit error: " & message)
+      # The error names the shared object and both sources.
+      check "record the same object, same.o" in message
+      check message.replace('\\', '/').contains("src/a/util.c")
+      check message.replace('\\', '/').contains("src/b/util.c")
+
+  test "object names an action id cannot tell apart still get distinct ids":
+    if findExe("nim").len == 0:
+      skip("nim not on PATH — nim convention recognize() returns false")
+    else:
+      # Nim records ``@ma@sutil.c.o`` for ``a/util.c`` and
+      # ``@ma_sutil.c.o`` for ``a_sutil.c``. An action id spells ``@`` as
+      # ``_``, so the readable ids of the two would be equal.
+      let scratch = expandFilename(getTempDir()) /
+        "test_nim_convention_close_object_names"
+      writeExecutableProject(scratch, "closeObjectNames", "close_exe", {
+        "a/util.c": "int util_a(void) { return 1; }\n",
+        "a_sutil.c": "int util_b(void) { return 2; }\n",
+        "close_exe.nim":
+          "{.compile: \"a/util.c\".}\n" &
+          "{.compile: \"a_sutil.c\".}\n" &
+          "proc utilA(): cint {.importc: \"util_a\".}\n" &
+          "proc utilB(): cint {.importc: \"util_b\".}\n" &
+          "echo utilA() + utilB()\n"})
+      defer:
+        removeDir(scratch)
+      let conv = nim_convention.nimConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var ids: seq[string] = @[]
+      var objectNames: seq[string] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("gcc-compile-"):
+          checkpoint("Phase 2 action " & action.id & " -> " &
+            action.outputs[0])
+          check action.id notin ids
+          ids.add(action.id)
+          objectNames.add(extractFilename(action.outputs[0]))
+      # Two objects, for ``a/util.c`` and ``a_sutil.c``, whose names
+      # differ only in ``@`` against ``_``.
+      var pragmaObjects: seq[string] = @[]
+      for name in objectNames:
+        if not name.endsWith(".nim.c.o"):
+          pragmaObjects.add(name)
+      require pragmaObjects.len == 2
+      check pragmaObjects[0] != pragmaObjects[1]
+      check pragmaObjects[0].replace('@', '_') ==
+        pragmaObjects[1].replace('@', '_')
+      # An id no other object name contends for keeps its readable form:
+      # the object name without ``.o``, ``@`` spelled ``_``.
+      for name in objectNames:
+        if name.endsWith(".nim.c.o"):
+          check ("gcc-compile-close_exe-" &
+            name[0 .. ^3].replace('@', '_')) in ids
 
 # ---------------------------------------------------------------------------
 # Emit-cache key covers the project's Nim config files.

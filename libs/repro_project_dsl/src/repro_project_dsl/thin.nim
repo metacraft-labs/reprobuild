@@ -9,9 +9,14 @@
 ## sections are never looked at, and their code may name procedures and types
 ## that only the full modes define.
 ##
-## ``package`` reads its body as structure: it finds each ``executable <name>``
-## that has a ``cli:`` section. Those are the descriptions the thin mode exists
-## to hand to a program; the other forms expand to nothing.
+## ``package`` reads its body as structure: for each ``executable <name>``
+## that has a ``cli:`` section it emits the exported template
+## ``<name>CliDescription(generator, T)``, which a program instantiates with
+## clispec's ``cliProgram`` or confutils' ``cliConfiguration``
+## (``repro_project_dsl/cli_description``, where the template's name and the
+## rules a ``cli:`` section follows for it are described). Those descriptions
+## are what the thin mode exists to hand to a program; the other forms expand
+## to nothing.
 ##
 ## Imports ``std/macros`` only.
 
@@ -19,40 +24,15 @@ import std/macros
 
 import repro_project_dsl/mode
 export mode
-
-type
-  ThinCliSection* = object
-    ## One ``executable`` of a ``package`` body that declares a ``cli:``
-    ## section: the executable's name and the section's body, verbatim.
-    executable*: NimNode
-    cli*: NimNode
-
-proc isForm(node: NimNode; name: string): bool {.compileTime.} =
-  node.kind in {nnkCall, nnkCommand} and node.len > 0 and
-    node[0].kind == nnkIdent and node[0].eqIdent(name)
-
-proc thinCliSections*(body: NimNode): seq[ThinCliSection] {.compileTime.} =
-  ## The executables of a ``package`` body that have a ``cli:`` section, in
-  ## source order. Only the structure is read: a section is recognized by its
-  ## head, and its contents are not examined.
-  if body.kind != nnkStmtList:
-    return
-  for section in body:
-    # ``executable <name>:`` -- the head, the name and the block.
-    if section.isForm("executable") and section.len == 3 and
-        section[2].kind == nnkStmtList:
-      for item in section[2]:
-        if item.isForm("cli") and item.len == 2 and
-            item[1].kind == nnkStmtList:
-          result.add(ThinCliSection(executable: section[1], cli: item[1]))
+import repro_project_dsl/cli_description
 
 macro package*(name: untyped; body: untyped): untyped =
-  ## The thin ``package``: it finds the ``cli:`` sections of its
-  ## executables (``thinCliSections``) and nothing else. It does not register
-  ## them yet, so for now it expands to nothing.
+  ## The thin ``package``: for each of its executables with a ``cli:``
+  ## section, the exported ``<name>CliDescription`` template a program
+  ## instantiates with its CLI library (``repro_project_dsl/cli_description``).
+  ## Nothing else of the body is examined.
   discard name
-  discard thinCliSections(body)
-  result = newStmtList()
+  result = cliDescriptionTemplates(body)
 
 # Every other top-level form of the full DSL, with nothing to keep in this
 # mode. Each takes whatever arguments the full form takes, unexamined.

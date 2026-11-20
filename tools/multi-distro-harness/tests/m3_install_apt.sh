@@ -286,6 +286,10 @@ esac
 PAYLOAD
   chmod 0755 "$_d/bin/repro"
   printf 'version %s\n' "$_v" > "$_d/lib/libreprofixture.so"
+  # The shell completion scripts every release archive carries;
+  # repro-build-packages.sh refuses an archive without them.
+  mkdir -p "$_d/share/repro/completions"
+  cp "$REPO_ROOT"/tests/fixtures/release-completions/* "$_d/share/repro/completions/"
   ( cd "$WORK/tarballs" && tar -czf "$_top.tar.gz" "$_top" )
   echo "$WORK/tarballs/$_top.tar.gz"
 }

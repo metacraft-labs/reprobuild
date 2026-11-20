@@ -10393,8 +10393,16 @@ macro package*(name: untyped; body: untyped): untyped =
   # `ident`, not `bindSym`: stage 2 is declared BELOW this macro (it is the
   # bulk of the file and reads better after the entry point), and `bindSym`
   # resolves in the definition scope, where the name does not exist yet.
-  return newCall(ident("packageImpl"), name, declaredExpr, provisioningExpr,
-    usesExpr, body)
+  #
+  # After the package: the ``<executable>CliDescription`` templates a program
+  # instantiates with its CLI library (``repro_project_dsl/cli_description``).
+  # The thin mode emits the same ones and nothing else; here they are emitted
+  # besides the package, and never expanded in the recipe itself, so the
+  # package's registration, interface and provider are what they were.
+  return newStmtList(
+    newCall(ident("packageImpl"), name, declaredExpr, provisioningExpr,
+      usesExpr, body),
+    cliDescriptionTemplates(body))
 
 macro packageImpl*(name: untyped;
                    resolvedPlatforms: static seq[PlatformConstraintDef];

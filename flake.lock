@@ -1332,17 +1332,17 @@
     "nim-cli-spec-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795132637,
-        "narHash": "sha256-Mie8w5dmMrzytH6RZ8CrXgh4q+zdzNKI91isxSNOhMw=",
+        "lastModified": 1795156360,
+        "narHash": "sha256-52dtjt5p4FUkBnFfsSb8JoicImn4VTZOgr0ZfZfmKqA=",
         "owner": "metacraft-labs",
         "repo": "nim-cli-spec",
-        "rev": "daef562cad0c1a3e2f98952812c1f85a497b1e2f",
+        "rev": "5380e20c8866e49e000e8070f692f54d303b5658",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-cli-spec",
-        "rev": "daef562cad0c1a3e2f98952812c1f85a497b1e2f",
+        "rev": "5380e20c8866e49e000e8070f692f54d303b5658",
         "type": "github"
       }
     },
