@@ -1592,6 +1592,26 @@ proc checkNoLinkedAncestors(c: BundleClosure; contentsPath: string) =
         "machine, so the unpack would write through it; nothing was " &
         "written")
 
+proc privateScratchDir*(prefix: string): string =
+  ## A fresh directory under the temporary directory, created mode 0700 in
+  ## one step by `mkdtemp(3)`, whatever the umask, for the files an import
+  ## or a restore writes for itself (member listings, exclude lists, tar's
+  ## diagnostics). They never go beside a bundle's parts: a local bundle's
+  ## directory may be writable by others, who could plant a symlink there
+  ## for a redirection to follow, or rewrite a listing or an exclude list
+  ## between its write and its read (Store-Bundles.md §5 step 3).
+  var tmpl = getTempDir() / (prefix & "XXXXXX")
+  if mkdtemp(tmpl.cstring) == nil:
+    fail("cannot create a private temporary directory from " & tmpl &
+      ": " & osErrorMsg(osLastError()))
+  tmpl
+
+proc removeScratchDir*(dir: string) =
+  ## Remove a `privateScratchDir` on the way out, without letting a failure
+  ## to remove it replace the error being raised.
+  try: removeDir(dir)
+  except OSError: discard
+
 proc listBundleMembers*(dir: string; parts: seq[BundlePart];
                         listingPath: string; zstd = "") =
   ## Write GNU tar's verbose listing of the stream the verified `parts` of
@@ -1826,8 +1846,11 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
     # will extract it and refuse unless its members are exactly the declared
     # ones. The part hashes come from the same unsigned manifest as the
     # parts, so they cannot confine the unpack; this check does.
-    let listingPath = dir / ("." & m.bundleId & ".members")
-    defer: removeFile(listingPath)
+    # Every file the import writes for itself goes into a private
+    # directory (`privateScratchDir`); `dir` is only read.
+    let scratch = privateScratchDir("repro-store-import-")
+    defer: removeScratchDir(scratch)
+    let listingPath = scratch / "members"
     listBundleMembers(dir, m.parts, listingPath)
     checkMembers(c, m.contentsPath, listingPath)
     removeFile(listingPath)
@@ -1838,17 +1861,15 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
       if dirExists(prefix) and prefixIntact(prefix):
         excluded.incl(prefix)
         result.excludedPrefixes.add(prefix)
-    let excludePath = dir / ("." & m.bundleId & ".exclude")
+    let excludePath = scratch / "exclude"
     block:
       var f = open(excludePath, fmWrite)
       defer: f.close()
       for prefix in result.excludedPrefixes:
         f.write(relToSlash(prefix) & "\n")
-    defer: removeFile(excludePath)
     let zstdExe = requireTool("zstd")
     let tarExe = requireTool("tar")
-    let errPath = dir / ("." & m.bundleId & ".stderr")
-    defer: removeFile(errPath)
+    let errPath = scratch / "unpack.stderr"
     let command = "set -o pipefail; (" & quoteShell(zstdExe) &
       " -q -dc --long=" & $ZstdWindowLog & " - | " & quoteShell(tarExe) &
       " -x -C / --numeric-owner --no-same-owner -p --anchored" &

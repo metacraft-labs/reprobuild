@@ -533,9 +533,11 @@ proc nixListingProblem*(listingPath: string;
     return e.msg
   members.finish()
 
-proc restoreLockedPaths(h: NixHalf; partsDir, root, target, zstdExe: string;
-    registered: seq[RegisteredPath]; invalid: HashSet[string]) =
+proc restoreLockedPaths(h: NixHalf; partsDir, scratch, root, target,
+    zstdExe: string; registered: seq[RegisteredPath];
+    invalid: HashSet[string]) =
   ## §7 steps 3.4 to 3.7, for the paths in `invalid`, whose locks are held.
+  ## `scratch` is the restore's private directory (`restoreNixHalf`).
   for r in registered:
     if r.path in invalid: removeStoreLeftover(storeLocation(root, r.path))
   # Every registered path that is valid is Nix's: tar adds nothing to it.
@@ -543,11 +545,9 @@ proc restoreLockedPaths(h: NixHalf; partsDir, root, target, zstdExe: string;
   for r in registered:
     if r.path notin invalid: skip.add(r.path.strip(chars = {'/'},
       trailing = false) & "\n")
-  let (excludeFile, excludes) = createTempFile("repro-bundle-exclude-", "")
-  excludeFile.write(skip)
-  excludeFile.close()
-  defer: removeFile(excludes)
-  let errPath = partsDir / ".unpack.stderr"
+  let excludes = scratch / "exclude"
+  writeFile(excludes, skip)
+  let errPath = scratch / "unpack.stderr"
   let command = "set -o pipefail; (" & quoteShell(zstdExe) &
     " -q -dc --long=" & $ZstdWindowLog & " - | " &
     quoteShell(requireExe("tar")) & " -C " & quoteShell(target) &
@@ -599,7 +599,13 @@ proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
   ## match its registration, and only then are those paths registered. A
   ## run killed at any point leaves them invalid, and the next run starts
   ## them over.
+  ##
+  ## Every file the restore writes for itself (the member listing, the
+  ## exclude list, tar's diagnostics) goes into a private directory
+  ## (`privateScratchDir`), never beside the parts, which are only read.
   let zstdExe = zstdForRestore(h)
+  let scratch = privateScratchDir("repro-bundle-nix-")
+  defer: removeScratchDir(scratch)
   let target = (if root.len > 0: root else: "/")
   createDir(target)
   let reg = readVerifiedPart(partsDir, h.registration)
@@ -616,13 +622,13 @@ proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
   # from the same unsigned manifest as the parts, so they cannot confine
   # the unpack.
   block:
-    let listing = partsDir / ".members"
-    defer: removeFile(listing)
+    let listing = scratch / "members"
     try:
       listBundleMembers(partsDir, h.parts, listing, zstdExe)
     except StoreBundleError as e:
       bundleFail("cannot check the Nix half: " & e.msg)
     let problem = nixListingProblem(listing, names)
+    removeFile(listing)
     if problem.len > 0:
       bundleFail("refusing the Nix half before restoring it: " & problem &
         "; nothing was written")
@@ -662,8 +668,8 @@ proc restoreNixHalf*(h: NixHalf; partsDir: string; root = "/") =
       gcLock = -1
       candidates = (locked + invalid).toSeq()
       candidates.sort()
-    restoreLockedPaths(h, partsDir, root, target, zstdExe, registered,
-      invalid)
+    restoreLockedPaths(h, partsDir, scratch, root, target, zstdExe,
+      registered, invalid)
   finally:
     release(locks)
     when defined(posix):
