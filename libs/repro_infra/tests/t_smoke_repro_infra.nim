@@ -1932,6 +1932,123 @@ suite "repro_infra: passwd.user primary group needs a sibling passwd.group":
     checkPasswdPrimaryGroups([SystemResource(kind: srkPasswdUser,
       address: "deploy", puName: "deploy", puGroups: @["docker"])])
 
+suite "repro_infra: a profile-declared account's memberships have one owner":
+  # A user's `groups` is its whole supplementary set (`usermod --groups`
+  # removes the rest); a group's `members` is a subset requirement
+  # (`usermod -aG` adds the member back). A member the profile also
+  # declares as a user, and whose `groups` omit the group, would be removed
+  # and re-added by every apply that touches the user; one whose `groups`
+  # name it cannot be created on a fresh host (each op needs the other's
+  # account first). Either way the profile is refused
+  # (System-Profile-And-Infra-Apply.md, passwd.group; reprobuild-pm issue
+  # 2026-11-12-passwd-user-and-passwd-group-can-fight-each-other-and-
+  # never-converge).
+  test "the defect: a user update drops the group's member, both checks pass":
+    # The mechanism the refusal prevents, through the drivers' own pure
+    # pieces. upsmon is in `nut` because passwd.group(nut, members =
+    # [upsmon]) put it there; passwd.user(upsmon) declares `dialout` only
+    # and is applied for another reason (its shell changed).
+    let observed = PasswdUserObservation(present: true, uid: "1001",
+      homeDir: "/home/upsmon", shell: "/bin/sh", primaryGroup: "upsmon",
+      groups: @["dialout", "nut"])
+    let desired = PasswdUserDesired(name: "upsmon",
+      shell: "/usr/sbin/nologin", groups: @["dialout"])
+    let diff = diffPasswdUser(desired, observed)
+    check diff.extraGroups == @["nut"]
+    let argv = buildUsermodArgs(desired, diff)
+    # `usermod --groups dialout` replaces the whole set: `nut` is gone.
+    let at = argv.find("--groups")
+    check at >= 0 and argv[at + 1] == "dialout"
+    # The user's post-apply check, masked to what it declares, reads the
+    # same with `nut` gone as with it present: it cannot see the loss. The
+    # group's next apply adds the member back.
+    var after = observed
+    after.shell = "/usr/sbin/nologin"
+    after.groups = @["dialout"]
+    var withNut = after
+    withNut.groups = @["dialout", "nut"]
+    check canonicalPasswdUserStateMaskedBy(after, desired) ==
+      canonicalPasswdUserStateMaskedBy(withNut, desired)
+
+  test "a stored generation that pairs them is not judged again":
+    # A host that installed such a generation before the refusal must
+    # still switch away from it and roll back to it.
+    let stored = parseSystemProfile("""
+passwd.user {
+  name = "upsmon"
+}
+passwd.group {
+  name = "nut"
+  members = ["upsmon"]
+}
+""", stored = true)
+    check stored.resources.len == 2
+
+  test "a member whose declared groups omit the group is refused by name":
+    let text = """
+passwd.group {
+  name = "nut"
+  members = ["upsmon"]
+}
+passwd.user {
+  name = "upsmon"
+  groups = ["dialout"]
+}
+"""
+    var msg = ""
+    try:
+      discard parseSystemProfile(text)
+    except ESystemProfileInvalid as e:
+      msg = e.msg
+    check "passwd.group 'nut'" in msg
+    check "passwd.user 'upsmon'" in msg
+    # The user declared first, or with no groups at all, is refused the
+    # same way.
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+passwd.user {
+  name = "upsmon"
+}
+passwd.group {
+  name = "nut"
+  members = ["upsmon"]
+}
+""")
+
+  test "a member the user also names is refused: the pair has no first op":
+    expect ESystemProfileInvalid:
+      discard parseSystemProfile("""
+passwd.group {
+  name = "nut"
+  members = ["upsmon"]
+}
+passwd.user {
+  name = "upsmon"
+  groups = ["nut"]
+}
+""")
+
+  test "the user's own groups, and members the profile does not own, pass":
+    # The membership declared once, on the user, after the group.
+    let owned = parseSystemProfile("""
+passwd.group {
+  name = "nut"
+}
+passwd.user {
+  name = "upsmon"
+  groups = ["nut"]
+}
+""")
+    check owned.resources.len == 2
+    # A member with no passwd.user in the profile: nothing removes it.
+    let unowned = parseSystemProfile("""
+passwd.group {
+  name = "nut"
+  members = ["upsmon"]
+}
+""")
+    check unowned.resources.len == 1
+
 suite "repro_infra: Phase C structural editor round-trip":
 
   test "add then remove a passwd.user stanza round-trips byte-identically":

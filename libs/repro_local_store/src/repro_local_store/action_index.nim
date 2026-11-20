@@ -591,13 +591,24 @@ when actionIndexSupported:
           result.strongOf[id] = elem.strong
 
   proc enumerateEdge*(idx: ActionIndex; weak: ContentDigest): EdgeView =
-    ## §8 step 1 + step 2. Touches only mapped memory; performs no syscall.
+    ## §8 step 1 + step 2. Touches only mapped memory, and performs no syscall
+    ## for a shard this process has already mapped. A shard it has not mapped
+    ## costs an open attempt on every walk, which is how a retired shard is
+    ## told from one that is present and would not map.
     ##
     ## The completeness claim is honoured ONLY when it is sound: a nonzero
     ## `growthFailed` means the chain is saturated and may be missing elements,
     ## and a nonzero `bypassWrites` means someone wrote Tier 1 without telling
     ## the index. Either voids every claim chain-wide, degrading every lookup
     ## to the union read — which is correct.
+    ##
+    ## THE COUNTERS ARE READ AFTER THE WALK, AND THAT ORDER IS LOAD-BEARING.
+    ## A walk that had to skip a shard whose file is present but would not map
+    ## in this process (a descriptor or address-space limit) has not seen that
+    ## shard's records or tombstones. The set counts that skip in
+    ## `growthFailed` during the walk (§6.7 "Retirement"), so the test below
+    ## sees it only because `scanEdge` has already returned. Reading the
+    ## counters first would honour a claim from a walk that missed elements.
     result.attached = idx != nil and idx.attached
     if not result.attached: return
     let scan = idx.scanEdge(weak)
