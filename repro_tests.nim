@@ -503,7 +503,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-egress-\" & $getCurrentProc..."),
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_engine_agent_route.nim",
     binary: "build/test-bin/t_addon_engine_agent_route",
@@ -13227,6 +13227,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "libs/repro_standard_provider/tests/test_rust_convention.nim",
     binary: "build/test-bin/test_rust_convention",
+    defines: @["reproProviderMode"],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_standard_provider_tests_o757f6dd4_g01",
+    singleReason: ""),
+  TestSpec(
+    source: "libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim",
+    binary: "build/test-bin/test_rust_convention_build_script_members",
     defines: @["reproProviderMode"],
     requiresReproBinary: false,
     requiresMonitorShim: false,

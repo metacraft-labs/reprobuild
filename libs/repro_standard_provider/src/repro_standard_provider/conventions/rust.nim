@@ -95,8 +95,10 @@
 ##     trade-off.
 ##
 ## **Still deferred** (post-M23):
-##   * ``build.rs`` crates — they keep routing through the Mode B crude
-##     fallback inside ``emitFragment``.
+##   * Packages with a build script — they keep routing through the
+##     Mode B crude fallback inside ``emitFragment``. One such package,
+##     the root's or any workspace member's, sends the whole workspace
+##     there (``RustProject.hasBuildScript``).
 ##   * Full Mode A for crates.io / git deps — the convention currently
 ##     drops to the crude fallback when an external dep is detected.
 ##     A future milestone can graduate this to per-dep ``--extern``
@@ -267,6 +269,13 @@ type
       ## ``cargo metadata`` is non-empty) or an optional dependency.
       ## Mode A does no feature resolution, so such a package sends the
       ## whole workspace to Mode B (Rust.md §"Recognition" item 6).
+    hasBuildScript: bool
+      ## True when the package has a build script: ``cargo metadata``
+      ## reports a target of kind ``custom-build`` for it, or a
+      ## ``build.rs`` lies beside its manifest
+      ## (``packageHasBuildScript``). Mode A runs no build script, so
+      ## such a package sends the whole workspace to Mode B (Rust.md
+      ## §"Recognition" item 5).
     harnessUnattributed: bool
       ## True when the package's ``Cargo.toml`` may set ``harness = false``
       ## where ``scanHarnessSettings`` cannot tell on which ``[[test]]``
@@ -304,6 +313,12 @@ type
       ## features enabled on one package depend on what every package
       ## that depends on it asks for, so the trigger is workspace-wide
       ## (Rust.md §"Features, lints and the crate environment").
+    hasBuildScript: bool
+      ## True when any package has a build script
+      ## (``RustPackage.hasBuildScript``). Routes the entire project
+      ## through Mode B: per-package delegation, in which the other
+      ## members stay in Mode A and consume cargo's rlib of this one, is
+      ## not implemented.
     harnessUnattributed: bool
       ## True when any package may set ``harness = false`` where Mode A
       ## cannot tell on which target (``RustPackage.harnessUnattributed``).
@@ -858,10 +873,12 @@ proc targetEdition(target: JsonNode; packageEdition: string): string =
 proc extractTargets(pkgNode: JsonNode;
                     packageEdition: string): seq[RustTarget] =
   ## Walk a package's ``targets`` array and keep ``bin`` / ``lib`` targets
-  ## plus (M22) ``test`` integration-test targets. Examples, benches, and
-  ## custom-build targets are still skipped — those need additional
-  ## tooling (per-example runners, criterion harness) that's outside the
-  ## M22 surface.
+  ## plus (M22) ``test`` integration-test targets. Examples and benches
+  ## are still skipped — those need additional tooling (per-example
+  ## runners, criterion harness) that's outside the M22 surface. A
+  ## ``custom-build`` target (the package's build script) is no target
+  ## Mode A compiles either: ``packageHasBuildScript`` reads it, and the
+  ## package then does not build in Mode A at all.
   ##
   ## **M23**: lib-flavoured targets (``lib`` / ``rlib`` / ``cdylib`` /
   ## ``staticlib`` / ``dylib``) are now distinguished per-target so the
@@ -1021,6 +1038,40 @@ proc packageDeclaresFeatures(pkgNode: JsonNode): bool =
         return true
   false
 
+proc packageHasBuildScript(pkgNode: JsonNode; manifestDir: string): bool =
+  ## True when the package has a build script. ``cargo metadata`` reports
+  ## it as a target whose ``kind`` is ``["custom-build"]``: the
+  ## ``build.rs`` Cargo finds beside the manifest, or the file the
+  ## manifest's ``build`` key names; ``build = false`` leaves none (Cargo
+  ## reference, "The Manifest Format", "The ``build`` field":
+  ## https://doc.rust-lang.org/cargo/reference/manifest.html#the-build-field).
+  ## Reading the target rather than looking only for a file covers every
+  ## workspace member and both spellings, given fresh metadata.
+  ##
+  ## A ``build.rs`` beside the manifest (``manifestDir``) counts as well,
+  ## whatever the metadata says. ``metadata`` may come from the emit cache
+  ## (``runCargoMetadata``), whose fingerprint walks regular files under
+  ## the project root: a ``build.rs`` that is a symbolic link, or that
+  ## belongs to a member outside the root, can appear without the cache
+  ## missing. The price is that a ``build.rs`` Cargo is told not to run
+  ## (``build = false``) also sends the workspace to Mode B, which builds
+  ## it correctly. A ``build`` key added outside the root, or behind a
+  ## link, is still missed while the cache holds (reprobuild-pm
+  ## issues/2026-11-19-rust-emit-cache-fingerprint-misses-symbolic-links-and-members-outside-the-root.md).
+  if manifestDir.len > 0 and
+      fileExists(extendedPath(manifestDir / "build.rs")):
+    return true
+  if "targets" notin pkgNode or pkgNode["targets"].kind != JArray:
+    return false
+  for target in pkgNode["targets"]:
+    if target.kind != JObject or "kind" notin target or
+       target["kind"].kind != JArray:
+      continue
+    for k in target["kind"]:
+      if k.kind == JString and k.getStr() == "custom-build":
+        return true
+  false
+
 proc loadProject(projectRoot: string;
                  metadata: JsonNode): RustProject =
   ## Parse ``cargo metadata`` into our flattened ``RustProject``. Detects
@@ -1149,6 +1200,9 @@ proc loadProject(projectRoot: string;
     let hasFeatures = packageDeclaresFeatures(pkgNode)
     if hasFeatures:
       result.hasFeatures = true
+    let hasBuildScript = packageHasBuildScript(pkgNode, manifestDir)
+    if hasBuildScript:
+      result.hasBuildScript = true
     let harness = scanHarnessSettings(
       if manifestPath.len > 0: manifestPath
       else: projectRoot / "Cargo.toml")
@@ -1175,6 +1229,7 @@ proc loadProject(projectRoot: string;
         devWorkspaceDeps: devWorkspaceDeps,
         hasExternalDeps: hasExternalDeps,
         hasFeatures: hasFeatures,
+        hasBuildScript: hasBuildScript,
         harnessUnattributed: harnessUnattributed,
         crateEnv: crateEnv))
       continue
@@ -1187,6 +1242,7 @@ proc loadProject(projectRoot: string;
       devWorkspaceDeps: devWorkspaceDeps,
       hasExternalDeps: hasExternalDeps,
       hasFeatures: hasFeatures,
+      hasBuildScript: hasBuildScript,
       harnessUnattributed: harnessUnattributed,
       crateEnv: crateEnv))
   # Workspace detection: prefer ``workspace_members.len > 1`` (the
@@ -2000,6 +2056,11 @@ proc syntheticPackage(projectRoot: string;
     toolUses: @[])
 
 proc hasBuildRs(projectRoot: string): bool =
+  ## A ``build.rs`` beside the root manifest. Only a shortcut to Mode B
+  ## that skips the ``rustc`` lookup and ``loadProject`` inside the
+  ## emit (``rustRecognize`` has already required ``rustc``): what decides
+  ## whether a package has a build script, for the root and for every
+  ## workspace member, is ``RustProject.hasBuildScript``.
   fileExists(extendedPath(projectRoot / "build.rs"))
 
 proc topologicalSortLibPackages(project: RustProject): seq[int] =
@@ -2219,7 +2280,7 @@ proc rustCrudeFallback(projectRoot: string;
                        request: ProviderGraphRequest):
                          GraphFragment {.gcsafe.} =
   ## Mode B emitter for Rust projects that can't take the Mode A path
-  ## (today: any project carrying a ``build.rs``). Delegates to
+  ## (the routing in ``rustEmitFragment`` lists the reasons). Delegates to
   ## ``cargo build --release --locked --offline`` under io-monitor
   ## monitoring per the M6 spec.
   {.cast(gcsafe).}:
@@ -2279,9 +2340,13 @@ proc rustEmitFragment(projectRoot: string;
   ## per-package + per-target info, register every (metadata, link) pair
   ## via the DSL, and hand the whole thing to ``buildPackageFragment``.
   ##
-  ## **M6 routing**: when the project carries a ``build.rs``, the Mode A
-  ## graph would be wrong (rustc alone can't honour build-script env
-  ## vars / linker hints) so we delegate to ``rustCrudeFallback``.
+  ## **M6 routing**: when any package of the project has a build script,
+  ## the Mode A graph would be wrong (rustc alone can't honour
+  ## build-script env vars / cfgs / linker hints) so we delegate to
+  ## ``rustCrudeFallback``. ``hasBuildRs`` catches the root's ``build.rs``
+  ## before ``rustc`` is looked up; ``RustProject.hasBuildScript``
+  ## catches every workspace member's ``build.rs`` and, from ``cargo
+  ## metadata``, a script named by the ``build`` key.
   ##
   ## **M23 routing**: when a project pulls in a crates.io / git
   ## dependency (``source != null`` for a normal/build dep in cargo
@@ -2342,6 +2407,13 @@ proc rustEmitFragment(projectRoot: string;
     # invokes cargo itself which handles registry/git resolution
     # natively.
     if project.hasExternalDeps:
+      return rustCrudeFallback(projectRoot, request)
+    # Rust.md §"Recognition" item 5: Mode A runs no build script, so a
+    # package that has one would compile without the ``--cfg`` flags,
+    # environment variables, link arguments and ``OUT_DIR`` sources its
+    # script provides: a failed compile, or code other than cargo's. A
+    # build script on any package sends the whole workspace to Mode B.
+    if project.hasBuildScript:
       return rustCrudeFallback(projectRoot, request)
     # Rust.md §"Recognition" item 6: Mode A passes no ``--cfg feature``
     # because it does no feature resolution, so a crate with default
