@@ -28573,6 +28573,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_preloaded_monitor_shim_keeps_out_of_the_host_allocator.nim",
+    binary: "build/test-bin/t_preloaded_monitor_shim_keeps_out_of_the_host_allocator",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim",
     binary: "build/test-bin/t_private_repo_participates_via_evidence_without_source_exposure",
     defines: @[],
@@ -28870,7 +28882,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
@@ -29530,7 +29542,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim",
@@ -30346,7 +30358,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim",
@@ -31258,7 +31270,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_skips_fetch_when_locked_sha_already_present.nim",
