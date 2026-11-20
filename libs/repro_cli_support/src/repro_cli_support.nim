@@ -35461,9 +35461,100 @@ proc renderActionKeyText(evidence: ActionKeyEvidence): string =
        else: "absent"))
   lines.join("\n")
 
+const CacheSharingSchema = "reprobuild.cache-sharing.v1"
+  ## The JSON document `repro cache sharing --json` prints.
+  ## A `v1` document only gains fields; a new `sharing` value or a changed
+  ## meaning of one moves it to `v2`.
+
+proc cacheSharingReport(selector: string; mode: ToolProvisioningMode;
+                        workRoot, publicCliPath: string): JsonNode =
+  ## Whether the builds of `selector` (`<project>[#<target>]`) can be served
+  ## to another checkout on this host, from the graph a build would lower
+  ## (the inspection `repro graph` and `repro cache key` run; nothing is
+  ## built), against the roots a build would key by (`wirePortableCache`):
+  ## none, and so `none`, under `REPRO_PORTABLE_CACHE=0`.
+  ##
+  ## Each action of the selection's closure gets `crossCheckoutSharingRefusal`
+  ## (the conditions decidable before it runs). The project's `sharing` is
+  ## `none` when no action can be served, `per-build` when the selection is
+  ## a single cacheable action that can, and `per-library` otherwise.
+  let info = prepareBuildGraphInspection(
+    (if selector.len == 0: "." else: selector), mode, publicCliPath,
+    selectDefaultAction = true, workRoot = workRoot)
+  var config: BuildEngineConfig
+  wirePortableCache(config, info.projectRoot, info.outDir)
+  # Exactly the roots a build keys portable records by: none when the
+  # portable identity is off, which the procedure answers as "not shared".
+  let roots = config.portableRoots
+  var byId = initTable[string, BuildAction]()
+  for action in info.actions:
+    byId[action.id] = action
+  # The selection's closure over `deps`, in graph order; the whole graph
+  # when the inspection selected nothing.
+  var selected = initHashSet[string]()
+  let start =
+    if info.selectedActionId.len > 0: info.selectedActionId
+    else: info.defaultActionId
+  if start.len > 0 and start in byId:
+    var stack = @[start]
+    while stack.len > 0:
+      let id = stack.pop()
+      if id in selected or id notin byId:
+        continue
+      selected.incl(id)
+      for dep in byId[id].deps:
+        stack.add(dep)
+  else:
+    for action in info.actions:
+      selected.incl(action.id)
+  var actions = newJArray()
+  var cacheable = 0
+  var candidates = 0
+  for action in info.actions:
+    if action.id notin selected:
+      continue
+    let refusal = crossCheckoutSharingRefusal(action, roots)
+    if action.cacheable:
+      inc cacheable
+    if refusal.len == 0:
+      inc candidates
+    var node = %*{"id": action.id, "shareable": refusal.len == 0}
+    if refusal.len > 0:
+      node["reason"] = %refusal
+    actions.add(node)
+  let sharing =
+    if candidates == 0: "none"
+    elif cacheable == 1: "per-build"
+    else: "per-library"
+  %*{
+    "schema": CacheSharingSchema,
+    "project": info.projectRoot,
+    "target": (if selector.len == 0: "." else: selector),
+    "toolProvisioning": modeName(info.toolProvisioning),
+    "sharing": sharing,
+    "shareableActions": candidates,
+    "cacheableActions": cacheable,
+    "actions": actions
+  }
+
+proc renderCacheSharingText(report: JsonNode): string =
+  var lines = @["sharing: " & report["sharing"].getStr() & " (" &
+    $report["shareableActions"].getInt() & " of " &
+    $report["cacheableActions"].getInt() & " cacheable actions can be " &
+    "served to another checkout)",
+    "  project: " & report["project"].getStr()]
+  for action in report["actions"]:
+    if action["shareable"].getBool():
+      lines.add("  " & action["id"].getStr() & ": can be shared")
+    else:
+      lines.add("  " & action["id"].getStr() & ": not shared: " &
+        action["reason"].getStr())
+  lines.join("\n")
+
 proc runCacheKeyCommands(conf: ReproCommandLineCache;
                          publicCliPath: string): int =
-  ## `repro cache key <action>` and `repro cache explain <a> <b>`. Exit 0
+  ## `repro cache key <action>`, `repro cache explain <a> <b>` and
+  ## `repro cache sharing [<project>]`. Exit 0
   ## whenever an answer was printed, whatever it says; 1 for an error.
   case conf.command
   of ReproCommandLineCacheCommand.key:
@@ -35532,6 +35623,25 @@ proc runCacheKeyCommands(conf: ReproCommandLineCache;
             lines.add("  " & label & " has no portable identity: " &
               side.refusal)
         echo lines.join("\n")
+    finally:
+      releaseAutoRunQuotaProcess(autoRunQuota)
+    0
+  of ReproCommandLineCacheCommand.sharing:
+    let c = conf.sharing
+    let mode = if c.toolProvisioning.len > 0:
+                 parseToolProvisioning(c.toolProvisioning)
+               else: tpmUnspecified
+    if c.actionCacheRoot.len > 0:
+      setActionCacheRootOverride(c.actionCacheRoot)
+    let format = inspectionFormat(c.format, c.json, allowDot = false)
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    try:
+      let report = cacheSharingReport(c.selector, mode, c.workRoot,
+        publicCliPath)
+      if format == gofJson:
+        echo pretty(report)
+      else:
+        echo renderCacheSharingText(report)
     finally:
       releaseAutoRunQuotaProcess(autoRunQuota)
     0
@@ -107684,7 +107794,8 @@ proc runReproCommandLine(programName: string; args: seq[string];
     return runCasCommand(conf.cas)
   of ReproCommandLineCommand.cache:
     case conf.cache.command
-    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain:
+    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain,
+        ReproCommandLineCacheCommand.sharing:
       # These lower the project's graph, so they live here and not in the
       # binary-cache client (`cache_cli`), which links no engine.
       try:

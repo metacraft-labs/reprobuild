@@ -50,10 +50,11 @@ proc runCacheCommand*(conf: ReproCommandLineCache): int =
         conf.deriveKey))
     of ReproCommandLineCacheCommand.genKey:
       return bcCliDispatch.cacheGenKey()
-    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain:
-      # `repro cache key` and `explain` lower a project's graph: the full
-      # `repro` dispatches them before it reaches this client, which links
-      # no build engine.
+    of ReproCommandLineCacheCommand.key, ReproCommandLineCacheCommand.explain,
+        ReproCommandLineCacheCommand.sharing:
+      # `repro cache key`, `explain` and `sharing` lower a project's graph:
+      # the full `repro` dispatches them before it reaches this client, which
+      # links no build engine.
       stderr.writeLine("repro cache: error: `" & $conf.command & "` needs " &
         "the build engine, which this program does not link; run it with " &
         "`repro`")

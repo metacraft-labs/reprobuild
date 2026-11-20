@@ -7,13 +7,19 @@ domain: build
 order: 40
 platforms: [linux]
 verifies:
-  commands: [build, cache key, cache explain]
+  commands: [build, cache key, cache explain, cache sharing]
   tests:
+    - tests/integration/t_cargo_and_cmake_cross_checkout_sharing_is_declared_as_measured.nim
+    - tests/integration/t_cargo_two_binaries_different_features_are_not_shared_wrongly.nim
+    - libs/repro_build_engine/tests/t_cross_checkout_sharing_refusal.nim
     - tests/integration/t_same_library_two_feature_sets_two_artifacts.nim
     - tests/integration/t_key_difference_explanation_names_the_cause.nim
     - libs/repro_local_store/tests/t_key_explanation_classifies_each_cause.nim
     - libs/repro_lock_gen/tests/t_one_library_two_consumers_two_instances.nim
 unverified:
+  - claim: "A CMake project configured with the store's compiler as CMAKE_C_COMPILER reports and measures none."
+    reason: "Measured by hand on Linux x86_64 on 2026-11-19 with repro 0.2.28; the test configures its CMake fixture with the compiler on PATH only."
+    owner: unassigned
   - claim: "The repro.nim fragment on this page builds."
     reason: "It is an excerpt of the build file t_same_library_two_feature_sets_two_artifacts.nim writes and builds; no test compiles the fragment as printed here."
     owner: unassigned
@@ -188,3 +194,62 @@ A `v1` document only gains fields. A field whose meaning changes, or a new
 cause kind, comes with a new schema name, so a program that switches on
 `kind` can refuse a schema it does not know. Both commands exit 0 whenever
 they print an answer; read `verdict`, not the exit status.
+
+## Ask whether another checkout can reuse a project's builds
+
+Two checkouts of one project at different paths share a library build only
+when the actions that build it can be served across checkouts. Whether they
+can depends on the build style and on where the toolchain comes from, and
+`repro cache sharing` answers it from the planned graph, without building:
+
+```sh
+repro cache sharing                  # the current project's default target
+repro cache sharing build#all        # a CMake build directory's `all`
+repro cache sharing --json --tool-provisioning=tarball
+```
+
+For each action it says whether its cached result can be served to another
+checkout on this host, and if not, the first reason: the action is not
+cacheable; the portable cache is off (`REPRO_PORTABLE_CACHE=0`); the action
+is declared `host-bound` or `volatile`; its input-check policy is not
+`checksum` or `hybrid`; its dependency evidence is a depfile or another tool
+report that the monitor does not validate; it is a built-in step that reads
+more than its declared inputs; it runs with `--unsafe-preserve-outputs`; its
+program lies outside every root the cache knows how to name in another
+checkout (a toolchain under `/nix/store` or `/usr`); or it declares no
+output. These are the checks a build itself makes before it keeps a result
+for another checkout. For the project it prints one of:
+
+| `sharing` | Meaning |
+|---|---|
+| `per-library` | Some actions can be served to another checkout, each on its own: a library built once can be reused by the next checkout. |
+| `per-build` | The selection is one cacheable action, and it can be served: the whole build is reused, or rebuilt, as a unit. |
+| `none` | Nothing this selection builds is served to another checkout. Each checkout builds it again (and still reuses its own earlier builds). |
+
+`none` is certain. `per-library` and `per-build` say what can be served once
+the actions have run: an action can still read a file outside the cache's
+roots when it runs, or write an output that names its checkout (a debug
+build without `-ffile-prefix-map`), and its result then stays with its
+checkout.
+
+What it reports for the common build styles on Linux:
+
+- A library compiled and archived by the C/C++ convention or by a build
+  file's `gcc` and `ar` calls, with `--tool-provisioning=tarball` (the
+  toolchain reprobuild provisions into its store): `per-library`. The
+  compile and archive actions are served; the link of an executable is not,
+  because the executable names the store's path.
+- Cargo through the typed `cargo` tool, whether one action builds the whole
+  workspace or one action builds a package, a binary or a library with
+  chosen features: `none`. Each checkout reuses only its own builds.
+- A CMake project configured with `-G Reprobuild`: `none`, with the compiler
+  on `PATH` and also with the store's compiler as `CMAKE_C_COMPILER`.
+
+Within one checkout every style keeps feature sets apart: a library built
+with one binary's features is never reused for another binary that enables
+other features, and switching between the two rebuilds it.
+
+With `--json` the document's `schema` is `reprobuild.cache-sharing.v1`, with
+the fields `sharing`, `shareableActions`, `cacheableActions` and `actions`
+(each with `id`, `shareable` and, when it cannot be shared, `reason`). As
+with the other documents, a `v1` document only gains fields.

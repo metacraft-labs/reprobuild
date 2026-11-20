@@ -466,14 +466,47 @@ stdenv.mkDerivation (finalAttrs: {
   # installed ELF/Mach-O role. Linux uses a transitive DT_RPATH; Darwin needs
   # one LC_RPATH load command per directory and valid install IDs for every
   # installed dylib.
+  #
+  # The Linux monitor shim is the exception: it gets NO search path at all.
+  # It is LD_PRELOADed into every monitored process, it needs only the C
+  # runtime that process already has (DT_NEEDED libc.so.6 and the loader),
+  # and it interposes dlopen(). glibc attributes a dlopen to the object
+  # whose code calls the real dlopen, which is the shim, and searches that
+  # object's DT_RPATH (dlopen(3) and ld.so(8):
+  # https://man7.org/linux/man-pages/man3/dlopen.3.html,
+  # https://man7.org/linux/man-pages/man8/ld.so.8.html). io-mon's
+  # wrapper resolves a bare soname against the CALLER's search path first,
+  # but on a miss it hands the soname to glibc unchanged, which then also
+  # searches the shim's DT_RPATH. With the engine's runtime family there
+  # (zstd, sqlite, openssl, blake3, xxhash, clingo), a monitored program
+  # that cannot find libzstd.so.1 unmonitored found the engine's copy
+  # under the monitor: the monitor changed which libraries the program
+  # loads. Measured 2026-11-20 with reprobuild 0.2.24's packaged shim: a
+  # probe built without libzstd in its RUNPATH loaded
+  # `<zstd>/lib/libzstd.so.1` "RPATH from file librepro_monitor_shim.so"
+  # under `repro test`, and failed to load it with the same shim stripped
+  # of its DT_RPATH.
   postFixup = ''
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       for b in "$out"/bin/* "$out"/lib/*; do
+        case "$(basename "$b")" in
+          librepro_monitor_shim.so)
+            ${patchelf}/bin/patchelf --remove-rpath "$b"
+            continue
+            ;;
+        esac
         if orig=$(${patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
           ${patchelf}/bin/patchelf --force-rpath \
             --set-rpath "$orig''${orig:+:}${runtimeLibraryPath}" "$b"
         fi
       done
+      # Fail the build rather than publish a shim that changes library
+      # resolution in the programs it monitors.
+      shim="$out/lib/librepro_monitor_shim.so"
+      if [ -e "$shim" ] && [ -n "$(${patchelf}/bin/patchelf --print-rpath "$shim")" ]; then
+        echo "error: $shim carries a library search path; it must carry none" >&2
+        exit 1
+      fi
     ''}
 
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''
