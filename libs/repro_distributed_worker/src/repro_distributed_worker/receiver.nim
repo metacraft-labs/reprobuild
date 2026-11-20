@@ -172,6 +172,14 @@ type
       ## snapshot's delta applied and its tree verified. "" = check the base
       ## commit out afresh for every goal (`materializeRepoSnapshot`).
 
+  ActiveLease = ref object
+    spec: LeaseSpec
+      ## As the lease will be (or was) run; `cleanupLease` needs its layers
+      ## and slot.
+    handle: LeaseHandle
+    slot: int
+      ## The slot it holds in `WorkerReceiver.slots`; -1 = none.
+
   WorkerReceiver* = ref object
     config*: WorkerConfig
     fetchBlob*: BlobFetcher
@@ -191,6 +199,11 @@ type
     executionRecords*: int
     leaseCounter: int
     slots: seq[bool]
+    active: Table[string, ActiveLease]
+      ## Every lease whose directory exists (goals and the canary), by id,
+      ## so a stopping worker can end and remove them (`stopLeases`).
+    stopped*: bool
+      ## Set by `stopLeases`: the worker runs no further canary.
     pool*: WorktreePool
       ## Created from `config.worktreePoolRoot` (nil without one).
     materializations*: int
@@ -240,6 +253,69 @@ proc releaseSlot(r: WorkerReceiver; slot: int) =
     r.slots[slot] = false
 
 proc canarySlot*(r: WorkerReceiver): int = r.config.leaseSlots
+
+proc trackLease(r: WorkerReceiver; spec: LeaseSpec): ActiveLease =
+  result = ActiveLease(spec: spec, handle: LeaseHandle(), slot: -1)
+  r.active[spec.leaseId] = result
+
+proc untrackLease(r: WorkerReceiver; leaseId: string): bool =
+  ## Whether the lease was still its caller's to clean up: false once
+  ## `stopLeases` ended and removed it.
+  if leaseId notin r.active:
+    return false
+  r.active.del(leaseId)
+  true
+
+proc activeLeases*(r: WorkerReceiver): int = r.active.len
+
+proc stopLeases*(r: WorkerReceiver): int =
+  ## The worker is stopping: ends every lease still running (`cancelLease`)
+  ## and removes its directory through the sandbox's own cleanup — under
+  ## the Linux floor the lease's files belong to its slot's subordinate uid,
+  ## and the daemon's user cannot delete them (reprobuild-pm issue
+  ## 2026-11-12). Synchronous, because the daemon's stop path may never
+  ## drive the dispatcher again; a suspended lease that is resumed finds
+  ## itself untracked and cleans nothing up twice. Returns how many leases
+  ## it ended.
+  r.stopped = true
+  var leases: seq[ActiveLease] = @[]
+  for lease in r.active.values:
+    leases.add(lease)
+  r.active.clear()
+  for lease in leases:
+    cancelLease(lease.handle)
+    discard cleanupLease(lease.spec)
+    removeLeaseCgroup(lease.spec.cgroupPath)
+    # EVID-6: the supervisor's output is not retained (see `dropLease`).
+    try: removeDir(lease.spec.metaDir) except OSError: discard
+    r.releaseSlot(lease.slot)
+  leases.len
+
+proc reclaimOrphanedLeases*(r: WorkerReceiver): int =
+  ## At start: removes the leases and supervisor output a previous worker
+  ## left behind — one that crashed, or was killed, before `stopLeases`
+  ## ran. Each lease is removed through the sandbox's own cleanup, as the
+  ## slot whose user owns its files (`leaseSlotOwning`). Only for a worker
+  ## that has started no lease yet: every lease directory is taken for an
+  ## orphan. Returns how many lease directories it removed.
+  for kind, path in walkDir(r.config.leaseRoot):
+    if kind != pcDir:
+      continue
+    let id = path.extractFilename
+    var spec = LeaseSpec(leaseId: id, leaseRoot: r.config.leaseRoot,
+      leaseDir: path, metaDir: r.config.metaRoot / id, layers: r.config.layers)
+    let slot = leaseSlotOwning(path)
+    if slot >= 0:
+      spec.slot = slot
+      # The cleanup supervisor writes its status beside the lease's own.
+      try: createDir(spec.metaDir) except OSError: discard
+    else:
+      spec.layers = {}
+    if cleanupLease(spec):
+      inc result
+  for kind, path in walkDir(r.config.metaRoot):
+    if kind == pcDir:
+      try: removeDir(path) except OSError: discard
 
 proc hex32(d: array[32, byte]): string =
   const H = "0123456789abcdef"
@@ -595,7 +671,12 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
   let siblingsRoot =
     if snap.developSiblings.len > 0: r.config.leaseRoot / leaseId / "siblings"
     else: ""
+  var slot = -1
+  var spec = LeaseSpec(leaseId: leaseId, leaseRoot: r.config.leaseRoot,
+    leaseDir: r.config.leaseRoot / leaseId, metaDir: r.config.metaRoot / leaseId,
+    layers: {})
   createDir(r.config.leaseRoot / leaseId)
+  let tracked = r.trackLease(spec)
   # Fetch exactly the snapshot's modified blobs first (asynchronously, each
   # BLAKE3-verified), so materialization itself never blocks the dispatcher.
   # They stay in memory: the worker's own stores never hold a snapshot's
@@ -619,11 +700,9 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
     {.cast(gcsafe).}:
       if hydrated.blobs.hasKey(d): some(hydrated.blobs[d])
       else: none(seq[byte])
-  var slot = -1
-  var spec = LeaseSpec(leaseId: leaseId, leaseRoot: r.config.leaseRoot,
-    leaseDir: r.config.leaseRoot / leaseId, metaDir: r.config.metaRoot / leaseId,
-    layers: {})
   proc dropLease() =
+    if not r.untrackLease(leaseId):
+      return   # `stopLeases` ended and removed it
     discard cleanupLease(spec)
     r.releaseSlot(slot)
     # The supervisor's output (the goal's stdout/stderr, its reports) can
@@ -749,6 +828,7 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
     setFilePermissions(inputsDir, {fpUserRead, fpUserWrite, fpUserExec,
       fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
   slot = r.acquireSlot()
+  tracked.slot = slot
   if slot < 0:
     dropLease()
     return ReachGoalResponse(requestId: req.requestId, status: gsFailed,
@@ -776,12 +856,19 @@ proc handleReachGoal*(r: WorkerReceiver; caller: CallerIdentity;
         ("operation", rep.syscall), ("pid", $rep.pid)]
       if rep.count > 0: fields.add(("count", $rep.count))
       rr.report("lease-supervisor", rep.kind, fields, log = log)
+  tracked.spec = spec
   var outcome: LeaseOutcome
   try:
-    outcome = await runLease(spec, onReport)
+    outcome = await runLease(spec, onReport, tracked.handle)
   except CatchableError as err:
     outcome = LeaseOutcome(error: "the execution lease failed: " & err.msg)
   removeLeaseCgroup(cg.path)
+  if leaseId notin r.active:
+    # The worker stopped during the lease (`stopLeases`): it was killed and
+    # its worktree is gone, so there is nothing to collect or certify.
+    return ReachGoalResponse(requestId: req.requestId, status: gsFailed,
+      reason: "the worker stopped during the execution lease",
+      profile: $r.config.profile)
   rec.isolation = outcome.isolation
   var resp = ReachGoalResponse(requestId: req.requestId,
     treeBefore: mat.observedTree, leaseReports: int32(outcome.reports.len),
@@ -967,12 +1054,17 @@ proc runCanaryLease*(r: WorkerReceiver; counter: int): Future[tuple[ok: bool;
     readRoots: r.config.readRoots, closureRoots: r.config.closureRoots,
     hidePaths: r.config.hidePaths, layers: r.config.layers,
     timeoutMs: 60_000, slot: r.canarySlot())
+  if r.stopped:
+    return (false, "the worker is stopping")
+  let tracked = r.trackLease(spec)
   var outcome: LeaseOutcome
   try:
     createDir(leaseDir)
-    outcome = await runLease(spec)
+    outcome = await runLease(spec, handle = tracked.handle)
   except CatchableError as err:
     outcome = LeaseOutcome(error: err.msg)
+  if not r.untrackLease(leaseId):
+    return (false, "the worker stopped during the canary lease")
   discard cleanupLease(spec)
   try: removeDir(spec.metaDir) except OSError: discard
   if not outcome.started:

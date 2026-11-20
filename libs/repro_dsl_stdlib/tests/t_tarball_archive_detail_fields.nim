@@ -31,11 +31,12 @@
 ##
 ## No mocks: the macros, the codec and a real `nim c` of the generated stub.
 
-import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, sequtils, strutils, unittest]
 
 import repro_interface_artifacts
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
+import repro_test_support/in_tree_scratch
 
 const DetailSha512 = repeat('c', 128)
 
@@ -269,8 +270,7 @@ suite "GM4b: tarball archive detail fields":
 
   test "the thin-interface stub reconstructs the contributed detail":
     let artifact = artifactFromRegisteredDsl(currentSourcePath())
-    let tempRoot = createTempDir("repro-gm4b-detail-stub", "",
-      getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-gm4b-detail-stub")
     defer: removeDir(tempRoot)
     writeNimInterfaceStub(tempRoot / "detail_interface.nim", artifact)
     let probe = tempRoot / "detail_probe.nim"
@@ -383,8 +383,7 @@ suite "GM4b: tarball archive detail fields":
 
   test "installer application: an incomplete installer-silent record is " &
       "an authoring error":
-    let tempRoot = createTempDir("repro-installer-detail-error", "",
-      getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-installer-detail-error")
     defer: removeDir(tempRoot)
     const Complete = [
       ("archiveType", "\"dmg\""),
@@ -461,8 +460,7 @@ suite "GM4b: tarball archive detail fields":
 
   test "GM4c: an application record without its team or sha256 is an " &
       "authoring error":
-    let tempRoot = createTempDir("repro-gm4c-detail-error", "",
-      getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-gm4c-detail-error")
     defer: removeDir(tempRoot)
     proc compileRecord(fields: string;
                        digest = "sha256 = \"" & repeat('f', 64) & "\""):

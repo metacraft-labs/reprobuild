@@ -63,6 +63,36 @@ suite "the lock-pinned catalog is declared to the compile, not read by it":
     delEnv(LockedCatalogEnv)
     check findEnclosingLockPinnedCatalog(recipe).revision == "bbbb2222"
 
+  test "a directory that only shares the catalog's name keeps the locked identity":
+    # This host has `~/.cache/reprobuild-packages`, a kernel-build scratch
+    # directory above the suite's TMPDIR. It defines no package, so it is no
+    # catalog, and the locked revision governs. A real catalog checkout there
+    # that is not at the pin is passed over just the same (only develop mode
+    # or a checkout AT the pin replaces it), so the identity keeps the pin
+    # either way; the predicate is what tells the two apart.
+    let root = createTempDir("repro-catalog-lookalike-", "")
+    defer: removeDir(root)
+    let project = root / "project"
+    createDir(project)
+    let recipe = project / "repro.nim"
+    writeFile(recipe, "import repro_project_dsl\n")
+    writeFile(project / CommittedLockFileName, lockPinning("dddd4444"))
+    let previous = getEnv(LockedCatalogEnv)
+    let previousRoot = getEnv(ReprobuildPackagesRootEnv)
+    defer:
+      if previous.len > 0: putEnv(LockedCatalogEnv, previous)
+      else: delEnv(LockedCatalogEnv)
+      if previousRoot.len > 0: putEnv(ReprobuildPackagesRootEnv, previousRoot)
+    delEnv(LockedCatalogEnv)
+    delEnv(ReprobuildPackagesRootEnv)
+    let lookalike = root / ReprobuildPackagesRepositoryName
+    createDir(lookalike / "kernel-src")
+    check not isReprobuildPackagesCatalog(lookalike)
+    check catalogSelectionIdentity(recipe) == "catalog-locked:dddd4444"
+    createDir(lookalike / "packages" / "interfaces")
+    check isReprobuildPackagesCatalog(lookalike)
+    check catalogSelectionIdentity(recipe) == "catalog-locked:dddd4444"
+
   test "a declaration that no lock pins the catalog reads no lock either":
     let root = createTempDir("repro-unlocked-catalog-", "")
     defer: removeDir(root)

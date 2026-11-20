@@ -104,19 +104,24 @@ suite "Remix registry — checkpoint cadence and refusal capture":
     let root = createTempDir("remix-cadence-", "")
     defer: removeDir(root)
     var cfg = dirs(root)
-    cfg.checkpointRefreshSeconds = 2
+    # `issuedAt` and the refresh test both truncate to whole seconds, so two
+    # instants 1.1 s apart can differ by 2 in `issuedAt` terms. With a 2 s
+    # interval that re-signed the "reused" checkpoint whenever the first tick
+    # landed late in its second (run 52: 1794665210 -> 1794665212). 4 s keeps
+    # the reuse check clear of that by almost two seconds of scheduling slack.
+    cfg.checkpointRefreshSeconds = 4
     let reg = newRegistrar(cfg, logKey)
     let spool = initSpool(cfg.spoolDir)
     discard spool.deliver("i", frame(mtSubmitRelease, genesis(generateKeypair())))
     discard reg.tick()
     let first = latestCheckpoint(root)
     # Past the one-second resolution of `issuedAt`, so a re-signature would
-    # be visible, but well inside the two-second refresh interval.
+    # be visible, but well inside the four-second refresh interval.
     sleep(1100)
     discard spool.deliver("i", frame(mtRequestIndexUpdate, @[]))
     discard reg.tick()
     check latestCheckpoint(root).issuedAt == first.issuedAt    # reused, not re-signed
-    sleep(2100)
+    sleep(3100)                    # 4.2 s in all: at least 4 whole seconds
     discard reg.tick()
     check latestCheckpoint(root).issuedAt > first.issuedAt     # refreshed on the timer
     check latestCheckpoint(root).rootHash == first.rootHash

@@ -236,6 +236,9 @@ const
   ctShimProtocolThreeTests = TestGraphArtifact(
     path: ctShimFixtureRoot & "/fixture_protocol_three_tests",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests")
+  ctShimProtocolAbortPaths = TestGraphArtifact(
+    path: ctShimFixtureRoot & "/fixture_protocol_abort_paths",
+    actionId: "reprobuild.test_fixtures.ct_shim_fixture_protocol_abort_paths")
   ctShimM4ParitySuite = TestGraphArtifact(
     path: ctShimFixtureRoot & "/fixture_m4_parity_suite",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite")
@@ -537,7 +540,7 @@ const
     TestGraphArtifacts(
       source: "libs/ct_test_unittest_parallel/tests/" &
         "t_test_binary_run_one_writes_result_file.nim",
-      artifacts: @[ctShimProtocolThreeTests]),
+      artifacts: @[ctShimProtocolThreeTests, ctShimProtocolAbortPaths]),
     # SHARED likewise: one parity fixture behind the parity test and the
     # partition-file test.
     TestGraphArtifacts(
@@ -3870,6 +3873,17 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/ct_shim_fixture_protocol_three_tests",
       actionId = "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests"))
+    # Cases that leave the process from inside their body (a failed
+    # ``require``, a ``quit``). Like the three-tests fixture it fails on
+    # purpose, so it lives here and not in ``build/test-bin``.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "libs/ct_test_unittest_parallel/tests/fixtures/" &
+        "fixture_protocol_abort_paths.nim",
+      binary = ctShimFixtureDir & "/fixture_protocol_abort_paths",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/ct_shim_fixture_protocol_abort_paths",
+      actionId = "reprobuild.test_fixtures.ct_shim_fixture_protocol_abort_paths"))
     # ``--threads:on`` matches what the two ct-test-runner tests passed by
     # hand; the parity assertion compares this binary under two different
     # runners, so its compile flags have to stay pinned rather than inherited.

@@ -28,13 +28,14 @@
 ## fixtures in this process, the real codec, renderer, resolver and a real
 ## `nim c` / `nim check` of generated sources.
 
-import std/[json, options, os, osproc, strutils, tables, tempfiles, unittest]
+import std/[json, options, os, osproc, strutils, tables, unittest]
 
 import repro_project_dsl
 import repro_interface_artifacts
 import repro_interface_artifacts/contribution_records
 import repro_home_apply
 import repro_home_apply/package_catalog
+import repro_test_support/in_tree_scratch
 
 package gm5bapp:
   provisioning:
@@ -135,7 +136,7 @@ suite "GM5b: Homebrew bridge records":
   test "the thin-interface stub registers the record":
     let pi = consumer()
     let artifact = ProjectInterfaceArtifact(projectInterface: pi)
-    let tempRoot = createTempDir("repro-gm5b-stub", "", getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-gm5b-stub")
     defer: removeDir(tempRoot)
     writeNimInterfaceStub(tempRoot / "gm5b_interface.nim", artifact)
     let probe = tempRoot / "gm5b_probe.nim"
@@ -216,7 +217,7 @@ suite "GM5b: Homebrew bridge records":
       check raised
 
   test "authoring errors: package-level Homebrew, a bad token, a bad tap":
-    let tempRoot = createTempDir("repro-gm5b-authoring", "", getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-gm5b-authoring")
     defer: removeDir(tempRoot)
     proc checkSource(body: string): tuple[output: string; exitCode: int] =
       let source = tempRoot / "bad_brew.nim"

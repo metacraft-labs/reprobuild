@@ -222,8 +222,13 @@ proc spawnLoopbackSwimPeers*(n: int;
   ## convergence test from contending with kernel ephemeral-port
   ## allocation. A future M-step can layer the engine over real
   ## UDP/TCP transport without touching this helper.
+  ##
+  ## `seed` decides the seed lists AND each engine's own random choices
+  ## (probe order, indirect-probe intermediaries), so a cluster spawned
+  ## with the same seed makes the same choices on every run.
   result = newSeq[LoopbackPeer](n)
   var rng = initRand(seed)
+  var engineSeeds = initRand(seed xor 0x5EED_5EED'i64)
   # First construct every peer + registry so we can build the seed
   # list across the full population.
   var endpoints = newSeq[Endpoint](n)
@@ -256,12 +261,18 @@ proc spawnLoopbackSwimPeers*(n: int;
       config = swimConfig,
       transport = newInProcessTransport(),
       seedEndpoints = seeds)
+    engine.seedRng(int64(engineSeeds.rand(high(int) - 1)) + 1)
     result[i].swim = engine
 
-proc startLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
+proc startLoopbackSwimPeers*(peers: seq[LoopbackPeer];
+                             runPeriodTimers = true) =
   ## Starts each peer's SWIM engine. Splits start from spawn so tests
   ## can pre-seed registries (e.g. inject a fake suspect) before the
   ## scheduler runs.
+  ##
+  ## With `runPeriodTimers = false` no `periodLoop` is started: the
+  ## bootstrap probes go out, and the caller drives each protocol period
+  ## with `runProtocolPeriod`.
   ##
   ## Two-phase to avoid the race where peer A's bootstrap probe lands
   ## at peer B before B has registered itself in the in-process
@@ -282,7 +293,8 @@ proc startLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
   for peer in peers:
     if not peer.swim.isNil:
       asyncCheck peer.swim.bootstrap()
-      asyncCheck peer.swim.periodLoop()
+      if runPeriodTimers:
+        asyncCheck peer.swim.periodLoop()
 
 proc shutdownLoopbackSwimPeers*(peers: seq[LoopbackPeer]) =
   for peer in peers:

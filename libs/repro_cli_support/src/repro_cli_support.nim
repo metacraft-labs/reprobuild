@@ -46732,15 +46732,35 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     result.diagnostic = result.worktree.diagnostic
     return
 
+  # A declared path that IS the pushed worktree settles the answer without
+  # Git. The common-directory sweep below costs two git processes per declared
+  # repo, and its result is consulted only when no declared path matches, so
+  # running it for an ordinary push from the declared checkout spent ~320
+  # processes per call on a list that was then discarded — and the pre-push
+  # gate calls this twice (once itself, once via ``pickTriggerRepo``). Two
+  # declarations of the same path are still detected, by path alone.
+  # reprobuild-pm issues/2026-10-10-pre-push-gate-observes-every-declared-
+  # repo-three-times-per-push.md.
   var pathMatches: seq[int]
+  for index, repo in repos:
+    if samePathIdentity(result.worktree.worktreeRoot,
+        workspaceRoot / repo.path):
+      pathMatches.add(index)
+  if pathMatches.len == 1:
+    result.found = true
+    result.repoIndex = pathMatches[0]
+    return
+  if pathMatches.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo shares the pushed " &
+      "worktree's filesystem identity"
+    return
+
   var commonMatches: seq[int]
   var missingDeclaredWorktrees = initHashSet[int]()
   var presentDeclaredWorktrees: seq[int]
   for index, repo in repos:
     let declaredPath = workspaceRoot / repo.path
-    if samePathIdentity(result.worktree.worktreeRoot, declaredPath):
-      pathMatches.add(index)
-      continue
     let declaredWorktree = discoverGitWorktree(identity, declaredPath)
     if declaredWorktree.ok:
       if samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
@@ -46756,12 +46776,11 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
       # in for it would turn a failed structural check into authorization.
       missingDeclaredWorktrees.incl(index)
 
-  let structural = if pathMatches.len > 0: pathMatches else: commonMatches
-  if structural.len == 1:
+  if commonMatches.len == 1:
     result.found = true
-    result.repoIndex = structural[0]
+    result.repoIndex = commonMatches[0]
     return
-  if structural.len > 1:
+  if commonMatches.len > 1:
     result.ambiguous = true
     result.diagnostic = "more than one declared repo shares the pushed " &
       "worktree's filesystem identity"
@@ -56072,18 +56091,25 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       continue
     headShas[repo.path] = headRes.headSha
     observedRoots[repo.name] = repoPath
-    let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
-    let isClean =
-      if cleanRes.status == gqsOk: cleanRes.isClean
-      else: false
-    if not isClean and inDirtyScope:
-      let reason =
-        if cleanRes.status != gqsOk:
-          probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
-        else:
-          "working tree has uncommitted changes"
-      dirtyEntries.add(WorkspaceLockDirtyEntry(
-        name: repo.name, path: repo.path, reason: reason))
+    # Only an in-scope repo's cleanliness can refuse, and the lock records
+    # HEAD and branch, never cleanliness — so probing an out-of-scope repo
+    # (``git status``, the costliest of the per-repo queries) computed a value
+    # that was discarded. Under the pre-push gate that was every declared repo
+    # outside the pushed closure (reprobuild-pm issues/2026-10-10-pre-push-
+    # gate-observes-every-declared-repo-three-times-per-push.md).
+    if inDirtyScope:
+      let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
+      let isClean =
+        if cleanRes.status == gqsOk: cleanRes.isClean
+        else: false
+      if not isClean:
+        let reason =
+          if cleanRes.status != gqsOk:
+            probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
+          else:
+            "working tree has uncommitted changes"
+        dirtyEntries.add(WorkspaceLockDirtyEntry(
+          name: repo.name, path: repo.path, reason: reason))
     let branchRes = gitRunPlainQuery(identity,
       ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
@@ -89654,6 +89680,13 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       # detection log carry the detections, the requester signs.
       dw.newWorkerReceiver(config, localOnly, storeOutput)
   receiver.storeRecord = storeRecord
+  # A previous daemon that crashed or was killed mid-lease left its leases
+  # behind, their files owned by a slot's subordinate uid; a clean stop
+  # removes its own (`workerStop` below).
+  discard dw.reclaimOrphanedLeases(receiver)
+  host.workerStop = proc() {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      discard dw.stopLeases(receiver)
   host.localLogs.add(config.detectionLogPath)
   let app = host.appender
   if hardened:
@@ -97449,10 +97482,21 @@ proc siblingVariantDeclarations(checkout: string):
     return
   let inheritedOverrides = getEnv(DevelopOverridesEnvVar)
   delEnv(DevelopOverridesEnvVar)
+  # Why the probe could not be ASKED, as opposed to the sibling declaring
+  # nothing. The written document still cannot tell the two apart (see
+  # above), but the operator can be told: a swallowed failure here surfaces
+  # only as a missing `variants` field, far from its cause -- a RunQuota
+  # auto-start that failed, an extraction or provider compile that failed --
+  # and twice now that has been all a failing run left behind.
+  var probeFailure = ""
   try:
     let probed = solverInputsFromCompiledProvider(checkout,
-      requireSolverBinding = false)
+      requireSolverBinding = false, failure = addr probeFailure)
     if probed.isNone:
+      if probeFailure.len > 0:
+        stderr.writeLine("repro develop: note: could not read the variant " &
+          "declarations of " & checkout & ", so the override records " &
+          "none: " & probeFailure)
       return
     for decl in probed.get().variants:
       if decl.name.len == 0:
@@ -97482,7 +97526,10 @@ proc siblingVariantDeclarations(checkout: string):
         if contributed.priority == vpDefault:
           recorded.default = contributed.value
       result.add(recorded)
-  except CatchableError:
+  except CatchableError as error:
+    stderr.writeLine("repro develop: note: could not read the variant " &
+      "declarations of " & checkout & ", so the override records none: " &
+      error.msg)
     result = @[]
   finally:
     if inheritedOverrides.len > 0:

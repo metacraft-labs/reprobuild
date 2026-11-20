@@ -99,11 +99,12 @@ type
 
     # Instrumentation counters (Peer-Cache-Scale M0).
     protocolPeriodCount*: int
-      ## Number of protocol periods this engine's `periodLoop` has
-      ## started. Convergence targets are stated in protocol periods, and
-      ## a period's wall-clock length stretches with the probe and with
-      ## scheduling delay, so a measurement counts periods here rather
-      ## than dividing elapsed time by `swimProbePeriodMs`.
+      ## Number of protocol periods this engine has started, from its
+      ## `periodLoop` or from `runProtocolPeriod`. Convergence targets are
+      ## stated in protocol periods, and a period's wall-clock length
+      ## stretches with the probe and with scheduling delay, so a
+      ## measurement counts periods here rather than dividing elapsed time
+      ## by `swimProbePeriodMs`.
     sentDirectProbeCount*: int
     sentIndirectProbeReqCount*: int
     sentAckCount*: int
@@ -841,15 +842,28 @@ proc probeOnce(engine: SwimEngine) {.async.} =
     return
   markSuspected(engine, targetPeerId, targetEndpoint)
 
+proc runProtocolPeriod*(engine: SwimEngine) {.async.} =
+  ## One protocol period: age suspicions, then probe the next member.
+  ## `periodLoop` runs one per `swimProbePeriodMs`; a test that states a
+  ## claim in protocol periods drives them itself, so the count does not
+  ## depend on how the host schedules the dispatcher's timers.
+  inc engine.protocolPeriodCount
+  try:
+    await probeOnce(engine)
+  except CatchableError:
+    discard
+
 proc periodLoop*(engine: SwimEngine) {.async.} =
   let period = max(1, engine.config.swimProbePeriodMs)
   while engine.running:
-    inc engine.protocolPeriodCount
-    try:
-      await probeOnce(engine)
-    except CatchableError:
-      discard
+    await runProtocolPeriod(engine)
     await sleepAsync(period)
+
+proc seedRng*(engine: SwimEngine; seed: int64) =
+  ## Replaces the clock-derived seed of the engine's probe-order and
+  ## indirect-probe choices, so an in-process cluster replays the same
+  ## choices on every run.
+  engine.rng = initRand(seed)
 
 # ---------------------------------------------------------------------------
 # Bootstrap.

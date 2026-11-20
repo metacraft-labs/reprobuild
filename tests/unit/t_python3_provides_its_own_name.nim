@@ -66,10 +66,17 @@ suite "python3 answers to the name it is declared under":
       check provides
 
   test "the Windows slice carries the alias specifically":
-    # Pinned on its own because this is the slice that regressed, and a
+    # Pinned on its own because Windows is where this regressed, and a
     # loop that passes for the wrong reason would hide it: the POSIX
     # entries satisfy the rule above through `executablePath` alone.
+    #
+    # Every Windows slice, not one: the package lists the embeddable zip
+    # and, since the catalog records became `tarball` statements, the full
+    # installer for each Windows CPU. Both distributions ship `python.exe`
+    # and nothing named `python3`, and a version pin selects any of them.
     let windows = slices("python3").filterIt(it.os == "windows")
-    check windows.len == 1
-    check windows[0].executablePath == "python.exe"
-    check windows[0].executableAlias == "python3.exe"
+    check windows.len > 0
+    for slice in windows:
+      checkpoint(slice.os & "/" & slice.cpu & " " & slice.packageId)
+      check slice.executablePath == "python.exe"
+      check slice.executableAlias == "python3.exe"

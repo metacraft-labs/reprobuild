@@ -170,7 +170,10 @@ const PartialCatalogCoverage* = {
     "hosts; the WinLibs archive arm is the Windows half only.",
   "install-file": "coreutils_install.nim's nixPackage is the realization " &
     "on Nix-capable hosts; the PortableGit archive arm is the Windows half " &
-    "only."
+    "only.",
+  "playwright": "playwright.nim's nixPackage (playwright-test) is the " &
+    "realization on Linux and macOS; the playwright-core archive plus its " &
+    "browser closure is the Windows half only."
 }
 
 const PlatformDeclarationSourceFile* =

@@ -11,6 +11,11 @@
       "source": "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim"
     },
     {
+      "ctTestCaseCount": 32,
+      "inventoryStaticCaseCount": 36,
+      "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
+    },
+    {
       "ctTestCaseCount": 2,
       "inventoryStaticCaseCount": 3,
       "source": "libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim"
@@ -26,8 +31,13 @@
       "source": "tests/integration/t_stdlib_python_tarball_arms_realize.nim"
     },
     {
-      "ctTestCaseCount": 5,
-      "inventoryStaticCaseCount": 6,
+      "ctTestCaseCount": 1,
+      "inventoryStaticCaseCount": 4,
+      "source": "tests/integration/t_windows_sh_leaves_path_unchanged.nim"
+    },
+    {
+      "ctTestCaseCount": 6,
+      "inventoryStaticCaseCount": 7,
       "source": "tests/unit/t_host_system_tools.nim"
     }
   ],
@@ -35,16 +45,16 @@
   "counts": {
     "catalogs": 5,
     "itemsByKind": {
-      "case": 17814,
-      "suite": 4132
+      "case": 18541,
+      "suite": 4312
     },
     "itemsByProvider": {
       "assembly-fallback": 3,
-      "nim-unittest": 21369,
+      "nim-unittest": 22168,
       "python-pytest": 7,
-      "python-unittest": 567
+      "python-unittest": 675
     },
-    "itemsTotal": 21946,
+    "itemsTotal": 22853,
     "responseDiagnostics": {
       "info": 1,
       "warning": 33
@@ -198,6 +208,21 @@
     },
     {
       "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
+      "id": "nim-unittest/nim/std/unittest/tests/integration/t_auto_runquota_shared_per_user_daemon.nim::the-shared-per-user-runquotad::two-sequential-invocations-use-one-daemon,-which-outlives-them",
+      "occurrences": 2,
+      "sites": [
+        {
+          "file": "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
+          "startLine": 198
+        },
+        {
+          "file": "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
+          "startLine": 383
+        }
+      ]
+    },
+    {
+      "detail": "more than one declaration reduces to this identity; the surface's id is a slug and carries no line, so these declarations are not separately addressable through it. Check the sites before calling it a source-side duplication: discovery is a static scan and is blind to `when` selection, so declarations in mutually exclusive branches collide here while at most one of them exists in any given build. That is a limitation of the identity (it has no configuration dimension), not necessarily a defect in the source",
       "id": "nim-unittest/nim/std/unittest/tests/integration/t_r2_iso_boot.nim::t_r2_iso_boot::r2-iso-boots-under-hyper-v-gen-2-uefi;-kernel-+-initramfs-reach-userspace",
       "occurrences": 2,
       "sites": [
@@ -243,29 +268,29 @@
     }
   ],
   "reconciliation": {
-    "caseCoveragePercent": 97.67,
-    "caseItemsInCatalog": 17814,
-    "casesAddressableThroughTheSurface": 16891,
-    "collidingIdentities": 12,
-    "distinctCaseIdentities": 17800,
+    "caseCoveragePercent": 97.69,
+    "caseItemsInCatalog": 18541,
+    "casesAddressableThroughTheSurface": 17526,
+    "collidingIdentities": 13,
+    "distinctCaseIdentities": 18526,
     "groundTruth": "benchmarks/reports/reprobuild-suite-m0-inventory-sources.json",
     "perSourceCaseCountAgreement": {
-      "agree": 2689,
-      "compared": 2695,
-      "disagree": 6
+      "agree": 2782,
+      "compared": 2790,
+      "disagree": 8
     },
-    "sourceCoveragePercent": 99.7,
-    "sourcesAddressableThroughTheSurface": 2695,
+    "sourceCoveragePercent": 99.71,
+    "sourcesAddressableThroughTheSurface": 2790,
     "sourcesNotAddressable": 8,
-    "trackedNimSuiteSources": 2703,
-    "trackedStaticCaseCount": 17294
+    "trackedNimSuiteSources": 2798,
+    "trackedStaticCaseCount": 17941
   },
   "schemaVersion": 1,
   "surface": {
     "binary": "ct-test",
     "provenance": "",
     "resolvedBy": "PATH:ct-test",
-    "sha256": "bdf2c9b47c5a2a81fdef76fd082d40b324f29fde693b0428b2fa5576f9e160c9"
+    "sha256": "df40c7641da62ace44a31118f20b14b46cb28491a98f719a59ef3c67b6a94718"
   },
   "title": "Reprobuild case addressability through the canonical `ct test` surface",
   "unaddressableSources": [
@@ -289,7 +314,7 @@
     },
     {
       "detail": "declares no literal suite/test of its own; any cases it contributes are declared in the modules it imports, which are discovered separately under their own identities",
-      "inventoryStaticCaseCount": 110,
+      "inventoryStaticCaseCount": 115,
       "reason": "declares-no-cases-of-its-own",
       "source": "tests/bundles/bundle_repro_dsl_stdlib_catalogs_pure_unit.nim"
     },
