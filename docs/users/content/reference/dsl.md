@@ -145,6 +145,18 @@ or `--include`. A file that states its imports therefore opens cleanly in
 `nim check`, `nimsuggest` and any Nim language server, and the application
 sources next to it are not affected by the project-file language.
 
+A file named `repro.nim`, `reprobuild.nim`, `home.nim` or `system.nim` that is
+opened on its own, by `nim check repro.nim` or by an editor, is checked against
+the whole language, `build:` bodies included, with no flag. A program of the
+project that imports its `repro.nim` compiles only the declarations it needs,
+so it does not compile reprobuild itself and does not see errors in the build
+bodies. A helper module of your own with another name is checked against the
+whole language when a `<helper>.nims` beside it says so:
+
+```text
+switch("define", "reproEvalMode")
+```
+
 ## Packages
 
 ```text
@@ -397,6 +409,10 @@ import reprobuild/dsl/packages/nim as nimTools
 proc compileApp*(): BuildActionDef =
   nim.c(source = "src/app.nim", binary = "build/bin/app")
 ```
+
+Next to it, `build_helpers.nims` lets `nim check build_helpers.nim` and an
+editor check it against the whole language
+([How the compiler and editors find the modules](#how-the-compiler-and-editors-find-the-modules)).
 
 ## Configuration
 
