@@ -274,14 +274,17 @@ proc requireReprobuildSources*(repoRoot: string) =
       "that ships share/repro/source/config.nims, or point " &
       "$REPROBUILD_SOURCE_ROOT at a reprobuild source tree.")
 
-const ProfileCompileDefines*: seq[string] = @[]
+const ProfileCompileDefines*: seq[string] = @["reproEvalMode"]
   ## The `-d:` symbols the profile compile passes to `nim c` beyond the ones
   ## Nim sets for the target platform. `profileCompileArgv` emits exactly
   ## these, and `repro home export` reports them as the compile-time
   ## definitions the intent was evaluated under -- one list, so the record
-  ## cannot disagree with the command. Empty today: a profile sees the
-  ## target's platform symbols (`linux`, `macosx`, `windows`, `amd64`, …)
-  ## plus whatever its own `config.nims` defines.
+  ## cannot disagree with the command. A profile sees the target's platform
+  ## symbols (`linux`, `macosx`, `windows`, `amd64`, …), these, and whatever
+  ## its own `config.nims` defines. `reproEvalMode` selects the full project
+  ## DSL (`repro_project_dsl/mode`): `reprobuild/home` re-exports
+  ## `repro_profile`, whose modules import it, and without a mode define it
+  ## is the thin mode.
 
 proc profileCompileArgv*(nimExe, profileRoot, nimcacheDir, outBinary,
                          repoRoot: string; cCompiler = "";

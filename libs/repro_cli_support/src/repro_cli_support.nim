@@ -29687,6 +29687,9 @@ proc typecheckConsumerAgainstInterface*(consumerProjectFile: string;
   createDir(extendedPath(nimcache))
   let (code, output) = runArgvCapturingInDir(nim,
     ["check", "--hints:off", "--warnings:off",
+     # The full DSL: without a mode define `import reprobuild` is the thin
+     # mode, which does not type-check build bodies (`repro_project_dsl/mode`).
+     "--define:reproEvalMode",
      "--nimcache:" & nimcache, consumerProjectFile],
     repoRoot)
   InterfaceTypecheckResult(ok: code == 0, output: output)

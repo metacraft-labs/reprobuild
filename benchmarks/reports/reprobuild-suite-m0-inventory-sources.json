@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3039,
+    "nimTestBinaries": 3040,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 809,
-    "staticallyDetectedRuntimeCompilerFlowTests": 152,
-    "testEntries": 3089
+    "staticallyDetectedRuntimeCompilerFlowTests": 153,
+    "testEntries": 3090
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,7 +1725,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1684,
+      "integration": 1685,
       "platform/destructive": 198,
       "pure unit": 809,
       "unclassified": 372
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3039,
+    "nimTestBinaryCount": 3040,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3089
+    "testEntryCount": 3090
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -6202,7 +6202,7 @@
           "executedVariables": [
             "parts"
           ],
-          "line": 35,
+          "line": 36,
           "path": "tests/integration/t_import_of_a_moved_stdlib_module_names_the_new_home.nim",
           "patterns": [
             "nim-argv"
@@ -7310,7 +7310,7 @@
             "thinConsumer",
             "thinDir"
           ],
-          "line": 220,
+          "line": 223,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "nim-argv"
@@ -7333,7 +7333,7 @@
             "thinConsumer",
             "thinDir"
           ],
-          "line": 243,
+          "line": 246,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "nim-argv"
@@ -7356,7 +7356,7 @@
             "thinConsumer",
             "thinDir"
           ],
-          "line": 248,
+          "line": 251,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "nim-argv"
@@ -7370,7 +7370,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 257,
+          "line": 260,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -7386,7 +7386,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 333,
+          "line": 336,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-extract-interface"
@@ -7402,7 +7402,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 343,
+          "line": 346,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-compile-provider-binary"
@@ -7418,7 +7418,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 358,
+          "line": 361,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "repro-extract-interface"
@@ -7443,7 +7443,7 @@
             "thinConsumer",
             "thinDir"
           ],
-          "line": 373,
+          "line": 376,
           "path": "tests/integration/t_project_interface_artifact_import_modes.nim",
           "patterns": [
             "nim-argv"
@@ -8617,6 +8617,60 @@
         }
       ],
       "source": "tests/integration/t_ti3_fingerprint_split.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "interfaceLeg",
+          "executedVariables": [],
+          "line": 197,
+          "path": "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "result = extractInterfaceFromModule(modulePath, outDir / \"interface.rbsz\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "providerLeg",
+          "executedVariables": [],
+          "line": 259,
+          "path": "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "let compiled = compileProviderBinary(modulePath, binPath,"
+        },
+        {
+          "assignedCommandVariable": "command",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "command",
+            "requestPath",
+            "responsePath"
+          ],
+          "line": 314,
+          "path": "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var command = @[\"nim\", \"c\", \"--hints:off\", \"--warnings:off\","
+        }
+      ],
+      "source": "tests/integration/test_cs_m12_engine_modes_unchanged.nim"
     },
     {
       "class": "graph-fixture",
@@ -45116,7 +45170,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_core",
-        "repro_interface_artifacts"
+        "repro_interface_artifacts",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -47100,7 +47155,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_project_dsl"
+        "repro_project_dsl",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -57296,7 +57352,8 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_core",
-        "repro_interface_artifacts"
+        "repro_interface_artifacts",
+        "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
@@ -59109,6 +59166,27 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_cs_m12_engine_modes_unchanged",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
