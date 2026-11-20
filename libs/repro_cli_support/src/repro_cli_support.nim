@@ -52,6 +52,7 @@ import repro_cli_support/daemon_cli
 # `fsContainment` in the namespace of every module that touches `repro_core`.
 import repro_core/link_target
 import repro_core/path_identity
+import repro_core/process_env
 import repro_core/relocation
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
 # did NOT produce (that is the entire measurement: seventeen store paths on one
@@ -5688,6 +5689,23 @@ proc lockPinnedProducerCacheRoot(workspaceRoot: string): string =
   ## per-producer + per-revision below so a refreshed pin fetches a fresh tree.
   absolutePath(workspaceRoot) / ".repro" / "cross-repo-producers"
 
+proc lockPinnedProducerGitEnv(): StringTableRef =
+  ## The environment of the host ``git`` that fetches and verifies a
+  ## lock-pinned producer: the caller's, minus Git's repository-local bindings
+  ## (a ``GIT_DIR`` must not redirect the fetch into an unrelated tree) and
+  ## minus the loader controls. The ``git`` is the one found on ``PATH`` -- on
+  ## a CI runner the distribution's ``/usr/bin/git`` -- and the engine runs it
+  ## for its own work, not as a command the user asked for. A caller inside a
+  ## Nix dev shell can export an ``LD_LIBRARY_PATH`` naming Nix's krb5 and
+  ## OpenSSL; ``git-remote-https`` then loads those against the host's older
+  ## glibc and every fetch dies with ``version `GLIBC_2.38' not found``
+  ## (reprobuild-pm issue 2026-11-18, a lock-pinned producer fetch hands the
+  ## caller's LD_LIBRARY_PATH to the host git). The engine's other host-tool
+  ## calls (``curl``, ``nix``, ``nix-store``) drop them the same way.
+  ## A fresh table each call, so this process's environment is never changed.
+  result = scrubbedGitRepositoryEnv()
+  dropLoaderControls(result)
+
 proc verifyLockPinnedProducerSource(dep: LockedDep;
                                     sourceRoot, consumerRoot: string) =
   ## A pin identifies the checked-out source, not merely an object present in
@@ -5707,7 +5725,7 @@ proc verifyLockPinnedProducerSource(dep: LockedDep;
     # become part of a SHA compared against the pin; a failure carries git's
     # merged message, which the refusal below quotes.
     let execution = gitRunSeparated(gitBin, @["-C", sourceRoot] & @args,
-      scrubbedGitRepositoryEnv())
+      lockPinnedProducerGitEnv())
     if execution.code == 0: (execution.code, execution.output.strip())
     else: (execution.code, execution.diagnostic)
   let top = gitRev(["rev-parse", "--show-toplevel"])
@@ -5803,7 +5821,7 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # failure then read "fetch failed from <url> at pinned revision <rev>: "
     # with no cause at all.
     let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+      workingDir = cwd, env = lockPinnedProducerGitEnv())
     (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
@@ -102523,10 +102541,7 @@ proc fetchFlakeRevisionFields*(nixExe: string;
   # Loader controls of a provisioned profile must not reach a host tool that
   # was not built against them (the reason `hostNixEnvironment` drops them
   # for `nix-store`).
-  for key in ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
-              "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
-              "DYLD_INSERT_LIBRARIES"]:
-    if env.hasKey(key): env.del(key)
+  dropLoaderControls(env)
   var errPath = ""
   try:
     let created = createTempFile("repro-nix-fetch-", ".stderr")

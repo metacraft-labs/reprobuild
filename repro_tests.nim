@@ -3445,6 +3445,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_a_producer_fetch_ignores_the_callers_loader_path.nim",
+    binary: "build/test-bin/t_a_producer_fetch_ignores_the_callers_loader_path",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_action_cache_root_resolution.nim",
     binary: "build/test-bin/t_action_cache_root_resolution",
     defines: @[],
