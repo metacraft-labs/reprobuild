@@ -67,6 +67,33 @@ const
   HardLinkInfix = " link to "
   SymlinkInfix = " -> "
   NixStoreDir* = "/nix/store"
+  ExtractModeShell* = "umask go-w; "
+    ## Run before every bundle half's `tar -x`, in the shell that starts it,
+    ## together with `ExtractModeOptions`. `--no-same-permissions` has tar
+    ## write each member's permission bits (never setuid, setgid or sticky)
+    ## less the umask, and `go-w` adds group and world write to the
+    ## importer's own umask. So no extraction writes a special bit or a
+    ## group- or world-writable mode, whatever the archive stores and
+    ## whoever imports it.
+  NixExtractModeShell* = "umask 022; "
+    ## The Nix half's `ExtractModeShell`: a fixed umask, not the importer's
+    ## with `go-w` added. Store paths are read by every user, and a root
+    ## setup script with umask 027 or 077 would otherwise leave them
+    ## unreadable. `NixCanonicalModes` then makes the modes Nix's own.
+  NixCanonicalModes* = "a+rX,a-w"
+    ## `chmod -R` of each restored store path before its NAR hash is
+    ## checked: Nix's canonical 0444 and 0555 (an owner-executable file, or
+    ## a directory) whatever modes the archive stored. A file executable by
+    ## group or others but not its owner becomes executable, so its NAR hash
+    ## no longer matches and it is refused.
+  ExtractModeOptions* = " --no-same-owner --no-same-permissions"
+    ## GNU tar's defaults for the superuser are `--same-owner` and
+    ## `--same-permissions`: as root, an archive member's uid, gid and
+    ## setuid bit would be restored as stored. A NAR hash, a `contents`
+    ## digest and a part hash cover none of them. See
+    ## https://www.gnu.org/software/tar/manual/html_node/Option-Summary.html
+    ## and reprobuild-pm issues/
+    ## 2026-11-17-bundle-extraction-keeps-the-archive-s-setuid-bits-and-owners.md.
   NixStoreNameChars* = {'A'..'Z', 'a'..'z', '0'..'9', '+', '-', '.', '_',
     '?', '='}
     ## The characters Nix allows in a store path name (Nix's

@@ -174,6 +174,17 @@ type
   ImportOptions* = object
     bundleDir*: string
     manifestName*: string
+    manifest*: JsonNode
+      ## The transport manifest, when the caller holds it from a source it
+      ## trusts more than the half's directory: `repro bundle restore` passes
+      ## the copy inlined in the `latest.json` it read. The manifest file in
+      ## `bundleDir` is then not read at all, so the parts are held to these
+      ## hashes. nil: read `bundleDir / manifestName`.
+    bundleId*: string
+      ## The id the caller expects: `repro bundle restore` passes the `<id>`
+      ## of the half's directory in that `latest.json`. A manifest naming
+      ## another id is refused before any part is read (§5 step 2). Empty:
+      ## the manifest's id is checked against `contents` only.
     force*: bool
 
   ImportReport* = object
@@ -1236,14 +1247,13 @@ type ParsedManifest = object
   parts: seq[BundlePart]
   contentsPath: string
   contentsSha: string
+  node: JsonNode   ## the manifest as read, once
 
-proc readManifest(path: string): ParsedManifest =
-  if not fileExists(path):
-    fail("bundle manifest not found: " & path)
-  let node =
-    try: parseJson(readFile(path))
-    except JsonParsingError as e: fail("malformed bundle manifest " & path &
-      ": " & e.msg)
+proc parseManifest(node: JsonNode; path: string): ParsedManifest =
+  ## `path` names where `node` came from, for messages.
+  if node.kind != JObject:
+    fail("bundle manifest " & path & " is not a JSON object")
+  result.node = node
   try:
     if node["schema"].getStr() != ManifestSchema:
       fail("unsupported bundle schema " & node["schema"].getStr() &
@@ -1258,6 +1268,15 @@ proc readManifest(path: string): ParsedManifest =
     fail("bundle manifest lists no parts")
   if not result.contentsPath.isAbsolute:
     fail("bundle contents path must be absolute: " & result.contentsPath)
+
+proc readManifest(path: string): ParsedManifest =
+  if not fileExists(path):
+    fail("bundle manifest not found: " & path)
+  let node =
+    try: parseJson(readFile(path))
+    except JsonParsingError as e: fail("malformed bundle manifest " & path &
+      ": " & e.msg)
+  parseManifest(node, path)
 
 proc readVerifiedPart*(dir: string; part: BundlePart): string =
   ## The whole part, after its SHA-256 matched. §5 step 1: no byte reaches
@@ -1778,19 +1797,29 @@ type VerifiedContents* = object
     ## The transport manifest as read; its fields are unverified.
 
 proc readVerifiedContents*(dir: string;
-                           manifestName = DefaultHalfName & ".json"):
+                           manifestName = DefaultHalfName & ".json";
+                           expectedId = ""; manifest: JsonNode = nil):
     VerifiedContents =
   ## Read and verify a half's `contents` without writing anything. Shared by
-  ## import and by `repro bundle inspect` (§7.1).
-  let m = readManifest(dir / manifestName)
+  ## import and by `repro bundle inspect` (§7.1). The manifest is read once,
+  ## or not at all when the caller passes it. With `expectedId`, a manifest
+  ## naming another bundle is refused before any part is read: the id the
+  ## manifest names is then the one the caller was given, and the `contents`
+  ## check below binds the half to it.
+  let m = (if manifest != nil: parseManifest(manifest, "given for " & dir)
+           else: readManifest(dir / manifestName))
+  if expectedId.len > 0 and m.bundleId != expectedId:
+    fail("bundle manifest " &
+      (if manifest != nil: "given for " & dir else: dir / manifestName) &
+      " names bundle " &
+      m.bundleId & ", not " & expectedId & ", the bundle it was expected to be")
   let c = parseContents(peekContents(dir, m))
   if contentsPathFor(c.roots.storeRoot, m.bundleId) != m.contentsPath or
       bundleIdOf(c) != m.bundleId:
     fail("bundle id does not match its contents")
   checkEntryPlacement(c, m.contentsPath)
   result = VerifiedContents(bundleId: m.bundleId, parts: m.parts,
-    contentsPath: m.contentsPath, closure: c,
-    manifest: parseJson(readFile(dir / manifestName)))
+    contentsPath: m.contentsPath, closure: c, manifest: m.node)
 
 proc importBundle*(opts: ImportOptions; local: BundleRoots;
                    producer = localProducer()): ImportReport =
@@ -1809,7 +1838,8 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
     phaseStart = now
   # Steps 1 + 2: verify the parts that carry `contents`, read it, check its
   # id, roots, producer and placement. Nothing is written before this.
-  let verified = readVerifiedContents(dir, manifestName)
+  let verified = readVerifiedContents(dir, manifestName, opts.bundleId,
+    opts.manifest)
   let c = verified.closure
   let m = (bundleId: verified.bundleId, parts: verified.parts,
     contentsPath: verified.contentsPath)
@@ -1870,9 +1900,13 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
     let zstdExe = requireTool("zstd")
     let tarExe = requireTool("tar")
     let errPath = scratch / "unpack.stderr"
-    let command = "set -o pipefail; (" & quoteShell(zstdExe) &
-      " -q -dc --long=" & $ZstdWindowLog & " - | " & quoteShell(tarExe) &
-      " -x -C / --numeric-owner --no-same-owner -p --anchored" &
+    # The member check confines where tar writes, not the modes it
+    # applies: those come from the archive, so tar drops the special and the
+    # group- and world-write bits and restores no owner (§5 step 3).
+    let command = "set -o pipefail; " & ExtractModeShell & "(" &
+      quoteShell(zstdExe) & " -q -dc --long=" & $ZstdWindowLog & " - | " &
+      quoteShell(tarExe) & " -x -C / --numeric-owner" & ExtractModeOptions &
+      " --anchored" &
       " --no-wildcards -X " & quoteShell(excludePath) & " -f -) >" &
       quoteShell(errPath) & " 2>&1"
     let code = feedParts(dir, m.parts, command, stopEarly = false)

@@ -49,18 +49,6 @@ when defined(posix):
       ## the environment of the daemon started here: it must outlive its
       ## parent, and a caller's environment can still carry the variables
       ## (a ``runquotad`` that was itself started with them, say).
-    invocationOwnershipEnvVars = ["REPRO_TEST_RUNNER_OWNER_TOKEN"]
-      ## Markers that tie a process to the invocation that started it, so
-      ## that whoever owns that invocation can find and end it. The test
-      ## runner ends every process whose environment carries a finished
-      ## case's ``REPRO_TEST_RUNNER_OWNER_TOKEN`` (``ownedProcessIds``). A
-      ## per-user daemon is SHARED by every invocation of the user, so it
-      ## must not carry the token of whichever case happened to start it:
-      ## when that case ended, the runner killed the daemon under every
-      ## other case's live lease, and their next frame failed with
-      ## ``Broken pipe`` (full run 52, the dev-env e2e cluster). The run's
-      ## daemon is stopped by ``run_tests.sh`` at the end of the run, and
-      ## idles out on its own otherwise.
 
   var oNoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
     ## Not exported by ``std/posix``.
@@ -423,9 +411,7 @@ when defined(posix):
     ##   ``SIGCHLD`` makes the kernel reap children unasked, and their exit
     ##   status is lost) -- and so that the daemon does not inherit that
     ##   setting across ``execve`` either;
-    ## * the invocation's environment without ``RUNQUOTA_EXIT_WITH_PARENT*``
-    ##   and without the test runner's ownership token
-    ##   (``invocationOwnershipEnvVars``).
+    ## * the invocation's environment without ``RUNQUOTA_EXIT_WITH_PARENT*``.
     ##   The caller has already published ``RUNQUOTA_SOCKET`` and
     ##   ``RUNQUOTA_ENDPOINT_SCOPE=private`` into it.
     ##
@@ -441,8 +427,7 @@ when defined(posix):
     argv.add(args)
     var environment: seq[string] = @[]
     for key, value in envPairs():
-      if key notin exitWithParentEnvVars and
-          key notin invocationOwnershipEnvVars:
+      if key notin exitWithParentEnvVars:
         environment.add(key & "=" & value)
     let cargv = allocCStringArray(argv)
     defer: deallocCStringArray(cargv)
@@ -623,22 +608,38 @@ when defined(posix):
       "from PATH), or start the host's RunQuota service."
 
   const unknownArgumentMarker* = "unknown runquotad argument: "
-    ## What `runquotad` prints before it exits on a flag it does not know
-    ## (runquota `apps/runquotad/runquotad.nim`).
+    ## The words `runquotad` prints, before exiting 2, for an argument it
+    ## does not know (its command-line loop). Unchanged since runquota
+    ## 9d6bd3c (2026-05-16), so every build older than `--idle-exit-after`
+    ## (d828b6c) prints them; the issue's home-manager runquota printed
+    ## exactly this. `t_auto_runquota_uses_private_endpoint_policy.nim`
+    ## feeds the current daemon an unknown argument and checks its refusal
+    ## still begins so: a guard that the wording is kept, since the old
+    ## builds this matches are frozen.
 
-  proc staleDaemonArgumentRemedy*(runquotad, logText: string): string =
-    ## The remedy for a started daemon that refused a flag repro passed it,
-    ## or "" when its log shows no such refusal. Such a daemon is older than
-    ## the flag, and the version string cannot tell it from a current build
-    ## (reprobuild-pm issue 2026-11-12, a profile runquotad 0.1.3 without
-    ## `--idle-exit-after`), so the remedy names the binary that was started.
-    let at = logText.rfind(unknownArgumentMarker)
-    if at < 0:
+  proc staleIdleExitDaemonRemedy*(runquotad, logText: string): string =
+    ## The remedy for a started daemon that refused `--idle-exit-after`, or
+    ## "" when its log shows no such refusal. repro starts the shared
+    ## per-user daemon with that argument (since 2026-11-11), so a
+    ## `runquotad` that does not know it predates the per-user daemon's idle
+    ## exit (runquota d828b6c) and cannot serve this repro. Every step of
+    ## `findRunQuotaDaemonBin` can reach such a binary when no Nix package
+    ## pins it: an explicit `RUNQUOTAD_BIN`, an older home-manager or system
+    ## `runquotad` ahead of the dev shell's on `PATH`, or a sibling
+    ## `../runquota` build that predates the flag (reprobuild-pm
+    ## `spec/RunQuota-Host-Configuration.md`, "The
+    ## shared per-user daemon (POSIX)", "What this costs"; issue
+    ## 2026-11-12-checkout-repro-starts-a-stale-runquotad-from-path-that-
+    ## rejects-idle-exit-after.md). Without this the operator sees only the
+    ## daemon's own refusal, which names no way out.
+    if (unknownArgumentMarker & "--idle-exit-after") notin logText:
       return ""
-    let flag = logText[at + unknownArgumentMarker.len .. ^1].splitLines()[0].strip()
-    "\nremedy: " & runquotad & " does not know " & flag & ", so it is " &
-      "older than this repro. Point RUNQUOTAD_BIN at a current runquotad " &
-      "(or remove the stale one from PATH)."
+    "\nremedy: " & runquotad & " does not know --idle-exit-after, so this " &
+      "runquotad predates the shared per-user RunQuota daemon and is older " &
+      "than this repro needs. Point RUNQUOTAD_BIN at a current runquotad (or " &
+      "remove the stale one from PATH, or rebuild it if it is a sibling " &
+      "runquota checkout's build), or, where one is provisioned, start the " &
+      "host's RunQuota service."
 
   proc waitForUserDaemon*(launch: var UserDaemonLaunch;
                           exe, socket, logPath: string;
@@ -677,13 +678,15 @@ when defined(posix):
     proc since(): string =
       $(getMonoTime() - started).inMilliseconds & " ms after it was started"
     proc diagnostics(): string =
-      # The log's tail, then -- when the log shows the daemon refused its
-      # private endpoint under the HOST policy, or refused a flag it is too
-      # old to know -- what that means and what to do
-      # (`hostPolicyDaemonRemedy`, `staleDaemonArgumentRemedy`).
+      # The log's tail, then -- when the log shows the daemon is too old
+      # for this repro: it refused its private endpoint under the HOST
+      # policy, or refused `--idle-exit-after` -- what that means and what
+      # to do (`hostPolicyDaemonRemedy`, `staleIdleExitDaemonRemedy`). At
+      # most one applies: a daemon that refuses the argument exits before
+      # it inspects any endpoint.
       let tail = userDaemonLogTail(logPath)
       tail & hostPolicyDaemonRemedy(exe, tail) &
-        staleDaemonArgumentRemedy(exe, tail)
+        staleIdleExitDaemonRemedy(exe, tail)
     # Why the daemon's state can no longer be read, once it cannot. From
     # then on only `answered()` and the ceiling end the wait.
     var unobservable = ""
