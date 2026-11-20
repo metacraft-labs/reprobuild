@@ -370,6 +370,74 @@ when defined(posix) and isNixSupported:
             useExtractionCache = false, consumerRoot = root)
           check fileExists(artifactPath)
 
+    test "the runner compile reads no configuration above the nimcache pool":
+      # reprobuild-pm issue 2026-11-18-interface-extraction-nimcache-pool-
+      # lives-in-the-shared-temporary-directory. The runner is the compile's
+      # main module and sits in a slot of the pool, so Nim would evaluate the
+      # `config.nims` of every ancestor of the slot -- `/tmp/config.nims`,
+      # which any local user can create, when the pool was under `/tmp`, and
+      # still whatever is above an `XDG_CACHE_HOME` placed there. The planted
+      # script stands in for that user's: it leaves a marker when evaluated.
+      # Real compiler, real extraction, no mocks.
+      let root = createTempDir("repro-ancestor-config-", "")
+      let project = root / "project"
+      # `shared` stands in for `/tmp`. It is an ancestor of the pool and NOT
+      # of the recipe, whose own chain (`root` and up) the extraction reads
+      # on purpose (`recipeConfigSearchPathFlags`).
+      let shared = root / "shared"
+      let cache = shared / "cache"
+      createDir(project)
+      createDir(cache)
+      createDir(root / "scratch")
+      createDir(root / "tmp")
+      let marker = root / "ancestor-config-ran"
+      # Both NimScript and the plain configuration format: Nim reads both
+      # from every ancestor.
+      writeFile(shared / "config.nims",
+        "writeFile(" & marker.escape & ", \"config.nims\")\n")
+      writeFile(cache / "nim.cfg", "define:\"ancestorNimCfgRan\"\n")
+      let oldTmp = getEnv("TMPDIR")
+      let oldCache = getEnv("XDG_CACHE_HOME")
+      let oldMode = getEnv("REPRO_PROVIDER_NIMCACHE_MODE")
+      putEnv("TMPDIR", root / "tmp")
+      putEnv("XDG_CACHE_HOME", cache)
+      # The shared pool, whatever the caller's environment selects: in the
+      # per-binary mode the runner would sit in `scratch`, below neither
+      # planted file, and the case would pass without testing anything.
+      putEnv("REPRO_PROVIDER_NIMCACHE_MODE", "shared")
+      defer:
+        if oldMode.len > 0: putEnv("REPRO_PROVIDER_NIMCACHE_MODE", oldMode)
+        else: delEnv("REPRO_PROVIDER_NIMCACHE_MODE")
+        if oldTmp.len > 0: putEnv("TMPDIR", oldTmp) else: delEnv("TMPDIR")
+        if oldCache.len > 0: putEnv("XDG_CACHE_HOME", oldCache)
+        else: delEnv("XDG_CACHE_HOME")
+        removeDir(root)
+      let modulePath = project / "repro.nim"
+      # The recipe fails its compile if the planted nim.cfg was applied.
+      writeFile(modulePath, providerBody & "\nwhen defined(ancestorNimCfgRan):\n" &
+        "  {.error: \"the runner compile read nim.cfg above the pool\".}\n")
+      require interfaceExtractionNimcacheRoot().parentDir == cache
+      let artifact = root / "interface.rbsz"
+      var failure = ""
+      try:
+        discard extractInterfaceFromModule(modulePath, artifact,
+          root / "interface.nim", getCurrentDir(), root / "scratch",
+          useExtractionCache = false, consumerRoot = project)
+      except CatchableError as err:
+        failure = err.msg
+      checkpoint(failure)
+      check "the runner compile read nim.cfg above the pool" notin failure
+      check failure.len == 0
+      check fileExists(artifact)
+      check not fileExists(marker)
+      # The runner really was compiled from a slot below both planted files.
+      var runnerInPool = false
+      for path in walkDirRec(interfaceExtractionNimcacheRoot()):
+        if path.extractFilename.startsWith("extract_runner_") and
+            path.endsWith(".nim"):
+          runnerInPool = true
+      check runnerInPool
+
     test "SDK dependencies outrank configuration and extra paths without losing recipe imports":
       # Real module trees and the real compiler: either competing module emits
       # a compile error if selected. Successful extraction/link must therefore

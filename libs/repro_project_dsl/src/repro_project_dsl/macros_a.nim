@@ -4900,7 +4900,13 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
             handedBuiltCCompiler)
         let nimCmd =
           quoteShell(compilerExe) &
-          " c -r --hints:off --warnings:off" & builtCCompilerFlag &
+          # The generator imports `repro_cli_support`, which needs the full
+          # project DSL (`repro_project_dsl/mode`). The engine's `config.nims`
+          # defines that mode when it reaches this compile (by the directory
+          # walk or the staged `include` above), but not when no checkout was
+          # found, so the command names it itself.
+          " c -r --hints:off --warnings:off --define:reproEvalMode" &
+          builtCCompilerFlag &
           extraPathFlags & " " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)

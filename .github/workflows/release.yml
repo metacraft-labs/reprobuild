@@ -691,6 +691,12 @@ jobs:
             cp -a build/bin/* "${pkg_name}/bin/"
             cp -a build/lib/* "${pkg_name}/lib/"
 
+            # The shell completion scripts (share/repro/completions), printed
+            # by the binary this leg just built, BEFORE the relocation below
+            # rewrites it. Every native package installs its copies from here,
+            # and the tarball installer registers them per user.
+            bash scripts/release/stage_release_completions.sh "${pkg_name}"
+
             # The sources an installed reprobuild compiles every project
             # against (share/repro/source + share/repro/src). Without them
             # the archive cannot run the first compile of ANY project:
@@ -923,6 +929,25 @@ jobs:
               exit 1
             fi
             echo "ok  ${asset}: $(wc -l < "${RUNNER_TEMP}/package.list") entries, identical to the archive"
+            # The completion files live OUTSIDE /usr/lib/reprobuild, where the
+            # shells look, so the comparison above does not see them. Each
+            # must be present and byte-identical to the archive copy it was
+            # made from. zsh reads Debian packages from vendor-completions and
+            # rpm packages from site-functions.
+            case "${ecosystem}" in
+              deb) zsh_dir=usr/share/zsh/vendor-completions ;;
+              *)   zsh_dir=usr/share/zsh/site-functions ;;
+            esac
+            for pair in \
+              "repro.bash:usr/share/bash-completion/completions/repro" \
+              "_repro:${zsh_dir}/_repro" \
+              "repro.fish:usr/share/fish/vendor_completions.d/repro.fish"; do
+              src="${top}/share/repro/completions/${pair%%:*}"
+              dst="${root}/${pair#*:}"
+              [ -s "${src}" ] || { echo "::error::${ASSET_NAME} carries no share/repro/completions/${pair%%:*}"; exit 1; }
+              cmp -s "${src}" "${dst}" || { echo "::error::${asset} does not install ${pair#*:} identical to the archive copy ${pair%%:*}"; exit 1; }
+            done
+            echo "ok  ${asset}: bash, zsh and fish completion identical to the archive"
             if [ "${ecosystem}" = "deb" ]; then
               # The same two halves as the archive gate, against the tree the
               # .deb installs: it is the image a package user actually runs.

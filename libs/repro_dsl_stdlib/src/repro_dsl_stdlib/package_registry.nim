@@ -54,7 +54,7 @@ importBundledStdlibPackages()
 # ``VersionedProvisioning`` catalog before GM4b. Explicit and grep-able, as the
 # retired registry's imports were; several are also bundled, and a module
 # imported twice is initialized once.
-import ./packages/[jdk, cabal, claude_code, composer, crystal, elixir, erlang,
+import ./packages/[jdk, cabal, composer, crystal, elixir, erlang,
   ghc, gradle, maven, php, ruby, swift, zig, cmake, clingo, chocolatey, zstd,
   dotnet_sdk, gcc, gh, git, go, just, meson, nim, ninja, node, python3, fpc,
   pkg_7zip, wix3, innounp, lessmsi, autoconf, automake, libtool, ocaml, alire,

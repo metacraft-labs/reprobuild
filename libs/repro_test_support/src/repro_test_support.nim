@@ -876,6 +876,13 @@ const ReprobuildRepoRoot* =
   ## this is the repository that CONTAINS this file — never the directory the
   ## test process happened to be launched from.
 
+const ReproEvalModeFlag* = "--define:reproEvalMode"
+  ## The flag that gives a test's own out-of-tree compile of DSL code the full
+  ## project DSL. Without a mode define, `import reprobuild` is the thin mode
+  ## (`repro_project_dsl/mode`), and a main file outside this tree does not
+  ## read this repository's `config.nims`, which defines the mode for every
+  ## compile inside it.
+
 type HostBinaryFormat* = enum
   ## Machine format of a file on disk, decided by its magic bytes.
   ##

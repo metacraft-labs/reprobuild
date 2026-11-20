@@ -20,6 +20,11 @@
 ##     resolves ``test`` (implicitly certificate-producing, D15), and an
 ##     unmarked edge ``lone`` (selected as ``lone-out``) for the plan that has
 ##     no certificate-producing node;
+##   * every edge states the ``hybrid`` input-check policy: a certifying run
+##     after the lock moved reuses ``unit_a``'s result, and a certificate may
+##     rest on a reused result only when its inputs re-hash to the recorded
+##     content, which a ``timestamp`` record cannot show (Test-Certificates.md
+##     §"Reused results");
 ##   * the managed hooks, installed by the real ``repro hooks ensure --vcs``
 ##     with ``REPROBUILD_REPRO`` naming the built ``repro``, so a commit runs
 ##     the real dispatcher, the managed refresh and the TC-8g gate.
@@ -39,6 +44,7 @@ const lockUpdateBuildLines* =
   "    let lockreader = certTool(actionId = \"lockreader\",\n" &
   "      input = \"repro.lock\",\n" &
   "      output = \"build/lock-seen\",\n" &
+  "      actionCachePolicy = acfpHybrid,\n" &
   "      marker = \".repro/runs.log\")\n" &
   "    discard aggregate(\"test\", @[unit_a, lockreader])\n"
 
@@ -57,7 +63,7 @@ proc setupLockUpdateFixture*(label: string; requireTest = false):
   ## package), enacted by ``app``'s ``repro.nim`` and recorded by the real
   ## ``repro lock refresh``; ``test`` is the implicitly marked name (D15).
   result = setupWorkspaceCertifyFixture(label, ["unit_a", "lone"],
-    lockUpdateBuildLines)
+    lockUpdateBuildLines, hybridStems = ["unit_a", "lone"])
   if requireTest:
     let app = result.app
     createDir(app / "policy")

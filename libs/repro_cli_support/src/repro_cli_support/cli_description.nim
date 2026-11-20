@@ -874,7 +874,8 @@ proc branchFlags(): NimNode {.compileTime.} =
 
 proc hooksActionFlags(): NimNode {.compileTime.} =
   ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
-  ## no selector both `--vcs` and `--shell-direnv` are implied.
+  ## no selector `--vcs`, `--shell-direnv` and `--shell-autocomplete` are
+  ## implied.
   let root = workspaceRootFlag()
   let report = workspaceReportFlags()
   quote do:
@@ -891,10 +892,20 @@ proc hooksActionFlags(): NimNode {.compileTime.} =
     boolFlag shellDirenv is bool,
       help = "The direnv `.envrc` activation block"
     boolFlag shellAutocomplete is bool,
-      help = "Shell completion scripts (not implemented yet)"
+      help = "Shell completion for repro, for every shell found (see " &
+        "--profile and --system)"
     flag shell is seq[string],
       help = "A native shell activation hook: bash, zsh, fish or pwsh " &
         "(repeat it for several)"
+    boolFlag profile is bool,
+      help = "Shell hooks for the current user only (the default): rc " &
+        "files and per-user completion directories"
+    boolFlag system is bool,
+      help = "Shell hooks for every user of the machine (writes system " &
+        "locations; usually needs root)"
+    flag systemRoot is string, visibility = internal,
+      help = "Prefix every system path written or consulted with PATH " &
+        "(tests)"
     `root`
     `report`
     pos path is string, required = false,
@@ -3147,8 +3158,9 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Exit 0 when the blob is present, 1 when it is not":
         pos digest is string, help = "The blob's 64-character hex digest"
     subcmd "cache",
-        help = "Look up, substitute and publish binary-cache entries, and " &
-          "explain build actions' cache keys (`key`, `explain`). The " &
+        help = "Look up, substitute and publish binary-cache entries, " &
+          "explain build actions' cache keys (`key`, `explain`), and say " &
+          "what another checkout can reuse (`sharing`). The " &
           "cache is `$REPRO_BINARY_CACHE_URL` (default " &
           "`http://localhost:7878`); `substitute` trusts only the caches " &
           "`$REPRO_CACHES_CONFIG` (else /etc/repro/caches.conf and " &
@@ -3201,6 +3213,19 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "`repro cache key --json` wrote"
         pos second is string,
           help = "The action or key file to compare it with"
+      # Whether a project's builds can be served to another checkout on this
+      # host, per action and for the project, from the planned graph: what a
+      # consumer (an agent's cache backend) reads to decide whether a
+      # project's cached libraries compose or only a whole workspace does.
+      subcmd "sharing", help = "Report whether a project's cached builds " &
+          "can be served to another checkout on this host":
+        flag format is string,
+          help = "The output format: `text` (the default) or `json`"
+        boolFlag json is bool, help = "Shortcut for `--format=json`"
+        `graphInspection`
+        pos selector is string, required = false,
+          help = "The project, or `<project>#<target>` (default: the " &
+            "current directory's default target)"
       # `repro cache help`: the same as `repro cache --help`.
       subcmd "help", visibility = hidden:
         pos topic is seq[string], required = false

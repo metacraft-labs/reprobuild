@@ -216,7 +216,10 @@ when isNixSupported:
       # ``nimcrypto`` …). Replay them via the shared engine-side helper so the
       # thin/source consumers compile the same way a real downstream consumer
       # would.
-      let consumerDepFlags = consumerCompilePathFlags(repoRoot)
+      # The full project DSL too: without a mode define ``import
+      # repro_project_dsl`` is the thin mode.
+      let consumerDepFlags = consumerCompilePathFlags(repoRoot) &
+        @[ReproEvalModeFlag]
       let thinCheckCommand = @["nim", "check"] & consumerDepFlags &
         pathFlags([thinDir, dslPath]) &
         @["--nimcache:" & (tempRoot / "nimcache-thin-check"), thinConsumer]

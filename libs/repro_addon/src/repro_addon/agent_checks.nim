@@ -494,7 +494,7 @@ proc agentProfileRefusal*(m: DeployManifest; prof: SystemProfile;
   if compiled:
     let current = parseSystemProfile(
       if fileExists(userProfilePath(stateDir)):
-        readFile(userProfilePath(stateDir)) else: "")
+        readFile(userProfilePath(stateDir)) else: "", stored = true)
     let widen = agentPrefixRefusal(prof, current)
     if widen.len > 0:
       return $adOutOfScope & ": " & widen & "; nothing was written"

@@ -30,6 +30,7 @@
   fetchFromGitHub,
   just,
   makeWrapper,
+  installShellFiles,
   symlinkJoin,
   patchelf,
   python3,
@@ -151,8 +152,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "fcd5b309c2cb38656d8d2c3b39a7c4e72b5dfb3a";
-    hash = "sha256-5C52b8pse9Rv9+PYVi5969H5PkkOIXlOeNkPoKLnA+I=";
+    rev = "5380e20c8866e49e000e8070f692f54d303b5658";
+    hash = "sha256-52dtjt5p4FUkBnFfsSb8JoicImn4VTZOgr0ZfZfmKqA=";
   },
   # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
   # package (the declarative description of a program's entry points); the
@@ -279,6 +280,8 @@ stdenv.mkDerivation (finalAttrs: {
     just
     python3 # scripts/build_apps.sh stages the Nix daemon through Python.
     makeWrapper
+    # installShellCompletion, for repro's completion scripts (postInstall).
+    installShellFiles
     nimFork
     # Spec-Implementation M2a: clingo is the ASP solver reprobuild's
     # repro_solver lib binds against. The CLI tool is used by smoke tests and
@@ -428,20 +431,82 @@ stdenv.mkDerivation (finalAttrs: {
     runHook postInstall
   '';
 
+  # Shell completion for Bash, Zsh and Fish, under $out/share where Nix-managed
+  # shells find a profile's completions without setup: bash-completion and
+  # fish through XDG_DATA_DIRS, zsh through `programs.zsh.enableCompletion`.
+  # The scripts are printed by the binary just installed, so they always match
+  # it; nixpkgs' documented pattern
+  # (https://nixos.org/manual/nixpkgs/stable/#installshellfiles). This runs
+  # before postFixup wraps the binaries, in the build sandbox (HOME is
+  # /homeless-shelter, no daemon): `repro completion` only prints. The
+  # scripts are written to files first so a failing or empty `completion`
+  # fails the build here instead of installing an empty script. A cross build
+  # cannot run the host binary and installs no completion.
+  postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+    for shell in bash zsh fish; do
+      "$out/bin/repro" completion "$shell" > "$TMPDIR/repro-completion.$shell"
+      grep -q __complete "$TMPDIR/repro-completion.$shell" || {
+        echo "repro completion $shell printed no script that calls repro __complete" >&2
+        exit 1
+      }
+    done
+    # `--name repro` for Bash: `--cmd` alone would name it repro.bash, and the
+    # unsuffixed name is the one every bash-completion 2.x loads and the one
+    # `repro hooks ensure --shell-autocomplete` looks for in a Nix profile
+    # before it adds a second, per-user registration.
+    installShellCompletion --cmd repro \
+      --bash --name repro "$TMPDIR/repro-completion.bash" \
+      --zsh "$TMPDIR/repro-completion.zsh" \
+      --fish "$TMPDIR/repro-completion.fish"
+  '';
+
   # Installed entry points span ordinary linked libraries and bare leaf-name
   # dlopen()s (notably zstd and clingo). Normal fixup only retains paths visible
   # from link dependencies, so restore the full runtime family for every
   # installed ELF/Mach-O role. Linux uses a transitive DT_RPATH; Darwin needs
   # one LC_RPATH load command per directory and valid install IDs for every
   # installed dylib.
+  #
+  # The Linux monitor shim is the exception: it gets NO search path at all.
+  # It is LD_PRELOADed into every monitored process, it needs only the C
+  # runtime that process already has (DT_NEEDED libc.so.6 and the loader),
+  # and it interposes dlopen(). glibc attributes a dlopen to the object
+  # whose code calls the real dlopen, which is the shim, and searches that
+  # object's DT_RPATH (dlopen(3) and ld.so(8):
+  # https://man7.org/linux/man-pages/man3/dlopen.3.html,
+  # https://man7.org/linux/man-pages/man8/ld.so.8.html). io-mon's
+  # wrapper resolves a bare soname against the CALLER's search path first,
+  # but on a miss it hands the soname to glibc unchanged, which then also
+  # searches the shim's DT_RPATH. With the engine's runtime family there
+  # (zstd, sqlite, openssl, blake3, xxhash, clingo), a monitored program
+  # that cannot find libzstd.so.1 unmonitored found the engine's copy
+  # under the monitor: the monitor changed which libraries the program
+  # loads. Measured 2026-11-20 with reprobuild 0.2.24's packaged shim: a
+  # probe built without libzstd in its RUNPATH loaded
+  # `<zstd>/lib/libzstd.so.1` "RPATH from file librepro_monitor_shim.so"
+  # under `repro test`, and failed to load it with the same shim stripped
+  # of its DT_RPATH.
   postFixup = ''
     ${lib.optionalString stdenv.hostPlatform.isLinux ''
       for b in "$out"/bin/* "$out"/lib/*; do
+        case "$(basename "$b")" in
+          librepro_monitor_shim.so)
+            ${patchelf}/bin/patchelf --remove-rpath "$b"
+            continue
+            ;;
+        esac
         if orig=$(${patchelf}/bin/patchelf --print-rpath "$b" 2>/dev/null); then
           ${patchelf}/bin/patchelf --force-rpath \
             --set-rpath "$orig''${orig:+:}${runtimeLibraryPath}" "$b"
         fi
       done
+      # Fail the build rather than publish a shim that changes library
+      # resolution in the programs it monitors.
+      shim="$out/lib/librepro_monitor_shim.so"
+      if [ -e "$shim" ] && [ -n "$(${patchelf}/bin/patchelf --print-rpath "$shim")" ]; then
+        echo "error: $shim carries a library search path; it must carry none" >&2
+        exit 1
+      fi
     ''}
 
     ${lib.optionalString stdenv.hostPlatform.isDarwin ''

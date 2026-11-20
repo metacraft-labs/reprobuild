@@ -320,7 +320,7 @@ suite "M71 Phase D: remote activation over loopback SSH":
         check targetRows.len == 1
         let targetRoots = targetStore.listRoots()
         check targetRoots.len == 1
-        check targetRoots[0].rootId == generationId
+        check targetRoots[0].rootId == profileRootIdForKey(existingStateDirRootKey(targetStateDir), generationId)
         check targetRoots[0].kind == "profile"
         check targetStore.deadSet().len == 0
 

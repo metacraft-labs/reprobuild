@@ -2139,6 +2139,46 @@ proc checkPasswdPrimaryGroups*(resources: openArray[SystemResource]) =
         "primary group; declare passwd.group '" & r.puName & "' in the " &
         "same profile, or drop it from groups")
 
+proc checkPasswdMembershipOwners*(resources: openArray[SystemResource]) =
+  ## One resource owns a membership. A `passwd.group` may not list as a
+  ## member an account the same profile declares as a `passwd.user`: that
+  ## account's memberships are its own `groups`
+  ## (System-Profile-And-Infra-Apply.md, `passwd.group`).
+  ##
+  ## - Where the user's `groups` omit the group, the two undo each other.
+  ##   `groups` is authoritative: whenever the user is applied (created, or
+  ##   updated for any reason), `usermod --groups` replaces the whole
+  ##   supplementary set and drops the group, while the user's post-apply
+  ##   check, masked to what it declares, still passes. `members` is a
+  ##   subset requirement: the group's next apply adds the member back. An
+  ##   apply that reports success has left the host short of its profile.
+  ## - Where the user's `groups` name the group too, the membership is
+  ##   declared twice, and on a host that has neither account the first
+  ##   apply fails one of the pair in either order: the group's `usermod
+  ##   -aG` needs the user, and the user's `useradd --groups` needs the
+  ##   group.
+  ##
+  ## Not run on a stored generation (`stored`): one installed before this
+  ## refusal is not judged again.
+  ##
+  ## (reprobuild-pm issue
+  ## 2026-11-12-passwd-user-and-passwd-group-can-fight-each-other-and-never-converge.)
+  var users = initHashSet[string]()
+  for r in resources:
+    if r.kind == srkPasswdUser:
+      users.incl(r.puName)
+  for r in resources:
+    if r.kind != srkPasswdGroup: continue
+    for m in r.pgMembers:
+      if m in users:
+        raiseSystemProfileInvalid("passwd.group '" & r.pgName & "' lists " &
+          "member '" & m & "', which the profile declares as passwd.user '" &
+          m & "'; that account's memberships are its own groups (its " &
+          "whole supplementary set), so name '" & r.pgName & "' in " &
+          "passwd.user '" & m & "' groups, declared after passwd.group '" &
+          r.pgName & "' so the group exists when the account is created, " &
+          "and drop '" & m & "' from the group's members")
+
 # ---------------------------------------------------------------------------
 # ReproOS add-on mode's profile surface (ReproOS-Add-On-Mode §4.3, §4.4):
 # the per-resource `collision` opt-in and the profile-wide `addOn` stanza.
@@ -3485,6 +3525,10 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
   checkPasswdPrimaryGroups(result.resources)
   checkSecretDeclarations(result)
   if not stored:
+    # Added 2026-11-18: a generation installed before it is not judged
+    # again, so a host whose stored generation pairs them still switches
+    # and rolls back (ReproOS-Add-On-Mode.md, stored generations).
+    checkPasswdMembershipOwners(result.resources)
     checkFloorDropIns(result)
     checkFloorActivators(result)
     checkFloorReach(result)

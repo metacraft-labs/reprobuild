@@ -14,7 +14,10 @@
 ##   3. after a tracked edit to ``side``'s input, ``repro certify`` executes
 ##      only ``side`` (the other two are reused from this host's cache
 ##      records, which count: Standard §6.2.1, D16) and certifies all three
-##      names for the new content;
+##      names for the new content. The edges state the ``hybrid`` input-check
+##      policy, because only a content-checked record whose inputs still hash
+##      to the recorded content may be attested (Test-Certificates.md
+##      §"Reused results");
 ##   4. committing that content and running a plain ``git push`` carries all
 ##      three certificates to the origin, as a note on the tree, through the
 ##      managed hook. Until then the clone has no notes ref;
@@ -42,7 +45,8 @@ suite "TC-8e — repro certify materializes the declared set":
         "in real repositories")
     else:
       var fx = setupWorkspaceCertifyFixture("tc8e-certify",
-        ["unit_a", "unit_b", "side"], buildLines)
+        ["unit_a", "unit_b", "side"], buildLines,
+        hybridStems = ["unit_a", "unit_b", "side"])
       defer: removeDir(fx.cf.sib.scratch)
       let content = fx.contentNow()
 

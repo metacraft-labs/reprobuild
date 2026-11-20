@@ -1114,6 +1114,7 @@ proc adaptSystemProfile*(p: ProfileIntent;
   # Same cross-resource refusal as the text path (`parseSystemProfile`).
   checkUnitStateConflicts(result.profile.resources)
   checkPasswdPrimaryGroups(result.profile.resources)
+  checkPasswdMembershipOwners(result.profile.resources)
   checkSecretDeclarations(result.profile)
   checkStateDirectories(result.profile)
 

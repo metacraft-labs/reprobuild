@@ -393,7 +393,7 @@ proc undeclaredDropIns*(stateDir, profileText: string): seq[SystemResource] =
   for r in parseSystemProfile(profileText).resources: wanted.add(r.address)
   var old: SystemProfile
   try:
-    old = parseSystemProfile(active.profileText)
+    old = parseSystemProfile(active.profileText, stored = true)
   except CatchableError:
     # A generation this build cannot read: nothing is removed for it. The
     # carried-state reach analysis still reads every such file on the host

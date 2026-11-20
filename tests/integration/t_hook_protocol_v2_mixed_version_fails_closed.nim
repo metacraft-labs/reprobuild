@@ -22,6 +22,7 @@ import std/[os, strutils, tempfiles, unittest]
 when not defined(windows):
   import std/osproc
 
+import repro_cli_support/lock_consistency
 import repro_cli_support/push_hook_protocol
 import repro_test_support
 
@@ -275,8 +276,8 @@ suite "hook protocol v2 mixed versions fail closed":
       let canonicalRepo = require(q(gitBin) & " -C " & q(fx.repo) &
         " rev-parse --show-toplevel").strip()
       check absentCli.output.strip() ==
-        "repro hooks: hook protocol mismatch; run 'repro hooks ensure --vcs " &
-          canonicalRepo & "' and retry"
+        "repro hooks: hook protocol mismatch; run `repro hooks ensure --vcs " &
+          remedyPathWord(canonicalRepo) & "` and retry"
 
       let log = fx.scratch / "exact-cli.log"
       let proxy = fx.scratch / addFileExt("exact-repro", ExeExt)
@@ -380,5 +381,6 @@ suite "hook protocol v2 mixed versions fail closed":
         let canonicalRepo = require(q(gitBin) & " -C " & q(fx.repo) &
           " rev-parse --show-toplevel").strip()
         check mismatch.output.strip() ==
-          "repro hooks: hook protocol mismatch; run '" & fx.reproBin &
-          " hooks ensure --vcs " & canonicalRepo & "' and retry"
+          "repro hooks: hook protocol mismatch; run `" &
+          remedyPathWord(fx.reproBin) & " hooks ensure --vcs " &
+          remedyPathWord(canonicalRepo) & "` and retry"
