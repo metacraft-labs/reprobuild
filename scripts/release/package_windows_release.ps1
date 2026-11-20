@@ -15,6 +15,9 @@
 #   share\repro\{source,src,reprobuild-packages}
 #            the sources an installed reprobuild compiles against, staged by
 #            scripts/release/stage_release_sources.sh
+#   share\repro\completions\repro.ps1
+#            repro's PowerShell completion script, printed by build\bin\repro.exe
+#            (scripts/release/stage_release_completions.sh)
 #
 # and, with -Zip, <OutDir>\reprobuild-<version>-<platform>-<arch>.zip whose one
 # top-level entry is that directory. Prints the package directory, then the
@@ -110,6 +113,17 @@ if ($LASTEXITCODE -ne 0) {
 & $bash ./scripts/release/stage_release_sources.sh ($pkgDir -replace '\\', '/') | Out-Host
 if ($LASTEXITCODE -ne 0) {
   throw "package_windows_release: stage_release_sources.sh failed (exit $LASTEXITCODE)"
+}
+
+# repro's PowerShell completion script, printed by the repro.exe this build
+# produced, so the archive carries the script that matches its own binary. The
+# installers load it from share\repro\completions\repro.ps1. Generated through
+# the same script as the POSIX archives, which writes the bytes repro printed
+# without a PowerShell text conversion in between and refuses an empty script
+# or one that does not call `repro __complete`.
+& $bash ./scripts/release/stage_release_completions.sh ($pkgDir -replace '\\', '/') powershell | Out-Host
+if ($LASTEXITCODE -ne 0) {
+  throw "package_windows_release: stage_release_completions.sh failed (exit $LASTEXITCODE)"
 }
 
 Write-Output $pkgDir

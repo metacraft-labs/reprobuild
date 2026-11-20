@@ -64549,7 +64549,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `stat`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -64557,7 +64557,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
