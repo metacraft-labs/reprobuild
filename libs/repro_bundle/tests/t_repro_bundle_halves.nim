@@ -38,6 +38,7 @@
 
 import std/[algorithm, json, os, osproc, sequtils, streams, strutils, tempfiles,
             unittest]
+from std/posix import Stat, lstat, umask
 import repro_bundle
 import repro_bundle/[nix_half, sources_half, select, bootstrap, github]
 import repro_local_store/store_bundle
@@ -1979,3 +1980,141 @@ suite "the native half is the one latest.json names":
       check restoreWith(wired, profile) == ""
       check imported == @[namedId]
       check fileExists(profile)
+
+# Modes and owners come from the restorer, not the archive. The member
+# checks confine where tar writes; what mode it writes is the archive's
+# unless the extraction says otherwise, and a NAR hash covers only a file's
+# executable bit. Regression tests for reprobuild-pm issue
+# 2026-11-17-bundle-extraction-keeps-the-archive-s-setuid-bits-and-owners.md.
+# Each runs with umask 0, so a bit missing afterwards is one the extraction
+# itself dropped, not one the test's umask hid. Run unprivileged, GNU tar
+# already drops the setuid bit by default; as root (restore.sh's setup-script
+# case) it would keep it, and the owner, without `--no-same-owner
+# --no-same-permissions`. These tests hold the group- and world-write half
+# of the rule, which the unprivileged default does not, and for the Nix half
+# Nix's canonical modes under any umask.
+
+proc modeBits(path: string): int =
+  var st: Stat
+  doAssert lstat(path.cstring, st) == 0, path
+  int(st.st_mode) and 0o7777
+
+proc badModes(root: string): seq[string] =
+  ## Every non-symlink path under `root` (and `root` itself) whose mode has
+  ## a setuid, setgid, sticky, group-write or world-write bit.
+  if not symlinkExists(root) and (modeBits(root) and 0o7022) != 0:
+    result.add(root & " " & toOct(modeBits(root), 4))
+  if dirExists(root) and not symlinkExists(root):
+    for p in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+      if (modeBits(p) and 0o7022) != 0:
+        result.add(p & " " & toOct(modeBits(p), 4))
+
+proc nonCanonical(root: string): seq[string] =
+  ## Every non-symlink path under the store path `root` (and `root` itself)
+  ## whose mode is not Nix's canonical 0555 (a directory, an executable
+  ## file) or 0444 (any other file).
+  proc problem(p: string): string =
+    let m = modeBits(p)
+    let want = (if dirExists(p) or (m and 0o100) != 0: 0o555 else: 0o444)
+    if m != want: p & " " & toOct(m, 4) else: ""
+  if symlinkExists(root): return
+  let top = problem(root)
+  if top.len > 0: result.add(top)
+  if dirExists(root):
+    for p in walkDirRec(root, yieldFilter = {pcFile, pcDir}):
+      let bad = problem(p)
+      if bad.len > 0: result.add(bad)
+
+proc widenedModesHalf(honest: NixHalf;
+                      bundleDir, honestDir, id: string): NixHalf =
+  ## The honest half, re-archived by its host with setuid, setgid and group
+  ## and world write added to every member. The bytes, and so the NAR
+  ## hashes, are unchanged: only modes differ.
+  let dir = bundleDir / "x86_64-linux" / NixHalfDir / id
+  createDir(dir)
+  let tarPath = dir.parentDir / (id & ".tar")
+  var create = "tar --format=posix --mode=ug+s,go+w -C / -cf " &
+    quoteShell(tarPath)
+  for p in honest.paths: create.add(" " & quoteShell(p[1 .. ^1]))
+  discard sh(create)
+  let (parts, total) = writeCompressedParts("cat " & quoteShell(tarPath) &
+    " | zstd -q -c -3 --long=27", dir, 128 * 1024)
+  removeFile(tarPath)
+  copyFile(honestDir / honest.registration.file,
+    dir / honest.registration.file)
+  result = honest
+  result.id = id
+  result.parts = parts
+  result.compressedBytes = total
+
+suite "a Nix half's modes are not the archive's":
+  test "the archive's modes give way to Nix's canonical ones, by both entry points":
+    if findExe("nix-store").len == 0 or findExe("nix-hash").len == 0 or
+        findExe("zstd").len == 0:
+      skip("nix-store, nix-hash and zstd are needed to restore a Nix half")
+    else:
+      let top = createTempDir("repro-bundle-modes-", "")
+      defer:
+        discard execCmdEx("chmod -R u+w " & quoteShell(top))
+        removeDir(top)
+      let (a, b, c, big) = addPayloadPaths(top)
+      let bundle = top / "bundle"
+      let honestDir = bundle / "x86_64-linux" / NixHalfDir / "h"
+      let h = packedHalf(@[a, b, c], honestDir, "h", a, b)
+      let wide = widenedModesHalf(h, bundle, honestDir, "wide")
+      let saved = umask(0)
+      defer: discard umask(saved)
+      # The library path.
+      let root = top / "lib-root"
+      restoreNixHalf(wide, bundle / "x86_64-linux" / NixHalfDir / "wide", root)
+      check pathValid(root, a)
+      check intactFile(storeLocationIn(root, a) / "lib" / "big.so", big)
+      var bad: seq[string]
+      for p in [a, b, c]: bad.add(nonCanonical(storeLocationIn(root, p)))
+      checkpoint "modes the archive set: " & bad.join(", ")
+      check bad.len == 0
+      # The bootstrap path: restore.sh, which inherits the umask.
+      let shRoot = top / "sh-root"
+      # It exits non-zero afterwards: strict, and no `repro` to hand to.
+      let (_, log) = runRestoreSh(top, wide, shRoot, bundle)
+      check "nix half restored" in log
+      check pathValid(shRoot, a)
+      var shBad: seq[string]
+      for p in [a, b, c]: shBad.add(nonCanonical(storeLocationIn(shRoot, p)))
+      checkpoint "modes the archive set: " & shBad.join(", ")
+      check shBad.len == 0
+      # A hardened umask (a root setup script with 077) must not leave the
+      # store unreadable to the users who run the shell, by either path.
+      discard umask(0o077)
+      let tightRoot = top / "tight-root"
+      restoreNixHalf(h, honestDir, tightRoot)
+      let tightShRoot = top / "tight-sh-root"
+      let (_, tightLog) = runRestoreSh(top, h, tightShRoot, bundle)
+      check "nix half restored" in tightLog
+      var tight: seq[string]
+      for p in [a, b, c]:
+        tight.add(nonCanonical(storeLocationIn(tightRoot, p)))
+        tight.add(nonCanonical(storeLocationIn(tightShRoot, p)))
+      checkpoint "modes under umask 077: " & tight.join(", ")
+      check tight.len == 0
+
+suite "a sources half's modes are not the archive's":
+  test "setuid and group- or world-write bits are dropped":
+    if findExe("zstd").len == 0 or findExe("tar").len == 0:
+      skip("tar and zstd are needed")
+    else:
+      let top = createTempDir("repro-bundle-src-modes-", "")
+      defer: removeDir(top)
+      let (h, dir) = craftedHalf(top, "modes", "ws", ["lib"], [],
+        "mkdir -p ws/lib; cp f ws/lib/a; chmod 0755 ws/lib/a; " &
+        "tar --format=posix --mode=6777 -cf archive.tar ws/lib/a; " &
+        "tar --format=posix --no-recursion --mode=1777 -rf archive.tar ws/lib")
+      let saved = umask(0)
+      defer: discard umask(saved)
+      let ws = top / "restore" / "ws"
+      check refusal(h, dir, ws) == ""
+      check readFile(ws / "lib" / "a") == "planted\n"
+      let bad = badModes(ws / "lib")
+      checkpoint "modes the archive set: " & bad.join(", ")
+      check bad.len == 0
+      check modeBits(ws / "lib" / "a") == 0o755

@@ -336,9 +336,18 @@ else
     if [ -d "$t" ] && [ ! -L "$t" ]; then chmod -R u+w "$t"; fi
     if [ -e "$t" ] || [ -L "$t" ]; then rm -rf "$t" || done_with "cannot remove the partial store path $t"; fi
   done < "$meta/invalid"
+  # No owner and no mode from the archive: as root, tar's defaults would
+  # restore its owners and setuid bits. Then Nix's canonical modes, before
+  # the hash check (tar_members.NixExtractModeShell, NixCanonicalModes).
   ( cd "$dir" && cat "${PARTS[@]}" ) | "$Z" -q -dc --long=27 \
-    | tar -C "$ROOT" --skip-old-files --anchored --no-wildcards -X "$meta/exclude" -xf - \
+    | ( umask 022 && exec tar -C "$ROOT" --no-same-owner --no-same-permissions \
+        --skip-old-files --anchored --no-wildcards -X "$meta/exclude" -xf - ) \
     || done_with "nix half unpack failed"
+  while IFS= read -r p; do
+    t="$at$p"
+    if [ -L "$t" ] || [ ! -e "$t" ]; then continue; fi
+    chmod -R a+rX,a-w -- "$t" || done_with "cannot set the modes of $t"
+  done < "$meta/invalid"
   # In sh -c: $0 is nix-hash, $1 the root's prefix, $2 one store path.
   tr '\n' '\0' < "$meta/invalid" \
     | xargs -0 -r -P "$PARALLEL" -n 1 sh -c 'printf "%s\t%s\n" "$2" "$("$0" --type sha256 "$1$2" 2>/dev/null)"' "$(command -v nix-hash)" "$at" \

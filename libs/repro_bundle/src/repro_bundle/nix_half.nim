@@ -548,10 +548,12 @@ proc restoreLockedPaths(h: NixHalf; partsDir, scratch, root, target,
   let excludes = scratch / "exclude"
   writeFile(excludes, skip)
   let errPath = scratch / "unpack.stderr"
-  let command = "set -o pipefail; (" & quoteShell(zstdExe) &
-    " -q -dc --long=" & $ZstdWindowLog & " - | " &
+  # A NAR hash covers a file's executable bit and nothing else of its mode
+  # or owner, so tar applies neither from the archive (§7 step 3.5).
+  let command = "set -o pipefail; " & NixExtractModeShell & "(" &
+    quoteShell(zstdExe) & " -q -dc --long=" & $ZstdWindowLog & " - | " &
     quoteShell(requireExe("tar")) & " -C " & quoteShell(target) &
-    " --skip-old-files --anchored --no-wildcards -X " &
+    ExtractModeOptions & " --skip-old-files --anchored --no-wildcards -X " &
     quoteShell(excludes) & " -xf -) >" & quoteShell(errPath) & " 2>&1"
   if feedParts(partsDir, h.parts, command, stopEarly = false) != 0:
     bundleFail("unpacking the Nix half failed: " &
@@ -562,6 +564,19 @@ proc restoreLockedPaths(h: NixHalf; partsDir, scratch, root, target,
     if r.path in invalid:
       restored.add(r)
       locations.add(storeLocation(root, r.path))
+  # Canonical modes before the hash check, so what is checked is what is
+  # registered. A store path that is a symlink is left alone: chmod would
+  # follow it, and `-R` does not follow the links it meets below an operand.
+  var toCanonicalise: seq[string]
+  for loc in locations:
+    if not symlinkExists(loc) and (dirExists(loc) or fileExists(loc)):
+      toCanonicalise.add(loc)
+  const ChmodBatch = 512
+  var i = 0
+  while i < toCanonicalise.len:
+    discard mustRun(requireExe("chmod"), @["-R", NixCanonicalModes, "--"] &
+      toCanonicalise[i ..< min(toCanonicalise.len, i + ChmodBatch)])
+    i += ChmodBatch
   let actual = narHashes(locations)
   var mismatched: seq[string]
   for i, r in restored:

@@ -70143,7 +70143,21 @@ type
   GatewayUpdateClassification* = object
     ok*: bool
     diagnostic*: string          ## why the push is refused, when not ``ok``
-    leases*: seq[GatewayLease]   ## forced branch updates and branch deletions
+    leases*: seq[GatewayLease]   ## forced branch updates and every deletion
+
+proc rootDeclaresARoleBranch(settings: WorkspaceSettings): bool =
+  ## Whether ``[workspace]``, the profile it names or the default profile
+  ## gives ANY role of the workspace root repository a branch. ``false`` for a
+  ## role declared absent (``false``): that names no branch.
+  for declarer in rootDeclarers(settings):
+    let decls = declarer.decls
+    if decls.mainline.isSome and decls.mainline.get().len > 0:
+      return true
+    for value in [decls.unstable, decls.staging, decls.stable,
+                  decls.production, decls.lts]:
+      if value.kind == brvBranch: return true
+    for (_, value) in decls.custom:
+      if value.kind == brvBranch: return true
 
 proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
@@ -70153,6 +70167,14 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
   ## (the recorded ``project`` only when that does not contain the member),
   ## the workspace root's from the settings file. ``ok`` is false when they
   ## cannot be resolved; the caller then refuses (fail closed).
+  ##
+  ## For the root, "no role resolves" has two causes that must not be read
+  ## alike. A settings file that declares no role at all names no role branch
+  ## (``ok``, nothing to refuse). One that gives a role a branch but resolves
+  ## no ``mainline`` (every fallback chain ends there, so nothing resolves) has
+  ## DECLARED a role branch the gateway cannot name: ``ok`` is false.
+  ## ``rootDeclaredRoleBranches`` answers "none" for both, which is right for
+  ## the client's refusal and would fail open here.
   if cfg.workspaceRoot.len == 0 or
       (cfg.repo.len == 0 and not cfg.repoIsWorkspaceRoot):
     return (ok: false, branches: @[], why: "the gateway's config names no " &
@@ -70166,9 +70188,25 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     try:
       let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
       if settingsPath.len == 0 or not fileExists(settingsPath):
+        # ``REPRO_WORKSPACE_CONFIG`` naming a file that does not exist reads
+        # as "no settings file" everywhere else. Here that would let a
+        # variable inherited from the pushing shell switch the refusal off.
+        let named = getEnv(workspace_root.WorkspaceConfigEnvVar)
+        if named.len > 0:
+          return (ok: false, branches: @[], why: workspace_root.WorkspaceConfigEnvVar &
+            " names '" & named & "', which does not exist, so the settings " &
+            "of '" & cfg.workspaceRoot & "' could not be read")
         return (ok: true, branches: @[], why: "")
-      return (ok: true, branches: rootDeclaredRoleBranches(
-        readWorkspaceSettings(settingsPath)), why: "")
+      let settings = readWorkspaceSettings(settingsPath)
+      try:
+        discard resolveRootRoles(settings)
+      except WorkspaceManifestParseError as err:
+        if rootDeclaresARoleBranch(settings):
+          return (ok: false, branches: @[], why: "'" & settingsPath &
+            "' declares a role branch for the workspace root repository, " &
+            "but its roles do not resolve: " & err.msg)
+        return (ok: true, branches: @[], why: "")
+      return (ok: true, branches: rootDeclaredRoleBranches(settings), why: "")
     except CatchableError as err:
       return (ok: false, branches: @[], why: "the settings of '" &
         cfg.workspaceRoot & "' could not be read: " & err.msg)
@@ -70210,8 +70248,13 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
   ##      ``merge-base --is-ancestor`` refuses the push.
   ##   3. A forced update or a deletion of a ``refs/heads/*`` ref is leased
   ##      at ``<old>``; of a branch a declared role names, it is refused, and
-  ##      it is refused too when the roles cannot be resolved. Forced updates
-  ##      of other refs stay plain (the upstream refuses them as before).
+  ##      it is refused too when the roles cannot be resolved.
+  ##   4. A deletion of any OTHER ref (a tag, the certificate notes) is leased
+  ##      at ``<old>`` as well: a plain ``:<ref>`` deletes whatever the
+  ##      upstream holds, including what others published after this gateway
+  ##      last forwarded the ref. No role names such a ref, so there is no
+  ##      role check. Forced updates of other refs stay plain (the upstream
+  ##      refuses them as before).
   result.ok = true
   var rolesLoaded = false
   var roles: tuple[ok: bool; branches: seq[tuple[role, branch: string]];
@@ -70222,11 +70265,18 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
     # The update must name a change: an all-zeroes ``<new>`` over an
     # all-zeroes ``<old>`` is no deletion (nothing was there to delete), yet
     # the forward would send it as ``:<ref>`` and delete the upstream's
-    # branch with no lease and no role check. Only a crafted client sends it.
+    # ref with no lease and no role check. Stock git sends it for
+    # ``git push origin :<ref>`` when this gateway has no such ref (measured
+    # with git 2.43), which is the ordinary case for a tag the gateway never
+    # forwarded; a crafted client can send it for any ref.
     if isZeroOid(u.oldSha) and isZeroOid(u.newSha):
       return GatewayUpdateClassification(ok: false, diagnostic: u.refName &
-        ": the update names neither an old nor a new value; nothing was " &
-        "forwarded")
+        ": the update names neither an old nor a new value: this gateway " &
+        "holds no such ref, so a deletion has no value to lease and " &
+        "nothing was forwarded. If the upstream holds '" & u.refName &
+        "', fetch it ('git fetch origin " & u.refName & "'), push that " &
+        "value through this gateway ('git push origin FETCH_HEAD:" &
+        u.refName & "', which changes nothing upstream), and delete again")
     # The EXACT ref: ``rev-parse`` would fall back to git's name-guessing
     # rules (``refs/heads/x`` also finds ``refs/heads/refs/heads/x``).
     # ``for-each-ref`` exits 0 whether or not the ref exists; any other exit
@@ -70255,8 +70305,9 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
     let isBranch = u.refName.startsWith("refs/heads/")
     let deletion = isZeroOid(u.newSha) and not isZeroOid(u.oldSha)
     var forced = false
-    # Only a branch can be leased or refused by role, so only a branch's
-    # ancestry is asked; any other ref is forwarded plain, as before.
+    # Only a branch's forced update is leased or refused by role, so only a
+    # branch's ancestry is asked; a forced update of any other ref is
+    # forwarded plain, as before.
     if isBranch and not isZeroOid(u.oldSha) and not isZeroOid(u.newSha):
       let anc = gitNoteRun(gitBin, ["--git-dir=" & gatewayBareDir,
         "merge-base", "--is-ancestor", u.oldSha, u.newSha], received)
@@ -70268,7 +70319,13 @@ proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
           ": could not tell whether " & u.oldSha & " is an ancestor of " &
           u.newSha & " (git merge-base exited " & $anc.code & ": " &
           anc.output.strip() & "); nothing was forwarded")
-    if not isBranch or not (forced or deletion):
+    if not (deletion or (isBranch and forced)):
+      continue
+    if not isBranch:
+      # A deletion of a tag, of the certificate notes, of any other ref: no
+      # role names it, and it is leased like a branch's.
+      result.leases.add(GatewayLease(refName: u.refName, expect: u.oldSha,
+        newSha: u.newSha))
       continue
     if not rolesLoaded:
       roles = gatewayRoleBranchesFor(cfg)
@@ -70303,6 +70360,13 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
   ## holds now, the commits there the forced push would have discarded
   ## (``rev-list U ^<new>``), and the remedy in order. ``""`` when the
   ## upstream still holds ``<old>`` (this lease was not the stale one).
+  ##
+  ## A leased ref outside ``refs/heads/*`` is always a deletion, and its
+  ## remedy is different: ``rewire --reset-refs`` resets branches only. The
+  ## gateway is brought to the upstream's value by pushing that value through
+  ## it (the forward of it changes nothing upstream), and the deletion is
+  ## then repeated under a current lease.
+  let isBranch = lease.refName.startsWith("refs/heads/")
   let remote = gitNoteQuery(gitBin, ["--git-dir=" & gatewayBareDir,
     "ls-remote", upstreamUrl, lease.refName])
   if remote.code != 0:
@@ -70311,9 +70375,15 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
     return lease.refName & ": the upstream refused the lease at " &
       lease.expect & ", and what it holds now could not be read (git " &
       "ls-remote exited " & $remote.code & ": " & remote.diagnostic.strip() &
-      "). Nothing was overwritten. Fetch '" &
-      lease.refName["refs/heads/".len .. ^1] & "', integrate it, run " &
-      "'repro workspace shared-clones rewire --reset-refs', and push again."
+      "). Nothing was overwritten. " &
+      (if isBranch:
+         "Fetch '" & lease.refName["refs/heads/".len .. ^1] &
+           "', integrate it, run 'repro workspace shared-clones rewire " &
+           "--reset-refs', and push again."
+       else:
+         "Fetch '" & lease.refName & "' from the upstream ('git fetch " &
+           "origin " & lease.refName & "'), push the value it holds " &
+           "through this gateway, and delete again.")
   var upstreamTip = gatewayZeroSha
   for line in remote.output.splitLines():
     let parts = line.strip().split('\t')
@@ -70322,10 +70392,13 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
   if upstreamTip == lease.expect or
       (isZeroOid(upstreamTip) and isZeroOid(lease.expect)):
     return ""
-  let branch = lease.refName["refs/heads/".len .. ^1]
   result = lease.refName & ": stale lease: the upstream holds " &
-    upstreamTip & ", not " & lease.expect & ", which this gateway last " &
-    "published"
+    (if isZeroOid(upstreamTip): "no such ref" else: upstreamTip) & ", not " &
+    lease.expect & ", which this gateway last published"
+  # Whether pushing the upstream's value through this gateway needs
+  # ``--force`` on the client: always for a tag (git refuses to move an
+  # existing tag without it), otherwise unless it descends from ``<old>``.
+  var catchUpNeedsForce = lease.refName.startsWith("refs/tags/")
   if not isZeroOid(upstreamTip):
     # The commits are on the upstream only. Fetch them into this gateway's
     # object store (no ref, no FETCH_HEAD, no auto gc), then list them
@@ -70341,6 +70414,12 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
     let listed =
       if fetched.code == 0: gitNoteQuery(gitBin, listArgs, received)
       else: (code: fetched.code, output: "", diagnostic: fetched.output)  # git-merged-text: quoted whole, never parsed
+    if not isBranch and not catchUpNeedsForce:
+      # Any answer other than "yes, it descends" asks for --force: git then
+      # sends the update whatever its shape.
+      catchUpNeedsForce = fetched.code != 0 or gitNoteRun(gitBin,
+        ["--git-dir=" & gatewayBareDir, "merge-base", "--is-ancestor",
+         lease.expect, upstreamTip], received).code != 0
     if listed.code == 0:
       const MaxListed = 20
       var lines: seq[string]
@@ -70351,15 +70430,44 @@ proc gatewayStaleLeaseReport(gitBin, gatewayBareDir, upstreamUrl: string;
         if lines.len < MaxListed: lines.add("    " & line.strip())
       if total > MaxListed:
         lines.add("    ... and " & $(total - MaxListed) & " more")
-      result.add(if isZeroOid(lease.newSha):
-          ". The deletion would have discarded, among others, these " &
-            $total & " upstream commit(s) this gateway never published:\n"
-        else: ". The forced push would have discarded these " & $total &
-          " upstream commit(s):\n")
-      result.add(lines.join("\n"))
+      if not isBranch:
+        # Deleting a tag or the notes ref discards no commit another ref
+        # still reaches; say what the upstream's value holds beyond the
+        # leased one, and nothing when there is nothing to list.
+        if total > 0:
+          result.add(". The upstream's value holds these " & $total &
+            " commit(s) that the value this gateway last published does " &
+            "not:\n" & lines.join("\n"))
+      elif isZeroOid(lease.newSha):
+        result.add(". The deletion would have discarded, among others, " &
+          "these " & $total & " upstream commit(s) this gateway never " &
+          "published:\n" & lines.join("\n"))
+      else:
+        result.add(". The forced push would have discarded these " & $total &
+          " upstream commit(s):\n" & lines.join("\n"))
     else:
       result.add(". The upstream commits it would have discarded could not " &
         "be listed: " & listed.diagnostic.strip())
+  if not isBranch:
+    if isZeroOid(upstreamTip):
+      result.add("\nThe upstream no longer has '" & lease.refName &
+        "', so nothing is left to delete there. This gateway still records " &
+        "it; 'git --git-dir=" & os.normalizedPath(gatewayBareDir) &
+        " update-ref -d " &
+        lease.refName & " " & lease.expect & "' drops that record.")
+    else:
+      result.add("\nNothing was deleted. To delete '" & lease.refName &
+        "' on the upstream:\n" &
+        "  1. fetch it from the upstream ('git fetch origin " &
+        lease.refName & "') and check that what it holds now, " &
+        upstreamTip & ", may go;\n" &
+        "  2. bring this gateway to that value by pushing it through: " &
+        "'git push " & (if catchUpNeedsForce: "--force " else: "") &
+        "origin " & upstreamTip & ":" & lease.refName & "' (the upstream " &
+        "already holds it, so nothing changes there);\n" &
+        "  3. delete again: the lease is then current.")
+    return
+  let branch = lease.refName["refs/heads/".len .. ^1]
   result.add("\nNothing was overwritten. To publish this branch:\n" &
     (if isZeroOid(upstreamTip):
        "  1. the upstream no longer has '" & branch & "'; nothing there " &
@@ -70396,11 +70504,22 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
   ## the certificate notes ref travels like any other received ref.
   ##
   ## ``leases`` (from ``gatewayClassifyUpdates``) are the forced branch
-  ## updates and branch deletions: each is forwarded with
+  ## updates and every deletion (a branch's, a tag's, the notes'): each is
+  ## forwarded with
   ## ``--force-with-lease=<ref>:<old>`` and WITHOUT a ``+``, which git lets
   ## override a stale lease (§5.3 "Forced updates", measured with git 2.43).
   ## A stale lease refuses the whole atomic push, and the diagnostic lists the
   ## upstream commits that would have been discarded.
+  ##
+  ## The push runs with ``LC_ALL=C``. Two decisions below read git's text:
+  ## ``AtomicPushUnsupportedMarker``, which git translates (``send-pack.c``
+  ## passes it through gettext), and ``stale info``, which git 2.43 prints
+  ## untranslated but does not promise to. Under the caller's locale a
+  ## translated git refused every push to an upstream without atomic support,
+  ## because the non-atomic retry never ran. ``LC_ALL`` outranks ``LANG``
+  ## and every other ``LC_*``, and gettext ignores ``LANGUAGE`` in the ``C``
+  ## locale, so the push's own report is in English whatever the locale of
+  ## the developer's ``git push``.
   var refspecs: seq[string]
   for u in updates:
     if isZeroOid(u.newSha):
@@ -70410,6 +70529,7 @@ proc gatewayForwardToUpstream*(gitBin, gatewayBareDir, upstreamUrl: string;
   if refspecs.len == 0:
     return (ok: true, diagnostic: "no refs to forward")
   let env = forwardingObjectStoreEnv(received)
+  env["LC_ALL"] = "C"
   proc push(atomic: bool): tuple[code: int; output: string] =
     # git-merged-reader: push's report and refusal reason are on stderr
     var cmd = quoteShell(gitBin) & " -C " & quoteShell(gatewayBareDir) &

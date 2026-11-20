@@ -882,3 +882,55 @@ suite "store bundle import writes nothing into the bundle directory":
     defer: removeScratchDir(dir)
     check dirExists(dir)
     check getFilePermissions(dir) == {fpUserRead, fpUserWrite, fpUserExec}
+
+# ---------------------------------------------------------------------------
+# Modes and owners come from the importer, not the archive
+# ---------------------------------------------------------------------------
+
+proc modeBits(path: string): int =
+  var st: Stat
+  doAssert lstat(path.cstring, st) == 0, path
+  int(st.st_mode) and 0o7777
+
+suite "store bundle import applies no special or group- or world-write bit":
+  test "a declared file carried setuid and a directory carried 1777 land without them":
+    # The member check confines where tar writes, not the mode it writes:
+    # `contents` and step 4 compare content, kind and link target. A host
+    # re-archives a declared file with mode 6777 and its directory with
+    # 1777, bytes and mtimes unchanged, so the import accepts the stream.
+    # Before reprobuild-pm issues/2026-11-17-bundle-extraction-keeps-the-
+    # archive-s-setuid-bits-and-owners.md, `tar -p` wrote both modes as
+    # stored: a setuid, world-writable file another local user could rewrite
+    # or run as the importer.
+    if not toolsPresent():
+      skip("GNU tar and zstd are not on PATH; bundles are written with them")
+    else:
+      let f = makeFixture()
+      defer: removeDir(f.top)
+      f.exportForTampering()
+      let dir = f.ws / "build"
+      let gen = dir / "gen.txt"
+      f.tamperedStream(proc (tarPath: string) =
+        run("tar --delete --no-recursion -f " & quoteShell(tarPath) & " " &
+          quoteShell(rel(dir) & "/") & " " & quoteShell(rel(gen)))
+        run("tar --format=posix --no-recursion --mode=1777 -rf " &
+          quoteShell(tarPath) & " -C / " & quoteShell(rel(dir)))
+        run("tar --format=posix --mode=6777 -rf " & quoteShell(tarPath) &
+          " -C / " & quoteShell(rel(gen))))
+      f.wipe()
+      # With no umask of its own, the importer's would hide nothing:
+      # whatever bit is missing afterwards, the import itself dropped.
+      let saved = umask(0)
+      defer: discard umask(saved)
+      let refusal = f.importRefusal()
+      check refusal == ""
+      check readFile(gen) == "generated\n"
+      let fileMode = modeBits(gen)
+      let dirMode = modeBits(dir)
+      checkpoint "gen.txt mode " & toOct(fileMode, 4) & ", build/ mode " &
+        toOct(dirMode, 4)
+      check (fileMode and 0o7022) == 0
+      check (dirMode and 0o7022) == 0
+      # The permission bits the archive grants are kept, write excepted.
+      check fileMode == 0o755
+      check dirMode == 0o755
