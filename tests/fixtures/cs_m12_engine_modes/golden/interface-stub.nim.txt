@@ -1,0 +1,27 @@
+import repro_project_dsl
+
+type
+  Csm12toolPackage* = object
+  Csm12toolPackageExecutable* = object
+    value*: SelectedExecutable
+
+const csm12tool* = Csm12toolPackage()
+
+proc executable*(pkg: Csm12toolPackage; name: string): Csm12toolPackageExecutable =
+  discard pkg
+  Csm12toolPackageExecutable(value: selectedExecutable("csm12tool", name))
+
+proc greet*( exe: Csm12toolPackageExecutable; jobs: int = 0; verbose: bool = false; who: string): PublicCliCall =
+  publicCliCall(exe.value.packageName, exe.value.executableName, "greet", exe.value.packageName & "." & exe.value.executableName & ".greet", @[cliArg("jobs", jobs, cpkFlag, 0, ""), cliArg("verbose", verbose, cpkFlag, 0, ""), cliArg("who", who, cpkPositional, 0, "")])
+
+proc count*( exe: Csm12toolPackageExecutable; jobs: int = 0; verbose: bool = false; upTo: int = 0): PublicCliCall =
+  publicCliCall(exe.value.packageName, exe.value.executableName, "count", exe.value.packageName & "." & exe.value.executableName & ".count", @[cliArg("jobs", jobs, cpkFlag, 0, ""), cliArg("verbose", verbose, cpkFlag, 0, ""), cliArg("upTo", upTo, cpkFlag, 0, "")])
+
+proc greet*( pkg: Csm12toolPackage; jobs: int = 0; verbose: bool = false; who: string): PublicCliCall =
+  discard pkg
+  publicCliCall("csm12tool", "csm12tool", "greet", "csm12tool.csm12tool.greet", @[cliArg("jobs", jobs, cpkFlag, 0, ""), cliArg("verbose", verbose, cpkFlag, 0, ""), cliArg("who", who, cpkPositional, 0, "")])
+
+proc count*( pkg: Csm12toolPackage; jobs: int = 0; verbose: bool = false; upTo: int = 0): PublicCliCall =
+  discard pkg
+  publicCliCall("csm12tool", "csm12tool", "count", "csm12tool.csm12tool.count", @[cliArg("jobs", jobs, cpkFlag, 0, ""), cliArg("verbose", verbose, cpkFlag, 0, ""), cliArg("upTo", upTo, cpkFlag, 0, "")])
+

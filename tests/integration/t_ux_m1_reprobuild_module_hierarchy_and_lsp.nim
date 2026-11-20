@@ -44,6 +44,7 @@ import std/[compilesettings, os, osproc, sequtils, strutils, tempfiles,
 from repro_core/ambient_execution import uncontrolledExecCmdEx,
   uncontrolledFindExe
 import repro_interface_artifacts
+import repro_test_support
 
 const
   RepoRoot = currentSourcePath().parentDir.parentDir.parentDir
@@ -147,8 +148,12 @@ proc discoveryFlags(workDir: string): seq[string] =
     else: delEnv("REPROBUILD_LIBS_DIR")
 
 proc nimCfgFor(flags: seq[string]): string =
-  ## A project ``nim.cfg`` carrying only the ``--path`` entries: what an
-  ## editor needs to resolve the DSL. Quoted so a path with spaces survives.
+  ## A project ``nim.cfg`` carrying the ``--path`` entries: what an editor
+  ## needs to resolve the DSL. Quoted so a path with spaces survives. It also
+  ## selects the full DSL (``ReproEvalModeFlag``): these fixtures use the
+  ## engine's vocabulary, and without a mode define ``import reprobuild`` is
+  ## the thin mode.
+  result.add(ReproEvalModeFlag & "\n")
   for flag in flags:
     if flag.startsWith("--path:"):
       result.add("--path:\"" & flag["--path:".len .. ^1] & "\"\n")
@@ -375,7 +380,9 @@ suite "nim check and nimsuggest open repro.nim and src/main.nim cold":
     if answers.len == 2:
       let pkg = answers[0]
       check pkg.symKind == "skMacro"
-      check pkg.qualifiedName == "repro_project_dsl.package"
+      # The full DSL's module (`repro_project_dsl/full`), which the umbrella
+      # re-exports in every mode but the thin one.
+      check pkg.qualifiedName == "full.package"
       check samePath(pkg.file, ProjectDslMacros)
       check declaresAt(pkg.file, pkg.line, "macro package*")
       let write = answers[1]

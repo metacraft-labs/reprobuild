@@ -20,7 +20,10 @@
 ##      every identity (the interface fingerprint, the record digest, the
 ##      contribution fingerprint and ``catalogArtifactIdentity``), so this
 ##      changes no identity (measured by the D5 fixture test: two roots, one
-##      identity). A location OUTSIDE the catalog root refuses (it could only
+##      identity). The LINE of a location is fixed (``PublishedLocationLine``):
+##      it is the compiler's account of a multi-line statement and differs
+##      between Nim builds, so the bytes would otherwise depend on the
+##      publisher's toolchain. A location OUTSIDE the catalog root refuses (it could only
 ##      be a host path) -- including one that starts with the root's spelling
 ##      and climbs out of it with ``..``; ``.`` and empty segments are dropped
 ##      and an inner ``..`` resolved, so a location has one spelling;
@@ -167,6 +170,9 @@ proc relativeToRoot(file, root: string): tuple[ok: bool; rel: string] =
     return withinRoot(slashed(file)[r.len .. ^1])
   (false, "")
 
+const PublishedLocationLine* = 1
+  ## The line every published location carries (see ``relocateLocations``).
+
 proc relocateLocations[T](x: var T; root: string; outside: var seq[string]) =
   ## Rewrite every ``SourceLocation`` reachable from ``x`` relative to
   ## ``root``; collect the ones that are not beneath it.
@@ -175,6 +181,14 @@ proc relocateLocations[T](x: var T; root: string; outside: var seq[string]) =
       let (ok, rel) = relativeToRoot(x.file, root)
       if ok:
         x.file = rel
+        # The line is the Nim compiler's account of where a multi-line
+        # statement sits, which differs between Nim builds (a `tarball ...`
+        # call spanning eight lines is recorded at its first line by one and
+        # at a later one by another: measured 2026-11-20, the same
+        # openclaw module published by two engines differed in exactly these
+        # bytes). A published artifact must not depend on the toolchain that
+        # published it, and the line is diagnostic only, so it is fixed.
+        x.line = PublishedLocationLine
       else:
         outside.add(x.file & ":" & $x.line)
   elif T is object or T is tuple:

@@ -995,8 +995,8 @@ type
       ## The engine's project anchor. For path-shaped positionals this
       ## is the original selector verbatim; for name-only invocations it
       ## is ``"."`` or ``bareNameAnchor`` of the first name
-      ## (``"./repro.nim#<firstName>"`` in a project, ``".#<firstName>"``
-      ## in a directory without a project file).
+      ## (``"./<project file>#<firstName>"``; in a directory without a
+      ## project file, ``"./repro.nim#<firstName>"`` all the same).
     extraNameSelectors*: seq[string]
       ## Names and same-project action fragments beyond the first. The lowering pass in
       ## ``lowerProviderSnapshot`` unions every selector's dependency
@@ -1079,9 +1079,17 @@ proc bareNameAnchor(name, currentDir: string): string =
   ## For every project without such a module both anchors parse to the same
   ## module path, output name and action.
   ##
-  ## A directory with no project file keeps the directory anchor: a Mode-1
-  ## workspace or Mode-2 manifest is recognised from the directory, and the
-  ## build redirects the fragment to the project it synthesises.
+  ## A directory with no project file is anchored on the project file it
+  ## WOULD hold (``./repro.nim#test``), not on the directory: ``.#test`` is
+  ## the legacy ``<dir>#<module>`` form there too, so a bare ``test`` beside
+  ## a ``test.nim`` selected that module in a Mode-1 workspace (for every
+  ## command but ``repro build``, which redirected first) and in a directory
+  ## with no project at all (reprobuild-pm issue
+  ## 2026-11-18-a-bare-name-in-a-directory-without-a-project-file-can-still-select-a-module).
+  ## The missing file still names the directory: ``repro build`` recognises a
+  ## Mode-1 workspace from it (``mode1WorkspaceCandidate``) and redirects the
+  ## fragment to the project it synthesises; every other reader reports the
+  ## missing project file.
   ## ``ProjectFileAmbiguousError`` (both ``repro.nim`` and ``reprobuild.nim``)
   ## propagates, as it would from ``parseBuildTarget``.
   ##
@@ -1091,10 +1099,33 @@ proc bareNameAnchor(name, currentDir: string): string =
   ## current directory.
   let dir = if currentDir.len > 0: currentDir else: getCurrentDir()
   let match = resolveProjectFile(dir)
-  if match.fileName.len > 0:
-    ("." / match.fileName) & "#" & name
-  else:
-    "." & "#" & name
+  let fileName =
+    if match.fileName.len > 0: match.fileName else: CanonicalProjectFileName
+  ("." / fileName) & "#" & name
+
+proc mode1WorkspaceCandidate(base: string): string =
+  ## The directory a build anchor's ``base`` names as a possible Mode-1
+  ## workspace, or "" when it names none. A directory names itself. A
+  ## ``repro.nim`` path that does not exist (``./repro.nim``, the anchor
+  ## ``bareNameAnchor`` gives a request of names only in a directory with no
+  ## project file) names the directory it would sit in, so an explicitly
+  ## spelled ``<dir>/repro.nim[#<name>]`` in a Mode-1 workspace selects the
+  ## project synthesised for ``<dir>``, as ``<dir>[#<name>]`` does. The
+  ## legacy ``reprobuild.nim`` spelling is not read this way: no anchor is
+  ## derived with it for a missing file. Whether the directory IS a Mode-1
+  ## workspace (no project file, no Mode-2 manifest, a recognised layout) is
+  ## the caller's test.
+  if base.len == 0:
+    return ""
+  if dirExists(extendedPath(base)):
+    return base
+  if extractFilename(base) == CanonicalProjectFileName and
+      not fileExists(extendedPath(base)):
+    let parent = parentDir(base)
+    let dir = if parent.len == 0: "." else: parent
+    if dirExists(extendedPath(dir)):
+      return dir
+  ""
 
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
@@ -29803,6 +29834,9 @@ proc typecheckConsumerAgainstInterface*(consumerProjectFile: string;
   createDir(extendedPath(nimcache))
   let (code, output) = runArgvCapturingInDir(nim,
     ["check", "--hints:off", "--warnings:off",
+     # The full DSL: without a mode define `import reprobuild` is the thin
+     # mode, which does not type-check build bodies (`repro_project_dsl/mode`).
+     "--define:reproEvalMode",
      "--nimcache:" & nimcache, consumerProjectFile],
     repoRoot)
   InterfaceTypecheckResult(ok: code == 0, output: output)
@@ -31170,14 +31204,28 @@ proc committedLockDerivedProject(workspaceRoot: string):
 proc resolveProjectDirFromTarget(target: string): string =
   ## Resolve the directory that owns the committed lock for a build
   ## target. An existing directory is itself; an existing file resolves
-  ## to its parent; everything else (a bare name selector, or an empty
-  ## target) falls back to the current working directory.
+  ## to its parent; a project file that does not exist (``<dir>/repro.nim``
+  ## or ``<dir>/reprobuild.nim``) in a directory that does names that
+  ## directory ([CLI/build.md §"Target Selection"]); everything else (a
+  ## bare name selector, or an empty target) falls back to the current
+  ## working directory.
+  ##
+  ## The missing-project-file case is the anchor ``bareNameAnchor`` gives a
+  ## request of names only in a directory with no project file, and the
+  ## spelling ``mode1WorkspaceCandidate`` reads as a Mode-1 workspace: an
+  ## explicit ``sub/repro.nim#x`` builds the project synthesised for
+  ## ``sub/`` and must pin ``sub/``'s lock, as ``sub#x`` does, not the
+  ## current directory's.
   if target.len == 0:
     return getCurrentDir()
   let abs = absolutePath(target)
   if dirExists(extendedPath(abs)):
     return abs
   if fileExists(extendedPath(abs)):
+    return parentDir(abs)
+  let name = extractFilename(abs)
+  if (name == CanonicalProjectFileName or name == LegacyProjectFileName) and
+      dirExists(extendedPath(parentDir(abs))):
     return parentDir(abs)
   getCurrentDir()
 
@@ -31852,9 +31900,13 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # is written to the workspace root itself — the synth dir is plain
   # build scratch.
   # ----------------------------------------------------------------
+  # The anchor may name the directory (``.``, ``.#default``) or the project
+  # file a request of names only is anchored on even when it is missing
+  # (``./repro.nim#test``, see ``bareNameAnchor``); both name the workspace.
   let parts = splitTarget(target)
-  if dirExists(extendedPath(parts.base)):
-    let workspaceCandidate = absolutePath(parts.base)
+  let workspaceDir = mode1WorkspaceCandidate(parts.base)
+  if workspaceDir.len > 0:
+    let workspaceCandidate = absolutePath(workspaceDir)
     if not hasAnyProjectFile(workspaceCandidate) and
         not hasMode2Manifest(workspaceCandidate):
       var ws = loadMode1Workspace(workspaceCandidate)
@@ -36204,15 +36256,52 @@ proc hcrObjectSymbolFor*(supportProfile, functionName: string): string =
   else:
     "_" & functionName
 
-proc objectFunctionBytes(objectPath, symbolName: string;
-                         supportProfile = CodetracerHcrSupportProfile):
+type HcrPatchBodyRelocationRefused* = object of ValueError
+  ## A Linux patch body was refused because it carries relocations that
+  ## nothing on the path to the target would apply.
+
+proc objectFunctionBytes*(objectPath, symbolName: string;
+                          supportProfile = CodetracerHcrSupportProfile):
     seq[byte] =
+  ## The patch body `repro watch --hcr` and `repro hcr coordinate` send.
+  ##
   ## The default is host-derived. It used to be the Mach-O profile outright,
   ## which meant the unqualified caller — the watch session — parsed its object
   ## as Mach-O on every host, while `defaultObjectSymbol` had already been
   ## host-derived since HLX-M1 and named the symbol ELF-style on Linux. Those
   ## two halves have to agree or the lookup is guaranteed to miss, so the
   ## parser now follows the same profile the symbol name does.
+  ##
+  ## On an ELF profile, a body with any relocation inside the function is
+  ## REFUSED (`HcrPatchBodyRelocationRefused`). These are the function's raw
+  ## `.text` bytes from a relocatable object, and in a RELA object every
+  ## relocated field holds zero or a placeholder: the value lives in
+  ## `.rela.text`. Neither this coordinator nor the Linux agent applies
+  ## `.rela.text` to a patch body, so such a body would be published and run
+  ## with its placeholders — a `call` (`R_X86_64_PLT32`) to the next
+  ## instruction, a RIP-relative load (`R_X86_64_PC32`) from the patch page,
+  ## an IE TLS access (`R_X86_64_GOTTPOFF`) at an arbitrary `%fs` offset —
+  ## and nothing would report it. `Linux-ELF-Provider.md` §2 and §9 and
+  ## `Relocation-Processing.md` §4.1: a relocation is applied or the patch is
+  ## refused by name. Until body relocation is implemented this refuses every
+  ## one. `scripts/hcr_patch_driver.nim` already refused the same bodies; this
+  ## brings the production path into line with it.
+  ##
+  ## A relocation check alone is not enough. A PC-relative reference to code
+  ## in the SAME section — `call` or tail-`jmp` to a `static` helper, `lea` of
+  ## its address — is resolved by the assembler and leaves no relocation, yet
+  ## its displacement is wrong once the body moves to the patch page. Without
+  ## `-ffunction-sections` every function of a TU shares one `.text`. So a
+  ## body whose section also holds another defined symbol is refused too: it
+  ## cannot be told apart, without decoding instructions, from one that
+  ## reaches that neighbour. Compiling the patchable TU with
+  ## `-ffunction-sections` gives each function its own section, which turns
+  ## such references back into relocations this check sees. Issue
+  ## `reprobuild-pm/issues/2026-11-17-linux-hcr-coordinator-sends-patch-bodies-without-applying-or-checking-relocations.md`;
+  ## gate `integration_hcr_linux_patch_body_with_unapplied_relocations_is_refused`.
+  ##
+  ## The Mach-O profile is not checked here: whether the macOS agent applies
+  ## body relocations is a separate question, not answered by this change.
   let graph =
     if hcrProfileIsElf(supportProfile):
       parseElfX86_64Object(objectPath)
@@ -36224,6 +36313,36 @@ proc objectFunctionBytes(objectPath, symbolName: string;
     raise newException(ValueError,
       "could not extract function bytes for " & symbolName & " from " &
         objectPath)
+  if hcrProfileIsElf(supportProfile):
+    let section = graph.sections[symbol.sectionId]
+    var reasons: seq[string] = @[]
+    let relocations = graph.relocationsForSymbol(symbol)
+    if relocations.len > 0:
+      var names: seq[string] = @[]
+      for r in relocations:
+        let within = section.address + uint64(r.offset) - symbol.address
+        names.add r.kindName & "->" & r.targetName & "@+" & $within
+      reasons.add "it carries " & $relocations.len & " relocation(s) that " &
+        supportProfile & " does not apply to a patch body: " &
+        names.join(", ")
+    var neighbours: seq[string] = @[]
+    for other in graph.symbols:
+      if other.isDefined and other.sectionId == symbol.sectionId and
+          other.kind in {sykFunction, sykData, sykOther} and
+          other.name.len > 0 and other.name != symbol.name and
+          not (other.address == symbol.address and other.size == symbol.size):
+        neighbours.add other.name
+    if neighbours.len > 0:
+      reasons.add "its section " & section.name & " also holds " &
+        neighbours.join(", ") & ", and a reference to a neighbour in the " &
+        "same section carries no relocation, so it cannot be checked " &
+        "(compile the patchable TU with -ffunction-sections)"
+    if reasons.len > 0:
+      raise newException(HcrPatchBodyRelocationRefused,
+        "hcr patch refused: patch body " & symbolName & " in " & objectPath &
+          ": " & reasons.join("; and ") &
+          " (until patch-body relocation is implemented, only a function " &
+          "alone in its section and with no relocations can be patched)")
 
 proc hcrUnwindMetadataFor*(supportProfile, objectPath: string): seq[byte] =
   ## The `unwindMetadataPayload` bytes a coordinator sends with a direct patch.
@@ -92168,7 +92287,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
   var part: CertificatePlanPart
   var names: seq[string]
   # The selectors the certifying build is given: the resolved anchor
-  # (``.#<name>`` for this project) and the extra names, exactly as the
+  # (``./repro.nim#<name>``, ``bareNameAnchor``) and the extra names, exactly as the
   # resolution above produced them. Not ``names``: a bare anchor name that
   # also names a directory (``test`` beside a ``test/`` directory) would be
   # classified as a path again by the build.

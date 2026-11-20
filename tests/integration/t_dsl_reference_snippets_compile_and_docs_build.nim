@@ -59,6 +59,7 @@ import std/[os, osproc, sequtils, sets, strutils, tables, tempfiles,
 from repro_core/ambient_execution import uncontrolledExecCmdEx,
   uncontrolledFindExe
 import repro_interface_artifacts
+import repro_test_support
 
 const
   RepoRoot = currentSourcePath().parentDir.parentDir.parentDir
@@ -182,7 +183,10 @@ proc discoveryFlags(workDir: string): seq[string] =
     else: delEnv("REPROBUILD_LIBS_DIR")
 
 proc nimCfgFor(flags: seq[string]): string =
-  ## Only the ``--path`` entries: what an editor needs to resolve the DSL.
+  ## The ``--path`` entries: what an editor needs to resolve the DSL. Also
+  ## the full DSL's mode (``ReproEvalModeFlag``): without a mode define
+  ## ``import reprobuild`` is the thin mode, which checks no section body.
+  result.add(ReproEvalModeFlag & "\n")
   for flag in flags:
     if flag.startsWith("--path:"):
       result.add("--path:\"" & flag["--path:".len .. ^1] & "\"\n")

@@ -2631,7 +2631,8 @@ const RetentionHookScript* = """#!/bin/sh
 # `git gc` runs this as gc.recentObjectsHook. Every object id printed here is
 # kept, together with everything it reaches in this pool, as if it were
 # recent. It prints what each checkout listed in repro/borrowers still names
-# -- its refs, its HEADs, its reflog entries and what its indexes stage --
+# -- its refs, its HEADs, its reflog entries, and what its indexes stage or
+# keep to undo a conflict resolution --
 # and, for any of those this pool does not hold itself (a commit made in the
 # checkout), the history behind it, so the parents of a checkout's own
 # commits are kept too. If this script fails, git skips pruning: a failure
@@ -2654,7 +2655,7 @@ registry="$pool/repro/borrowers"
 # registry here means something removed it. Refuse: git then prunes nothing.
 [ -f "$registry" ] || exit 1
 work="$pool/repro/retain.$$"
-rm -rf "$work" && mkdir "$work" || exit 1
+rm -rf "$work" && mkdir "$work" "$work/empty" || exit 1
 trap 'rm -rf "$work"' EXIT
 git --git-dir="$pool" for-each-ref --format='^%(objectname)' > "$work/pooltips" || exit 1
 
@@ -2803,18 +2804,26 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     [ -d "$logs" ] || continue
     find "$logs" -type f -exec cat {} + | cut -d' ' -f1,2 | tr ' ' '\n' >> "$work/names"
   done
-  # Staged entries, of the checkout and of each linked worktree: a blob staged
+  # Index entries, of the checkout and of each linked worktree: a blob staged
   # with `git checkout <old> -- <path>` may be one only expired history in this
-  # pool reaches. Each index is read by path, so a worktree whose directory is
-  # gone is still read. ls-files reads the index file, not the objects;
-  # --sparse keeps a sparse index from being expanded through trees, and
-  # core.fsmonitor=false keeps a gc from starting the checkout's monitor. An
-  # index that exists but cannot be read may stage anything: refuse. Gitlinks
-  # (mode 160000) name commits of a submodule's own repository.
+  # pool reaches, and so may the conflicted stages a resolve-undo record keeps
+  # after the conflict was resolved and the merge abandoned (`git checkout -m`
+  # reads them back). Cache-tree trees are not printed: git checks that one
+  # exists before reusing it and rebuilds it otherwise.
+  # Each index is read through its own worktree's git directory, so a worktree
+  # whose directory is gone is still read, and under that worktree's own
+  # configuration. The empty work tree, run from inside it, keeps git from
+  # finding files outside the sparse patterns: either a configuration that does
+  # not allow the index to be sparse, or such files, makes git expand a sparse
+  # index through trees that may be missing. ls-files reads the index file, not
+  # the objects, and core.fsmonitor=false keeps a gc from starting the
+  # checkout's monitor. An index that exists but cannot be read may stage
+  # anything: refuse. Gitlinks (mode 160000) name commits of a submodule's own
+  # repository.
   indexes=0
-  for index in "$common/index" "$common"/worktrees/*/index; do
-    [ -e "$index" ] || continue
-    GIT_INDEX_FILE=$index git -C "$leaf" -c core.fsmonitor=false ls-files --stage --sparse > "$work/staged" || { indexes=1; break; }
+  for gitdir in "$common" "$common"/worktrees/*; do
+    [ -e "$gitdir/index" ] || continue
+    git -C "$work/empty" --git-dir="$gitdir" --work-tree="$work/empty" -c core.fsmonitor=false ls-files --stage --resolve-undo --sparse > "$work/staged" || { indexes=1; break; }
     grep -v '^160000 ' "$work/staged" | cut -d' ' -f2 >> "$work/names"
   done
   [ "$indexes" = 0 ] || { status=1; continue; }
