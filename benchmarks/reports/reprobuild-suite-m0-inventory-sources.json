@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3058,
+    "nimTestBinaries": 3060,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 810,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3108
+    "testEntries": 3110
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1725,10 +1725,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1700,
+      "integration": 1701,
       "platform/destructive": 199,
       "pure unit": 810,
-      "unclassified": 373
+      "unclassified": 374
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1948,9 +1948,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3058,
+    "nimTestBinaryCount": 3060,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3108
+    "testEntryCount": 3110
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12141,6 +12141,25 @@
       "source": "libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_create_action_record_carries_dependency_policy",
+      "class": "unclassified",
+      "classificationReason": "imports `repro_build_engine {.all.}`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_depfile"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": false,
+      "source": "libs/repro_build_engine/tests/t_create_action_record_carries_dependency_policy.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -45938,6 +45957,25 @@
       "source": "tests/integration/t_emulator_is_not_a_verifier_bypass.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_engine_created_action_replays_and_rekeys",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_engine_created_action_replays_and_rekeys.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

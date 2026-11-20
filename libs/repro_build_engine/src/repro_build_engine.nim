@@ -3804,24 +3804,35 @@ proc weakFingerprintFor*(id: string;
   ## re-deriving it.
   keyedOnGoverningLock(weakFingerprintFromText(id), governingLockIdentity)
 
-proc legacyDepfileGatheringPolicy(depfile: string;
-                                  ignoredInputPrefixes: openArray[string]):
+proc makeDepfileGatheringPolicy(depfiles: openArray[string];
+                                ignoredInputPrefixes: openArray[string] = []):
     DependencyGatheringPolicy =
+  ## A recognized-format policy over one or more make-format depfiles, one
+  ## ``ExpectedDependencyFile`` per path, as the DSL's ``makeDepfilePolicy``
+  ## lowers. Each path is ``required = false``: a glob may expand to nothing,
+  ## and a cacheable edge that produced none of its reports is withheld from
+  ## publication at the aggregate level, not per path.
+  var outputs: seq[ExpectedDependencyFile] = @[]
+  for path in depfiles:
+    outputs.add(ExpectedDependencyFile(
+      logicalName: "deps",
+      path: path,
+      required: false))
   DependencyGatheringPolicy(
     kind: dgRecognizedFormat,
     completeness: decComplete,
     recognizedReports: @[
       RecognizedDependencyReportSpec(
         formatName: DependencyFormatName(MakeDepfileFormatName),
-        outputs: @[
-          ExpectedDependencyFile(
-            logicalName: "deps",
-            path: depfile,
-            required: false)
-        ],
+        outputs: outputs,
         completeness: decComplete)
     ],
     ignoredInputPrefixes: @ignoredInputPrefixes)
+
+proc legacyDepfileGatheringPolicy(depfile: string;
+                                  ignoredInputPrefixes: openArray[string]):
+    DependencyGatheringPolicy =
+  makeDepfileGatheringPolicy([depfile], ignoredInputPrefixes)
 
 proc action*(id: string; argv: openArray[string]; cwd = "";
              deps: openArray[string] = []; inputs: openArray[string] = [];
@@ -5797,12 +5808,47 @@ proc isVolatileMonitorPath(path: string; scope: VolatileScope): bool =
   ## (`dropsAsVolatileRuntimeState`); see `foldOneMonitorRecord`.
   dropsAsVolatileInput(path, scope)
 
+const
+  CreatedActionAutomaticMonitor* = "automaticMonitor"
+    ## ``dependencyPolicy.kind`` of a ``create-action`` record whose action
+    ## the engine monitors, as the DSL's ``automaticMonitorPolicy()``.
+  CreatedActionMakeDepfile* = "makeDepfile"
+    ## ``dependencyPolicy.kind`` of a ``create-action`` record whose action
+    ## reports its reads in make-format depfiles, as the DSL's
+    ## ``makeDepfilePolicy(...)``. The record lists them in ``depfiles``.
+
+proc keyedOnCreatedActionPolicy*(fingerprint: ContentDigest; kind: string;
+                                 depfiles: openArray[string]): ContentDigest =
+  ## `fingerprint` with a created action's dependency policy mixed in: the
+  ## policy's kind name and, for a depfile policy, every depfile path.
+  ##
+  ## The policy decides what the action's cache record means. A record
+  ## written under a depfile policy lists the paths the depfile named; one
+  ## written under the monitor lists what the process was seen to read. The
+  ## same command under the other policy must not be served that record, so
+  ## the policy is part of the created action's key. Length-framed, like
+  ## `keyedOnArgv`.
+  var framed = "create-action-dependency-policy\x1e"
+  let base = toHex(fingerprint.bytes)
+  framed.add($base.len & "\x1f" & base & "\x1e")
+  framed.add($kind.len & "\x1f" & kind & "\x1e")
+  framed.add($depfiles.len & "\x1e")
+  for depfile in depfiles:
+    framed.add($depfile.len & "\x1f" & depfile & "\x1e")
+  blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
+
 proc parseCreateActionRecord(payload, path: string; lineNo: int;
                              governingLockIdentity: LockIdentity): BuildAction =
   ## Decode an M25 ``create-action`` JSON payload into a BuildAction. The
   ## payload format is a single-line JSON object; embedded newlines are
   ## forbidden so the surrounding line-oriented fragment parser stays
   ## simple.
+  ##
+  ## A record that is ``cacheable`` must carry a ``dependencyPolicy``, and
+  ## the policy is part of the action's key (`keyedOnCreatedActionPolicy`).
+  ## With one, the created action is monitored (or reads its depfiles) and
+  ## is keyed exactly as a declared edge is: its argv, its inputs' content
+  ## and what it was seen to read.
   ##
   ## Named-Lock-Files §4.1/§7.2: `governingLockIdentity` is the identity of
   ## the action that PRODUCED this fragment, and it is a required parameter
@@ -5884,9 +5930,69 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let widthFlag = stringField("widthFlag", required = false)
   let commandStatsId = stringField("commandStatsId", required = false)
   let cacheable = boolField("cacheable", default = false)
+
+  # The dependency policy, in the vocabulary of the DSL's static edges:
+  #   {"kind": "automaticMonitor"}
+  #   {"kind": "makeDepfile", "depfiles": ["<path>", ...]}
+  # A cached action is keyed on what it read, and only the policy says how
+  # the engine learns that. A cacheable record without one would be keyed on
+  # its declared inputs alone, the declared-only shape
+  # `repro_core/dependency_gathering.nim` forbids, so it is refused. A
+  # record that is not cacheable keeps the engine's default (the monitor).
+  var policyKind = ""
+  var policyDepfiles: seq[string] = @[]
+  var dependencyPolicy = none(DependencyGatheringPolicy)
+  if node.hasKey("dependencyPolicy"):
+    let policyNode = node["dependencyPolicy"]
+    if policyNode.kind != JObject:
+      fail("field 'dependencyPolicy' must be an object with a 'kind'")
+    for key in policyNode.keys:
+      if key notin ["kind", "depfiles"]:
+        # Refused rather than ignored: a misspelt field would otherwise
+        # quietly drop the evidence the author meant to declare.
+        fail("field 'dependencyPolicy' has unknown member '" & key & "'")
+    if not policyNode.hasKey("kind") or policyNode["kind"].kind != JString:
+      fail("field 'dependencyPolicy' must name its 'kind' as a string")
+    policyKind = policyNode["kind"].getStr()
+    if policyNode.hasKey("depfiles"):
+      if policyNode["depfiles"].kind != JArray:
+        fail("'dependencyPolicy.depfiles' must be an array of strings")
+      for item in policyNode["depfiles"]:
+        if item.kind != JString or item.getStr().len == 0:
+          fail("'dependencyPolicy.depfiles' must contain only non-empty " &
+            "strings")
+        policyDepfiles.add(item.getStr())
+    case policyKind
+    of CreatedActionAutomaticMonitor:
+      if policyDepfiles.len > 0:
+        fail("dependency policy '" & CreatedActionAutomaticMonitor &
+          "' takes no 'depfiles'; use '" & CreatedActionMakeDepfile & "'")
+      dependencyPolicy = some(automaticMonitorGatheringPolicy())
+    of CreatedActionMakeDepfile:
+      if policyDepfiles.len == 0:
+        fail("dependency policy '" & CreatedActionMakeDepfile &
+          "' needs at least one path in 'depfiles'")
+      dependencyPolicy = some(makeDepfileGatheringPolicy(policyDepfiles))
+    else:
+      fail("unknown dependency policy kind '" & policyKind & "'; expected '" &
+        CreatedActionAutomaticMonitor & "' or '" & CreatedActionMakeDepfile &
+        "'")
+  elif cacheable:
+    fail("'" & id & "' is cacheable but declares no 'dependencyPolicy'. " &
+      "A cached action is keyed on what it read, and the policy says how " &
+      "that is learnt: add \"dependencyPolicy\": {\"kind\": \"" &
+      CreatedActionAutomaticMonitor & "\"} (or a '" &
+      CreatedActionMakeDepfile & "' policy with its 'depfiles'), or drop " &
+      "'cacheable'")
+  else:
+    policyKind = CreatedActionAutomaticMonitor
+
   # The record's id names the action, not the command: two records with one
-  # id and different command lines must not share a cache record.
-  let weakFingerprint = keyedOnArgv(weakFingerprintFromText(id), argv, cwd)
+  # id and different command lines must not share a cache record, nor two
+  # records that gather their dependencies differently.
+  let weakFingerprint = keyedOnCreatedActionPolicy(
+    keyedOnArgv(weakFingerprintFromText(id), argv, cwd),
+    policyKind, policyDepfiles)
   result = action(id, argv, cwd = cwd, deps = deps, inputs = inputs,
     outputs = outputs, optionalOutputs = stringSeqField("optionalOutputs"),
     pool = pool, poolUnits = poolUnits, cpuMilli = cpuMilli,
@@ -5894,6 +6000,7 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
     widthFlag = widthFlag,
     commandStatsId = commandStatsId, cacheable = cacheable,
     weakFingerprint = weakFingerprint, env = env,
+    dependencyPolicy = dependencyPolicy,
     governingLockIdentity = governingLockIdentity)
 
 proc readDynamicGraphFragment(path: string;
