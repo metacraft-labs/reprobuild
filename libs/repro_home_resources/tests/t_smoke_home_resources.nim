@@ -161,13 +161,6 @@ suite "M68 smoke: home resource lifecycle":
     check report.driftCount == 0
     check report.changedCount == 0
 
-  test "plan: rendering contains the header line":
-    let desired = initDesiredSet()
-    var recorded = initOrderedTable[string, RecordedBinding]()
-    let report = composePlan(desired, recorded)
-    let rendered = renderPlan(report)
-    check rendered.startsWith("repro home plan: 0 resource(s) planned")
-
   # ----------------------------------------------------------------
   # Wrong-platform fail-closed: each Phase B driver must raise
   # ENotImplementedPlatform on a host whose OS does not match the

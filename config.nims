@@ -555,6 +555,10 @@ for libName in [
   # their per-version requirements, and the deterministic index writer. The
   # objects' codec is `repro_domain_types/nimble_index`.
   "repro_nimble_index",
+  # Nimble package catalog NPC-M4: the index generator -- the source set
+  # reader, the origin egress policy, the fetch (`netFetch`) and pure index
+  # edges, origin events and `repro catalog verify`.
+  "repro_nimble_generator",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import
@@ -1045,8 +1049,11 @@ addSiblingFirstPackagePath(".." / "nim-entrypoints" / "src", "ENTRYPOINTS_SRC",
 # confutils (the metacraft-labs fork): ``confutils/clispec_config`` is how
 # repro's own command line is instantiated from its clispec description
 # (``repro_cli_support/cli_program``). The package is rooted at the checkout
-# (no ``src/``), and only the clispec bridge is imported, so none of
-# confutils' serialization dependencies are needed. Same policy: the
+# (no ``src/``). Two of its modules are imported: the clispec bridge, and
+# ``confutils/layers/toml_source``, the TOML adapter the configuration
+# writers validate a whole file through
+# (``repro_dsl_stdlib/generated_config/described``), which needs
+# ``toml_serialization``, vendored here (above). Same policy: the
 # ``../nim-confutils`` checkout, else the ``$CONFUTILS_SRC`` pin.
 addSiblingFirstPackagePath(".." / "nim-confutils", "CONFUTILS_SRC",
   "confutils.nim")

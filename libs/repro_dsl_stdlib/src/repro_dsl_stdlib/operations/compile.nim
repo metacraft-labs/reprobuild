@@ -37,7 +37,8 @@ proc compile*(source: string;
               target: string;
               inputs: seq[LibraryApi] = @[];
               standard = "";
-              defines: seq[string] = @[]): BuildActionDef =
+              defines: seq[string] = @[];
+              pic = false): BuildActionDef =
   ## Convenience overload that builds a ``CompileOptions`` literal
   ## from the canonical named-arg shape recipe authors use most.
   compile(CompileOptions(
@@ -45,4 +46,5 @@ proc compile*(source: string;
     target: target,
     inputs: inputs,
     defines: defines,
-    standard: standard))
+    standard: standard,
+    pic: pic))

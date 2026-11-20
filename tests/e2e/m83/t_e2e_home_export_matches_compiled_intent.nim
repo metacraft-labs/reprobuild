@@ -150,7 +150,8 @@ suite "repro home export: compiled intent":
     # The planner's input, obtained independently: `repro home plan` for
     # host alpha compiles the profile and publishes the envelope it
     # consumed.
-    let plan = sb.runHomePlan(host = "alpha")
+    let plan = sb.runHomePlan(host = "alpha", extraEnv = sb.fixturePackageEnv(
+      ["ripgrep", "jq", "strace", "fd", "bat", "htop"]))
     checkpoint("repro home plan output:\n" & plan.output)
     require plan.exitCode == 0
     check plan.nimSpawns >= 1

@@ -16,10 +16,11 @@
     git-hooks.follows = "nixos-modules/git-hooks-nix";
     # `bundlers` is the official NixOS bundler collection (the same set
     # `nix bundle --bundler github:NixOS/bundlers#toArx` reaches for). We
-    # only consume its `toArx` bundler (nix-community/nix-bundle under the
-    # hood) to package the full `reprobuild` store closure into ONE
-    # self-extracting, relocatable executable (see `packages.repro-portable`
-    # below). Follow our nixpkgs so the bundler's arx/nix-user-chroot helper
+    # consume only the nix-community/nix-bundle source it locks
+    # (`bundlers.inputs.nix-bundle`), whose arx and nix-user-chroot pieces
+    # package the full `reprobuild` store closure into ONE self-extracting,
+    # relocatable executable (see `packages.repro-portable` below and
+    # nix/repro-portable/package.nix). Follow our nixpkgs so those helper
     # tools share the fleet's package set rather than pulling a second one.
     bundlers = {
       url = "github:NixOS/bundlers";
@@ -385,7 +386,18 @@
       # every monitored process decoding it again. The range also builds the
       # debug shim at the stated -O level and injects native ARM64 children on
       # Windows on Arm.
-      url = "github:metacraft-labs/io-mon/735726963f48d91031463cbd9d1e9cf8f444f5ee";
+      # Bumped 73572696 -> efe6dc5b (2026-11-19, io-mon `agents`): io-mon's
+      # command line is a clispec description (`io_mon/cli_description`,
+      # parsed by `io_mon/cli`), which repro mounts under `repro debug io
+      # monitor` and `repro internal io monitor`; this revision is the first
+      # that has it, so the engine does not build against an older pin. The
+      # range also keys the macOS EndpointSecurity subtree view on the audit
+      # token and fences the capture (ae0bf6f).
+      # Bumped efe6dc5b -> 8b8faa81 (2026-11-19, io-mon `agents`): the
+      # mountable description uses nim-cli-spec's `cliUnbound` instead of a
+      # copy of its own, so it needs nim-cli-spec fcd5b30 (`clispec/splice`),
+      # the revision this flake pins.
+      url = "github:metacraft-labs/io-mon/8b8faa81bb0cad5d2d91fae80ceaaa7092782ec2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -441,7 +453,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/f6065a9c6f3b56ab7c1d7e24750f7b9cb27c5661";
+      url = "github:metacraft-labs/nim-cli-spec/fcd5b309c2cb38656d8d2c3b39a7c4e72b5dfb3a";
       flake = false;
     };
     nim-entrypoints-src = {
@@ -462,12 +474,13 @@
       # ``confutils/clispec_config``: confutils instantiated over a clispec
       # description. repro's own command line is such a description
       # (``repro_cli_support/cli_program``), so the engine compile imports it.
-      # Only the clispec bridge and its layers are imported, which need no
-      # serialization library; the package root (no ``src/``) is the import
-      # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
+      # The clispec bridge and its layers are imported, and the TOML adapter
+      # (``confutils/layers/toml_source``), through which the configuration
+      # writers validate a whole file (it needs ``toml_serialization``,
+      # vendored here); the package root (no ``src/``) is the import path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/ddd056a1cd13a9a24aa5f3451df23aaaa6c46091";
+      url = "github:metacraft-labs/nim-confutils/ffd5d9a6cf8481b2e696be3704f14b315a10aed9";
       flake = false;
     };
     nimcrypto-src = {
@@ -938,8 +951,23 @@
     # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
     # it when a start fails, frees the clone child's stack by its base
     # pointer, and retries the error-pipe read and `waitpid` on EINTR.
+    #
+    # Advanced from c47c55d1 to 4a8c0b82: `staticExec` and `gorgeEx` start a
+    # command made of plain and quoted words, or `cd <absolute dir> &&
+    # [exec] <plain command>`, without `/bin/sh -c`, so a recipe compile
+    # whose macros run a command at compile time no longer reads the host's
+    # shell either. A program that cannot be started now reports the shell's
+    # exit code (127 or 126) for the compiler's own commands too. One
+    # commit, in compiler/gorgeimpl.nim and compiler/shellfreeexec.nim plus
+    # their tests.
+    #
+    # Advanced from 4a8c0b82 to fde9384c, which carries it: `std/net` `send`
+    # returns after a swallowed disconnect (no spin on a reset peer) and
+    # resumes a short write at the written offset (upstream bb85d2dda5,
+    # e2b2142a49; reprobuild-pm issue
+    # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=c47c55d166224bcffe485045378c766a0f5e67a2";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
       flake = false;
     };
     nim-csources-src = {
@@ -2128,22 +2156,27 @@
           #    load). A dlopen-by-baked-abs-path solver cannot be statically
           #    linked, and clingo/openssl/blake3/sqlite would all have to be
           #    static too. So a true static binary is infeasible here.
-          #  * The `toArx` bundler embeds the whole closure and, at run time,
-          #    uses `nix-user-chroot` to expose the extracted store at the
-          #    real `/nix/store` inside a user namespace. That makes every
-          #    baked `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen
-          #    path resolve WITHOUT a real `/nix/store` on the host. It
-          #    requires unprivileged user namespaces (default on the target
-          #    Debian image).
+          #  * The bundle embeds the whole closure and, at run time, uses
+          #    `nix-user-chroot` to expose the extracted store at the real
+          #    `/nix/store` inside a user namespace. That makes every baked
+          #    `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen path
+          #    resolve WITHOUT a real `/nix/store` on the host. It requires
+          #    unprivileged user namespaces (default on the target Debian
+          #    image).
           #
-          # This is the same machinery as `nix bundle --bundler
-          # github:NixOS/bundlers#toArx .#reprobuild`, wired as a first-class
-          # package output so callers can just `nix build .#repro-portable`.
-          # The bundler keys off `meta.mainProgram` ("repro"), so the produced
-          # executable launches the single `repro` image from the extracted
-          # closure. It ADDS to — and does not
-          # disturb — `packages.default`/`packages.reprobuild` or `just build`.
-          reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
+          # This is the machinery behind `nix bundle --bundler
+          # github:NixOS/bundlers#toArx .#reprobuild`, but NOT the stock
+          # bundler: that one's nix-user-chroot hid /bin (so every `/bin/sh`
+          # spawn failed), started repro in `/` instead of the caller's
+          # directory, and emptied PATH. nix/repro-portable/package.nix
+          # assembles the same arx + nix-user-chroot pieces with those fixed;
+          # `checks.repro-portable-host-root` proves it against a host root
+          # without /nix. It ADDS to — and does not disturb —
+          # `packages.default`/`packages.reprobuild` or `just build`.
+          reproPortable = pkgs.callPackage ./nix/repro-portable/package.nix {
+            inherit reprobuild;
+            nix-bundle-src = bundlers.inputs.nix-bundle;
+          };
 
           # The language toolchains the Mode 2/3 convention tests drive --
           # `libs/repro_standard_provider/tests/test_<lang>_*_convention` and
@@ -2628,6 +2661,18 @@
             packaged-runquota-runtime-wrapper = pkgs.callPackage ./nix/tests-runquota-runtime-wrapper.nix {
               inherit reprobuild runquotaTools;
             };
+            # The portable bundle, run on a host-shaped root with NO /nix
+            # (merged-/usr, busybox + static git, as on a Debian runner image):
+            # repro must spawn `/bin/sh`, start in the caller's directory, and
+            # carry a real `hooks ensure` + `git checkout` round trip. The
+            # stock nix-user-chroot is the negative control and must fail all
+            # four. Linux only, like the bundle. It builds the full ~800 MB
+            # archive; run it alone with
+            # `nix build .#checks.x86_64-linux.repro-portable-host-root`.
+            ${if pkgs.stdenv.hostPlatform.isLinux then "repro-portable-host-root" else null} =
+              pkgs.callPackage ./nix/tests/repro-portable-host-root.nix {
+                inherit reproPortable;
+              };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''

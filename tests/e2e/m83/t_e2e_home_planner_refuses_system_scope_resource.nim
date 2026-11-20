@@ -84,7 +84,8 @@ suite "the home planner refuses a system-scope resource":
       let doc = parseJson(exported.stdout)
       check doc["intent"]["resources"].len == 1
       check doc["intent"]["resources"][0]["kind"].getStr == "env.userVariable"
-      let plan = sb.runHomePlan()
+      # `repro home plan` previews the package too: bind it to a fixture.
+      let plan = sb.runHomePlan(extraEnv = sb.fixturePackageEnv(["ripgrep"]))
       checkpoint("control plan:\n" & plan.output)
       check plan.exitCode == 0
 
@@ -103,7 +104,7 @@ suite "the home planner refuses a system-scope resource":
     check targeted.exitCode != 0
     checkNamesTheResource(targeted.stderr)
 
-    let plan = sb.runHomePlan()
+    let plan = sb.runHomePlan(extraEnv = sb.fixturePackageEnv(["ripgrep"]))
     checkpoint("plan:\n" & plan.output)
     check plan.exitCode != 0
     checkNamesTheResource(plan.output)

@@ -58,9 +58,9 @@ import sys
 from pathlib import Path
 
 # The commands whose flags and environment variables are compared, by their
-# words after `repro` ("" is `repro` itself). Each later group of commands is
-# added here when its parsing moves onto the description, and the test lists
-# the same commands.
+# words after `repro` ("" is `repro` itself): every command repro declares
+# (its hidden spellings aside). The test lists the same commands, and checks
+# that its list is every command the description declares.
 COVERED_COMMANDS = [
     "",
     "help",
@@ -283,6 +283,114 @@ COVERED_COMMANDS = [
     "attest cross-check",
     "attest launch",
     "attest reap",
+    # Every other command repro declares (round 8b): the list is every
+    # command, hidden spellings aside. Round 8c: the add-on's and io-mon's
+    # command lines, mounted under `system addon|state|secret|adopt` and
+    # `debug io monitor` / `internal io monitor`, with every verb.
+    "daemon serve",
+    "daemon start",
+    "daemon status",
+    "daemon stop",
+    "daemon restart",
+    "daemon sessions",
+    "daemon logs",
+    "store daemon start",
+    "store daemon status",
+    "store daemon stop",
+    "home __build-bundle",
+    "home __receive-bundle",
+    "home __transfer-bundle",
+    "home __remote-activate",
+    "system addon",
+    "system addon preflight",
+    "system addon bootstrap",
+    "system addon evidence-ship",
+    "system addon evidence-enrol",
+    "system addon store-verify",
+    "system addon egress-check",
+    "system addon evidence-harvest",
+    "system addon evidence-credential-check",
+    "system addon uninstall",
+    "system addon verify-discard-record",
+    "system addon verify",
+    "system addon boot-confirm",
+    "system addon reassert",
+    "system addon recover",
+    "system addon secrets",
+    "system addon probe",
+    "system addon secret",
+    "system addon secret put",
+    "system addon rotate-recipient-key",
+    "system addon image-assemble",
+    "system addon agent-repin",
+    "system addon agent-tick",
+    "system addon agent-fetch",
+    "system addon agent-apply",
+    "system addon migration-plan",
+    "system addon resume",
+    "system addon migrate",
+    "system addon contain",
+    "system addon release",
+    "system addon fingerprint",
+    "system addon fingerprint diff",
+    "system addon expected-delta",
+    "system addon ledger",
+    "system addon import",
+    "system addon state",
+    "system addon state backup",
+    "system addon state release",
+    "system addon state verify",
+    "system addon state restore",
+    "system addon state digest",
+    "system addon state unit",
+    "system addon state install-unit",
+    "system addon status",
+    "system addon retention",
+    "system addon selfcheck-btrfs",
+    "system addon selfcheck-write",
+    "system state",
+    "system state backup",
+    "system state release",
+    "system state verify",
+    "system state restore",
+    "system state digest",
+    "system state unit",
+    "system state install-unit",
+    "system secret",
+    "system secret put",
+    "system secret materialise",
+    "system adopt",
+    "debug io",
+    "debug io monitor",
+    "debug io monitor run",
+    "debug io monitor inspect",
+    "hooks protocol",
+    "hooks dispatch",
+    "hooks cache-push",
+    "pressure",
+    "internal",
+    "internal shared-pool-upload-pack",
+    "internal resolve-package",
+    "internal io",
+    "internal io monitor",
+    "internal io monitor run",
+    "internal io monitor inspect",
+    "internal runquota-helper",
+    "internal compile-provider",
+    "internal extract-interface",
+    "internal compile-profile",
+    "internal probe-profile-platforms",
+    "internal dev-env-introspect",
+    "internal render-dev-env-shell",
+    "internal direnv-activate",
+    "internal native-shell-activate",
+    "internal dev-session-supervisor",
+    "internal dev-session-http",
+    "internal cmake-regenerate",
+    "catalog",
+    "catalog publish",
+    "catalog generate",
+    "catalog verify",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
@@ -300,8 +408,10 @@ SHORT_FLAG = re.compile(r"(?<![\w-])-([A-Za-z])\1?(?![\w-])")
 ENV_CLAUSE = re.compile(r"\benvironment:\s*((?:`[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*`"
                         r"(?:\s*,\s*|\s+and\s+)?)+)")
 ENV_NAME = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)`")
-COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
-HEADED_COMMAND = re.compile(r"`repro ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*)`")
+# A command word; an internal step may start with `__` (`home __build-bundle`).
+COMMAND_WORD = re.compile(r"^(?:__)?[a-z][a-z0-9-]*$")
+HEADED_COMMAND = re.compile(
+    r"`repro ([a-z][a-z0-9-]*(?: (?:__)?[a-z][a-z0-9-]*)*)`")
 
 
 BULLET_LEAD = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+`([^`\n]+)`")

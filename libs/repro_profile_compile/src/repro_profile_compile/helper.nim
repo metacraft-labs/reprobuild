@@ -1,18 +1,17 @@
-## Body of the internal `__repro-compile-profile` helper subcommand.
+## Body of the internal `__repro-compile-profile` helper subcommand
+## (`repro internal compile-profile`).
 ##
-## This proc is invoked by the public `repro` CLI's main dispatcher
-## when it sees the `__repro-compile-profile` argv. The
-## `__repro-compile-profile` argv is NEVER user-facing; it is the
-## subprocess shape that the profile COMPILE edge
-## (`__repro_profile_compile`, `edge.nim`) expects.
-##
-## Argv shape:
+## The public `repro` CLI's dispatcher calls these procs with the values its
+## generated parser read from the helper's command line, which repro's
+## description declares (`repro_cli_support/cli_description`). The command
+## line is NEVER user-facing; it is the subprocess shape that the profile
+## COMPILE edge (`__repro_profile_compile`, `edge.nim`) writes:
 ##
 ##   repro __repro-compile-profile
-##     --profile <profile-root.nim>
-##     --binary <output-profile-binary>
-##     --nimcache <nimcache-dir>
-##     --repo-root <reprobuild-repo-root>
+##     --profile=<profile-root.nim>
+##     --binary=<output-profile-binary>
+##     --nimcache=<nimcache-dir>
+##     --repo-root=<reprobuild-repo-root>
 ##     [--verbose]
 ##
 ## All paths must be absolute. The helper exits 0 on success, 1 on a
@@ -36,34 +35,17 @@
 ## record is what io-mon observes this process and its children (`nim`, the
 ## C toolchain) read.
 
-import std/[os, strutils]
+import std/strutils
+from std/os import fileExists
 from repro_core/paths import extendedPath
 
 import ./compile
 import ./platforms
 
-proc valueAfterFlag(args: openArray[string]; flag: string): string =
-  var i = 0
-  while i < args.len:
-    if args[i] == flag and i + 1 < args.len:
-      return args[i + 1]
-    inc i
-  ""
-
-proc hasFlag(args: openArray[string]; flag: string): bool =
-  for a in args:
-    if a == flag:
-      return true
-  false
-
-proc runProfileCompileHelper*(args: openArray[string]): int =
-  ## Implementation of `repro __repro-compile-profile`. See module docs.
-  let profileRoot = valueAfterFlag(args, "--profile")
-  let binaryPath = valueAfterFlag(args, "--binary")
-  let nimcacheDir = valueAfterFlag(args, "--nimcache")
-  let repoRoot = valueAfterFlag(args, "--repo-root")
-  let verbose = hasFlag(args, "--verbose")
-
+proc runProfileCompileHelper*(profileRoot, binaryPath, nimcacheDir,
+                              repoRoot: string; verbose = false): int =
+  ## Implementation of `repro __repro-compile-profile`. See module docs. The
+  ## parser requires every flag; a value given empty is refused here.
   for (name, value) in [
     ("--profile", profileRoot),
     ("--binary", binaryPath),
@@ -106,7 +88,8 @@ proc runProfileCompileHelper*(args: openArray[string]): int =
     return 1
   0
 
-proc runProfilePlatformProbeHelper*(args: openArray[string]): int =
+proc runProfilePlatformProbeHelper*(profileRoot, outPath, nimcacheDir,
+                                    repoRoot: string): int =
   ## Implementation of `repro __repro-probe-profile-platforms`: evaluate the
   ## profile for every target platform (`runProfilePlatformProbes`) and write
   ## the outcomes to `--out`. The body of the platform-probe edge
@@ -114,14 +97,10 @@ proc runProfilePlatformProbeHelper*(args: openArray[string]): int =
   ## freshness check of its own, no depfile -- io-mon observes what the
   ## checks read.
   ##
-  ## Argv: `--profile <root.nim> --out <json> --nimcache <dir>
-  ## --repo-root <dir>`. Exits 0 when the document was written (whatever
+  ## Argv: `--profile=<root.nim> --out=<json> --nimcache=<dir>
+  ## --repo-root=<dir>`. Exits 0 when the document was written (whatever
   ## each platform's outcome), 1 when the probe could not run at all, 2 on
   ## a usage error.
-  let profileRoot = valueAfterFlag(args, "--profile")
-  let outPath = valueAfterFlag(args, "--out")
-  let nimcacheDir = valueAfterFlag(args, "--nimcache")
-  let repoRoot = valueAfterFlag(args, "--repo-root")
   for (name, value) in [
     ("--profile", profileRoot),
     ("--out", outPath),

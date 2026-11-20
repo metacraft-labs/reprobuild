@@ -271,7 +271,7 @@ suite "path-mode dev environment":
     # This fixture needs a stable complete cache. A freshly copied executable
     # legitimately refreshes its racy evidence on a hit; age the owned file
     # before the first resolution rather than bypass that production check.
-    sleep(int(RacyWindowNs div 1_000_000) + 10)
+    sleep(int(executable_evidence.RacyWindowNs div 1_000_000) + 10)
     let mixed = readInterfaceArtifact(interfacePath)
     var complete = mixed.projectInterface
     complete.toolUses = complete.toolUses.filterIt(it.packageSelector == "present")

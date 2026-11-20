@@ -1,7 +1,10 @@
 import std/[json, net, os, strutils]
 from repro_core/paths import extendedPath
 when defined(posix):
+  import std/posix
   from repro_core/paths import unixSocketPathMaxLen, unixSocketPathFits
+  from repro_core/peer_identity import socketPeerCredentials
+  import repro_core/owned_directory
 
 import repro_hcr_agent/protocol
 
@@ -14,6 +17,13 @@ type
 
   HcrAgentSocketConnection* = object
     socket*: Socket
+
+  HcrAgentPeerError* = object of IOError
+    ## The process at the other end of the patch channel is not this user's,
+    ## or who it is cannot be established. The channel carries executable
+    ## code, so the connection is closed before any frame crosses it.
+    ## reprobuild-pm ``spec/HCR/HCR-Overview.md`` §5.2 "Who may use the
+    ## channel".
 
 proc close*(listener: var HcrAgentUnixListener) =
   if not listener.socket.isNil:
@@ -76,6 +86,34 @@ when defined(posix):
           $path.len & " bytes, longer than the " & $unixSocketPathMaxLen() &
           "-byte Unix-socket path limit on this platform")
 
+when defined(posix):
+  proc requireSameUserPeer(socket: Socket; peerRole: string) =
+    ## Admit the connected AF_UNIX ``socket`` only when the kernel says the
+    ## process at its other end runs as this process's effective uid
+    ## (``SO_PEERCRED`` on Linux, ``getpeereid`` on macOS and the BSDs). A
+    ## path is not an identity: whoever binds or reaches the name first
+    ## answers on it. Closes ``socket`` and raises ``HcrAgentPeerError``
+    ## otherwise, before anything is read from or written to it.
+    let me = int(geteuid())
+    var peerUid = -1
+    var reason = ""
+    try:
+      peerUid = socketPeerCredentials(SocketHandle(socket.getFd())).uid
+    except OSError as err:
+      reason = err.msg
+    if reason.len == 0 and peerUid == me:
+      return
+    socket.close()
+    if reason.len > 0:
+      raise newException(HcrAgentPeerError,
+        "refusing the HCR " & peerRole & ": cannot read its peer " &
+          "credentials (" & reason & "), and the patch channel carries " &
+          "executable code")
+    raise newException(HcrAgentPeerError,
+      "refusing the HCR " & peerRole & ": it runs as uid " & $peerUid &
+        ", not as this user (uid " & $me & "), and the patch channel " &
+        "carries executable code")
+
 proc listenHcrAgentUnixSocket*(path: string;
                                removeExisting = true): HcrAgentUnixListener =
   when defined(posix):
@@ -96,8 +134,13 @@ proc listenHcrAgentUnixSocket*(path: string;
 
 proc acceptHcrAgentConnection*(listener: HcrAgentUnixListener):
     HcrAgentSocketConnection =
+  ## Accept one connection, admitted only when the connecting process runs
+  ## as this user (``requireSameUserPeer``); another account's connection
+  ## raises ``HcrAgentPeerError``.
   var client: owned(Socket)
   listener.socket.accept(client)
+  when defined(posix):
+    requireSameUserPeer(client, "agent connecting to " & listener.path)
   HcrAgentSocketConnection(socket: client)
 
 proc connectHcrAgentUnixSocket*(path: string): HcrAgentSocketConnection =
@@ -106,9 +149,48 @@ proc connectHcrAgentUnixSocket*(path: string): HcrAgentSocketConnection =
     result = HcrAgentSocketConnection(
       socket: newSocket(AF_UNIX, SOCK_STREAM, IPPROTO_NONE))
     result.socket.connectUnix(path)
+    requireSameUserPeer(result.socket, "coordinator listening on " & path)
   else:
     raise newException(OSError,
       "HCR agent Unix socket IPC is only supported on POSIX hosts")
+
+when defined(posix):
+  const HcrAgentSocketDirRole = OwnedDirectoryRole(
+    noun: "HCR agent socket directory",
+    exposure: "another account could listen in place of the coordinator " &
+      "and send this user's process executable code",
+    remedy: "remove it or fix its mode and start the session again; if " &
+      "another account owns it, pass an absolute --hcr-agent-socket in a " &
+      "directory only you can write")
+
+  proc hcrAgentPrivateSocketDir*(tempRoot = "/tmp"): string =
+    ## The per-user directory a DERIVED agent socket lives in:
+    ## ``<tempRoot>/repro-hcr-<euid>``. ``/tmp`` rather than ``getTempDir()``
+    ## because the derived path exists to be short. A socket is never put
+    ## directly in a shared temporary directory, where anyone can create the
+    ## predictable name first. reprobuild-pm ``spec/HCR/CLI-Integration.md``
+    ## §"Agent Socket Path".
+    tempRoot / ("repro-hcr-" & $int(geteuid()))
+
+  proc hcrAgentDerivedSocketPath*(resolved: string;
+                                  tempRoot = "/tmp"): string =
+    ## The short socket that replaces a relative ``--hcr-agent-socket`` whose
+    ## resolved path is too long: ``<private dir>/<64-bit FNV-1a of the
+    ## resolved path, 16 hex>.sock``. 64 bits so that two of this user's
+    ## projects do not share one by accident: the coordinator removes an
+    ## existing socket before it binds.
+    var h = 14695981039346656037'u64
+    for ch in resolved:
+      h = (h xor uint64(ord(ch))) * 1099511628211'u64
+    hcrAgentPrivateSocketDir(tempRoot) / (toHex(h, 16).toLowerAscii & ".sock")
+
+  proc admitHcrAgentPrivateSocketDir*(tempRoot = "/tmp") =
+    ## Create the per-user directory ``0700`` when missing, and admit it only
+    ## when ``lstat`` says it is a real directory owned by this user with no
+    ## group or other permission. An existing directory is never repaired.
+    ## Raises ``OwnedDirectoryError`` for a refusal.
+    ensureOwnedDirectory(hcrAgentPrivateSocketDir(tempRoot),
+      privateDir = true, HcrAgentSocketDirRole)
 
 proc hcrAgentSocketEnv*(path: string): tuple[name: string, value: string] =
   (ReproHcrAgentSocketEnv, path)
@@ -153,8 +235,9 @@ proc writeAgentMessage*(connection: HcrAgentSocketConnection;
   connection.socket.send(result)
 
 proc hcrAgentWindowsPipeName*(pid: int): string =
-  ## HX-W-5's process-derived Windows endpoint, analogous to the POSIX
-  ## `/tmp/repro-hcr-<pid>.sock` path.
+  ## HX-W-5's process-derived Windows endpoint. On Windows the agent serves
+  ## this pipe and the coordinator connects; on Linux and macOS the roles are
+  ## reversed (the coordinator listens on ``REPRO_HCR_AGENT_SOCKET``).
   "\\\\.\\pipe\\repro-hcr-" & $pid
 
 when defined(windows):

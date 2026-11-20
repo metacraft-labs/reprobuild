@@ -299,6 +299,7 @@ proc clangCompile*(opts: CompileOptions): BuildActionDef =
   let bt = currentCompileFlags()
   clang(source = opts.source, output = opts.target,
     compileOnly = true,
+    pic = opts.pic,
     includeDirs = includeDirs,
     defines = defs,
     standard = std,

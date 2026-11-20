@@ -50,6 +50,7 @@ import repro_selfhost
 import repro_selfhost/handover
 import repro_selfhost/install as selfinstall
 import repro_tool_profiles
+import ./cli_program
 
 export handover
 
@@ -244,11 +245,21 @@ proc exemptFromPins(args: openArray[string]): bool =
 
 proc needsProviderToolchain(args: openArray[string]): bool =
   ## Whether the invocation may compile a provider, so a non-resident pinned
-  ## compiler is worth realizing now. ``--version``, the ``version`` verb and
-  ## help never do.
+  ## compiler is worth realizing now. ``--version``, the ``version`` and
+  ## ``help`` commands, a help request and a completion request never do.
+  ## Asked of the generated parser (without the environment, which none of
+  ## those depends on); a command line it refuses is left to the dispatch
+  ## to report, and counts as one that may.
   if args.len == 0:
     return false
-  args[0] notin ["--version", "-V", "version", "help", "--help", "-h"]
+  try:
+    let conf = ReproCommandLine.load(args)
+    conf.command notin {ReproCommandLineCommand.help,
+      ReproCommandLineCommand.version}
+  except CliHelpRequest:
+    false
+  except CatchableError:
+    true
 
 proc execHandOver(entryPoint: string; args: seq[string]): int =
   ## Replace this process with the pinned entry point (POSIX ``execv``), or

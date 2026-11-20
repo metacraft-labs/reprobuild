@@ -19,6 +19,7 @@ import repro_local_store/store
 when not defined(windows):
   import repro_local_store/store_bundle
   import repro_bundle/select
+  import ./bundle_nim_pins
 
 type
   StoreBundleCliHooks* = object
@@ -244,6 +245,7 @@ else:
             if fileExists(path):
               devEnvs.add(FrozenDevEnv(projectRoot: root, scriptPath: path))
         let closure = computeClosure(local, devEnvs, selection)
+        warnPinnedUpstreamNim("store " & sub, closure.projectDirs)
         if sub == "closure":
           if emitJson: echo pretty(closureJson(closure, info))
           else: printClosureText(closure, info)

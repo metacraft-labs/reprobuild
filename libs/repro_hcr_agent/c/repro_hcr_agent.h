@@ -290,6 +290,23 @@ REPRO_HCR_AGENT_API int repro_hcr_agent_host_supports_direct_patch(void);
 REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_dual_code_page_count(void);
 REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_sealed_code_page_count(void);
 REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_fallback_code_page_count(void);
+
+/*
+ * Linux, design §5.2 and §14. Which backing completed the agent-start probe of
+ * the text page replacement: 1 the `memfd` dual mapping, 2 the anonymous
+ * fallback, 0 neither, in which case the host is refused at negotiation.
+ * Every `mprotect` the provider issued (count, then each logged range; the
+ * probe's own scratch copy is not counted) and every `PROT_WRITE|PROT_EXEC`
+ * request it refused to issue, so a gate can show that no `mprotect` touched
+ * target text and no writable-and-executable mapping was ever requested.
+ * `repro_hcr_agent_mprotect_issued_range` returns 0 for a logged index and -1
+ * otherwise. Observations only; nothing in the agent branches on them.
+ */
+REPRO_HCR_AGENT_API int repro_hcr_agent_host_text_replacement_backing(void);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_mprotect_issued_count(void);
+REPRO_HCR_AGENT_API int repro_hcr_agent_mprotect_issued_range(
+    uint64_t index, uint64_t *address, uint64_t *length);
+REPRO_HCR_AGENT_API uint64_t repro_hcr_agent_wx_requests_refused(void);
 REPRO_HCR_AGENT_API int repro_hcr_agent_host_membarrier_sync_core(void);
 
 /* HLX-M4: the real-time signal number the tier-2 quiescence handshake uses

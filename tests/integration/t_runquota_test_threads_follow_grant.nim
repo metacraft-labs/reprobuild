@@ -26,6 +26,10 @@
 ## (``RUNQUOTA_ENDPOINT_SCOPE=private``) because the endpoint is the test
 ## user's own.
 
+# The RunQuota helper role of the image this test stands in for: its
+# command line read by repro's generated parser.
+from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
+  selectsRunQuotaHelper
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_build_engine
@@ -89,8 +93,8 @@ when isMainModule:
   if params.len > 0 and params[0] == "fixture-action":
     fixtureMain(params)
     quit 0
-  if params.len > 0 and params[0] == "__repro-runquota-helper":
-    quit runRunQuotaHelperCli(params[1 .. ^1])
+  if selectsRunQuotaHelper(params):
+    quit runRunQuotaHelperArgs(params)
 
 suite "negotiated widths reach the test binary":
 

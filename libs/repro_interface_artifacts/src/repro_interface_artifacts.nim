@@ -7008,6 +7008,12 @@ proc runtimeRpathCompilerFlags*(runtimeDirs: openArray[string];
   ## installation. Keep this target-parameterized so a Linux test can verify
   ## Darwin argv shape: ld64 requires one LC_RPATH option per directory,
   ## whereas GNU ld accepts a colon-delimited DT_RPATH value.
+  ##
+  ## GNU ld applies the LAST ``--{en,dis}able-new-dtags`` on its command line
+  ## to the whole output, so the ``--disable-new-dtags`` emitted here turns
+  ## every search entry of the binary into a DT_RPATH, including entries
+  ## other flags add. `portableReleaseRpathFlags` relies on that rule in the
+  ## other direction and must therefore come after every call to this proc.
   var uniqueDirs: seq[string] = @[]
   for libDir in runtimeDirs:
     if libDir.len > 0 and libDir notin uniqueDirs:
@@ -7050,8 +7056,21 @@ proc portableReleaseRpathFlags*(clingoPrefix, releaseLibDir: string):
   ## such a helper runs it through the release's bundled loader
   ## (`portableReleaseHelperArgv`), which loads the release's clingo on any
   ## host the release itself runs on.
+  ##
+  ## The trailing `--enable-new-dtags` makes the helper's whole search list a
+  ## DT_RUNPATH. The loader searches a DT_RPATH BEFORE `--library-path` and a
+  ## DT_RUNPATH after it (ld.so(8), "Dynamic library search order";
+  ## https://man7.org/linux/man-pages/man8/ld.so.8.html). Under a DT_RPATH, a
+  ## directory a Nix compiler adds (its own glibc's) outranks the release's
+  ## lib directory, so the bundled loader mapped that glibc's `libc.so.6` and
+  ## died on a GLIBC_PRIVATE symbol it lacks. GNU ld honours only the last
+  ## dtags flag, and `runtimeRpathCompilerFlags` emits `--disable-new-dtags`,
+  ## so these flags must follow every call to it: `externalHashFlags` adds
+  ## them after all of its runtime directories. A helper without the marker
+  ## is started directly and keeps the DT_RPATH those directories rely on.
   if clingoPrefix.len == 0 and releaseLibDir.len > 0:
-    @["--passL:" & quoteShell("-Wl,-rpath," & PortableReleaseHelperRunpathMarker)]
+    @["--passL:" & quoteShell("-Wl,-rpath," & PortableReleaseHelperRunpathMarker),
+      "--passL:-Wl,--enable-new-dtags"]
   else:
     @[]
 
@@ -7438,7 +7457,9 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passL:-L" & (clingoPrefix / "lib"))
     result.add("--passL:-Wl,-rpath," & (clingoPrefix / "lib"))
   # Installed from the portable release archive, with no clingo prefix on
-  # the host: see `portableReleaseLibDir`.
+  # the host: see `portableReleaseLibDir`. These flags must stay after every
+  # `runtimeRpathCompilerFlags` call above: their `--enable-new-dtags` has to
+  # be the last dtags flag (see `portableReleaseRpathFlags`).
   when defined(linux):
     if clingoPrefix.len == 0:
       result.add(portableReleaseRpathFlags(clingoPrefix,

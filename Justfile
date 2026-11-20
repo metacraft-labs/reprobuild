@@ -1315,10 +1315,11 @@ integration_hcr_linux_phase_i_refusal_reports_an_applied_patch:
         tests/e2e/hcr-linux-prepare/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim \
         2>&1 | tee test-logs/integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.log
 
-# HLX-M9 -- a host that cannot complete the mprotect RW->RX round trip is
-# refused DURING NEGOTIATION, with a diagnostic naming the blocking policy
-# (read from PR_GET_MDWE, not guessed). The hardened arm is a real
-# prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN), not an injected failure.
+# HLX-M9 -- the agent-start probe performs a complete text page replacement
+# (design §5.1/§5.2). Under a real prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN)
+# the memfd backing still publishes; with it disabled the anonymous fallback is
+# refused and the host is refused DURING NEGOTIATION, with a diagnostic naming
+# the blocking policy (read from PR_GET_MDWE, not guessed).
 integration_hcr_linux_hardened_host_refuses_at_negotiation:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -1327,6 +1328,15 @@ integration_hcr_linux_hardened_host_refuses_at_negotiation:
         --out:build/test-bin/integration_hcr_linux_hardened_host_refuses_at_negotiation \
         tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim \
         2>&1 | tee test-logs/integration_hcr_linux_hardened_host_refuses_at_negotiation.log
+
+integration_hcr_patch_channel_admits_only_this_users_peer:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_patch_channel_admits_only_this_users_peer \
+        --out:build/test-bin/integration_hcr_patch_channel_admits_only_this_users_peer \
+        tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim \
+        2>&1 | tee test-logs/integration_hcr_patch_channel_admits_only_this_users_peer.log
 
 # HLX-M9 -- provider-owned code pages (patch bodies, island pages) are a
 # memfd_create dual mapping: the exec view is MAP_PRIVATE|PROT_READ|PROT_EXEC

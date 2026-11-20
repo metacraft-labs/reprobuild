@@ -365,43 +365,17 @@ proc runRelease*(operator, reason: string; stateDir = "/var/lib/repro/system";
     raise newException(ContainmentError, "released, but systemctl refused: " &
       problems.join("; "))
 
-proc parseOperatorArgs(verb: string; args: seq[string]):
-    tuple[operator, reason: string] =
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    var name = a
-    var value = ""
-    let eq = a.find('=')
-    if eq > 0:
-      name = a[0 ..< eq]
-      value = a[eq + 1 .. ^1]
-    elif i + 1 < args.len:
-      inc i
-      value = args[i]
-    case name
-    of "--operator": result.operator = value
-    of "--reason": result.reason = value
-    else: raise newException(ValueError, "unknown option " & a)
-    inc i
-  if result.operator.len == 0 or result.reason.len == 0:
-    raise newException(ValueError, "usage: repro system addon " & verb &
-      " --operator NAME --reason TEXT")
-
-proc parseContainArgs*(args: seq[string]): tuple[operator, reason: string] =
-  ## For the docs test (the user guide's runbook lines).
-  parseOperatorArgs("contain", args)
-
-proc runContainCli*(args: seq[string]; release = false): int =
+proc runContainCommand*(operator, reason: string; release = false): int =
+  ## ``repro system addon contain|release --operator NAME --reason TEXT``
+  ## (``release`` for the second).
   let verb = if release: "release" else: "contain"
-  var o: tuple[operator, reason: string]
-  try: o = parseOperatorArgs(verb, args)
-  except ValueError as e:
-    stderr.write("repro system addon " & verb & ": " & e.msg & "\n")
+  if operator.len == 0 or reason.len == 0:
+    stderr.write("repro system addon " & verb & ": --operator and --reason " &
+      "are required\n")
     return 2
   try:
-    let r = if release: runRelease(o.operator, o.reason)
-            else: runContain(o.operator, o.reason)
+    let r = if release: runRelease(operator, reason)
+            else: runContain(operator, reason)
     if r.already:
       stdout.write("already contained (" & containedMarkerPath() & ")\n")
       return 0

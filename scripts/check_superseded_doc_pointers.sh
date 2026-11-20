@@ -34,10 +34,22 @@ ALLOWED=(
 escape() { sed 's/[][\.*^$]/\\&/g'; }
 pattern=$(printf '%s\n' "${SUPERSEDED[@]}" | escape | paste -sd'|')
 
-# grep exits 1 for "no match" and 2 for an error; only 1 is a pass.
+# TRACKED FILES ONLY. The pointers this gate is about are documentation of
+# record: committed code, Nix, tests, tools and published docs. A recursive
+# grep of the directory also read every ignored file of a working checkout --
+# build/, .nimcache/, .repro/, test-logs/ -- which in a checkout that has run
+# the suite is tens of gigabytes, and whose build reports quote these paths,
+# so the gate refused commits over files nobody had committed. `git grep`
+# searches the index's files in the working tree, which is what a commit
+# carries. (reprobuild-pm issue
+# 2026-11-19-the-superseded-doc-pointer-gate-greps-untracked-build-output.md)
+#
+# git grep exits 1 for "no match" and 128 for an error; only 1 is a pass.
 set +e
-hits=$(grep -rnIE --exclude-dir=.git --exclude-dir=vendor --exclude-dir=user-guide \
-  --exclude="$(basename "$0")" "$pattern" .)
+hits=$(git grep -nIE "$pattern" -- . \
+  ':(exclude,glob)**/vendor/**' \
+  ':(exclude,glob)**/user-guide/**' \
+  ":(exclude)scripts/$(basename "$0")")
 rc=$?
 set -e
 if [[ $rc -gt 1 ]]; then

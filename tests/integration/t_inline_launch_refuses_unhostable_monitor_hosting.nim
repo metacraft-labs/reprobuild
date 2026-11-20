@@ -347,7 +347,7 @@ when defined(linux) or defined(macosx):
   proc driveHelperRefusal() =
     ## Test "the RunQuota helper path refuses instead of dropping its lease".
     ## The helper path cannot host for a DIFFERENT reason — the action is
-    ## started two processes deep, by ``repro __repro-runquota-helper`` —
+    ## started two processes deep, by ``repro internal runquota-helper`` —
     ## and its failure mode is different too: a hosted plan here would be
     ## monitored, but launched by the engine with no RunQuota lease at
     ## all. Refusing is the same answer for both.

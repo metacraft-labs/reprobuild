@@ -1526,7 +1526,7 @@ package reprobuild:
   # ``libs/repro_binary_cache_client/tests/`` spawn the
   # ``repro-binary-cache`` server daemon (and, for the A3 CLI gate, the
   # ``repro_binary_cache_client_cli`` test driver — a thin wrapper over
-  # the shared ``runCacheSubcommand`` dispatch that now backs
+  # ``repro cache``'s own command line and handlers, which back
   # ``repro cache``) as a subprocess from
   # ``build/test-bin/``. These were previously built only by the
   # Windows-only ``scripts/run-a2-gate.ps1`` gate, so the helpers were
@@ -3334,7 +3334,7 @@ package reprobuild:
     # The ``repro-binary-cache`` server daemon is the SAME shipping app
     # source used under ``apps/``. The client-side driver
     # (``repro_binary_cache_client_cli``) is a test-only wrapper over the
-    # shared ``runCacheSubcommand`` dispatch that backs the shipping
+    # ``repro cache`` command line and handlers that back the shipping
     # ``repro cache`` subcommand — the standalone
     # ``repro-binary-cache-client`` binary was retired (Binary-Caches.md
     # §"Client CLI Surface"). The integration tests spawn both from

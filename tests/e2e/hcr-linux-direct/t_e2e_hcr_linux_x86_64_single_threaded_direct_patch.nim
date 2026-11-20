@@ -201,7 +201,7 @@ when defined(linux) and defined(amd64):
       # report even though a single-threaded gate cannot exercise the hazard.
       check delivery.session.agentCapabilities.contains("membarrier-sync-core")
       check delivery.session.agentCapabilities.contains(
-        "text-protection-roundtrip")
+        "text-page-replacement")
 
       # 5. The observable the milestone names: the target's own return value.
       check not output.contains("dlopen")

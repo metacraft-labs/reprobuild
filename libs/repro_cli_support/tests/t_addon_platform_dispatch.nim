@@ -71,19 +71,23 @@ suite "portable CLI keeps the Linux add-on boundary":
     check "supported only on Linux" notin actual.output
 
   test "add-on dispatch reaches Linux usage or explicitly refuses the platform":
+    # The add-on's command line is mounted in repro's description on every
+    # platform, so a bare `system addon` is the parser's usage error
+    # everywhere; a verb reaches the handler, which refuses the platform.
     let actual = dispatch("system", @["addon"])
     check actual.code == 2
-    when defined(linux):
-      check "usage: repro system addon <command>" in actual.output
-      check "supported only on Linux" notin actual.output
-    else:
-      check "repro system addon: supported only on Linux" in actual.output
-      check "usage: repro system addon <command>" notin actual.output
+    check "'repro system addon' needs a subcommand" in actual.output
+    check "supported only on Linux" notin actual.output
+    when not defined(linux):
+      let verb = dispatch("system", @["addon", "status"])
+      check verb.code == 2
+      check "repro system addon: supported only on Linux" in verb.output
 
   test "adoption reaches only the Linux ownership ledger":
     let stateDir = createTempDir("addon-dispatch-", "")
     defer: removeDir(stateDir)
-    let actual = dispatch("system", @["adopt"], stateDir = stateDir)
+    let actual = dispatch("system", @["adopt", "unit:x", "--profile", "p"],
+      stateDir = stateDir)
     check actual.code == 2
     when defined(linux):
       check "only an add-on host has objects to adopt" in actual.output

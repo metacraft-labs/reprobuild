@@ -37,7 +37,14 @@
 ##      lookup in every leg above;
 ##   h. one compile that would resolve interfaces from two catalog revisions
 ##      is refused, naming both; the positive control (both locks at `R`)
-##      compiles.
+##      compiles;
+##   i. one compile in which a pinned consumer and an unpinned sibling select
+##      the SAME checkout -- at the consumer's pin for one, the nearest
+##      checkout for the other -- compiles (reprobuild-pm issue
+##      `2026-11-18-one-checkout-selected-at-the-pin-and-as-the-ambient-sibling-is-refused-as-two-catalogs.md`:
+##      the v0.2.27 macOS release build of `reprobuild/repro.nim` with
+##      `nim-cli-spec` beside it); with that checkout at another commit the
+##      two consumers do read two revisions, and the compile is refused.
 
 import std/[compilesettings, os, osproc, strtabs, strutils, tempfiles,
   unittest]
@@ -400,5 +407,60 @@ suite "a lock-pinned catalog is not overridden by an ambient checkout":
     let control = nimCheck(consumer / "main.nim")
     checkpoint(control.output)
     check control.exitCode == 0
+
+  test "i: a pinned and an unpinned consumer of one checkout share a catalog":
+    # The release workspace: the catalog checked out at the pin of the
+    # consumer's lock, beside the consumer and beside a sibling project
+    # whose lock pins no catalog at all.
+    proc layout(ws, checkoutAt: string): tuple[main, other: string] =
+      cloneAt(upstream, ws / "reprobuild-packages", checkoutAt)
+      let consumer = ws / "consumer"
+      discard makeConsumer(consumer, upstream, pinnedRevision)
+      result.main = consumer / "main.nim"
+      writeFile(result.main,
+        "import repro_project_dsl\n" &
+        "import \"../sibling/other\"\n\n" &
+        "package mainConsumer:\n" &
+        "  defaultToolProvisioning \"tarball\"\n" &
+        "  uses:\n    \"rppinnedfixture\"\n")
+      let sibling = ws / "sibling"
+      discard makeConsumer(sibling)
+      result.other = sibling / "other.nim"
+      writeFile(result.other,
+        "import repro_project_dsl\n\n" &
+        "package otherConsumer:\n" &
+        "  defaultToolProvisioning \"tarball\"\n" &
+        "  uses:\n    \"rppinnedfixture\"\n")
+
+    let ws = scratch / "i" / "ws"
+    let at = layout(ws, pinnedRevision)
+    # The two selections differ in kind and agree in directory.
+    let mainSelection = selectExternalCatalog(at.main)
+    let otherSelection = selectExternalCatalog(at.other)
+    check mainSelection.kind == eckSiblingAtPin
+    check otherSelection.kind == eckAmbientSibling
+    check mainSelection.root == ws / "reprobuild-packages"
+    check otherSelection.root == mainSelection.root
+    check ensureLockPinnedCatalog(at.main, ws / "consumer") == ""
+    let shared = nimCheck(at.main)
+    checkpoint(shared.output)
+    check shared.exitCode == 0
+    check "two catalogs" notin shared.output
+
+    # Negative control: the checkout is at the stale commit. The consumer's
+    # pin is then its materialized copy, the sibling still reads the
+    # checkout, and those are two revisions in one compile.
+    let stale = scratch / "i" / "stale"
+    let st = layout(stale, staleRevision)
+    check selectExternalCatalog(st.main).kind == eckLockPinned
+    check selectExternalCatalog(st.other).kind == eckAmbientSibling
+    check ensureLockPinnedCatalog(st.main, stale / "consumer") ==
+      materialized(stale / "consumer", pinnedRevision)
+    let refused = nimCheck(st.main)
+    checkpoint(refused.output)
+    check refused.exitCode != 0
+    check "two catalogs" in refused.output
+    check materialized(stale / "consumer", pinnedRevision) in refused.output
+    check (stale / "reprobuild-packages") in refused.output
 
 removeDir(scratch)

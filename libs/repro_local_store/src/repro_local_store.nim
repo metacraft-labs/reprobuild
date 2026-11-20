@@ -54,6 +54,7 @@ import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
 import ./repro_local_store/lru_eviction
 import ./repro_local_store/sandbox_manifest
+import ./repro_local_store/content_table
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
@@ -68,6 +69,7 @@ export sqlite3_binding
 export store
 export lru_eviction
 export sandbox_manifest
+export content_table
 export optimise
 export portable_fingerprint
 export portable_memo
@@ -253,12 +255,14 @@ type
       ## write column. 0 when unknown, which `retentionVerdict` treats as
       ## `rvUnknownWriteTime` — a miss, never a hit.
     hostFingerprint*: string
-      ## §3's `host-bound` write column: machine-id / OS / architecture,
-      ## enough to say WHICH host's realization this is. Empty when
-      ## undeclared. It is not a security token and is never compared for
-      ## equality on the local read path — a local hit is by definition on
-      ## the producing host. It exists so a cross-machine substitution can be
-      ## REFUSED with the producing host named, rather than refused blankly.
+      ## §3's `host-bound` and `volatile` write column: machine-id /
+      ## hostname / OS / architecture, enough to say WHICH host's
+      ## realization this is. Empty when undeclared. It is not a security
+      ## token: whoever can write the cache root can forge it, as they can
+      ## forge a `.rec`. It IS compared on the local read path (§3.2 rule 4,
+      ## `servableOnThisHost`): a cache root, a store bundle or an image can
+      ## carry an entry to another machine without anything publishing it, so
+      ## a local hit is NOT by construction on the producing host.
     buildEpoch*: string
       ## Identifies the `repro build` invocation that wrote the entry, for
       ## §2.2's `this-build` clause. Empty when undeclared.
@@ -501,6 +505,18 @@ type
       ## on it.
       ##
       ## APPENDED, like `aclMissRetentionExpired`, so no ordinal shifts.
+    aclMissOtherHost
+      ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4. The record matched
+      ## on every input and its outputs verified, but the use is `host-bound`
+      ## or `volatile` (the stricter of the class the entry records and the
+      ## class of the edge using it) and the entry does not record THIS host:
+      ## it records another host's fingerprint, or none. Such an entry reached
+      ## this cache in a copied or image-baked cache root, a store bundle, or
+      ## a peer or binary-cache install, and it is another host's realization,
+      ## which §3 forbids serving here. Distinct from `aclMissInputChanged`
+      ## for the reason `aclMissRetentionExpired` is: nothing changed.
+      ##
+      ## APPENDED, like the two above, so no ordinal shifts.
 
   ActionCacheLookup* = object
     status*: ActionCacheLookupStatus
@@ -554,6 +570,16 @@ type
       ## `skipCacheHitEvidence` — the arm that reaches this function — is the
       ## default on the main CLI path, so a check placed only at the per-edge
       ## lookup is a check the production path does not execute.
+    determinism*: EdgeDeterminism
+      ## The probing edge's effective class, for §3.2 rule 4
+      ## (`servableOnThisHost`): when the use -- the stricter of this and the
+      ## class the matched record carries -- is `host-bound` or `volatile`,
+      ## a record that does not name THIS host is no record. It is here for
+      ## the reason `refuseRecordWithNoInputs` is: this scan answers for the
+      ## whole graph, and a copied or image-baked cache root has the outputs
+      ## on disk, so nothing downstream would look again. The default
+      ## (`edStrong`) adds nothing to the recorded class, so other callers
+      ## still refuse another host's recorded `host-bound` entry.
 
   HotMetadataScanStatus* = enum
     hmssUnavailable
@@ -2448,13 +2474,64 @@ proc isDirectRegularFile(path: string): bool =
     let info = getFileInfo(extendedPath(path), followSymlink = false)
     info.kind == pcFile
 
+const LocalHashTableKey = "localHash.v1"
+  ## The content-table key of `localHash` over `fileBytesForHash`'s payload.
+  ## A change to either is a new key, so no entry outlives its meaning.
+
+proc tableLocalHashText(hash: LocalInvalidationHash): string =
+  $ord(hash.algorithm) & ":" & $ord(hash.domain) & ":" & $hash.value
+
+proc parseTableLocalHash(text: string):
+    tuple[ok: bool; hash: LocalInvalidationHash] =
+  let parts = text.split(':')
+  if parts.len != 3:
+    return
+  try:
+    let algorithm = parseInt(parts[0])
+    let domain = parseInt(parts[1])
+    if algorithm < 0 or algorithm > ord(high(HashAlgorithm)) or
+        domain < 0 or domain > ord(high(HashDomain)):
+      return
+    result.hash.algorithm = HashAlgorithm(algorithm)
+    result.hash.domain = HashDomain(domain)
+    result.hash.value = parseBiggestUInt(parts[2])
+    result.ok = true
+  except ValueError:
+    discard
+
 proc observeFileWithMetadata(path: string; policy: FileFingerprintPolicy;
                              metadata: FileMetadata): FileFingerprint =
   result.path = path
   result.policy = policy
   result.metadata = metadata
   if policy in {ffpChecksum, ffpHybrid}:
+    # The per-host content table (`content_table`): a regular file whose
+    # identity, size, modification time and file-system version are the ones
+    # its hash was recorded under is not read again. The version is read
+    # before hashing and checked after it, so a file written while it was
+    # hashed is never memoized.
+    let memoize = metadata.kind == ffkRegular and contentTableRoot().len > 0
+    let hashStarted = if memoize: hashStartNs() else: 0'i64
+    let before =
+      if memoize: contentVersion(extendedPath(path)) else: ContentVersion()
+    if before.known:
+      let memo = lookupContentHash(before, LocalHashTableKey)
+      if memo.len > 0:
+        let parsed = parseTableLocalHash(memo)
+        if parsed.ok:
+          result.hasLocalHash = true
+          result.localHash = parsed.hash
+          return
     let content = fileBytesForHash(path, result.metadata)
+    if content.readable and before.known:
+      let hash = localHash(content.payload)
+      let after = contentVersion(extendedPath(path))
+      if after == before:
+        recordContentHash(before, LocalHashTableKey, tableLocalHashText(hash),
+          hashStarted)
+      result.hasLocalHash = true
+      result.localHash = hash
+      return
     # An unreadable file leaves `hasLocalHash` false: there is no honest
     # value to put there. Revalidation reads that as "changed"; recording
     # refuses to publish (`UnreadableInputError`).
@@ -2947,6 +3024,11 @@ const
     ## Exported so tests and tooling can find the sidecar without re-deriving
     ## the extension. Not `.rec`, `.octime` or `.det`, so every older reader
     ## of an edge directory ignores it.
+  ActionOutputFileExt* = ".out"
+    ## The action-output sidecar (`recordActionOutput`), declared here so the
+    ## reap, removal and GC sweeps below can name it. Not `.rec`, `.octime`,
+    ## `.det`, `.acc` or `.obs`, so every older reader of an edge directory
+    ## ignores it.
 
 proc inputAccessFileName*(strongHex: string): string =
   strongHex & InputAccessFileExt
@@ -3068,10 +3150,12 @@ proc hostFingerprint*(): string =
   ## this metadata is worth. `/etc/machine-id` is read if it happens to be
   ## there and simply skipped if it is not.
   ##
-  ## This value is never a security boundary and is never compared for
-  ## equality on the local read path -- a local hit is by construction on the
-  ## producing host. Its whole job is to let a cross-machine substitution be
-  ## refused with the producing host NAMED rather than refused blankly.
+  ## This value is never a security boundary. A `host-bound` or `volatile`
+  ## local read compares it for equality (`servableOnThisHost`, §3.2 rule 4):
+  ## a copied cache root, a store bundle or a baked image carries entries to
+  ## another machine, so a local hit is not by construction on the producing
+  ## host. The hostname is part of it, so a renamed host misses its own
+  ## `host-bound` entries once: the fail-closed direction.
   if cachedHostFingerprint.len > 0:
     return cachedHostFingerprint
   var parts: seq[string] = @[]
@@ -3093,6 +3177,37 @@ proc hostFingerprint*(): string =
   parts.add("arch=" & hostCPU)
   cachedHostFingerprint = parts.join(" ")
   cachedHostFingerprint
+
+proc hostBoundUse*(record: ActionResultRecord;
+                   usingClass: EdgeDeterminism): EdgeDeterminism =
+  ## The class of one USE of `record` (`Edge-Determinism-And-Soft-Rebuild.md`
+  ## §3.2 rule 1): the stricter of the class the entry records (an entry that
+  ## records none counts as `weak`) and `usingClass`, the effective class of
+  ## the edge reading it.
+  let recorded =
+    if record.determinism.declared: record.determinism.class else: edWeak
+  strictest(recorded, usingClass)
+
+proc servableOnThisHost*(record: ActionResultRecord;
+                         usingClass: EdgeDeterminism): bool =
+  ## §3.2 rule 4: a use that is `host-bound` or `volatile` is served only an
+  ## entry that records THIS host's fingerprint. Every other use is servable.
+  ##
+  ## The ONE host check, shared by the per-edge lookup (`applyHostBinding`),
+  ## the whole-graph navigator scan (`HotMetadataProbe.determinism`) and the
+  ## engine's per-record fast-no-op arm, so the three cannot disagree.
+  ##
+  ## An entry whose class is not on the record records no host, and that is a
+  ## miss, not a reason to look further. Every Tier-1 read decodes through
+  ## `decodeRecContainer`, which attaches the `.det` sidecar whenever its
+  ## back-reference names the `.rec` that is there now. A record that arrives
+  ## without a class therefore has no current sidecar: a peer or binary-cache
+  ## install (§3.2 rule 3), a `.rec` an older binary rewrote, or a sidecar
+  ## someone removed. Pure: no I/O, no exception.
+  if hostBoundUse(record, usingClass).allowsCrossMachineSubstitution():
+    return true
+  record.determinism.declared and
+    record.determinism.hostFingerprint == hostFingerprint()
 
 proc declaredDeterminism*(class: EdgeDeterminism;
                           retention = forever();
@@ -5054,8 +5169,15 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
     elif priorWriteSequence != 0'u64 and fileExists(extendedPath(detPath)):
       try:
         let prior = decodeDeterminism(bytes(readFile(detPath)))
+        # Another host's sidecar is never carried forward
+        # (`Edge-Determinism-And-Soft-Rebuild.md` §3.2 rules 3 and 4). It can
+        # only be here because the cache root or a store bundle came from
+        # that host, and the bytes being written now are not its bytes:
+        # carrying its fingerprint onto them would make every later
+        # host-bound read miss again, a re-run on every build.
         if prior.meta.declared and
-            prior.recordWriteSequence == priorWriteSequence:
+            prior.recordWriteSequence == priorWriteSequence and
+            prior.meta.hostFingerprint == hostFingerprint():
           detPayload = encodeDeterminism(prior.meta, writeSequence)
           writeDet = true
       except OSError, IOError, EnvelopeError:
@@ -5144,7 +5266,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
     if kind == pcFile and
         (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt) or
          path.endsWith(InputAccessFileExt) or
-         path.endsWith(ObservedExecutionFileExt)):
+         path.endsWith(ObservedExecutionFileExt) or
+         path.endsWith(ActionOutputFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -5846,6 +5969,12 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
         probe.outputRoot, probe.ownedOutputs).len > 0:
       return HotMetadataScan(status: hmssMissingRecord,
         recordCount: totalRecords, checkedInputCount: checkedInputs)
+    # Another host's `host-bound` / `volatile` realization (§3.2 rule 4),
+    # reported as `hmssMissingRecord` for the same reason: the scheduler
+    # re-consults the edge and `lookupActionResult` names the host.
+    if not record.servableOnThisHost(probe.determinism):
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
     # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
     # It is the whole-graph "everything is already up to date" shortcut,
     # so a record whose environment moved and is not caught HERE is served
@@ -6540,9 +6669,11 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   metadataCache: ptr FileMetadataCache = nil;
                                   envResolver: EnvResolver = nil;
                                   outputRoot = "";
-                                  containerOutputs: seq[string] = @[]):
+                                  containerOutputs: seq[string] = @[];
+                                  useHotTier = true):
                                   ActionCacheLookup =
-  if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
+  if useHotTier and allowMetadataOnlyHit and not verifyOutputBlobs and
+      policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
       var changed = false
@@ -6762,6 +6893,169 @@ proc inputAccessesFor*(cache: ActionCache; weak, strong: ContentDigest):
   except OSError, IOError:
     none(InputAccesses)
 
+# ---------------------------------------------------------------------------
+# Action-output sidecar (Provider-Compile-Tiering.md §"A TryCompile hit must
+# replay the probe's output").
+#
+# The stdout and stderr of the execution behind a record, as CAS blobs, so a
+# later hit can hand a caller the output a run would have printed
+# (`repro build --action-output=all`; CLI/build.md §"Action Output"). A CMake
+# try_compile reads its compiler's `-v` output and its warnings out of that
+# output; a hit that printed nothing would make the configure compute
+# different cache variables from a miss.
+#
+# A sidecar for the same reason as the others: the RBAR frame cannot grow
+# (`ActionRecordVersion`). Keyed like the input-access sidecar, by the strong
+# fingerprint alone with no write-sequence back-reference: a republish that
+# never saw the output (the cache daemon, a peer install) leaves it in place,
+# and any execution with that strong fingerprint is one whose output may be
+# replayed for it. The output need not be byte-identical to what a fresh run
+# would print (it names the recording run's scratch paths); the spec asks for
+# the configure-level result to match, not the bytes.
+#
+# Written for EVERY record the engine publishes after an execution, empty
+# streams included: an absent sidecar means "this record cannot say what the
+# run printed" (a record from an older binary, a peer install), which is not
+# the same as "it printed nothing", and a caller that needs the output treats
+# the first as a miss. An empty stream stores no blob.
+# ---------------------------------------------------------------------------
+
+const
+  ActionOutputMagic = "RBAO"
+  ActionOutputVersion = 1'u16
+
+type
+  RecordedActionOutput* = object
+    ## The captured streams of the execution behind one record. A blob with
+    ## `sizeBytes == 0` is an empty stream, stored nowhere.
+    stdout*: CasBlobRef
+    stderr*: CasBlobRef
+
+  ReplayedActionOutput* = object
+    stdout*: string
+    stderr*: string
+
+proc actionOutputFileName*(strongHex: string): string =
+  strongHex & ActionOutputFileExt
+
+proc encodeActionOutput*(strongHex: string;
+                         output: RecordedActionOutput): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(ActionOutputMagic[i])))
+  result.writeU16Le(ActionOutputVersion)
+  # The record this describes, inside the payload as well as in the file
+  # name, so a sidecar copied or renamed beside another record is refused.
+  result.writeString(strongHex)
+  for blob in [output.stdout, output.stderr]:
+    result.writeU64Le(blob.sizeBytes)
+    if blob.sizeBytes > 0'u64:
+      result.writeDigest(blob.digest)
+
+proc decodeActionOutput*(raw: openArray[byte]; strongHex: string):
+    Option[RecordedActionOutput] =
+  ## `none` on ANY problem: a wrong magic, an unknown version, a different
+  ## record, trailing or missing bytes. `none` means "the output is unknown",
+  ## never "it was empty".
+  if raw.len < 6:
+    return none(RecordedActionOutput)
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(ActionOutputMagic[i])):
+      return none(RecordedActionOutput)
+  try:
+    var pos = 4
+    if readU16Le(raw, pos) != ActionOutputVersion:
+      return none(RecordedActionOutput)
+    if readString(raw, pos) != strongHex:
+      return none(RecordedActionOutput)
+    var blobs: array[2, CasBlobRef]
+    for i in 0 .. 1:
+      blobs[i].sizeBytes = readU64Le(raw, pos)
+      if blobs[i].sizeBytes > 0'u64:
+        blobs[i].digest = readDigest(raw, pos)
+    if pos != raw.len:
+      return none(RecordedActionOutput)
+    some(RecordedActionOutput(stdout: blobs[0], stderr: blobs[1]))
+  except EnvelopeError:
+    none(RecordedActionOutput)
+
+proc recordActionOutput*[CasT: LocalCas | Store](cache: ActionCache;
+                         cas: var CasT; weak, strong: ContentDigest;
+                         stdout, stderr: string) =
+  ## Store `stdout` and `stderr` in `cas` and write the action-output sidecar
+  ## beside the `.rec` that `recordActionResult` just published. Best-effort,
+  ## like the input-access sidecar: one that cannot be written costs a later
+  ## replaying hit (which then re-runs), never the build.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let strongHex = digestHex(strong)
+  let finalPath = dirPath / actionOutputFileName(strongHex)
+  let now = getTime()
+  let tmpPath = finalPath & ".tmp." & $getCurrentProcessId() & "." &
+    $now.toUnix & "." & $now.nanosecond
+  try:
+    var output: RecordedActionOutput
+    if stdout.len > 0:
+      output.stdout = cas.storeBlob(bytes(stdout))
+    if stderr.len > 0:
+      output.stderr = cas.storeBlob(bytes(stderr))
+    createDir(extendedPath(dirPath))
+    writeFile(extendedPath(tmpPath),
+      byteString(encodeActionOutput(strongHex, output)))
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
+  except CatchableError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+
+proc recordedActionOutputFor*[CasT: LocalCas | Store](cache: ActionCache;
+                              cas: CasT; weak, strong: ContentDigest):
+    Option[ReplayedActionOutput] =
+  ## The output recorded for one (edge, path-set) pair, read back from the
+  ## CAS and verified, or `none` when no sidecar is there, it cannot be read,
+  ## or a blob it names is missing or corrupt.
+  let strongHex = digestHex(strong)
+  let path = cache.perEdgeDirPath(weak) / actionOutputFileName(strongHex)
+  if not fileExists(extendedPath(path)):
+    return none(ReplayedActionOutput)
+  try:
+    let decoded = decodeActionOutput(bytes(readFile(extendedPath(path))),
+      strongHex)
+    if decoded.isNone:
+      return none(ReplayedActionOutput)
+    var replay: ReplayedActionOutput
+    if decoded.get.stdout.sizeBytes > 0'u64:
+      replay.stdout = byteString(cas.readBlob(decoded.get.stdout))
+    if decoded.get.stderr.sizeBytes > 0'u64:
+      replay.stderr = byteString(cas.readBlob(decoded.get.stderr))
+    some(replay)
+  except CatchableError:
+    none(ReplayedActionOutput)
+
+proc applyHostBinding(lookup: var ActionCacheLookup;
+                      usingClass: EdgeDeterminism) =
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4 at the per-edge
+  ## lookup: a hit whose use is `host-bound` or `volatile` and whose entry
+  ## does not record THIS host becomes `aclMissOtherHost`. The check itself is
+  ## `servableOnThisHost`; this only turns its answer into a lookup status
+  ## and names the reason.
+  ##
+  ## Cost: none beyond a string compare. The class and host come from the
+  ## decoded record, which carries its current `.det` sidecar already.
+  if lookup.status notin {aclHit, aclHybridCutoff}:
+    return
+  if lookup.record.servableOnThisHost(usingClass):
+    return
+  let use = lookup.record.hostBoundUse(usingClass)
+  let meta = lookup.record.determinism
+  let here = hostFingerprint()
+  lookup.status = aclMissOtherHost
+  lookup.message =
+    if not meta.declared or meta.hostFingerprint.len == 0:
+      "cached entry records no host; a " & $use &
+        " use is served only this host's realization (" & here & ")"
+    else:
+      "cached entry is another host's " & $use & " realization (" &
+        meta.hostFingerprint & "), not this host's (" & here & ")"
+
 proc applyRetention(cache: ActionCache; weak: ContentDigest;
                     lookup: var ActionCacheLookup;
                     retention: CacheRetention;
@@ -6811,17 +7105,27 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          retention = forever();
                          nowUnix: int64 = 0;
                          buildEpoch = "";
-                         containerOutputs: openArray[string] = []):
+                         containerOutputs: openArray[string] = [];
+                         determinism = edWeak;
+                         useHotTier = true):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
+  ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
+  ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
+  ## `useHotTier = false` answers from the full records even where the warm
+  ## metadata projection would do: that projection drops the strong
+  ## fingerprint (`hotMetadataRecord`), which a caller replaying the
+  ## record's captured output needs to find it (`recordedActionOutputFor`).
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot,
-    containerOutputs = @containerOutputs)
+    containerOutputs = @containerOutputs,
+    useHotTier = useHotTier)
+  result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
@@ -6834,17 +7138,27 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          retention = forever();
                          nowUnix: int64 = 0;
                          buildEpoch = "";
-                         containerOutputs: openArray[string] = []):
+                         containerOutputs: openArray[string] = [];
+                         determinism = edWeak;
+                         useHotTier = true):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
+  ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
+  ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
+  ## `useHotTier = false` answers from the full records even where the warm
+  ## metadata projection would do: that projection drops the strong
+  ## fingerprint (`hotMetadataRecord`), which a caller replaying the
+  ## record's captured output needs to find it (`recordedActionOutputFor`).
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot,
-    containerOutputs = @containerOutputs)
+    containerOutputs = @containerOutputs,
+    useHotTier = useHotTier)
+  result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 # ===========================================================================
@@ -6951,7 +7265,7 @@ proc scanCacheEntries*(cache: ActionCache;
         recPath: path,
         recordBytes: fileSizeOrZero(path))
       for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
-                  ObservedExecutionFileExt]:
+                  ObservedExecutionFileExt, ActionOutputFileExt]:
         entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
       try:
         entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
@@ -6984,6 +7298,21 @@ proc scanCacheEntries*(cache: ActionCache;
       if not decodable:
         entry.payloadBytes = 0
         entry.blobDigests = @[]
+      else:
+        # The captured-output blobs the action-output sidecar names are
+        # this entry's too: released with it, and kept while it lives.
+        let outPath = edgeDir / actionOutputFileName(strongHex)
+        if fileExists(extendedPath(outPath)):
+          try:
+            let output = decodeActionOutput(
+              bytes(readFile(extendedPath(outPath))), strongHex)
+            if output.isSome:
+              for blob in [output.get.stdout, output.get.stderr]:
+                if blob.sizeBytes > 0'u64:
+                  entry.payloadBytes += int64(blob.sizeBytes)
+                  entry.blobDigests.add(digestHex(blob.digest))
+          except OSError, IOError:
+            discard
       entry.expired =
         entry.meta.declared and
         isExpired(entry.meta.retention, entry.meta.writeTimeUnix, now,
@@ -6998,7 +7327,7 @@ proc removeEntry(entry: CacheEntryRef): bool =
   ## success.
   let dir = entry.recPath.parentDir
   for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
-              ObservedExecutionFileExt]:
+              ObservedExecutionFileExt, ActionOutputFileExt]:
     let sidecar = dir / (entry.strongHex & ext)
     if fileExists(extendedPath(sidecar)):
       try: removeFile(extendedPath(sidecar))

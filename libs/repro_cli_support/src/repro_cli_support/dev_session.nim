@@ -17,6 +17,8 @@ import repro_cli_support/service_registrar  # §7.3: the env var a refusal names
 import repro_cli_support/watch
 import repro_cli_support/session_process_owner
 import repro_cli_support/dev_session_access
+# The renderer of the command lines a session spawns of the `repro` image.
+from repro_cli_support/cli_program import reproArgvOf
 
 type
   DevSessionMode* = enum
@@ -3400,20 +3402,21 @@ proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
     state.runWatchCycle(config, artifact, artifactPath)
 
 proc startHttpServer(config: DevSessionSupervisorConfig): Process =
-  var args = @[
-    "__repro-dev-session-http",
-    "--session-dir", config.outDir.sessionDir,
-    "--parent-pid", $getCurrentProcessId(),
-    "--supervised",
-    "--session-id", config.sessionId
-  ]
-  # No `--host` means the platform default transport, which the listener
-  # chooses (`runDevSessionHttpServer`); only an explicit `--http` names one.
+  # The server's command line (`repro internal dev-session-http`), written
+  # by the renderer from its declaration. No `--host` means the platform
+  # default transport, which the listener chooses
+  # (`runDevSessionHttpServer`); only an explicit `--http` names one.
+  var values = @[
+    ("sessionDir", @[config.outDir.sessionDir]),
+    ("parentPid", @[$getCurrentProcessId()]),
+    ("supervised", @["true"]),
+    ("sessionId", @[config.sessionId]),
+    ("httpAllowRemote", (if config.httpAllowRemote: @["true"] else: @[]))]
   if config.httpBind.len > 0:
     let httpBindParts = parseHttpBind(config.httpBind)
-    args.add(["--host", httpBindParts.host, "--port", $httpBindParts.port])
-  if config.httpAllowRemote:
-    args.add(AllowRemoteFlag)
+    values.add(("host", @[httpBindParts.host]))
+    values.add(("port", @[$httpBindParts.port]))
+  let args = reproArgvOf(["internal", "dev-session-http"], values)
   startProcess(config.publicCliPath,
     args = args,
     workingDir = config.projectRoot,

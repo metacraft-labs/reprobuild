@@ -31,6 +31,10 @@
 ## (`RUNQUOTAD_BIN`), on an endpoint this test owns, under the private
 ## endpoint policy (`RUNQUOTA_ENDPOINT_SCOPE=private`).
 
+# The RunQuota helper role of the image this test stands in for: its
+# command line read by repro's generated parser.
+from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
+  selectsRunQuotaHelper
 import std/[json, os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_build_engine
@@ -87,8 +91,8 @@ when isMainModule:
     sleep(parseInt(params[1]))
     writeFile(params[2], "done\n")
     quit 0
-  if params.len > 0 and params[0] == "__repro-runquota-helper":
-    quit runRunQuotaHelperCli(params[1 .. ^1])
+  if selectsRunQuotaHelper(params):
+    quit runRunQuotaHelperArgs(params)
 
 proc buildThreeQueued(repoRoot, tempRoot, group, measurement: string):
     JsonNode =

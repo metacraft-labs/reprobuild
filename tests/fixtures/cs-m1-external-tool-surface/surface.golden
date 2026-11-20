@@ -5,6 +5,7 @@ package "appimagetool"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -31,6 +32,7 @@ package "ar"
     inputCheckPolicy=acfpHybrid
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["archive"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -51,6 +53,7 @@ package "autoconf"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -75,6 +78,7 @@ package "cargo"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=["rustc", "gcc", "clang", "zig", "cmake", "perl", "make"]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -87,15 +91,17 @@ package "cargo"
       param name="features" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--features" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
       param name="manifestPath" nimType="string" kind=cpkFlag role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--manifest-path" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
       param name="targetDir" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target-dir" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
+      param name="color" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--color" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
       param name="package" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--package" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
       param name="bin" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--bin" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
       param name="target" nimType="string" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--target" required=false src=repro_dsl_stdlib/packages/cargo_cli.nim
-    argv=["/tool/cargo", "build", "--config", "config-v", "--locked", "--release", "--offline", "--no-default-features", "--features", "features-v", "--manifest-path", "manifestPath-v", "--target-dir", "targetDir-v", "--package", "package-v", "--bin", "bin-v", "--target", "target-v"]
+    argv=["/tool/cargo", "build", "--config", "config-v", "--locked", "--release", "--offline", "--no-default-features", "--features", "features-v", "--manifest-path", "manifestPath-v", "--target-dir", "targetDir-v", "--color", "color-v", "--package", "package-v", "--bin", "bin-v", "--target", "target-v"]
     command name="install" path=["install"] entry="cargo.cargo.install" src=repro_dsl_stdlib/packages/cargo_cli.nim
     dependencyPolicy=(kind: bdpMakeDepfile, depfiles: @[], ignoredInputPrefixes: @[], suppressMonitorShimSeed: false, captureBreadth: mcbFullCapture)
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=["rustc", "gcc", "clang", "zig", "cmake", "perl", "make"]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -117,6 +123,7 @@ package "cargo"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=["rustc", "gcc", "clang", "zig", "cmake", "perl", "make"]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -141,6 +148,7 @@ package "cargo"
       interface param name="features" nimType="string" kind=ipkFlag position=0 alias="--features" required=false
       interface param name="manifestPath" nimType="string" kind=ipkFlag position=0 alias="--manifest-path" required=false
       interface param name="targetDir" nimType="string" kind=ipkFlag position=0 alias="--target-dir" required=false
+      interface param name="color" nimType="string" kind=ipkFlag position=0 alias="--color" required=false
       interface param name="package" nimType="string" kind=ipkFlag position=0 alias="--package" required=false
       interface param name="bin" nimType="string" kind=ipkFlag position=0 alias="--bin" required=false
       interface param name="target" nimType="string" kind=ipkFlag position=0 alias="--target" required=false
@@ -173,6 +181,7 @@ package "cargo-nextest"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -217,6 +226,7 @@ package "clang"
     inputCheckPolicy=acfpHybrid
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -269,6 +279,7 @@ package "cmake"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["buildDir"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -286,6 +297,7 @@ package "cmake"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -301,6 +313,7 @@ package "cmake"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -337,6 +350,7 @@ package "create-dmg"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["dmg"]
     optionalOutputs=[]
     removeBeforeRun=["dmg"]
@@ -371,6 +385,7 @@ package "dpkg-deb"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["archive"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -397,6 +412,7 @@ package "gas"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -417,6 +433,7 @@ package "gcc"
     inputCheckPolicy=acfpHybrid
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -473,6 +490,7 @@ package "git"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpEntropyBlessed justification="git draws randomness only to name files it is about to rename away. Measured with io-mon @87143d62 on the linux-preload-hooks backend: `git init`, `git rev-parse HEAD`, `git log --oneline -1`, `git status --porcelain` and `git clone` draw NONE; `git add` draws one record and `git add` + `git commit` two, and each record sits in the same pid as the creation of .git/index.lock, .git/refs/heads/<branch>.lock and .git/objects/XX/tmp_obj_XXXXXX -- lock files and loose-object temporaries. Every one of those is renamed or hard-linked to a name git computes from CONTENT (the object hash) or fixes by convention (index, refs/heads/<branch>), so no random byte survives into an object, a ref or the working tree; that git\'s whole object store is content-addressed is what makes the claim checkable rather than a promise. Across CodeTracer\'s ten shell gates at 996f9b12 git accounts for 22 of the 45 records, all path=getrandom, all in `git add` / `git commit` pids. This blesses ENTROPY only, and the exception is worth naming because it is the one people reach for: a commit object\'s hash depends on its author and committer TIMESTAMPS. That is a clock read (mrTimeRead), a separate signal this engine does not grade for any tool, and nothing here waives it."
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -489,6 +507,7 @@ package "install-file"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["target"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -513,6 +532,7 @@ package "ld"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -543,6 +563,7 @@ package "make"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -567,6 +588,7 @@ package "meson"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["buildDir"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -585,6 +607,7 @@ package "meson"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -597,6 +620,7 @@ package "meson"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=["destdir"]
     removeBeforeRun=[]
@@ -610,6 +634,7 @@ package "meson"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -644,6 +669,7 @@ package "mktemp"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpEntropyBlessed justification="GNU coreutils `mktemp` draws randomness for exactly one purpose: the X-suffix of the temporary name it creates and prints. That name is a handle to scratch space whose whole contract is that it does not outlive the caller, so the random bytes designate a LOCATION and never the content of a product. Measured with io-mon @87143d62 on the linux-preload-hooks backend: across CodeTracer\'s ten shell gates at 996f9b12 mktemp accounts for 23 of the 45 mrNonDeterministic records, every one path=getrandom, every one emitted in a pid whose mrProcessExec names mktemp and whose only writes are the scratch directory the gate later removes; not one of those names appears in a declared output. This blesses ENTROPY only. It says nothing about a recipe that captures the printed name INTO a product -- that is the recipe\'s bug, and a signal that records zero events for a script whose whole output is $RANDOM was never what guarded against it."
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -660,6 +686,7 @@ package "nim"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpEntropyBlessed justification="The nim compiler\'s randomness is confined to naming things it then throws away -- temporary files and temporary directories under its nimcache -- and to hash-table seeding inside its own process. Neither reaches an output: the generated C, the object files and the linked binary are named from the module path and the --out:/--nimcache: arguments, all of which are in the action\'s argv and therefore in its cache key. A temp name that differed between two runs would change no byte of the product. Measured on this host against the M5 shim, a full monitored `nim c` (nim driving gcc and ld, 25 206 records, mcComplete, eventLoss=0) in fact emitted ZERO mrNonDeterministic records at all, so the blessing is a declaration about what nim\'s randomness is FOR rather than a waiver being cashed in today -- which is the point: it must be in place before a nim or CRT revision starts drawing entropy on a path that does not affect the output."
     subTools=["gcc"]
+    envPassthrough=[] refs=["ScratchLocationEnvNames"]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -701,6 +728,7 @@ package "nim"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpEntropyBlessed justification="The nim compiler\'s randomness is confined to naming things it then throws away -- temporary files and temporary directories under its nimcache -- and to hash-table seeding inside its own process. Neither reaches an output: the generated C, the object files and the linked binary are named from the module path and the --out:/--nimcache: arguments, all of which are in the action\'s argv and therefore in its cache key. A temp name that differed between two runs would change no byte of the product. Measured on this host against the M5 shim, a full monitored `nim c` (nim driving gcc and ld, 25 206 records, mcComplete, eventLoss=0) in fact emitted ZERO mrNonDeterministic records at all, so the blessing is a declaration about what nim\'s randomness is FOR rather than a waiver being cashed in today -- which is the point: it must be in place before a nim or CRT revision starts drawing entropy on a path that does not affect the output."
     subTools=["gcc"]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -779,6 +807,7 @@ package "ninja"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -803,6 +832,7 @@ package "nm"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -825,6 +855,7 @@ package "node"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -841,6 +872,7 @@ package "nsis"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -861,6 +893,7 @@ package "objcopy"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -889,6 +922,7 @@ package "objdump"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -913,6 +947,7 @@ package "patchelf"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -939,6 +974,7 @@ package "ranlib"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["archive"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -955,6 +991,7 @@ package "readelf"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -977,6 +1014,7 @@ package "rpmbuild"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1003,6 +1041,7 @@ package "sh"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1021,6 +1060,7 @@ package "strip"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=[]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1045,6 +1085,7 @@ package "stylus"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1063,6 +1104,7 @@ package "tar"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["file"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1099,6 +1141,7 @@ package "tree-sitter"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=["node"]
+    envPassthrough=[] refs=[]
     outputs=["outputDir"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1119,6 +1162,7 @@ package "wix-candle"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1145,6 +1189,7 @@ package "wix-light"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1171,6 +1216,7 @@ package "zig"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["output"]
     optionalOutputs=[]
     removeBeforeRun=[]
@@ -1197,6 +1243,7 @@ package "zig"
     inputCheckPolicy=acfpUnstated
     nonDeterminism=ndpUnblessed justification=""
     subTools=[]
+    envPassthrough=[] refs=[]
     outputs=["archive"]
     optionalOutputs=[]
     removeBeforeRun=[]

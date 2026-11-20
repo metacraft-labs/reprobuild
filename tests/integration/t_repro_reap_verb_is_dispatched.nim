@@ -1,16 +1,16 @@
-## `repro reap` reaches the reaper (`runReap`, the entry `runReapCli` wraps)
-## instead of falling through to usage.
+## `repro reap` reaches the reaper (`runReap`) instead of falling through to
+## usage.
 ##
 ## Ephemeral-State-Leases.md §4.3 names `repro reap --once` as fallback (b) —
 ## the reason the lease model does not require a daemon for correctness — and
-## CLI/reap.md specifies the verb. `runReapCli` has existed and been tested
-## since L3 (`libs/repro_resources/tests/t_l3_reaper.nim` cases 9/10/15/18), but
-## nothing DISPATCHED it: there was no `reap` arm in `runThinAppDispatch`, so
-## the command the spec promised fell through to the generic usage text and
-## exited 2. `runReapCli`'s own docstring used to record that — *"Nothing
-## dispatches `repro reap` yet"* — and has been corrected along with this
-## wiring, which is why that sentence is quoted here in the past tense rather
-## than cited as a live reference.
+## CLI/reap.md specifies the verb. The reaper's sweep has existed and been
+## tested since L3 (`libs/repro_resources/tests/t_l3_reaper.nim` cases
+## 9/10/15/18), but nothing DISPATCHED it at first: there was no `reap` arm,
+## so the command the spec promised fell through to the generic usage text
+## and exited 2. The reaper's own docstring used to record that — *"Nothing
+## dispatches `repro reap` yet"* — and was corrected along with this wiring,
+## which is why that sentence is quoted here in the past tense rather than
+## cited as a live reference.
 ##
 ## That is not a cosmetic gap. The `lease-reaper` row of CLI/health.md names
 ## this command as its remedy, and Interactive-UX-And-Progress.md Principle 2
@@ -33,6 +33,9 @@
 ##   3. A record it cannot destroy makes the verb exit NONZERO and name the
 ##      record — the diagnosis the health remedy promises ("then act on what it
 ##      names"), not a silent success.
+##   4. `repro build`'s `--hard-rebuild` and `--rebuild-host-bound` are refused
+##      with a pointer to `--force` (exit 2), and destroy nothing; `--force`
+##      on the same store is the control.
 ##
 ## Hermetic: a throwaway state store under the test's own scratch directory. No
 ## daemon, no provider, no network. The records are written with the library's
@@ -73,7 +76,7 @@ proc expiredRecord(address, typeId, attrsTypeId: string;
 
 suite "repro reap is a dispatched verb":
 
-  test "the reap verb reaches runReapCli, and an undispatched one does not":
+  test "the reap verb reaches the reaper, and an undispatched one does not":
     let bin = reproBinary()
     let root = scratch("empty")
     defer: removeDir(root)
@@ -169,3 +172,32 @@ suite "repro reap is a dispatched verb":
     # The record is left for a sweep that can do better — never silently
     # dropped, which would strand real state with nothing naming it.
     check hasStateRecord(store, "nic0")
+
+  test "the build verbs' rebuild spellings are refused with a pointer to --force":
+    ## Arm 4, through the real command line: `repro reap`'s description
+    ## declares `--hard-rebuild` and `--rebuild-host-bound` only to refuse
+    ## them (they are `repro build`'s, where they invalidate action-cache
+    ## entries and destroy nothing). The refusal must say where the verb
+    ## went, exit 2 and leave the state alone; `--force` on the same store
+    ## is the control that the store was sweepable at all.
+    let bin = reproBinary()
+    let root = scratch("refusal")
+    defer: removeDir(root)
+    let storeRoot = root / "state"
+    let store = openStateStore(storeRoot)
+    writeStateRecord(store,
+      expiredRecord("held", "reapdispatch.unlinked", "reapdispatch.unlinked",
+                    getTime()))
+    for spelling in ["--hard-rebuild", "--rebuild-host-bound"]:
+      let res = runShell(shellCommand(
+        [bin, "reap", spelling, "--state-root=" & storeRoot]))
+      checkpoint(spelling & ": " & res.output)
+      check res.code == 2
+      check res.output.contains("repro build")
+      check res.output.contains("--force")
+      check not res.output.contains("repro reap: state-root=")
+      check hasStateRecord(store, "held")
+    let forced = runShell(shellCommand(
+      [bin, "reap", "--force", "--state-root=" & storeRoot]))
+    check forced.output.contains("repro reap: state-root=" & storeRoot &
+      " (force)")

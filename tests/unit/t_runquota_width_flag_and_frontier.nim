@@ -18,7 +18,7 @@
 ##
 ## NO MOCKS: values in, values out.
 
-import std/unittest
+import std/[strutils, unittest]
 
 import runquota_client
 import runquota_core
@@ -130,10 +130,14 @@ suite "a range in the request":
       cpuPreferredMilli: 8000)
     let command = ReproCommandSpec(argv: @["bin"], widthFlag: "--workers")
     let argv = helperCliArgs(request, command, "/r.json")
+    # Each value is attached to its flag (`--<long>=<value>`), so a width
+    # flag that itself starts with `--` stays the value; the helper's
+    # declared command line reads it back (t_cs_m6_role_process_command_lines).
     var seen: seq[string] = @[]
-    for i in 0 ..< argv.len - 1:
-      if argv[i] in ["--cpu-min", "--cpu-pref", "--width-flag"]:
-        seen.add argv[i] & "=" & argv[i + 1]
+    for word in argv:
+      for flag in ["--cpu-min", "--cpu-pref", "--width-flag"]:
+        if word.startsWith(flag & "="):
+          seen.add word
     check seen == @["--cpu-min=1000", "--cpu-pref=8000",
       "--width-flag=--workers"]
 

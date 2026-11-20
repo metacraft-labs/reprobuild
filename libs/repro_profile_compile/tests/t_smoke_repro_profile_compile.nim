@@ -303,14 +303,14 @@ suite "M83 Phase C: profileCompileBuildAction":
       "TEMP", "TEMPDIR"]
     check act.weakFingerprint != weak
     check act.argv[0] == "/bin/repro"
-    check act.argv[1] == "__repro-compile-profile"
-    check "--profile" in act.argv
-    check "--binary" in act.argv
+    check act.argv[1 .. 2] == @["internal", "compile-profile"]
+    # Each value attached to its declared flag, the words repro's generated
+    # parser reads back (`repro internal compile-profile`).
+    check "--profile=/profile/home.nim" in act.argv
+    check "--binary=/cache/abc.profile-build" in act.argv
     check "--rbpi" notin act.argv
-    check "--nimcache" in act.argv
-    check "--repo-root" in act.argv
-    check "/profile/home.nim" in act.argv
-    check "/cache/abc.profile-build" in act.argv
+    check "--nimcache=/cache/nimcache/abc" in act.argv
+    check "--repo-root=/repo" in act.argv
     # The dependency record is the monitor's, and only the monitor's: no
     # hand-written depfile, no source manifest, no declared source list.
     check "--depfile" notin act.argv
@@ -345,7 +345,7 @@ suite "M83 Phase C: profileCompileBuildAction":
     # The claim the justification makes is true of this edge only because
     # its helper never runs what it compiled: the argv is the compile
     # helper, and no part of it names the intent-output contract.
-    check act.argv[1] == "__repro-compile-profile"
+    check act.argv[1 .. 2] == @["internal", "compile-profile"]
     check ReproIntentOutFlag notin act.argv
 
   test "weak fingerprint names compiler and output identity, not sources":

@@ -245,6 +245,13 @@ package cargo:
       # configures with cmake, ``openssl-src`` with perl + make).
       subTools "rustc", "gcc", "clang", "zig", "cmake", "perl", "make"
 
+      # cargo spells its configuration-file keys in kebab-case
+      # (https://doc.rust-lang.org/cargo/reference/config.html). The keys
+      # below are declared verbatim (``key = ...``); the convention is what a
+      # key spelt otherwise is compared with (``target_dir`` is reported as
+      # cargo's ``target-dir``).
+      convention file = kebabCase
+
       # MR16: cargo + rustc emit one Make-format ``.d`` depfile per
       # crate under ``<target-dir>/<profile>/deps/<crate>-<hash>.d`` (the
       # hash depends on compiler-input content so the recipe cannot
@@ -284,14 +291,27 @@ package cargo:
         # this surface a recipe would be spelling it through a verbatim
         # ``shell()``, which is exactly the hand-written acquisition the
         # from-source tier exists to remove.
-        boolFlag offline is bool, alias = "--offline"
+        #
+        # ``key = ...`` on this and the flags below: the setting of cargo's
+        # configuration file (``.cargo/config.toml``) that the flag
+        # overrides, as cargo documents it
+        # (https://doc.rust-lang.org/cargo/reference/config.html). The keys
+        # are what reprobuild's configuration writers check a cargo
+        # configuration against (``cargoConfigDescription``, emitted by the
+        # package macro); cargo's other settings are not described here, so a
+        # writer that names a description can write only these.
+        boolFlag offline is bool, alias = "--offline", key = "net.offline"
         boolFlag noDefaultFeatures is bool, alias = "--no-default-features"
         flag features is string, alias = "--features"
         flag manifestPath is string,
           alias = "--manifest-path",
           role = input
         flag targetDir is string,
-          alias = "--target-dir"
+          alias = "--target-dir", key = "build.target-dir"
+        # ``--color``: when cargo colours its output; ``term.color`` in the
+        # configuration file.
+        flag color is string, alias = "--color",
+          values = ["auto", "always", "never"], key = "term.color"
         # Package / binary selectors: let a recipe restrict a virtual
         # workspace build to one member crate + binary (a granular
         # per-artifact edge) instead of building every member.
@@ -303,7 +323,7 @@ package cargo:
         # (``lib/rustlib/<triple>/``) and the target's C toolchain through
         # the ``CC_<triple>`` / ``CARGO_TARGET_<TRIPLE>_LINKER`` environment
         # (``adapters/cross_zig`` renders both for a zig-driven cross build).
-        flag target is string, alias = "--target"
+        flag target is string, alias = "--target", key = "build.target"
 
       subcmd "install":
         # The vendored-sources configuration, by path: cargo reads

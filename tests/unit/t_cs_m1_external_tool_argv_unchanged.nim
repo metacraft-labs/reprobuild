@@ -58,6 +58,18 @@
 ##   ``gccLink`` / ``clangLink`` bake a shared library's full SONAME into its
 ##   ``DT_SONAME``, as ``LinkOptions.soname`` always promised. It is
 ##   rendered only when a caller sets it: a shared link with a SONAME.
+## * Every command renders its ``envPassthrough`` names (and the ``const``
+##   lists it names, ``refs``): they decide which of the host's variables
+##   reach the tool's edges, and the field had been added to the model
+##   without being rendered, which failed this test's coverage guard. Only
+##   ``nim c`` declares any (``refs=["ScratchLocationEnvNames"]``); no argv
+##   changed.
+## * ``cargo build`` gained the optional ``color`` flag (``--color``, with
+##   the closed set ``auto|always|never``), and ``offline``, ``targetDir``,
+##   ``target`` and ``color`` name the configuration-file keys they override
+##   (``key = ...``), from which the package's configuration description is
+##   derived. ``--color`` is rendered only when a caller sets it; the keys
+##   are not part of argv.
 ##
 ## The negative controls prove the comparison can fail: a model with one
 ## flag's ``alias`` changed, one with a flag's ``format`` changed, one with a

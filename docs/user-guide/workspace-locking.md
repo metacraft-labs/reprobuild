@@ -866,7 +866,7 @@ instead.
 This **refuses (exit 2)** for every tier, including personal (a
 corruption is not a mere unreachable backend). The diagnostic names the
 tier, the backend, and a machine-readable `cause=` in its evidence.
-There are two distinct causes and they are not repaired the same way.
+The causes below are not repaired the same way.
 
 **`cause=locked-revision-unreachable` — the revision is gone.**
 
@@ -880,6 +880,20 @@ There are two distinct causes and they are not repaired the same way.
 Nothing was tampered with: the commit the lock pins no longer exists in
 the checkout. Either restore it in the backend (push it back from a
 clone that still has it), or accept the new history and re-pin.
+
+**`cause=shallow-checkout` — the revision cannot be seen from here.**
+
+The locked revision is absent, but the checkout is shallow (a
+depth-limited clone, such as CI's default `actions/checkout`), so its
+absence says nothing about upstream. Fetch the full history
+(`git fetch --unshallow`, or `fetch-depth: 0` on `actions/checkout`) and
+retry; do not re-pin, because the lock is not wrong.
+
+Certification (`repro test --certify`) does not verify the lock's own
+root entry: that entry names the commit the lock was refreshed on, which
+is the parent of the commit carrying the lock, and a certificate binds
+the tested content instead. A shallow CI checkout can therefore be
+certified even though a push from it would be refused with this cause.
 
 **`cause=content-mismatch` — the content changed under a revision that
 is still there.**

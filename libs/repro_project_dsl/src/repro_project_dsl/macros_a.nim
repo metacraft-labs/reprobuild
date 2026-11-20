@@ -3926,11 +3926,18 @@ proc dirLooksWritable(dir: string): bool =
   ## bare ``Traceback from system`` this module used to produce. So the check
   ## must happen BEFORE anything is created.
   ##
-  ## The composition names no executable that must be found on ``PATH``:
-  ## ``test`` / ``[`` and ``echo`` are POSIX shell builtins, and ``echo`` is
-  ## internal to ``cmd.exe``. That matters because a macro shelling out at
-  ## compile time runs inside a Nim compile action whose ``PATH`` is only
-  ## ``<nim>/bin:<gcc-wrapper>/bin`` — see ``compile_time_shell.nim``.
+  ## The probe names no executable that must be found on ``PATH``, because a
+  ## macro shelling out at compile time runs inside a Nim compile action
+  ## whose ``PATH`` is only ``<nim>/bin:<gcc-wrapper>/bin`` (see
+  ## ``compile_time_shell.nim``). On POSIX it is the running compiler itself,
+  ## by absolute path, evaluating three NimScript statements
+  ## (`compilerWritabilityProbe`): no shell runs, so the host's ``/bin/sh``
+  ## and its libraries are not inputs of the recipe compile that makes it.
+  ## A ``test -w <dir> && echo`` through ``/bin/sh`` was, and a bundle
+  ## restored on a machine whose ``/bin/sh`` is another program recompiled
+  ## every recipe that declares a resource contract. On Windows ``echo``,
+  ## ``mkdir`` and ``rd`` are internal to ``cmd.exe``, which has no other
+  ## shell to bring in.
   ##
   ## ``false`` does NOT by itself mean "not writable". The probe's answer is
   ## read from ``staticExec`` output, and a compile that does not execute
@@ -3950,7 +3957,8 @@ proc dirLooksWritable(dir: string): bool =
       " && rd " & probe & " && echo REPRO_RW"))
     result = out0.contains("REPRO_RW")
   else:
-    let out0 = staticExec("test -w " & quoteShell(dir) & " && echo REPRO_RW")
+    let out0 = staticExec(compilerWritabilityProbe(getCurrentCompilerExe(),
+      dir))
     result = out0.contains("REPRO_RW")
 
 proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
@@ -4493,6 +4501,25 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     # subdirectory there, so concurrent compiles of different consumers never
     # share shim files. The key is a filesystem-safe rendering of the
     # consumer's absolute source path plus its FNV hash as a collision guard.
+    #
+    # An interface extraction that does not own a directory (every Windows
+    # extraction, and a POSIX one that is not recipe-relative) puts that
+    # consumer-keyed subdirectory beside its RUNNER instead, the compile's
+    # main module (`getProjectPath`): a slot of the extraction's shared
+    # nimcache pool, or its private temporary tree. Nim names a module's C
+    # file after the module's shortest path relative to the project or a
+    # `--path` root (`mangleModuleName`), so a shim beside the runner is
+    # named `@mrepro-sibling-shims@s<key>@srepro_sib_<selector>.nim.c`,
+    # whose length depends on neither the consumer's location nor the
+    # temporary directory. The extraction declares its temporary directory
+    # inside the consumer's `.repro/build/...` scratch, under a `--path`
+    # root, and a shim there was named after that whole path: on Windows
+    # the generated C file passed MAX_PATH (264 characters in the v0.2.27
+    # release build of `reprobuild/repro.nim`) and the compile failed with
+    # `cannot open`. The runner's directory lies under the extraction's
+    # ignored input prefix, as the temporary directory did, so the shims are
+    # still not recorded; what a shim says is recorded through the sibling
+    # file it includes.
     var shimDir = getEnv(SiblingShimDirEnv)
     let ownedShimDir = shimDir.len > 0
     if not ownedShimDir:
@@ -4513,7 +4540,10 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       for i in countdown(baseName.len - 1, 0):
         revBase.add(baseName[i])
       let consumerKey = "c_" & $h & "_" & revBase
-      shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
+      let shimRoot =
+        when defined(reproInterfaceMode): getProjectPath()
+        else: getTempDir()
+      shimDir = shimRoot / "repro-sibling-shims" / consumerKey
     if not dirExists(shimDir):
       createDir(shimDir)
     for (moduleAlias, selector, siblingReproPath) in producerModules:
@@ -4856,9 +4886,22 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
               writeFile(stagedConfig, stagedContent)
           for searchPath in querySettingSeq(searchPaths):
             extraPathFlags.add(" --path:" & quoteShell(searchPath))
+        # The generator imports `repro_cli_support`, whose `repro_core/
+        # c_compiler` asks `/bin/sh -c 'command -v cc …'` at compile time for
+        # the C compiler an image is built with, unless the compile names it
+        # (`-d:reproBuiltCCompiler`). Every recipe compile the engine runs
+        # names it (`nimCCompilerFlags`), this one included; hand the same
+        # answer on, so the generator compile starts no shell either and
+        # names the compiler the recipe compile was given.
+        var builtCCompilerFlag = ""
+        when defined(reproBuiltCCompiler):
+          const handedBuiltCCompiler {.strdefine: "reproBuiltCCompiler".} = ""
+          builtCCompilerFlag = " " & quoteShell("--define:reproBuiltCCompiler=" &
+            handedBuiltCCompiler)
         let nimCmd =
           quoteShell(compilerExe) &
-          " c -r --hints:off --warnings:off" & extraPathFlags & " " &
+          " c -r --hints:off --warnings:off" & builtCCompilerFlag &
+          extraPathFlags & " " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
         # The working directory has to be WRITABLE as well as config-bearing:

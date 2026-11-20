@@ -459,9 +459,13 @@ proc needsSslDefine(path: string): bool =
   ##   * The binary-cache client's post-connect deadlines: it bounds a TLS
   ##     handshake against a peer that accepts and never answers, which
   ##     only an ssl-enabled http_pool performs.
+  ##   * The Nimble index generator's tests: the generator follows an
+  ##     origin's redirects itself, over TLS, before git fetches, and its
+  ##     tests serve their origins over real HTTPS.
   path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
     path.endsWith("/t_repro_https_cache_end_to_end.nim") or
-    path.endsWith("/t_cache_reads_are_bounded.nim")
+    path.endsWith("/t_cache_reads_are_bounded.nim") or
+    path.contains("libs/repro_nimble_generator/tests/")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
   ## Five attestation gates are compiled with
