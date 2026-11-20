@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3045,
+    "nimTestBinaries": 3046,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 809,
     "staticallyDetectedRuntimeCompilerFlowTests": 154,
-    "testEntries": 3095
+    "testEntries": 3096
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1728,7 +1728,7 @@
       "integration": 1690,
       "platform/destructive": 198,
       "pure unit": 809,
-      "unclassified": 372
+      "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1942,9 +1942,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3045,
+    "nimTestBinaryCount": 3046,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3095
+    "testEntryCount": 3096
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5405,7 +5405,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 419,
+          "line": 423,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -5421,7 +5421,23 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 633,
+          "line": 487,
+          "path": "tests/integration/t_compiler_scratch_isolation.nim",
+          "patterns": [
+            "repro-extract-interface"
+          ],
+          "runtimeCompilerApi": "extractInterfaceFromModule",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard extractInterfaceFromModule(modulePath, artifact,"
+        },
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 701,
           "path": "tests/integration/t_compiler_scratch_isolation.nim",
           "patterns": [
             "repro-extract-interface"
@@ -19846,13 +19862,14 @@
       "localDependencyShape": [
         "repro_core",
         "repro_home_apply",
-        "repro_home_generations"
+        "repro_home_generations",
+        "repro_local_store"
       ],
       "owner": "libs/repro_home_apply",
       "requiresReproBinary": false,
       "source": "libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -20814,6 +20831,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_interface_nimcache_pool_is_this_users_alone",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
@@ -43670,7 +43704,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_compiler_scratch_isolation.nim",
       "sourceSuiteCount": 4,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },

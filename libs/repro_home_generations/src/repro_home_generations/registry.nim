@@ -12,6 +12,11 @@
 ##     side) and inserts the corresponding root + holds into the
 ##     store index.
 ##
+##   - `profileRootId(stateDir, generationIdHex)` is the id of the
+##     `profile` root one generation of one state directory holds its
+##     prefixes through. `ensureGenerationRoots(stateDir, store)`
+##     registers it for every generation the state directory keeps.
+##
 ##   - `enumerateGenerations(stateDir)` walks
 ##     `<state-dir>/generations/` and returns one `GenerationRecord`
 ##     per directory found. Used by `repro home history`.
@@ -20,7 +25,7 @@
 ##     state-dir `current` writer for callers that already have a
 ##     `Store` open.
 
-import std/[algorithm, os, strutils]
+import std/[algorithm, os, sets, strutils]
 from repro_core/paths import extendedPath
 
 import repro_local_store
@@ -46,6 +51,55 @@ proc digestToPrefixId(d: Digest256): PrefixIdBytes =
     result[i] = d[i]
 
 # ---------------------------------------------------------------------------
+# Profile root ids.
+# ---------------------------------------------------------------------------
+
+const
+  HomeProfileRootPrefix* = "home/"
+    ## Every `profile` root a home state directory registers starts with
+    ## this. A `profile` root named by a bare generation id was registered
+    ## by a build that did not scope its roots.
+
+proc profileRootIdForKey*(stateDirKey, generationIdHex: string): string =
+  HomeProfileRootPrefix & stateDirKey & "/" & generationIdHex
+
+proc profileRootId*(stateDir, generationIdHex: string): string =
+  ## `home/<state-dir-key>/<generation-id>`: the root one generation of one
+  ## state directory holds its realized prefixes through. Creates the
+  ## state directory's key when it has none (`stateDirRootKey`).
+  profileRootIdForKey(stateDirRootKey(stateDir), generationIdHex)
+
+proc holdGeneration(store: var Store; rootId: string;
+                    realizedPrefixIds: openArray[Digest256];
+                    registered: bool): bool =
+  ## Register `rootId` unless it is `registered`, and attach every prefix
+  ## it does not hold yet. True when it registered or attached anything.
+  ##
+  ## A root that is present is never registered again: `registerRoot`
+  ## replaces the row, which drops every hold until they are re-attached,
+  ## and another state directory's store GC can run in between (apply
+  ## locks are per state directory; the index is shared).
+  var held = initHashSet[PrefixIdBytes]()
+  if registered:
+    for prefixId in store.prefixesHeldByRoot(rootId):
+      held.incl(prefixId)
+  else:
+    registerRoot(store, rootId, rkProfile, holderUid = -1, ttlSeconds = -1)
+    result = true
+  for prefixDigest in realizedPrefixIds:
+    let prefixId = digestToPrefixId(prefixDigest)
+    if prefixId notin held:
+      # A prefix the store no longer indexes cannot be held: the attach is
+      # then ignored.
+      attachPrefixToRoot(store, rootId, prefixId)
+      result = true
+
+proc rootIsRegistered(store: Store; rootId: string): bool =
+  for row in store.listRoots():
+    if row.rootId == rootId:
+      return true
+
+# ---------------------------------------------------------------------------
 # Generation writer.
 # ---------------------------------------------------------------------------
 
@@ -65,8 +119,10 @@ proc writeGeneration*(stateDir: string;
   ## - Atomically writes the pointer envelope to
   ##   `<state-dir>/generations/<gen-id>/pointer.bin`.
   ## - Registers a `profile`-kind root in the store index whose id is
-  ##   the hex generation id, and inserts one `root_holds_prefix` row
-  ##   per entry in `envelope.realizedPrefixIds`.
+  ##   `profileRootId(stateDir, <hex generation id>)`, and inserts one
+  ##   `root_holds_prefix` row per entry in `envelope.realizedPrefixIds`.
+  ##   A root already there (a re-apply of an earlier profile) is kept and
+  ##   only gains the holds it lacks.
   ##
   ## The caller IS responsible for: choosing the activation
   ## timestamp, choosing the host identity, choosing the generation
@@ -84,20 +140,66 @@ proc writeGeneration*(stateDir: string;
     envelope.configurableGraphDigest[i] = rbcgKey[i]
   # Materialize the generation directory and the pointer envelope.
   let genIdHex = generationIdHex(envelope.generationId)
+  # The root id names this state directory and the generation, matching
+  # the "Store GC Interaction" section's contract that store GC unions
+  # the prefix-id lists across every generation present under
+  # `<state-dir>/generations/` -- of every state directory that uses the
+  # store, each through a root of its own. It is resolved before anything
+  # is written: a key that cannot be read or created then fails the
+  # commit before it leaves a pointer without a root.
+  let rootId = profileRootId(stateDir, genIdHex)
   let dir = generationDir(stateDir, genIdHex)
   createDir(extendedPath(dir))
   let pointerFile = pointerPath(stateDir, genIdHex)
   writePointerFile(pointerFile, envelope)
-  # Register the profile root + the per-prefix holds in the store
-  # index. The root id is the hex generation id, matching the
-  # "Store GC Interaction" section's contract that store GC unions
-  # the prefix-id lists across every generation present under
-  # `<state-dir>/generations/`.
-  registerRoot(store, genIdHex, rkProfile,
-    holderUid = -1, ttlSeconds = -1)
-  for prefixDigest in envelope.realizedPrefixIds:
-    let prefixId = digestToPrefixId(prefixDigest)
-    attachPrefixToRoot(store, genIdHex, prefixId)
+  # Register the profile root + the per-prefix holds in the store index.
+  discard holdGeneration(store, rootId, envelope.realizedPrefixIds,
+    registered = rootIsRegistered(store, rootId))
+
+proc ensureGenerationRoots*(stateDir: string; store: var Store):
+    seq[string] =
+  ## Give every generation under `<state-dir>/generations/` the `profile`
+  ## root `writeGeneration` registers for it, when it does not have it in
+  ## full. Returns the generation ids it registered or completed.
+  ##
+  ## A generation lacks its root when a build that named roots by the bare
+  ## generation id committed it, when the state directory lost its key, or
+  ## when a kill fell between the root row and its last hold. A root that
+  ## is present only gains the holds it lacks.
+  ##
+  ## A root named by a bare generation id is left alone. Another state
+  ## directory that has not run this build yet may hold the same generation
+  ## through it, and nothing here can tell.
+  let root = generationsRoot(stateDir)
+  if not dirExists(extendedPath(root)):
+    return @[]
+  var registered = initHashSet[string]()
+  for row in store.listRoots():
+    registered.incl(row.rootId)
+  var key = ""
+  # TODO(win-longpath): walk results escape; needs review
+  for kind, entry in walkDir(root, relative = false):
+    if kind != pcDir:
+      continue
+    let id = extractFilename(entry)
+    if id.startsWith("."):
+      continue
+    var envelope: PointerEnvelope
+    try:
+      envelope = readPointerFile(entry / PointerFileName)
+    except CatchableError:
+      # Not a committed generation this build can read: it names no
+      # prefixes to hold.
+      continue
+    if generationIdHex(envelope.generationId) != id:
+      continue
+    if key.len == 0:
+      key = stateDirRootKey(stateDir)
+    let rootId = profileRootIdForKey(key, id)
+    if holdGeneration(store, rootId, envelope.realizedPrefixIds,
+        registered = rootId in registered):
+      result.add(id)
+  result.sort()
 
 # ---------------------------------------------------------------------------
 # Generation enumeration.

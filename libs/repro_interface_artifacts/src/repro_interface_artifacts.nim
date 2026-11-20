@@ -85,6 +85,9 @@ import cbor
 import repro_core
 import repro_core/file_lock
 import repro_core/variant_assignments
+when defined(posix):
+  import repro_core/owned_directory
+  export owned_directory.OwnedDirectoryError
 from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
 export file_lock.ReproFileLock
@@ -8007,13 +8010,34 @@ proc interfaceExtractionNimcacheRoot*(): string =
   ## are an immutable store path, and a short prefix on Windows (Nim's mkdir
   ## is MAX_PATH-bound).
   ##
-  ## Not the temporary directory, where it used to be. The extraction creates
-  ## the root and so probes every directory above it, and the monitor records
-  ## those probes. A temporary directory is often made per shell (a Nix dev
-  ## shell's `TMPDIR` is a fresh `mktemp -d`), so the extraction's record
-  ## named a directory that a new shell, or another machine restoring a
-  ## bundle, does not have, and it missed there.
-  let cache = getCacheDir()
+  ## Not the temporary directory, where it used to be, for two reasons.
+  ## Reproducibility: the extraction creates the root and so probes every
+  ## directory above it, and the monitor records those probes. A temporary
+  ## directory is often made per shell (a Nix dev shell's `TMPDIR` is a fresh
+  ## `mktemp -d`), so the extraction's record named a directory that a new
+  ## shell, or another machine restoring a bundle, does not have, and it
+  ## missed there. Trust: on Linux the default temporary directory is the
+  ## world-writable `/tmp`, where another local user could create the root
+  ## first and own every slot in it, or plant a runner under its predictable
+  ## name, and the extraction compiled and ran it with this user's privileges
+  ## (reprobuild-pm issue 2026-11-18-interface-extraction-nimcache-pool-lives-
+  ## in-the-shared-temporary-directory). The pool holds code this user
+  ## executes, so it is a backing store under Tool-Owned-Caches.md §"Trust
+  ## Boundary": in this user's private state, and refused when it is not
+  ## this user's (`ensureInterfaceNimcacheStoreDir`).
+  var cache = getCacheDir()
+  when defined(posix):
+    # A relative `XDG_CACHE_HOME` is to be ignored (XDG Base Directory
+    # specification). Resolved against each process's working directory it
+    # would put the pool in the recipe's tree for the edge's child, and the
+    # parent's ignored prefix would name another directory.
+    # The fallback is the platform default `getCacheDir` would have given
+    # without the variable, so the pool stays beside the provider's.
+    if cache.len > 0 and not cache.isAbsolute:
+      when defined(macosx):
+        cache = getHomeDir() / "Library" / "Caches"
+      else:
+        cache = getHomeDir() / ".cache"
   if cache.len == 0:
     raise newException(ValueError,
       "cannot resolve the user cache directory for the interface nimcache")
@@ -8082,9 +8106,10 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## of every ancestor, which Nim applies to a compile whose main module is
   ## the recipe -- the provider compile reads them that way.
   ##
-  ## The extraction's main module is a generated runner, so Nim reads the
-  ## runner directory's chain instead, and the runner lives in a nimcache
-  ## slot under the temporary directory (see `extractInterfaceFromModule`).
+  ## The extraction's main module is a generated runner, so Nim would read
+  ## the runner directory's chain instead -- the runner lives in a nimcache
+  ## slot of the per-user pool (see `extractInterfaceFromModule`) -- and the
+  ## extraction passes `--skipParentCfg` so that it reads none of it.
   ## A recipe that reaches its imports through such a file (a root
   ## `config.nims` with `switch("path", thisDir())` and `usesImportPath
   ## "stubs"`) then failed with "cannot open file: stubs/...". The compiler
@@ -8133,6 +8158,158 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
     if flag notin result:
       result.add(flag)
 
+when defined(posix):
+  const InterfaceNimcacheStoreRole = OwnedDirectoryRole(
+    noun: "interface-extraction nimcache directory",
+    exposure: "another account could replace the extraction runner or the " &
+      "objects it links, and this user's extraction would compile and run " &
+      "them",
+    remedy: "repro does not repair a store it may not use: remove it, or " &
+      "point XDG_CACHE_HOME at a directory only you can write, and build " &
+      "again")
+
+when defined(posix):
+  proc createMissingPrivateDirs(path: string) =
+    ## Create `path` and any missing ancestor at mode 0700, set exactly (the
+    ## umask is not consulted). `createDir` follows the umask, and under the
+    ## 002 umask of a distribution with per-user groups it made a missing
+    ## `~/.cache` 0775, which the pool's parent check then refused. Existing
+    ## directories are left as they are.
+    if path.len == 0 or dirExists(path):
+      return
+    createMissingPrivateDirs(parentDir(path))
+    if mkdir(path.cstring, Mode(0o700)) == 0:
+      if chmod(path.cstring, Mode(0o700)) != 0:
+        raiseOSError(osLastError(), path)
+    elif errno != EEXIST:
+      raiseOSError(osLastError(),
+        "cannot create the interface-extraction nimcache's parent " & path)
+
+  proc isOwnPrivateGroup(gid: Gid): bool =
+    ## Whether `gid` is this user's private group: the primary group of the
+    ## effective user, named as the user is. That is the per-user group
+    ## convention (`USERGROUPS_ENAB` in login.defs(5)), under which the
+    ## default umask is 002 and a group-writable directory is writable by
+    ## this user alone. A shared group such as `users` is not one.
+    let pw = getpwuid(geteuid())
+    if pw == nil or pw.pw_gid != gid:
+      return false
+    let gr = getgrgid(gid)
+    gr != nil and $gr.gr_name == $pw.pw_name
+
+  proc refuseNimcacheAncestor(root, path, why: string; owner, mode: int) =
+    raise newException(OwnedDirectoryError,
+      "refusing the interface-extraction nimcache directory " & root &
+      ": " & path & " above it " & why & " (owned by uid " & $owner &
+      ", mode 0" & toOct(mode and 0o7777, 4) & "), so another account " &
+      "could replace the pool and this user's extraction would compile and " &
+      "run what it holds; point XDG_CACHE_HOME at a directory only you can " &
+      "write, and build again")
+
+proc ensureInterfaceNimcacheStoreDir*(path: string) =
+  ## Create `path` (mode 0700) when it is missing, then admit it only when it
+  ## is a real directory owned by this user and writable by no other
+  ## (Tool-Owned-Caches.md §"Trust Boundary"). Anything else -- another
+  ## user's directory, a group- or world-writable one, a symlink -- raises
+  ## `OwnedDirectoryError` naming the path, its owner and its mode, and is
+  ## left exactly as found. Missing ancestors are created at mode 0700
+  ## (`createMissingPrivateDirs`); they are checked by
+  ## `requireInterfaceNimcacheRootParent`, not here.
+  ##
+  ## On Windows the pool is under LOCALAPPDATA, whose ACL already admits only
+  ## its user (the same split as `repro_core/owned_directory`).
+  when defined(posix):
+    createMissingPrivateDirs(parentDir(path))
+    ensureOwnedDirectory(path, privateDir = false, InterfaceNimcacheStoreRole)
+  else:
+    createDir(extendedPath(path))
+
+proc requireInterfaceNimcacheRootParent*(root: string) =
+  ## The pool root's own check (`ensureInterfaceNimcacheStoreDir`) is not
+  ## enough when another account can replace the root, or any directory on
+  ## the way to it, between the check and the compile. So every component of
+  ## the path to the root's parent is walked from `/`, resolving symbolic
+  ## links one at a time:
+  ##
+  ## * every directory must be this user's or root's, and writable by no
+  ##   other account unless it is sticky, as `/tmp` is (in a sticky directory
+  ##   only an entry's owner can rename it). Group write is also accepted
+  ##   from this user's private group (`isOwnPrivateGroup`), so a `~/.cache`
+  ##   made 0775 under a per-user-group umask is not refused;
+  ## * every symbolic link must be this user's or root's. It lives in a
+  ##   directory that passed the rule above, so nobody else can replace it,
+  ##   and its target is walked the same way. A link another user left in
+  ##   `/tmp` (an `XDG_CACHE_HOME=/tmp/...` they created first) is refused:
+  ##   they could repoint it once the pool had been admitted.
+  ##
+  ## A refusal names the component, its owner and its mode. POSIX only, like
+  ## `repro_core/owned_directory`. The parent must already exist.
+  when defined(posix):
+    let me = int(geteuid())
+    var pending: seq[string] = @[]
+    for part in parentDir(absolutePath(root)).split('/'):
+      pending.add(part)
+    var current = "/"
+    var hops = 0
+    proc checkDir(path: string) =
+      var st: Stat
+      if stat(path.cstring, st) != 0:
+        raiseOSError(osLastError(),
+          "cannot inspect the interface-extraction nimcache's ancestor " & path)
+      let mode = int(st.st_mode) and 0o7777
+      let owner = int(st.st_uid)
+      let sticky = (mode and 0o1000) != 0
+      if owner != me and owner != 0:
+        refuseNimcacheAncestor(root, path, "belongs to another account",
+          owner, mode)
+      if not sticky and ((mode and 0o002) != 0 or
+          ((mode and 0o020) != 0 and not isOwnPrivateGroup(st.st_gid))):
+        refuseNimcacheAncestor(root, path,
+          "is writable by other accounts and not sticky", owner, mode)
+    checkDir(current)
+    var i = 0
+    while i < pending.len:
+      let part = pending[i]
+      inc i
+      if part.len == 0 or part == ".":
+        continue
+      if part == "..":
+        current = parentDir(current)
+        if current.len == 0: current = "/"
+        continue
+      let candidate = current / part
+      var st: Stat
+      if lstat(candidate.cstring, st) != 0:
+        raiseOSError(osLastError(),
+          "cannot inspect the interface-extraction nimcache's ancestor " &
+          candidate)
+      if S_ISLNK(st.st_mode):
+        let owner = int(st.st_uid)
+        if owner != me and owner != 0:
+          refuseNimcacheAncestor(root, candidate,
+            "is a symbolic link another account owns", owner,
+            int(st.st_mode))
+        inc hops
+        if hops > 40:
+          raise newException(OwnedDirectoryError,
+            "refusing the interface-extraction nimcache directory " & root &
+            ": too many symbolic links on the way to it")
+        let target = expandSymlink(candidate)
+        var rest: seq[string] = @[]
+        for t in target.split('/'):
+          rest.add(t)
+        pending = rest & pending[i .. ^1]
+        i = 0
+        if target.isAbsolute:
+          current = "/"
+        continue
+      if not S_ISDIR(st.st_mode):
+        raise newException(OwnedDirectoryError,
+          "refusing the interface-extraction nimcache directory " & root &
+          ": " & candidate & " above it is not a directory")
+      checkDir(candidate)
+      current = candidate
+
 type InterfaceNimcacheSlot* = object
   dir*: string
     ## The slot's directory; its nimcache is `dir / "nimcache"` and the
@@ -8149,6 +8326,22 @@ proc acquireInterfaceNimcacheSlot*(configDir: string;
   ## waiting on one particular slot would idle behind its holder while
   ## another frees. The lock is kernel-owned, so a killed extraction
   ## releases its slot.
+  ##
+  ## Every level of the store -- the pool root (`configDir`'s parent, whose
+  ## own parent must not let another account replace it:
+  ## `requireInterfaceNimcacheRootParent`), `configDir`, and the slot -- is
+  ## admitted by
+  ## `ensureInterfaceNimcacheStoreDir` before it is used: whoever can write
+  ## one of them can replace the runner the slot compiles or the objects it
+  ## links. The root and `configDir` are checked before any lock file is
+  ## created in them.
+  let root = parentDir(absolutePath(configDir))
+  when defined(posix):
+    # The parent first: nothing is created in a parent that is refused.
+    createMissingPrivateDirs(parentDir(root))
+  requireInterfaceNimcacheRootParent(root)
+  ensureInterfaceNimcacheStoreDir(root)
+  ensureInterfaceNimcacheStoreDir(configDir)
   let count = max(1, slotCount)
   var pause = 20
   while true:
@@ -8156,13 +8349,70 @@ proc acquireInterfaceNimcacheSlot*(configDir: string;
       let dir = configDir / ("slot-" & $i)
       var lock: ReproFileLock
       if tryAcquireProviderFileLock(dir & ".lock", lock):
-        createDir(extendedPath(dir))
+        try:
+          ensureInterfaceNimcacheStoreDir(dir)
+        except CatchableError:
+          releaseProviderNimcacheLock(lock)
+          raise
         return InterfaceNimcacheSlot(dir: dir, index: i, lock: lock)
     sleep(pause)
     pause = min(pause * 2, 500)
 
 proc releaseInterfaceNimcacheSlot*(slot: var InterfaceNimcacheSlot) =
   releaseProviderNimcacheLock(slot.lock)
+
+proc publishContentNamedFile*(path, content: string) =
+  ## Write `content` at `path`, whose name is a digest of that content (the
+  ## extraction runner and its search-path script), publishing it once.
+  ##
+  ## Published by rename, so a concurrent extraction that derived the same
+  ## name never observes a partially written file: the path either does not
+  ## exist yet or holds the whole content.
+  ##
+  ## A file already at `path` is used only when it holds exactly `content`.
+  ## The name being a digest of the content says what an honest publisher
+  ## wrote, not what is there: the digest is FNV over a predictable source,
+  ## and the file is an ignored input of the extraction edge, so nothing else
+  ## would notice a substitute. Any other bytes are refused, naming the path,
+  ## and left in place (Tool-Owned-Caches.md §"Trust Boundary": a store is
+  ## refused, not repaired).
+  proc requireSame() =
+    let existing =
+      try: readFile(extendedPath(path))
+      except IOError as err:
+        raise newException(IOError, "refusing the interface-extraction " &
+          "file " & path & ": it exists but cannot be read (" & err.msg &
+          "), so it cannot be shown to hold what this extraction would " &
+          "write")
+    if existing != content:
+      raise newException(IOError, "refusing the interface-extraction file " &
+        path & ": its name is the digest of the content this extraction " &
+        "would write, but it holds other bytes (" & $existing.len & " bytes, " &
+        "expected " & $content.len & "). Something other than an extraction " &
+        "wrote it; repro will not compile or run it. Remove it and build " &
+        "again")
+  if fileExists(extendedPath(path)):
+    requireSame()
+    return
+  let (stageFile, stagePath) =
+    createTempFile("extract_runner_stage_", ".tmp", parentDir(path))
+  try:
+    stageFile.write(content)
+  finally:
+    close(stageFile)
+  try:
+    moveFile(extendedPath(stagePath), extendedPath(path))
+  except OSError:
+    # Windows refuses to replace a file another process holds open. That
+    # process published the same name; its copy is ours only if it holds
+    # the same bytes.
+    try:
+      removeFile(extendedPath(stagePath))
+    except OSError:
+      discard
+    if not fileExists(extendedPath(path)):
+      raise
+    requireSame()
 
 proc providerDynamicEnabled(): bool =
   ## Returns true when ``REPRO_PROVIDER_DYNAMIC`` selects the Tier 1
@@ -8407,7 +8657,8 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   # the recipe by absolute path (scratch only — the edge's key and record
   # name the recipe relative to its own directory). Nim reads the
   # `config.nims` / `nim.cfg` chain of the MAIN module's directory — the
-  # runner's — not the recipe's; see
+  # runner's — not the recipe's, and the compile skips the ancestors of that
+  # directory (`--skipParentCfg`, below); see
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" for what that means for a recipe's configuration.
   let runnerSource =
@@ -8502,6 +8753,23 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   # (index 2), never after the runner, or nim treats it as a second input file.
   if getEnv("REPRO_INTERFACE_LIST_CMD").len > 0:
     command.insert(@["--listCmd"], 2)
+  # NO ANCESTOR CONFIGURATION. Nim runs the `nim.cfg` / `config.nims` of
+  # every ancestor of the main module's directory, and the main module is the
+  # runner, in a slot of the pool or in `tempParent`. None of those ancestors
+  # is the recipe's (its chain is applied explicitly below), and they need
+  # not be this user's: with the pool under `/tmp`, or under an
+  # `XDG_CACHE_HOME` that is, any local user could create `/tmp/config.nims`
+  # and have it run as this user on every extraction (reprobuild-pm issue
+  # 2026-11-18-interface-extraction-nimcache-pool-lives-in-the-shared-
+  # temporary-directory). `--skipParentCfg` leaves the compiler's and the
+  # user's own configuration, as before.
+  # `--skipProjCfg` likewise leaves out the `nim.cfg` / `config.nims` /
+  # `<runner>.nim.cfg` of the runner's own directory, which nothing generates:
+  # in the per-binary mode the runner sits in the build's scratch, which the
+  # pool's ownership checks do not cover. The search-path script
+  # (`<runner>.nims`) is loaded outside both switches (`loadConfigs`,
+  # compiler/nimconf.nim), so it still applies.
+  command.insert(@["--skipParentCfg", "--skipProjCfg"], 2)
   # The recipe's own configuration chain. The runner, not the recipe, is the
   # main module, so Nim would read the runner directory's `config.nims` /
   # `nim.cfg` chain; the search paths the recipe's chain adds are passed
@@ -8556,9 +8824,10 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   # recompile the whole library every time even with the nimcache shared.
   #
   # What the runner's directory does NOT supply any more is configuration:
-  # Nim runs the config files of every ancestor of the main module's
-  # directory, and under the temporary directory those are not the recipe's.
-  # The recipe's own chain is applied explicitly above.
+  # Nim would run the config files of every ancestor of the main module's
+  # directory, and those are not the recipe's -- nor necessarily this
+  # user's -- so the compile passes `--skipParentCfg` (above). The recipe's
+  # own chain is applied explicitly above.
   #
   # The runner's name is a digest of its source, which names the recipe by
   # absolute path: two recipes never share a runner or its entry, one recipe
@@ -8610,31 +8879,11 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   var compileExecution: ProviderCompileExecutionResult
   try:
     let runnerPath = runnerDir / runnerName
-    proc publishOnce(path, content: string) =
-      if fileExists(extendedPath(path)):
-        return
-      # Publish by rename, so a concurrent extraction that derived the same
-      # name (possible in `tempParent`, which no lock covers) never observes
-      # a partially written file: the path either does not exist yet or
-      # already holds the whole content. The name is a digest of the
-      # content, so whoever published it published these bytes.
-      let (stageFile, stagePath) =
-        createTempFile("extract_runner_stage_", ".tmp", runnerDir)
-      try:
-        stageFile.write(content)
-      finally:
-        close(stageFile)
-      try:
-        moveFile(extendedPath(stagePath), extendedPath(path))
-      except OSError:
-        # Windows refuses to replace a file another process holds open. That
-        # process published byte-identical content, so its copy is ours too.
-        try:
-          removeFile(extendedPath(stagePath))
-        except OSError:
-          discard
-        if not fileExists(extendedPath(path)):
-          raise
+    # Published once and compared, never trusted by name
+    # (`publishContentNamedFile`). `tempParent`, which no lock covers, can
+    # see two extractions derive the same name; the rename keeps that safe.
+    template publishOnce(path, content: string) =
+      publishContentNamedFile(path, content)
     # The script first: a runner is never compiled without it, whichever
     # extraction published either file.
     let searchPathScript = nimSearchPathScriptPath(runnerPath)

@@ -7633,6 +7633,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim",
+    binary: "build/test-bin/t_interface_nimcache_pool_is_this_users_alone",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_interface_artifacts_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim",
     binary: "build/test-bin/t_interface_nimcache_slots",
     defines: @[],

@@ -591,7 +591,7 @@ libs/repro_home_apply/tests/t_homebrew_bridge_records.nim	nim	7
 libs/repro_home_apply/tests/t_junction_aware_remove.nim	nim	7
 libs/repro_home_apply/tests/t_macos_archives.nim	nim	11
 libs/repro_home_apply/tests/t_macos_installer_app_realize.nim	nim	15
-libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim	nim	6
+libs/repro_home_apply/tests/t_partial_recovery_keeps_committed_generations.nim	nim	22
 libs/repro_home_apply/tests/t_plan_topological_sort.nim	nim	7
 libs/repro_home_apply/tests/t_preview_chain.nim	nim	7
 libs/repro_home_apply/tests/t_realize_honors_adapter_preference.nim	nim	4
@@ -643,6 +643,7 @@ libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	
 libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim	nim	8
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
+libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim	nim	14
 libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim	nim	3
 libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim	nim	15
 libs/repro_interface_artifacts/tests/t_l3_lifted_symbols_compile_in_a_consumer.nim	nim	9
@@ -1908,7 +1909,7 @@ tests/integration/t_committed_lock_records_canonical_remote_url_when_not_named_o
 tests/integration/t_committed_lock_records_develop_set_siblings.nim	nim	3
 tests/integration/t_committed_lock_records_no_materialization_path.nim	nim	3
 tests/integration/t_compiler_args_transport.nim	nim	6
-tests/integration/t_compiler_scratch_isolation.nim	nim	6
+tests/integration/t_compiler_scratch_isolation.nim	nim	7
 tests/integration/t_completion_emits_shell_script.nim	nim	3
 tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim	nim	1
 tests/integration/t_concurrent_publish_disjoint_per_backend.nim	nim	1
