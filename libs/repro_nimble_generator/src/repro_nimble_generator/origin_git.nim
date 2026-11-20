@@ -200,8 +200,25 @@ proc runBounded*(g: OriginGit; args: seq[string]; cwd, home: string;
         if not outOpen and not errOpen:
           break
         if peekExitCode(p) != -1 and ready == 0:
-          # Exited and nothing left queued: what a detached grandchild
-          # writes later is not the child's output.
+          # Exited. The poll above may have timed out BEFORE the child's
+          # last write, so what it wrote before exiting can still be queued:
+          # drain it, without waiting. What a detached grandchild writes
+          # later is not the child's output.
+          for fd in [outFd, errFd]:
+            if (fd == outFd and not outOpen) or (fd == errFd and not errOpen):
+              continue
+            while true:
+              let n = posix.read(fd, addr buf[0], buf.len)
+              if n <= 0:
+                break
+              if fd == outFd:
+                let at = result.stdoutText.len
+                result.stdoutText.setLen(at + n)
+                copyMem(addr result.stdoutText[at], addr buf[0], n)
+              elif result.stderrText.len < 65536:
+                let at = result.stderrText.len
+                result.stderrText.setLen(at + n)
+                copyMem(addr result.stderrText[at], addr buf[0], n)
           break
       if inOpen:
         streams.close(p.inputStream)

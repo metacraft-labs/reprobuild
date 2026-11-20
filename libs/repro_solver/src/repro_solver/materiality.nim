@@ -414,6 +414,12 @@ proc deriveConsultedIntervals*(packages: openArray[PackageDecl];
   let traded = tradedPackages(packages,
     tradeableVariants(variantDecls, sol))
   let declarers = reachableDeclarers(packages, sol, pinnedVariants)
+  var perVersion = initHashSet[string]()
+  for p in packages:
+    for vd in p.versionDepends:
+      perVersion.incl(p.name)
+      for d in vd.depends:
+        perVersion.incl(d.name)
 
   var names: seq[string] = @[]
   for name in sol.packages.keys:
@@ -436,6 +442,13 @@ proc deriveConsultedIntervals*(packages: openArray[PackageDecl];
       continue
     let isSelected = sol.selected[name] == ssSelected
     if declared.hasKey(name) and declared[name].pinned:
+      continue
+    if name in perVersion:
+      # NPC-M6: which of these edges bind depends on which version each
+      # declarer chooses, which this derivation does not model. Raw
+      # over-invalidates, which is the safe direction.
+      result.add(rawInterval(name, sol.packages.getOrDefault(name, ""),
+        "a per-version dependency list declares or constrains this package"))
       continue
     let selection = sol.packages.getOrDefault(name, "")
     if selection.len == 0:
