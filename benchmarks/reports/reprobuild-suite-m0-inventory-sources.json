@@ -43712,7 +43712,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_committed_lock_pins_solved_graph_and_build_consumes_it.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

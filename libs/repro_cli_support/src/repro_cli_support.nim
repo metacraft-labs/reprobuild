@@ -31287,24 +31287,36 @@ proc committedLockDerivedProject(workspaceRoot: string):
     repos: @[repo] & nestedDeps,
     projectFile: committedLockPath(root)))
 
-proc resolveProjectDirFromTarget(target: string): string =
-  ## Resolve the directory that owns the committed lock for a build
-  ## target. An existing directory is itself; an existing file resolves
-  ## to its parent; a project file that does not exist (``<dir>/repro.nim``
-  ## or ``<dir>/reprobuild.nim``) in a directory that does names that
-  ## directory ([CLI/build.md §"Target Selection"]); everything else (a
-  ## bare name selector, or an empty target) falls back to the current
-  ## working directory.
+proc buildLockProjectDir*(target: string): string =
+  ## The directory whose committed lock (and ``repro.solver`` sidecar) a
+  ## ``repro build`` pins, from the engine anchor ``parseAndResolveSelectors``
+  ## returned (``target``, ``"."`` when no selector was given). The build
+  ## (``lockConsumption``), ``--print-solved-graph`` and the package answer
+  ## of ``repro why`` all read the lock through this one rule, so the graph
+  ## printed or explained is the one the build pins.
   ##
-  ## The missing-project-file case is the anchor ``bareNameAnchor`` gives a
-  ## request of names only in a directory with no project file, and the
-  ## spelling ``mode1WorkspaceCandidate`` reads as a Mode-1 workspace: an
-  ## explicit ``sub/repro.nim#x`` builds the project synthesised for
-  ## ``sub/`` and must pin ``sub/``'s lock, as ``sub#x`` does, not the
-  ## current directory's.
-  if target.len == 0:
+  ## The ``#<fragment>`` is dropped first; what is left is the anchor's path:
+  ##
+  ## * empty (no selector): the current directory;
+  ## * an existing directory: that directory;
+  ## * an existing file: its directory;
+  ## * a project file that does not exist (``<dir>/repro.nim`` or
+  ##   ``<dir>/reprobuild.nim``) in a directory that does: that directory,
+  ##   the one the project file would be in ([CLI/build.md §"Target
+  ##   Selection"]). A bare name is anchored this way, and an explicit
+  ##   ``sub/repro.nim#x`` builds the project synthesised for ``sub/`` and
+  ##   must pin ``sub/``'s lock.
+  ##
+  ## Any other path names nothing, and raises ``ValueError``. It is NEVER
+  ## replaced by the current directory: ``--print-solved-graph ./typo`` used
+  ## to exit 0 with the current directory's graph, and ``repro why <pkg>
+  ## ./sub#x`` (whose fragment was not dropped) answered from the current
+  ## directory's lock instead of ``./sub``'s (reprobuild-pm issue
+  ## 2026-11-18-repro-why-and-print-solved-graph-fall-back-to-the-current-directory-for-a-path-that-does-not-resolve).
+  let base = splitTarget(target).base
+  if base.len == 0:
     return getCurrentDir()
-  let abs = absolutePath(target)
+  let abs = absolutePath(base)
   if dirExists(extendedPath(abs)):
     return abs
   if fileExists(extendedPath(abs)):
@@ -31313,15 +31325,10 @@ proc resolveProjectDirFromTarget(target: string): string =
   if (name == CanonicalProjectFileName or name == LegacyProjectFileName) and
       dirExists(extendedPath(parentDir(abs))):
     return parentDir(abs)
-  getCurrentDir()
-
-proc buildLockProjectDir*(target: string): string =
-  ## The directory whose committed lock (and ``repro.solver`` sidecar) a
-  ## ``repro build`` pins, from the engine anchor ``parseAndResolveSelectors``
-  ## returned (``target``, ``"."`` when no selector was given). Both the build
-  ## (``lockConsumption``) and ``--print-solved-graph`` read the lock through
-  ## this one rule, so the printed graph is the one the build pins.
-  resolveProjectDirFromTarget(splitTarget(target).base)
+  raise newException(ValueError,
+    "path selector '" & base & "' names no file or directory (" & abs &
+      "); no project is read for it, and the current directory's lock is " &
+      "not read in its place")
 
 # Forward declarations — bodies live after ``parseExplainFixture`` (which
 # they consume to turn the sidecar solver-inputs text into the solver's
@@ -36195,8 +36202,12 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
   proc packageSelectionAnswer(): string =
     if explicitAction:
       return ""
+    # The lock is the one a build of ``target`` pins, found by the build's
+    # own rule: the fragment of ``./sub#x`` is dropped, and a path that
+    # names nothing yields no package answer (never the current
+    # directory's).
     let projDir =
-      try: resolveProjectDirFromTarget(target)
+      try: buildLockProjectDir(target)
       except CatchableError: return ""
     var graph: tuple[solution: UnifiedSolution, source: string,
                      lockPath: string, found: bool]
