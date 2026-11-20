@@ -13,6 +13,8 @@
 
 {.experimental: "callOperator".}
 
+import std/os
+
 import repro_project_dsl
 
 import ../types/library
@@ -65,5 +67,8 @@ proc nim_library*(into: string;
     appLib = true)
   result = newLibrary(install = action, api = api,
                       installPrefix = "usr/lib")
+  # A consumer's link searches where this edge writes the library, as for
+  # ``c_library``.
+  result.linkDir = output.parentDir
   result.linkTimeName = linkTimeNameAction("nim-library-link-time-name-",
     pkg, layout, action, output)

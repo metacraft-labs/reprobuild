@@ -356,8 +356,10 @@ proc gccLink*(opts: LinkOptions): BuildActionDef =
   var libDirs: seq[string] = @[]
   for dep in opts.deps:
     for l in apiLinks(dep.api): libs.add(l)
-    if dep.installPrefix.len > 0:
-      libDirs.add(dep.installPrefix)
+    # Where the dep's own edge writes it, which is where ``-l`` must look;
+    # never ``installPrefix``, a staged-install path no edge writes.
+    if dep.linkDir.len > 0 and dep.linkDir notin libDirs:
+      libDirs.add(dep.linkDir)
   let firstObj =
     if opts.objects.len > 0 and opts.objects[0].outputs.len > 0:
       opts.objects[0].outputs[0]
