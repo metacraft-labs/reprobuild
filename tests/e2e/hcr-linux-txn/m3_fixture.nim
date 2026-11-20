@@ -32,6 +32,7 @@
 ## byte-identity and page-leak arms observe text, values and
 ## `/proc/self/maps`, none of which the map takes part in.
 
+from repro_core/process_streams import drainStream
 import std/[exitprocs, json, os, osproc, streams, strutils, tempfiles]
 
 # Nim parses `../hcr-linux-direct/x` as arithmetic, so the ELF reader HLX-M0
@@ -172,8 +173,8 @@ type
 
 proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
   let process = startProcess(binary, args = @args, options = {})
-  result.output = process.outputStream.readAll()
-  result.stderrText = process.errorStream.readAll()
+  result.output = drainStream(process.outputStream)
+  result.stderrText = drainStream(process.errorStream)
   result.exitCode = process.waitForExit()
   process.close()
   let trimmed = result.output.strip()

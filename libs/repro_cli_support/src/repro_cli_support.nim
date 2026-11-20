@@ -46732,15 +46732,35 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
     result.diagnostic = result.worktree.diagnostic
     return
 
+  # A declared path that IS the pushed worktree settles the answer without
+  # Git. The common-directory sweep below costs two git processes per declared
+  # repo, and its result is consulted only when no declared path matches, so
+  # running it for an ordinary push from the declared checkout spent ~320
+  # processes per call on a list that was then discarded — and the pre-push
+  # gate calls this twice (once itself, once via ``pickTriggerRepo``). Two
+  # declarations of the same path are still detected, by path alone.
+  # reprobuild-pm issues/2026-10-10-pre-push-gate-observes-every-declared-
+  # repo-three-times-per-push.md.
   var pathMatches: seq[int]
+  for index, repo in repos:
+    if samePathIdentity(result.worktree.worktreeRoot,
+        workspaceRoot / repo.path):
+      pathMatches.add(index)
+  if pathMatches.len == 1:
+    result.found = true
+    result.repoIndex = pathMatches[0]
+    return
+  if pathMatches.len > 1:
+    result.ambiguous = true
+    result.diagnostic = "more than one declared repo shares the pushed " &
+      "worktree's filesystem identity"
+    return
+
   var commonMatches: seq[int]
   var missingDeclaredWorktrees = initHashSet[int]()
   var presentDeclaredWorktrees: seq[int]
   for index, repo in repos:
     let declaredPath = workspaceRoot / repo.path
-    if samePathIdentity(result.worktree.worktreeRoot, declaredPath):
-      pathMatches.add(index)
-      continue
     let declaredWorktree = discoverGitWorktree(identity, declaredPath)
     if declaredWorktree.ok:
       if samePathIdentity(result.worktree.commonDir, declaredWorktree.commonDir):
@@ -46756,12 +46776,11 @@ proc resolveRepoWorktreeMatch(identity: GitToolIdentity;
       # in for it would turn a failed structural check into authorization.
       missingDeclaredWorktrees.incl(index)
 
-  let structural = if pathMatches.len > 0: pathMatches else: commonMatches
-  if structural.len == 1:
+  if commonMatches.len == 1:
     result.found = true
-    result.repoIndex = structural[0]
+    result.repoIndex = commonMatches[0]
     return
-  if structural.len > 1:
+  if commonMatches.len > 1:
     result.ambiguous = true
     result.diagnostic = "more than one declared repo shares the pushed " &
       "worktree's filesystem identity"
@@ -56072,18 +56091,25 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
       continue
     headShas[repo.path] = headRes.headSha
     observedRoots[repo.name] = repoPath
-    let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
-    let isClean =
-      if cleanRes.status == gqsOk: cleanRes.isClean
-      else: false
-    if not isClean and inDirtyScope:
-      let reason =
-        if cleanRes.status != gqsOk:
-          probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
-        else:
-          "working tree has uncommitted changes"
-      dirtyEntries.add(WorkspaceLockDirtyEntry(
-        name: repo.name, path: repo.path, reason: reason))
+    # Only an in-scope repo's cleanliness can refuse, and the lock records
+    # HEAD and branch, never cleanliness — so probing an out-of-scope repo
+    # (``git status``, the costliest of the per-repo queries) computed a value
+    # that was discarded. Under the pre-push gate that was every declared repo
+    # outside the pushed closure (reprobuild-pm issues/2026-10-10-pre-push-
+    # gate-observes-every-declared-repo-three-times-per-push.md).
+    if inDirtyScope:
+      let cleanRes = queryGitState(isCleanQuery(repoPath), identity)
+      let isClean =
+        if cleanRes.status == gqsOk: cleanRes.isClean
+        else: false
+      if not isClean:
+        let reason =
+          if cleanRes.status != gqsOk:
+            probeFailureReason("clean/dirty", repoPath, cleanRes.diagnostic)
+          else:
+            "working tree has uncommitted changes"
+        dirtyEntries.add(WorkspaceLockDirtyEntry(
+          name: repo.name, path: repo.path, reason: reason))
     let branchRes = gitRunPlainQuery(identity,
       ["-C", repoPath, "symbolic-ref", "--short", "-q", "HEAD"])
     if branchRes.code == 0:
@@ -82055,32 +82081,97 @@ proc renderHealthTextLines*(checks: seq[HealthCheck]): seq[string] =
     if c.status != hsOk and c.remedy.len > 0:
       result.add("  remedy: " & c.remedy)
 
+type
+  HealthFixEmit = proc (line: string) {.closure.}
+    ## Where ``--fix`` writes one line. It is called BEFORE the action the
+    ## line announces, and the writer flushes, so an operator watching a
+    ## long fix (cloning many repositories) sees what is running now.
+
+proc healthFixWillAct(c: HealthCheck; ctx: HealthContext): bool =
+  ## Whether ``applyHealthFixes`` changes anything for this row. Kept beside
+  ## it: the plan below must name exactly the rows the dispatcher acts on.
+  if c.status == hsOk:
+    return false
+  case c.fixKind
+  of hfNone, hfMigrateStateFile: false
+  of hfDirenvAllow: resolveDirenvBin().len > 0
+  of hfStartDaemon: c.status == hsFail
+  of hfCloneSiblings: ctx.gitOk and ctx.missingSiblings.len > 0
+  of hfSharedCloneLeaves: ctx.gitOk
+  of hfEnsureVcsHooks, hfWorkspaceErgonomics: true
+
+proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
+                         ctx: HealthContext): seq[string] =
+  ## The plan ``repro health --fix`` prints before its first action
+  ## (Interactive-UX-And-Progress Principle 1, "Announce before acting";
+  ## CLI/health.md §"Modes"). ``--fix`` is not scoped to a row: it runs
+  ## every safe fix the diagnosis found, so a reader sent here for one row
+  ## (the state-file migration) is told what else is about to happen, and
+  ## how many repositories will be cloned, while the run can still be
+  ## interrupted. Empty when no row has a fix to run.
+  var steps: seq[string]
+  for c in checks:
+    if not healthFixWillAct(c, ctx):
+      continue
+    case c.fixKind
+    of hfNone, hfMigrateStateFile: discard
+    of hfDirenvAllow:
+      steps.add(c.name & ": run `direnv allow` in " & parsed.workspaceRoot)
+    of hfStartDaemon:
+      steps.add(c.name & ": start the user store daemon")
+    of hfCloneSiblings:
+      var names: seq[string]
+      for repo in ctx.missingSiblings: names.add(repo.path)
+      steps.add(c.name & ": clone " & $names.len & " missing " &
+        (if names.len == 1: "repository" else: "repositories") &
+        " over the network (" & formatFindingList(names, parsed.verbose) &
+        ")")
+    of hfEnsureVcsHooks:
+      steps.add(c.name & ": reinstall the managed VCS hooks across the " &
+        "workspace")
+    of hfSharedCloneLeaves:
+      steps.add(c.name & ": repair refetch chains and stale " &
+        "remote-tracking refs in checkouts that borrow from shared clones")
+    of hfWorkspaceErgonomics:
+      steps.add(c.name & ": repair the workspace ergonomics files " &
+        "(.gitignore, AGENTS.md, workspace-projects.md)")
+  if steps.len == 0:
+    return
+  result.add("fix: plan: " & $steps.len & " safe " &
+    (if steps.len == 1: "fix" else: "fixes") &
+    " will run now, in this order (interrupt to stop):")
+  for step in steps:
+    result.add("fix: plan:   " & step)
+
 proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
-                      ctx: HealthContext): seq[string] =
-  ## Perform ONLY the safe remediations the spec authorizes, announcing
-  ## each action before running it. Returns the announcement / outcome
-  ## lines for the report. Never performs a destructive or ambiguous fix.
+                      ctx: HealthContext; emit: HealthFixEmit) =
+  ## Perform ONLY the safe remediations the spec authorizes. The plan is
+  ## emitted first, then each action's line is emitted BEFORE the action
+  ## runs (``emit`` flushes) and its outcome after. Never performs a
+  ## destructive or ambiguous fix.
   let self = reproSelfPath()
+  for line in healthFixPlanLines(parsed, checks, ctx):
+    emit(line)
   for c in checks:
     if c.status == hsOk:
       continue
     case c.fixKind
     of hfNone:
       # Unsafe / ambiguous: report only, never auto-fix.
-      result.add("fix: skip " & c.name &
+      emit("fix: skip " & c.name &
         " (no safe auto-fix; remedy: " & c.remedy & ")")
     of hfDirenvAllow:
-      result.add("fix: running `direnv allow " & parsed.workspaceRoot & "`")
+      emit("fix: running `direnv allow " & parsed.workspaceRoot & "`")
       let direnvBin = resolveDirenvBin()
       if direnvBin.len == 0:
-        result.add("fix: direnv not on PATH; cannot allow")
+        emit("fix: direnv not on PATH; cannot allow")
       else:
         let res = execCmdEx(quoteShell(direnvBin) & " allow",
           workingDir = parsed.workspaceRoot)
         if res.exitCode == 0:
-          result.add("fix: direnv .envrc now trusted")
+          emit("fix: direnv .envrc now trusted")
         else:
-          result.add("fix: direnv allow failed: " & res.output.strip())
+          emit("fix: direnv allow failed: " & res.output.strip())
     of hfStartDaemon:
       # Single-user direct mode (no daemon) is a fully supported path, so
       # a daemon-mode ``warn`` is NOT force-fixed: we never push a daemon
@@ -82089,42 +82180,47 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       # that should be running is down). For the ``warn`` case we describe
       # the opt-in remedy without executing it.
       if c.status != hsFail:
-        result.add("fix: describe " & c.name &
+        emit("fix: describe " & c.name &
           " (single-user mode is supported; opt-in remedy: " &
           c.remedy & ")")
       else:
-        result.add("fix: starting user store daemon (`" & self &
+        emit("fix: starting user store daemon (`" & self &
           " daemon start`)")
         try:
           let cfg = defaultUserDaemonConfig()
           let status = startUserDaemon(stablePublicCliPath(), cfg)
           if status.running:
-            result.add("fix: user daemon running (" & status.endpoint & ")")
+            emit("fix: user daemon running (" & status.endpoint & ")")
           else:
-            result.add("fix: daemon start did not report running")
+            emit("fix: daemon start did not report running")
         except CatchableError as err:
-          result.add("fix: daemon start failed: " & err.msg)
+          emit("fix: daemon start failed: " & err.msg)
     of hfCloneSiblings:
       if not ctx.gitOk:
-        result.add("fix: cannot clone siblings (no usable git tool)")
+        emit("fix: cannot clone siblings (no usable git tool)")
         continue
-      for repo in ctx.missingSiblings:
+      let total = ctx.missingSiblings.len
+      var cloned = 0
+      for i, repo in ctx.missingSiblings:
         let abs = parsed.workspaceRoot / repo.path
-        result.add("fix: cloning missing sibling " & repo.path &
-          " from " & repo.fetchUrl)
+        emit("fix: cloning missing sibling " & repo.path &
+          " from " & repo.fetchUrl & " (" & $(i + 1) & "/" & $total & ")")
         let res = gitRunPlain(ctx.gitIdentity,
           ["clone", repo.fetchUrl, abs])
         if res.code == 0 and dirExists(abs / ".git"):
-          result.add("fix: cloned " & repo.path)
+          inc cloned
+          emit("fix: cloned " & repo.path)
         else:
-          result.add("fix: clone of " & repo.path & " failed: " &
+          emit("fix: clone of " & repo.path & " failed: " &
             res.output.strip())
+      emit("fix: siblings: cloned " & $cloned & ", failed " &
+        $(total - cloned))
     of hfEnsureVcsHooks:
       # Reinstalling a managed hook is additive and reversible: a foreign
       # hook found at the canonical path is preserved as
       # ``<hook>.repro-local`` and still runs first. Nothing of the user's is
       # discarded, so this is a safe auto-fix.
-      result.add("fix: reinstalling managed VCS hooks across the workspace")
+      emit("fix: reinstalling managed VCS hooks across the workspace")
       try:
         let report = ensureWorkspaceHooks(parsed.workspaceRoot)
         var keys: seq[string]
@@ -82135,7 +82231,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
         # A single-repo target installs nothing here (see below), and a
         # "0 hook(s) across 0 repo(s)" line would read as a failed fix.
         if report.mode == "workspace" or report.entries.len > 0:
-          result.add("fix: " & $report.entries.len & " hook(s) across " &
+          emit("fix: " & $report.entries.len & " hook(s) across " &
             $report.repos.len & " repo(s) (" & parts.join(", ") & ")")
         # ``ensureWorkspaceHooks`` makes every participating repo's
         # ``core.hooksPath`` worktree-safe before installing into it. A
@@ -82151,18 +82247,18 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
             let repair = ensureWorktreeSafeHooksPath(target)
             let line = hooksPathRepairReport(target, repair)
             if line.len > 0:
-              result.add("fix: " & line)
+              emit("fix: " & line)
             if not repair.ok:
-              result.add("fix: could NOT make core.hooksPath in " & target &
+              emit("fix: could NOT make core.hooksPath in " & target &
                 " worktree-safe (it is '" & repair.previous & "'): " &
                 repair.diagnostic)
       except CatchableError as err:
-        result.add("fix: hooks ensure failed: " & err.msg)
+        emit("fix: hooks ensure failed: " & err.msg)
     of hfSharedCloneLeaves:
       if not ctx.gitOk:
-        result.add("fix: cannot repair shared-clone leaves (no usable git tool)")
+        emit("fix: cannot repair shared-clone leaves (no usable git tool)")
         continue
-      result.add("fix: repairing refetch chains and stale remote-tracking refs " &
+      emit("fix: repairing refetch chains and stale remote-tracking refs " &
         "in checkouts that borrow from shared clones")
       for missing in ctx.poolMissing:
         let repaired = repairPoolMissing(ctx.gitIdentity.binaryPath,
@@ -82177,28 +82273,28 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           except CatchableError:
             rewired = false
         if repaired.ok:
-          result.add("fix: re-created the shared cache " &
+          emit("fix: re-created the shared cache " &
             repaired.sharedBarePath & " and re-wired " & missing.leaf)
         elif rewired:
-          result.add("fix: re-created the shared cache " &
+          emit("fix: re-created the shared cache " &
             repaired.sharedBarePath & " and re-wired " & missing.leaf &
             ", but the check that followed reported: " & repaired.diagnostic)
         else:
-          result.add("fix: could NOT re-wire " & missing.leaf &
+          emit("fix: could NOT re-wire " & missing.leaf &
             " to a re-created shared cache: " & repaired.diagnostic)
       for lr in ctx.leafReports:
         let repaired = checkLeaf(ctx.gitIdentity.binaryPath, lr.leaf,
           lcmRepair, pool = lr.pool)
         for f in repaired.findings:
           if f.kind == lfkStaleRemoteRef and f.removed:
-            result.add("fix: removed " & f.refName & " in " & lr.leaf)
+            emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
     of hfMigrateStateFile:
       # Done before the diagnosis (``applyStateFileMigrationFix``); a row
       # still failing here is one the migration refused, already reported.
       discard
     of hfWorkspaceErgonomics:
-      result.add("fix: repairing workspace ergonomics files")
+      emit("fix: repairing workspace ergonomics files")
       let gitignoreFile = parsed.workspaceRoot / ".gitignore"
       var gitignoreContent = ""
       if fileExists(gitignoreFile):
@@ -82218,7 +82314,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       
       if gitignoreModified:
         writeFile(gitignoreFile, gitignoreContent)
-        result.add("fix: updated .gitignore to ignore .repro/ and workspace-projects.md")
+        emit("fix: updated .gitignore to ignore .repro/ and workspace-projects.md")
 
       let agentsFile = parsed.workspaceRoot / "AGENTS.md"
       var agentsContent = ""
@@ -82232,15 +82328,16 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           agentsContent.add("\n")
         agentsContent.add("\nRead @workspace-projects.md for the active project set and per-repo descriptions.\n")
         writeFile(agentsFile, agentsContent)
-        result.add("fix: updated AGENTS.md with workspace-projects.md reference")
+        emit("fix: updated AGENTS.md with workspace-projects.md reference")
 
       try:
         writeGeneratedWorkspaceProjects(parsed.workspaceRoot)
-        result.add("fix: generated workspace-projects.md")
+        emit("fix: generated workspace-projects.md")
       except CatchableError as err:
-        result.add("fix: failed generating workspace-projects.md: " & err.msg)
+        emit("fix: failed generating workspace-projects.md: " & err.msg)
 
-proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
+proc applyStateFileMigrationFix(workspaceRoot: string;
+                                 emit: HealthFixEmit) =
   ## ``--fix`` for the ``workspace-state-file`` row: move the old state file
   ## and any ``[[manifest]]`` layers in a state file to where they belong
   ## (``migrateWorkspaceStateFile``, Workspace-Settings-Files.md §8 step 2).
@@ -82250,13 +82347,13 @@ proc applyStateFileMigrationFix(workspaceRoot: string): seq[string] =
   ## nothing and is reported; the row then fails with its remedy.
   if inspectWorkspaceStateFiles(workspaceRoot).len == 0:
     return
-  result.add("fix: migrating the workspace state file under " &
+  emit("fix: migrating the workspace state file under " &
     workspaceRoot / ".repro")
   try:
     for line in migrateWorkspaceStateFile(workspaceRoot):
-      result.add("fix: " & line)
+      emit("fix: " & line)
   except StateMigrationError, WorkspaceManifestParseError, IOError, OSError:
-    result.add("fix: could NOT migrate the workspace state file: " &
+    emit("fix: could NOT migrate the workspace state file: " &
       getCurrentExceptionMsg())
 
 proc runHealthCommand*(c: ReproCommandLineHealth): int =
@@ -82267,12 +82364,17 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
   let parsed = healthArgsOf(c)
-  let stateFixActions =
-    if parsed.fix: applyStateFileMigrationFix(parsed.workspaceRoot)
-    else: @[]
-  if not parsed.json:
-    for line in stateFixActions:
+  # ``--fix`` lines are written as they happen, never collected and printed
+  # after the fixes ran: a fix can clone many repositories, and a plan the
+  # operator reads only once the work is done is no plan. ``--json`` keeps
+  # stdout to the one JSON document, as before.
+  let jsonMode = parsed.json
+  let emitFix: HealthFixEmit = proc (line: string) =
+    if not jsonMode:
       stdout.writeLine(line)
+      stdout.flushFile()
+  if parsed.fix:
+    applyStateFileMigrationFix(parsed.workspaceRoot, emitFix)
   var (checks, ctx) = gatherHealthChecks(parsed)
 
   if parsed.fix and ctx.setAsideFiles > 0:
@@ -82282,12 +82384,9 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
       "state or manifest file does not parse (see the failing row); fix it " &
       "first")
   elif parsed.fix:
-    let actions = applyHealthFixes(parsed, checks, ctx)
+    applyHealthFixes(parsed, checks, ctx, emitFix)
     # Re-diagnose after fixing so the final report reflects the new state.
     (checks, ctx) = gatherHealthChecks(parsed)
-    if not parsed.json:
-      for line in actions:
-        stdout.writeLine(line)
 
   if parsed.json:
     stdout.writeLine(pretty(healthChecksToJson(checks), indent = 2))
@@ -89581,6 +89680,13 @@ proc startDaemonWorkerRole*(host: PeerCacheHost; stateDir: string): string =
       # detection log carry the detections, the requester signs.
       dw.newWorkerReceiver(config, localOnly, storeOutput)
   receiver.storeRecord = storeRecord
+  # A previous daemon that crashed or was killed mid-lease left its leases
+  # behind, their files owned by a slot's subordinate uid; a clean stop
+  # removes its own (`workerStop` below).
+  discard dw.reclaimOrphanedLeases(receiver)
+  host.workerStop = proc() {.gcsafe, closure.} =
+    {.cast(gcsafe).}:
+      discard dw.stopLeases(receiver)
   host.localLogs.add(config.detectionLogPath)
   let app = host.appender
   if hardened:
@@ -97376,10 +97482,21 @@ proc siblingVariantDeclarations(checkout: string):
     return
   let inheritedOverrides = getEnv(DevelopOverridesEnvVar)
   delEnv(DevelopOverridesEnvVar)
+  # Why the probe could not be ASKED, as opposed to the sibling declaring
+  # nothing. The written document still cannot tell the two apart (see
+  # above), but the operator can be told: a swallowed failure here surfaces
+  # only as a missing `variants` field, far from its cause -- a RunQuota
+  # auto-start that failed, an extraction or provider compile that failed --
+  # and twice now that has been all a failing run left behind.
+  var probeFailure = ""
   try:
     let probed = solverInputsFromCompiledProvider(checkout,
-      requireSolverBinding = false)
+      requireSolverBinding = false, failure = addr probeFailure)
     if probed.isNone:
+      if probeFailure.len > 0:
+        stderr.writeLine("repro develop: note: could not read the variant " &
+          "declarations of " & checkout & ", so the override records " &
+          "none: " & probeFailure)
       return
     for decl in probed.get().variants:
       if decl.name.len == 0:
@@ -97409,7 +97526,10 @@ proc siblingVariantDeclarations(checkout: string):
         if contributed.priority == vpDefault:
           recorded.default = contributed.value
       result.add(recorded)
-  except CatchableError:
+  except CatchableError as error:
+    stderr.writeLine("repro develop: note: could not read the variant " &
+      "declarations of " & checkout & ", so the override records none: " &
+      error.msg)
     result = @[]
   finally:
     if inheritedOverrides.len > 0:

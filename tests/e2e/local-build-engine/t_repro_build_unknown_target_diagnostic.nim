@@ -49,6 +49,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     if not daemon.running:
       let code = daemon.peekExitCode()
       let output =
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
       daemon.close()
       raise newException(OSError, "runquotad exited with status " & $code &
@@ -57,6 +58,7 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
   daemon.terminate()
   discard daemon.waitForExit()
   let output =
+    # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
     if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
   daemon.close()
   raise newException(OSError, "runquotad socket did not appear within " &

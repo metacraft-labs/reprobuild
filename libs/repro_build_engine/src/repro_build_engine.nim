@@ -6139,6 +6139,22 @@ type
       ## is scaffolding for the fold, not evidence: nothing downstream keys a
       ## cache entry on a pid, and a pid is not stable across runs.
 
+    failedExecAttempts*: HashSet[int]
+      ## The `mrProcessExec` records of this capture, by their ordinal among
+      ## the capture's exec records, whose call FAILED. io-mon writes an
+      ## exec attempt BEFORE the call, with nothing in it that says how the
+      ## call will end (a successful exec never returns to say so), and writes
+      ## the `execstatus=failed` marker only afterwards. So the attempt record
+      ## cannot be judged when the fold reaches it. `observeExecAttempt`
+      ## pairs each marker with the attempt it answers in the pass that runs
+      ## before the fold, and the fold then never binds a retracted attempt.
+      ## Not binding, rather than binding and restoring at the marker, leaves
+      ## no window in which another thread of the pid could draw under the
+      ## image of an exec that did not happen.
+    execRecordOrdinal*: int
+      ## How many `mrProcessExec` records the fold has passed in this capture:
+      ## the key into `failedExecAttempts`. Reset with it, per capture.
+
 proc monitorProfileEvidenceComplete(detail: string): bool =
   ## Does this `mrBackendProfile` record CLAIM that its capture's evidence is
   ## complete? A record that does not say so has not said so.
@@ -8601,8 +8617,16 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # relative path names nothing this fold can trust; and a failed exec ran no
     # bytes at all, so it must not overwrite the image the pid is really
     # running.
+    #
+    # "Failed" is two records, not one. The marker carries the token; the
+    # ATTEMPT it answers was written before the call and looks exactly like a
+    # successful exec. `failedExecAttempts` names those attempts (see the
+    # field), so both halves are skipped and the pid keeps its image.
+    let execOrdinal = seen.execRecordOrdinal
+    inc seen.execRecordOrdinal
     if record.osPid != 0 and record.path.isAbsolute and
-        not record.detail.contains(FailedExecDetailToken):
+        not record.detail.contains(FailedExecDetailToken) and
+        execOrdinal notin seen.failedExecAttempts:
       seen.execImageByPid[record.osPid] = record.path
   of mrNonDeterministic:
     addEntropyObservation(evidence, record.path,
@@ -9065,6 +9089,54 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # requires (`monitorEvidenceRequirement`).
   mesUnknownScopeLoss
 
+type PendingExecAttempts = Table[(uint64, uint64), seq[(int, string)]]
+  ## (pid, thread) -> the ordinal and path of each exec attempt of that
+  ## thread that no failure marker has answered yet, oldest first.
+
+proc observeExecAttempt(record: MonitorRecord;
+                        pending: var PendingExecAttempts;
+                        ordinal: var int;
+                        failed: var HashSet[int]) =
+  ## Pair each `execstatus=failed` marker with the attempt it retracts, and
+  ## record that attempt's ordinal in `failed`.
+  ##
+  ## A marker answers the latest unanswered attempt OF ITS OWN THREAD FOR THE
+  ## SAME PATH: the hook writes both from the thread that made the call and
+  ## from the same argument. Keying on the thread as well as the pid keeps
+  ## one thread's failure from retracting an exec another thread of the same
+  ## process made.
+  ##
+  ## Every unanswered attempt is kept, not only the latest, because the
+  ## marker need not be the next exec record of its thread in the order this
+  ## reads. The canonical order is (process, thread, sequence), and io-mon's
+  ## per-process sequence counter restarts in each image, so two images of
+  ## one pid can interleave their records. A single slot would let an
+  ## unrelated attempt sorted between a failed attempt and its marker leave
+  ## the failed attempt standing.
+  ##
+  ## WHAT THIS TRUSTS. A marker with no attempt of its own (a lost record)
+  ## would retract an earlier unanswered exec of the same path by the same
+  ## thread, and that exec may have succeeded. io-mon writes the two records
+  ## back to back from one hook, so this takes a capture that has already
+  ## lost a record; it is no weaker than the trust the token itself is given.
+  ## A marker that answers nothing retracts nothing.
+  ##
+  ## `ordinal` counts exactly what `foldOneMonitorRecord`'s `mrProcessExec`
+  ## arm counts in `execRecordOrdinal`: every exec record, markers included.
+  if record.kind != mrProcessExec:
+    return
+  let key = (record.osPid, record.threadId)
+  if record.detail.contains(FailedExecDetailToken):
+    pending.withValue(key, attempts):
+      for index in countdown(attempts[].high, 0):
+        if attempts[][index][1] == record.path:
+          failed.incl(attempts[][index][0])
+          attempts[].delete(index)
+          break
+  else:
+    pending.mgetOrPut(key, @[]).add((ordinal, record.path))
+  inc ordinal
+
 proc observeSpawnImage(record: MonitorRecord;
                        images: var Table[uint64, string]) =
   ## Canonical captures sort by PID, not wall time. Spawn metadata must be
@@ -9140,9 +9212,15 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   var pipes = initHashSet[string]()
   try:
     seen.execImageByPid.clear()
+    seen.failedExecAttempts.clear()
+    seen.execRecordOrdinal = 0
+    var pendingExecAttempts: PendingExecAttempts
+    var execOrdinal = 0
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       observeSpawnImage(record, seen.execImageByPid)
+      observeExecAttempt(record, pendingExecAttempts, execOrdinal,
+        seen.failedExecAttempts)
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
@@ -9210,8 +9288,14 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
   seen.execImageByPid.clear()
+  seen.failedExecAttempts.clear()
+  seen.execRecordOrdinal = 0
+  var pendingExecAttempts: PendingExecAttempts
+  var execOrdinal = 0
   for record in records:
     observeSpawnImage(record, seen.execImageByPid)
+    observeExecAttempt(record, pendingExecAttempts, execOrdinal,
+      seen.failedExecAttempts)
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)
@@ -17414,12 +17498,27 @@ proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
   if parts.len > 0:
     result = " (" & parts.join(", ") & ")"
 
+proc withWidthPlaceholders(action: BuildAction): BuildAction
+
+proc bypassWidthMilli*(hostCores, maxParallelism: int): uint32 =
+  ## The width a sized action runs at when no RunQuota lease is taken: an
+  ## equal share of the host's cores among the actions the engine runs at
+  ## once, and at least one slot. Left as declared, a Nim compile has no
+  ## ``--parallelBuild`` and starts one C compiler per core, so twelve
+  ## concurrent test-binary compiles on a 32-core host ran ~250 ``cc1``
+  ## (full run 53, 2026-11-15) where the host has 32 cores for everyone.
+  let share = max(1, hostCores) div max(1, maxParallelism)
+  uint32(max(1, share)) * 1000'u32
+
 proc startBypassRunQuotaProcess(action: BuildAction;
                                 config: BuildEngineConfig):
     ReproDirectRunningProcess =
   ## Use RunQuota's native process backend without acquiring a lease. On
   ## Windows this preserves argument boundaries instead of expanding valid
   ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
+  ##
+  ## A sized action still gets its width flag: ``bypassWidthMilli``, filled
+  ## in as a grant of that size would be.
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
@@ -17430,14 +17529,20 @@ proc startBypassRunQuotaProcess(action: BuildAction;
       writeFile(extendedPath(path), "")
     except CatchableError:
       discard
-  return startDirect(preparedRunQuotaCommand(action, config))
+  if action.widthFlag.len == 0:
+    return startDirect(preparedRunQuotaCommand(action, config))
+  var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
+  command.widthFlag = action.widthFlag
+  let width = bypassWidthMilli(countProcessors(),
+    int(max(1'u32, config.maxParallelism)))
+  return startDirect(command.applyGrantedWidth(width))
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction =
   ## The action with a placeholder where its width flag's value goes, before
   ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
   ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
-  ## launch paths use it: under the bypass there is no grant, and the
-  ## command line is left as declared.
+  ## launch paths and the bypass use it; the bypass fills it with
+  ## ``bypassWidthMilli``.
   ##
   ## The flag is placed in the command the action EXECUTES: on the wrapped
   ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
@@ -18531,6 +18636,14 @@ when not defined(windows):
     ## being touched by -- the helper every other reprobuild process of the
     ## user shares.
 
+  const NixHelperEnvironment* = [
+    "HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_CONFIG_DIRS",
+    "XDG_DATA_HOME", "XDG_STATE_HOME", "TMPDIR", "NIX_CONFIG",
+    "NIX_CONF_DIR", "NIX_USER_CONF_FILES", "NIX_REMOTE", "NIX_PATH",
+    "NIX_STORE_DIR", "NIX_STATE_DIR"]
+    ## The variables that decide where the helper's ``nix`` reads its
+    ## configuration and keeps its caches and temporary files.
+
   proc nixDaemonHelperKey*(daemonExe: string): string =
     ## The identity of the helper this process would START: a digest of the
     ## resolved helper file's bytes, or ``""`` when only a bare name (a PATH
@@ -18547,10 +18660,22 @@ when not defined(windows):
     ## it. Keying by content keeps the sharing that matters (every process of
     ## one build, and every build whose helper is byte-identical) and never
     ## lets two different helpers answer for each other.
+    ##
+    ## THE ENVIRONMENT IS PART OF THE IDENTITY. The helper inherits the
+    ## whole environment of the process that happened to start it, and the
+    ## ``nix`` it runs keeps its fetcher cache, configuration and temporary
+    ## files where ``NixHelperEnvironment`` says. A caller with a private
+    ## ``XDG_CACHE_HOME`` (28 integration tests set one) used to start the
+    ## helper every other process then shared; once that caller deleted its
+    ## directory, every fetch through the helper failed with ``could not find
+    ## repository at '<deleted>/nix/tarball-cache-v2'`` until it idled out.
     if daemonExe.len == 0 or not fileExists(daemonExe):
       return ""
     try:
-      toHex(weakFingerprintFromText(readFile(daemonExe)).bytes)[0 ..< 16]
+      var identity = readFile(daemonExe)
+      for name in NixHelperEnvironment:
+        identity.add("\0" & name & "=" & getEnv(name))
+      toHex(weakFingerprintFromText(identity).bytes)[0 ..< 16]
     except IOError, OSError:
       ""
 

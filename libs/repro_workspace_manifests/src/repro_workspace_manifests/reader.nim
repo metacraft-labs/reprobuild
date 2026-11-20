@@ -782,6 +782,37 @@ proc roleValueRejection*(value: BranchRoleValue): string =
     return branchNameRejection(value.branch)
   ""
 
+proc mainlineValueRejection*(node: TomlValueRef;
+                             remedy = "write the branch name"): string =
+  ## Why the TOML value written for a `mainline` key is unusable because of
+  ## its TYPE, or "" when it is a string (whose shape `branchNameRejection`
+  ## then checks) or the key is not written at all.
+  ##
+  ## Workspace-Branch-Roles.md §3.1: `mainline` is the one role that cannot
+  ## be `false`. `false` declares an optional tier absent so that it falls
+  ## back, and `mainline` is where every chain ends. The check reads the
+  ## generic tree because the typed decoder coerces a TOML boolean or number
+  ## into a string field: without it `mainline = false` loaded as the branch
+  ## named "false". `remedy` says what the declarer can do instead; a
+  ## fragment, unlike a profile or `[workspace]`, may also omit the key.
+  if node.isNil or node.kind == TomlKind.String:
+    return ""
+  if node.kind == TomlKind.Bool and not node.boolVal:
+    return "`mainline` cannot be `false`: `false` declares an optional " &
+      "role absent so that it falls back, and every role falls back to " &
+      "`mainline`, which has nothing to fall back to. To fix it, " & remedy
+  let written =
+    case node.kind
+    of TomlKind.Int: "an integer"
+    of TomlKind.Float: "a float"
+    of TomlKind.Bool: "`true`"
+    of TomlKind.DateTime: "a date-time"
+    of TomlKind.Array: "an array"
+    of TomlKind.Tables: "an array of tables"
+    of TomlKind.Table, TomlKind.InlineTable: "a table"
+    of TomlKind.String: "a string"  # returned above; kept for exhaustiveness
+  "`mainline` must be a branch name, written as a string, not " & written
+
 proc customRoleTableFromTree*(path, schema, keyPath: string;
                               node: TomlValueRef): seq[(string, BranchRoleValue)] =
   ## Decode a `branch-roles` sub-table from the generic tree, refusing an
@@ -832,6 +863,11 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
     if k notin known:
       raiseManifestError(path, "repo." & k, schema, schema,
         schemaSkewMessage(path, k, "RepoBody"))
+  if "mainline" in repoKeys:
+    let rejection = mainlineValueRejection(repoNode.tableVal["mainline"],
+      "write the branch name, or remove the key so that a profile supplies it")
+    if rejection.len > 0:
+      raiseManifestError(path, "repo.mainline", schema, schema, rejection)
   if fragment.repo.mainline.isSome:
     let rejection = branchNameRejection(fragment.repo.mainline.get())
     if rejection.len > 0:

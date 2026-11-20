@@ -45,6 +45,7 @@
 ## Only HOME / XDG_STATE_HOME / LOCALAPPDATA are redirected, so nothing outside
 ## the scratch directory is read as state or written.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 from repro_core/paths import extendedPath
 
@@ -73,7 +74,7 @@ proc runRepro(env: StringTableRef; cwd: string;
               args: openArray[string]): tuple[exitCode: int; output: string] =
   let p = startProcess(reproBinary(), workingDir = cwd, args = @args,
     env = env, options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)

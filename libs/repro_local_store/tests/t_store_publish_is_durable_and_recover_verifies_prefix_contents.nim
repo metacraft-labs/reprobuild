@@ -45,6 +45,7 @@
 ## recovery entry points. Damage is applied with plain filesystem and SQL
 ## operations, which is exactly the state the disk is in after the power cut.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times,
             unittest]
 when defined(posix):
@@ -208,7 +209,7 @@ proc traceChild(spec, traceFile: string) =
       t[ChildEnv] = spec
       t),
     options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   if code != 0:
@@ -425,7 +426,7 @@ when defined(linux):
       if hung:
         p.kill()
       let code = p.waitForExit()
-      let output = p.outputStream.readAll()
+      let output = drainStream(p.outputStream)
       p.close()
       checkpoint("child output: " & output)
       check not hung

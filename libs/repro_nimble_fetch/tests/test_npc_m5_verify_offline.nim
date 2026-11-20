@@ -14,6 +14,7 @@
 ## No mock: a real fetch over the shared HTTPS fixture, a real lock written
 ## by the lock writer, a real network namespace.
 
+from repro_core/process_streams import drainStream
 import std/[net, os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_lock
@@ -48,7 +49,7 @@ proc verifyOffline(lock, store: string; port: int): tuple[code: int;
   let p = startProcess(unshare, args = ["-rn", getAppFilename(),
     "--verify-child", lock, store, $port],
     options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (code, output)

@@ -18,6 +18,7 @@
 ## unrelated descriptor onto it — what another thread's ``pipe()``/``open()``
 ## does — and check that releasing again leaves it open.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_core/process_close
@@ -50,8 +51,8 @@ suite "closeProcessOnce and execCmdExCloseOnce release each descriptor once":
     when defined(posix):
       let p = startProcess("/bin/sh", args = ["-c", "echo out; echo err >&2"],
                            options = {})
-      check p.outputStream.readAll() == "out\n"
-      check p.errorStream.readAll() == "err\n"
+      check drainStream(p.outputStream) == "out\n"
+      check drainStream(p.errorStream) == "err\n"
       discard p.waitForExit()
       let fds = [cint(p.inputHandle), cint(p.outputHandle),
                  cint(p.errorHandle)]

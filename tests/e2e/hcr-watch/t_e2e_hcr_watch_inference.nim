@@ -14,8 +14,9 @@
 ## The gate therefore runs on Linux x86_64 and macOS arm64, and it is the only
 ## place `repro watch --hcr`'s PRODUCTION wire is driven on Linux at all.
 
-import std/[json, monotimes, os, osproc, sequtils, strutils, tempfiles, times, unittest]
+import std/[json, os, osproc, sequtils, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
+import repro_test_support/watch_log
 when defined(posix):
   from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
@@ -160,17 +161,6 @@ proc prepareMonitorTools(repoRoot, tempRoot: string): tuple[shim: string] =
   result.shim = requireBinary(monitorShimPath(repoRoot),
     "reprobuild.test_fixtures.monitor_shim")
 
-proc waitForLogContains(logPath, needle, context: string; timeoutMs = 30_000) =
-  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
-  while getMonoTime() < deadline:
-    if fileExists(logPath) and readFile(logPath).contains(needle):
-      return
-    sleep(50)
-  let log =
-    if fileExists(logPath): readFile(logPath) else: ""
-  raise newException(ValueError,
-    "timed out waiting for " & context & ": " & needle & "\n" & log)
-
 proc agentHello(): HcrAgentMessage =
   HcrAgentMessage(
     schemaId: HcrAgentProtocolSchemaId,
@@ -277,7 +267,8 @@ suite "HCR watch inference E2E":
       # run of this gate reported "timed out waiting for HCR baseline" while the
       # same command completed fine by hand.
       waitForLogContains(logPath, "repro watch: hcr waiting for agent socket=",
-        "HCR baseline", timeoutMs = 600_000)
+        "HCR baseline", timeoutMs = WatchBaselineBudgetMs,
+        watch = process)
       var agent = connectHcrAgentUnixSocket(socketPath)
       defer: agent.close()
       discard agent.writeAgentMessage(agentHello())
@@ -285,7 +276,7 @@ suite "HCR watch inference E2E":
       check ack.kind == hmkHelloAck
 
       waitForLogContains(logPath, "repro watch: watching paths=",
-        "watch subscription")
+        "watch subscription", watch = process)
       writeFile(sourcePath, NewSource)
 
       # Loud, with the transcript in hand. When the watch process dies before it

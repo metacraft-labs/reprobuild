@@ -33,6 +33,7 @@
 ## ``REPRO_LIVE=1``; it skips with that reason. Executing amd64 binaries
 ## needs an x86_64 Linux host; elsewhere the execution checks skip.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 
 import repro_dsl_stdlib/packages/apt_closure
@@ -67,7 +68,7 @@ proc run(argv: seq[string]; env: seq[(string, string)] = @[]):
   let p = startProcess(argv[0], args = argv[1 .. ^1], env = envTable,
     options = {poStdErrToStdOut})
   defer: p.close()
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.code = p.waitForExit()
 
 suite "Add-On apt closure: alternatives-managed commands exist and run":

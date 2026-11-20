@@ -5,6 +5,7 @@
 ## builtin. Custom-separator path-lists fall back to
 ## ``$env.NAME = ... + sep + ...``.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, unittest]
 
 import repro_test_support
@@ -58,7 +59,7 @@ suite "e2e_dev_env_export_nushell":
           workingDir = c.tempRoot,
           options = {poUsePath, poStdErrToStdOut})
         let diag = if proc1.outputStream != nil:
-          proc1.outputStream.readAll() else: ""
+          drainStream(proc1.outputStream) else: ""
         let code = proc1.waitForExit()
         proc1.close()
         if code != 0:

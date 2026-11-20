@@ -25,6 +25,15 @@
 ##     ``installUserDaemonBuildExecutor`` reddens this test on exactly that
 ##     line of stdout — verified, not assumed.
 ##
+##     The full client builds FIRST and so starts the daemon, which inherits
+##     its seeded source roots. That is the second configuration in which the
+##     keys disagreed (run 53, engine at 28f1e43dcaf: 6ce93174... full,
+##     66a9db43... thin): the thin request dropped the seeds' provenance
+##     record but not the seeds, which then ranked as caller overrides. A
+##     complete request (``environmentIsComplete``) now unsets every name the
+##     caller lacks, the seeds with it, and the build re-seeds them with
+##     provenance, so the keys on that line must match.
+##
 ##     It also asserts the daemon RECORDED TWO SESSIONS WITH DIFFERENT
 ##     PROJECT ROOTS, because byte equality on its own cannot tell a served
 ##     thin build from one that quietly handed over to the full image and
@@ -133,6 +142,32 @@ const
     ## list rather than imported so the test does not pull the CLI's
     ## dependency closure in to ask a question about the environment.
 
+const
+  HermeticCachesConf =
+    "[test-loopback]\n" &
+    "url = \"http://127.0.0.1:1\"\n" &
+    "trusted-public-keys = \"04" & repeat("11", 64) & "\"\n" &
+    "priority = 20\n"
+    ## The ONLY binary cache a build in this suite may consult: a loopback
+    ## port nothing listens on, so every lookup misses at once and offline.
+    ##
+    ## Without it the builds below read the HOST's cache configuration --
+    ## ``/etc/repro/caches.conf``, ``~/.config/repro/caches.conf`` and
+    ## ``REPRO_BINARY_CACHE_URL`` -- and asked the production cache for every
+    ## provider compile (run 53: ``GET https://repro-cache.metacraft-labs.com/
+    ## manifests/...``). It is deliberately configured rather than disabled:
+    ## the provider-compile cache key is printed only when a cache is
+    ## configured, and that key is what the parity case compares. On a host
+    ## with no cache configured (every run before run 53) the line was absent
+    ## from both outputs and the parity case could not see a key that moved.
+  HostCacheEnvNames = [
+    "REPRO_BINARY_CACHE_URL", "REPRO_BINARY_CACHE_KEY_PATH",
+    "REPRO_BINARY_CACHE_CERT_PATH", "REPRO_BINARY_CACHE_SCOPE",
+    "REPRO_CACHE_DISABLE", "REPRO_PROVIDER_COMPILE_CACHE"
+  ]
+    ## Host settings that would add a cache, enable publishing, or turn the
+    ## lookup (and with it the printed key) off.
+
 type
   CapturedRun = object
     code: int
@@ -187,6 +222,14 @@ proc runCaptured(exe: string; args: openArray[string]; cwd: string;
   var envTable = newStringTable()
   for key, value in envPairs():
     envTable[key] = value
+  # Hermetic binary cache, before the caller's own `unset`/`env` so a case
+  # can still override it. See `HermeticCachesConf`.
+  let cachesConf = cwd / "captured-caches.conf"
+  writeFile(cachesConf, HermeticCachesConf)
+  for name in HostCacheEnvNames:
+    if envTable.hasKey(name):
+      envTable.del(name)
+  envTable["REPRO_CACHES_CONFIG"] = cachesConf
   for name in unset:
     if envTable.hasKey(name):
       envTable.del(name)
@@ -360,6 +403,17 @@ suite "MAC-1 thin daemon client":
       # Byte equality, not "contains the same words". The provider-compile
       # cache key is printed on this stream, and a key that moves because of
       # which client asked is precisely the defect being gated.
+      #
+      # ...provided it IS printed. It is printed only when a binary cache is
+      # configured, and before `HermeticCachesConf` that was the host's
+      # business: on a host with none, both outputs lacked the line and two
+      # different keys compared equal. And it must be the loopback cache, not
+      # whatever the host configures.
+      check "provider compile cache miss: \"localDaemonParity\" (" in
+        full.output
+      check "http://127.0.0.1:1" in full.output
+      check "metacraft-labs.com" notin full.output & full.errors &
+        thin.output & thin.errors
       check thin.output == full.output
       check thin.errors == full.errors
       check readFile(projectThin / "dist" / "copied.txt") == fullArtifact

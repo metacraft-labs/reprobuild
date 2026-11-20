@@ -39,6 +39,7 @@ when defined(posix):
   import std/[json, net, os, osproc, posix, sequtils, streams, strutils,
               tempfiles, times, unittest]
   import repro_core/cli_images
+  from repro_core/process_streams import drainStream
   # For `systemdUnitName` and `launchdLabel`: the teardown below stops the
   # transient unit / launchd job the daemon this case launches runs under,
   # and the name has to come from the runtime that chose it.
@@ -1739,7 +1740,7 @@ else:
           break
         sleep(50)
       if exitCode != 0 and runnerProcess.outputStream != nil:
-        checkpoint(runnerProcess.outputStream.readAll())
+        checkpoint(drainStream(runnerProcess.outputStream))
       if exitCode != 0 and fileExists(summary):
         let failedReport = parseFile(summary)
         checkpoint("actual daemon fixture exit=" &

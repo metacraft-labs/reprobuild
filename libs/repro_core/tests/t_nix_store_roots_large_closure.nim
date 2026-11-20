@@ -22,6 +22,7 @@
 ## rooted. They are deleted again at the end with `nix-store --delete` (never
 ## a garbage collection, never `--ignore-liveness`).
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, sets, streams, strutils, tempfiles, times, unittest]
 
 import repro_core/nix_store_roots
@@ -48,7 +49,7 @@ proc nixStore(args: openArray[string]): tuple[output: string; code: int] =
   var p = startProcess(nixStoreExe(), args = args,
     options = {poStdErrToStdOut})
   try:
-    result.output = p.outputStream.readAll()
+    result.output = drainStream(p.outputStream)
     result.code = p.waitForExit()
   finally:
     p.close()

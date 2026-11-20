@@ -132,6 +132,17 @@ proc runBuild(repoRoot, reproBin, selector: string;
 proc evidence(path: string): string =
   if fileExists(path): readFile(path).strip() else: ""
 
+proc buildOutputTail(output: string; maxLines = 120): string =
+  ## The last lines of a build's merged output. A build that never reached
+  ## the layer leaves no evidence, and its exit code alone does not say
+  ## whether it failed in the layer (expected on a host without swtpm) or
+  ## before it (a compile, a dependency, the engine itself), so a missing
+  ## nonce is reported together with what the build printed.
+  let lines = output.strip().splitLines()
+  let first = max(0, lines.len - maxLines)
+  (if first > 0: "... (" & $first & " earlier lines omitted)\n" else: "") &
+    lines[first .. ^1].join("\n")
+
 proc runGraph(repoRoot, reproBin, selector: string): JsonNode =
   ## Ask the engine for the ACTIONS it would schedule for ``selector``. This
   ## is the lowered graph, not the recipe's source, so a comment asserting an
@@ -202,6 +213,9 @@ suite "an opt-in layer is something repro build can run, and its setting is in t
     checkpoint("first build of " & LiveTarget & " exited " & $first.exitCode &
       " (a non-zero exit here is expected on a host without swtpm; the " &
       "claim is that the layer RAN, not that it succeeded)")
+    if firstEvidence.len == 0:
+      checkpoint("the first build left no evidence; its output:\n" &
+        buildOutputTail(first.output))
     check firstEvidence.len > 0
     check "live-layer-entered" in firstEvidence
 
@@ -209,6 +223,9 @@ suite "an opt-in layer is something repro build can run, and its setting is in t
     let second = runBuild(repoRoot, reproBin, LiveTarget)
     let secondEvidence = evidence(evidencePath)
     checkpoint("second build exited " & $second.exitCode)
+    if secondEvidence.len == 0 or secondEvidence == firstEvidence:
+      checkpoint("the second build left no fresh evidence; its output:\n" &
+        buildOutputTail(second.output))
     check secondEvidence.len > 0
     check secondEvidence != firstEvidence
 
@@ -220,6 +237,9 @@ suite "an opt-in layer is something repro build can run, and its setting is in t
       extraArgs = ["--force-rebuild"], layerRequested = true)
     checkpoint("ordinary edge forced to re-run with " & LayerEnv &
       "=1 exported; exited " & $ordinary.exitCode)
+    if ordinary.exitCode != 0:
+      checkpoint("the ordinary edge's build output:\n" &
+        buildOutputTail(ordinary.output))
     check ordinary.exitCode == 0
     check evidence(evidencePath) == secondEvidence
 

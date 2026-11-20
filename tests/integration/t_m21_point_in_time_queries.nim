@@ -63,6 +63,7 @@
 ## missing one is a hard error rather than a skip: a skip here would make
 ## every assertion below vacuous.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, posix, sequtils, sets, streams, strtabs,
     strutils, tables, tempfiles, times, unittest]
 
@@ -388,7 +389,7 @@ proc runRunner(env: RunEnvironment; tag: string; filters: seq[string];
   let process = startProcess(requireBin("repro_test_runner"),
     workingDir = env.gitRepo, args = args, env = childEnv,
     options = {poStdErrToStdOut})
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   let code = process.waitForExit()
   process.close()
   var summary = newJObject()

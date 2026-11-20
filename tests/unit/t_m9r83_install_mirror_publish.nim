@@ -5,6 +5,7 @@
 ## the store-registered relative path, hashed reads resolve through the
 ## sidecar, and legacy mode continues to use the mutable mirror path.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, envvars, os, osproc, streams, strutils, tempfiles,
   unittest]
 
@@ -46,7 +47,7 @@ template withoutEnv(name: string; body: untyped) =
 proc runBashScript(scriptPath: string): tuple[exitCode: int; output: string] =
   let process = startProcess("bash", args = @["-e", scriptPath],
     options = {poUsePath, poStdErrToStdOut})
-  result.output = process.outputStream.readAll()
+  result.output = drainStream(process.outputStream)
   result.exitCode = process.waitForExit()
   process.close()
 

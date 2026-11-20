@@ -36,6 +36,18 @@
 ## non-empty and differing answers, and every rejection case is refused by
 ## both sides.
 ##
+## Cost: every `repro home export` here compiles the profile and probes it
+## for six platforms unless the action cache answers, and what the cache
+## keys on is the profile FILE, not its text: rewriting `home.nim` with the
+## same bytes re-runs both edges (measured at `28f1e43dcaf`, load ~200: 330 s
+## against 12 s unchanged and 10 s after a `data.toml` edit). So the profile
+## is written only when its text changes, and the cases are ordered so that
+## each distinct `hosts` map is compiled once: the selection cases sharing a
+## map are adjacent, and the ones with none come last, next to the rejection
+## cases, which use the same registry-less profile. Writing it per case cost
+## 24 compiles instead of 7 and took the case past the runner's 7200 s
+## ceiling in full-suite run 53.
+##
 ## No mocks: the real `build/bin/repro` (compile edge, planner, export), the
 ## real `nix`. Platforms: Linux and macOS (the hosts with Nix); on Windows
 ## the gate is not compiled in -- Nix does not run there; home-pc and m1 run
@@ -66,6 +78,23 @@ proc profileText(hosts: JsonNode): string =
     for host, activities in hosts:
       result.add "    " & escapeJson(host) & ": [" &
         activities.getElems.mapIt(it.getStr).join(", ") & "]\n"
+
+proc setProfileText(sb: ProfileSandbox; text: string) =
+  ## Write the profile only when its text changes: a rewrite with the same
+  ## bytes still invalidates the compile and the probe (see the header).
+  if readFile(sb.profilePath) != text:
+    writeFile(sb.profilePath, text)
+
+proc selectionCasesByProfile(): seq[string] =
+  ## The row-selection cases, grouped by the profile they compile: equal
+  ## `hosts` maps adjacent, the cases with no map last (see the header).
+  var keyed: seq[(bool, string, string)]
+  for dir in caseDirs("row-selection"):
+    let text = profileText(parseFile(dir / "case.json"){"hosts"})
+    keyed.add (text == profileText(nil), text, dir)
+  keyed.sort()
+  for (_, _, dir) in keyed:
+    result.add dir
 
 proc hasResourceRows(dir: string): bool =
   readFile(dir / "data.toml").contains("[[resource]]")
@@ -106,11 +135,11 @@ when defined(linux) or defined(macosx):
 
       var compared, nonEmpty, undeclaredRefused, refusedUnstated = 0
       var answers: seq[seq[string]]
-      for dir in caseDirs("row-selection"):
+      for dir in selectionCasesByProfile():
         let name = dir.extractFilename
         let caseJson = parseFile(dir / "case.json")
         let hosts = caseJson{"hosts"}
-        writeFile(sb.profilePath, profileText(hosts))
+        sb.setProfileText(profileText(hosts))
         sb.writeProfileFile("data.toml", readFile(dir / "data.toml"))
         var pairs: seq[(string, string, JsonNode)]
         for evaluation in caseJson["evaluations"]:
@@ -181,7 +210,7 @@ when defined(linux) or defined(macosx):
       for dir in caseDirs("row-rejection"):
         let name = dir.extractFilename
         let caseJson = parseFile(dir / "case.json")
-        writeFile(sb.profilePath, profileText(nil))
+        sb.setProfileText(profileText(nil))
         sb.writeProfileFile("data.toml", readFile(dir / "data.toml"))
         let r = sb.runRepro(["home", "export", "--format", "json"])
         checkpoint(name & ": planner exit " & $r.exitCode & "\n" & r.stderr)

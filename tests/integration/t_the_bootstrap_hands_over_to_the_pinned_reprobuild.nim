@@ -378,9 +378,14 @@ suite "the pinned provider compiler reaches the provider compile":
       "  version \"0.0.1\"\n")
     writeFile(project / "repro.lock", lockFor([("nim", PinnedNim, "store")],
       s.platform))
-    let nimRes = selfinstall.installPinnedImage(providerNimPin(), s.store,
-      PinnedNim, s.platform, fakeNimDistribution(s.root / "nim-tree"))
     let record = s.root / "nim-invocations.txt"
+    let nimTree = fakeNimDistribution(s.root / "nim-tree")
+    # The record's location also travels as a file in the prefix: the
+    # recipe compiles launch the compiler with an isolated environment
+    # (`providerCompileLaunchEnv`), which `M5_STUB_RECORD` does not reach.
+    writeFile(nimTree / "M5_STUB_RECORD", record & "\n")
+    let nimRes = selfinstall.installPinnedImage(providerNimPin(), s.store,
+      PinnedNim, s.platform, nimTree)
     var extra = @[("M5_STUB_RECORD", record), ("REPROBUILD_NO_RUNQUOTA", "1"),
       ("REPROBUILD_PROGRESS", "quiet")]
     # The provider compile also needs a C compiler. Name the host's so the

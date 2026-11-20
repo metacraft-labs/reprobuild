@@ -29,6 +29,7 @@
 ## fixture is a real compiled executable, and the replacement is a real
 ## rename(2) observed through the kernel's own /proc view.
 
+from repro_core/process_streams import drainStream
 import repro_test_support/reasoned_skip
 
 when defined(linux):
@@ -187,7 +188,7 @@ else:
       writeFile(released, "continue")
 
       let exitCode = process.waitForExit(timeout = 120_000)
-      let output = process.outputStream.readAll()
+      let output = drainStream(process.outputStream)
       checkpoint(output)
       check exitCode == 0
 

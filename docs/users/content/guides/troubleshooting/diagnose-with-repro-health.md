@@ -11,6 +11,7 @@ verifies:
   tests:
     - tests/integration/t_health_reports_each_layer_status_with_remedy.nim
     - tests/integration/t_health_fix_remediates_safe_issues_only.nim
+    - tests/integration/t_health_fix_announces_its_plan_before_acting.nim
     - tests/integration/t_health_reports_a_refusing_hook_as_not_ok.nim
 unverified:
   - claim: "repro health exits 1 when any check fails."
@@ -54,6 +55,15 @@ repro health --fix
 
 `--fix` applies only the safe remedies. A failure whose remedy could discard
 work stays failed, with its remedy printed, for you to decide.
+
+`--fix` applies every safe remedy at once; you cannot pick one check. One of
+them clones each repository of the workspace that is missing on disk, which
+can be many. After it has migrated the workspace state file (when there is
+one to migrate), and before any other change, `--fix` prints a plan: a
+`fix: plan:` header, then one `fix: plan:` line per check it will act on,
+with the number of repositories it will clone. It then prints each step as
+the step starts, and it does not wait after the plan. With `--json`, neither
+the plan nor the steps are printed; stdout carries only the final report.
 
 ## Use it in CI
 

@@ -29,6 +29,7 @@
 ## early return counted as a pass. The `skip()` arm exists only for platforms
 ## that are not Linux x86_64.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
 # Agent sockets go in a short directory under /tmp, not under the scratch
 # tree: on a runner whose work directory is long (the persistent benchmark
@@ -173,7 +174,7 @@ when defined(linux) and defined(amd64):
       let delivery = client.deliverPatchRequest(connection, request)
       connection.close()
 
-      let output = process.outputStream.readAll()
+      let output = drainStream(process.outputStream)
       let exitCode = process.waitForExit()
       process.close()
       if exitCode != 0:

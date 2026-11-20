@@ -5,6 +5,7 @@
 ## hits the dispatch arm independently to confirm the zsh shell-kind
 ## flag routes through the same code path.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, unittest]
 
 import repro_test_support
@@ -44,7 +45,7 @@ suite "e2e_dev_env_export_zsh":
           workingDir = c.tempRoot,
           options = {poUsePath, poStdErrToStdOut})
         let diag = if proc1.outputStream != nil:
-          proc1.outputStream.readAll() else: ""
+          drainStream(proc1.outputStream) else: ""
         let code = proc1.waitForExit()
         proc1.close()
         if code != 0:

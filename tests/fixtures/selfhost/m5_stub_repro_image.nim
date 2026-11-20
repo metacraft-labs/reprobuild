@@ -38,8 +38,15 @@ when isMainModule:
   # `M5_STUB_RECORD` names a file to append one line per invocation to: this
   # image's path and its argv. It is how that test observes that the
   # provider compile ran THIS file as `nim`, which nothing else can show
-  # without compiling a real provider.
-  let record = getEnv("M5_STUB_RECORD")
+  # without compiling a real provider. The same name, as a FILE in this
+  # image's prefix (`<prefix>/M5_STUB_RECORD`, holding the path), serves a
+  # stub launched with an isolated environment: the recipe compiles run with
+  # only the variables they declare, so the variable never reaches them.
+  var record = getEnv("M5_STUB_RECORD")
+  if record.len == 0:
+    let recordFile = parentDir(parentDir(getAppFilename())) / "M5_STUB_RECORD"
+    if fileExists(recordFile):
+      record = readFile(recordFile).strip()
   if record.len > 0:
     let f = open(record, fmAppend)
     f.writeLine(getAppFilename() & "	" & args.join(" "))

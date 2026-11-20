@@ -30,6 +30,7 @@
 ## assertion from a vacuous one; that is the specific lesson NH-M2 recorded,
 ## where four gates passed under BOTH the correct and the incorrect ordering.
 
+from repro_core/process_streams import drainStream
 import std/[exitprocs, json, monotimes, os, osproc, streams, strtabs, strutils, tempfiles, times]
 
 import repro_hcr_agent
@@ -180,7 +181,7 @@ proc describeChildFate(process: Process): string =
   ## entirely and leave an `IOError` about an IPC header as the whole story. A
   ## SIGSEGV hid behind that for a day and cost a filed issue a wrong cause.
   let output =
-    try: process.outputStream.readAll()
+    try: drainStream(process.outputStream)
     except CatchableError: ""
   let code =
     try: process.waitForExit()
@@ -226,7 +227,7 @@ proc runReload*(repoRoot, targetBin, socketName: string;
     raise newException(IOError, err.msg & describeChildFate(process))
   connection.close()
 
-  result.targetOutput = process.outputStream.readAll()
+  result.targetOutput = drainStream(process.outputStream)
   result.exitCode = process.waitForExit()
   process.close()
   if result.exitCode != 0:
@@ -288,7 +289,7 @@ proc runReloadTimed*(repoRoot, targetBin, socketName: string;
     int(inMilliseconds(getMonoTime() - started))
   connection.close()
 
-  result.run.targetOutput = process.outputStream.readAll()
+  result.run.targetOutput = drainStream(process.outputStream)
   result.run.exitCode = process.waitForExit()
   process.close()
   if result.run.exitCode != 0:

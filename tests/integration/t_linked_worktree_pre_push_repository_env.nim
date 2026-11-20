@@ -19,6 +19,7 @@
 ## repository environment, while the managed Reprobuild child receives the
 ## scrubbed environment and all unrelated environment values unchanged.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, os, osproc, streams, strtabs, strutils, tempfiles,
   unittest]
 
@@ -81,7 +82,7 @@ proc runProcess(binary: string; args: openArray[string];
   let process = startProcess(binary, args = @args, env = env,
     options = {poStdErrToStdOut, poUsePath})
   defer: process.close()
-  result.output = process.outputStream.readAll()
+  result.output = drainStream(process.outputStream)
   result.code = process.waitForExit()
 
 proc initOrigin(gitBin, origin, work, content: string): string =

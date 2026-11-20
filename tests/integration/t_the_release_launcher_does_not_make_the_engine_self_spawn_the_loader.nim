@@ -64,6 +64,7 @@
 ## Linux only: the loader launcher is a Linux artifact (macOS archives use
 ## LC_RPATH, Windows ships the PE images directly).
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_test_support
@@ -206,7 +207,7 @@ proc runBuild(program: string; args: seq[string]; cwd, cacheRoot: string;
   var p = uncontrolledStartProcess(program, workingDir = cwd, args = args,
     env = env, options = {poStdErrToStdOut})
   try:
-    result.output = p.outputStream.readAll()
+    result.output = drainStream(p.outputStream)
     result.code = p.waitForExit()
   finally:
     p.close()

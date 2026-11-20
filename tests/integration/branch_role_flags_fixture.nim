@@ -42,6 +42,7 @@
 ## Nothing is mocked: the real `repro` binary runs as a subprocess against
 ## real repositories and the real filesystem.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles]
 
 import repro_test_support
@@ -210,8 +211,8 @@ proc runRepro*(ws: RoleWorkspace; args: openArray[string];
     workingDir = (if cwd.len > 0: cwd else: ws.root), options = {})
   # Drain both pipes concurrently enough for these small outputs: stderr is
   # read after stdout, and neither grows past a pipe buffer here.
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 

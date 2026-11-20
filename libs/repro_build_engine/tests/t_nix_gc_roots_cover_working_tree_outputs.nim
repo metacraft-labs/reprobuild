@@ -375,6 +375,13 @@ suite "Nix GC roots cover working-tree build outputs":
     config.portableLookup = true
 
     let first = runBuild(g, config)
+    # This check has failed only inside full suite runs (runs 46-50 at
+    # d0469cddae4); isolated runs pass. Record what the engine did and what
+    # Nix answered, so the next failure names its arm (`nix-gc-roots`,
+    # `nix-gc-root-failed`, or neither) instead of only the count.
+    checkpoint("first trace:\n" & first.dumpTrace())
+    checkpoint("roots of p: " & $rootLinksOf(p) & "\nnix-store --query --roots: " &
+      $nixStore(["--query", "--roots", p]))
     check first.byId("gc/portable").launched
     check rootsUnder(p, f.cacheRoot).len > 0
     # The pre-pass really is the arm that answers a warm build here;

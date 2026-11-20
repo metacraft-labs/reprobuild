@@ -4112,6 +4112,7 @@ const BundledStdlibSelectors* = [
   "pytest",
   "python-dev",
   "python3",
+  "python3-opentelemetry",
   "rebar3",
   "rg",
   "ruby",

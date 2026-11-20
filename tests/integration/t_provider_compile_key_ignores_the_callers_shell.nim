@@ -41,6 +41,7 @@
 ## a build of `c4a1556cb`, 53 of 56 warm variations hit, and each of the 3
 ## misses coincided with an edit under that checkout's `libs/`.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
 
 import repro_hash
@@ -89,7 +90,7 @@ proc runBuildCli(reproBin, projectRoot, actionCacheRoot: string;
       "--log=actions", projectRoot],
     env = env, options = {poStdErrToStdOut})
   defer: p.close()
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   (output: output, exitCode: p.waitForExit())
 
 proc mtimeOf(path: string): times.Time =

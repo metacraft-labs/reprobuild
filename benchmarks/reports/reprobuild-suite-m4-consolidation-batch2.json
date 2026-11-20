@@ -727,6 +727,22 @@
      }
     },
     {
+     "source": "libs/repro_dsl_stdlib/tests/t_catalog_launcher_toolchain.nim",
+     "cases": [
+      "launcher toolchain catalog entries::every new nix arm resolves against the canonical nixpkgs pin",
+      "launcher toolchain catalog entries::ldd is declared Linux-only",
+      "launcher toolchain catalog entries::llvm-strip and llvm-objdump have llvm-mingw arms on both Windows cpus",
+      "launcher toolchain catalog entries::the unpinned zig default is still 0.13.0",
+      "launcher toolchain catalog entries::zig 0.14.1 selects an upstream archive on every published slice"
+     ],
+     "staticCaseCountAtBase": 5,
+     "standalone": {
+      "binaryBytes": 2033888,
+      "wholeBinaryExitCode": 0
+     },
+     "addedAfterBatch": "NOT PART OF THIS BATCH'S MEASUREMENT. c155b87b80b (`feat(stdlib): catalog zig 0.14.1, llvm-strip, ldd, and nix arms for elixir`) added this source to the bundle in scripts/generate_test_edges.nim without a ledger row, so its five cases were unattributed and test_consolidated_pure_unit_cases_list_individually went red (full-suite run 52). The cases were read from the member's OWN standalone binary's --list-json, compiled fresh (nim c, private nimcache) from reprobuild 13dde34b8a7; that binary's size is binaryBytes and its whole run exited 0. Only the fields the verification test reads are recorded: no compile timings were taken, and the bundle's `before`/`after` blocks and the `suite` block are untouched and still describe the 13-member batch as it landed."
+    },
+    {
      "source": "libs/repro_dsl_stdlib/tests/t_d2_dnf_index.nim",
      "cases": [
       "D2 P1 dnf-index parser::buildDnfIndex populates byName + virtuals",

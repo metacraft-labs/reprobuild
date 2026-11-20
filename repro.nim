@@ -230,10 +230,15 @@ type
 const
   ctShimFixtureRoot = "build/test-fixtures/ct-test-unittest-parallel"
   installMirrorFixtureRoot = "build/test-fixtures/install-mirror-runtime"
+  preloadHostAllocatorFixtureRoot =
+    "build/test-fixtures/preload-host-allocator"
 
   ctShimProtocolThreeTests = TestGraphArtifact(
     path: ctShimFixtureRoot & "/fixture_protocol_three_tests",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests")
+  ctShimProtocolAbortPaths = TestGraphArtifact(
+    path: ctShimFixtureRoot & "/fixture_protocol_abort_paths",
+    actionId: "reprobuild.test_fixtures.ct_shim_fixture_protocol_abort_paths")
   ctShimM4ParitySuite = TestGraphArtifact(
     path: ctShimFixtureRoot & "/fixture_m4_parity_suite",
     actionId: "reprobuild.test_fixtures.ct_shim_fixture_m4_parity_suite")
@@ -535,7 +540,7 @@ const
     TestGraphArtifacts(
       source: "libs/ct_test_unittest_parallel/tests/" &
         "t_test_binary_run_one_writes_result_file.nim",
-      artifacts: @[ctShimProtocolThreeTests]),
+      artifacts: @[ctShimProtocolThreeTests, ctShimProtocolAbortPaths]),
     # SHARED likewise: one parity fixture behind the parity test and the
     # partition-file test.
     TestGraphArtifacts(
@@ -639,6 +644,19 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/test-fixtures/hcr-linux-stack-access/stack-access",
         actionId: "reprobuild.test_fixtures.hcr_linux_stack_access")])]
+    else: @[]) & (when defined(linux): @[
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "t_preloaded_monitor_shim_keeps_out_of_the_host_allocator.nim",
+      artifacts: @[
+        TestGraphArtifact(
+          path: preloadHostAllocatorFixtureRoot &
+            "/clock-under-allocator-lock",
+          actionId: "reprobuild.test_fixtures.clock_under_allocator_lock"),
+        TestGraphArtifact(
+          path: preloadHostAllocatorFixtureRoot &
+            "/liballocating_clock_hook.so",
+          actionId: "reprobuild.test_fixtures.allocating_clock_hook")])]
     else: @[]) & (when defined(linux) or defined(macosx): @[
     # Linux and macOS, where the producing edge is declared (there is no Nix
     # package on Windows; both gates skip there).
@@ -859,6 +877,40 @@ proc shimLinkEnvironment(): seq[(string, string)] =
       salted.add(key)
   for key in sorted(salted):
     result.add((key, ""))
+
+proc linuxShimDefines(zigTriple: string): seq[string] =
+  ## The Nim defines of the Linux preload shim edge, mirroring io-mon's
+  ## ``scripts/build_shim.sh``. ``zigTriple`` is the zig cross target's
+  ## triple, or "" for a native build.
+  ##
+  ## * ``useMalloc``: io-mon refuses to compile the shim library without it
+  ##   (the per-thread Nim heaps return a cell through the TLS of a host
+  ##   thread that may already have exited).
+  ## * ``ioMonGlibcPrivateHeap``: on glibc, the shim's own
+  ##   malloc/calloc/realloc/free references are linked (``--wrap``) to a
+  ##   private allocator over anonymous ``mmap`` inside io-mon. Without it
+  ##   ``useMalloc`` takes them from WHATEVER allocator the host program
+  ##   provides, and the shim's hooks run inside that allocator: jemalloc,
+  ##   which rustc links statically, calls ``clock_gettime`` from
+  ##   ``arena_new`` while it holds ``arenas_lock``, the shim's
+  ##   ``clock_gettime`` hook formats its evidence record with a Nim string,
+  ##   and the allocation re-enters jemalloc, which waits on its own
+  ##   non-recursive lock forever. That is how the release shim built by
+  ##   this edge hung every rustc it was preloaded into (rustc 1.94, a first
+  ##   ``--print=file-names`` probe, all threads in ``futex_wait``), while
+  ##   the Nix package, built by ``build_shim.sh``, did not.
+  ##   ``tests/integration/t_preloaded_monitor_shim_keeps_out_of_the_host_allocator.nim``
+  ##   runs the shim this edge produces inside a program that reads the clock
+  ##   under its allocator lock.
+  ##
+  ## io-mon passes ``ioMonGlibcPrivateHeap`` when the build host's C runtime
+  ## is glibc (``getconf GNU_LIBC_VERSION``). This edge builds for the build
+  ## host or for a zig ``*-linux-gnu*`` target, which are glibc on every
+  ## platform the repository ships, so the define is withheld only from a
+  ## musl target.
+  result = @["useMalloc"]
+  if "musl" notin zigTriple:
+    result.add("ioMonGlibcPrivateHeap")
 
 proc pinnedToolDir(root, tool, version, probe: string): string =
   ## ``<root>/<tool>/<version>`` when it exists and carries `probe`, else
@@ -3746,6 +3798,32 @@ package reprobuild:
       discard collect("hcr-linux-stack-access-fixture",
         @[hcrStackDir, hcrStackFixture])
 
+    # The preloaded shim must allocate from its own heap, never from the
+    # host program's: ``t_preloaded_monitor_shim_keeps_out_of_the_host_allocator``
+    # runs the shim inside a program whose allocator reads the clock under its
+    # lock, as jemalloc does. The control is a preload whose clock_gettime
+    # allocates, which that program must catch.
+    when defined(linux):
+      let preloadAllocatorDir = dslfs.ensureDir(
+        preloadHostAllocatorFixtureRoot,
+        actionId = "reprobuild.test_fixtures.preload_host_allocator_dir")
+      reprobuildTestFixturesActions.add(preloadAllocatorDir)
+      reprobuildTestFixturesActions.add(gcc(
+        source = "tests/fixtures/preload-host-allocator/" &
+          "clock_under_allocator_lock.c",
+        output = preloadHostAllocatorFixtureRoot &
+          "/clock-under-allocator-lock",
+        optimization = "2", libs = @["pthread"],
+        after = @[preloadAllocatorDir],
+        actionId = "reprobuild.test_fixtures.clock_under_allocator_lock"))
+      reprobuildTestFixturesActions.add(gcc(
+        source = "tests/fixtures/preload-host-allocator/" &
+          "allocating_clock_hook.c",
+        output = preloadHostAllocatorFixtureRoot &
+          "/liballocating_clock_hook.so",
+        shared = true, pic = true, after = @[preloadAllocatorDir],
+        actionId = "reprobuild.test_fixtures.allocating_clock_hook"))
+
     let ctShimFixtureDir = ctShimFixtureRoot
     when defined(linux):
       let mirrorFixtureDir = dslfs.ensureDir(installMirrorFixtureRoot,
@@ -3795,6 +3873,17 @@ package reprobuild:
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/ct_shim_fixture_protocol_three_tests",
       actionId = "reprobuild.test_fixtures.ct_shim_fixture_protocol_three_tests"))
+    # Cases that leave the process from inside their body (a failed
+    # ``require``, a ``quit``). Like the three-tests fixture it fails on
+    # purpose, so it lives here and not in ``build/test-bin``.
+    reprobuildTestFixturesActions.add(nim.c(
+      source = "libs/ct_test_unittest_parallel/tests/fixtures/" &
+        "fixture_protocol_abort_paths.nim",
+      binary = ctShimFixtureDir & "/fixture_protocol_abort_paths",
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/ct_shim_fixture_protocol_abort_paths",
+      actionId = "reprobuild.test_fixtures.ct_shim_fixture_protocol_abort_paths"))
     # ``--threads:on`` matches what the two ct-test-runner tests passed by
     # hand; the parity assertion compares this binary under two different
     # runners, so its compile flags have to stay pinned rather than inherited.
@@ -4189,7 +4278,12 @@ package reprobuild:
         # release mode as the cross script built it: an unoptimized `zig cc`
         # compile instruments undefined behaviour, and the checks' source
         # locations are build-host paths no file-name map rewrites.
-        defines = @["useMalloc"] &
+        #
+        # ``ioMonGlibcPrivateHeap``: see ``linuxShimDefines``. Without it
+        # the shim allocates from the HOST program's allocator, and a
+        # release shim built by this edge hung rustc.
+        defines = linuxShimDefines(
+            if shimZigTarget != nil: shimZigTarget.triple else: "") &
           (if shimZigTarget != nil: @["release"] else: @[]),
         binary = "build/lib/librepro_monitor_shim.so",
         appLib = true,

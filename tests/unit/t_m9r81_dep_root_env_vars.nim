@@ -45,6 +45,16 @@ package m9r81DepEnvFixture:
   executable depEnvProbe:
     discard
 
+# Its own package, with dependencies no case gives a sibling: the case that
+# checks absent roots runs as its own process at the same time as the one
+# that creates `tests/<dep>` siblings for m9r81DepEnvFixture, so sharing
+# that package's dependency names made the absent case see them.
+package m9r81NoSiblingFixture:
+  buildDeps:
+    "m9r81-never-a-sibling >=1"
+  executable noSiblingProbe:
+    discard
+
 template withLegacyMirrorMode(body: untyped) =
   let oldSet = existsEnv(MirrorModeEnv)
   let oldValue = getEnv(MirrorModeEnv)
@@ -88,7 +98,10 @@ suite "M9.R.81 dependency root env vars":
     withLegacyMirrorMode:
       let entries = dependencyRootEnvEntries(
         "/recipes",
-        @["qt6-base >=6.6", "dep.with+dots", "qt6-base <7"])
+        @["qt6-base >=6.6", "dep.with+dots", "qt6-base <7"],
+        # The resolver's ordering and de-duplication are the subject here;
+        # `/recipes` has no siblings, so keep entries for absent ones.
+        onlyExistingSiblings = false)
       check entries.len == 2
       check entries[0] == (
         "DEP_QT6_BASE_ROOT",
@@ -130,7 +143,7 @@ suite "M9.R.81 dependency root env vars":
     # depend on the checkout's parent directory.
     withLegacyMirrorMode:
       resetBuildActionRegistry()
-      setCurrentOwningPackageOverride("m9r81DepEnvFixture")
+      setCurrentOwningPackageOverride("m9r81NoSiblingFixture")
       try:
         discard buildAction(
           id = "m9r81-no-sibling-action",

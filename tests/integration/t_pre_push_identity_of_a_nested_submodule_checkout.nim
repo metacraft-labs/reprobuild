@@ -26,6 +26,7 @@
 ## The canonicalisation is additionally pinned at the function level, where
 ## its local-path and credential rules can be exercised exactly.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -71,7 +72,7 @@ proc runProcess(binary: string; args: openArray[string]):
   let process = startProcess(binary, args = @args, env = env,
     options = {poStdErrToStdOut, poUsePath})
   defer: process.close()
-  result.output = process.outputStream.readAll()
+  result.output = drainStream(process.outputStream)
   result.code = process.waitForExit()
 
 proc configureUser(gitBin, work: string) =

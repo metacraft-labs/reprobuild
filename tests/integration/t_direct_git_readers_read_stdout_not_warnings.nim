@@ -54,6 +54,7 @@
 ##
 ## Hermetic: temp checkouts and a local bare remote only, no network.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support
@@ -85,8 +86,8 @@ proc gitStreams(gitBin, path: string; args: openArray[string]):
     options = {poUsePath})
   defer: process.close()
   result.code = process.waitForExit()
-  result.outText = process.outputStream.readAll()
-  result.errText = process.errorStream.readAll()
+  result.outText = drainStream(process.outputStream)
+  result.errText = drainStream(process.errorStream)
 
 proc pushedCheckout(scratch: string): tuple[repo, remote: string] =
   ## A checkout of a local bare remote whose `main` is fully pushed.

@@ -97,9 +97,16 @@
 ## (its raw `sandbox-log.ndjson`) became an `egress-denied` report (up to
 ## five leases until one is received); every lease's denial is asserted.
 ##
+## A worker stopped while its canary lease runs (Linux, the floor) ends the
+## lease and removes its directory through the sandbox, although the files
+## belong to the slot's subordinate uid; a worker that starts beside a
+## lease no worker knows of removes it the same way. A FIFO in the canary's
+## TMPDIR holds the lease running, so the stop always lands mid-lease.
+##
 ## MOCK POLICY — none. The "daemon" is the shipped `repro daemon serve`
 ## process; its control socket and state directory are the real ones.
 
+from repro_core/process_streams import drainStream
 import std/[asyncdispatch, asyncnet, nativesockets, net, os, osproc, posix, streams,
             strtabs, strutils, times,
             unittest]
@@ -691,6 +698,91 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         check "TOOLCHAIN-RAN" in rootResult
         discard cleanupLease(rootSpec)
 
+  test "a worker stopped during its canary lease removes the lease":
+    # reprobuild-pm issue 2026-11-12: a daemon stopped while its periodic
+    # canary lease ran left `leases/canary-<pid>-<n>` behind, owned by the
+    # slot's subordinate uid, which its caller cannot delete.
+    when not defined(linux):
+      skip("platform N/A: the lease's files belong to another uid only " &
+        "under the Linux floor")
+    else:
+      let available = availableLeaseLayers()
+      checkpoint("lease layers on this host: " & $available)
+      check available.ok
+      check llFloor in available.layers
+      if available.ok and llFloor in available.layers:
+        let base = m7TestBase("repro-m7-stop-canary")
+        defer: removeDir(base)
+        let config = WorkerConfig(leaseRoot: base / "worker-state" / "leases",
+          metaRoot: base / "lease-meta",
+          readRoots: @["/usr", "/bin", "/lib", "/lib64", "/etc", "/nix/store"],
+          closureRoots: @["/usr/bin", "/bin", "/usr/lib", "/lib", "/lib64",
+            "/nix/store"],
+          pathEnv: coreToolDir() & ":/usr/bin:/bin",
+          layers: available.layers)
+        createDir(config.leaseRoot)
+        createDir(config.metaRoot)
+        let worker = newWorkerReceiver(config, nil, nil)
+        let leaseId = "canary-" & $getCurrentProcessId() & "-1"
+        let leaseDir = config.leaseRoot / leaseId
+        # The canary copies /bin/sh to `$TMPDIR/repro-canary`. A FIFO there
+        # holds that copy in open(2) until the lease is killed, so the stop
+        # deterministically lands while the lease runs — after the floor
+        # handed the lease directory to the lease user.
+        createDir(leaseDir / "tmp")
+        check posix.mkfifo(cstring(leaseDir / "tmp" / "repro-canary"),
+          Mode(0o600)) == 0
+        let probe = worker.runCanaryLease(1)
+        let by = epochTime() + 30.0
+        while not probe.finished and leaseSlotOwning(leaseDir) < 0 and
+            epochTime() < by:
+          waitFor sleepAsync(20)
+        checkpoint("canary finished before the stop: " & $probe.finished)
+        require not probe.finished
+        check worker.activeLeases == 1
+        check leaseSlotOwning(leaseDir) == worker.canarySlot()
+        # The control: the lease's files are not the caller's to delete.
+        check not tryRemoveFile(leaseDir / "tmp" / "repro-canary")
+        # Option 2 first: a worker starting beside this lease takes it for a
+        # previous daemon's orphan and removes it through the sandbox.
+        let successor = newWorkerReceiver(config, nil, nil)
+        check successor.reclaimOrphanedLeases() == 1
+        check not dirExists(leaseDir)
+        # Then a second lease, stopped by its worker (option 1).
+        let leaseId2 = "canary-" & $getCurrentProcessId() & "-2"
+        let leaseDir2 = config.leaseRoot / leaseId2
+        createDir(leaseDir2 / "tmp")
+        check posix.mkfifo(cstring(leaseDir2 / "tmp" / "repro-canary"),
+          Mode(0o600)) == 0
+        let probe2 = successor.runCanaryLease(2)
+        let by2 = epochTime() + 30.0
+        while not probe2.finished and leaseSlotOwning(leaseDir2) < 0 and
+            epochTime() < by2:
+          waitFor sleepAsync(20)
+        require not probe2.finished
+        check leaseSlotOwning(leaseDir2) == successor.canarySlot()
+        check successor.stopLeases() == 1
+        check successor.activeLeases == 0
+        check not dirExists(leaseDir2)
+        check not dirExists(config.metaRoot / leaseId2)
+        # Resumed, the stopped canary reports the stop and removes nothing
+        # twice; a stopped worker runs no further canary.
+        let verdict = waitFor probe2
+        checkpoint("stopped canary: " & verdict.reason)
+        check not verdict.ok
+        check "stopped" in verdict.reason
+        check not dirExists(leaseDir2)
+        let after = waitFor successor.runCanaryLease(3)
+        check not after.ok
+        check not dirExists(config.leaseRoot / ("canary-" &
+          $getCurrentProcessId() & "-3"))
+        # The first worker's lease was killed by neither: stop it too.
+        check worker.stopLeases() == 1
+        check (waitFor probe).ok == false
+        var left: seq[string] = @[]
+        for _, path in walkDir(config.leaseRoot): left.add(path)
+        check left.len == 0
+
   test "a library preloaded into the worker does not reach the lease's environment":
     when not defined(linux):
       skip("the Linux lease's raw exec is what is under test")
@@ -712,7 +804,7 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         env[InterposeChildEnv] = base
         let child = startProcess(getAppFilename(), env = env,
           options = {poStdErrToStdOut})
-        let childOut = child.outputStream.readAll()
+        let childOut = drainStream(child.outputStream)
         let code = child.waitForExit()
         child.close()
         checkpoint("child exit " & $code & ":\n" & childOut)

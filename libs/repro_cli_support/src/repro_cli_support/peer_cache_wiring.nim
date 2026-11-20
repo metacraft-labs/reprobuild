@@ -173,6 +173,9 @@ type
     workerStatus*: proc(): seq[string] {.gcsafe, closure.}
       ## Set by the worker role: `key=value` lines (goals executed and
       ## refused, certificates issued and withheld) for the status file.
+    workerStop*: proc() {.gcsafe, closure.}
+      ## Set by the worker role: ends and removes its running leases. `stop`
+      ## calls it first, before the dispatcher is driven again.
     localLogs*: seq[string]
       ## The local logs this node writes (trusted profile: detections and
       ## audit; the worker role adds its own) — swept for retention on a
@@ -1122,6 +1125,9 @@ proc stop*(host: PeerCacheHost) =
   host.running = false
   if host.isForkedChild:
     return
+  if not host.workerStop.isNil:
+    try: host.workerStop()
+    except CatchableError: discard
   try:
     waitFor host.client.stop()
   except CatchableError:

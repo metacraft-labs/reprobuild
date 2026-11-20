@@ -39,6 +39,7 @@
 ## waits for as long as the lock is held), it only weakens the negative
 ## control there, and it is said here rather than implied.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times,
     unittest]
 
@@ -184,7 +185,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
   var process = startProcess(program, args = @args, workingDir = cwd,
     env = env, options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()

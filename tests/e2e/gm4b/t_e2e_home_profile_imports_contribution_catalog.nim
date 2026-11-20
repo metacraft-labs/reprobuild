@@ -66,6 +66,7 @@
 ## for a host NAME that is not this machine in the library case so the PATH
 ## inventory takes no part.
 
+from repro_core/process_streams import drainStream
 import std/[options, os, osproc, sequtils, streams, strtabs, strutils,
   tempfiles, unittest]
 from repro_core/paths import extendedPath
@@ -183,7 +184,7 @@ proc runPlan(label: string; withCatalogs: bool):
     args = @["home", "apply", "--plan", "--allow-drift",
              "--target-platform", here.platform, "--target-arch", here.arch],
     env = env, options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)

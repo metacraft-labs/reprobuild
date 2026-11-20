@@ -29,6 +29,7 @@
 ## NO MOCKS. A real record with real input files on a real filesystem, a real
 ## chain, and a real second process reading it.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_hash
@@ -146,7 +147,7 @@ suite "integration_action_cache_oversized_record_is_indexed":
       let code = reader.waitForExit()
       if code != 0:
         checkpoint("reader exited " & $code & ": " &
-          reader.outputStream.readAll())
+          drainStream(reader.outputStream))
       reader.close()
       check code == 0
 

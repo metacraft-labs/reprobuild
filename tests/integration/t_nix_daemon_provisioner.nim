@@ -684,6 +684,15 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       check keyA == nixDaemonHelperKey(root / "c")
       check keyA != nixDaemonHelperKey(root / "b")
       check nixDaemonHelperKey(root / "missing") == ""
+      # A caller whose nix caches live elsewhere gets its own helper: one
+      # started under a private XDG_CACHE_HOME kept that directory after the
+      # caller deleted it, and every other caller's fetches failed.
+      let previousCache = getEnv("XDG_CACHE_HOME")
+      putEnv("XDG_CACHE_HOME", root / "private-cache")
+      check nixDaemonHelperKey(root / "a") != keyA
+      if previousCache.len > 0: putEnv("XDG_CACHE_HOME", previousCache)
+      else: delEnv("XDG_CACHE_HOME")
+      check nixDaemonHelperKey(root / "a") == keyA
       let previousDir = getEnv(NixDaemonSocketDirEnv)
       putEnv(NixDaemonSocketDirEnv, root)
       defer: putEnv(NixDaemonSocketDirEnv, previousDir)

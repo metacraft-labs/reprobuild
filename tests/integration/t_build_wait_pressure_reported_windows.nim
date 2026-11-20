@@ -75,6 +75,12 @@ when defined(windows):
       if not daemon.running:
         break
       sleep(25)
+    # Out of tries with the daemon still up: stop it, so the read below
+    # ends instead of waiting on a live writer.
+    if daemon.running:
+      daemon.terminate()
+      discard daemon.waitForExit()
+    # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
     let output = daemon.outputStream.readAll()
     daemon.close()
     raise newException(OSError, "runquotad did not come up: " & output)

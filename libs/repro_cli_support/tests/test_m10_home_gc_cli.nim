@@ -6,6 +6,7 @@
 ## ``libs/repro_home_apply/tests/t_home_gc.nim``; this file focuses
 ## on the dispatcher seam, help-text wording, and exit codes.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, unittest]
 from repro_core/paths import extendedPath
 from repro_test_support import testCaseScratchSlug
@@ -75,7 +76,7 @@ proc runRepro(args: openArray[string]; env: openArray[(string, string)] = []):
   # if the pipe buffer fills mid-run. For our tiny fixtures the
   # buffer is plenty, so we just block on exit then read.
   let exitCode = p.waitForExit()
-  let captured = streams.readAll(p.outputStream)
+  let captured = drainStream(p.outputStream)
   p.close()
   for kv in env:
     delEnv(kv[0])

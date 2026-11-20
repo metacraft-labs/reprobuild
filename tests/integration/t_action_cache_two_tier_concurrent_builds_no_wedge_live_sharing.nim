@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, times, unittest]
 
 import repro_hash
@@ -166,7 +167,7 @@ suite "integration_action_cache_two_tier_concurrent_builds_no_wedge_live_sharing
         let code = p.waitForExit()
         if code != 0:
           allOk = false
-          checkpoint("worker exited " & $code & ": " & p.outputStream.readAll())
+          checkpoint("worker exited " & $code & ": " & drainStream(p.outputStream))
         p.close()
       let elapsed = epochTime() - started
       check allOk

@@ -78,6 +78,7 @@
 ## cannot lower `.#test-fixtures`; case 5 when no dynamically linked `ar`
 ## running on a store C runtime is on PATH.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
@@ -341,7 +342,7 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
             let p = startProcess(argv[0], workingDir = action{"cwd"}.getStr(),
               args = argv[1 .. ^1], env = table,
               options = {poStdErrToStdOut})
-            let output = p.outputStream.readAll()
+            let output = drainStream(p.outputStream)
             let code = p.waitForExit()
             p.close()
             (code, output, outDir / ShimFileName)

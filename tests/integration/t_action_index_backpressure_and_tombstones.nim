@@ -24,6 +24,7 @@
 ## the property under test is cross-process and a thread pool would not
 ## reproduce it.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, sets, streams, strutils, tempfiles, times, unittest]
 
 import repro_hash
@@ -142,7 +143,7 @@ suite "integration_action_index_backpressure_and_tombstones":
         if code != 0:
           allOk = false
           checkpoint("producer exited " & $code & ": " &
-            p.outputStream.readAll())
+            drainStream(p.outputStream))
         p.close()
       let elapsed = epochTime() - started
       check allOk

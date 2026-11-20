@@ -152,6 +152,9 @@ proc unmeetableRunQuota() =
   ## happened to set it.
   putEnv("RUNQUOTAD_BIN", findExe("false"))
   putEnv("RUNQUOTA_SOCKET", project() / "nothing-serves-this.sock")
+  # An inherited private scope (published by an enclosing `repro`) would hold
+  # the project directory to the owner-only rule and refuse before the probe.
+  delEnv("RUNQUOTA_ENDPOINT_SCOPE")
   when defined(posix):
     if userEndpointDir.len == 0:
       userEndpointDir = scratchUserEndpointDir()

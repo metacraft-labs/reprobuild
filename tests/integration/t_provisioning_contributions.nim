@@ -1,8 +1,9 @@
-import std/[algorithm, os, osproc, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, os, osproc, sequtils, strutils, unittest]
 
 import repro_interface_artifacts
 import repro_project_dsl
 import repro_tool_profiles
+import repro_test_support/in_tree_scratch
 
 package contributedTool:
   executable contributedTool:
@@ -55,8 +56,7 @@ suite "federated provisioning contributions":
     check roundTrip.projectInterface.provisioningContributions[0].contributor ==
       contribution.contributor
 
-    let tempRoot = createTempDir("repro-provisioning-contribution", "",
-      getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-provisioning-contribution")
     defer: removeDir(tempRoot)
     let stub = tempRoot / "catalog_interface.nim"
     writeNimInterfaceStub(stub, artifact)

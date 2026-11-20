@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, times, unittest]
 
 import repro_test_support
@@ -88,6 +89,7 @@ proc startForegroundDaemon(tempRoot: string): owned(Process) =
       result.terminate()
       discard result.waitForExit()
     let output =
+      # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
       if result.outputStream != nil: result.outputStream.readAll()
       else: ""
     checkpoint("foreground daemon output before running:\n" & output)
@@ -294,7 +296,7 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
       ], daemonEnv(tempRoot)), repoRoot())
 
       let exitCode = attached.waitForExit()
-      let output = attached.outputStream.readAll()
+      let output = drainStream(attached.outputStream)
       checkpoint(output)
       check exitCode == 0
       check output.contains("cycle 1 start initial")
@@ -341,7 +343,7 @@ suite "Local daemons/control-plane M5 daemon-hosted watch sessions":
         waitForFileContent(projectRoot / "dist" / "copied.txt", "k1\n",
           tempRoot)
         let exitCode = watcher.waitForExit()
-        let output = watcher.outputStream.readAll()
+        let output = drainStream(watcher.outputStream)
         check exitCode == 0
         check output.contains("event seen path=")
         check output.contains("detail=write") or output.contains("detail=extend") or

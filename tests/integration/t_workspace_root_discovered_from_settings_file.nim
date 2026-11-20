@@ -52,6 +52,7 @@
 ## No mocks: real directories, a real git repository for the member, and the
 ## real `repro` binary.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -75,8 +76,8 @@ proc runRepro(args: openArray[string]; cwd: string; config = ""):
   let p = startProcess(reproBinary(), workingDir = cwd, args = @args,
     env = env, options = {})
   p.inputStream.close()
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 
