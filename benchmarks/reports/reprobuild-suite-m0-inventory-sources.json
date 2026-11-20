@@ -20536,8 +20536,8 @@
       "owner": "libs/repro_infra",
       "requiresReproBinary": false,
       "source": "libs/repro_infra/tests/t_smoke_repro_infra.nim",
-      "sourceSuiteCount": 30,
-      "staticCaseCount": 225,
+      "sourceSuiteCount": 31,
+      "staticCaseCount": 230,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -25009,7 +25009,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_profile_compile/tests/t_smoke_profile_adapter.nim",
       "sourceSuiteCount": 5,
-      "staticCaseCount": 96,
+      "staticCaseCount": 97,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
