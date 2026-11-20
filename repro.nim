@@ -2983,8 +2983,10 @@ package reprobuild:
       defines = @["release", "ssl"],
       paths = sourceOnlyNimPaths,
       # A helper tests run from build/bin is built without the user's Nim
-      # configuration (ReproOS Add-On Mode spec §13 decision 142).
+      # configuration (ReproOS Add-On Mode spec §13 decision 142), and
+      # without the host's nimble directories (scripts/build_apps.sh).
       skipUserCfg = true,
+      noNimblePath = true,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       runInSourceDir = true,
@@ -3020,7 +3022,7 @@ package reprobuild:
     when defined(linux):
       var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
         "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
-        "--skipUserCfg", "--define:release", "--define:ssl"]
+        "--skipUserCfg", "--noNimblePath", "--define:release", "--define:ssl"]
       for p in sourceOnlyNimPaths: binaryCacheDepsArgs.add("--path:" & p)
       let binaryCacheDeps = shell(
         command = quoteShellCommand(binaryCacheDepsArgs),
