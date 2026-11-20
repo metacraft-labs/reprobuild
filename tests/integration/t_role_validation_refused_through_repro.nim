@@ -179,6 +179,8 @@ suite "branch-role validation through repro":
       let report = parseJson(resolved.stdout)
       check report["status"].getStr() == "error"
       check report["repos"].len == 0
+      # The defect's signature: the boolean read as the branch "false".
+      check "\"false\"" notin resolved.stdout
       for needle in [fragment, "repo.mainline", "`mainline` cannot be `false`"]:
         check needle in report["error"].getStr()
 

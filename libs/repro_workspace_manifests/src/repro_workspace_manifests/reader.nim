@@ -801,8 +801,17 @@ proc mainlineValueRejection*(node: TomlValueRef;
     return "`mainline` cannot be `false`: `false` declares an optional " &
       "role absent so that it falls back, and every role falls back to " &
       "`mainline`, which has nothing to fall back to. To fix it, " & remedy
-  "`mainline` must be a branch name, written as a string, not a " &
-    ($node.kind).toLowerAscii()
+  let written =
+    case node.kind
+    of TomlKind.Int: "an integer"
+    of TomlKind.Float: "a float"
+    of TomlKind.Bool: "`true`"
+    of TomlKind.DateTime: "a date-time"
+    of TomlKind.Array: "an array"
+    of TomlKind.Tables: "an array of tables"
+    of TomlKind.Table, TomlKind.InlineTable: "a table"
+    of TomlKind.String: "a string"  # returned above; kept for exhaustiveness
+  "`mainline` must be a branch name, written as a string, not " & written
 
 proc customRoleTableFromTree*(path, schema, keyPath: string;
                               node: TomlValueRef): seq[(string, BranchRoleValue)] =
