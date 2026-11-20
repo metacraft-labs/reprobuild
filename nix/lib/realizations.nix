@@ -74,6 +74,25 @@ let
 
   realizations = concatMap loadCatalog catalogs;
 
+  # Every canonical package any catalog contribution targets, whatever kind of
+  # realization it carries (Nix, Homebrew, a tarball, ...): the names a
+  # realization source may be given for (realization-sources.nix).
+  catalogPackageNames =
+    let
+      docOf = catalog: fromJSON (readFile catalog.records);
+    in
+    builtins.attrNames (
+      builtins.listToAttrs (
+        concatMap (
+          catalog:
+          map (c: {
+            name = c.targetPackage;
+            value = true;
+          }) (docOf catalog).contributions
+        ) catalogs
+      )
+    );
+
   where =
     r:
     "${r.catalog.name} ${r.contribution.location.file or "?"}:${
@@ -225,7 +244,7 @@ let
       };
 in
 {
-  inherit lookup lookupCanonical reverseIndex;
+  inherit lookup lookupCanonical reverseIndex catalogPackageNames;
 
   # reprobuild.lib.nixRealizationOf name -> "attribute.path"
   # Throws (with the reason) for a name no catalog realizes unambiguously.

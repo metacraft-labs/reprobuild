@@ -1,6 +1,6 @@
 {
   "format": "repro.home.export",
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "selection": {
     "host": "m1",
     "hostDeclared": true,
@@ -217,16 +217,14 @@
         "applications": [],
         "unresolved": [
           "busybox",
-          "gm7app",
-          "patchelf"
+          "gm7app"
         ]
       },
       "aarch64-linux": {
         "applications": [],
         "unresolved": [
           "busybox",
-          "gm7app",
-          "patchelf"
+          "gm7app"
         ]
       },
       "x86_64-darwin": {
@@ -234,8 +232,7 @@
           "gm7app"
         ],
         "unresolved": [
-          "busybox",
-          "patchelf"
+          "busybox"
         ]
       },
       "aarch64-darwin": {
@@ -243,8 +240,7 @@
           "gm7app"
         ],
         "unresolved": [
-          "busybox",
-          "patchelf"
+          "busybox"
         ]
       },
       "x86_64-windows": {

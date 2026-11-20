@@ -38,16 +38,23 @@ rest of the implementation documentation.
   [Test Certificates](test-certificates.md) for certifying before you commit,
   the pre-commit gate, how certificates reach a gateway, and `repro push`.
 - **Feeding your home profile to another tool (Nix, scripts, CI)?** See
-  [Exporting a home profile](home-export.md) for `repro home export`, its
-  JSON schema, and `--check` for committed snapshots.
+  [Export a home profile for Nix](../users/content/guides/machines/export-a-home-profile.md)
+  for `repro home export` and `--check` for committed snapshots, and
+  [Home profile export](../users/content/reference/files/home-export.md) for its JSON
+  schema. (The old page, [Exporting a home profile](home-export.md), is
+  superseded.)
 - **Configuring the same machines with Nix?** See
-  [Reading a home profile from Nix](nix-helper-library.md) for
-  `reprobuild.lib` (`readData`, `readIntent`, `nixRealizationOf`) and the
-  Home Manager module that applies a profile one category at a time.
+  [Nix library and Home Manager module](../users/content/reference/nix-library.md) for
+  `reprobuild.lib` and the Home Manager module, and
+  [Drive Home Manager from a home profile](../users/content/guides/machines/drive-home-manager-from-a-profile.md).
+  (The old page, [Reading a home profile from Nix](nix-helper-library.md), is
+  superseded.)
 - **Switching a host from Home Manager to your profile?** See
-  [Host facts and `repro home compare`](host-facts.md) to measure, per
-  category, whether the two give the host the same thing — as a flake check
-  per host.
+  [Compare a Home Manager configuration with a profile](../users/content/guides/machines/compare-with-home-manager.md)
+  to measure, per category, whether the two give the host the same thing — as
+  a flake check per host, and [Host facts](../users/content/reference/files/host-facts.md)
+  for the document's fields. (The old page,
+  [Host facts and `repro home compare`](host-facts.md), is superseded.)
 - **Need a specific reprobuild version?** See
   [Pinning reprobuild itself](pinning-reprobuild-itself.md). It is an
   ordinary `uses:` dependency plus a committed lock entry — several versions

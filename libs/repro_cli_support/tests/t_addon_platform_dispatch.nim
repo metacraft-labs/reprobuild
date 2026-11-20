@@ -4,11 +4,14 @@
 ## none plans, applies, probes the host, or starts a daemon. The Linux arm must
 ## still reach the real add-on usage while other platforms refuse that mode.
 ##
-## The rollback cases tell the two rollback paths apart by how each rejects
-## an unknown option, before either takes a lock or reads the host:
-## `repro_addon/cli.runAddonRollbackCli` says "unknown option", the ordinary
-## `parseInfraFlags` raises "unknown flag:". The add-on state directory is a
-## scratch directory holding only the ledger copy `isAddonHost` tests for.
+## The rollback cases tell the two rollback paths apart by how each refuses
+## an empty `--host=`, before either takes a lock or reads the host: on an
+## add-on host the full engine refuses every whole-system rollback flag (the
+## add-on's rollback takes a generation and `--reconcile-drift` only); the
+## ordinary rollback's host resolver refuses the empty name. The add-on
+## state directory is a scratch directory holding only the ledger copy
+## `isAddonHost` tests for. (Both paths parse the command line with repro's
+## generated parser first, so an unknown flag no longer tells them apart.)
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
@@ -49,37 +52,42 @@ suite "portable CLI keeps the Linux add-on boundary":
   test "system usage retains the ordinary command family":
     let actual = dispatch("system")
     check actual.code == 2
-    check "usage: repro system" in actual.output
+    # repro's parser: a bare namespace names the subcommands it expects.
+    check "needs a subcommand" in actual.output
     check "rollback" in actual.output
     check "supported only on Linux" notin actual.output
 
   test "infra usage remains independent of add-on mode":
     let actual = dispatch("infra")
     check actual.code == 2
-    check "usage: repro infra" in actual.output
+    check "needs a subcommand" in actual.output
     check "apply" in actual.output
     check "supported only on Linux" notin actual.output
 
   test "unknown system commands keep their own diagnostic":
     let actual = dispatch("system", @["unknown-dispatch-control"])
     check actual.code == 2
-    check "unknown subcommand: unknown-dispatch-control" in actual.output
+    check "unknown subcommand 'unknown-dispatch-control'" in actual.output
     check "supported only on Linux" notin actual.output
 
   test "add-on dispatch reaches Linux usage or explicitly refuses the platform":
+    # The add-on's command line is mounted in repro's description on every
+    # platform, so a bare `system addon` is the parser's usage error
+    # everywhere; a verb reaches the handler, which refuses the platform.
     let actual = dispatch("system", @["addon"])
     check actual.code == 2
-    when defined(linux):
-      check "usage: repro system addon <command>" in actual.output
-      check "supported only on Linux" notin actual.output
-    else:
-      check "repro system addon: supported only on Linux" in actual.output
-      check "usage: repro system addon <command>" notin actual.output
+    check "'repro system addon' needs a subcommand" in actual.output
+    check "supported only on Linux" notin actual.output
+    when not defined(linux):
+      let verb = dispatch("system", @["addon", "status"])
+      check verb.code == 2
+      check "repro system addon: supported only on Linux" in verb.output
 
   test "adoption reaches only the Linux ownership ledger":
     let stateDir = createTempDir("addon-dispatch-", "")
     defer: removeDir(stateDir)
-    let actual = dispatch("system", @["adopt"], stateDir = stateDir)
+    let actual = dispatch("system", @["adopt", "unit:x", "--profile", "p"],
+      stateDir = stateDir)
     check actual.code == 2
     when defined(linux):
       check "only an add-on host has objects to adopt" in actual.output
@@ -92,21 +100,23 @@ suite "portable CLI keeps the Linux add-on boundary":
     let stateDir = createTempDir("addon-dispatch-", "")
     defer: removeDir(stateDir)
     writeFile(stateDir / "addon-ledger", "")
-    let actual = dispatch("system",
-      @["rollback", "--unknown-dispatch-control"], stateDir = stateDir)
+    let actual = dispatch("system", @["rollback", "--host="],
+      stateDir = stateDir)
     check actual.code == 2
     when defined(linux):
-      check "unknown option --unknown-dispatch-control" in actual.output
-      check "unknown flag:" notin actual.output
+      check ("on an add-on host only a generation and --reconcile-drift " &
+        "apply") in actual.output
+      # The add-on path refused it, not the ordinary host resolver.
+      check actual.output.count("repro system rollback:") == 1
     else:
-      check "unknown flag: --unknown-dispatch-control" in actual.output
-      check "unknown option" notin actual.output
+      check "repro system rollback:" in actual.output
+      check "on an add-on host" notin actual.output
 
   test "rollback elsewhere keeps the ordinary system rollback":
     let stateDir = createTempDir("addon-dispatch-", "")
     defer: removeDir(stateDir)
-    let actual = dispatch("system",
-      @["rollback", "--unknown-dispatch-control"], stateDir = stateDir)
+    let actual = dispatch("system", @["rollback", "--host="],
+      stateDir = stateDir)
     check actual.code == 2
-    check "unknown flag: --unknown-dispatch-control" in actual.output
-    check "unknown option" notin actual.output
+    check "repro system rollback:" in actual.output
+    check "on an add-on host" notin actual.output

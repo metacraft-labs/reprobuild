@@ -77,6 +77,15 @@ proc sanitizeStaticExec(val: string): string =
 # Windows has none: `staticExec` runs no shell there, so `command` is not
 # found and the last output line is an error message rather than a path.
 # Windows gets its compiler from the bootstrap or from `REPRO_BOOTSTRAP_CC`.
+#
+# A compile that already knows its C compiler names it with
+# `-d:reproBuiltCCompiler=<path>` and so runs no probe. Every recipe compile
+# Reprobuild runs (the project provider, the interface extraction runner, a
+# profile) does, through `nimCCompilerFlags`: the probe is a `/bin/sh -c`,
+# so it made the host's shell and its libraries inputs of every such compile,
+# and it read `PATH` to answer. Its answer would also have been wrong there:
+# the compiler that built the image is the one the compile passes as
+# `--gcc.exe`, not whichever `cc` the compile's `PATH` happens to hold.
 when defined(windows):
   const BuiltCCompilerPath* = ""
 elif defined(reproBuiltCCompiler):
@@ -288,8 +297,10 @@ proc cCompilerFamily*(cc: string): string =
     return cachedCCompilerFamilies[cc]
   result = "gcc"
   try:
-    let (output, exitCode) = uncontrolledExecCmdEx(quoteShell(cc) &
-      " --version")
+    # Run directly, not through `/bin/sh -c`: the recipe compiles call this
+    # from inside their monitored action, where a shell would make the host's
+    # `/bin/sh` and its libraries inputs of the compile.
+    let (output, exitCode) = uncontrolledExecArgvEx([cc, "--version"])
     if exitCode == 0 and "clang" in output.toLowerAscii:
       result = "clang"
   except CatchableError, OSError:
@@ -305,6 +316,11 @@ proc nimCCompilerFlags*(cc: string): seq[string] =
   ## and the bootstrap named an SDK for it (`bootstrapSysrootArgs`), the SDK
   ## is passed too. A compiler the caller named finds its SDK the way it
   ## always did.
+  ##
+  ## `reproBuiltCCompiler` names `cc` to the compiled image as the compiler
+  ## it was built with (`BuiltCCompilerPath`), which is exactly what it is;
+  ## without it, an image that imports this module would ask the host's
+  ## `/bin/sh` at compile time (see `BuiltCCompilerPath`).
   if cc.len == 0:
     return
   result.add("--cc:" & cCompilerFamily(cc))
@@ -312,6 +328,7 @@ proc nimCCompilerFlags*(cc: string): seq[string] =
   result.add("--gcc.linkerexe:" & cc)
   result.add("--clang.exe:" & cc)
   result.add("--clang.linkerexe:" & cc)
+  result.add("--define:reproBuiltCCompiler=" & cc)
   if cc == getEnv(bootstrapCCompilerEnv):
     let sysroot = bootstrapSysrootArgs()
     if sysroot.len == 2:
@@ -375,11 +392,12 @@ proc cCompilerAcceptsFlags*(cc: string; flags: openArray[string];
     writeFile(extendedPath(src), "int repro_cc_flag_probe(void) { return 0; }\n")
     if fileExists(extendedPath(obj)):
       removeFile(extendedPath(obj))
-    var command = quoteShell(cc)
+    # Run directly, not through `/bin/sh -c` (see `cCompilerFamily`).
+    var argv = @[cc]
     for flag in flags:
-      command.add " " & quoteShell(flag)
-    let (_, exitCode) = uncontrolledExecCmdEx(command &
-      " -c " & quoteShell(src) & " -o " & quoteShell(obj))
+      argv.add flag
+    argv.add @["-c", src, "-o", obj]
+    let (_, exitCode) = uncontrolledExecArgvEx(argv)
     result = exitCode == 0 and fileExists(extendedPath(obj))
   except CatchableError, OSError:
     result = false

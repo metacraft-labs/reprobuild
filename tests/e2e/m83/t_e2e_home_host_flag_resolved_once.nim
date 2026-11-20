@@ -167,12 +167,16 @@ suite "GM8: one host resolver for every repro home command":
   test "e2e_home_plan_accepts_host":
     let sb = newProfileSandbox("gm8-resource-plan-host", ProfileText)
     defer: sb.dispose()
+    # `repro home plan` previews the packages too (the preview `apply
+    # --plan` prints), so they are bound to fixtures as for that gate.
+    let env = sb.fixturePackageEnv(Packages)
     let alpha = sb.runRepro(["home", "plan", "--host", "gm8-alpha"],
-      host = "")
+      host = "", extraEnv = env)
     show("plan --host gm8-alpha", alpha)
     check alpha.exitCode == 0
     check alpha.stdout.contains("alphaOnly")
-    let beta = sb.runRepro(["home", "plan", "--host", "gm8-beta"], host = "")
+    let beta = sb.runRepro(["home", "plan", "--host", "gm8-beta"], host = "",
+      extraEnv = env)
     show("plan --host gm8-beta", beta)
     check beta.exitCode == 0
     check not beta.stdout.contains("alphaOnly")

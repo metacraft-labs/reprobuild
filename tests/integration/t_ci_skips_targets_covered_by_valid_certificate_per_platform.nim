@@ -170,7 +170,7 @@ proc declarePolicy(fx: Fixture; gitBin: string; targets: seq[string];
   let snapshot = everyBranchSnapshot(pmAdvisory, targets,
     [platformA, platformB],
     ciTrust = (if ciTrust == "skip": pctSkip else: pctAdvisory),
-    name = "lib-a")
+    name = "lib-a", commandSets = true)
   commitBaseAndCandidate(fx, gitBin, snapshot)
 
 proc setupFixture(gitBin: string): Fixture =
@@ -248,7 +248,9 @@ proc planJson(fx: Fixture; platform: string): JsonNode =
     fx.reproBin, "ci", "plan",
     "--platform=" & platform,
     "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & fx.libAPath, "--json"]))
+    "--current-repo=" & fx.libAPath,
+    "--registered-keys=" & jobOwnedKeyStore(fx.workspaceRoot, fx.scratch),
+    "--json"]))
   checkpoint("ci plan (" & platform & ") output:\n" & res.output)
   check res.code == 0
   # The JSON is the LAST object in the output (stderr notes may precede on
@@ -379,11 +381,12 @@ suite "TC-4 — CI fast-track: skip targets covered by a valid cert per platform
         let fx = setupFixture(gitBin)
         defer: removeDir(fx.scratch)
         writeProjectManifest(fx)
-        let snapshot = renderCertificatePolicySnapshot(BranchCertificatePolicy(
+        let snapshot = renderCertificatePolicySnapshot(withFixtureCommandSets(
+          BranchCertificatePolicy(
           name: "ci-fast-track", package: "certpolicy", ciTrust: pctSkip,
           rules: @[PolicyRule(branches: @["main"], gateMode: pmAdvisory,
             commitGate: pmAdvisory, requires: @[PolicyRequirement(
-              certificate: "t-unit", platforms: @[platformA, platformB])])]))
+              certificate: "t-unit", platforms: @[platformA, platformB])])])))
         commitBaseAndCandidate(fx, gitBin, snapshot)
         seedLock(fx)
         const keyIdP = "tc9c-policy-key"

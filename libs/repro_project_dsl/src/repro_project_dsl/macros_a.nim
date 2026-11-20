@@ -554,9 +554,9 @@ proc literalCaseLabel(label: NimNode): string =
   ## Lower a ``case`` arm's label literal into the gate value string
   ## the solver expects. ``of "gcc": ...`` yields ``"gcc"``; ``of true:
   ## ...`` yields ``"true"``; integer labels yield their decimal repr.
-  ## Returns the empty string when the label shape is not a single
-  ## literal (e.g. ``of "a", "b": ...``) — the caller falls back to the
-  ## union behaviour for those cases.
+  ## Returns the empty string when the label is not a literal (or is the
+  ## empty string); ``variantCaseGate`` refuses such an arm at compile time
+  ## rather than lowering it ungated.
   case label.kind
   of nnkStrLit..nnkTripleStrLit:
     label.strVal
@@ -569,6 +569,147 @@ proc literalCaseLabel(label: NimNode): string =
     $label.intVal
   else:
     ""
+
+# ---------------------------------------------------------------------------
+# Variant gates in a dependency block: the admissible shapes, and the refusal
+# of every other one.
+#
+# Configurable-System §"`uses:` Resolution Driven by Variants": every arm of a
+# variant-conditioned dependency is statically enumerable from the recipe
+# source, so one metadata-fetch wave covers all of them (Core-Invariants
+# §"Static Metadata Is The Hot Path"), and the solver receives each entry with
+# the ONE (variant, value) pair that selects it -- `ConditionalGate` holds
+# exactly one. Inside a dependency block a variant may therefore condition
+# entries only as
+#
+#   * `if <boolVariant>.value:` (or `if <boolVariant>:`) with an optional
+#     single `else:` -- gated `true` / `false`;
+#   * `case <variant>.value:` (or `case <variant>:`) whose `of` arms each
+#     carry exactly one literal label, with no `else:` arm;
+#
+# and never nested inside another variant arm. Every other `if` / `case`
+# shape is a compile-time error. The predecessor lowered each of them with the
+# OUTER gate -- usually none -- so its entries became unconditional
+# dependencies, silently: both arms of `if v.value == "x": a else: b`, a
+# `case` `else:` arm, a multi-label `of`, and the inner arms of a nested gate
+# all landed on the dependency floor whatever the variant said.
+#
+# reprobuild-pm issue 2026-11-12-every-arm-is-statically-enumerable-but-the-
+# canonical-example-computes-its-uses.md.
+# ---------------------------------------------------------------------------
+
+const VariantDependencyForms =
+  "every arm of a variant-conditioned dependency must be statically " &
+  "enumerable from the recipe source, so that one metadata fetch covers " &
+  "all of them and the solver sees each entry under the one variant value " &
+  "that selects it. Inside a dependency block a variant may condition " &
+  "entries only as `case <variant>.value:` with exactly one literal label " &
+  "per `of` arm and no `else:` arm, or as `if <boolVariant>.value:` with " &
+  "an optional `else:`; use `when` for a condition on compile-time facts"
+
+proc constructText(node: NimNode): string =
+  ## The construct as the author wrote it, on one line, for a diagnostic.
+  let text = node.repr.strip()
+  let newline = text.find('\n')
+  if newline >= 0: text[0 ..< newline].strip() else: text
+
+proc refuseVariantDependencyShape(construct, why: string; node: NimNode) =
+  ## Stop the compile at ``node`` with the shared refusal.
+  error(construct & " in a dependency block " & why & "; " &
+    VariantDependencyForms, node)
+
+proc refuseNestedVariantGate(construct, outerVariant: string;
+                             node: NimNode) =
+  refuseVariantDependencyShape(construct,
+    "is nested inside an arm gated on variant `" & outerVariant &
+      "`, and an entry carries at most one variant gate, so the inner " &
+      "condition would be lost", node)
+
+proc membershipVariant(cond: NimNode): string =
+  ## ``<element> in <variant>.value`` / ``notin``: the multi-valued variant
+  ## it tests, or "".
+  if cond.kind == nnkInfix and cond.len == 3 and
+      cond[0].kind in {nnkIdent, nnkSym} and
+      identText(cond[0]).normalize in ["in", "notin"]:
+    return variantSelectorName(cond[2])
+  ""
+
+proc variantIfGate(node: NimNode; outerVariant: string): string =
+  ## The bool variant an ``if`` in a dependency block gates on. Refuses, at
+  ## compile time, every ``if`` that is not ``if <v>.value:`` / ``if <v>:``
+  ## with an optional single ``else:``, and any ``if`` inside a gated arm.
+  let head = "`if " & constructText(node[0][0]) & "`"
+  if outerVariant.len > 0:
+    refuseNestedVariantGate(head, outerVariant, node)
+  for i in 1 ..< node.len:
+    if node[i].kind in {nnkElifBranch, nnkElifExpr}:
+      refuseVariantDependencyShape(
+        "`elif " & constructText(node[i][0]) & "`",
+        "turns `" & head[1 .. ^2] & "` into a chain whose arms are " &
+          "selected by more than one condition, which no single variant " &
+          "value names", node[i])
+  let cond = node[0][0]
+  let member = membershipVariant(cond)
+  if member.len > 0:
+    error(head & " in a dependency block is a membership gate on a " &
+      "multi-valued variant (`" & member & "`). Gating a dependency on a " &
+      "multi-valued variant is not implemented yet: the solver has no " &
+      "multi-valued variants, so the gate cannot be lowered, and it is " &
+      "refused rather than made unconditional. Until it is implemented, " &
+      "declare a bool variant per member and gate on it with " &
+      "`if <boolVariant>.value:`", node)
+  result = variantSelectorName(cond)
+  if result.len == 0:
+    refuseVariantDependencyShape(head,
+      "is not a variant gate: its condition is not a bare " &
+        "`<variant>.value` (or `<variant>`) selector, and the arms of an " &
+        "arbitrary condition are not enumerable", node)
+
+proc variantCaseGate(node: NimNode; outerVariant: string): string =
+  ## The variant a ``case`` in a dependency block gates on. Refuses, at
+  ## compile time, every ``case`` that is not ``case <v>.value:`` /
+  ## ``case <v>:`` with one literal label per ``of`` arm and no ``else:``,
+  ## and any ``case`` inside a gated arm.
+  let head = "`case " & constructText(node[0]) & "`"
+  if outerVariant.len > 0:
+    refuseNestedVariantGate(head, outerVariant, node)
+  result = variantSelectorName(node[0])
+  if result.len == 0:
+    refuseVariantDependencyShape(head,
+      "is not a variant gate: its selector is not a bare " &
+        "`<variant>.value` (or `<variant>`) selector, and the arms of an " &
+        "arbitrary expression are not enumerable", node)
+  for i in 1 ..< node.len:
+    let branch = node[i]
+    case branch.kind
+    of nnkOfBranch:
+      let labels = branch.len - 1
+      var labelText: seq[string]
+      for j in 0 ..< labels:
+        labelText.add(constructText(branch[j]))
+      let arm = "`of " & labelText.join(", ") & "` in " & head
+      if labels != 1:
+        refuseVariantDependencyShape(arm,
+          "has " & $labels & " labels, and each `of` arm must carry " &
+            "exactly one, the variant value that selects it", branch)
+      let label = branch[0]
+      if literalCaseLabel(label).len == 0:
+        let why =
+          if label.kind in {nnkStrLit..nnkTripleStrLit}:
+            "has an empty label, which names no variant value"
+          else:
+            "has a label that is not a literal (a string, an integer, " &
+              "`true` or `false`), so the source does not say which " &
+              "variant value selects it"
+        refuseVariantDependencyShape(arm, why, branch)
+    of nnkElse:
+      refuseVariantDependencyShape("the `else:` arm of " & head,
+        "stands for every value no `of` arm names, which the source does " &
+          "not enumerate; write one `of` arm per value instead", branch)
+    else:
+      refuseVariantDependencyShape(
+        "`" & constructText(branch) & "` in " & head,
+        "is not an `of <literal>:` arm", branch)
 
 const
   DepKindTarget* = "target"
@@ -686,78 +827,31 @@ proc lowerUsesBody(node: NimNode; accum: NimNode; policyPath: seq[string];
     # resolves it from the solver later. Recursion continues through
     # `lowerUsesBody`, so a `when` written inside an arm is still emitted for
     # the compiler rather than handed to an evaluator.
-    var nestedGateVariant = ""
-    var thenGateValue = ""
-    var elseGateValue = ""
-    block detectVariantGate:
-      var elifCount = 0
-      var hasElse = false
-      for b in node:
-        case b.kind
-        of nnkElifBranch, nnkElifExpr: inc elifCount
-        of nnkElse, nnkElseExpr: hasElse = true
-        else: discard
-      if elifCount != 1: break detectVariantGate
-      var cond: NimNode = nil
-      for b in node:
-        if b.kind in {nnkElifBranch, nnkElifExpr} and b.len >= 1:
-          cond = b[0]
-          break
-      if cond.isNil: break detectVariantGate
-      let varName = variantSelectorName(cond)
-      if varName.len == 0: break detectVariantGate
-      nestedGateVariant = varName
-      thenGateValue = "true"
-      if hasElse:
-        elseGateValue = "false"
+    #
+    # Only `if <boolVariant>.value:` with an optional `else:` is a gate.
+    # Every other shape is refused by `variantIfGate`: the predecessor lowered
+    # it with the outer gate, usually none, which made its entries
+    # unconditional dependencies without a word.
+    let variant = variantIfGate(node, gateVariant)
     for branch in node:
       case branch.kind
       of nnkElifBranch, nnkElifExpr:
-        if branch.len >= 2:
-          if nestedGateVariant.len > 0 and gateVariant.len == 0:
-            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
-              thenGateValue, depKind, outStmts)
-          else:
-            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
-              gateValue, depKind, outStmts)
+        lowerUsesBody(branch[^1], accum, policyPath, variant, "true",
+          depKind, outStmts)
       of nnkElse, nnkElseExpr:
-        if branch.len >= 1:
-          if nestedGateVariant.len > 0 and gateVariant.len == 0 and
-              elseGateValue.len > 0:
-            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
-              elseGateValue, depKind, outStmts)
-          else:
-            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
-              gateValue, depKind, outStmts)
+        lowerUsesBody(branch[^1], accum, policyPath, variant, "false",
+          depKind, outStmts)
       else:
         discard
   of nnkCaseStmt:
     # ``case <variant>.value: of "gcc": ...`` -- one gate per arm value, on
-    # the same reasoning as the `if` form above.
-    var nestedGateVariant = ""
-    if node.len >= 1 and gateVariant.len == 0:
-      nestedGateVariant = variantSelectorName(node[0])
+    # the same reasoning as the `if` form above. `variantCaseGate` refuses
+    # every arm the source does not enumerate.
+    let variant = variantCaseGate(node, gateVariant)
     for i in 1 ..< node.len:
       let branch = node[i]
-      case branch.kind
-      of nnkOfBranch, nnkElifBranch:
-        if branch.len >= 2:
-          var armValue = ""
-          if nestedGateVariant.len > 0 and branch.kind == nnkOfBranch and
-              branch.len == 2:
-            armValue = literalCaseLabel(branch[0])
-          if armValue.len > 0:
-            lowerUsesBody(branch[^1], accum, policyPath, nestedGateVariant,
-              armValue, depKind, outStmts)
-          else:
-            lowerUsesBody(branch[^1], accum, policyPath, gateVariant,
-              gateValue, depKind, outStmts)
-      of nnkElse:
-        if branch.len >= 1:
-          lowerUsesBody(branch[^1], accum, policyPath, gateVariant, gateValue,
-            depKind, outStmts)
-      else:
-        discard
+      lowerUsesBody(branch[^1], accum, policyPath, variant,
+        literalCaseLabel(branch[0]), depKind, outStmts)
   of nnkCommentStmt, nnkDiscardStmt, nnkEmpty:
     discard
   else:
@@ -2363,6 +2457,31 @@ proc escapedCodeList(items: openArray[string]): string =
     parts.add(escForCode(item))
   parts.join(", ")
 
+proc envPassthroughCode(actionRef, site: string;
+                        names, refs: openArray[string]): string =
+  ## The statements a generated typed wrapper runs after it records its
+  ## edge: the tool's declared names go on the registered edge AND on the
+  ## handle the wrapper returns (``appendRegisteredActionEnvPassthrough``'s
+  ## ``var`` overload). Spliced into the body, never exposed as a formal, for
+  ## the reason the ``nonDeterminism`` splice gives: a formal could be
+  ## overridden or dropped at a call site, and the declaration is the tool's.
+  ##
+  ## A referenced const list is passed on by name, so it resolves in the
+  ## module that declared the tool (the ``nim`` tool's module imports
+  ## ``ScratchLocationEnvNames``), and its names are checked there at compile
+  ## time: a list holding an empty name or ``PATH`` is a compile error naming
+  ## ``site``, as a literal one is.
+  if names.len > 0:
+    result.add("  appendRegisteredActionEnvPassthrough(" & actionRef & ", [" &
+      escapedCodeList(names) & "])\n")
+  for refCode in refs:
+    let problemCall = "envPassthroughNamesProblem(" & refCode & ", " &
+      escForCode(site & " (envPassthrough " & refCode & ")") & ")"
+    result.add("  when " & problemCall & ".len > 0:\n")
+    result.add("    {.error: " & problemCall & ".}\n")
+    result.add("  appendRegisteredActionEnvPassthrough(" & actionRef & ", " &
+      refCode & ")\n")
+
 proc inputCheckPolicyCode(policy: ActionCacheFingerprintPolicy): string =
   ## The source text of a typed wrapper's ``actionCachePolicy`` default
   ## (Caching-Architecture D2): the declared policy, or the unstated default.
@@ -2686,9 +2805,17 @@ proc packageLiteral(pkg: PackageDef): string =
           escForCode(cmd.ext.providerEntrypointId) &
         ", dependencyPolicy: " & dependencyPolicyCode(cmd.ext.dependencyPolicy) &
         ", nonDeterminism: " & $cmd.ext.nonDeterminism &
+        # The tool's declared input-check policy. The typed wrapper takes it
+        # at macro time, but the registered ``PackageDef`` is this literal,
+        # so leaving it out made every registered command read
+        # ``acfpUnstated`` whatever its ``cli:`` block declared.
+        ", inputCheckPolicy: " & $cmd.ext.inputCheckPolicy &
         ", nonDeterminismJustification: " &
           escForCode(cmd.ext.nonDeterminismJustification) &
         ", subTools: @[" & escapedCodeList(cmd.ext.subTools) &
+        "], envPassthrough: @[" & escapedCodeList(cmd.ext.envPassthrough) &
+        "], envPassthroughRefs: @[" &
+          escapedCodeList(cmd.ext.envPassthroughRefs) &
         "], removeBeforeRunFlags: @[" &
           escapedCodeList(cmd.ext.removeBeforeRunFlags) &
         "], optionalOutputFlags: @[" & escapedCodeList(cmd.ext.optionalOutputFlags) &
@@ -3190,6 +3317,12 @@ proc toolActionWrapperCode(pkg: PackageDef): string =
     if cmd.ext.subTools.len > 0:
       result.add("  appendRegisteredActionSubToolRefs(" & actionRef &
         ".id, [" & escapedCodeList(cmd.ext.subTools) & "])\n")
+    # The tool's environment passthrough (``envPassthrough`` in its ``cli:``
+    # block): every edge this wrapper records passes the names through by
+    # name, and no formal lets a call site drop or replace them.
+    result.add(envPassthroughCode(actionRef,
+      exe.exportName & "." & (if cmd.name.len > 0: cmd.name else: "call"),
+      cmd.ext.envPassthrough, cmd.ext.envPassthroughRefs))
     if cmd.ext.removeBeforeRunFlags.len > 0:
       result.add("  appendRegisteredActionRemoveBeforeRun(" & actionRef &
         ".id, call, [" & escapedCodeList(cmd.ext.removeBeforeRunFlags) & "])\n")
@@ -3407,6 +3540,19 @@ proc workspaceProducerModule(selector, consumerSourceFile: string): string =
 # `reprobuildPackagesInterfaceModule` and the moved-package diagnostic live in
 # `repro_project_dsl/reprobuild_packages_catalog`, imported by
 # `repro_project_dsl.nim` so the tool resolver can share the remedy text.
+
+proc catalogInterfaceModuleOfThisCompile(selector,
+    consumerSourceFile: string): string =
+  ## The catalog interface module for ``selector``, resolved while a
+  ## ``package`` block expands. One compile resolves every external catalog
+  ## interface from ONE catalog: a lookup that would take one from a second
+  ## catalog stops the compile with the error naming both
+  ## (`reprobuildPackagesInterfaceModuleInCompile`).
+  let found = reprobuildPackagesInterfaceModuleInCompile(selector,
+    consumerSourceFile)
+  if found.conflict.len > 0:
+    error(found.conflict)
+  found.module
 
 type
   ProducerResourceModuleDecl* = object
@@ -3780,11 +3926,18 @@ proc dirLooksWritable(dir: string): bool =
   ## bare ``Traceback from system`` this module used to produce. So the check
   ## must happen BEFORE anything is created.
   ##
-  ## The composition names no executable that must be found on ``PATH``:
-  ## ``test`` / ``[`` and ``echo`` are POSIX shell builtins, and ``echo`` is
-  ## internal to ``cmd.exe``. That matters because a macro shelling out at
-  ## compile time runs inside a Nim compile action whose ``PATH`` is only
-  ## ``<nim>/bin:<gcc-wrapper>/bin`` — see ``compile_time_shell.nim``.
+  ## The probe names no executable that must be found on ``PATH``, because a
+  ## macro shelling out at compile time runs inside a Nim compile action
+  ## whose ``PATH`` is only ``<nim>/bin:<gcc-wrapper>/bin`` (see
+  ## ``compile_time_shell.nim``). On POSIX it is the running compiler itself,
+  ## by absolute path, evaluating three NimScript statements
+  ## (`compilerWritabilityProbe`): no shell runs, so the host's ``/bin/sh``
+  ## and its libraries are not inputs of the recipe compile that makes it.
+  ## A ``test -w <dir> && echo`` through ``/bin/sh`` was, and a bundle
+  ## restored on a machine whose ``/bin/sh`` is another program recompiled
+  ## every recipe that declares a resource contract. On Windows ``echo``,
+  ## ``mkdir`` and ``rd`` are internal to ``cmd.exe``, which has no other
+  ## shell to bring in.
   ##
   ## ``false`` does NOT by itself mean "not writable". The probe's answer is
   ## read from ``staticExec`` output, and a compile that does not execute
@@ -3804,7 +3957,8 @@ proc dirLooksWritable(dir: string): bool =
       " && rd " & probe & " && echo REPRO_RW"))
     result = out0.contains("REPRO_RW")
   else:
-    let out0 = staticExec("test -w " & quoteShell(dir) & " && echo REPRO_RW")
+    let out0 = staticExec(compilerWritabilityProbe(getCurrentCompilerExe(),
+      dir))
     result = out0.contains("REPRO_RW")
 
 proc requireDslScratchDir(dir, scratchRoot, consumerSourceFile: string) =
@@ -4237,7 +4391,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       # per-selector shim below, because every catalog interface module is
       # also named ``repro.nim``.
       let catalogModule =
-        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+        catalogInterfaceModuleOfThisCompile(selector, consumerSourceFile)
       if catalogModule.len > 0:
         let catalogAlias = selectorModuleName(selector) & "_packages_module"
         var catalogSeen = false
@@ -4284,7 +4438,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       if workspaceProducerModule(selector, consumerSourceFile).len > 0:
         continue
       let catalogModule =
-        reprobuildPackagesInterfaceModule(selector, consumerSourceFile)
+        catalogInterfaceModuleOfThisCompile(selector, consumerSourceFile)
       if catalogModule.len == 0:
         continue
       let catalogAlias = selectorModuleName(selector) & "_packages_module"
@@ -4347,6 +4501,25 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
     # subdirectory there, so concurrent compiles of different consumers never
     # share shim files. The key is a filesystem-safe rendering of the
     # consumer's absolute source path plus its FNV hash as a collision guard.
+    #
+    # An interface extraction that does not own a directory (every Windows
+    # extraction, and a POSIX one that is not recipe-relative) puts that
+    # consumer-keyed subdirectory beside its RUNNER instead, the compile's
+    # main module (`getProjectPath`): a slot of the extraction's shared
+    # nimcache pool, or its private temporary tree. Nim names a module's C
+    # file after the module's shortest path relative to the project or a
+    # `--path` root (`mangleModuleName`), so a shim beside the runner is
+    # named `@mrepro-sibling-shims@s<key>@srepro_sib_<selector>.nim.c`,
+    # whose length depends on neither the consumer's location nor the
+    # temporary directory. The extraction declares its temporary directory
+    # inside the consumer's `.repro/build/...` scratch, under a `--path`
+    # root, and a shim there was named after that whole path: on Windows
+    # the generated C file passed MAX_PATH (264 characters in the v0.2.27
+    # release build of `reprobuild/repro.nim`) and the compile failed with
+    # `cannot open`. The runner's directory lies under the extraction's
+    # ignored input prefix, as the temporary directory did, so the shims are
+    # still not recorded; what a shim says is recorded through the sibling
+    # file it includes.
     var shimDir = getEnv(SiblingShimDirEnv)
     let ownedShimDir = shimDir.len > 0
     if not ownedShimDir:
@@ -4367,7 +4540,10 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
       for i in countdown(baseName.len - 1, 0):
         revBase.add(baseName[i])
       let consumerKey = "c_" & $h & "_" & revBase
-      shimDir = getTempDir() / "repro-sibling-shims" / consumerKey
+      let shimRoot =
+        when defined(reproInterfaceMode): getProjectPath()
+        else: getTempDir()
+      shimDir = shimRoot / "repro-sibling-shims" / consumerKey
     if not dirExists(shimDir):
       createDir(shimDir)
     for (moduleAlias, selector, siblingReproPath) in producerModules:
@@ -4710,9 +4886,22 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
               writeFile(stagedConfig, stagedContent)
           for searchPath in querySettingSeq(searchPaths):
             extraPathFlags.add(" --path:" & quoteShell(searchPath))
+        # The generator imports `repro_cli_support`, whose `repro_core/
+        # c_compiler` asks `/bin/sh -c 'command -v cc …'` at compile time for
+        # the C compiler an image is built with, unless the compile names it
+        # (`-d:reproBuiltCCompiler`). Every recipe compile the engine runs
+        # names it (`nimCCompilerFlags`), this one included; hand the same
+        # answer on, so the generator compile starts no shell either and
+        # names the compiler the recipe compile was given.
+        var builtCCompilerFlag = ""
+        when defined(reproBuiltCCompiler):
+          const handedBuiltCCompiler {.strdefine: "reproBuiltCCompiler".} = ""
+          builtCCompilerFlag = " " & quoteShell("--define:reproBuiltCCompiler=" &
+            handedBuiltCCompiler)
         let nimCmd =
           quoteShell(compilerExe) &
-          " c -r --hints:off --warnings:off" & extraPathFlags & " " &
+          " c -r --hints:off --warnings:off" & builtCCompilerFlag &
+          extraPathFlags & " " &
           "--nimcache:" & quoteShell(accDir / ("nc_" & selectorKey)) &
           " " & quoteShell(genPath)
         # The working directory has to be WRITABLE as well as config-bearing:
@@ -4903,6 +5092,44 @@ proc parseInterfaceParam(node: NimNode;
           valuesNode.repr, valuesNode)
       for item in valuesNode:
         result.values.add(cliExprOf(item))
+    # `implies = [<param> = <value>, ...]`, written as in a `cli:` block.
+    # Whether each target is a parameter of the command is checked once the
+    # command's parameters are all known (`checkInterfaceImplications`).
+    let impliesNode = namedValue(node[i], "implies")
+    if not impliesNode.isNil:
+      if impliesNode.kind != nnkBracket or impliesNode.len == 0:
+        error("implies must be a non-empty list such as [other = value], " &
+          "got: " & impliesNode.repr, impliesNode)
+      for item in impliesNode:
+        if item.kind != nnkExprEqExpr or
+            item[0].kind notin {nnkIdent, nnkSym, nnkAccQuoted}:
+          error("implies entries are written <parameter> = <value>, got: " &
+            item.repr, item)
+        result.implies.add(CliImplication(param: identText(item[0]),
+          value: cliExprOf(item[1])))
+
+proc checkInterfaceImplications(declared: openArray[(CliParamDef, NimNode)];
+                                visible: openArray[CliParamDef];
+                                scopeLabel: string) =
+  ## Refuses an `implies` of a `defineCliInterface` parameter that names the
+  ## parameter itself or no parameter of `visible` (the parameters its
+  ## command sees), as clispec refuses one in a `cli:` block. `declared`
+  ## pairs each parameter declared in the scope with its statement, where
+  ## the error is reported. `cliModelTypeChecks` skips a target it cannot
+  ## find, so without this a misspelt target would be silently dropped.
+  for (param, stmt) in declared:
+    for implication in param.implies:
+      if eqIdent(implication.param, param.name):
+        error("parameter '" & param.name & "': implies itself", stmt)
+      var found = false
+      for other in visible:
+        if eqIdent(other.name, implication.param):
+          found = true
+          break
+      if not found:
+        error("parameter '" & param.name & "': implies '" &
+          implication.param & "', which is not a parameter of " &
+          scopeLabel, stmt)
 
 proc dependencyPolicyLiteral(node: NimNode;
                              fallback: BuildActionDependencyPolicy):
@@ -4965,7 +5192,9 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
                            paramGroups: CliParamGroups;
                            commonParams: openArray[CliParamDef];
                            defaultPolicy: BuildActionDependencyPolicy;
-                           defaultNonDeterminism: NonDeterminismDecl):
+                           defaultNonDeterminism: NonDeterminismDecl;
+                           defaultEnvPassthrough,
+                             defaultEnvPassthroughRefs: seq[string]):
     CliCommandDef =
   let loc = lineFile(node)
   let head = calleeName(node).normalize
@@ -4983,14 +5212,27 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
   result.ext.dependencyPolicy = defaultPolicy
   result.ext.nonDeterminism = defaultNonDeterminism.policy
   result.ext.nonDeterminismJustification = defaultNonDeterminism.justification
+  result.ext.envPassthrough = defaultEnvPassthrough
+  result.ext.envPassthroughRefs = defaultEnvPassthroughRefs
   result.params = @commonParams
   result.sourceFile = loc.file
   result.sourceLine = loc.line
   let body = node[node.len - 1]
+  # This command's own parameters with their statements, for
+  # `checkInterfaceImplications` once every parameter is known.
+  var declared: seq[(CliParamDef, NimNode)] = @[]
   for stmt in body:
     if calleeName(stmt).normalize == "dependencypolicy":
       result.ext.dependencyPolicy = parseInterfaceDependencyPolicy(stmt,
         result.ext.dependencyPolicy)
+      continue
+    refuseBareEnvPassthrough(stmt)
+    if calleeName(stmt).normalize == "envpassthrough":
+      # Same statement, same meaning, as in the ``package`` door
+      # (``parseCliCommandExtension``): a subcommand adds to what the
+      # interface's top level declared.
+      parseEnvPassthroughDecl(stmt, result.ext.envPassthrough,
+        result.ext.envPassthroughRefs)
       continue
     if calleeName(stmt).normalize == "nondeterminism":
       # M6: same statement, same meaning, in the second parser. The two CLI
@@ -5056,10 +5298,16 @@ proc parseInterfaceCommand(toolId: string; node: NimNode;
     for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
       let name = calleeName(expandedStmt).normalize
       if name in ["pos", "flag", "boolflag"]:
-        result.params.add(parseInterfaceParam(expandedStmt))
+        let param = parseInterfaceParam(expandedStmt)
+        result.params.add(param)
+        declared.add((param, expandedStmt))
       else:
         error("CLI command bodies accept pos/flag/boolFlag statements",
           expandedStmt)
+  # A subcommand's parameter may imply any parameter the subcommand sees: its
+  # own and the interface's top-level flags.
+  checkInterfaceImplications(declared, result.params,
+    if result.name.len == 0: "call:" else: "subcmd \"" & result.name & "\"")
 
 proc cliArgHelperName(param: CliParamDef): string =
   case param.ext.role
@@ -5187,6 +5435,11 @@ proc defineCliInterfaceCode(toolSymbol, toolId: string;
       "nonDeterminismJustification = " &
         escForCode(command.ext.nonDeterminismJustification) & ", " &
       "dependencyPolicy = dependencyPolicy)\n")
+    # The interface's environment passthrough, spliced as in
+    # ``toolActionWrapperCode``.
+    result.add(envPassthroughCode(actionRef,
+      toolId & "." & (if command.name.len > 0: command.name else: "call"),
+      command.ext.envPassthrough, command.ext.envPassthroughRefs))
     # Typed-Outputs M1: bind typed fields against the call-site flag
     # values via the shared helper (the ``package``-block wrapper uses
     # the same one).
@@ -5245,19 +5498,25 @@ macro defineCliInterface*(toolSymbol: untyped;
   var defaultPolicy = defaultDependencyPolicy()
   # M6: unblessed until the interface says otherwise, with a reason.
   var defaultNonDeterminism: NonDeterminismDecl = (ndpUnblessed, "")
+  var defaultEnvPassthrough, defaultEnvPassthroughRefs: seq[string]
+  # The top-level flags with their statements, for
+  # `checkInterfaceImplications`.
+  var commonDeclared: seq[(CliParamDef, NimNode)] = @[]
   proc addCommonParams(stmt: NimNode) =
     var stack: seq[string] = @[]
     for expandedStmt in expandCliParamGroups(stmt, paramGroups, stack):
       let head = calleeName(expandedStmt).normalize
       if head in ["flag", "boolflag"]:
-        commonParams.add(parseInterfaceParam(expandedStmt,
-          capBeforeSubcommand))
+        let param = parseInterfaceParam(expandedStmt, capBeforeSubcommand)
+        commonParams.add(param)
+        commonDeclared.add((param, expandedStmt))
       elif head == "pos":
         error("top-level CLI parameters before subcommands must be flags",
           expandedStmt)
       else:
         error("top-level CLI interface statements accept flags, templates, " &
-          "dependencyPolicy, nonDeterminism, call:, or subcmd sections",
+          "dependencyPolicy, nonDeterminism, envPassthrough, call:, or " &
+          "subcmd sections",
           expandedStmt)
   for stmt in body:
     let head = calleeName(stmt).normalize
@@ -5270,14 +5529,27 @@ macro defineCliInterface*(toolSymbol: untyped;
     elif head == "nondeterminism":
       defaultNonDeterminism = parseNonDeterminismDecl(stmt,
         defaultNonDeterminism)
+    elif head == "envpassthrough":
+      parseEnvPassthroughDecl(stmt, defaultEnvPassthrough,
+        defaultEnvPassthroughRefs)
+    else:
+      refuseBareEnvPassthrough(stmt)
+  # A top-level flag may imply only another top-level flag, as a root
+  # parameter of a `cli:` block may imply only a root parameter: every
+  # subcommand inherits it, and not every subcommand sees a subcommand's own
+  # parameters.
+  checkInterfaceImplications(commonDeclared, commonParams,
+    "the interface's top level")
   var commands: seq[CliCommandDef] = @[]
   for stmt in body:
     let head = calleeName(stmt).normalize
     case head
     of "call", "subcmd":
       commands.add(parseInterfaceCommand(toolId, stmt, paramGroups,
-        commonParams, defaultPolicy, defaultNonDeterminism))
-    of "flag", "boolflag", "pos", "dependencypolicy", "nondeterminism":
+        commonParams, defaultPolicy, defaultNonDeterminism,
+        defaultEnvPassthrough, defaultEnvPassthroughRefs))
+    of "flag", "boolflag", "pos", "dependencypolicy", "nondeterminism",
+        "envpassthrough":
       discard
     of "":
       if stmt.kind == nnkTemplateDef:

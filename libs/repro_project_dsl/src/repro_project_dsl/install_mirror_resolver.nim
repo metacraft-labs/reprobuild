@@ -13,6 +13,7 @@ import repro_platform
 # runtime's SQLite binding and shm-index/shm-queue dependencies.
 import repro_local_store/prefix_paths
 import repro_core/target_object_check
+import repro_core/variant_assignments
 
 const TargetObjectExemptionSidecarKey* = "target-object-exemption"
   ## Sidecar key under which each declared object-check exemption is
@@ -58,17 +59,16 @@ proc activeTargetTripleTag*(): string =
   ## the assignment itself rather than ask ``toolchain_policy``; the two read
   ## one env entry with one spelling, and the stdlib's solver-assigned value
   ## can only ever agree with it (the solver consumed the same contribution
-  ## at ``prSet``). Read here and in ``toolchain_policy`` only.
-  for assignment in getEnv("REPRO_VARIANTS").split(','):
-    let kv = assignment.split('=', 1)
-    if kv.len == 2 and kv[0].strip() == "targetTriple":
-      let value = kv[1].strip()
-      # A triple naming the build host itself is a native build
-      # (CLI/build.md §"Cross Targets: `--target`").
-      if value.len > 0 and value.toLowerAscii() != "native" and
-          not isHostTriple(value):
-        return value
-      return ""
+  ## at ``prSet``). Read here and in ``toolchain_policy`` only. A repeated
+  ## assignment takes the LAST, as the solver, ``toolchain_policy`` and the
+  ## object check do (``repro_core/variant_assignments``): the mirror and the
+  ## cache identity built on it must name the triple the build compiled for.
+  let value = lastVariantAssignment(getEnv("REPRO_VARIANTS"), "targetTriple")
+  # A triple naming the build host itself is a native build
+  # (CLI/build.md §"Cross Targets: `--target`").
+  if value.len > 0 and value.toLowerAscii() != "native" and
+      not isHostTriple(value):
+    return value
   ""
 
 var installMirrorTargetOverride {.threadvar.}: tuple[active: bool,
@@ -233,6 +233,25 @@ proc installMirrorStoreRelativePath*(depName, version,
   except ValueError:
     ""
 
+proc isInstallMirrorStorePath(rel, depName, version,
+                               realizationHashHex: string): bool =
+  ## Whether ``rel`` is a store path the install mirror of this realization
+  ## can have: its canonical 40-hex path
+  ## (``installMirrorStoreRelativePath``), or the 16-hex path a build before
+  ## the widening published it at, which the store keeps it at while its
+  ## index records it there (``prefix_paths.legacyPrefixRelativePath``). The
+  ## publisher records the path the store answered; this only refuses a
+  ## path that names some other prefix.
+  if rel.len == 0: return false
+  if rel == installMirrorStoreRelativePath(depName, version,
+                                           realizationHashHex):
+    return true
+  try:
+    rel == legacyPrefixRelativePath(depName, version,
+      parseRealizationHashHex(realizationHashHex)).replace("\\", "/")
+  except ValueError:
+    false
+
 proc writeRealizationInfoFile*(recipesRoot, depName, version,
                                realizationHashHex: string;
                                storeRelativePath = "") =
@@ -247,7 +266,7 @@ proc writeRealizationInfoFile*(recipesRoot, depName, version,
       storeRelativePath.replace("\\", "/")
     else:
       canonicalRel
-  if rel.len == 0 or rel != canonicalRel:
+  if not isInstallMirrorStorePath(rel, depName, version, realizationHashHex):
     return
   let path = realizationInfoPath(recipesRoot, depName)
   let payload = "platform=" & currentRealizationPlatformTag() & "\n" &
@@ -306,7 +325,9 @@ proc readRealizationInfoFile*(recipesRoot, depName: string): RealizationInfo =
       result.version, result.realizationHashHex)
     if result.storeRelativePath.len == 0:
       result.storeRelativePath = canonicalRel
-    elif result.storeRelativePath != canonicalRel:
+    elif not isInstallMirrorStorePath(result.storeRelativePath, depName,
+                                      result.version,
+                                      result.realizationHashHex):
       result.storeRelativePath = ""
 
 proc hashedDepMirrorRoot*(recipesRoot, depName: string): string =

@@ -101,7 +101,8 @@ suite "trycompile.rbsz v3 envelope":
           childTargets: @["all:Debug", "all:Release"]),
       ],
       defaultConfigs: @["Debug", "Release"],
-      actionEnv: @["PATH=/toolchain/bin:/usr/bin"])
+      actionEnv: @["PATH=/toolchain/bin:/usr/bin"],
+      relocatable: true)
 
     let encoded = encodeTryCompileMetadata(meta)
     # Envelope must declare its version explicitly — that's the contract
@@ -110,7 +111,7 @@ suite "trycompile.rbsz v3 envelope":
     # comparing the encoder's output against the encoder's own constant
     # would agree with any bump, including one that forgot to teach the
     # decoder about the new trailer.
-    check encoded[4] == byte(5)
+    check encoded[4] == byte(6)
     check encoded[5] == byte(0)
 
     let decoded = decodeTryCompileMetadata(encoded)
@@ -147,6 +148,9 @@ suite "trycompile.rbsz v3 envelope":
     # ``$PATH`` with the build header still reporting the actions as
     # declaring one.
     check decoded.actionEnv == @["PATH=/toolchain/bin:/usr/bin"]
+    # v6: a try_compile project's actions are relocatable; losing the flag
+    # here keys every probe on its scratch directory again.
+    check decoded.relocatable
     check decoded.defaultConfigs == @["Debug", "Release"]
     # v1 compat view exposes the first target through the legacy fields.
     check decoded.targetName == "myTarget:Debug"
@@ -265,6 +269,7 @@ suite "trycompile.rbsz v3 envelope":
     # inventing a default here — would put a PATH nobody declared into
     # every action's cache key.
     check decoded.actionEnv.len == 0
+    check not decoded.relocatable
 
   test "a reader rejects an envelope from a NEWER generator":
     ## The asymmetry that keeps a schema bump from degrading silently.

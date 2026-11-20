@@ -150,7 +150,8 @@ suite "repro home export: compiled intent":
     # The planner's input, obtained independently: `repro home plan` for
     # host alpha compiles the profile and publishes the envelope it
     # consumed.
-    let plan = sb.runHomePlan(host = "alpha")
+    let plan = sb.runHomePlan(host = "alpha", extraEnv = sb.fixturePackageEnv(
+      ["ripgrep", "jq", "strace", "fd", "bat", "htop"]))
     checkpoint("repro home plan output:\n" & plan.output)
     require plan.exitCode == 0
     check plan.nimSpawns >= 1
@@ -184,16 +185,16 @@ suite "repro home export: compiled intent":
       "export after plan, compile edge")
     check alphaRun.nimSpawns - alphaRun.nimCompileSpawns == ProbeSpawns
     check alpha["format"].getStr == "repro.home.export"
-    check alpha["schemaVersion"].getInt == 5
+    check alpha["schemaVersion"].getInt == 6
     check alpha["intent"] == plannerJson
     # The intent round-trips through the one ProfileIntent decoder.
     check emitProfileIntentJson(parseProfileIntentJson($alpha["intent"])) ==
       emitProfileIntentJson(plannerIntent)
-    # The document's shape is the documented schema version 2
-    # (docs/user-guide/home-export.md). `intent` is rendered by the shared
-    # ProfileIntent encoder, so a change to that encoder would otherwise
-    # change this published schema without anyone bumping `schemaVersion`
-    # or the documentation; these key sets are the tripwire. An added
+    # The document's shape is the documented schema
+    # (docs/users/content/reference/files/home-export.md). `intent` is
+    # rendered by the shared ProfileIntent encoder, so a change to that
+    # encoder would otherwise change this published schema without anyone
+    # bumping `schemaVersion` or the documentation; these key sets are the tripwire. An added
     # field is compatible (document it and extend the set); a renamed or
     # reshaped one also bumps `HomeExportSchemaVersion`.
     check keysOf(alpha) == sorted(@["format", "schemaVersion", "selection",
@@ -392,7 +393,7 @@ content = "x\n"
 """)
     let (run, doc) = sb.exportFor(["--host", "alpha"])
     require run.exitCode == 0
-    check doc["schemaVersion"].getInt == 5
+    check doc["schemaVersion"].getInt == 6
     check keysOf(doc["intent"]) == sorted(@["name", "activities",
       "configOverrides", "hosts", "resources", "buildActions",
       "adapterPreference"])

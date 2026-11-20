@@ -14,7 +14,7 @@
 ## its own module — imported only by ``repro-install-mirror-publish`` and
 ## its tests — restores that boundary.
 
-import std/[algorithm, os, strutils]
+import std/[os, strutils]
 
 import repro_local_store
 
@@ -26,34 +26,19 @@ type
     storeRelativePath*: string
     absolutePath*: string
 
-const InstallMirrorWritePermissions = {
-  fpUserWrite, fpGroupWrite, fpOthersWrite
-}
-
-proc stripWritePermissions(path: string) =
-  var permissions = getFilePermissions(path)
-  let original = permissions
-  for permission in InstallMirrorWritePermissions:
-    permissions.excl(permission)
-  if permissions != original:
-    setFilePermissions(path, permissions)
-
 proc enforceInstallMirrorStoreReadOnly(prefixRoot: string) =
+  ## Strip every write bit from a prefix the store already held when this
+  ## publish ran (one an older build published writable, before
+  ## ``realizeDirectoryAsPrefix`` learned ``readOnly``). A prefix this publish
+  ## realised is already read-only: the store stripped it in staging, so it
+  ## was never indexed writable (Local-Content-Addressed-Store.md
+  ## §"Read-Only Prefixes"). No symbolic link is followed: a link in a
+  ## prefix may point into another prefix or out of the store, and its
+  ## target's mode is not this prefix's to change.
   if prefixRoot.len == 0 or not dirExists(prefixRoot):
     raise newException(ValueError,
       "install mirror store prefix is missing: " & prefixRoot)
-  var dirs = @[prefixRoot]
-  for entry in walkDirRec(prefixRoot,
-                          yieldFilter = {pcFile, pcLinkToFile, pcDir},
-                          relative = true):
-    let path = prefixRoot / entry
-    if dirExists(path):
-      dirs.add(path)
-    else:
-      stripWritePermissions(path)
-  dirs.sort(proc (a, b: string): int = cmp(b.len, a.len))
-  for dir in dirs:
-    stripWritePermissions(dir)
+  stripTreeWriteBits(prefixRoot)
 
 proc publishInstallMirrorToStore*(recipesRoot, depName, version,
                                   sourceDir: string;
@@ -91,7 +76,7 @@ proc publishInstallMirrorToStore*(recipesRoot, depName, version,
     provenanceChecksum: "",
     materializationMechanism: "")
   let realized = store.realizeDirectoryAsPrefix(sourceDir, hint,
-    extra = ["tree:" & treeDigest])
+    extra = ["tree:" & treeDigest], readOnly = true)
   result.realizationHashHex = prefixIdHex(realized.prefixId)
   result.storeRelativePath = realized.relativePath.replace("\\", "/")
   result.absolutePath = realized.absolutePath.replace("\\", "/")

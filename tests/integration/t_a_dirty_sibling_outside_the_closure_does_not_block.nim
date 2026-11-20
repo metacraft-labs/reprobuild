@@ -1,5 +1,5 @@
-## NF-2 (Workspace-And-Develop-Mode.md §"Reproducibility And `repro check`";
-## RA-21's `developSetClosure`) — **the scoping rule**.
+## NF-2 (Nix-Flake-Coexistence.md §4 "Dirty siblings"; RA-21's
+## `developSetClosure`) — **the scoping rule**.
 ##
 ##   > an unrelated dirty repo elsewhere in the workspace MUST NOT block a push
 ##   > of `R`
@@ -19,8 +19,8 @@
 ##     input and NO `depends` edge — the "unrelated repo elsewhere in the
 ##     workspace" the rule is about. Dirty, it must NOT block;
 ##   * `epsilon` is IN the closure but is named by no flake input. Dirty, it
-##     MUST block, because the policy is inherited verbatim and it speaks of a
-##     develop-mode *dependency*, not of a lock entry;
+##     MUST block, because the scope is the committed repo's develop-set
+##     closure (plus the bound inputs), not the set of lock entries;
 ##   * `alpha` is both a dependency and a flake input; the case next door
 ##     covers it.
 ##

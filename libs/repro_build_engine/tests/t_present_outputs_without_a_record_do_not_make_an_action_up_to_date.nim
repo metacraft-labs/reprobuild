@@ -65,7 +65,7 @@ when not defined(windows):
       "cp src/input.txt " & output & " && echo run >> runs.txt && " &
       "printf '%s: %s\\n' " & output & " " & (root / "src" / "input.txt") &
       " > deps.d"
-    action(id, ["/bin/sh", "-c", script],
+    result = action(id, ["/bin/sh", "-c", script],
       cwd = root,
       inputs = ["src/input.txt"],
       outputs = [output],
@@ -75,6 +75,14 @@ when not defined(windows):
       actionCachePolicy = ffpChecksum,
       dependencyPolicy = depfilePolicy("deps.d"),
       governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    if weak.len > 0:
+      # A shared key is a COLLISION between two command lines, which
+      # `action()` no longer makes by construction (it keys argv; reprobuild-pm
+      # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+      # 2026-11-16). The refusal under test is the defence for when one
+      # happens anyway (a record from a peer, a collision), so set it here.
+      result.weakFingerprint = weakFingerprintFor(
+        "no-record-shortcut." & weak, lockIdentityOutsideSolvedGraph())
 
   proc inPlaceConfig(cacheRoot: string): BuildEngineConfig =
     ## What `repro build` runs with: reuse in place, rebuild what is missing,

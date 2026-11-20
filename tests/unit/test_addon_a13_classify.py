@@ -178,8 +178,17 @@ def green(kind, base="debian-13"):
                                     "dependantInOutput": True, "ok": True}
         rec["decision160Guard"] = {"exit": 1, "after": "a13r10.socket\n",
                                    "ok": True}
+        rec["fixingSwitch"] = {"exit": 1, "after": "a13r10.socket\trendered=x\nfailed\n",
+                               "ok": True}
+        rec["dependantsBlock"] = {"exit": 1, "after": "a13r10-dep.service\tof=a13r10.socket\n",
+                                  "ok": True}
         rec["decision160"] = {"recoverExit": 0, "ok": True}
         rec["decision160Done"] = {"exit": 0, "pending": "", "ok": True}
+        rec["bootQueuedRestart"] = {"queued": True,
+                                    "recordAfterBoot": "a13r10.socket",
+                                    "socketAfterBoot": "active",
+                                    "recoverExit": 0, "after": "active",
+                                    "ok": True}
     elif kind in ("conv", "convseam"):
         rec = base_record(CONV, base, engine=ENGINE,
                           seams=(kind == "convseam"))
@@ -209,10 +218,41 @@ def green(kind, base="debian-13"):
             rec["decision153"] = {"exit": 1, "reported": True,
                                   "heldInEtc": True, "started": False,
                                   "judged": True}
-            rec["decision153Unjudged"] = {"reported": True, "heldInEtc": True,
-                                          "active": "inactive"}
+            rec["decision153Unjudged"] = {"unit": "a13r12ureq.slice",
+                                          "reported": True, "heldInEtc": True,
+                                          "active": "inactive",
+                                          "targetHeld": False}
             rec["decision153Premise"] = {"startExit": 0, "requirerRan": True,
                                          "heldSkipped": True}
+            rec["decisionH1"] = {"staged": "inactive", "active": "active",
+                                 "recordLeft": "", "holdLeft": "", "ok": True}
+            rec["decisionEssential"] = {"exit": 1, "refused": True,
+                                        "dropInWritten": False}
+            rec["deadApplyAdopted"] = {"exit": 1, "refusedForReason": True,
+                                       "ran": False, "started": False,
+                                       "heldInEtc": True, "checkBeganAt": 120.5,
+                                       "releasedAt": 160.2,
+                                       "serviceActiveAt": -1.0,
+                                       "serviceStartedBeforeCheck": False,
+                                       "serviceStartedBeforeRelease": False,
+                                       "ok": True}
+            rec["fullApplyFixing"] = {"staged": "failed", "exit": 0,
+                                      "active": "active", "recordLeft": "",
+                                      "ok": True}
+            rec["deadJudgedActive"] = {"before": "active", "staged": "inactive",
+                                       "socketStaged": "inactive",
+                                       "exit": 0, "after": "active",
+                                       "enabled": "static", "holdLeft": "",
+                                       "checkBeganAt": 300.1,
+                                       "releasedAt": 305.4,
+                                       "serviceActiveAt": 305.6, "ok": True}
+            rec["essentialHostTrigger"] = {"exit": 2, "refused": True,
+                                           "dropInWritten": False, "held": "",
+                                           "ok": True}
+            rec["lateEssentialTrigger"] = {"sshdSocketBefore": "not-found",
+                                           "exit": 1, "named": True,
+                                           "held": "", "active": "inactive",
+                                           "ok": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -387,6 +427,108 @@ def red_record(kind, base="debian-13"):
                             "the trigger, and the unit that requires it, on "
                             "record"),
                         red("stopped at the first red step under the mutation")]
+    elif kind == "mutfixstart":
+        rec = base_record(ADOPT, base, mutation="fixing-switch-skips-starts")
+        rec["fixingSwitch"] = {"exit": 0, "after": "inactive\n", "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("the fixing switch: a switch whose generation "
+                            "changes the recorded trigger's unit must start "
+                            "the trigger, and fails, recorded, when it does "
+                            "not start"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutdepblock":
+        rec = base_record(ADOPT, base, mutation="dependants-do-not-block")
+        rec["dependantsBlock"] = {"exit": 0, "after": "active\n"
+                                  "Description=A13 decision-151 probe: generation 4m\n",
+                                  "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("dependants block like triggers: a unit on record "
+                            "that still does not start refuses a switch that "
+                            "leaves it as it is"),
+                        red("stopped at the first red step under the mutation")]
+    elif kind == "mutstaleorder":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="live-check-restart-before-stale-holds-cleared")
+        rec["decisionH1"] = {"staged": "inactive", "active": "inactive",
+                             "recordLeft": "eth-r11-sock.socket", "holdLeft": "",
+                             "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("H1: the next full apply clears a dead apply's stale "
+                            "hold before it starts the triggers that apply "
+                            "left on record, and keeps the record until they "
+                            "are up")]
+    elif kind == "mutessential":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="essential-requirers-held")
+        rec["decisionEssential"] = {"exit": 0, "refused": False,
+                                    "dropInWritten": True}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 171: an apply in which an essential "
+                            "requirer would be held (a console getty that "
+                            "requires a judged unit) is refused before it "
+                            "writes anything")]
+    elif kind == "mutdeadhold":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="dead-apply-holds-lifted")
+        rec["deadApplyAdopted"] = {"exit": 0, "refusedForReason": False,
+                                   "ran": True, "started": True,
+                                   "heldInEtc": False, "checkBeganAt": 121.0,
+                                   "releasedAt": 161.0,
+                                   "serviceActiveAt": 118.4,
+                                   "serviceStartedBeforeCheck": True,
+                                   "serviceStartedBeforeRelease": True,
+                                   "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("M3: a judged service a dead full apply held, "
+                            "with connections arriving, stays held until the "
+                            "next apply's check, and never starts when that "
+                            "check refuses it")]
+    elif kind == "mutfullfix":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="full-apply-fixing-skips-starts")
+        rec["fullApplyFixing"] = {"staged": "failed", "exit": 0,
+                                  "active": "inactive", "recordLeft": "",
+                                  "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("M2: a full apply whose generation resolves a "
+                            "recorded trigger starts it before its commit, "
+                            "and clears the record")]
+    elif kind == "mutlateess":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="late-essential-report-dropped")
+        rec["lateEssentialTrigger"] = {"sshdSocketBefore": "not-found",
+                                       "exit": 0, "named": False, "held": "",
+                                       "active": "inactive", "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("decision 177(c): an essential trigger systemd "
+                            "links to a judged unit only at the apply's reload "
+                            "fails the apply, named, and is neither stopped "
+                            "nor held")]
+    elif kind == "mutdeadactive":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="dead-judged-was-active-lost")
+        rec["deadJudgedActive"] = {"before": "active", "staged": "inactive",
+                                   "socketStaged": "inactive",
+                                   "exit": 0, "after": "inactive",
+                                   "enabled": "static", "holdLeft": "",
+                                   "checkBeganAt": 300.1, "releasedAt": 305.4,
+                                   "serviceActiveAt": -1.0, "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("M-B: a judged service a dead full apply held "
+                            "while it ran, not enabled, is started again once "
+                            "the next apply's check passes it")]
+    elif kind == "mutbootblock":
+        rec = base_record(ADOPT, base, mutation="boot-record-starts-block")
+        rec["bootQueuedRestart"] = {"queued": False, "recordAfterBoot": "",
+                                    "socketAfterBoot": "active",
+                                    "recoverExit": 0, "after": "active",
+                                    "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("M4: at boot the re-assertion queues the start of "
+                            "a recorded trigger without waiting for it and "
+                            "leaves the record, which the next recover "
+                            "confirms and clears"),
+                        red("stopped at the first red step under the mutation")]
     elif kind == "mutunjudgedreq":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="unjudged-requirers-released")
@@ -511,7 +653,9 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutholdwin", "mutnoedges", "mutreissuetgt", "mutreissuesock",
              "muttrigconv", "muttrigheld", "mutrestartignored",
              "mutdependants", "mutswitchrecord", "mutunjudgedreq",
-             "mutrevertstarts"]
+             "mutfixstart", "mutdepblock", "mutstaleorder", "mutessential",
+             "mutrevertstarts", "mutdeadhold", "mutfullfix", "mutbootblock",
+             "mutdeadactive", "mutlateess"]
 
 
 class Accepts(unittest.TestCase):
@@ -1043,6 +1187,106 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutrestartignored")
         del rec["decision160Revert"]["pending"]
         self.assertRejected("mutrestartignored-debian-13", rec)
+        # A13 review round 11: each new falsifier red for its own reason.
+        rec = red_record("mutfixstart")
+        rec["fixingSwitch"]["exit"] = 1
+        self.assertRejected("mutfixstart-debian-13", rec)
+        rec = red_record("mutfixstart")
+        rec["fixingSwitch"]["after"] = "a13r10.socket\trendered=x\n"
+        self.assertRejected("mutfixstart-debian-13", rec)
+        rec = red_record("mutdepblock")
+        rec["dependantsBlock"]["after"] = "active\n"
+        self.assertRejected("mutdepblock-debian-13", rec)
+        rec = red_record("mutstaleorder")
+        rec["decisionH1"]["recordLeft"] = ""
+        self.assertRejected("mutstaleorder-debian-13", rec)
+        rec = red_record("mutstaleorder")
+        rec["decisionH1"]["staged"] = "active"
+        self.assertRejected("mutstaleorder-debian-13", rec)
+        rec = red_record("mutessential")
+        rec["decisionEssential"]["dropInWritten"] = False
+        self.assertRejected("mutessential-debian-13", rec)
+        for key, field, value in (("decisionH1", "ok", False),
+                                  ("decisionEssential", "refused", False),
+                                  ("decisionEssential", "dropInWritten", True),
+                                  ("deadApplyAdopted", "ok", False),
+                                  ("decision153Unjudged", "targetHeld", True),
+                                  ("deadJudgedActive", "ok", False),
+                                  ("lateEssentialTrigger", "ok", False),
+                                  ("essentialHostTrigger", "ok", False),
+                                  ("fullApplyFixing", "ok", False)):
+            rec = green("conv")
+            rec[key][field] = value
+            self.assertRejected("conv-debian-13", rec)
+        # A13 review round 12: each new falsifier red for its own reason.
+        # The order decides, not the start: a service that started after
+        # the release (what the product does with an adopted unit) is not
+        # the falsifier's red, and one never started is not either.
+        rec = red_record("mutdeadhold")
+        rec["deadApplyAdopted"].update({"serviceActiveAt": 170.0,
+                                        "serviceStartedBeforeCheck": False,
+                                        "serviceStartedBeforeRelease": False})
+        self.assertRejected("mutdeadhold-debian-13", rec)
+        rec = red_record("mutdeadhold")
+        rec["deadApplyAdopted"].update({"serviceActiveAt": -1.0,
+                                        "serviceStartedBeforeRelease": False})
+        self.assertRejected("mutdeadhold-debian-13", rec)
+        rec = red_record("mutdeadhold")
+        rec["deadApplyAdopted"]["checkBeganAt"] = -1.0
+        self.assertRejected("mutdeadhold-debian-13", rec)
+        # The timestamps decide, not the gate's boolean (round 13, L5): a
+        # service that ran after the release is not the falsifier's red
+        # even if the boolean says otherwise.
+        rec = red_record("mutdeadhold")
+        rec["deadApplyAdopted"].update({"serviceActiveAt": 170.0,
+                                        "serviceStartedBeforeRelease": True})
+        self.assertRejected("mutdeadhold-debian-13", rec)
+        # And a product record with the mutation's order is not green.
+        rec = green("conv")
+        rec["deadApplyAdopted"].update({"serviceActiveAt": 118.4,
+                                        "serviceStartedBeforeRelease": True})
+        self.assertRejected("conv-debian-13", rec)
+        rec = red_record("mutfullfix")
+        rec["fullApplyFixing"]["recordLeft"] = "eth-r11-sock.socket"
+        self.assertRejected("mutfullfix-debian-13", rec)
+        rec = red_record("mutfullfix")
+        rec["fullApplyFixing"]["exit"] = 1
+        self.assertRejected("mutfullfix-debian-13", rec)
+        rec = red_record("mutlateess")
+        rec["lateEssentialTrigger"]["sshdSocketBefore"] = "loaded"
+        self.assertRejected("mutlateess-debian-13", rec)
+        rec = red_record("mutlateess")
+        rec["lateEssentialTrigger"]["exit"] = 1
+        self.assertRejected("mutlateess-debian-13", rec)
+        rec = red_record("mutdeadactive")
+        rec["deadJudgedActive"]["exit"] = 1
+        self.assertRejected("mutdeadactive-debian-13", rec)
+        rec = red_record("mutdeadactive")
+        rec["deadJudgedActive"]["before"] = "inactive"
+        self.assertRejected("mutdeadactive-debian-13", rec)
+        # The staging must hold: neither the service nor the socket active.
+        rec = red_record("mutdeadactive")
+        rec["deadJudgedActive"]["staged"] = "active"
+        self.assertRejected("mutdeadactive-debian-13", rec)
+        # A product record whose service ran before the release is not green.
+        rec = green("conv")
+        rec["deadJudgedActive"]["serviceActiveAt"] = 303.0
+        self.assertRejected("conv-debian-13", rec)
+        rec = red_record("mutbootblock")
+        rec["bootQueuedRestart"]["queued"] = True
+        self.assertRejected("mutbootblock-debian-13", rec)
+        rec = red_record("mutbootblock")
+        rec["bootQueuedRestart"]["recordAfterBoot"] = "a13r10.socket"
+        self.assertRejected("mutbootblock-debian-13", rec)
+        for key in ("fixingSwitch", "dependantsBlock", "bootQueuedRestart"):
+            rec = green("adopt")
+            rec[key]["ok"] = False
+            self.assertRejected("adopt-debian-13", rec)
+        # L6: the unjudged-requirer falsifier needs its step's own evidence.
+        rec = red_record("mutunjudgedreq")
+        rec["decision153Unjudged"] = {"reported": False, "heldInEtc": True,
+                                      "active": "inactive"}
+        self.assertRejected("mutunjudgedreq-debian-13", rec)
         # §13 decision 153 extended: red because the unjudged requirer was
         # released, with the judged one held and the premise measured.
         rec = red_record("mutunjudgedreq")

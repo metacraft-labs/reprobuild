@@ -232,6 +232,9 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       check deferred.argv[9].endsWith("run-build")
 
     test "monitor-wrapped direct actions defer runtime paths":
+      ## The monitor is told to set the loader path for the command alone
+      ## (`--payload-env`), before its own `--`; no shell is put between the
+      ## monitor and the command, and the command's argv is unchanged.
       let argv = @[
         "/opt/repro/bin/repro", "internal", "io", "monitor",
         "--depfile", "/tmp/action.iomon", "--",
@@ -242,19 +245,42 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       let deferred = deferRuntimeLibraryEnvForShell(argv, env)
       check envValue(deferred.env, "LD_LIBRARY_PATH") == ""
       check envValue(deferred.env, "PATH") == "/usr/bin"
-      check deferred.argv[0 .. 6] == argv[0 .. 6]
-      when defined(macosx):
-        check deferred.argv[7] == resolveNonSipShell()
-        check deferred.argv[7].len > 0
-        check deferred.argv[7] != "/bin/sh"
-      else:
-        check deferred.argv[7] == "/bin/sh"
-      check deferred.argv[8] == "-c"
-      check deferred.argv[9].startsWith(
-        "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
-      check deferred.argv[9].endsWith("exec \"$@\"")
-      check deferred.argv[10] == "sh"
-      check deferred.argv[11 .. ^1] == argv[7 .. ^1]
+      check deferred.argv == argv[0 .. 5] &
+        @["--payload-env=LD_LIBRARY_PATH=/source/sqlite/lib"] & argv[6 .. ^1]
+      for arg in deferred.argv:
+        check arg != "/bin/sh"
+        check not arg.contains("exec \"$@\"")
+      # What `repro internal io monitor` makes of it: the assignment, and
+      # io-mon's own arguments exactly as they were.
+      let taken = takeMonitorPayloadEnv(deferred.argv[4 .. ^1])
+      check taken.env == @[("LD_LIBRARY_PATH", "/source/sqlite/lib")]
+      check taken.rest == argv[4 .. ^1]
+
+    test "the monitor takes payload assignments only before its own `--`":
+      ## An argument of the COMMAND that happens to read like the flag is
+      ## the command's, and a malformed assignment is left for io-mon's
+      ## parser to refuse rather than dropped.
+      let args = @["--payload-env=A=1", "--depfile", "/tmp/d",
+        "--payload-env=B=x=y", "--payload-env==v", "--payload-env=noeq",
+        "--", "/bin/prog", "--payload-env=C=3", "--"]
+      let taken = takeMonitorPayloadEnv(args)
+      check taken.env == @[("A", "1"), ("B", "x=y")]
+      check taken.rest == @["--depfile", "/tmp/d", "--payload-env==v",
+        "--payload-env=noeq", "--", "/bin/prog", "--payload-env=C=3", "--"]
+
+    test "a payload assignment carries any value unchanged":
+      ## The value travels as one argv word, so spaces, newlines, quotes
+      ## and further `=` need no quoting and reach the command as they were.
+      let value = "/a b/lib:/c\nd'e\"f=g$HOME"
+      let argv = @[
+        "/opt/repro/bin/repro", "internal", "io", "monitor",
+        "--depfile", "/tmp/action.iomon", "--", "/bin/prog", "x"
+      ]
+      let deferred = deferRuntimeLibraryEnvForShell(argv,
+        @["LD_LIBRARY_PATH=" & value, "PATH=/usr/bin"])
+      let taken = takeMonitorPayloadEnv(deferred.argv[4 .. ^1])
+      check taken.env == @[("LD_LIBRARY_PATH", value)]
+      check taken.rest == argv[4 .. ^1]
 
     test "the runtime-env splice goes in front of a payload that has its own `--`":
       ## THE THIRD CONSUMER OF `monitorPayloadArgIndex`, and the one nothing
@@ -265,9 +291,10 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       ## from the wrapper's first argument to the FIRST one — the grammar
       ## io-mon's own `parseRun` applies. Two consumers of the corrected index
       ## were covered by `t_executed_binary_is_a_recorded_input` (the class-1
-      ## elision and the key mix). This is the third: it decides which SLICE of
-      ## a monitored argv the `export LD_LIBRARY_PATH=…` shell is spliced in
-      ## front of, so the repair moved a LOADER-PATH behaviour as well as an
+      ## elision and the key mix). This is the third: it decides where in a
+      ## monitored argv the `--payload-env=LD_LIBRARY_PATH=…` assignment goes
+      ## (it used to be an `export …; exec "$@"` shell spliced in front of
+      ## the payload), so the repair moved a LOADER-PATH behaviour as well as an
       ## attribution one — and nothing graded that consumer, in either
       ## direction. Restoring the old backwards scan reddens these two cases
       ## and no other case in this file.
@@ -280,11 +307,10 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       ## WHAT THE WRONG INDEX DOES, which is why the assertion is on the
       ## SPLICE POSITION and not on a returned number. Pointed at the argument
       ## after the PAYLOAD's separator, `wrapMonitoredPayloadWithRuntimeEnv`
-      ## copies `… -- /usr/bin/env runner --` through verbatim and puts the
-      ## exporting shell after it. The action then runs `/usr/bin/env runner`
-      ## — the program whose libraries the export exists for — with the loader
-      ## paths still absent, and hands it a `/bin/sh -c 'export …; exec "$@"'`
-      ## as a positional argument. The deferral silently applies to the wrong
+      ## copies `… -- /usr/bin/env runner` through verbatim and puts the
+      ## assignment after it. The action then runs `/usr/bin/env runner` — the
+      ## program whose libraries it exists for — with the loader paths still
+      ## absent, and hands it `--payload-env=…` as a positional argument. The deferral silently applies to the wrong
       ## program, and the symptom is a load failure inside the tool rather
       ## than anything that names this function.
       let payload = @["/usr/bin/env", "runner", "--", "/data/input.txt"]
@@ -302,26 +328,18 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       let deferred = deferRuntimeLibraryEnvForShell(argv, env)
       check envValue(deferred.env, "LD_LIBRARY_PATH") == ""
       check envValue(deferred.env, "PATH") == "/usr/bin"
-      # Everything up to and including the WRAPPER's separator is untouched ...
-      check deferred.argv[0 ..< wrapper.len] == wrapper
-      # ... the exporting shell is spliced immediately after it ...
-      when defined(macosx):
-        check deferred.argv[wrapper.len] == resolveNonSipShell()
-        check deferred.argv[wrapper.len] != "/bin/sh"
-      else:
-        check deferred.argv[wrapper.len] == "/bin/sh"
-      check deferred.argv[wrapper.len + 1] == "-c"
-      check deferred.argv[wrapper.len + 2].startsWith(
-        "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
-      check deferred.argv[wrapper.len + 2].endsWith("exec \"$@\"")
-      check deferred.argv[wrapper.len + 3] == "sh"
-      # ... and the WHOLE payload, its own `--` included, sits under that
-      # shell. This is the assertion the old backwards scan fails: it would
-      # put `/usr/bin/env runner --` before the shell and only
-      # `/data/input.txt` after it.
-      check deferred.argv[wrapper.len + 4 .. ^1] == payload
-      check deferred.argv[wrapper.len + 4] == "/usr/bin/env"
-      check deferred.argv.len == argv.len + 4
+      # Everything before the WRAPPER's separator is untouched ...
+      check deferred.argv[0 ..< wrapper.len - 1] == wrapper[0 ..< ^1]
+      # ... the assignment goes immediately before that separator ...
+      check deferred.argv[wrapper.len - 1] ==
+        "--payload-env=LD_LIBRARY_PATH=/source/sqlite/lib"
+      check deferred.argv[wrapper.len] == "--"
+      # ... and the WHOLE payload, its own `--` included, follows it. This
+      # is the assertion the old backwards scan fails: it would put the
+      # assignment after `/usr/bin/env runner --`, as an argument of the
+      # command.
+      check deferred.argv[wrapper.len + 1 .. ^1] == payload
+      check deferred.argv.len == argv.len + 1
 
     test "the StringTable launcher splices at the same index":
       ## `deferRuntimeLibraryEnvForShell` has TWO overloads and they ask
@@ -342,16 +360,11 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
       check not table.hasKey("LD_LIBRARY_PATH")
       check table["PATH"] == "/usr/bin"
-      check deferredArgv[0 ..< wrapper.len] == wrapper
-      when defined(macosx):
-        check deferredArgv[wrapper.len] == resolveNonSipShell()
-        check deferredArgv[wrapper.len] != "/bin/sh"
-      else:
-        check deferredArgv[wrapper.len] == "/bin/sh"
-      check deferredArgv[wrapper.len + 1] == "-c"
-      check deferredArgv[wrapper.len + 2].contains(
-        "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
-      check deferredArgv[wrapper.len + 4 .. ^1] == payload
+      check deferredArgv[0 ..< wrapper.len - 1] == wrapper[0 ..< ^1]
+      check deferredArgv[wrapper.len - 1] ==
+        "--payload-env=LD_LIBRARY_PATH=/source/sqlite/lib"
+      check deferredArgv[wrapper.len] == "--"
+      check deferredArgv[wrapper.len + 1 .. ^1] == payload
 
     test "non-shell actions retain runtime paths in their environment":
       let argv = @["/usr/bin/cc", "input.c"]
@@ -380,17 +393,8 @@ suite "DSL-port M9.R.14e.3 — engine threads aux search-path channels onto acti
       table["LD_LIBRARY_PATH"] = "/source/sqlite/lib"
       let deferredArgv = deferRuntimeLibraryEnvForShell(argv, table)
       check not table.hasKey("LD_LIBRARY_PATH")
-      when defined(macosx):
-        check deferredArgv[7] == resolveNonSipShell()
-        check deferredArgv[7].len > 0
-        check deferredArgv[7] != "/bin/sh"
-      else:
-        check deferredArgv[7] == "/bin/sh"
-      check deferredArgv[8] == "-c"
-      check deferredArgv[9].contains(
-        "export LD_LIBRARY_PATH=/source/sqlite/lib; ")
-      check deferredArgv[9].endsWith("exec \"$@\"")
-      check deferredArgv[11] == "/usr/bin/cmake"
+      check deferredArgv == argv[0 .. 5] &
+        @["--payload-env=LD_LIBRARY_PATH=/source/sqlite/lib"] & argv[6 .. ^1]
 
   test "multiple deps' paths concatenate in order":
     # Two distinct from-source deps each contribute a pkgconfig dir.

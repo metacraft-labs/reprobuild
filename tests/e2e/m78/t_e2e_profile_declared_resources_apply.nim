@@ -188,16 +188,16 @@ suite "M78 gate: e2e_profile_declared_resources_apply":
         check r1.exitCode == 0
         check r1.output.contains("applied generation ")
 
-        # The managed block is written with its repro-managed sentinels.
+        # The managed block is written with its repro:home: sentinels.
         check fileExists(profileRc)
         let profileRcContent = readFile(profileRc)
-        check profileRcContent.contains("repro-managed:" & ProfileBlockId)
+        check profileRcContent.contains("repro:home:" & ProfileBlockId)
         check profileRcContent.contains(ProfileBlockBody)
 
         # The `when windows:` resource materialized on this Windows host.
         check fileExists(windowsRc)
         let windowsRcContent = readFile(windowsRc)
-        check windowsRcContent.contains("repro-managed:" & WindowsBlockId)
+        check windowsRcContent.contains("repro:home:" & WindowsBlockId)
         check windowsRcContent.contains(WindowsBlockBody)
 
         # The `when linux:` resource is absent under the non-matching
@@ -242,8 +242,8 @@ suite "M78 gate: e2e_profile_declared_resources_apply":
         # ---- Deliberate drift on a declared resource -> EDrift ----
         # Edit the managed block BODY (between sentinels) out-of-band.
         let driftOrig = readFile(profileRc)
-        let openS = "# >>> repro-managed:" & ProfileBlockId & " >>>"
-        let closeS = "# <<< repro-managed:" & ProfileBlockId & " <<<"
+        let openS = "# >>> repro:home:" & ProfileBlockId & " >>>"
+        let closeS = "# <<< repro:home:" & ProfileBlockId & " <<<"
         let openIdx = driftOrig.find(openS)
         let closeIdx = driftOrig.find(closeS)
         check openIdx >= 0

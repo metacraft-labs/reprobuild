@@ -16,10 +16,11 @@
     git-hooks.follows = "nixos-modules/git-hooks-nix";
     # `bundlers` is the official NixOS bundler collection (the same set
     # `nix bundle --bundler github:NixOS/bundlers#toArx` reaches for). We
-    # only consume its `toArx` bundler (nix-community/nix-bundle under the
-    # hood) to package the full `reprobuild` store closure into ONE
-    # self-extracting, relocatable executable (see `packages.repro-portable`
-    # below). Follow our nixpkgs so the bundler's arx/nix-user-chroot helper
+    # consume only the nix-community/nix-bundle source it locks
+    # (`bundlers.inputs.nix-bundle`), whose arx and nix-user-chroot pieces
+    # package the full `reprobuild` store closure into ONE self-extracting,
+    # relocatable executable (see `packages.repro-portable` below and
+    # nix/repro-portable/package.nix). Follow our nixpkgs so those helper
     # tools share the fleet's package set rather than pulling a second one.
     bundlers = {
       url = "github:NixOS/bundlers";
@@ -378,7 +379,25 @@
       # The range also carries Linux fixes (wordexp/pidfd_spawn process starts,
       # an uninjectable /bin/sh under system/popen reported as a loss, a
       # refusal to build the shim against a non-glibc libc).
-      url = "github:metacraft-labs/io-mon/30d85793e891c1a80859d52a9eb197b42d56752c";
+      # Bumped 30d85793 -> 73572696 (2026-11-16, io-mon `agents`): io-mon
+      # accepts a sealed table of each image's inline syscall sites
+      # (`io_mon/inline_site_table`, `FsSnoopRequest.inlineSiteTables`), so the
+      # engine computes a compiler image's sites once per build instead of
+      # every monitored process decoding it again. The range also builds the
+      # debug shim at the stated -O level and injects native ARM64 children on
+      # Windows on Arm.
+      # Bumped 73572696 -> efe6dc5b (2026-11-19, io-mon `agents`): io-mon's
+      # command line is a clispec description (`io_mon/cli_description`,
+      # parsed by `io_mon/cli`), which repro mounts under `repro debug io
+      # monitor` and `repro internal io monitor`; this revision is the first
+      # that has it, so the engine does not build against an older pin. The
+      # range also keys the macOS EndpointSecurity subtree view on the audit
+      # token and fences the capture (ae0bf6f).
+      # Bumped efe6dc5b -> 8b8faa81 (2026-11-19, io-mon `agents`): the
+      # mountable description uses nim-cli-spec's `cliUnbound` instead of a
+      # copy of its own, so it needs nim-cli-spec fcd5b30 (`clispec/splice`),
+      # the revision this flake pins.
+      url = "github:metacraft-labs/io-mon/8b8faa81bb0cad5d2d91fae80ceaaa7092782ec2";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -434,7 +453,20 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/a9684dfc1e659af309acf646915dbfe400896b65";
+      url = "github:metacraft-labs/nim-cli-spec/fcd5b309c2cb38656d8d2c3b39a7c4e72b5dfb3a";
+      flake = false;
+    };
+    nim-entrypoints-src = {
+      # nim-entrypoints ships the ``entrypoints`` package: the declarative
+      # description of a program's entry points (and what each one reads from
+      # its environment) that repro's command line is being moved onto. It is a
+      # leaf library needing only the standard library; the ``compat/`` shims
+      # in that repository are not part of the pin. config.nims reads
+      # ENTRYPOINTS_SRC (after a ``../nim-entrypoints`` sibling); the sandboxed
+      # package build + override-free CI jobs have no sibling, so seed it from
+      # here, exactly like nim-cli-spec-src. Keep this URL, flake.lock,
+      # repro.lock and .github/sibling-repos aligned.
+      url = "github:metacraft-labs/nim-entrypoints/8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
       flake = false;
     };
     nim-confutils-src = {
@@ -442,12 +474,13 @@
       # ``confutils/clispec_config``: confutils instantiated over a clispec
       # description. repro's own command line is such a description
       # (``repro_cli_support/cli_program``), so the engine compile imports it.
-      # Only the clispec bridge and its layers are imported, which need no
-      # serialization library; the package root (no ``src/``) is the import
-      # path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
+      # The clispec bridge and its layers are imported, and the TOML adapter
+      # (``confutils/layers/toml_source``), through which the configuration
+      # writers validate a whole file (it needs ``toml_serialization``,
+      # vendored here); the package root (no ``src/``) is the import path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/1a60f8c08d877e7f8e1d18f2cc84aad741c2facb";
+      url = "github:metacraft-labs/nim-confutils/ffd5d9a6cf8481b2e696be3704f14b315a10aed9";
       flake = false;
     };
     nimcrypto-src = {
@@ -574,7 +607,10 @@
       # promotion merge, now the tip of both `dev` and `agents`. Its tree is
       # identical to c1d55ce, but a checkout synced to either branch is at this
       # commit, and the engine refuses a placed sibling off its pin.
-      url = "github:metacraft-labs/nim-stackable-hooks/d715806424e8373708494913e59a48237978cc2a";
+      # Bumped d715806 -> c34e325 (2026-11-16) with io-mon-src: io-mon
+      # 73572696 is built against it; it makes the raw syscall entries safe
+      # for CLONE_VM clones.
+      url = "github:metacraft-labs/nim-stackable-hooks/c34e3252d413361a0f250d8921e00c119d30e114";
       flake = false;
     };
     reprobuild-ct-test-runner-src = {
@@ -906,8 +942,32 @@
     # pipes only on fd 0, 1 and 2 and its own children inherit no further
     # copies; a grandchild that outlives the child no longer delays the
     # parent's end-of-file.
+    #
+    # Advanced from bb0e8943 to c47c55d1: the compiler starts a C compile,
+    # assembly or link without `/bin/sh -c` when the command needs no shell
+    # (`compiler/shellfreeexec.nim`), so a compile no longer reads the host's
+    # `/bin/sh` and its libraries, which a monitored compile recorded as
+    # inputs that another machine's shell does not match. Riding along
+    # (bb0e8943..93793d47): `std/osproc` closes the child's pipes and reaps
+    # it when a start fails, frees the clone child's stack by its base
+    # pointer, and retries the error-pipe read and `waitpid` on EINTR.
+    #
+    # Advanced from c47c55d1 to 4a8c0b82: `staticExec` and `gorgeEx` start a
+    # command made of plain and quoted words, or `cd <absolute dir> &&
+    # [exec] <plain command>`, without `/bin/sh -c`, so a recipe compile
+    # whose macros run a command at compile time no longer reads the host's
+    # shell either. A program that cannot be started now reports the shell's
+    # exit code (127 or 126) for the compiler's own commands too. One
+    # commit, in compiler/gorgeimpl.nim and compiler/shellfreeexec.nim plus
+    # their tests.
+    #
+    # Advanced from 4a8c0b82 to fde9384c, which carries it: `std/net` `send`
+    # returns after a swallowed disconnect (no spin on a reset peer) and
+    # resumes a short write at the written offset (upstream bb85d2dda5,
+    # e2b2142a49; reprobuild-pm issue
+    # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=bb0e894367a94b6bcf4ce0b2ee666a4d9cbe1654";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
       flake = false;
     };
     nim-csources-src = {
@@ -992,7 +1052,7 @@
     # `--override-input reprobuild-nix-packages-src git+file:<checkout>`.
     # Move the pin when the catalog's records change.
     reprobuild-nix-packages-src = {
-      url = "github:metacraft-labs/reprobuild-nix-packages/bb14c2e1b25e50be320261bea93400263f2deeb5";
+      url = "github:metacraft-labs/reprobuild-nix-packages/c6f6f509316d4b789d0e64a346d2d4bb3271e12d";
       flake = false;
     };
 
@@ -1031,6 +1091,7 @@
       nim-shm-gset-src,
       nim-shm-queue-src,
       nim-cli-spec-src,
+      nim-entrypoints-src,
       nim-confutils-src,
       nim-fork-src,
       nim-csources-src,
@@ -1045,7 +1106,7 @@
       ...
     }:
     let
-      # The Nix helper library (milestone GM5; docs/user-guide/nix-helper-library.md),
+      # The Nix helper library (milestone GM5; docs/users/content/reference/nix-library.md),
       # exported as `lib` and tested by the `lib-*` checks below.
       # System-independent: the IFD derivation of `readIntent` is built for
       # whichever system the CALLER names as the evaluator (`buildSystem`),
@@ -1265,6 +1326,7 @@
               (row "SHM_GSET_SRC" "nim-shm-gset-src" "/src")
               (row "SHM_QUEUE_SRC" "nim-shm-queue-src" "/src")
               (row "CLI_SPEC_SRC" "nim-cli-spec-src" "/src")
+              (row "ENTRYPOINTS_SRC" "nim-entrypoints-src" "/src")
               (row "CONFUTILS_SRC" "nim-confutils-src" "")
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
@@ -1510,6 +1572,7 @@
                 export SHM_GSET_SRC=${nim-shm-gset-src}/src
                 export SHM_QUEUE_SRC=${nim-shm-queue-src}/src
                 export CLI_SPEC_SRC=${nim-cli-spec-src}/src
+                export ENTRYPOINTS_SRC=${nim-entrypoints-src}/src
                 export CONFUTILS_SRC=${nim-confutils-src}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
@@ -1636,6 +1699,7 @@
               shmGsetSrc = nim-shm-gset-src;
               shmQueueSrc = nim-shm-queue-src;
               cliSpecSrc = nim-cli-spec-src;
+              entrypointsSrc = nim-entrypoints-src;
               confutilsSrc = nim-confutils-src;
               codetracerSrc = codetracer-src;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
@@ -1792,6 +1856,7 @@
                 SHM_GSET_SRC|${nim-shm-gset-src}/src
                 SHM_QUEUE_SRC|${nim-shm-queue-src}/src
                 CLI_SPEC_SRC|${nim-cli-spec-src}/src
+                ENTRYPOINTS_SRC|${nim-entrypoints-src}/src
                 CONFUTILS_SRC|${nim-confutils-src}
                 CODETRACER_PINNED_SRC|${codetracer-src}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
@@ -2023,6 +2088,7 @@
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
                                       ${nim-cli-spec-src} \
+                                      ${nim-entrypoints-src} \
                                       ${nim-confutils-src} \
                                       ${codetracer-src} \
                                       ${reprobuild-ct-test-runner-src} \
@@ -2090,22 +2156,27 @@
           #    load). A dlopen-by-baked-abs-path solver cannot be statically
           #    linked, and clingo/openssl/blake3/sqlite would all have to be
           #    static too. So a true static binary is infeasible here.
-          #  * The `toArx` bundler embeds the whole closure and, at run time,
-          #    uses `nix-user-chroot` to expose the extracted store at the
-          #    real `/nix/store` inside a user namespace. That makes every
-          #    baked `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen
-          #    path resolve WITHOUT a real `/nix/store` on the host. It
-          #    requires unprivileged user namespaces (default on the target
-          #    Debian image).
+          #  * The bundle embeds the whole closure and, at run time, uses
+          #    `nix-user-chroot` to expose the extracted store at the real
+          #    `/nix/store` inside a user namespace. That makes every baked
+          #    `/nix/store/...` rpath, PT_INTERP, and the clingo dlopen path
+          #    resolve WITHOUT a real `/nix/store` on the host. It requires
+          #    unprivileged user namespaces (default on the target Debian
+          #    image).
           #
-          # This is the same machinery as `nix bundle --bundler
-          # github:NixOS/bundlers#toArx .#reprobuild`, wired as a first-class
-          # package output so callers can just `nix build .#repro-portable`.
-          # The bundler keys off `meta.mainProgram` ("repro"), so the produced
-          # executable launches the single `repro` image from the extracted
-          # closure. It ADDS to — and does not
-          # disturb — `packages.default`/`packages.reprobuild` or `just build`.
-          reproPortable = bundlers.bundlers.${system}.toArx reprobuild;
+          # This is the machinery behind `nix bundle --bundler
+          # github:NixOS/bundlers#toArx .#reprobuild`, but NOT the stock
+          # bundler: that one's nix-user-chroot hid /bin (so every `/bin/sh`
+          # spawn failed), started repro in `/` instead of the caller's
+          # directory, and emptied PATH. nix/repro-portable/package.nix
+          # assembles the same arx + nix-user-chroot pieces with those fixed;
+          # `checks.repro-portable-host-root` proves it against a host root
+          # without /nix. It ADDS to — and does not disturb —
+          # `packages.default`/`packages.reprobuild` or `just build`.
+          reproPortable = pkgs.callPackage ./nix/repro-portable/package.nix {
+            inherit reprobuild;
+            nix-bundle-src = bundlers.inputs.nix-bundle;
+          };
 
           # The language toolchains the Mode 2/3 convention tests drive --
           # `libs/repro_standard_provider/tests/test_<lang>_*_convention` and
@@ -2505,6 +2576,55 @@
               brewIntentModule = brewFixtureHomeManagerModule;
               root = ./.;
             };
+            # The user reference page of the library and the module
+            # (docs/users/content/reference/nix-library.md) names every
+            # public function of the library with its arguments, and its
+            # options region is what the module declares
+            # (nix/tests/lib-reference.nix). The build fails listing each
+            # difference; `nix eval --raw .#checks.<system>.lib-reference.render`
+            # prints the options region to paste. A control run against the
+            # page with one option deleted must fail too.
+            lib-reference =
+              let
+                result = import ./nix/tests/lib-reference.nix {
+                  inherit (pkgs) lib;
+                  inherit reprobuildLib;
+                  intentOptions =
+                    (inputs.nixos-modules.inputs.home-manager-unstable.lib.homeManagerConfiguration {
+                      inherit pkgs;
+                      modules = [
+                        intentHomeManagerModule
+                        {
+                          home = {
+                            username = "reference";
+                            homeDirectory = if pkgs.stdenv.isDarwin then "/Users/reference" else "/home/reference";
+                            stateVersion = "25.05";
+                          };
+                        }
+                      ];
+                    }).options.reprobuild.intent;
+                  pageText = builtins.readFile ./docs/users/content/reference/nix-library.md;
+                };
+                problems =
+                  result.failures
+                  ++ pkgs.lib.optional (result.controlFailures == [ ])
+                    "the control (the page without option ${result.controlOption}) passed, so the check proves nothing"
+                  ++ pkgs.lib.optional (reprobuildLib ? resolveRealizationSource && result.sourceControlFailures == [ ])
+                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing";
+              in
+              pkgs.runCommand "reprobuild-lib-reference"
+                {
+                  problems = builtins.concatStringsSep "\n" problems;
+                  passthru = { inherit (result) render; };
+                }
+                ''
+                  if [ -n "$problems" ]; then
+                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library:" >&2
+                    printf '%s\n' "$problems" | sed 's/^/  - /' >&2
+                    exit 1
+                  fi
+                  echo ok > $out
+                '';
             # readIntent's IFD mode: the packaged `repro` exports the fixture
             # profiles inside the build sandbox, on the EVALUATOR's system
             # (`builtins.currentSystem` under `--impure`, else this check's
@@ -2541,6 +2661,18 @@
             packaged-runquota-runtime-wrapper = pkgs.callPackage ./nix/tests-runquota-runtime-wrapper.nix {
               inherit reprobuild runquotaTools;
             };
+            # The portable bundle, run on a host-shaped root with NO /nix
+            # (merged-/usr, busybox + static git, as on a Debian runner image):
+            # repro must spawn `/bin/sh`, start in the caller's directory, and
+            # carry a real `hooks ensure` + `git checkout` round trip. The
+            # stock nix-user-chroot is the negative control and must fail all
+            # four. Linux only, like the bundle. It builds the full ~800 MB
+            # archive; run it alone with
+            # `nix build .#checks.x86_64-linux.repro-portable-host-root`.
+            ${if pkgs.stdenv.hostPlatform.isLinux then "repro-portable-host-root" else null} =
+              pkgs.callPackage ./nix/tests/repro-portable-host-root.nix {
+                inherit reproPortable;
+              };
             repo-requirements =
               pkgs.runCommand "reprobuild-repo-requirements" { nativeBuildInputs = [ pkgs.just ]; }
                 ''
@@ -2638,6 +2770,7 @@
             SHM_GSET_SRC = "${nim-shm-gset-src}/src";
             SHM_QUEUE_SRC = "${nim-shm-queue-src}/src";
             CLI_SPEC_SRC = "${nim-cli-spec-src}/src";
+            ENTRYPOINTS_SRC = "${nim-entrypoints-src}/src";
             CONFUTILS_SRC = "${nim-confutils-src}";
             # Kernel UAPI syscall tables for the CONF-3 lease-floor derivation
             # (scripts/derive_lease_floor_syscalls.py); NixOS has no /usr/include.

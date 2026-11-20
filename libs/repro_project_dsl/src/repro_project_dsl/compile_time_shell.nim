@@ -50,6 +50,20 @@
 ## The Windows branch is unchanged and still names a shell, because there
 ## ``staticExec`` executes the program DIRECTLY — there is no implicit shell,
 ## so a composed command line has to supply one.
+##
+## ## No shell at all, with the pinned compiler
+##
+## The implicit ``/bin/sh`` described above is upstream Nim's. The Nim
+## compiler reprobuild pins (the ``metacraft-labs/nim`` fork the package
+## ships) starts a ``staticExec`` / ``gorgeEx`` command without a shell when
+## it is plain and quoted words, or ``cd <absolute dir> && [exec] <plain
+## words>`` (``compiler/shellfreeexec.nim`` there), so for those commands no
+## shell runs either. That matters beyond ``PATH``: a recipe compile runs
+## under the filesystem monitor, and a shell it starts puts the host's
+## ``/bin/sh`` and its libraries among the compile's recorded inputs, so a
+## bundle restored on a machine whose ``/bin/sh`` is another program
+## recompiles it. Every command built here is therefore kept plain: the
+## composition above, and `compilerWritabilityProbe`.
 
 import std/[compilesettings, os, strutils]
 
@@ -62,6 +76,17 @@ proc compileTimeShellCommand*(workDir: string; command: string): string =
   ## ``cd`` is a shell builtin and ``exec`` is a shell keyword, both handled by
   ## the ``/bin/sh`` that ``staticExec`` starts anyway. That is the property
   ## `t_macro_time_shell_out_needs_no_shell_on_the_path.nim` pins.
+  ##
+  ## On POSIX the result is ``cd <workDir> && exec <command>``, and when
+  ## ``command`` is made of plain and quoted words (as every caller's is: an
+  ## absolute compiler path and ``quoteShell``ed arguments), the pinned Nim
+  ## compiler runs it with no shell at all: it starts ``command`` in
+  ## ``workDir`` directly (``directCommand`` in the compiler's
+  ## ``shellfreeexec``). The shell would make the host's ``/bin/sh`` and its
+  ## libraries inputs of the recipe compile, which a machine with another
+  ## ``/bin/sh`` does not have, so keep ``command`` plain: a ``$``, a
+  ## redirection or any other shell syntax in it sends the whole line to
+  ## ``/bin/sh`` again (`t_recipe_compiles_do_not_record_the_host_shell`).
   if workDir.len == 0:
     return command
   when defined(windows):
@@ -69,6 +94,51 @@ proc compileTimeShellCommand*(workDir: string; command: string): string =
       quoteShell("cd /d " & quoteShell(workDir) & " && " & command)
   else:
     "cd " & quoteShell(workDir) & " && exec " & command
+
+proc compileTimeCommand*(argv: openArray[string]): string =
+  ## ``argv`` as a command line for a compile-time ``staticExec``: each word
+  ## ``quoteShell``ed, so the line is plain and quoted words that mean
+  ## exactly ``argv``, which the pinned compiler starts without a shell (see
+  ## the module header). Build every ``staticExec`` command that runs one
+  ## program this way rather than by hand: a word quoted by hand that holds
+  ## a ``$`` or a backslash, or an unquoted one with a space, sends the line
+  ## to ``/bin/sh``, or changes what it runs.
+  for i, word in argv:
+    if i > 0: result.add(' ')
+    result.add(quoteShell(word))
+
+const WritabilityProbeName = ".reprobuild-write-probe"
+
+proc compilerWritabilityProbe*(nimExe, dir: string): string =
+  ## A command that prints ``REPRO_RW`` when a new entry can be created in
+  ## the existing directory ``dir``, for a compile-time ``staticExec``, run
+  ## by the compiler ``nimExe`` itself (``getCurrentCompilerExe()``) and no
+  ## other program: it evaluates ``mkDir`` and ``rmDir`` of a probe entry in
+  ## ``dir`` as NimScript and then ``echo``es. A refused ``mkDir`` ends the
+  ## evaluation with an error, and nothing is printed.
+  ##
+  ## Why the compiler. The probe must not name a program that has to be
+  ## found on ``PATH`` (a compile action's ``PATH`` has none of ``test`` or
+  ## ``sh``), and it must not need a shell: ``test -w`` is a builtin, and
+  ## the shell that runs it puts the host's ``/bin/sh`` and its libraries
+  ## among the inputs the monitor records for the recipe compile. A
+  ## compile-time macro cannot try the creation itself: the Nim VM runs
+  ## ``os.createDir`` as a compiler callback whose ``OSError`` escapes the
+  ## VM's ``try``. NimScript's ``mkDir`` raises inside the evaluation, which
+  ## is a process of its own here, so a refusal costs that process only.
+  ##
+  ## The command is plain words, so the pinned compiler starts it without a
+  ## shell (`compileTimeShellCommand`). The configuration files a user or a
+  ## project directory would add are skipped (``--skipUserCfg``,
+  ## ``--skipParentCfg``, ``--skipProjCfg``): the evaluation reads the
+  ## compiler's own files and nothing else. Two probes of one directory at
+  ## once are harmless: ``mkDir`` of an existing directory and ``rmDir`` of a
+  ## missing one both succeed.
+  let probe = dir / WritabilityProbeName
+  let script = "mkDir(" & escape(probe) & "); rmDir(" & escape(probe) &
+    "); echo \"REPRO_RW\""
+  quoteShell(nimExe) & " --hints:off --warnings:off --colors:off " &
+    "--skipUserCfg --skipParentCfg --skipProjCfg --eval:" & quoteShell(script)
 
 # ---------------------------------------------------------------------------
 # Did ``staticExec`` run at all?

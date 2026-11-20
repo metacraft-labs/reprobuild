@@ -91,6 +91,14 @@ proc newBench(): Bench =
 proc source(b: Bench; certs: seq[string] = @[]): CapturedTpm2Source =
   newCapturedTpm2Source(b.attestPath, b.signaturePath, b.logPath, certs)
 
+proc capturedDriver(src: Tpm2Source): Tpm2Driver =
+  ## A driver configured for the registers the pinned quote covers
+  ## (``AgileQuotePcrs``, sha256:0-7). The driver's DEFAULT is PCRs 0-15,
+  ## which this recording does not cover, so a default driver refuses it
+  ## — the last case of "a quote over a register set this driver did not
+  ## configure is refused" shows exactly that.
+  newTpm2Driver(src, pcrSelection(TpmAlgSha256, AgileQuotePcrs))
+
 proc noActionEntry(payloadLen: int): string =
   ## A well-formed crypto-agile ``EV_NO_ACTION`` entry for the four banks
   ## this log declares.
@@ -126,7 +134,7 @@ suite "the tpm2 driver's identity is not its own to choose":
   test "the backend is tpm2 and the tier follows from it":
     let b = newBench()
     defer: removeDir(b.dir)
-    let d = newTpm2Driver(source(b))
+    let d = capturedDriver(source(b))
     check d.backend == abTpm2
     check d.tier == atTpm
     check d.tier == tierOf(abTpm2)
@@ -177,7 +185,7 @@ suite "the tpm2 driver probes without consuming a quote":
     defer: removeDir(b.dir)
     removeFile(b.attestPath)
     removeFile(b.logPath)
-    let readiness = newTpm2Driver(source(b)).driverProbe()
+    let readiness = capturedDriver(source(b)).driverProbe()
     check not readiness.ready
     # The paths, not merely the fact that something is absent: an
     # operator reading "not ready" would go looking for them.
@@ -188,7 +196,7 @@ suite "the tpm2 driver probes without consuming a quote":
   test "a machine with all three is ready, and names them":
     let b = newBench()
     defer: removeDir(b.dir)
-    let readiness = newTpm2Driver(source(b)).driverProbe()
+    let readiness = capturedDriver(source(b)).driverProbe()
     check readiness.ready
     check b.attestPath in readiness.detail
     check b.signaturePath in readiness.detail
@@ -199,7 +207,7 @@ suite "the tpm2 driver composes evidence that joins up":
   test "acquireQuote returns a composite carrying all three artifacts":
     let b = newBench()
     defer: removeDir(b.dir)
-    let d = newTpm2Driver(source(b))
+    let d = capturedDriver(source(b))
     let res = acquireQuote(d, agileQuoteQualifying())
 
     let ev = parseTpm2Evidence(res.evidence)
@@ -220,14 +228,14 @@ suite "the tpm2 driver composes evidence that joins up":
   test "a machine holding no chain returns none, not an empty sequence":
     let b = newBench()
     defer: removeDir(b.dir)
-    check acquireQuote(newTpm2Driver(source(b)),
+    check acquireQuote(capturedDriver(source(b)),
                        agileQuoteQualifying()).certificates.isNone
 
   test "a machine holding a chain returns it":
     let b = newBench()
     defer: removeDir(b.dir)
     writeFile(b.certPath, "\x30\x82not-a-real-certificate")
-    let res = acquireQuote(newTpm2Driver(source(b, @[b.certPath])),
+    let res = acquireQuote(capturedDriver(source(b, @[b.certPath])),
                            agileQuoteQualifying())
     check res.certificates.isSome
     check res.certificates.get == @["\x30\x82not-a-real-certificate"]
@@ -242,7 +250,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     let other = flipByte(agileQuoteQualifying(), 0)
     check other.len == ReportDataSize
     let msg = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), other))
+      discard acquireQuote(capturedDriver(source(b)), other))
     check "the quote binds" in msg
     check AgileQuoteQualifyingHex in msg
     check bytesToHex(other) in msg
@@ -250,7 +258,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
   test "the seam refuses a request that is not 64 bytes, before the driver runs":
     let b = newBench()
     defer: removeDir(b.dir)
-    let d = newTpm2Driver(source(b))
+    let d = capturedDriver(source(b))
     check "the discipline binds exactly 64" in driverRefusal(proc () =
       discard acquireQuote(d, agileQuoteQualifying()[0 ..< 63]))
     check "the discipline binds exactly 64" in driverRefusal(proc () =
@@ -276,11 +284,28 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     check configured == @[0, 1, 2, 3, 4, 5, 6]
 
     var byDefault: seq[int] = @[]
-    for e in selectedPcrs(newTpm2Driver(source(b)).quotedSelection()):
+    let defaultDriver = newTpm2Driver(source(b))
+    for e in selectedPcrs(defaultDriver.quotedSelection()):
       check e.bank == DefaultQuotedPcrBank
       byDefault.add e.index
     check byDefault == @DefaultQuotedPcrs
-    check byDefault == @[0, 1, 2, 3, 4, 5, 6, 7]
+    # By value, and against the specification rather than the constant:
+    # Remote-Attestation §4.3 (TPM, check 1) has the verifier require the
+    # quote to cover every PCR it examines, PCRs 0-15. A default of 0-7
+    # left out register 11, and the verifier refused every report the
+    # agent produced (reprobuild-pm issue
+    # 2026-11-17-tpm-agent-default-quote-selection-omits-pcr-11).
+    check byDefault == @[0, 1, 2, 3, 4, 5, 6, 7,
+                         8, 9, 10, 11, 12, 13, 14, 15]
+    check DefaultQuotedPcrBank == TpmAlgSha256
+
+    # And a default driver refuses this recording, which covers only
+    # sha256:0-7 — a quote that does not answer for register 11 is not
+    # accepted by narrowing what the driver asked for.
+    let defaultMsg = driverRefusal(proc () =
+      discard acquireQuote(defaultDriver, agileQuoteQualifying()))
+    check "configured to quote 16" in defaultMsg
+    check "the quote covers 8" in defaultMsg
 
     let msg = driverRefusal(proc () =
       discard acquireQuote(narrow, agileQuoteQualifying()))
@@ -289,7 +314,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     # A different BANK is the same refusal: a SHA-1 selection is not the
     # SHA-256 one even over the same register numbers.
     let wrongBank = newTpm2Driver(source(b),
-                                  pcrSelection(TpmAlgSha1, DefaultQuotedPcrs))
+                                  pcrSelection(TpmAlgSha1, AgileQuotePcrs))
     check "the quote covers" in driverRefusal(proc () =
       discard acquireQuote(wrongBank, agileQuoteQualifying()))
 
@@ -302,7 +327,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     defer: removeDir(b.dir)
     writeFile(b.logPath, legacyLog())
     let msg = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "cannot answer for its own quote" in msg
     check "carries no sha256 bank" in msg
 
@@ -314,7 +339,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     writeFile(b.logPath,
               flipByte(agileLog(), sha256DigestOffsetOfEntry1(agileLog())))
     let msg = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "does not reproduce the register digest" in msg
     check "cannot answer" notin msg
 
@@ -323,7 +348,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     defer: removeDir(b.dir)
     writeFile(b.logPath, repeat('\xFF', 64))
     let msg = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "the event log does not decode" in msg
     check "driver tpm2" in msg
 
@@ -332,7 +357,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     defer: removeDir(b.dir)
     writeFile(b.attestPath, repeat('\x00', agileQuoteAttest().len))
     let msg = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "the quote does not decode" in msg
     check "driver tpm2" in msg
 
@@ -357,7 +382,7 @@ suite "the tpm2 driver refuses evidence that answers a different question":
                                           agileQuoteSignature()))
 
     let msg = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "the report envelope carries at most" in msg
     check $MaxTpm2EvidenceBytes in msg
     check $padded.len in msg
@@ -367,12 +392,12 @@ suite "the tpm2 driver refuses evidence that answers a different question":
     defer: removeDir(b.dir)
     removeFile(b.signaturePath)
     let missing = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "does not exist" in missing
     check b.signaturePath in missing
     check "driver tpm2" in missing
     writeFile(b.signaturePath, "")
     let empty = driverRefusal(proc () =
-      discard acquireQuote(newTpm2Driver(source(b)), agileQuoteQualifying()))
+      discard acquireQuote(capturedDriver(source(b)), agileQuoteQualifying()))
     check "is empty" in empty
     check "driver tpm2" in empty

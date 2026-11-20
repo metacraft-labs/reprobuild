@@ -25,7 +25,7 @@
 ## No mocks; no subprocesses. Platforms: every host (the evaluation targets
 ## are named, not the host's).
 
-import std/[algorithm, json, os, sequtils, unittest]
+import std/[algorithm, json, options, os, sequtils, unittest]
 
 import repro_home_intent
 import repro_profile_compile
@@ -44,11 +44,17 @@ suite "GM5: shared built-in predicate fixtures":
     systems.sort()
     known.sort()
     check systems == known
-    let evaluations = doc["evaluations"].getElems
+    let all = doc["evaluations"].getElems
+    # A refused evaluation has no `holdsOn` (see README).
+    let evaluations = all.filterIt(it.hasKey("holdsOn"))
     check evaluations.anyIt(it["holdsOn"].len == 0)
     check evaluations.anyIt(it["holdsOn"].len == systems.len)
     check evaluations.anyIt(it["holdsOn"].len > 0 and
       it["holdsOn"].len < systems.len)
+    # The `nixos` fact: stated true, stated false, and unstated (refused).
+    check all.anyIt(it.hasKey("nixos") and it["nixos"].getBool)
+    check all.anyIt(it.hasKey("nixos") and not it["nixos"].getBool)
+    check all.anyIt(it.hasKey("refused") and it["refused"].getBool)
     let rejections = doc["rejections"].getElems
     check rejections.anyIt(it["error"].getStr == "unknown-identifier")
     check rejections.anyIt(it["error"].getStr == "invalid")
@@ -58,14 +64,32 @@ suite "GM5: shared built-in predicate fixtures":
     for evaluation in doc["evaluations"]:
       let source = evaluation["predicate"].getStr
       let host = evaluation["host"].getStr
+      # `nixos` is stated by the case, or left unstated (README).
+      let nixos =
+        if evaluation.hasKey("nixos"): some(evaluation["nixos"].getBool)
+        else: none(bool)
+      let refused = evaluation.hasKey("refused") and
+        evaluation["refused"].getBool
       let ast = validateBuiltinPredicate(source)
       var holds: seq[string]
       for system in doc["systems"]:
         let index = findTargetPlatform(system.getStr)
         check index >= 0
-        let ctx = targetHostContext(ProfileTargetPlatforms[index], host)
-        if predicateHolds(ast, ctx):
+        let ctx = targetHostContext(ProfileTargetPlatforms[index], host, nixos)
+        if refused:
+          # Refused on EVERY system, never read as false.
+          var raised = false
+          try:
+            discard predicateHolds(ast, ctx)
+          except EFactNotStated:
+            raised = true
+          checkpoint(repr(source) & " @ " & system.getStr &
+            " must be refused: the nixos fact is not stated")
+          check raised
+        elif predicateHolds(ast, ctx):
           holds.add system.getStr
+      if refused:
+        continue
       holds.sort()
       var expected = evaluation["holdsOn"].getElems.mapIt(it.getStr)
       expected.sort()

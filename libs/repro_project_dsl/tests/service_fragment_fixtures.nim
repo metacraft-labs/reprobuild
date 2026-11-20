@@ -34,7 +34,7 @@ package ssoFragmentPkg:
   build:
     ssoConfig = renderConfigFile(ConfigPath,
       "issuer = \"" &
-        readConfigurable[string]("ssoFragmentPkg.issuer") & "\"\n",
+        readConfigurable[string]("package.ssoFragmentPkg.issuer") & "\"\n",
       actionId = RenderConfigActionId)
     ssoSteps = renderConfigFile(StepsPath,
       "FirstInstance:\n  Org:\n    Name: dev\n",

@@ -96,7 +96,15 @@ proc repoDirExists(path: string): bool = dirExists(repoPath(path))
 switch("styleCheck", "hint")
 
 if defined(windows):
-  switch("define", "sslVersion=3-x64")
+  # Nim's std/openssl loads libssl-<sslVersion>.dll by name. The suffix is the
+  # Windows architecture OpenSSL was built for (reprobuild-pm
+  # Distribution-And-Packaging.md §7.1, W4): x64 on the x64 leg, arm64 on
+  # windows-aarch64, matching windows/toolchain-utils.ps1's
+  # Get-WindowsArchRuntimeNames.
+  if defined(arm64):
+    switch("define", "sslVersion=3-arm64")
+  else:
+    switch("define", "sslVersion=3-x64")
 
 
 
@@ -440,6 +448,12 @@ for libName in [
   "repro_depfile",
   "repro_project_dsl",
   "repro_dsl_stdlib",
+  # The canonical recipe import surface (`import reprobuild`,
+  # `reprobuild/dsl[/<module>]`, `reprobuild/home`, `reprobuild/system`):
+  # thin re-export modules over the two libraries above and `repro_profile`.
+  # Exposed through `--path` like every other library -- never through
+  # `--import:`, which Nim applies to every module of a compilation.
+  "reprobuild",
   "repro_home_intent",
   "repro_system_apply",
   "repro_profile",
@@ -530,6 +544,25 @@ for libName in [
   # types. M2b-M2e extend it with the ASP encoder; downstream libs
   # import it via ``import repro_solver`` once the encoder is alive.
   "repro_solver",
+  # Nimble package catalog NPC-M2: the static `.nimble` reader and the
+  # translation of Nimble requirements into the solver's constraint language.
+  # Depends on `repro_solver/version_constraints` only (no clingo), so the
+  # catalog generator and develop mode can read a `.nimble` without loading
+  # the solver.
+  "repro_nimble_reader",
+  # Nimble package catalog NPC-M3: reading a Nimble index by hash (root, then
+  # only the shards a closure touches), the solver-facing candidates with
+  # their per-version requirements, and the deterministic index writer. The
+  # objects' codec is `repro_domain_types/nimble_index`.
+  "repro_nimble_index",
+  # Nimble package catalog NPC-M4: the index generator -- the source set
+  # reader, the origin egress policy, the fetch (`netFetch`) and pure index
+  # edges, origin events and `repro catalog verify`.
+  "repro_nimble_generator",
+  # Nimble package catalog NPC-M5: the source plane's client -- mirrors, the
+  # lockfile-keyed closure index, the `nimble.fetch` (`netFetch`) edges, the
+  # confined archive extractor and the local source store.
+  "repro_nimble_fetch",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import
@@ -913,11 +946,37 @@ proc pinnedSiblingRevision(sibling: string): string =
         return line[at + sep.len .. ^1].strip()
   return ""
 
+const RepositorySelectingGitVariables = ["GIT_DIR", "GIT_WORK_TREE",
+  "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
+  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX"]
+
 proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
   ## `gorgeEx` runs relative to the script's directory, not the process's, so
   ## the sibling's checkout is named absolutely.
-  gorgeEx("git -C " & quoteShell(repoPath(siblingCheckout(sibling))) & " " &
-    args)
+  ##
+  ## A git hook exports the variables that select THIS repository
+  ## (`GIT_DIR`, `GIT_INDEX_FILE`, ...), and `git -C` does not override
+  ## them: under the pre-commit `just lint`, `rev-parse HEAD` answered
+  ## reprobuild's own HEAD for every sibling, and `merge-base` looked for
+  ## the sibling's pinned commit in reprobuild's object store, where a
+  ## partial clone lazily fetched it from the shared pool for minutes per
+  ## sibling (measured 2026-11-18). They are cleared for the probe and
+  ## restored after it. `GIT_NO_LAZY_FETCH=1`: a probe never fetches; a pin
+  ## the sibling does not have locally is a sibling that is not ahead of it.
+  var saved: seq[(string, string)] = @[]
+  for name in RepositorySelectingGitVariables:
+    if existsEnv(name):
+      saved.add((name, getEnv(name)))
+      delEnv(name)
+  let hadNoLazyFetch = existsEnv("GIT_NO_LAZY_FETCH")
+  let noLazyFetch = getEnv("GIT_NO_LAZY_FETCH")
+  putEnv("GIT_NO_LAZY_FETCH", "1")
+  result = gorgeEx("git -C " & quoteShell(repoPath(siblingCheckout(sibling))) &
+    " " & args)
+  if hadNoLazyFetch: putEnv("GIT_NO_LAZY_FETCH", noLazyFetch)
+  else: delEnv("GIT_NO_LAZY_FETCH")
+  for (name, value) in saved:
+    putEnv(name, value)
 
 proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ## Sibling-first, but never silently against an explicit pin.
@@ -986,11 +1045,19 @@ addSiblingFirstPackagePath(".." / "nim-shm-gset" / "src", "SHM_GSET_SRC",
 # the ``../nim-cli-spec`` checkout, else the ``$CLI_SPEC_SRC`` pin.
 addSiblingFirstPackagePath(".." / "nim-cli-spec" / "src", "CLI_SPEC_SRC",
   "clispec.nim")
+# entrypoints: the declarative description of a program's entry points. A leaf
+# library (standard library only), rooted at its ``src/``. Same sibling-first
+# policy: the ``../nim-entrypoints`` checkout, else the ``$ENTRYPOINTS_SRC`` pin.
+addSiblingFirstPackagePath(".." / "nim-entrypoints" / "src", "ENTRYPOINTS_SRC",
+  "entrypoints.nim")
 # confutils (the metacraft-labs fork): ``confutils/clispec_config`` is how
 # repro's own command line is instantiated from its clispec description
 # (``repro_cli_support/cli_program``). The package is rooted at the checkout
-# (no ``src/``), and only the clispec bridge is imported, so none of
-# confutils' serialization dependencies are needed. Same policy: the
+# (no ``src/``). Two of its modules are imported: the clispec bridge, and
+# ``confutils/layers/toml_source``, the TOML adapter the configuration
+# writers validate a whole file through
+# (``repro_dsl_stdlib/generated_config/described``), which needs
+# ``toml_serialization``, vendored here (above). Same policy: the
 # ``../nim-confutils`` checkout, else the ``$CONFUTILS_SRC`` pin.
 addSiblingFirstPackagePath(".." / "nim-confutils", "CONFUTILS_SRC",
   "confutils.nim")
@@ -1553,9 +1620,14 @@ when not defined(windows):
     # rpath. `scripts/build_apps.sh` refuses the same fallbacks.
     let nixPackageBuild = getEnv("NIX_BUILD_TOP").len > 0 and
       getEnv("IN_NIX_SHELL").len == 0
-    if dir.len == 0 and nixPackageBuild and
+    # Only a `-d:ssl` link needs the OpenSSL this block finds, so only a
+    # `-d:ssl` compile refuses to guess one. Any other compile run by a process
+    # with a builder's environment -- the packaged `repro` compiling a home
+    # profile in a `runCommand` (`reprobuildFacts`, `readIntent`'s IFD mode) --
+    # is not a package build, adds no `-L`, and needs none.
+    if dir.len == 0 and nixPackageBuild and defined(ssl) and
         not (ambientOpensslOnly):
-      quit("config.nims: a Nix package build found no OpenSSL in " &
+      quit("config.nims: a Nix package build of a `-d:ssl` target found no OpenSSL in " &
         "OPENSSL_LIBDIR, OPENSSL_PREFIX or NIX_LDFLAGS; refusing the Homebrew " &
         "and /nix/store glob fallbacks (they would put a host path in the " &
         "package's rpath). Set OPENSSL_LIBDIR in the derivation's env.")

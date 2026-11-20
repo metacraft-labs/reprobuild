@@ -69,6 +69,7 @@ import blake3
 import repro_core
 from repro_core/source_root import resolveReprobuildSourceRoot
 import repro_core/file_lock
+from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_hash
 import repro_build_engine
 from repro_local_store import FileFingerprintPolicy, ffpHybrid
@@ -79,6 +80,17 @@ import repro_profile_intent/envelope as profile_envelope
 import ./sources
 import ./compile
 import ./platforms
+# The helpers' command lines are declared in repro's description; only
+# their spellings are read here, at compile time.
+from repro_cli_support/cli_description import reproLongFlags
+
+const
+  CompileProfileFlags = reproLongFlags(@["internal", "compile-profile"])
+    ## The long spelling of each flag of `repro internal compile-profile`.
+  ProbeProfilePlatformsFlags =
+    reproLongFlags(@["internal", "probe-profile-platforms"])
+    ## The long spelling of each flag of `repro internal
+    ## probe-profile-platforms`.
 
 # ---------------------------------------------------------------------------
 # Public types.
@@ -409,7 +421,7 @@ proc profileRunWeakFingerprint*(intentPath: string): ContentDigest =
 # variables, the rule the single edge applied to the profile binary's reads.
 # ---------------------------------------------------------------------------
 
-const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
+const ProfileCompileScratchEnvNames* = ScratchLocationEnvNames
   ## Variables that only choose where the compile's disposable files go.
   ## `nim` and the C toolchain read them (io-mon records the reads), and an
   ## observed read is keyed on its VALUE. `nix develop` gives every shell a
@@ -419,6 +431,8 @@ const ProfileCompileScratchEnvNames* = ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]
   ## they are keyed by name only (`actionEnvironmentKeyText`) and dropped from
   ## the observed-environment key (`cacheEnvInputs`), exactly as the provider
   ## compile treats them (`ProviderCompileEnvironmentPassthrough`).
+  ## The list itself is `repro_core/scratch_env.ScratchLocationEnvNames`,
+  ## shared with that compile and with the standard library's `nim.c` edge.
   ##
   ## The cost of the rule: a profile whose INTENT embeds its temp directory
   ## (`getTempDir()` in a resource's content) would be served the intent of
@@ -468,16 +482,18 @@ proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
   ##
   ## Entropy: blessed exactly as the provider compile is (see the section
   ## comment above).
+  # The helper's command line in the words the CLI's generated parser reads
+  # back to these values: each value attached to its declared flag.
   var argv = @[
     publicCliPath,
-    "__repro-compile-profile",
-    "--profile", profileRoot,
-    "--binary", binaryPath,
-    "--nimcache", nimcacheDir,
-    "--repo-root", repoRoot
+    "internal", "compile-profile",
+    CompileProfileFlags.profile & "=" & profileRoot,
+    CompileProfileFlags.binary & "=" & binaryPath,
+    CompileProfileFlags.nimcache & "=" & nimcacheDir,
+    CompileProfileFlags.repoRoot & "=" & repoRoot
   ]
   if verbose:
-    argv.add("--verbose")
+    argv.add(CompileProfileFlags.verbose)
   let cwd =
     if workDir.len > 0: workDir
     else: profileRoot.parentDir
@@ -955,11 +971,11 @@ proc profilePlatformProbeBuildAction*(absProfile, outPath, scratch,
   ## `__repro-probe-profile-platforms` helper, writing `outPath`.
   let argv = @[
     publicCliPath,
-    "__repro-probe-profile-platforms",
-    "--profile", absProfile,
-    "--out", outPath,
-    "--nimcache", scratch,
-    "--repo-root", repoRoot
+    "internal", "probe-profile-platforms",
+    ProbeProfilePlatformsFlags.profile & "=" & absProfile,
+    ProbeProfilePlatformsFlags.`out` & "=" & outPath,
+    ProbeProfilePlatformsFlags.nimcache & "=" & scratch,
+    ProbeProfilePlatformsFlags.repoRoot & "=" & repoRoot
   ]
   let cwd =
     if workDir.len > 0: workDir

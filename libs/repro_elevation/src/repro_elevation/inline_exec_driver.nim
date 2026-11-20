@@ -21,12 +21,13 @@
 ##                                rendered through `auditArgvWithRedaction`
 ##                                so the substituted `@FILE:` contents
 ##                                never reach the log (spec §2.1).
-##   * `runInlineExecCall`      — the spawn shim. Platform-pure logic
-##                                under `when defined(linux/macosx)`
-##                                that calls `osproc.startProcess`;
-##                                `when defined(windows)` uses the same
-##                                primitive (the broker is already
-##                                elevated when this runs).
+##   * `runInlineExecCall`      — the spawn shim, through
+##                                `bounded_exec.runBoundedExec`: output to
+##                                a file, stdin from the null device, and a
+##                                deadline that kills the whole process
+##                                tree (`effectiveInlineExecTimeoutSeconds`).
+##                                The broker is already elevated when this
+##                                runs.
 ##
 ## Errors:
 ##   * a missing / unreadable `@FILE:<path>` raises `EProtocol(
@@ -34,13 +35,16 @@
 ##   * a spawn failure raises `EProtocol` with the OS reason.
 ##   * an exit code NOT in `iecAcceptExitCodes` raises `EProtocol`
 ##     with the captured stderr tail.
+##   * an action still running at its deadline has its process tree
+##     killed and raises `EProtocol` naming the deadline.
 
-import std/[osproc, streams, strtabs, strutils]
-from repro_core/process_streams import drainStream
-from repro_core/process_close import closeProcessOnce
+import std/[os, strtabs, strutils]
 
+import ./bounded_exec
 import ./errors
 import ./operations
+
+export bounded_exec
 
 type
   InlineExecCallOutcome* = object
@@ -107,21 +111,57 @@ proc inlineExecCallAuditDetail*(op: PrivilegedOperation;
   result = "spawned `" & safeArgv.join(" ") & "` -> exit " &
     $outcome.exitCode
 
-proc trimTail(s: string; maxLen: int): string =
-  if s.len <= maxLen:
-    return s
-  result = s[s.len - maxLen .. ^1]
+const
+  DefaultInlineExecTimeoutSeconds* = 16_200
+    ## 4 h 30 min: the deadline of an inline-exec action whose profile edge
+    ## declares no `timeoutSeconds`.
+    ##
+    ## Chosen against the longest step the production profile bounds itself:
+    ## win-ci-bare-001's Hyper-V golden rebuild, which carries its own
+    ## 240-minute guard (`vmHarnessGoldenBuildTimeoutMinutes`) and must be
+    ## allowed to reach it and clean up. A smaller default would kill that
+    ## step half way through its own recovery. The ceiling is the 5-hour
+    ## `ExecutionTimeLimit` of the DeployAgent task: past that, Task
+    ## Scheduler kills `repro.exe` alone and leaves the action's tree running,
+    ## which is the state this deadline exists to prevent. A profile that
+    ## knows its step is short says so with `timeoutSeconds`.
+  InlineExecTimeoutEnvVar* = "REPRO_APPLY_ACTION_TIMEOUT_SECONDS"
+    ## Replaces the default for every edge that declares no deadline of its
+    ## own. A value `<= 0` turns the default off (no deadline), the same
+    ## convention as `REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS`.
+
+proc effectiveInlineExecTimeoutSeconds*(op: PrivilegedOperation): int =
+  ## The deadline, in seconds, `runInlineExecCall` applies to ``op``; `0`
+  ## means none. The edge's own `iecTimeoutSeconds` wins, then
+  ## `REPRO_APPLY_ACTION_TIMEOUT_SECONDS`, then
+  ## `DefaultInlineExecTimeoutSeconds`.
+  if op.kind == pokInlineExecCall and op.iecTimeoutSeconds > 0:
+    return op.iecTimeoutSeconds
+  let raw = getEnv(InlineExecTimeoutEnvVar).strip()
+  if raw.len > 0:
+    try:
+      return max(0, parseInt(raw))
+    except ValueError:
+      discard
+  DefaultInlineExecTimeoutSeconds
 
 proc spawnInlineExecCall(argv: seq[string]; cwd: string;
-                         env: seq[string]): InlineExecCallOutcome =
-  ## The actual spawn. Pure delegation to `osproc.startProcess` — the
-  ## broker is already elevated when this runs, so the child inherits
-  ## the elevated token.
+                         env: seq[string];
+                         timeoutSeconds: int): BoundedExecOutcome =
+  ## The actual spawn, through `runBoundedExec`: stdout and stderr to a file,
+  ## stdin from the null device, and the whole process tree killed at the
+  ## deadline. The broker is already elevated when this runs, so the child
+  ## inherits the elevated token.
   ##
-  ## `env` is the `NAME=VALUE` list the operation carried; an empty
-  ## list means "inherit the broker's process environment unchanged"
-  ## (matches what the engine's non-elevated path does for an unset
-  ## per-edge `env` list).
+  ## Not a pipe, and that is the point. This used to be
+  ## `startProcess(..., {poStdErrToStdOut, poUsePath})`, a read of the merged
+  ## pipe and an unbounded `waitForExit`; on win-ci-bare-001 that held the
+  ## deploy agent for ~21 h. `bounded_exec` has the incident, and the two
+  ## ways a pipe holds the parent even when it is read to the end.
+  ##
+  ## `env` is the `NAME=VALUE` list the operation carried; an empty list means
+  ## "inherit the broker's process environment unchanged" (matches what the
+  ## engine's non-elevated path does for an unset per-edge `env` list).
   if argv.len == 0:
     raiseProtocol("reprobuild.inlineExecCall: empty argv after expansion")
   var envTable: StringTableRef = nil
@@ -133,43 +173,12 @@ proc spawnInlineExecCall(argv: seq[string]; cwd: string;
         raiseProtocol("reprobuild.inlineExecCall: malformed env entry '" &
           entry & "' (expected NAME=VALUE)")
       envTable[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
-  var process: Process
   try:
-    process = startProcess(
-      command = argv[0],
-      workingDir = cwd,
-      args = argv[1 .. ^1],
-      env = envTable,
-      options = {poStdErrToStdOut, poUsePath})
-  except OSError as e:
+    result = runBoundedExec(argv, cwd = cwd, env = envTable,
+      timeoutMs = timeoutSeconds * 1000,
+      tailBytes = MaxCapturedOutputTailBytes)
+  except BoundedExecError as e:
     raiseProtocol("reprobuild.inlineExecCall spawn failed: " & e.msg)
-  # Not `process.close()`: that closes the merged stdout/stderr descriptor
-  # twice on POSIX. This runs inside the build engine's elevated-exec broker
-  # hook, on the scheduler thread, possibly while the engine's worker pool is
-  # live; see `repro_core/process_close`.
-  defer: closeProcessOnce(process)
-  # Capture stdout (with stderr merged in) so the audit log keeps the
-  # last few KiB on a failure. Empty captures collapse to empty
-  # strings — a "well-behaved" elevated command logs to syslog /
-  # ApplyLog, not stdout.
-  #
-  # N51: drained to EOF, not to the first short read. The capture exists to
-  # put the elevated command's own words in the audit log on a failure, and
-  # `readAll` on Windows returns whatever one `ReadFile` yielded — measured at
-  # 5 bytes of a 409-byte diagnostic. A 5-byte audit record of a privileged
-  # failure is worse than none, because it reads as a complete one.
-  let stdoutStream = process.outputStream()
-  var captured = ""
-  if stdoutStream != nil:
-    try:
-      captured = drainStream(stdoutStream)
-    except IOError, OSError:
-      captured = ""
-  let exitCode = process.waitForExit()
-  result = InlineExecCallOutcome(
-    exitCode: exitCode,
-    stdoutTail: trimTail(captured, MaxCapturedOutputTailBytes),
-    stderrTail: "")
 
 proc runInlineExecCall*(op: PrivilegedOperation;
                         reader: ArgFileReader = defaultArgFileReader):
@@ -194,7 +203,17 @@ proc runInlineExecCall*(op: PrivilegedOperation;
   let cwd =
     if op.iecWorkingDirectory.len > 0: op.iecWorkingDirectory
     else: ""
-  let outcome = spawnInlineExecCall(argv, cwd, op.iecEnvironment)
+  let timeoutSeconds = effectiveInlineExecTimeoutSeconds(op)
+  let run = spawnInlineExecCall(argv, cwd, op.iecEnvironment, timeoutSeconds)
+  if run.timedOut:
+    raiseProtocol("reprobuild.inlineExecCall '" & op.address &
+      "' did not finish within its deadline of " & $timeoutSeconds &
+      " s and was stopped (" & run.killNote & "); the action failed and " &
+      "the next apply retries it; tail: " & run.outputTail)
+  let outcome = InlineExecCallOutcome(
+    exitCode: run.exitCode,
+    stdoutTail: run.outputTail,
+    stderrTail: "")
   let accept =
     if op.iecAcceptExitCodes.len == 0: @[0]
     else: op.iecAcceptExitCodes

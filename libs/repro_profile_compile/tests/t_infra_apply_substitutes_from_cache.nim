@@ -23,6 +23,17 @@
 ## a scratch file through ``REPRO_CACHES_CONFIG`` so the host's own
 ## ``/etc/repro/caches.conf`` (fleet hosts render one) cannot leak in.
 ##
+## Every edge these cases substitute or publish PINS ``expectedOutputDigest``
+## (``applyOnce`` pins the digest of the bytes the shell produces, computed
+## by running the same script in a scratch directory). An apply substitutes,
+## and a publishing apply publishes, only a digested edge (Binary-Caches.md
+## §"Publishing for a host that cannot build", "The entry key is an
+## address, not an identity of the inputs"; the last suite below protects
+## that rule). The digest is not part of the entry key, so pinning it leaves
+## every trust and publish case exactly as strong as before: an undigested
+## edge would build locally and publish nothing for a reason that is not the
+## one each case tests.
+##
 ## Cases:
 ##
 ##   1. M4 gate. A PUBLISHER (operator-supplied keypair A) builds and
@@ -49,13 +60,28 @@
 ##      missing, and the apply builds locally.
 ##   6. SYMLINK IN OUTPUTS. A publisher whose declared output tree holds a
 ##      symbolic link publishes nothing for that edge: a partial prefix
-##      must never leave the host.
+##      must never leave the host (the direct publish call names the link
+##      as the reason, so the refusal is the link's and not the digest
+##      rule's).
+##   7. STALE INPUTS (reprobuild-pm issues/2026-11-12-binary-cache-keys-
+##      for-build-action-edges-hash-the-declaration-not-the-inputs.md). An
+##      edge whose script reads a file its argv does not carry keeps its key
+##      when that file changes. A trusted entry built from input v1 sits
+##      under the key; a consumer whose input is v2 and whose edge pins no
+##      digest builds v2 locally. Positive control: the same edge pinning
+##      the v1 digest is substituted from that entry.
+##   8. PUBLISH RULE. An opted-in publisher publishes neither an undigested
+##      edge nor a digested edge whose built bytes are not the pinned ones.
+##      Positive control: the edge pinning its real digest is published.
 ##
 ## Non-vacuity: before this gate was amended the dispatcher substituted
 ## through ``SubstituteEndpoint(trustedSigners: @[])`` without
 ## ``enforceTrust`` and auto-generated a publisher keypair. Against that
 ## code case 2 and case 3 hit (an untrusted entry materialises) and case 4
 ## finds a generated key and a published manifest — each case fails.
+## Against reprobuild 0d9aa569b0, before the digest rule, case 7's consumer
+## substitutes the stale v1 outputs without running the shell and case 8's
+## publisher publishes the undigested and the mismatched edge.
 
 import std/[httpclient, os, osproc, net, random, strutils, tempfiles, unittest]
 
@@ -207,16 +233,53 @@ type
     cwd: string
     shellRan: bool
 
+proc producedDigest(action: ProfileBuildAction): string =
+  ## The `expectedOutputDigest` of what `action`'s argv produces: the script
+  ## is run, as the broker would run it, in a fresh scratch directory, and
+  ## its declared outputs are hashed with the apply's own
+  ## `localOutputsDigest` -- the number a producer pins from
+  ## `repro cache publish`. Not a constant in this file, so a change to the
+  ## archive format cannot leave a pin no build ever matches.
+  let scratch = createTempDir("m4-produced-digest-", "")
+  defer:
+    try: removeDir(scratch) except CatchableError: discard
+  var a = action
+  a.cwd = scratch
+  let p = startProcess(a.argv[0], workingDir = scratch, args = a.argv[1 .. ^1],
+                       options = {poStdErrToStdOut, poParentStreams})
+  let code = p.waitForExit()
+  p.close()
+  doAssert code == 0, "producing " & a.id & " exited " & $code
+  result = localOutputsDigest(a)
+  doAssert result.startsWith("blake3:"), "no digest for " & a.id
+
+var witnessDigestMemo = ""
+
+proc witnessDigest(): string =
+  ## The digest of `witnessShellAction`'s output, which is the same for
+  ## every id and cwd (the archive holds the output's path and bytes only).
+  if witnessDigestMemo.len == 0:
+    witnessDigestMemo = producedDigest(witnessShellAction("digest-probe",
+                                                          getTempDir()))
+  witnessDigestMemo
+
+proc digestedWitnessAction(id, cwd: string): ProfileBuildAction =
+  ## `witnessShellAction` pinning the digest of the bytes it builds: an edge
+  ## an apply may substitute and a publishing apply may publish.
+  result = witnessShellAction(id, cwd)
+  result.expectedOutputDigest = witnessDigest()
+
 proc applyOnce(root, tag, actionId: string): ApplyRun =
-  ## One apply of a single build-action edge in a FRESH cwd with a FRESH
-  ## engine cache root, so an engine-local action-cache hit is impossible
-  ## and only the binary cache can supply the output without a build.
+  ## One apply of a single digested build-action edge in a FRESH cwd with a
+  ## FRESH engine cache root, so an engine-local action-cache hit is
+  ## impossible and only the binary cache can supply the output without a
+  ## build.
   result.cwd = root / ("cwd-" & tag)
   let cacheRoot = root / ("engine-cache-" & tag)
   createDir(result.cwd); createDir(cacheRoot)
   let ctx = FixtureContext(filePrefix: root / ("ctx-" & tag))
   let disp = mkBuildActionDispatcher(cacheRoot, ctx)
-  let outs = disp(@[witnessShellAction(actionId, result.cwd)], nil)
+  let outs = disp(@[digestedWitnessAction(actionId, result.cwd)], nil)
   doAssert outs.len == 1, "dispatcher returned " & $outs.len & " outcomes"
   result.outcome = outs[0]
   if not result.outcome.ok:
@@ -379,6 +442,12 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         # into link-to-directory entries, so the prefix it published was
         # missing a subtree; a consumer substituted it cleanly and ran
         # without it. Now the whole edge is refused for publication.
+        #
+        # The edge pins a digest (only a digested edge is ever published),
+        # so what stops this publish is the link, which the direct call
+        # below confirms by its reason. No digest of a tree holding a link
+        # exists to pin; the stager refuses the tree before any digest is
+        # compared.
         let cwd = tmpRoot / "cwd-link"
         createDir(cwd)
         let action = ProfileBuildAction(
@@ -388,7 +457,8 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
             "ln -s ../real bin/lib; printf x > bin/tool"],
           cwd: cwd, outputs: @["bin"],
           commandStatsId: "m4.symlink.write",
-          requiresElevation: true, cacheable: true)
+          requiresElevation: true, cacheable: true,
+          expectedOutputDigest: "blake3:" & repeat('a', 64))
         let cacheRoot = tmpRoot / "engine-cache-link"
         createDir(cacheRoot)
         let disp = mkBuildActionDispatcher(cacheRoot,
@@ -400,6 +470,11 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         let entry = deriveCacheEntryKeyHex(buildActionCacheIdentity(
           action, ""))
         check not manifestPublished(url, entry)  # and nothing left the host
+        let direct = publishBuildActionOutputs(action,
+          resolveBuildActionCacheConfig(), tmpRoot / "direct-link")
+        check not direct.ok
+        check "symbolic link" in direct.reason
+        check not manifestPublished(url, entry)
 
   test "a publisher refuses to stage an output tree that contains a link to a file":
     when not (defined(linux) or defined(macosx)):
@@ -417,6 +492,7 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         # to a regular file outside the declared tree.
         let cwd = tmpRoot / "cwd-filelink"
         createDir(cwd)
+        # Digested for the same reason as the directory case above.
         let action = ProfileBuildAction(
           id: "filelink-edge",
           argv: @["/bin/sh", "-c",
@@ -424,7 +500,8 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
             "ln -s ../real/tool bin/tool; printf x > bin/other"],
           cwd: cwd, outputs: @["bin"],
           commandStatsId: "m4.filelink.write",
-          requiresElevation: true, cacheable: true)
+          requiresElevation: true, cacheable: true,
+          expectedOutputDigest: "blake3:" & repeat('a', 64))
         let cacheRoot = tmpRoot / "engine-cache-filelink"
         createDir(cacheRoot)
         let disp = mkBuildActionDispatcher(cacheRoot,
@@ -435,6 +512,10 @@ suite "M4 — repro infra apply substitutes build-action outputs from cache":
         check symlinkExists(cwd / "bin" / "tool")
         check not manifestPublished(url, deriveCacheEntryKeyHex(
           buildActionCacheIdentity(action, "")))
+        let direct = publishBuildActionOutputs(action,
+          resolveBuildActionCacheConfig(), tmpRoot / "direct-filelink")
+        check not direct.ok
+        check "symbolic link" in direct.reason
 
   test "a caches.conf that cannot be parsed configures no cache":
     when not (defined(linux) or defined(macosx)):
@@ -710,13 +791,18 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
         # The publisher declares the tree `bin` (the declared outputs are
         # part of the entry key, so the consumer below declares the same),
         # and the digest of that staged tree equals the file's: the staged
-        # archive is the same either way.
+        # archive is the same either way. The publisher pins it, since only
+        # a digested edge is published.
+        let pubDigest = producedDigest(pinnedAction("stray-edge",
+          getTempDir(), "", outputs = @["bin"]))
         let run1 = applyAction(tmpRoot, "pub",
-          pinnedAction("stray-edge", tmpRoot / "cwd-pub", "", outputs = @["bin"]))
+          pinnedAction("stray-edge", tmpRoot / "cwd-pub", pubDigest,
+                       outputs = @["bin"]))
         checkBuiltLocally(run1)
         let real = localOutputsDigest(pinnedAction("stray-edge", run1.cwd, "",
           outputs = @["bin"]))
         check real == localOutputsDigest(witnessShellAction("stray-edge", run1.cwd))
+        check real == pubDigest
         useConsumer(conf, url)
         let cwd = tmpRoot / "cwd-stray"
         let first = applyAction(tmpRoot, "s1",
@@ -743,3 +829,195 @@ suite "substitute-only edges: the profile pins the bytes, not the publisher":
                        outputs = @["bin"]))
         check third.outcome.ok
         check not third.outcome.substitutedFromCache
+
+# ---------------------------------------------------------------------------
+# The entry key is an address, not an identity of the inputs.
+#
+# reprobuild-pm issues/2026-11-12-binary-cache-keys-for-build-action-edges-
+# hash-the-declaration-not-the-inputs.md (review findings R10-03, R05-03):
+# `buildActionCacheIdentity` hashes the edge's declaration (id, argv,
+# cwd-relative outputs, tool refs, elevation, stats id) and nothing the edge
+# READS. An edge whose script reads a file outside its argv keeps the same
+# key when that file changes, so an apply that took any trusted entry under
+# the key served the first publisher's outputs to every host after the
+# input changed. Binary-Caches.md §"Publishing for a host that cannot build"
+# ("The entry key is an address, not an identity of the inputs", amended
+# 2026-11-15) decides it: an apply substitutes a build-action edge only when
+# the edge pins `expectedOutputDigest`, and a publishing apply publishes only
+# a digested edge whose built bytes are the pinned ones.
+# ---------------------------------------------------------------------------
+
+const InputRel = "input.txt"
+const DerivedRel = "bin/input-derived.dat"
+
+proc inputReadingAction(id, cwd: string): ProfileBuildAction =
+  ## An edge whose output is a copy of `input.txt`, a file its argv does not
+  ## name the content of: the script reads it by a cwd-RELATIVE path, so the
+  ## key is the same in every cwd and for every content of the input — the
+  ## shape of an infra edge that runs a config script over a file the
+  ## profile ships. The witness marks a real local run, as above.
+  ProfileBuildAction(
+    id: id,
+    argv: @["/bin/sh", "-c",
+      "mkdir -p bin; cat '" & InputRel & "' > '" & DerivedRel & "'; " &
+      "printf x >> '" & WitnessRel & "'"],
+    cwd: cwd,
+    outputs: @[DerivedRel],
+    commandStatsId: "m4.input.read",
+    requiresElevation: true,
+    cacheable: true)
+
+proc publishOutputsByHand(url: string; kp: Keypair;
+                          action: ProfileBuildAction; stage: string):
+    PublishInProcessResult =
+  ## Publish the outputs present under `action.cwd` under the edge's own key,
+  ## signed by `kp`: what a producer running `repro cache publish` with the
+  ## line `repro infra cache-keys` prints does. No digest is checked here.
+  createDir(stage)
+  for rel in outputRelPaths(action):
+    createDir(parentDir(stage / rel))
+    copyFileWithPermissions(action.cwd / rel, stage / rel)
+  let idy = buildActionCacheIdentity(action, "")
+  publishInProcess(PublishInProcessRequest(
+    entryKeyHex: deriveCacheEntryKeyHex(idy),
+    prefixDir: stage,
+    identity: idy,
+    endpoint: url,
+    keypair: peerAuth.loadOrGenerateKeypair(kp.certPath, kp.keyPath)))
+
+suite "the binary-cache key binds the declaration, not the inputs":
+
+  test "an edge whose inputs changed is not served the stale outputs under its unchanged key":
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-stale-input-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+
+        # The publisher host: input v1, an opted-in publisher apply.
+        let cwdPub = tmpRoot / "cwd-pub"
+        createDir(cwdPub)
+        writeFile(cwdPub / InputRel, "input v1")
+        usePublisher(conf, url, kpA)
+        let pub = applyAction(tmpRoot, "pub",
+          inputReadingAction("input-edge", cwdPub))
+        check pub.outcome.ok
+        check pub.shellRan
+        check readFile(cwdPub / DerivedRel) == "input v1"
+        # The input is not part of the key: the key the consumer below
+        # derives is this one.
+        let key = deriveCacheEntryKeyHex(buildActionCacheIdentity(
+          inputReadingAction("input-edge", cwdPub), ""))
+        # The stale entry must be in the cache, trusted, for the consumer
+        # step to test anything. The code this test was written against put
+        # it there itself (its publishing apply published every edge). A
+        # publishing apply no longer publishes an edge that pins no digest
+        # (next test), but a producer can still publish under the key that
+        # `repro infra cache-keys` prints, so the entry is put there by hand
+        # when the apply did not.
+        if not manifestPublished(url, key):
+          let res = publishOutputsByHand(url, kpA,
+            inputReadingAction("input-edge", cwdPub), tmpRoot / "stage-v1")
+          check res.ok
+        check manifestPublished(url, key)
+
+        # The consumer host: the input changed to v2, argv did not. It
+        # trusts the publisher's key and the cache serves an entry under the
+        # edge's key. It must build v2, not substitute v1.
+        let cwdCon = tmpRoot / "cwd-con"
+        createDir(cwdCon)
+        writeFile(cwdCon / InputRel, "input v2")
+        useConsumer(conf, url)
+        let con = applyAction(tmpRoot, "con",
+          inputReadingAction("input-edge", cwdCon))
+        check con.outcome.ok
+        check not con.outcome.substitutedFromCache
+        check not con.outcome.cacheHit
+        check con.shellRan
+        check readFile(cwdCon / DerivedRel) == "input v2"
+
+        # Positive control: the entry is servable and trusted. The same edge
+        # pinning the digest of the v1 bytes is substituted from it, so the
+        # local build above is the digest rule, not a missing or untrusted
+        # entry. (An edge that pins its bytes keeps them until re-pinned.)
+        let v1Digest = localOutputsDigest(
+          inputReadingAction("input-edge", cwdPub))
+        check v1Digest.startsWith("blake3:")
+        let cwdPin = tmpRoot / "cwd-pin"
+        createDir(cwdPin)
+        writeFile(cwdPin / InputRel, "input v2")
+        var pinned = inputReadingAction("input-edge", cwdPin)
+        pinned.expectedOutputDigest = v1Digest
+        let pin = applyAction(tmpRoot, "pin", pinned)
+        check pin.outcome.ok
+        check pin.outcome.substitutedFromCache
+        check not pin.shellRan
+        check readFile(cwdPin / DerivedRel) == "input v1"
+
+  test "a publishing apply publishes only an edge whose built bytes are the pinned ones":
+    when not (defined(linux) or defined(macosx)):
+      skip("POSIX shell action and cache server subprocess; no Windows arm")
+    else:
+      withCacheServer("m4-publish-rule-"):
+        let kpA = makeKeypair(tmpRoot / "key-a")
+        let conf = tmpRoot / "caches.conf"
+        writeCachesConf(conf, url, @[kpA.pubHex])
+        usePublisher(conf, url, kpA)
+        let key = entryKeyHexFor("publish-rule-edge")
+
+        # An edge that pins no digest: built, and not published. An entry
+        # under a key that binds no input would be taken by anything that
+        # substitutes on the key alone.
+        let undigested = applyAction(tmpRoot, "undigested",
+          witnessShellAction("publish-rule-edge", tmpRoot / "cwd-undigested"))
+        checkBuiltLocally(undigested)
+        check not manifestPublished(url, key)
+        let direct = publishBuildActionOutputs(
+          witnessShellAction("publish-rule-edge", undigested.cwd),
+          resolveBuildActionCacheConfig(), tmpRoot / "direct-undigested")
+        check not direct.ok
+        check "expectedOutputDigest" in direct.reason
+        check not manifestPublished(url, key)
+
+        # An edge that pins a digest its built bytes do not have: built (a
+        # non-substitute-only edge builds on a miss), and not published.
+        let wrong = "blake3:" & repeat('0', 64)
+        let mismatched = applyAction(tmpRoot, "mismatched",
+          pinnedAction("publish-rule-edge", tmpRoot / "cwd-mismatched", wrong))
+        checkBuiltLocally(mismatched)
+        check not manifestPublished(url, key)
+
+        # A pin with the tag and no hex is not a digest: the publisher's
+        # own check compares nothing against an empty pin, so this one is
+        # refused before anything is packed.
+        var emptyPin = witnessShellAction("publish-rule-edge",
+                                          mismatched.cwd)
+        emptyPin.expectedOutputDigest = "blake3:"
+        let emptyDirect = publishBuildActionOutputs(emptyPin,
+          resolveBuildActionCacheConfig(), tmpRoot / "direct-empty-pin")
+        check not emptyDirect.ok
+        check "blake3:<hex>" in emptyDirect.reason
+        check not manifestPublished(url, key)
+
+        # The one shared validator both publishers use: only the exact
+        # spelling the substitute side can match is a pin.
+        check isWellFormedDigestPin("blake3:" & repeat('a', 64))
+        check not isWellFormedDigestPin("")
+        check not isWellFormedDigestPin("blake3:")
+        check not isWellFormedDigestPin("blake3:" & repeat('A', 64))
+        check not isWellFormedDigestPin("blake3:" & repeat('a', 63))
+        check not isWellFormedDigestPin("blake3:" & repeat('a', 65))
+        check not isWellFormedDigestPin("blake3:" & repeat('g', 64))
+        check not isWellFormedDigestPin("sha256:" & repeat('a', 64))
+
+        # Positive control: the same edge pinning the digest of what it
+        # builds is published, so the probe above can see a publish.
+        let real = localOutputsDigest(
+          witnessShellAction("publish-rule-edge", undigested.cwd))
+        check real.startsWith("blake3:")
+        let matched = applyAction(tmpRoot, "matched",
+          pinnedAction("publish-rule-edge", tmpRoot / "cwd-matched", real))
+        checkBuiltLocally(matched)
+        check manifestPublished(url, key)

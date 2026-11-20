@@ -198,6 +198,13 @@ suite "the A11 code review's findings":
       check dirExists(member)
       check not fileExists(member / "usr/share/wedge/planted")
       check pass(none).refusals.len == 0
+      # A union that is not realised needs every member's archive, the
+      # published ones too: building it reads each postinst for the
+      # alternatives links (§8.3 item 4, "Alternatives").
+      check not debNeedsStaging(lock, lock.debs[0], store)
+      moveDir(union, union & ".aside")
+      check debNeedsStaging(lock, lock.debs[0], store)
+      moveDir(union & ".aside", union)
 
   test "2: every path renders the fetch unit the same":
     let exe = "/repro/store/prefixes/repro-addon/1-x/bin/repro"

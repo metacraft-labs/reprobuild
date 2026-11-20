@@ -14,16 +14,19 @@
 
 from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils]
-import blake3
 import repro_core/ambient_execution
 import repro_local_store/store
 when not defined(windows):
   import repro_local_store/store_bundle
+  import repro_bundle/select
+  import ./bundle_nim_pins
 
 type
   StoreBundleCliHooks* = object
     resolveActionCacheRoot*: proc (explicit: string): string
     allowProject*: proc (projectRoot: string): int
+    workspaceRootFor*: proc (startPath: string): string
+      ## The workspace enclosing a directory, or "" (for `--selection`).
 
   StoreBundleArgs* = object
     ## What `repro store closure|export|import` was given; each subcommand
@@ -40,6 +43,8 @@ type
     allowDevEnv*: bool            ## `--allow-dev-env`
     force*: bool                  ## `--force`
     bundleDir*: string            ## `import`'s bundle directory
+    selection*: string            ## `--selection`
+    workspaceRoot*: string        ## `--workspace-root`
 
 proc helpHint(sub: string): string =
   "; run `repro store " & sub & " --help` for its usage"
@@ -68,11 +73,6 @@ else:
       value > 0
     except ValueError:
       false
-
-  proc frozenScriptPath*(storeRoot, projectRoot: string): string =
-    ## `<store>/frozen-dev-env/<blake3(projectRoot)[0..31]>/activate.bash`.
-    storeRoot / FrozenDevEnvDirName /
-      blake3.digest(projectRoot).toHex()[0 ..< 32] / "activate.bash"
 
   proc shellQuote(value: string): string =
     "'" & value.replace("'", "'\\''") & "'"
@@ -124,15 +124,28 @@ else:
     writeFile(path, text)
     FrozenDevEnv(projectRoot: root, scriptPath: path)
 
-  proc closureJson(c: BundleClosure): JsonNode =
+  type SelectionInfo = object
+    selector: string
+    members: seq[string]
+
+  proc closureJson(c: BundleClosure; info: SelectionInfo): JsonNode =
     var skipped = newJArray()
     for s in c.skippedRecords:
       skipped.add(%*{"edge": s.edgeDir, "record": s.strongHex,
-        "reason": s.reason})
+        "kind": $s.kind, "reason": s.reason})
+    var records = newJArray()
+    for r in c.records:
+      records.add(%*{"edge": r.edgeDir, "record": r.strongHex,
+        "projectDir": r.outputRoot})
     %*{
+      "producer": {"version": c.producer.version,
+        "revision": c.producer.revision},
       "roots": {"storeRoot": c.roots.storeRoot,
         "actionCacheRoot": c.roots.actionCacheRoot,
         "workspaceRoots": %c.roots.workspaceRoots},
+      "selection": {"selector": info.selector, "members": %info.members,
+        "exclude": %c.selection.excluded, "include": %c.selection.included},
+      "carriedRecords": records,
       "edges": %c.edges,
       "records": c.records.len,
       "prefixes": %c.prefixes,
@@ -142,11 +155,18 @@ else:
       "skippedRecords": skipped
     }
 
-  proc printClosureText(c: BundleClosure) =
+  proc printClosureText(c: BundleClosure; info: SelectionInfo) =
     echo "store root:        " & c.roots.storeRoot
     echo "action-cache root: " & c.roots.actionCacheRoot
     for r in c.roots.workspaceRoots:
       echo "workspace root:    " & r
+    if info.selector.len > 0:
+      echo "selection:         " & info.selector & " (" &
+        info.members.join(", ") & ")"
+    for d in c.selection.excluded:
+      echo "  excluded:        " & d
+    for d in c.selection.included:
+      echo "  included:        " & d
     echo "edges:             " & $c.edges.len & " (" & $c.records.len &
       " re-witnessable records)"
     echo "store prefixes:    " & $c.prefixes.len
@@ -157,7 +177,7 @@ else:
     echo "restamped inputs:  " & $c.restamps.len
     for s in c.skippedRecords:
       echo "skipped record " & s.strongHex[0 ..< 16] & " in " &
-        s.edgeDir.extractFilename & ": " & s.reason
+        s.edgeDir.extractFilename & " (" & $s.kind & "): " & s.reason
 
   proc runStoreBundleCommand*(sub: string; a: StoreBundleArgs;
                               hooks: StoreBundleCliHooks): int =
@@ -169,13 +189,38 @@ else:
       return 2
     if a.zstdLevel.isSome: exportOpts.zstdLevel = a.zstdLevel.get
     if a.zstdThreads.isSome: exportOpts.zstdThreads = a.zstdThreads.get
-    let roots = a.roots
+    var roots = a.roots
     let freeze = a.freezeDevEnv
     let outDir = a.outDir
     let emitJson = a.emitJson
-    let local = BundleRoots(
-      storeRoot: resolveStoreRoot(a.storeRoot),
-      actionCacheRoot: hooks.resolveActionCacheRoot(a.actionCacheRoot),
+    var info = SelectionInfo(selector: a.selection)
+    var selection = BundleSelection()
+    let storeRoot = resolveStoreRoot(a.storeRoot)
+    let acRoot = hooks.resolveActionCacheRoot(a.actionCacheRoot)
+    try:
+      if a.selection.len > 0 and sub in ["closure", "export"]:
+        # The selection `repro bundle create` carries in its native half
+        # (docs/store-bundles.md, "A selection of the roots").
+        var ws = a.workspaceRoot
+        if ws.len == 0 and hooks.workspaceRootFor != nil:
+          ws = hooks.workspaceRootFor(getCurrentDir())
+        if ws.len == 0:
+          stderr.writeLine("repro store " & sub & ": --selection needs a " &
+            "workspace; run it inside one or pass --workspace-root=DIR")
+          return 2
+        ws = normalizedPath(absolutePath(ws))
+        let members = resolveMembers(ws, a.selection)
+        for m in members:
+          if m.checkedOut: info.members.add(m.relPath)
+        selection = nativeSelection(ws, members,
+          [normalizedPath(absolutePath(storeRoot)),
+           normalizedPath(absolutePath(acRoot))])
+        if ws notin roots:
+          roots.insert(ws, 0)
+    except CatchableError as e:
+      stderr.writeLine("repro store " & sub & ": error: " & e.msg)
+      return 1
+    let local = BundleRoots(storeRoot: storeRoot, actionCacheRoot: acRoot,
       workspaceRoots: roots)
     try:
       case sub
@@ -199,14 +244,13 @@ else:
             let path = frozenScriptPath(local.storeRoot, root)
             if fileExists(path):
               devEnvs.add(FrozenDevEnv(projectRoot: root, scriptPath: path))
-        let closure = computeClosure(local, devEnvs)
+        let closure = computeClosure(local, devEnvs, selection)
+        warnPinnedUpstreamNim("store " & sub, closure.projectDirs)
         if sub == "closure":
-          if emitJson: echo pretty(closureJson(closure))
-          else: printClosureText(closure)
+          if emitJson: echo pretty(closureJson(closure, info))
+          else: printClosureText(closure, info)
           return 0
         exportOpts.outDir = absolutePath(outDir)
-        when declared(ReprobuildSourceRevision):
-          exportOpts.reproRevision = ReprobuildSourceRevision
         let report = exportBundle(closure, exportOpts)
         if emitJson:
           echo readFile(report.manifestPath)
@@ -242,6 +286,7 @@ else:
             "reinsertedPrefixes": report.reinsertedPrefixes,
             "quarantinedPrefixes": %report.quarantinedPrefixes,
             "rewitnessedRecords": report.rewitnessedRecords,
+            "unwitnessedRecords": report.unwitnessedRecords,
             "restamped": report.restamped,
             "restampMismatches": report.restampMismatches,
             "frozenDevEnvs": envs,
@@ -253,7 +298,11 @@ else:
           echo "  verified entries:     " & $report.verifiedEntries
           echo "  prefixes reinserted:  " & $report.reinsertedPrefixes &
             " (" & $report.excludedPrefixes.len & " already present)"
-          echo "  records re-witnessed: " & $report.rewitnessedRecords
+          echo "  records re-witnessed: " & $report.rewitnessedRecords &
+            (if report.unwitnessedRecords > 0:
+              " (" & $report.unwitnessedRecords & " left alone: an output " &
+                "is not carried by the bundle)"
+             else: "")
           echo "  inputs restamped:     " & $report.restamped &
             (if report.restampMismatches > 0:
                " (" & $report.restampMismatches & " differ and were left alone)"

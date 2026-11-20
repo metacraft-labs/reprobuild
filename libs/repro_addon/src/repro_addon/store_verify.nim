@@ -243,16 +243,8 @@ proc adoptUnverified*(site: StoreVerifySite; paths: seq[string]):
                  "digest than the path has now: " &
                  result.refused.join(", "))], attest: true), site.evidence)
 
-proc runStoreVerifyCli*(args: seq[string]): int =
-  var background, adopt = false
-  for a in args:
-    case a
-    of "--background": background = true
-    of "--adopt-unverified": adopt = true
-    else:
-      stderr.write("usage: repro system addon store-verify [--background] " &
-        "[--adopt-unverified]\n")
-      return 2
+proc runStoreVerifyCommand*(background, adopt: bool): int =
+  ## ``repro system addon store-verify [--background] [--adopt-unverified]``.
   let site = defaultStoreVerifySite()
   try:
     let paths = currentStorePaths(site.stateDir)

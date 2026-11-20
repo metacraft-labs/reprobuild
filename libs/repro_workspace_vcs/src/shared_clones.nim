@@ -46,6 +46,7 @@ import git_tool
 # worker pool may be live; see ``repro_core/process_close``.
 from repro_core/process_exec import execCmdExCloseOnce
 from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
+import repro_core/process_env
 
 const
   AlternatesRelPath* = "objects/info/alternates"
@@ -1177,6 +1178,7 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ##
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
+  ##
   result = true
   for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
       barePath):
@@ -1875,10 +1877,12 @@ proc leafPoolUploadPackCommand*(pool: string): string =
   ## through its POSIX shell, on Windows too, and appends the pool path.
   quotePoolShell(poolUploadPackLauncherPath(pool))
 
-proc poolTransportShell(gitBin: string): string =
-  ## Use an explicit shell for file redirection. poEvalCommand does not
-  ## invoke a shell on Windows, and cmd.exe cannot safely quote arbitrary
-  ## paths containing percent signs. Git itself already requires this shell.
+proc poolTransportShell*(gitBin: string): string =
+  ## The POSIX shell ``gitBin`` runs hooks and ``!`` commands with. Used
+  ## for file redirection: poEvalCommand does not invoke a shell on
+  ## Windows, and cmd.exe cannot safely quote arbitrary paths containing
+  ## percent signs. Git itself already requires this shell. Raises
+  ## ``IOError`` on Windows when it cannot be found.
   when defined(windows):
     let declared = runGit(gitBin, ["var", "GIT_SHELL_PATH"])
     if declared.code == 0 and fileExists(declared.output.strip()):
@@ -2627,11 +2631,12 @@ const RetentionHookScript* = """#!/bin/sh
 # `git gc` runs this as gc.recentObjectsHook. Every object id printed here is
 # kept, together with everything it reaches in this pool, as if it were
 # recent. It prints what each checkout listed in repro/borrowers still names
-# -- its refs, its HEADs and its reflog entries -- and, for any of those this
-# pool does not hold itself (a commit made in the checkout), the history
-# behind it, so the parents of a checkout's own commits are kept too. If this
-# script fails, git skips pruning: a failure keeps objects, it never deletes
-# them.
+# -- its refs, its HEADs, its reflog entries and what its indexes stage --
+# and, for any of those this pool does not hold itself (a commit made in the
+# checkout), the history behind it, so the parents of a checkout's own
+# commits are kept too. If this script fails, git skips pruning: a failure
+# keeps objects, it never deletes them. It fails for a checkout it cannot
+# vouch for, including one whose refs are not stored as files (reftable).
 
 # gc exports this pool's GIT_DIR (and friends) to the hook, and they override
 # `git -C <checkout>`. Clear them before reading any checkout.
@@ -2725,6 +2730,20 @@ scan_dir() {
     scan_dir "$child" "$(($2 - 1))" || return 1
   done
 }
+# ref_storage_files COMMON-DIR succeeds only when the checkout keeps its refs
+# in the `files` backend, the only one whose HEADs and reflogs are read below
+# as files. A reftable checkout keeps them in reftable stacks; reading it as
+# files would name neither a detached HEAD nor a reflog entry, and still
+# succeed. Git reads extensions only from the common config, without
+# includes, so this reads that file alone. Unset means `files`.
+ref_storage_files() {
+  storage=$(git config --file "$1/config" --get extensions.refStorage)
+  case $? in
+    0) [ "$storage" = files ] ;;
+    1) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
 : > "$work/found"
 while IFS= read -r parent || [ -n "$parent" ]; do
@@ -2747,6 +2766,14 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
 done < "$work/discovered"
 if [ "${1-}" = --discover ]; then
   [ "$incomplete" = 0 ] || exit 2
+  # A borrower git cannot open, or one on another ref backend, keeps expiry
+  # off (§3.2): the gc pass below would refuse it on every run. (Index
+  # readability is checked by the gc pass alone, which refuses safely.)
+  while IFS= read -r leaf || [ -n "$leaf" ]; do
+    [ -n "$leaf" ] && [ -d "$leaf" ] && [ -e "$leaf/.git" ] || continue
+    common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
+    ref_storage_files "$common" || exit 1
+  done < "$work/leaves"
   exit 0
 fi
 
@@ -2759,6 +2786,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   # rather than let its objects expire.
   [ -e "$leaf/.git" ] || continue
   common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { status=1; continue; }
+  ref_storage_files "$common" || { status=1; continue; }
   : > "$work/names"
   # Refs, read from the ref store: this format never opens the objects.
   git -C "$leaf" for-each-ref --format='%(objectname)' >> "$work/names" || { status=1; continue; }
@@ -2775,6 +2803,21 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
     [ -d "$logs" ] || continue
     find "$logs" -type f -exec cat {} + | cut -d' ' -f1,2 | tr ' ' '\n' >> "$work/names"
   done
+  # Staged entries, of the checkout and of each linked worktree: a blob staged
+  # with `git checkout <old> -- <path>` may be one only expired history in this
+  # pool reaches. Each index is read by path, so a worktree whose directory is
+  # gone is still read. ls-files reads the index file, not the objects;
+  # --sparse keeps a sparse index from being expanded through trees, and
+  # core.fsmonitor=false keeps a gc from starting the checkout's monitor. An
+  # index that exists but cannot be read may stage anything: refuse. Gitlinks
+  # (mode 160000) name commits of a submodule's own repository.
+  indexes=0
+  for index in "$common/index" "$common"/worktrees/*/index; do
+    [ -e "$index" ] || continue
+    GIT_INDEX_FILE=$index git -C "$leaf" -c core.fsmonitor=false ls-files --stage --sparse > "$work/staged" || { indexes=1; break; }
+    grep -v '^160000 ' "$work/staged" | cut -d' ' -f2 >> "$work/names"
+  done
+  [ "$indexes" = 0 ] || { status=1; continue; }
   grep -E '^[0-9a-f]{40}([0-9a-f]{24})?$' "$work/names" | grep -v -E '^0+$' | sort -u > "$work/ids"
   cat "$work/ids"
   # Ids this pool does not hold were made in the checkout. Print the history
@@ -2944,18 +2987,69 @@ proc retentionHookConfigValue*(pool: string): string =
   ## that shell is ``sh`` even on Windows.
   quoteShellPosix(retentionHookPath(pool).replace('\\', '/'))
 
+proc retentionDiscoveryEnv*(gitBin: string;
+                            base: StringTableRef = nil): StringTableRef =
+  ## The environment the hook's ``--discover`` pass runs in: ``base``
+  ## (default: ``scrubbedGitRepositoryEnv()``) with the directory of the
+  ## pool's own Git first on the search path, so the pass runs the Git the
+  ## pool is configured for (Shared-Clone-Pool-Integrity §3.2).
+  ##
+  ## The prepend reads and writes the search path through ``base`` itself.
+  ## On Windows that table is case-insensitive, so the inherited ``Path`` is
+  ## extended in place; a second ``PATH`` entry beside it would leave the
+  ## child to pick one, and it could run whatever ``git`` the inherited one
+  ## finds first.
+  result = (if base.isNil: scrubbedGitRepositoryEnv() else: base)
+  result.prependPathEntry(gitBin.parentDir)
+
+const RetentionDiscoverAlias* = "repro-retention-discover"
+  ## The name of the shell alias ``retentionDiscoveryArgs`` defines for the
+  ## one ``git`` invocation that runs the hook's ``--discover`` pass.
+
+proc retentionDiscoveryArgs*(pool: string): seq[string] =
+  ## The ``git`` arguments that run the retention hook's ``--discover`` pass
+  ## the way ``git gc`` runs the hook: as a shell command Git itself starts
+  ## (a ``!`` alias defined for this one invocation), with ``GIT_DIR`` set to
+  ## the pool, from the same ``gc.recentObjectsHook`` value.
+  ##
+  ## Git starts it through its own POSIX shell, with the search path it
+  ## gives every hook: its exec-path first and, in Git for Windows, its
+  ## ``<mingw>/bin`` and ``/usr/bin`` next, ahead of the inherited
+  ## ``C:\Windows\System32``. Started directly instead, the pass depended on
+  ## which ``sh`` came first on the engine's search path. Git for Windows'
+  ## launcher (``bin\sh.exe``) put its own Git first, and its real
+  ## ``usr\bin\sh.exe`` kept ``System32`` first, so the hook's ``sort -u``
+  ## ran Windows' ``sort.exe`` (reprobuild-pm
+  ## ``issues/2026-11-16-windows-shared-pool-retention-discovery-depends-on-which-sh-is-first-on-path.md``).
+  ## ``--git-dir`` rather than ``-C``: an explicit repository is not
+  ## subject to discovery or its ownership check, and the hook clears
+  ## ``GIT_DIR`` before reading any checkout, as it does under gc.
+  @["--git-dir=" & pool,
+    "-c", "alias." & RetentionDiscoverAlias & "=!" &
+      retentionHookConfigValue(pool) & " --discover",
+    RetentionDiscoverAlias]
+
 proc poolRetentionReady*(gitBin, pool: string): bool =
   ## The hook and readiness share one discovery implementation. A newly
   ## found borrower is registered, but this pass still keeps ``never``; only
   ## a later complete pass can enable expiry. Discovery errors fail closed.
+  ##
+  ## ``gitBin`` runs the pass (``retentionDiscoveryArgs``), so it gets the
+  ## shell and search path that Git gives the hook under gc, whatever ``sh``
+  ## comes first on this process's search path. Git propagates the alias's
+  ## exit status.
   if not gitSupportsRetentionHook(gitBin) or
       not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
     return false
-  let env = scrubbedGitRepositoryEnv()
-  env["PATH"] = gitBin.parentDir & $PathSep & getEnv("PATH")
-  let discovered = execCmdExCloseOnce("sh " &
-    quoteShell(retentionHookPath(pool)) & " --discover", env = env)
-  discovered.exitCode == 0
+  var command = quoteShell(gitBin)
+  for arg in retentionDiscoveryArgs(pool):
+    command.add(" " & quoteShell(arg))
+  try:
+    execCmdExCloseOnce(command,
+      env = retentionDiscoveryEnv(gitBin)).exitCode == 0
+  except CatchableError:
+    # Git that cannot be started is a discovery failure too.
+    false
 
 proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static

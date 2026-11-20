@@ -256,6 +256,14 @@ package gcc:
         flag standard is string,
           alias = "-std=",
           format = concat
+        # The full SONAME (``LinkOptions.soname``), baked into a shared
+        # library's ``DT_SONAME``. Spelled ``-Wl,-soname,<value>`` -- the
+        # comma form, as ``zig cc`` spells it (``packages/zig.nim``) -- so
+        # one rendering is valid for every driver that passes it through to
+        # ld (https://sourceware.org/binutils/docs/ld/Options.html).
+        flag soname is string,
+          alias = "-Wl,-soname,",
+          format = concat
         # ADDED 2026-09-18 (HLX-M5 residue). `-gz=none` is not a style
         # preference for a project that participates in hot code reloading: this
         # toolchain emits `SHF_COMPRESSED` `.debug_*` BY DEFAULT, and the HCR
@@ -335,6 +343,7 @@ proc gccCompile*(opts: CompileOptions): BuildActionDef =
   let bt = currentCompileFlags()
   gcc(source = opts.source, output = opts.target,
     compileOnly = true,
+    pic = opts.pic,
     includeDirs = includeDirs,
     defines = defs,
     standard = std,
@@ -358,8 +367,14 @@ proc gccLink*(opts: LinkOptions): BuildActionDef =
     output = opts.target,
     shared = (opts.kind == lokShared),
     staticLink = (opts.kind == lokStatic),
+    # Only a shared library carries a SONAME; on an executable
+    # ``-soname`` would stamp a ``DT_SONAME`` no loader reads.
+    soname = (if opts.kind == lokShared: opts.soname else: ""),
     libs = libs,
-    libDirs = libDirs)
+    libDirs = libDirs,
+    # Order after the objects and after the edges of every library
+    # ``-l`` names, so the link cannot start before those edges have run.
+    after = opts.objects & linkPrerequisites(opts.deps))
 
 proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
   ## Use the canonical archiver's existing typed CLI and provisioning identity.
@@ -368,7 +383,7 @@ proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
   for obj in opts.objects:
     objects.add(if obj.outputs.len > 0: obj.outputs[0] else: "")
   binutilsModule.ar(
-    modifiers = (if opts.modifiers.len > 0: opts.modifiers else: "rcs"),
+    modifiers = (if opts.modifiers.len > 0: opts.modifiers else: DefaultArModifiers),
     archive = opts.target, objects = objects, after = opts.objects)
 
 proc gccStrip*(opts: StripOptions): BuildActionDef =

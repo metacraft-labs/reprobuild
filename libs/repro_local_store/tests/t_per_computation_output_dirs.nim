@@ -110,6 +110,16 @@ proc lookupInPlace(fx: var Fixture; weak: ContentDigest;
     verifyOutputBlobs = false, allowMetadataOnlyHit = true,
     outputRoot = fx.work)
 
+proc craftedOutside(fx: Fixture; record: ActionResultRecord;
+                    outside: string): ActionResultRecord =
+  ## `record` with its outputs moved below `outside/<computation name>/`, as
+  ## a hostile `.rec` carried in a store bundle could name them: the name
+  ## the cleanup paths look for, in a directory outside the action cache.
+  result = record
+  let victim = outside / computationDirName(record.strongFingerprint)
+  for i in 0 ..< result.outputs.len:
+    result.outputs[i].path = victim / extractFilename(result.outputs[i].path)
+
 suite "per-computation output directories (cache layer)":
 
   test "a publish moves staging to the record's computation directory":
@@ -231,3 +241,62 @@ suite "per-computation output directories (cache layer)":
     # The live record still hits after the sweep.
     let hit = fx.lookupInPlace(weak, "kept")
     check hit.status in {aclHit, aclHybridCutoff}
+
+suite "a record cannot have a directory outside recipe-compiles deleted":
+  ## reprobuild-pm issue
+  ## 2026-11-17-carried-action-records-may-name-output-paths-outside-the-bundle-roots.md:
+  ## the cleanup paths deleted the directory a record's OWN output paths
+  ## named, wherever it was. Store-Bundles.md §5.1 and
+  ## Hermetic-Builds-And-Path-Independence.md §"Ownership and cleanup".
+
+  test "ownedComputationDir admits only <recipe-compiles>/<kind>/<identity>/<entry>":
+    var fx = newFixture("percomp-owned-")
+    defer: fx.close()
+    let x = fx.runComputation(weakOf("edge-owned"), "X", "binary-x")
+    let recipeRoot = fx.cache.recipeCompilesRootOf
+    check ownedComputationDir(x, recipeRoot) == recordComputationDir(x)
+    check ownedComputationDir(x, "") == ""
+    let outside = fx.root / "outside"
+    check ownedComputationDir(fx.craftedOutside(x, outside), recipeRoot) == ""
+    # Inside recipe-compiles, but not at the entry level.
+    check ownedComputationDir(fx.craftedOutside(x, recipeRoot / "provider"),
+      recipeRoot) == ""
+    check ownedComputationDir(fx.craftedOutside(x,
+      fx.identityDir / "nested"), recipeRoot) == ""
+
+  test "evicting a crafted record leaves the directory it names alone":
+    var fx = newFixture("percomp-evict-outside-")
+    defer: fx.close()
+    let weak = weakOf("edge-evict-outside")
+    let first = fx.runComputation(weak, "input-0", "binary-0")
+    let outside = fx.root / "outside"
+    let crafted = fx.craftedOutside(first, outside)
+    let victim = recordComputationDir(crafted)
+    check victim == outside / computationDirName(first.strongFingerprint)
+    createDir(victim)
+    writeFile(victim / "precious", "not the cache's")
+    # Replace the real record with the crafted one, still the oldest.
+    fx.cache.writePerEdgeRecords(weak, [crafted])
+    for i in 1 ..< 9:
+      discard fx.runComputation(weak, "input-" & $i, "binary-" & $i)
+    let edgeDir = fx.root / "action-cache" / "hot-records" /
+      perEdgeRecordFileName(weak)
+    # The crafted record was the one evicted ...
+    check not fileExists(edgeDir /
+      (toHex(first.strongFingerprint.bytes) & ".rec"))
+    # ... and the directory it named outside the cache survived.
+    check fileExists(victim / "precious")
+
+  test "the retention GC never claims a directory outside recipe-compiles":
+    var fx = newFixture("percomp-gc-outside-")
+    defer: fx.close()
+    let weak = weakOf("edge-gc-outside")
+    let first = fx.runComputation(weak, "X", "binary-x")
+    let crafted = fx.craftedOutside(first, fx.root / "outside")
+    fx.cache.writePerEdgeRecords(weak, [crafted])
+    let victim = recordComputationDir(crafted)
+    var found = false
+    for entry in fx.cache.scanCacheEntries(RetentionGcPolicy()):
+      check victim notin entry.computationDirs
+      found = true
+    check found

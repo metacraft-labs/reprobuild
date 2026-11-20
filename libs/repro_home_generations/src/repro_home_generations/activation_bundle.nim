@@ -681,9 +681,12 @@ proc importActivationBundleBytes*(store: var Store; bytes: openArray[byte];
       raiseActivationBundleCorrupt(filePath,
         "prefixes[" & $i & "].receipt.realizedPath",
         "receipt path does not match bundle prefix path")
-    let canonicalPath = prefixRelativePath(receipt.packageName,
-      receipt.version, closure.prefixId)
-    if canonicalPath != closure.storeRelativePath:
+    # Its 40-hex path, or the 16-hex path a build before the widening
+    # published it at (which the receipt, checked above, records): the
+    # store keeps such a prefix where it lies, so a bundle of it names that
+    # path.
+    if not isPrefixPathOf(closure.storeRelativePath, receipt.packageName,
+                          receipt.version, closure.prefixId):
       raiseActivationBundleCorrupt(filePath,
         "prefixes[" & $i & "].storeRelativePath",
         "bundle prefix path is not canonical for receipt metadata")

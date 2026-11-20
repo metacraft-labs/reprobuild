@@ -4,7 +4,7 @@
 ## Per `Home-Profile-Intent-Layer.md`:
 ##
 ##   The standard predicate set is:
-##     - Platform: `windows`, `macos`, `linux`, `bsd`, `wsl`
+##     - Platform: `windows`, `macos`, `linux`, `bsd`, `wsl`, `nixos`
 ##     - Architecture: `x86_64`, `arm64`, `arm32`
 ##     - Host identity: `host` (string compared via `==`, `!=`, `in`)
 ##     - Boolean combinators: `and`, `or`, `not`, parentheses
@@ -18,7 +18,7 @@
 ##   Two predicates whose normalized forms are identical are the same
 ##   `when` block.
 
-import std/[algorithm, sets, strutils]
+import std/[algorithm, os, sets, strutils]
 when defined(linux):
   import std/os
 
@@ -69,10 +69,23 @@ type
     ## `host_identity.currentHost()` plus the platform/arch detection
     ## the build/apply layer already performs. Tests construct one
     ## directly to exercise referentially-transparent evaluation.
-    platform*: string   ## one of: windows, macos, linux, bsd, wsl
+    platform*: string   ## one of: windows, macos, linux, bsd (`wsl` and
+                        ## `nixos` are the facts below)
     arch*: string       ## one of: x86_64, arm64, arm32
     host*: string       ## the resolved host identity string
     isWsl*: bool        ## true if running under WSL on Linux
+    isNixos*: bool      ## true if the host is NixOS (`ID=nixos` in
+                        ## os-release); meaningful only when `nixosStated`
+    nixosStated*: bool  ## whether `isNixos` was established. The planner on
+                        ## the host reads it; a context built for another
+                        ## target states it or leaves it unstated, and
+                        ## evaluating `nixos` against an unstated fact is
+                        ## refused (`EFactNotStated`), never read as false.
+
+  EFactNotStated* = object of ValueError
+    ## A predicate needs a host fact the context does not state (`nixos`).
+    ## Whether a Linux target is NixOS is not part of its system name, so a
+    ## consumer evaluating for a target must say it.
 
   UserPredicateLookup* = proc(name: string): bool {.gcsafe.}
     ## Callback the parser uses to learn whether an unknown predicate
@@ -83,6 +96,29 @@ type
 
   UserPredicateEvaluator* = proc(name: string;
                                  ctx: HostContext): bool {.gcsafe.}
+
+proc osReleaseIsNixos*(text: string): bool =
+  ## Whether the text of an os-release file (os-release(5)) names NixOS:
+  ## `ID=nixos`, with or without quotes.
+  for raw in text.splitLines:
+    let line = raw.strip()
+    if line.startsWith("ID="):
+      var v = line[3 .. ^1].strip()
+      if v.len >= 2 and v[0] in {'"', '\''} and v[^1] == v[0]:
+        v = v[1 .. ^2]
+      return v == "nixos"
+  false
+
+proc readHostIsNixos(): bool =
+  ## os-release(5): `/etc/os-release`, else `/usr/lib/os-release`. Only Linux
+  ## can be NixOS.
+  when defined(linux):
+    for path in ["/etc/os-release", "/usr/lib/os-release"]:
+      if fileExists(path):
+        return try: osReleaseIsNixos(readFile(path)) except IOError: false
+    false
+  else:
+    false
 
 proc currentHostContext*(): HostContext =
   ## Construct predicate facts for the running host. Apply/planning
@@ -112,6 +148,8 @@ proc currentHostContext*(): HostContext =
       getEnv("WSL_INTEROP").len > 0
   else:
     result.isWsl = false
+  result.isNixos = readHostIsNixos()
+  result.nixosStated = true
 
 # ---------------------------------------------------------------------------
 # Tokeniser.
@@ -531,6 +569,14 @@ proc evaluateBool*(n: PredNode; ctx: HostContext;
     if id in StandardPlatformIdents:
       if id == "wsl":
         result = ctx.isWsl
+      elif id == "nixos":
+        if not ctx.nixosStated:
+          raise newException(EFactNotStated,
+            "the `nixos` predicate needs to know whether the target is " &
+            "NixOS, which is not part of its system name; state it " &
+            "(`repro home export --target ... --nixos` or `--nixos=false`, " &
+            "readIntent's `nixos` argument)")
+        result = ctx.isNixos
       else:
         result = ctx.platform == id
     elif id in StandardArchIdents:
@@ -593,14 +639,37 @@ proc evaluateBool*(n: PredNode; ctx: HostContext;
           return true
     else: discard
 
+proc mentionsNixos(n: PredNode): bool =
+  ## Whether the guard names the `nixos` predicate anywhere.
+  case n.kind
+  of pnIdent: n.ident.toLowerAscii() == "nixos"
+  of pnAnd, pnOr:
+    for op in n.operands:
+      if mentionsNixos(op): return true
+    false
+  of pnNot: mentionsNixos(n.operand)
+  else: false
+
 proc predicateHolds*(n: PredNode; ctx: HostContext;
                      userPredicate: UserPredicateEvaluator = nil): bool =
   ## Whether a guard admits `ctx`: a nil AST (no guard) always does.
   ## THE guard rule for every intent element -- activity-body `when`
   ## blocks, guarded resources and guarded config overrides -- so the
   ## planner and `repro home export --target` cannot disagree on it.
+  ##
+  ## A guard that NAMES `nixos` is refused (`EFactNotStated`) when the
+  ## context does not state the fact, whatever the operands before it
+  ## evaluate to: whether the refusal happens must not depend on the order
+  ## `and` / `or` operands are written or canonicalized in (a data file's
+  ## `when` is canonicalized by the planner and read as written by Nix).
   if n == nil:
     return true
+  if not ctx.nixosStated and mentionsNixos(n):
+    raise newException(EFactNotStated,
+      "the `nixos` predicate needs to know whether the target is " &
+      "NixOS, which is not part of its system name; state it " &
+      "(`repro home export --target ... --nixos` or `--nixos=false`, " &
+      "readIntent's `nixos` argument)")
   evaluateBool(n, ctx, userPredicate)
 
 # ---------------------------------------------------------------------------
@@ -694,7 +763,7 @@ proc builtinShapeProblem(n: PredNode; wantBool: bool): string =
 proc validateBuiltinPredicate*(source: string; filePath = "";
                                line = 0): PredNode =
   ## Parse `source` and require it to be a well-typed predicate of the
-  ## BUILT-IN grammar only: `windows`, `macos`, `linux`, `bsd`, `wsl`,
+  ## BUILT-IN grammar only: `windows`, `macos`, `linux`, `bsd`, `wsl`, `nixos`,
   ## `x86_64`, `arm64`, `arm32`, `host ==` / `!=` / `in [...]`, `true`,
   ## `false`, combined with `and`, `or`, `not` and parentheses. A
   ## user-defined predicate is rejected: places that carry predicate TEXT

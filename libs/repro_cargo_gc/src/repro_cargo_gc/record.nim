@@ -161,13 +161,34 @@ proc resolveUnits(p: CargoStreamParser; targetReal: string;
         if isProfileDir(abs):
           if candidate notin deps:
             deps[candidate] = inodeIndexOfDeps(abs)
+          # cargo links a macOS `.dSYM` bundle out of `deps/` with a symlink
+          # (`debug/app.dSYM -> deps/app-<hash>.dSYM`): the target names the
+          # unit.
+          let linkTarget = symlinkTargetName(profileAbs(p.targetDir, rel))
+          if linkTarget.len > 0 and embeddedUnitHash(linkTarget).len > 0:
+            result.add(pend.unit, candidate, embeddedUnitHash(linkTarget))
+            continue
           let id = fileIdOfPath(profileAbs(p.targetDir, rel))
           if id in deps[candidate]:
             result.add(pend.unit, candidate, deps[candidate][id])
             continue
-          # No hard link (the file system copied it): protect every unit
-          # whose deps/ file carries this artifact's name. Over-retaining is
-          # the safe error.
+          # No hard link: cargo copied the file (it does on macOS, whose file
+          # ids then differ). The copy's bytes still name its unit, so match
+          # it to the deps/ file of the same name with identical content.
+          let artifactName = parts[^1]
+          var matched = false
+          for kind, f in walkDir(abs / DepsDir):
+            if kind notin {pcFile, pcDir}: continue # a `.dSYM` is a directory
+            let fname = f.extractFilename
+            let h = embeddedUnitHash(fname)
+            if h.len > 0 and unhashedName(fname) == artifactName and
+                sameContent(f, profileAbs(p.targetDir, rel)):
+              result.add(pend.unit, candidate, h)
+              matched = true
+          if matched: continue
+          # Not even a byte-identical twin (the artifact was rebuilt since,
+          # or changed): protect every unit whose deps/ file carries this
+          # artifact's name. Over-retaining is the safe error.
           let stem = parts[^1].changeFileExt("")
           for kind, f in walkDir(abs / DepsDir):
             discard kind

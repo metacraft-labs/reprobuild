@@ -103,7 +103,7 @@ profile "zahary":
   # own versioned `# BEGIN DOTFILES DIRENV v2` block to the PowerShell
   # profile, and its `Ensure-GitBashInPath` / `Ensure-DirenvConfig` still
   # touch the user PATH and the XDG env vars. The Reprobuild-managed
-  # block below uses its OWN `repro-managed:` sentinels and its own
+  # block below uses its OWN `repro:home:` sentinels and its own
   # `env.userPath` contribution accounting, so the two coexist without
   # conflict. Once the user is satisfied that Reprobuild owns these
   # affordances, they retire the legacy `# BEGIN DOTFILES DIRENV` block

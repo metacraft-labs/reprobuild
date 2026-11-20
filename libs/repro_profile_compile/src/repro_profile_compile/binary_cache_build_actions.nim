@@ -35,8 +35,9 @@
 ##
 ## A publisher's signature says who packed an archive, not what a profile
 ## meant it to contain. For an edge the host can build itself that is
-## tolerable: the fallback is a local build of the same definition. For an
-## edge the host can NEVER build (`substituteOnly`: a 32-bit ARM appliance's
+## tolerable only when the edge pins its bytes (every substituted edge
+## does: see "The entry key is an address" below). For an edge the host can
+## NEVER build (`substituteOnly`: a 32-bit ARM appliance's
 ## services) it is not — every key in the host's `trusted-public-keys` would
 ## be a code authority over what the host runs (ReproOS-Add-On-Mode threat
 ## model, G5: a thief of a publisher key must own nothing). So such an edge
@@ -59,15 +60,36 @@
 ## Off-by-default: with no cache configured the dispatcher takes the
 ## unchanged local-build path.
 ##
-## Content-addressable key: the cache identity for a build-action edge
-## folds the action's weak fingerprint (id + argv + cwd + outputs +
-## tool refs + elevation flag — see
-## `apply_build_actions.weakFingerprintForProfileBuildAction`) into the
-## key material. Two applies of the SAME profile against the SAME
-## toolchain derive the SAME key, so the substituted outputs are
-## byte-identical to a local build (and, for an edge that carries `expectedOutputDigest`, verified against the digest the signed profile pins — see "Substitute-only edges" below) (the cache is content-addressed).
-## Any change to the action definition derives a DIFFERENT key, so a
-## stale cache entry can never shadow a changed edge.
+## ## The entry key is an address; the digest binds the bytes
+##
+## The cache identity of a build-action edge (`buildActionCacheIdentity`)
+## folds a fingerprint of the edge's DECLARATION -- id, argv, cwd-relative
+## outputs, tool refs, elevation flag, command-stats id -- and the
+## consuming platform. It binds NOTHING the edge reads: a fetched source,
+## an upstream output, the script an argv names, a config file next to it,
+## host state. Editing any of those leaves the key unchanged, so two
+## entries that are not interchangeable at runtime can sit under one key.
+## The key therefore says only WHERE an entry is looked up, never that the
+## bytes found there are what a local build of this edge would produce.
+##
+## What an apply accepts is bound by `expectedOutputDigest`, which the
+## profile pins (and which reaches the host inside the signed deploy
+## manifest):
+##
+##   * an edge is substituted ONLY when it pins a digest, and the served
+##     archive is hashed against it before anything is extracted;
+##   * an edge that pins no digest is never substituted: it builds locally
+##     whatever the cache holds under its key (its local build is still
+##     cached by the engine's own action cache, which observes its inputs);
+##   * a publishing apply publishes only an edge that pins a digest, and
+##     only when the archive it packs from the built outputs hashes to it,
+##     so every entry this path publishes is one an apply would accept.
+##
+## Before this rule an undigested edge took any trusted entry under its
+## key, so editing an input the edge read (argv unchanged) kept serving the
+## first publisher's outputs fleet-wide. Binary-Caches.md §"Publishing for
+## a host that cannot build" ("The entry key is an address, not an identity
+## of the inputs").
 
 import std/[os, sets, strutils]
 
@@ -123,7 +145,8 @@ proc shouldPublishBuildActionOutputs*(cfg: BuildActionCacheConfig): bool =
     applyPublishOptedIn()
 
 # ---------------------------------------------------------------------------
-# Content-addressable cache identity for a build-action edge.
+# Cache entry address for a build-action edge (see the module header: it
+# binds the declaration, not the inputs).
 # ---------------------------------------------------------------------------
 
 proc contentDigestHex(d: ContentDigest): string =
@@ -142,9 +165,26 @@ proc outputRelPaths*(action: ProfileBuildAction): seq[string]
   ## output-prefix mapping section; ``cacheFingerprintHex`` needs the
   ## cwd-relative output paths to build a placement-independent key.
 
+const DigestPinTagPrefix* = "blake3:"
+
+proc isWellFormedDigestPin*(pin: string): bool =
+  ## `blake3:` plus 64 lowercase hex digits: the only spelling the profile
+  ## compiler admits and the only one the substitute side's exact string
+  ## comparison can match. Every publisher validates against this, so none
+  ## can publish an entry nothing can use, or one under an empty pin (which
+  ## the publisher reads as "no pin").
+  pin.startsWith(DigestPinTagPrefix) and
+    pin.len == DigestPinTagPrefix.len + 64 and
+    pin[DigestPinTagPrefix.len .. ^1].allCharsInSet({'0' .. '9', 'a' .. 'f'})
+
 proc cacheFingerprintHex(action: ProfileBuildAction): string =
-  ## Content-addressable fingerprint for a build-action edge's BINARY
-  ## CACHE key. Deliberately CWD-INDEPENDENT: it mixes the action id,
+  ## Fingerprint of a build-action edge's DECLARATION, folded into its
+  ## binary-cache entry key. It is not a content address of anything the
+  ## edge reads: the files a script opens, fetched sources and upstream
+  ## outputs are not part of it, so an edit to them keeps the same key
+  ## (module header, "The entry key is an address"). What an apply takes
+  ## from the entry is bound by `expectedOutputDigest`, not by this.
+  ## Deliberately CWD-INDEPENDENT: it mixes the action id,
   ## argv, cwd-relative output paths, tool refs, elevation flag, and
   ## command-stats id — but NOT the absolute ``cwd``. The apply-scratch
   ## cwd is a per-apply placement detail (a fresh box may extract into
@@ -177,8 +217,9 @@ const
 
 proc buildActionCacheIdentity*(action: ProfileBuildAction;
                                platform: PlatformTriple): CacheEntryIdentity =
-  ## Derive the content-addressable `CacheEntryIdentity` for one
-  ## build-action edge on `platform`. The cwd-independent
+  ## Derive the `CacheEntryIdentity` (the entry ADDRESS, binding the
+  ## declaration only -- see the module header) for one build-action edge
+  ## on `platform`. The cwd-independent
   ## `cacheFingerprintHex` is folded into BOTH the provider-revision and
   ## the toolchain extra-fingerprint so the key is a pure function of the
   ## action definition + platform (NOT the apply-scratch cwd — see
@@ -513,8 +554,11 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
                                cfg: BuildActionCacheConfig;
                                scratchRoot: string): SubstituteAttempt =
   ## Attempt to serve one build-action edge's OUTPUTS from the binary
-  ## cache. On a HIT: materialise the outputs under `cwd`
-  ## byte-identically and return `hit = true`. On a MISS / any error:
+  ## cache. Only an edge that pins `expectedOutputDigest` can hit: the
+  ## entry key binds no input content (module header), so an undigested
+  ## edge is a miss whatever the cache holds and builds locally. On a HIT:
+  ## materialise the outputs under `cwd` byte-identically and return
+  ## `hit = true`. On a MISS / any error:
   ## return `hit = false` with a diagnostic `reason` so the caller
   ## falls back to a local build. Never raises — a cache problem must
   ## degrade to a local build, not abort the apply.
@@ -523,18 +567,27 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
   if outputRelPaths(action).len == 0:
     result.reason = "action declares no cwd-relative outputs"
     return
-  if action.substituteOnly and action.expectedOutputDigest.len == 0:
-    # The profile compiler refuses this shape; a hand-written intent can
-    # still carry it, and it is refused here too (fail closed).
-    result.reason = "substitute-only edge " & action.id &
-      " pins no expectedOutputDigest; refusing to take its bytes from a " &
-      "publisher's word alone"
+  if action.expectedOutputDigest.len == 0:
+    if action.substituteOnly:
+      # The profile compiler refuses this shape; a hand-written intent can
+      # still carry it, and it is refused here too (fail closed).
+      result.reason = "substitute-only edge " & action.id &
+        " pins no expectedOutputDigest; refusing to take its bytes from a " &
+        "publisher's word alone"
+    else:
+      # The entry key binds the declaration, not the inputs (module
+      # header): an entry under it may be the outputs of inputs this host
+      # no longer has. Without a pinned digest nothing can tell, so the
+      # edge builds locally whatever the cache holds.
+      result.reason = "edge " & action.id & " pins no " &
+        "expectedOutputDigest; an entry key binds no input content, so " &
+        "an undigested edge builds locally"
     return
   # Present outputs that pack back to the pinned digest ARE the result: no
   # fetch, no rewrite. This is what makes a converge tick that changes
   # nothing cost one hash instead of a download and a rewrite of every
   # service's prefix.
-  if action.expectedOutputDigest.len > 0 and outputsExist(action):
+  if outputsExist(action):
     let have = localOutputsDigest(action)
     if have.len > 0 and have == action.expectedOutputDigest:
       result.hit = true
@@ -574,16 +627,15 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
     var archiveBytes = newSeq[byte](archiveText.len)
     for i, ch in archiveText:
       archiveBytes[i] = byte(ch)
-    if action.expectedOutputDigest.len > 0:
-      # Hashed before a single byte is extracted: a publisher that signs
-      # the wrong bytes materialises nothing.
-      let got = archiveDigestTag(rawArchiveBytes(archiveBytes))
-      if got != action.expectedOutputDigest:
-        result.reason = "output digest mismatch for " & action.id &
-          ": the profile pins " & action.expectedOutputDigest &
-          ", the cache served " & got & " (signed by a trusted publisher, " &
-          "which is not the authority here); nothing was materialised"
-        return
+    # Hashed before a single byte is extracted: a publisher that signs
+    # the wrong bytes materialises nothing.
+    let got = archiveDigestTag(rawArchiveBytes(archiveBytes))
+    if got != action.expectedOutputDigest:
+      result.reason = "output digest mismatch for " & action.id &
+        ": the profile pins " & action.expectedOutputDigest &
+        ", the cache served " & got & " (signed by a trusted publisher, " &
+        "which is not the authority here); nothing was materialised"
+      return
     removeDir(extractDir)
     createDir(extractDir)
     let entries = extractPrefix(archiveBytes, extractDir)
@@ -596,18 +648,17 @@ proc trySubstituteBuildAction*(action: ProfileBuildAction;
       result.reason = "substituted archive did not materialise the " &
         "declared outputs for " & action.id
       return
-    if action.expectedOutputDigest.len > 0:
-      # What landed must hash to the pin too — the same check the next
-      # tick's present-outputs shortcut makes — or this tick would report
-      # a hit that the next one cannot confirm, and the download would
-      # repeat every tick.
-      let landed = localOutputsDigest(action)
-      if landed != action.expectedOutputDigest:
-        result.reason = "materialised outputs of " & action.id &
-          " hash to " & landed & ", not the pinned " &
-          action.expectedOutputDigest & " (an undeclared file under the " &
-          "output tree, or an archive that holds more than the outputs)"
-        return
+    # What landed must hash to the pin too — the same check the next
+    # tick's present-outputs shortcut makes — or this tick would report
+    # a hit that the next one cannot confirm, and the download would
+    # repeat every tick.
+    let landed = localOutputsDigest(action)
+    if landed != action.expectedOutputDigest:
+      result.reason = "materialised outputs of " & action.id &
+        " hash to " & landed & ", not the pinned " &
+        action.expectedOutputDigest & " (an undeclared file under the " &
+        "output tree, or an archive that holds more than the outputs)"
+      return
     result.hit = true
     result.bytesFetched = rootOutcome.bytesFetched
   except CatchableError as e:
@@ -620,7 +671,11 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
                                 cfg: BuildActionCacheConfig;
                                 scratchRoot: string): tuple[ok: bool; reason: string] =
   ## Publish a freshly-built edge's OUTPUTS to the binary cache under
-  ## the same content-addressable key `trySubstituteBuildAction` reads.
+  ## the same key `trySubstituteBuildAction` reads. Only an edge that pins
+  ## `expectedOutputDigest` is published, and only when the archive packed
+  ## from its built outputs hashes to that digest: the key binds no input
+  ## content (module header), so an entry is published only where an apply
+  ## would accept it, and never for bytes the profile does not pin.
   ## Best-effort: any failure returns `ok = false` with a reason but
   ## MUST NOT abort the apply — the box already converged locally. A host
   ## that is not configured as a publisher (no operator-supplied keypair,
@@ -631,6 +686,18 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
             reason: "publish skipped: this apply is not an opted-in " &
               "publisher (REPRO_APPLY_PUBLISH=1 with " &
               "REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH)")
+  if action.expectedOutputDigest.len == 0:
+    return (ok: false,
+            reason: "publish skipped: edge " & action.id & " pins no " &
+              "expectedOutputDigest; an entry key binds no input content, " &
+              "so an apply never substitutes an undigested edge")
+  # The publisher treats an empty hex pin as "no pin", so a pin is accepted
+  # only in the one shape the substitute side's exact comparison can match.
+  if not isWellFormedDigestPin(action.expectedOutputDigest):
+    return (ok: false,
+            reason: "publish skipped: edge " & action.id & " pins " &
+              action.expectedOutputDigest & ", which is not a " &
+              DigestPinTagPrefix & "<hex> digest")
   let stageDir = scratchRoot / "publish-stage"
   try:
     removeDir(stageDir)
@@ -652,7 +719,12 @@ proc publishBuildActionOutputs*(action: ProfileBuildAction;
       prefixDir: stageDir,
       identity: idy,
       endpoint: cfg.publishEndpoint,
-      keypair: keypair)
+      keypair: keypair,
+      # The publisher hashes the archive it packed and refuses, before
+      # uploading anything, one whose digest is not the pin: the bytes
+      # checked are the bytes that would be published.
+      expectedRawDigestHex:
+        action.expectedOutputDigest[DigestPinTagPrefix.len .. ^1])
     let pubRes = publishInProcess(pubReq)
     if pubRes.ok:
       return (ok: true, reason: "")

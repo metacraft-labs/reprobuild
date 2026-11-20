@@ -289,8 +289,9 @@ proc verifySource(s: Store; row: PrefixRow): PlannedPrefix =
     fail("source receipt digest does not match the index row: " & where)
   let adoptedHere = receipt.adapter.startsWith(AdoptedAdapterPrefix) and
     receipt.realizedPath == row.realizedPath
-  if result.sourceDir.extractFilename !=
-      realizationDirName(receipt.version, receipt.realizationHash) and
+  # Its 40-hex name, or an older build's 16-hex name the receipt records
+  # as exactly this path (``prefixDirMatchesReceipt``).
+  if not prefixDirMatchesReceipt(row.realizedPath, receipt) and
       not adoptedHere:
     fail("source prefix directory name does not match its receipt: " & where)
   let actual = storeTreeDigest(result.sourceDir)
@@ -505,11 +506,20 @@ proc publish(d: var Store; plan: PlannedPrefix; rootId: string;
       syncDirectoryDurably(target.parentDir.parentDir)
     var won = not (dirExists(target) or symlinkExists(target))
     if won:
+      # A read-only source root (Local-Content-Addressed-Store §"Read-Only
+      # Prefixes") gave the stage an r-x root, and moving a directory to a
+      # new parent needs write permission on it. Rename with the bit, then
+      # put the source's mode back before the row is indexed (step 5b).
+      let rootMode = getFilePermissions(stage)
+      restoreDirectoryWriteBits(stage, recursive = false)
       try: moveDir(stage, target)
       except OSError:
         if not dirExists(target): raise
         won = false
       if won:
+        if getFilePermissions(target) != rootMode:
+          setFilePermissions(target, rootMode)
+          syncDirectoryDurably(target)
         syncDirectoryDurably(target.parentDir)
     if not won:
       # Lost the race. Accept the winner only if it is this prefix; it is

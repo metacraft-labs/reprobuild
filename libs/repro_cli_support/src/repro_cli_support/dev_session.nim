@@ -1,5 +1,5 @@
 import std/[algorithm, atomics, hashes, json, monotimes, nativesockets, net, options, os, osproc, sequtils,
-            strtabs, strutils, tables, times]
+            strtabs, strutils, sysrand, tables, times]
 
 import cbor
 import repro_core
@@ -17,6 +17,8 @@ import repro_cli_support/service_registrar  # §7.3: the env var a refusal names
 import repro_cli_support/watch
 import repro_cli_support/session_process_owner
 import repro_cli_support/dev_session_access
+# The renderer of the command lines a session spawns of the `repro` image.
+from repro_cli_support/cli_program import reproArgvOf
 
 type
   DevSessionMode* = enum
@@ -409,6 +411,48 @@ proc shellCommand(args: openArray[string]): string =
 proc writeJsonFile(path: string; node: JsonNode) =
   createDir(extendedPath(parentDir(path)))
   writeFile(extendedPath(path), pretty(node) & "\n")
+
+proc publishJsonFile*(path: string; node: JsonNode) =
+  ## Write ``path`` so that a reader sees either no file or the whole file,
+  ## never the empty or partial file ``writeFile`` leaves visible between its
+  ## ``O_TRUNC`` open and the end of its write. The content goes to a staging
+  ## sibling first and is then renamed into place; ``rename(2)`` within one
+  ## directory is atomic on POSIX
+  ## (https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html).
+  ##
+  ## Used for files a reader waits for and then parses once, such as
+  ## ``http-ready.json``: ``controlClientFor`` and the tests treat its mere
+  ## existence as "the bind is published".
+  ##
+  ## THE STAGING FILE. The session directory's permissions are not
+  ## guaranteed (see ``removeReadyOwnedBy``), so the staging name carries
+  ## 64 random bits and, on POSIX, is created ``O_EXCL | O_NOFOLLOW``: a
+  ## name planted in advance -- a symlink to one of this user's files -- is
+  ## never written through. ``moveFile`` then renames it over ``path``.
+  ##
+  ## WINDOWS. ``moveFile`` replaces through ``MoveFileExW`` with
+  ## ``MOVEFILE_REPLACE_EXISTING``, which fails while another process holds
+  ## the TARGET open without ``FILE_SHARE_DELETE``. For ``http-ready.json``
+  ## the supervisor removes any previous marker before it starts the helper
+  ## (``discardStaleControlApiBind``), so the target normally does not exist;
+  ## if a stale marker survived that removal because a reader held it, the
+  ## publish fails and raises, naming the file, rather than leaving a
+  ## half-written one. A file rewritten under live readers (``session.json``)
+  ## keeps ``writeJsonFile`` and ``readJsonFileResilient``.
+  let dir = parentDir(path)
+  createDir(extendedPath(dir))
+  var suffix = ""
+  for b in urandom(8):
+    suffix.add toHex(b, 2).toLowerAscii
+  let staging = dir / ("." & extractFilename(path) & "." &
+    $getCurrentProcessId() & "." & suffix & ".tmp")
+  let content = pretty(node) & "\n"
+  try:
+    writeNewFileExclusive(staging, content)
+    moveFile(extendedPath(staging), extendedPath(path))
+  except CatchableError:
+    try: removeFile(extendedPath(staging)) except OSError: discard
+    raise
 
 proc readJsonFileResilient*(path: string): JsonNode =
   # `parseFile` lifts the race that exists between a concurrent
@@ -3358,20 +3402,21 @@ proc runWatchLoop(state: var SessionState; config: DevSessionSupervisorConfig;
     state.runWatchCycle(config, artifact, artifactPath)
 
 proc startHttpServer(config: DevSessionSupervisorConfig): Process =
-  var args = @[
-    "__repro-dev-session-http",
-    "--session-dir", config.outDir.sessionDir,
-    "--parent-pid", $getCurrentProcessId(),
-    "--supervised",
-    "--session-id", config.sessionId
-  ]
-  # No `--host` means the platform default transport, which the listener
-  # chooses (`runDevSessionHttpServer`); only an explicit `--http` names one.
+  # The server's command line (`repro internal dev-session-http`), written
+  # by the renderer from its declaration. No `--host` means the platform
+  # default transport, which the listener chooses
+  # (`runDevSessionHttpServer`); only an explicit `--http` names one.
+  var values = @[
+    ("sessionDir", @[config.outDir.sessionDir]),
+    ("parentPid", @[$getCurrentProcessId()]),
+    ("supervised", @["true"]),
+    ("sessionId", @[config.sessionId]),
+    ("httpAllowRemote", (if config.httpAllowRemote: @["true"] else: @[]))]
   if config.httpBind.len > 0:
     let httpBindParts = parseHttpBind(config.httpBind)
-    args.add(["--host", httpBindParts.host, "--port", $httpBindParts.port])
-  if config.httpAllowRemote:
-    args.add(AllowRemoteFlag)
+    values.add(("host", @[httpBindParts.host]))
+    values.add(("port", @[$httpBindParts.port]))
+  let args = reproArgvOf(["internal", "dev-session-http"], values)
   startProcess(config.publicCliPath,
     args = args,
     workingDir = config.projectRoot,
@@ -3539,6 +3584,17 @@ proc queryValue(query, name, fallback: string): string =
       return part[eq + 1 .. ^1]
   fallback
 
+proc sendAll(client: Socket; data: string) =
+  ## Send ``data`` to one control-API client, raising ``OSError`` when the
+  ## client has gone away.
+  ##
+  ## Not ``client.send(data)``: see ``writeFully`` for the two defects in
+  ## the pinned ``std/net`` loop (a reset peer spins the single-threaded
+  ## listener forever; a short write resends from byte 0). Raising ends
+  ## that one exchange; the accept loop (``runDevSessionHttpServer``) drops
+  ## the connection and goes on.
+  writeFully(proc (p: pointer; size: int): int = client.send(p, size), data)
+
 proc sendResponse(client: Socket; status: int; contentType, body: string;
                   extraHeaders = "") =
   ## ``extraHeaders`` is zero or more complete ``Name: value\r\n`` lines.
@@ -3554,7 +3610,7 @@ proc sendResponse(client: Socket; status: int; contentType, body: string;
     of 405: "Method Not Allowed"
     of 415: "Unsupported Media Type"
     else: "Error"
-  client.send("HTTP/1.1 " & $status & " " & reason & "\r\n" &
+  client.sendAll("HTTP/1.1 " & $status & " " & reason & "\r\n" &
     "Content-Type: " & contentType & "\r\n" &
     "Content-Length: " & $body.len & "\r\n" &
     extraHeaders &
@@ -3562,14 +3618,13 @@ proc sendResponse(client: Socket; status: int; contentType, body: string;
 
 proc sendSse(client: Socket; id: int; node: JsonNode) =
   let kind = node{"kind"}.getStr("message")
-  client.send("id: " & $id & "\n")
-  client.send("event: " & kind & "\n")
-  client.send("data: " & $node & "\n\n")
+  client.sendAll("id: " & $id & "\n" & "event: " & kind & "\n" &
+    "data: " & $node & "\n\n")
 
 proc serveEvents(client: Socket; sessionDir, query: string) =
   let waitMs = parseInt(queryValue(query, "wait-ms", "250"))
   let since = parseInt(queryValue(query, "since", "0"))
-  client.send("HTTP/1.1 200 OK\r\n" &
+  client.sendAll("HTTP/1.1 200 OK\r\n" &
     "Content-Type: text/event-stream\r\n" &
     "Cache-Control: no-cache\r\n" &
     "Connection: close\r\n\r\n")
@@ -3597,12 +3652,36 @@ const
     ## The largest request body read and discarded. Reading it rather than
     ## closing on unread bytes keeps the kernel from answering the client
     ## with a reset that can destroy the response it has not read yet.
+  HttpRequestReadTimeoutMs = 5000
+    ## The whole request -- request line, headers and drained body -- must
+    ## arrive within this long of the connection being accepted. The
+    ## listener serves one connection at a time, so without a deadline any
+    ## account that can reach a TCP port could connect, send nothing, and
+    ## keep ``repro down`` and every other client from the API for as long
+    ## as it liked (§"Control API Access Control", "Request deadline").
 
-proc recvHttpLine(socket: Socket): tuple[line: string; ok: bool] =
-  ## One CRLF- (or LF-) terminated line. ``ok`` is false at end of stream
-  ## or when the line exceeds ``MaxHttpHeaderLineBytes``.
+proc remainingMs(deadline: MonoTime): int =
+  ## Milliseconds left before ``deadline``; 0 once it has passed.
+  max(0, int((deadline - getMonoTime()).inMilliseconds))
+
+proc recvBefore(socket: Socket; size: int; deadline: MonoTime): string =
+  ## ``recv`` that gives up at ``deadline``: "" when the deadline passes or
+  ## the peer closes, so the caller treats both as the end of the exchange.
+  let left = remainingMs(deadline)
+  if left <= 0:
+    return ""
+  try:
+    socket.recv(size, timeout = left)
+  except TimeoutError:
+    ""
+
+proc recvHttpLine(socket: Socket; deadline: MonoTime):
+    tuple[line: string; ok: bool] =
+  ## One CRLF- (or LF-) terminated line. ``ok`` is false at end of stream,
+  ## when ``deadline`` passes, or when the line exceeds
+  ## ``MaxHttpHeaderLineBytes``.
   while true:
-    let chunk = socket.recv(1)
+    let chunk = socket.recvBefore(1, deadline)
     if chunk.len == 0:
       return (result.line, false)
     let ch = chunk[0]
@@ -3659,12 +3738,14 @@ proc handleHttpClient(client: Socket; sessionDir: string;
   ## not authenticated learns nothing about which routes exist, and a
   ## refused request has no side effect.
   defer: client.close()
-  let (request, requestOk) = client.recvHttpLine()
+  let deadline = getMonoTime() + initDuration(
+    milliseconds = HttpRequestReadTimeoutMs)
+  let (request, requestOk) = client.recvHttpLine(deadline)
   if not requestOk or request.len == 0:
     return
   var headers: seq[tuple[name, value: string]] = @[]
   while true:
-    let (line, ok) = client.recvHttpLine()
+    let (line, ok) = client.recvHttpLine(deadline)
     if not ok:
       return
     if line.len == 0:
@@ -3714,7 +3795,7 @@ proc handleHttpClient(client: Socket; sessionDir: string;
     try: remaining = min(parseInt(lengths[0]), MaxHttpBodyBytes)
     except ValueError: remaining = 0
     while remaining > 0:
-      let chunk = client.recv(min(remaining, 4096))
+      let chunk = client.recvBefore(min(remaining, 4096), deadline)
       if chunk.len == 0: break
       remaining -= chunk.len
 
@@ -3810,7 +3891,9 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
   # that sees the bind can always read the token it needs.
   let token = mintControlToken()
   writeControlToken(tokenPath, token)
-  writeJsonFile(config.sessionDir / HttpReadyFile, %*{
+  # Published atomically: readers poll for this file's existence and parse
+  # it at once, so it must never be visible half-written.
+  publishJsonFile(config.sessionDir / HttpReadyFile, %*{
     "schemaId": "reprobuild.dev-session.http.v1",
     "sessionId": config.sessionId,
     "httpBind": httpBindValue,
@@ -3832,5 +3915,13 @@ proc runDevSessionHttpServer*(config: DevSessionHttpConfig): int =
     var client: owned(Socket)
     server.accept(client)
     if not client.isNil:
-      client.handleHttpClient(config.sessionDir, access)
+      # One client's failure ends only its own exchange: a peer that resets
+      # mid-answer (`sendAll`), or an authenticated request whose query does
+      # not parse, must not take the listener -- and with it `repro down`
+      # -- away from everyone else. `handleHttpClient` closes the socket on
+      # every path.
+      try:
+        client.handleHttpClient(config.sessionDir, access)
+      except CatchableError:
+        discard
   0

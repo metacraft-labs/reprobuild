@@ -739,8 +739,8 @@ type
       ## (`reprobuild@manifest`) the inline-key path uses when unset.
 
   BootstrapDevelopBody* = object
-    ## RA-22 — host/workspace policy for `repro add`'s develop-vs-binary
-    ## default (Workspace-And-Develop-Mode.md §"`repro add` and develop-mode
+    ## RA-22 — host/workspace policy for `repro ws add`'s develop-vs-binary
+    ## default (Workspace-And-Develop-Mode.md §"`repro workspace add` and develop-mode
     ## policy"). A dependency whose fetch URL begins with one of the
     ## `org_urls` prefixes is added in DEVELOP mode by default (a local
     ## sibling checkout); every other dependency defaults to BINARY. The

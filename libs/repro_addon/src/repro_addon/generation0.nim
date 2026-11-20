@@ -7,7 +7,16 @@
 ##
 ## - ``repro-addon.target``: the target the add-on's units hang off, wanted
 ##   by ``multi-user.target``. Nothing of the base ``Requires=`` it, so a
-##   broken add-on cannot hold up the base's boot;
+##   broken add-on target cannot hold up the base's boot. The one exception
+##   is ``repro-addon-boot-hold.service``, which ``sysinit.target``
+##   requires (§13 decision 172): it never fails (its script exits 0 under
+##   ``ExecStart=-`` and ``timeout``), so the boot waits only for it to run;
+##   what it cannot cover -- a missing or unloadable unit file while the
+##   ``sysinit.target.requires`` link remains, a hang setting up its
+##   namespace past ``TimeoutStartSec=``, a fork or resource failure -- is
+##   the decision's stated residual: uninstall removes the link with the
+##   unit, and ``repro system addon verify`` reports a link left dangling
+##   or a unit systemd cannot load;
 ## - ``repro-store.mount``: ``/repro/store`` bind-mounted read-only over
 ##   itself, so no process on the host can write the store through the
 ##   ordinary mount namespace (the apply process gets a private writable
@@ -42,8 +51,9 @@ import std/[algorithm, strutils]
 
 import repro_elevation/posix_system_parse
 from repro_infra/profile import SecretsBootUnit
+from repro_infra/apply import EssentialUnits
 
-from ./effective_floor import StartHoldText
+from ./effective_floor import StartHoldText, MinimalStartHoldText, StartHoldAssertion
 import ./fingerprint
 import ./mutations
 
@@ -183,10 +193,9 @@ const
     ## the sink (never the peer-cache anchors, threat model G28's rule).
   EvidenceStateDir* = "/var/lib/repro/evidence"
     ## ``0700 root``: the host's sink write credential (``host-ca.key``,
-    ## ``host-ca.crt``), the shipping cursor and the sink's last receipt.
-    ## Nothing else can read the credential; the shipping unit cannot read
-    ## the attestation key or the recipient key (they are under
-    ## ``/var/lib/repro/agent``, hidden from it).
+    ## ``host-ca.crt``) and the apt hook harvest's cursor. The shipping unit
+    ## runs as a dynamic user (§13 decision 181) and cannot open it: systemd
+    ## hands it the credential through ``LoadCredential=``.
   EvidenceCredentialCertPath* = EvidenceStateDir & "/host-ca.crt"
   EvidenceCredentialKeyPath* = EvidenceStateDir & "/host-ca.key"
   AttestationKeyPath* = "/var/lib/repro/agent/attestation.key"
@@ -197,8 +206,35 @@ const
   AttestationPubPath* = "/var/lib/repro/agent/attestation.pub"
   EvidenceDirPath* = "/var/lib/repro/system/addon/evidence"
     ## The local records (one JSON document per event, spec §10.4).
-  EvidenceOutboxPath* = EvidenceDirPath & "/outbox"
+  EvidenceShipUser* = "repro-addon-evidence"
+    ## The shipping unit's dynamic user (``DynamicUser=``, §13 decision
+    ## 181): no account in ``/etc/passwd``, so bootstrap adds none (T23).
+    ## The transient runs that ship for ``contain``, ``release``, uninstall
+    ## and ``evidence-credential-check`` name the same user, so they share
+    ## its state directory, its outbox and ``ship.lock``.
+  EvidenceShipStateDir* =
+    when mutated("evidence-ship-runs-as-root"): "/var/lib/repro-addon-evidence"
+    else: "/var/lib/private/repro-addon-evidence"
+    ## The dynamic user's ``StateDirectory=`` as root sees it (systemd links
+    ## ``/var/lib/repro-addon-evidence`` to it): the outbox, the shipping
+    ## cursor, the sink's last receipt and ``ship.lock``.
+  EvidenceShipStatePaths* = ["/var/lib/private/repro-addon-evidence",
+                             "/var/lib/repro-addon-evidence"]
+    ## What uninstall removes of that state directory.
+  EvidenceShipUnitStateDir* = "/var/lib/repro-addon-evidence"
+    ## The same directory as the shipping unit sees it.
+  EvidenceOutboxPath* = EvidenceShipStateDir & "/outbox"
     ## Each record as the sink receives it, until the sink acknowledges it.
+    ## Owned by the shipping unit's dynamic user; the root writers write
+    ## each entry through descriptors that follow no link and hand it to
+    ## that user (``record_dir.writeDelegatedEntry``). A root reader takes
+    ## only entry names from it, never their bytes (§13 decision 181).
+  EvidenceShipConfinedEnv* = "REPRO_ADDON_SHIP_CONFINED"
+    ## Set in the shipping unit and its transient runs: the shipping and
+    ## credential-check commands decode the sink's bytes only where it is
+    ## set, and hand themselves to a confined run otherwise.
+  EvidenceCredentialNames* = ["host-ca.crt", "host-ca.key"]
+    ## The credential's names under ``$CREDENTIALS_DIRECTORY``.
   StoreQuarantinePath* = "/var/lib/repro/system/addon/store-quarantine"
     ## Store paths whose bytes differed from their realisation digest (spec
     ## §13 decision 46): one per line; no switch uses one again.
@@ -241,6 +277,9 @@ const
   EgressUnit* = "repro-addon-egress.service"
   EgressCheckUnit* = "repro-addon-egress-check.service"
   EgressCheckTimer* = "repro-addon-egress-check.timer"
+  HostNftablesUnit* = "nftables.service"
+    ## The distribution's ruleset loader, whose flush deletes the egress
+    ## observer's table; the observer unit is tied to it by reference.
   DefaultEvidenceHeartbeatSec* = 300
   DefaultAgentPollSec* = 300
   AgentPollRandomDelaySec* = 30
@@ -580,23 +619,70 @@ proc bootConfirmUnit*(reproExe: string): string =
   "[Install]\n" &
   "WantedBy=repro-addon.target\n"
 
+const
+  MinimalHoldText* = MinimalStartHoldText
+    ## The hold the boot-hold script writes (A9 review round 20: always,
+    ## straight from the record): the start hold's always-failing
+    ## assertion and nothing else. ``boot_holds.releaseBootHolds`` lifts it
+    ## as it lifts the start hold, and the effective-unit check takes it
+    ## for the add-on's own (``effective_floor.isAddonHold``).
+  ConservativeHoldDir* = "/etc/systemd/system"
+    ## Where the units the add-on installs live: when the record cannot be
+    ## read, every socket, timer and path unit here is held.
+
+proc essentialActivatorPattern*(): string =
+  ## The shell ``case`` pattern of the socket, timer and path units among
+  ## A13's essential units (``repro_infra/apply.EssentialUnits``, §13
+  ## decision 177: an essential unit is never held) -- the one list, read
+  ## here, not a copy: the conservative boot hold never holds the
+  ## management path (an administrator's ``ssh.socket`` override on a base
+  ## that socket-activates sshd) or the add-on's own timer (A9 review round
+  ## 18, L2).
+  var names: seq[string]
+  when not mutated("conservative-hold-holds-essential"):
+    for u in EssentialUnits:
+      if u.endsWith(".socket") or u.endsWith(".timer") or u.endsWith(".path"):
+        names.add(u)
+  if names.len == 0: names.add("x-repro-addon-none")
+  names.join("|")
+
 proc bootHoldScript*(): string =
   ## The boot-hold unit's shell step, as ``/bin/sh -c`` runs it (``$``
-  ## not yet doubled for systemd). Nothing once ``sysinit.target`` is
-  ## reached (an apply that starts the unit). Otherwise:
+  ## not yet doubled for systemd). It fails closed (§13 decision 172 as
+  ## amended 2026-11-17 by the owner on A9 review round 20): every path
+  ## logs a line of its own, and either every unit it must hold is held
+  ## and systemd has loaded the holds, or the unit does not finish in
+  ## time and fails, so ``sysinit.target`` -- which requires it -- is
+  ## never reached with an activator free.
   ##
-  ## - a record or hold text that is a link is refused, and the unit fails;
-  ## - each recorded line must be ``<unit>.d`` in the characters a unit
-  ##   name uses (letters, digits, ``@ . _ : -``); any other line is
-  ##   skipped, so the record never steers a write outside the runtime unit
-  ##   directory, and a drop-in directory that is a link is skipped too;
-  ## - the hold copied is the recorded text only if its SHA-256 is the
-  ##   start hold's (``StartHoldText``); otherwise -- no text, other bytes,
-  ##   a link -- each recorded unit gets a minimal hold with the same
-  ##   assertion (``[Unit]`` and ``AssertPathExists=!/``): fail closed,
-  ##   never an activator left free to start;
-  ## - every hold written is listed for the re-assertion to lift, and
-  ##   systemd is reloaded once.
+  ## - ``sysinit.target`` already reached (an apply that starts the unit):
+  ##   nothing, said so.
+  ## - The list of drop-in directories is the pending switch's record,
+  ##   read where it lies; a record that is absent (a pending marker with
+  ##   no record), not a regular file (a link, a directory) or unreadable
+  ##   is not trusted, and every socket, timer and path unit in
+  ##   ``/etc/systemd/system`` but the essential ones is held instead
+  ##   (A9 review rounds 17, finding 9, and 20). A record with no line
+  ##   holds nothing, said so: the switch had no start hold.
+  ## - Each listed line must be ``<unit>.d`` in the characters a unit name
+  ##   uses (letters, digits, ``@ . _ : -``); any other line is skipped and
+  ##   logged, so the list never steers a write outside the runtime unit
+  ##   directory.
+  ## - Each hold is ``MinimalHoldText`` (``[Unit]`` and
+  ##   ``AssertPathExists=!/``), written straight away: no copy and no
+  ##   digest of the switch's hold text first, so the writes are the fast
+  ##   part and the reload the only slow step. Its path is listed for the
+  ##   re-assertion to lift (``releaseBootHolds``) BEFORE it is written, so
+  ##   a hold is never there unlisted. A hold that cannot be written (its
+  ##   directory cannot be made, or is a link) is logged and counted.
+  ## - systemd is reloaded once, bounded by ``timeout 30``.
+  ## - A hold not written, or a reload that failed, leaves an activator
+  ##   free: the script then logs why and waits, so the unit overruns
+  ##   ``TimeoutStartSec=`` and fails, and ``sysinit.target`` with it --
+  ##   the boot stops rather than starting an activator unheld (the
+  ##   boot-freeze residual the owner accepted in decision 172). Its exit
+  ##   status is never the signal: ``ExecStart=``'s ``-`` would turn it
+  ##   into success.
   ##
   ## Absolute paths for every tool; ``set -f`` so no expansion globs. No
   ## double quote, ``#``, brace or backslash: the canonical profile text
@@ -604,26 +690,82 @@ proc bootHoldScript*(): string =
   ## quoted and is validated to characters that need none. No single quote
   ## either: the script is one single-quoted ``ExecStart=`` argument, and
   ## systemd joins ``'a''b'`` into ``ab`` (systemd.syntax(7), "Quoting").
-  ## A9 review round 16, finding 10.
   let rt = RuntimeUnitDirPath
-  let sha = sha256Hex(StartHoldText)
   let h = rt & "/$d/" & StartHoldFileName
-  "set -f; /usr/bin/systemctl is-active -q sysinit.target && exit 0; " &
-  "r=" & BootHoldRecordPath & "; t=" & BootHoldTextPath & "; " &
-  "if [ -L $r ]; then echo repro-addon boot-holds: the record is a link, refused; exit 1; fi; " &
-  "[ -f $r ] || exit 0; " &
-  "ok=no; if [ -f $t ] && [ ! -L $t ]; then case $(/usr/bin/sha256sum $t) in " &
-    sha & "*) ok=yes;; esac; fi; " &
-  "/usr/bin/mkdir -p /run/repro-addon; n=0; " &
-  "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) continue;; x*.d) ;; *) continue;; esac; " &
-  "if [ -L " & rt & "/$d ]; then continue; fi; " &
-  "/usr/bin/mkdir -p " & rt & "/$d || continue; /usr/bin/rm -f " & h & "; " &
-  "if [ $ok = yes ]; then /usr/bin/cp $t " & h & " || continue; " &
-  "else echo [Unit] > " & h & "; echo AssertPathExists=!/ >> " & h & "; fi; " &
-  "echo " & h & " >> " & BootHoldsWrittenList & "; " &
-  "n=$((n+1)); done < $r; " &
-  "if [ $n -gt 0 ]; then /usr/bin/systemctl daemon-reload || exit 1; fi; " &
-  "echo repro-addon boot-holds: held $n unit drop-in directories, text $ok"
+  let l = "/run/repro-addon/boot-hold-list"
+  let w = BootHoldsWrittenList
+  let say = "echo repro-addon boot-holds: "
+  # The fail-closed wait: longer than TimeoutStartSec=, so systemd ends it
+  # and fails the unit.
+  let failClosed = "exec /usr/bin/sleep " & $(BootHoldTimeoutSec * 2)
+  let conservative =
+    "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
+    essentialActivatorPattern() & ") continue;; " &
+    "*.socket|*.timer|*.path) echo $u.d;; esac; done"
+  let recordAbsent =
+    when mutated("boot-hold-record-absent-skips"):
+      # FALSIFYING MUTATION: round 19's script -- a pending marker with no
+      # record exits at once, holding nothing.
+      "exit 0"
+    else:
+      say & "the pending marker is there but the record is absent: holding " &
+        "every socket, timer and path unit in " & ConservativeHoldDir &
+        " but the essential ones; src=c"
+  let reload =
+    "/usr/bin/timeout 30 /usr/bin/systemctl daemon-reload"
+  let afterReload =
+    when mutated("boot-hold-reload-failure-passes"):
+      # FALSIFYING MUTATION: round 19's script -- a failed reload is logged
+      # and the unit succeeds with the holds on disk but not loaded.
+      "if [ $n -gt 0 ]; then " & reload & " || " & say &
+        "systemd was not reloaded; fi; " &
+      say & "held $n unit drop-in directories; exit 0"
+    else:
+      "if [ $f -gt 0 ]; then " & say & "$f of the holds could not be written: " &
+        "failing the unit so sysinit.target is not reached with an activator " &
+        "free; " & failClosed & "; fi; " &
+      "if [ $n -eq 0 ]; then " & say & "no unit is listed: nothing to hold; " &
+        "exit 0; fi; " &
+      "if " & reload & "; then " & say & "held $n unit drop-in directories, " &
+        "systemd reloaded; exit 0; fi; " &
+      say & "wrote $n holds but systemd was not reloaded: failing the unit so " &
+        "sysinit.target is not reached with the holds unloaded; " & failClosed
+  # One hold: listed first, then written (A9 review round 20).
+  let writeOne =
+    when mutated("boot-hold-holds-after-slow-step"):
+      # FALSIFYING MUTATION: the hold is written only after the slow step
+      # (here a reload per hold, as the copy and digest of round 19 were
+      # before the writes), so an overrun leaves holds unwritten.
+      reload & "; echo " & h & " >> " & w & "; echo [Unit] > " & h &
+        " && echo " & StartHoldAssertion & " >> " & h
+    else:
+      "echo " & h & " >> " & w & "; echo [Unit] > " & h &
+        " && echo " & StartHoldAssertion & " >> " & h
+  "set -f; " &
+  "if /usr/bin/systemctl is-active -q sysinit.target; then " & say &
+    "sysinit.target is already active: nothing to put back; exit 0; fi; " &
+  "r=" & BootHoldRecordPath & "; l=" & l & "; " &
+  "/usr/bin/mkdir -p /run/repro-addon || " & say & "cannot make /run/repro-addon; " &
+  "src=r; " &
+  "if [ -L $r ]; then " & say & "the record is a link: holding every socket, " &
+    "timer and path unit in " & ConservativeHoldDir & " but the essential ones; src=c; " &
+  "elif [ ! -e $r ]; then " & recordAbsent & "; " &
+  "elif [ ! -f $r ] || [ ! -r $r ]; then " & say & "the record is not a readable " &
+    "regular file: holding every socket, timer and path unit in " &
+    ConservativeHoldDir & " but the essential ones; src=c; fi; " &
+  "if ( if [ $src = c ]; then " & conservative & "; else /usr/bin/cat $r; fi ) > $l; " &
+    "then :; else " & say & "cannot write the list " & l & ": failing the unit " &
+    "so sysinit.target is not reached with an activator free; " & failClosed & "; fi; " &
+  "n=0; f=0; " &
+  "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) " & say &
+    "skipped the record line $d; continue;; x*.d) ;; *) " & say &
+    "skipped the record line $d; continue;; esac; " &
+  "if [ -L " & rt & "/$d ] || ! /usr/bin/mkdir -p " & rt & "/$d; then " & say &
+    "cannot make " & rt & "/$d; f=$((f+1)); continue; fi; " &
+  "if " & writeOne & "; then n=$((n+1)); else " & say & "cannot write " & h &
+    "; f=$((f+1)); fi; " &
+  "done < $l; " &
+  afterReload
 
 proc bootHoldUnit*(): string =
   ## The boot-hold unit (§13 decision 159; A9 review round 15):
@@ -658,6 +800,9 @@ proc bootHoldUnit*(): string =
       "After=local-fs.target\nBefore=sysinit.target shutdown.target\n"
   "[Unit]\n" &
   "Description=Reprobuild add-on boot-time start holds\n" &
+  # A [Unit] key (systemd.unit(5)): only a dependency, such as shutdown's
+  # Conflicts=, stops it; see the [Service] comment below.
+  "RefuseManualStop=yes\n" &
   "DefaultDependencies=no\n" &
   order &
   "Conflicts=shutdown.target\n" &
@@ -665,11 +810,28 @@ proc bootHoldUnit*(): string =
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
-  "RemainAfterExit=yes\n" &
+  # Not RemainAfterExit=: once it has run it is inactive, so nothing a
+  # switch plans ever restarts it, and a stop of it -- which, required by
+  # sysinit.target, would stop every unit that requires sysinit.target --
+  # is refused unless a dependency asks for it, as shutdown's Conflicts=
+  # does (systemd.unit(5), RefuseManualStop=; §13 decision 172).
+  "RemainAfterExit=no\n" &
   "TimeoutStartSec=" & $BootHoldTimeoutSec & "\n" &
   # systemd expands $NAME in ExecStart= (systemd.service(5), "Command
   # lines"); $$ passes a single $ to the shell.
-  "ExecStart=/bin/sh -c '" & bootHoldScript().replace("$", "$$") & "'\n" &
+  # ``-``: an exit status is recorded and treated as success
+  # (systemd.service(5), "ExecStart="), and nothing the script runs exits
+  # non-zero anyway. No outer ``timeout`` (A9 review round 20; §13
+  # decision 172 as amended 2026-11-17): a script that overruns, or that
+  # chooses to wait because a hold or the reload failed, is ended by
+  # TimeoutStartSec=, which fails the unit -- and sysinit.target, which
+  # requires it -- so the boot never goes on with an activator free.
+  (when mutated("boot-hold-outer-timeout"):
+     # FALSIFYING MUTATION: round 19's wrapper -- an overrun is killed by
+     # ``timeout`` and the ``-`` prefix reports success.
+     "ExecStart=-/usr/bin/timeout -k 5 " & $(BootHoldTimeoutSec - 15) & " /bin/sh -c '"
+   else: "ExecStart=-/bin/sh -c '") &
+    bootHoldScript().replace("$", "$$") & "'\n" &
   # Its own floor (CONF-1): it reads the state directory, writes under
   # /run only, and reloads systemd over its private socket, which checks
   # the peer's uid, not a capability -- so no capability at all. No
@@ -706,7 +868,18 @@ proc bootHoldUnit*(): string =
     "sysinit.target; PrivateUsers: its writes are root's\n" &
   "\n" &
   "[Install]\n" &
-  "WantedBy=sysinit.target\n"
+  # RequiredBy=, not WantedBy=: a job sysinit.target requires matters to
+  # the boot's anchor (multi-user.target requires basic.target, which
+  # requires sysinit.target), and systemd never deletes such a job to
+  # break an ordering cycle -- it deletes one that does not matter, or
+  # fails the transaction (``transaction_verify_order_one()``,
+  # src/core/transaction.c, https://github.com/systemd/systemd/blob/v257/src/core/transaction.c;
+  # §13 decision 172, A9 review round 17, finding 2).
+  (when mutated("boot-hold-wanted"):
+     # FALSIFYING MUTATION: wanted only, so a cycle may delete its job.
+     "WantedBy=sysinit.target\n"
+   else:
+     "RequiredBy=sysinit.target\n")
 
 proc secretsUnit(reproExe: string): string =
   # Boot-time secrets (§7.7, §10.3): re-materialise the current
@@ -987,8 +1160,39 @@ proc egressUnit*(nft: string; tableSha256 = ""): string =
   ## the switch restarts a changed unit, which loads the new table into the
   ## kernel. Without it the unit's bytes stayed the same and the old sets
   ## stayed loaded until a reboot (A11 review round 2).
+  ##
+  ## The host's ``nftables.service`` (Debian's and Ubuntu's) loads an
+  ## ``/etc/nftables.conf`` that begins ``flush ruleset`` at start and
+  ## reload, runs ``nft flush ruleset`` at stop, and a package upgrade
+  ## try-restarts it: each deletes this table while this unit, which
+  ## ``RemainAfterExit=yes``, stays active. So the unit is tied to that
+  ## service by reference, within spec §13 decision 43 (the add-on's own
+  ## table), with nothing written on the service, a management-path unit:
+  ## ``After=`` orders the load after the host's ruleset at boot and in
+  ## every shared transaction; ``PartOf=`` carries a restart (and a
+  ## try-restart) of it here, which the fetch unit's ``Requires=`` carries
+  ## on to a running fetch, and its stop, which stops this unit (before the
+  ## flush: stops run in reverse order) and a running fetch until the next
+  ## fetch starts this unit again; ``ReloadPropagatedFrom=`` carries its
+  ## reload to ``ExecReload=``, which loads the table again (the file
+  ## declares, deletes and defines it in one transaction, so a load over a
+  ## missing or present table is the same). Not covered: a start of that
+  ## service while this unit is active (``systemctl enable --now
+  ## nftables`` after bootstrap), or a flush by hand. ``ExecStop=``
+  ## tolerates a table such a flush already deleted, so a later stop or
+  ## restart of this unit does not end ``failed``. A base without that
+  ## service leaves the references unresolved, which systemd ignores.
+  ## Reprobuild-pm issue
+  ## ``2026-11-16-addon-egress-table-stays-deleted-after-nftables-service-flushes-the-ruleset.md``.
   let load = when mutated("egress-observer-not-installed"): "/bin/true"
              else: nft & " -f " & EgressNftPath
+  let hostRuleset = when mutated("egress-unit-ignores-host-ruleset"): ""
+                    else:
+                      "After=" & HostNftablesUnit & "\n" &
+                      "PartOf=" & HostNftablesUnit & "\n" &
+                      "ReloadPropagatedFrom=" & HostNftablesUnit & "\n"
+  let reload = when mutated("egress-unit-ignores-host-ruleset"): ""
+               else: "ExecReload=" & load & "\n"
   let table = when mutated("egress-unit-ignores-table"): ""
               else:
                 if tableSha256.len > 0:
@@ -999,22 +1203,39 @@ proc egressUnit*(nft: string; tableSha256 = ""): string =
   table &
   "Requires=" & AgentSlice & "\n" &
   "After=" & AgentSlice & "\n" &
+  hostRuleset &
   "Before=" & AgentFetchUnit & " " & ReassertUnit & "\n" &
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
   "RemainAfterExit=yes\n" &
   "ExecStart=" & load & "\n" &
-  "ExecStop=" & nft & " delete table inet repro_addon_egress\n" &
+  reload &
+  "ExecStop=-" & nft & " delete table inet repro_addon_egress\n" &
   "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectSystem=strict\n" &
+  "InaccessiblePaths=-/var/lib/repro -/run/repro\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
+  "PrivateDevices=yes\n" &
   "ProtectKernelTunables=yes\n" &
+  "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
   "ProtectControlGroups=yes\n" &
-  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  # It loads one root-written file with nft over netlink: no Unix socket
+  # (§13 decision 181), no IP socket, nothing of the add-on's state.
+  (when mutated("egress-units-unix-sockets"):
+     "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n"
+   else: "RestrictAddressFamilies=AF_NETLINK\n") &
   "IPAddressDeny=any\n" &
   "\n" &
   "[Install]\n" &
@@ -1031,19 +1252,35 @@ proc egressCheckUnit*(reproExe: string): string =
   "[Service]\n" &
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon egress-check\n" &
-  "CapabilityBoundingSet=CAP_NET_ADMIN\n" &
+  # CAP_DAC_OVERRIDE: its records go into the outbox, which belongs to the
+  # shipping unit's dynamic user (§13 decision 181); root without it cannot
+  # write into a directory another user owns.
+  "CapabilityBoundingSet=CAP_NET_ADMIN CAP_DAC_OVERRIDE\n" &
   "AmbientCapabilities=\n" &
   "NoNewPrivileges=yes\n" &
   "ProtectSystem=strict\n" &
-  "ReadWritePaths=" & EvidenceDirPath & "\n" &
+  "ReadWritePaths=" & EvidenceDirPath & " -" & EvidenceShipStateDir & "\n" &
   "InaccessiblePaths=-/var/lib/repro/agent -/run/repro\n" &
   "ProtectHome=yes\n" &
   "PrivateTmp=yes\n" &
   "PrivateDevices=yes\n" &
   "ProtectKernelTunables=yes\n" &
   "ProtectKernelModules=yes\n" &
+  "ProtectKernelLogs=yes\n" &
   "ProtectControlGroups=yes\n" &
-  "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n" &
+  "ProtectClock=yes\n" &
+  "ProtectHostname=yes\n" &
+  "RestrictNamespaces=yes\n" &
+  "RestrictRealtime=yes\n" &
+  "RestrictSUIDSGID=yes\n" &
+  "LockPersonality=yes\n" &
+  "SystemCallArchitectures=native\n" &
+  # AF_NETLINK alone (§13 decision 181): it reads the table's counters
+  # over netlink and needs no Unix socket, so neither the system bus nor
+  # PID 1's private socket is reachable from it.
+  (when mutated("egress-units-unix-sockets"):
+     "RestrictAddressFamilies=AF_NETLINK AF_UNIX\n"
+   else: "RestrictAddressFamilies=AF_NETLINK\n") &
   "IPAddressDeny=any\n"
 
 proc egressCheckTimer*(heartbeatSec: int): string =
@@ -1257,21 +1494,82 @@ proc renderEvidenceConf*(e: EvidenceUnitsInputs; agent: AgentUnitsInputs): strin
   "heartbeat-interval = " & $evidenceHeartbeatSec(e) & "\n" &
   "tick-interval = " & $tick & "\n"
 
+proc evidenceShipConfinement*(e: EvidenceUnitsInputs): seq[string] =
+  ## The shipping unit's identity and sandbox, one ``Key=value`` per line
+  ## (§13 decision 181): the unit file carries these lines, and the
+  ## transient runs root callers start (``systemd-run -p``) carry the same
+  ## ones, so there is one confinement for every decoder of the sink's
+  ## bytes.
+  ##
+  ## - A dynamic user, never uid 0, with no capability; its own state
+  ##   directory and outbox (``StateDirectory=``, chowned to it by systemd
+  ##   at each start).
+  ## - The sink write credential through ``LoadCredential=``: systemd
+  ##   (root) reads it from the ``0700 root`` ``EvidenceStateDir`` and the
+  ##   unit reads it from ``$CREDENTIALS_DIRECTORY``, readable by it alone.
+  ## - ``/var/lib/repro`` and ``/run/repro`` hidden: nothing there is the
+  ##   shipper's. ``/repro`` stays visible read-only (the unit's own binary
+  ##   is in the store), as everything is under ``ProtectSystem=strict``.
+  ## - ``RestrictAddressFamilies=AF_INET AF_INET6``: no ``AF_UNIX``
+  ##   socket can be made, so neither the system bus nor PID 1's private
+  ##   socket is reachable (its stdout and stderr are descriptors systemd
+  ##   passes, not sockets it opens); IP egress to the sink's address only.
+  let user = when mutated("evidence-ship-runs-as-root"): newSeq[string]()
+             else: @["DynamicUser=yes", "User=" & EvidenceShipUser]
+  let families = when mutated("evidence-ship-unix-sockets"):
+                   "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX"
+                 else: "RestrictAddressFamilies=AF_INET AF_INET6"
+  let egress = when mutated("evidence-ship-unrestricted-egress"): newSeq[string]()
+               else: @["IPAddressDeny=any", "IPAddressAllow=" & e.sinkAddress]
+  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
+               else: "-/var/lib/repro -/run/repro"
+  result = user & @[
+    "StateDirectory=repro-addon-evidence repro-addon-evidence/outbox",
+    "StateDirectoryMode=0700",
+    "LoadCredential=" & EvidenceCredentialNames[0] & ":" &
+      EvidenceCredentialCertPath,
+    "LoadCredential=" & EvidenceCredentialNames[1] & ":" &
+      EvidenceCredentialKeyPath,
+    "Environment=" & EvidenceShipConfinedEnv & "=1",
+    "CapabilityBoundingSet=",
+    "AmbientCapabilities=",
+    "NoNewPrivileges=yes",
+    "ProtectSystem=strict",
+    "InaccessiblePaths=" & hidden,
+    "ProtectHome=yes",
+    "PrivateTmp=yes",
+    "PrivateDevices=yes",
+    "ProtectKernelTunables=yes",
+    "ProtectKernelModules=yes",
+    "ProtectKernelLogs=yes",
+    "ProtectControlGroups=yes",
+    "ProtectClock=yes",
+    "ProtectHostname=yes",
+    "ProtectProc=invisible",
+    "RestrictNamespaces=yes",
+    "RestrictRealtime=yes",
+    "RestrictSUIDSGID=yes",
+    "LockPersonality=yes",
+    "MemoryDenyWriteExecute=yes",
+    "SystemCallArchitectures=native"]
+  for l in FetchSyscallFilter.splitLines():
+    if l.len > 0: result.add(l)
+  result.add("SystemCallErrorNumber=EPERM")
+  result.add(families)
+  for l in (ResolverSocketsHidden & "InaccessiblePaths=-/run/dbus -/var/run/dbus\n").splitLines():
+    if l.len > 0: result.add(l)
+  result.add(egress)
+
 proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   ## ``repro-addon-evidence.service`` (spec §10.4): ships the outbox to the
-  ## Evidence sink and heartbeats. Root -- the records and the credential
-  ## are root's files -- but with NO capability, a read-only system apart
-  ## from its own two directories, the attestation and recipient keys and
-  ## the secrets hidden, and egress to the sink's address only. It is the
-  ## only add-on unit that talks to the sink; the units that write records
-  ## (apply, re-assert, the apt hook) have no network and cannot sign as
-  ## the sink credential, and this one cannot sign attestations.
-  let egress = when mutated("evidence-ship-unrestricted-egress"): ""
-               else: "IPAddressDeny=any\nIPAddressAllow=" & e.sinkAddress & "\n"
-  # The store stays visible (read-only, as everywhere): the unit's own
-  # binary is in it.
-  let hidden = when mutated("evidence-ship-sees-agent-keys"): "-/run/repro"
-               else: "-/var/lib/repro/agent -/run/repro"
+  ## Evidence sink and heartbeats, as a dynamic user with no capability
+  ## (``evidenceShipConfinement``; §13 decision 181). It is the only add-on
+  ## unit that talks to the sink; the units that write records (apply,
+  ## re-assert, the apt hook) have no network and cannot sign as the sink
+  ## credential, and this one cannot sign attestations. The apt hook
+  ## wrapper's events are turned into records first, by a privileged
+  ## ``ExecStartPre=+`` step that reads root's own log and decodes nothing
+  ## from the network.
   "[Unit]\n" &
   "Description=Reprobuild add-on: ship evidence records to the Evidence sink\n" &
   "After=network-online.target\n" &
@@ -1284,37 +1582,11 @@ proc evidenceShipUnit*(reproExe: string; e: EvidenceUnitsInputs): string =
   "\n" &
   "[Service]\n" &
   "Type=oneshot\n" &
+  "ExecStartPre=+" & reproExe & " system addon evidence-harvest\n" &
   "ExecStart=" & reproExe & " system addon evidence-ship\n" &
   "TimeoutStartSec=" & (when mutated("ship-backoff-reaches-timeout"): "300"
                          else: $EvidenceShipTimeoutStartSec) & "\n" &
-  "CapabilityBoundingSet=\n" &
-  "AmbientCapabilities=\n" &
-  "NoNewPrivileges=yes\n" &
-  "ProtectSystem=strict\n" &
-  "ReadWritePaths=" & EvidenceStateDir & " " & EvidenceOutboxPath & "\n" &
-  "InaccessiblePaths=" & hidden & "\n" &
-  "ProtectHome=yes\n" &
-  "PrivateTmp=yes\n" &
-  "PrivateDevices=yes\n" &
-  "ProtectKernelTunables=yes\n" &
-  "ProtectKernelModules=yes\n" &
-  "ProtectKernelLogs=yes\n" &
-  "ProtectControlGroups=yes\n" &
-  "ProtectClock=yes\n" &
-  "ProtectHostname=yes\n" &
-  "ProtectProc=invisible\n" &
-  "RestrictNamespaces=yes\n" &
-  "RestrictRealtime=yes\n" &
-  "RestrictSUIDSGID=yes\n" &
-  "LockPersonality=yes\n" &
-  "MemoryDenyWriteExecute=yes\n" &
-  "SystemCallArchitectures=native\n" &
-  FetchSyscallFilter &
-  "SystemCallErrorNumber=EPERM\n" &
-  "RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX\n" &
-  ResolverSocketsHidden &
-  "InaccessiblePaths=-/run/dbus -/var/run/dbus\n" &
-  egress
+  evidenceShipConfinement(e).join("\n") & "\n"
 
 proc storeVerifyUnit*(reproExe: string): string =
   ## ``repro-addon-store-verify.service`` (spec §13 decision 46): the current
@@ -1370,8 +1642,9 @@ proc evidenceShipPathUnit*(): string =
   # failed (A11 audit F2).
   (when mutated("evidence-path-rate-limited"): "" else:
      "TriggerLimitIntervalSec=0\n") &
-  "MakeDirectory=yes\n" &
-  "DirectoryMode=0700\n" &
+  # No MakeDirectory=: the outbox is the shipping unit's dynamic user's
+  # (StateDirectory=), and PID 1 would make it by path, as root, in a
+  # directory that user owns (§13 decision 181).
   "Unit=" & EvidenceShipUnit & "\n" &
   "\n" &
   "[Install]\n" &

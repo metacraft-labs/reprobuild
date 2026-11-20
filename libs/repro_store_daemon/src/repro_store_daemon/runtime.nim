@@ -6,6 +6,10 @@ import repro_tool_profiles
 
 import ./client
 import ./protocol
+# `repro store serve`'s command line is declared in repro's description;
+# only its spellings are read here, at compile time.
+from repro_cli_support/cli_description import reproLongFlags
+
 
 when defined(posix):
   import std/posix except Time
@@ -54,49 +58,17 @@ type
 
 const DevDaemonLockFileName = ".reprostored-dev.lock"
 
-proc parseStoreRootFlag(args: seq[string]; defaultRoot = ""):
-    tuple[root: string; rest: seq[string]] =
-  var i = 0
-  while i < args.len:
-    let raw = args[i]
-    if raw.startsWith("--store-root="):
-      result.root = raw[len("--store-root=") .. ^1]
-    elif raw == "--store-root":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--store-root requires a path")
-      result.root = args[i + 1]
-      inc i
-    else:
-      result.rest.add(raw)
-    inc i
-  if result.root.len == 0:
-    result.root = defaultRoot
+const StoreServeFlags = reproLongFlags(@["store", "serve"])
+  ## The long spelling of each flag of `repro store serve`.
 
-proc parseEndpointFlag(args: seq[string]; defaultEndpoint = ""):
-    tuple[endpoint: string; rest: seq[string]] =
-  var i = 0
-  while i < args.len:
-    let raw = args[i]
-    if raw.startsWith("--endpoint="):
-      result.endpoint = raw[len("--endpoint=") .. ^1]
-    elif raw == "--endpoint":
-      if i + 1 >= args.len:
-        raise newException(ValueError, "--endpoint requires a path")
-      result.endpoint = args[i + 1]
-      inc i
-    else:
-      result.rest.add(raw)
-    inc i
-  if result.endpoint.len == 0:
-    result.endpoint = defaultEndpoint
-
-proc parseDevConfig*(args: seq[string]): tuple[config: DevDaemonConfig;
-    rest: seq[string]] =
-  let p1 = parseStoreRootFlag(args, defaultDevStoreRoot())
-  let p2 = parseEndpointFlag(p1.rest, defaultDevEndpoint())
-  result.config = DevDaemonConfig(endpoint: p2.endpoint,
-    storeRoot: devStoreRoot(p1.root))
-  result.rest = p2.rest
+proc storeServeArgs*(config: DevDaemonConfig): seq[string] =
+  ## The development store daemon's command line, `repro store serve --dev
+  ## ...` (the `repro` image run as the daemon), in the words repro's
+  ## generated parser reads back to ``config``: each flag the spelling the
+  ## description declares, its value (a path) the next word.
+  @["store", "serve", StoreServeFlags.dev,
+    StoreServeFlags.storeRoot, config.storeRoot,
+    StoreServeFlags.endpoint, config.endpoint]
 
 proc devDaemonLockPath*(storeRoot: string): string =
   storeRoot / DevDaemonLockFileName
@@ -335,6 +307,8 @@ proc useDefForTarball(req: StoreDaemonExternalRealizeRequest): InterfaceToolUse 
     nonRedistributable: req.nonRedistributable,
     launcher: req.launcher,
     closureManifest: req.closureManifest,
+    closureEntries: parseClosureManifestText(req.closureEntries.join("\n"),
+      "closure entries of " & req.packageSelector),
     stripComponents: req.stripComponents,
     packageId: req.packageId,
     lockIdentity: req.lockIdentity,
@@ -476,6 +450,14 @@ proc handleClient(socket: IpcConn; config: DevDaemonConfig; startedAt: Time;
       errorBody("unsupported store-daemon message: " & $frame.kind))
 
 proc runDevDaemonForeground*(config: DevDaemonConfig): int =
+  # The private per-user directory is admitted before anything is bound in
+  # it or written to it: the endpoint, when it lies there, and the status
+  # file, which lives there whenever XDG_RUNTIME_DIR is unset. reprobuild-pm
+  # spec/Store-Daemon-And-Multi-User-Coordination.md, "The per-user endpoint
+  # directory is private". A refusal raises, naming the directory.
+  admitDevEndpointDir(config.endpoint)
+  admitDevRuntimeDir()
+
   var daemonLock = acquireDevDaemonLock(config)
   defer:
     releaseDevDaemonLock(daemonLock)
@@ -491,6 +473,10 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
       stderr.writeLine("reprostored --dev: endpoint already hosts store " &
         existing.storeRoot)
       return 2
+  except StoreDaemonEndpointRefused:
+    # Another account listens at this endpoint. Never unlink or replace its
+    # socket (removeEndpointFiles / the bind's rename would): refuse.
+    raise
   except CatchableError:
     discard
 
@@ -503,7 +489,17 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
         " quarantined-prefixes=" & $report.quarantinedPrefixes.len)
 
   removeEndpointFiles(config)
-  var listener = bindIpcListener(config.endpoint)
+  var listener =
+    when defined(windows):
+      # Owner and DACL are this user's SID alone, so a client's owner check
+      # (``requireIpcListener``) admits this pipe even when the daemon runs
+      # elevated. reprobuild-pm
+      # spec/Store-Daemon-And-Multi-User-Coordination.md, "A client
+      # authenticates the daemon".
+      bindIpcListener(config.endpoint,
+        sddl = ownerOnlyPipeSddl(ipcOwnIdentity().sid))
+    else:
+      bindIpcListener(config.endpoint)
   defer:
     closeIpcListener(listener)
     removeEndpointFiles(config)
@@ -523,37 +519,6 @@ proc runDevDaemonForeground*(config: DevDaemonConfig): int =
         discard
     client.closeIpcConn()
   0
-
-proc reprostoredUsage*(): string =
-  "usage: reprostored --dev [--store-root <path>] [--endpoint <path>]"
-
-proc runReprostoredCommand*(args: seq[string]): int =
-  if args.len == 1 and args[0] in ["--help", "-h"]:
-    echo reprostoredUsage()
-    return 0
-  if "--dev" notin args:
-    stderr.writeLine("reprostored: only --dev is implemented in this pass")
-    return 2
-  var filtered: seq[string] = @[]
-  for arg in args:
-    if arg != "--dev":
-      filtered.add(arg)
-  try:
-    let parsed = parseDevConfig(filtered)
-    if parsed.rest.len > 0:
-      stderr.writeLine("reprostored: unexpected argument: " & parsed.rest[0])
-      return 2
-    return runDevDaemonForeground(parsed.config)
-  except CatchableError as err:
-    stderr.writeLine("reprostored: error: " & err.msg)
-    return 1
-
-proc siblingReprostoredPath*(publicCliPath: string): string =
-  let candidate = parentDir(publicCliPath) / addFileExt("reprostored", ExeExt)
-  if fileExists(candidate):
-    candidate
-  else:
-    addFileExt("reprostored", ExeExt)
 
 proc waitForDevStatus(endpoint, expectedRoot: string; timeoutMs = 60000):
     StoreDaemonStatus =
@@ -598,9 +563,7 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
         discard dup2(devNull, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      let argv = allocCStringArray([
-        exe, "store", "serve", "--dev", "--store-root", config.storeRoot,
-        "--endpoint", config.endpoint])
+      let argv = allocCStringArray(@[exe] & storeServeArgs(config))
       discard execv(cstring(exe), argv)
       quit(127)
   else:
@@ -620,9 +583,7 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
     if not isAbsolute(image):
       let found = findExe(image)
       image = if found.len > 0: found else: absolutePath(image)
-    discard spawnWithOwnStdio(image,
-      ["store", "serve", "--dev", "--store-root", config.storeRoot,
-        "--endpoint", config.endpoint],
+    discard spawnWithOwnStdio(image, storeServeArgs(config),
       env, inheritEnvironment = false, logPath = "",
       workingDir = parentDir(image))
   waitForDevStatus(config.endpoint, config.storeRoot)
@@ -643,3 +604,13 @@ proc renderStatus*(status: StoreDaemonStatus): string =
     "realized-prefix-count: " & $status.realizedPrefixCount & "\n" &
     "root-count: " & $status.rootCount & "\n" &
     "pending-realizations: " & $status.pendingRealizationCount
+
+proc renderRefusedStatus*(endpoint, reason: string): string =
+  ## What ``repro store daemon status --dev`` prints for an endpoint the
+  ## client refused (``StoreDaemonEndpointRefused``): never "not-running",
+  ## because whoever holds it is not this user's daemon and may well be
+  ## running. reprobuild-pm ``spec/Store-Daemon-And-Multi-User-Coordination.md``
+  ## §"A client authenticates the daemon".
+  "repro store daemon: refused (the endpoint is not this user's)\n" &
+    "endpoint: " & endpoint & "\n" &
+    "reason: " & reason

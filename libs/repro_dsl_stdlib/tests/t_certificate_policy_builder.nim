@@ -156,6 +156,134 @@ suite "the snapshot":
     check read.policy.rules == pinned.rules
     check not readCertificatePolicySnapshot(split.lockPart).present
 
+suite "command sets (what a required name means)":
+  # Test-Certificates.md §"What a required name means: its command set".
+  # The DSL's policy carries none; a lock writer adds them, and the strict
+  # reader checks their format.
+
+  proc hexOf(c: char): string = repeat(c, 64)
+
+  proc withSets(sets: openArray[CertificateCommandSet]):
+      BranchCertificatePolicy =
+    result = spec
+    result.package = "metacraft-certificate-policy"
+    result.commandSets = @sets
+
+  let complete = withSets([
+    CertificateCommandSet(name: "unit-suite", commands: @[
+      "integration=blake3:" & hexOf('5'), "unit=blake3:" & hexOf('9')]),
+    CertificateCommandSet(name: "pre-commit", commands: @[
+      "pre-commit-checks=blake3:" & hexOf('3')])])
+
+  proc refusal(text: string): string =
+    try:
+      discard parseCertificatePolicySnapshot(text)
+    except CertificatePolicySnapshotError as err:
+      return err.msg
+    ""
+
+  test "the required names, in first-requirement order":
+    check requiredCertificateNames(spec) == @["pre-commit", "unit-suite"]
+    check requiredCertificateNames(withDefaults) ==
+      @["lint", "unit-suite", "smoke"]
+
+  test "a name no rule requires may have a table; tables render sorted":
+    var extra = complete
+    extra.commandSets.insert(CertificateCommandSet(name: "zz-nightly",
+      commands: @["n=blake3:" & hexOf('7')]), 0)
+    extra.commandSets.add(CertificateCommandSet(name: "a-smoke",
+      commands: @["s=blake3:" & hexOf('8')]))
+    let text = renderCertificatePolicySnapshot(extra)
+    let a = text.find("name = \"a-smoke\"")
+    let p = text.find("name = \"pre-commit\"")
+    let u = text.find("name = \"unit-suite\"")
+    let z = text.find("name = \"zz-nightly\"")
+    check a >= 0 and a < p and p < u and u < z
+    let back = parseCertificatePolicySnapshot(text)
+    check commandSetOf(back, "zz-nightly").commands ==
+      @["n=blake3:" & hexOf('7')]
+    check renderCertificatePolicySnapshot(back) == text
+
+  test "render after the rules, sorted by name, and read back":
+    let text = renderCertificatePolicySnapshot(complete)
+    check text.endsWith("\n[[certificate_policy.certificate]]\n" &
+      "name = \"pre-commit\"\n" &
+      "commands = [\"pre-commit-checks=blake3:" & hexOf('3') & "\"]\n" &
+      "\n[[certificate_policy.certificate]]\n" &
+      "name = \"unit-suite\"\n" &
+      "commands = [\"integration=blake3:" & hexOf('5') & "\", \"unit=blake3:" &
+        hexOf('9') & "\"]\n")
+    let back = parseCertificatePolicySnapshot(text)
+    check back.rules == complete.rules
+    check commandSetOf(back, "unit-suite").commands ==
+      complete.commandSets[0].commands
+    check commandSetOf(back, "pre-commit").recorded
+    check renderCertificatePolicySnapshot(back) == text
+
+  test "a snapshot that records none still reads (written before them)":
+    var legacy = spec
+    legacy.package = "metacraft-certificate-policy"
+    let back = parseCertificatePolicySnapshot(
+      renderCertificatePolicySnapshot(legacy))
+    check back.commandSets.len == 0
+    check not commandSetOf(back, "unit-suite").recorded
+
+  test "the format is checked loudly":
+    let text = renderCertificatePolicySnapshot(complete)
+    let unitLine = "commands = [\"integration=blake3:" & hexOf('5') &
+      "\", \"unit=blake3:" & hexOf('9') & "\"]"
+    check unitLine in text
+    check "unknown command-set key 'owner'" in refusal(text.replace(
+      "name = \"unit-suite\"\n", "name = \"unit-suite\"\nowner = \"x\"\n"))
+    check "sorted and unique" in refusal(text.replace(unitLine,
+      "commands = [\"unit=blake3:" & hexOf('9') & "\", \"integration=blake3:" &
+        hexOf('5') & "\"]"))
+    check "sorted and unique" in refusal(text.replace(unitLine,
+      "commands = [\"unit=blake3:" & hexOf('9') & "\", \"unit=blake3:" &
+        hexOf('9') & "\"]"))
+    check "must not be empty" in refusal(text.replace(unitLine,
+      "commands = []"))
+    check "is not <action id>=blake3:" in refusal(text.replace(unitLine,
+      "commands = [\"unit=blake3:" & hexOf('A') & "\"]"))
+    check "is not <action id>=blake3:" in refusal(text.replace(unitLine,
+      "commands = [\"unit=sha256:" & hexOf('9') & "\"]"))
+    check "is not <action id>=blake3:" in refusal(text.replace(unitLine,
+      "commands = [\"=blake3:" & hexOf('9') & "\"]"))
+    check "needs 'commands'" in refusal(text.replace(unitLine & "\n", ""))
+    # A table may name a certificate no rule requires (the writers record
+    # every marked name); a required name without one is the error.
+    check "certificate 'unit-suite' is required but has no command set" in
+      refusal(text.replace("name = \"unit-suite\"", "name = \"nightly\""))
+    check "has two command sets" in refusal(text.replace(
+      "name = \"unit-suite\"", "name = \"pre-commit\""))
+    # All or none: a snapshot that records one set records every one.
+    var partial = complete
+    partial.commandSets.setLen(1)
+    check "has no command set" in refusal(text.replace(
+      "\n[[certificate_policy.certificate]]\nname = \"unit-suite\"\n" &
+        unitLine & "\n", ""))
+    expect CertificatePolicySnapshotError:
+      discard renderCertificatePolicySnapshot(partial)
+
+  test "an emission carries none":
+    let emission = renderCertificatePolicyEmission(complete, "consumer")
+    check "certificate_policy.certificate" notin emission
+    check parseCertificatePolicyEmission(emission).policy.commandSets.len == 0
+    let forged = emission & "\n[[certificate_policy.certificate]]\n" &
+      "name = \"pre-commit\"\ncommands = [\"x=blake3:" & hexOf('1') & "\"]\n"
+    expect CertificatePolicySnapshotError:
+      discard parseCertificatePolicyEmission(forged)
+
+  test "a candidate narrows a name by omitting any entry of the base":
+    let base = @["a=blake3:" & hexOf('1'), "b=blake3:" & hexOf('2')]
+    check omittedCommands(base, base).len == 0
+    check omittedCommands(base, base & @["c=blake3:" & hexOf('3')]).len == 0
+    check omittedCommands(base, @["a=blake3:" & hexOf('1')]) ==
+      @["b=blake3:" & hexOf('2')]
+    check omittedCommands(base, @["a=blake3:" & hexOf('1'),
+      "b=blake3:" & hexOf('4')]) == @["b=blake3:" & hexOf('2')]
+    check omittedCommands(base, []) == base
+
 suite "branch patterns":
 
   test "git wildmatch over short branch names":

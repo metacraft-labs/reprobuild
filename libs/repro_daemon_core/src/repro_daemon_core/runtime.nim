@@ -7,6 +7,10 @@ import blake3
 
 import ./client
 import ./daemon_log
+# `repro daemon`'s command line is declared in repro's description; only its
+# spellings are read here, at compile time. The thin client links this
+# module and must not link the generated parser.
+from repro_cli_support/cli_description import reproLongFlags
 import ./writer_identity
 import ./protocol
 import ./stats_store
@@ -1142,8 +1146,11 @@ proc cachedImageDigestHex(config: UserDaemonConfig; imagePath: string): string =
   ## `imageDigestHex` memoized on `fileIdentityStamp`.
   ##
   ## The digest is hashed over the whole `repro` image -- 15.66 MiB on this
-  ## host -- and the ONLY consumer is the daemon-staleness comparison in
-  ## `startUserDaemon`, which every `repro build` performs. Measured in situ
+  ## host -- and its consumers are the daemon-staleness comparison in
+  ## `startUserDaemon` and the `engineDigest` a routed request states
+  ## (`expectedUserDaemonDigest`), both of which every routed `repro build`
+  ## performs on the same image, so the second is a memo hit except in the
+  ## racy window after a rebuild. Measured in situ
   ## it cost 16.5 ms of a 74.7 ms warm no-op: the second-largest term in the
   ## invocation's fixed cost, and pure re-derivation of an answer that does
   ## not change between builds.
@@ -1242,19 +1249,47 @@ proc expectedDaemonRunningDigestHex(config: UserDaemonConfig;
       return companionDigest
   fileDigestHex(sourceExe)
 
+proc expectedUserDaemonDigest*(publicCliPath: string;
+                               requestedConfig: UserDaemonConfig): string =
+  ## The digest of the engine a build or watch request is sent for, which the
+  ## request carries as ``engineDigest``: the digest ``startUserDaemon``
+  ## expects the daemon to be running, computed the same way (the same
+  ## anchoring of the config's paths, ``daemonExe`` over ``publicCliPath``,
+  ## and ``expectedDaemonRunningDigestHex`` in the config's mode). A daemon
+  ## that passed the client's staleness check therefore always matches it.
+  ##
+  ## Computed on its own rather than taken from ``startUserDaemon``'s result,
+  ## which carries a digest only when a daemon was already running.
+  ##
+  ## "" when the image cannot be digested (missing, relative or unreadable).
+  ## The daemon declines such a request with ``engine-unknown`` and the
+  ## client falls back to its own engine; it never serves on it.
+  let config = withAnchoredDaemonPaths(requestedConfig)
+  let sourceExe =
+    if config.daemonExe.len > 0: config.daemonExe
+    else: publicCliPath
+  try:
+    expectedDaemonRunningDigestHex(config, sourceExe, config.devMode)
+  except CatchableError:
+    ""
+
 type ForeignEngineVerdict* = object
-  ## What `foreignEngineVerdict` found. `decline` is true only when a
-  ## mismatch is PROVEN; the two digests are carried for the decline's
-  ## payload and the daemon log.
+  ## What `foreignEngineVerdict` found. `decline` is true unless both
+  ## digests are KNOWN and EQUAL. `reason` is empty when the request is
+  ## served, `engine-mismatch` when the digests are known and differ, and
+  ## `engine-unknown` when either is unknown. The digests that are known are
+  ## carried for the decline's payload and the daemon log.
   decline*: bool
+  reason*: string
   requestImageHash*: string
   daemonImageHash*: string
 
-proc foreignEngineVerdict*(config: UserDaemonConfig;
-                           requestPublicCliPath, daemonRunningHash: string):
+proc foreignEngineVerdict*(requestEngineDigest, daemonRunningHash: string):
     ForeignEngineVerdict =
-  ## Whether a build or watch request was sent for an engine OTHER than the
-  ## one this daemon is running, and must therefore be declined.
+  ## Whether a build or watch request must be declined because this daemon
+  ## cannot prove it runs the engine the request was sent for: the engine is
+  ## a different one (`engine-mismatch`), or either identity is unknown
+  ## (`engine-unknown`).
   ##
   ## WHY THE CLIENT'S OWN CHECK IS NOT ENOUGH. `startUserDaemon` compares the
   ## daemon's running-image digest with the client's engine and restarts a
@@ -1268,33 +1303,75 @@ proc foreignEngineVerdict*(config: UserDaemonConfig;
   ## fails the build with `unsupported interface envelope version`
   ## (reprobuild-pm issue 2026-10-16, shared-daemon dry-run). No client-side
   ## check can close the window, because the daemon can always be swapped
-  ## after it. The request, however, names the engine it was sent for
-  ## (`publicCliPath`), so the daemon can close it at the only point that
-  ## is not racy: when it holds the request.
+  ## after it. The daemon can close it at the only point that is not racy:
+  ## when it holds the request.
   ##
-  ## THE SAME COMPARISON AS `startUserDaemon`, on purpose: the request's image
-  ## through the memoized `cachedImageDigestHex` (which the client has
-  ## normally just warmed for exactly this path, so this is a stat and a
-  ## small read rather than a hash of the whole image), against the
-  ## daemon's `runningHash`. A request that passed the client's check against
-  ## an un-swapped daemon therefore always passes this one.
+  ## THE REQUEST STATES ITS ENGINE'S DIGEST (`engineDigest`, computed by
+  ## `expectedUserDaemonDigest`, the very value the client's staleness check
+  ## compared), and that is what is compared with the daemon's `runningHash`.
+  ## A request that passed the client's check against an un-swapped daemon
+  ## therefore always passes this one. The daemon deliberately does NOT
+  ## digest the file it finds at the request's `publicCliPath`: a daemon
+  ## whose filesystem view differs from the client's (a service manager that
+  ## mounts a different `/home`, a private mount namespace) can find a
+  ## different file at that path, whose digest may equal its own while the
+  ## client's engine differs -- a cross-engine serve that failing closed on
+  ## an unknown digest would not catch (reprobuild-pm issue 2026-11-16, the
+  ## daemon identifies a request's engine by a path it may see differently).
+  ## Trusting the stated digest is sound for the per-user daemon because its
+  ## clients are its own principal: the check guards correctness, not access.
   ##
-  ## THIS SIDE SERVES WHAT IT CANNOT DISPROVE: an empty, relative or missing
-  ## path (an older client, or an engine deleted since) or an unavailable
-  ## digest proves nothing, and the request is served as before. That is
-  ## the opposite of `startUserDaemon`, which refuses to route to a daemon
-  ## whose identity it cannot establish (reprobuild-pm issue 2026-09-30).
-  ## The client's check is the one that must establish identity; this one
-  ## only closes the race after it, so declining on an unknown here would
-  ## turn every request from a client too old to name its engine into a
-  ## direct build without making any of them more correct.
+  ## THIS SIDE FAILS CLOSED, as the client's reuse rule does
+  ## (`startUserDaemon`, reprobuild-pm issue 2026-09-30) and as
+  ## reprobuild-pm `spec/Failure-Semantics.md` §"General Rules" requires of
+  ## an ambiguous correctness failure. The request is served only when both
+  ## digests are known and equal. A request with no `engineDigest` (a client
+  ## that predates the field) or a daemon that cannot digest its own running
+  ## image proves nothing, and an unknown identity is never a reason to
+  ## serve: such a request is declined with `engine-unknown`, and the client
+  ## falls back to its own engine exactly as on `engine-mismatch`
+  ## (reprobuild-pm `spec/Local-Daemons-And-Control-Plane.md` §"A Daemon
+  ## Serves Only Its Own Engine").
+  result.requestImageHash = requestEngineDigest
   result.daemonImageHash = daemonRunningHash
-  if requestPublicCliPath.len == 0 or not isAbsolute(requestPublicCliPath) or
-      not fileExists(requestPublicCliPath) or daemonRunningHash.len == 0:
-    return
-  result.requestImageHash = cachedImageDigestHex(config, requestPublicCliPath)
-  result.decline = result.requestImageHash.len > 0 and
-    result.requestImageHash != daemonRunningHash
+  if requestEngineDigest.len == 0 or daemonRunningHash.len == 0:
+    result.decline = true
+    result.reason = "engine-unknown"
+  elif requestEngineDigest != daemonRunningHash:
+    result.decline = true
+    result.reason = "engine-mismatch"
+
+proc foreignEngineDeclineMessage(command, requestPublicCliPath,
+                                 daemonImagePath: string;
+                                 verdict: ForeignEngineVerdict): string =
+  proc shown(value: string): string =
+    if value.len > 0: value else: "unknown"
+  if verdict.reason == "engine-mismatch":
+    # The request's digest is the one it STATED (`engineDigest`); the path
+    # is only what the client called its engine and is not what was digested.
+    "daemon-hosted " & command & " declined: the request was sent " &
+      "for engine digest " & verdict.requestImageHash & " (client engine " &
+      requestPublicCliPath & ") but this repro-daemon runs " &
+      daemonImagePath & " (" & verdict.daemonImageHash & "); it was " &
+      "restarted onto another image after the client checked it, by " &
+      "another reprobuild build sharing this endpoint or by a rebuild"
+  else:
+    "daemon-hosted " & command & " declined: this repro-daemon cannot " &
+      "prove it runs the engine the request was sent for (request engine " &
+      shown(requestPublicCliPath) & ", digest " &
+      shown(verdict.requestImageHash) & "; daemon engine " &
+      shown(daemonImagePath) & ", digest " & shown(verdict.daemonImageHash) &
+      "); an unknown engine identity is never served -- run a current " &
+      "repro client, or `repro daemon restart`"
+
+proc foreignEngineDeclinePayload(verdict: ForeignEngineVerdict): string =
+  ## Carries each digest that is known; an unknown one is omitted.
+  result = "{\"fallbackAllowed\":true,\"reason\":\"" & verdict.reason & "\""
+  if verdict.requestImageHash.len > 0:
+    result.add(",\"requestImageHash\":\"" & verdict.requestImageHash & "\"")
+  if verdict.daemonImageHash.len > 0:
+    result.add(",\"daemonImageHash\":\"" & verdict.daemonImageHash & "\"")
+  result.add("}")
 
 proc foreignEngineDeclineEvent(command, runId, projectRoot,
                                requestPublicCliPath, daemonImagePath: string;
@@ -1317,16 +1394,11 @@ proc foreignEngineDeclineEvent(command, runId, projectRoot,
     command: command,
     kind: bekUnsupported,
     severity: "warning",
-    message: "daemon-hosted " & command & " declined: the request was sent " &
-      "for engine " & requestPublicCliPath & " (" & verdict.requestImageHash &
-      ") but this repro-daemon runs " & daemonImagePath & " (" &
-      verdict.daemonImageHash & "); another reprobuild build sharing this " &
-      "endpoint restarted it",
+    message: foreignEngineDeclineMessage(command, requestPublicCliPath,
+      daemonImagePath, verdict),
     terminal: true,
     exitCode: 64,
-    payloadJson: "{\"fallbackAllowed\":true,\"reason\":\"engine-mismatch\"," &
-      "\"requestImageHash\":\"" & verdict.requestImageHash & "\"," &
-      "\"daemonImageHash\":\"" & verdict.daemonImageHash & "\"}")
+    payloadJson: foreignEngineDeclinePayload(verdict))
 
 proc writeSessionRecord*(config: UserDaemonConfig; session: UserDaemonSession) =
   ## Exported for `t_daemon_active_session_tally.nim`. It is the daemon's
@@ -2694,12 +2766,14 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
     let request = parseBuildRequestBody(frame.body)
     # Before the request is accepted, and before anything (the parent
     # prewarm included) reads its project: a request sent for another
-    # engine is declined here, with no session record, because no session
-    # ever ran. See `foreignEngineVerdict` for why only the daemon can do it.
-    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+    # engine, or for an engine this daemon cannot identify, is declined
+    # here, with no session record, because no session ever ran. See
+    # `foreignEngineVerdict` for why only the daemon can do it.
+    let verdict = foreignEngineVerdict(request.engineDigest,
       devRestart.runningHash)
     if verdict.decline:
-      logLine(config.logPath, "build request declined reason=engine-mismatch" &
+      logLine(config.logPath, "build request declined reason=" &
+        verdict.reason &
         " request-image=" & request.publicCliPath & " request-hash=" &
         verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
       socket.writeFrame(udkBuildEvent, buildEventBody(
@@ -2716,10 +2790,11 @@ proc handleClient(socket: IpcConn; config: UserDaemonConfig; startedAt: Time;
     let request = parseWatchRequestBody(frame.body)
     # Same decline as a build request, for the same reason: every watch
     # cycle is a build run by this daemon's engine.
-    let verdict = foreignEngineVerdict(config, request.publicCliPath,
+    let verdict = foreignEngineVerdict(request.engineDigest,
       devRestart.runningHash)
     if verdict.decline:
-      logLine(config.logPath, "watch request declined reason=engine-mismatch" &
+      logLine(config.logPath, "watch request declined reason=" &
+        verdict.reason &
         " request-image=" & request.publicCliPath & " request-hash=" &
         verdict.requestImageHash & " running-hash=" & verdict.daemonImageHash)
       socket.writeFrame(udkWatchEvent, buildEventBody(
@@ -2948,7 +3023,7 @@ proc restartCandidateReady(config: UserDaemonConfig;
   state.deferralPollsSuppressed = 0
   true
 
-proc daemonProcessArgs(config: UserDaemonConfig): seq[string]
+proc daemonProcessArgs*(config: UserDaemonConfig): seq[string]
 proc launchWithFork(exe: string; config: UserDaemonConfig)
 
 proc performDevSelfRestart(config: UserDaemonConfig;
@@ -3325,57 +3400,48 @@ proc runUserDaemonForeground*(initialConfig: UserDaemonConfig): int =
     client.closeIpcConn()
   0
 
-proc siblingUserDaemonPath*(publicCliPath: string): string =
-  ## Locate the ``repro-daemon`` companion binary for the given ``repro``
-  ## executable. Prefers a sibling next to ``publicCliPath`` (the layout used
-  ## by installed and ``just build`` outputs), then falls back to ``findExe``
-  ## so a daemon staged into ``PATH`` (for example, in a dev shell with
-  ## ``build/bin`` on ``PATH``) still wins. Returns the bare unqualified
-  ## binary name when neither lookup succeeds; callers must treat that as
-  ## "daemon binary not found" and fail fast rather than handing the bare
-  ## name to ``launchctl`` / ``execv``.
-  let candidate = parentDir(publicCliPath) /
-    addFileExt("repro-daemon", ExeExt)
-  if fileExists(candidate):
-    return os.normalizedPath(candidate)
-  let viaPath = findExe("repro-daemon")
-  if viaPath.len > 0:
-    return os.normalizedPath(absolutePath(viaPath))
-  addFileExt("repro-daemon", ExeExt)
+const DaemonFlags = reproLongFlags(@["daemon"])
+  ## The long spelling of each flag of `repro daemon` (every subcommand,
+  ## `serve` included, takes them), from repro's description.
 
-proc daemonProcessArgs(config: UserDaemonConfig): seq[string] =
-  # Executable-Consolidation M2: the daemon process is `repro daemon serve …`
-  # (the self-spawned `repro` image), so every launch site (`launchWithFork`,
-  # `launchWithLaunchd`, `launchWithSystemdUser`, and the dev self-restart
-  # re-exec) prepends the `daemon serve` subcommand selector ahead of the
-  # daemon flags. `runThinApp` consumes `daemon serve` and hands the remaining
-  # flags to `runUserDaemonCommand` → `parseUserDaemonArgs`.
-  result = @["daemon", "serve", "--foreground", "--endpoint", config.endpoint,
-    "--state-dir", config.stateDir, "--log", config.logPath]
+proc daemonProcessArgs*(config: UserDaemonConfig): seq[string] =
+  ## The daemon process's command line, `repro daemon serve …` (the
+  ## self-spawned `repro` image), which every launch site (`launchWithFork`,
+  ## `launchWithLaunchd`, `launchWithSystemdUser`, and the dev self-restart
+  ## re-exec) starts: the words repro's generated parser reads back to
+  ## ``config`` (``userDaemonConfigOf`` in ``repro_cli_support``).
+  ##
+  ## Each flag is the spelling the description declares; its value is the
+  ## next word (paths, a peer-cache spec and a trust-profile name, none of
+  ## which starts with ``-``), the form the launchd plist and the transient
+  ## systemd unit have always carried.
+  result = @["daemon", "serve", DaemonFlags.foreground,
+    DaemonFlags.endpoint, config.endpoint,
+    DaemonFlags.stateDir, config.stateDir, DaemonFlags.log, config.logPath]
   if config.devMode:
-    result.add("--dev")
+    result.add(DaemonFlags.dev)
   if config.sourceExe.len > 0:
-    result.add("--source-exe")
+    result.add(DaemonFlags.sourceExe)
     result.add(config.sourceExe)
   if config.stagedGenerationDir.len > 0:
-    result.add("--staged-generation")
+    result.add(DaemonFlags.stagedGeneration)
     result.add(config.stagedGenerationDir)
   if config.previousStagedGenerationDir.len > 0:
-    result.add("--previous-staged-generation")
+    result.add(DaemonFlags.previousStagedGeneration)
     result.add(config.previousStagedGenerationDir)
   if config.restartRunId.len > 0:
-    result.add("--restart-run-id")
+    result.add(DaemonFlags.restartRunId)
     result.add(config.restartRunId)
   if config.systemScope:
-    result.add("--system")
+    result.add(DaemonFlags.system)
   if config.leaseStoreRoot.len > 0:
-    result.add("--state-root")
+    result.add(DaemonFlags.stateRoot)
     result.add(config.leaseStoreRoot)
   if config.peerCacheSpec.len > 0:
-    result.add("--peer-cache")
+    result.add(DaemonFlags.peerCache)
     result.add(config.peerCacheSpec)
   if config.trustProfile.len > 0:
-    result.add("--trust-profile")
+    result.add(DaemonFlags.trustProfile)
     result.add(config.trustProfile)
 
 proc legacyLaunchdLabel(config: UserDaemonConfig): string =
@@ -3895,8 +3961,8 @@ proc startUserDaemon*(publicCliPath: string;
           "compatible status handshake at " & config.endpoint &
           "; stop the incompatible daemon or set REPRO_DAEMON=off for direct mode")
   discard cleanupStaleUserDaemonDiscovery(config)
-  # Fail fast when the daemon binary cannot be located. Without this guard the
-  # bare unqualified name returned by ``siblingUserDaemonPath`` propagates into
+  # Fail fast when the daemon binary cannot be located. Without this guard a
+  # bare unqualified name (what the retired sibling lookup returned) reaches
   # ``launchctl bootstrap`` (which silently registers a non-executable plist
   # entry and forces a 30 s status-wait timeout) and then into ``execv`` in the
   # posix-fork fallback (another 60 s wait). Both paths eventually surface as a
@@ -4099,80 +4165,3 @@ proc renderUserDaemonSessions*(sessions: openArray[UserDaemonSession]):
     if session.message.len > 0:
       result.add("\t" & session.message)
 
-proc parseUserDaemonConfigFlags*(args: seq[string];
-                                 base = defaultUserDaemonConfig()):
-    tuple[config: UserDaemonConfig; rest: seq[string]] =
-  result.config = base
-  var explicitLog = false
-  var i = 0
-  while i < args.len:
-    let raw = args[i]
-    proc valueFor(flag: string): string =
-      let prefix = flag & "="
-      if raw.startsWith(prefix):
-        return raw[prefix.len .. ^1]
-      if raw == flag:
-        if i + 1 >= args.len:
-          raise newException(ValueError, flag & " requires a value")
-        inc i
-        return args[i]
-      raise newException(ValueError, "internal user-daemon flag parse error")
-
-    if raw == "--foreground":
-      result.config.foreground = true
-    elif raw == "--dev":
-      result.config.devMode = true
-    elif raw == "--daemon-exe" or raw.startsWith("--daemon-exe="):
-      result.config.daemonExe = valueFor("--daemon-exe")
-    elif raw == "--source-exe" or raw.startsWith("--source-exe="):
-      result.config.sourceExe = valueFor("--source-exe")
-    elif raw == "--staged-generation" or
-        raw.startsWith("--staged-generation="):
-      result.config.stagedGenerationDir = valueFor("--staged-generation")
-    elif raw == "--previous-staged-generation" or
-        raw.startsWith("--previous-staged-generation="):
-      result.config.previousStagedGenerationDir =
-        valueFor("--previous-staged-generation")
-    elif raw == "--restart-run-id" or raw.startsWith("--restart-run-id="):
-      result.config.restartRunId = valueFor("--restart-run-id")
-    elif raw == "--endpoint" or raw.startsWith("--endpoint="):
-      result.config.endpoint = valueFor("--endpoint")
-    elif raw == "--state-dir" or raw.startsWith("--state-dir="):
-      result.config.stateDir = valueFor("--state-dir")
-    elif raw == "--log" or raw.startsWith("--log="):
-      result.config.logPath = valueFor("--log")
-      explicitLog = true
-    elif raw == "--system":
-      result.config.systemScope = true
-    elif raw == "--state-root" or raw.startsWith("--state-root="):
-      result.config.leaseStoreRoot = valueFor("--state-root")
-    elif raw == "--peer-cache" or raw.startsWith("--peer-cache="):
-      result.config.peerCacheSpec = valueFor("--peer-cache")
-    elif raw == "--trust-profile" or raw.startsWith("--trust-profile="):
-      result.config.trustProfile = valueFor("--trust-profile")
-    else:
-      result.rest.add(raw)
-    inc i
-  if not explicitLog:
-    result.config.logPath = result.config.stateDir / "logs" /
-      "repro-daemon.log"
-
-proc userDaemonUsage*(): string =
-  "usage: repro-daemon [--foreground] [--dev] [--system] [--endpoint PATH] " &
-    "[--state-dir PATH] [--log PATH] [--state-root PATH] " &
-    "[--peer-cache SPEC] [--trust-profile trusted|hardened]"
-
-proc runUserDaemonCommand*(args: seq[string]): int =
-  if args.len == 1 and args[0] in ["--help", "-h"]:
-    echo userDaemonUsage()
-    return 0
-  try:
-    let parsed = parseUserDaemonConfigFlags(args)
-    if parsed.rest.len > 0:
-      stderr.writeLine("repro-daemon: unexpected argument: " &
-        parsed.rest[0])
-      return 2
-    return runUserDaemonForeground(parsed.config)
-  except CatchableError as err:
-    stderr.writeLine("repro-daemon: error: " & err.msg)
-    return 1

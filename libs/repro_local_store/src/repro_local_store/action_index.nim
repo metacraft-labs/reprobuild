@@ -307,15 +307,118 @@ when actionIndexSupported:
 
   proc link(oldp, newp: cstring): cint {.importc, header: "<unistd.h>".}
 
-  # --- create-or-attach (§6.1) ---------------------------------------------
+  # --- stale-chain recreation (§6.1 "Recreating a stale chain") -------------
 
-  proc removeChainFiles(dir: string) =
+  proc flock(fd: cint; op: cint): cint {.importc, header: "<sys/file.h>".}
+  const
+    LockEx = cint(2)
+    LockNb = cint(4)
+
+  type
+    StaleChainPoint* = enum
+      ## The windows of a stale-chain removal at which a test can stop this
+      ## engine while another engine runs its whole open. Exported only so the
+      ## convergence test can drive the interleavings that used to split the
+      ## index; production never sets the hook.
+      scpJudgedStale   ## the chain at `shard0` was judged stale, nothing held
+      scpOpened        ## the anchor is open, its lock not yet taken
+      scpLockedStale   ## the lock is held and the locked file re-judged stale
+
+    DiscardOutcome = enum
+      doRetry          ## the stale chain is gone (or was already replaced):
+                       ## run create-or-attach again
+      doAttached       ## the re-judged file attached: use it
+      doDecline        ## leave the files alone and run on Tier 1 only
+
+  var actionIndexStaleChainHook*:
+      proc (point: StaleChainPoint) {.nimcall, gcsafe, raises: [].} = nil
+    ## Test-only schedule point; nil in production. Typed `gcsafe` and
+    ## `raises: []` so it widens neither effect of `openActionIndex`.
+
+  template staleChainPoint(point: StaleChainPoint) =
+    {.cast(gcsafe).}:
+      let hook = actionIndexStaleChainHook
+      if hook != nil: hook(point)
+
+  const
+    StaleLockAttempts = 50
+    StaleLockPauseMs = 2
+      ## §6.1 step 1: about a tenth of a second in all. The holder is normally
+      ## another engine doing the same few unlinks; one that takes longer is
+      ## stopped or wedged and must not stall a build.
+    OpenRounds = 4
+      ## §6.1: "an engine that has not attached after a few rounds of steps
+      ## 1–5 declines the index".
+
+  proc removeGrownShards(dir: string): bool =
+    ## §6.1 step 4: remove every grown shard `index.shard<k>`, k ≥ 1, and every
+    ## growth temporary `index.shardtmp.*` — everything named `index.shard*`
+    ## except the anchor, which the caller unlinks only once this returns true.
+    ## A file that is already gone counts as removed: another engine of an
+    ## older build may be racing us, and absence is the goal.
+    result = true
     try:
       for kind, path in walkDir(dir):
-        if kind == pcFile and path.extractFilename.startsWith("index.shard"):
-          try: removeFile(path)
-          except CatchableError: discard
-    except CatchableError: discard
+        let name = path.extractFilename
+        if kind != pcDir and name.startsWith("index.shard") and
+            name != ActionIndexAnchorName:
+          if posix.unlink(path.cstring) != 0 and errno != ENOENT:
+            result = false
+    except CatchableError:
+      result = false
+
+  proc discardChainUnderLock(dir, anchor: string;
+      s: var ShmGSetT[AcIndexKey]): DiscardOutcome =
+    ## §6.1 steps 1–4: remove a stale chain only while holding the anchor's
+    ## `flock` and only while the path still names the locked file, so no
+    ## engine can remove a FRESH chain on the strength of a stale judgement
+    ## made before another engine replaced it. On `doAttached`, `s` holds the
+    ## attached set.
+    let fd = posix.open(anchor.cstring, O_RDWR or O_CLOEXEC)
+    if fd < 0:
+      # Gone already: another engine removed it. Anything else (permissions,
+      # descriptor exhaustion) says nothing about the chain: leave it be.
+      return (if errno == ENOENT: doRetry else: doDecline)
+    defer: discard posix.close(fd)   # closing the descriptor drops the lock
+    staleChainPoint(scpOpened)
+    var locked = false
+    for attempt in 0 ..< StaleLockAttempts:
+      if flock(fd, LockEx or LockNb) == 0:
+        locked = true
+        break
+      if attempt + 1 < StaleLockAttempts: sleep(StaleLockPauseMs)
+    if not locked:
+      # Step 1: someone holds the lock past the bound. Their removal may have
+      # finished and published a fresh chain by now; take it if so, otherwise
+      # decline rather than wait.
+      s = attachSetT(anchor, AcIndexKey)
+      if s.available: return doAttached
+      s.detach()
+      return doDecline
+    # Step 2: does the path still name the file we locked? If not, another
+    # engine already replaced the chain; retry create-or-attach.
+    var held, named: Stat
+    if fstat(fd, held) != 0: return doDecline
+    if stat(anchor.cstring, named) != 0:
+      return (if errno == ENOENT: doRetry else: doDecline)
+    if held.st_dev != named.st_dev or held.st_ino != named.st_ino:
+      return doRetry
+    # Step 3: judge the locked file again. Only a chain from another boot is
+    # removed; any other failure leaves the files alone.
+    s = attachSetT(anchor, AcIndexKey)
+    if s.available: return doAttached
+    let why = s.attachFailure()
+    s.detach()
+    if why != afWrongBoot: return doDecline
+    staleChainPoint(scpLockedStale)
+    # Step 4: grown shards first, so a fresh chain's directory scan never
+    # finds a stale `index.shard<k>`; the anchor only if all of them went.
+    if not removeGrownShards(dir): return doDecline
+    if posix.unlink(anchor.cstring) != 0 and errno != ENOENT:
+      return doDecline
+    doRetry
+
+  # --- create-or-attach (§6.1) ---------------------------------------------
 
   proc tryCreateChain(dir, anchor: string): bool =
     ## Create shard0 and publish it at the well-known anchor under an exclusive
@@ -345,7 +448,11 @@ when actionIndexSupported:
     ##
     ## A chain whose creator boot id does not match the current boot is STALE
     ## (§6.1). It is removed and recreated empty rather than read, because
-    ## Tier 1 is authoritative and a cold index costs only a warm-up.
+    ## Tier 1 is authoritative and a cold index costs only a warm-up. The
+    ## removal runs under the anchor's `flock` and only while the path still
+    ## names the locked file (`discardChainUnderLock`): an unlocked removal let
+    ## an engine acting on an earlier stale judgement delete another engine's
+    ## FRESH chain, so the two mapped different inodes — a split index.
     let dir = cacheRoot / ActionIndexDirName
     let anchor = dir / ActionIndexAnchorName
     result = ActionIndex(attached: false, dir: dir, anchor: anchor,
@@ -354,7 +461,7 @@ when actionIndexSupported:
       createDir(dir)
     except CatchableError:
       return
-    for attempt in 0 .. 1:
+    for round in 0 ..< OpenRounds:
       if not fileExists(anchor):
         if not tryCreateChain(dir, anchor):
           return
@@ -366,10 +473,27 @@ when actionIndexSupported:
         return
       result.failure = s.attachFailure()
       s.detach()
-      if attempt == 1: return
-      # A stale (`afWrongBoot`), skewed or unreadable chain is disposable: the
-      # index is a cache of a cache. Drop it and build a fresh one once.
-      removeChainFiles(dir)
+      # The anchor vanished between the existence check and the attach:
+      # another engine removed a stale chain under its lock (§6.1 step 4).
+      # That is step 1's `ENOENT`, not a chain that fails to attach, so run
+      # create-or-attach again.
+      if result.failure == afMissing and not fileExists(anchor): continue
+      # Only a chain from another boot is removed (§6.1 "Only a stale chain is
+      # removed"). A key-format or layout skew, or a map/open failure of our
+      # own, may say nothing about a chain that is live for every other
+      # engine, so we decline and leave the files alone.
+      if result.failure != afWrongBoot: return
+      staleChainPoint(scpJudgedStale)
+      case discardChainUnderLock(dir, anchor, s)
+      of doAttached:
+        result.gset = s
+        result.attached = true
+        result.failure = afNone
+        return
+      of doDecline:
+        return
+      of doRetry:
+        discard
 
   proc closeActionIndex*(idx: ActionIndex) =
     if idx == nil or not idx.attached: return
@@ -572,11 +696,6 @@ when actionIndexSupported:
 
   # --- flattening and retirement (§6.7) ------------------------------------
 
-  proc flock(fd: cint; op: cint): cint {.importc, header: "<sys/file.h>".}
-  const
-    LockEx = cint(2)
-    LockNb = cint(4)
-
   proc flattenChain*(idx: ActionIndex): bool =
     ## Copy each still-live element of every older shard into the newest shard,
     ## then mark the drained shard and unlink it (§6.7).
@@ -599,7 +718,7 @@ when actionIndexSupported:
     if idx == nil or not idx.attached: return false
     let n = idx.gset.shardCount()
     if n <= 1: return false
-    let fd = posix.open(idx.anchor.cstring, O_RDWR)
+    let fd = posix.open(idx.anchor.cstring, O_RDWR or O_CLOEXEC)
     if fd < 0: return false
     defer: discard posix.close(fd)
     if flock(fd, LockEx or LockNb) != 0: return false

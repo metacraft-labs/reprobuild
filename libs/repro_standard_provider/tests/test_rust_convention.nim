@@ -24,13 +24,13 @@
 ##   * ``recognize`` returns false when:
 ##       - ``Cargo.toml`` is absent (not a Cargo project)
 ##       - ``uses:`` lists ``python`` instead of ``rust`` / ``cargo``
-##   * ``emitFragment`` against the canonical fixture produces:
-##       - exactly one ``rustc-metadata-*`` action with ``--emit=metadata,dep-info``
+##   * ``emitFragment`` against the canonical (binary-only) fixture produces:
+##       - no ``rustc-metadata-*`` action: a binary has no metadata pass
 ##       - exactly one ``rustc-link-*`` action with ``--emit=link,dep-info``
-##       - the link action declares the metadata action's id in ``deps``
-##       - both actions carry a ``depfile`` and ``dependencyPolicy ==
+##         and no deps
+##       - it carries a ``depfile`` and ``dependencyPolicy ==
 ##         bdpMakeDepfile``
-##       - both are in the ``compile`` pool
+##       - it is in the ``compile`` pool
 ##
 ## The fragment test depends on ``rustc`` AND ``cargo`` being on PATH
 ## because the convention invokes ``cargo metadata`` eagerly at emit time
@@ -47,7 +47,7 @@
 ## but the rejection-reason coverage degrades; the e2e validator picks up
 ## that gap by exercising the full path against a real toolchain.
 
-import std/[os, strutils, tables, unittest]
+import std/[os, osproc, streams, strtabs, strutils, tables, unittest]
 import repro_test_support/reasoned_skip
 import repro_test_support
 
@@ -322,7 +322,11 @@ suite "rust convention M4":
     let request = dummyRequest(scratch)
     check not conv.recognize(scratch, request)
 
-  test "emitFragment: two-action graph against canonical fixture":
+  test "emitFragment: a binary gets one link action and no metadata pass":
+    # A binary crate skips the metadata-only pass: pipelining exists so
+    # that dependents can type-check against a library's metadata early,
+    # and nothing depends on a binary. Cargo emits ``--emit=dep-info,link``
+    # for a binary unit too.
     if not rustToolchainAvailable():
       skip("rustc or cargo not on PATH")
     else:
@@ -345,25 +349,13 @@ suite "rust convention M4":
         elif action.id.startsWith("rustc-link-"):
           linkActions.add(action)
 
-      # Pass 1: exactly one rustc-metadata action; argv carries
-      # --emit=metadata,dep-info plus --crate-name and -C metadata=.
-      check metadataActions.len == 1
-      let metadataAction = metadataActions[0]
-      let metadataArgv = inlineArgvOf(metadataAction)
-      check "--emit=metadata,dep-info" in metadataArgv
-      check "--crate-name" in metadataArgv
-      check FixtureCrateName in metadataArgv
-      check "--edition" in metadataArgv
-      check "--crate-type" in metadataArgv
-      check "bin" in metadataArgv
-      check metadataArgv[^1].endsWith("main.rs")
-      check metadataAction.depfile.len > 0
-      check metadataAction.dependencyPolicy.kind == bdpMakeDepfile
-      check metadataAction.pool == "compile"
+      # No metadata pass, and nothing with ``--emit=metadata``.
+      check metadataActions.len == 0
+      for action in linkActions:
+        check "--emit=metadata,dep-info" notin inlineArgvOf(action)
 
-      # Pass 2: exactly one rustc-link action; argv carries
-      # --emit=link,dep-info; deps include the metadata action's id;
-      # output ends with the binary path.
+      # Exactly one rustc-link action; argv carries --emit=link,dep-info;
+      # it depends on no metadata action; output ends with the binary path.
       check linkActions.len == 1
       let linkAction = linkActions[0]
       let linkArgv = inlineArgvOf(linkAction)
@@ -374,7 +366,7 @@ suite "rust convention M4":
       check "--crate-type" in linkArgv
       check "bin" in linkArgv
       check linkArgv[^1].endsWith("main.rs")
-      check metadataAction.id in linkAction.deps
+      check linkAction.deps.len == 0
       check linkAction.depfile.len > 0
       check linkAction.dependencyPolicy.kind == bdpMakeDepfile
       check linkAction.pool == "compile"
@@ -386,15 +378,10 @@ suite "rust convention M4":
       else:
         check primaryOutput.endsWith(FixtureCrateName)
 
-      # The metadata action's rmeta is wired in as an input of the link
-      # action — captures the pipelined edge in the action cache
-      # fingerprint per Rust.md §"Cross-crate ordering edges".
-      var sawRmetaInput = false
+      # With no metadata pass there is no rmeta of its own for the link
+      # action to consume.
       for inp in linkAction.inputs:
-        if inp.endsWith(".rmeta"):
-          sawRmetaInput = true
-          break
-      check sawRmetaInput
+        check not inp.endsWith(".rmeta")
 
   # --- M22: integration-test discovery -------------------------------------
 
@@ -415,13 +402,23 @@ suite "rust convention M4":
       require conv.recognize(TestFixtureRoot, request)
       let fragment = conv.emitFragment(TestFixtureRoot, request)
 
+      # The integration test's actions, whose ids name the target kind
+      # ``test``. The library's own test crate (kind ``lib``) is the
+      # subject of ``test_rust_convention_unit_test_crates``; here it only
+      # has to be present.
       var compileActions: seq[BuildActionDef] = @[]
       var runActions: seq[BuildActionDef] = @[]
       var stampActions: seq[BuildActionDef] = @[]
+      var libTestCompiles = 0
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("rustc-test-compile-") and
+            ".lib." in action.id:
+          inc libTestCompiles
+        if ".test." notin action.id:
+          continue
         if action.id.startsWith("rustc-test-compile-"):
           compileActions.add(action)
         elif action.id.startsWith("rustc-test-run-"):
@@ -432,6 +429,7 @@ suite "rust convention M4":
       check compileActions.len == 1
       check runActions.len == 1
       check stampActions.len == 1
+      check libTestCompiles == 1
 
       let compileAction = compileActions[0]
       let compileArgv = inlineArgvOf(compileAction)
@@ -471,9 +469,12 @@ suite "rust convention M4":
       check stampOut.endsWith("test_greet.stamp")
       check "/tests/" in stampOut
 
-  test "emitFragment M22: rust/binary has no test actions":
+  test "emitFragment M22: rust/binary has no integration-test actions":
     # Inverse cohort: the rust/binary fixture has no ``tests/`` directory
-    # so the convention must not emit any ``rustc-test-*`` actions.
+    # so the convention must not emit any integration test's
+    # ``rustc-test-*`` actions (target kind ``test`` in the id). The
+    # binary's own test crate (kind ``bin``) is there, as ``cargo test``
+    # builds one for a binary whose ``test`` setting is on, the default.
     if not rustToolchainAvailable():
       skip("rustc or cargo not on PATH")
     else:
@@ -485,6 +486,8 @@ suite "rust convention M4":
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
+        if ".bin." in action.id:
+          continue
         check not action.id.startsWith("rustc-test-compile-")
         check not action.id.startsWith("rustc-test-run-")
         check not action.id.startsWith("rustc-test-stamp-")
@@ -509,31 +512,30 @@ suite "rust convention M4":
       require conv.recognize(WorkspaceChainFixtureRoot, request)
       let fragment = conv.emitFragment(WorkspaceChainFixtureRoot, request)
 
-      # Collect actions keyed on crate name (strip the
-      # ``rustc-metadata-`` / ``rustc-link-`` prefix + ``-umbrella``
-      # suffix).
+      # Collect actions keyed on target name: an id is
+      # ``rustc-<phase>-<package>.<kind>.<target>``.
       var metadataByCrate = initTable[string, BuildActionDef]()
       var linkByCrate = initTable[string, BuildActionDef]()
       for node in fragment.nodes:
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id.startsWith("rustc-metadata-") and
-            action.id.endsWith("-umbrella"):
-          let crate = action.id["rustc-metadata-".len ..^ "-umbrella".len + 1]
+        let crate = action.id.rsplit('.', maxsplit = 1)[^1]
+        if action.id.startsWith("rustc-metadata-"):
           metadataByCrate[crate] = action
-        elif action.id.startsWith("rustc-link-") and
-            action.id.endsWith("-umbrella"):
-          let crate = action.id["rustc-link-".len ..^ "-umbrella".len + 1]
+        elif action.id.startsWith("rustc-link-"):
           linkByCrate[crate] = action
 
-      # All three crates should have both passes emitted.
+      # Both libraries get both passes; the binary crate_c a link pass
+      # alone (a binary has no metadata pass).
       check "crate_a" in metadataByCrate
       check "crate_a" in linkByCrate
       check "crate_b" in metadataByCrate
       check "crate_b" in linkByCrate
-      check "crate_c" in metadataByCrate
+      check "crate_c" notin metadataByCrate
       check "crate_c" in linkByCrate
+      check linkByCrate["crate_a"].id == "rustc-link-crate-a.lib.crate_a"
+      check linkByCrate["crate_c"].id == "rustc-link-crate-c.bin.crate_c"
 
       # M23 Part A: crate_b's metadata pass must reference crate_a's
       # rmeta via ``--extern crate_a=...`` AND declare crate_a's
@@ -562,20 +564,19 @@ suite "rust convention M4":
       # only; ``--extern crate_b=...`` must be present. The transitive
       # crate_a is reached via ``-L dependency=<crate_a bin/deps dir>``
       # so we check for a ``-L`` flag referencing crate_a's dirs.
-      let crateCMetaArgv = inlineArgvOf(metadataByCrate["crate_c"])
+      let crateCLinkArgv = inlineArgvOf(linkByCrate["crate_c"])
       var sawCrateBExternInC = false
       var sawCrateASearchPathInC = false
-      for arg in crateCMetaArgv:
-        if arg.startsWith("crate_b=") and arg.endsWith(".rmeta"):
+      for arg in crateCLinkArgv:
+        if arg.startsWith("crate_b=") and arg.endsWith(".rlib"):
           sawCrateBExternInC = true
         if arg.startsWith("dependency=") and arg.contains("crate_a"):
           sawCrateASearchPathInC = true
       check sawCrateBExternInC
       check sawCrateASearchPathInC
-      # crate_c's metadata pass must list crate_b's actions in deps so
-      # the engine waits for crate_b before running rustc-metadata-crate_c.
-      check metadataByCrate["crate_b"].id in metadataByCrate["crate_c"].deps
-      check linkByCrate["crate_b"].id in metadataByCrate["crate_c"].deps
+      # crate_c's link pass must list crate_b's link action in deps so
+      # the engine waits for crate_b's rlib before linking crate_c.
+      check linkByCrate["crate_b"].id in linkByCrate["crate_c"].deps
 
   # --- M23: cdylib variant ------------------------------------------------
 
@@ -603,10 +604,10 @@ suite "rust convention M4":
         if node.kind != gnkAction:
           continue
         let action = decodeBuildActionPayload(toBytes(node.payload))
-        if action.id == "rustc-metadata-rust_cdylib_example-umbrella":
+        if action.id == "rustc-metadata-rust-cdylib-example.cdylib.rust_cdylib_example":
           metadataAction = action
           sawMetadata = true
-        elif action.id == "rustc-link-rust_cdylib_example-umbrella":
+        elif action.id == "rustc-link-rust-cdylib-example.cdylib.rust_cdylib_example":
           linkAction = action
           sawLink = true
 
@@ -700,3 +701,276 @@ suite "rust convention M4":
             if action.id.startsWith("crude-build-"):
               sawMode = true
           check sawMode
+
+  # --- Features and the crate environment ----------------------------------
+  #
+  # Rust.md §"Recognition" item 6 and §"Features, lints and the crate
+  # environment" (reprobuild-pm). Mode A does no feature resolution, so a
+  # workspace in which any package declares a feature or an optional
+  # dependency builds in Mode B as a whole; and every Mode A ``rustc``
+  # action runs with the variables Cargo sets for that kind of crate.
+  # Written as the adversarial confirmation of reprobuild-pm issue
+  # ``issues/2026-11-16-rust-mode-a-may-compile-crates-with-features-or-without-cargos-crate-environment.md``:
+  # both tests failed before the convention carried the feature trigger
+  # and the crate environment. No mocks: the convention runs the real
+  # ``cargo metadata``, and the env test runs the real ``rustc`` with the
+  # emitted argv and environment.
+
+  test "emitFragment: a path-only workspace with a feature or optional dependency builds in Mode B":
+    # Two path-only workspaces of two members each, where only ONE member
+    # carries the trigger; the other is plain. The trigger is
+    # workspace-wide, so neither member may get a Mode A action.
+    #   * ``default-features``: a library with ``default = ["x"]`` that
+    #     refuses to compile with ``x`` off. Mode A would compile it with
+    #     no ``--cfg feature``, i.e. with its default features off, and
+    #     hit the ``compile_error!``.
+    #   * ``optional-dependency``: a library with an optional path
+    #     dependency on its sibling and no ``[features]`` table.
+    let cases = @[
+      ("default-features",
+        "[features]\n" &
+        "default = [\"x\"]\n" &
+        "x = []\n",
+        "#[cfg(not(feature = \"x\"))]\n" &
+        "compile_error!(\"x off\");\n" &
+        "pub fn answer() -> i32 { 42 }\n"),
+      ("optional-dependency",
+        "[dependencies]\n" &
+        "plain = { path = \"../plain\", optional = true }\n",
+        "pub fn answer() -> i32 { 42 }\n"),
+    ]
+    for (caseName, triggerToml, triggerLib) in cases:
+      checkpoint "case " & caseName
+      let scratch = getTempDir() / ("test_rust_convention_features_" & caseName)
+      if dirExists(scratch):
+        removeDir(scratch)
+      createDir(scratch / "plain" / "src")
+      createDir(scratch / "trigger" / "src")
+      writeFile(scratch / "reprobuild.nim",
+        "import repro_project_dsl\n" &
+        "package featuredWorkspace:\n" &
+        "  uses:\n" &
+        "    \"rust >=1.80\"\n" &
+        "\n" &
+        "  library trigger\n")
+      writeFile(scratch / "Cargo.toml",
+        "[workspace]\n" &
+        "resolver = \"2\"\n" &
+        "members = [\"plain\", \"trigger\"]\n")
+      writeFile(scratch / "plain" / "Cargo.toml",
+        "[package]\n" &
+        "name = \"plain\"\n" &
+        "version = \"0.1.0\"\n" &
+        "edition = \"2021\"\n" &
+        "publish = false\n")
+      writeFile(scratch / "plain" / "src" / "lib.rs",
+        "pub fn plain() -> i32 { 1 }\n")
+      writeFile(scratch / "trigger" / "Cargo.toml",
+        "[package]\n" &
+        "name = \"trigger\"\n" &
+        "version = \"0.1.0\"\n" &
+        "edition = \"2021\"\n" &
+        "publish = false\n" &
+        "\n" & triggerToml)
+      writeFile(scratch / "trigger" / "src" / "lib.rs", triggerLib)
+      defer:
+        removeDir(scratch)
+      if not rustToolchainAvailable():
+        skip("rustc or cargo not on PATH")
+        break
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var sawCrude = false
+      var modeAIds: seq[string] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        if action.id.startsWith("rustc-"):
+          modeAIds.add(action.id)
+        if action.id.startsWith("crude-build-"):
+          sawCrude = true
+      checkpoint caseName & ": Mode A actions emitted: " & $modeAIds
+      check modeAIds.len == 0
+      check sawCrude
+
+  test "emitFragment: Mode A rustc actions carry the crate environment":
+    # A binary that embeds ``env!("CARGO_PKG_VERSION")`` and
+    # ``env!("CARGO_BIN_NAME")``. The emitted metadata and link actions
+    # are run with real rustc, with the environment the action declares;
+    # without the crate environment rustc rejects ``env!``.
+    let scratch = getTempDir() / "test_rust_convention_crate_env"
+    if dirExists(scratch):
+      removeDir(scratch)
+    createDir(scratch / "src")
+    createDir(scratch / "tests")
+    writeFile(scratch / "reprobuild.nim",
+      "import repro_project_dsl\n" &
+      "package crateEnvExample:\n" &
+      "  uses:\n" &
+      "    \"rust >=1.80\"\n" &
+      "\n" &
+      "  executable crate-env-bin\n")
+    writeFile(scratch / "Cargo.toml",
+      "[package]\n" &
+      "name = \"crate-env\"\n" &
+      "version = \"3.4.5-rc.1+build.7\"\n" &
+      "edition = \"2021\"\n" &
+      "authors = [\"A <a@example.com>\", \"B\"]\n" &
+      "description = \"crate env probe\"\n" &
+      "homepage = \"https://example.com/home\"\n" &
+      "repository = \"https://example.com/repo\"\n" &
+      "license = \"MIT\"\n" &
+      "license-file = \"LICENSE.txt\"\n" &
+      "rust-version = \"1.70\"\n" &
+      "publish = false\n" &
+      "\n" &
+      "[lib]\n" &
+      "name = \"crate_env\"\n" &
+      "path = \"src/lib.rs\"\n" &
+      "\n" &
+      "[[bin]]\n" &
+      "name = \"crate-env-bin\"\n" &
+      "path = \"src/main.rs\"\n")
+    writeFile(scratch / "README.md", "probe\n")
+    writeFile(scratch / "LICENSE.txt", "probe\n")
+    writeFile(scratch / "src" / "lib.rs",
+      "pub const NAME: &str = env!(\"CARGO_PKG_NAME\");\n")
+    writeFile(scratch / "src" / "main.rs",
+      "fn main() {\n" &
+      "    println!(\"{} {} {}\", env!(\"CARGO_PKG_VERSION\"),\n" &
+      "        env!(\"CARGO_BIN_NAME\"), env!(\"CARGO_CRATE_NAME\"));\n" &
+      "}\n")
+    writeFile(scratch / "tests" / "probe.rs",
+      "#[test]\n" &
+      "fn bin_exe() { assert!(!env!(\"CARGO_BIN_EXE_crate-env-bin\").is_empty()); }\n")
+    defer:
+      removeDir(scratch)
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let conv = rust_convention.rustConvention()
+      let request = dummyRequest(scratch)
+      require conv.recognize(scratch, request)
+      let fragment = conv.emitFragment(scratch, request)
+      var byId = initTable[string, BuildActionDef]()
+      var order: seq[string] = @[]
+      for node in fragment.nodes:
+        if node.kind != gnkAction:
+          continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        byId[action.id] = action
+        order.add(action.id)
+
+      proc envOf(action: BuildActionDef): Table[string, string] =
+        for (name, value) in action.env:
+          result[name] = value
+
+      # Every rustc action declares the package-level variables.
+      var rustcCount = 0
+      for id in order:
+        if not id.startsWith("rustc-") or id.startsWith("rustc-test-run-") or
+            id.startsWith("rustc-test-stamp-"):
+          continue
+        inc rustcCount
+        let env = envOf(byId[id])
+        checkpoint "action " & id & " env: " & $env
+        check env.getOrDefault("CARGO_PKG_NAME") == "crate-env"
+        check env.getOrDefault("CARGO_PKG_VERSION") == "3.4.5-rc.1+build.7"
+        check env.getOrDefault("CARGO_PKG_VERSION_MAJOR") == "3"
+        check env.getOrDefault("CARGO_PKG_VERSION_MINOR") == "4"
+        check env.getOrDefault("CARGO_PKG_VERSION_PATCH") == "5"
+        check env.getOrDefault("CARGO_PKG_VERSION_PRE") == "rc.1"
+        check env.getOrDefault("CARGO_PKG_AUTHORS") == "A <a@example.com>:B"
+        check env.getOrDefault("CARGO_PKG_DESCRIPTION") == "crate env probe"
+        check env.getOrDefault("CARGO_PKG_HOMEPAGE") == "https://example.com/home"
+        check env.getOrDefault("CARGO_PKG_REPOSITORY") == "https://example.com/repo"
+        check env.getOrDefault("CARGO_PKG_LICENSE") == "MIT"
+        check env.getOrDefault("CARGO_PKG_LICENSE_FILE") == "LICENSE.txt"
+        check env.getOrDefault("CARGO_PKG_RUST_VERSION") == "1.70"
+        check env.getOrDefault("CARGO_PKG_README") == "README.md"
+        check env.getOrDefault("CARGO_MANIFEST_PATH").endsWith("Cargo.toml")
+        check env.getOrDefault("CARGO_MANIFEST_DIR") ==
+          env.getOrDefault("CARGO_MANIFEST_PATH").parentDir
+        check env.getOrDefault("CARGO_PRIMARY_PACKAGE") == "1"
+        check env.getOrDefault("CARGO").len > 0
+        check "CARGO_CRATE_NAME" in env
+      # lib x2, bin x1 (no metadata pass), the integration test's compile,
+      # and the test crates of the library and of the binary.
+      check rustcCount == 6
+
+      # The integration test's compile sees the package's binary and a
+      # target tmpdir, and depends on the binary's link action.
+      var testCompileId = ""
+      var binLinkId = ""
+      for id in order:
+        if id.startsWith("rustc-test-compile-") and ".test." in id:
+          testCompileId = id
+        elif id.startsWith("rustc-link-") and
+            byId[id].outputs[0].extractFilename.startsWith("crate_env_bin"):
+          binLinkId = id
+      require testCompileId.len > 0
+      require binLinkId.len > 0
+      let testEnv = envOf(byId[testCompileId])
+      check testEnv.getOrDefault("CARGO_BIN_EXE_crate-env-bin") ==
+        byId[binLinkId].outputs[0]
+      check testEnv.getOrDefault("CARGO_TARGET_TMPDIR").len > 0
+      check dirExists(testEnv.getOrDefault("CARGO_TARGET_TMPDIR"))
+      check binLinkId in byId[testCompileId].deps
+      var testRunId = ""
+      for id in order:
+        if id.startsWith("rustc-test-run-"):
+          testRunId = id
+      require testRunId.len > 0
+      check testEnv.getOrDefault("CARGO_TARGET_TMPDIR") in
+        byId[testRunId].scratchDirs
+      # The binary's bytes are an input of both the test compile and the
+      # run, and the run sees the variables a test reads at run time.
+      check byId[binLinkId].outputs[0] in byId[testCompileId].inputs
+      check byId[binLinkId].outputs[0] in byId[testRunId].inputs
+      check binLinkId in byId[testRunId].deps
+      let runEnv = envOf(byId[testRunId])
+      check runEnv.getOrDefault("CARGO_BIN_EXE_crate-env-bin") ==
+        byId[binLinkId].outputs[0]
+      check runEnv.getOrDefault("CARGO_TARGET_TMPDIR") ==
+        testEnv.getOrDefault("CARGO_TARGET_TMPDIR")
+      check runEnv.getOrDefault("CARGO_MANIFEST_DIR").len > 0
+      check "CARGO_CRATE_NAME" notin runEnv
+
+      # Run the lib and bin actions with real rustc and the declared
+      # environment, then run the binary.
+      proc runAction(action: BuildActionDef): (string, int) =
+        let argv = inlineArgvOf(action)
+        var envTab = newStringTable(modeCaseSensitive)
+        for k, v in envPairs():
+          envTab[k] = v
+        for (name, value) in action.env:
+          envTab[name] = value
+        let p = startProcess(argv[0], workingDir = scratch,
+          args = argv[1 .. ^1], env = envTab,
+          options = {poStdErrToStdOut})
+        let output = p.outputStream.readAll()
+        let code = p.waitForExit()
+        p.close()
+        (output, code)
+      for prefix in ["rustc-metadata-", "rustc-link-"]:
+        for id in order:
+          if id.startsWith(prefix) and
+              byId[id].outputs[0].extractFilename.startsWith("libcrate_env-"):
+            let (output, code) = runAction(byId[id])
+            checkpoint id & ": " & output
+            check code == 0
+      for prefix in ["rustc-metadata-", "rustc-link-"]:
+        for id in order:
+          if id.startsWith(prefix) and not
+              byId[id].outputs[0].extractFilename.startsWith("libcrate_env-"):
+            let (output, code) = runAction(byId[id])
+            checkpoint id & ": " & output
+            check code == 0
+      let binOut = byId[binLinkId].outputs[0]
+      require fileExists(binOut)
+      let (runOut, runCode) = execCmdEx(quoteShell(binOut))
+      check runCode == 0
+      check runOut.strip == "3.4.5-rc.1+build.7 crate-env-bin crate_env_bin"

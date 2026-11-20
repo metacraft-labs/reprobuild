@@ -28,6 +28,7 @@ from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_apply
+import repro_home_resources/drivers/managed_block
 import repro_home_generations
 
 # ---------------------------------------------------------------------------
@@ -100,25 +101,6 @@ proc verifyFileAgainstCurrent*(rec: GeneratedFile): FileDriftReport =
 # Managed-block verification.
 # ---------------------------------------------------------------------------
 
-proc renderSentinelLocal(prefix, id, suffix: string): string =
-  prefix & id & suffix
-
-proc extractBlockBytes(hostFileBytes, openSentinel, closeSentinel: string):
-    tuple[ok: bool; bytes: string] =
-  ## Find the (open, close) sentinel pair and return the bytes between
-  ## them (excluding the sentinel lines themselves). This mirrors the
-  ## logic in `repro_home_apply/materialize_managed_blocks.nim`.
-  let openIdx = hostFileBytes.find(openSentinel)
-  let closeIdx = hostFileBytes.find(closeSentinel)
-  if openIdx < 0 or closeIdx < 0 or closeIdx <= openIdx:
-    return (false, "")
-  let lineEndAfterOpen = hostFileBytes.find('\n', openIdx)
-  let bodyStart = if lineEndAfterOpen >= 0: lineEndAfterOpen + 1
-                  else: openIdx + openSentinel.len
-  if bodyStart > closeIdx:
-    return (false, "")
-  return (true, hostFileBytes[bodyStart ..< closeIdx])
-
 proc verifyManagedBlockAgainstCurrent*(rec: ManagedBlock): FileDriftReport =
   ## Drift verdict for a managed block. Compares the BLAKE3 of the
   ## bytes between the sentinels in the live host file to the
@@ -131,29 +113,50 @@ proc verifyManagedBlockAgainstCurrent*(rec: ManagedBlock): FileDriftReport =
     result.observedHex = "<host-file-missing>"
     return
   let hostBytes = readFile(extendedPath(rec.hostFilePath))
-  let openS = renderSentinelLocal(OpenSentinelPrefix, rec.blockId,
-    OpenSentinelSuffix)
-  let closeS = renderSentinelLocal(CloseSentinelPrefix, rec.blockId,
-    CloseSentinelSuffix)
-  let extracted = extractBlockBytes(hostBytes, openS, closeS)
-  if not extracted.ok:
+  # The shared locator (via the home-layer driver), never a private
+  # sentinel search: it knows the current `repro:home:` form and the
+  # earlier `repro-managed:` one, and refuses a duplicated block.
+  var extracted: tuple[found: bool; body: string]
+  try:
+    extracted = readHomeManagedBlockBody(hostBytes, rec.blockId,
+      rec.hostFilePath)
+  except ManagedBlockError as err:
+    result.drifted = true
+    result.expectedHex = digestHex(digestBytes(rec.postWriteBlockBytes))
+    result.observedHex = "<malformed: " & err.msg & ">"
+    return
+  if not extracted.found:
     result.missing = true
     result.drifted = true
     result.expectedHex = digestHex(digestBytes(rec.postWriteBlockBytes))
     result.observedHex = "<sentinels-missing>"
     return
-  var liveBlockBytes = newSeq[byte](extracted.bytes.len)
-  for i, ch in extracted.bytes:
+  # Both sides in the LF-folded form `readHomeManagedBlockBody` returns: a
+  # record written by an earlier release holds the bytes it was given.
+  var recordedBytes = rec.postWriteBlockBytes
+  block foldRecorded:
+    var folded = newSeqOfCap[byte](recordedBytes.len)
+    var i = 0
+    while i < recordedBytes.len:
+      if recordedBytes[i] == byte('\r') and i + 1 < recordedBytes.len and
+          recordedBytes[i + 1] == byte('\n'):
+        inc i
+        continue
+      folded.add(recordedBytes[i])
+      inc i
+    recordedBytes = folded
+  var liveBlockBytes = newSeq[byte](extracted.body.len)
+  for i, ch in extracted.body:
     liveBlockBytes[i] = byte(ord(ch))
   # Strip the trailing newline the writer adds after the block bytes
   # if the recorded bytes did not end with one.
-  let recordedTrailingNL = rec.postWriteBlockBytes.len > 0 and
-    rec.postWriteBlockBytes[^1] == byte('\n')
+  let recordedTrailingNL = recordedBytes.len > 0 and
+    recordedBytes[^1] == byte('\n')
   if not recordedTrailingNL and liveBlockBytes.len > 0 and
       liveBlockBytes[^1] == byte('\n'):
     liveBlockBytes.setLen(liveBlockBytes.len - 1)
   let observed = digestBytes(liveBlockBytes)
-  let expected = digestBytes(rec.postWriteBlockBytes)
+  let expected = digestBytes(recordedBytes)
   var same = true
   for i in 0 ..< 32:
     if observed[i] != expected[i]:

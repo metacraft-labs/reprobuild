@@ -23,6 +23,7 @@ import std/[strutils]
 import repro_dsl_stdlib/packages/apt_closure
 
 import repro_core/arg_files
+import repro_core/system_file_holding
 export arg_files
 
 import ./errors
@@ -605,6 +606,21 @@ type
       sfSourceUrl*: string
       sfSha256*: string
       sfSourceLocal*: string
+      sfMode*: string
+        ## The exact permission bits to write, four octal digits; "" keeps
+        ## the replaced regular file's bits (else 0644). When set, or when
+        ## `sfGroup` is, the observed digest covers the mode and group as
+        ## well as the content (`systemFileStateText`).
+      sfGroup*: string
+        ## The owning group's name; "" means root's group (gid 0). The
+        ## driver resolves it with `getgrnam(3)` when it writes and fails
+        ## the operation with `EProtocol` when it does not exist.
+      sfForm*: string
+        ## `copy`, `link` or "" as declared. The writer never reads it (the
+        ## add-on switch's materialisation policy decides link or copy);
+        ## the observation does: a link at the path of a file declaring
+        ## `copy` is drift, so a link of an earlier generation is replaced
+        ## even when the bytes it resolves to are unchanged.
       sfDestroy*: bool
     of pokFsSystemDirectory:
       ## Create / converge / remove the managed directory `fsdPath`.
@@ -892,12 +908,21 @@ type
       ##                            "operation succeeded; reboot
       ##                            required" code Windows installers
       ##                            return).
+      ## * `iecTimeoutSeconds`    — the action's own deadline, from the
+      ##                            profile edge's `timeoutSeconds`. `0`
+      ##                            means "the default"
+      ##                            (`effectiveInlineExecTimeoutSeconds`).
+      ##                            In-process only: the broker wire frame
+      ##                            does not carry it, so an operation that
+      ##                            crosses to a forked broker runs under
+      ##                            the default deadline, never under none.
       iecExecutable*: string
       iecArguments*: seq[string]
       iecWorkingDirectory*: string
       iecEnvironment*: seq[string]
       iecToolIdentityRefs*: seq[string]
       iecAcceptExitCodes*: seq[int]
+      iecTimeoutSeconds*: int
 
 # ---------------------------------------------------------------------------
 # linux.fhsSandbox — closed-set charset / shape helpers.
@@ -2308,6 +2333,12 @@ proc operationValidationError*(op: PrivilegedOperation): string =
       return "fs.systemFile '" & op.sfPath &
         "' sets `sfSha256` but no `sfSourceUrl` — the digest is only " &
         "meaningful when paired with a URL fetch"
+    # How the file is held: the constructor, the adapter and the text
+    # parser refuse these already; the broker re-checks a decoded frame.
+    let holdingError = systemFileHoldingError(op.sfMode, op.sfGroup,
+                                              op.sfForm)
+    if holdingError.len > 0:
+      return "fs.systemFile '" & op.sfPath & "' " & holdingError
     if op.sfSha256.len > 0:
       # Lowercase 64-char hex check. Mirrors the format the BLAKE3
       # driver emits for `posixDigestHexOfText`.

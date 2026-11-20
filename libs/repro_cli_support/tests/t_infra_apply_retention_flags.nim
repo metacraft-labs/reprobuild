@@ -46,14 +46,19 @@ suite "repro infra apply: the add-on retention flags":
   test "the help lists them":
     let r = dispatch(@["apply", "--help"])
     check r.code == 0
-    check "--keep-generations N" in r.output and "--keep-days D" in r.output
+    check "--keep-generations" in r.output and "--keep-days" in r.output
 
   test "a negative or non-numeric bound is a usage error":
-    for bad in [@["--keep-generations", "-1"], @["--keep-days=x"],
-                @["--keep-generations=two"]]:
+    # A negative bound is refused by the command; a non-numeric one by
+    # repro's command-line parser, which declares both as integers.
+    let negative = dispatch(@["apply", "--no-preview", "--keep-generations",
+                              "-1"])
+    check negative.code == 2
+    check "expects a non-negative integer" in negative.output
+    for bad in [@["--keep-days=x"], @["--keep-generations=two"]]:
       let r = dispatch(@["apply", "--no-preview"] & bad)
       check r.code == 2
-      check "expects a non-negative integer" in r.output
+      check "invalid value" in r.output and bad[0].split('=')[0] in r.output
 
   test "on a host that is not an add-on host they are refused":
     let dir = createTempDir("repro-infra-retention-", "")

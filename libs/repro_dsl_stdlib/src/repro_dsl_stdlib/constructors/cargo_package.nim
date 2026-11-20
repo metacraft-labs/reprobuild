@@ -290,7 +290,20 @@ proc cargo_package*(srcDir = "src";
     for (k, _) in env:
       if k == "RUSTC": recipeRustc = true
     if not recipeRustc:
-      discard rustStdComponent(target)   # refuses an uncatalogued target
+      let component = rustStdComponent(target)   # refuses an uncatalogued target
+      # The sysroot edge is specified for Linux targets only (Rust.md
+      # "Cross-compiling"). The catalog also carries the Windows `gnullvm`
+      # components, for the target-keyed tool-profile realization, but the
+      # merge below is a POSIX shell edge whose `RUSTC` is a `/bin/sh`
+      # wrapper (which cargo cannot run on a Windows host), and no linker is
+      # arranged for a non-Linux target. Refuse by name rather than emit an
+      # edge that fails later and obscurely.
+      if component.os != "linux":
+        raise newException(ValueError,
+          "cargo_package: the cross sysroot edge merges rust-std for Linux " &
+          "targets only, and '" & target & "' is a " & component.os &
+          " target; set RUSTC in extraEnv to a rustc whose sysroot carries " &
+          "that target's standard library")
       let root = if projectRoot.len > 0: projectRoot else: "."
       env.add(("RUSTC", rustTargetRustcPath(root, target)))
       if projectRoot.len > 0:

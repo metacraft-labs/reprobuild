@@ -223,7 +223,8 @@ when defined(posix):
       lease.finish(outcome = finishOutcome(completion),
         peakMemoryBytes = completion.peakResidentMemoryBytes,
         processCount = completion.processCount,
-        totals = completion.totals, cpuProfile = completion.cpuProfile)
+        totals = completion.totals, cpuProfile = completion.cpuProfile,
+        sizing = completion.finishSizing())
       lease.release()
     except CatchableError as err:
       noteOutcome(crate, "unreported: finish failed: " & err.msg)

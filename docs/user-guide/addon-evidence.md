@@ -69,6 +69,18 @@ overwritten; `evidence-enrol` refuses a host that already has either one.
   let the host append. Remove it from there to revoke that host alone.
   Until you copy it, records wait on the host.
 
+The unit that ships records, `repro-addon-evidence.service`, does not run
+as root. It runs as its own dynamic user (`repro-addon-evidence`) with no
+capabilities, and systemd hands it the sink credential at start
+(`LoadCredential=`), so the credential file itself stays readable by root
+only. The unit can reach the sink's address and nothing else; it cannot
+open a Unix socket, so it cannot talk to systemd or the system bus. Its
+queue of records waiting to leave, the outbox, lives in that user's state
+directory, `/var/lib/private/repro-addon-evidence/outbox`.
+`evidence-credential-check`, `contain` and `release` reach the sink the
+same way: they start a short-lived unit with exactly that confinement and
+read its result.
+
 To check the credential from the host, run
 `repro system addon evidence-credential-check`. An append must be
 acknowledged, and a list, a read, an overwrite and a delete must each be
@@ -114,8 +126,8 @@ it cannot read or write is an alert of its own
 (`check-state-unreadable`, `check-state-unwritable`), and an unreadable
 one is never overwritten. The command prints
 a status for each detector of each host (`live-idle`, `live-detecting`,
-`silent` or `never-reported`) and one `ALERT` line for each finding. It
-exits 1 when there is at least one alert. The findings are:
+`silent`, `never-reported` or `unproven`) and one `ALERT` line for each
+finding. It exits 1 when there is at least one alert. The findings are:
 
 - every refusal, rollback, re-assert drift, apt hook finding and refused
   connection a host recorded;
@@ -124,7 +136,30 @@ exits 1 when there is at least one alert. The findings are:
 - a signed statement that does not verify, a generation that changed
   between records, or a generation that no published manifest produced;
 - a host still behind the producer's latest manifest after that manifest's
-  maximum age.
+  maximum age;
+- a detector that reports in, but whose positive control has not tripped
+  (`control-missing`, status `unproven`): see below.
+
+Three detectors test themselves on the host every time they run, because
+what they depend on there can stop working while they keep reporting:
+
+- the manifest check (`DET-AO-1`) offers the agent a manifest signed by a
+  key made up for the test, and the host's deploy anchors must refuse it;
+- the egress observer (`DET-AO-3`) receives one packet that each fetch
+  sends to `127.68.69.84`, a loopback address that never leaves the host,
+  and must count it;
+- the apt hook (`DET-AO-6`) looks up the package that owns
+  `/usr/bin/dpkg`, and must find `dpkg`.
+
+Each run reports whether its test passed. The command raises
+`control-missing` when a host is reporting and no test of the manifest
+check or of the egress observer has passed within three tick intervals,
+or when the latest apt hook run's test did not pass. A test that fails on
+the host is also reported as its own alert (`manifest-control-missed`,
+`hook-control-missed`). An egress observer that stops counting usually
+means its nftables rules no longer match the fetch unit, for example
+because they were flushed. Restarting `repro-addon-egress.service` loads
+the table again.
 
 Each `ALERT` line reads `ALERT <host id> <detector> <trigger> seq=<n>
 <detail>`: the detector's identifier, what triggered it, and the sink
@@ -177,9 +212,14 @@ did:
    repro system addon contain --operator alice --reason "refused compile at seq 15"
    ```
 
-   It records the containment and ships the record to the sink first. Then
-   it stops the deploy agent's fetch and apply units, and while the
-   containment lasts they do not start again, not after a reboot either. The host stays on its current
+   It first stops the deploy agent's fetch and apply units from starting,
+   and waits up to three minutes for a run already in progress to finish.
+   Then it records the containment and ships the record to the sink. Only
+   then does it stop the units. While the containment lasts they do not
+   start again, not after a reboot either. If a run is still going when
+   the wait ends, `contain` says so; any record that run writes later
+   reaches the sink as `ticked-while-contained`. If `contain` is
+   interrupted before it records, run it again. The host stays on its current
    generation. The sink's detectors then report the agent as `contained`
    instead of `silent`. A stop that was not recorded this way, or that came
    after the agent had already gone silent, still reads as silence.

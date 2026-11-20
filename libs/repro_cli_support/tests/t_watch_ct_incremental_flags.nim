@@ -1,54 +1,58 @@
 ## M2 verification — the `repro watch --ct-incremental` flag surface.
 ##
-## Drives the REAL ``repro watch`` argument parser via
-## ``applyWatchCtIncrementalFlag`` — the exact proc the watch command's argument
-## loop delegates to for these two flags (so this test exercises the production
-## grammar, not a duplicated copy). Covers:
+## Drives the REAL ``repro watch`` argument parser: ``loadWatchCommandLine``,
+## the parser generated from repro's command-line description, which both
+## routes into a watch (the command line and the daemon worker) read their
+## arguments through. Covers:
 ##
 ##   * ``watch_ct_incremental_flag_parses`` — both flags are accepted and set
-##     the parsed state; a bare ``--ct-incremental-trace-dir`` (no value) is
-##     rejected with a clear diagnostic.
+##     the parsed configuration;
+##   * ``ct_incremental_trace_dir_requires_inline_value`` — a bare
+##     ``--ct-incremental-trace-dir`` (no ``=value``) is a usage error, never
+##     a silently empty trace dir, and the value is not taken from the next
+##     word (the flag takes it only in the ``=`` spelling);
 ##   * ``watch_without_flag_is_unchanged`` — when neither flag is present the
-##     parsed state is the legacy default (disabled, empty trace dir) and other
-##     flags fall through to the caller's elif chain unchanged.
+##     parsed state is the legacy default (disabled, empty trace dir) and the
+##     other flags and the positional target are read as before.
+##
+## No mocks: the configuration comes from the generated parser.
 
 import std/[strutils, unittest]
 
 import repro_cli_support
+import repro_cli_support/cli_program
 
 suite "M2: repro watch --ct-incremental flag parsing":
 
   test "watch_ct_incremental_flag_parses":
-    ## Both flags are accepted and populate the parsed flags object.
-    var flags = WatchCtIncrementalFlags()
-    check applyWatchCtIncrementalFlag(flags, "--ct-incremental")
-    check flags.enabled
-    check applyWatchCtIncrementalFlag(flags,
-      "--ct-incremental-trace-dir=.repro/ct-trace")
-    check flags.traceDir == ".repro/ct-trace"
+    ## Both flags are accepted and populate the parsed configuration.
+    let (c, _) = loadWatchCommandLine(["--ct-incremental",
+      "--ct-incremental-trace-dir=.repro/ct-trace"])
+    check c.ctIncremental
+    check c.ctIncrementalTraceDir == ".repro/ct-trace"
 
   test "ct_incremental_trace_dir_requires_inline_value":
-    ## A bare ``--ct-incremental-trace-dir`` (no ``=value``) is a hard error,
-    ## matching the shape of every other value-taking watch flag — never a
-    ## silently-empty trace dir.
-    var flags = WatchCtIncrementalFlags()
-    var raised = false
-    try:
-      discard applyWatchCtIncrementalFlag(flags, "--ct-incremental-trace-dir")
-    except ValueError as e:
-      raised = true
-      check "--ct-incremental-trace-dir requires an inline value" in e.msg
-    check raised
+    ## A bare ``--ct-incremental-trace-dir`` is a usage error (exit 2), with
+    ## or without a following word.
+    for argv in [@["--ct-incremental-trace-dir"],
+                 @["--ct-incremental-trace-dir", ".repro/ct-trace"]]:
+      var raised = false
+      try:
+        discard loadWatchCommandLine(argv)
+      except CliUsageError as e:
+        raised = true
+        check e.exitCode == 2
+        check "--ct-incremental-trace-dir" in e.msg
+      check raised
 
   test "watch_without_flag_is_unchanged":
-    ## With neither flag present, the parser consumes nothing (returns false so
-    ## the caller's elif chain proceeds) and the default state stays the legacy
-    ## one: disabled, empty trace dir.
-    var flags = WatchCtIncrementalFlags()
-    # Unrelated flags and the positional target are NOT consumed here.
-    check not applyWatchCtIncrementalFlag(flags, "--tool-provisioning=path")
-    check not applyWatchCtIncrementalFlag(flags, "--max-cycles=1")
-    check not applyWatchCtIncrementalFlag(flags, "mytarget")
-    # Legacy default: incremental mode off, no trace dir.
-    check not flags.enabled
-    check flags.traceDir.len == 0
+    ## With neither flag present the default state stays the legacy one
+    ## (disabled, no trace dir), and the other flags and the positional
+    ## target are read as before.
+    let (c, _) = loadWatchCommandLine(["--tool-provisioning=path",
+      "--max-cycles=1", "mytarget"])
+    check not c.ctIncremental
+    check c.ctIncrementalTraceDir.len == 0
+    check c.toolProvisioning == "path"
+    check c.maxCycles == 1
+    check c.selectors == @["mytarget"]

@@ -59,6 +59,7 @@ proc looksLikeUsageDump(output: string): bool =
   ## appear in those and not in legitimate engine diagnostics.
   for needle in [
     "Run `repro --help` for the list of commands",
+    "For more information, try 'repro",
     "Usage: repro [options] [<command>]",
     "repro build [target[#name]",
   ]:

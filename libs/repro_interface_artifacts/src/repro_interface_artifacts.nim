@@ -84,9 +84,13 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+import repro_core/variant_assignments
+from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
+import repro_interface_artifacts/closure_manifest
+export closure_manifest
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -169,6 +173,7 @@ const BuiltSourcePackageRoots = [
   ("SHM_QUEUE_SRC", compileTimeSourceRoot("SHM_QUEUE_SRC")),
   ("SHM_GSET_SRC", compileTimeSourceRoot("SHM_GSET_SRC")),
   ("CLI_SPEC_SRC", compileTimeSourceRoot("CLI_SPEC_SRC")),
+  ("ENTRYPOINTS_SRC", compileTimeSourceRoot("ENTRYPOINTS_SRC")),
   # confutils: repro's own command line (``repro_cli_support/cli_program``)
   # is instantiated through it, so a nested compile of the engine needs it.
   ("CONFUTILS_SRC", compileTimeSourceRoot("CONFUTILS_SRC")),
@@ -627,6 +632,13 @@ type
       ## unpacks into the prefix. See
       ## ``TarballProvisioningDef.closureManifest``: an entry point with
       ## runtime dependencies is not one tarball.
+    closureEntries*: seq[ClosureEntry]
+      ## v34: the manifest's parsed content, inlined by whoever lifted the
+      ## record (the publisher). When non-empty realization uses THESE and
+      ## never opens ``closureManifest``, which a consumer of a published
+      ## artifact has no way to resolve. Empty for a record whose closure
+      ## has not been inlined (a recipe read in place) and for a record
+      ## with no closure.
     detail*: TarballArchiveDetail
       ## GM4b (v21): the archive-realization metadata — version, alternative
       ## digests, install method, installer/pacman/bootstrap arguments, env
@@ -1216,8 +1228,26 @@ static:
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 33'u16
-    ## v33 (current): ``TarballArchiveDetail`` retains the ELF relocation of
+  EnvelopeVersion = 34'u16
+    ## v34 (current): ``InterfaceTarballProvisioning`` retains
+    ##                ``closureEntries``, the PARSED content of the
+    ##                ``closureManifest`` file (path, sha256, url,
+    ##                archiveType, stripComponents per archive), after
+    ##                ``detail``. The publisher inlines them so a consumer
+    ##                that reads only a catalog's ``published-interfaces/``
+    ##                can realize a package with a dependency closure
+    ##                without the file, which it does not have
+    ##                (Federated-Catalog-Imports.md § Home profiles,
+    ##                decided 2026-11-17, option 1). v33 and older
+    ##                payloads decode them empty. They bind into every
+    ##                fingerprint that binds the record, so a changed
+    ##                closure moves the interface fingerprint, the realization
+    ##                digest and the contribution fingerprint (``tarballFieldView``
+    ##                names it, only when present); the fingerprint projection
+    ##                writes the block only when entries exist, so no
+    ##                fingerprint hashed from a record without a closure
+    ##                moves.
+    ## v33: ``TarballArchiveDetail`` retains the ELF relocation of
     ##                a dynamically linked archive (``elfInterpreter``,
     ##                ``elfRunpath``, ``elfPatchDirs``, ``gccLinkSpecs``,
     ##                ``gccSpecDefaults``),
@@ -2159,6 +2189,18 @@ proc writeTarballProvisioning(outp: var seq[byte];
   if version >= 21'u16:
     outp.writeTarballArchiveDetail(provisioning.detail, version,
       forFingerprint)
+  if version >= 34'u16:
+    # The fingerprint projection omits an empty block (see the v34 note on
+    # ``EnvelopeVersion``); the wire payload always carries the count, since
+    # the reader decodes a fixed layout.
+    if not forFingerprint or provisioning.closureEntries.len > 0:
+      outp.writeU32Le(uint32(provisioning.closureEntries.len))
+      for entry in provisioning.closureEntries:
+        outp.writeString(entry.path)
+        outp.writeString(entry.sha256)
+        outp.writeString(entry.url)
+        outp.writeString(entry.archiveType)
+        outp.writeU32Le(uint32(max(entry.stripComponents, 0)))
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -2192,6 +2234,16 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
     result.os = readString(bytes, pos)
   if version >= 21'u16:
     result.detail = readTarballArchiveDetail(bytes, pos, version)
+  if version >= 34'u16:
+    let count = int(readU32Le(bytes, pos))
+    for _ in 0 ..< count:
+      var entry: ClosureEntry
+      entry.path = readString(bytes, pos)
+      entry.sha256 = readString(bytes, pos)
+      entry.url = readString(bytes, pos)
+      entry.archiveType = readString(bytes, pos)
+      entry.stripComponents = int(readU32Le(bytes, pos))
+      result.closureEntries.add(entry)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -3009,6 +3061,38 @@ proc toInterfaceNixProvisioning(packageName: string;
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
 
+proc inlinedClosureEntries(provisioning: TarballProvisioningDef):
+    seq[ClosureEntry] =
+  ## The parsed content of ``provisioning``'s closure manifest, for the
+  ## record that will be PUBLISHED (envelope v34): a consumer of the artifact
+  ## cannot open the file, so the entries must travel in the record.
+  ##
+  ## A def that already carries inlined lines (it was rebuilt from a
+  ## published artifact) is parsed from them and the file is never opened. A
+  ## def with a manifest path reads the file, resolved the way realization
+  ## resolves it: absolute as written, else beside the declaring file, else
+  ## against the working directory. A missing file yields no entries here; the
+  ## publisher refuses such a record.
+  if provisioning.closureEntries.len > 0:
+    return parseClosureManifestText(provisioning.closureEntries.join("\n"),
+      "inlined closure entries of " & provisioning.url)
+  if provisioning.closureManifest.len == 0:
+    return @[]
+  let declared = provisioning.closureManifest
+  let path =
+    if declared.isAbsolute: declared
+    elif provisioning.sourceFile.len > 0:
+      parentDir(provisioning.sourceFile) / declared
+    else: declared
+  # A lift that cannot see the file (a prebuilt provider read away from its
+  # checkout) leaves the entries empty and keeps the realize-time error it
+  # always had; the PUBLISHER refuses such a record instead, because a
+  # published record without its entries cannot be realized by a consumer
+  # (``catalog_publication``).
+  if not fileExists(extendedPath(path)):
+    return @[]
+  parseClosureManifestText(readFile(extendedPath(path)), path)
+
 proc toInterfaceTarballProvisioning(packageName: string;
                                     provisioning: TarballProvisioningDef;
                                     contributor = ""):
@@ -3026,6 +3110,7 @@ proc toInterfaceTarballProvisioning(packageName: string;
     nonRedistributable: provisioning.nonRedistributable,
     launcher: provisioning.launcher,
     closureManifest: provisioning.closureManifest,
+    closureEntries: inlinedClosureEntries(provisioning),
     detail: provisioning.detail,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
@@ -3972,6 +4057,8 @@ proc emitProvisioningContributionRegistrations(code: var string;
         ", nonRedistributable: " & $provisioning.nonRedistributable &
         ", launcher: " & escForCode(provisioning.launcher) &
         ", closureManifest: " & escForCode(provisioning.closureManifest) &
+        ", closureEntries: @[" & provisioning.closureEntries.mapIt(
+          escForCode(canonicalClosureLine(it))).join(", ") & "]" &
         ", archiveType: " & escForCode(provisioning.archiveType) &
         ", executablePath: " & escForCode(provisioning.executablePath) &
         ", executableAlias: " & escForCode(provisioning.executableAlias) &
@@ -4827,6 +4914,70 @@ proc providerCompileNimcacheRoot*(): string =
       "cannot resolve the user cache directory for the provider nimcache")
   absolutePath(cache) / "repro-nimcache-provider"
 
+proc recipeCompileToolPath*(modulePath, nim, cc: string): string =
+  ## The `PATH` a recipe compile declares: the directories of the Nim
+  ## compiler and the C compiler it runs, plus resolved Git when `modulePath`
+  ## selects a lock-pinned catalog the compile must verify. Empty when none
+  ## of them is an absolute path.
+  ##
+  ## Declared rather than inherited because the compile reads `PATH` (the C
+  ## compiler driver searches it), and its monitor then records the value:
+  ## an inherited `PATH` makes the caller's shell, and on another machine
+  ## that machine's default `PATH`, part of the compile's key. Both recipe
+  ## compiles declare it, the provider compile (`providerCompileLaunchEnv`)
+  ## and the interface extraction (`repro_cli_support.extractInterfaceEdge`).
+  var dirs: seq[string] = @[]
+  # A lock-pinned catalog the compile helper must materialize is fetched and
+  # verified with Git. Resolve Git here, before isolation, and declare only
+  # that tool directory rather than inheriting the shell PATH. A checkout
+  # selected in the pin's place -- at the pinned commit, or through develop
+  # mode -- is read in place and needs no Git. `$REPROBUILD_PACKAGES_ROOT`
+  # selects no pin at all.
+  let catalogGit =
+    if modulePath.len > 0 and
+        getEnv(ReprobuildPackagesRootEnv).len == 0 and
+        selectExternalCatalog(modulePath).kind == eckLockPinned:
+      findExe("git")
+    else: ""
+  for tool in [nim, cc, catalogGit]:
+    if tool.len > 0 and tool.isAbsolute:
+      let dir = parentDir(tool)
+      if dir notin dirs:
+        dirs.add(dir)
+  dirs.join($PathSep)
+
+proc recipeCompileToolPath*(modulePath = ""): string =
+  ## `recipeCompileToolPath` for the Nim and C compilers the next recipe
+  ## compile will run (`nimCompilerPath`, `hostCCompilerPath`).
+  let cc =
+    try: hostCCompilerPath()
+    except CatchableError: ""
+  recipeCompileToolPath(modulePath, nimCompilerPath(), cc)
+
+proc recipeCompilePathEnv*(toolPath: string): seq[string] =
+  ## THE SINGLE PLACE A RECIPE COMPILE'S `PATH` ENTRY IS COMPOSED, for both
+  ## recipe compiles: the provider compile (`providerCompileLaunchEnv`) and
+  ## the interface extraction (`repro_cli_support.extractInterfaceEdge`).
+  ##
+  ## A recipe compile is not a lowered action, so its `PATH` is not decided by
+  ## `repro_cli_support.actionPathDecision`, whose rule is about the tools a
+  ## recipe edge declares. It is always the hermetic shape: the directories of
+  ## the compilers the compile runs (`recipeCompileToolPath`), keyed by value.
+  ## Composing the entry here, not at each compile, keeps the two compiles
+  ## from drifting apart and keeps `repro_cli_support` free of hand-written
+  ## `PATH=` entries (`t_declared_env_is_in_the_cache_key` case 10).
+  ##
+  ## Empty when `toolPath` is empty: an emitted `PATH` is never the empty
+  ## string, because a declared empty `PATH` replaces the inherited one and
+  ## the compile would find no tool at all.
+  if toolPath.len > 0:
+    result.add("PATH=" & toolPath)
+
+proc recipeCompilePathEnvForModule*(modulePath = ""): seq[string] =
+  ## `recipeCompilePathEnv` for the compilers the next recipe compile runs
+  ## (`recipeCompileToolPath(modulePath)`).
+  recipeCompilePathEnv(recipeCompileToolPath(modulePath))
+
 proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   ## The environment values the provider-compile edge DECLARES, so that the
   ## caller's shell stops deciding what the edge is.
@@ -4886,19 +5037,7 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   let cc =
     try: hostCCompilerPath()
     except CatchableError: ""
-  var dirs: seq[string] = @[]
-  # A lock-pinned catalog is verified by the compile helper. Resolve Git
-  # here, before isolation, and declare only that tool directory rather than
-  # inheriting the shell PATH. Other compiles retain their original PATH.
-  let catalogGit =
-    if catalogSelectionIdentity(modulePath).startsWith("catalog-locked:"):
-      findExe("git")
-    else: ""
-  for tool in [nim, cc, catalogGit]:
-    if tool.len > 0 and tool.isAbsolute:
-      let dir = parentDir(tool)
-      if dir notin dirs:
-        dirs.add(dir)
+  let toolPath = recipeCompileToolPath(modulePath, nim, cc)
   if nim.len > 0 and nim.isAbsolute:
     result.add("REPRO_NIM_COMPILER=" & nim)
   if cc.len > 0 and cc.isAbsolute:
@@ -4913,8 +5052,7 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   let sdk = getEnv(bootstrapSdkRootEnv)
   if sdk.len > 0:
     result.add(bootstrapSdkRootEnv & "=" & sdk)
-  if dirs.len > 0:
-    result.add("PATH=" & dirs.join($PathSep))
+  result.add(recipeCompilePathEnv(toolPath))
   result.add("TERM=dumb")
   result.add("LANG=C")
   # Carry the cache BASE across the isolated HOME, always reserving the
@@ -4923,6 +5061,12 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   # through providerCompileIgnoredInputPrefixes.
   let cacheHomeEnv = when defined(windows): "LOCALAPPDATA" else: "XDG_CACHE_HOME"
   result.add(cacheHomeEnv & "=" & parentDir(providerCompileNimcacheRoot()))
+  # Created here, before the edge's cache lookup, so the directories above
+  # the nimcache exist whenever the lookup compares the record: the compile
+  # probes them on its way to the nimcache, and a fresh machine restoring a
+  # bundle (or a fresh HOME) would otherwise miss on "absent" for a
+  # directory the edge creates for itself.
+  createDir(extendedPath(providerCompileNimcacheRoot()))
   if homeDir.len > 0:
     createDir(extendedPath(homeDir))
     result.add("HOME=" & homeDir)
@@ -6757,8 +6901,28 @@ proc reproPackagePathFlags(workDir: string): seq[string] =
   ## package is added or its candidate list changes there, update it here too.
   ## (reprobuild's OWN ``libs/*/src`` tree is replayed separately by
   ## ``reproLibPathFlags``; this helper covers only the out-of-tree packages.)
+  ##
+  ## The candidate lists below are relative to a REPROBUILD root, as they are
+  ## in ``config.nims``. When ``workDir`` is a consumer that compiles against
+  ## an external reprobuild SDK, they are resolved at that SDK's root instead
+  ## (``bootstrapSiblingPackagePathFlags``, the set ``protectSdkCompilePaths``
+  ## already treats as the SDK's bootstrap closure). Resolving them at the
+  ## consumer read ``libs/<family>/src`` and ``../codetracer/libs/<family>``
+  ## inside the consumer, and each family's marker decided on its own which
+  ## copy it took: codetracer's older ``nim-serialization`` lacks
+  ## ``serialization/case_objects.nim``, so ``serialization`` came from the
+  ## SDK while ``json_serialization``, ``faststreams`` and ``stew`` came from
+  ## codetracer. These flags are reasserted ahead of everything, so the
+  ## recipe compile paired two releases of one library family and failed
+  ## (reprobuild-pm issue 2026-11-18-codetracer-recipe-extraction-mixes-
+  ## reprobuild-serialization-with-codetracer-json-serialization).
   if workDir.len == 0:
     return
+  if not workDirIsReprobuildTree(workDir):
+    let sdkLibs = reprobuildExternalLibsRoot(workDir)
+    if sdkLibs.len > 0:
+      return bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
+        workDir.parentDir)
   let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
   if ctRunnerAdapter.len > 0:
     result.add("--path:" & ctRunnerAdapter)
@@ -6844,6 +7008,12 @@ proc runtimeRpathCompilerFlags*(runtimeDirs: openArray[string];
   ## installation. Keep this target-parameterized so a Linux test can verify
   ## Darwin argv shape: ld64 requires one LC_RPATH option per directory,
   ## whereas GNU ld accepts a colon-delimited DT_RPATH value.
+  ##
+  ## GNU ld applies the LAST ``--{en,dis}able-new-dtags`` on its command line
+  ## to the whole output, so the ``--disable-new-dtags`` emitted here turns
+  ## every search entry of the binary into a DT_RPATH, including entries
+  ## other flags add. `portableReleaseRpathFlags` relies on that rule in the
+  ## other direction and must therefore come after every call to this proc.
   var uniqueDirs: seq[string] = @[]
   for libDir in runtimeDirs:
     if libDir.len > 0 and libDir notin uniqueDirs:
@@ -6886,8 +7056,21 @@ proc portableReleaseRpathFlags*(clingoPrefix, releaseLibDir: string):
   ## such a helper runs it through the release's bundled loader
   ## (`portableReleaseHelperArgv`), which loads the release's clingo on any
   ## host the release itself runs on.
+  ##
+  ## The trailing `--enable-new-dtags` makes the helper's whole search list a
+  ## DT_RUNPATH. The loader searches a DT_RPATH BEFORE `--library-path` and a
+  ## DT_RUNPATH after it (ld.so(8), "Dynamic library search order";
+  ## https://man7.org/linux/man-pages/man8/ld.so.8.html). Under a DT_RPATH, a
+  ## directory a Nix compiler adds (its own glibc's) outranks the release's
+  ## lib directory, so the bundled loader mapped that glibc's `libc.so.6` and
+  ## died on a GLIBC_PRIVATE symbol it lacks. GNU ld honours only the last
+  ## dtags flag, and `runtimeRpathCompilerFlags` emits `--disable-new-dtags`,
+  ## so these flags must follow every call to it: `externalHashFlags` adds
+  ## them after all of its runtime directories. A helper without the marker
+  ## is started directly and keeps the DT_RPATH those directories rely on.
   if clingoPrefix.len == 0 and releaseLibDir.len > 0:
-    @["--passL:" & quoteShell("-Wl,-rpath," & PortableReleaseHelperRunpathMarker)]
+    @["--passL:" & quoteShell("-Wl,-rpath," & PortableReleaseHelperRunpathMarker),
+      "--passL:-Wl,--enable-new-dtags"]
   else:
     @[]
 
@@ -7208,12 +7391,32 @@ proc externalHashFlags(workDir = ""): seq[string] =
   # filtered by target architecture — `/usr/local` on Apple Silicon is
   # commonly an x86-64 Homebrew, and the store holds every architecture the
   # host has ever built for.
+  #
+  # One step comes before the Homebrew prefixes and the glob, which
+  # `config.nims` (a checkout build) has no use for: the runtime library
+  # directories an installed package publishes
+  # (`REPROBUILD_RUNTIME_LIBRARY_PATH`, which carries the package's own
+  # OpenSSL). The glob answers with the first matching store path of
+  # whatever this host happens to have realized, so it made this flag, and
+  # with it the key of every recipe compile, a function of the host's store:
+  # the same package, the same recipe and the same compiler selection on a
+  # machine whose store held another OpenSSL (one restored from a bundle,
+  # say) keyed every provider compile and interface extraction differently
+  # and rebuilt them. The package's own directory is the same on every host
+  # that runs the package.
   let opensslNames = ["libssl.dylib", "libssl.3.dylib", "libssl.so", "libssl.so.3"]
   let opensslLibDir = block:
     var dir = firstExistingLibDir(
       [getEnv("OPENSSL_LIBDIR"), getEnv("OPENSSL_PREFIX")], opensslNames)
     if dir.len == 0:
       dir = nixLdflagsLibDir(opensslNames)
+    if dir.len == 0:
+      for runtimeDir in getEnv("REPROBUILD_RUNTIME_LIBRARY_PATH").split(PathSep):
+        if runtimeDir.len > 0:
+          dir = firstExistingLibDir([runtimeDir], opensslNames,
+            hostArchOnly = true)
+          if dir.len > 0:
+            break
     if dir.len == 0:
       dir = firstExistingLibDir(
         ["/opt/homebrew/opt/openssl@3", "/opt/homebrew/opt/openssl",
@@ -7254,7 +7457,9 @@ proc externalHashFlags(workDir = ""): seq[string] =
     result.add("--passL:-L" & (clingoPrefix / "lib"))
     result.add("--passL:-Wl,-rpath," & (clingoPrefix / "lib"))
   # Installed from the portable release archive, with no clingo prefix on
-  # the host: see `portableReleaseLibDir`.
+  # the host: see `portableReleaseLibDir`. These flags must stay after every
+  # `runtimeRpathCompilerFlags` call above: their `--enable-new-dtags` has to
+  # be the last dtags flag (see `portableReleaseRpathFlags`).
   when defined(linux):
     if clingoPrefix.len == 0:
       result.add(portableReleaseRpathFlags(clingoPrefix,
@@ -7348,25 +7553,23 @@ const
     ## tool-owned cache's identity.
   ProviderParallelBuildEnv* = "REPRO_PROVIDER_PARALLEL_BUILD"
   ProviderParallelBuildMax* = 64
-  ProviderCompileEnvironmentPassthrough* = [
+  ProviderCompileEnvironmentPassthrough* = @[
     "REPRO_NIM_COMPILER",
     "REPRO_BOOTSTRAP_CC",
     "REPRO_BOOTSTRAP_SDKROOT",
     "CC",
     "REPRO_PROVIDER_NIMCACHE_MODE",
-    ProviderParallelBuildEnv,
-    "TMPDIR",
-    "TMP",
-    "TEMP",
-    "TEMPDIR",
-    LockedCatalogEnv
-  ]
+    ProviderParallelBuildEnv] &
+    @ScratchLocationEnvNames &
+    @[LockedCatalogEnv]
     ## Environment values already represented by the provider compile command
     ## or affecting scratch placement only. The command-derived action key
     ## carries the compiler, C toolchain, and parallelism; the remaining names
     ## only choose disposable nimcache/temp locations. Keying monitored cache
     ## evidence on their per-process values would make every new `repro`
     ## invocation miss an otherwise unchanged provider compile.
+    ## `ScratchLocationEnvNames` (`repro_core/scratch_env`) is the temp-
+    ## directory list the profile compile and `nim.c` share with this one.
     ## `LockedCatalogEnv`: its revision is in both edges' identity
     ## (`catalogSelectionIdentity`), its paths are the recipe's own location.
 
@@ -7386,17 +7589,13 @@ proc activeVariantSignature*(): string =
   ## overwrite a ``buildType=debug`` one in the same position slot. The
   ## precedent is ``providerGraphStoreRoot``'s ``variants-<slug>``
   ## directories, which isolate the provider-graph snapshot store on the
-  ## same value for the same reason.
+  ## same value for the same reason. A name assigned more than once counts
+  ## once, with its LAST value (``repro_core/variant_assignments``), so
+  ## ``--release --debug`` and ``--debug --release`` key different builds.
   let raw = getEnv(ProviderVariantEnv)
   if raw.len == 0:
     return ""
-  var parts: seq[string] = @[]
-  for item in raw.split(','):
-    let s = item.strip()
-    if s.len > 0 and s notin parts:
-      parts.add(s)
-  parts.sort()
-  parts.join(",")
+  canonicalVariantAssignmentsOf(raw)
 
 const
   ProviderCacheName* = "nim.c/nimcache@provider"
@@ -7802,11 +8001,23 @@ const InterfaceNimcacheSlotCount* = 4
 
 proc interfaceExtractionNimcacheRoot*(): string =
   ## Root of the interface extraction's shared nimcache, beside the provider
-  ## compile's (`providerCompileNimcacheRoot`) and for the same reasons:
-  ## machine-local derived state that must survive a new action-cache root,
-  ## a writable location when the reprobuild sources are an immutable store
-  ## path, and a short prefix on Windows (Nim's mkdir is MAX_PATH-bound).
-  getTempDir() / "repro-nimcache-interface"
+  ## compile's (`providerCompileNimcacheRoot`, in the user cache directory)
+  ## and for the same reasons: machine-local derived state that must survive
+  ## a new action-cache root, a writable location when the reprobuild sources
+  ## are an immutable store path, and a short prefix on Windows (Nim's mkdir
+  ## is MAX_PATH-bound).
+  ##
+  ## Not the temporary directory, where it used to be. The extraction creates
+  ## the root and so probes every directory above it, and the monitor records
+  ## those probes. A temporary directory is often made per shell (a Nix dev
+  ## shell's `TMPDIR` is a fresh `mktemp -d`), so the extraction's record
+  ## named a directory that a new shell, or another machine restoring a
+  ## bundle, does not have, and it missed there.
+  let cache = getCacheDir()
+  if cache.len == 0:
+    raise newException(ValueError,
+      "cannot resolve the user cache directory for the interface nimcache")
+  absolutePath(cache) / "repro-nimcache-interface"
 
 proc interfaceExtractionIgnoredInputPrefixes*(): seq[string] =
   ## What the extraction edge's monitor must not record from the shared

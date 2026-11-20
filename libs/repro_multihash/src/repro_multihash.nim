@@ -147,6 +147,67 @@ proc narStyleTreeMultihash*(
   blake3Multihash(narStyleTreeSerialization(entries))
 
 # ---------------------------------------------------------------------------
+# The typed canonical tree: the same serialization, with each entry's KIND.
+#
+# A source tree is more than (path, content) pairs: a symbolic link is a
+# separate kind of entry whose content is its target text, and a file can be
+# executable. A digest that leaves either out names several trees at once --
+# retargeting an in-tree link changes which file a compiler reads under a
+# module name, and adding a link adds a module, without changing a byte of
+# any regular file. The typed form covers both.
+#
+# It extends `narStyleTreeSerialization` instead of replacing it: an
+# executable file is framed as the path `<path> NUL "x"` and a link as
+# `<path> NUL "l"`, and a non-executable regular file as its plain path. A
+# path cannot contain NUL (POSIX file names and git tree entries both exclude
+# it), so no typed frame equals any plain one and no two trees share a
+# serialization. A tree of non-executable regular files therefore serializes,
+# and hashes, exactly as it did before, so no `blake3:` value recorded for
+# such a tree changes.
+# ---------------------------------------------------------------------------
+
+type
+  CanonicalEntryKind* = enum
+    cekRegular = "regular"        ## a regular file without the exec bit
+    cekExecutable = "executable"  ## a regular file with the owner exec bit
+    cekSymlink = "symlink"        ## a symbolic link; content = its target
+
+  CanonicalTreeEntry* = object
+    path*: string                 ## relative, `/`-separated, no NUL
+    kind*: CanonicalEntryKind
+    content*: string              ## file bytes, or a link's target text
+
+const
+  ExecutableFrameSuffix* = "\0x"
+  SymlinkFrameSuffix* = "\0l"
+
+proc canonicalFrames*(entries: seq[CanonicalTreeEntry]):
+    seq[tuple[path: string, content: string]] =
+  ## The (framed path, content) pairs `narStyleTreeSerialization` hashes for
+  ## a typed tree. Raises `MultihashError` for a path holding NUL.
+  for e in entries:
+    if '\0' in e.path:
+      raise newException(MultihashError,
+        "a tree entry path cannot contain NUL: " & e.path.escape())
+    let framed =
+      case e.kind
+      of cekRegular: e.path
+      of cekExecutable: e.path & ExecutableFrameSuffix
+      of cekSymlink: e.path & SymlinkFrameSuffix
+    result.add((path: framed, content: e.content))
+
+proc canonicalTreeSerialization*(entries: seq[CanonicalTreeEntry]): seq[byte] =
+  ## The serialization of a typed tree (see above). Order-independent.
+  narStyleTreeSerialization(canonicalFrames(entries))
+
+proc canonicalTreeMultihash*(entries: seq[CanonicalTreeEntry]): string =
+  ## ``blake3:<hex>`` over the typed canonical tree: paths, kinds (regular,
+  ## executable, link) and contents (a link's target text). Equal to
+  ## `narStyleTreeMultihash` of the same tree when every entry is a
+  ## non-executable regular file.
+  blake3Multihash(canonicalTreeSerialization(entries))
+
+# ---------------------------------------------------------------------------
 # Git object-id integrity (the VCS-native content hash)
 # ---------------------------------------------------------------------------
 

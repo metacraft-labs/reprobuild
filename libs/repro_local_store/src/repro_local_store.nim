@@ -10,7 +10,7 @@ when defined(windows):
 when defined(posix):
   # Nim's `std/posix` does not expose `flock(2)` uniformly across macOS and
   # Linux, so bind the small `sys/file.h` surface directly (mirrors
-  # repro_home_generations/locks.nim). Used to serialize the durable
+  # repro_home_generations/locks.nim). Used to serialize the
   # per-cache-root write-sequence counter (AC-1b: deterministic newest-wins
   # record ordering) across concurrent build engine processes.
   const
@@ -18,6 +18,23 @@ when defined(posix):
 
   proc cFlockSeq(fd: cint; operation: cint): cint
     {.importc: "flock", header: "<sys/file.h>".}
+
+when defined(windows):
+  # The Windows half of the same serialization: an exclusive `LockFileEx`
+  # on one byte of the lock file, released by `UnlockFileEx` or, if the
+  # process dies, by the handle closing. Mirrors repro_daemon_core/runtime.
+  const
+    SeqLockFileExclusive = 0x00000002'i32
+
+  proc cLockFileExSeq(hFile: Handle; dwFlags: DWORD; dwReserved: DWORD;
+                      nNumberOfBytesToLockLow, nNumberOfBytesToLockHigh: DWORD;
+                      lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "LockFileEx", sideEffect.}
+  proc cUnlockFileExSeq(hFile: Handle; dwReserved: DWORD;
+                        nNumberOfBytesToUnlockLow,
+                        nNumberOfBytesToUnlockHigh: DWORD;
+                        lpOverlapped: ptr OVERLAPPED): WINBOOL {.
+    stdcall, dynlib: "kernel32", importc: "UnlockFileEx", sideEffect.}
 
 import repro_core
 import repro_core/evidence_level
@@ -37,9 +54,12 @@ import ./repro_local_store/sqlite3_binding
 import ./repro_local_store/store
 import ./repro_local_store/lru_eviction
 import ./repro_local_store/sandbox_manifest
+import ./repro_local_store/content_table
 import ./repro_local_store/optimise
 import ./repro_local_store/portable_fingerprint
 import ./repro_local_store/portable_memo
+import ./repro_local_store/key_explanation
+import ./repro_local_store/portable_output_store
 import ./repro_local_store/publication_rule
 import ./repro_local_store/pattern_scoped_enumeration
 export action_index
@@ -50,9 +70,12 @@ export sqlite3_binding
 export store
 export lru_eviction
 export sandbox_manifest
+export content_table
 export optimise
 export portable_fingerprint
 export portable_memo
+export key_explanation
+export portable_output_store
 export publication_rule
 export pattern_scoped_enumeration
 
@@ -234,12 +257,14 @@ type
       ## write column. 0 when unknown, which `retentionVerdict` treats as
       ## `rvUnknownWriteTime` — a miss, never a hit.
     hostFingerprint*: string
-      ## §3's `host-bound` write column: machine-id / OS / architecture,
-      ## enough to say WHICH host's realization this is. Empty when
-      ## undeclared. It is not a security token and is never compared for
-      ## equality on the local read path — a local hit is by definition on
-      ## the producing host. It exists so a cross-machine substitution can be
-      ## REFUSED with the producing host named, rather than refused blankly.
+      ## §3's `host-bound` and `volatile` write column: machine-id /
+      ## hostname / OS / architecture, enough to say WHICH host's
+      ## realization this is. Empty when undeclared. It is not a security
+      ## token: whoever can write the cache root can forge it, as they can
+      ## forge a `.rec`. It IS compared on the local read path (§3.2 rule 4,
+      ## `servableOnThisHost`): a cache root, a store bundle or an image can
+      ## carry an entry to another machine without anything publishing it, so
+      ## a local hit is NOT by construction on the producing host.
     buildEpoch*: string
       ## Identifies the `repro build` invocation that wrote the entry, for
       ## §2.2's `this-build` clause. Empty when undeclared.
@@ -280,6 +305,23 @@ type
       ## hit itself cannot say. `eskUnstated` for a sidecar written before the
       ## field (versions 1 and 2), which therefore derives a record that stays
       ## on this host.
+    hostBoundReason*: string
+      ## A runtime object under `/run` (a daemon's socket, a FIFO, a device
+      ## node) the execution read and the build engine's volatile-runtime
+      ## fold dropped, or "" (`PathSetEvidence.hostBoundInput`). Stored for
+      ## the same reason as the level: such a record must not be published
+      ## off this host, and a portable record derived from a later local hit
+      ## could not otherwise know. "" for a sidecar written before the field
+      ## (versions 1 to 3), whose producer dropped such reads without
+      ## recording them -- see `hostBoundUnknown`.
+    hostBoundUnknown*: bool
+      ## True for a sidecar written before `hostBoundReason` (versions 1 to
+      ## 3). Its producer's fold dropped EVERY input under `/run` by prefix,
+      ## unrecorded and uncounted, so whether the run read host state there
+      ## is not known, and an empty `hostBoundReason` must not be read as
+      ## "it did not". The build engine keeps such a record on this host:
+      ## no portable record is derived from it and no publisher is offered
+      ## it. Not stored; derived from the version when decoded.
 
   ActionResultRecord* = object
     weakFingerprint*: ContentDigest
@@ -392,6 +434,10 @@ type
 
   FileMetadataCache* = object
     entries: Table[string, FileMetadata]
+    storeEntryValidity: Table[string, bool]
+      ## Whether a package-store output path is registered VALID, looked up
+      ## once per entry for the life of this cache rather than once per
+      ## absent probe inside it. See `storeOutputPathIsValid`.
     stats: FileMetadataCacheStats
 
   FileMetadataCacheStats* = object
@@ -461,6 +507,18 @@ type
       ## on it.
       ##
       ## APPENDED, like `aclMissRetentionExpired`, so no ordinal shifts.
+    aclMissOtherHost
+      ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4. The record matched
+      ## on every input and its outputs verified, but the use is `host-bound`
+      ## or `volatile` (the stricter of the class the entry records and the
+      ## class of the edge using it) and the entry does not record THIS host:
+      ## it records another host's fingerprint, or none. Such an entry reached
+      ## this cache in a copied or image-baked cache root, a store bundle, or
+      ## a peer or binary-cache install, and it is another host's realization,
+      ## which §3 forbids serving here. Distinct from `aclMissInputChanged`
+      ## for the reason `aclMissRetentionExpired` is: nothing changed.
+      ##
+      ## APPENDED, like the two above, so no ordinal shifts.
 
   ActionCacheLookup* = object
     status*: ActionCacheLookupStatus
@@ -514,6 +572,16 @@ type
       ## `skipCacheHitEvidence` — the arm that reaches this function — is the
       ## default on the main CLI path, so a check placed only at the per-edge
       ## lookup is a check the production path does not execute.
+    determinism*: EdgeDeterminism
+      ## The probing edge's effective class, for §3.2 rule 4
+      ## (`servableOnThisHost`): when the use -- the stricter of this and the
+      ## class the matched record carries -- is `host-bound` or `volatile`,
+      ## a record that does not name THIS host is no record. It is here for
+      ## the reason `refuseRecordWithNoInputs` is: this scan answers for the
+      ## whole graph, and a copied or image-baked cache root has the outputs
+      ## on disk, so nothing downstream would look again. The default
+      ## (`edStrong`) adds nothing to the recorded class, so other callers
+      ## still refuse another host's recorded `host-bound` entry.
 
   HotMetadataScanStatus* = enum
     hmssUnavailable
@@ -709,19 +777,24 @@ const
   PerEdgeFileMagic = "RBPE"
   # v1: header {magic, version, recordCount} then the record frames.
   # v2 (AC-1b fix): inserts a durable u64 `writeSequence` immediately after
-  # the version, BEFORE the record count. The sequence is a strictly
-  # monotonic per-cache-root counter (see `nextWriteSequence`) stamped at
-  # write time, so the union read can order the split `.rec` files by TRUE
+  # the version, BEFORE the record count. The sequence comes from
+  # the per-cache-root counter, allocated above every container already in
+  # the edge directory (see `nextWriteSequence`), stamped at write time, so the union read can order the split `.rec` files by TRUE
   # write recency (newest-wins / newest-corrupt-rejects) rather than by racy
   # filesystem mtime. v1 files and legacy AC-1 single files decode fine and
   # are assigned sequence 0 (treated as oldest), then re-stamped on next write.
   PerEdgeFileVersion = 2'u16
   PerEdgeFileVersionLegacy = 1'u16
-  # Filename of the durable, flock-serialized write-sequence counter, kept at
-  # the `hot-records/` root (a SIBLING of the per-edge `<key>/` directories).
-  # It is never a `<key>/` directory and never a `.rec` file, so no per-edge
-  # dir listing or record read path ever mistakes it for an edge or a record.
+  # Filename of the write-sequence counter, kept at the `hot-records/` root
+  # (a SIBLING of the per-edge `<key>/` directories). It is never a `<key>/`
+  # directory and never a `.rec` file, so no per-edge dir listing or record
+  # read path ever mistakes it for an edge or a record. The counter is
+  # replaced by temp file + rename, so it is never locked itself: a lock held
+  # on an inode that a rename then unlinks excludes nobody.
   WriteSequenceFileName = ".seq"
+  # The file the counter's lock is held on. Separate from the counter for the
+  # reason above, and a root-level file for the same reason the counter is.
+  WriteSequenceLockFileName = ".seq.lock"
   RecordTailMask = 0xffff_ffff'u64
   MaxActionRecordFrameBytes = 64 * 1024 * 1024
   MaxRecordsPerWeakFingerprint = 2
@@ -1966,13 +2039,16 @@ proc observeOutputWitness(path: string; metadata: FileMetadata): OutputWitness =
       result.hasTreeDigest = false
 
 proc initFileMetadataCache*(): FileMetadataCache =
-  FileMetadataCache(entries: initTable[string, FileMetadata]())
+  FileMetadataCache(entries: initTable[string, FileMetadata](),
+    storeEntryValidity: initTable[string, bool]())
 
 proc clear*(cache: var FileMetadataCache) =
   cache.entries.clear()
+  cache.storeEntryValidity.clear()
 
 proc invalidate*(cache: var FileMetadataCache; path: string) =
   cache.entries.del(path)
+  cache.storeEntryValidity.del(path)
 
 proc metadataStats*(cache: FileMetadataCache): FileMetadataCacheStats =
   cache.stats
@@ -2067,6 +2143,92 @@ proc fingerprintMetadata(path: string;
     attributeMetadataProbe(cache, path,
       (getMonoTime() - started).inNanoseconds)
 
+const NixStoreDatabase = "/nix/var/nix/db/db.sqlite"
+  ## Where Nix registers which `/nix/store` entries are VALID. A constant for
+  ## the reason `immutableStoreOutputPath`'s prefix is one: nothing ambient
+  ## (`NIX_STATE_DIR`) may nominate a different oracle. A store whose
+  ## database lives elsewhere finds no row here, so every entry reads as not
+  ## valid and its absent probes are recorded -- the conservative direction.
+
+# Process-global, like the counters near `outputStateCheckCalls` and for the
+# same reason: the scheduler runs single-threaded. The connection is opened
+# with `SqliteOpenNoMutex`, so a second thread, or use in a child after a
+# `fork` without `exec`, would need its own connection.
+var
+  nixStoreDatabaseOpenAttempts = 0
+  nixStoreDatabaseUsable = false
+  nixStoreDatabase: Database
+  nixStoreValidityQuery: Statement
+
+const NixStoreDatabaseMaxOpenAttempts = 3
+  ## A failed open is retried on later lookups, a few times only: one
+  ## transient `SQLITE_BUSY` while Nix migrates its schema must not turn the
+  ## skip off for a long-lived process, and a database this user cannot read
+  ## must not cost an open per lookup.
+
+proc nixStoreRegistersValid(outputPath: string): bool =
+  ## Nix's own answer to "is this output path registered valid", read from
+  ## its database, or `false` when the database cannot be read.
+  ##
+  ## Read-only and WITHOUT `immutable=1`: a registration that sits in the
+  ## write-ahead log and not yet in the main file must be seen, and so must
+  ## a path invalidated there. No busy wait: on a store that uses a rollback
+  ## journal a lookup during a Nix commit would otherwise stall. Any error is
+  ## `false`, because the cost of a wrong `false` is one probe and the cost
+  ## of a wrong `true` is a stale cache hit.
+  if not nixStoreDatabaseUsable:
+    if nixStoreDatabaseOpenAttempts >= NixStoreDatabaseMaxOpenAttempts or
+        not fileExists(NixStoreDatabase):
+      return false
+    inc nixStoreDatabaseOpenAttempts
+    try:
+      nixStoreDatabase = sqlite3_binding.open(
+        "file:" & NixStoreDatabase & "?mode=ro",
+        SqliteOpenReadonly or SqliteOpenNoMutex or SqliteOpenUri,
+        busyTimeoutMs = 0)
+    except SqliteError:
+      return false
+    try:
+      nixStoreValidityQuery = nixStoreDatabase.prepare(
+        "SELECT 1 FROM ValidPaths WHERE path = ?1")
+    except SqliteError:
+      nixStoreDatabase.close()
+      return false
+    nixStoreDatabaseUsable = true
+  try:
+    nixStoreValidityQuery.reset()
+    nixStoreValidityQuery.bindText(1, outputPath)
+    result = nixStoreValidityQuery.step() == SqliteRow
+    nixStoreValidityQuery.reset()
+  except SqliteError:
+    result = false
+
+proc storeOutputPathIsValid(outputPath: string;
+                            cache: ptr FileMetadataCache): bool =
+  ## Condition 2 of the store-absence skip: the output path is registered
+  ## VALID in the store's database, and it exists now.
+  ##
+  ## Existence alone is not enough. A directory under the store that Nix has
+  ## not registered -- the leftover of an interrupted build or substitution
+  ## -- carries no immutability guarantee: Nix may replace it, and a file can
+  ## then appear where the probe found none. Validity is what Nix promises
+  ## not to add to (reprobuild-pm `spec/Filesystem-Policy-And-Observed-
+  ## Inputs.md` §"Immutable Roots Answer Absent Probes Statically",
+  ## condition 2). Existence is still required, through the same metadata
+  ## cache as before, so that a registered path someone deleted by hand is
+  ## not trusted either.
+  ##
+  ## Memoised per entry in `cache`, so the lookup happens once per distinct
+  ## output path per cache, not once per absent probe inside it.
+  if fingerprintMetadata(outputPath, cache).kind == ffkMissing:
+    return false
+  if cache.isNil:
+    return nixStoreRegistersValid(outputPath)
+  cache[].storeEntryValidity.withValue(outputPath, known):
+    return known[]
+  result = nixStoreRegistersValid(outputPath)
+  cache[].storeEntryValidity[outputPath] = result
+
 proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
                                      cache: ptr FileMetadataCache): FileMetadata =
   # A membership-tracked directory has to be re-listed, not just stat'd, and
@@ -2112,15 +2274,23 @@ proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
   #
   #   1. The path lies STRICTLY INSIDE an output path. A bare output path
   #      can appear -- see `immutableStoreOutputPath`.
-  #   2. That output path EXISTS NOW. If it does not, the package can still
-  #      be built or substituted and would bring this path with it, so the
-  #      absence is not stable and the probe must happen.
+  #   2. That output path is REGISTERED VALID in the store's database, and
+  #      exists now (`storeOutputPathIsValid`). If it does not exist, the
+  #      package can still be built or substituted and would bring this path
+  #      with it. If it exists but is not valid -- the leftover of an
+  #      interrupted build or substitution -- Nix may replace it. Either way
+  #      the absence is not stable and the probe must happen.
   #
-  # Condition 2 costs one probe per distinct output path rather than one per
-  # absent input, and it goes through this same cache, so a store root
-  # shared by hundreds of probes is stat'd once. Garbage collection does not
-  # break it: a collected output path re-materializes with the same contents
-  # under the same name, because the name is derived from what produces it.
+  # Condition 2 costs one stat and one database lookup per distinct output
+  # path rather than one per absent input, and both are memoised in this
+  # same cache, so a store root shared by hundreds of probes is checked once.
+  #
+  # The absence lasts only as long as the entry's contents. An
+  # input-addressed entry that is garbage-collected and rebuilt
+  # unreproducibly can gain a file under the same name; that residual is
+  # closed by the action key binding the entry's NAR hash, not here
+  # (reprobuild-pm `spec/Filesystem-Policy-And-Observed-Inputs.md`
+  # §"Immutable Roots Answer Absent Probes Statically").
   #
   # Keyed on the root's CLASS, decided from the path with no syscall. The
   # class-3 residue -- a PATH-resolved linker driver, `nim.cfg` searched up
@@ -2131,8 +2301,7 @@ proc fingerprintRecordedMetadataImpl(path: string; recorded: FileMetadata;
   # would have discarded.
   if recorded.kind == ffkMissing:
     let outputPath = immutableStoreOutputPath(path)
-    if outputPath.len > 0 and
-        fingerprintMetadata(outputPath, cache).kind != ffkMissing:
+    if outputPath.len > 0 and storeOutputPathIsValid(outputPath, cache):
       # Deliberately NOT counted as a metadata-cache hit: it is not one, and
       # folding it into `currentRunHits` would hide the skip inside a metric
       # that already moves for other reasons. `storeAbsenceSkips` is the only
@@ -2307,13 +2476,64 @@ proc isDirectRegularFile(path: string): bool =
     let info = getFileInfo(extendedPath(path), followSymlink = false)
     info.kind == pcFile
 
+const LocalHashTableKey = "localHash.v1"
+  ## The content-table key of `localHash` over `fileBytesForHash`'s payload.
+  ## A change to either is a new key, so no entry outlives its meaning.
+
+proc tableLocalHashText(hash: LocalInvalidationHash): string =
+  $ord(hash.algorithm) & ":" & $ord(hash.domain) & ":" & $hash.value
+
+proc parseTableLocalHash(text: string):
+    tuple[ok: bool; hash: LocalInvalidationHash] =
+  let parts = text.split(':')
+  if parts.len != 3:
+    return
+  try:
+    let algorithm = parseInt(parts[0])
+    let domain = parseInt(parts[1])
+    if algorithm < 0 or algorithm > ord(high(HashAlgorithm)) or
+        domain < 0 or domain > ord(high(HashDomain)):
+      return
+    result.hash.algorithm = HashAlgorithm(algorithm)
+    result.hash.domain = HashDomain(domain)
+    result.hash.value = parseBiggestUInt(parts[2])
+    result.ok = true
+  except ValueError:
+    discard
+
 proc observeFileWithMetadata(path: string; policy: FileFingerprintPolicy;
                              metadata: FileMetadata): FileFingerprint =
   result.path = path
   result.policy = policy
   result.metadata = metadata
   if policy in {ffpChecksum, ffpHybrid}:
+    # The per-host content table (`content_table`): a regular file whose
+    # identity, size, modification time and file-system version are the ones
+    # its hash was recorded under is not read again. The version is read
+    # before hashing and checked after it, so a file written while it was
+    # hashed is never memoized.
+    let memoize = metadata.kind == ffkRegular and contentTableRoot().len > 0
+    let hashStarted = if memoize: hashStartNs() else: 0'i64
+    let before =
+      if memoize: contentVersion(extendedPath(path)) else: ContentVersion()
+    if before.known:
+      let memo = lookupContentHash(before, LocalHashTableKey)
+      if memo.len > 0:
+        let parsed = parseTableLocalHash(memo)
+        if parsed.ok:
+          result.hasLocalHash = true
+          result.localHash = parsed.hash
+          return
     let content = fileBytesForHash(path, result.metadata)
+    if content.readable and before.known:
+      let hash = localHash(content.payload)
+      let after = contentVersion(extendedPath(path))
+      if after == before:
+        recordContentHash(before, LocalHashTableKey, tableLocalHashText(hash),
+          hashStarted)
+      result.hasLocalHash = true
+      result.localHash = hash
+      return
     # An unreadable file leaves `hasLocalHash` false: there is no honest
     # value to put there. Revalidation reads that as "changed"; recording
     # refuses to publish (`UnreadableInputError`).
@@ -2796,16 +3016,21 @@ proc observedExecutionNames(raw: openArray[byte];
 
 const
   InputAccessMagic = "RBIA"
-  InputAccessVersion = 3'u16
+  InputAccessVersion = 4'u16
     ## v2 (campaign M17 chunk 1) appends the evidence level; v3 (chunk 2) the
-    ## evidence source after it. Versions 1 and 2 still decode, with what they
-    ## lack unstated.
+    ## evidence source after it; v4 the host-bound reason after that.
+    ## Versions 1 to 3 still decode, with what they lack unstated.
     ## v2 (campaign M17) appends the execution's evidence level. A v1
     ## sidecar still decodes, with `elUnstated`.
   InputAccessFileExt* = ".acc"
     ## Exported so tests and tooling can find the sidecar without re-deriving
     ## the extension. Not `.rec`, `.octime` or `.det`, so every older reader
     ## of an edge directory ignores it.
+  ActionOutputFileExt* = ".out"
+    ## The action-output sidecar (`recordActionOutput`), declared here so the
+    ## reap, removal and GC sweeps below can name it. Not `.rec`, `.octime`,
+    ## `.det`, `.acc` or `.obs`, so every older reader of an edge directory
+    ## ignores it.
 
 proc inputAccessFileName*(strongHex: string): string =
   strongHex & InputAccessFileExt
@@ -2863,6 +3088,7 @@ proc encodeInputAccesses*(strongHex: string;
   result.writeFrontCoded(accesses.enumerations)
   result.add(evidenceLevelByte(accesses.evidenceLevel))
   result.writeString($accesses.evidenceSource)
+  result.writeString(accesses.hostBoundReason)
 
 proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
     Option[InputAccesses] =
@@ -2877,7 +3103,7 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
   try:
     var pos = 4
     let version = readU16Le(raw, pos)
-    if version notin [1'u16, 2'u16, InputAccessVersion]:
+    if version notin [1'u16, 2'u16, 3'u16, InputAccessVersion]:
       return none(InputAccesses)
     if readString(raw, pos) != strongHex:
       return none(InputAccesses)
@@ -2894,6 +3120,10 @@ proc decodeInputAccesses*(raw: openArray[byte]; strongHex: string):
       if not parseEvidenceSource(readString(raw, pos),
           accesses.evidenceSource):
         return none(InputAccesses)
+    if version >= 4'u16:
+      accesses.hostBoundReason = readString(raw, pos)
+    else:
+      accesses.hostBoundUnknown = true
     if pos != raw.len:
       return none(InputAccesses)
     some(accesses)
@@ -2922,10 +3152,12 @@ proc hostFingerprint*(): string =
   ## this metadata is worth. `/etc/machine-id` is read if it happens to be
   ## there and simply skipped if it is not.
   ##
-  ## This value is never a security boundary and is never compared for
-  ## equality on the local read path -- a local hit is by construction on the
-  ## producing host. Its whole job is to let a cross-machine substitution be
-  ## refused with the producing host NAMED rather than refused blankly.
+  ## This value is never a security boundary. A `host-bound` or `volatile`
+  ## local read compares it for equality (`servableOnThisHost`, §3.2 rule 4):
+  ## a copied cache root, a store bundle or a baked image carries entries to
+  ## another machine, so a local hit is not by construction on the producing
+  ## host. The hostname is part of it, so a renamed host misses its own
+  ## `host-bound` entries once: the fail-closed direction.
   if cachedHostFingerprint.len > 0:
     return cachedHostFingerprint
   var parts: seq[string] = @[]
@@ -2947,6 +3179,37 @@ proc hostFingerprint*(): string =
   parts.add("arch=" & hostCPU)
   cachedHostFingerprint = parts.join(" ")
   cachedHostFingerprint
+
+proc hostBoundUse*(record: ActionResultRecord;
+                   usingClass: EdgeDeterminism): EdgeDeterminism =
+  ## The class of one USE of `record` (`Edge-Determinism-And-Soft-Rebuild.md`
+  ## §3.2 rule 1): the stricter of the class the entry records (an entry that
+  ## records none counts as `weak`) and `usingClass`, the effective class of
+  ## the edge reading it.
+  let recorded =
+    if record.determinism.declared: record.determinism.class else: edWeak
+  strictest(recorded, usingClass)
+
+proc servableOnThisHost*(record: ActionResultRecord;
+                         usingClass: EdgeDeterminism): bool =
+  ## §3.2 rule 4: a use that is `host-bound` or `volatile` is served only an
+  ## entry that records THIS host's fingerprint. Every other use is servable.
+  ##
+  ## The ONE host check, shared by the per-edge lookup (`applyHostBinding`),
+  ## the whole-graph navigator scan (`HotMetadataProbe.determinism`) and the
+  ## engine's per-record fast-no-op arm, so the three cannot disagree.
+  ##
+  ## An entry whose class is not on the record records no host, and that is a
+  ## miss, not a reason to look further. Every Tier-1 read decodes through
+  ## `decodeRecContainer`, which attaches the `.det` sidecar whenever its
+  ## back-reference names the `.rec` that is there now. A record that arrives
+  ## without a class therefore has no current sidecar: a peer or binary-cache
+  ## install (§3.2 rule 3), a `.rec` an older binary rewrote, or a sidecar
+  ## someone removed. Pure: no I/O, no exception.
+  if hostBoundUse(record, usingClass).allowsCrossMachineSubstitution():
+    return true
+  record.determinism.declared and
+    record.determinism.hostFingerprint == hostFingerprint()
 
 proc declaredDeterminism*(class: EdgeDeterminism;
                           retention = forever();
@@ -3235,13 +3498,59 @@ proc recordComputationDir*(record: ActionResultRecord): string =
     elif result != found:
       return ""
 
-proc removeRecordComputationDir*(record: ActionResultRecord): string
+const RecipeCompilesDirName* = "recipe-compiles"
+
+proc recipeCompilesRootOf*(cache: ActionCache): string =
+  ## `<R>/recipe-compiles` for the cache opened at `<R>/action-cache`: the one
+  ## directory computation directories may live in
+  ## (Hermetic-Builds-And-Path-Independence.md §"Ownership and cleanup").
+  os.normalizedPath(absolutePath(cache.root.parentDir / RecipeCompilesDirName))
+
+proc ownedComputationDir*(record: ActionResultRecord;
+                          recipeCompilesRoot: string): string =
+  ## `recordComputationDir`, confined to where a computation directory can
+  ## be: a direct child of `<recipeCompilesRoot>/<kind>/<identity>/` other than
+  ## `staging/`. "" for anything else.
+  ##
+  ## A record's output paths are whatever its writer put there, and a record
+  ## can arrive from elsewhere (a store bundle carries `.rec` files that import
+  ## does not validate, Store-Bundles.md §5.1). The cleanup paths delete the
+  ## directory this returns recursively, so without the confinement a crafted
+  ## record naming `/any/where/<32 hex of its strong fingerprint>/x` had that
+  ## directory deleted when the record was evicted or collected
+  ## (reprobuild-pm issue
+  ## 2026-11-17-carried-action-records-may-name-output-paths-outside-the-bundle-roots.md).
+  let dir = recordComputationDir(record)
+  if dir.len == 0 or recipeCompilesRoot.len == 0:
+    return ""
+  # `normalizedPath` writes `\` on Windows: compare on either separator.
+  let root = os.normalizedPath(recipeCompilesRoot)
+  if dir.len <= root.len + 1 or not dir.startsWith(root) or
+      dir[root.len] notin {DirSep, AltSep}:
+    return ""
+  let parts = dir[root.len + 1 .. ^1].split({DirSep, AltSep})
+  if parts.len != 3 or parts[2] == ComputationStagingDirName:
+    return ""
+  for part in parts:
+    if part.len == 0 or part == "." or part == "..":
+      return ""
+  # A symlink at any level would make the recursive removal act on its target.
+  var walk = root
+  for part in parts:
+    walk = walk / part
+    if symlinkExists(extendedPath(walk)):
+      return ""
+  dir
+
+proc removeRecordComputationDir*(record: ActionResultRecord;
+                                 recipeCompilesRoot: string): string
     {.discardable.} =
   ## Remove the computation directory `record` owns, if any, and return it.
+  ## Only a directory `ownedComputationDir` admits is ever removed.
   ## Best-effort: a directory that survives is garbage for the orphan sweep
   ## (`sweepOrphanComputationDirs`), and a record whose directory is gone
   ## fails its in-place check and re-runs, so neither outcome is unsound.
-  result = recordComputationDir(record)
+  result = ownedComputationDir(record, recipeCompilesRoot)
   if result.len > 0 and dirExists(extendedPath(result)):
     try:
       removeDir(extendedPath(result))
@@ -4228,7 +4537,7 @@ type
     ## since either added or removed a `.rec` name (so `members` differs) or
     ## rewrote an existing one (so its container's `writeSequence` differs
     ## from `writeSequence` here, because every publish stamps a fresh value
-    ## from the durable `.seq` counter). Both are checked, and either one
+    ## above every container in the directory, `nextWriteSequence`). Both are checked, and either one
     ## failing sends the reader to the union read of §5.3 -- which is
     ## unconditionally correct, because Tier 1 is authoritative.
     ##
@@ -4344,7 +4653,7 @@ proc loadLegacyPerEdgeFile(cache: ActionCache; weak: ContentDigest):
     result = @[]
 
 proc writeSequenceFilePath(cache: ActionCache): string =
-  ## The durable write-sequence counter, a SIBLING of the per-edge directories
+  ## The write-sequence counter, a SIBLING of the per-edge directories
   ## at the `hot-records/` root (never a `<key>/` dir, never a `.rec`).
   cache.hotRoot / WriteSequenceFileName
 
@@ -4362,53 +4671,133 @@ proc readSequenceValue(path: string): uint64 =
   except CatchableError:
     result = 0'u64
 
-proc nextWriteSequence(cache: ActionCache): uint64 =
-  ## Allocate the next value of the durable, strictly-monotonic per-cache-root
-  ## write-sequence counter. The counter is serialized across concurrent build
-  ## engine processes by an exclusive `flock` (POSIX) / exclusive-open retry
-  ## (Windows) on the `hot-records/.seq` file, so two records written
-  ## microseconds apart — in one process OR across processes sharing one cache
-  ## root — always receive distinct, increasing sequences. This is the total,
-  ## race-free order the union read uses for newest-wins / newest-corrupt-
-  ## rejects, replacing the racy nanosecond-mtime tie-break.
-  createDir(extendedPath(cache.hotRoot))
+proc highestWriteSequenceIn(dirPath: string): uint64 =
+  ## The highest trailer sequence of any `.rec` container in one edge
+  ## directory, 0 when it holds none. Read with the ORDERING walk, so no
+  ## record is decoded. This is the floor `nextWriteSequence` allocates above:
+  ## a container that survived is evidence of a sequence already handed out,
+  ## whatever became of the counter that handed it out.
+  let ep = extendedPath(dirPath)
+  if not dirExists(ep):
+    return 0'u64
+  for kind, path in walkDir(ep):
+    if kind == pcFile and path.endsWith(PerEdgeRecFileExt):
+      try:
+        result = max(result, scanPerEdgeFileWriteSequence(bytes(readFile(path))))
+      except OSError, IOError:
+        discard
+
+proc writeSequenceValue(path: string; value: uint64) =
+  ## Replace the counter by temp file + atomic rename, so a crash leaves the
+  ## old value or the new one and never a truncated file. Not fsynced: a
+  ## counter value lost to power loss is recovered from the edge directory's
+  ## trailers (`highestWriteSequenceIn`). Raises if the value cannot be
+  ## committed, because a publish whose sequence the counter does not record
+  ## could share it with a concurrent publish to the same edge.
+  let tmpPath = path & ".tmp." & $getCurrentProcessId() & "." &
+    $getMonoTime().ticks
+  try:
+    writeFile(extendedPath(tmpPath), $value)
+    moveFile(extendedPath(tmpPath), extendedPath(path))
+  except OSError, IOError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+    raise
+
+proc allocateWriteSequenceLocked(cache: ActionCache; floor: uint64): uint64 =
+  ## The allocation itself; the caller holds the counter lock. `floor` is the
+  ## edge directory's highest trailer, read by the caller BEFORE it took the
+  ## lock: a container renamed in after that read had its sequence allocated
+  ## under this lock, so the counter already accounts for it.
   let path = cache.writeSequenceFilePath()
+  let base = max(readSequenceValue(path), floor)
+  if base == high(uint64):
+    raise newException(OSError,
+      "write-sequence space exhausted under " & cache.hotRoot &
+      "; refusing to wrap to 0, which would order the record oldest")
+  result = base + 1'u64
+  writeSequenceValue(path, result)
+
+proc nextWriteSequence(cache: ActionCache; dirPath: string): uint64 =
+  ## Allocate the write sequence for a container about to be published into
+  ## the edge directory `dirPath` (Action-Cache-Per-Edge-Store.md §5.2).
+  ##
+  ## The value is `max(counter, highest trailer in dirPath) + 1`, taken under
+  ## an exclusive lock on `hot-records/.seq.lock` — `flock` on POSIX,
+  ## `LockFileEx` on Windows — and the counter is then replaced by temp file +
+  ## rename. That gives the two properties the union read's total order needs:
+  ##
+  ## * NEVER BEHIND A SURVIVING RECORD. The counter is not fsynced, and before
+  ##   this it was rewritten by a truncating `writeFile`, so a crash could
+  ##   leave it empty, and a power loss could lose it. A counter that read 0
+  ##   then stamped the next record as the OLDEST in its edge: `capRecFiles`
+  ##   evicted the record just written, newest-wins chose a stale candidate,
+  ##   and a convergent rewrite could repeat its predecessor's sequence, which
+  ##   is what the newest alias and the sidecars use to detect staleness. A
+  ##   record imported from another cache root carries that root's sequence
+  ##   and is covered the same way. The floor is the edge directory because
+  ##   record order is only ever compared within one edge.
+  ## * DISTINCT ACROSS CONCURRENT WRITERS. Every allocation holds the lock.
+  ##   One that cannot take it RAISES, and the publish fails exactly as a
+  ##   failed rename does; it never falls back to an unlocked
+  ##   read-increment-write, which hands two processes the same value.
+  ##
+  ## The floor is read before the lock is taken, so the directory I/O does not
+  ## hold up every other publisher on the root. The lock is held for the
+  ## counter read and write only.
+  createDir(extendedPath(cache.hotRoot))
+  let floor = highestWriteSequenceIn(dirPath)
+  let lockPath = cache.hotRoot / WriteSequenceLockFileName
   when defined(posix):
-    # Serialize the read-modify-write across processes with an exclusive
-    # `flock` held on a dedicated lock fd for the duration of the bump. The
-    # value itself is (re)written with `writeFile` (truncating) while the lock
-    # is held, so a concurrent process blocks on the flock and observes the
-    # committed value on its next read.
-    let fd = posix.open(path.cstring, O_RDWR or O_CREAT, Mode(0o600))
+    # Read-only is enough for `flock`, and 0666 (less the umask) lets every
+    # user who may publish into a shared cache root open the lock file that
+    # the first of them created.
+    let fd = posix.open(lockPath.cstring, O_RDONLY or O_CREAT or O_CLOEXEC,
+                        Mode(0o666))
     if fd < 0:
-      # Counter fd unavailable: fall back to a monotonic value from the
-      # persisted counter + 1. Never 0 for a real write, so it still outranks
-      # a legacy/seq-0 record.
-      return readSequenceValue(path) + 1'u64
+      raiseOSError(osLastError(),
+        "cannot open the write-sequence lock " & lockPath)
     var acquired = false
+    var lockErr: OSErrorCode
     while true:
       if cFlockSeq(fd, SeqLockExclusive) == 0:
         acquired = true
         break
-      if errno != EINTR:
+      lockErr = osLastError()
+      if lockErr.int32 != EINTR:
         break
     if not acquired:
       discard posix.close(fd)
-      return readSequenceValue(path) + 1'u64
-    result = readSequenceValue(path) + 1'u64
+      raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
     try:
-      writeFile(extendedPath(path), $result)
-    except CatchableError:
-      discard
-    # Closing the fd releases the exclusive flock.
-    discard posix.close(fd)
+      result = cache.allocateWriteSequenceLocked(floor)
+    finally:
+      # Closing the fd releases the exclusive flock.
+      discard posix.close(fd)
+  elif defined(windows):
+    let h = createFileW(newWideCString(extendedPath(lockPath)),
+      (GENERIC_READ or GENERIC_WRITE).DWORD,
+      (FILE_SHARE_READ or FILE_SHARE_WRITE or FILE_SHARE_DELETE).DWORD, nil,
+      OPEN_ALWAYS.DWORD, 0.DWORD, 0)
+    if h == INVALID_HANDLE_VALUE:
+      raiseOSError(osLastError(),
+        "cannot open the write-sequence lock " & lockPath)
+    var overlapped: OVERLAPPED
+    if cLockFileExSeq(h, SeqLockFileExclusive.DWORD, 0.DWORD, 1.DWORD,
+                      0.DWORD, addr overlapped) == 0:
+      let lockErr = osLastError()
+      discard closeHandle(h)
+      raiseOSError(lockErr, "cannot lock the write-sequence counter " & lockPath)
+    try:
+      result = cache.allocateWriteSequenceLocked(floor)
+    finally:
+      var unlockOverlapped: OVERLAPPED
+      discard cUnlockFileExSeq(h, 0.DWORD, 1.DWORD, 0.DWORD,
+                               addr unlockOverlapped)
+      discard closeHandle(h)
   else:
-    # Windows / other: no flock. The build model has one engine process per
-    # build touching the cache serially; cross-build contention on one cache
-    # root is the concern, and a truncating rewrite keeps the counter strictly
-    # increasing for the common single-writer case.
-    result = readSequenceValue(path) + 1'u64
-    writeFile(extendedPath(path), $result)
+    {.error: "nextWriteSequence needs an exclusive file lock on this target".}
 
 type
   RecContainer = object
@@ -4541,7 +4930,7 @@ proc loadNewestPerEdgeRecordsViaAlias(cache: ActionCache;
   ##     set unchanged.
   ##
   ## Those two exhaust the ways the directory can move: every publish stamps
-  ## a fresh sequence from the durable `.seq` counter, so it either changes
+  ## a fresh sequence above every container in the directory, so it either changes
   ## the name set or changes a sequence. An alias that survives both checks
   ## therefore names the container the union read would have ordered last.
   let dirPath = cache.perEdgeDirPath(weak)
@@ -4581,7 +4970,7 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
   ## edge's directory, NEVER a whole-cache scan (the anti-wedge invariant).
   ## Records are deduped by strong fingerprint (a legacy file and a migrated
   ## `.rec` for the same path-set converge). Ordered OLDEST→NEWEST by each
-  ## `.rec` file's DURABLE write sequence (a `.seq`-backed monotonic counter),
+  ## `.rec` file's trailer write sequence (allocated by `nextWriteSequence`),
   ## with the strong-fingerprint hex as a total-order tie-break, so a caller
   ## iterating in reverse (as `lookupActionResult` does) considers the truly
   ## newest path-set first — preserving AC-1's "newest record wins /
@@ -4598,7 +4987,7 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
   var seenStrong = initHashSet[string]()
   if dirExists(extendedPath(dirPath)):
     # (writeSequence, strongHex) is a TOTAL, STABLE key: each `.rec` file gets a
-    # distinct durable sequence at write time, and the strong-fp hex is unique
+    # fresh sequence at write time, and the strong-fp hex is unique
     # per file, so no two distinct files ever compare equal.
     var recFiles: seq[tuple[seq: uint64; strongHex: string;
         recs: seq[ActionResultRecord]]] = @[]
@@ -4663,7 +5052,8 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
   ## atomically `rename()` it to `dirPath/finalName`. fsync-less: a cache needs
   ## consistency, not durability. Never clobbers a sibling `.rec` of a distinct
   ## path-set — only the same-named (same strong fp) file, which is convergence.
-  ## Stamps a FRESH durable write sequence so a convergent rewrite of the same
+  ## Stamps a FRESH write sequence, allocated above every container already in
+  ## `dirPath` (`nextWriteSequence`), so a convergent rewrite of the same
   ## path-set becomes strictly newest (higher sequence) than every sibling.
   createDir(extendedPath(dirPath))
   # Read the sequence of the record we are replacing BEFORE the rename, so a
@@ -4677,7 +5067,7 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
         decodePerEdgeFileWithSeq(bytes(readFile(priorRecPath))).writeSequence
     except OSError, IOError, EnvelopeError:
       priorWriteSequence = 0'u64
-  let writeSequence = cache.nextWriteSequence()
+  let writeSequence = cache.nextWriteSequence(dirPath)
   let now = getTime()
   let tmpPath = dirPath / (finalName & ".tmp." &
     $getCurrentProcessId() & "." & $now.toUnix & "." & $now.nanosecond)
@@ -4781,8 +5171,15 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
     elif priorWriteSequence != 0'u64 and fileExists(extendedPath(detPath)):
       try:
         let prior = decodeDeterminism(bytes(readFile(detPath)))
+        # Another host's sidecar is never carried forward
+        # (`Edge-Determinism-And-Soft-Rebuild.md` §3.2 rules 3 and 4). It can
+        # only be here because the cache root or a store bundle came from
+        # that host, and the bytes being written now are not its bytes:
+        # carrying its fingerprint onto them would make every later
+        # host-bound read miss again, a re-run on every build.
         if prior.meta.declared and
-            prior.recordWriteSequence == priorWriteSequence:
+            prior.recordWriteSequence == priorWriteSequence and
+            prior.meta.hostFingerprint == hostFingerprint():
           detPayload = encodeDeterminism(prior.meta, writeSequence)
           writeDet = true
       except OSError, IOError, EnvelopeError:
@@ -4871,7 +5268,8 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
     if kind == pcFile and
         (path.endsWith(WitnessFileExt) or path.endsWith(DeterminismFileExt) or
          path.endsWith(InputAccessFileExt) or
-         path.endsWith(ObservedExecutionFileExt)):
+         path.endsWith(ObservedExecutionFileExt) or
+         path.endsWith(ActionOutputFileExt)):
       let owner = path.parentDir / (path.splitFile.name & PerEdgeRecFileExt)
       if not fileExists(extendedPath(owner)):
         try:
@@ -4906,7 +5304,7 @@ proc capRecFiles(cache: ActionCache; dirPath: string): seq[string]
         discard
       if unlinked:
         for record in evictedRecords:
-          removeRecordComputationDir(record)
+          removeRecordComputationDir(record, cache.recipeCompilesRootOf)
       # Drop the evicted record's sidecars too, or they leak.
       for sidecar in [entries[i].path.parentDir /
                         witnessFileName(entries[i].strongHex),
@@ -5581,6 +5979,12 @@ proc scanHotIndexMetadataInputsUnchanged*(cache: ActionCache;
         probe.outputRoot, probe.ownedOutputs).len > 0:
       return HotMetadataScan(status: hmssMissingRecord,
         recordCount: totalRecords, checkedInputCount: checkedInputs)
+    # Another host's `host-bound` / `volatile` realization (§3.2 rule 4),
+    # reported as `hmssMissingRecord` for the same reason: the scheduler
+    # re-consults the edge and `lookupActionResult` names the host.
+    if not record.servableOnThisHost(probe.determinism):
+      return HotMetadataScan(status: hmssMissingRecord,
+        recordCount: totalRecords, checkedInputCount: checkedInputs)
     # M10 — the OBSERVED ENVIRONMENT has to be checked on this path too.
     # It is the whole-graph "everything is already up to date" shortcut,
     # so a record whose environment moved and is not caught HERE is served
@@ -6022,9 +6426,21 @@ proc sameContentIdentity(recorded, current: FileFingerprint): bool =
   ## changing it would re-key every content-keyed record in every existing
   ## cache. The kind is already recorded beside it (`writeMetadata`), so
   ## comparing it costs nothing and leaves the record format untouched.
+  ##
+  ## A DIRECTORY hashes the empty payload whatever it is, so for one the
+  ## size word is compared too: it is 0 for a real directory and the digest
+  ## of the `readlink` text for a link to one (`linkedDirectoryIdentity`).
+  ## Without it a link retargeted at another directory -- NixOS's
+  ## `/run/current-system` after `nixos-rebuild switch`, recorded as a probe
+  ## on the way to a tool (`linkHopsUnderRun` in `repro_core/paths`) --
+  ## moved the metadata, fell through to this comparison under `ffpHybrid`,
+  ## and compared equal, serving the old generation's outputs. Compared here
+  ## rather than hashed, for the reason above: no existing key moves.
   recorded.hasLocalHash and current.hasLocalHash and
     recorded.metadata.kind == current.metadata.kind and
-    recorded.localHash == current.localHash
+    recorded.localHash == current.localHash and
+    (recorded.metadata.kind != ffkDirectory or
+      recorded.metadata.sizeBytes == current.metadata.sizeBytes)
 
 proc inputContentStillRecorded*(record: ActionResultRecord;
                                 inputRoot = ""): tuple[ok: bool;
@@ -6263,9 +6679,11 @@ proc lookupActionResultImpl[CasT](cache: var ActionCache; cas: CasT;
                                   metadataCache: ptr FileMetadataCache = nil;
                                   envResolver: EnvResolver = nil;
                                   outputRoot = "";
-                                  containerOutputs: seq[string] = @[]):
+                                  containerOutputs: seq[string] = @[];
+                                  useHotTier = true):
                                   ActionCacheLookup =
-  if allowMetadataOnlyHit and not verifyOutputBlobs and policy in {ffpTimestamp, ffpHybrid}:
+  if useHotTier and allowMetadataOnlyHit and not verifyOutputBlobs and
+      policy in {ffpTimestamp, ffpHybrid}:
     let hot = cache.readHotRecord(weak)
     if hot.found and hot.record.policy == policy:
       var changed = false
@@ -6485,6 +6903,169 @@ proc inputAccessesFor*(cache: ActionCache; weak, strong: ContentDigest):
   except OSError, IOError:
     none(InputAccesses)
 
+# ---------------------------------------------------------------------------
+# Action-output sidecar (Provider-Compile-Tiering.md §"A TryCompile hit must
+# replay the probe's output").
+#
+# The stdout and stderr of the execution behind a record, as CAS blobs, so a
+# later hit can hand a caller the output a run would have printed
+# (`repro build --action-output=all`; CLI/build.md §"Action Output"). A CMake
+# try_compile reads its compiler's `-v` output and its warnings out of that
+# output; a hit that printed nothing would make the configure compute
+# different cache variables from a miss.
+#
+# A sidecar for the same reason as the others: the RBAR frame cannot grow
+# (`ActionRecordVersion`). Keyed like the input-access sidecar, by the strong
+# fingerprint alone with no write-sequence back-reference: a republish that
+# never saw the output (the cache daemon, a peer install) leaves it in place,
+# and any execution with that strong fingerprint is one whose output may be
+# replayed for it. The output need not be byte-identical to what a fresh run
+# would print (it names the recording run's scratch paths); the spec asks for
+# the configure-level result to match, not the bytes.
+#
+# Written for EVERY record the engine publishes after an execution, empty
+# streams included: an absent sidecar means "this record cannot say what the
+# run printed" (a record from an older binary, a peer install), which is not
+# the same as "it printed nothing", and a caller that needs the output treats
+# the first as a miss. An empty stream stores no blob.
+# ---------------------------------------------------------------------------
+
+const
+  ActionOutputMagic = "RBAO"
+  ActionOutputVersion = 1'u16
+
+type
+  RecordedActionOutput* = object
+    ## The captured streams of the execution behind one record. A blob with
+    ## `sizeBytes == 0` is an empty stream, stored nowhere.
+    stdout*: CasBlobRef
+    stderr*: CasBlobRef
+
+  ReplayedActionOutput* = object
+    stdout*: string
+    stderr*: string
+
+proc actionOutputFileName*(strongHex: string): string =
+  strongHex & ActionOutputFileExt
+
+proc encodeActionOutput*(strongHex: string;
+                         output: RecordedActionOutput): seq[byte] =
+  for i in 0 ..< 4:
+    result.add(byte(ord(ActionOutputMagic[i])))
+  result.writeU16Le(ActionOutputVersion)
+  # The record this describes, inside the payload as well as in the file
+  # name, so a sidecar copied or renamed beside another record is refused.
+  result.writeString(strongHex)
+  for blob in [output.stdout, output.stderr]:
+    result.writeU64Le(blob.sizeBytes)
+    if blob.sizeBytes > 0'u64:
+      result.writeDigest(blob.digest)
+
+proc decodeActionOutput*(raw: openArray[byte]; strongHex: string):
+    Option[RecordedActionOutput] =
+  ## `none` on ANY problem: a wrong magic, an unknown version, a different
+  ## record, trailing or missing bytes. `none` means "the output is unknown",
+  ## never "it was empty".
+  if raw.len < 6:
+    return none(RecordedActionOutput)
+  for i in 0 ..< 4:
+    if raw[i] != byte(ord(ActionOutputMagic[i])):
+      return none(RecordedActionOutput)
+  try:
+    var pos = 4
+    if readU16Le(raw, pos) != ActionOutputVersion:
+      return none(RecordedActionOutput)
+    if readString(raw, pos) != strongHex:
+      return none(RecordedActionOutput)
+    var blobs: array[2, CasBlobRef]
+    for i in 0 .. 1:
+      blobs[i].sizeBytes = readU64Le(raw, pos)
+      if blobs[i].sizeBytes > 0'u64:
+        blobs[i].digest = readDigest(raw, pos)
+    if pos != raw.len:
+      return none(RecordedActionOutput)
+    some(RecordedActionOutput(stdout: blobs[0], stderr: blobs[1]))
+  except EnvelopeError:
+    none(RecordedActionOutput)
+
+proc recordActionOutput*[CasT: LocalCas | Store](cache: ActionCache;
+                         cas: var CasT; weak, strong: ContentDigest;
+                         stdout, stderr: string) =
+  ## Store `stdout` and `stderr` in `cas` and write the action-output sidecar
+  ## beside the `.rec` that `recordActionResult` just published. Best-effort,
+  ## like the input-access sidecar: one that cannot be written costs a later
+  ## replaying hit (which then re-runs), never the build.
+  let dirPath = cache.perEdgeDirPath(weak)
+  let strongHex = digestHex(strong)
+  let finalPath = dirPath / actionOutputFileName(strongHex)
+  let now = getTime()
+  let tmpPath = finalPath & ".tmp." & $getCurrentProcessId() & "." &
+    $now.toUnix & "." & $now.nanosecond
+  try:
+    var output: RecordedActionOutput
+    if stdout.len > 0:
+      output.stdout = cas.storeBlob(bytes(stdout))
+    if stderr.len > 0:
+      output.stderr = cas.storeBlob(bytes(stderr))
+    createDir(extendedPath(dirPath))
+    writeFile(extendedPath(tmpPath),
+      byteString(encodeActionOutput(strongHex, output)))
+    moveFile(extendedPath(tmpPath), extendedPath(finalPath))
+  except CatchableError:
+    if fileExists(extendedPath(tmpPath)):
+      try: removeFile(extendedPath(tmpPath))
+      except OSError: discard
+
+proc recordedActionOutputFor*[CasT: LocalCas | Store](cache: ActionCache;
+                              cas: CasT; weak, strong: ContentDigest):
+    Option[ReplayedActionOutput] =
+  ## The output recorded for one (edge, path-set) pair, read back from the
+  ## CAS and verified, or `none` when no sidecar is there, it cannot be read,
+  ## or a blob it names is missing or corrupt.
+  let strongHex = digestHex(strong)
+  let path = cache.perEdgeDirPath(weak) / actionOutputFileName(strongHex)
+  if not fileExists(extendedPath(path)):
+    return none(ReplayedActionOutput)
+  try:
+    let decoded = decodeActionOutput(bytes(readFile(extendedPath(path))),
+      strongHex)
+    if decoded.isNone:
+      return none(ReplayedActionOutput)
+    var replay: ReplayedActionOutput
+    if decoded.get.stdout.sizeBytes > 0'u64:
+      replay.stdout = byteString(cas.readBlob(decoded.get.stdout))
+    if decoded.get.stderr.sizeBytes > 0'u64:
+      replay.stderr = byteString(cas.readBlob(decoded.get.stderr))
+    some(replay)
+  except CatchableError:
+    none(ReplayedActionOutput)
+
+proc applyHostBinding(lookup: var ActionCacheLookup;
+                      usingClass: EdgeDeterminism) =
+  ## `Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 4 at the per-edge
+  ## lookup: a hit whose use is `host-bound` or `volatile` and whose entry
+  ## does not record THIS host becomes `aclMissOtherHost`. The check itself is
+  ## `servableOnThisHost`; this only turns its answer into a lookup status
+  ## and names the reason.
+  ##
+  ## Cost: none beyond a string compare. The class and host come from the
+  ## decoded record, which carries its current `.det` sidecar already.
+  if lookup.status notin {aclHit, aclHybridCutoff}:
+    return
+  if lookup.record.servableOnThisHost(usingClass):
+    return
+  let use = lookup.record.hostBoundUse(usingClass)
+  let meta = lookup.record.determinism
+  let here = hostFingerprint()
+  lookup.status = aclMissOtherHost
+  lookup.message =
+    if not meta.declared or meta.hostFingerprint.len == 0:
+      "cached entry records no host; a " & $use &
+        " use is served only this host's realization (" & here & ")"
+    else:
+      "cached entry is another host's " & $use & " realization (" &
+        meta.hostFingerprint & "), not this host's (" & here & ")"
+
 proc applyRetention(cache: ActionCache; weak: ContentDigest;
                     lookup: var ActionCacheLookup;
                     retention: CacheRetention;
@@ -6534,17 +7115,27 @@ proc lookupActionResult*(cache: var ActionCache; cas: LocalCas;
                          retention = forever();
                          nowUnix: int64 = 0;
                          buildEpoch = "";
-                         containerOutputs: openArray[string] = []):
+                         containerOutputs: openArray[string] = [];
+                         determinism = edWeak;
+                         useHotTier = true):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
+  ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
+  ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
+  ## `useHotTier = false` answers from the full records even where the warm
+  ## metadata projection would do: that projection drops the strong
+  ## fingerprint (`hotMetadataRecord`), which a caller replaying the
+  ## record's captured output needs to find it (`recordedActionOutputFor`).
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot,
-    containerOutputs = @containerOutputs)
+    containerOutputs = @containerOutputs,
+    useHotTier = useHotTier)
+  result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 proc lookupActionResult*(cache: var ActionCache; cas: Store;
@@ -6557,17 +7148,27 @@ proc lookupActionResult*(cache: var ActionCache; cas: Store;
                          retention = forever();
                          nowUnix: int64 = 0;
                          buildEpoch = "";
-                         containerOutputs: openArray[string] = []):
+                         containerOutputs: openArray[string] = [];
+                         determinism = edWeak;
+                         useHotTier = true):
                          ActionCacheLookup =
   ## `containerOutputs`: the requesting action's container directory outputs
   ## (see `outputStateMismatchImpl`), revalidated for existence only.
+  ## `determinism`: the requesting edge's effective class, for §3.2 rule 4
+  ## (`applyHostBinding`). The default is §2.1's unlabelled `weak`.
+  ## `useHotTier = false` answers from the full records even where the warm
+  ## metadata projection would do: that projection drops the strong
+  ## fingerprint (`hotMetadataRecord`), which a caller replaying the
+  ## record's captured output needs to find it (`recordedActionOutputFor`).
   result = cache.lookupActionResultImpl(cas, weak, policy,
     verifyOutputBlobs = verifyOutputBlobs,
     allowMetadataOnlyHit = allowMetadataOnlyHit,
     metadataCache = metadataCache,
     envResolver = envResolver,
     outputRoot = outputRoot,
-    containerOutputs = @containerOutputs)
+    containerOutputs = @containerOutputs,
+    useHotTier = useHotTier)
+  result.applyHostBinding(determinism)
   cache.applyRetention(weak, result, retention, nowUnix, buildEpoch)
 
 # ===========================================================================
@@ -6659,6 +7260,7 @@ proc scanCacheEntries*(cache: ActionCache;
   if not dirExists(extendedPath(root)):
     return
   let now = if policy.nowUnix != 0: policy.nowUnix else: toUnix(getTime())
+  let recipeRoot = cache.recipeCompilesRootOf
   for edgeKind, edgeDir in walkDir(extendedPath(root)):
     if edgeKind != pcDir:
       continue
@@ -6673,7 +7275,7 @@ proc scanCacheEntries*(cache: ActionCache;
         recPath: path,
         recordBytes: fileSizeOrZero(path))
       for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
-                  ObservedExecutionFileExt]:
+                  ObservedExecutionFileExt, ActionOutputFileExt]:
         entry.recordBytes += fileSizeOrZero(edgeDir / (strongHex & ext))
       try:
         entry.mtimeUnix = toUnix(getLastModificationTime(extendedPath(path)))
@@ -6693,7 +7295,7 @@ proc scanCacheEntries*(cache: ActionCache;
       try:
         let decoded = decodePerEdgeFileWithSeq(bytes(readFile(path)))
         for record in decoded.records:
-          let owned = recordComputationDir(record)
+          let owned = ownedComputationDir(record, recipeRoot)
           if owned.len > 0:
             entry.computationDirs.add(owned)
           if record.outputPayloadKind != opkCasBlobs:
@@ -6706,6 +7308,21 @@ proc scanCacheEntries*(cache: ActionCache;
       if not decodable:
         entry.payloadBytes = 0
         entry.blobDigests = @[]
+      else:
+        # The captured-output blobs the action-output sidecar names are
+        # this entry's too: released with it, and kept while it lives.
+        let outPath = edgeDir / actionOutputFileName(strongHex)
+        if fileExists(extendedPath(outPath)):
+          try:
+            let output = decodeActionOutput(
+              bytes(readFile(extendedPath(outPath))), strongHex)
+            if output.isSome:
+              for blob in [output.get.stdout, output.get.stderr]:
+                if blob.sizeBytes > 0'u64:
+                  entry.payloadBytes += int64(blob.sizeBytes)
+                  entry.blobDigests.add(digestHex(blob.digest))
+          except OSError, IOError:
+            discard
       entry.expired =
         entry.meta.declared and
         isExpired(entry.meta.retention, entry.meta.writeTimeUnix, now,
@@ -6720,7 +7337,7 @@ proc removeEntry(entry: CacheEntryRef): bool =
   ## success.
   let dir = entry.recPath.parentDir
   for ext in [WitnessFileExt, DeterminismFileExt, InputAccessFileExt,
-              ObservedExecutionFileExt]:
+              ObservedExecutionFileExt, ActionOutputFileExt]:
     let sidecar = dir / (entry.strongHex & ext)
     if fileExists(extendedPath(sidecar)):
       try: removeFile(extendedPath(sidecar))
@@ -6844,8 +7461,6 @@ proc runRetentionGc*(cache: ActionCache;
 # record write, a record removed by an older binary, the directories of the
 # earlier single-directory layout).
 # ===========================================================================
-
-const RecipeCompilesDirName* = "recipe-compiles"
 
 when defined(posix):
   proc cRenamePath(src, dst: cstring): cint

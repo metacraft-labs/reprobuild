@@ -1,0 +1,91 @@
+{
+  "format": "repro.home.export",
+  "schemaVersion": 6,
+  "selection": {
+    "host": "h",
+    "hostDeclared": true,
+    "activities": [
+      "default"
+    ],
+    "unknownActivities": []
+  },
+  "intent": {
+    "name": "nixosFact",
+    "activities": [
+      {
+        "name": "default",
+        "body": [
+          {
+            "kind": "packageRef",
+            "name": "bash",
+            "version": ""
+          },
+          {
+            "kind": "whenGuard",
+            "predicate": "nixos",
+            "body": [
+              {
+                "kind": "packageRef",
+                "name": "nixos-only-tool",
+                "version": ""
+              }
+            ]
+          },
+          {
+            "kind": "whenGuard",
+            "predicate": "linux and not nixos",
+            "body": [
+              {
+                "kind": "packageRef",
+                "name": "other-linux-tool",
+                "version": ""
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "configOverrides": [],
+    "hosts": {
+      "h": [
+        "default"
+      ]
+    },
+    "resources": [],
+    "buildActions": [],
+    "adapterPreference": {}
+  },
+  "platforms": {
+    "x86_64-linux": "same",
+    "aarch64-linux": "same",
+    "x86_64-darwin": "same",
+    "aarch64-darwin": "same",
+    "x86_64-windows": "same",
+    "aarch64-windows": "same"
+  },
+  "provenance": {
+    "repro": {
+      "version": "0.2.26",
+      "sourceRevision": "eb6055725485d71efe30072b4d5b33f88a3ac0d4-dirty"
+    },
+    "hostSource": "flag",
+    "profile": {
+      "root": "home.nim",
+      "digest": "5c439a0580cdce5b8aa13026d215476714e15068073400f931e134773a196216",
+      "inputs": [
+        {
+          "path": "home.nim",
+          "blake3": "0fa7e77b1a7a5986790ae8394aac6561152279322b31b28ca625b3f02d0eb541"
+        }
+      ]
+    },
+    "dataFiles": [],
+    "compile": {
+      "target": "x86_64-linux",
+      "os": "linux",
+      "cpu": "amd64",
+      "defines": [],
+      "probe": {}
+    }
+  }
+}

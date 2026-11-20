@@ -295,7 +295,25 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 34'u16
+  BuildActionPayloadVersion* = 38'u16
+    ## v38: ``relocatable`` -- one strict sentinel byte appended after
+    ## ``canonicalWorkKey``. v37-and-earlier payloads decode as not
+    ## relocatable, which is what every action declared before it.
+    ## v37: ``canonicalWorkKey`` -- the key of the action's canonical work
+    ## tree (Hermetic-Builds-And-Path-Independence.md §"Canonical work
+    ## trees"), a string appended after ``envPassthrough``. v36-and-earlier
+    ## payloads decode with it empty: the action gets no canonical tree,
+    ## which is what every action declared before it.
+    ## v36: ``envPassthrough`` -- the environment variables whose host value
+    ## the action reads, keyed by name only (Filesystem-Policy-And-Observed-
+    ## Inputs.md §"Declared And Passthrough Variables"), a string list
+    ## appended after ``contentKeyedToolCaches``. v35-and-earlier payloads
+    ## decode with the list empty, which is what every action declared
+    ## before it.
+    ## v35: ``contentKeyedToolCaches`` -- the content-keyed tool-owned caches
+    ## the action reads (Tool-Owned-Caches.md §"Trust Boundary"), a string
+    ## list appended after the width fields. v34-and-earlier payloads decode
+    ## with the list empty, which is what every action declared before it.
     ## v34: Caching-Architecture D2 -- the action cache policy byte gains
     ## ``acfpUnstated`` as value 0 (the edge stated no policy), and the
     ## stated policies move up by one. A v9..v33 byte (0 timestamp,
@@ -1549,6 +1567,61 @@ proc resetRecipeRevisionFingerprintCache*() {.dynOrStatic.} =
   recipeRevisionCacheRoot = ""
   recipeRevisionCacheValue = ""
 
+const CanonicalWorkDirVar* = "REPRO_CANONICAL_WORK_DIR"
+  ## The variable through which the engine hands a keyed action
+  ## (``BuildActionDef.canonicalWorkKey``) its canonical work tree. The same
+  ## name as ``repro_core/canonical_work_dir.CanonicalWorkDirEnv``, which the
+  ## engine sets; the DSL does not import the engine's module.
+
+proc isValidCanonicalWorkKeyText*(key: string): bool {.dynOrStatic.} =
+  ## The engine's rule for a canonical work key (``repro_core/
+  ## canonical_work_dir.isValidCanonicalWorkKey``), checked where the edge is
+  ## declared so a bad key fails the recipe rather than the build: one path
+  ## component of letters, digits, ``-`` and ``_``, at most 80 bytes, not
+  ## starting with ``-``.
+  if key.len == 0 or key.len > 80 or key[0] == '-':
+    return false
+  for ch in key:
+    if ch notin {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_'}:
+      return false
+  true
+
+proc logicalRecipePath*(projectRoot: string): string {.dynOrStatic.} =
+  ## The recipe's location that does not depend on where it was checked out:
+  ## ``projectRoot`` relative to the root of the git repository containing it
+  ## (the nearest ancestor holding ``.git``), with forward slashes, e.g.
+  ## ``packages/source/gemini-cli``. ``.`` for a recipe at a repository's
+  ## root. When no repository contains it, the project directory's own name.
+  if projectRoot.len == 0:
+    return ""
+  let start = absolutePath(projectRoot).normalizedPath
+  var dir = start
+  while true:
+    if dirExists(dir / ".git") or fileExists(dir / ".git"):
+      let rel = relativePath(start, dir).replace('\\', '/')
+      return if rel.len == 0: "." else: rel
+    let up = parentDir(dir)
+    if up.len == 0 or up == dir:
+      break
+    dir = up
+  extractFilename(start)
+
+proc canonicalWorkKeyFor*(role, package, logicalPath: string): string
+    {.dynOrStatic.} =
+  ## The canonical work key of a step (Hermetic-Builds-And-Path-
+  ## Independence.md §"Canonical work trees"): ``<role>-<16 hex digits>``,
+  ## the digits the start of sha256("repro-canonical-work-v1" NUL role NUL
+  ## package NUL logicalPath). Location-independent, so two checkouts of one
+  ## repository compute the same key; not unique by construction, which is
+  ## harmless (a collision only serialises two recipes on one tree, emptied
+  ## before each run). ``role`` must itself be valid key text.
+  let digest = dslSha256Hex("repro-canonical-work-v1\x00" & role & "\x00" &
+    package & "\x00" & logicalPath)
+  result = role & "-" & digest[0 ..< 16]
+  if not isValidCanonicalWorkKeyText(result):
+    raise newException(ValueError, "canonical work role '" & role &
+      "' does not make a valid key")
+
 proc computeRecipeRevisionFingerprint*(projectRoot: string): string {.dynOrStatic.} =
   ## Read the recipe file (``repro.nim`` / ``reprobuild.nim``) under
   ## ``projectRoot`` and return its sha256 hex digest, or the empty
@@ -1651,6 +1724,14 @@ when defined(reproProviderMode):
     ## A missing file is recorded too, with the digest `missing`, so a file
     ## that appears later — an optional committed lock — also invalidates.
     providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
+
+  proc providerUnobservedInput*(identity: string) {.dynOrStatic.} =
+    ## Report that the graph this evaluation emits was derived from reads
+    ## that could not be observed completely, so no stored copy of it may be
+    ## reused: the fragment is produced again on every refresh
+    ## (``unobservedEvaluationInput``; Failure-Semantics.md §"Monitoring
+    ## Failures", unknown-scope loss).
+    providerEvaluationInputRegistry.add(unobservedEvaluationInput(identity))
 
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
@@ -2164,7 +2245,10 @@ proc buildAction*(id: string; call: PublicCliCall;
                   scratchDirs: openArray[string] = [];
                   removeBeforeRun: openArray[string] = [];
                   optionalOutputs: openArray[string] = [];
-                  sizedBy = ""):
+                  sizedBy = "";
+                  contentKeyedToolCaches: openArray[string] = [];
+                  canonicalWorkKey = "";
+                  relocatable = false):
     BuildActionDef {.dynOrStatic.} =
   ## ``sizedBy``: the width flag of a command that is not a typed call but
   ## runs a parallel tool (``sized_tools.sizedWidthByFlag``). The edge then
@@ -2212,6 +2296,21 @@ proc buildAction*(id: string; call: PublicCliCall;
   ## ``ProfileBuildAction``, which is not a route any recipe has. A cache
   ## hit does NOT re-raise it, and the versioned payload codec does not
   ## carry it — see the field's own comment in ``types.nim`` for why.
+  ##
+  ## ``contentKeyedToolCaches``: the content-keyed tool-owned caches the
+  ## action reads and shares with other edges (Go's build cache, ccache).
+  ## The engine then treats the edge as ``host-bound`` at least, so its
+  ## records never leave this host; see the field in ``types.nim``.
+  ##
+  ## ``canonicalWorkKey``: the key of a per-run work tree the engine places
+  ## at a path that names neither the checkout nor the user, and hands to
+  ## the action as ``REPRO_CANONICAL_WORK_DIR``. Derive it with
+  ## ``canonicalWorkKeyFor``; see the field in ``types.nim``.
+  if canonicalWorkKey.len > 0 and not isValidCanonicalWorkKeyText(
+      canonicalWorkKey):
+    raise newException(ValueError, "action " & id & " declares an invalid " &
+      "canonical work key '" & canonicalWorkKey & "': use letters, digits, " &
+      "`-` and `_` (derive it with `canonicalWorkKeyFor`)")
   # M9.R.34: stamp the recipe-revision fingerprint at registration
   # time so edits to ``repro.nim`` / ``reprobuild.nim`` bus the local
   # action-cache key. ``computeRecipeRevisionFingerprint`` returns the
@@ -2221,7 +2320,19 @@ proc buildAction*(id: string; call: PublicCliCall;
   # encoding aside from the new sentinel byte the v20 codec adds.
   let recipeRevisionFingerprint = computeRecipeRevisionFingerprint(
     activeProviderProjectRoot())
-  let packageActionEnv = currentPackageActionEnvEntries()
+  var packageActionEnv = currentPackageActionEnvEntries()
+  if relocatable:
+    # ``OUT_MIRROR`` names the package's staging root under the project
+    # root, and a declared variable is keyed by value: it would pin a
+    # relocatable action to the one location it ran in. A relocatable action
+    # computes the same thing anywhere, so it cannot depend on that path,
+    # and it is not handed one (a tool that read it would fail visibly
+    # rather than be served another location's result).
+    var kept: seq[(string, string)] = @[]
+    for entry in packageActionEnv:
+      if entry[0] != "OUT_MIRROR":
+        kept.add(entry)
+    packageActionEnv = kept
   let actionEnv = mergePackageActionEnv(packageActionEnv, env)
   # An action that starts a parallel tool is sized: it asks RunQuota for a
   # width range and names the flag that takes the grant (``sized_tools``).
@@ -2268,7 +2379,10 @@ proc buildAction*(id: string; call: PublicCliCall;
     declaredOutputs: @declaredOutputs,
     readOnlyRoots: @readOnlyRoots,
     scratchDirs: @scratchDirs,
-    removeBeforeRun: @removeBeforeRun)
+    removeBeforeRun: @removeBeforeRun,
+    contentKeyedToolCaches: @contentKeyedToolCaches,
+    canonicalWorkKey: canonicalWorkKey,
+    relocatable: relocatable)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -3195,6 +3309,90 @@ proc appendRegisteredActionSubToolRefs*(actionId: string;
             refName notin buildActionRegistry[i].subToolRefs:
           buildActionRegistry[i].subToolRefs.add(refName)
       return
+
+proc envPassthroughNameProblem*(name: string): string =
+  ## Why ``name`` cannot be declared environment passthrough by a tool's
+  ## ``cli:`` block (``envPassthrough``), or "" when it can. One rule for the
+  ## three places that check a declared name: the directive's string literals
+  ## (refused while the macro expands), the names of a ``const`` list the
+  ## directive references (refused by the check the typed wrapper generates,
+  ## ``envPassthroughNamesProblem``), and nowhere else -- an edge-level
+  ## ``appendRegisteredActionEnvPassthrough`` keeps its own runtime refusal.
+  ##
+  ## Deliberately NOT ``{.dynOrStatic.}``: the generated check evaluates it at
+  ## compile time, which a proc whose body is replaced by an import cannot do.
+  ##
+  ## ``PATH`` is refused in any letter case (Windows treats environment names
+  ## case-insensitively): an action's PATH class is decided by its tool
+  ## references, and a declared passthrough would take a hermetic ``PATH`` out
+  ## of the edge's key while the edge is still counted as hermetic (the same
+  ## rule ``withEdgeEnvPassthrough`` enforces where the edge is lowered).
+  if name.len == 0:
+    "envPassthrough cannot name an empty variable: a passthrough entry " &
+      "is keyed by its NAME, and an empty name keys nothing"
+  elif cmpIgnoreCase(name, "PATH") == 0:
+    "envPassthrough cannot name `" & name & "`: an action's PATH class is " &
+      "decided by its tool references, and a passthrough PATH would take " &
+      "a hermetic PATH out of the edge's key"
+  else:
+    ""
+
+proc envPassthroughNamesProblem*(names: openArray[string];
+                                 site: string): string =
+  ## The first ``envPassthroughNameProblem`` among ``names``, prefixed with
+  ## ``site`` (which declaration it came from), or "" when every name is
+  ## acceptable. The typed wrapper generated for a ``cli:`` scope that
+  ## references a const list by name evaluates this at compile time and turns
+  ## a non-empty answer into a compile error.
+  for name in names:
+    let problem = envPassthroughNameProblem(name)
+    if problem.len > 0:
+      return site & ": " & problem
+  ""
+
+proc appendRegisteredActionEnvPassthrough*(actionId: string;
+                                           names: openArray[string]) {.dynOrStatic.} =
+  ## Name, on an already-registered action, environment variables whose HOST
+  ## value it reads (``BuildActionDef.envPassthrough``): keyed by name only,
+  ## never by value. Appended in the given order, deduplicated, empty names
+  ## skipped. A TOOL that reads such a variable declares it once, with
+  ## ``envPassthrough`` in its ``cli:`` block, and the typed wrapper the block
+  ## generates calls this on every edge it records (the ``nim`` tool's ``c``
+  ## subcommand and the temp-directory names). Call it directly for an
+  ## edge-specific name, or for an edge that is not recorded through a typed
+  ## wrapper (the ``ct_test_nim_unittest`` compile). No-op when the id is
+  ## absent.
+  ##
+  ## Searches from the END, like ``markRegisteredActionOptionalOutputs``: a
+  ## typed call repeated with the same arguments registers a second entry
+  ## under the same id, and the caller's edge is the one it just registered.
+  ##
+  ## ``PATH`` is refused here, at recipe evaluation, and again where the
+  ## edge is lowered (``withEdgeEnvPassthrough``): whether an edge's
+  ## ``PATH`` is the host's is decided from its tool references, and a
+  ## declared passthrough would take a hermetic ``PATH`` out of its key.
+  for name in names:
+    if cmpIgnoreCase(name, "PATH") == 0:
+      raise newException(ValueError,
+        "action " & actionId & " cannot declare `" & name & "` as " &
+          "environment passthrough: an action's PATH class is decided by " &
+          "its tool references")
+  for i in countdown(buildActionRegistry.len - 1, 0):
+    if buildActionRegistry[i].id == actionId:
+      for name in names:
+        if name.len > 0 and name notin buildActionRegistry[i].envPassthrough:
+          buildActionRegistry[i].envPassthrough.add(name)
+      return
+
+proc appendRegisteredActionEnvPassthrough*(action: var BuildActionDef;
+                                           names: openArray[string]) {.dynOrStatic.} =
+  ## As above, for a constructor holding the handle it was returned: the
+  ## names go on the registry entry the graph is built from AND on
+  ## ``action``, so the handle the constructor returns agrees with the edge.
+  appendRegisteredActionEnvPassthrough(action.id, names)
+  for name in names:
+    if name.len > 0 and name notin action.envPassthrough:
+      action.envPassthrough.add(name)
 
 proc classifyRegisteredActionToolIdentityRefs*(
     actionId: string;
@@ -4496,6 +4694,18 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
     payload.writeU32Le(action.cpuMinMilli)
     payload.writeU32Le(action.cpuPreferredMilli)
     payload.writeString(action.widthFlag)
+  # v35: the content-keyed tool-owned caches the action reads.
+  if version >= 35'u16:
+    payload.writeStringSeq(action.contentKeyedToolCaches)
+  # v36: the environment variables passed through by name.
+  if version >= 36'u16:
+    payload.writeStringSeq(action.envPassthrough)
+  # v37: the key of the action's canonical work tree.
+  if version >= 37'u16:
+    payload.writeString(action.canonicalWorkKey)
+  # v38: the action is relocatable.
+  if version >= 38'u16:
+    payload.writeByte(if action.relocatable: 1'u8 else: 0'u8)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -4782,6 +4992,31 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.cpuMinMilli = 0'u32
     result.cpuPreferredMilli = 0'u32
     result.widthFlag = ""
+  if version >= 35'u16:
+    result.contentKeyedToolCaches = readStringSeq(bytes, pos)
+  else:
+    # An older payload names no cache: absence of the list is absence of the
+    # declaration, which is what every action said before the field existed.
+    result.contentKeyedToolCaches = @[]
+  if version >= 36'u16:
+    result.envPassthrough = readStringSeq(bytes, pos)
+  else:
+    # An older payload passes nothing through by name: every variable the
+    # action is observed to read stays keyed by value, as it always was.
+    result.envPassthrough = @[]
+  if version >= 37'u16:
+    result.canonicalWorkKey = readString(bytes, pos)
+  else:
+    # An older payload declares no canonical work tree: the action runs
+    # where it always did.
+    result.canonicalWorkKey = ""
+  if version >= 38'u16:
+    let relocatableByte = readByte(bytes, pos)
+    if relocatableByte > 1'u8:
+      raisePayload("invalid build action relocatable sentinel")
+    result.relocatable = relocatableByte == 1'u8
+  else:
+    result.relocatable = false
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -5200,19 +5435,34 @@ proc ensureLine*(tool: ReproFs; output, line: string; actionId = "";
     dependencyPolicy = automaticMonitorPolicy(),
     actionCachePolicy = actionCachePolicy)
 
-proc ensureSnippet*(tool: ReproFs; output, openSentinel, closeSentinel, openSearch, closeSearch, snippet: string; actionId = "";
+proc ensureSnippet*(tool: ReproFs; output, blockId, snippet: string;
+                    actionId = "";
                     deps: openArray[string] = [];
                     after: openArray[BuildActionDef] = [];
                     cacheable = true; commandStatsId = "";
                     actionCachePolicy = defaultActionCachePolicy()):
     BuildActionDef {.discardable, dynOrStatic.} =
+  ## Ensure ``output`` holds the managed block ``blockId`` of the package
+  ## declaring this action, with ``snippet`` as its content
+  ## (reprobuild-pm spec/CLI/internal/fs-file-utilities.md §3). The
+  ## sentinels are ``# >>> repro:project:<packageName>:<blockId> >>>`` and its
+  ## closing twin, rendered by the managed-file writer: the caller names the
+  ## block, never the sentinel text, so every writer reads every block.
+  ##
+  ## ``<packageName>`` is the package whose ``build:`` body is running
+  ## (``currentOwningPackage``); a call outside one has no owner to name and
+  ## is refused.
   discard tool
+  let packageName = currentOwningPackage()
+  if packageName.len == 0:
+    raise newException(ValueError, "fs.ensureSnippet(" & output & ", " &
+      blockId & "): called outside a package's build body, so the block " &
+      "has no owning package to name in its sentinels")
   let call = builtinFsCall("ensureSnippet", [
     outputArg("output", output),
-    cliArg("openSentinel", openSentinel),
-    cliArg("closeSentinel", closeSentinel),
-    cliArg("openSearch", openSearch),
-    cliArg("closeSearch", closeSearch),
+    cliArg("scope", "project"),
+    cliArg("packageName", packageName),
+    cliArg("blockId", blockId),
     cliArg("snippet", snippet)
   ])
   let selectedActionId =

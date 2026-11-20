@@ -34,10 +34,11 @@
 ##   3. every `fingerprint` **differs** from M4's — the move actually happened,
 ##      so this file cannot pass vacuously against an implementation that
 ##      forgot to key;
-##   4. and each current fingerprint is **exactly** the composition of the two
+##   4. and each current fingerprint is **exactly** the composition of the
 ##      keyings that have landed since M4, applied to the M4 fingerprint in the
-##      order `action()` applies them — the edge's environment declaration
-##      first, the corpus's governing lock identity outside it. This is the
+##      order the constructors apply them — a process edge's argv and cwd, or
+##      a builtin's kind and payload, innermost, then the edge's environment
+##      declaration, the corpus's governing lock identity outside it. This is the
 ##      "line by line" part: the change is those keyings and nothing else. A
 ##      fingerprint that moved for a third, unrelated reason — an id derivation
 ##      change, an extra field mixed in, a different domain tag — satisfies
@@ -89,6 +90,24 @@
 ## another spec is not an NLF default-path regression; it is a second
 ## explainable term, and it is in the explanation here so that a *third*
 ## unexplained one is still caught.
+##
+## ## The THIRD keying: argv and payload
+##
+## reprobuild-pm `spec/Caching-Architecture.md` §"BuildXL-Inspired
+## Fingerprinting", rider of 2026-11-16 (derived from `Core-Invariants.md`
+## §"One Implementation Per Concern"), makes the engine, not the caller, mix
+## a process edge's argv and cwd (`keyedOnArgv`) and a filesystem builtin's
+## kind and payload (`keyedOnBuiltinPayload`) into its weak fingerprint. Before it,
+## the default caller fingerprint was the action id alone, so a direct caller
+## of `action()` or `builtinAction` shared one record across command lines
+## or texts under one id (reprobuild-pm issue
+## `issues/2026-11-16-action-default-weak-fingerprint-is-the-id-alone.md`;
+## the behaviour test is `t_every_edge_keys_its_command_and_payload`). Every
+## row built through a constructor moved once for it; the three object
+## literals did not, because `weakFingerprintFor` is still the id and the
+## lock. As with the environment term, this is a later keying from another
+## spec, not an NLF default-path regression, and (4) names it so that an
+## unexplained fourth one is still caught.
 ##
 ## ## The M4 fixture is now a frozen historical record
 ##
@@ -211,7 +230,7 @@ suite "NLF-STAT-4 the post-M7 diff against the M4 baseline is explained":
           a.envPassthrough.join(", "))
       check a.envPassthrough.len == 0
 
-  test "each fingerprint moved by EXACTLY the two keyings that landed":
+  test "each fingerprint moved by EXACTLY the keyings that landed":
     # The line-by-line explanation, machine-checked.
     # `current = H(H(m4, env), lock)` for every row: the environment mix
     # inside, the lock mix outside, which is the order `action()` composes
@@ -229,14 +248,36 @@ suite "NLF-STAT-4 the post-M7 diff against the M4 baseline is explained":
     let governing = emptySolvedGraphIdentity(CorpusPlatform)
     require recorded.len == current.len
     require recorded.len == corpus.len
+    #
+    # The third term, reprobuild-pm Caching-Architecture.md
+    # §"BuildXL-Inspired Fingerprinting", rider of 2026-11-16: the engine
+    # mixes a process edge's argv and cwd (`keyedOnArgv`) innermost, and a
+    # filesystem builtin's kind and payload (`keyedOnBuiltinPayload`,
+    # `PayloadKeyedBuiltinKinds`) inside the lock. The three object literals
+    # are executor-backed kinds and compose `weakFingerprintFor`, which is
+    # still the id and the lock, so for them the move is still the lock
+    # alone.
+    # The term is read from each row's own argv, cwd and payload. Argv and
+    # cwd are frozen by the `material` column above; the payload is not, and
+    # it is pinned by the live fixture beside this one.
     for i in 0 ..< recorded.len:
-      let explained = hex(keyedOnGoverningLock(
-        keyedOnActionEnvironment(parseDigest(recorded[i].fingerprint),
-          corpus[i].env, corpus[i].envPassthrough),
-        governing))
+      let a = corpus[i]
+      let m4 = parseDigest(recorded[i].fingerprint)
+      let explained =
+        if a.kind == bakProcess:
+          hex(keyedOnGoverningLock(keyedOnActionEnvironment(
+            keyedOnArgv(m4, a.argv, a.cwd), a.env, a.envPassthrough),
+            governing))
+        elif a.kind notin PayloadKeyedBuiltinKinds:
+          hex(keyedOnGoverningLock(keyedOnActionEnvironment(m4, a.env,
+            a.envPassthrough), governing))
+        else:
+          hex(keyedOnGoverningLock(keyedOnBuiltinPayload(m4, a.kind,
+            a.builtinText, a.builtinEntries), governing))
       if current[i].fingerprint != explained:
         checkpoint("row " & $(i + 1) & " (" & recorded[i].id &
-          ") moved by something OTHER than the lock and environment keyings" &
+          ") moved by something OTHER than the lock, environment and " &
+          "argv/payload keyings" &
           "\n  M4 baseline: " & recorded[i].fingerprint &
           "\n  declared env: " & corpus[i].env.join(", ") &
           "\n  explained:   " & explained &

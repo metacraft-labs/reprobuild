@@ -267,6 +267,23 @@ proc postBaselineCorpusActions*(): seq[BuildAction] =
     governingLockIdentity = CorpusLockIdentity,
     cacheable = false,
     text = "."))
+  # NPC-AREQ9 (`bakCatalogIndex`): a pure edge of the Nimble catalog
+  # generator, reading only declared inputs and never the network.
+  result.add(builtinAction(bakCatalogIndex, "stat4/catalog-index-shard",
+    governingLockIdentity = CorpusLockIdentity,
+    inputs = ["generation/libfoo.versions"],
+    outputs = ["generation/catalog-shard"],
+    text = "shard"))
+  # NPC-AREQ20 (`bakSourceFetch`): a Nimble source fetch edge, `netFetch`
+  # with its mirror and origin as tracked destinations; its declared output
+  # is a receipt.
+  result.add(builtinAction(bakSourceFetch, "stat4/nimble-fetch-libfoo",
+    governingLockIdentity = CorpusLockIdentity,
+    outputs = ["generation/libfoo.fetch"],
+    text = "nimble.fetch libfoo",
+    networkMode = netFetch,
+    netDestinations = ["https://mirror.example.invalid/",
+                       "https://forge.example.invalid/libfoo"]))
 
 proc everyEdgeKindActions*(): seq[BuildAction] =
   ## The baseline corpus plus every post-baseline kind: the graph the §7.2

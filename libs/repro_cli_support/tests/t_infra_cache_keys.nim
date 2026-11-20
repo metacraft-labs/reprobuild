@@ -26,6 +26,7 @@ import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_binary_cache_client
 import repro_binary_cache_client/cli_dispatch as bc_cli
+from repro_cli_support/cache_cli import cacheIdentityOfFlags
 import repro_profile
 import repro_profile_compile/binary_cache_build_actions as bc_actions
 import repro_cli_support/infra as cli_infra
@@ -117,10 +118,10 @@ suite "repro infra cache-keys: identity for a named platform":
     check "--toolchain-version=1" in flags
     check ("--toolchain-extra=" & idy.toolchain.extraFingerprint) in flags
     check ("--provider-revision=" & idy.providerRevision) in flags
-    # Round trip through the dispatcher's own parser: the flags derive the
-    # same key the apply derives.
-    check deriveCacheEntryKeyHex(bc_cli.identityFromPublishFlags(flags)) ==
-      deriveCacheEntryKeyHex(idy)
+    # Round trip through `repro cache derive-key`'s own command line (the
+    # generated parser): the flags derive the same key the apply derives.
+    check deriveCacheEntryKeyHex(bc_cli.identityOf(
+      cacheIdentityOfFlags(flags))) == deriveCacheEntryKeyHex(idy)
 
   test "an edge with an output outside cwd is reported as not substitutable":
     let a = edge("x", outputs = @["/etc/elsewhere/file"])
@@ -136,6 +137,29 @@ suite "repro infra cache-keys: identity for a named platform":
       bc_actions.buildActionCacheIdentity(a, triple("armv7")))
     check ("entry-key: " & key) in report
     check ("repro cache publish " & key & " <prefix> --package-name=infra-apply-action.searxng-prefix") in report
+
+  test "an edge that pins no digest is reported as never substituted":
+    # The key binds the edge's declaration, not what it reads, so an apply
+    # substitutes only an edge that pins `expectedOutputDigest`
+    # (Binary-Caches.md §"Publishing for a host that cannot build", "The
+    # entry key is an address"; reprobuild-pm issues/2026-11-12-binary-
+    # cache-keys-for-build-action-edges-hash-the-declaration-not-the-
+    # inputs.md). A producer reading this report must be told that
+    # publishing under the key of an undigested edge serves no apply, and
+    # how to pin one.
+    let a = edge("searxng-prefix")
+    check a.expectedOutputDigest.len == 0 and not a.substituteOnly
+    let report = cli_infra.renderCacheKeys(@[a], triple("armv7"))
+    check "entry-key: " in report
+    check "expectedOutputDigest: (none" in report
+    check "an apply never substitutes this edge" in report
+    check "output-digest" in report
+    # Control: an edge that pins one prints it, with no such note.
+    var pinned = edge("searxng-prefix")
+    pinned.expectedOutputDigest = "blake3:" & repeat('a', 64)
+    let pinnedReport = cli_infra.renderCacheKeys(@[pinned], triple("armv7"))
+    check ("expectedOutputDigest: blake3:" & repeat('a', 64)) in pinnedReport
+    check "never substitutes" notin pinnedReport
 
 # ---------------------------------------------------------------------------
 # CLI round trip against a real compiled profile.

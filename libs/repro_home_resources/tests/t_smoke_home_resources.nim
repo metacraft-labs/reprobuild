@@ -161,13 +161,6 @@ suite "M68 smoke: home resource lifecycle":
     check report.driftCount == 0
     check report.changedCount == 0
 
-  test "plan: rendering contains the header line":
-    let desired = initDesiredSet()
-    var recorded = initOrderedTable[string, RecordedBinding]()
-    let report = composePlan(desired, recorded)
-    let rendered = renderPlan(report)
-    check rendered.startsWith("repro home plan: 0 resource(s) planned")
-
   # ----------------------------------------------------------------
   # Wrong-platform fail-closed: each Phase B driver must raise
   # ENotImplementedPlatform on a host whose OS does not match the
@@ -2174,7 +2167,7 @@ suite "Recipe-Val side-finding: POSIX env.userVariable arm":
         check recorded.len > 0
         let after = readFile(rc)
         # Sentinel + export line both materialize.
-        check after.contains("repro-managed:repro-home-env-MAVEN_HOME")
+        check after.contains("repro:home:repro-home-env-MAVEN_HOME")
         check after.contains("export MAVEN_HOME='/opt/maven'")
         # Observe round-trip: the post-write digest must match what
         # `observeUserVariable` reads back, so the lifecycle algorithm
@@ -2228,8 +2221,8 @@ suite "Recipe-Val side-finding: POSIX env.userVariable arm":
         discard applyUserVariableCreate("MAVEN_HOME", p2)
         let after = readFile(rc)
         # Both blocks coexist; neither clobbered the other.
-        check after.contains("repro-managed:repro-home-env-JAVA_HOME")
-        check after.contains("repro-managed:repro-home-env-MAVEN_HOME")
+        check after.contains("repro:home:repro-home-env-JAVA_HOME")
+        check after.contains("repro:home:repro-home-env-MAVEN_HOME")
         check after.contains("export JAVA_HOME='/opt/jdk'")
         check after.contains("export MAVEN_HOME='/opt/maven'")
         # Destroying one leaves the other intact.
@@ -2277,7 +2270,7 @@ suite "Test home fence: drivers refuse writes into a fenced home":
       check not testHomeFenceActive()
       check testHomeFenceViolation(rc) == ""
       discard applyManagedBlockResource(rc, "fence-off", "x\n")
-      check readFile(rc).contains("repro-managed:fence-off")
+      check readFile(rc).contains("repro:home:fence-off")
 
   test "managed-block and user-file writes inside the fenced home raise and change nothing":
     let root = createTempDir("repro-fence-on-", "")
@@ -2351,7 +2344,7 @@ suite "Test home fence: drivers refuse writes into a fenced home":
       let inside = suiteScratch / "case" / "home" / ".bashrc"
       check testHomeFenceViolation(inside) == ""
       discard applyManagedBlockResource(inside, "carve", "ok\n")
-      check readFile(inside).contains("repro-managed:carve")
+      check readFile(inside).contains("repro:home:carve")
       let sibling = home / ".cache" / "other" / "file"
       check testHomeFenceViolation(sibling).len > 0
       expect TestHomeFenceError:

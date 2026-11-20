@@ -51,6 +51,10 @@ from ./fingerprint import sha256OfFile
 
 import repro_infra/service_floor
 import repro_infra/service_account
+import repro_infra/addon_diagnostics
+
+const FloorRefusalPrefix = $adFloorNotEffective & ":"
+  ## How an ``EAddOnFloorNotEffective`` refusal's first line starts.
 
 type
   ShowProps* = Table[string, string]
@@ -86,6 +90,10 @@ const
   StartHoldText* = "# Written by the ReproOS add-on switch: the unit may not " &
     "start until its\n# effective configuration has been checked against " &
     "its hardening floor.\n[Unit]\n" & StartHoldAssertion & "\n"
+  MinimalStartHoldText* = "[Unit]\n" & StartHoldAssertion & "\n"
+    ## The start hold the boot-hold unit writes (``generation0.
+    ## MinimalHoldText``): the same assertion with no comment, which the
+    ## unit's shell cannot carry inline (A9 review round 20).
   RevertHoldName* = "zz-repro-addon-revert-hold.conf"
     ## The persistent drop-in a revert writes, under ``/etc/systemd/system``,
     ## for each unit of the generation its own floor check refused (§13
@@ -1201,10 +1209,10 @@ proc refusalRuleCodes*(output, stem: string): seq[string] =
   for raw in output.splitLines():
     var l = raw.strip()
     if not inBlock:
-      let at = l.find("EAddOnFloorNotEffective:")
+      let at = l.find(FloorRefusalPrefix)
       if at < 0: continue
       inBlock = true
-      l = l[at + "EAddOnFloorNotEffective:".len .. ^1].strip()
+      l = l[at + FloorRefusalPrefix.len .. ^1].strip()
       if l.len == 0: continue
     if l == "nothing was started":
       inBlock = false
@@ -1421,7 +1429,8 @@ proc isAddonHold*(path, content: string): bool =
   ## loaded files do not judge: the switch's start hold, or a revert's
   ## persistent hold (§13 decision 133) holding exactly ``RevertHoldText``.
   ## A file of that name with other content is judged like any drop-in,
-  ## and so is a start hold that is not exactly ``StartHoldText`` in a
+  ## and so is a start hold that is not exactly ``StartHoldText`` (or the
+  ## boot-hold unit's ``MinimalStartHoldText``) in a
   ## regular file under the runtime unit directory: the hold the switch
   ## writes on an activator (§13 decisions 151 and 155) is exempt, a file
   ## planted under its name is not.
@@ -1430,8 +1439,13 @@ proc isAddonHold*(path, content: string): bool =
       # Falsifying build: a start hold exempted by its name alone.
       return true
     else:
+      # The boot-hold unit's minimal hold is the add-on's too (A9 review
+      # round 20): the boot puts it where the switch's start hold was, and
+      # the replay's or the revert's check that follows must not judge it
+      # as a planted drop-in.
       return path.startsWith(RuntimeHoldDir & "/") and not symlinkExists(path) and
-        content == StartHoldText
+        (content == StartHoldText or
+         (content == MinimalStartHoldText and not mutated("boot-hold-minimal-hold-judged")))
   when mutated("revert-hold-any-content"):
     # Falsifying build: a revert hold exempted by its name alone.
     path.endsWith("/" & RevertHoldName)
@@ -1451,6 +1465,30 @@ proc writablePlacesOf*(show: ShowProps): seq[string] =
     if v.len > 0: ds.add((key: k, value: v))
   floorWritablePlaces(ds)
 
+proc bootHoldCycleOf*(unit: string; show: ShowProps;
+                      orderedBeforeOf: proc (u: string): seq[string] = nil): string =
+  ## §13 decision 172, the effective half, for any unit of the generation
+  ## (the owner's decision of 2026-11-16 on A9 review round 18, M2): a unit
+  ## systemd orders after ``sysinit.target`` -- ``After=`` naming it,
+  ## ``basic.target`` or the boot-hold unit, as default dependencies or an
+  ## explicit line put there -- that is ordered, by any chain of
+  ## ``Before=`` systemd reports (its own, then every other unit's,
+  ## implicit ones included), before a unit that runs before
+  ## ``sysinit.target``: an ordering cycle through the boot-hold unit or
+  ## ``sysinit.target``. The refusal's text, or "".
+  when mutated("boot-hold-cycle-effective-unchecked"):
+    return ""
+  let reportedAfter = words(show.getOrDefault("After"))
+  if "sysinit.target" notin reportedAfter and "basic.target" notin reportedAfter and
+      BootHoldUnitName notin reportedAfter:
+    return ""
+  let route = earlyOrderingRoute(unit,
+    proc (u: string): seq[string] =
+      if u == unit: words(show.getOrDefault("Before"))
+      elif orderedBeforeOf != nil: orderedBeforeOf(u)
+      else: @[])
+  if route.len > 0: earlyOrderingReason(route) else: ""
+
 proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         fragment: string; ownDropIns: openArray[string];
                         loaded: openArray[tuple[path, content: string]] = [];
@@ -1458,7 +1496,8 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
                         ownUnits = initHashSet[string]();
                         conflictsOf: proc (unit: string): seq[string] = nil;
                         listenerProvenance: proc (path: string): string = nil;
-                        serviceWritable: seq[string] = @[]):
+                        serviceWritable: seq[string] = @[];
+                        orderedBeforeOf: proc (u: string): seq[string] = nil):
                         seq[string] =
   ## A socket, timer or path unit that triggers a floored service, as
   ## systemd reads it (A9 review rounds 5 and 7): loaded from the add-on's
@@ -1489,6 +1528,13 @@ proc activatorProblems*(unit: string; show: ShowProps; lines: ShowLines;
       let why = activatorBootOrderRefusal(unit, defaultDeps = false,
         words(show.getOrDefault("After")), words(show.getOrDefault("Before")))
       if why.len > 0: problem2("boot-order", "After,Before,DefaultDependencies", why)
+  # §13 decision 172: and never, by any chain of Before= systemd reports
+  # (its own, then every other unit's, implicit ones included), before a
+  # unit that runs before sysinit.target -- the boot-hold unit and what it
+  # follows among them: an ordering cycle through the boot-hold unit.
+  block:
+    let why = bootHoldCycleOf(unit, show, orderedBeforeOf)
+    if why.len > 0: problem2("boot-hold-cycle", "Before", why)
   if show.getOrDefault("FragmentPath") != fragment:
     problem2("provenance", "FragmentPath", "FragmentPath=" & show.getOrDefault("FragmentPath") &
             ", not a unit file the add-on wrote (" & fragment & ")")

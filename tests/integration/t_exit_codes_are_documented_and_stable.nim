@@ -43,8 +43,9 @@
 ##
 ## ## The two documents
 ##
-## The command's own `--help` output is in this repository and is checked
-## unconditionally: wherever this test runs, an exit code added without
+## The command's own `--help` output (clispec's help, generated from the
+## command's declaration in repro's description) is in this repository and
+## is checked unconditionally: wherever this test runs, an exit code added without
 ## being documented there reddens. The CLI reference page lives in the
 ## sibling specification checkout, which is not present in every
 ## environment; when that checkout is absent entirely the page's case
@@ -59,6 +60,7 @@ import std/[algorithm, os, strutils, tables, unittest]
 
 import repro_attest_verify
 import repro_cli_support/attest
+import repro_cli_support/cli_program
 
 const
   ExitCodeHeading = "## Exit codes"
@@ -160,40 +162,44 @@ proc documentedInReference(md: string): Table[int, string] =
     current = -1
 
 proc documentedInUsage(usage: string): Table[int, string] =
-  ## The exit codes the command's own `--help` lists. The block opens on
-  ## a line reading `Exit codes:` and each entry is `  N  prose`.
+  ## The exit codes the command's own `--help` lists. The page is clispec's
+  ## generated help, whose long description is laid out one paragraph per
+  ## line of the declaration, paragraphs separated by a blank line and each
+  ## wrapped at the page width: the list opens on a paragraph reading
+  ## `Exit codes:` and each entry is a paragraph `N  prose`, its wrapped
+  ## lines folded back into one. The list ends at the first paragraph that
+  ## does not start with a code.
   result = initTable[int, string]()
+  var paragraphs: seq[string] = @[]
+  var current: seq[string] = @[]
+  for line in usage.splitLines:
+    if line.strip().len == 0:
+      if current.len > 0:
+        paragraphs.add current.join(" ")
+        current = @[]
+    else:
+      current.add line.strip()
+  if current.len > 0:
+    paragraphs.add current.join(" ")
   var blocks = 0
   var inBlock = false
-  var current = -1
-  for line in usage.splitLines:
-    if line.strip() == "Exit codes:":
+  for paragraph in paragraphs:
+    if paragraph == "Exit codes:":
       inc blocks
       doAssert blocks == 1,
         "the usage text opens a second exit-code block; the one a user " &
           "reads and the one this parser reads would not have to agree"
       inBlock = true
-      current = -1
       continue
     if not inBlock: continue
-    if line.len == 0:
-      inBlock = false
-      current = -1
-      continue
-    let fields = line.strip().splitWhitespace()
-    if line.startsWith("  ") and not line.startsWith("   ") and
-       fields.len >= 2 and parseIntOrNone(fields[0]) >= 0:
+    let fields = paragraph.splitWhitespace()
+    if fields.len >= 2 and parseIntOrNone(fields[0]) >= 0:
       let code = parseIntOrNone(fields[0])
       doAssert code notin result,
         "the usage text lists exit code " & $code & " twice"
-      result[code] = line.strip()[fields[0].len .. ^1].strip()
-      current = code
-      continue
-    if current >= 0 and line.startsWith("   "):
-      result[current] = result[current] & " " & line.strip()
+      result[code] = paragraph[fields[0].len .. ^1].strip()
       continue
     inBlock = false
-    current = -1
 
 proc codeSet(t: Table[int, string]): seq[int] =
   for k in t.keys: result.add k
@@ -244,7 +250,10 @@ suite "the attest exit codes are documented and stable":
   # -- documented, in the command itself ------------------------------
 
   test "the command's own usage documents exactly the codes it can return":
-    let listed = documentedInUsage(renderAttestUsage())
+    # The long help `repro attest --help` prints, generated from repro's
+    # description: the page a user reads.
+    let listed = documentedInUsage(ReproCommandLine.helpText(["attest"],
+      long = true))
     var expected: seq[int] = @[]
     for c in AttestExitCode: expected.add ord(c)
     expected.sort()
@@ -265,6 +274,31 @@ suite "the attest exit codes are documented and stable":
         if ("`" & $d & "`") notin listed[code]:
           echo "usage entry for ", code, " does not name ", $d, ": ",
             listed[code]
+
+  test "the usage parser reads the list's paragraphs and nothing after it":
+    # Pinned on a page constructed for the purpose, as the reference
+    # parser is below: a wrapped entry is folded back into one, a code
+    # after the list has ended is not read, and nothing before the
+    # heading is.
+    let page = """Summary
+
+0  not in the list yet
+
+Exit codes:
+
+0  success
+
+1  a failure whose description
+wraps onto a second line
+
+Usage: tool [options]
+
+2  after the list
+"""
+    let listed = documentedInUsage(page)
+    check listed.codeSet == @[0, 1]
+    check listed[0] == "success"
+    check listed[1] == "a failure whose description wraps onto a second line"
 
   # -- the reference parser, on documents written for it ---------------
 

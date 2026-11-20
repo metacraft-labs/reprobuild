@@ -25,15 +25,22 @@ import std/[algorithm, os, sets, strutils, tables, times]
 
 when defined(posix):
   from std/posix import nil
+when defined(windows):
+  from std/winlean import createSymbolicLinkW
 
 import blake3
 import repro_core
 
+from repro_core/link_target import readSymlinkTarget
 import ./portable_fingerprint
 import ./prefix_paths
 import ./realization_hash
+import ./receipt_codec
+import ./prefix_location
 export prefix_paths
 export realization_hash
+export receipt_codec
+export prefix_location
 # The pure path-arithmetic half of the store (``PrefixIdBytes``,
 # ``prefixRelativePath``, ``casBlobRelative``, ...) lives in its own
 # dependency-free module so non-store callers — notably
@@ -61,9 +68,6 @@ export link_capability
 # ---------------------------------------------------------------------------
 
 type
-  StoreError* = object of CatchableError
-    ## Base type for every error the store may raise to its callers.
-
   EStoreSchemaTooNew* = object of StoreError
     ## The on-disk `index.db` has a `PRAGMA user_version` higher than the
     ## one this build of Reprobuild understands. Refuses to write.
@@ -77,13 +81,6 @@ type
   ECasDigestMismatch* = object of StoreError
     ## A blob's bytes did not hash to the requested BLAKE3-256 key.
 
-  EReceiptMissing* = object of StoreError
-  EReceiptCorrupt* = object of StoreError
-  EReceiptMismatch* = object of StoreError
-    ## The realization-hash recorded in a prefix's `.repro-receipt` does
-    ## not match the prefix's directory name. Quarantined to
-    ## `gc/pending-deletion/`.
-
   AdapterName* = enum
     ## The on-disk `adapter` column is a free-form text so future
     ## adapters add themselves by name without a schema change, but the
@@ -93,68 +90,6 @@ type
     anNix = "nix"
     anTarball = "tarball"
     anScoop = "scoop"
-
-  RealizationReceipt* = object
-    ## The typed payload sealed into every realized prefix as
-    ## `.repro-receipt`. The on-disk encoding is the canonical binary
-    ## envelope below; the JSON form is for `repro store dump`.
-    schemaVersion*: uint16
-    adapter*: string
-    packageName*: string
-    version*: string
-    realizationHash*: PrefixIdBytes
-    realizedPath*: string
-    declaredExecutablePath*: string
-    exportedExecutables*: seq[string]
-    lockIdentity*: string
-    provenanceUrl*: string
-    provenanceChecksum*: string
-    declaredExecutableAlias*: string
-      ## The second name realize copied the declared program under, if any.
-      ##
-      ## One of three v3 fields recording REALIZE INPUTS THAT CHANGE THE
-      ## SEALED BYTES. A prefix is not a pure function of the archive it
-      ## came from: before sealing, realize copies the declared program
-      ## under ``executableAlias``, writes a launcher pair for
-      ## ``launcher``, and deletes ``prunePaths``. Two packages over one
-      ## archive that declare these differently hold DIFFERENT bytes.
-      ##
-      ## They are recorded so a reader can ask a prefix whether its tree is
-      ## the one a fresh extraction of a given declaration would produce —
-      ## a question the rest of the receipt cannot answer, and the one a
-      ## sibling-prefix clone has to answer before it may link anything.
-    declaredLauncher*: string
-      ## The interpreter realize wrote a launcher pair for, if any. See
-      ## ``declaredExecutableAlias``.
-    declaredPrunePaths*: seq[string]
-      ## The prefix-relative paths realize deleted after extraction. See
-      ## ``declaredExecutableAlias``.
-    materializationMechanism*: string  ## "hardlink" | "reflink" | "copy" |
-                                       ## "directory" (debug hint only)
-    createdAtUnix*: int64
-    writerProcessId*: int64
-    writerMode*: string                ## "direct" | "daemon"
-    outputName*: string
-    contentDigest*: string
-      ## v4: the prefix's content as realised, ``tree-v2:<hex>``
-      ## (``storeTreeDigest``: ``portable_fingerprint.treeDigestOf`` over
-      ## ``treeEntries`` of the prefix, its receipt left out). "" in a v1-v3
-      ## receipt or one a realiser wrote without it (an adopted prefix): such
-      ## a prefix's content is unverifiable, never trusted for being there.
-      ## Recipe-Val M8: which Nix-style package output this receipt
-      ## belongs to. Empty string (the default) means "legacy
-      ## single-output realize" and the on-disk encoding round-trips
-      ## byte-identically to the pre-M8 receipt envelope. Multi-output
-      ## realize sets this to ``"bin"`` / ``"man"`` / ``"doc"`` /
-      ## ``"dev"`` (whatever the recipe declared).
-    outputPrefixes*: Table[string, string]
-      ## Recipe-Val M8 sibling-output index: empty for single-output
-      ## receipts, populated only on the receipt sealed into the
-      ## *first* output of a multi-output realize so a downstream
-      ## consumer can discover the sibling prefixes (one per declared
-      ## output) without re-walking the store index. Keys are
-      ## logical output names (``"bin"``, ``"man"``, …); values are
-      ## store-relative paths (forward-slashed).
 
   PrefixRow* = object
     ## One row in the `prefixes` table.
@@ -295,7 +230,6 @@ type
 
 const
   StoreSchemaVersion* = 1
-  ReceiptFileName* = ".repro-receipt"
   AdoptedAdapterPrefix* = "adopted:"
     ## The adapter of a receipt written for a prefix the store did not
     ## publish: a directory an earlier layout placed under ``prefixes/``
@@ -304,16 +238,6 @@ const
     ## directory name predates the realization-hash naming, so recovery
     ## checks such a receipt against the path it records instead of the
     ## name its hash would give. Nothing else may write this adapter.
-  ReceiptMagic* = "RPRC"                ## envelope magic
-  ReceiptFormatVersion* = 4'u16
-    ## v2: Recipe-Val M8 — appends ``outputName: string`` and a
-    ## length-prefixed (name, relativePath) sibling-output map after
-    ## the v1 ``writerMode`` field. v1 receipts decode with both
-    ## fields empty, which matches the single-output legacy
-    ## behavior byte-for-byte (the canonical encoding of an empty
-    ## string + empty table appends 6 bytes, so v1 receipts written
-    ## on disk before this upgrade remain readable without
-    ## re-sealing).
   DefaultGcGraceSeconds* = 5 * 60       ## five minutes per the spec
   LastUseResolutionSeconds* = 24 * 3600
     ## A use of a prefix or a CAS blob is RECORDED at most once per object
@@ -385,18 +309,9 @@ proc toForwardSlash(value: string): string =
 # without the store runtime.
 
 # ---------------------------------------------------------------------------
-# Receipt envelope (binary)
+# Receipt content digest. The receipt type and its binary codec live in
+# ``./receipt_codec`` (re-exported above).
 # ---------------------------------------------------------------------------
-
-proc writePrefixId(buf: var seq[byte]; id: PrefixIdBytes) =
-  for b in id: buf.add(b)
-
-proc readPrefixId(buf: openArray[byte]; pos: var int): PrefixIdBytes =
-  if pos + 32 > buf.len:
-    raise newException(EReceiptCorrupt, "truncated prefix id")
-  for i in 0 ..< 32:
-    result[i] = buf[pos + i]
-  pos += 32
 
 const StoreTreeDigestPrefix* = "tree-v2:"
 
@@ -413,172 +328,6 @@ proc storeTreeDigest*(dir: string): string =
   for e in treeEntries(dir):
     if e.rel != ReceiptFileName: entries.add(e)
   StoreTreeDigestPrefix & treeDigestOf(entries)
-
-proc encodeReceipt*(rec: RealizationReceipt): seq[byte] =
-  ## Canonical binary envelope: 4-byte magic, u16 LE version, fields in
-  ## a fixed order, followed by a trailing BLAKE3 checksum.
-  var body: seq[byte] = @[]
-  body.writeU16Le(rec.schemaVersion)
-  body.writeString(rec.adapter)
-  body.writeString(rec.packageName)
-  body.writeString(rec.version)
-  body.writePrefixId(rec.realizationHash)
-  body.writeString(rec.realizedPath)
-  body.writeString(rec.declaredExecutablePath)
-  body.writeU32Le(uint32(rec.exportedExecutables.len))
-  for exported in rec.exportedExecutables:
-    body.writeString(exported)
-  body.writeString(rec.lockIdentity)
-  body.writeString(rec.provenanceUrl)
-  body.writeString(rec.provenanceChecksum)
-  body.writeString(rec.materializationMechanism)
-  body.writeU64Le(uint64(rec.createdAtUnix))
-  body.writeU64Le(uint64(rec.writerProcessId))
-  body.writeString(rec.writerMode)
-  # Recipe-Val M8 v2 trailing fields. Single-output realize leaves
-  # ``outputName`` empty and ``outputPrefixes`` empty, so v1
-  # receipts that round-trip through encode/decode pick up the
-  # 4-byte zero count and the 4-byte empty-string length only —
-  # the body grows by 8 bytes vs. v1, which the checksum and
-  # ``payloadLen`` header rebuild correctly.
-  body.writeString(rec.outputName)
-  body.writeU32Le(uint32(rec.outputPrefixes.len))
-  # Emit sibling-output entries in deterministic order: sort keys
-  # so a multi-output realize always emits the same bytes regardless
-  # of which output's receipt was sealed first.
-  var siblingKeys: seq[string] = @[]
-  for key in rec.outputPrefixes.keys:
-    siblingKeys.add(key)
-  siblingKeys.sort()
-  for key in siblingKeys:
-    body.writeString(key)
-    body.writeString(rec.outputPrefixes[key])
-  # v3 trailing fields: the realize inputs that CHANGE THE SEALED BYTES but
-  # are not derivable from the archive. A prefix is not a pure function of
-  # its download — realize also copies the declared program under
-  # ``executableAlias``, writes a launcher pair for ``launcher``, and drops
-  # ``prunePaths`` — so a reader that wants to know whether this tree is the
-  # one a fresh extraction would produce has to be told. Without them a
-  # sibling-prefix clone cannot be made safe: it would copy an alias the
-  # cloning package never declared, and two machines would hold different
-  # bytes under one prefix id.
-  body.writeString(rec.declaredExecutableAlias)
-  body.writeString(rec.declaredLauncher)
-  body.writeU32Le(uint32(rec.declaredPrunePaths.len))
-  for prunePath in rec.declaredPrunePaths:
-    body.writeString(prunePath)
-  # v4 trailing field: the content digest at realisation (see the field).
-  body.writeString(rec.contentDigest)
-
-  result.add(byte(ord(ReceiptMagic[0])))
-  result.add(byte(ord(ReceiptMagic[1])))
-  result.add(byte(ord(ReceiptMagic[2])))
-  result.add(byte(ord(ReceiptMagic[3])))
-  result.writeU16Le(ReceiptFormatVersion)
-  result.writeU32Le(uint32(body.len))
-  result.add(body)
-  let checksum = blake3.digest(result)
-  for b in checksum:
-    result.add(b)
-
-proc decodeReceipt*(buf: openArray[byte]): RealizationReceipt =
-  if buf.len < 10 + 32:
-    raise newException(EReceiptCorrupt, "receipt too short")
-  for i in 0 ..< 4:
-    if buf[i] != byte(ord(ReceiptMagic[i])):
-      raise newException(EReceiptCorrupt, "unknown receipt magic")
-  var pos = 4
-  let version = readU16Le(buf, pos)
-  if version notin {1'u16, 2'u16, 3'u16, ReceiptFormatVersion}:
-    raise newException(EReceiptCorrupt,
-      "unsupported receipt format version: " & $version)
-  let bodyLen = int(readU32Le(buf, pos))
-  if pos + bodyLen + 32 != buf.len:
-    raise newException(EReceiptCorrupt,
-      "receipt size mismatch (declared body " & $bodyLen & " bytes)")
-  let bodyStart = pos
-  let bodyEnd = bodyStart + bodyLen
-  # Verify trailing BLAKE3 checksum over header + body.
-  var prefixForChecksum: seq[byte] = @[]
-  for i in 0 ..< bodyEnd:
-    prefixForChecksum.add(buf[i])
-  let expected = blake3.digest(prefixForChecksum)
-  for i in 0 ..< 32:
-    if buf[bodyEnd + i] != expected[i]:
-      raise newException(EReceiptCorrupt, "receipt checksum mismatch")
-  result.schemaVersion = readU16Le(buf, pos)
-  result.adapter = readString(buf, pos)
-  result.packageName = readString(buf, pos)
-  result.version = readString(buf, pos)
-  result.realizationHash = readPrefixId(buf, pos)
-  result.realizedPath = readString(buf, pos)
-  result.declaredExecutablePath = readString(buf, pos)
-  let exportedCountRaw = readU32Le(buf, pos)
-  if not elementCountFits(exportedCountRaw, bodyEnd - pos, 4):
-    raise newException(EReceiptCorrupt, "element count exceeds remaining body")
-  let exportedCount = int(exportedCountRaw)
-  result.exportedExecutables = newSeq[string](exportedCount)
-  for i in 0 ..< exportedCount:
-    result.exportedExecutables[i] = readString(buf, pos)
-  result.lockIdentity = readString(buf, pos)
-  result.provenanceUrl = readString(buf, pos)
-  result.provenanceChecksum = readString(buf, pos)
-  result.materializationMechanism = readString(buf, pos)
-  result.createdAtUnix = int64(readU64Le(buf, pos))
-  result.writerProcessId = int64(readU64Le(buf, pos))
-  result.writerMode = readString(buf, pos)
-  result.outputPrefixes = initTable[string, string]()
-  if version >= 2'u16:
-    # Recipe-Val M8 v2 trailing fields. v1 receipts decode with
-    # both fields empty (single-output legacy semantics).
-    result.outputName = readString(buf, pos)
-    let siblingCountRaw = readU32Le(buf, pos)
-    if not elementCountFits(siblingCountRaw, bodyEnd - pos, 8):
-      raise newException(EReceiptCorrupt, "element count exceeds remaining body")
-    let siblingCount = int(siblingCountRaw)
-    for i in 0 ..< siblingCount:
-      let key = readString(buf, pos)
-      let value = readString(buf, pos)
-      result.outputPrefixes[key] = value
-  if version >= 3'u16:
-    # v1 and v2 receipts decode with all three empty. That is the SAFE
-    # direction for the consumer these exist for: a clone keyed on them
-    # refuses to match an older receipt rather than assuming it declared
-    # nothing, because "empty" and "unknown" are the same bytes here.
-    result.declaredExecutableAlias = readString(buf, pos)
-    result.declaredLauncher = readString(buf, pos)
-    let pruneCountRaw = readU32Le(buf, pos)
-    if not elementCountFits(pruneCountRaw, bodyEnd - pos, 4):
-      raise newException(EReceiptCorrupt, "element count exceeds remaining body")
-    let pruneCount = int(pruneCountRaw)
-    result.declaredPrunePaths = newSeq[string](pruneCount)
-    for i in 0 ..< pruneCount:
-      result.declaredPrunePaths[i] = readString(buf, pos)
-  if version >= 4'u16:
-    result.contentDigest = readString(buf, pos)
-  if pos != bodyEnd:
-    raise newException(EReceiptCorrupt, "trailing receipt bytes")
-
-proc receiptDigest*(rec: RealizationReceipt): PrefixIdBytes =
-  ## BLAKE3-256 of the canonical encoded receipt.
-  blake3.digest(encodeReceipt(rec))
-
-proc readReceiptFile*(path: string): RealizationReceipt =
-  if not fileExists(extendedPath(path)):
-    raise newException(EReceiptMissing, "no receipt at " & path)
-  let raw = readFile(extendedPath(path))
-  var buf = newSeq[byte](raw.len)
-  for i, ch in raw:
-    buf[i] = byte(ord(ch))
-  decodeReceipt(buf)
-
-proc writeReceiptFile*(path: string; rec: RealizationReceipt) =
-  let bytes = encodeReceipt(rec)
-  var text = newString(bytes.len)
-  for i, b in bytes:
-    text[i] = char(b)
-  createDir(extendedPath(parentDir(path)))
-  writeFile(extendedPath(path), text)
 
 # ---------------------------------------------------------------------------
 # Realization-hash computation
@@ -1335,6 +1084,106 @@ proc syncTreeDurably*(dir: string) =
     syncDirectoryDurably(dir)
   else:
     discard dir
+
+# ---------------------------------------------------------------------------
+# Read-only prefixes (Local-Content-Addressed-Store.md §"Read-Only Prefixes")
+# ---------------------------------------------------------------------------
+#
+# A published prefix may carry no write bit at all (the install mirror's,
+# Store-And-Installation-Layout.md §"Read-Only Enforcement"). Two rules
+# follow. Their directory halves are POSIX-only: Windows does not read a
+# directory's read-only attribute as forbidding a rename or an unlink in it,
+# and ``removeFile`` clears a file's read-only attribute itself.
+#
+#   * The bits are stripped in STAGING, never after the prefix is indexed:
+#     ``stripTreeWriteBits`` before the publish rename, and the staging
+#     root's own bit right after the rename and before the index row commits.
+#     The root keeps its bit through the rename because a directory moved to
+#     a new parent must itself be writable (its ``..`` entry is rewritten).
+#   * Taking a tree back OUT (GC, recovery, eviction, a displaced or losing
+#     stage) first gives its DIRECTORIES their owner's write bit back
+#     (``restoreDirectoryWriteBits``): the move needs it on the root, and an
+#     unlink needs it on the parent. Never a file's: a prefix file may be a
+#     hardlink of its source, and a mode belongs to the inode both names
+#     share. Never through a symbolic link: the link's target is not the
+#     store's.
+
+const StoreWriteBits = {fpUserWrite, fpGroupWrite, fpOthersWrite}
+
+proc stripRootWriteBits*(root: string) =
+  ## Clear the write bits of the directory ``root`` alone (step 5b: the
+  ## staging root, once it has been renamed into place). Raises ``OSError``
+  ## if the chmod fails. Windows: a no-op, as for every directory here.
+  when defined(posix):
+    let perms = getFilePermissions(root)
+    if (perms * StoreWriteBits).len > 0:
+      setFilePermissions(root, perms - StoreWriteBits)
+  else:
+    discard root
+
+proc stripTreeWriteBits*(root: string; includeRoot = true) =
+  ## Clear every write bit on each file and directory of ``root``, children
+  ## before their directory, without following a symbolic link (a link is
+  ## skipped, not chmod-ed through). ``includeRoot = false`` leaves ``root``
+  ## itself alone, for a stage that still has to be renamed. Raises
+  ## ``OSError`` on the first chmod that fails. Windows: files get the
+  ## read-only attribute, which is what ``setFilePermissions`` maps a mode to
+  ## there; directories are left alone, since Windows does not read that
+  ## attribute on a directory as "read-only".
+  for kind, entry in walkDir(root, relative = false, checkDir = true):
+    case kind
+    of pcDir:
+      stripTreeWriteBits(entry, includeRoot = true)
+    of pcFile:
+      # ``walkDir`` classified it without following it, so not a link.
+      let perms = getFilePermissions(entry)
+      if (perms * StoreWriteBits).len > 0:
+        setFilePermissions(entry, perms - StoreWriteBits)
+    of pcLinkToFile, pcLinkToDir:
+      discard
+  if includeRoot:
+    stripRootWriteBits(root)
+
+when defined(posix):
+  var oDirectoryFlag {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+
+proc restoreDirectoryWriteBits*(root: string; recursive = true) =
+  ## Give ``root`` (and, when ``recursive``, every directory below it) its
+  ## owner's write bit back, so the store can move the tree to a new parent
+  ## and unlink what is in it. Files are never touched, and no symbolic link
+  ## is followed: each directory is opened ``O_DIRECTORY | O_NOFOLLOW`` and
+  ## changed through that descriptor, so a directory swapped for a link
+  ## between the listing and the change is refused, not followed.
+  ## Best-effort: a directory that cannot be changed is left as it is, and
+  ## the move or unlink that needed it reports the failure. Windows: a no-op.
+  when defined(posix):
+    let fd = posix.open(root.cstring, posix.O_RDONLY or oDirectoryFlag or
+      oNoFollow or posix.O_CLOEXEC)
+    if fd < 0:
+      return
+    var st: posix.Stat
+    if posix.fstat(fd, st) == 0 and posix.S_ISDIR(st.st_mode) and
+        (st.st_mode.cint and posix.S_IWUSR.cint) == 0:
+      discard posix.fchmod(fd,
+        posix.Mode(st.st_mode.cint or posix.S_IWUSR.cint))
+    discard posix.close(fd)
+    if recursive:
+      try:
+        for kind, entry in walkDir(root, relative = false):
+          if kind == pcDir:
+            restoreDirectoryWriteBits(entry, recursive = true)
+      except OSError:
+        discard
+  else:
+    discard root
+    discard recursive
+
+proc removeStoreTree*(path: string) =
+  ## ``removeDir`` for a tree the store is discarding (a quarantined prefix,
+  ## a staging directory): restore its directories' write bits first, so a
+  ## read-only tree is removable by the store user that owns it.
+  restoreDirectoryWriteBits(path)
+  removeDir(path)
 
 proc syncPlacedPrefixDurably*(absolutePath: string) =
   ## For a writer that puts a prefix directory at
@@ -2153,8 +2002,14 @@ type
     ## discovered by an overlay being fat, which is late and gives no
     ## cause.
     files*: int
+      ## Regular files. ``hardlinked + copied == files``.
     hardlinked*: int
     copied*: int
+    symlinks*: int
+      ## Symbolic links, to files or to directories, recreated with their
+      ## target text. Never linked or copied, so never in ``files``.
+    directories*: int
+      ## Directories created, empty ones included.
     perFileFallbacks*: int
       ## Files that fell back for a reason that is a property of the FILE.
       ## These must not be read as a defect in the pair.
@@ -2198,6 +2053,31 @@ proc reasonFor(attempt: LinkAttempt): MaterializeFallbackReason =
     of loUnsupported: mfrUnsupported
     else: mfrOther
 
+proc recreateSymlink(target, dst: string; toDirectory: bool) =
+  ## A symbolic link at ``dst`` whose target text is ``target``, exactly as
+  ## read from the source, relative or absolute. On Windows a link's kind
+  ## (file or directory) is fixed at creation; the caller passes the kind
+  ## ``treeEntries`` would record for the source entry, because
+  ## ``std/os.createSymlink`` guesses it by testing ``target`` against the
+  ## current directory, which is wrong for every relative target.
+  ##
+  ## A link already at ``dst`` is replaced, as ``copyFile`` replaces a
+  ## file, so materialising into a populated destination again succeeds.
+  if symlinkExists(extendedPath(dst)):
+    removeFile(extendedPath(dst))
+  when defined(windows):
+    const symbolicLinkFlagDirectory = 1'i32
+    const symbolicLinkFlagAllowUnprivilegedCreate = 2'i32
+    let flag = symbolicLinkFlagAllowUnprivilegedCreate or
+      (if toDirectory: symbolicLinkFlagDirectory else: 0'i32)
+    var wTarget = newWideCString(target.replace('/', '\\'))
+    var wDst = newWideCString(extendedPath(dst))
+    if winlean.createSymbolicLinkW(wDst, wTarget, flag) == 0:
+      raiseOSError(osLastError(), "cannot create symbolic link " & dst &
+        " -> " & target)
+  else:
+    createSymlink(target, dst)
+
 proc materializeDirectory*(srcDir, dstDir: string;
                            report: var MaterializeReport;
                            allowSharedInode =
@@ -2220,6 +2100,21 @@ proc materializeDirectory*(srcDir, dstDir: string;
   ## (``isPerFileFallback``): NTFS's 1023-link cap is a property of one
   ## blob, so treating it as a verdict on the filesystem would turn every
   ## subsequent file into a copy because one file was popular.
+  ##
+  ## **The destination is the source's tree, entry for entry**
+  ## (Local-Content-Addressed-Store §"Write Protocol" step 3): the same
+  ## entries ``storeTreeDigest`` covers. A directory is created even when
+  ## it is empty. A symbolic link, to a file or to a directory, is recreated
+  ## as a link with the same target text: it is never followed, never
+  ## copied (``copyFile`` would publish the bytes it resolves to, a frozen
+  ## copy of a runtime dependency's file) and never hardlinked (``link(2)``
+  ## follows it on macOS, so the hardlink arm would not even agree with
+  ## itself across platforms). A link to a directory is not descended into.
+  ## Without this, one source tree published as two different trees
+  ## depending on whether the store shared the source's filesystem, and the
+  ## prefix lacked directory links and empty directories its realization id
+  ## had been computed over (reprobuild-pm issue 2026-11-15, "store
+  ## materialization drops directory links and empty directories").
   report = MaterializeReport()
   if not dirExists(extendedPath(srcDir)):
     raise newException(StoreError, "materialize source missing: " & srcDir)
@@ -2245,11 +2140,27 @@ proc materializeDirectory*(srcDir, dstDir: string;
       else:
         "copy: the pair offers no hardlink arm [" & cap.describe() & "]"
 
-  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile, pcLinkToFile},
+  for entry in walkDirRec(extendedPath(srcDir), yieldFilter = {pcFile,
+      pcLinkToFile, pcDir, pcLinkToDir}, followFilter = {pcDir},
       relative = true):
     let src = srcDir / entry
     let dst = dstDir / entry
     createDir(extendedPath(parentDir(dst)))
+    let kind = getFileInfo(extendedPath(src), followSymlink = false).kind
+    case kind
+    of pcDir:
+      createDir(extendedPath(dst))
+      report.directories.inc
+      continue
+    of pcLinkToFile, pcLinkToDir:
+      # The same classification ``treeEntries`` makes, so the published
+      # link is the kind the digest recorded.
+      let toDirectory = kind == pcLinkToDir or dirExists(extendedPath(src))
+      recreateSymlink(readSymlinkTarget(extendedPath(src)), dst, toDirectory)
+      report.symlinks.inc
+      continue
+    of pcFile:
+      discard
     report.files.inc
 
     var linked = false
@@ -2279,7 +2190,12 @@ proc materializeDirectory*(srcDir, dstDir: string;
         else: mfrUnsupported].inc
 
     if not linked:
-      copyFile(extendedPath(src), extendedPath(dst))
+      # With the source's permissions: ``copyFile`` creates the file with
+      # the default mode, which drops the executable bit, and the tree
+      # digest (so the realization id) covers that bit. The hardlink arm
+      # shares the inode and so the mode; the copy arm must agree with it.
+      copyFileWithPermissions(extendedPath(src), extendedPath(dst),
+        ignorePermissionErrors = false)
       report.copied.inc
 
 proc describeMechanism*(report: MaterializeReport): string =
@@ -2323,6 +2239,8 @@ proc renderMaterializeReportText*(report: MaterializeReport;
   lines.add "hardlinked: " & $report.hardlinked
   lines.add "copied: " & $report.copied
   lines.add "per-file fallbacks: " & $report.perFileFallbacks
+  lines.add "symlinks: " & $report.symlinks
+  lines.add "directories: " & $report.directories
   for reason in MaterializeFallbackReason:
     if reason == mfrNone: continue
     if report.reasons[reason] > 0:
@@ -2349,6 +2267,8 @@ proc renderMaterializeReportJson*(report: MaterializeReport;
     ", \"hardlinked\": " & $report.hardlinked &
     ", \"copied\": " & $report.copied &
     ", \"per_file_fallbacks\": " & $report.perFileFallbacks &
+    ", \"symlinks\": " & $report.symlinks &
+    ", \"directories\": " & $report.directories &
     ", \"fallback_reasons\": {" & reasons.join(", ") & "}" &
     ", \"capability_probed\": " & (if report.capabilityProbed: "true" else: "false") &
     ", \"hardlink_available\": " & (if report.hardlinkAvailable: "true" else: "false") &
@@ -2633,7 +2553,10 @@ proc publishRowLocked(s: var Store; row: PrefixRow;
   ## fresh directory at the prefix path. With ``replacing`` (the row
   ## exists but described a directory that was missing or did not verify)
   ## the row is UPDATED to describe the new directory -- not deleted,
-  ## which would cascade away every root's hold. Returns whether this call
+  ## which would cascade away every root's hold. The update includes the
+  ## path: a row that recorded an older build's 16-hex name whose directory
+  ## now belongs to another id is moved to the 40-hex name the directory
+  ## was published at (``placePrefix``). Returns whether this call
   ## created or replaced the row; ``false`` is the pre-existing
   ## ``INSERT OR IGNORE`` loser, which leaves the row alone.
   result = s.insertPrefixOrIgnore(row)
@@ -2642,12 +2565,13 @@ proc publishRowLocked(s: var Store; row: PrefixRow;
                                         onlyIfUnrecorded = false)
   elif replacing:
     var u = s.db.prepare(
-      "UPDATE prefixes SET receipt_digest = ?, created_at = ? " &
-      "WHERE prefix_id = ?")
+      "UPDATE prefixes SET receipt_digest = ?, created_at = ?, " &
+      "realized_path = ? WHERE prefix_id = ?")
     defer: u.finalize()
     u.bindBlob(1, row.receiptDigest)
     u.bindInt(2, row.createdAtUnix)
-    u.bindBlob(3, row.prefixId)
+    u.bindText(3, row.realizedPath)
+    u.bindBlob(4, row.prefixId)
     discard u.step()
     discard s.recordPrefixContentDigest(row.prefixId, contentDigest,
                                         onlyIfUnrecorded = false)
@@ -2655,7 +2579,7 @@ proc publishRowLocked(s: var Store; row: PrefixRow;
 
 proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
                          contentDigest: PrefixIdBytes; replacing: var bool;
-                         res: var RealizeResult) =
+                         res: var RealizeResult; readOnly = false) =
   ## Steps 5-6 of the write protocol for a sealed ``stage``: rename it to
   ## ``res.absolutePath`` and index it, or settle as the loser of the
   ## rename against a VERIFIED existing prefix. Fills ``res``'s
@@ -2667,6 +2591,11 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
   ## is flushed after it, both before the index transaction commits. So a
   ## power cut leaves either no row, or a row naming a tree whose data and
   ## name are on disk.
+  ##
+  ## ``readOnly`` (§"Read-Only Prefixes"): the caller stripped every write
+  ## bit below ``stage`` but not ``stage``'s own, which the rename to a new
+  ## parent needs. It is stripped here, after the rename and before the row
+  ## commits, so no index row ever names a writable tree.
   syncTreeDurably(stage)
   let packageDir = parentDir(res.absolutePath)
   let packageDirExisted = dirExists(extendedPath(packageDir))
@@ -2711,6 +2640,10 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
         # Make the rename durable before the index names its result. A
         # failure here rolls the transaction back and leaves an unindexed
         # directory, which recovery verifies against its receipt.
+        if readOnly:
+          stripRootWriteBits(extendedPath(res.absolutePath))
+          # The root's new mode must survive a power cut as its name does.
+          syncDirectoryDurably(extendedPath(res.absolutePath))
         syncDirectoryDurably(packageDir)
         let wrote = s.publishRowLocked(row, contentDigest, replacing)
         s.db.exec("COMMIT")
@@ -2749,7 +2682,7 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
     if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
                          pvUnrecorded}:
       if dirExists(extendedPath(stage)):
-        try: removeDir(extendedPath(stage)) except OSError: discard
+        try: removeStoreTree(extendedPath(stage)) except OSError: discard
       res.outcome = roLoserOfRace
       res.verification = check.outcome
       let existing = s.lookupPrefix(row.prefixId)
@@ -2767,11 +2700,93 @@ proc publishStagedPrefix(s: var Store; stage: string; row: PrefixRow;
     if check.outcome != pvUnindexed:
       replacing = true
 
+proc repointPrefixRow(s: var Store; prefixId: PrefixIdBytes;
+                      relativePath: string) =
+  ## Record that ``prefixId``'s verified directory is at ``relativePath``.
+  ## Only ``placePrefix``'s two names of one id ever reach here.
+  var u = s.db.prepare(
+    "UPDATE prefixes SET realized_path = ? WHERE prefix_id = ?")
+  defer: u.finalize()
+  u.bindText(1, toForwardSlash(relativePath))
+  u.bindBlob(2, prefixId)
+  discard u.step()
+
+proc repointPrefixRow*(s: var Store; prefixId: PrefixIdBytes;
+                       relativePath: string; receiptDigest: PrefixIdBytes;
+                       createdAtUnix: int64) =
+  ## For an adapter that renamed a prefix into place itself and sealed a
+  ## fresh receipt in it (``repro_tool_profiles.registerInUnifiedStore``):
+  ## move ``prefixId``'s row to ``relativePath`` and the new receipt. The
+  ## content record is cleared, since it described the tree at the old
+  ## path; the next use records the tree that is there now, as for a row an
+  ## older build inserted. The caller has established that no prefix of
+  ## this id remains at the old path.
+  var u = s.db.prepare(
+    "UPDATE prefixes SET realized_path = ?, receipt_digest = ?, " &
+    "created_at = ?, content_digest = NULL WHERE prefix_id = ?")
+  defer: u.finalize()
+  u.bindText(1, toForwardSlash(relativePath))
+  u.bindBlob(2, receiptDigest)
+  u.bindInt(3, createdAtUnix)
+  u.bindBlob(4, prefixId)
+  discard u.step()
+
+proc placePrefix(s: var Store; prefixId: PrefixIdBytes;
+                 lookup: tuple[found: bool; row: PrefixRow];
+                 packageName, version, outputName: string;
+                 diagnostic: var string): string =
+  ## The store-relative path ``prefixId``'s prefix is found or published at
+  ## on this store, with the same answer the index-free resolver
+  ## (``prefix_location.resolvePrefixRelativePath``) gives once this call's
+  ## realisation is done -- so the writer and every path-only reader agree
+  ## on one path per id.
+  ##
+  ## * The index records the id at its legacy 16-hex name (an older build
+  ##   published it there): that path, which is where units bound to it
+  ##   look -- unless that name now holds ANOTHER id's prefix (two ids
+  ##   sharing their first 64 bits, the collision the widening exists to
+  ##   end), which is never touched; the id is then published at its 40-hex
+  ##   name and the row moved there. A directory at the legacy name with no
+  ##   receipt recording this id at that path is not this id's prefix and is
+  ##   displaced, so the prefix is restored where the row and the units
+  ##   expect it.
+  ## * Otherwise: the 40-hex name. A directory at the legacy name whose
+  ##   receipt claims this id is not one the index vouches for (a receipt is
+  ##   not authority for adopting a directory; ``recover`` re-indexes an
+  ##   intact one), yet a path-only reader would take it, so it is displaced.
+  ##
+  ## ``diagnostic`` receives what was displaced, "" when nothing was.
+  let current = prefixRelativePath(packageName, version, prefixId, outputName)
+  let legacy = legacyPrefixRelativePath(packageName, version, prefixId,
+                                        outputName)
+  let occupant = legacyPrefixOccupant(s.root, legacy, prefixId)
+  if lookup.found and toForwardSlash(lookup.row.realizedPath) == legacy:
+    case occupant
+    of lpoOtherId:
+      return current
+    of lpoUnrecognised:
+      diagnostic = s.displaceUntrustedPrefix(prefixId,
+        s.absolutePrefixPath(legacy), "the directory at " & legacy &
+        ", where the store index records this prefix, carries no receipt " &
+        "recording it there")
+      return legacy
+    of lpoAbsent, lpoThisId:
+      return legacy
+  if occupant == lpoThisId:
+    diagnostic = s.displaceUntrustedPrefix(prefixId,
+      s.absolutePrefixPath(legacy), "a directory at the 16-hex name " &
+      legacy & " claims this prefix, but the store index " &
+      (if lookup.found: "records it at " & lookup.row.realizedPath
+       else: "has no row for it") &
+      " (its receipt is not authority for adopting it)")
+  current
+
 proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
                     hint: StoreReceiptHint;
                     populate: proc (stagingDir: string;
                                     mechanism: var string);
-                    writerMode = "direct"): RealizeResult =
+                    writerMode = "direct";
+                    readOnly = false): RealizeResult =
   ## Materializes a prefix using the spec's stage → rename → INSERT OR
   ## IGNORE protocol.
   ##
@@ -2781,12 +2796,22 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
   ## `.repro-receipt` — the store seals that itself so the on-disk
   ## directory name and the receipt-recorded realization-hash are
   ## guaranteed to match.
+  ##
+  ## The prefix is published at its 40-hex name, or found at an older
+  ## build's 16-hex name when the index records it there (``placePrefix``).
+  ##
+  ## ``readOnly`` publishes the tree with no write bit on any file or
+  ## directory, stripped in staging (§"Read-Only Prefixes"), so it is
+  ## read-only from the moment the index names it. It does not touch a
+  ## prefix that is already present.
   result.prefixId = prefixId
-  result.relativePath = prefixRelativePath(hint.packageName,
-    hint.version, prefixId, hint.outputName)
+  let lookup = s.lookupPrefix(prefixId)
+  result.relativePath = s.placePrefix(prefixId, lookup, hint.packageName,
+    hint.version, hint.outputName, result.integrityDiagnostic)
+  if result.integrityDiagnostic.len > 0:
+    result.replacedUntrusted = true
   result.absolutePath = s.absolutePrefixPath(result.relativePath)
 
-  let lookup = s.lookupPrefix(prefixId)
   # ``replacing``: the index has a row, but the directory it describes is
   # gone or did not verify; the fresh realisation below updates the row
   # instead of inserting one.
@@ -2799,6 +2824,9 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
       result.verification = check.outcome
       if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
                            pvUnrecorded}:
+        if result.row.realizedPath != result.relativePath:
+          s.repointPrefixRow(prefixId, result.relativePath)
+          result.row.realizedPath = result.relativePath
         discard s.touchPrefix(prefixId)
         return result
       if check.outcome == pvMismatch:
@@ -2842,6 +2870,8 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
     # The record a later use is checked against: the tree exactly as it is
     # about to be published, receipt included.
     let contentDigest = prefixTreeDigest(stage)
+    if readOnly:
+      stripTreeWriteBits(extendedPath(stage), includeRoot = false)
     var row = PrefixRow(
       prefixId: prefixId,
       packageName: hint.packageName,
@@ -2850,11 +2880,12 @@ proc realizePrefix*(s: var Store; prefixId: PrefixIdBytes;
       adapter: hint.adapter,
       receiptDigest: digest,
       createdAtUnix: receipt.createdAtUnix)
-    s.publishStagedPrefix(stage, row, contentDigest, replacing, result)
+    s.publishStagedPrefix(stage, row, contentDigest, replacing, result,
+      readOnly = readOnly)
     return result
   except CatchableError:
     if dirExists(extendedPath(stage)):
-      try: removeDir(extendedPath(stage)) except OSError: discard
+      try: removeStoreTree(extendedPath(stage)) except OSError: discard
     raise
 
 # ---------------------------------------------------------------------------
@@ -3113,7 +3144,22 @@ proc quarantineUnique(s: var Store; absolutePath: string): string =
   # Rename preserves mtime. Stamp before a concurrent sweep can see the tree;
   # the age of the original build must not consume its quarantine grace.
   setLastModificationTime(extendedPath(absolutePath), getTime())
-  moveDir(extendedPath(absolutePath), extendedPath(result))
+  # A read-only prefix (§"Read-Only Prefixes"): moving a directory to a new
+  # parent needs write permission on the directory itself, so only its own
+  # bit is restored before the move. The rest of the tree gets its
+  # directories' bits back when it is unlinked (`removeStoreTree`), not
+  # here: a walk of the whole tree does not belong inside the GC's write
+  # transaction. No file is made writable.
+  let rootMode = getFilePermissions(extendedPath(absolutePath))
+  restoreDirectoryWriteBits(extendedPath(absolutePath), recursive = false)
+  try:
+    moveDir(extendedPath(absolutePath), extendedPath(result))
+  except OSError:
+    # The prefix stays where it is, so it keeps the mode it had: a failed
+    # move must not leave a read-only prefix writable.
+    try: setFilePermissions(extendedPath(absolutePath), rootMode)
+    except OSError: discard
+    raise
 
 proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
                graceSeconds = DefaultGcGraceSeconds): GcPrefixResult =
@@ -3200,7 +3246,7 @@ proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
       age = 0
     if age >= graceSeconds.int64:
       try:
-        removeDir(extendedPath(result.quarantinedPath))
+        removeStoreTree(extendedPath(result.quarantinedPath))
         s.appendAuditNoPrefix(gaReclaim, "unlinked " & result.quarantinedPath &
           " (age " & $age & "s >= grace " & $graceSeconds & "s)")
         result.reclaimed = true
@@ -3284,7 +3330,7 @@ proc sweepPendingDeletion*(s: var Store; graceSeconds = DefaultGcGraceSeconds):
         continue
       try:
         if kind in {pcDir, pcLinkToDir}:
-          removeDir(entry)
+          removeStoreTree(entry)
         else:
           removeFile(entry)
         s.appendAuditNoPrefix(gaReclaim, "unlinked " & entry &
@@ -3308,7 +3354,7 @@ proc sweepStaging*(s: var Store): seq[string] =
     case kind
     of pcDir, pcLinkToDir:
       try:
-        removeDir(entry)
+        removeStoreTree(entry)
         result.add(entry)
       except OSError: discard
     of pcFile, pcLinkToFile:
@@ -3412,13 +3458,16 @@ proc reconcileUnindexedPrefixes(s: var Store; report: var RecoverReport) =
           report.quarantinedPrefixes.add(dir)
         except OSError: discard
         continue
-      # Verify the directory leaf name matches the realization-hash -- or,
-      # for an adopted prefix, that the receipt records this very path.
+      # Verify the directory leaf name matches the realization-hash: its
+      # 40-hex name, or an older build's 16-hex name that the receipt
+      # records as this very path (``prefixDirMatchesReceipt``) -- or, for
+      # an adopted prefix, that the receipt records this very path.
       let expectedLeaf = realizationDirName(receipt.version,
         receipt.realizationHash)
+      let relDir = s.relativeFromRoot(dir)
       let adoptedHere = receipt.adapter.startsWith(AdoptedAdapterPrefix) and
-        receipt.realizedPath == s.relativeFromRoot(dir)
-      if dir.extractFilename != expectedLeaf and not adoptedHere:
+        receipt.realizedPath == relDir
+      if not prefixDirMatchesReceipt(relDir, receipt) and not adoptedHere:
         try:
           discard s.quarantineUnique(dir)
           s.appendAudit(gaQuarantine, receipt.realizationHash,
@@ -3586,7 +3635,8 @@ proc recoverStoreRoot*(root: string): RecoverReport =
 
 proc realizeDirectoryAsPrefix*(s: var Store; sourceDir: string;
                               hint: StoreReceiptHint;
-                              extra: openArray[string] = []): RealizeResult =
+                              extra: openArray[string] = [];
+                              readOnly = false): RealizeResult =
   ## Helper for adapters that already have the realized contents laid
   ## out in `sourceDir` (M53 Nix and M54 tarball both produce this
   ## shape).  Computes the realization hash, hardlinks or copies the
@@ -3596,7 +3646,8 @@ proc realizeDirectoryAsPrefix*(s: var Store; sourceDir: string;
     hint.provenanceUrl, hint.provenanceChecksum, extra)
   result = s.realizePrefix(prefixId, hint,
     proc (stagingDir: string; mechanism: var string) =
-      materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism))
+      materializeViaHardlinkOrCopy(sourceDir, stagingDir, mechanism),
+    readOnly = readOnly)
 
 # ---------------------------------------------------------------------------
 # Recipe-Val M8 — multi-output realize
@@ -3644,6 +3695,7 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
       prefixId: PrefixIdBytes
       relativePath: string
       absolutePath: string
+      lookup: tuple[found: bool; row: PrefixRow]
   var pending: seq[Pending] = newSeq[Pending](outputs.len)
   var siblingMap = initTable[string, string]()
   for i, spec in outputs:
@@ -3655,11 +3707,17 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
       hint.version, hint.adapter, hint.lockIdentity,
       hint.declaredExecutablePath, spec.outputName, manifest,
       hint.provenanceUrl, hint.provenanceChecksum, extra)
-    let rel = prefixRelativePath(hint.packageName, hint.version,
-      prefixId, spec.outputName)
+    # Where each output lives on this store: its 40-hex name, or an older
+    # build's 16-hex name the index records it at (``placePrefix``, as in
+    # ``realizePrefix``). Decided before any receipt is sealed, since every
+    # receipt lists every sibling's path.
+    let lookup = s.lookupPrefix(prefixId)
+    var displaced = ""
+    let rel = s.placePrefix(prefixId, lookup, hint.packageName,
+      hint.version, spec.outputName, displaced)
     let abs = s.absolutePrefixPath(rel)
     pending[i] = Pending(spec: spec, prefixId: prefixId,
-      relativePath: rel, absolutePath: abs)
+      relativePath: rel, absolutePath: abs, lookup: lookup)
     siblingMap[spec.outputName] = toForwardSlash(rel)
   # Phase 2: stage each output, seal a receipt that lists every
   # sibling output's relative path, atomic rename + index insert.
@@ -3670,12 +3728,14 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
     # Cache hit (already-present prefix): skip staging entirely -- if the
     # directory verifies against the index's record (G7, see
     # ``realizePrefix``); otherwise it is displaced and realised again.
-    let lookup = s.lookupPrefix(p.prefixId)
+    let lookup = p.lookup
     var replacing = lookup.found
     if lookup.found and dirExists(extendedPath(p.absolutePath)):
       let check = s.verifyRealizedPrefix(p.prefixId, p.absolutePath)
       if check.outcome in {pvVerified, pvCached, pvRecordedFirst,
                            pvUnrecorded}:
+        if lookup.row.realizedPath != p.relativePath:
+          s.repointPrefixRow(p.prefixId, p.relativePath)
         entry.outcome = roAlreadyPresent
         discard s.touchPrefix(p.prefixId)
         result.perOutput.add(entry)
@@ -3729,7 +3789,7 @@ proc realizeMultiOutput*(s: var Store; hint: StoreReceiptHint;
       result.perOutput.add(entry)
     except CatchableError:
       if dirExists(extendedPath(stage)):
-        try: removeDir(extendedPath(stage)) except OSError: discard
+        try: removeStoreTree(extendedPath(stage)) except OSError: discard
       raise
 
 # ---------------------------------------------------------------------------

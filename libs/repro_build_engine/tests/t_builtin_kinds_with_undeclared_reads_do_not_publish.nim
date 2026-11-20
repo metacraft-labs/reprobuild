@@ -53,7 +53,8 @@ let TmpDir = absolutePath(
 const
   Refused = [bakCopyFile, bakPreserveTree, bakEnsureLine, bakEnsureSnippet,
              bakWorkspaceVcs, bakBinaryCacheSubstitute, bakForeignProvision,
-             bakMetadataFetch, bakSolveLock, bakLockUpdate]
+             bakMetadataFetch, bakSolveLock, bakLockUpdate, bakCatalogIndex,
+             bakSourceFetch]
   Allowed = [bakEnsureDir, bakWriteText, bakStamp]
   StubProvisioner = "t-stub-provisioner"
 
@@ -71,6 +72,8 @@ registerBinaryCacheSubstituteExecutor(stubExecutor)
 registerMetadataFetchExecutor(stubExecutor)
 registerSolveLockExecutor(stubExecutor)
 registerLockUpdateExecutor(stubExecutor)
+registerCatalogIndexExecutor(stubExecutor)
+registerSourceFetchExecutor(stubExecutor)
 registerForeignProvisionExecutor(StubProvisioner, stubExecutor)
 
 proc project(name: string): string =
@@ -92,7 +95,7 @@ proc actionOf(kind: BuildActionKind; p: string): BuildAction =
     text = "src\ntree"
     entries = @["file\tmain.c"]
   of bakEnsureSnippet:
-    entries = @["# begin", "# end", "# begin", "# end", "snippet"]
+    entries = ensureSnippetEntries("t-pkg", "t-block", "snippet")
   else:
     discard
   result = builtinAction(kind, id, cwd = p,

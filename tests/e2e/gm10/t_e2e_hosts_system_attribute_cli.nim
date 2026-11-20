@@ -74,7 +74,7 @@ suite "GM10: the hosts system attribute through the home CLI":
     checkpoint exported.stderr
     require exported.exitCode == 0
     let doc = parseJson(exported.stdout)
-    check doc["schemaVersion"].getInt == 5
+    check doc["schemaVersion"].getInt == 6
     check doc["intent"]["hostSystems"] == %*{
       "gm10-elsewhere": {"mode": "managedElsewhere",
                          "managedBy": "example-org/gm10-infra",

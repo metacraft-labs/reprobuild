@@ -220,7 +220,7 @@ def build_block_text(kind: str, package_name: str, indent: str,
         lines.append(
             f"{inner}let cfgPrefix = readConfigurable[string](")
         lines.append(
-            f"{inner}  {nim_string_lit(package_name + '.prefix')}, "
+            f"{inner}  {nim_string_lit('package.' + package_name + '.prefix')}, "
             f"{nim_string_lit(prefix_default)})"
         )
     # Render flag list

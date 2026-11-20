@@ -40,7 +40,7 @@
 ## ─────────────────────────────────────────────────────────────────────────
 ##
 ## * ``recordConfigDefault[T]`` — register a default value for a
-##   ``<packageName>.<bindingName>`` key. Called from code emitted by
+##   ``package.<packageName>.<bindingName>`` key. Called from code emitted by
 ##   the ``package`` macro for every entry in a ``config:`` block whose
 ##   shape is the v8 typed-default form (``name: T = default``) AND
 ##   that did NOT match the existing ``parseVariantDeclaration``
@@ -63,7 +63,7 @@
 ##   re-emerges, or, for a REQUIRED key (one with no default), so the
 ##   slot returns to UNSATISFIED and the next read raises.
 ##
-## * ``registeredConfigKeys`` — list every ``<package>.<name>`` key for
+## * ``registeredConfigKeys`` — list every ``package.<package>.<name>`` key for
 ##   diagnostic / inspection paths.
 ##
 ## * ``registerVersion`` / ``registeredVersions`` /
@@ -194,7 +194,8 @@ type
 
 var dslPortDefaults: Table[string, DslScalarValue]
   ## Defaults table: one entry per call to ``recordConfigDefault``.
-  ## Keyed by ``<packageName>.<bindingName>``. Insertion is idempotent
+  ## Keyed by ``package.<packageName>.<bindingName>`` (``packageConfigKey``).
+  ## Insertion is idempotent
   ## (re-recording a key leaves the existing default in place) so that
   ## module-init replays do not clobber a previously-overridden cell.
 
@@ -294,6 +295,38 @@ proc resetDslPortConfigState*() =
   dslPortRequired.clear()
   dslPortKeyOrder.setLen(0)
 
+const PackageConfigKeyPrefix* = "package."
+  ## The kind segment every key in this lane begins with.
+  ## Configurable-System.md §"2. Scope-derived name (default persistence
+  ## key)" names a package's configurable `package.<name>[.<scope>…].<leaf>`:
+  ## the FIRST segment is the kind of the outermost scope, so a package
+  ## and an activity of the same name cannot collide. Package-Model.md
+  ## §"Directory-Scoped Rule Generators" addresses an override by that
+  ## name (`package.nim.targetTriple`). Every key this lane registers is
+  ## built by `packageConfigKey`, so the spec's spelling is the only one a
+  ## `setConfigurable` / `readConfigurable` can name. The bare
+  ## `<name>.<leaf>` the lane used to register names no configurable and
+  ## is refused, with a pointer to the key it meant (`missingKeyHint`).
+
+proc packageConfigKey*(packageName: string; path: varargs[string]): string =
+  ## The scope-derived key of the configurable `path` declared in
+  ## package `packageName`: `package.<packageName>[.<path>…]`.
+  result = PackageConfigKeyPrefix & packageName
+  for segment in path:
+    result.add('.')
+    result.add(segment)
+
+proc missingKeyHint(key: string): string =
+  ## What an `EDslPortMissingKey` adds when `key` is a registered key
+  ## with its kind segment left off -- the spelling this lane registered
+  ## before it adopted Configurable-System.md's.
+  if not key.startsWith(PackageConfigKeyPrefix) and
+      (PackageConfigKeyPrefix & key) in dslPortDefaults:
+    " (a configurable key begins with its kind: did you mean '" &
+      PackageConfigKeyPrefix & key & "'?)"
+  else:
+    ""
+
 proc recordConfigDefaultRaw*(key: string; default: DslScalarValue) =
   ## Type-erased default registration. The ``recordConfigDefault[T]``
   ## generic wrapper below is the call site the ``package`` macro
@@ -320,7 +353,7 @@ proc recordConfigDefault*[T](packageName, name: string; default: T) =
   ## generic instead of as a separate overload because the macro emits
   ## an explicit generic parameter ``recordConfigDefault[seq[X]](...)``
   ## which routes to THIS proc, not to a sibling ``[E: enum]`` overload.
-  let key = packageName & "." & name
+  let key = packageConfigKey(packageName, name)
   when T is bool:
     recordConfigDefaultRaw(key, dslScalarBool(default))
   elif T is SomeInteger:
@@ -386,7 +419,7 @@ proc recordConfigRequired*[T](packageName, name: string) =
   ## required or not, and the environment walker refuses a binding to it
   ## by name -- a DIFFERENT refusal from this one, and deliberately not
   ## merged with it.
-  let key = packageName & "." & name
+  let key = packageConfigKey(packageName, name)
   when T is bool:
     recordConfigRequiredRaw(key, dslScalarBool(false))
   elif T is SomeInteger:
@@ -455,7 +488,7 @@ proc restoreConfigurableOverrides*(snapshot: Table[string, DslScalarValue]) =
   dslPortOverrides = snapshot
 
 proc registeredConfigKeys*(): seq[string] =
-  ## Return every ``<package>.<name>`` key in insertion order. A copy
+  ## Return every ``package.<package>.<name>`` key in insertion order. A copy
   ## so callers cannot mutate the registry.
   result = dslPortKeyOrder
 
@@ -502,8 +535,8 @@ type
     ## provenance) triple `Configurable-System.md` specifies, plus the
     ## OPERATION that makes the two axes independent.
     key*: string
-      ## The configurable's full key, `<package>.<name>` or
-      ## `<package>.<activity>.<name>` -- byte-identical to the key
+      ## The configurable's full key, `package.<package>.<name>` or
+      ## `package.<package>.<activity>.<name>` -- byte-identical to the key
       ## `recordConfigDefault` registers, which is what makes a
       ## contribution a contributor into the EXISTING table rather than
       ## a second one.
@@ -666,7 +699,7 @@ proc recordContributionPoint*[T](packageName, name: string; default: T;
   ## contributed, i.e. would make the owner's own `renderConfig` fail on
   ## a workspace where no consumer is enabled.
   when T is seq[string]:
-    recordContributionPointRaw(packageName & "." & name,
+    recordContributionPointRaw(packageConfigKey(packageName, name),
       dslScalarSeqString(default), sourceFile, sourceLine)
   else:
     {.error: "recordContributionPoint: unsupported contribution-point " &
@@ -822,7 +855,8 @@ proc contributeConfigurableRaw*(key, package: string;
   if key notin dslPortDefaults:
     raise newException(EDslPortMissingKey,
       "contributeConfigurable: no configurable registered for key '" &
-      key & "' -- declare it in a `config:` block first")
+      key & "'" & missingKeyHint(key) &
+      " -- declare it in a `config:` block first")
   if operation == coAppend and key notin dslPortContributionPoints:
     raise newException(EDslPortNotAContributionPoint,
       "contributeConfigurable('" & key & "'): `append` is only " &
@@ -1239,7 +1273,8 @@ proc dslPortLookup(key: string): DslScalarValue =
     return dslPortDefaults[key]
   raise newException(EDslPortMissingKey,
     "readConfigurable: no configurable registered for key '" & key &
-    "' — verify the package's config: block declares '" & key &
+    "'" & missingKeyHint(key) &
+    " — verify the package's config: block declares '" & key &
     "' and that the package module has been imported")
 
 proc readConfigurable*[T](key: string): T =
@@ -1316,7 +1351,9 @@ proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
   ## shape for fixture / multi-recipe code paths that probe several
   ## possible types.
   ##
-  ## IT DOES RAISE FOR ONE CASE, and that case is deliberate: a
+  ## IT RAISES FOR TWO CASES, both deliberate. The first is a key that
+  ## is a registered key with its kind segment left off (see the scalar
+  ## overload below and ``PackageConfigKeyPrefix``). The second is a
   ## REQUIRED configurable nothing has satisfied
   ## (``EDslPortUnsatisfiedRequired``, Shared-Development-Services L5
   ## §6). ``seq[Enum]`` is in ``recordConfigRequired``'s type set, so
@@ -1336,6 +1373,12 @@ proc readConfigurable*[E: enum](key: string; fallback: seq[E]): seq[E] =
     for o in stored.seqEnumOrds:
       result.add(E(o))
   except EDslPortMissingKey:
+    # A key that names a registered configurable with its kind
+    # segment left off is a misspelling, not an absent key: falling
+    # back would leave the configurable at whatever the caller
+    # guessed while every override of it went unread.
+    if missingKeyHint(key).len > 0:
+      raise
     return fallback
 
 proc readConfigurable*[T](key: string; fallback: T): T =
@@ -1353,6 +1396,13 @@ proc readConfigurable*[T](key: string; fallback: T): T =
   ## answered with ``fallback``; the ``except`` below catches
   ## ``EDslPortMissingKey`` ONLY, and ``EDslPortUnsatisfiedRequired``
   ## is deliberately not a subtype of it.
+  ##
+  ## IT ALSO RE-RAISES ``EDslPortMissingKey`` for a key that is a
+  ## REGISTERED key with its kind segment left off (`dbusBroker.x` for
+  ## `package.dbusBroker.x`, see ``PackageConfigKeyPrefix``). That is a
+  ## misspelling, not an absent key. The check sees what is registered
+  ## when the read runs, so a kindless read made before the owning
+  ## package registers its defaults still gets the fallback.
   ##
   ## THIS COMMENT SAID "Never raises" UNTIL L5's required-configurable
   ## work, and the exception is the point rather than an oversight:
@@ -1391,6 +1441,12 @@ proc readConfigurable*[T](key: string; fallback: T): T =
          "; M2/M9.D supports bool / int / string / float / enum / " &
          "seq[enum]; L8 adds seq[string]".}
   except EDslPortMissingKey:
+    # A key that names a registered configurable with its kind
+    # segment left off is a misspelling, not an absent key: falling
+    # back would leave the configurable at whatever the caller
+    # guessed while every override of it went unread.
+    if missingKeyHint(key).len > 0:
+      raise
     return fallback
 
 proc inspectConfigurable*(key: string): DslScalarValue =
@@ -1412,7 +1468,8 @@ proc setConfigurableRaw*(key: string; value: DslScalarValue) =
   if key notin dslPortDefaults:
     raise newException(EDslPortMissingKey,
       "setConfigurable: no configurable registered for key '" & key &
-      "' — register the default via the package's config: block first")
+      "'" & missingKeyHint(key) &
+      " — register the default via the package's config: block first")
   let registered = dslPortDefaults[key]
   if registered.kind != value.kind:
     raise newException(EDslPortTypeMismatch,
@@ -1501,7 +1558,7 @@ proc resetConfigurable*(key: string) =
   if key notin dslPortDefaults:
     raise newException(EDslPortMissingKey,
       "resetConfigurable: no configurable registered for key '" & key &
-      "'")
+      "'" & missingKeyHint(key))
   if key in dslPortContributionPoints:
     # Shared-Development-Services L8: drop the row `setConfigurable`
     # owns, and ONLY that row. A reset is the inverse of a `set`, so it
@@ -3323,7 +3380,7 @@ proc resolveServiceConvergePoint*(packageName, bareName: string): string =
   var matches: seq[string] = @[]
   let suffix = "." & bareName
   for key in dslPortContributionPointOrder:
-    if not key.startsWith(packageName & "."):
+    if not key.startsWith(packageConfigKey(packageName) & "."):
       continue
     if key.endsWith(suffix):
       matches.add(key)
@@ -3331,7 +3388,7 @@ proc resolveServiceConvergePoint*(packageName, bareName: string): string =
     return matches[0]
   var declared: seq[string] = @[]
   for key in dslPortContributionPointOrder:
-    if key.startsWith(packageName & "."):
+    if key.startsWith(packageConfigKey(packageName) & "."):
       declared.add(key)
   if matches.len == 0:
     raise newException(EDslPortMissingKey,
@@ -4402,13 +4459,16 @@ proc managedBlockOpenSentinel*(scope: ManagedBlockScope;
                                packageName, blockId: string): string =
   ## Spec §"Sentinel uniqueness" — open sentinel of the triple form.
   ## Public so tests + the apply phase can format the same string the
-  ## merger emits.
-  "# >>> repro:" & $scope & ":" & packageName & ":" & blockId & " >>>"
+  ## merger emits. Rendered by the managed-file writer
+  ## (``repro_core/managed_block``), the one owner of the format.
+  coreManagedBlock.openSentinel(
+    coreManagedBlock.managedBlockKey($scope, packageName, blockId))
 
 proc managedBlockCloseSentinel*(scope: ManagedBlockScope;
                                 packageName, blockId: string): string =
   ## Spec §"Sentinel uniqueness" — close sentinel of the triple form.
-  "# <<< repro:" & $scope & ":" & packageName & ":" & blockId & " <<<"
+  coreManagedBlock.closeSentinel(
+    coreManagedBlock.managedBlockKey($scope, packageName, blockId))
 
 proc renderManagedBlockChunk(c: DslManagedBlockContribution): string =
   ## Render one sentinel-delimited chunk: open + content (trailing \n
@@ -5452,7 +5512,7 @@ type
     variantConfigField*: string
       ## The config-field ident named in the outer ``variant <ident>:``
       ## head. Diagnostic surface — ``activeVariantArms`` also keys off
-      ## ``packageName & "." & variantConfigField`` to read the
+      ## ``packageConfigKey(packageName, variantConfigField)`` to read the
       ## configurable cell.
     armValue*: string
       ## The enum literal as a SOURCE-LEVEL IDENT string — e.g.
@@ -5596,7 +5656,7 @@ proc activeVariantArms*(packageName, configField: string): seq[DslVariantArm] =
   result = @[]
   if packageName notin dslPortVariants:
     return
-  let key = packageName & "." & configField
+  let key = packageConfigKey(packageName, configField)
   if not isConfigKeyRegistered(key):
     return
   let stored = inspectConfigurable(key)
@@ -6910,10 +6970,13 @@ type
     pkgConfig*: string
       ## pkg-config module name (``.pc`` basename without ``.pc``).
     soname*: string
-      ## SONAME — platform decoration applied by packagers.
+      ## The library's BASE name (``foo`` for ``libfoo.so``), not the
+      ## full SONAME: the stdlib derives that as
+      ## ``lib<soname>.so[.<sover>]`` (``sharedLibrarySoname``).
     sover*: string
-      ## SOVERSION — combined with ``soname`` to produce the fully
-      ## versioned library filename.
+      ## SOVERSION (``1`` for ``libfoo.so.1``). Appended to the derived
+      ## SONAME, which is both the library's ``DT_SONAME`` and the name
+      ## of the file it is written under. Empty: no version suffix.
     linkKind*: LibraryLinkKind
       ## How consumers link against this library — static archive,
       ## shared object, or both. ``llkUnset`` when ``linkKind`` was

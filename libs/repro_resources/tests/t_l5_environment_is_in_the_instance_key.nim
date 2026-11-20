@@ -76,7 +76,7 @@ package l5KeyPkg:
     ## from the configurable the environments bind. That is what makes
     ## the `derived` half below a measurement rather than a restatement.
     ssoConfig = renderConfigFile(ConfigPath,
-      "issuer = \"" & readConfigurable[string]("l5KeyPkg.issuer") & "\"\n")
+      "issuer = \"" & readConfigurable[string]("package.l5KeyPkg.issuer") & "\"\n")
 
   service ssoStable:
     executable l5KeyBin

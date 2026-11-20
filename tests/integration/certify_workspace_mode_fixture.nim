@@ -64,6 +64,7 @@ proc app*(fx: WorkspaceCertifyFixture): string = fx.cf.sib.app
 proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
                                    buildLines: string;
                                    untrackedStems: openArray[string] = [];
+                                   extraIgnores: openArray[string] = [];
                                    hybridStems: openArray[string] = []):
     WorkspaceCertifyFixture =
   ## The TC-8d workspace with ``app`` turned into a project: one edge per
@@ -74,7 +75,9 @@ proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
   ## §6.2.1); the rest keep the default ``timestamp``, whose results it may
   ## not. The committed ``repro.lock`` is the one the TC-8d fixture refreshed
   ## (it pins the siblings; the tool comes from ``PATH``, which no lock
-  ## pins), so the project needs no second refresh.
+  ## pins), so the project needs no second refresh. ``extraIgnores`` are
+  ## appended to the committed ``.gitignore``, for a test that needs an
+  ## ignored file the fixture does not otherwise produce.
   result.cf = setupCertifyFixture(label)
   result.binDir = result.cf.sib.scratch / "bin"
   writeExecutable(result.binDir / "cert-tool",
@@ -117,7 +120,9 @@ proc setupWorkspaceCertifyFixture*(label: string; stems: openArray[string];
     "    \"cert-tool >=1.0 <2.0\"\n" & siblingUses & "\n" &
     "  build:\n" & body & buildLines)
   # Build outputs and the run log are not part of the content.
-  writeFile(app / ".gitignore", ".repro/\nbuild/\n")
+  var ignores = ".repro/\nbuild/\n"
+  for pattern in extraIgnores: ignores.add(pattern & "\n")
+  writeFile(app / ".gitignore", ignores)
   discard result.cf.gitIn(app, "add -A")
   for stem in untrackedStems:
     discard result.cf.gitIn(app, "rm -q --cached " &

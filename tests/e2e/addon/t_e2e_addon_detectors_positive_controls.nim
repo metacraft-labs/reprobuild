@@ -24,7 +24,12 @@
 ##
 ## Each control is checked twice: the record reaches the gate's sink (it
 ## left the host, DET-6), and the off-host check over the sink's store
-## raises the detector's alert. Before any control the check reports every
+## raises the detector's alert. The controls that run on the host every
+## time their detector runs (DET-4; spec §10.4 "Scheduled positive
+## controls") are checked under the real units and the base's real dpkg
+## database: the tick's DET-AO-1 control and the egress check's DET-AO-3
+## control before the baseline, the apt hook's DET-AO-6 control with the
+## DET-AO-6 control's package. Before any control the check reports every
 ## detector live-idle and no alert: "nothing detected" is a state the gate
 ## sees, distinct from the silence DET-AO-8's control produces (DET-5).
 ##
@@ -49,6 +54,7 @@ import std/[json, options, os, sequtils, strutils, times, unittest]
 import repro_test_support/reasoned_skip
 import repro_deploy_agent/manifest
 import repro_peer_cache/auth as peerAuth
+import repro_peer_cache/evidence
 
 import repro_addon/evidence_check
 
@@ -124,6 +130,19 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   ship()
   discard sink.waitFor(host, "addon-agent-tick", "", 180)
   discard sink.waitFor(host, "addon-store", "", 180)
+  # DET-4 on the host: every tick runs DET-AO-1's control with the host's
+  # anchors, and every fetch sends DET-AO-3's control datagram, which the
+  # check that follows it must have seen counted.
+  proc controlTripped(detector: string; since: uint64; trigger = ""): bool =
+    sink.entries().anyIt(it.seq >= since and it.kind == ekRecord and
+      it.record.detector == detector and
+      (trigger.len == 0 or it.record.trigger == trigger) and
+      it.record.field("control") == "tripped")
+  step("DET-4: the tick's DET-AO-1 control tripped on the host",
+       controlTripped("addon-agent-tick", 0), "")
+  step("DET-4: the egress check's DET-AO-3 control tripped on the host",
+       controlTripped("addon-egress", 0),
+       g.exec("nft list set inet repro_addon_egress refused4").stdout)
   let base = sink.check(host, signers)
   record["baseline"] = toJson(base)
   step("baseline: nothing detected, every detector live-idle, no alert",
@@ -205,16 +224,46 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
        "EAddOnStoreChanged" in g.lastTick().message, $g.lastTick())
   control("DET-AO-5", "addon-store", "store-changed", since)
 
-  # DET-AO-7: a unit whose health check fails.
+  # DET-AO-7: a unit whose health check fails. The tick is an agent apply,
+  # which refuses a new unit with the whole-floor waiver (spec §10.1 "An
+  # agent apply never weakens the floor", C102), so the unit is under the
+  # floor and runs the add-on's own store binary, inside the closure the
+  # floor confines execution to. It starts; only its health check (nothing
+  # listens on port 9) fails, so the switch rolls back for that reason,
+  # not the floor's (reprobuild-pm issue 2026-11-17-addon-detectors-gate-
+  # det-ao-7-control-is-refused-by-the-floor-before-it-fails).
   since = sink.headSeq()
   inc sequence
-  discard publish(PublishSpec(sequence: sequence,
-    profileText: "addOn {\n  confirmTimeout = 15\n}\n\n" &
-      unitProfile("repro-a11-fail.service", "/bin/sleep infinity",
-                  health = "tcp:127.0.0.1:9")))
-  let t7 = g.tickUnits()
+  let storeRepro = g.exec("ls -d /repro/store/prefixes/repro-addon/*/bin/repro" &
+    " | head -1").stdout.strip()
+  step("DET-AO-7: the add-on's store binary is there to run under the floor",
+       storeRepro.startsWith("/repro/store/"), storeRepro)
+  proc confirmFailures(): int =
+    ## Apply-log records of a switch rolled back because its health check
+    ## failed: ``recordRolledBack`` writes ``confirm failed: `` only then.
+    let r = g.exec("cat /var/lib/repro/system/generations/*/log/apply.log " &
+                   "2>/dev/null | grep -a -o 'confirm failed: ' | wc -l")
+    try: parseInt(r.stdout.strip()) except ValueError: -1
+  let rb7 = g.rolledBackRecords()
+  let cf7 = confirmFailures()
+  var t7: TickResult
+  if storeRepro.startsWith("/repro/store/"):
+    discard publish(PublishSpec(sequence: sequence,
+      profileText: "addOn {\n  confirmTimeout = 15\n}\n\n" &
+        unitProfile("repro-a11-fail.service",
+                    storeRepro & " system addon test-sleep 864000",
+                    health = "tcp:127.0.0.1:9", floorWaiver = false)))
+    t7 = g.tickUnits()
   step("DET-AO-7: the failing switch is aoRolledBack",
        t7.outcome == "aoRolledBack", $t7)
+  # Rolled back for the control's reason: the confirm step's health check
+  # failed (a unit that could not start would roll back without it).
+  let rbDelta = g.rolledBackRecords() - rb7
+  let cfDelta = confirmFailures() - cf7
+  step("DET-AO-7: the rollback is the health check's",
+       rb7 >= 0 and cf7 >= 0 and rbDelta == 1 and cfDelta == 1,
+       "rolled-back records +" & $rbDelta & ", confirm failures +" &
+         $cfDelta & "; " & $t7)
   control("DET-AO-7", "addon-rollback", "rolled-back", since)
 
   # DET-AO-9: a locally modified generation (an operator's apply).
@@ -291,6 +340,9 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   discard g.exec("DEBIAN_FRONTEND=noninteractive apt-get install -y -q " &
     "-o Dpkg::Options::=--force-confnew " & deb, timeoutSec = 900)
   control("DET-AO-6", "addon-apt-hook", "hook-finding", since)
+  step("DET-4: the apt hook's DET-AO-6 control tripped over the base's " &
+       "dpkg database", controlTripped("addon-apt-hook", since, "hook-run"),
+       "")
   discard g.exec("DEBIAN_FRONTEND=noninteractive apt-get purge -y -q " &
                  "repro-a11-fixture", timeoutSec = 900)
 

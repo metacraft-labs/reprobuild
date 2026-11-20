@@ -41,12 +41,18 @@ proc splitEnvEntries(entries: openArray[string]): seq[(string, string)] =
     result.add((entry[0 ..< eq], entry[eq + 1 .. ^1]))
 
 proc registerAction(action: TryCompileActionDef;
-                    actionEnv: openArray[(string, string)]): BuildActionDef
+                    actionEnv: openArray[(string, string)];
+                    relocatable: bool): BuildActionDef
     {.discardable.} =
   ## ``actionEnv`` is the envelope's payload-level declaration and is
   ## applied to EVERY action, which is the whole reason it lives on the
   ## payload rather than on ``TryCompileActionDef``: there is exactly one
   ## place that can forget it, and it is this one.
+  ##
+  ## ``relocatable`` (envelope v6) is payload-level for the same reason: the
+  ## generator sets it for a ``try_compile`` project, whose every action runs
+  ## in a per-invocation scratch directory. It applies to the inline-exec
+  ## actions, the only ones whose argv and cwd the lowering can relocate.
   let call =
     if action.inline:
       inlineExecCall(action.inlineArgv, action.inlineCwd)
@@ -68,7 +74,8 @@ proc registerAction(action: TryCompileActionDef;
     cacheable = action.cacheable,
     commandStatsId = action.commandStatsId,
     env = actionEnv,
-    dependencyPolicy = dependencyPolicyForAction(action))
+    dependencyPolicy = dependencyPolicyForAction(action),
+    relocatable = relocatable and action.inline)
 
 proc readMetadataFromProjectRoot(projectRoot: string): TryCompileMetadata =
   let path = projectRoot / "trycompile.rbsz"
@@ -113,7 +120,8 @@ when defined(reproProviderMode):
       var actionById = initTable[string, BuildActionDef]()
       let actionEnv = splitEnvEntries(meta.actionEnv)
       for action in meta.actions:
-        let registeredAction = registerAction(action, actionEnv)
+        let registeredAction = registerAction(action, actionEnv,
+          meta.relocatable)
         registered.add(registeredAction)
         actionById[registeredAction.id] = registeredAction
       var targetByName = initTable[string, BuildTargetDef]()

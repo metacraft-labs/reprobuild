@@ -5,7 +5,7 @@ kind: explanation
 persona: build-maintainer
 order: 15
 verifies:
-  commands: [build, lock update, why, store list, store gc]
+  commands: [build, lock update, why, store list, store gc, cache]
   tests:
     - tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim
     - tests/integration/t_integration_solver_resolves_variants.nim
@@ -14,6 +14,15 @@ verifies:
     - tests/e2e/gm4b/t_e2e_home_apply_realizes_nix_selection.nim
     - tests/integration/t_integration_local_store_gc.nim
 unverified:
+  - claim: "The reprobuild flake's modules write the cache configuration from services.reprobuild.caches."
+    reason: "Read from nix/modules/reprobuild.nix at reprobuild 84b459adda; not evaluated for this page."
+    owner: unassigned
+  - claim: "A reprobuild binary cache holds packages built from their package definitions and compiled project-file programs, keyed by package, version, platform, toolchain and dependencies, signed, and fetched only from a cache whose key is trusted in caches.conf."
+    reason: "Read from repro cache --help and the client source of reprobuild 84b459adda (repro 0.2.24); no publish or substitute was run for this page."
+    owner: unassigned
+  - claim: "reprobuild does not configure Nix substituters and does not read them for what it builds, and its binary cache serves nothing a Nix substituter client reads."
+    reason: "Read from the source of reprobuild 84b459adda (no narinfo or nix-cache-info endpoint); Nix provisioning was observed to build a pinned github:NixOS/nixpkgs reference through nix. No test asserts the separation."
+    owner: unassigned
   - claim: "--tool-provisioning overrides REPRO_TOOL_PROVISIONING, which overrides the package's defaultToolProvisioning."
     reason: "Read from the CLI's provisioning resolution; no test checks the order."
     owner: unassigned
@@ -93,6 +102,39 @@ version keeps it while another project uses a newer one.
 `repro store list` shows the entries. `repro store gc` removes the ones nothing
 refers to any more: it moves each to a pending-deletion area first and deletes it
 after a grace period, and it records each decision.
+
+## Binary caches and Nix substituters
+
+Two kinds of cache can save a machine from building something, and a host
+that takes tools from Nix uses both.
+
+A Nix substituter, such as `cache.nixos.org`, holds Nix store paths. When
+reprobuild obtains a tool from Nix, it asks Nix to build the pinned nixpkgs
+attribute, and Nix downloads the store path from the substituters Nix is
+configured with, or builds it. reprobuild does not configure them, and the
+tool stays in the Nix store.
+
+A reprobuild [binary cache](../reference/glossary.md#binary-cache) holds what
+reprobuild itself builds: packages built from their package definitions, and
+the compiled programs reprobuild makes from project files. Each entry is keyed by what it
+was built from (the package, its version, the platform, the toolchain and its
+dependencies) and signed by the machine that published it. A machine fetches
+an entry only from a cache whose signing key its cache configuration trusts:
+a system file and a per-user file, or the one file `REPRO_CACHES_CONFIG`
+names. `repro cache` publishes and fetches entries, and `repro-binary-cache`
+is the server, which NixOS can run through the flake's `repro-binary-cache`
+module.
+
+Neither serves the other. A reprobuild binary cache is not a Nix substituter,
+and reprobuild does not read Nix substituters for what it builds. A host
+gets Nix-provisioned tools through Nix's substituters, and everything
+reprobuild builds through reprobuild's caches.
+
+On a host configured with Nix, both are declared in the same configuration.
+Nix's own `nix.settings.substituters` and `trusted-public-keys` set Nix's
+caches, and the reprobuild flake's NixOS, nix-darwin and Home Manager modules
+(`services.reprobuild.caches`) write reprobuild's cache configuration, each
+cache with its URL and trusted keys.
 
 ## What this does not cover
 

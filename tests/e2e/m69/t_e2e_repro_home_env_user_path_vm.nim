@@ -61,7 +61,7 @@ proc main() =
     let after1 = readFile(hostFile)
     doAssert after1.contains("/opt/repro-m83-vm/bin"),
       "contribution entry missing from managed block"
-    doAssert after1.contains("repro-managed:" & UserPathBlockId),
+    doAssert after1.contains("repro:home:" & UserPathBlockId),
       "managed-block sentinel missing"
 
     # 2. Observe present (with the contribution).
@@ -72,7 +72,7 @@ proc main() =
     removeUserPathContribution(contribution, hostFilePath = hostFile)
     let after2 =
       if fileExists(hostFile): readFile(hostFile) else: ""
-    doAssert not after2.contains("repro-managed:" & UserPathBlockId),
+    doAssert not after2.contains("repro:home:" & UserPathBlockId),
       "managed-block sentinel still present after destroy"
 
     let obs2 = observeUserPath(contribution, hostFilePath = hostFile)

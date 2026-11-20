@@ -294,6 +294,39 @@ EXPECT.update({
     # released.
     "mutunjudgedreq": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
                        "engine build unjudged-requirers-released"),
+    # A13 review round 11. H2: the fixing switch starts nothing it resolved.
+    "mutfixstart": ("e2e_addon_adopt_hand_configured_service", "red",
+                    "add-on build fixing-switch-skips-starts"),
+    # M1: a recorded dependant does not block.
+    "mutdepblock": ("e2e_addon_adopt_hand_configured_service", "red",
+                    "add-on build dependants-do-not-block"),
+    # H1: the next full apply restarts the recorded triggers under the dead
+    # apply's hold.
+    "mutstaleorder": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                      "engine build live-check-restart-before-stale-holds-cleared"),
+    # Decision 171 as the owner decided it: an essential unit is held.
+    "mutessential": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                     "engine build essential-requirers-held"),
+    # A13 review round 12. M3: the next full apply lifts a dead apply's
+    # holds and starts its triggers before its own check (round 11's
+    # order; mutstaleorder above falsified that order's previous form and
+    # stays for round-11 records).
+    "mutdeadhold": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                    "engine build dead-apply-holds-lifted"),
+    # M2: a full apply commits a resolution without starting it.
+    "mutfullfix": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                   "engine build full-apply-fixing-skips-starts"),
+    # M4: at boot the records' starts block and the record is cleared.
+    "mutbootblock": ("e2e_addon_adopt_hand_configured_service", "red",
+                     "add-on build boot-record-starts-block"),
+    # A13 review round 13, M-B: a judged unit a dead apply held loses its
+    # "ran before".
+    "mutdeadactive": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                      "engine build dead-judged-was-active-lost"),
+    # A13 review round 14 (decision 177(c) as decided 2026-11-18): a late
+    # essential trigger's failure is dropped and the apply passes.
+    "mutlateess": ("e2e_addon_to_reproos_conversion_keeps_state", "red",
+                   "engine build late-essential-report-dropped"),
 })
 TARGET.update({
     "mutliveset": "a switch that changes only a service's credential judges it",
@@ -306,6 +339,15 @@ TARGET.update({
     "mutdependants": "decision 160: a trigger that cannot start again fails the switch, and its revert commits",
     "mutswitchrecord": "decision 160: while a trigger is on record, an add-on switch",
     "mutunjudgedreq": "decision 153: a unit the live check does not judge that requires",
+    "mutfixstart": "the fixing switch: a switch whose generation changes",
+    "mutdepblock": "dependants block like triggers:",
+    "mutstaleorder": "H1: the next full apply clears a dead apply's stale hold",
+    "mutessential": "decision 171: an apply in which an essential requirer would be held",
+    "mutdeadhold": "M3: a judged service a dead full apply held",
+    "mutfullfix": "M2: a full apply whose generation resolves a recorded trigger",
+    "mutbootblock": "M4: at boot the re-assertion queues the start",
+    "mutdeadactive": "M-B: a judged service a dead full apply held while it ran",
+    "mutlateess": "decision 177(c): an essential trigger systemd links to a judged",
 })
 
 ROUND4_PROBES = ["account", "timer", "pathfloored", "path", "host"]
@@ -399,6 +441,71 @@ def on_target_rec(kind, rec):
         u = rec.get("decision160Revert", {})
         return (on_target(kind, steps) and u.get("exit", 0) != 0 and
                 u.get("blocked") == "active" and u.get("revertFailed") is True)
+    if kind == "mutfixstart":
+        # Red because the fixing switch passed with the port still taken
+        # and its commit cleared the record, not for another reason.
+        u = rec.get("fixingSwitch", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                "a13r10.socket\t" not in u.get("after", "x a13r10.socket\t") and
+                "marker" not in u.get("after", "marker"))
+    if kind == "mutdepblock":
+        # Red because the switch went through with the dependant on record.
+        u = rec.get("dependantsBlock", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                "generation 4m" in u.get("after", ""))
+    if kind == "mutstaleorder":
+        # Red because the recorded trigger stayed down with its record,
+        # after a staged stale hold, not for another reason.
+        u = rec.get("decisionH1", {})
+        return (on_target(kind, steps) and u.get("staged") not in (None, "active") and
+                u.get("active") not in (None, "active") and
+                "eth-r11-sock.socket" in u.get("recordLeft", ""))
+    if kind == "mutessential":
+        # Red because the apply wrote the essential unit's drop-in and was
+        # not refused.
+        u = rec.get("decisionEssential", {})
+        return (on_target(kind, steps) and u.get("refused") is False and
+                u.get("dropInWritten") is True)
+    if kind == "mutdeadhold":
+        # Red because of the order, not because the service ran at all (the
+        # product also starts an adopted unit, at its release): under the
+        # mutation the service a dead apply held ran before the new apply
+        # released its holds -- the falsifier's criterion, which a product
+        # run must fail (see dead_hold_order).
+        u = rec.get("deadApplyAdopted", {})
+        return on_target(kind, steps) and dead_hold_order(u) == "before-release"
+    if kind == "mutfullfix":
+        # Red because the apply committed and cleared the record with the
+        # socket left down, not for another reason.
+        u = rec.get("fullApplyFixing", {})
+        return (on_target(kind, steps) and u.get("exit") == 0 and
+                u.get("staged") not in (None, "active") and
+                u.get("active") not in (None, "active") and
+                u.get("recordLeft") == "")
+    if kind == "mutlateess":
+        # Red because the apply passed with the late essential trigger
+        # linked, not for another reason: the probe could be staged (no
+        # sshd.socket on the base) and nothing held it.
+        u = rec.get("lateEssentialTrigger", {})
+        return (on_target(kind, steps) and u.get("sshdSocketBefore") == "not-found" and
+                u.get("exit") == 0 and u.get("held") == "" and
+                u.get("named") is False)
+    if kind == "mutdeadactive":
+        # Red because the service stayed down after a passing apply, not
+        # for another reason: it ran before the staging and the apply
+        # passed.
+        u = rec.get("deadJudgedActive", {})
+        return (on_target(kind, steps) and u.get("before") == "active" and
+                u.get("staged") not in (None, "active") and
+                u.get("socketStaged") not in (None, "active") and
+                u.get("exit") == 0 and u.get("after") not in (None, "active") and
+                dead_hold_order(u) == "never")
+    if kind == "mutbootblock":
+        # Red because the boot's re-assertion started and confirmed the
+        # trigger and cleared the record, instead of queueing it.
+        u = rec.get("bootQueuedRestart", {})
+        return (on_target(kind, steps) and u.get("queued") is False and
+                u.get("recordAfterBoot") == "")
     if kind == "mutdependants":
         # Red because the revert failed on the unit that requires the
         # trigger, started at its step 7, not for another reason: the port
@@ -437,9 +544,11 @@ def on_target_rec(kind, rec):
     if kind == "mutunjudgedreq":
         # Red because the unjudged requirer was released, not for another
         # reason: the judged requirer stayed held, the premise held.
+        # The target step's own evidence (A13 review round 11, L6): the
+        # requirer was not held in /etc and is active, not merely unreported.
         d = rec.get("decision153Unjudged", {})
         return (on_target(kind, steps) and isinstance(d, dict) and
-                not unjudged_held(d) and
+                d.get("heldInEtc") is False and d.get("active") == "active" and
                 held_requirer(rec.get("decision153", {})) and
                 premise_measured(rec.get("decision153Premise", {})))
     if kind == "muttrigheld":
@@ -559,7 +668,18 @@ def on_target_rec(kind, rec):
                 triggers_up(rec.get("decision151", {})) and
                 held_requirer(rec.get("decision153", {})) and
                 unjudged_held(rec.get("decision153Unjudged", {})) and
-                premise_measured(rec.get("decision153Premise", {})))
+                premise_measured(rec.get("decision153Premise", {})) and
+                rec.get("decisionH1", {}).get("ok") is True and
+                rec.get("deadApplyAdopted", {}).get("ok") is True and
+                dead_hold_order(rec.get("deadApplyAdopted", {})) == "never" and
+                rec.get("fullApplyFixing", {}).get("ok") is True and
+                rec.get("deadJudgedActive", {}).get("ok") is True and
+                dead_hold_order(rec.get("deadJudgedActive", {})) == "after-release" and
+                rec.get("essentialHostTrigger", {}).get("ok") is True and
+                rec.get("lateEssentialTrigger", {}).get("ok") is True and
+                rec.get("decisionEssential", {}).get("exit", 0) != 0 and
+                rec.get("decisionEssential", {}).get("refused") is True and
+                rec.get("decisionEssential", {}).get("dropInWritten") is False)
     if kind == "mutreceipt":
         # At receipt-before-dir-fsync the receipt on the disk is empty (the
         # rename committed, the data not); before the rename the old receipt
@@ -611,12 +731,38 @@ def held_requirer(d153):
             d153.get("started") is False)
 
 
+def dead_hold_order(d):
+    """A13 review round 12, M3: when the service a dead full apply held first
+    ran, relative to the next apply's release of its holds, from the gate's
+    guest-side timestamps (uptime seconds). "before-release" is the
+    falsifier's criterion; a product run must show "never" (its check
+    refused the service) or "after-release"."""
+    # Decided from the timestamps themselves, never from the gate's own
+    # boolean (A13 review round 13, L5).
+    if not isinstance(d, dict):
+        return "unmeasured"
+    def num(k):
+        v = d.get(k)
+        return float(v) if isinstance(v, (int, float)) and not isinstance(v, bool) else -1.0
+    check, release, service = num("checkBeganAt"), num("releasedAt"), num("serviceActiveAt")
+    if check < 0:
+        return "unmeasured"
+    if service < 0:
+        return "never"
+    if release < 0 or service < release:
+        return "before-release"
+    return "after-release"
+
+
 def unjudged_held(d):
     """§13 decision 153 as the owner extended it in A13 review round 10:
     the unit outside the judged set that requires a refused unit stayed
-    held, not active, and the apply said why."""
+    held, not active, and the apply said why; and (A13 review round 12,
+    the owner decision "never hold .target units") a target that requires
+    it was not held."""
     return (isinstance(d, dict) and d.get("reported") is True and
-            d.get("heldInEtc") is True and d.get("active") not in (None, "active"))
+            d.get("heldInEtc") is True and d.get("active") not in (None, "active") and
+            d.get("targetHeld") is not True)
 
 
 def premise_measured(d):
@@ -876,7 +1022,9 @@ def green_incomplete(kind, rec):
                            ("decision151Refused", "refusedForReason"),
                            ("decision151Recovered", "ok"),
                            ("decision160Revert", "ok"), ("decision160Guard", "ok"),
-                           ("decision160", "ok"), ("decision160Done", "ok")):
+                           ("fixingSwitch", "ok"), ("dependantsBlock", "ok"),
+                           ("decision160", "ok"), ("decision160Done", "ok"),
+                           ("bootQueuedRestart", "ok")):
             d = rec.get(key)
             if not isinstance(d, dict) or d.get(field) is not True:
                 return "%s %r, expected %s" % (key, d, field)

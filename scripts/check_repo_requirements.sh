@@ -78,6 +78,23 @@ if grep -Fq 'That host does not exist yet' README.md; then
   fail 'README.md must not deny the official get.reprobuild.com install channel'
 fi
 
+# The public docs must describe what this version does. Terraform/OpenTofu
+# provider reuse and cloud-resource management are planned (reprobuild-pm
+# spec/Terraform-Provider-Host.md: "Nothing in this document is implemented"),
+# so README.md, docs/user-manual.md and docs/agents/ must not state them as
+# current behaviour. This is a regression guard for the sentences that once
+# said so and close rewordings of them, not a general claim detector; it also
+# matches accurate denials ("does not manage cloud resources"), so keep such
+# sentences out of these files or narrow the pattern. Newlines are folded first
+# so a line wrap cannot hide a phrase. Remove this check when provider reuse ships. reprobuild-pm issue
+# 2026-11-12-readme-says-reprobuild-reuses-terraform-providers-and-manages-cloud-resources.md.
+unshipped_cloud_claims='\b(can|does|will|it) reuses? ((all|your|existing|any) )*(terraform|opentofu)|\breuses ((all|your|existing|any) )*(terraform|opentofu)|\b(reprobuild|repro|it) (also |can |will )?(manag|provision|reconcil)[a-z]* ([a-z-]+ ){0,3}cloud resources|reconciliation for [^.]*cloud resources|\b(and|or|required) (a )?cloud resources?[.,]|cloud fleets|cloud/terraform-provider'
+for path in README.md docs/user-manual.md $(find docs/agents -name '*.md' | sort); do
+  if tr '\n' ' ' < "${path}" | tr -s ' ' | grep -Eqi -- "${unshipped_cloud_claims}"; then
+    fail "${path} must not claim Terraform/OpenTofu provider reuse or cloud-resource management as current behaviour (planned, not implemented)"
+  fi
+done
+
 for path in .github .github/workflows nix docs libs apps tests benchmarks scripts examples tools references vendor; do
   require_dir "${path}"
 done

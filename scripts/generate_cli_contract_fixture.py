@@ -24,15 +24,27 @@ What it extracts, and from where:
 * `command <path>`: each command in `COVERED_COMMANDS`, whose flags and
   environment variables the test compares (a command is covered once its
   parsing has moved onto the description).
-* `flag <path> <spelling>`: the flags (`--name`, `-x`) the command's page
+* `flag <path> <spelling>`: the flags (`--name`, `-x`, `-xx`) the command's page
   or section writes where it states syntax: in a code block, or in the code
   a list item starts with (`` - `--format json|text` — the output format``).
   Code in running prose (``like `--version`, ...``) does not count, because
   prose names other commands' and other tools' flags too.
-* `env <path> <NAME>`: the environment variables (`UPPER_CASE` names with an
-  underscore) written in any code in the command's page or section. A piece of code that starts with `repro <words>` belongs to the
-  command those words name (so `repro --version` in the `version` page is
-  the root command's flag); any other piece belongs to the page's command.
+* `env <path> <NAME>`: the environment variables that are inputs of the
+  command's command line: those a flag's list item names in an
+  `environment:` clause (`` - `--daemon VALUE` — ...; environment:
+  `REPRO_DAEMON`. ``), the form the pages use for a variable that supplies a
+  flag's value when the flag is absent. Every other upper-case name a page
+  writes as code (a variable the command reads below its command line, one it
+  carries to the actions it runs, an ELF header field, a C constant) is prose
+  about what the command does, not an input of its command line, so it is not
+  recorded.
+
+A piece of code that starts with `repro <words>` belongs to the command those
+words name (so `repro --version` in the `version` page is the root command's
+flag); a piece that starts with a subcommand word of the page's command
+(`update ...` in the `lock` page) belongs to that subcommand; any other piece
+belongs to the page's command. A list item's `environment:` clause belongs to
+the command its leading code does.
 
 `--help` and `-h` are not recorded: every command accepts them, built into the
 parser, so neither side lists them.
@@ -46,9 +58,9 @@ import sys
 from pathlib import Path
 
 # The commands whose flags and environment variables are compared, by their
-# words after `repro` ("" is `repro` itself). Each later group of commands is
-# added here when its parsing moves onto the description, and the test lists
-# the same commands.
+# words after `repro` ("" is `repro` itself): every command repro declares
+# (its hidden spellings aside). The test lists the same commands, and checks
+# that its list is every command the description declares.
 COVERED_COMMANDS = [
     "",
     "help",
@@ -88,10 +100,13 @@ COVERED_COMMANDS = [
     "cache publish",
     "cache derive-key",
     "cache gen-key",
+    "cache key",
+    "cache explain",
     "bundle",
     "bundle create",
     "bundle publish",
     "bundle restore",
+    "bundle inspect",
     "reap",
     "launch-plan",
     "launch-plan show",
@@ -106,6 +121,280 @@ COVERED_COMMANDS = [
     "self which",
     "self list",
     "self prune-roots",
+    "home",
+    "home add",
+    "home remove",
+    "home enable",
+    "home disable",
+    "home list",
+    "home why",
+    "home history",
+    "home apply",
+    "home plan",
+    "home export",
+    "home facts",
+    "home compare",
+    "home rollback",
+    "home gc",
+    "home set",
+    "home get",
+    "home adopt",
+    "home resource",
+    "home resource move",
+    "home migrate-from-env-scripts",
+    "system",
+    "system add",
+    "system remove",
+    "system list",
+    "system why",
+    "system plan",
+    "system apply",
+    "system sync",
+    "system history",
+    "system rollback",
+    "system audit",
+    "infra",
+    "infra plan",
+    "infra apply",
+    "infra cache-keys",
+    "infra install-root",
+    "infra image",
+    "anywhere",
+    "deploy-agent",
+    "deploy-agent keygen",
+    "deploy-agent compile-profile",
+    "hardware",
+    "hardware probe",
+    "disk",
+    "disk plan",
+    "disk apply",
+    "disk mount",
+    "disk unmount",
+    "disk generate",
+    "disk image",
+    "cargo",
+    "cargo gc",
+    "cargo record-live",
+    "cargo run",
+    "health",
+    "debug",
+    "debug artifact",
+    "exec",
+    "run",
+    "shell",
+    "shell hook",
+    "allow",
+    "deny",
+    "dev-env",
+    "dev-env export",
+    "dev-env deactivate",
+    "up",
+    "down",
+    "dev",
+    "hcr",
+    "hcr coordinate",
+    "hcr prepare-object",
+    "prompt",
+    "prompt init",
+    "workspace",
+    "workspace restore",
+    "workspace init",
+    "workspace bootstrap",
+    "workspace enable",
+    "workspace disable",
+    "workspace sets",
+    "workspace sets list",
+    "workspace sets resolve",
+    "workspace sets add",
+    "workspace sets remove",
+    "workspace projects",
+    "workspace projects list",
+    "workspace projects resolve",
+    "workspace projects add",
+    "workspace projects remove",
+    "workspace repos",
+    "workspace repos list",
+    "workspace repos add",
+    "workspace repos remove",
+    "workspace add",
+    "workspace remove",
+    "workspace status",
+    "workspace lock",
+    "workspace list",
+    "workspace manifests",
+    "workspace branch-roles",
+    "workspace forall",
+    "workspace shared-clones",
+    "workspace sync",
+    "workspace pull",
+    "workspace new",
+    "workspace switch",
+    "workspace provision",
+    "workspace migrate",
+    "workspace migrate-locks",
+    "workspace publish-evidence",
+    "sync",
+    "pull",
+    "branch",
+    "switch",
+    "push",
+    "check",
+    "hooks",
+    "hooks ensure",
+    "hooks reinstall",
+    "hooks uninstall",
+    "lock",
+    "lock list",
+    "lock solve",
+    "lock refresh",
+    "lock update",
+    "lock validate",
+    "lock diff",
+    "lock explain",
+    "locking",
+    "locking explain",
+    "locking adopt-manifest",
+    "gateway",
+    "gateway pre-receive",
+    "gateway post-receive",
+    "gateway migrate",
+    "add",
+    "remove",
+    "develop",
+    "flake",
+    "flake override-args",
+    "flake refresh-lock",
+    "flake override-status",
+    "build",
+    "bench",
+    "lint",
+    "clean",
+    "test",
+    "certify",
+    "certificates",
+    "certificates list",
+    "certificates plan",
+    "certificates policy",
+    "ci",
+    "ci plan",
+    "watch",
+    "attest",
+    "attest expect",
+    "attest challenge",
+    "attest verify",
+    "attest cross-check",
+    "attest launch",
+    "attest reap",
+    # Every other command repro declares (round 8b): the list is every
+    # command, hidden spellings aside. Round 8c: the add-on's and io-mon's
+    # command lines, mounted under `system addon|state|secret|adopt` and
+    # `debug io monitor` / `internal io monitor`, with every verb.
+    "daemon serve",
+    "daemon start",
+    "daemon status",
+    "daemon stop",
+    "daemon restart",
+    "daemon sessions",
+    "daemon logs",
+    "store daemon start",
+    "store daemon status",
+    "store daemon stop",
+    "home __build-bundle",
+    "home __receive-bundle",
+    "home __transfer-bundle",
+    "home __remote-activate",
+    "system addon",
+    "system addon preflight",
+    "system addon bootstrap",
+    "system addon evidence-ship",
+    "system addon evidence-enrol",
+    "system addon store-verify",
+    "system addon egress-check",
+    "system addon evidence-harvest",
+    "system addon evidence-credential-check",
+    "system addon uninstall",
+    "system addon verify-discard-record",
+    "system addon verify",
+    "system addon boot-confirm",
+    "system addon reassert",
+    "system addon recover",
+    "system addon secrets",
+    "system addon probe",
+    "system addon secret",
+    "system addon secret put",
+    "system addon rotate-recipient-key",
+    "system addon image-assemble",
+    "system addon agent-repin",
+    "system addon agent-tick",
+    "system addon agent-fetch",
+    "system addon agent-apply",
+    "system addon migration-plan",
+    "system addon resume",
+    "system addon migrate",
+    "system addon contain",
+    "system addon release",
+    "system addon fingerprint",
+    "system addon fingerprint diff",
+    "system addon expected-delta",
+    "system addon ledger",
+    "system addon import",
+    "system addon state",
+    "system addon state backup",
+    "system addon state release",
+    "system addon state verify",
+    "system addon state restore",
+    "system addon state digest",
+    "system addon state unit",
+    "system addon state install-unit",
+    "system addon status",
+    "system addon retention",
+    "system addon selfcheck-btrfs",
+    "system addon selfcheck-write",
+    "system state",
+    "system state backup",
+    "system state release",
+    "system state verify",
+    "system state restore",
+    "system state digest",
+    "system state unit",
+    "system state install-unit",
+    "system secret",
+    "system secret put",
+    "system secret materialise",
+    "system adopt",
+    "debug io",
+    "debug io monitor",
+    "debug io monitor run",
+    "debug io monitor inspect",
+    "hooks protocol",
+    "hooks dispatch",
+    "hooks cache-push",
+    "pressure",
+    "internal",
+    "internal shared-pool-upload-pack",
+    "internal resolve-package",
+    "internal io",
+    "internal io monitor",
+    "internal io monitor run",
+    "internal io monitor inspect",
+    "internal runquota-helper",
+    "internal compile-provider",
+    "internal extract-interface",
+    "internal compile-profile",
+    "internal probe-profile-platforms",
+    "internal dev-env-introspect",
+    "internal render-dev-env-shell",
+    "internal direnv-activate",
+    "internal native-shell-activate",
+    "internal dev-session-supervisor",
+    "internal dev-session-http",
+    "internal cmake-regenerate",
+    "catalog",
+    "catalog publish",
+    "catalog generate",
+    "catalog verify",
+    "nimble",
+    "nimble verify",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}
@@ -114,13 +403,66 @@ FENCE = re.compile(r"^\s*```")
 HEADING = re.compile(r"^(#+)\s+(.*)$")
 INLINE_CODE = re.compile(r"`([^`\n]+)`")
 LONG_FLAG = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
-SHORT_FLAG = re.compile(r"(?<![\w-])-[A-Za-z](?![\w-])")
-ENV_VAR = re.compile(r"(?<![\w$])[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?![\w])")
-COMMAND_WORD = re.compile(r"^[a-z][a-z0-9-]*$")
-HEADED_COMMAND = re.compile(r"`repro ([a-z][a-z0-9-]*(?: [a-z][a-z0-9-]*)*)`")
+# A short spelling: one letter, or one letter doubled (`-vv`, which `repro
+# build` declares beside `-v`).
+SHORT_FLAG = re.compile(r"(?<![\w-])-([A-Za-z])\1?(?![\w-])")
+# A list item's `environment:` clause: the code spans after it, up to the
+# end of the item, each one variable name. Inside the clause a name needs no
+# underscore (`SHELL`): the clause says the code is a variable.
+ENV_CLAUSE = re.compile(r"\benvironment:\s*((?:`[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*`"
+                        r"(?:\s*,\s*|\s+and\s+)?)+)")
+ENV_NAME = re.compile(r"`([A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*)`")
+# A command word; an internal step may start with `__` (`home __build-bundle`).
+COMMAND_WORD = re.compile(r"^(?:__)?[a-z][a-z0-9-]*$")
+HEADED_COMMAND = re.compile(
+    r"`repro ([a-z][a-z0-9-]*(?: (?:__)?[a-z][a-z0-9-]*)*)`")
 
 
 BULLET_LEAD = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+`([^`\n]+)`")
+BULLET = re.compile(r"^(\s*)(?:[-*+]|\d+\.)\s+")
+
+
+def flag_items(lines: list[str]) -> list[tuple[str, str]]:
+    """The list items outside code blocks whose leading code states a flag,
+    each as (its leading code, its whole text with continuation lines
+    joined)."""
+    items: list[tuple[str, str]] = []
+    in_block = False
+    current: list[str] | None = None
+    lead = ""
+    indent = 0
+
+    def close() -> None:
+        nonlocal current
+        if current is not None:
+            items.append((lead, " ".join(current)))
+        current = None
+
+    for line in lines:
+        if FENCE.match(line):
+            close()
+            in_block = not in_block
+            continue
+        if in_block:
+            continue
+        bullet = BULLET.match(line)
+        if bullet:
+            close()
+            first = BULLET_LEAD.match(line)
+            if first and (LONG_FLAG.search(first.group(1)) or
+                          SHORT_FLAG.search(first.group(1))):
+                lead = first.group(1)
+                indent = len(bullet.group(1))
+                current = [line.strip()]
+            continue
+        if current is not None:
+            stripped = line.strip()
+            if stripped and len(line) - len(line.lstrip()) > indent:
+                current.append(stripped)
+            else:
+                close()
+    close()
+    return items
 
 
 def code_pieces(lines: list[str]) -> list[tuple[str, bool]]:
@@ -153,8 +495,21 @@ def owner(piece: str, page_command: str, known: set[str]) -> str:
     """The command a piece of code belongs to: the longest known command its
     leading `repro <words>` name, else the page's command."""
     words = piece.split()
-    if not words or words[0] != "repro":
+    if not words:
         return page_command
+    if words[0] != "repro":
+        # A namespace page that lists its verbs writes them without the
+        # `repro <namespace>` prefix (`` `update <dependency> [--to <rev>]` ``
+        # in the `lock` page): such a piece belongs to that subcommand.
+        path = page_command.split() if page_command else []
+        best = ""
+        for word in words:
+            if not COMMAND_WORD.match(word):
+                break
+            path.append(word)
+            if " ".join(path) in known:
+                best = " ".join(path)
+        return best or page_command
     path: list[str] = []
     best = ""
     for word in words[1:]:
@@ -225,12 +580,17 @@ def surface(pages: Path) -> list[str]:
             if target not in flags:
                 continue
             if syntax:
-                for spelling in LONG_FLAG.findall(piece) + SHORT_FLAG.findall(
-                        piece):
+                for spelling in LONG_FLAG.findall(piece) + [
+                        m.group(0) for m in SHORT_FLAG.finditer(piece)]:
                     if spelling not in BUILT_IN_FLAGS:
                         flags[target].add(spelling)
-            for name in ENV_VAR.findall(piece):
-                envs[target].add(name)
+        for lead, text in flag_items(lines):
+            target = owner(lead, command, known)
+            if target not in envs:
+                continue
+            for clause in ENV_CLAUSE.findall(text):
+                for name in ENV_NAME.findall(clause):
+                    envs[target].add(name)
     rows = [
         "# The command-line contract the command specification states, for",
         "# tests/unit/t_cs_m6_spec_pages_match_declarations.nim. Generated by",

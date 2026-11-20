@@ -98,6 +98,18 @@
 ## does buy is stated and tested in its reachable half: built-in
 ## (non-forking) actions cannot declare an environment at all, so their
 ## records survive.
+##
+## ## Teardown on Windows
+##
+## A fixture's cache root holds engine records at
+## `…/hot-records/0-1-<64 hex>.rbar/<64 hex>.rec`, about 270 characters under
+## a `%TEMP%` fixture root. The engine writes them in the extended-length
+## form; a plain `removeDir` walks without it, cannot see them, and fails
+## with "The directory is not empty" after every assertion has passed. That
+## is what failed cases 1 to 3 on eli-pc (reprobuild-pm issue
+## 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d), so the
+## fixtures are removed with `removeDirEventually`, which escalates to the
+## extended-length form.
 
 import std/[algorithm, os, sequtils, strutils, tables, tempfiles, unittest]
 
@@ -105,6 +117,7 @@ import repro_build_engine
 import repro_hash
 import repro_local_store
 import repro_platform
+from repro_test_support import removeDirEventually
 
 ## Both decisions mean "the recorded result is still valid, do not
 ## re-execute" (Incremental-Invalidation.md §"File Fingerprint Policies").
@@ -183,7 +196,30 @@ proc warmConfig(cacheRoot: string): BuildEngineConfig =
   result.bypassRunQuota = true
   result.maxParallelism = 2'u32
 
-proc shPath(): string = findExe("sh")
+proc shPath(): string =
+  ## The POSIX shell the probes run. Cases 12 and 14 read the `PATH` it was
+  ## STARTED with, so on Windows it must be the shell itself and not a
+  ## launcher in front of it. Git for Windows' `bin\sh.exe`, and the Scoop
+  ## shim that points at it, set up a login environment and PREPEND
+  ## `/ucrt64/bin:/usr/bin:$HOME/bin` before starting the real shell: on
+  ## eli-pc the engine handed the child exactly `/nonexistent-repro-probe-dir`
+  ## and the probe printed `/ucrt64/bin:/usr/bin:/c/Users/zahary/bin:` in
+  ## front of it (reprobuild-pm issue
+  ## 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d). Which
+  ## `sh` comes first on `PATH` is a property of the host, not of the engine.
+  ## The shell itself is the `sh.exe` with its runtime DLL beside it
+  ## (`usr\bin` in Git for Windows, `bin` in MSYS2 and Cygwin); a launcher
+  ## has none. A self-probe (this test binary) is not an option: it loads
+  ## SQLite from `PATH` at start-up and cannot start under the `PATH` these
+  ## cases declare.
+  result = findExe("sh")
+  when defined(windows):
+    for dir in getEnv("PATH").split(PathSep):
+      if dir.len == 0:
+        continue
+      if fileExists(dir / "sh.exe") and
+          (fileExists(dir / "msys-2.0.dll") or fileExists(dir / "cygwin1.dll")):
+        return dir / "sh.exe"
 
 suite "an action's declared environment is part of its cache key":
 
@@ -193,7 +229,7 @@ suite "an action's declared environment is part of its cache key":
       skip()
     else:
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let config = warmConfig(f.cacheRoot)
 
       let alpha = graph([envEdge(sh, f.workRoot,
@@ -247,7 +283,7 @@ suite "an action's declared environment is part of its cache key":
       skip()
     else:
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let config = warmConfig(f.cacheRoot)
 
       # The graph is REBUILT after every host change, and that is
@@ -294,7 +330,7 @@ suite "an action's declared environment is part of its cache key":
       skip()
     else:
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let config = warmConfig(f.cacheRoot)
 
       let without = graph([envEdge(sh, f.workRoot)])
@@ -348,20 +384,26 @@ suite "the environment key rendering is canonical and host-independent":
     # environment keep their keys.
     let base = weakFingerprintFromText("some-edge")
     check keyedOnActionEnvironment(base, [], []) == base
-    # And the constructor must agree: an action built with no env has the
-    # same fingerprint as the pre-change constructor produced, which is
-    # exactly `keyedOnGoverningLock(base, identity)`.
+    # And the constructor must agree: an action built with no env gets no
+    # environment term, so its fingerprint is the engine's other mixes of
+    # `base` and nothing else -- its argv and cwd (`keyedOnArgv`, which
+    # `action()` applies to every process edge since reprobuild-pm
+    # Caching-Architecture.md §"BuildXL-Inspired Fingerprinting", rider of
+    # 2026-11-16) inside the lock.
     let identity = lockIdentityOutsideSolvedGraph()
     let a = action("id", ["/bin/true"], weakFingerprint = base,
       governingLockIdentity = identity)
-    check a.weakFingerprint == keyedOnGoverningLock(base, identity)
+    check a.weakFingerprint ==
+      keyedOnGoverningLock(keyedOnArgv(base, ["/bin/true"]), identity)
 
     # THE REACHABLE HALF. `builtinAction` takes no `env` argument at
     # all, so a built-in edge cannot declare an environment however hard
     # a caller tries — the compatibility property is not merely
-    # satisfiable for this class, it is structural. Every `ensureDir`,
-    # `copyFile`, `writeText`, `stamp`, `preserveTree`, `ensureLine` and
-    # `ensureSnippet` record ever written stays valid.
+    # satisfiable for this class, it is structural: no environment term
+    # ever enters an `ensureDir`, `copyFile`, `writeText`, `stamp`,
+    # `preserveTree`, `ensureLine` or `ensureSnippet` key. (Their keys did
+    # move once, for another reason: `builtinAction` mixes in the kind and
+    # payload, `keyedOnBuiltinPayload`, under the same 2026-11-16 rider.)
     #
     # This is what makes the identity arm non-vacuous, and it is stated
     # as an enumeration over the kinds rather than one sample so that a
@@ -374,7 +416,9 @@ suite "the environment key rendering is canonical and host-independent":
       checkpoint("built-in kind: " & $kind)
       check b.env.len == 0
       check b.envPassthrough.len == 0
-      check b.weakFingerprint == keyedOnGoverningLock(base, identity)
+      check b.weakFingerprint ==
+        keyedOnGoverningLock(keyedOnBuiltinPayload(base, kind, "", []),
+          identity)
 
   test "5. the rendering is order- and duplicate-canonical":
     let base = weakFingerprintFromText("some-edge")
@@ -614,6 +658,46 @@ suite "the environment key rendering is canonical and host-independent":
     checkpoint("hand-rolled PATH entries: " & $handRolled)
     check handRolled.len == 0
 
+    # (g) — the recipe compiles. The interface extraction is built in this
+    # file but is not a lowered action: it is one of the two compiles the
+    # engine runs on its own behalf, and its `PATH` is always the directories
+    # of the compilers it runs. That entry is composed in exactly one place,
+    # `recipeCompilePathEnv` in `repro_interface_artifacts`, which the
+    # provider compile uses too. Without this half, (a) could be satisfied by
+    # moving a hand-written entry into any helper outside this file.
+    var extractionUsesRecipePath = false
+    for line in lines:
+      let stripped = line.strip()
+      if stripped.startsWith("#"):
+        continue
+      if stripped.contains("extractEnv.add(recipeCompilePathEnvForModule("):
+        extractionUsesRecipePath = true
+    check extractionUsesRecipePath
+    let artifactsSource = currentSourcePath().parentDir.parentDir.parentDir /
+      "repro_interface_artifacts" / "src" / "repro_interface_artifacts.nim"
+    check fileExists(artifactsSource)
+    let artifactsLines = readFile(artifactsSource).splitLines()
+    var artifactsPathSites: seq[string] = @[]
+    for i, line in artifactsLines:
+      let stripped = line.strip()
+      if stripped.startsWith("#"):
+        continue
+      if stripped.contains("\"PATH=\" &"):
+        var owner = ""
+        var j = i
+        while j >= 0:
+          if artifactsLines[j].startsWith("proc "):
+            owner = artifactsLines[j][5 .. ^1]
+            let cut = owner.find('*')
+            if cut >= 0: owner = owner[0 ..< cut]
+            break
+          dec j
+        artifactsPathSites.add($(i + 1) & " in " & owner)
+    checkpoint("recipe-compile PATH entries: " & $artifactsPathSites)
+    check artifactsPathSites.len == 1
+    for site in artifactsPathSites:
+      check site.endsWith(" in recipeCompilePathEnv")
+
     # (c) — and the scan must have found call sites at all, or (a) and
     # (c) would both pass vacuously.
     checkpoint("actionPathEntry callers: " & $entryCallers)
@@ -753,11 +837,12 @@ suite "the environment key rendering is canonical and host-independent":
     # launcher layers `action.env` OVER the inherited environment rather
     # than replacing it". This runs the launcher and asks it.
     let sh = shPath()
+    checkpoint("probe shell: " & sh)
     check sh.len > 0
 
     proc pathSeenBy(env: openArray[string]): string =
       let f = makeFixture()
-      defer: removeDir(f.root)
+      defer: removeDirEventually(f.root)
       let edge = action("path/probe",
         [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
         cwd = f.workRoot,
@@ -846,9 +931,10 @@ suite "the environment key rendering is canonical and host-independent":
     # `sh` by absolute path; no resolver is configured, so the declared
     # PATH is the whole of what the edge itself contributes.
     let sh = shPath()
+    checkpoint("probe shell: " & sh)
     check sh.len > 0
     let f = makeFixture()
-    defer: removeDir(f.root)
+    defer: removeDirEventually(f.root)
     var edge = action("path/probe",
       [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
       cwd = f.workRoot,

@@ -960,6 +960,7 @@ def external_source_checkouts(
         "runquota": ("RUNQUOTA_SRC",),
         "nim-shm-queue": ("SHM_QUEUE_SRC",),
         "nim-cli-spec": ("CLI_SPEC_SRC",),
+        "nim-entrypoints": ("ENTRYPOINTS_SRC",),
         "nim-confutils": ("CONFUTILS_SRC",),
         "nim-shm-gset": ("SHM_GSET_SRC",),
         "nim-stackable-hooks": (
@@ -1010,6 +1011,7 @@ def runtime_metadata(
         "RUNQUOTA_SRC",
         "SHM_QUEUE_SRC",
         "CLI_SPEC_SRC",
+        "ENTRYPOINTS_SRC",
         "CONFUTILS_SRC",
         "SHM_GSET_SRC",
         "NIM_STACKABLE_HOOKS_SRC",
@@ -1220,6 +1222,10 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
         r'binary:\s*"([^"]+)",\s*'
         r"defines:\s*@\[(.*?)\],\s*"
         r"requiresReproBinary:\s*(true|false),\s*"
+        # Optional so a table (or a test fixture) written before the field
+        # existed still parses. Non-capturing: the inventory does not record
+        # it, and the group numbers below stay as they were.
+        r"(?:requiresMonitorShim:\s*(?:true|false),\s*)?"
         r"extraPassC:\s*@\[(.*?)\],\s*"
         r"extraPassL:\s*@\[(.*?)\],\s*"
         r"targetOs:\s*(\w+),\s*"

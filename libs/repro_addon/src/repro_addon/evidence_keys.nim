@@ -84,7 +84,13 @@ proc createEvidenceKeys*(k = defaultKeyPaths()): EvidenceKeys =
       sha256: sha256OfFile(p), mode: st.mode, owner: st.owner))
 
 proc createEvidenceDirs*() =
-  ## The outbox the shipping unit's path unit watches.
-  createDir(EvidenceOutboxPath)
+  ## The local records' directory, and the outbox the shipping unit's path
+  ## unit watches: in the shipping unit's state directory (§13 decision
+  ## 181), made ``0700 root`` here; systemd hands it to the unit's dynamic
+  ## user at the unit's first start.
+  createDir(EvidenceDirPath)
   setFilePermissions(EvidenceDirPath, {fpUserRead, fpUserWrite, fpUserExec})
-  setFilePermissions(EvidenceOutboxPath, {fpUserRead, fpUserWrite, fpUserExec})
+  for d in [parentDir(EvidenceShipStateDir), EvidenceShipStateDir,
+            EvidenceOutboxPath]:
+    createDir(d)
+    setFilePermissions(d, {fpUserRead, fpUserWrite, fpUserExec})

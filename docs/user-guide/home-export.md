@@ -1,5 +1,12 @@
 # Exporting a home profile — `repro home export`
 
+> **Superseded.** This page is no longer maintained. The published pages are
+> [Home profile export](../users/content/reference/files/home-export.md) (every field of the
+> document, which must change in the same commit as `home_export.nim`) and
+> [Export a home profile for Nix](../users/content/guides/machines/export-a-home-profile.md).
+> The `hosts:` entry forms below (`applies:`, `system:`) are in the
+> [DSL reference](../users/content/reference/dsl.md#hosts). Edit those, not this page.
+
 `repro home export` prints what your `home.nim` evaluates to for one host, as
 a versioned JSON document. Other tools read that document instead of
 re-implementing Reprobuild's rules: a Nix module can take your package list
@@ -203,7 +210,7 @@ since the Nix side keeps its own links (schema version unchanged).
 ```jsonc
 {
   "format": "repro.home.export",
-  "schemaVersion": 5,
+  "schemaVersion": 6,
   "selection": {
     "host": "laptop",
     "hostDeclared": true,
@@ -263,7 +270,8 @@ since the Nix side keeps its own links (schema version unchanged).
 | Field | Meaning |
 |---|---|
 | `format` | Always `repro.home.export`. Refuse any other value. |
-| `schemaVersion` | `5`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. Version 3 added `activity` on resources — a version-2 reader would apply a resource on hosts that do not select its activity. Version 4 added `intent.systemManagedElsewhere` and `evaluation.system` — in a version-3 document "no host is managed elsewhere" cannot be told from "written before the attribute existed", and a reader that decides whether to take a host's system over must not guess. Version 5 replaced `intent.systemManagedElsewhere` with `intent.hostSystems` and added `evaluation.system.mode` and `.activities`, for add-on hosts: an add-on host is managed "here", so a version-4 reader would take it for a host whose whole system it may switch. |
+| `schemaVersion` | `6`. Adding a field does not change it; changing the meaning or shape of an existing one does. Refuse versions you do not know. Version 2 added guards on resources and config overrides — a version-1 reader would apply a guarded resource everywhere — and `platforms`. Version 3 added `activity` on resources — a version-2 reader would apply a resource on hosts that do not select its activity. Version 4 added `intent.systemManagedElsewhere` and `evaluation.system` — in a version-3 document "no host is managed elsewhere" cannot be told from "written before the attribute existed", and a reader that decides whether to take a host's system over must not guess. Version 5 replaced `intent.systemManagedElsewhere` with `intent.hostSystems` and added `evaluation.system.mode` and `.activities`, for add-on hosts: an add-on host is managed "here", so a version-4 reader would take it for a host whose whole system it may switch.  Version 6 added `catalogImports`: a profile that imports catalogs through `repro-catalogs.toml` lists each import's `repo`, `remote`, `revision`, `interfaceArtifact` and the `packages` it defined for the profile, so a reader can tell where a canonical package name came from; a version-5 reader would take those names for the standard library's. |
+| `catalogImports` | Present only when the profile declares `repro-catalogs.toml`: an array of `{repo, remote, revision, interfaceArtifact, packages}`. `revision` is the pinned commit (a home profile pins by `commit` only); `packages` are the references of this profile that import defined. An IFD export of a profile with imports is refused (the sandbox has no shared clone). |
 | `selection.host` | The host the document was produced for. |
 | `selection.hostDeclared` | Whether the profile's `hosts:` block has an entry for that host. A profile with a `hosts:` registry declares every host it may be applied to: exporting (or planning, applying, `repro home facts`) for a host it does not name is refused, so in a document from such a profile this is always `true`. A profile without a registry is host-agnostic: every host gets `default`, and this is `false`. |
 | `selection.activities` | The activities `repro home plan` enables on that host, in the order the profile declares them. Computed by the planner's own rule. Platform-independent. |
@@ -332,9 +340,14 @@ reference as `unresolved` for that target.
 
 A reference no definition it can see
 names at all might be an application defined in the `reprobuild-packages`
-catalog, so when there is one and no catalog checkout is reachable (beside
-the profile, beside the `reprobuild` checkout, or `$REPROBUILD_PACKAGES_ROOT`),
-the export fails instead of guessing. On a host that gives Reprobuild one of
+catalog, so when there is one and no catalog checkout is reachable
+(`$REPROBUILD_PACKAGES_ROOT`; when a `repro.lock` above the profile pins the
+catalog, a `repro develop` checkout of it, the workspace's own checkout, a
+checkout beside the profile at the pinned commit, or the pinned revision
+fetched under `.repro/`; otherwise a checkout beside the profile or a
+directory above it, else beside the `reprobuild` checkout), the export fails
+instead of guessing. A checkout beside the profile at some other commit does
+not replace the pin. On a host that gives Reprobuild one of
 `packages` / `applications` and Nix the other, `repro home apply` refuses a
 package whose selection on this host — which honors the local lock and can
 use the host's `PATH` — would put it in a different concern than the export
@@ -501,10 +514,15 @@ records each file's digest.
 ### Predicates
 
 Guards use the built-in predicate grammar: `windows`, `macos`, `linux`,
-`bsd`, `wsl`, `x86_64`, `arm64`, `arm32`, `host == "name"`,
+`bsd`, `wsl`, `nixos`, `x86_64`, `arm64`, `arm32`, `host == "name"`,
 `host != "name"`, `host in ["a", "b"]`, combined with `and`, `or`, `not` and
 parentheses. When `repro home export --target` evaluates them, `wsl` is false
-for every target and `host` is the selected host.
+for every target and `host` is the selected host. `nixos` is a fact about the
+host that the target's system name does not carry (Home Manager
+configurations exist for both a NixOS and another Linux), so the export states
+nothing for it: pass `--nixos` (or `--nixos=false`) with `--target`, and a
+profile whose guards reach `nixos` is refused (exit `3`) without it. On the
+machine itself the planner reads `ID=nixos` from `/etc/os-release`.
 
 All digests are lower-case hex. The document adds no absolute paths of its
 own (provenance paths are relative to the profile directory); anything

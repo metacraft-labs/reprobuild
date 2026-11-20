@@ -95,6 +95,9 @@ when defined(posix):
 
 import repro_core/cli_images
 import repro_test_support
+# The thin client's tables, generated at compile time from repro's
+# command-line description (the module the thin client itself imports).
+import repro_cli_support/cli_description
 
 proc repoRoot(): string =
   getCurrentDir()
@@ -316,26 +319,8 @@ when defined(posix):
   ## A real pty, for the TTY guard. ``isatty(2)`` is the only thing
   ## ``shouldRouteToDaemon`` reads on that arm, and nothing but a terminal
   ## device makes it answer true — not a pipe, not a file, not an environment
-  ## variable. These four are POSIX and live in ``<stdlib.h>``; Nim's
-  ## ``std/posix`` does not declare them. (``std/posix`` itself is imported
-  ## with the other imports at the top of the file; see the note there.)
-  proc posix_openpt(oflag: cint): cint
-    {.importc: "posix_openpt", header: "<stdlib.h>".}
-  proc grantpt(fd: cint): cint {.importc: "grantpt", header: "<stdlib.h>".}
-  proc unlockpt(fd: cint): cint {.importc: "unlockpt", header: "<stdlib.h>".}
-  proc ptsname(fd: cint): cstring {.importc: "ptsname", header: "<stdlib.h>".}
-
-  proc openPtySlavePath(): tuple[master: cint; slave: string] =
-    ## Returns the master fd — which the CALLER must keep open for the slave
-    ## to stay usable — and the filesystem path of its slave side, which a
-    ## shell redirection can open.
-    let master = posix_openpt(ptyPosix.O_RDWR or ptyPosix.O_NOCTTY)
-    doAssert master >= 0, "posix_openpt failed"
-    doAssert grantpt(master) == 0, "grantpt failed"
-    doAssert unlockpt(master) == 0, "unlockpt failed"
-    let name = ptsname(master)
-    doAssert name != nil, "ptsname failed"
-    (master, $name)
+  ## variable. ``openPtySlavePath`` is the shared test-support helper.
+  import repro_test_support/terminal_fixtures
 
 proc writeFallbackScript(path: string) =
   writeFile(path,
@@ -395,6 +380,56 @@ suite "MAC-1 thin daemon client":
       let sources = daemonBuildRequestRootSources(tempRoot)
       checkpoint("build request root sources: " & sources.join(" | "))
       check sources == @["request", "derived"]
+
+    test "integration_thin_client_routed_refusal_is_the_direct_usage_error":
+      # The thin client routes `repro build` WITHOUT parsing it, so a command
+      # line `repro build` refuses is refused in the daemon worker, by the
+      # same parse (`loadBuildCommandLine`). It must still be the usage error
+      # the full image gives it directly: exit 2 and the same message, not
+      # the daemon's generic "daemon-hosted build failed" and exit 1. Two
+      # refusals: one the generated parser makes (an unknown flag) and one
+      # the build makes of a line the parser accepts (`--json` without
+      # `--list-targets`).
+      let tempRoot = createTempDir("repro-mac1-refusal", "")
+      let endpoint = daemonSocketEndpoint("mac1-refusal")
+      defer:
+        stopDaemon(tempRoot, endpoint)
+        removeDirEventually(tempRoot)
+      createDir(tempRoot / "state")
+      createDir(tempRoot / "store")
+      let env = daemonEnv(tempRoot, endpoint)
+      let project = freshProject(tempRoot)
+      for (extra, needle) in [
+          ("--bogus", "error: unknown flag '--bogus' for 'repro build'"),
+          ("--dry-urn", "tip: a similar flag exists: '--dry-run'"),
+          ("--json", "repro build: --json applies to --list-targets only")]:
+        let args = buildArgs(project, tempRoot) & @[extra]
+        let full = runCaptured(fullCliBin(), args, tempRoot, env,
+          EmbeddedSourceRootNames)
+        checkpoint("full stderr:\n" & full.errors)
+        check full.code == 2
+        check full.errors.contains(needle)
+        let thin = runCaptured(thinCliBin(), args, tempRoot, env,
+          EmbeddedSourceRootNames)
+        checkpoint("thin stderr:\n" & thin.errors)
+        check thin.code == 2
+        check thin.errors.contains(needle)
+        check not thin.errors.contains("daemon-hosted build failed")
+        if extra != "--json":
+          # The parser's refusal is clispec's error block, the same bytes on
+          # both paths: the thin client writes the daemon's diagnostic after
+          # the "\r" it writes before every diagnostic (its progress-line
+          # clear), and nothing else.
+          check "Usage: repro build" in full.errors
+          check thin.errors == "\r" & full.errors
+      # The refusals were the daemon's, not a hand-over's: the full image
+      # refused before reaching the daemon, and the thin client's three
+      # requests were accepted, the first two (lines `repro build` does not
+      # accept, so they name no project) recorded under the working
+      # directory, the third under the project its arguments name.
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources == @["workingDir", "workingDir", "derived"]
 
     test "integration_thin_client_serves_an_install_layout_with_no_environment":
       # WHAT THIS IS FOR. MAC-1's saving is only real if something a user
@@ -524,12 +559,16 @@ suite "MAC-1 thin daemon client":
         newSeq[(string, string)]()),
       ("--only", @["build", ".", "--only", "x"],
         newSeq[(string, string)]()),
+      ("--only=x", @["build", ".", "--only=x"],
+        newSeq[(string, string)]()),
       ("--daemon=off", @["build", ".", "--daemon=off"],
         newSeq[(string, string)]()),
       ("--daemon require (space form)", @["build", ".", "--daemon", "require"],
         newSeq[(string, string)]()),
       ("REPRO_DAEMON in the environment", @["build", "."],
         @[("REPRO_DAEMON", "auto")]),
+      ("REPRO_DAEMON=off in the environment", @["build", "."],
+        @[("REPRO_DAEMON", "off")]),
       ("--write-benchmark", @["build", ".", "--write-benchmark=b.json"],
         newSeq[(string, string)]()),
       ("--write-stats", @["build", ".", "--write-stats"],
@@ -574,6 +613,24 @@ suite "MAC-1 thin daemon client":
       # a launcher that can change the answer.
       for arg in extra:
         check run.output.contains("ARG:" & arg)
+
+  test "integration_thin_client_tables_are_builds_declarations":
+    # The hand-over table and the daemon-mode variable are generated from
+    # `repro build`'s declarations (the flags it declares `clientSide`, and
+    # the variable `--daemon` declares), so neither is a second list: the
+    # thin client and the parser read one description. A build flag that is
+    # not client-side (`--dry-run`) stays routable.
+    const handOver = reproThinClientHandOverFlags()
+    for flag in ["--daemon", "--list-targets", "--list-targets-json",
+        "--print-solved-graph", "--only", "--write-benchmark", "--write-stats",
+        "--stats-groups", "--progress-bars"]:
+      checkpoint(flag)
+      check flag in handOver
+    for flag in ["--dry-run", "--progress", "--log", "--work-root"]:
+      checkpoint(flag)
+      check flag notin handOver
+    check reproFlagEnv(@["build"], "daemon") == ["REPRO_DAEMON"]
+    check "--progress" in reproFlagSpellings(@["build"], "progress")
 
   test "integration_thin_client_routes_a_plain_quiet_build":
     let tempRoot = createTempDir("repro-mac1-routes", "")

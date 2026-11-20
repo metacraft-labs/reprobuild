@@ -29,6 +29,18 @@ proc uncontrolledExecCmdEx*(command: string;
   ## Nim-from-source provisioners call it there). See ``process_close``.
   execCmdExCloseOnce(command, options, env, workingDir, input)
 
+proc uncontrolledExecArgvEx*(argv: openArray[string];
+                             options: set[ProcessOption] = {poStdErrToStdOut,
+                                                            poUsePath};
+                             env: StringTableRef = nil;
+                             workingDir = ""; input = ""):
+    tuple[output: string, exitCode: int] =
+  ## Runs ``argv`` WITHOUT a shell (``argv[0]`` found on the ambient PATH
+  ## when it is a bare name) and captures its output, as
+  ## ``uncontrolledExecCmdEx`` does for a command line
+  ## (``process_exec.execArgvExCloseOnce``).
+  execArgvExCloseOnce(argv, options, env, workingDir, input)
+
 proc uncontrolledExecProcess*(command: string; workingDir = "";
                               args: openArray[string] = [];
                               env: StringTableRef = nil;

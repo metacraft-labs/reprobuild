@@ -28,7 +28,9 @@ suite "same-project fragment selection":
 
   test "named target union remains unchanged":
     let selected = parseAndResolveSelectors(["alpha", "beta"], "repro build")
-    check selected.target == ".#alpha"
+    # Anchored on the project file, so a sibling ``alpha.nim`` could not turn
+    # it into the legacy ``<dir>#<module>`` form.
+    check selected.target == "." / "repro.nim" & "#alpha"
     check selected.extraNameSelectors == @["beta"]
     check not selected.targetWasOmitted
 

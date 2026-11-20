@@ -102,7 +102,13 @@ const
     ## upstream states from turning every lookup into an unbounded replay; past
     ## it the solve simply runs, which is correct but slower.
 
-  PathSetSchema* = "reprobuild.solve-path-set.v1"
+  PathSetSchema* = "reprobuild.solve-path-set.v2"
+    ## v2 records observations v1 omitted — unselected packages and dormant
+    ## constraints (`MaterialityBasis`). A v1 entry is therefore not merely
+    ## shorter but unsound: it can match live metadata in which a rejected
+    ## candidate has since been published. `parsePathSet` reads a foreign
+    ## schema as an empty path set and lookup skips it, so every v1 entry
+    ## costs one re-solve instead of a stale hit.
 
 type
   SolveObservation* = object
@@ -134,6 +140,10 @@ type
       ## enumeration) or over the whole retrieved body (for a document).
     reason*: string
       ## Why `mfRaw`, when it is.
+    basis*: MaterialityBasis
+      ## Which fact about the answer this observation protects. One version
+      ## list may carry a selection observation and several constraint
+      ## observations; each is replayed on its own.
 
   SolvePathSet* = object
     observations*: seq[SolveObservation]
@@ -210,7 +220,7 @@ proc observeObject*(kind: MetadataObjectKind; subject, objectPath: string;
   result = SolveObservation(kind: kind, subject: subject,
     recordedAt: objectPath, filter: iv.kind, low: iv.low, high: iv.high,
     highInclusive: iv.highInclusive, selection: iv.selection,
-    reason: iv.reason)
+    reason: iv.reason, basis: iv.basis)
   let body =
     if fileExists(objectPath): readFile(objectPath) else: ""
   if isEnumerationKind(kind):
@@ -226,6 +236,7 @@ proc observeObject*(kind: MetadataObjectKind; subject, objectPath: string;
     result.high = ""
     result.highInclusive = false
     result.reason = "a " & $kind & " is a document, not an enumeration"
+    result.basis = mbSelection
     result.memberDigest = digestOfBody(body)
 
 proc replayObservation*(obs: SolveObservation; currentPath: string): string =
@@ -262,7 +273,8 @@ proc renderObservation(obs: SolveObservation): string =
     "low=" & obs.low & "\x1f" & "high=" & obs.high & "\x1f" &
     "highIncl=" & (if obs.highInclusive: "1" else: "0") & "\x1f" &
     "selection=" & obs.selection & "\x1f" &
-    "digest=" & obs.memberDigest & "\x1f" & "reason=" & obs.reason
+    "digest=" & obs.memberDigest & "\x1f" & "reason=" & obs.reason & "\x1f" &
+    "basis=" & $obs.basis
 
 proc renderPathSet*(ps: SolvePathSet): string =
   ## The on-disk form. One observation per line, in recorded order (which
@@ -312,6 +324,13 @@ proc parsePathSet*(text: string): SolvePathSet =
       of "selection": obs.selection = value
       of "digest": obs.memberDigest = value
       of "reason": obs.reason = value
+      of "basis":
+        var matched = false
+        for b in MaterialityBasis:
+          if $b == value:
+            obs.basis = b
+            matched = true
+        if not matched: return SolvePathSet(observations: @[])
       else: discard
     if seen == 0: continue
     result.observations.add(obs)

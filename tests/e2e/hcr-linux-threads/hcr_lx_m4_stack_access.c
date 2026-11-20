@@ -7,6 +7,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <sys/prctl.h>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -33,6 +35,162 @@ static void deny_stack_reads(int error) {
   assert(prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &program) == 0);
 }
 
+/* ---- modes 10 and 11: a thread interrupted inside the sigreturn trampoline.
+ *
+ * The HLX-M4 gate lost 1 tier-2 run in 72 at window+3 under host load: the
+ * quiescence signal reached a worker after its application handler had
+ * returned into `__restore_rt` but before the `rt_sigreturn` ran. Its outer
+ * frame's saved PC was inside the window, and the scan that finds outer
+ * frames by their `pretcode` word starts at the stack pointer, one word above
+ * the `pretcode` the handler's `ret` had just popped. Nothing adjusted it.
+ *
+ * In the gate that interleaving needs an interrupt between two particular
+ * instructions. Here it is built deterministically with real signals: the
+ * thread keeps the quiescence signal blocked, the outer handler single-steps
+ * itself (EFLAGS.TF) through its `ret` into the trampoline, and the SIGTRAP
+ * handler, on reaching the chosen trampoline instruction, clears TF and
+ * unblocks the quiescence signal in the mask its own `sigreturn` restores, so
+ * the already-pending signal is delivered exactly there. Mode 10 stops at the
+ * trampoline's first instruction, mode 11 at the next one (the `syscall`). */
+static int tramp_quiesce_signo;
+static int tramp_stop_index;
+static volatile int tramp_ready;
+static volatile int tramp_done;
+static volatile int tramp_hit;
+static volatile int tramp_index;
+static volatile int tramp_steps;
+static volatile uint64_t tramp_address;
+static volatile uint64_t tramp_hit_pc;
+static volatile uint64_t outer_rip;
+static volatile uint64_t outer_rip_slot;
+
+static void tramp_outer_handler(int signo, siginfo_t *info, void *raw) {
+  ucontext_t *uc = (ucontext_t *)raw;
+  (void)signo;
+  (void)info;
+  outer_rip = (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+  outer_rip_slot = (uint64_t)(uintptr_t)&uc->uc_mcontext.gregs[REG_RIP];
+  /* Set TF clear of the red zone: every instruction from here on traps. */
+  __asm__ volatile("sub $128, %%rsp\n\t"
+                   "pushfq\n\t"
+                   "orq $0x100, (%%rsp)\n\t"
+                   "popfq\n\t"
+                   "add $128, %%rsp"
+                   ::: "memory", "cc");
+}
+
+static void tramp_trap_handler(int signo, siginfo_t *info, void *raw) {
+  ucontext_t *uc = (ucontext_t *)raw;
+  uint64_t rip = (uint64_t)uc->uc_mcontext.gregs[REG_RIP];
+  /* The sigreturn trampoline every handler in this process returns through. */
+  uint64_t trampoline = (uint64_t)(uintptr_t)__builtin_return_address(0);
+  (void)signo;
+  (void)info;
+  tramp_steps += 1;
+  if (tramp_steps > 100000) {
+    uc->uc_mcontext.gregs[REG_EFL] &= ~(greg_t)0x100;
+    tramp_hit = -1;
+    return;
+  }
+  if (rip - trampoline < 16) {
+    if (tramp_index == tramp_stop_index) {
+      uc->uc_mcontext.gregs[REG_EFL] &= ~(greg_t)0x100;
+      sigdelset(&uc->uc_sigmask, tramp_quiesce_signo);
+      tramp_address = trampoline;
+      tramp_hit_pc = rip;
+      tramp_hit = 1;
+    }
+    tramp_index += 1;
+  }
+}
+
+static void *tramp_thread(void *unused) {
+  sigset_t block;
+  sigset_t pending;
+  (void)unused;
+  sigemptyset(&block);
+  sigaddset(&block, tramp_quiesce_signo);
+  assert(pthread_sigmask(SIG_BLOCK, &block, NULL) == 0);
+  __atomic_store_n(&tramp_ready, 1, __ATOMIC_RELEASE);
+  for (;;) {
+    assert(sigpending(&pending) == 0);
+    if (sigismember(&pending, tramp_quiesce_signo)) break;
+    sched_yield();
+  }
+  /* The outer frame: its saved PC is the instruction after this syscall. */
+  syscall(SYS_tgkill, (long)getpid(), (long)syscall(SYS_gettid), (long)SIGUSR1);
+  __atomic_store_n(&tramp_done, 1, __ATOMIC_RELEASE);
+  return NULL;
+}
+
+static void run_trampoline_mode(int stop_index) {
+  struct sigaction outer, trap;
+  pthread_t thread;
+  repro_hcr_lx_parked_thread *slot;
+  uint32_t n;
+  int found = 0;
+  int status;
+  /* The top of `main` fakes a verified trampoline for the scan-only modes;
+   * this mode needs the real one, learned by the real handler. */
+  repro_hcr_lx_sigreturn_trampoline = 0;
+  repro_hcr_lx_trampoline_verified = 0;
+  tramp_stop_index = stop_index;
+  tramp_quiesce_signo = SIGRTMIN + 4;
+  assert(repro_hcr_lx_quiesce_install(tramp_quiesce_signo) == 0);
+  memset(&outer, 0, sizeof(outer));
+  outer.sa_sigaction = tramp_outer_handler;
+  outer.sa_flags = SA_SIGINFO;
+  sigemptyset(&outer.sa_mask);
+  assert(sigaction(SIGUSR1, &outer, NULL) == 0);
+  memset(&trap, 0, sizeof(trap));
+  trap.sa_sigaction = tramp_trap_handler;
+  trap.sa_flags = SA_SIGINFO;
+  sigemptyset(&trap.sa_mask);
+  sigaddset(&trap.sa_mask, tramp_quiesce_signo);
+  assert(sigaction(SIGTRAP, &trap, NULL) == 0);
+  assert(pthread_create(&thread, NULL, tramp_thread, NULL) == 0);
+  while (!__atomic_load_n(&tramp_ready, __ATOMIC_ACQUIRE)) sched_yield();
+
+  status = repro_hcr_lx_quiesce_begin(2000000000ull);
+  assert(status == 0);
+  assert(tramp_hit == 1);
+  assert(repro_hcr_lx_trampoline_verified == 1);
+  assert(!repro_hcr_lx_trampoline_shape_unknown);
+  assert(repro_hcr_lx_sigreturn_trampoline == tramp_address);
+  assert(repro_hcr_lx_quiesce.slot_count == 1);
+  slot = &repro_hcr_lx_quiesce.slots[0];
+  assert(slot->parked == 1);
+  /* Positive control: the thread really was parked INSIDE the trampoline, at
+   * the instruction this mode chose, not in the outer handler or after it. */
+  assert(slot->pc == tramp_hit_pc);
+  assert(stop_index == 0 ? slot->pc == tramp_address : slot->pc > tramp_address);
+  assert(slot->pc - tramp_address < repro_hcr_lx_trampoline_span);
+  /* THE INVARIANT: the frame being returned from is reported, with the PC
+   * its `rt_sigreturn` will restore and the address of that saved PC. */
+  for (n = 0; n < slot->nested_count; ++n) {
+    if (slot->nested_pc[n] == outer_rip &&
+        slot->nested_pc_slot[n] == outer_rip_slot) {
+      found += 1;
+    }
+  }
+  if (found != 1) {
+    fprintf(stderr, "outer frame not reported: nested_count=%u pc=0x%llx "
+            "outer_rip=0x%llx\n", slot->nested_count,
+            (unsigned long long)slot->pc, (unsigned long long)outer_rip);
+  }
+  assert(found == 1);
+  assert(repro_hcr_lx_quiesce.trampoline_frames_seen == 1);
+  /* And step 6 adjusts it: a window around the outer PC counts exactly one
+   * adjustment, in an OUTER frame. The resume target is the PC itself, so the
+   * thread still returns where it was. */
+  assert(repro_hcr_lx_quiesce_adjust_window(outer_rip - 1, outer_rip + 7,
+                                            outer_rip) == 1);
+  assert(repro_hcr_lx_quiesce.nested_adjust_count == 1);
+  assert(repro_hcr_lx_quiesce_release() == 0);
+  assert(pthread_join(thread, NULL) == 0);
+  assert(tramp_done == 1);
+}
+
 int main(int argc, char **argv) {
   size_t page = repro_hcr_lx_page_size();
   unsigned char *memory = mmap(NULL, page * 3, PROT_READ | PROT_WRITE,
@@ -47,7 +205,9 @@ int main(int argc, char **argv) {
   assert(repro_hcr_lx_snapshot_readable_ranges() > 0);
   assert(repro_hcr_lx_readable_end_of((uint64_t)(uintptr_t)memory) >=
          (uint64_t)(uintptr_t)(memory + page * 3));
-  if (mode == 9) {
+  if (mode == 10 || mode == 11) {
+    run_trampoline_mode(mode - 10);
+  } else if (mode == 9) {
     raise(SIGSEGV); /* Verify the harness preserves the original child fate. */
     return 2;
   } else if (mode == 7 || mode == 8) {

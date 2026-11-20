@@ -55,6 +55,7 @@ export ct_test_interface
 
 import repro_project_dsl
 export repro_project_dsl
+from repro_core/scratch_env import ScratchLocationEnvNames
 
 const NimUnittestToolId* = "ct_test_nim_unittest.buildNimUnittest"
   ## Stable identity string preserved from the pre-M4 shim shape so the
@@ -93,6 +94,34 @@ const buildNimUnittest* = BuildNimUnittest()
   ## ``buildNimUnittest.build(source = ..., binary = ..., defines = ...)``
   ## to record a build edge; that call expands via Nim UFCS to the
   ## ``build(tool, ...)`` proc declared below.
+
+proc nimUnittestExecutablePath*(binary: string;
+                                windowsTarget = defined(windows)): string =
+  ## The file a test binary declared as ``binary`` really is on disk, and
+  ## therefore the path both of its edges must name.
+  ##
+  ## On Windows ``nim c --out:foo`` writes ``foo.exe``, and the io monitor
+  ## starts the child with ``CreateProcessW`` given an explicit application
+  ## path, which does NOT append ``.exe`` the way a ``PATH`` search would
+  ## (https://learn.microsoft.com/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw,
+  ## ``lpApplicationName``: "The function will not use the search path ...
+  ## you must specify the file name extension"). So the compile edge's
+  ## declared output, the typed ``testBinary`` handle and every execute
+  ## edge's ``binary`` input all go through this one helper: an execute edge
+  ## naming the bare path launches a file that does not exist
+  ## (``CreateProcessW failed (err=2)``), and because no edge declares that
+  ## bare path as an output nothing orders the compile before it either.
+  ## Same rule as ``nim.c``'s ``effectiveBinary``
+  ## (``repro_dsl_stdlib/packages/nim.nim``).
+  ##
+  ## Idempotent, so a caller that already spelled ``foo.exe`` (or a handle
+  ## built from this helper's result) is unchanged. ``windowsTarget`` is a
+  ## parameter only so the Windows rule can be tested on any host; callers
+  ## leave it at the default, the host the recipe is evaluated for.
+  if windowsTarget and binary.len > 0 and not binary.endsWith(".exe"):
+    binary & ".exe"
+  else:
+    binary
 
 proc defaultNimcacheDir(binary: string): string =
   let outputName = splitFile(binary).name
@@ -230,14 +259,10 @@ proc build*(tool: BuildNimUnittest;
   # produces exactly `foo.exe`. Declaring `foo` left the edge's one output
   # absent, which the engine fails for a cacheable action
   # (Build-Engine-And-Scheduler.md §"A declared output is an obligation").
-  # `binary` itself is unchanged for the nimcache directory, the typed
-  # output and the callers, which already add `.exe` on Windows.
-  let outputBinary =
-    when defined(windows):
-      if binary.len == 0 or binary.endsWith(".exe"): binary
-      else: binary & ".exe"
-    else:
-      binary
+  # The typed `testBinary` handle below carries this same path, so the
+  # execute edges launch the file this edge produces. Only the nimcache
+  # directory keeps keying on `binary`'s stem.
+  let outputBinary = nimUnittestExecutablePath(binary)
   cliArgs.add(outputArg(name = "output", value = outputBinary,
     alias = "--out:", format = cafConcat))
 
@@ -295,6 +320,16 @@ proc build*(tool: BuildNimUnittest;
     else: "gcc"
   appendRegisteredActionToolIdentityRefs(result.action.id, [backendCompiler])
 
+  # The same temp-directory passthrough the ``nim`` tool declares on its
+  # ``c`` subcommand (``envPassthrough`` in the ``cli:`` block of
+  # ``repro_dsl_stdlib/packages/nim``, which states the reason and the cost).
+  # This edge is a ``nim c`` compile but is recorded here, through
+  # ``recordToolInvocation``, not through the typed ``nim.c`` wrapper, so the
+  # tool's declaration does not reach it and it names the list itself. Not
+  # applied to the execute edges below: what a test does with its temp
+  # directory is the test's business.
+  appendRegisteredActionEnvPassthrough(result.action, ScratchLocationEnvNames)
+
   # Typed-Outputs M1 binding: populate ``edge.testBinary`` with a
   # ``NimUnittestBinary`` whose ``path`` is the resolved binary path so
   # UFCS dispatch (``edge.testBinary.run(...)``) reaches the run/list
@@ -306,11 +341,17 @@ proc build*(tool: BuildNimUnittest;
   # group fails to compile; consumers that enumerate the graph's test
   # binaries by this type (``repro test --shard``) must not see those as a
   # second copy of the group's cases.
-  result.testBinary = NimUnittestBinary(path: binary)
+  #
+  # The handle carries the DECLARED OUTPUT (`<binary>.exe` on Windows), not
+  # the spelling the caller passed: `run` / `runTest` / `list` turn
+  # `self.path` into the program the execute edge launches and into the
+  # input that orders this compile before it. Handing them the bare path
+  # made a Windows execute edge launch a file no edge produces.
+  result.testBinary = NimUnittestBinary(path: outputBinary)
   if typedTestBinary:
     appendRegisteredActionTypedOutput(
       result.action.id, "testBinary",
-      @["NimUnittestBinary"], binary)
+      @["NimUnittestBinary"], outputBinary)
 
   # Named-Targets M1: compute the implicit target name from the output
   # path basename and stamp it onto the edge so ``repro why`` / the
@@ -338,7 +379,10 @@ proc run*(self: NimUnittestBinary; filter = "";
     BuildActionDef {.discardable.} =
   ## Emit one execution edge that runs the test binary. The bound
   ## ``self.path`` flows in as a synthesised ``binary`` input flag so
-  ## the action cache keys on the binary content.
+  ## the action cache keys on the binary content. It is spelled through
+  ## ``nimUnittestExecutablePath`` (``.exe`` on Windows), so a handle a
+  ## caller built from the bare ``binary =`` path still launches the file
+  ## the compile edge declares.
   ##
   ## ``requiredBinaries`` (Bootstrap-And-Self-Build B3): paths of
   ## additional executable artifacts the test subprocess depends on at
@@ -417,7 +461,7 @@ proc run*(self: NimUnittestBinary; filter = "";
   ## ``poolUnits = 1``) preserve the prior unconstrained behaviour for
   ## every existing call site.
   var cliArgs: seq[PublicCliArg] = @[]
-  cliArgs.add(inputArg("binary", self.path))
+  cliArgs.add(inputArg("binary", nimUnittestExecutablePath(self.path)))
   if filter.len > 0:
     cliArgs.add(cliArg("filter", filter))
   let call = publicCliCall(NimUnittestToolId, NimUnittestToolId,
@@ -458,7 +502,7 @@ proc runTest*(self: NimUnittestBinary; testName: string;
   ## ``<suite>::<test>`` form per the codetracer parallel test
   ## framework spec.
   var cliArgs: seq[PublicCliArg] = @[]
-  cliArgs.add(inputArg("binary", self.path))
+  cliArgs.add(inputArg("binary", nimUnittestExecutablePath(self.path)))
   cliArgs.add(cliArg("run", testName))
   let call = publicCliCall(NimUnittestToolId, NimUnittestToolId,
     "runTest", NimUnittestToolId & ".runTest", cliArgs)
@@ -483,7 +527,7 @@ proc list*(self: NimUnittestBinary;
   ## Reprobuild's action cache memoises this until the binary
   ## content changes.
   var cliArgs: seq[PublicCliArg] = @[]
-  cliArgs.add(inputArg("binary", self.path))
+  cliArgs.add(inputArg("binary", nimUnittestExecutablePath(self.path)))
   cliArgs.add(cliArg("list-json", true))
   let call = publicCliCall(NimUnittestToolId, NimUnittestToolId,
     "list", NimUnittestToolId & ".list", cliArgs)

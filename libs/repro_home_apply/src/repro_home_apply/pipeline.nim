@@ -10,8 +10,9 @@
 ##   Step  7.  Realize packages (M55/M56)
 ##   Step  8.  Stage generated files + managed blocks (M59)
 ##   Step  9.  Materialize launch plans (M57)
-##   Step 10.  Atomic switch of `current`
-##   Step 11.  Commit manifest + register store roots + eager GC
+##   Step 10.  Commit the generation (manifest into CAS, `pointer.bin`,
+##             store roots), then switch `current` to it
+##   Step 11.  Clear the partial-apply marker, eager GC
 ##
 ## Test injection: setting `REPRO_TEST_APPLY_KILL_AFTER_STEP=<N>`
 ## causes the pipeline to write the partial-apply marker and raise
@@ -128,6 +129,14 @@ type
     notApplied*: bool                 ## the host does not apply `concern`:
                                       ## planned and shown, never executed,
                                       ## never drift
+    resourceAction*: Option[ResourceAction]
+                                      ## category "resource": the resource
+                                      ## planner's own decision, with the
+                                      ## detail `action` folds away
+                                      ## (replace, adopt, drift digests,
+                                      ## deferred, kept vendor update).
+                                      ## `repro home plan --json` reports
+                                      ## it per resource.
 
   PlanPreview* = object
     ## M72 Deliverable 2: the result of `repro home apply --plan`.
@@ -1997,7 +2006,8 @@ proc packageResolutionCatalog(opts: ApplyOptions; plan: ApplyPlan):
   # A profile's `catalogs:` section imports contribution catalogs into the
   # same projection, as a recipe's `import` does.
   projectCatalogPackages(names, opts.profilePath,
-    opts.stateDir / "catalog-projection", plan.catalogImports)
+    opts.stateDir / "catalog-projection", plan.catalogImports,
+    importedCatalogsFor(opts.profilePath))
 
 proc packageResolutionContext(opts: ApplyOptions; plan: ApplyPlan;
                               catalog: ProfileCatalog):
@@ -2834,6 +2844,10 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
         if not notApplied:
           inc preview.driftCount
       item.detail = a.summary
+      if a.kind == rakDriftBlocked:
+        item.detail.add("; expected=" & a.driftExpectedHex.substr(0, 11) &
+          " observed=" & a.driftObservedHex.substr(0, 11))
+      item.resourceAction = some(a)
       preview.items.add(item)
   result.addResourceItems(composePlan(ownedDesired, recordedBindings,
     DecisionOptions(reconcile: reconcilePolicy, enforcePreventDestroy: true)),
@@ -2855,16 +2869,20 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
     result.generationIdHex == activeGenIdHex and result.driftCount == 0 and
     result.unrealizable.len == 0
 
-proc renderPlanPreview*(preview: PlanPreview): string =
+proc renderPlanPreview*(preview: PlanPreview;
+                        command = "repro home apply --plan"): string =
   ## Stable, line-oriented rendering of a `--plan` preview. The gate
   ## asserts on the category headers and the per-item action verbs.
+  ## `command` names the entry point in the header: `repro home plan` and
+  ## `repro home apply --plan` render the one preview
+  ## (Core-Invariants.md §One Implementation Per Concern).
   ##
   ## GM7: items of a concern the host does not apply are listed apart, after
   ## the applied ones, under `not applied on <host>`; records released by a
   ## narrowed concern set under `released`. Neither section exists for a
   ## host that applies every concern and released nothing, so the rendering
   ## of an undeclared profile is unchanged.
-  result = "repro home apply --plan: " & $preview.items.len &
+  result = command & ": " & $preview.items.len &
     " operation(s) previewed, " & $preview.driftCount & " drift(s)"
   if preview.unrealizable.len > 0:
     result.add(", " & $preview.unrealizable.len &
@@ -2947,14 +2965,18 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
   ## happened so the CLI layer can render a single status line.
   let opts = resolveOptions(rawOpts)
 
-  # ---- Pre-step: partial-apply recovery ----------------------------------
   ensureStateDir(opts.stateDir)
-  let recovered = recoverPartialApply(opts.stateDir)
-  result.abortedRecovered = recovered
 
   # ---- Step 1: acquire apply lock ---------------------------------------
   var lock = acquireApplyLock(opts.stateDir, timeoutSeconds = 30)
   try:
+    # ---- Partial-apply recovery, under the lock -------------------------
+    # Never before it: a second apply started while a first one runs would
+    # read the first apply's marker and quarantine its generation (and on
+    # Windows rewrite the stable bin dir) before failing with EApplyBusy.
+    let recovered = recoverPartialApply(opts.stateDir)
+    result.abortedRecovered = recovered
+
     if shouldKillAfter(1):
       writeMarker(opts.stateDir, "", "killed-after-step-1")
       raiseKilledByTestHook(1)
@@ -3193,20 +3215,26 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             recordSelectionsInLock(opts, resolutionCtx, packagePreviews)
           return
 
+      # Whether the generation's directory predates this apply
+      # (re-applying an earlier profile reproduces its content-addressed
+      # id): recovery keeps a committed generation retention already held.
+      let earlyGenDir = generationDir(opts.stateDir,
+        generationIdHex(candidateId))
+      let genDirPreexisting = dirExists(extendedPath(earlyGenDir))
+
       if shouldKillAfter(6):
         writeMarker(opts.stateDir, generationIdHex(candidateId),
-          "killed-after-step-6")
+          "killed-after-step-6", preexisting = genDirPreexisting)
         raiseKilledByTestHook(6)
 
       # ---- Commit: write marker before any destructive step. ------------
-      writeMarker(opts.stateDir, generationIdHex(candidateId), "in-progress")
+      writeMarker(opts.stateDir, generationIdHex(candidateId), "in-progress",
+        preexisting = genDirPreexisting)
       # Create the per-generation directory eagerly so partial-apply
       # recovery has a target to quarantine even when the kill happens
       # before the launcher / manifest writes that would otherwise
       # populate it. The directory ALONE does not advance `current` —
       # rotation in step 10 is the point of no return.
-      let earlyGenDir = generationDir(opts.stateDir,
-        generationIdHex(candidateId))
       createDir(extendedPath(earlyGenDir))
 
       # ---- Step 7: realize packages -------------------------------------
@@ -3476,8 +3504,15 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
               if k notin newBlockKeys and blocksApplied:
                 # Strip the sentinel-delimited region from the host file,
                 # keeping everything around it and deleting the file only
-                # if nothing else is left (the shared removal path).
-                destroyManagedBlockResource(mb.hostFilePath, mb.blockId)
+                # if nothing else is left (the shared removal path). A
+                # block the shared locator refuses (duplicated or
+                # unterminated) is left as it is and does not stop the
+                # removal of the other dropped blocks.
+                try:
+                  destroyManagedBlockResource(mb.hostFilePath, mb.blockId)
+                except ManagedBlockError as err:
+                  stderr.writeLine("repro home apply: left managed block '" &
+                    mb.blockId & "' in " & mb.hostFilePath & ": " & err.msg)
           except CatchableError:
             # The previous manifest may be unreadable in pathological
             # cases (manifest in CAS was GC'd by another tool, etc.).
@@ -4115,7 +4150,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
         envelope.realizedPrefixIds.add(digestFromKey(r.prefixId))
       envelope.generationId = candidateId
 
-      # Step 11 (commit): seal manifest + intent snapshot + RBCG into
+      # Step 10 (commit): seal manifest + intent snapshot + RBCG into
       # CAS, write pointer.bin, register store root, attach holds.
       # The pipeline runs the commit BEFORE rotation so a crash
       # during CAS sealing leaves the partial-recovery marker in
@@ -4136,11 +4171,14 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
       # generation is reachable from `current`. ---------------------
       rotateCurrent(opts.stateDir, generationIdHex(candidateId))
 
+      # Clear the partial-apply marker — the generation is committed and
+      # current. Cleared before GC so a crash during GC leaves no marker
+      # naming the active generation (recovery keeps such a generation
+      # anyway: `recoverPartialApply`).
+      clearMarker(opts.stateDir)
+
       # ---- Step 11 (eager GC) -------------------------------------
       result.gcResult = gc(store)
-
-      # Clear the partial-apply marker — success.
-      clearMarker(opts.stateDir)
 
       # GM4b: the generation is committed and current; serialise what it
       # selected into the home-profile lock. A remote bundle built here is

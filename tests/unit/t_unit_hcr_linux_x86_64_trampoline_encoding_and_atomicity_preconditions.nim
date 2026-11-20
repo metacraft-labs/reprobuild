@@ -27,7 +27,7 @@
 ##      overwritten.
 ##
 ## No silent skips on Linux x86_64. `MEMBARRIER_CMD_PRIVATE_EXPEDITED_SYNC_CORE`
-## and the `mprotect` RW->RX round trip are asserted AVAILABLE rather than
+## and the text page replacement (design §5.1) are asserted AVAILABLE rather than
 ## probed-and-tolerated: if a future host lacks either, this gate must fail
 ## loudly so someone resolves HLX-OQ-3 / HLX-OQ-1 rather than shipping a
 ## provider that quietly stops synchronizing cores.
@@ -79,8 +79,12 @@ when defined(linux) and defined(amd64):
     "repro_hcr_lx_probe_code_page_is_dual", cdecl.}
   proc probeWxRequestsRefused(): uint64 {.importc:
     "repro_hcr_lx_probe_wx_requests_refused", cdecl.}
-  proc probeTextProtectionRoundtrip(): cint {.importc:
-    "repro_hcr_lx_probe_text_protection_roundtrip", cdecl.}
+  proc probeTextReplacementSupported(): cint {.importc:
+    "repro_hcr_lx_probe_text_replacement_supported", cdecl.}
+  proc probeTextReplacementBacking(): cint {.importc:
+    "repro_hcr_lx_probe_text_replacement_backing", cdecl.}
+  proc probeTextReplacementMemfdResult(): clonglong {.importc:
+    "repro_hcr_lx_probe_text_replacement_memfd_result", cdecl.}
   proc probeMembarrierSyncCore(): cint {.importc:
     "repro_hcr_lx_probe_membarrier_sync_core", cdecl.}
   proc probeMembarrierQueryMask(): int64 {.importc:
@@ -320,17 +324,21 @@ when defined(linux) and defined(amd64):
       check noCet.windowAddress == 0x1000'u64
       check noCet.windowOffset == 0'u32
 
-    test "host provides SYNC_CORE membarrier and an mprotect RW/RX round trip":
+    test "host provides SYNC_CORE membarrier and the text page replacement":
       # Design §4.4: SYNC_CORE is the cross-modifying-code requirement, not an
-      # i-cache concern, and it is required on x86_64. Design §5.2: the RW->RX
-      # round trip is probed at agent start so a hardened host is refused at
-      # negotiation rather than mid-commit. Both are asserted, not tolerated.
+      # i-cache concern, and it is required on x86_64. Design §5.2: a complete
+      # §5.1 page replacement is probed at agent start so a hardened host is
+      # refused at negotiation rather than mid-commit. Both are asserted, not
+      # tolerated, and on this unhardened host the `memfd` backing (1) is the
+      # one that completes.
       check probeMembarrierSyncCoreCmd() == 32 # 1 << 5, linux/membarrier.h
       check probeMembarrierRegisterCmd() == 64 # 1 << 6
       check probeMembarrierQueryMask() > 0
       check (probeMembarrierQueryMask() and 32'i64) != 0'i64
       check probeMembarrierSyncCore() == 1
-      check probeTextProtectionRoundtrip() == 1
+      check probeTextReplacementSupported() == 1
+      check probeTextReplacementMemfdResult() == 0
+      check probeTextReplacementBacking() == 1
 
     test "publication is one aligned store, and re-patching the same site works":
       # Build a real executable stub carrying a real GCC-shaped patchable entry:

@@ -323,6 +323,24 @@ when defined(linux) and defined(amd64):
         check p["publicationsApplied"].getInt() == 0
         check p["quiesceOtherFailures"].getInt() == 0
 
+    test "a control fault that wrecked the stack pointer is still reported":
+      # The crash arms die by executing a window's bytes as code, which can
+      # leave `rsp` anywhere. Without an alternate signal stack the kernel
+      # cannot push the fault handler's frame, the process dies 139 with no
+      # HCR-M4-CRASH line, and `runFixture` aborts the whole gate: measured
+      # for `tier1` in ten of twelve gate runs at load/CPU 4-7. Deterministic
+      # here: the fixture faults with `rsp` = 0x1000.
+      let repoRoot = getCurrentDir()
+      let bodies = buildPatchBodies(repoRoot)
+      let threadsBin = buildFixture(repoRoot, "hcr_lx_m4_threads.c",
+                                    "m4_threads")
+      let r = runFixture(threadsBin, ["fault-bad-stack", hex(bodies.a),
+                                      hex(bodies.b), "2", "1", "0"])
+      checkpoint(r.stderrText)
+      check r.exitCode == CrashExitCode
+      check r.crashed
+      check r.faultSignal == 4
+
     test "the host condition is readable":
       let load = hostLoadPerCpu()
       checkpoint("load/CPU " & $load)

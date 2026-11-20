@@ -478,7 +478,10 @@ suite "pre-push protocol v2 policy regressions":
       createDir(develop.parentDir())
       discard require(q(gitBin) & " clone " & q(fx.depOrigin) & " " &
         q(develop))
-      writeDevelopOverride(fx.workspace, "tool", develop)
+      # The override substitutes `dep`, a member of `app`'s closure: stage 3
+      # checks only such an override (Workspace-And-Develop-Mode.md §"Which
+      # develop overrides the push gate checks").
+      writeDevelopOverride(fx.workspace, "dep", develop)
       writeFile(develop / "dirty-override.txt", "dirty override\n")
       let overrideFailure = run(q(gitBin) & " -C " & q(fx.app) &
         " push origin main")
@@ -699,7 +702,9 @@ suite "pre-push protocol v2 policy regressions":
       discard require(q(gitBin) & " -C " & q(sideCar) &
         " config user.name 'Policy Tester'")
       discard commit(gitBin, sideCar, "override-local-only")
-      writeDevelopOverride(fx.workspace, "tool", sideCar)
+      # It substitutes `dep`, a closure member; an override outside the
+      # closure is not checked at all.
+      writeDevelopOverride(fx.workspace, "dep", sideCar)
       discard commit(gitBin, fx.app, "app-outgoing-2")
 
       let refused = run(q(gitBin) & " -C " & q(fx.app) & " push origin main")

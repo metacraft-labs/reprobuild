@@ -303,6 +303,31 @@ type
     publicCliPath*: string
     rawArgs*: seq[string]
     environment*: seq[string]
+    environmentIsComplete*: bool
+      ## True when ``environment`` is the caller's WHOLE environment
+      ## (``daemonCarriedEnvironment``), so a name it lacks is a name the
+      ## caller lacks and the worker installs exactly this environment.
+      ## False for a request from a client before v0.2.0, which forwarded a
+      ## curated list and cannot show that a name was absent, and for an
+      ## in-process caller that builds a partial request; the worker then
+      ## overlays the request and unsets only the names it is authoritative
+      ## over (``daemonWorkerEnvUnsets``). Encoded as a trailing field: an
+      ## older daemon stops reading before it, and a body written by an
+      ## older client ends without it and decodes as false.
+    engineDigest*: string
+      ## The content digest of the engine this request was sent for: the
+      ## digest the client's staleness restart expects the daemon to be
+      ## running (``expectedUserDaemonDigest``). The daemon compares it with
+      ## its own running-image digest and serves only on equality
+      ## (``foreignEngineVerdict``). It does NOT digest the file at
+      ## ``publicCliPath`` instead, because a daemon whose filesystem view
+      ## differs from the client's (a service manager mounting a different
+      ## ``/home``) can find a different file there. Encoded as a trailing
+      ## field after ``environmentIsComplete``: an older daemon stops reading
+      ## before it, and a body from an older client ends without it and
+      ## decodes as "", an unknown identity the daemon declines
+      ## (reprobuild-pm ``spec/Local-Daemons-And-Control-Plane.md``
+      ## §"A Daemon Serves Only Its Own Engine").
     attached*: bool
     cancelOnDisconnect*: bool
 
@@ -316,6 +341,10 @@ type
     publicCliPath*: string
     rawArgs*: seq[string]
     environment*: seq[string]
+    environmentIsComplete*: bool
+      ## As ``UserDaemonBuildRequest.environmentIsComplete``.
+    engineDigest*: string
+      ## As ``UserDaemonBuildRequest.engineDigest``.
     attached*: bool
     detached*: bool
     cancelOnDisconnect*: bool
@@ -761,6 +790,8 @@ proc buildRequestBody*(request: UserDaemonBuildRequest): seq[byte] =
     sanitizeUserDaemonRequestEnvironment(request.environment))
   result.writeBool(request.attached)
   result.writeBool(request.cancelOnDisconnect)
+  result.writeBool(request.environmentIsComplete)
+  result.writeString(request.engineDigest)
 
 proc parseBuildRequestBody*(body: openArray[byte]): UserDaemonBuildRequest =
   var pos = 0
@@ -776,6 +807,14 @@ proc parseBuildRequestBody*(body: openArray[byte]): UserDaemonBuildRequest =
     sanitizeUserDaemonRequestEnvironment(body.readStringSeq(pos))
   result.attached = body.readBool(pos)
   result.cancelOnDisconnect = body.readBool(pos)
+  if pos < body.len:
+    # A body from a client before this field ends here and decodes as an
+    # incomplete environment, which keeps the curated unset rule for it.
+    result.environmentIsComplete = body.readBool(pos)
+  if pos < body.len:
+    # A body from a client before ``engineDigest`` ends here and decodes as
+    # "", an unknown engine identity the daemon declines.
+    result.engineDigest = body.readString(pos)
 
 proc watchRequestBody*(request: UserDaemonWatchRequest): seq[byte] =
   result.writeString(request.runId)
@@ -794,6 +833,8 @@ proc watchRequestBody*(request: UserDaemonWatchRequest): seq[byte] =
   result.writeI64(int64(request.debounceMs))
   result.writeI64(int64(request.maxCycles))
   result.writeStringSeq(request.selectedRoots)
+  result.writeBool(request.environmentIsComplete)
+  result.writeString(request.engineDigest)
 
 proc parseWatchRequestBody*(body: openArray[byte]): UserDaemonWatchRequest =
   var pos = 0
@@ -813,6 +854,12 @@ proc parseWatchRequestBody*(body: openArray[byte]): UserDaemonWatchRequest =
   result.debounceMs = int(body.readI64(pos))
   result.maxCycles = int(body.readI64(pos))
   result.selectedRoots = body.readStringSeq(pos)
+  if pos < body.len:
+    # See ``parseBuildRequestBody``.
+    result.environmentIsComplete = body.readBool(pos)
+  if pos < body.len:
+    # See ``parseBuildRequestBody``.
+    result.engineDigest = body.readString(pos)
 
 proc watchSessionRequestBody*(request: UserDaemonWatchSessionRequest): seq[byte] =
   result.writeString(request.sessionId)

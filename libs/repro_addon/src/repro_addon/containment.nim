@@ -2,20 +2,26 @@
 ## decision 51; A11 drill finding D5; RESP-4).
 ##
 ##   repro system addon contain --operator NAME --reason TEXT
-##       1. records ``addon-containment`` / ``operator-contained`` (attested
+##       1. writes the containment marker (``<state>/addon/contained``, not
+##          yet naming a record) and gives the fetch timer, the fetch unit
+##          and the apply unit a runtime drop-in conditioning them on the
+##          marker's absence (``ConditionPathExists=!``, see
+##          ``ContainDropInName``), so no tick STARTS; nothing is stopped;
+##       2. waits, for at most ``ContainQuiesceMs``, until a tick already
+##          running has finished and written its heartbeat;
+##       3. records ``addon-containment`` / ``operator-contained`` (attested
 ##          by the host's key, naming the operator and the reason) and ships
 ##          it to the sink BEFORE anything stops, so the off-host check can
 ##          tell the deploy agent's silence that follows from an attacker's
-##          (it then reports the agent ``contained``, not ``silent``);
-##       2. writes the containment marker (``<state>/addon/contained``);
-##       3. gives the fetch timer, the fetch unit and the apply unit a runtime
-##          drop-in conditioning them on the marker's absence
-##          (``ConditionPathExists=!``, see ``ContainDropInName``), stops the
-##          fetch side, so no network-fed input is fetched, then, under the
-##          host apply lock (a switch in progress finishes first), the apply
-##          unit, and clears the agent units' failed state, so the host
-##          reads as it was before the compromise;
-##       4. at every boot while the marker exists, the re-assert unit writes
+##          (it then reports the agent ``contained``, not ``silent``). After
+##          steps 1 and 2 no tick heartbeat can follow the record, and the
+##          check reads one that does as ``ticked-while-contained``;
+##       4. names the record in the marker, stops the fetch side, so no
+##          network-fed input is fetched, then, under the host apply lock (a
+##          switch in progress finishes first), the apply unit, and clears
+##          the agent units' failed state, so the host reads as it was
+##          before the compromise;
+##       5. at every boot while the marker exists, the re-assert unit writes
 ##          the drop-ins again, and the apply unit refuses to run.
 ##   repro system addon release --operator NAME --reason TEXT
 ##       records ``operator-released`` and ships it, removes the marker and
@@ -51,6 +57,9 @@ type
     shipped*: bool            ## the sink acknowledged it
     shipError*: string
     already*: bool
+    busyAtRecord*: seq[string]
+      ## The agent's units still running when ``contain`` recorded (its
+      ## wait timed out); empty when none was.
 
 const
   ContainedUnits* = [AgentFetchTimer, AgentFetchUnit]
@@ -64,7 +73,9 @@ proc shipNow(site: EvidenceSite): tuple[shipped: bool; error: string] =
     return (false, "this host has no Evidence sink")
   try:
     let conf = loadEvidenceConf()
-    let r = runEvidenceShip(defaultShipSite(), conf, site.host)
+    # In the shipping unit's confinement (§13 decision 181): this root
+    # process decodes nothing the sink sends.
+    let r = shipFor(defaultShipSite(), conf, site.host)
     (r.pending == 0 and r.error.len == 0, r.error)
   except CatchableError as e:
     (false, e.msg)
@@ -125,13 +136,17 @@ proc removeContainDropIns(runDir = "/run/systemd/system") =
     try: removeFile(runDir / (u & ".d") / ContainDropInName)
     except OSError: discard
 
-proc maskAgent*(markerPath: string): seq[string] =
+proc blockAgentStarts*(markerPath: string): seq[string] =
   ## Make the agent's units unstartable while ``markerPath`` exists (a
-  ## runtime drop-in each), stop the fetch side, then the apply side under
-  ## the apply lock, and clear their failed state.
+  ## runtime drop-in each, then a manager reload). Nothing running is
+  ## stopped. The problems systemctl reported, if any.
   result = writeContainDropIns(markerPath)
   let r = systemctlAll(["daemon-reload"], [])
   if r.len > 0: result.add(r)
+
+proc stopAgent*(): seq[string] =
+  ## Stop the fetch side, then the apply side under the apply lock, and
+  ## clear their failed state.
   let a = systemctlAll(["stop"], ContainedUnits)
   if a.len > 0: result.add(a)
   var lock = acquireHostApplyLock("repro system addon contain")
@@ -141,6 +156,33 @@ proc maskAgent*(markerPath: string): seq[string] =
   finally:
     lock.release()
   discard systemctlAll(["reset-failed"], [AgentFetchUnit, ContainedApplyUnit])
+
+proc maskAgent*(markerPath: string): seq[string] =
+  ## ``blockAgentStarts``, then ``stopAgent``.
+  result = blockAgentStarts(markerPath)
+  result.add(stopAgent())
+
+const
+  ContainQuiesceMs* = 180_000
+    ## How long ``contain`` waits for a running tick to finish before it
+    ## records. A tick that has not finished by then is stopped after the
+    ## record, and a heartbeat it still writes reads as
+    ## ``ticked-while-contained``, which is then what happened.
+  ContainQuiescePollMs* = 250
+  BusyStates = ["active", "activating", "deactivating", "reloading",
+                "refreshing"]
+
+proc busyAgentUnits*(): seq[string] =
+  ## The agent's tick units that are running now (a oneshot tick is
+  ## ``activating`` until it exits). The fetch timer only waits, so it is
+  ## not one of them.
+  for u in [AgentFetchUnit, ContainedApplyUnit]:
+    if not unitLoaded(u): continue
+    try:
+      let r = runSystemctl(["show", "-p", "ActiveState", "--value", u])
+      if r.exitCode == 0 and r.output.strip() in BusyStates: result.add(u)
+    except CatchableError:
+      discard
 
 proc nextContainmentSequence*(stateDir: string; nowMs = 0'i64): uint64 =
   ## Strictly increasing per host, kept root-only beside the marker: the
@@ -203,30 +245,96 @@ proc recordContainment(stateDir: string; site: EvidenceSite;
   recordContainmentAs(site, credentialHostId(), action, operator, reason,
                       nextContainmentSequence(stateDir))
 
-proc runContain*(operator, reason: string; stateDir = "/var/lib/repro/system";
-                 site = defaultSite()): ContainResult =
+type
+  ContainOps* = object
+    ## The host effects ``runContainWith`` makes, in its order; a test
+    ## replaces them to observe that order.
+    blockStarts*: proc(markerPath: string): seq[string]
+    busyUnits*: proc(): seq[string]
+    sleepMs*: proc(ms: int)
+    record*: proc(): string
+    ship*: proc(): tuple[shipped: bool; error: string]
+    stop*: proc(): seq[string]
+
+proc containmentRecorded*(stateDir: string): bool =
+  ## The marker exists and names the record its contain wrote. A marker
+  ## that does not is a contain that stopped before its record (step 1 or
+  ## 2): the host cannot start a tick, and running ``contain`` again
+  ## finishes it.
+  try:
+    for l in readFile(containedMarkerPath(stateDir)).splitLines():
+      if l.startsWith("record=") and l.len > "record=".len: return true
+  except IOError, OSError:
+    discard
+  false
+
+proc writeMarker(stateDir, operator, reason, record: string) =
+  createDir(stateDir / "addon")
+  var text = "operator=" & operator & "\nreason=" &
+    reason.replace("\n", " ") & "\nat=" & $now().utc & "\n"
+  if record.len > 0: text.add("record=" & record & "\n")
+  # 0644, as the marker always was: only its existence is read elsewhere.
+  writeFileAtomic(containedMarkerPath(stateDir), text, 0o644)
+
+proc quiesce(ops: ContainOps; timeoutMs: int): seq[string] =
+  ## Wait until no tick runs; the units still running at the timeout.
+  var waited = 0
+  result = ops.busyUnits()
+  while result.len > 0 and waited < timeoutMs:
+    ops.sleepMs(ContainQuiescePollMs)
+    waited += ContainQuiescePollMs
+    result = ops.busyUnits()
+
+proc runContainWith*(ops: ContainOps; operator, reason: string;
+                     stateDir: string; quiesceMs = ContainQuiesceMs):
+    ContainResult =
+  ## ``contain``'s steps (see the header) through ``ops``.
   if operator.len == 0 or reason.len == 0:
     raise newException(ContainmentError, "--operator and --reason are required")
   if not fileExists(stateDir / "addon-ledger"):
     raise newException(ContainmentError, "this is not an add-on host")
-  if isContained(stateDir):
+  if containmentRecorded(stateDir):
     result.already = true
     return
-  # 1. The record leaves the host before anything stops.
-  result.record = recordContainment(stateDir, site, "contain", operator,
-                                    reason)
-  let s = shipNow(site)
-  result.shipped = s.shipped
-  result.shipError = s.error
-  # 2. The marker, then 3. the units.
-  createDir(stateDir / "addon")
-  writeFile(containedMarkerPath(stateDir), "operator=" & operator &
-    "\nreason=" & reason.replace("\n", " ") & "\nat=" &
-    $now().utc & "\nrecord=" & result.record & "\n")
-  let problems = maskAgent(containedMarkerPath(stateDir))
+  let marker = containedMarkerPath(stateDir)
+  var problems: seq[string]
+  when mutated("contain-records-before-quiesce"):
+    # FALSIFYING BUILD: the record first, while a tick can still start or
+    # finish and write its heartbeat after it.
+    result.record = ops.record()
+    let s0 = ops.ship()
+    result.shipped = s0.shipped
+    result.shipError = s0.error
+    writeMarker(stateDir, operator, reason, result.record)
+    problems.add(ops.blockStarts(marker))
+  else:
+    # 1. No tick starts; 2. a running one finishes and writes its heartbeat.
+    writeMarker(stateDir, operator, reason, "")
+    problems.add(ops.blockStarts(marker))
+    result.busyAtRecord = quiesce(ops, quiesceMs)
+    # 3. The record leaves the host before anything stops.
+    result.record = ops.record()
+    let s = ops.ship()
+    result.shipped = s.shipped
+    result.shipError = s.error
+    # 4. The marker names it; the units stop.
+    writeMarker(stateDir, operator, reason, result.record)
+  problems.add(ops.stop())
   if problems.len > 0:
     raise newException(ContainmentError, "the record was written and the " &
       "marker set, but systemctl refused: " & problems.join("; "))
+
+proc runContain*(operator, reason: string; stateDir = "/var/lib/repro/system";
+                 site = defaultSite()): ContainResult =
+  let ops = ContainOps(
+    blockStarts: blockAgentStarts,
+    busyUnits: busyAgentUnits,
+    sleepMs: proc(ms: int) = sleep(ms),
+    record: proc(): string =
+      recordContainment(stateDir, site, "contain", operator, reason),
+    ship: proc(): tuple[shipped: bool; error: string] = shipNow(site),
+    stop: stopAgent)
+  runContainWith(ops, operator, reason, stateDir)
 
 proc reapplyContainment*(stateDir = "/var/lib/repro/system"): bool =
   ## At boot: mask the agent's units again while the marker exists (a
@@ -257,48 +365,26 @@ proc runRelease*(operator, reason: string; stateDir = "/var/lib/repro/system";
     raise newException(ContainmentError, "released, but systemctl refused: " &
       problems.join("; "))
 
-proc parseOperatorArgs(verb: string; args: seq[string]):
-    tuple[operator, reason: string] =
-  var i = 0
-  while i < args.len:
-    let a = args[i]
-    var name = a
-    var value = ""
-    let eq = a.find('=')
-    if eq > 0:
-      name = a[0 ..< eq]
-      value = a[eq + 1 .. ^1]
-    elif i + 1 < args.len:
-      inc i
-      value = args[i]
-    case name
-    of "--operator": result.operator = value
-    of "--reason": result.reason = value
-    else: raise newException(ValueError, "unknown option " & a)
-    inc i
-  if result.operator.len == 0 or result.reason.len == 0:
-    raise newException(ValueError, "usage: repro system addon " & verb &
-      " --operator NAME --reason TEXT")
-
-proc parseContainArgs*(args: seq[string]): tuple[operator, reason: string] =
-  ## For the docs test (the user guide's runbook lines).
-  parseOperatorArgs("contain", args)
-
-proc runContainCli*(args: seq[string]; release = false): int =
+proc runContainCommand*(operator, reason: string; release = false): int =
+  ## ``repro system addon contain|release --operator NAME --reason TEXT``
+  ## (``release`` for the second).
   let verb = if release: "release" else: "contain"
-  var o: tuple[operator, reason: string]
-  try: o = parseOperatorArgs(verb, args)
-  except ValueError as e:
-    stderr.write("repro system addon " & verb & ": " & e.msg & "\n")
+  if operator.len == 0 or reason.len == 0:
+    stderr.write("repro system addon " & verb & ": --operator and --reason " &
+      "are required\n")
     return 2
   try:
-    let r = if release: runRelease(o.operator, o.reason)
-            else: runContain(o.operator, o.reason)
+    let r = if release: runRelease(operator, reason)
+            else: runContain(operator, reason)
     if r.already:
       stdout.write("already contained (" & containedMarkerPath() & ")\n")
       return 0
     stdout.write((if release: "released" else: "contained") & "; record " &
       r.record & "\n")
+    if r.busyAtRecord.len > 0:
+      stdout.write("warning: " & r.busyAtRecord.join(", ") & " still ran " &
+        "when the record was made, and was stopped after it; a heartbeat it " &
+        "wrote reads as ticked-while-contained\n")
     if r.shipped:
       stdout.write("the record reached the sink\n")
     else:

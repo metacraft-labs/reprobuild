@@ -325,9 +325,28 @@ suite "repro_elevation: --no-elevate skip path":
 suite "repro_elevation: broker-mode arg parsing":
   test "parses --privileged-broker --channel --token":
     let parsed = parseBrokerModeArgs(@["--privileged-broker",
-      "--channel", "\\\\.\\pipe\\repro-elev-xyz", "--token", "xyz"])
+      "--channel", "0123456789abcdef0123456789abcdef", "--token", "xyz",
+      "--parent-pid", "4242", "--parent-start", "133000000000000000"])
     check parsed.isBrokerMode
+    check parsed.channel == "0123456789abcdef0123456789abcdef"
     check parsed.token == "xyz"
+    check parsed.parentPid == 4242
+    check parsed.parentStart == 133000000000000000'u64
+
+  test "a --parent-pid outside a 32-bit process id is a protocol error":
+    # 2^32 - 1 is the largest DWORD process id; one past it, and a value
+    # that does not even fit 64 bits, are refused as EProtocol rather than
+    # escaping as a RangeDefect or wrapping.
+    proc brokerArgs(pid: string): seq[string] =
+      @["--privileged-broker", "--channel",
+        "0123456789abcdef0123456789abcdef", "--token", "xyz",
+        "--parent-pid", pid, "--parent-start", "133000000000000000"]
+    when sizeof(int) >= 8:
+      check parseBrokerModeArgs(brokerArgs("4294967295")).parentPid ==
+        4294967295
+    for pid in ["4294967296", "99999999999999999999", "not-a-pid"]:
+      expect EProtocol:
+        discard parseBrokerModeArgs(brokerArgs(pid))
 
   test "non-broker args are reported as not-broker-mode":
     let parsed = parseBrokerModeArgs(@["home", "apply"])

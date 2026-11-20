@@ -1,3 +1,7 @@
+# The RunQuota helper role of the image this test stands in for: its
+# command line read by repro's generated parser.
+from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
+  selectsRunQuotaHelper
 import std/[json, os, osproc, streams, strutils, tempfiles, times]
 
 import repro_build_engine
@@ -528,8 +532,8 @@ when isMainModule:
   if params.len > 0 and params[0] == "fixture-action":
     fixtureMain(params)
     quit 0
-  if params.len > 0 and params[0] == "__repro-runquota-helper":
-    quit runRunQuotaHelperCli(params[1 .. ^1])
+  if selectsRunQuotaHelper(params):
+    quit runRunQuotaHelperArgs(params)
   # A gate refusal is a ValueError whose message names every refused action
   # in full. Left unhandled, the `-d:release` build reports it through Nim's
   # fixed 2000-byte buffer (`reportUnhandledErrorAux`, system/excpt.nim),

@@ -6,7 +6,7 @@
 ## request prints to stdout and exits 0, so a script or an operator can ask
 ## any verb how to call it.
 ##
-## ``repro help <command>`` answers every command ``repro --help`` lists,
+## ``repro help <command>`` answers every command ``repro --help-all`` lists,
 ## with help on stdout and exit 0, including the commands whose own parser
 ## does not know ``--help``. ``repro help`` must not hand such a parser a
 ## ``--help`` it would reject or, worse, take as an operand: ``repro allow
@@ -27,7 +27,8 @@ import repro_test_support
 import repro_cli_support/cli_description
 
 macro shownCommands(): untyped =
-  ## The top-level commands ``repro --help`` lists, from the description.
+  ## The top-level commands ``repro --help-all`` lists, from the
+  ## description.
   var words: seq[string] = @[]
   for cmd in reproCommandLineModel().commands:
     if not cmd.anonymous and cmd.path.len == 1 and
@@ -56,15 +57,19 @@ suite "sync and hooks help":
     let empty = createTempDir("repro-help-", "")
     defer: removeDir(empty)
     for (argv, expected) in [
-        (@["sync", "--help"], "usage: repro sync"),
-        (@["sync", "-h"], "usage: repro sync"),
-        (@["workspace", "sync", "--help"], "usage: repro sync"),
-        (@["ws", "sync", "--help"], "usage: repro sync"),
-        (@["hooks", "ensure", "--help"], "usage: repro hooks"),
-        (@["hooks", "--help"], "usage: repro hooks")]:
+        # Their help is generated from the description (the hand-written
+        # usage texts went when the commands moved onto it).
+        (@["sync", "--help"], "Usage: repro sync"),
+        (@["sync", "-h"], "Usage: repro sync"),
+        (@["workspace", "sync", "--help"], "Usage: repro workspace sync"),
+        (@["ws", "sync", "--help"], "Usage: repro workspace sync"),
+        (@["hooks", "ensure", "--help"], "Usage: repro hooks ensure"),
+        (@["hooks", "--help"], "Usage: repro hooks")]:
       var cmd = @[repro]
       cmd.add(argv)
-      cmd.add("--workspace-root=" & empty)
+      if argv != @["hooks", "--help"]:
+        # The namespace itself takes no `--workspace-root`.
+        cmd.add("--workspace-root=" & empty)
       let res = runShell(shellCommand(cmd))
       checkpoint(argv.join(" ") & " -> exit " & $res.code & "\n" & res.output)
       check res.code == 0
@@ -90,8 +95,11 @@ suite "sync and hooks help":
     var topics: seq[seq[string]] = @[]
     for word in ShownCommands:
       topics.add(@[word])
-    # A deeper word of a command whose parser does not know `--help`.
-    topics.add(@["allow", "somewhere"])
+    # (A deeper word of a command whose words another parser read, `repro
+    # help system addon somewhere`, was the last such topic; the add-on's
+    # command line is mounted in repro's description now, so a word below it
+    # that names no verb is an unknown command, as everywhere: checked
+    # below with `allow`'s.)
     for topic in topics:
       let res = runShell(shellCommand(@[repro, "help"] & topic, env),
         cwd = empty, timeoutMs = 60_000)
@@ -99,9 +107,29 @@ suite "sync and hooks help":
         "\n" & res.output)
       check res.code == 0
       check res.output.strip().len > 0
-      # What `repro allow --help` and `repro deny --help` print: the
-      # command ran, with `--help` as its directory.
+      # What `repro allow --help` and `repro deny --help` printed before
+      # they moved onto the description: the command ran, with `--help` as
+      # its directory.
       check "Allowed repro dev-env" notin res.output
       check "was not trusted" notin res.output
+    let mounted = runShell(shellCommand(@[repro, "help", "system", "addon",
+      "somewhere"], env), cwd = empty, timeoutMs = 60_000)
+    checkpoint("repro help system addon somewhere -> exit " & $mounted.code &
+      "\n" & mounted.output)
+    check mounted.code == 2
+    check "error: unknown subcommand 'somewhere' for 'repro system addon'" in
+      mounted.output
+    let deeper = runShell(shellCommand(@[repro, "help", "allow", "somewhere"],
+      env), cwd = empty, timeoutMs = 60_000)
+    checkpoint("repro help allow somewhere -> exit " & $deeper.code & "\n" &
+      deeper.output)
+    check deeper.code == 2
+    # clispec's error block for the word below `repro allow`, which has no
+    # subcommands: an unexpected argument, with no empty list of
+    # subcommands after it.
+    check "error: unexpected argument 'somewhere' for 'repro allow'" in
+      deeper.output
+    check "expected one of" notin deeper.output
+    check "For more information, try 'repro allow --help'." in deeper.output
     check entriesUnder(empty).len == 0
     check entriesUnder(home).len == 0

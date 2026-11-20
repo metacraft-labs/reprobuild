@@ -90,7 +90,7 @@ suite "DSL-port M9.R.5b — recipe options sweep":
     # `"/usr"`. Verify via the readConfigurable fallback accessor.
     # Use the fallback flavour so an unrelated recipe import order does
     # not perturb the read.
-    let prefix = readConfigurable[string]("cairoSource.prefix", "<unset>")
+    let prefix = readConfigurable[string]("package.cairoSource.prefix", "<unset>")
     # The cairo recipe either lifted `--prefix=/usr` (in which case
     # the registered default matches) or had no `--prefix=` flag (in
     # which case the fallback is returned). Both are acceptable
@@ -141,17 +141,19 @@ suite "DSL-port M9.R.5b — recipe options sweep":
     # load-bearing surface today (M9.R.5b's swept recipes carry
     # `config: discard` when no `--prefix=` flag was present in the
     # legacy options block). The fallback flavour MUST never raise on
-    # a missing key.
+    # a missing key. (It does raise on a REGISTERED key written without
+    # its `package.` kind segment: that is a misspelling, not a missing
+    # key.)
     let nonexistent = readConfigurable[string](
-      "neverRegisteredKey.prefix", "<fallback>")
+      "package.neverRegisteredKey.prefix", "<fallback>")
     check nonexistent == "<fallback>"
     # Round-trip: register a key, then override it, then read it.
     recordConfigDefault[string]("m9r5bTest", "demoKey", "default-val")
-    let initial = readConfigurable[string]("m9r5bTest.demoKey", "<unset>")
+    let initial = readConfigurable[string]("package.m9r5bTest.demoKey", "<unset>")
     check initial == "default-val"
-    setConfigurable("m9r5bTest.demoKey", "override-val")
+    setConfigurable("package.m9r5bTest.demoKey", "override-val")
     let overridden = readConfigurable[string](
-      "m9r5bTest.demoKey", "<unset>")
+      "package.m9r5bTest.demoKey", "<unset>")
     check overridden == "override-val"
 
   test "registeredBuildFlags accessor was retired (M9.R.6.1)":

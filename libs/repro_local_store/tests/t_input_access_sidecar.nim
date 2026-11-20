@@ -62,6 +62,36 @@ suite "input-access sidecar":
     check decodeInputAccesses(encodeInputAccesses("ab12", InputAccesses()),
       "ab12").get() == InputAccesses()
 
+  test "the host-bound reason round-trips, and a version 3 sidecar decodes as host-bound unknown":
+    # The build engine sets it when its volatile-runtime fold dropped a
+    # runtime object under `/run` (a socket, a FIFO, a device node) the
+    # execution read; a portable record derived from a later local hit must
+    # stay on this host exactly as the live one did.
+    var accesses = sample()
+    accesses.hostBoundReason = "/run/nscd/socket"
+    let raw = encodeInputAccesses("ab12", accesses)
+    let decoded = decodeInputAccesses(raw, "ab12")
+    require decoded.isSome
+    check decoded.get().hostBoundReason == "/run/nscd/socket"
+    check decoded.get() == accesses
+    # A version 3 sidecar is the version 4 one without the trailing string
+    # (a u32 length and its bytes): its producer never recorded the field.
+    var v3 = encodeInputAccesses("ab12", sample())
+    v3.setLen(v3.len - 4)
+    # version-literal-ok: frozen historical sidecar version 3, the last one written before the host-bound reason; must not move with the current version
+    v3[4] = 3'u8
+    # version-literal-ok: high byte of the same frozen little-endian version 3
+    v3[5] = 0'u8
+    let older = decodeInputAccesses(v3, "ab12")
+    require older.isSome
+    check older.get().hostBoundReason == ""
+    check older.get().reads == sample().reads
+    # ...and an empty reason from it is NOT "nothing was read there": its
+    # producer dropped every input under `/run` unrecorded, so the build
+    # engine keeps such a record on this host (`hostBoundUnknown`).
+    check older.get().hostBoundUnknown
+    check not decoded.get().hostBoundUnknown
+
   test "a sidecar for another record, version or shape is refused":
     let raw = encodeInputAccesses("ab12", sample())
     check decodeInputAccesses(raw, "cd34").isNone

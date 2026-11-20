@@ -147,7 +147,9 @@ proc plannedAddresses(output: string): seq[string] =
   ## where every desired resource is a `create` and nothing else is listed:
   ## after an apply the plan also lists recorded addresses the host no
   ## longer wants (`no-op` when already gone, `destroy` otherwise), so a
-  ## verb-agnostic reading would not mean "desired".
+  ## verb-agnostic reading would not mean "desired". A resource line reads
+  ## `create  <address>  (<summary>)` under `[resource]`; `words[2]` is the
+  ## opening of the summary.
   for line in output.splitLines():
     let words = line.strip().splitWhitespace()
     if words.len < 3 or words[0] != "create" or not words[2].startsWith("("):
@@ -210,7 +212,7 @@ suite "GM9: activity-scoped resources follow host selection":
     require exported.exitCode == 0
     let doc = parseJson(exported.stdout)
     check doc["schemaVersion"].getInt == HomeExportSchemaVersion
-    check HomeExportSchemaVersion == 5
+    check HomeExportSchemaVersion == 6
     var scopes: seq[string]
     for r in doc["intent"]["resources"]:
       let activity = r["activity"]

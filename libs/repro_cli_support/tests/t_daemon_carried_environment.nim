@@ -441,3 +441,102 @@ suite "daemon request environment authority":
       check not existsEnv(Role)
       restoreDaemonRequestEnvironment(carried)
       check getEnv(Hardening) == "fortify fortify3 pic"
+
+  test "a complete request is the hosted build's whole environment":
+    # A daemon forked from a `nix develop` shell holds far more than the
+    # cc-wrapper's inputs: `CC`, `CXX`, `PKG_CONFIG`, the pkg-config wrapper's
+    # role variable, `CONFIG_SHELL`, a project's own settings. A plain-shell
+    # caller of `--daemon=off` sees none of them, so a hosted build for a
+    # client that sent its whole environment must not see them either.
+    const PkgConfigRole =
+      "NIX_PKG_CONFIG_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu"
+    let current = @["CC=gcc", "CXX=g++", "PKG_CONFIG=pkg-config",
+      PkgConfigRole & "=1", "SOME_PROJECT_SETTING=daemon",
+      "PATH=/daemon-path", "HOME=/home/caller"]
+    let request = @["PATH=/client-path", "HOME=/home/caller"]
+    let complete = daemonWorkerEnvUnsets(request, current,
+      requestEnvIsComplete = true)
+    for name in ["CC", "CXX", "PKG_CONFIG", PkgConfigRole,
+                 "SOME_PROJECT_SETTING"]:
+      check name in complete
+    # Carried names are installed by the overlay, never unset.
+    check "PATH" notin complete
+    check "HOME" notin complete
+    # Control: an incomplete request (a client before v0.2.0, which sent a
+    # curated list) keeps the curated rule, so none of these is unset.
+    let curated = daemonWorkerEnvUnsets(request, current)
+    for name in ["CC", "CXX", "PKG_CONFIG", PkgConfigRole,
+                 "SOME_PROJECT_SETTING"]:
+      check name notin curated
+
+    withEnv({"CC": "gcc", PkgConfigRole: "1",
+             "SOME_PROJECT_SETTING": "daemon"}):
+      # The caller's environment is the process's minus the daemon-shell names.
+      var caller: seq[string]
+      for key, value in envPairs():
+        if key notin ["CC", PkgConfigRole, "SOME_PROJECT_SETTING"]:
+          caller.add(key & "=" & value)
+      let saved = applyDaemonRequestEnvironment(caller,
+        requestEnvIsComplete = true)
+      # What an action spawned now inherits: none of them.
+      let seen = execCmdEx("sh -c 'echo ${CC-unset}:${" & PkgConfigRole &
+        "-unset}:${SOME_PROJECT_SETTING-unset}'")
+      check seen.exitCode == 0
+      check seen.output.strip == "unset:unset:unset"
+      restoreDaemonRequestEnvironment(saved)
+      check getEnv("CC") == "gcc"
+      check getEnv(PkgConfigRole) == "1"
+      check getEnv("SOME_PROJECT_SETTING") == "daemon"
+
+  test "both clients' requests say their environment is complete":
+    # The flag travels as a trailing field. A body written by a client before
+    # it ends without one and must decode as INCOMPLETE, so that client keeps
+    # the curated rule rather than losing every name it never forwarded.
+    #
+    # `engineDigest` is appended after the flag (reprobuild-pm
+    # spec/Local-Daemons-And-Control-Plane.md §"Protocol Compatibility"), so
+    # an older client's body is the current body with the WHOLE digest
+    # encoding (a u32 length and its bytes) sliced off, and the body of a
+    # client before the flag is one byte shorter still.
+    const digest = "0123456789abcdef"
+    proc withoutDigest(body: seq[byte]): seq[byte] =
+      body[0 ..< body.len - 4 - digest.len]
+    let buildBody = buildRequestBody(UserDaemonBuildRequest(
+      runId: "complete-env", target: ".", environment: @["PATH=/p"],
+      environmentIsComplete: true, engineDigest: digest, attached: true))
+    check parseBuildRequestBody(buildBody).environmentIsComplete
+    check parseBuildRequestBody(buildBody).engineDigest == digest
+    let preDigestBuild = withoutDigest(buildBody)
+    check parseBuildRequestBody(preDigestBuild).environmentIsComplete
+    check parseBuildRequestBody(preDigestBuild).engineDigest == ""
+    check not parseBuildRequestBody(
+      preDigestBuild[0 ..< preDigestBuild.len - 1]).environmentIsComplete
+    check not parseBuildRequestBody(buildRequestBody(UserDaemonBuildRequest(
+      runId: "partial-env", target: ".",
+      environment: @["PATH=/p"]))).environmentIsComplete
+    let watchBody = watchRequestBody(UserDaemonWatchRequest(
+      runId: "complete-env", target: ".", environment: @["PATH=/p"],
+      environmentIsComplete: true, engineDigest: digest, attached: true))
+    check parseWatchRequestBody(watchBody).environmentIsComplete
+    check parseWatchRequestBody(watchBody).engineDigest == digest
+    let preDigestWatch = withoutDigest(watchBody)
+    check parseWatchRequestBody(preDigestWatch).environmentIsComplete
+    check parseWatchRequestBody(preDigestWatch).engineDigest == ""
+    check not parseWatchRequestBody(
+      preDigestWatch[0 ..< preDigestWatch.len - 1]).environmentIsComplete
+    # The two production composers set it; a request built without it is an
+    # in-process caller's partial environment.
+    let cliSource = readFile(currentSourcePath().parentDir.parentDir /
+      "src" / "repro_cli_support.nim")
+    check cliSource.count("environmentIsComplete: true") == 2
+    let thinSource = readFile(currentSourcePath().parentDir.parentDir.parentDir.parentDir /
+      "apps" / "repro-client" / "repro_client.nim")
+    check thinSource.count("environmentIsComplete: true") == 1
+    # Every production composer also states the engine it was sent for,
+    # computed as its staleness check computes it: a request without it is
+    # an unknown identity the daemon declines (reprobuild-pm issue
+    # 2026-11-16, the daemon identifies a request's engine by a path).
+    check cliSource.count(
+      "engineDigest: expectedUserDaemonDigest(publicCliPath, config)") == 2
+    check thinSource.count(
+      "engineDigest: expectedUserDaemonDigest(fullCli, config)") == 1

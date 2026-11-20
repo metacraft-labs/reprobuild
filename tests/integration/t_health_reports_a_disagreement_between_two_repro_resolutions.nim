@@ -179,15 +179,38 @@ proc setupFixture(gitBin: string): Fixture =
   discard requireGit(q(gitBin) & " clone " & q(fileUrl(origin)) & " " &
     q(result.repoPath))
 
-  # Real managed hooks from the real binary: the installed bodies are the
+  # Real managed hooks from the real build: the installed bodies are the
   # demand both resolutions are judged against.
+  #
+  # Installed by a COPY of the real build, which is then deleted. A body
+  # resolves the build that installed it before PATH (reprobuild-pm
+  # spec/CLI/hooks.md §"Per-install resolution", 2026-11-16), so a dev shell's
+  # PATH governs a body only once its installing build is gone -- a Nix store
+  # path garbage collection removed is the field case. While the installer
+  # exists no shell's PATH reaches these hooks and there is nothing for two
+  # resolutions to disagree about; deleting it restores the per-shell state
+  # this suite is about.
+  let installer = result.scratch / "installing-build"
+  createDir(installer)
+  copyFileWithPermissions(result.reproBin,
+    installer / addFileExt("repro", ExeExt))
+  copyFileWithPermissions(engineBinary(),
+    installer / reprobuildEngineExeName())
   let ensured = runShell(shellCommand(@[
-    result.reproBin, "hooks", "ensure", "--vcs", result.workspaceRoot]))
+    installer / addFileExt("repro", ExeExt), "hooks", "ensure", "--vcs",
+    result.workspaceRoot],
+    @[(name: "REPRO_PUBLIC_CLI_PATH", value: ""),
+      (name: "REPRO_FULL_CLI", value: "")]))
   checkpoint("hooks ensure: " & ensured.output)
   doAssert ensured.code == 0, "fixture could not install managed hooks"
-  doAssert "--hook-contract=" in readFile(
-    result.repoPath / ".git" / "hooks" / "post-commit.repro-managed"),
+  let installedBody = readFile(
+    result.repoPath / ".git" / "hooks" / "post-commit.repro-managed")
+  doAssert "--hook-contract=" in installedBody,
     "fixture's managed body carries no contract token"
+  doAssert ("REPRO_INSTALLING_BUILD=" & quoteShellPosix(
+    installer / reprobuildEngineExeName())) in installedBody,
+    "fixture's managed body does not name the copy as its installing build"
+  removeDir(installer)
 
   # The SECOND resolution: a store-shaped tree holding a refusing build, and a
   # direnv profile ``.rc`` that exports it — the artefact direnv itself writes
@@ -243,7 +266,13 @@ suite "PG-14 — health reports a disagreement between two repro resolutions":
       check "DISAGREE" in detail
 
       # (B) both resolutions named; the store-bearing one by its STORE PATH.
-      check engineBinary() in detail
+      # This shell's resolution is the explicit REPROBUILD_REPRO (the real
+      # thin client); before per-install resolution the engine path was named
+      # here through the bodies' "written by", which now names the deleted
+      # installer copy instead.
+      check fx.reproBin in detail
+      # The writer is still named, by the path the bodies record.
+      check (fx.scratch / "installing-build") in detail
       check fakeStoreBase in detail
       check "[store " in detail
       check ("direnv dev shell at " & fx.repoPath) in detail

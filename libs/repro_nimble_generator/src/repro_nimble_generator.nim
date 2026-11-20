@@ -1,0 +1,18 @@
+## `repro_nimble_generator` -- generating a Nimble package index from a
+## source set, as build-graph edges.
+##
+## * `source_set` -- `nimble-sources.toml`, read as a closed TOML subset.
+## * `egress` -- the origin egress policy every fetch passes.
+## * `origin_git` -- git as the bounded, confined origin transport.
+## * `source_tree` -- the source digest, canonical archive and tree facts.
+## * `registry` -- `packages.json` at the pinned commit.
+## * `edge_objects` -- the fetch edges' outputs, a closed vocabulary.
+## * `assemble` -- one package's records, observation and origin events.
+## * `generator` -- the edges and the generation.
+## * `verify` -- comparing two generations of one index.
+
+import repro_nimble_generator/[source_set, egress, origin_git, source_tree,
+  registry, edge_objects, assemble, generator, verify]
+
+export source_set, egress, origin_git, source_tree, registry, edge_objects,
+  assemble, generator, verify

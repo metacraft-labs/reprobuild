@@ -19,14 +19,21 @@
 ## build read", because it is not recorded at all. Both in-repo copies are
 ## checked for that sentence specifically.
 ##
-## MOCK POLICY — NO MOCKS. The assertions read the real help `repro help
-## build` prints (`legacyVerbSynopsis("build")`, until `build` is parsed from
-## repro's command-line description and the text moves into its `--evidence`
-## help) and the real committed documentation file.
+## MOCK POLICY — NO MOCKS. The assertions read the real help `repro build
+## --help` prints (the long help page, generated from `build`'s declarations
+## in repro's command-line description, where the hazard is `--evidence`'s
+## long help; the page wraps it to the terminal, so it is read with its
+## whitespace collapsed) and the real committed documentation file.
 
 import std/[os, strutils, unittest]
 
-import repro_cli_support
+import repro_cli_support/cli_program
+
+proc buildHelp(): string =
+  ## `repro build --help` (the long page), with every run of whitespace (the
+  ## wrapping and its indentation) collapsed to one space.
+  ReproCommandLine.helpText(["build"], long = true).splitWhitespace().
+    join(" ")
 
 proc repoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -76,15 +83,15 @@ const DocHazardRows = [
 suite "DA-1i the operator is told what reads-only costs":
 
   test "the build synopsis offers the flag":
-    let usage = legacyVerbSynopsis("build")
-    if not usage.contains("--evidence=full|reads-only"):
-      echo "`repro --help` does not offer `--evidence=full|reads-only`. A ",
-        "flag an operator cannot discover is a flag that only appears in ",
+    let usage = buildHelp()
+    if not usage.contains("--evidence <full|reads-only>"):
+      echo "`repro build --help` does not offer `--evidence <full|reads-only>`. ",
+        "A flag an operator cannot discover is a flag that only appears in ",
         "somebody's shell history."
-    check usage.contains("--evidence=full|reads-only")
+    check usage.contains("--evidence <full|reads-only>")
 
   test "the help text carries all four hazard rows":
-    let usage = legacyVerbSynopsis("build")
+    let usage = buildHelp()
     let absent = missing(usage, HelpHazardRows)
     if absent.len > 0:
       echo "the `--evidence` help text is missing ", absent.len,
@@ -99,7 +106,7 @@ suite "DA-1i the operator is told what reads-only costs":
     ## concludes "a file the build read is modified" already handles the
     ## unreadable-becomes-readable case. It does not, and the reason is that
     ## the file is not recorded at all.
-    let usage = legacyVerbSynopsis("build")
+    let usage = buildHelp()
     if not usage.contains("not recorded at all"):
       echo "the `--evidence` help text does not say that an unopenable file ",
         "is NOT RECORDED AT ALL, so a reader will take row 1 (\"a recorded ",
@@ -111,7 +118,7 @@ suite "DA-1i the operator is told what reads-only costs":
     ## lookups this drops are largely elidable SOUNDLY by content-addressed-
     ## root elision at no correctness cost. The mode exists for
     ## ninja-comparability.
-    let usage = legacyVerbSynopsis("build")
+    let usage = buildHelp()
     let absent = missing(usage, ["NOT merely faster", "ninja", "not speed"])
     if absent.len > 0:
       echo "the `--evidence` help text is missing ", absent,
@@ -123,7 +130,7 @@ suite "DA-1i the operator is told what reads-only costs":
     ## Artifacts and publishing are unaffected — the degraded thing is the
     ## up-to-dateness check, not the product. An operator who thinks the
     ## output bytes are suspect will throw away work that is perfectly good.
-    let usage = legacyVerbSynopsis("build")
+    let usage = buildHelp()
     let absent = missing(usage,
       ["correct and publishable", "staleness check", "--evidence=full"])
     if absent.len > 0:
@@ -135,7 +142,7 @@ suite "DA-1i the operator is told what reads-only costs":
     ## refused by a build that requires full evidence, AND the scope is not in
     ## the cache key, so a full-evidence result stays usable by everyone.
     ## Stating only the first would read as "reads-only poisons the cache".
-    let usage = legacyVerbSynopsis("build")
+    let usage = buildHelp()
     let absent = missing(usage,
       ["refused by a build that requires full evidence",
        "not part of the cache key"])
@@ -161,7 +168,7 @@ suite "DA-1i the operator is told what reads-only costs":
     ## that made the hazard table part of this milestone rather than a
     ## follow-up. Graded on BOTH copies because either one alone leaves an
     ## operator who read the other one surprised.
-    let usage = legacyVerbSynopsis("build")
+    let usage = buildHelp()
     let doc = readFile(repoRoot() / "docs" / "dependency-collection.md")
     const Needle = "every later cache lookup in that session"
     for (name, text) in {"the --evidence help text": usage,

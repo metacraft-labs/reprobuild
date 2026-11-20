@@ -23,6 +23,14 @@
 ##   build:
 ##     let libfoo = c_library(into = "libfoo",
 ##                            sources = @["src/foo.c"])
+##
+## On an ELF target that writes ``lib/libfoo.so.1.0``, whose
+## ``DT_SONAME`` is ``libfoo.so.1.0``, and the link-time symlink
+## ``lib/libfoo.so -> libfoo.so.1.0`` (C-Cpp.md §"Mode A — Fine-grained
+## build graph (primary)"). A consumer linked with ``-lfoo`` records
+## ``DT_NEEDED libfoo.so.1.0`` -- a file that exists.
+
+import std/os
 
 import repro_project_dsl
 
@@ -30,6 +38,7 @@ import ../types/library
 import ../types/options
 import ../operations/compile
 import ../operations/link
+import ./shared_library_layout
 
 proc activePackageName(): string {.inline.} =
   ## v1 helper — return the active ``package`` block's name, or ``""``
@@ -81,23 +90,42 @@ proc c_library*(into: string;
       target = target,
       inputs = inputs,
       defines = extraDefines,
-      standard = standard))
+      standard = standard,
+      # Every object is position-independent, whatever the link kind:
+      # a shared link needs it, and a PIC object serves a static archive
+      # too (C-Cpp.md §"Mode A"). Left to the compiler's default, a
+      # shared link fails on a non-PIE gcc, and on an x86-64 PIE one as
+      # soon as a source references a global ("recompile with -fPIC").
+      pic = targetTakesPic()))
 
   let linkKind =
     case api.linkKind
     of llkStatic: lokStatic
     of llkShared, llkBoth, llkUnset: lokShared
+  # One name drives the file, ``-Wl,-soname,`` and the declared output,
+  # so they cannot disagree: a consumer's ``DT_NEEDED`` is the SONAME,
+  # and the loader opens a file of exactly that name
+  # (``shared_library_layout``).
+  let baseName = if api.soname.len > 0: api.soname else: into
+  let layout =
+    if linkKind == lokShared: sharedLibraryLayout(api, into)
+    else: SharedLibraryLayout()
   let targetName =
-    if api.soname.len > 0:
-      "lib" & api.soname & (if linkKind == lokStatic: ".a" else: ".so")
-    else:
-      "lib" & into & (if linkKind == lokStatic: ".a" else: ".so")
+    if linkKind == lokStatic: "lib" / ("lib" & baseName & ".a")
+    else: layout.target
   let linkEdge = link(LinkOptions(
     objects: objects,
     deps: deps,
     kind: linkKind,
     target: targetName,
-    soname: api.soname))
+    soname: layout.soname))
 
-  newLibrary(install = linkEdge, api = api,
-             installPrefix = "usr/lib")
+  result = newLibrary(install = linkEdge, api = api,
+                      installPrefix = "usr/lib")
+
+  # A versioned SONAME is not the name ``-l<base>`` looks for, so write
+  # ``lib<base>.so`` beside it as a symlink to it, as the link-time name
+  # (C-Cpp.md §"Mode A"). Both are declared outputs.
+  if linkEdge.outputs.len > 0:
+    result.linkTimeName = linkTimeNameAction("c-library-link-time-name-",
+      pkg, layout, linkEdge, linkEdge.outputs[0])

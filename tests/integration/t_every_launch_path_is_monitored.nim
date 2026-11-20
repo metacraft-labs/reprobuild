@@ -52,7 +52,7 @@
 ##       when neither bypass nor inline applies.
 ##       spawn: ``startRunQuotaProcess`` (:3999) -> ``startProcess(helper,
 ##       helperCliArgs(...))`` (:4011). The argv reaches the OS two
-##       processes deep: engine -> ``repro __repro-runquota-helper`` ->
+##       processes deep: engine -> ``repro internal runquota-helper`` ->
 ##       the command.
 ##       backend label ``runquota-helper``.
 ##
@@ -112,7 +112,7 @@
 ##     supplied by the caller is not delivered and should not be
 ##     expected"), so a path can host the monitor only if the ENGINE is
 ##     the process that spawns. L2's argv is spawned by a separate
-##     ``repro __repro-runquota-helper`` process, two deep. L3 and L3b are
+##     ``repro internal runquota-helper`` process, two deep. L3 and L3b are
 ##     spawned inside ``offerWithRunQuotaBatch`` /
 ##     ``startGrantedWithRunQuota``, which spawn the child themselves as
 ##     part of binding it to the granted lease; hosting there needs a
@@ -323,7 +323,7 @@
 ## Every case runs the real ``repro`` binary as the monitor driver, the
 ## real graph-built monitor shim, a real compiled C fixture performing a
 ## real ``open``/``read`` of a real file, and — for L2, L3 and L3b — the
-## real ``repro __repro-runquota-helper`` and a real ``runquotad`` daemon
+## real ``repro internal runquota-helper`` and a real ``runquotad`` daemon
 ## over a real unix socket. Nothing is stubbed. The oracle is the
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
@@ -591,7 +591,7 @@ type EngineSourceFile = object
 ## and no rewrite-warning template there either, so the compile-time linter
 ## does not see them at all — which is the other half of why they needed a
 ## row here.
-const SpawnPrimitives: array[45, tuple[name: string; expected: int;
+const SpawnPrimitives: array[47, tuple[name: string; expected: int;
                                        why: string]] = [
   ("startProcess", 4,
     "post-build converter, L2 RunQuota helper, nix daemon, config-free Nim metadata"),
@@ -615,8 +615,11 @@ const SpawnPrimitives: array[45, tuple[name: string; expected: int;
   ("execCmd", 0, "std/osproc; NOT matched by a search for execCmdEx"),
   ("execCmdEx", 0, ""),
   ("uncontrolledExecCmdEx", 0, ""),
+  ("uncontrolledExecArgvEx", 0, "uncontrolledExecCmdEx for an argv, no shell"),
   ("execProcess", 0, ""),
   ("execProcesses", 0, "std/osproc; NOT matched by a search for execProcess"),
+  ("execArgvProcesses", 0,
+    "std/osproc (the Nim fork): execProcesses for argvs, no shell"),
   ("uncontrolledExecProcess", 0, ""),
   ("execShellCmd", 0, ""),
   ("uncontrolledExecShellCmd", 0, ""),
@@ -652,7 +655,7 @@ const SpawnPrimitives: array[45, tuple[name: string; expected: int;
   # source instead of by remembering it. The first is the RunQuota helper's
   # own entry point; the other two build the argv a child is started from,
   # which is the same reason `commandSpec` has a row.
-  ("runRunQuotaHelperCli", 0, "the L2 helper's own entry point"),
+  ("runRunQuotaHelper", 0, "the L2 helper's own entry point"),
   ("acquireCliArgs", 0, "builds the `runquota acquire -- <argv>` command line"),
   ("helperCliArgs", 1, "L2: the argv the RunQuota helper is started with"),
   # The OS. These have no `uncontrolled*` hatch, no rewrite template and no
@@ -734,7 +737,7 @@ const SpawnNameTails = ["startprocess", "startdirect", "execcmdex",
 ## ``posix.nim`` exports 492 routines — so they are gated on the IMPORT
 ## LINE instead, which is stronger and is what ``symbolRestricted`` below
 ## is for. See ``capabilitySurfaces``.
-const SpawnCapabilityModules: array[7, tuple[path: string;
+const SpawnCapabilityModules: array[8, tuple[path: string;
                                              engineImports: bool;
                                              why: string]] = [
   ("osproc", true,
@@ -745,6 +748,12 @@ const SpawnCapabilityModules: array[7, tuple[path: string;
     "startDirect and the RunQuota launch/offer wrappers"),
   ("io_mon", true,
     "re-exports fs_snoop, whose runMonitored spawns the monitored child"),
+  # Round 8c of the CLI move: io-mon's command line (`runFsSnoopCli`) left
+  # `fs_snoop` for `io_mon/cli`, which the `io_mon` hub does not re-export.
+  # Only `repro_cli_support` imports it (`repro debug io monitor`, `repro
+  # internal io monitor`); no file of the engine library may.
+  ("io_mon/cli", false,
+    "io_mon/cli: runFsSnoopCli, io-mon's command line over runMonitored"),
   ("ambient_execution", false,
     "repro_core's sanctioned escape hatches: uncontrolledStartProcess et al"),
   ("posix", true,
@@ -841,7 +850,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "osproc", audit: caFullSurface,
       sourceRels: @["pure/osproc.nim"],
       spawning: @["execProcess", "execCmd", "startProcess", "execProcesses",
-                  "execCmdEx"],
+                  "execCmdEx", "execArgvProcesses"],
       inert: @["close", "suspend", "resume", "terminate", "kill", "running",
                "processID", "waitForExit", "peekExitCode", "inputStream",
                "outputStream", "errorStream", "peekableOutputStream",
@@ -853,7 +862,15 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       spawning: @["commandSpec", "launchProcess"],
       inert: @["libraryInfo", "shellScriptDir", "backendProfile", "launchResult", "running",
                "pollCompletion", "terminate", "killNow", "waitForCompletion",
-               "waitForExit", "cancelAndWait", "close"]),
+               "waitForExit", "cancelAndWait", "close",
+               # The Windows leftover sweep. It reads the Job Object a
+               # command already runs in and terminates it when anything is
+               # still alive; on POSIX it answers false. It ends processes
+               # and never starts one.
+               "endJobLeftovers",
+               # Sizing data: copies a completion's memory profile and IO
+               # bytes into the finish. Pure, starts nothing.
+               "finishSizing"]),
     # THE MODULE THE WHOLE ENUMERATION GOES THROUGH, and the one that was
     # on the capability list with no surface at all. `startDirect` (L1),
     # `offerWithRunQuotaBatch` (L3) and `startGrantedWithRunQuota` (L3b)
@@ -864,7 +881,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
       sourceRels: @["libs/repro_runquota/src/repro_runquota.nim"],
       spawning: @["startDirect", "startWithRunQuota", "offerWithRunQuota",
                   "offerWithRunQuotaBatch", "startGrantedWithRunQuota",
-                  "runWithRunQuota", "runRunQuotaHelperCli",
+                  "runWithRunQuota", "runRunQuotaHelper",
                   "acquireCliArgs", "helperCliArgs"],
       inert: @["toRunQuotaRequest", "grantHeartbeatMs", "grantUnresponsiveMs",
                "grantBoundedReadMs", "reportGrantHeartbeat", "awaitGrantLoop",
@@ -896,6 +913,16 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                "extNull", "extText", "extInt", "extReal",
                "declareRunQuotaExtension", "recordRunQuotaExtensionRow",
                "denialDeadlockTimeoutMs",
+               # Sizing data: the switch read and the engine's `after` list
+               # stored on a running action for its finish. Neither starts
+               # anything.
+               "sizingDataEnabled", "declareAfter",
+               # Build-wait pressure: the switch read, a one-way report on
+               # the session's existing connection, and `repro pressure`,
+               # which connects to the daemon and asks (`QueryPressure`).
+               # None starts a process.
+               "buildPressureEnabled", "sendPressureReport",
+               "runPressureCommand",
                # The bounded queue wait (e1c068066, "make a RunQuota queue
                # wait loud and bounded"). Read one by one: the grant poll,
                # the liveness probe and the lease-holder snapshot are
@@ -927,6 +954,12 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # with the caller's existing spawn path. The other two close
                # or report the connection held to an adopted daemon. None
                # starts a process.
+               # The session-close diagnostic. `runQuotaSessionLeases` asks
+               # the daemon's `leases` inspection over the session's existing
+               # connection, and `summarizeSessionLeases` is a pure JSON
+               # parse that names the leases a refused close leaked. Neither
+               # starts a process.
+               "runQuotaSessionLeases", "summarizeSessionLeases",
                "decideRunQuotaHandover", "holdsAdoptedDaemon",
                "releaseAdoptedDaemonHold",
                # The hold every POSIX adopter and starter of the shared
@@ -981,7 +1014,7 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # both lands in `vanished`.
     CapabilitySurface(key: "io_mon", audit: caFullSurface,
       sourceRels: @["io_mon/fs_snoop.nim", "io_mon/shim_discovery.nim"],
-      spawning: @["runMonitored", "runFsSnoopCli", "startMonitor",
+      spawning: @["runMonitored", "startMonitor",
                   "pollMonitor", "finishMonitor",
                   # io-mon #18, reported by this audit when #383 bumped the
                   # pin. Both start `xcrun` via `execCmdEx` (macOS only, but
@@ -1004,7 +1037,20 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # Renders the body of one Apple toolchain drop-in as a
                # string; ``populateAppleToolchainDropIns`` is what writes
                # and resolves it. Inert: it returns text and starts nothing.
-               "renderAppleToolchainDropIn"]),
+               "renderAppleToolchainDropIn",
+               # Exported by round 8c for io-mon's CLI module, which reads
+               # its command line's values with them: a temporary directory
+               # made and removed, and three value decoders. None starts a
+               # process.
+               "createLocalTempDir", "removeLocalTempDir", "parseOutputMode",
+               "parseInterestFlag", "parseEvidenceScopeFlag"]),
+    # io-mon's command line (round 8c). `runFsSnoopCli` is the CLI wrapper
+    # around `runMonitored`; the other two read a command line into a
+    # request and start nothing.
+    CapabilitySurface(key: "io_mon/cli", audit: caFullSurface,
+      sourceRels: @["io_mon/cli.nim"],
+      spawning: @["runFsSnoopCli"],
+      inert: @["fsSnoopCommandOf", "parseFsSnoopArgs"]),
     # The escape hatches, and the rewrite templates that warn about the
     # stdlib names. The templates are pattern rewrites, but they are also
     # ordinary exported templates that can be called by name, so they are
@@ -1019,8 +1065,8 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     CapabilitySurface(key: "ambient_execution", audit: caFullSurface,
       sourceRels: @["libs/repro_core/src/repro_core/ambient_execution.nim"],
       spawning: @["uncontrolledFindExe", "uncontrolledExecCmdEx",
-                  "uncontrolledExecProcess", "uncontrolledExecShellCmd",
-                  "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
+                  "uncontrolledExecArgvEx", "uncontrolledExecProcess",
+                  "uncontrolledExecShellCmd", "uncontrolledStartProcess", "warnFindExe", "warnExecCmdEx",
                   "warnExecProcess", "warnExecShellCmd", "warnStartProcess"],
       inert: @[]),
     # THE OPERATING SYSTEM. Both rows are `caImportAllowlist`: they export
@@ -1060,16 +1106,21 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
     # spawn of the ``runquotad`` an invocation owns), which starts nothing
     # either, so the engine's own import is down to ``fcntl`` and
     # ``F_DUPFD_CLOEXEC`` and the allowlist below with it.
+    #
+    # The rest of the spawn context then moved too, to
+    # ``repro_core/monitor_spawn_stdio`` (shared with the Go standard
+    # convention's monitored ``go list``), which starts nothing. The engine no
+    # longer names ``Mode``, ``umask``, ``dup2``, ``close``, ``fcntl`` or
+    # ``F_DUPFD_CLOEXEC`` at all, so they are no longer allowed here: an
+    # engine that imports one of them again has to be classified again.
     CapabilitySurface(key: "posix", audit: caImportAllowlist,
       sourceRels: @["posix/posix.nim"],
       spawning: @[],
       # `lstat` and the `S_IS*` tests: `endpointRootOwned` reads the
       # ownership and type of a daemon endpoint's path components
       # (Dev-Env-Warm-Entry.md §3). Metadata reads; none can start a child.
-      inert: @["kill", "setpgid", "umask", "dup2", "close", "fcntl", "lstat"],
+      inert: @["kill", "setpgid", "lstat"],
       allowedSymbols: @["Pid", "SIGKILL", "SIGTERM", "kill", "setpgid",
-                        "Mode", "umask", "dup2", "close", "fcntl",
-                        "F_DUPFD_CLOEXEC",
                         "Stat", "lstat", "S_ISDIR", "S_ISLNK", "S_ISSOCK"]),
     CapabilitySurface(key: "winlean", audit: caImportAllowlist,
       sourceRels: @["windows/winlean.nim"],
@@ -1104,7 +1155,7 @@ proc capabilitySurfaceRoot(key, repoRoot: string): string =
   of "runquota_process":
     let fromEnv = getEnv("RUNQUOTA_SRC")
     if fromEnv.len > 0: fromEnv else: repoRoot.parentDir / "runquota"
-  of "io_mon":
+  of "io_mon", "io_mon/cli":
     let fromEnv = getEnv("IO_MON_SRC")
     if fromEnv.len > 0 and fileExists(fromEnv / "io_mon.nim"):
       fromEnv
@@ -1463,7 +1514,7 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
 proc configFor(lp: LaunchPath; repoRoot, cacheRoot: string):
     BuildEngineConfig =
   # The RunQuota "helper CLI" is the ``repro`` image itself: L2 spawns
-  # ``repro __repro-runquota-helper …`` (helperCliArgs, repro_runquota.nim
+  # ``repro internal runquota-helper …`` (helperCliArgs, repro_runquota.nim
   # :496). The standalone ``runquota`` binary is a status/acquire CLI and
   # does NOT accept that argv.
   result = BuildEngineConfig(
@@ -1782,6 +1833,21 @@ proc evidenceShape(res: ActionResult;
     # coverage is `test_m9r73_narrow_invalidation` and
     # `t_a_project_under_a_volatile_prefix_keeps_its_reads`.
     render("volatileScope", ev.volatileScope.exemptRoots),
+    # The volatile-runtime fold's elision counters and its host-bound input
+    # (Dependency-Observation-Attribution.md "Every elision is counted"):
+    #
+    #   * `kernelStateDrops` — how many records under `/dev`, `/proc`, `/sys`
+    #     the fold dropped. NOT vacuous wherever the captured process touches
+    #     any of them (a shell's `/dev/null`, the loader's `/proc` reads), and
+    #     a launch path whose capture saw a different number of them is the
+    #     kind of difference this comparison exists to catch.
+    #   * `runtimeStateDrops` and `hostBoundInput` — VACUOUS here: the
+    #     fixture touches no socket, FIFO or device under `/run`. Rendered so
+    #     the fields cannot leave the comparison silently; their coverage is
+    #     `t_a_tool_reached_through_run_is_an_input`.
+    render("kernelStateDrops", @[$ev.kernelStateDrops]),
+    render("runtimeStateDrops", @[$ev.runtimeStateDrops]),
+    render("hostBoundInput", @[ev.hostBoundInput]),
     render("evidenceProvenance", (block:
       var contributors: seq[string] = @[]
       for contributor in ev.evidenceProvenance:
@@ -2000,7 +2066,9 @@ suite "every_launch_path_is_monitored":
 
   when defined(linux) or defined(macosx):
     test "evidence shape folds aliases while retaining distinct and missing writes":
-      let root = createTempDir("repro-evidence-shape-", "", "/tmp")
+      # Under the suite's temporary directory ($TMPDIR), as every scratch
+      # tree here is: nothing in this case depends on where it lives.
+      let root = createTempDir("repro-evidence-shape-", "")
       defer: removeDir(root)
       let actual = root / "actual"
       let alias = root / "alias"
@@ -2598,23 +2666,25 @@ suite "every_launch_path_is_monitored":
 
     # 3. The dispatcher that has to recognise it, both for the self-spawn
     #    (``internal``) and for the operator-facing (``debug``) spelling.
-    #    All three words are pinned, in both arms: the CLI falls through
-    #    to the unknown-subcommand path (exit 2) if any one of them stops
-    #    matching, which is how a renamed triple surfaces as a failed
-    #    action rather than as a compile error.
-    #    The self-spawn arm is spelled in TWO dispatchers:
-    #    ``runLegacyCommand`` (the commands not yet moved onto the
-    #    command-line description) and ``runThinAppDispatch`` (the per-program
-    #    arms, which must see it BEFORE ``repro-daemon`` does).
+    #    The words are commands of repro's command-line description
+    #    (``internal`` > ``io`` > ``monitor`` and ``debug`` > ``io`` >
+    #    ``monitor``), whose generated parser selects the arm; a renamed
+    #    word makes the self-spawn an unknown subcommand (exit 2), which is
+    #    how a renamed triple surfaces as a failed action rather than as a
+    #    compile error. Both declarations and both arms are pinned by text.
+    #    (The image's program name no longer selects a role, so there is no
+    #    second, per-program dispatcher to see the triple first.)
+    let description = readFile(root /
+      "libs/repro_cli_support/src/repro_cli_support/cli_description.nim")
+    check countOccurrences(description,
+      "subcmd \"internal\", visibility = internal,") == 1
+    check countOccurrences(description,
+      "subcmd \"io\", help = \"Filesystem monitoring\":") == 2
+    check countOccurrences(description, "subcmd \"monitor\",") == 2
     check countOccurrences(cliSupport,
-      "args[0] == \"internal\" and args[1] == \"io\" and") == 2
+      "of ReproCommandLineInternalIoCommand.monitor:") == 1
     check countOccurrences(cliSupport,
-      "args[0] == \"debug\" and") >= 1
-    check countOccurrences(cliSupport,
-      "args[1] == \"io\" and args[2] == \"monitor\"") == 1   # the debug arm
-    # Three arms, so three ``monitor`` word tests: the two self-spawn
-    # arms above and the operator-facing one.
-    check countOccurrences(cliSupport, "args[2] == \"monitor\"") == 3
+      "of ReproCommandLineDebugIoCommand.monitor:") == 1
 
     # 4. The hand-copied literal in the dev-session supervisor.
     let devSession = readFile(root /
@@ -2649,8 +2719,8 @@ suite "every_launch_path_is_monitored":
 
     # And no SEVENTH spelling has appeared unpinned. Five of the six
     # sites spell the triple as a sequence literal and are swept here;
-    # the sixth is the dispatcher's element-wise comparison (site 3),
-    # which is pinned by text above because it is not a literal.
+    # the sixth is the description's commands (site 3), pinned by text
+    # above because it is not a literal.
     const LiteralSpellings = 5
     var spelled = 0
     var spelledIn: seq[string] = @[]
@@ -2672,7 +2742,7 @@ suite "every_launch_path_is_monitored":
 
   when defined(linux) or defined(macosx):
     let repoRoot = getCurrentDir()
-    # The fixture's Unix socket must fit sun_path even with a deep TMPDIR.
+    # The fixture's scratch tree (`ensureFixture`).
     var tempRoot = ""
     var fixtureBin = ""
 
@@ -2700,7 +2770,12 @@ suite "every_launch_path_is_monitored":
       ## this file left five ``repro-hm4-launch-paths*`` trees in ``/tmp``.
       if fixtureUp: return
       fixtureUp = true
-      tempRoot = createTempDir("repro-hm4-launch-paths", "", "/tmp")
+      # Under $TMPDIR, not a fixed `/tmp`: a host whose `/tmp` is full or
+      # quota-limited must still run this file, and the one path here with a
+      # length limit, the daemon's socket, is placed by
+      # `runquotaRendezvousDir`, which moves it to a short directory when
+      # this root is too deep for `sun_path`.
+      tempRoot = createTempDir("repro-hm4-launch-paths", "")
       releaseDirAtProcessExit(tempRoot)
       let fixtureSource = tempRoot / "fixture.c"
       fixtureBin = tempRoot / "fixture"

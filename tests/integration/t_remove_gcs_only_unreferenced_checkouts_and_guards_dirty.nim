@@ -1,4 +1,4 @@
-## RA-22 — `repro remove <repo>` reachability garbage collection +
+## RA-22 — `repro ws remove <repo>` reachability garbage collection +
 ## dirty-checkout guard.
 ##
 ## Black-box: drives the compiled ``repro`` binary against a hermetic
@@ -31,7 +31,7 @@
 ## case is what makes the test falsifiable against the seeding bug.
 ##
 ## Sub-cases (each its own ``test_ra22_*`` block):
-##   1. ``repro remove libb`` GCs libb + libu; libs + the roots STAY.
+##   1. ``repro ws remove libb`` GCs libb + libu; libs + the roots STAY.
 ##   2. A DIRTY GC target, non-TTY, no ``--force`` → REFUSE; nothing deleted
 ##      (RA-9 destructive-command safety).
 ##   3. The same dirty target WITH ``--force`` → removed.
@@ -166,7 +166,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   result.workspaceRoot = workspaceRoot
 
 proc invokeRemove(fx: Fixture; extra: seq[string]): tuple[code: int; output: string] =
-  var parts = @[q(fx.reproBin), "remove"]
+  var parts = @[q(fx.reproBin), "ws", "remove"]
   for e in extra: parts.add(q(e))
   parts.add("--workspace-root=" & q(fx.workspaceRoot))
   runCmd(parts.join(" "))
@@ -174,7 +174,7 @@ proc invokeRemove(fx: Fixture; extra: seq[string]): tuple[code: int; output: str
 proc makeDirty(repoPath: string) =
   writeFile(repoPath / "uncommitted.txt", "local work that must not vanish\n")
 
-suite "RA-22 — repro remove reachability GC and dirty guard":
+suite "RA-22 — repro ws remove reachability GC and dirty guard":
 
   test "test_ra22_remove_gcs_unique_checkout_keeps_shared":
     let gitBin = findExe("git")

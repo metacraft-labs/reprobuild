@@ -1,6 +1,8 @@
 ## Host facts, Reprobuild side (reprobuild-pm spec
 ## Gradual-Nix-To-Reprobuild-Migration.md §Measuring equivalence, §Host
-## facts; user guide `docs/user-guide/host-facts.md`).
+## facts; field reference `docs/users/content/reference/files/host-facts.md`,
+## which changes in the same commit as this schema; user guide
+## `docs/users/content/guides/machines/compare-with-home-manager.md`).
 ##
 ## A host-facts document is one host's home reduced to the four categories
 ## both the Nix path (Home Manager) and the Reprobuild path can be compared
@@ -36,10 +38,12 @@ export file_facts.sha256Digest, file_facts.homeRelativeId
 const
   HostFactsFormat* = "repro.host-facts"
   HostFactsSchemaVersion* = 1
-    ## Bumped on any change to the meaning of an existing field. Adding an
-    ## informational field is compatible; adding a COMPARED field is not
-    ## (an older document would then differ from a newer one on a field it
-    ## never had).
+    ## Bumped on any change to the meaning of an existing field. Adding a
+    ## top-level field is compatible (`repro home compare` ignores unknown
+    ## top-level keys). Adding an ENTRY field is not, informational or
+    ## not: compare treats every entry field outside
+    ## `HostFactsInformationalFields` as compared, so an older document
+    ## would then differ from a newer one on a field it never had.
   HostFactsCategories* = ["packages", "files", "environment", "services"]
     ## The compared categories, in report order.
   HostFactsInformationalFields* = ["id", "origin", "version"]

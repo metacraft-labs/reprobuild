@@ -91,10 +91,10 @@ proc resetRecipeState(storeRoot: string) =
   resetDslPortFsState()
   resetDslPortFsExtState()
   resetDslPortMaterialiseState()
-  resetConfigurable("dbusBroker.aptSnapshot")
-  resetConfigurable("dbusBroker.busActivationStrategy")
-  resetConfigurable("dbusBroker.messagebusUid")
-  resetConfigurable("dbusBroker.messagebusGid")
+  resetConfigurable("package.dbusBroker.aptSnapshot")
+  resetConfigurable("package.dbusBroker.busActivationStrategy")
+  resetConfigurable("package.dbusBroker.messagebusUid")
+  resetConfigurable("package.dbusBroker.messagebusGid")
   registerStoreRoot("dbusBroker", storeRoot, dhaSha256)
   recipe.registerDbusBrokerFiles()
 
@@ -222,8 +222,8 @@ suite "NDE0-D dbus-broker package":
     let root = createTempDir("nde0d_uid_", "")
     defer: removeDir(root)
     resetRecipeState(root)
-    setConfigurable("dbusBroker.messagebusUid", 500)
-    setConfigurable("dbusBroker.messagebusGid", 500)
+    setConfigurable("package.dbusBroker.messagebusUid", 500)
+    setConfigurable("package.dbusBroker.messagebusGid", 500)
     reregisterWithCurrentConfigurables(root)
 
     let passwdBytes = readStoreFile(consumeMessagebusPasswd())
@@ -252,7 +252,7 @@ suite "NDE0-D dbus-broker package":
     # Pass B — flip the M9.D typed-enum to basDaemon.
     resetRecipeState(rootB)
     setConfigurable[BusActivationStrategy](
-      "dbusBroker.busActivationStrategy", basDaemon)
+      "package.dbusBroker.busActivationStrategy", basDaemon)
     reregisterWithCurrentConfigurables(rootB)
     let daemonBytes = readStoreFile(consumeDbusService())
 
@@ -325,7 +325,7 @@ suite "NDE0-D dbus-broker package":
     # re-binds the store-root (the M9.A reset wipes it as part of the
     # symmetric "drop EVERY registered storeRoot" contract).
     setConfigurable[BusActivationStrategy](
-      "dbusBroker.busActivationStrategy", basDaemon)
+      "package.dbusBroker.busActivationStrategy", basDaemon)
     reregisterWithCurrentConfigurables(root)
     let sockB = consumeDbusSocket()
     let svcB = consumeDbusService()
@@ -560,13 +560,13 @@ suite "NDE0-D dbus-broker DSL surface":
     # Pins the M9.D typed-enum config surface end-to-end. Reset the
     # cell first so we observe the default rather than a stale
     # override from a prior test.
-    resetConfigurable("dbusBroker.busActivationStrategy")
+    resetConfigurable("package.dbusBroker.busActivationStrategy")
     # Default via the typed reader.
     check readConfigurable[BusActivationStrategy](
-      "dbusBroker.busActivationStrategy") == basBroker
+      "package.dbusBroker.busActivationStrategy") == basBroker
     # Storage shape verification: the macro captured the enum type
     # name + literal value name byte-for-byte.
-    let stored = inspectConfigurable("dbusBroker.busActivationStrategy")
+    let stored = inspectConfigurable("package.dbusBroker.busActivationStrategy")
     check stored.kind == dskEnum
     check stored.enumTypeName == "BusActivationStrategy"
     # ``$basBroker`` evaluates to the enum's string representation
@@ -579,10 +579,10 @@ suite "NDE0-D dbus-broker DSL surface":
     check stored.enumOrd == ord(basBroker)
     # Override + read.
     setConfigurable[BusActivationStrategy](
-      "dbusBroker.busActivationStrategy", basDaemon)
+      "package.dbusBroker.busActivationStrategy", basDaemon)
     check readConfigurable[BusActivationStrategy](
-      "dbusBroker.busActivationStrategy") == basDaemon
+      "package.dbusBroker.busActivationStrategy") == basDaemon
     # Reset restores the default.
-    resetConfigurable("dbusBroker.busActivationStrategy")
+    resetConfigurable("package.dbusBroker.busActivationStrategy")
     check readConfigurable[BusActivationStrategy](
-      "dbusBroker.busActivationStrategy") == basBroker
+      "package.dbusBroker.busActivationStrategy") == basBroker

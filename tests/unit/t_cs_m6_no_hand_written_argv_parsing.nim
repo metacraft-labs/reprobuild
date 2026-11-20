@@ -3,7 +3,9 @@
 ## flag literal outside the description.
 ##
 ## WHAT COUNTS. In repro's command-line code (`apps/repro`,
-## `apps/repro-client`, `libs/repro_cli_support/src`), a string literal that
+## `apps/repro-client`, `libs/repro_cli_support/src`) and the add-on's, whose
+## command line repro mounts (`apps/repro-addon`, `libs/repro_addon/src`;
+## round 8c), a string literal that
 ## spells a flag (`"--name"`, `"-x"`, with or without `=` and a value) used
 ##
 ## * in a comparison: `arg == "--json"`, `"-h" != arg`;
@@ -17,16 +19,20 @@
 ## description (`repro_cli_support/cli_description.nim`) is where flags are
 ## declared, so it is not scanned.
 ##
-## HOW IT SHRINKS. Commands move onto the description group by group, so for
-## now the files still holding hand-written parsing are listed in
-## `Remaining` with the exact number of such comparisons each holds. The
-## count is a ratchet in both directions: a file over its number has new
-## hand-written parsing; a file under it has lost some, and its number must
-## come down with it, so the list only ever shrinks. The final group empties
-## it.
+## THE END STATE. Every command, the role processes repro spawns of itself
+## included, is parsed from the description, so no scanned file holds a
+## single such comparison: `Remaining`, the ratchet the migration shrank
+## group by group, is empty and stays empty. Code that reads or writes
+## ANOTHER program's command line (the Nim compiler's `--path:`, Nix's
+## `--override-input`, `env -S`, `sh -c`) names that program's word with a
+## named constant that says whose it is, and a refusal that names one of
+## repro's own flags takes its spelling from the description
+## (`reproLongFlags`), so neither shape is a flag literal compared here.
 ##
-## The procs of the commands already parsed from the description must hold
-## none at all, whichever file they live in (`MigratedProcs`).
+## The procs of the commands parsed from the description hold none at all,
+## whichever file they live in (`MigratedProcs`); the scan finds a proc by
+## its non-generic header, so the generic readers that several
+## configurations share are covered by the file count alone.
 ##
 ## The positive control counts a fixture holding one instance of every shape
 ## above and the shapes that must not count, so the scan cannot pass by
@@ -39,29 +45,21 @@ import std/[algorithm, os, strutils, unittest]
 const
   ScannedRoots = [
     "apps" / "repro", "apps" / "repro-client",
-    "libs" / "repro_cli_support" / "src"]
+    "libs" / "repro_cli_support" / "src",
+    "apps" / "repro-addon", "libs" / "repro_addon" / "src"]
   Description = "libs/repro_cli_support/src/repro_cli_support/cli_description.nim"
-  Remaining = [
-    # (file, hand-written argv comparisons against flag literals it holds).
-    # `apps/repro-client/repro_client.nim` left this list in the first group:
-    # its flag tables are generated from the description. The third group
-    # emptied `bundle_cli.nim`, `selfhost.nim`, `store_bundle_cli.nim` and
-    # `store_copy_cli.nim`.
-    ("libs/repro_cli_support/src/repro_cli_support.nim", 1086),
-    ("libs/repro_cli_support/src/repro_cli_support/anywhere.nim", 23),
-    ("libs/repro_cli_support/src/repro_cli_support/attest.nim", 96),
-    ("libs/repro_cli_support/src/repro_cli_support/cargo_gc.nim", 10),
-    ("libs/repro_cli_support/src/repro_cli_support/deploy_agent.nim", 32),
-    ("libs/repro_cli_support/src/repro_cli_support/dev_env_fast_path.nim", 13),
-    ("libs/repro_cli_support/src/repro_cli_support/disk.nim", 13),
-    ("libs/repro_cli_support/src/repro_cli_support/hardware.nim", 4),
-    ("libs/repro_cli_support/src/repro_cli_support/home.nim", 200),
-    ("libs/repro_cli_support/src/repro_cli_support/infra.nim", 50),
-    ("libs/repro_cli_support/src/repro_cli_support/infra_image.nim", 1),
-    ("libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim", 20),
-    ("libs/repro_cli_support/src/repro_cli_support/project_pins.nim", 4),
-    ("libs/repro_cli_support/src/repro_cli_support/workspace_restore.nim", 8),
-  ]
+  Remaining: array[0, (string, int)] = []
+    ## (file, hand-written argv comparisons against flag literals it holds):
+    ## none. The groups emptied it: the first took `apps/repro-client`, the
+    ## third `bundle_cli.nim`, `selfhost.nim`, `store_bundle_cli.nim` and
+    ## `store_copy_cli.nim`, the fourth the machine commands' modules, the
+    ## fifth `dev_env_fast_path.nim`, the sixth `workspace_restore.nim`, the
+    ## sixth to eighth `repro_cli_support.nim` (1218 at the start) and
+    ## `attest.nim`; the eighth's role processes took the last 43 of
+    ## `repro_cli_support.nim` with `project_pins.nim`'s 4, and named the
+    ## other programs' words `infra.nim` and `infra_image.nim` compared. Round
+## 8c added the add-on's sources, its command line declared in
+## `repro_infra/addon_command_line` and its verbs run from typed values.
   MigratedProcs = [
     # The commands parsed from the description. The first group:
     # `version`, `capabilities`, `show-conventions`, `completion` (and
@@ -79,11 +77,104 @@ const
     # `launch-plan`, `cert-signer`, `self` (their submodules,
     # `store_bundle_cli`, `store_copy_cli`, `bundle_cli` and `selfhost`,
     # left `Remaining` with nothing to parse).
-    "runUserDaemonCliCommand", "userDaemonConfigOf", "runStoreCommand",
+    "runUserDaemonCliCommand", "runStoreCommand",
     "runStoreDaemonCommand", "runStoreServeCommand", "runCasCommand",
-    "parseCasDigest", "runCacheCommand",
-    "runBundleCliCommand", "namespaceHelpText", "runReapCommand",
-    "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand"]
+    "parseCasDigest",
+    "runBundleCliCommand", "runReapCommand",
+    "runLaunchPlanCommand", "runCertSignerCommand", "runSelfCommand",
+    # The fourth group (machines) whose procs live here: `health`, `debug
+    # artifact`. Its other commands' modules (`home`, `infra`, `disk`,
+    # `hardware`, `cargo_gc`, `deploy_agent`, `anywhere`,
+    # `infra_install_root`) left `Remaining` above.
+    "healthArgsOf", "runHealthCommand", "runDebugArtifactCommand",
+    # The fifth group (development environments): `exec`, `run`, `shell`
+    # with `shell hook`, `allow`, `deny`, `dev-env export|deactivate`, `up`,
+    # `dev`, `down`, `hcr coordinate|prepare-object`, `prompt` with `prompt
+    # init`. (`devSessionStartOf`, generic over `up`'s and `dev`'s
+    # configuration, is not found by `procBody`; it reads typed fields
+    # only.)
+    "devEnvSelectionOf", "reproRunOf", "runReproRunCommand",
+    "runReproExecCommand", "runReproShellCommand", "runShellHookCommand",
+    "runReproAllowCommand", "runReproDenyCommand", "devEnvExportOf",
+    "runDevEnvExportCommand", "runDevEnvDeactivateCommand",
+    "devSessionCommandOf", "resolveDevSessionCommand", "runUpOrDevCommand",
+    "runDownCommand", "runHcrCoordinateCommand", "runHcrPrepareObjectCommand",
+    "promptArgsOf", "runPromptCommand", "runPromptInitCommand",
+    # The sixth group (workspaces and publication): `hooks` (and the managed
+    # hooks' internal `protocol`, `dispatch`, `cache-push`), `check`, `push`,
+    # `workspace` with every subcommand, `lock`, `locking`, `gateway`, `add`,
+    # `remove`; `sync`, `pull`, `branch` and `switch` share the generic
+    # readers of their `workspace` spellings (`syncArgsOf`, `pullArgsOf`,
+    # `branchArgsOf`, `switchArgsOf`, `roleChoiceOf`, `applyRepoSelection`,
+    # `reportSpecOf`, `hooksCommandOf`, `lockVerbInputsOf`), which
+    # `procBody` does not find; they read typed fields only.
+    "runHooksCommand", "runHooksProtocolCommand", "runHooksDispatchCommand",
+    "runCachePushCommand", "checkArgsOf", "resolveCheckScope", "pushArgsOf",
+    "runPushCommand", "defaultWorkspaceSyncArgs", "syncJobsOf",
+    "applyTagSelection", "runWorkspaceSyncWithProjects",
+    "branchRolesArgsOf", "runWorkspaceBranchRolesCommand",
+    "runWorkspaceEnableCommand", "runWorkspaceDisableCommand",
+    "setsRequestOf", "runWorkspaceSetsCommand", "runWorkspaceProjectsCommand",
+    "reposRequestOf", "runWorkspaceReposCommand", "workspaceStatusArgsOf",
+    "workspaceListArgsOf", "workspaceManifestsArgsOf", "sharedClonesArgsOf",
+    "workspaceForallArgsOf", "workspaceLockArgsOf",
+    "runWorkspaceMigrateCommand", "runWorkspaceMigrateLocksCommand",
+    "runWorkspacePublishEvidenceCommand", "bootstrapTargetDir",
+    "runWorkspaceBootstrapCommand", "runWorkspaceProvisionCommand",
+    "workspaceInitArgsOf", "runWorkspaceInitFromUrl", "runWorkspaceCommand",
+    "addArgsOf", "removeArgsOf", "gatewayDirOf", "runGatewayCommand",
+    # `repro add|remove` as the package-dependency verbs, with the refusal of
+    # the workspace-repository flags they still parse (hidden).
+    "runPackageAddCommand", "runPackageRemoveCommand", "refusedWordsOf",
+    "refuseWorkspaceFlags",
+    "runGatewayMigrateCommand", "runReproLockingCommand",
+    "runReproLockingExplain", "runReproLockingAdoptManifest",
+    "runReproLockCommand", "runReproLockList", "runReproLockDiff",
+    "runReproLockUpdate", "projectsWorkspaceRoot",
+    # The sixth group's `develop` and `flake` (with `flake override-args`,
+    # `refresh-lock`, `override-status`), and the develop-set computation
+    # the flake verbs and the managed hooks share. (`developSetSelectionOf`
+    # and `developSelectorWords`, generic over the configurations that
+    # declare the selection, are not found by `procBody`; they read typed
+    # fields only.)
+    "runDevelopCommand", "developSetArgsOf", "workspaceDevelopArgsOf",
+    "runWorkspaceDevelopCommand", "runDevelopDropCommand",
+    "developFlagsGiven", "firstOutside", "developAllArgsOf",
+    "flakeDevelopSelectionOf", "flakeShellBindingsOf",
+    "hookSubstitutedDevelopSet", "executeFlakeLockRefresh",
+    "runFlakeOverrideArgsCommand", "runFlakeRefreshLockCommand",
+    "runFlakeOverrideStatusCommand", "runReproFlakeCommand",
+    # The seventh group (the build family) so far: `build`, with `bench` and
+    # `lint`, which take its command line (`runBuildVerbCommand`); every
+    # route into a build, the daemon worker's included, reads its arguments
+    # through `loadBuildCommandLine`, and the daemon parent's request
+    # readers through `buildRequestOf`; and `clean`.
+    "runBuildCommand", "runBuildVerbCommand", "loadBuildCommandLine",
+    "buildRequestOf", "givenOnCommandLine", "daemonRequestProjectRoot",
+    "daemonPrewarmTargetOutputDir", "runCleanCommand",
+    # The rest of the seventh group: `test` (the verb alias of a build, and
+    # the sharded CI path), `certify` (its three modes), `certificates`
+    # with `list`, `plan`, `policy`, `ci plan` and `watch`, whose daemon
+    # worker reads the client's arguments through `loadWatchCommandLine`.
+    # (`testOptionsOf`, generic over `test`'s and `certify`'s configuration,
+    # is not found by `procBody`; it reads typed fields only, and hands its
+    # build the words confutils' generated `argvOf` writes back from the
+    # origins.)
+    "runTestVerbCommand", "loadTestCommandLine", "runReproTestCommand",
+    "runReproTest", "testBuildArgs", "plainTestBuild",
+    "runCertifyingTestBuild", "runCertifyVerbCommand",
+    "loadCertifyCommandLine", "certifyFlagsGivenOutside", "runCertifyVerify",
+    "runCertifyCheckSet", "runCertificatesCommand",
+    "runCertificatesPolicyCommand", "ciPlanArgsOf", "runCiPlanCommand",
+    "runCiCommand", "runWatchVerbCommand", "loadWatchCommandLine",
+    "runWatchCommand",
+    # The eighth group: the role processes (`repro internal <role>` and the
+    # hidden `__repro-<role>` spellings), whose typed readers are generic
+    # over the two spellings' configurations; and the procs their
+    # configurations reach.
+    "runInternalCommand", "runSharedPoolUploadPack", "runResolvePackage",
+    "runCmakeRegenerationHelper", "runReproDirenvActivationHelper",
+    "runReproNativeShellActivationHelper"]
 
 proc isFlagLiteralAt(line: string; quote: int): bool =
   ## Whether the string literal opening at `quote` spells a flag.
@@ -179,23 +270,22 @@ proc scannedFiles(): seq[string] =
 
 proc procBody(source, name: string): string =
   ## The text of top-level proc `name`: from its `proc` line to the next
-  ## top-level declaration.
+  ## top-level declaration. Every top-level `proc` of that name counts, so a
+  ## forward declaration does not hide the body that follows it.
   let lines = source.splitLines()
-  var start = -1
-  for i, line in lines:
-    if line.startsWith("proc " & name & "(") or
-        line.startsWith("proc " & name & "*("):
-      start = i
-      break
-  if start < 0:
-    return ""
-  var stop = lines.len
-  for i in start + 1 ..< lines.len:
-    let line = lines[i]
-    if line.len > 0 and line[0] notin {' ', '#'}:
-      stop = i
-      break
-  lines[start ..< stop].join("\n")
+  var bodies: seq[string] = @[]
+  for start, line in lines:
+    if not (line.startsWith("proc " & name & "(") or
+        line.startsWith("proc " & name & "*(")):
+      continue
+    var stop = lines.len
+    for i in start + 1 ..< lines.len:
+      let next = lines[i]
+      if next.len > 0 and next[0] notin {' ', '#'}:
+        stop = i
+        break
+    bodies.add(lines[start ..< stop].join("\n"))
+  bodies.join("\n")
 
 const Fixture = """
 if arg == "--json": discard            # 1: comparison
@@ -228,8 +318,7 @@ suite "CS-M6: no hand-written argv parsing outside the description":
         found.add((rel, count))
     var expected: seq[(string, int)] = @[]
     for entry in Remaining:
-      if entry[1] > 0:
-        expected.add(entry)
+      expected.add(entry)
     for entry in found:
       checkpoint("found " & entry[0] & ": " & $entry[1])
     check found == expected

@@ -18,5 +18,6 @@ Every category also holds at least one `same` entry (`bash`,
 freely between the sides and must never be reported.
 
 Read by `tests/e2e/m83/t_e2e_compare_reports_each_category.nim` and
-`t_e2e_compare_unmapped_is_not_different.nim`; the schema is
-`docs/user-guide/host-facts.md`.
+`t_e2e_compare_unmapped_is_not_different.nim`; the schema is described in
+`docs/users/content/reference/files/host-facts.md`, and its use in
+`docs/users/content/guides/machines/compare-with-home-manager.md`.

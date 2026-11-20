@@ -175,7 +175,7 @@ suite "the tpm2 evidence composite round-trips and joins up":
 
   test "the register bitmap is pinned BY VALUE, on asymmetric selections":
     # The round trip below is necessary and not sufficient, measured
-    # rather than assumed: `DefaultQuotedPcrs` fills a whole byte, so a
+    # rather than assumed: `AgileQuotePcrs` fills a whole byte, so a
     # bitmap packed with the bits the other way round produces the
     # IDENTICAL byte and survives any round trip through `selectedPcrs`.
     # These selections do not fill a byte, so they see it.
@@ -189,8 +189,10 @@ suite "the tpm2 evidence composite round-trips and joins up":
           "\x00\x00\x80"
     check pcrSelection(TpmAlgSha256, [0, 3, 11]).selections[0].select ==
           "\x09\x08\x00"
-    check pcrSelection(TpmAlgSha256, DefaultQuotedPcrs).selections[0].select ==
+    check pcrSelection(TpmAlgSha256, AgileQuotePcrs).selections[0].select ==
           "\xFF\x00\x00"
+    check pcrSelection(TpmAlgSha256, DefaultQuotedPcrs).selections[0].select ==
+          "\xFF\xFF\x00"
     var got: seq[int] = @[]
     for e in selectedPcrs(pcrSelection(TpmAlgSha256, [0, 3, 11])):
       got.add e.index
@@ -213,9 +215,11 @@ suite "the tpm2 evidence composite round-trips and joins up":
       check entry.bank == TpmAlgSha256
       indices.add entry.index
     check indices == @DefaultQuotedPcrs
-    # The real quote selects exactly this.
+    # The real quote selects exactly the registers it was captured over,
+    # which are fewer than the default (see ``AgileQuotePcrs``).
+    let captured = pcrSelection(TpmAlgSha256, AgileQuotePcrs)
     let q = tpm2EvidenceQuote(parseTpm2Evidence(blob))
-    check selectedPcrs(q.attest.quote.pcrSelect) == selectedPcrs(sel)
+    check selectedPcrs(q.attest.quote.pcrSelect) == selectedPcrs(captured)
 
 suite "the composite fits the envelope that has to carry it":
 

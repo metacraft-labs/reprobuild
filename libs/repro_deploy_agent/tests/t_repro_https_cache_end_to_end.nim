@@ -21,8 +21,9 @@
 ##   1. **M4 path over HTTPS** — the apply/substitute path. A real
 ##      ``repro-binary-cache`` daemon runs as a SUBPROCESS over HTTPS. The
 ##      REAL ``mkBuildActionDispatcher`` (the closure ``repro infra apply``
-##      injects) publishes a NUL-laced build-action output to the HTTPS
-##      cache on a miss, then — from a FRESH engine-cache root + FRESH cwd —
+##      injects) publishes a NUL-laced build-action output (an edge pinning
+##      its ``expectedOutputDigest``, which an apply requires to publish or
+##      substitute it) to the HTTPS cache on a miss, then — from a FRESH engine-cache root + FRESH cwd —
 ##      SUBSTITUTES it back over TLS. Asserted: the substitute did NOT raise
 ##      (an ssl-less ``repro`` would raise "https:// requires -d:ssl"),
 ##      ``substitutedFromCache == true``, and the bytes are byte-identical.
@@ -62,6 +63,7 @@ import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import repro_elevation      # FixtureContext (the per-apply fixture context)
 import repro_profile
 import repro_profile_compile
+from repro_profile_compile/binary_cache_build_actions import localOutputsDigest
 
 const Target = "windows-runner-001"
 
@@ -334,6 +336,21 @@ const M4WitnessRel = ".witness"
 const M4PrintfArg = "M7-https\\000\\001\\002-tail"
 const M4Expected = "M7-https\x00\x01\x02-tail"
 
+proc m4Digest(): string =
+  ## The `expectedOutputDigest` of `M4Expected` at `M4OutRel`, hashed the
+  ## way the apply hashes outputs. An apply substitutes, and a publishing
+  ## apply publishes, only an edge that pins its digest (Binary-Caches.md
+  ## §"Publishing for a host that cannot build", "The entry key is an
+  ## address"); the digest is not part of the entry key.
+  let scratch = createTempDir("m7-https-digest-", "")
+  defer:
+    try: removeDir(scratch) except CatchableError: discard
+  createDir(scratch / "bin")
+  writeFile(scratch / M4OutRel, M4Expected)
+  result = localOutputsDigest(ProfileBuildAction(cwd: scratch,
+    outputs: @[M4OutRel]))
+  doAssert result.startsWith("blake3:")
+
 proc m4Action(cwd: string): ProfileBuildAction =
   let script =
     "mkdir -p bin; " &
@@ -344,7 +361,8 @@ proc m4Action(cwd: string): ProfileBuildAction =
     argv: @["/bin/sh", "-c", script],
     cwd: cwd, deps: @[], inputs: @[], outputs: @[M4OutRel],
     commandStatsId: "m7.https.write", toolIdentityRefs: @[],
-    requiresElevation: true, cacheable: true)
+    requiresElevation: true, cacheable: true,
+    expectedOutputDigest: m4Digest())
 
 const M5OutRel = "bin/deploy-https.txt"
 const M5Payload = "converged-over-https"

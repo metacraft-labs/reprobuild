@@ -73,12 +73,38 @@ proc digestText(text: string): string =
 proc argumentDigest*(arguments: string): string =
   digestText(arguments)
 
-proc graphInvocationKey*(providerArtifactId, entryPointId, entryPointBodyHash,
-                         arguments, lockSliceId, activity, namespace: string):
-    string =
-  providerArtifactId & "|" & entryPointId & "|" & entryPointBodyHash & "|" &
-    argumentDigest(arguments) & "|" & lockSliceId & "|" & activity & "|" &
-    namespace
+proc graphInvocationKey*(projectId, entryPointId, arguments, lockSliceId,
+                         activity, namespace: string): string =
+  ## The identity of a graph invocation: WHICH invocation owns a stored
+  ## fragment, never which build of the provider produced it
+  ## (Project-Provider-Graph-Protocol.md §"Graph Fragment").
+  ##
+  ## It is made of the project, the entry point id, the argument digest, the
+  ## lock slice, the activity and the namespace, and nothing else. The
+  ## provider artifact id and the entry point body hash are deliberately
+  ## absent: they are VALIDITY attributes, recorded on the stored fragment
+  ## (``StoredGraphFragment.providerArtifactId`` / ``entryPointBodyHash``,
+  ## and the ``gevProviderSource`` input). A mismatch on them makes the
+  ## refresh run the invocation again, and the fragment it returns is stored
+  ## under this same key, replacing the previous one. That is what lets a
+  ## re-produced fragment be compared with the one it replaces -- early
+  ## cutoff, stale-edge pruning, stale-effect cleanup -- across a provider
+  ## recompile, a recipe body edit or an import-mode switch, and what keeps
+  ## two live fragments of one invocation from claiming the same effect.
+  ##
+  ## A different lock slice or activity IS a different invocation: its
+  ## fragments are not the previous ones re-produced, so the previous ones
+  ## are pruned.
+  ##
+  ## Each component is length-prefixed, so no value containing the
+  ## separator can make two different invocations share a key.
+  for component in [projectId, entryPointId, argumentDigest(arguments),
+                    lockSliceId, activity, namespace]:
+    if result.len > 0:
+      result.add('|')
+    result.add($component.len)
+    result.add(':')
+    result.add(component)
 
 proc devEnvIntrospectionEntryPointId*(projectName: string): string =
   projectName & ".dev-env"
@@ -534,6 +560,23 @@ proc fileReadInput*(path: string): GraphEvaluationInput =
   GraphEvaluationInput(kind: gevFileRead, identity: path,
     digest: fileContentDigest(path))
 
+const UnobservedEvaluationDigest* = "unobserved"
+  ## The digest of an evaluation input whose content the producer could NOT
+  ## observe. ``fileContentDigest`` returns a hex digest or ``missing`` and
+  ## never this value, so the input reads as changed on every refresh and the
+  ## owning fragment is produced again every time.
+
+proc unobservedEvaluationInput*(identity: string): GraphEvaluationInput =
+  ## An evaluation input for a graph derived from reads that could not be
+  ## observed completely — Failure-Semantics.md §"Monitoring Failures": when
+  ## the scope of a loss is unknown, nothing derived from it is reused. The
+  ## fragment that carries it is never served from the snapshot; every
+  ## refresh re-invokes its entry point (and early cutoff still applies when
+  ## the rerun reproduces it unchanged). ``identity`` names what was not
+  ## observed, for the reader of the snapshot.
+  GraphEvaluationInput(kind: gevFileRead, identity: identity,
+    digest: UnobservedEvaluationDigest)
+
 proc providerSourceInput*(providerArtifactId, binaryDigest: string):
     GraphEvaluationInput =
   ## The record of WHICH PROVIDER produced a fragment: its artifact id, and
@@ -629,20 +672,29 @@ proc emptyProviderGraphSnapshot*(providerArtifactId: string;
   ProviderGraphSnapshot(providerArtifactId: providerArtifactId,
     manifest: manifest)
 
-proc storedFragmentFrom(fragment: GraphFragment; providerArtifactId,
-                        lockSliceId, activity: string): StoredGraphFragment =
+proc invocationKeyFor(config: RefreshConfig; entryPointId, arguments,
+                      namespace: string): string =
+  ## The key ``config``'s refresh stores the invocation of ``entryPointId``
+  ## on ``arguments`` in ``namespace`` under.
+  graphInvocationKey(config.projectId, entryPointId, arguments,
+    config.lockSliceId, config.activity, namespace)
+
+proc storedFragmentFrom(fragment: GraphFragment;
+                        config: RefreshConfig): StoredGraphFragment =
+  ## The stored form of a fragment ``config``'s refresh produced: keyed by
+  ## the invocation, carrying the producing provider artifact and the entry
+  ## point body hash as validity attributes beside it.
   let argDigest = argumentDigest(fragment.arguments)
   StoredGraphFragment(
-    invocationKey: graphInvocationKey(providerArtifactId, fragment.entryPointId,
-      fragment.entryPointBodyHash, fragment.arguments, lockSliceId, activity,
-      fragment.namespace),
-    providerArtifactId: providerArtifactId,
+    invocationKey: invocationKeyFor(config, fragment.entryPointId,
+      fragment.arguments, fragment.namespace),
+    providerArtifactId: config.providerArtifactId,
     entryPointId: fragment.entryPointId,
     entryPointBodyHash: fragment.entryPointBodyHash,
     arguments: fragment.arguments,
     argumentDigest: argDigest,
-    lockSliceId: lockSliceId,
-    activity: activity,
+    lockSliceId: config.lockSliceId,
+    activity: config.activity,
     namespace: fragment.namespace,
     fragmentDigest: fragment.fragmentDigest,
     nodes: fragment.nodes,
@@ -653,14 +705,16 @@ proc storedFragmentFrom(fragment: GraphFragment; providerArtifactId,
 
 proc reusableIndex(snapshot: ProviderGraphSnapshot;
                    fragment: StoredGraphFragment): int =
+  ## The stored fragment ``fragment`` replaces: the one under the same
+  ## invocation key, or -1.
+  ##
+  ## Matched by key and nothing else. The key no longer moves when the
+  ## provider is recompiled, so there is no attribute-matching fallback to
+  ## find "the same" fragment under another key -- and there must not be:
+  ## a fragment of another lock slice or activity is another invocation,
+  ## which is pruned, not replaced.
   for i, existing in snapshot.fragments:
     if existing.invocationKey == fragment.invocationKey:
-      return i
-  for i, existing in snapshot.fragments:
-    if existing.entryPointId == fragment.entryPointId and
-        existing.arguments == fragment.arguments and
-        existing.namespace == fragment.namespace and
-        existing.activity == fragment.activity:
       return i
   -1
 
@@ -977,8 +1031,7 @@ proc executePlan(config: RefreshConfig; provider: ProviderExecutionConfig;
   # construction, the one ``computeGraphFragmentDigest`` gives for the
   # stored fragment.
   fragment.fragmentDigest = computeGraphFragmentDigest(fragment)
-  result = storedFragmentFrom(fragment, config.providerArtifactId,
-    config.lockSliceId, config.activity)
+  result = storedFragmentFrom(fragment, config)
   applyStoredFragment(snapshot, report, result)
 
 proc runRootAndChildren(config: RefreshConfig; provider: ProviderExecutionConfig;
@@ -1054,6 +1107,53 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
           namespace: fragment.namespace,
           reason: girEvaluationInputChanged))
 
+proc requireRefreshProjectId(config: RefreshConfig) =
+  ## The project is the first component of every invocation key a refresh
+  ## stores (``graphInvocationKey``). An empty one would key the fragments
+  ## of every project that left it out alike, so two projects sharing a
+  ## store would replace each other's fragments as if they were one
+  ## invocation. Refuse it before anything is spawned or read, naming the
+  ## entry point the refresh was for.
+  if config.projectId.len == 0:
+    raiseRuntime("provider graph refresh has no project id: entry point '" &
+      config.rootEntryPointId & "' of provider artifact '" &
+      config.providerArtifactId & "'; the caller must supply the package " &
+      "name of the project it refreshes")
+
+proc providerSnapshotKeyedFor*(snapshot: ProviderGraphSnapshot;
+                               config: RefreshConfig): bool =
+  ## Whether every stored fragment is an invocation THIS refresh would make:
+  ## its stored key is the one ``config`` gives its entry point, arguments
+  ## and namespace. False when the project, the lock slice or the activity
+  ## changed -- each a different invocation -- and for a snapshot keyed in
+  ## an earlier shape of the key, whose fragments are then produced again
+  ## once.
+  ##
+  ## Each fragment is keyed from its OWN stored arguments, so that alone
+  ## cannot see a refresh for another root. The snapshot must also hold the
+  ## root invocation this refresh requests -- the root entry point on
+  ## ``config.rootArguments`` in ``config.namespace``. A different root
+  ## argument gives the root fragment a different key (its argument
+  ## digest), so a snapshot produced for another root is not reused without
+  ## invoking the root (Project-Provider-Graph-Protocol.md §"Full Versus
+  ## Fragment Invocation"), even when the provider artifact does not depend
+  ## on the root and so does not force the invocation itself.
+  ##
+  ## Exported because ``refreshProviderGraph`` is not the only reuse site: a
+  ## caller that serves a stored snapshot WITHOUT refreshing it (the CLI's
+  ## warm snapshot shortcut) must apply the same rule, or it would serve the
+  ## graph this refresh refuses.
+  let rootKey = invocationKeyFor(config, config.rootEntryPointId,
+    config.rootArguments, config.namespace)
+  var holdsRequestedRoot = false
+  for fragment in snapshot.fragments:
+    if fragment.invocationKey != invocationKeyFor(config,
+        fragment.entryPointId, fragment.arguments, fragment.namespace):
+      return false
+    if fragment.invocationKey == rootKey:
+      holdsRequestedRoot = true
+  holdsRequestedRoot
+
 proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   ## Bring the persisted provider-graph snapshot up to date and return it.
   ##
@@ -1071,11 +1171,22 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
   ## unchanged. The body hashes the DSL ships are not closure-complete (see
   ## ``providerSourceInput``), so such an arm would serve a stale graph
   ## after, for example, a change to a helper proc or a package-scope flag.
+  ##
+  ## Re-running is not re-keying. Every fragment is stored under its
+  ## invocation key (``graphInvocationKey``), which does not name the
+  ## provider, so a fragment the new provider re-produces replaces the
+  ## stored one under the same key: an equal digest is reported as an early
+  ## cutoff, and only what it no longer owns is reported stale. A stored
+  ## fragment whose key this refresh does not reproduce -- another lock
+  ## slice, activity, project or root, or a member that is gone -- is
+  ## pruned, and its effects become cleanup candidates that a surviving
+  ## claim on the same effect still protects (``planOutputCleanup``).
   # Before anything is spawned or read: a refresh with no project root
   # cannot produce a usable graph, and every plan below inherits this
-  # value.
+  # value. Nor can one with no project, which every key below names.
   requireInvocationProjectRoot(config.rootArguments, config.rootEntryPointId,
     config.providerArtifactId)
+  requireRefreshProjectId(config)
   result.persistedSnapshotPath = providerSnapshotPath(config.storeRoot)
   let provider = execConfig(config)
   let binaryInput = fileReadInput(providerBinaryInputPath(provider))
@@ -1083,9 +1194,10 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
     raiseRuntime("provider binary is missing: " & config.providerBinaryPath)
   var snapshot = loadProviderGraphSnapshot(config.storeRoot)
 
-  if snapshot.fragments.len > 0 and
-      snapshot.providerArtifactId == config.providerArtifactId and
-      providerSnapshotBinaryFresh(snapshot, binaryInput.identity):
+  let providerFresh = snapshot.fragments.len > 0 and
+    snapshot.providerArtifactId == config.providerArtifactId and
+    providerSnapshotBinaryFresh(snapshot, binaryInput.identity)
+  if providerFresh and providerSnapshotKeyedFor(snapshot, config):
     let manifest = snapshot.manifest
     validateManifest(manifest, config.providerArtifactId)
     refreshStoredBindings(snapshot, manifest)
@@ -1126,10 +1238,15 @@ proc refreshProviderGraph*(config: RefreshConfig): ProviderRefreshReport =
     result.snapshot = snapshot
     return
 
+  # The stored graph cannot be reused: either another provider produced it
+  # (the validity attributes), or the provider is current and the
+  # invocations are not (the keys, including the requested root's). Run
+  # the root and every child again; the previous snapshot only decides what
+  # is reported replaced, cut off or pruned.
   let previous = snapshot
   snapshot = emptyProviderGraphSnapshot(config.providerArtifactId, manifest)
   runRootAndChildren(config, provider, binaryInput, manifest, snapshot, result,
-    girProviderArtifactChanged)
+    if providerFresh: girLockOrConfigChanged else: girProviderArtifactChanged)
   ensureNoDuplicateEffects(snapshot)
   requireUnchangedProviderBinary(binaryInput)
   for oldFragment in previous.fragments:

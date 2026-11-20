@@ -143,17 +143,9 @@ proc freshAgentInputs*(): AgentUnitsInputs =
   result.allowedAddresses.sort()
   result.hosts.sort()
 
-proc runAgentRepinCli*(args: seq[string]): int =
-  ## ``repro system addon agent-repin [--apply <digest>]``.
-  var applyDigest = ""
-  var i = 0
-  while i < args.len:
-    if args[i] == "--apply" and i + 1 < args.len:
-      applyDigest = args[i + 1]
-      i += 2
-    else:
-      stderr.write("usage: repro system addon agent-repin [--apply <digest>]\n")
-      return 2
+proc runAgentRepin*(applyDigest: string): int =
+  ## ``repro system addon agent-repin [--apply <digest>]``: the plan, or
+  ## (``applyDigest`` non-empty) its apply.
   if not fileExists(AgentConfPath):
     stderr.write("repro system addon agent-repin: no deploy agent is " &
       "configured (" & AgentConfPath & " is missing)\n")

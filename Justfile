@@ -78,6 +78,14 @@ addon-static *ARCHES="amd64 arm64 armhf":
 e2e_addon_bootstrap_uninstall_byte_identity:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_uninstall_byte_identity
 
+# Bundles: a selection bundle made by this tree's packaged repro, published
+# to a local bare repository and restored in a plain rootless podman
+# container (debian:bookworm-slim, no Nix store, no network), builds the
+# selection with no producer action. Fails when podman cannot run. See
+# scripts/run_bundle_container_gate.sh.
+e2e_bundle_restores_on_a_plain_machine:
+    bash ./scripts/run_bundle_container_gate.sh
+
 # A16 (spec §6.5): image synthesis and remote bootstrap. Both run the full
 # engine of this checkout on the build host: `just build` first.
 e2e_addon_zero_touch_image_synthesis_boots_converged:
@@ -154,6 +162,11 @@ e2e_addon_to_reproos_conversion_keeps_state:
 
 e2e_addon_writes_never_follow_symlinks:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_writes_never_follow_symlinks
+
+# A declared mode, group or copy form makes an fs.systemFile a private copy
+# on an add-on host, never a link into the world-readable static tree.
+e2e_addon_declared_mode_file_is_a_private_copy:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-debian-13-amd64,ubuntu-24.04-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_declared_mode_file_is_a_private_copy
 
 # Milestone A5: crash consistency, boot re-assertion, confirm-or-revert. The
 # reset gate runs the seam build (run_addon_gate.sh selects it).
@@ -737,6 +750,10 @@ lint:
     # alone -- the release job's gate, without the build in front of it.
     bash ./scripts/release/check_staged_release_sources.sh 2>&1 | tee -a test-logs/lint.log
     bash ./scripts/check_ambient_execution.sh 2>&1 | tee -a test-logs/lint.log
+    # A comment naming a superseded docs/user-guide/ page sends the next
+    # contributor to edit a copy nobody reads; the published page under
+    # docs/users/content/ goes stale. Pure grep, no build needed.
+    bash ./scripts/check_superseded_doc_pointers.sh 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived
@@ -931,11 +948,25 @@ lint:
     # so the disagreement surfaces when the RULE is edited rather than when
     # the first file of a new shape lands on it.
     python3 ./scripts/reprobuild_suite_inventory.py --check-shape-parity 2>&1 | tee -a test-logs/lint.log
+    # The canonical `reprobuild/dsl/<module>` re-export tree against the
+    # standard library it is generated from. Same class as the suite gates
+    # above -- a tracked artifact that is a pure function of the tree, red
+    # whenever a stdlib module lands without `just regen-reprobuild-dsl-modules`
+    # -- so it runs behind them for the same reason. Before it was here the
+    # only check was one case inside a long integration test, and a stdlib
+    # module added upstream left the tree stale with nothing to say so at
+    # commit time. Reads two directory trees, no compiler, under a second.
+    python3 ./scripts/generate_reprobuild_dsl_modules.py --check 2>&1 | tee -a test-logs/lint.log
 
 format:
     bash ./scripts/format_sources.sh
 
 fmt: format
+
+# Regenerate the `reprobuild/dsl/<module>` re-export modules from the
+# standard-library tree (libs/reprobuild/README.md).
+regen-reprobuild-dsl-modules:
+    python3 ./scripts/generate_reprobuild_dsl_modules.py
 
 # Regenerate the four tracked artifacts that are pure functions of the tree:
 # repro_tests.nim, scripts/reprobuild-test-shape-parity.tsv,
@@ -1284,10 +1315,11 @@ integration_hcr_linux_phase_i_refusal_reports_an_applied_patch:
         tests/e2e/hcr-linux-prepare/t_integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.nim \
         2>&1 | tee test-logs/integration_hcr_linux_phase_i_refusal_reports_an_applied_patch.log
 
-# HLX-M9 -- a host that cannot complete the mprotect RW->RX round trip is
-# refused DURING NEGOTIATION, with a diagnostic naming the blocking policy
-# (read from PR_GET_MDWE, not guessed). The hardened arm is a real
-# prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN), not an injected failure.
+# HLX-M9 -- the agent-start probe performs a complete text page replacement
+# (design §5.1/§5.2). Under a real prctl(PR_SET_MDWE, PR_MDWE_REFUSE_EXEC_GAIN)
+# the memfd backing still publishes; with it disabled the anonymous fallback is
+# refused and the host is refused DURING NEGOTIATION, with a diagnostic naming
+# the blocking policy (read from PR_GET_MDWE, not guessed).
 integration_hcr_linux_hardened_host_refuses_at_negotiation:
     mkdir -p test-logs build/test-bin build/nimcache
     nim c -r \
@@ -1296,6 +1328,15 @@ integration_hcr_linux_hardened_host_refuses_at_negotiation:
         --out:build/test-bin/integration_hcr_linux_hardened_host_refuses_at_negotiation \
         tests/e2e/hcr-linux-hardening/t_integration_hcr_linux_hardened_host_refuses_at_negotiation.nim \
         2>&1 | tee test-logs/integration_hcr_linux_hardened_host_refuses_at_negotiation.log
+
+integration_hcr_patch_channel_admits_only_this_users_peer:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/integration_hcr_patch_channel_admits_only_this_users_peer \
+        --out:build/test-bin/integration_hcr_patch_channel_admits_only_this_users_peer \
+        tests/e2e/hcr-linux-hardening/t_integration_hcr_patch_channel_admits_only_this_users_peer.nim \
+        2>&1 | tee test-logs/integration_hcr_patch_channel_admits_only_this_users_peer.log
 
 # HLX-M9 -- provider-owned code pages (patch bodies, island pages) are a
 # memfd_create dual mapping: the exec view is MAP_PRIVATE|PROT_READ|PROT_EXEC
@@ -1319,6 +1360,18 @@ e2e_hcr_linux_x86_64_single_threaded_direct_patch:
         --out:build/test-bin/e2e_hcr_linux_x86_64_single_threaded_direct_patch \
         tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_x86_64_single_threaded_direct_patch.nim \
         2>&1 | tee test-logs/e2e_hcr_linux_x86_64_single_threaded_direct_patch.log
+
+# A re-patch's code-patch event reports the word its store replaced (generation
+# N's jump), not the original window (reprobuild-pm issues/2026-11-15-hcr-code-
+# patch-event-reports-generation-0-as-the-word-a-re-patch-replaced.md).
+e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word:
+    mkdir -p test-logs build/test-bin build/nimcache
+    nim c -r \
+        --threads:on \
+        --nimcache:build/nimcache/e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word \
+        --out:build/test-bin/e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word \
+        tests/e2e/hcr-linux-direct/t_e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.nim \
+        2>&1 | tee test-logs/e2e_hcr_linux_repatch_code_patch_event_reports_the_replaced_word.log
 
 # HLX-M2 — a function inside a `dlopen`ed shared library is patched.
 # Campaign: reprobuild-specs/HCR-Linux-ELF-Provider.milestones.org, HLX-M2.
@@ -3303,3 +3356,16 @@ integration_hcr_linux_stack_mapping_changes_do_not_fault:
         --out:build/test-bin/integration_hcr_linux_stack_mapping_changes_do_not_fault \
         tests/e2e/hcr-linux-threads/t_integration_hcr_linux_stack_mapping_changes_do_not_fault.nim \
         2>&1 | tee test-logs/integration_hcr_linux_stack_mapping_changes_do_not_fault.log
+
+# User documentation site (docs/users/): standard Metacraft docs recipes.
+build-docs:
+    bash ./scripts/build_user_docs.sh build
+
+dev-docs port="8000" host="127.0.0.1":
+    cd docs/users && nim c -r --skipParentCfg --hints:off -o:build/dev src/dev.nim {{port}} {{host}}
+
+serve-docs port="8000" host="127.0.0.1":
+    cd docs/users && nim c -r --skipParentCfg --hints:off -o:build/serve_public src/serve_public.nim {{port}} {{host}}
+
+open-docs port="8000":
+    python3 -m webbrowser "http://127.0.0.1:{{port}}/"

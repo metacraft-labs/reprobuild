@@ -1128,6 +1128,25 @@ proc resumeSwitch*(g: Guest; timeoutSec = 900): ExecOut =
     sleep(500)
   ExecOut(exitCode: 255, stderr: "the resumed switch did not end in time")
 
+proc bootHoldBeforeReboot*(g: Guest): string =
+  ## What decides the boot-hold unit's next boot, read before a reboot (A9
+  ## review round 20): the pending marker, the record of the switch's start
+  ## holds (its kind and lines), and the ``sysinit.target.requires`` link
+  ## that queues the unit.
+  g.exec("ls -la /var/lib/repro/system/addon/pending /var/lib/repro/system/addon/boot-holds " &
+    "2>&1; echo --- record; cat /var/lib/repro/system/addon/boot-holds 2>&1; " &
+    "echo --- requires; ls -la /etc/systemd/system/sysinit.target.requires/ 2>&1; true").stdout
+
+proc bootHoldAfterBoot*(g: Guest): string =
+  ## The boot-hold unit's run this boot (A9 review round 20): whether its
+  ## condition held, how its process ended and when it started, and its
+  ## whole journal for the boot.
+  g.exec("systemctl show -p ConditionResult -p ConditionTimestampMonotonic " &
+    "-p ExecMainStatus -p ExecMainCode -p ExecMainStartTimestampMonotonic " &
+    "-p ExecMainExitTimestampMonotonic -p Result -p ActiveState " &
+    "repro-addon-boot-hold.service; echo --- journal; " &
+    "journalctl -b -o short-monotonic --no-pager -u repro-addon-boot-hold.service; true").stdout
+
 proc waitReasserted*(g: Guest; timeoutSec = 900): string =
   ## After a boot: wait until the re-assert unit has run, and return its
   ## journal for this boot.
@@ -1139,6 +1158,23 @@ proc waitReasserted*(g: Guest; timeoutSec = 900): string =
     sleep(1000)
   result = g.exec("journalctl -b -o cat --no-pager -u " &
                   "repro-addon-reassert.service").stdout
+  # §13 decision 157: the re-assertion leaves a switch with a
+  # health-checked floored unit -- its replay, or its revert to a
+  # generation with one -- to repro-addon-boot-confirm.service, after it.
+  # The boot's recovery is over only when that unit has run too; its
+  # journal follows the re-assertion's.
+  if "left to repro-addon-boot-confirm.service" in result:
+    while epochTime() < deadline:
+      let st = g.exec("systemctl show -p ActiveState -p ExecMainExitTimestampMonotonic " &
+                      "-p ConditionResult -p ConditionTimestampMonotonic " &
+                      "repro-addon-boot-confirm.service").stdout
+      if "ActiveState=failed" in st or ("ActiveState=active" in st and
+          "ExecMainExitTimestampMonotonic=0" notin st) or
+          ("ConditionResult=no" in st and "ConditionTimestampMonotonic=0" notin st):
+        break
+      sleep(1000)
+    result.add(g.exec("journalctl -b -o cat --no-pager -u " &
+                      "repro-addon-boot-confirm.service").stdout)
   if testSeams():
     # A hard reset can bring back a seam control file the paused switch had
     # already consumed: its unlink is not fsynced (the seam must not sync,

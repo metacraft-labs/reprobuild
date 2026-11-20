@@ -16,4 +16,4 @@ a project declares: its tools, variables, tasks and services.
 |---|---|
 | [Enter a project's environment](enter-a-project-environment.md) | You want the project's tools in a shell, for one command, or exported |
 | [Activate environments when you change directory](activate-on-directory-change.md) | You want the environment to switch on and off as you enter and leave the project |
-| [Keep an existing Nix flake as the environment](keep-a-nix-flake-environment.md) | The repository already has a flake dev shell |
+| [Keep an existing Nix flake as the environment](keep-a-nix-flake-environment.md) | The repository already has a flake development shell |

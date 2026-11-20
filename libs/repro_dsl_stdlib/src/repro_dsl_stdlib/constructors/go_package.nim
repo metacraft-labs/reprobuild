@@ -478,6 +478,14 @@ proc go_package*(binaryName: string;
     else: GoScratchSubdir / "toolexec" / "asm-trimpath"
   var ignoredRoots = @[effectiveDestdir, modCache, goCache,
                        parentDir(asmWrapper)]
+  # The module cache, the build cache and (below) zig's cache are shared by
+  # every Go build edge of this project, and Go and zig serve their entries
+  # by the names they are stored under without re-checking the bytes. The
+  # edge's reads under them are excluded from its key just above, so another
+  # writer could change what this edge produces without moving its key. The
+  # edge names them as content-keyed tool-owned caches, and the engine keeps
+  # its results on this host (Tool-Owned-Caches.md "Trust Boundary").
+  var toolCaches = @[modCache, goCache]
   var cgoEnv = ""
   if staticCgo:
     let triple = goStaticCgoTriple()
@@ -492,6 +500,7 @@ proc go_package*(binaryName: string;
     cgoEnv.add("ZIG_LOCAL_CACHE_DIR=\"" & q(zigCache / "local") & "\" ")
     buildToolRefs.add("zig")
     ignoredRoots.add(zigCache)
+    toolCaches.add(zigCache)
     if projectRoot.len > 0:
       let wrappers = emitZigCrossWrappersAction(projectRoot, pkgName, triple)
       buildDeps.add(wrappers.id)
@@ -558,7 +567,8 @@ proc go_package*(binaryName: string;
     # assembler wrapper the edge writes, and zig's cache under `staticCgo`.
     dependencyPolicy = automaticMonitorPolicy(ignoredRoots),
     commandStatsId = "go_package.build",
-    toolIdentityRefs = buildToolRefs)
+    toolIdentityRefs = buildToolRefs,
+    contentKeyedToolCaches = toolCaches)
   if projectRoot.len > 0:
     setRegisteredActionDeclaredOutputs(buildEdge.id, @[effectiveDestdir])
     # The source stays read-only: a build that wrote into its own

@@ -245,6 +245,23 @@ suite "the A11 code review's second round":
     var old = own
     old = replaceUnitContent(old, EgressUnit, egressUnit("/usr/sbin/nft"))
     check unitContentOf(migrateOwnProfile(old), EgressUnit) == unit0
+    # A unit rendered before the observer was tied to the host's
+    # nftables.service (reprobuild-pm issue 2026-11-16: no After=, PartOf=,
+    # ReloadPropagatedFrom= or ExecReload=, and an ExecStop= without its
+    # ``-``) is migrated to the tied unit by the next switch.
+    var untied: seq[string]
+    for l in unit0.splitLines(keepEol = true):
+      if l.startsWith("After=" & HostNftablesUnit) or
+          l.startsWith("PartOf=") or l.startsWith("ReloadPropagatedFrom=") or
+          l.startsWith("ExecReload="):
+        continue
+      untied.add l.replace("ExecStop=-", "ExecStop=")
+    let untiedUnit = untied.join("")
+    check untiedUnit != unit0
+    check egressNftBinaryOf(untiedUnit) == "/usr/sbin/nft"
+    check egressNftBinaryOf(unit0) == "/usr/sbin/nft"
+    let pre = replaceUnitContent(own, EgressUnit, untiedUnit)
+    check unitContentOf(migrateOwnProfile(pre), EgressUnit) == unit0
 
   test "7: an alert on a heartbeat can be acknowledged, by its kind":
     let h = newHost(root, "ack7", sink)

@@ -177,13 +177,18 @@ proc inflateBlock(br: var BitReader; out2: var seq[byte];
       for i in 0 ..< matchLength:
         out2.add out2[start + i]
 
-proc inflateRaw(data: string; start, limit: int): seq[byte] =
+proc inflateRawAt(data: string; start, limit, capacity: int;
+                  endPos: var int): seq[byte] =
   ## RFC 1951. `limit` is the exact byte count the caller expects, taken from
   ## `Elf64_Chdr.ch_size` — an inflate that overruns it is refused rather than
   ## grown, because the declared size is the only independent statement of how
-  ## large the section is.
+  ## large the section is. A caller whose `limit` is only a ceiling (gzip)
+  ## passes a smaller `capacity` so the ceiling is not allocated up front.
+  ## ``endPos`` receives the offset of the first byte after the stream (the
+  ## final block's last partial byte included), where a container's trailer
+  ## starts.
   var br = BitReader(data: data, pos: start, bitBuf: 0, bitCount: 0)
-  result = newSeqOfCap[byte](limit)
+  result = newSeqOfCap[byte](if capacity < 0: limit else: min(capacity, limit))
   while true:
     let final = br.bit()
     let blockType = br.bits(2)
@@ -269,6 +274,11 @@ proc inflateRaw(data: string; start, limit: int): seq[byte] =
         "DEFLATE block type 3 is reserved")
     if final == 1:
       break
+  endPos = br.pos
+
+proc inflateRaw(data: string; start, limit: int): seq[byte] =
+  var ignored = 0
+  inflateRawAt(data, start, limit, -1, ignored)
 
 proc adler32(data: openArray[byte]): uint32 =
   var a = 1'u32
@@ -320,3 +330,107 @@ proc zlibDecompress*(data: string; start, expanded: int): seq[byte] =
     fail("elf-compressed-section-checksum-mismatch",
       "zlib Adler-32 is 0x" & toHex(stored, 8) & " but the expanded bytes " &
       "hash to 0x" & toHex(computed, 8))
+
+# ---------------------------------------------------------------------------
+# RFC 1952 (gzip), for archives a forge serves.
+# ---------------------------------------------------------------------------
+
+proc crc32Table(): array[256, uint32] =
+  for n in 0 ..< 256:
+    var c = uint32(n)
+    for _ in 0 ..< 8:
+      c = if (c and 1'u32) != 0: 0xEDB88320'u32 xor (c shr 1) else: c shr 1
+    result[n] = c
+
+const Crc32Table = crc32Table()
+
+proc crc32*(data: openArray[byte]): uint32 =
+  ## The CRC-32 of RFC 1952 section 8 (the ISO 3309 polynomial).
+  var c = 0xFFFFFFFF'u32
+  for b in data:
+    c = Crc32Table[int((c xor uint32(b)) and 0xFF'u32)] xor (c shr 8)
+  c xor 0xFFFFFFFF'u32
+
+proc gzipDecompress*(data: string; maxBytes: int): seq[byte] =
+  ## One gzip member (RFC 1952, https://www.rfc-editor.org/rfc/rfc1952),
+  ## expanded to at most ``maxBytes``: a stream that would expand further is
+  ## refused (`gzip-too-large`) while it is decoded, so a decompression bomb
+  ## costs at most ``maxBytes``. The trailer's CRC-32 and ISIZE are verified,
+  ## located from the END of the input as `zlibDecompress` locates its
+  ## Adler-32, and the DEFLATE stream must end exactly where the trailer
+  ## starts, so trailing bytes or a second member are a refusal
+  ## (`gzip-malformed`): a forge serves one member, and nothing after it is
+  ## part of the archive. A header CRC (FHCRC) is verified when present.
+  ##
+  ## Refusal reasons: `gzip-truncated`, `gzip-malformed`, `gzip-too-large`,
+  ## `gzip-checksum-mismatch`.
+  const
+    FText = 1'u8
+    FHcrc = 2'u8
+    FExtra = 4'u8
+    FName = 8'u8
+    FComment = 16'u8
+  discard FText
+  if data.len < 18:
+    fail("gzip-truncated", "gzip stream is shorter than its header and trailer")
+  if ord(data[0]) != 0x1f or ord(data[1]) != 0x8b:
+    fail("gzip-malformed", "not a gzip stream (no 1f 8b magic)")
+  if ord(data[2]) != 8:
+    fail("gzip-malformed", "gzip compression method " & $ord(data[2]) &
+      " is not DEFLATE")
+  let flg = uint8(ord(data[3]))
+  if (flg and 0xE0'u8) != 0:
+    fail("gzip-malformed", "gzip header sets reserved flag bits")
+  var pos = 10
+  let trailer = data.len - 8
+  if (flg and FExtra) != 0:
+    if pos + 2 > trailer:
+      fail("gzip-truncated", "gzip FEXTRA length is truncated")
+    let xlen = ord(data[pos]) or (ord(data[pos + 1]) shl 8)
+    pos += 2 + xlen
+  for flag in [FName, FComment]:
+    if (flg and flag) != 0:
+      while pos < trailer and data[pos] != '\0': inc pos
+      inc pos
+  if (flg and FHcrc) != 0:
+    if pos + 2 > trailer:
+      fail("gzip-truncated", "gzip FHCRC is truncated")
+    var header = newSeq[byte](pos)
+    for i in 0 ..< pos: header[i] = byte(ord(data[i]))
+    let storedHcrc = uint32(ord(data[pos])) or (uint32(ord(data[pos + 1])) shl 8)
+    if (crc32(header) and 0xFFFF'u32) != storedHcrc:
+      fail("gzip-checksum-mismatch", "gzip header CRC-16 is 0x" &
+        toHex(storedHcrc, 4) & " but the header hashes to 0x" &
+        toHex(crc32(header) and 0xFFFF'u32, 4))
+    pos += 2
+  if pos > trailer:
+    fail("gzip-truncated", "gzip header runs into the trailer")
+  var streamEnd = 0
+  try:
+    result = inflateRawAt(data, pos, maxBytes, data.len * 4, streamEnd)
+  except InflateError as e:
+    if e.reason == "elf-compressed-section-size-mismatch":
+      fail("gzip-too-large", "gzip stream expands to more than " &
+        $maxBytes & " bytes")
+    elif e.reason.endsWith("truncated"):
+      fail("gzip-truncated", e.msg)
+    else:
+      fail("gzip-malformed", e.msg)
+  if streamEnd < trailer:
+    fail("gzip-malformed", "gzip stream has " & $(trailer - streamEnd) &
+      " byte(s) after its DEFLATE data and before the last 8 (trailing " &
+      "data or a second member)")
+  if streamEnd > trailer:
+    fail("gzip-truncated", "gzip DEFLATE data runs into the 8-byte trailer")
+  proc le32(at: int): uint32 =
+    uint32(ord(data[at])) or (uint32(ord(data[at + 1])) shl 8) or
+      (uint32(ord(data[at + 2])) shl 16) or (uint32(ord(data[at + 3])) shl 24)
+  let storedCrc = le32(trailer)
+  let storedSize = le32(trailer + 4)
+  if storedSize != uint32(result.len and 0xFFFFFFFF):
+    fail("gzip-checksum-mismatch", "gzip ISIZE is " & $storedSize &
+      " but the stream expanded to " & $result.len & " bytes")
+  let computed = crc32(result)
+  if storedCrc != computed:
+    fail("gzip-checksum-mismatch", "gzip CRC-32 is 0x" & toHex(storedCrc, 8) &
+      " but the expanded bytes hash to 0x" & toHex(computed, 8))
