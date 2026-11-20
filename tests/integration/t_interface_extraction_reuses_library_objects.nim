@@ -112,6 +112,10 @@ suite "interface extraction reuses library objects":
           let res = execCmdEx(quoteShellCommand([
             "env",
             "TMPDIR=" & tmp,
+            # The shared interface nimcache is under the user cache
+            # directory; a private one keeps the object counts about this
+            # fixture alone.
+            "XDG_CACHE_HOME=" & tempRoot / "cache",
             "PATH=" & parentDir(witness) & ":" & getEnv("PATH"),
             "REPRO_NIM_COMPILER=" & witness,
             "REPROBUILD_STORE_ROOT=" & storeRoot,

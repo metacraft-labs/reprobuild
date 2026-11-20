@@ -80,6 +80,9 @@ proc build(reproBin, path, witness, projectRoot, actionCacheRoot,
   let res = execCmdEx(quoteShellCommand([
     "env",
     "TMPDIR=" & tmp,
+    # The shared interface nimcache (and the witness logs inside it) is under
+    # the user cache directory.
+    "XDG_CACHE_HOME=" & tmp / "cache",
     "PATH=" & path,
     "REPRO_NIM_COMPILER=" & witness,
     "REPROBUILD_STORE_ROOT=" & storeRoot,
@@ -119,8 +122,9 @@ suite "interface extraction variants keep their own outputs":
         let pathC = parentDir(witnessC) & ":" & hostPath
         let actionCacheRoot = tempRoot / "action-cache"
         let storeRoot = tempRoot / "store"
-        # A private temporary directory, so the shared interface nimcache
-        # (and the witness logs inside it) belong to this fixture alone.
+        # A private temporary directory, and a cache directory inside it
+        # (`build`), so the shared interface nimcache and the witness logs
+        # inside it belong to this fixture alone.
         createDir(tempRoot / "tmp")
         createDir(actionCacheRoot)
         let project = tempRoot / "project"

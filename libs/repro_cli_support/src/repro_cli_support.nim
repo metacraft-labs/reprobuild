@@ -12174,8 +12174,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     for name in ["TMPDIR", "TMP", "TEMP", "TEMPDIR"]:
       extractEnv.add(name & "=" & extractTmp)
   # The shared nimcache's root exists before the lookup, for the reason
-  # `providerCompileLaunchEnv` creates the provider's.
-  createDir(extendedPath(interfaceExtractionNimcacheRoot()))
+  # `providerCompileLaunchEnv` creates the provider's. Created through the
+  # pool's own admission (mode 0700, refused when it is not this user's), not
+  # `createDir`: that one follows the umask, and under a umask of 002 the
+  # root would be group-writable and every extraction would then refuse the
+  # directory this line had just made (Tool-Owned-Caches.md §"Trust
+  # Boundary"; `acquireInterfaceNimcacheSlot`).
+  ensureInterfaceNimcacheStoreDir(interfaceExtractionNimcacheRoot())
   var ignoredInputPrefixes = interfaceExtractionIgnoredInputPrefixes()
   if relocatable:
     ignoredInputPrefixes.add(parentDir(edgeArtifact) / "work")
