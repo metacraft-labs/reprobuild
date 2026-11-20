@@ -423,6 +423,59 @@ suite "the write sequence never falls behind a surviving record":
     check leftovers.len == 0
 
   when defined(posix):
+    test "a symlink planted at the temp name is not written through":
+      ## The temp name is fixed, so on a root shared by several users another
+      ## user can predict it. A `.seq.tmp` symlink must be replaced, not
+      ## followed: the file it points at keeps its content, and the publish
+      ## still advances the counter.
+      var f = openFixture("tmplink")
+      defer: closeFixture(f)
+      let weak = weakOf("write-seq.tmplink")
+      let first = f.recordVariant(weak, 0)
+      let victim = f.root / "victim.txt"
+      writeFile(victim, "keep me")
+      createSymlink(victim, f.counterPath & ".tmp")
+      let second = f.recordVariant(weak, 1)
+      let firstSeq = trailerSequence(f.recFileOf(first))
+      let secondSeq = trailerSequence(f.recFileOf(second))
+      checkpoint("victim: " & readFile(victim) & "; first " & $firstSeq &
+        "; second " & $secondSeq)
+      check readFile(victim) == "keep me"
+      check secondSeq > firstSeq
+      check not symlinkExists(f.counterPath & ".tmp")
+
+  test "a directory planted at the temp name does not refuse publishes":
+    ## A directory at the fixed temp name cannot be replaced by the counter's
+    ## temp file. Removing it is not safe either: a recursive delete walks by
+    ## name, and a co-user who swaps a subdirectory for a symlink mid-walk
+    ## redirects it into the publisher's own files. So the directory is left
+    ## exactly as planted, the counter goes through a per-writer temp name,
+    ## and that name is renamed onto the counter rather than left behind.
+    var f = openFixture("tmpdir")
+    defer: closeFixture(f)
+    let weak = weakOf("write-seq.tmpdir")
+    let first = f.recordVariant(weak, 0)
+    let planted = f.counterPath & ".tmp"
+    createDir(planted / "inner")
+    writeFile(planted / "inner" / "keep.txt", "keep me")
+    let second = f.recordVariant(weak, 1)
+    let third = f.recordVariant(weak, 2)
+    let firstSeq = trailerSequence(f.recFileOf(first))
+    let secondSeq = trailerSequence(f.recFileOf(second))
+    let thirdSeq = trailerSequence(f.recFileOf(third))
+    var leftovers: seq[string] = @[]
+    for kind, path in walkDir(f.cache.hotRecordsRoot):
+      if path.extractFilename.startsWith(".seq.tmp"):
+        leftovers.add(path.extractFilename)
+    checkpoint("first " & $firstSeq & "; second " & $secondSeq & "; third " &
+      $thirdSeq & "; temp names: " & $leftovers)
+    check secondSeq > firstSeq
+    check thirdSeq > secondSeq
+    check readFile(f.counterPath).strip == $thirdSeq
+    check readFile(planted / "inner" / "keep.txt") == "keep me"
+    check leftovers == @[".seq.tmp"]
+
+  when defined(posix):
     test "a FIFO named like a container does not stall the counter lock":
       ## The floor is read under the root-wide lock (§5.2). A `.rec` that is
       ## not a regular file would block that read while the lock is held, and

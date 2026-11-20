@@ -4713,6 +4713,7 @@ else:
   proc isRegularFile(path: string): bool =
     let info = getFileInfo(path)
     info.kind == pcFile
+
 proc highestWriteSequenceIn(dirPath: string): uint64 =
   ## The highest trailer sequence of any `.rec` container in one edge
   ## directory, 0 when it holds none. Read with the ORDERING walk, so no
@@ -4731,6 +4732,65 @@ proc highestWriteSequenceIn(dirPath: string): uint64 =
       except OSError, IOError:
         discard
 
+proc unlinkStaleSequenceTemp(tmpPath: string) =
+  ## Best-effort removal of a `.seq.tmp` that a crash left, or that another
+  ## user planted. Only a regular file or a link is unlinked; unlinking a
+  ## link never touches its target. A DIRECTORY is never removed: a
+  ## recursive delete walks by name, and a co-user who swaps a directory in
+  ## that tree for a symlink mid-walk would redirect it into this user's own
+  ## files. A failure (another user's file in a sticky directory, a
+  ## directory) is left for `writeSequenceValue`'s fallback name.
+  let info =
+    try: getFileInfo(tmpPath, followSymlink = false)
+    except OSError: return
+  # On Windows a junction or directory symlink is `pcLinkToDir`, which
+  # `removeFile` cannot delete; it is left for the fallback name too.
+  if info.kind notin {pcDir, pcLinkToDir}:
+    try: removeFile(tmpPath)
+    except OSError: discard
+
+when defined(posix):
+  var SequenceTempNoFollow {.importc: "O_NOFOLLOW",
+                             header: "<fcntl.h>".}: cint
+
+  proc writeSequenceTempExclusive(tmpPath, text: string) =
+    ## Creates `tmpPath` -- it must not exist -- and writes `text` to it.
+    ## O_EXCL|O_NOFOLLOW: whatever sits at the name, a symlink included,
+    ## makes the open fail instead of being written through.
+    let fd = posix.open(tmpPath.cstring,
+      O_WRONLY or O_CREAT or O_EXCL or SequenceTempNoFollow or O_CLOEXEC,
+      0o666.Mode)
+    if fd < 0:
+      raiseOSError(osLastError(), "cannot create " & tmpPath)
+    var written = 0
+    var complete = false
+    try:
+      while written < text.len:
+        let n = posix.write(fd, unsafeAddr text[written], text.len - written)
+        if n < 0:
+          if errno == EINTR: continue
+          raiseOSError(osLastError(), "cannot write " & tmpPath)
+        written += n
+      complete = true
+    finally:
+      discard posix.close(fd)
+      # The file is ours (O_EXCL created it), so a failed write removes it;
+      # the caller never learns its name and could not.
+      if not complete:
+        discard posix.unlink(tmpPath.cstring)
+else:
+  proc writeSequenceTempExclusive(tmpPath, text: string) =
+    ## Windows: refuse a name that is taken (a file, a directory, a link)
+    ## rather than write through it. Creating a link there needs a privilege
+    ## a co-user normally lacks, so the check-then-write window is accepted.
+    var taken = true
+    try: discard getFileInfo(tmpPath, followSymlink = false)
+    except OSError: taken = false
+    if taken:
+      raise newException(OSError, "cannot create " & tmpPath &
+        ": the name is taken")
+    writeFile(tmpPath, text)
+
 proc writeSequenceValue(path: string; value: uint64) =
   ## Replace the counter by temp file + atomic rename, so a crash leaves the
   ## old value or the new one and never a truncated file. Not fsynced: a
@@ -4741,15 +4801,35 @@ proc writeSequenceValue(path: string; value: uint64) =
   ##
   ## The caller holds the counter lock, so no two writers are ever between
   ## this write and its rename at once, and the temp name is FIXED: a crash
-  ## between the two leaves one `.seq.tmp`, which the next publish renames
-  ## over, rather than a `.seq.tmp.<pid>.<ticks>` that nothing reaps.
-  let tmpPath = path & ".tmp"
+  ## between the two leaves one `.seq.tmp`, which the next publish unlinks
+  ## and recreates, rather than a `.seq.tmp.<pid>.<ticks>` that nothing reaps.
+  ##
+  ## A fixed name in a root other users may share is predictable. The temp is
+  ## therefore created exclusively and without following a link, so a planted
+  ## symlink never makes this writer truncate the file it points at. When the
+  ## fixed name cannot be cleared (a directory, or another user's file in a
+  ## sticky directory), the value goes through a per-writer name instead, so
+  ## something planted at `.seq.tmp` cannot refuse every publish to the root.
+  ## That name is renamed onto the counter like the fixed one, so it is left
+  ## behind only by a crash between its write and its rename.
+  let fixedTmp = extendedPath(path & ".tmp")
+  var tmpPath = ""
   try:
-    writeFile(extendedPath(tmpPath), $value)
-    moveFile(extendedPath(tmpPath), extendedPath(path))
+    unlinkStaleSequenceTemp(fixedTmp)
+    try:
+      writeSequenceTempExclusive(fixedTmp, $value)
+      tmpPath = fixedTmp
+    except OSError, IOError:
+      let fallback = extendedPath(path & ".tmp." & $getCurrentProcessId() &
+        "." & $getMonoTime().ticks)
+      writeSequenceTempExclusive(fallback, $value)
+      tmpPath = fallback
+    moveFile(tmpPath, extendedPath(path))
   except OSError, IOError:
-    if fileExists(extendedPath(tmpPath)):
-      try: removeFile(extendedPath(tmpPath))
+    # Only a temp this writer created is removed; `removeFile` unlinks a
+    # link without following it.
+    if tmpPath.len > 0:
+      try: removeFile(tmpPath)
       except OSError: discard
     raise
 
