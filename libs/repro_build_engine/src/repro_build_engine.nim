@@ -6139,6 +6139,22 @@ type
       ## is scaffolding for the fold, not evidence: nothing downstream keys a
       ## cache entry on a pid, and a pid is not stable across runs.
 
+    failedExecAttempts*: HashSet[int]
+      ## The `mrProcessExec` records of this capture, by their ordinal among
+      ## the capture's exec records, whose call FAILED. io-mon writes an
+      ## exec attempt BEFORE the call, with nothing in it that says how the
+      ## call will end (a successful exec never returns to say so), and writes
+      ## the `execstatus=failed` marker only afterwards. So the attempt record
+      ## cannot be judged when the fold reaches it. `observeExecAttempt`
+      ## pairs each marker with the attempt it answers in the pass that runs
+      ## before the fold, and the fold then never binds a retracted attempt.
+      ## Not binding, rather than binding and restoring at the marker, leaves
+      ## no window in which another thread of the pid could draw under the
+      ## image of an exec that did not happen.
+    execRecordOrdinal*: int
+      ## How many `mrProcessExec` records the fold has passed in this capture:
+      ## the key into `failedExecAttempts`. Reset with it, per capture.
+
 proc monitorProfileEvidenceComplete(detail: string): bool =
   ## Does this `mrBackendProfile` record CLAIM that its capture's evidence is
   ## complete? A record that does not say so has not said so.
@@ -8601,8 +8617,16 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     # relative path names nothing this fold can trust; and a failed exec ran no
     # bytes at all, so it must not overwrite the image the pid is really
     # running.
+    #
+    # "Failed" is two records, not one. The marker carries the token; the
+    # ATTEMPT it answers was written before the call and looks exactly like a
+    # successful exec. `failedExecAttempts` names those attempts (see the
+    # field), so both halves are skipped and the pid keeps its image.
+    let execOrdinal = seen.execRecordOrdinal
+    inc seen.execRecordOrdinal
     if record.osPid != 0 and record.path.isAbsolute and
-        not record.detail.contains(FailedExecDetailToken):
+        not record.detail.contains(FailedExecDetailToken) and
+        execOrdinal notin seen.failedExecAttempts:
       seen.execImageByPid[record.osPid] = record.path
   of mrNonDeterministic:
     addEntropyObservation(evidence, record.path,
@@ -9065,6 +9089,54 @@ proc gradeCaptureScope(profileRecords: openArray[MonitorRecord];
   # requires (`monitorEvidenceRequirement`).
   mesUnknownScopeLoss
 
+type PendingExecAttempts = Table[(uint64, uint64), seq[(int, string)]]
+  ## (pid, thread) -> the ordinal and path of each exec attempt of that
+  ## thread that no failure marker has answered yet, oldest first.
+
+proc observeExecAttempt(record: MonitorRecord;
+                        pending: var PendingExecAttempts;
+                        ordinal: var int;
+                        failed: var HashSet[int]) =
+  ## Pair each `execstatus=failed` marker with the attempt it retracts, and
+  ## record that attempt's ordinal in `failed`.
+  ##
+  ## A marker answers the latest unanswered attempt OF ITS OWN THREAD FOR THE
+  ## SAME PATH: the hook writes both from the thread that made the call and
+  ## from the same argument. Keying on the thread as well as the pid keeps
+  ## one thread's failure from retracting an exec another thread of the same
+  ## process made.
+  ##
+  ## Every unanswered attempt is kept, not only the latest, because the
+  ## marker need not be the next exec record of its thread in the order this
+  ## reads. The canonical order is (process, thread, sequence), and io-mon's
+  ## per-process sequence counter restarts in each image, so two images of
+  ## one pid can interleave their records. A single slot would let an
+  ## unrelated attempt sorted between a failed attempt and its marker leave
+  ## the failed attempt standing.
+  ##
+  ## WHAT THIS TRUSTS. A marker with no attempt of its own (a lost record)
+  ## would retract an earlier unanswered exec of the same path by the same
+  ## thread, and that exec may have succeeded. io-mon writes the two records
+  ## back to back from one hook, so this takes a capture that has already
+  ## lost a record; it is no weaker than the trust the token itself is given.
+  ## A marker that answers nothing retracts nothing.
+  ##
+  ## `ordinal` counts exactly what `foldOneMonitorRecord`'s `mrProcessExec`
+  ## arm counts in `execRecordOrdinal`: every exec record, markers included.
+  if record.kind != mrProcessExec:
+    return
+  let key = (record.osPid, record.threadId)
+  if record.detail.contains(FailedExecDetailToken):
+    pending.withValue(key, attempts):
+      for index in countdown(attempts[].high, 0):
+        if attempts[][index][1] == record.path:
+          failed.incl(attempts[][index][0])
+          attempts[].delete(index)
+          break
+  else:
+    pending.mgetOrPut(key, @[]).add((ordinal, record.path))
+  inc ordinal
+
 proc observeSpawnImage(record: MonitorRecord;
                        images: var Table[uint64, string]) =
   ## Canonical captures sort by PID, not wall time. Spawn metadata must be
@@ -9140,9 +9212,15 @@ proc foldMonitorDepFileEvidence*(path, cwd: string;
   var pipes = initHashSet[string]()
   try:
     seen.execImageByPid.clear()
+    seen.failedExecAttempts.clear()
+    seen.execRecordOrdinal = 0
+    var pendingExecAttempts: PendingExecAttempts
+    var execOrdinal = 0
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       observeSpawnImage(record, seen.execImageByPid)
+      observeExecAttempt(record, pendingExecAttempts, execOrdinal,
+        seen.failedExecAttempts)
     for record in streamMonitorDepFileRecords(path,
         defaultMonitorDepFileReaderOptions()):
       if record.kind == mrBackendProfile:
@@ -9210,8 +9288,14 @@ proc foldMonitorRecordsEvidence*(records: openArray[MonitorRecord];
   var profileRecords: seq[MonitorRecord] = @[]
   var pipes = initHashSet[string]()
   seen.execImageByPid.clear()
+  seen.failedExecAttempts.clear()
+  seen.execRecordOrdinal = 0
+  var pendingExecAttempts: PendingExecAttempts
+  var execOrdinal = 0
   for record in records:
     observeSpawnImage(record, seen.execImageByPid)
+    observeExecAttempt(record, pendingExecAttempts, execOrdinal,
+      seen.failedExecAttempts)
   for record in records:
     if record.kind == mrBackendProfile:
       profileRecords.add(record)

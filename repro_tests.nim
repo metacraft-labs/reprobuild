@@ -22282,7 +22282,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g03",
+    group: "t_group_tests_integration_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_cargo_target_dir_ownership_rebuild.nim",
@@ -22954,7 +22954,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g04",
+    group: "t_group_tests_integration_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_content_id_refuses_states_with_no_honest_identifier.nim",
@@ -23698,7 +23698,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g05",
+    group: "t_group_tests_integration_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_develop_list_reports_tier_and_backend.nim",
@@ -24574,7 +24574,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g06",
+    group: "t_group_tests_integration_g05",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_force_push_of_any_declared_role_is_refused.nim",
@@ -24879,6 +24879,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim",
     binary: "build/test-bin/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g06",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_health_fix_announces_its_plan_before_acting.nim",
+    binary: "build/test-bin/t_health_fix_announces_its_plan_before_acting",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,
@@ -33408,6 +33420,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "t_group_tests_integration_g17",
     singleReason: ""),
+  TestSpec(
+    source: "tests/integration/test_cs_m12_editor_checks_repro_nim.nim",
+    binary: "build/test-bin/test_cs_m12_editor_checks_repro_nim",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let scratchRoot = getTempDir() /"),
   TestSpec(
     source: "tests/integration/test_cs_m12_engine_modes_unchanged.nim",
     binary: "build/test-bin/test_cs_m12_engine_modes_unchanged",

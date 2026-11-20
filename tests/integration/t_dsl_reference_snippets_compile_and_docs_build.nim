@@ -13,7 +13,9 @@
 ##     ``--warningAsError[UnusedImport]:on``, the way an editor opens it: the
 ##     only Reprobuild-specific input is a ``nim.cfg`` holding the ``--path``
 ##     entries of ``consumerCompilePathFlags``, the engine's own consumer
-##     compile flag set. Project files are checked a second time with
+##     compile flag set, and for a helper module (``build_helpers.nim``) the
+##     ``<helper>.nims`` the page documents; a file named like a DSL file
+##     gets the full DSL by its name. Project files are checked a second time with
 ##     ``-d:reproProviderMode``, the mode the engine compiles them in.
 ##   * a block fenced ``nim fragment`` is an excerpt and is not compiled (the
 ##     page has none today, and says so to its readers). The test prints both
@@ -58,6 +60,7 @@ import std/[os, osproc, sequtils, sets, strutils, tables, tempfiles,
 # ambient-execution wrappers say so.
 from repro_core/ambient_execution import uncontrolledExecCmdEx,
   uncontrolledFindExe
+from repro_project_dsl/mode import ReproDslMainFileNames
 import repro_interface_artifacts
 import repro_test_support
 
@@ -72,6 +75,9 @@ const
   BuiltHtml = PublicDir / "reference" / "dsl" / "index.html"
   BuiltMarkdown = PublicDir / "reference" / "dsl.md"
   ProjectFileNames = ["repro.nim", "reprobuild.nim"]
+  HelperNims = "switch(\"define\", \"reproEvalMode\")\n"
+    ## The ``<helper>.nims`` the page documents for a helper module that uses
+    ## the full DSL.
   SiblingRemedy = "the documentation site needs its framework checkouts: " &
     "run `bash scripts/build_user_docs.sh fetch` (optionally with " &
     "REPRO_DOCS_SIBLING_ROOT pointing at an empty directory) and run this " &
@@ -183,10 +189,10 @@ proc discoveryFlags(workDir: string): seq[string] =
     else: delEnv("REPROBUILD_LIBS_DIR")
 
 proc nimCfgFor(flags: seq[string]): string =
-  ## The ``--path`` entries: what an editor needs to resolve the DSL. Also
-  ## the full DSL's mode (``ReproEvalModeFlag``): without a mode define
-  ## ``import reprobuild`` is the thin mode, which checks no section body.
-  result.add(ReproEvalModeFlag & "\n")
+  ## The ``--path`` entries: what an editor needs to resolve the DSL. No mode
+  ## define: an example named like a DSL file gets the full DSL by its name
+  ## (``repro_project_dsl/mode``), and a helper module by the ``<helper>.nims``
+  ## the page tells its reader to write (``writeSnippet``).
   for flag in flags:
     if flag.startsWith("--path:"):
       result.add("--path:\"" & flag["--path:".len .. ^1] & "\"\n")
@@ -211,6 +217,8 @@ proc writeSnippet(root: string; index: int; snippet: Snippet;
   writeFile(result / "nim.cfg", nimCfg)
   writeFile(result / snippet.fileName,
     if code.len > 0: code else: snippet.code)
+  if snippet.fileName notin ReproDslMainFileNames:
+    writeFile(result / snippet.fileName.changeFileExt("nims"), HelperNims)
 
 # ---------------------------------------------------------------------------
 # The resource-constructor table.
