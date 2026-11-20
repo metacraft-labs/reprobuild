@@ -288,6 +288,21 @@ type
     scoopRequiresExecutionProfile*: bool
     scoopRoot*: string
     scoopJunctionTarget*: string
+    kind*: string
+      ## The provisioning mode this tool was resolved under, in its
+      ## ``--tool-provisioning`` spelling (``path``, ``nix``, ``tarball``,
+      ## ``scoop``, ``from-source``): the invocation's mode, or the mode a
+      ## per-tool override named. A reader of the identity file or its
+      ## inspection can then tell a ``path`` SDK from a ``tarball`` one
+      ## without knowing how the invocation was run. Codec v12. NOT
+      ## fingerprinted: the realizing arm's own fields (``installMethod``,
+      ## the archive, the prefix) are, and they are what the tool IS; this
+      ## records how it was selected.
+    overriddenBy*: string
+      ## Where the per-tool override that selected ``kind`` was written:
+      ## ``flag``, ``env``, ``config:<path>``, or empty when the tool was
+      ## resolved under the invocation's mode. Codec v12. NOT
+      ## fingerprinted, for the same reason as ``kind``.
     profileFingerprint*: ContentDigest
       ## NEVER set this in an object literal. Construct the profile, then
       ## call ``refreshProfileIdentity`` — that is the only place the
@@ -445,7 +460,11 @@ const
   # identity. A v10 or older artifact reads back with none, so a reference
   # to an exported executable resolves to nothing until the identity is
   # resolved again (the tool-identity cache key moves with the interface).
-  ArtifactVersion = 11'u16
+  # v12 — the per-tool provisioning ``kind`` and ``overriddenBy`` of every
+  # profile. A v11 or older profile
+  # reads back with both empty: it was resolved before per-tool overrides
+  # existed, so its kind is the invocation's and nothing overrode it.
+  ArtifactVersion = 12'u16
   NixMaterializationMagic = [byte(ord('R')), byte(ord('B')), byte(ord('N')), byte(ord('M'))]
   NixMaterializationVersion = 3'u16
 
@@ -10285,8 +10304,19 @@ type
     installMethod*: string
     adapterStrength*: AdapterStrength
     cachePortability*: CachePortability
+    reason*: string
+      ## Why the arm that realized it was taken, when the fallback's name
+      ## does not say it all: for ``ToolFallbackOverride``, the override and
+      ## where it was written. Empty for the other fallbacks.
 
 const
+  ToolFallbackOverride* = "per-tool-override"
+    ## Any mode: a per-tool provisioning override selected another mode for
+    ## this tool than the invocation's, and that mode's arm realized it.
+    ## Every such tool is logged by name, like the other fallbacks. Logged
+    ## only when the overridden mode differs from the invocation's: an
+    ## override that names the invocation's own mode realizes the tool by
+    ## that mode's own arm, which is no fallback.
   ToolFallbackNixArchiveOnly* = "nix-mode-archive-only"
     ## ``tpmNix``: the catalog declares no ``nixPackage`` arm, and the host
     ## archive realizes the tool (``nixModeTakesTarballArm``).
@@ -10315,6 +10345,7 @@ proc formatToolFallbackNotice*(notice: ToolFallbackNotice): string =
     (if notice.adapterStrength == asStrong: "strong" else: "weak") &
     ", cachePortability=" &
     (if notice.cachePortability == cpPortable: "portable" else: "local-only") &
+    (if notice.reason.len > 0: "; " & notice.reason else: "") &
     ")"
 
 proc toolFallbackNotices*(): seq[ToolFallbackNotice] =
@@ -10327,7 +10358,7 @@ proc clearToolFallbackNotices*() =
   toolFallbackNoticesSeen.setLen(0)
 
 proc noteToolFallback(useDef: InterfaceToolUse; mode, fallback: string;
-                      profile: PathOnlyToolProfile) =
+                      profile: PathOnlyToolProfile; reason = "") =
   ## Log ``fallback`` by name on stderr and remember it. Tool profiles are
   ## resolved more than once per build (the batch, the per-tool retry, the
   ## dev environment), so an identical notice is logged once per thread; a
@@ -10335,7 +10366,7 @@ proc noteToolFallback(useDef: InterfaceToolUse; mode, fallback: string;
   let notice = ToolFallbackNotice(packageSelector: useDef.packageSelector,
     mode: mode, fallback: fallback, installMethod: profile.installMethod,
     adapterStrength: profile.adapterStrength,
-    cachePortability: profile.cachePortability)
+    cachePortability: profile.cachePortability, reason: reason)
   if notice in toolFallbackNoticesSeen:
     return
   toolFallbackNoticesSeen.add(notice)
@@ -10352,6 +10383,149 @@ proc pathModeAbsentRefusal(useDef: InterfaceToolUse; found: string): string =
   ## and says it was not found, and the remedy follows it.
   found & ". " & pathModeRemedy(useDef)
 
+# ---------------------------------------------------------------------------
+# Per-tool provisioning overrides.
+#
+# This layer knows only the OUTCOME of override resolution: for each ``uses:``
+# entry, the mode it is realized under and where the override that chose it
+# was written. Which overrides exist, and their precedence, is the one
+# resolver's (``repro_dev_env_engine.resolveToolUseProvisioning``);
+# that module sits above this one, so it hands the outcome down as a
+# ``ToolModeSelections`` table rather than being called from here.
+# ---------------------------------------------------------------------------
+
+type
+  ToolModeSelection* = object
+    ## The mode one ``uses:`` entry is realized under, when a per-tool
+    ## override chose it. An entry with no selection is realized under the
+    ## invocation's mode, exactly as before overrides existed.
+    mode*: ToolProvisioningMode
+    overriddenBy*: string
+      ## ``flag``, ``env`` or ``config:<path>``.
+    location*: string
+      ## Where the override is written, for diagnostics: the flag as
+      ## spelled, the variable's name, or ``<file>:<line>``.
+
+  ToolModeSelections* = Table[string, ToolModeSelection]
+    ## Keyed by the ``uses:`` entry's package selector.
+
+  ToolProvisioningNoArm* = object of ValueError
+    ## A per-tool override named a mode for which the package declares no
+    ## arm on this host, so nothing can realize it. Raised before any
+    ## tool is realized, so no provisioning edge runs. The fields repeat what
+    ## the message says, for callers that report it structurally
+    ## (``repro tool realize`` exits 3 on it).
+    packageSelector*: string
+    mode*: string
+    platform*: string
+    overriddenBy*: string
+    location*: string
+    declaredModes*: seq[string]
+
+proc provisioningModeName*(mode: ToolProvisioningMode): string =
+  ## ``mode`` in its ``--tool-provisioning`` spelling; ``unspecified`` for
+  ## ``tpmUnspecified``.
+  case mode
+  of tpmPathOnly: "path"
+  of tpmNix: "nix"
+  of tpmTarball: "tarball"
+  of tpmScoop: "scoop"
+  of tpmFromSource: "from-source"
+  of tpmUnspecified: "unspecified"
+
+proc useDeclaresProvisioningArm*(useDef: InterfaceToolUse;
+                                 mode: ToolProvisioningMode): bool =
+  ## Whether ``useDef``'s package declares an arm for ``mode`` on this host:
+  ## the arm an override to ``mode`` would be realized by, with no
+  ## fall-through: an override is exact. Decided from the
+  ## declaration alone -- nothing is fetched, built or looked up on PATH --
+  ## so it can run before any action:
+  ##
+  ## * ``path``: the package names an executable PATH can answer for, or
+  ##   declares an environment-prefix arm (path mode's realization of a
+  ##   library). A library selected for its headers has no PATH arm.
+  ## * ``nix``: a ``nixPackage`` arm, on a host Nix realizes for.
+  ## * ``tarball``: an archive whose (cpu, os) applies to this host.
+  ## * ``scoop``: a Scoop arm, on Windows.
+  ## * ``from-source``: a source recipe the from-source resolver finds.
+  case mode
+  of tpmPathOnly:
+    useDef.environmentPrefixProvisioning.len > 0 or
+      (useDef.executableName.len > 0 and not selectsLibraryOutputs(useDef))
+  of tpmNix:
+    useDef.nixProvisioning.len > 0 and
+      nixServesTarget(hostRealizationTarget())
+  of tpmTarball:
+    hasHostTarballProvisioning(useDef)
+  of tpmScoop:
+    defined(windows) and useDef.scoopProvisioning.len > 0
+  of tpmFromSource:
+    # ``m9r14fResolveRecipeDir`` always answers a directory (its last
+    # resort is the conventional path, whether or not a recipe is there),
+    # so the arm exists only when that directory holds a recipe.
+    useDef.executableName.len > 0 and
+      fileExists(extendedPath(m9r14fResolveRecipeDir(useDef,
+        fromSourceRecipeRoot()) / "repro.nim"))
+  of tpmUnspecified:
+    false
+
+proc declaredProvisioningModes*(useDef: InterfaceToolUse): seq[string] =
+  ## The modes, in ``--tool-provisioning`` spelling, for which ``useDef``'s
+  ## package declares an arm on this host (``useDeclaresProvisioningArm``).
+  for mode in [tpmPathOnly, tpmNix, tpmTarball, tpmScoop, tpmFromSource]:
+    if useDeclaresProvisioningArm(useDef, mode):
+      result.add(provisioningModeName(mode))
+
+proc hostPlatformName*(): string =
+  ## This host as the ``<cpu>-<os>`` pair the arm selection matches.
+  hostCpuToken() & "-" & hostOsToken()
+
+proc noArmForOverride*(useDef: InterfaceToolUse;
+                       selection: ToolModeSelection): ref ToolProvisioningNoArm =
+  ## The refusal for an override to a mode ``useDef`` has no arm for: it
+  ## names the package, the mode, the host platform, the override's source
+  ## and the modes the package does declare an arm for here.
+  let declared = declaredProvisioningModes(useDef)
+  let modeName = provisioningModeName(selection.mode)
+  result = newException(ToolProvisioningNoArm,
+    "tool provisioning override refused: package \"" &
+      useDef.packageSelector & "\" has no " & modeName & " arm on " &
+      hostPlatformName() & ", so the override " &
+      (if selection.location.len > 0: selection.location
+       else: selection.overriddenBy) &
+      " cannot be realized (an override never falls through to another " &
+      "mode). It declares an arm here for: " &
+      (if declared.len > 0: declared.join(", ") else: "no mode") & ".")
+  result.packageSelector = useDef.packageSelector
+  result.mode = modeName
+  result.platform = hostPlatformName()
+  result.overriddenBy = selection.overriddenBy
+  result.location = selection.location
+  result.declaredModes = declared
+
+proc requireOverriddenArms*(uses: openArray[InterfaceToolUse];
+                            selections: ToolModeSelections) =
+  ## Refuse, before anything is realized, every override whose package has
+  ## no arm for the overridden mode on this host. Checked for all the
+  ## uses first so a build never realizes one tool and then refuses another.
+  for useDef in uses:
+    if useDef.packageSelector.len == 0 or
+        not selections.hasKey(useDef.packageSelector):
+      continue
+    let selection = selections[useDef.packageSelector]
+    if not useDeclaresProvisioningArm(useDef, selection.mode):
+      raise noArmForOverride(useDef, selection)
+
+proc overrideRealizationRefusal(useDef: InterfaceToolUse; mode: string;
+                                detail: string): string =
+  ## The refusal for an overridden tool its own arm could not realize where
+  ## the invocation mode would have fallen through: an override is exact, and
+  ## a failed realization of an overridden tool fails.
+  "tool-resolution failed: \"" & useDef.packageSelector & "\" is " &
+    "overridden to --tool-provisioning=" & mode & ", which realizes it only " &
+    "by its " & mode & " arm and never falls through to another mode: " &
+    detail
+
 proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                     pathValue, storeRoot: string;
                     producerExecutableSelectors:
@@ -10359,8 +10533,13 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
                         initTable[string, ProducerExecutableDirs]();
                     producerAuxSelectors: Table[string, ProducerAuxDirs] =
                       initTable[string, ProducerAuxDirs]();
-                    pathLookup: SidecarPathLookup = nil):
+                    pathLookup: SidecarPathLookup = nil;
+                    exact = false):
     PathOnlyToolProfile =
+  ## ``exact``: ``mode`` was chosen by a per-tool override, so the tool is
+  ## realized only by its package's arm for ``mode`` and every fall-through
+  ## below is refused instead of taken. Those fall-throughs still apply to
+  ## tools that are not overridden.
   if useDef.packageSelector.len > 0 and
       producerExecutableSelectors.hasKey(useDef.packageSelector):
     let producerPath =
@@ -10460,6 +10639,9 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     except OSError as absent:
       raise newException(OSError, pathModeAbsentRefusal(useDef, absent.msg))
   of tpmNix:
+    if exact and not useDeclaresProvisioningArm(useDef, tpmNix):
+      raise noArmForOverride(useDef, ToolModeSelection(mode: tpmNix,
+        overriddenBy: "override"))
     if nixModeTakesTarballArm(useDef):
       # The catalog declares no ``nixPackage`` arm for this tool (zig ships
       # static release archives and nothing else is pinned), so the archive
@@ -10475,8 +10657,9 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     except UsesVersionOutOfRange as refusal:
       # nixpkgs builds a version the recipe's range refuses. An archive the
       # catalog pins inside the range is the realization the refusal names
-      # (``nixRangeRefusalFallsBackToTarball``); with none, it stands.
-      if not nixRangeRefusalFallsBackToTarball(useDef):
+      # (``nixRangeRefusalFallsBackToTarball``); with none, it stands. An
+      # overridden tool never takes that archive: the refusal stands.
+      if exact or not nixRangeRefusalFallsBackToTarball(useDef):
         raise
       try:
         result = resolveTarballTool(useDef, storeRoot)
@@ -10488,6 +10671,11 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
           ". The in-range archive cannot run on this host: " & missing.msg)
       noteToolFallback(useDef, "nix", ToolFallbackNixRangeToArchive, result)
   of tpmTarball:
+    if exact and not hasHostTarballProvisioning(useDef):
+      # An overridden tool is never realized by its source recipe in place
+      # of the archive the override asked for.
+      raise noArmForOverride(useDef, ToolModeSelection(mode: tpmTarball,
+        overriddenBy: "override"))
     if not tarballModeFallsThroughToFromSource(useDef):
       # A host tarball is the realization and is never bypassed: its own
       # failure is the result (Dependency-Provisioning-In-Build-Graph.md 4.3).
@@ -10538,6 +10726,18 @@ proc toolProfileFor(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
     if outcome.kind == rrResolved:
       result = outcome.profile
       return
+    if exact and outcome.kind == rrSiblingMissing:
+      # Neither the stdlib fall-through nor the cycle break realizes an
+      # overridden tool from another arm.
+      raise noArmForOverride(useDef, ToolModeSelection(mode: tpmFromSource,
+        overriddenBy: "override"))
+    if exact and useDef.executableName.len > 0 and
+        useDef.executableName in fromSourceCycleBrokenTools:
+      raise newException(OSError, overrideRealizationRefusal(useDef,
+        "from-source", "it closes a from-source auto-recurse cycle, which " &
+        "an overridden tool may not break through its nix, scoop or " &
+        "tarball arm. Break the cycle in the recipes, or override another " &
+        "tool of the cycle instead."))
     if useDef.executableName.len > 0 and
         useDef.executableName in fromSourceCycleBrokenTools:
       var fallProfile: PathOnlyToolProfile
@@ -10724,8 +10924,23 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
                             initTable[string, ProducerExecutableDirs]();
                         producerAuxSelectors: Table[string, ProducerAuxDirs] =
                           initTable[string, ProducerAuxDirs]();
-                        pins: openArray[ProvisioningPin] = []):
+                        pins: openArray[ProvisioningPin] = [];
+                        selections: ToolModeSelections =
+                          initTable[string, ToolModeSelection]();
+                        storeRootFor: proc (mode: ToolProvisioningMode):
+                          string {.closure.} = nil):
     PathOnlyBuildIdentity =
+  ## ``selections``: the uses a
+  ## per-tool override selected another mode for, as the one resolver
+  ## (``repro_dev_env_engine``) computed them. Each is realized under its
+  ## selected mode, exactly (no fall-through), into the store
+  ## ``storeRootFor`` names for that mode (empty, or no ``storeRootFor``:
+  ## ``storeRoot``), and its profile records ``kind`` and ``overriddenBy``.
+  ## Every override is checked to have an arm on this host BEFORE any tool
+  ## is realized (``requireOverriddenArms``). A use with no selection is
+  ## resolved under ``mode`` as before. Empty keeps the pre-override
+  ## behaviour, byte for byte except for each profile's ``kind``.
+  ##
   ## ``pins`` (M7 deliverable 3): the provisioning selections the resolver
   ## (``repro_interface_artifacts/contribution_selection``) made from the
   ## committed lock or an explicit curator policy. They are checked against
@@ -10759,8 +10974,20 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
   result.projectName = artifact.projectInterface.projectName
   result.interfaceFingerprint = artifact.interfaceFingerprint
   let pathLookup = SidecarPathLookup()
-  for useDef in applyProvisioningPins(artifact.projectInterface, pins):
+  let uses = applyProvisioningPins(artifact.projectInterface, pins)
+  requireOverriddenArms(uses, selections)
+  for useDef in uses:
     var profile: PathOnlyToolProfile
+    let overridden = useDef.packageSelector.len > 0 and
+      selections.hasKey(useDef.packageSelector)
+    let selection =
+      if overridden: selections[useDef.packageSelector]
+      else: ToolModeSelection(mode: mode)
+    var toolStoreRoot = storeRoot
+    if overridden and not storeRootFor.isNil:
+      let chosen = storeRootFor(selection.mode)
+      if chosen.len > 0:
+        toolStoreRoot = chosen
     # A `nativeBuildDeps:` tool runs on the build host, so under `--target`
     # every sibling mirror it is resolved from -- its own and its recipe's
     # dependency closure -- is the native one, in every mode. `repro
@@ -10770,10 +10997,21 @@ proc toolBuildIdentity*(artifact: ProjectInterfaceArtifact;
       if useDef.depKind == DepKindNative: ""
       else: effectiveInstallMirrorTarget()
     withInstallMirrorTarget(mirrorTarget):
-      profile = toolProfileFor(useDef, mode, pathValue, storeRoot,
-        producerExecutableSelectors, producerAuxSelectors, pathLookup)
-      if mode == tpmFromSource:
-        resolveSourceDependencyClosure(profile, useDef, storeRoot)
+      profile = toolProfileFor(useDef, selection.mode, pathValue,
+        toolStoreRoot, producerExecutableSelectors, producerAuxSelectors,
+        pathLookup, exact = overridden)
+      if selection.mode == tpmFromSource:
+        resolveSourceDependencyClosure(profile, useDef, toolStoreRoot)
+    profile.kind = provisioningModeName(selection.mode)
+    profile.overriddenBy = selection.overriddenBy
+    if overridden and selection.mode != mode:
+      # A tool realized under an override is logged by name, with
+      # the arm that realized it and the override that chose it.
+      noteToolFallback(useDef, provisioningModeName(mode),
+        ToolFallbackOverride, profile, reason = "per-tool override " &
+          (if selection.location.len > 0: selection.location
+           else: selection.overriddenBy) & " selected --tool-provisioning=" &
+          provisioningModeName(selection.mode))
     result.profiles.add(profile)
     result.actionIdentities.add(actionIdentityFor(useDef, profile))
 
@@ -10893,6 +11131,9 @@ proc writeProfile(outp: var seq[byte]; profile: PathOnlyToolProfile) =
   outp.writeU64Le(cast[uint64](evidence.recordedAtNs))
   # v11 — the exported executables. Same trailing-extension discipline.
   outp.writeStringSeq(profile.exportedExecutables)
+  # v12 — how the tool was selected. Same trailing-extension discipline.
+  outp.writeString(profile.kind)
+  outp.writeString(profile.overriddenBy)
   outp.writeDigest(profile.profileFingerprint)
 
 proc readProfile(bytes: openArray[byte]; pos: var int;
@@ -10975,6 +11216,9 @@ proc readProfile(bytes: openArray[byte]; pos: var int;
     result.executableEvidence.recordedAtNs = cast[int64](readU64Le(bytes, pos))
   if version >= 11'u16:
     result.exportedExecutables = readStringSeq(bytes, pos)
+  if version >= 12'u16:
+    result.kind = readString(bytes, pos)
+    result.overriddenBy = readString(bytes, pos)
   # A v < 10 artifact leaves the evidence unrecorded, so its first cache hit
   # re-hashes the executable rather than trusting the digest.
   # A v < 8 artifact leaves the digest empty. Its stored
@@ -11179,6 +11423,8 @@ proc jsonProfile(profile: PathOnlyToolProfile): JsonNode =
   %*{
     "installMethod": profile.installMethod,
     "packageSelector": profile.packageSelector,
+    "kind": profile.kind,
+    "overriddenBy": profile.overriddenBy,
     "packageId": profile.packageId,
     "nixSelector": profile.nixSelector,
     "tarballUrl": profile.tarballUrl,

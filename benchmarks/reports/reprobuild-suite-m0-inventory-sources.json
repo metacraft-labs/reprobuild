@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 3025,
+    "nimTestBinaries": 3028,
     "pureUnitConsolidationGroups": 88,
     "pureUnitTests": 808,
     "staticallyDetectedRuntimeCompilerFlowTests": 152,
-    "testEntries": 3075
+    "testEntries": 3078
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1724,7 +1724,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1673,
+      "integration": 1676,
       "platform/destructive": 198,
       "pure unit": 808,
       "unclassified": 370
@@ -1941,9 +1941,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3025,
+    "nimTestBinaryCount": 3028,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3075
+    "testEntryCount": 3078
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -56506,6 +56506,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tool_realize_cli",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_tool_realize_cli.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_top_level_sync_pull_shortcuts_match_workspace_forms",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -63463,6 +63481,46 @@
       "source": "tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tool_provisioning_override_no_fallthrough",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": true,
+      "source": "tests/unit/t_tool_provisioning_override_no_fallthrough.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tool_provisioning_override_precedence",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dev_env_engine",
+        "repro_interface_artifacts",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": true,
+      "source": "tests/unit/t_tool_provisioning_override_precedence.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
