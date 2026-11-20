@@ -170,6 +170,14 @@ type
       ## Told at the commit's crash-relevant points (``commit-envelope``:
       ## the envelope is durable, `current` not moved yet; and inside the
       ## move). A test seam for the add-on's crash gate; nil otherwise.
+    stageEnvelope*: bool
+      ## Write the generation envelope the commit would write to
+      ## ``stagedEnvelopePath`` BEFORE the after-hook runs, durably. The
+      ## add-on's network guard commits a generation only once the guard
+      ## is disarmed, inside that hook (ReproOS-Add-On-Mode §4.5, §7.2
+      ## step 9); a crash between the disarm and the commit leaves a
+      ## `disarmed` marker that recovery commits WITHOUT replaying the
+      ## switch (§13 decision 117), from this staged envelope.
     commitOnlyWhenClean*: bool
       ## Move `current` and write the generation envelope only when the
       ## privileged set and the after-hook reported no error and no
@@ -1036,6 +1044,20 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # add-on switch's fragment tools, service starts, confirmation and
   # ledger). Its diagnostics are errors of this apply.
   var clean = result.errorCount == 0 and result.driftCount == 0
+  let envelope = GenerationEnvelope(
+      schemaVersion: GenSchemaVersion,
+      generationId: generationId,
+      activationTimestamp: commitTs,
+      hostIdentity: opts.hostIdentity,
+      planId: env.planId,
+      profileDigestHex: env.profileDigestHex,
+      profileText: profileText,
+      appliedCount: result.appliedCount,
+      noOpCount: result.noOpCount,
+      previousGenerationId: previousGenerationId)
+  if opts.phases.stageEnvelope:
+    writeGenerationEnvelope(stagedEnvelopePath(opts.stateDir, generationId),
+                            envelope)
   if opts.phases.afterPrivilegedSet != nil:
     let problems = opts.phases.afterPrivilegedSet(generationId, clean)
     for p in problems:
@@ -1058,18 +1080,7 @@ proc runInfraApply*(profileText: string; opts: ApplyOptions): ApplyResult =
   # generation and `repro system rollback` can re-apply a prior
   # generation's profile (the system state dir has no CAS, so the
   # small profile text is embedded directly).
-  writeGenerationEnvelope(pointerPath(opts.stateDir, generationId),
-    GenerationEnvelope(
-      schemaVersion: GenSchemaVersion,
-      generationId: generationId,
-      activationTimestamp: commitTs,
-      hostIdentity: opts.hostIdentity,
-      planId: env.planId,
-      profileDigestHex: env.profileDigestHex,
-      profileText: profileText,
-      appliedCount: result.appliedCount,
-      noOpCount: result.noOpCount,
-      previousGenerationId: previousGenerationId))
+  writeGenerationEnvelope(pointerPath(opts.stateDir, generationId), envelope)
   # The generation pointer / `current` marker is updated by the
   # NON-elevated parent (this proc), never the broker.
   if opts.phases.commitPoint != nil:

@@ -76,6 +76,11 @@ type
     coupled*: seq[CoupledUnit]
 
 const
+  NetworkBaseTools* = ["/usr/bin/arping", "/usr/sbin/arping", "/usr/bin/nmcli",
+                       "/usr/bin/ip", "/usr/sbin/ip"]
+    ## The base programs the `network` class runs (``network_link``); their
+    ## owners join the base identity when a generation has a network
+    ## object.
   BaseIdentityHeader* = "# repro-addon-base v1"
   BaseIdentityFileName* = "addon-base"
     ## Under ``generations/<id>/``, beside the generation's ledger.
@@ -545,6 +550,18 @@ proc observeBaseIdentity*(ledger: Ledger;
   for e in ledger.entries:
     let p = packageOfObservation(e.observation)
     if p.len > 0: names.incl(p)
+  # The `network` class's base-coupled programs (spec §4.5; §13 decision
+  # 88, threat model C54): the duplicate-address probe's `arping`
+  # (iputils), NetworkManager's `nmcli` and iproute2's `ip`, whichever
+  # paths the base has.
+  var networked = false
+  for r in resources:
+    if r.kind == srkLinuxNetworkLink: networked = true
+  for e in ledger.entries:
+    if e.class == lcNetwork: networked = true
+  if networked:
+    for tool in NetworkBaseTools:
+      for p in toolOwners(tool, driver): names.incl(p)
   var units = vendorUnitsOf(ledger)
   for r in resources:
     if r.kind == srkSystemdSystemUnit and r.suCollision in ["replace", "dropIn"]:

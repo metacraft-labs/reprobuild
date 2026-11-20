@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2796,
+    "nimTestBinaries": 2802,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2840
+    "testEntries": 2846
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,10 +1616,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1540,
+      "integration": 1545,
       "platform/destructive": 182,
       "pure unit": 761,
-      "unclassified": 335
+      "unclassified": 336
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2796,
+    "nimTestBinaryCount": 2802,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2840
+    "testEntryCount": 2846
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9509,6 +9509,26 @@
       "source": "libs/repro_addon/tests/t_addon_legacy_apt_closure_adoption.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_network_class",
+      "class": "unclassified",
+      "classificationReason": "imports `guard_lock`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon",
+        "repro_infra",
+        "repro_profile",
+        "repro_profile_intent"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_network_class.nim",
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 36,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31483,6 +31503,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_e2e_addon_network_class_refusals",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_addon_network_class_refusals.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_e2e_addon_no_plaintext_secret_on_disk",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -32270,6 +32307,74 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/addon/t_e2e_omarchy_addon_base_layer_refusal.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_omarchy_addon_network_guard_disarm_conditions",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_omarchy_addon_network_guard_disarm_conditions.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_omarchy_addon_network_guard_reverts_lost_address",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_omarchy_addon_network_guard_reverts_lost_address.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_omarchy_addon_network_link_adds_only",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_omarchy_addon_network_link_adds_only.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_omarchy_addon_network_refuses_lan_duplicate",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_e2e_omarchy_addon_network_refuses_lan_duplicate.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,

@@ -364,6 +364,10 @@ type
       ## relayed by ``socat`` to this loopback port on the host (the
       ## time-shifted snapshot mirror).
     when defined(gostiAvailable):
+      extraNics*: seq[ExtraNic]
+        ## NICs after the user-mode one, each on a datagram link to one
+        ## other guest of the gate (gosti ``BootMediaSpec.extraNics``):
+        ## the network class's test LAN (``lanPair``). QEMU only.
       qemu*: QemuBootBackend
       incus*: IncusBackend
       vm*: VmHandle
@@ -561,7 +565,8 @@ when defined(gostiAvailable):
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskReadonly: readonly, diskInPlace: true,
-      dataDiskPaths: g.dataDisks, noDisplayDevice: g.noDisplay)
+      dataDiskPaths: g.dataDisks, noDisplayDevice: g.noDisplay,
+      extraNics: g.extraNics)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & (if readonly: " (disk read-only)" else: "") &
            (if g.relayPort > 0: " (network restricted to the mirror)" else: ""))
@@ -605,11 +610,48 @@ proc bootNoWait*(g: Guest) =
       generation: (if g.base.debArch == "amd64" and not g.uefi: 1 else: 2),
       acceleration: baAuto, sshForwardPort: freePort(),
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
-      diskInPlace: true, noDisplayDevice: g.noDisplay)
+      diskInPlace: true, noDisplayDevice: g.noDisplay,
+      extraNics: g.extraNics)
     g.restrictNetwork(spec)
     g.note("booting " & g.base.name & " (serial only)")
     g.vm = g.qemu.bootFromMedia(spec)
     g.booted = true
+
+proc lanPair*(a, b: Guest; id = "lan0") =
+  ## Wire ``a`` and ``b`` to each other with one more NIC each, named
+  ## ``id`` in QEMU: a point-to-point Ethernet link of two unix datagram
+  ## sockets, one in each guest's run directory (gosti ``ExtraNic``). Each
+  ## guest's MAC is drawn once here and kept across its boots. Call before
+  ## either boots.
+  when defined(gostiAvailable):
+    if a.kind != gkQemu or b.kind != gkQemu:
+      raise newException(TestBedError, "a LAN between guests is QEMU only")
+    proc mac(): string =
+      result = "52:54:00"
+      for i in 0 ..< 3: result.add(":" & randomHex(2))
+    let sa = a.runDir / (id & ".sock")
+    let sb = b.runDir / (id & ".sock")
+    a.extraNics.add(ExtraNic(id: id, mac: mac(), localSocket: sa,
+                             remoteSocket: sb))
+    b.extraNics.add(ExtraNic(id: id, mac: mac(), localSocket: sb,
+                             remoteSocket: sa))
+
+proc lanMac*(g: Guest; id = "lan0"): string =
+  ## The MAC of ``g``'s NIC ``id`` (``lanPair``); "" when it has none.
+  when defined(gostiAvailable):
+    for n in g.extraNics:
+      if n.id == id: return n.mac
+
+proc setLink*(g: Guest; id: string; up: bool) =
+  ## Pull (``up = false``) or plug back the cable of ``g``'s NIC ``id``
+  ## from outside the guest: QMP ``set_link`` (gosti ``setLink``), a
+  ## channel that does not go through the guest's network.
+  when defined(gostiAvailable):
+    let r = g.qemu.setLink(g.vm, id, up)
+    if not r.ok:
+      raise newException(TestBedError, "set_link " & id & " " & $up &
+        " failed: " & r.detail)
+    g.note("set_link " & id & (if up: " up" else: " down"))
 
 proc waitSerial*(g: Guest; needle: string; timeoutSec: int): string =
   ## Poll the serial log until it contains ``needle`` (or the guest's QEMU

@@ -160,6 +160,26 @@ e2e_omarchy_addon_root_snapshot_rollback:
 e2e_arch_addon_root_snapshot_setting:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-ext4-amd64,omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_root_snapshot_setting
 
+# The network class and its guard (milestone AR5): the Omarchy VM and a
+# plain Arch helper on a test LAN (tests/e2e/addon/network_gate_support.nim).
+# The refusal gate also runs on a systemd-networkd Arch guest; the guard's
+# state-machine gate needs the seam build (its MS-2 run hands the switch a
+# connection the planner refuses, below the planner).
+e2e_omarchy_addon_network_link_adds_only:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_network_link_adds_only
+
+e2e_addon_network_class_refusals:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_addon_network_class_refusals
+
+e2e_omarchy_addon_network_refuses_lan_duplicate:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_network_refuses_lan_duplicate
+
+e2e_omarchy_addon_network_guard_reverts_lost_address:
+    REPRO_ADDON_TEST_SEAMS=1 REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_network_guard_reverts_lost_address
+
+e2e_omarchy_addon_network_guard_disarm_conditions:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_network_guard_disarm_conditions
+
 e2e_addon_bootstrap_changes_nothing_preexisting:
     bash ./scripts/run_addon_gate.sh t_e2e_addon_bootstrap_changes_nothing_preexisting
 

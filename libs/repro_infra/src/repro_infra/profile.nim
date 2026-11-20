@@ -26,7 +26,7 @@
 ## `macos.systemDefault` are deferred — the parser rejects them with a
 ## clear "deferred to a later phase" diagnostic.
 
-import std/[sets, strutils, tables]
+import std/[net, sets, strutils, tables]
 
 import repro_elevation
 import repro_dsl_stdlib/packages/apt_closure
@@ -84,6 +84,7 @@ type
     srkLinuxAddOnTool = "linux.addOnTool"
     srkSystemdSystemDropIn = "systemd.systemDropIn"
     srkLinuxSysusersEntry = "linux.sysusersEntry"
+    srkLinuxNetworkLink = "linux.networkLink"
 
   StateDisposition* = enum
     ## What a conversion to ReproOS does with a declared state directory
@@ -415,6 +416,30 @@ type
       seDescription*: string              ## GECOS, users only
       seHome*: string                     ## "" => systemd's default (/)
       seShell*: string                    ## "" => systemd's default (nologin)
+    of srkLinuxNetworkLink:
+      ## An ADDITIONAL link the distribution does not manage
+      ## (ReproOS-Add-On-Mode §4.5, the `network` class): an `ipvlan`
+      ## (L2) or `macvlan` child of a parent interface matched by its
+      ## MAC, or a `dummy` link, with static addresses and optionally
+      ## per-link DNS servers for routing-only domains. Realised by the
+      ## add-on switch itself, under the network guard, as one
+      ## NetworkManager keyfile `repro-<nlName>.nmconnection`; it never
+      ## reaches the infra drivers (`toPrivilegedOperation` refuses it).
+      nlName*: string                     ## the link's interface name
+      nlKind*: string                     ## ipvlan | macvlan | dummy
+      nlParentMac*: string                ## the parent's MAC, lowercase;
+                                          ## "" for a dummy link
+      nlAddresses*: seq[string]           ## static addresses, CIDR form
+      nlDnsServers*: seq[string]          ## per-link DNS servers
+      nlDnsDomains*: seq[string]          ## the domains they serve,
+                                          ## `~<domain>` (routing-only)
+      nlUndeclarable*: seq[tuple[field, value: string]]
+        ## Items §4.5 says a link may NOT declare (a gateway, DHCP, a
+        ## parent setting, a global DNS server or search domain, a
+        ## dependency on a foreign connection), kept as written so the
+        ## add-on's plan refuses each by name with `EAddOnOutOfScope`
+        ## rather than the parser dropping it silently. Never rendered:
+        ## a profile carrying one is never applied, so never stored.
 
   AddOnSettings* = object
     ## The profile-wide `addOn { ... }` stanza of ReproOS add-on mode
@@ -448,6 +473,27 @@ type
     rootSnapshotDeclared*: bool
       ## True when the stanza names `rootSnapshot` (a second one is
       ## refused, and the rendered stanza carries it only then).
+    networkGuard*: NetworkGuardSettings
+      ## The nested `networkGuard { ... }` stanza (§4.5, §8.5): required,
+      ## with at least one `keep` entry or `outOfBand` link, when the
+      ## profile declares a `linux.networkLink`.
+
+  NetworkGuardKeep* = object
+    ## One `keep` entry: an interface that must still hold an address in
+    ## `prefix` for the guard to disarm (§4.5 step 3, §8.5).
+    iface*: string
+    prefix*: string            ## CIDR, IPv4 or IPv6, as written
+
+  NetworkGuardSettings* = object
+    ## `addOn { networkGuard { timeout = ...  keep = [...]  outOfBand =
+    ## [...] } }` (ReproOS-Add-On-Mode §8.5; §13 decisions 96, 97, 101).
+    declared*: bool
+    timeoutSec*: int
+      ## The guard timer's `--on-active`, 30 to 3600 seconds; 0 when not
+      ## declared, so the default (`DefaultNetworkGuardTimeoutSec`)
+      ## applies and the rendered stanza omits it.
+    keep*: seq[NetworkGuardKeep]
+    outOfBand*: seq[string]    ## link names
 
   RootSnapshotSetting* = enum
     ## The values of `addOn { rootSnapshot = ... }` (§7.2, §8.5).
@@ -555,6 +601,8 @@ proc realWorldIdentity*(r: SystemResource): string =
     "systemDropIn:" & r.diUnit & "/" & r.diName
   of srkLinuxSysusersEntry:
     "sysusersEntry:" & r.seName
+  of srkLinuxNetworkLink:
+    "networkLink:" & r.nlName
 
 proc resourceKindTag*(r: SystemResource): string =
   ## The string form of the resource's kind — the LEFT half of the
@@ -608,6 +656,7 @@ proc resourceName*(r: SystemResource): string =
   of srkLinuxAddOnTool: r.atCommand
   of srkSystemdSystemDropIn: r.diUnit & "/" & r.diName
   of srkLinuxSysusersEntry: r.seName
+  of srkLinuxNetworkLink: r.nlName
 
 # ---------------------------------------------------------------------------
 # The declarative-format parser. Pure — no filesystem access.
@@ -1624,11 +1673,20 @@ const
     ## add-on's to decide (ReproOS-Add-On-Mode §4.3, §4.3.1, §4.3.2):
     ## `divert` and `takeOver` are each refused by name on the other base,
     ## and `overrideBaseLayer` on Debian.
+  NetworkClassDirectories* = ["/etc/NetworkManager/system-connections/",
+                              "/etc/systemd/network/"]
+    ## The `network` class's directories (ReproOS-Add-On-Mode §4.5 *The
+    ## class's directories*, §13 decision 120): NetworkManager's
+    ## connections and systemd-networkd's configuration. On every base a
+    ## connection is written only by a `linux.networkLink`, under the
+    ## network guard, never by an `fs.systemFile` (threat model G52).
   AddOnClassDirectories* = ["/etc/systemd/system/", "/etc/sysusers.d/",
-                            "/etc/tmpfiles.d/", "/etc/sysctl.d/"]
+                            "/etc/tmpfiles.d/", "/etc/sysctl.d/",
+                            NetworkClassDirectories[0],
+                            NetworkClassDirectories[1]]
     ## Directories reached through their own add-on classes (units,
-    ## sysusers, tmpfiles, sysctl). They are never managed prefixes, and
-    ## an `fs.systemFile` below them is out of scope.
+    ## sysusers, tmpfiles, sysctl, network). They are never managed
+    ## prefixes, and an `fs.systemFile` below them is out of scope.
   UnitSearchDirectories* = ["/etc/systemd/system.control/",
                             "/etc/systemd/system.attached/",
                             "/etc/systemd/user/", "/etc/systemd/user.control/",
@@ -1907,6 +1965,93 @@ proc checkStateDirectories*(p: SystemProfile) =
             ") are nested; declare one of them")
       seen.add((d.path, d.disposition, r.suName))
 
+const
+  NetworkLinkKinds* = ["ipvlan", "macvlan", "dummy"]
+    ## The link kinds a `linux.networkLink` may declare (§4.5).
+  NetworkLinkFields* = ["name", "kind", "parentMac", "addresses",
+                        "dnsServers", "dnsDomains", "address", "depends_on"]
+    ## The fields a `linux.networkLink` stanza may carry.
+  NetworkLinkUndeclarableFields* = ["gateway", "defaultRoute", "dhcp",
+    "mtu", "parent", "parentMtu", "parentAddresses", "parentDhcp",
+    "parentConnection", "globalDnsServers", "searchDomains",
+    "dependsOnConnection"]
+    ## Fields a link may NOT declare (§4.5 *What it may not declare*):
+    ## parsed so the add-on's plan refuses each with `EAddOnOutOfScope`
+    ## naming it, instead of the parser rejecting an unknown field.
+  DefaultNetworkGuardTimeoutSec* = 300
+    ## `networkGuard.timeout` when not declared (§8.5; §13 decision 101).
+  MinNetworkGuardTimeoutSec* = 30
+  MaxNetworkGuardTimeoutSec* = 3600
+
+proc interfaceNameError*(what, name: string): string =
+  ## Why `name` is not a valid Linux interface name, or "": 1 to 15 bytes
+  ## (`IFNAMSIZ` - 1), no `/`, whitespace, `:` or control character, not
+  ## `.` or `..` (`dev_valid_name` in the kernel's net/core/dev.c).
+  if name.len == 0 or name.len > 15:
+    return what & " '" & name & "' must be 1 to 15 characters (IFNAMSIZ)"
+  if name in [".", ".."]:
+    return what & " '" & name & "' is not a valid interface name"
+  for c in name:
+    if c in {'/', ':', ' ', '\t', '\n', '\r', '"', '\\'} or ord(c) < 33 or
+        ord(c) > 126:
+      return what & " '" & name & "' contains a character an interface " &
+        "name may not hold"
+  ""
+
+proc cidrError*(what, value: string; requireHost = false): string =
+  ## Why `value` is not an IPv4 or IPv6 address in CIDR form
+  ## (`<address>/<prefix length>`), or "".
+  let slash = value.find('/')
+  if slash <= 0 or slash == value.len - 1:
+    return what & " '" & value & "' is not in CIDR form (<address>/<length>)"
+  var ip: IpAddress
+  try:
+    ip = parseIpAddress(value[0 ..< slash])
+  except ValueError:
+    return what & " '" & value & "' does not start with an IP address"
+  var n = -1
+  try: n = parseInt(value[slash + 1 .. ^1])
+  except ValueError: discard
+  let maxLen = if ip.family == IpAddressFamily.IPv4: 32 else: 128
+  if n < 0 or n > maxLen or value[slash + 1 .. ^1] != $n:
+    return what & " '" & value & "' has no valid prefix length (0 to " &
+      $maxLen & ")"
+  if $ip != value[0 ..< slash]:
+    return what & " '" & value & "' is not written canonically (" & $ip &
+      "/" & $n & ")"
+  if requireHost and n == 0:
+    return what & " '" & value & "' has a zero prefix length"
+  ""
+
+proc macAddressError*(what, mac: string): string =
+  ## Why `mac` is not an Ethernet MAC written as six lowercase hex pairs
+  ## separated by `:`, or "".
+  let parts = mac.split(':')
+  if parts.len != 6:
+    return what & " '" & mac & "' is not a MAC address (xx:xx:xx:xx:xx:xx)"
+  for p in parts:
+    if p.len != 2: return what & " '" & mac & "' is not a MAC address"
+    for c in p:
+      if c notin {'0'..'9', 'a'..'f'}:
+        return what & " '" & mac & "' must be lowercase hexadecimal"
+  ""
+
+proc dnsDomainError*(what, domain: string): string =
+  ## Why `domain` is not a domain name as systemd-resolved takes a search
+  ## or routing domain (optional leading `~`, LDH labels separated by
+  ## `.`), or "".
+  let d = if domain.startsWith("~"): domain[1 .. ^1] else: domain
+  if d.len == 0 or d.len > 253:
+    return what & " '" & domain & "' is not a domain name"
+  for label in d.split('.'):
+    if label.len == 0 or label.len > 63 or label[0] == '-' or
+        label[^1] == '-':
+      return what & " '" & domain & "' is not a domain name"
+    for c in label:
+      if c notin {'a'..'z', 'A'..'Z', '0'..'9', '-', '_'}:
+        return what & " '" & domain & "' is not a domain name"
+  ""
+
 proc managedPrefixError*(prefix: string): string =
   ## Why `prefix` cannot be a managed `/etc` prefix, or "" when it can.
   ## A prefix is written as the add-on reads it: `/etc/name/` for a
@@ -1980,9 +2125,107 @@ proc parseRootSnapshotSetting*(rawValue: string): RootSnapshotSetting =
   for s in RootSnapshotSetting:
     if $s == name: return s
 
-proc parseAddOnStanza*(body: string): AddOnSettings =
-  ## The `addOn { managedEtcPrefixes = [...] }` stanza.
+proc parseNetworkGuardStanza*(body: string): NetworkGuardSettings =
+  ## The nested `networkGuard { timeout = 300  keep = ["eno1
+  ## 192.168.100.0/24"]  outOfBand = ["wt0"] }` (§8.5): what can be
+  ## checked without the rest of the profile or the host. A `keep` string
+  ## is `<interface> <prefix>` with exactly one space.
   result.declared = true
+  var seen: seq[string]
+  for assignment in splitFieldAssignments(body):
+    let eq = assignment.find('=')
+    if eq < 0:
+      raiseSystemProfileInvalid("expected 'key = value' in 'networkGuard', " &
+        "got: '" & assignment & "'")
+    let key = assignment[0 ..< eq].strip()
+    let rawValue = assignment[eq + 1 .. ^1].strip()
+    if key in seen:
+      raiseSystemProfileInvalid("'networkGuard' declares " & key & " twice")
+    seen.add(key)
+    case key
+    of "timeout":
+      var secs = 0
+      try:
+        secs = parseInt(rawValue.strip(chars = {'"', ' '}))
+      except ValueError:
+        raiseSystemProfileInvalid("'networkGuard' timeout '" & rawValue &
+          "' is not a whole number of seconds")
+      if secs notin MinNetworkGuardTimeoutSec .. MaxNetworkGuardTimeoutSec:
+        raiseSystemProfileInvalid("'networkGuard' timeout " & $secs &
+          " must be between " & $MinNetworkGuardTimeoutSec & " and " &
+          $MaxNetworkGuardTimeoutSec & " seconds")
+      result.timeoutSec = secs
+    of "keep":
+      for k in parseListLiteral(rawValue):
+        let parts = k.split(' ')
+        if parts.len != 2:
+          raiseSystemProfileInvalid("'networkGuard' keep entry '" & k &
+            "' is not '<interface> <prefix>' with one space")
+        var err = interfaceNameError("'networkGuard' keep interface",
+                                     parts[0])
+        if err.len == 0:
+          err = cidrError("'networkGuard' keep prefix", parts[1])
+        if err.len > 0: raiseSystemProfileInvalid(err)
+        result.keep.add(NetworkGuardKeep(iface: parts[0], prefix: parts[1]))
+    of "outOfBand":
+      for l in parseListLiteral(rawValue):
+        let err = interfaceNameError("'networkGuard' outOfBand link", l)
+        if err.len > 0: raiseSystemProfileInvalid(err)
+        if l notin result.outOfBand: result.outOfBand.add(l)
+    else:
+      raiseSystemProfileInvalid("'networkGuard' has no field '" & key &
+        "' (known: timeout, keep, outOfBand)")
+
+proc splitNestedNetworkGuard(body: string):
+    tuple[rest: string; guard: string; found: bool] =
+  ## Cut the one nested `networkGuard { ... }` block out of an `addOn`
+  ## body (outside quotes), returning the body without it and the block's
+  ## own body. A second one, or a nested block of any other name, is
+  ## refused.
+  result.rest = body
+  var i = 0
+  var inQuote = false
+  while i < result.rest.len:
+    let c = result.rest[i]
+    if c == '"': inQuote = not inQuote
+    elif not inQuote and c == '{':
+      # The head is the identifier just before the brace.
+      var h = i - 1
+      while h >= 0 and result.rest[h] in {' ', '\t', '\r', '\n'}: dec h
+      var start = h
+      while start >= 0 and result.rest[start] in IdentChars: dec start
+      let head = result.rest[start + 1 .. h]
+      if head != "networkGuard":
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag & "' may nest only " &
+          "a 'networkGuard' block, got '" & head & "'")
+      if result.found:
+        raiseSystemProfileInvalid("'" & AddOnStanzaTag & "' declares " &
+          "networkGuard twice")
+      var j = i + 1
+      var q = false
+      while j < result.rest.len:
+        if result.rest[j] == '"': q = not q
+        elif not q and result.rest[j] == '{':
+          raiseSystemProfileInvalid("'networkGuard' may not nest a block")
+        elif not q and result.rest[j] == '}': break
+        inc j
+      if j >= result.rest.len:
+        raiseSystemProfileInvalid("'networkGuard' block is not closed")
+      result.guard = result.rest[i + 1 ..< j]
+      result.found = true
+      result.rest = result.rest[0 .. start] & result.rest[j + 1 .. ^1]
+      i = start + 1
+      continue
+    inc i
+
+proc parseAddOnStanza*(body: string): AddOnSettings =
+  ## The `addOn { managedEtcPrefixes = [...] }` stanza, with its optional
+  ## nested `networkGuard { ... }` (§8.5).
+  result.declared = true
+  let nested = splitNestedNetworkGuard(body)
+  if nested.found:
+    result.networkGuard = parseNetworkGuardStanza(nested.guard)
+  let body = nested.rest
   for assignment in splitFieldAssignments(body):
     let eq = assignment.find('=')
     if eq < 0:
@@ -2034,7 +2277,7 @@ proc parseAddOnStanza*(body: string): AddOnSettings =
     else:
       raiseSystemProfileInvalid("'" & AddOnStanzaTag &
         "' has no field '" & key & "' (known: managedEtcPrefixes, " &
-        "confirmTimeout, omarchyAccount, rootSnapshot)")
+        "confirmTimeout, omarchyAccount, rootSnapshot, networkGuard)")
 
 proc isUnderManagedPrefix*(path, prefix: string): bool =
   ## Does `prefix` (as declared, see `managedPrefixError`) cover `path`?
@@ -2069,13 +2312,22 @@ proc stanzaBounds(clean: string):
     var closeIdx = -1
     var i = braceIdx + 1
     var inQuote = false
+    # Only the `addOn` stanza nests a block (its `networkGuard`, §8.5):
+    # every other stanza ends at its first unquoted `}`, as it always has.
+    let nests = clean[pos ..< braceIdx].strip() == AddOnStanzaTag
+    var depth = 0
     while i < clean.len:
       let c = clean[i]
       if c == '"':
         inQuote = not inQuote
+      elif not inQuote and nests and c == '{':
+        inc depth
       elif not inQuote and c == '}':
-        closeIdx = i
-        break
+        if depth > 0:
+          dec depth
+        else:
+          closeIdx = i
+          break
       inc i
     if closeIdx < 0:
       raiseSystemProfileInvalid("resource '" &
@@ -2115,6 +2367,113 @@ proc systemProfileStanzaLineSpans*(text: string;
     let s = lineOf(span.head)
     let e = lineOf(span.close)
     result.add((startLine: s, endLine: e))
+
+proc parseNetworkLinkFields*(fields, rawFields: Table[string, string]):
+    SystemResource =
+  ## A `linux.networkLink` stanza's typed resource (§4.5). Strict: a
+  ## field outside `NetworkLinkFields` and `NetworkLinkUndeclarableFields`
+  ## is refused here. What the class may not declare is kept, for the
+  ## add-on's plan to refuse by name (`nlUndeclarable`); so is a DNS
+  ## domain that is not routing-only and a DNS server with no routing
+  ## domain, which are a global search domain and a global server.
+  for k in fields.keys:
+    if k notin NetworkLinkFields and k notin NetworkLinkUndeclarableFields:
+      raiseSystemProfileInvalid("linux.networkLink has no field '" & k &
+        "' (known: " & NetworkLinkFields[0 .. 5].join(", ") & ")")
+  if "name" notin fields:
+    raiseSystemProfileInvalid("linux.networkLink is missing required " &
+      "field 'name'")
+  let name = fields["name"]
+  var err = interfaceNameError("linux.networkLink name", name)
+  if err.len > 0: raiseSystemProfileInvalid(err)
+  let kind = if "kind" in fields: fields["kind"] else: ""
+  if kind notin NetworkLinkKinds:
+    raiseSystemProfileInvalid("linux.networkLink '" & name & "' kind '" &
+      kind & "' is not one of " & NetworkLinkKinds.join(", "))
+  result = SystemResource(kind: srkLinuxNetworkLink, nlName: name,
+                          nlKind: kind)
+  let mac = if "parentMac" in fields: fields["parentMac"] else: ""
+  if kind == "dummy":
+    if mac.len > 0:
+      raiseSystemProfileInvalid("linux.networkLink '" & name & "': a " &
+        "dummy link has no parent, so no parentMac")
+  else:
+    if mac.len == 0:
+      raiseSystemProfileInvalid("linux.networkLink '" & name & "': an " &
+        kind & " link names its parent by parentMac")
+    err = macAddressError("linux.networkLink parentMac", mac)
+    if err.len > 0: raiseSystemProfileInvalid(err)
+    result.nlParentMac = mac
+  if "addresses" in rawFields:
+    for a in parseListLiteral(rawFields["addresses"]):
+      err = cidrError("linux.networkLink '" & name & "' address", a,
+                      requireHost = true)
+      if err.len > 0: raiseSystemProfileInvalid(err)
+      if a in result.nlAddresses:
+        raiseSystemProfileInvalid("linux.networkLink '" & name &
+          "' lists address " & a & " twice")
+      result.nlAddresses.add(a)
+  if result.nlAddresses.len == 0:
+    raiseSystemProfileInvalid("linux.networkLink '" & name & "' declares " &
+      "no address; the class exists to add one (§4.5)")
+  if "dnsServers" in rawFields:
+    for d in parseListLiteral(rawFields["dnsServers"]):
+      try: discard parseIpAddress(d)
+      except ValueError:
+        raiseSystemProfileInvalid("linux.networkLink '" & name &
+          "' dnsServers entry '" & d & "' is not an IP address")
+      result.nlDnsServers.add(d)
+  if "dnsDomains" in rawFields:
+    for d in parseListLiteral(rawFields["dnsDomains"]):
+      err = dnsDomainError("linux.networkLink '" & name & "' dnsDomains entry", d)
+      if err.len > 0: raiseSystemProfileInvalid(err)
+      if d.startsWith("~"):
+        result.nlDnsDomains.add(d)
+      else:
+        # A domain without `~` is a search domain for every name on the
+        # host: global, so not declarable (§4.5).
+        result.nlUndeclarable.add(("searchDomains", d))
+  if result.nlDnsDomains.len > 0 and result.nlDnsServers.len == 0:
+    raiseSystemProfileInvalid("linux.networkLink '" & name & "' routes " &
+      "domains to DNS but names no dnsServers")
+  if result.nlDnsServers.len > 0 and result.nlDnsDomains.len == 0:
+    # A server with no routing-only domain serves every name: global.
+    result.nlUndeclarable.add(("globalDnsServers",
+                               result.nlDnsServers.join(",")))
+  for f in NetworkLinkUndeclarableFields:
+    if f in fields:
+      result.nlUndeclarable.add((f, fields[f]))
+
+proc networkGuardProblem*(p: SystemProfile): string =
+  ## Why the profile's `linux.networkLink` objects and its `networkGuard`
+  ## do not fit together (§8.5; §13 decision 97), or "": a profile that
+  ## declares a network object must declare `networkGuard` with at least
+  ## one `keep` entry or `outOfBand` link, and no `keep` interface or
+  ## `outOfBand` link may be a link the profile itself declares. Checked
+  ## when the profile is parsed and again at plan time.
+  var links: seq[string]
+  for r in p.resources:
+    if r.kind == srkLinuxNetworkLink: links.add(r.nlName)
+  let g = p.addOn.networkGuard
+  if links.len > 0 and (not g.declared or
+                        (g.keep.len == 0 and g.outOfBand.len == 0)):
+    return "the profile declares linux.networkLink " & links.join(", ") &
+      " but no `addOn { networkGuard { ... } }` with a `keep` entry or an " &
+      "`outOfBand` link; the guard must check something besides the SSH " &
+      "session (§8.5, §13 decision 97)"
+  for k in g.keep:
+    if k.iface in links:
+      return "networkGuard keep names " & k.iface & ", a link this " &
+        "profile declares; the guard checks what the profile does not own"
+  for l in g.outOfBand:
+    if l in links:
+      return "networkGuard outOfBand names " & l & ", a link this " &
+        "profile declares; the guard checks what the profile does not own"
+  ""
+
+proc checkNetworkGuardDeclared(p: SystemProfile) =
+  let why = networkGuardProblem(p)
+  if why.len > 0: raiseSystemProfileInvalid(why)
 
 proc parseSystemProfile*(text: string; addOnDefaults = false;
                          stored = false): SystemProfile =
@@ -2189,6 +2548,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
     of $srkLinuxAddOnTool: srk = srkLinuxAddOnTool
     of $srkSystemdSystemDropIn: srk = srkSystemdSystemDropIn
     of $srkLinuxSysusersEntry: srk = srkLinuxSysusersEntry
+    of $srkLinuxNetworkLink: srk = srkLinuxNetworkLink
     else:
       raiseSystemProfileInvalid("unknown system resource kind '" &
         kindTag & "'")
@@ -2986,6 +3346,8 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
       if err.len > 0:
         raiseSystemProfileInvalid(err)
       res = SystemResource(kind: srkLinuxDpkgDiversion, ddPath: p)
+    of srkLinuxNetworkLink:
+      res = parseNetworkLinkFields(fields, rawFields)
     res.address =
       if "address" in fields and fields["address"].len > 0: fields["address"]
       else: realWorldIdentity(res)
@@ -2998,6 +3360,7 @@ proc parseSystemProfile*(text: string; addOnDefaults = false;
     if "depends_on" in rawFields:
       res.dependsOn = parseDependsOn(kindTag, rawFields["depends_on"])
     result.resources.add(res)
+  checkNetworkGuardDeclared(result)
   checkUnitStateConflicts(result.resources)
   checkPasswdPrimaryGroups(result.resources)
   checkSecretDeclarations(result)
@@ -3237,6 +3600,12 @@ proc toPrivilegedOperation*(r: SystemResource;
     PrivilegedOperation(kind: pokLinuxDpkgDiversion, address: r.address,
       ddPath: r.ddPath,
       ddDestroy: destroy)
+  of srkLinuxNetworkLink:
+    # Realised by the add-on switch under the network guard (§4.5), never
+    # by a driver: an operation for it would be a write with no guard.
+    raise newException(ValueError, "linux.networkLink '" & r.nlName &
+      "' is realised by the add-on switch under the network guard, never " &
+      "by a driver")
 
 proc isDestructiveRollback*(r: SystemResource): bool =
   ## True when rolling this resource back would disable an Optional

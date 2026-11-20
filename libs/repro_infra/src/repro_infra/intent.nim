@@ -473,6 +473,18 @@ proc renderStanza*(r: SystemResource): seq[string] =
       result.add("  home = " & renderScalar(r.seHome))
     if r.seShell.len > 0:
       result.add("  shell = " & renderScalar(r.seShell))
+  of srkLinuxNetworkLink:
+    # `nlUndeclarable` is never rendered: a profile carrying one is
+    # refused at plan time, so never stored.
+    result.add("  name = " & renderScalar(r.nlName))
+    result.add("  kind = " & renderScalar(r.nlKind))
+    if r.nlParentMac.len > 0:
+      result.add("  parentMac = " & renderScalar(r.nlParentMac))
+    result.add("  addresses = " & renderList(r.nlAddresses))
+    if r.nlDnsServers.len > 0:
+      result.add("  dnsServers = " & renderList(r.nlDnsServers))
+    if r.nlDnsDomains.len > 0:
+      result.add("  dnsDomains = " & renderList(r.nlDnsDomains))
   of srkLinuxFhsSandbox:
     result.add("  binPath = " & renderScalar(r.fsbBinPath))
     result.add("  fhsTrees = " & renderList(r.fsbFhsTreeRoots))
@@ -495,6 +507,21 @@ proc renderStanza*(r: SystemResource): seq[string] =
     result.add("  address = " & renderScalar(r.address))
   result.add("}")
 
+proc renderNetworkGuardStanza*(g: NetworkGuardSettings): seq[string] =
+  ## The nested `networkGuard { ... }` lines of the `addOn` stanza (§8.5),
+  ## or nothing when it is not declared.
+  if not g.declared: return @[]
+  result.add("  networkGuard {")
+  if g.timeoutSec > 0:
+    result.add("    timeout = " & $g.timeoutSec)
+  var keep: seq[string]
+  for k in g.keep: keep.add(k.iface & " " & k.prefix)
+  if keep.len > 0:
+    result.add("    keep = " & renderList(keep))
+  if g.outOfBand.len > 0:
+    result.add("    outOfBand = " & renderList(g.outOfBand))
+  result.add("  }")
+
 proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
   ## The profile-wide `addOn { ... }` stanza (ReproOS-Add-On-Mode §4.4),
   ## or nothing when the profile declares none.
@@ -508,6 +535,7 @@ proc renderAddOnStanza*(settings: AddOnSettings): seq[string] =
     result.add("  omarchyAccount = " & quoteSystemValue(settings.omarchyAccount))
   if settings.rootSnapshotDeclared:
     result.add("  rootSnapshot = " & quoteSystemValue($settings.rootSnapshot))
+  result.add(renderNetworkGuardStanza(settings.networkGuard))
   result.add("}")
 
 proc renderSecretFileStanza*(d: SecretFileDecl): seq[string] =

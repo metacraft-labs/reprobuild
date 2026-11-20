@@ -31,6 +31,7 @@ from repro_infra/apply_lock import currentBootId, processAlive
 import ./etc_write
 import ./fingerprint
 import ./generation0
+import ./guard_lock
 import ./ledger
 import ./mutations
 import ./seams
@@ -95,6 +96,27 @@ type
                               ## attempt it reverts took, which the actor
                               ## completing the revert deletes (§13
                               ## decision 105)
+    # The network guard (spec §4.5 step 4; §13 decisions 87, 102-110,
+    # 116-129). Set only for a switch that adds, changes or removes a
+    # `network` object, and carried by the revert that undoes it. The
+    # guard fields move only forward -- armed, then disarmed (and the
+    # commit) or reverting / fired (and the revert) -- and only through
+    # `transitionGuard` / `recordGuardTimer`, under the guard lock;
+    # `writePendingMarker` keeps whatever the marker on disk says of them.
+    guard*: string            ## "" (no guard) | armed | disarmed |
+                              ## reverting | fired
+    guardAttempt*: string     ## the attempt id (32 hex digits) the guard's
+                              ## timers were armed for
+    guardTimer*: string       ## the attempt's current timer unit (the
+                              ## original, a successor or a fresh one)
+    guardReason*: string      ## reverting / fired: why
+    guardPrevious*: string    ## the generation a revert goes back to
+    guardBoot*: string        ## the kernel boot id when the guard was armed
+    guardTimeout*: int        ## networkGuard.timeout, seconds
+    guardStartRealtime*: int64 ## CLOCK_REALTIME µs when the switch began:
+                              ## an SSH session counts only from here
+    guardStartMono*: int64    ## CLOCK_MONOTONIC µs, likewise (logind's
+                              ## session creation time is compared with it)
 
 const
   StaticLinkPath* = "/etc/repro/static"
@@ -589,6 +611,18 @@ proc render*(m: PendingMarker): string =
     result.add("root-snapshot\t" & escapeField(m.rootSnapshot) & "\n")
   if m.revertSnapshot.len > 0:
     result.add("revert-snapshot\t" & escapeField(m.revertSnapshot) & "\n")
+  # The guard, only for a network switch, so every other marker reads as
+  # before.
+  if m.guardAttempt.len > 0:
+    result.add("guard\t" & escapeField(m.guard) & "\n")
+    result.add("guard-attempt\t" & escapeField(m.guardAttempt) & "\n")
+    result.add("guard-timer\t" & escapeField(m.guardTimer) & "\n")
+    result.add("guard-reason\t" & escapeField(m.guardReason) & "\n")
+    result.add("guard-previous\t" & escapeField(m.guardPrevious) & "\n")
+    result.add("guard-boot\t" & escapeField(m.guardBoot) & "\n")
+    result.add("guard-timeout\t" & $m.guardTimeout & "\n")
+    result.add("guard-start-realtime\t" & $m.guardStartRealtime & "\n")
+    result.add("guard-start-mono\t" & $m.guardStartMono & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -631,19 +665,143 @@ proc parsePendingMarker*(text: string): PendingMarker =
     of "owner-boot": result.ownerBoot = v
     of "root-snapshot": result.rootSnapshot = v
     of "revert-snapshot": result.revertSnapshot = v
+    of "guard":
+      if v notin ["", "armed", "disarmed", "reverting", "fired"]:
+        raise newException(StaticTreeError, "unknown guard state " & v)
+      result.guard = v
+    of "guard-attempt": result.guardAttempt = v
+    of "guard-timer": result.guardTimer = v
+    of "guard-reason": result.guardReason = v
+    of "guard-previous": result.guardPrevious = v
+    of "guard-boot": result.guardBoot = v
+    of "guard-timeout", "guard-start-realtime", "guard-start-mono":
+      var n: BiggestInt
+      try: n = parseBiggestInt(v)
+      except ValueError:
+        raise newException(StaticTreeError, "malformed " & f[0] & " " & v)
+      case f[0]
+      of "guard-timeout": result.guardTimeout = int(n)
+      of "guard-start-realtime": result.guardStartRealtime = int64(n)
+      else: result.guardStartMono = int64(n)
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
+
+proc writeMarkerBytes(stateDir: string; m: PendingMarker) =
+  createDir(parentDir(pendingMarkerPath(stateDir)))
+  writeFileNoFollow(pendingMarkerPath(stateDir), m.render(), 0o600)
 
 proc writePendingMarker*(stateDir: string; m: PendingMarker) =
   ## Atomic: a crash leaves the previous marker or this one. The writer is
   ## the switch, so the marker is stamped with this process and this boot:
   ## that is how recovery and the apply guard tell the switch that owns a
   ## marker from any other holder of the host apply lock.
+  ##
+  ## A guarded marker (spec §4.5 step 4) is written under the guard lock,
+  ## and its guard state, timer and reason are the ones on disk whenever
+  ## the marker there is of the same attempt: only `transitionGuard` and
+  ## `recordGuardTimer` change them, so a step boundary the owner records
+  ## can never undo a `fired` the timer wrote meanwhile. A marker with no
+  ## guard on disk yet (the switch's first write, or a revert's first one
+  ## over a marker of another attempt) is written as given.
   var stamped = m
   stamped.ownerPid = getCurrentProcessId()
   stamped.ownerBoot = currentBootId()
-  createDir(parentDir(pendingMarkerPath(stateDir)))
-  writeFileNoFollow(pendingMarkerPath(stateDir), stamped.render(), 0o600)
+  if stamped.guardAttempt.len == 0:
+    writeMarkerBytes(stateDir, stamped)
+    return
+  withGuardLock:
+    if fileExists(pendingMarkerPath(stateDir)):
+      var disk: PendingMarker
+      var ok = true
+      try: disk = parsePendingMarker(readFile(pendingMarkerPath(stateDir)))
+      except CatchableError: ok = false
+      if ok and disk.guardAttempt == stamped.guardAttempt:
+        stamped.guard = disk.guard
+        stamped.guardTimer = disk.guardTimer
+        stamped.guardReason = disk.guardReason
+    writeMarkerBytes(stateDir, stamped)
+
+proc guardRank(state: string): int =
+  ## The guard's forward order: armed, then one of the three it ends in.
+  case state
+  of "armed": 1
+  of "disarmed", "reverting", "fired": 2
+  else: 0
+
+type
+  GuardTransition* = object
+    found*: bool        ## a marker of the attempt was there
+    before*: string     ## its guard state, as read under the lock
+    after*: string      ## its guard state once this call was done
+    marker*: PendingMarker
+
+proc updateGuardedMarker*(stateDir, attempt: string;
+                          change: proc (m: var PendingMarker): bool):
+    tuple[found: bool; marker: PendingMarker] =
+  ## Under the guard lock: re-read the marker; when it is of ``attempt``,
+  ## let ``change`` look at it and, when ``change`` returns true, write it
+  ## back as changed -- without restamping its owner (spec §4.5 step 4:
+  ## a guard actor's rewrite does not make it the owner).
+  withGuardLock:
+    if not fileExists(pendingMarkerPath(stateDir)): return
+    var m: PendingMarker
+    try: m = parsePendingMarker(readFile(pendingMarkerPath(stateDir)))
+    except CatchableError: return
+    if m.guardAttempt != attempt or attempt.len == 0: return
+    if change(m):
+      writeMarkerBytes(stateDir, m)
+    result = (true, m)
+
+proc transitionGuard*(stateDir, attempt, to, reason: string;
+                      timer = ""): GuardTransition =
+  ## Under the guard lock, re-read the marker and move its guard from
+  ## ``armed`` to ``to`` (``disarmed``, ``reverting`` or ``fired``) with
+  ## ``reason``, or -- when it has left ``armed`` already -- leave state and
+  ## reason as they are. A non-empty ``timer`` becomes the marker's current
+  ## timer either way (a fresh timer an actor armed, spec §4.5 step 4).
+  ## The marker's owner is not changed: this is not the switch writing.
+  ## ``found`` is false when no marker of ``attempt`` is there.
+  doAssert to in ["disarmed", "reverting", "fired"]
+  withGuardLock:
+    if not fileExists(pendingMarkerPath(stateDir)): return
+    var m: PendingMarker
+    try: m = parsePendingMarker(readFile(pendingMarkerPath(stateDir)))
+    except CatchableError: return
+    if m.guardAttempt != attempt or attempt.len == 0: return
+    result.found = true
+    result.before = m.guard
+    if guardRank(m.guard) <= 1:
+      m.guard = to
+      m.guardReason = reason
+    if timer.len > 0: m.guardTimer = timer
+    writeMarkerBytes(stateDir, m)
+    result.after = m.guard
+    result.marker = m
+
+proc recordGuardTimer*(stateDir, attempt, timer: string): bool =
+  ## Under the guard lock, name ``timer`` as the attempt's current timer
+  ## (a successor ``revert-network`` armed). False when no marker of the
+  ## attempt is there.
+  withGuardLock:
+    if not fileExists(pendingMarkerPath(stateDir)): return false
+    var m: PendingMarker
+    try: m = parsePendingMarker(readFile(pendingMarkerPath(stateDir)))
+    except CatchableError: return false
+    if m.guardAttempt != attempt or attempt.len == 0: return false
+    m.guardTimer = timer
+    writeMarkerBytes(stateDir, m)
+    result = true
+
+proc readGuardedMarker*(stateDir: string): tuple[present: bool;
+                                                  marker: PendingMarker] =
+  ## The marker as it is under the guard lock (``present`` false when
+  ## there is none or it does not parse).
+  withGuardLock:
+    if not fileExists(pendingMarkerPath(stateDir)): return
+    try:
+      result = (true, parsePendingMarker(readFile(pendingMarkerPath(stateDir))))
+    except CatchableError:
+      discard
 
 proc markerOwnedByCaller*(m: PendingMarker; pid: int; bootId: string): bool =
   ## Pure: the marker was written by process ``pid`` in the boot

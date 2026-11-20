@@ -408,6 +408,11 @@ proc emitProfileIntentJson*(p: ProfileIntent): string =
       result.add ",\"omarchyAccount\":" & escapeJson(p.addOn.omarchyAccount)
     if p.addOn.rootSnapshot.len > 0:
       result.add ",\"rootSnapshot\":" & escapeJson(p.addOn.rootSnapshot)
+    if p.addOn.networkGuardDeclared:
+      result.add ",\"networkGuard\":{\"timeout\":" &
+        $p.addOn.networkGuardTimeoutSec & ",\"keep\":" &
+        encodeStringArray(p.addOn.networkGuardKeep) & ",\"outOfBand\":" &
+        encodeStringArray(p.addOn.networkGuardOutOfBand) & "}"
     result.add "}"
   # ReproOS add-on mode A16: the `baseOs:` section, only when declared, so
   # the key set of a profile without one is unchanged.
@@ -670,6 +675,26 @@ proc parseProfileIntentJson*(s: string): ProfileIntent =
         raise newException(ValueError,
           "addOn.rootSnapshot must be \"required\", \"ifConfigured\" or \"off\"")
       result.addOn.rootSnapshot = a["rootSnapshot"].getStr()
+    if a.hasKey("networkGuard"):
+      let g = a["networkGuard"]
+      if g.kind != JObject or not g.hasKey("timeout") or
+          g["timeout"].kind != JInt or not g.hasKey("keep") or
+          g["keep"].kind != JArray or not g.hasKey("outOfBand") or
+          g["outOfBand"].kind != JArray:
+        raise newException(ValueError, "addOn.networkGuard must be an " &
+          "object with `timeout`, `keep` and `outOfBand`")
+      result.addOn.networkGuardDeclared = true
+      result.addOn.networkGuardTimeoutSec = g["timeout"].getInt()
+      for it in g["keep"]:
+        if it.kind != JString:
+          raise newException(ValueError,
+            "addOn.networkGuard.keep must be an array of strings")
+        result.addOn.networkGuardKeep.add it.getStr()
+      for it in g["outOfBand"]:
+        if it.kind != JString:
+          raise newException(ValueError,
+            "addOn.networkGuard.outOfBand must be an array of strings")
+        result.addOn.networkGuardOutOfBand.add it.getStr()
   # Optional; absent when the profile has no `baseOs:` section.
   if root.hasKey("baseOs"):
     result.baseOs = parseBaseOs(root["baseOs"])

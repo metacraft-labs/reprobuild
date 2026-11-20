@@ -115,6 +115,14 @@ const
   AddonUsage* = """usage: repro system addon <command> [options]
 
 commands:
+  confirm <generation>
+      From an SSH session opened after a network generation's switch
+      began, confirm it: the watching apply disarms the network guard once
+      every invariant holds (spec §4.5).
+  revert-network <previous> --attempt <id> [--reason <text>]
+      What a network-guard timer runs (repro-addon-guard-*): restore the
+      previous generation's network objects and, once the host apply lock
+      is free, complete the revert. Not for operators.
   preflight [--deploy-signers F] [--cache-publishers F [--cache-url U]]
             [--target T --manifest URL... [--profile-compiler P] [--poll-interval S]]
             [--evidence-sink ADDR:PORT --evidence-sink-ca F [--heartbeat-interval S]]
@@ -655,6 +663,8 @@ proc runAddonCli*(args: seq[string]): int =
           "verify-discard-record " & r.overrideRecord &
           " --key <enrolled key>`\n")
       for p in r.removed: stdout.write("removed " & p & "\n")
+      for l in r.guardUnitPasses:
+        stdout.write("network guard units: " & l & "\n")
       for d in r.drift: stdout.write("left in place (drift): " & d & "\n")
       for k in r.keptEvidence:
         stdout.write("kept with the store (store evidence left aside): " &
@@ -684,6 +694,30 @@ proc runAddonCli*(args: seq[string]): int =
       let r = runAddonVerify()
       stdout.write(renderVerify(r))
       return (if r.status == "ok": 0 else: 1)
+    of "revert-network":
+      # What a network-guard timer runs (spec §4.5 step 4), from the
+      # out-of-store copy /var/lib/repro/bin/repro: never refuses.
+      var previous, attempt, reason = ""
+      var stateDir = DefaultStateDir
+      var i = 0
+      while i < rest.len:
+        let a = rest[i]
+        if a == "--attempt": attempt = takeValue(rest, i, a)
+        elif a == "--reason": reason = takeValue(rest, i, a)
+        elif a == "--state-dir": stateDir = takeValue(rest, i, a)
+        elif a.startsWith("-"):
+          raise newException(ValueError, "unknown option " & a)
+        elif previous.len == 0: previous = a
+        else: raise newException(ValueError, "unexpected argument " & a)
+        inc i
+      if attempt.len != 32:
+        raise newException(ValueError, "revert-network needs --attempt " &
+          "<32 hex digits>")
+      return runRevertNetwork(stateDir, previous, attempt, reason)
+    of "confirm":
+      if rest.len != 1:
+        raise newException(ValueError, "usage: repro system addon confirm <generation>")
+      return runConfirm(DefaultStateDir, rest[0])
     of "reassert", "recover":
       var atBoot = false
       for a in rest:
@@ -785,6 +819,26 @@ proc runAddonCli*(args: seq[string]): int =
       # Seam builds only (a hanging command in the store, for a gate);
       # every other build answers with a usage error.
       return seamSleepCommand(rest)
+    of "test-agent-apply":
+      # Seam builds only: the switch as a deploy-agent apply enters it
+      # (an agent sequence), for the network guard's control (aa) -- the
+      # tick reports a pending network marker, arms no timer and applies
+      # nothing. The full tick's signed-manifest path is A8's.
+      when AddonTestSeams:
+        if rest.len != 2 or rest[0] != "--profile":
+          raise newException(ValueError,
+            "usage: repro system addon test-agent-apply --profile <file>")
+        try:
+          discard runAddonApply(AddonApplyOptions(stateDir: DefaultStateDir,
+            hostIdentity: readHostname(), userProfileText: readFile(rest[1]),
+            agentSequence: high(uint32).uint64))
+          stdout.write("test-agent-apply: applied\n")
+          return 0
+        except CatchableError as e:
+          stdout.write("test-agent-apply: " & e.msg & "\n")
+          return 1
+      else:
+        return 2
     of "probe":
       if rest.len != 1:
         raise newException(ValueError, "probe needs one healthCheck value")
@@ -921,6 +975,9 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   if r.rootSnapshot.len > 0:
     result.add("root snapshot taken: " & r.rootSnapshot & "\n")
   for n in r.snapshotNotes: result.add("root snapshots: " & n & "\n")
+  # The network class's report and what its guard did (spec §4.5, §8.5).
+  for l in r.networkPlan: result.add(l & "\n")
+  for n in r.guardNotes: result.add("network guard: " & n & "\n")
   if r.baseIdentity.id.len > 0:
     # The base the plan was computed against (§7.4) and, after a
     # distribution upgrade, what changed since the current generation (§7.9).

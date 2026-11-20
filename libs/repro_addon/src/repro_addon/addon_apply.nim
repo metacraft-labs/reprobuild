@@ -112,6 +112,9 @@ import ./effective_floor
 import ./sysctl_precedence
 import ./takeover
 import ./transitions
+import ./network_guard
+import ./network_link
+import ./network_switch
 
 export AddonDriftError, AddonCollisionError, EAddOnExclusiveOverlap
 export transitions.Transition, transitions.TransitionVerb,
@@ -211,6 +214,11 @@ type
       ## marker so a recovery that finishes the revert can record the
       ## attempt as rolled back.
     revertReason*: string
+    revertGuardAttempt*: string
+      ## A revert of a guarded network switch (spec §4.5 step 4): its
+      ## guard's attempt id. The revert's marker carries the guard (state,
+      ## timer, reason) so a crash during the revert is still the guard's,
+      ## finished by the attempt's timer or recovery.
     revertSnapshot*: string
       ## A revert: the key of the root snapshot the failed attempt took
       ## (``root_snapshot``), recorded in the revert's marker; the actor
@@ -320,6 +328,13 @@ type
     rootSnapshotPlan*: string
       ## The plan's ``root snapshot: ...`` line (spec §7.2, §8.5): the
       ## snapper configuration it is taken with, or why none is.
+    networkPlan*: seq[string]
+      ## The `network` class's report (spec §4.5, §8.5): the observed
+      ## links, addresses and routes, the guard's timeout, keep and
+      ## out-of-band sets, and each address the probe checks.
+    guardNotes*: seq[string]
+      ## What the network guard did: the guard binary's verification or
+      ## repair, the arm, the disarm or the revert, every timer stopped.
     rootSnapshot*: string
       ## The snapshot this switch took (``<config>#<number>
       ## (repro-addon=<key>)``); "" when none.
@@ -361,7 +376,8 @@ const
     ## (``secret`` arrives with A7, ``firewall`` is opt-in and refused in
     ## agent applies until §13 Q6).
   AddonProfileKinds* = AddonManagedKinds + {srkSystemdSystemTimer,
-                        srkPasswdUser, srkPasswdGroup, srkLinuxAddOnTool}
+                        srkPasswdUser, srkPasswdGroup, srkLinuxAddOnTool,
+                        srkLinuxNetworkLink}
     ## What an add-on profile may declare (spec §8.3, "As implemented (A6)"):
     ## the managed kinds, and the four the composition carries through them
     ## (``reshape``): a ``systemd.systemTimer`` is the ``unit`` class's
@@ -814,6 +830,8 @@ proc addOnNameError*(r: SystemResource): string =
       if not isSafePosixUserOrGroupName(r.seName):
         result = "linux.sysusersEntry name '" & r.seName.escape() &
           "' is not an account name of [A-Za-z0-9._-]"
+    of srkLinuxNetworkLink:
+      result = interfaceNameError("linux.networkLink name", r.nlName)
     of srkSystemdSystemTimer:
       result = systemdUnitNameError("systemd.systemTimer name", r.stName)
       if result.len == 0 and not r.stName.endsWith(".timer"):
@@ -2700,6 +2718,11 @@ proc reshape(user: SystemProfile; dropIns: var HashSet[string]):
     of srkLinuxAddOnTool:
       result.add(addOnToolCarriers(r))
       result.add(r)
+    of srkLinuxNetworkLink:
+      # The `network` class never reaches the infra drivers: the switch
+      # writes its connections itself, under the network guard (spec §4.5;
+      # ``network_switch``).
+      discard
     of srkLinuxSysctl:
       if r.sysctlFilename.len == 0:
         # Spec §4.1: /etc/sysctl.d/90-repro-<name>.conf, <name> from the
@@ -3069,6 +3092,16 @@ proc recordRolledBack*(stateDir, attempt, backTo, asGeneration, why: string;
       " -> back to " & backTo & " as " & asGeneration,
     recordClass: AuditClassLiveState))
 
+proc hasRolledBackRecord*(stateDir, attempt: string): bool =
+  ## Does ``attempt``'s apply log already hold a ``rolled-back`` record?
+  ## (A guarded revert writes it at its own step 9, before its marker
+  ## goes; a recovery that finishes that step 9 must not write it twice.)
+  if attempt.len == 0: return false
+  try:
+    "rolled-back" in readFile(applyLogPath(stateDir, attempt))
+  except CatchableError:
+    false
+
 proc decideInstall(driver: CollisionDriver; r: SystemResource;
                    ownedLinks: HashSet[string];
                    enabledUnits: HashSet[string];
@@ -3225,6 +3258,11 @@ proc seamCommitPoint(stateDir, seamPrefix: string): proc(point: string) {.gcsafe
     result = proc(point: string) {.gcsafe.} =
       {.cast(gcsafe).}:
         seamPause(stateDir, seamPrefix & point)
+        # The network guard's control (p): the commit made to fail after
+        # the guard was disarmed, before `current` moves.
+        if point == "commit-envelope" and seamFlag(stateDir, "commit-fails"):
+          raise newException(IOError, "the commit failed (test seam " &
+            "commit-fails)")
   else:
     nil
 
@@ -3996,6 +4034,21 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # another one starts: its marker and write-ahead plan are the only
   # record of what it changed. Its own replay and revert are the
   # exceptions, and so is a plan, which writes nothing.
+  if not opts.planOnly and opts.agentSequence > 0'u64 and
+      purpose notin ["replay", "revert"] and hasPendingMarker(stateDir):
+    # A deploy-agent apply never recovers a network switch: its unit has no
+    # CAP_NET_ADMIN and no network (§9.1) and refuses every network path,
+    # so it could not complete a network revert. It reports the marker,
+    # arms no timer, applies nothing, and leaves it to the re-assert unit
+    # or `repro system addon recover` (spec §4.5 step 4's table).
+    var guarded = false
+    try: guarded = readPendingMarker(stateDir).guardAttempt.len > 0
+    except CatchableError: discard
+    if guarded:
+      raise newException(AddonApplyError, "a network generation's switch " &
+        "is pending (" & pendingMarkerPath(stateDir) & "); a deploy-agent " &
+        "apply leaves it to the re-assert unit or `repro system addon " &
+        "recover`, arms no timer and applies nothing")
   if not opts.planOnly and purpose notin ["replay", "revert"] and
       hasPendingMarker(stateDir):
     # An apply recovers an interrupted switch first when that switch's
@@ -4254,6 +4307,55 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # On any other base an acknowledgement is listed as acknowledging
       # nothing (``omarchy.baseLayerPass``).
       result.baseLayerOverrides = baseLayerPass(result.baseIdentity.id, user)
+  # --- The `network` class (spec §4.5, §8.5): its objects, whether this
+  # generation adds, changes or removes one (a NETWORK generation, applied
+  # only by an operator and only under the guard), and every refusal that
+  # is decided before anything is written. A revert or a replay finishes
+  # or undoes a switch already under way and is not planned again.
+  var netLinks: seq[SystemResource]
+  for r in user.resources:
+    if r.kind == srkLinuxNetworkLink: netLinks.add(r)
+  var netObjects: seq[NetworkObject]
+  for r in netLinks: netObjects.add(networkObjectOf(r))
+  # The MS-2 run of spec §4.5 (§13 decision 86): the gate's own test
+  # program -- the seam build, never the published binary -- hands the
+  # switch a connection the planner would refuse (one that binds the
+  # parent), below the planner, in place of the one rendered for a link.
+  if purpose == "apply" and not replaying and not opts.recordOnly:
+    let inject = seamText(stateDir, "network-inject")
+    if inject.len > 0:
+      let nl = inject.find('\n')
+      let name = inject[0 ..< max(nl, 0)].strip()
+      for o in netObjects.mitems:
+        if o.name == name and nl > 0:
+          o.content = inject[nl + 1 .. ^1]
+          o.uuid = keyfileUuid(o.content)
+  let netChange = networkChanges(previous, netObjects)
+  let guarded = netChange.any and purpose in ["apply", "rollback"] and
+                not replaying and not opts.recordOnly
+  var netPlan: NetworkPlan
+  if (netLinks.len > 0 or netChange.any) and purpose in ["apply", "rollback"] and
+      not replaying and not opts.recordOnly:
+    netPlan = planNetwork(NetworkPlanInputs(links: netLinks,
+      previous: previous, guard: user.addOn.networkGuard,
+      host: observeHostNetwork(), managers: observeManagers(),
+      agentApply: opts.agentSequence > 0'u64,
+      arping: resolveHostTool(ArpingCandidates), change: netChange))
+    result.networkPlan = netPlan.lines
+    if guarded:
+      let g = user.addOn.networkGuard
+      var keep: seq[string]
+      for k in g.keep: keep.add(k.iface & " " & k.prefix)
+      result.networkPlan.add("network: a network generation (" &
+        netChange.describe & "), applied under the network guard: timeout " &
+        $(if g.timeoutSec > 0: g.timeoutSec else: DefaultNetworkGuardTimeoutSec) &
+        " s, keep [" & keep.join(", ") & "], outOfBand [" &
+        g.outOfBand.join(", ") & "]")
+      for r in netLinks:
+        if r.nlDnsDomains.len > 0:
+          result.networkPlan.add("network: " & r.nlName & " sends " &
+            r.nlDnsDomains.join(" ") & " to " & r.nlDnsServers.join(" ") &
+            " for every process on the host (threat model T58)")
   # The switch's own root snapshot (spec §7.2, §8.5): decided at plan time,
   # so `required` on a host without a snapper configuration for `/` is
   # refused before step 1 and before anything is written. Only a fresh
@@ -5549,6 +5651,33 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       "[\"serviceFloor: <why>\"]); a named exception still changes the " &
       "unit and does not avoid this. Nothing was changed")
 
+  # The duplicate-address probe (spec §4.5, §13 decisions 88, 100): the
+  # last refusal, before the root snapshot and before anything is written.
+  if guarded and netPlan.probe.len > 0:
+    probeDuplicates(resolveHostTool(ArpingCandidates), netPlan.probe)
+  # The guard's out-of-store copy of the add-on binary (spec §4.5 step 1,
+  # §5.3; §13 decisions 127-129): verified against the store's current
+  # add-on binary by every apply, revert and replay, and rewritten when it
+  # differs or is missing -- never drift. A host whose generation 0
+  # predates it gets it here, recorded in the generation log. A network
+  # generation is not switched without a good copy (``EAddOnGuardTimer``).
+  var guardBinaryDigest = ""
+  var guardBinaryAdded = false
+  block:
+    var ledgerDigest = ""
+    for e in previous.entries:
+      if e.class == lcGuardBinary: ledgerDigest = e.sha256
+    let chk = ensureGuardBinary(storeAddonBinaryOf(ownText), ledgerDigest)
+    if chk.ok:
+      guardBinaryDigest = chk.digest
+      guardBinaryAdded = ledgerDigest.len == 0
+      if chk.note.len > 0: result.guardNotes.add(chk.note)
+    elif guarded:
+      raise newAddOnError(adGuardTimer, chk.why & "; a network generation " &
+        "is not switched without the guard; nothing was written")
+    else:
+      guardBinaryDigest = ledgerDigest
+      result.guardNotes.add(diagnosticMessage(adGuardTimer, chk.why))
   # Step 1 recomputes the store's hold from every unit, manifest and
   # hand-back record on the host; the plan checked they can be read, but
   # one can have become unreadable since. Checked again here, before the
@@ -5805,11 +5934,84 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   var heldAtRevert: seq[string]   # spec §10.1: what a revert keeps on hold
   if not opts.planOnly:
     writeSecretsSource(stateDir, secretsSource)
+  # The network guard (spec §4.5 step 1; §13 decisions 87, 104, 125):
+  # after the probe, the snapshot and the write-ahead plan, the guard's
+  # record (what a revert restores, without the store) is made durable,
+  # then the timer is armed, and only then is the marker written naming
+  # it. A failed arm refuses the switch: no switch without a guard. The
+  # snapshot just taken is deleted, the write-ahead plan removed, and no
+  # marker written.
+  var guardFields: PendingMarker
+  if guarded:
+    let attempt = newAttemptId()
+    var rec = GuardRecord(attempt: attempt, previous: committedPrevious)
+    for o in netObjects:
+      rec.attemptObjects.add(GuardObject(path: o.path, uuid: o.uuid,
+                                         sha256: sha256Hex(o.content),
+                                         name: o.name))
+    for e in networkEntries(previous):
+      rec.previousObjects.add(GuardObject(path: e.path, uuid: e.value,
+        sha256: e.sha256, preserved: e.preserved, name: e.unit))
+    let timeout = if user.addOn.networkGuard.timeoutSec > 0:
+                    user.addOn.networkGuard.timeoutSec
+                  else: DefaultNetworkGuardTimeoutSec
+    var armProblem = ""
+    var unit = ""
+    try:
+      writeGuardRecord(stateDir, rec)
+      # Verified again just before the arm (decision 128).
+      var ledgerDigest = guardBinaryDigest
+      let chk = ensureGuardBinary(storeAddonBinaryOf(ownText), ledgerDigest)
+      if not chk.ok:
+        armProblem = diagnosticMessage(adGuardTimer, chk.why)
+      else:
+        if chk.note.len > 0: result.guardNotes.add(chk.note)
+        let a = armGuardTimer(stateDir, attempt, committedPrevious, "",
+                              timeout)
+        armProblem = a.problem
+        unit = a.unit
+    except CatchableError as e:
+      armProblem = diagnosticMessage(adGuardTimer, e.msg)
+    if armProblem.len > 0:
+      var left: seq[string]
+      if snapshotKey.len > 0:
+        left = deleteSnapshotByKey(stateDir, snapshotKey,
+          "the refused network switch", snapshotSite).left
+      clearPendingPlan(stateDir)
+      clearGuardRecord(stateDir)
+      raise newAddOnError(adGuardTimer, armProblem.replace(
+        $adGuardTimer & ": ", "") & "; there is no network switch without " &
+        "a guard: refused before the switch, no marker written" &
+        (if left.len > 0: "\n" & left.join("\n") else: ""))
+    # Control (h) of the guard's gate: a crash between the timer's start and
+    # the marker's write leaves a stale timer and an orphan snapshot.
+    seamPause(stateDir, "guard-after-arm")
+    guardFields = PendingMarker(guard: "armed", guardAttempt: attempt,
+      guardTimer: unit, guardPrevious: committedPrevious,
+      guardBoot: currentBootId(), guardTimeout: timeout,
+      guardStartRealtime: nowRealtimeUs(), guardStartMono: nowMonoUs())
+    result.guardNotes.add("armed the network guard: " & unit & " fires in " &
+      $timeout & " s unless the guard is disarmed (attempt " & attempt & ")")
+  elif opts.revertGuardAttempt.len > 0 and hasPendingMarker(stateDir):
+    # A revert of a guarded switch carries its guard (state, timer, reason)
+    # in its own marker, so a crash in the revert is still the guard's.
+    try:
+      let prior = readPendingMarker(stateDir)
+      if prior.guardAttempt == opts.revertGuardAttempt:
+        guardFields = prior
+    except CatchableError:
+      discard
   var marker = PendingMarker(fromGeneration: committedPrevious,
     newStatic: treePath, previousStatic: previousStatic, step: ssRealise,
     status: "in-progress", purpose: purpose, revertOf: opts.revertOf,
     revertReason: opts.revertReason, rootSnapshot: snapshotKey,
-    revertSnapshot: opts.revertSnapshot)
+    revertSnapshot: opts.revertSnapshot,
+    guard: guardFields.guard, guardAttempt: guardFields.guardAttempt,
+    guardTimer: guardFields.guardTimer, guardReason: guardFields.guardReason,
+    guardPrevious: guardFields.guardPrevious,
+    guardBoot: guardFields.guardBoot, guardTimeout: guardFields.guardTimeout,
+    guardStartRealtime: guardFields.guardStartRealtime,
+    guardStartMono: guardFields.guardStartMono)
   if replaying:
     # What the interrupted switch stopped and disabled stays on record
     # until this one finishes.
@@ -5820,6 +6022,18 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     marker.rootSnapshot = priorMarker.rootSnapshot
     if marker.revertSnapshot.len == 0:
       marker.revertSnapshot = priorMarker.revertSnapshot
+    # And its guard, for a replayed revert of a network switch (spec §4.5
+    # step 4): the attempt's timers and recovery still act on it.
+    if marker.guardAttempt.len == 0 and priorMarker.guardAttempt.len > 0:
+      marker.guard = priorMarker.guard
+      marker.guardAttempt = priorMarker.guardAttempt
+      marker.guardTimer = priorMarker.guardTimer
+      marker.guardReason = priorMarker.guardReason
+      marker.guardPrevious = priorMarker.guardPrevious
+      marker.guardBoot = priorMarker.guardBoot
+      marker.guardTimeout = priorMarker.guardTimeout
+      marker.guardStartRealtime = priorMarker.guardStartRealtime
+      marker.guardStartMono = priorMarker.guardStartMono
     # A replayed revert stays a revert, with what it reverts, so a crash
     # during the replay is recovered as one too.
     if priorMarker.purpose.len > 0: marker.purpose = priorMarker.purpose
@@ -5923,6 +6137,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           "--reconcile-drift removes it)")
       why.join("; ")
   var hookSysctl: seq[tuple[key, value: string]]
+  var netWrites: NetworkWrites    # the network class's writes (step 4-5)
+  var hookGuardNotes: seq[string]  # what the guard did in the after-hook
   var hookGeneration = ""
   var hookRecordedClean = false
     ## A record-only replay got through steps 4-6 with no problem of its
@@ -6057,6 +6273,24 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           problems.add("cannot mark generation " & generationId & " as written " &
                        "by an engine that keeps the record of floored units' " &
                        "directories (§13 decision 72)")
+      # The `network` class's writes (spec §4.5), the last of steps 4-5:
+      # the connections the generation drops, then each it adds or
+      # changes, each guarded by a read of the network guard under its
+      # lock (decision 103). A record-only replay records the drivers'
+      # writes only: a revert removes the network objects through the
+      # guard's record, never through a replay of the switch that wrote
+      # them (spec §4.5 step 4: an un-disarmed generation is never
+      # replayed).
+      if not opts.recordOnly and (netObjects.len > 0 or netChange.any):
+        netWrites = writeNetworkObjects(stateDir, marker, netObjects,
+                                        previous, seamPrefix)
+        problems.add(netWrites.problems)
+        if netWrites.firedReason.len > 0:
+          problems.add("the network guard fired (" & netWrites.firedReason &
+            "); no further network object was written (§13 decision 103)")
+      if seamFlag(stateDir, "network-step-fails") and marker.guardAttempt.len > 0 and
+          purpose == "apply":
+        problems.add("a switch step failed (test seam network-step-fails)")
       # Steps 4 and 5 are the drivers' writes, in the profile's apply
       # order (links and copies interleave); both are complete here.
       # They are made durable before the marker says so. The drivers fsync
@@ -6495,6 +6729,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       for e in opts.bootstrapEntries: restated.incl($e.class & " " & e.path)
       for e in previous.entries:
         if e.resource.len > 0 or e.class == lcStaticLink: continue
+        # The guard binary's entry is rewritten with the digest just
+        # verified (below), never carried (spec §13 decision 128).
+        if e.class == lcGuardBinary and guardBinaryDigest.len > 0: continue
         if ($e.class & " " & e.path) in restated: continue
         if e.class == lcAccount and e.path in declaredAccounts:
           continue      # a passwd resource holds it now (its entry below)
@@ -6504,6 +6741,31 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         put(e)
       for e in opts.bootstrapEntries: put(e)
       for e in forgottenEntries: put(e)
+      # The guard's out-of-store binary (spec §5.3; §13 decisions 127-129).
+      if guardBinaryDigest.len > 0:
+        put(guardBinaryEntry(guardBinaryDigest))
+        if guardBinaryAdded and generationId.len > 0:
+          try:
+            appendAuditRecord(applyLogPath(stateDir, generationId), AuditRecord(
+              timestamp: getTime().toUnix(), operationKind: "addon.guard-binary",
+              resourceAddress: GuardBinaryPath, outcome: "added",
+              diagnostic: "the network guard's out-of-store repro (sha256 " &
+                guardBinaryDigest & "), added as a guardBinary ledger object " &
+                "on a host whose generation 0 predates it (§13 decision 129)",
+              recordClass: AuditClassLiveState))
+          except CatchableError as ex:
+            problems.add("cannot record the guard binary's addition: " & ex.msg)
+      # The `network` class's connections (spec §4.5): what is on the host
+      # now, with their bytes preserved under the state directory; a
+      # removal that failed keeps its entry. A record-only replay wrote
+      # none and keeps the previous generation's.
+      if opts.recordOnly:
+        for e in networkEntries(previous): put(e)
+      else:
+        for e in networkLedgerEntries(netWrites.written,
+            proc (c: string): string = preserveBytes(stateDir, c)):
+          put(e)
+        for e in netWrites.kept: put(e)
       # The static tree: its link and its prefix, rebuilt every generation.
       put(LedgerEntry(class: lcStaticLink, path: StaticLinkPath,
         linkTarget: readStaticTarget(), resource: "static-tree",
@@ -6622,6 +6884,23 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
           writeFileAtomic(gd / AgentRecordName, render(opts.agentRecord),
                           0o644)
       seamPause(stateDir, seamPrefix & "step-8")
+      # The network guard (spec §4.5 steps 2-4): a network generation does
+      # not commit when step 8 ends. With everything clean so far the
+      # owner watches the invariants until it disarms -- and the infra
+      # apply then commits -- or the timer fires; any failure before
+      # disarm writes `reverting` with its reason first (decisions 104,
+      # 126), and the revert below follows.
+      if guarded and marker.guardAttempt.len > 0:
+        if clean and problems.len == 0:
+          let w = watchGuard(stateDir, marker, user.addOn.networkGuard,
+                             netPlan.defaultRoutes)
+          hookGuardNotes.add(w.notes)
+          if not w.disarmed:
+            problems.add(diagnosticMessage(adNetworkGuard, w.reason))
+        if problems.len > 0 or not clean:
+          let b = beginGuardRevert(stateDir, marker, (if problems.len > 0:
+            problems.join("; ") else: "the switch did not complete cleanly"))
+          hookGuardNotes.add(b.notes)
       # A8: below the rollback floor the new generation stays, and what
       # failed is reported (`failed-at-floor`) instead of withholding the
       # commit -- which would revert to the generation the floor forbids.
@@ -6654,6 +6933,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       phases: ApplyPhaseHooks(beforePrivilegedSet: beforeSet,
                               afterPrivilegedSet: afterSet,
                               commitOnlyWhenClean: true,
+                              # A guarded network switch commits only once
+                              # disarmed; recovery commits a `disarmed`
+                              # marker from this (§13 decision 117).
+                              stageEnvelope: guarded,
                               commitPoint: seamCommitPoint(stateDir,
                                                            seamPrefix))))
     if result.infra.errorCount > 0 or result.infra.driftCount > 0:
@@ -6673,6 +6956,40 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       let undoable = marker.step < ssFlip
     else:
       let undoable = freshSwitch and marker.step < ssFlip
+    if undoable and marker.guardAttempt.len > 0:
+      # A NETWORK switch refused at step 2 (spec §7.2 "Refused at step 2";
+      # §13 decisions 104-106, 116): it goes through the guard. It writes
+      # `reverting` with the refusal as its reason, is undone as below,
+      # appends `rolled-back` with EAddOnNetworkGuard naming the refusal's
+      # own diagnostic, deletes its snapshot, removes the marker and stops
+      # the guard timer last. Nothing of the network was written yet (the
+      # network writes come after the flip).
+      let b = beginGuardRevert(stateDir, marker, e.msg)
+      result.guardNotes.add(b.notes)
+      let undoProblems = undoPreStop(marker)
+      recordRolledBack(stateDir, hookGeneration, committedPrevious,
+        committedPrevious, guardDiagnostic(b.reason), false)
+      var left: seq[string]
+      if marker.rootSnapshot.len > 0:
+        let d = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
+          "the refused network switch's revert", snapshotSite)
+        left = d.left
+        for n in d.deleted:
+          e.msg.add("\ndeleted the refused switch's root snapshot " & n)
+      clearPendingMarker(stateDir)
+      clearPendingPlan(stateDir)
+      releasePendingRoot()
+      for n in finishGuardRevert(stateDir, marker.guardAttempt):
+        result.guardNotes.add(n)
+      e.msg.add("\nrecorded rolled-back with " & $adNetworkGuard & " (" &
+        b.reason & ")")
+      if undoProblems.len > 0:
+        raise newException(AddonApplyError, e.msg & "\nputting back what " &
+          "step 2 stopped failed: " & undoProblems.join("; ") &
+          (if left.len > 0: "\n" & left.join("\n") else: ""))
+      if left.len > 0:
+        e.msg.add("\n" & left.join("\n"))
+      raise e
     if undoable:
       # A refusal decided before the flip (an exclusive unit that would
       # overlap): nothing was switched, but step 2 may already have
@@ -6723,11 +7040,42 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   result.confirm = hookConfirm
   result.failedAtFloor = hookFailedAtFloor
 
+  result.guardNotes.add(hookGuardNotes)
+  if not result.infra.committed and guarded and marker.guardAttempt.len > 0:
+    # A disarmed guard is only ever committed (§13 decision 117): a commit
+    # that failed after the disarm leaves the marker `disarmed`, reported,
+    # and nothing is reverted; recovery retries the commit.
+    var onDisk = ""
+    try: onDisk = readPendingMarker(stateDir).guard
+    except CatchableError: discard
+    if onDisk == "disarmed":
+      raise newException(AddonApplyError, "the network guard was disarmed " &
+        "but the commit failed: " & (if infraError.len > 0: infraError
+        else: "the switch did not complete cleanly") & "; the marker at " &
+        pendingMarkerPath(stateDir) & " stays `disarmed` and nothing is " &
+        "reverted; `repro system addon recover` commits it")
   if not result.infra.committed:
     # Not a generation: `current` still names the one the switch began
     # from. The marker records how far the switch got and why it stopped.
-    let why = if infraError.len > 0: infraError
+    var why = if infraError.len > 0: infraError
               else: "the switch did not complete cleanly"
+    # A guarded network switch goes through `reverting` (the after-hook
+    # wrote it when it ran; this covers a failure it never reached), and
+    # its network objects are put back from the guard's record first, so
+    # the host's network is the previous generation's whatever the ledger
+    # recorded (spec §4.5 steps 1 and 4).
+    var guardReason = ""
+    if guarded and marker.guardAttempt.len > 0:
+      let b = beginGuardRevert(stateDir, marker, why)
+      result.guardNotes.add(b.notes)
+      guardReason = b.reason
+      try:
+        for p in restoreNetworkObjects(readGuardRecord(stateDir)):
+          result.guardNotes.add("network restore: " & p)
+      except CatchableError as ex:
+        result.guardNotes.add("network restore: the guard record is " &
+          "unreadable: " & ex.msg)
+      why = guardDiagnostic(guardReason) & " (" & why & ")"
     marker.status = "failed"
     marker.detail = why
     writePendingMarker(stateDir, marker)
@@ -6817,6 +7165,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         assumeActive: assume, retention: opts.retention,
         reproExe: opts.reproExe, revertOf: hookGeneration, revertReason: why,
         revertSnapshot: marker.rootSnapshot,
+        revertGuardAttempt: (if guarded: marker.guardAttempt else: ""),
         nonBlockingStarts: opts.nonBlockingStarts,
         confirmCapSec: opts.confirmCapSec))
     except CatchableError as e:
@@ -6824,8 +7173,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         "be rolled back to " & committedPrevious & " either: " & e.msg &
         "\nthe pending marker at " & pendingMarkerPath(stateDir) &
         " records it; run `repro system addon recover`")
-    recordRolledBack(stateDir, hookGeneration, committedPrevious,
-                     reverted.generationId, why, hookHealthFailed)
+    if not (guarded and marker.guardAttempt.len > 0):
+      # (A guarded revert recorded it at its own step 9.)
+      recordRolledBack(stateDir, hookGeneration, committedPrevious,
+                       reverted.generationId, why, hookHealthFailed)
     # This process completed the revert: it deletes the attempt's root
     # snapshot (spec §7.2, §13 decisions 105, 119). One it cannot delete
     # is reported with `EAddOnSnapshotLeft`; the orphan sweep retries it.
@@ -6833,6 +7184,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if marker.rootSnapshot.len > 0:
       left = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
         "the revert", snapshotSite).left
+    # The guard's timers go last, once the revert is complete (decision 106).
+    if guarded and marker.guardAttempt.len > 0:
+      for n in finishGuardRevert(stateDir, marker.guardAttempt):
+        result.guardNotes.add(n)
+    for n in result.guardNotes: left.add("network guard: " & n)
     var err = newException(AddonRolledBack, "the switch was rolled back to " &
       committedPrevious & " (re-applied as generation " &
       reverted.generationId & "): " & why &
@@ -6912,8 +7268,23 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       resourceAddress: "generation:" & result.generationId,
       outcome: "secrets-failed", diagnostic: secretsFailure,
       recordClass: AuditClassLiveState))
+  if marker.purpose == "revert" and marker.guardAttempt.len > 0 and
+      not hasRolledBackRecord(stateDir, marker.revertOf):
+    # The revert of a network switch completes here: `rolled-back` is
+    # appended BEFORE the marker goes (spec §4.5 step 4, "What revert
+    # means": the actor that completes a revert records it, then deletes
+    # the snapshot and removes the marker), so no crash between the two
+    # loses the record. Its callers do not record it again.
+    recordRolledBack(stateDir, marker.revertOf, committedPrevious,
+                     result.generationId, marker.revertReason, false)
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
+  if marker.guardAttempt.len > 0:
+    # The guard was disarmed and the generation is committed, or its
+    # revert is: the guard's records go (the timers are stopped at the
+    # disarm, or last by the actor that completed the revert).
+    clearGuardRecord(stateDir)
+    clearConfirm(stateDir)
   # A switch the rollback floor kept in place is resolved by its commit.
   if fileExists(floorHoldPath(stateDir)): removeFile(floorHoldPath(stateDir))
 
@@ -6932,7 +7303,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
                               replayError: string;
                               driver: CollisionDriver = nil;
                               nonBlockingStarts = false;
-                              confirmCapSec = 0): FailedReplayRevert =
+                              confirmCapSec = 0;
+                              guardReason = ""): FailedReplayRevert =
   ## A recovery whose replay of an interrupted switch failed for any reason
   ## other than rolling itself back (a plan that cannot be read or
   ## planned, a refusal, a step that raised) reverts to the generation the
@@ -6956,6 +7328,11 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
   ##
   ## A revert that is attempted and fails raises, with its own marker
   ## kept (the first case, at the next recovery).
+  ##
+  ## With ``guardReason`` the switch is a guarded network switch that
+  ## recovery reverts WITHOUT replaying it (spec §4.5 step 4, §13 decision
+  ## 87): the revert carries the guard, and the attempt is recorded
+  ## `rolled-back` with ``EAddOnNetworkGuard`` and that reason.
   var now = prior
   try: now = readPendingMarker(stateDir)
   except CatchableError: discard
@@ -7042,14 +7419,20 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
   if planUsable:
     for u in plan.activeUnits:
       if u notin assume: assume.add(u)
-  let reason = "the replay of the interrupted switch failed: " & replayError &
-    " (reverted from " & backFrom & ")"
+  let reason =
+    if guardReason.len > 0:
+      guardDiagnostic(guardReason) & " (reverted by " &
+        "recovery from " & backFrom & ")"
+    else:
+      "the replay of the interrupted switch failed: " & replayError &
+        " (reverted from " & backFrom & ")"
   let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
     hostIdentity: readHostname(), ownProfileText: back.own,
     userProfileText: back.user, storedTarget: true, driver: driver,
     purpose: "revert",
     assumeActive: assume, revertOf: prior.attempt, revertReason: reason,
     revertSnapshot: prior.rootSnapshot,
+    revertGuardAttempt: (if guardReason.len > 0: prior.guardAttempt else: ""),
     nonBlockingStarts: nonBlockingStarts, confirmCapSec: confirmCapSec))
   # Step 2 disabled the units the switch was removing, recording each
   # first. When the switch got no further, their files are still the old
@@ -7066,7 +7449,8 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
         discard runSystemctl(["enable", "--", u])
     except CatchableError:
       discard        # reported by the next check as drift
-  recordRolledBack(stateDir, prior.attempt, fromGen, r.generationId, reason,
+  if guardReason.len == 0:   # a guarded revert recorded it at its step 9
+    recordRolledBack(stateDir, prior.attempt, fromGen, r.generationId, reason,
                    false)
   # The recovery completed the revert: it deletes the attempt's root
   # snapshot (spec §13 decisions 105, 119).

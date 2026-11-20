@@ -116,6 +116,17 @@ type
       ## default, `ifConfigured`, applies). The value is checked when the
       ## compiled profile is rendered to the text form
       ## (`repro_infra.rootSnapshotValueError`).
+    networkGuardDeclared*: bool
+      ## `networkGuard:` (§4.5, §8.5) is declared. Its fields below are
+      ## checked when the compiled profile is rendered to the text form
+      ## (`repro_infra.parseNetworkGuardStanza`).
+    networkGuardTimeoutSec*: int
+      ## `networkGuard: timeout: <seconds>`; 0 when not declared.
+    networkGuardKeep*: seq[string]
+      ## Each `keep` record rendered as the text form writes it,
+      ## `"<interface> <prefix>"`.
+    networkGuardOutOfBand*: seq[string]
+      ## `networkGuard: outOfBand: [...]`, link names.
 
   BaseOsBootFile* = object
     ## One boot firmware file of a `baseOs:` section (`config.txt`,

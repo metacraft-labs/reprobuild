@@ -63,6 +63,9 @@ import ./store_custody
 import ./store_root
 import ./switch
 import ./takeover
+import ./guard_lock
+import ./network_guard
+import ./network_link
 
 
 type
@@ -101,6 +104,9 @@ type
       ## Store evidence still on disk after a removal that should have
       ## taken it (no ``--keep-store``): a failed or refused removal of
       ## ``/repro``. Neither discarded nor kept (round 10).
+    guardUnitPasses*: seq[string]
+      ## The network guard's unit loop (spec §6.4 step 5): one line per
+      ## pass, what it stopped, until none was left.
     undone*: HashSet[string]
       ## ``<class> <path>`` of every ledger entry this run undid; what the
       ## kept ledger of an incomplete run drops.
@@ -840,7 +846,10 @@ proc pendingSwitchRefusal*(stateDir: string;
         ", " & (if m.purpose.len > 0: m.purpose else: "apply") &
         " from generation " &
         (if m.fromGeneration.len > 0: m.fromGeneration else: "none") &
-        ", step " & $m.step & ", owner pid " & $m.ownerPid & ")"
+        ", step " & $m.step & ", owner pid " & $m.ownerPid &
+        (if m.guardAttempt.len > 0: ", network guard " & m.guard &
+           (if m.guardReason.len > 0: " (" & m.guardReason & ")" else: "")
+         else: "") & ")"
     except CatchableError as e:
       what = " (unreadable: " & e.msg & ")"
     return "a switch is pending: " & pendingMarkerPath(dir) & what &
@@ -989,6 +998,21 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
       except CatchableError as ex:
         result.errors.add("dpkg-divert --remove " & dv.path & ": " & ex.msg)
 
+  # The `network` class's connections (spec §4.5): each one still as the
+  #    ledger recorded it is deactivated and its keyfile removed (`nmcli
+  #    connection delete`), taking its link and addresses with it; one that
+  #    changed is left as drift.
+  for n in byClass[lcNetwork]:
+    let d = observeDrift(n)
+    if d.len > 0 and d != "missing":
+      result.drift.add(n.path & ": " & d)
+      continue
+    let p = removeNetworkObject(n.path, n.value, n.unit)
+    if p.len > 0:
+      result.errors.add(p)
+    else:
+      if d != "missing": result.removed.add(n.path)
+      result.undone.incl(entryKey(n))
   # 4. /etc files (those a diversion step did not already take), then the
   #    directories the add-on created, deepest first; the kernel values
   #    sysctl fragments set go back to what the ledger recorded before.
@@ -1060,6 +1084,17 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    the recipient key among it (threat model T61). One that cannot be
   #    deleted is reported with `EAddOnSnapshotLeft` and keeps the
   #    uninstall incomplete, like drift.
+  #    The network guard's leftovers (spec §6.4 step 5; §13 decisions 122,
+  #    124): every `repro-addon-guard-*` unit is stopped, pass after pass
+  #    until none remain (a firing between two passes arms a successor,
+  #    which the next pass stops), and only then is the guard lock
+  #    deleted, its absence tolerated. This runs whether or not the
+  #    uninstall ends complete. The out-of-store guard binary
+  #    (`/var/lib/repro/bin/repro`) goes with the state below, after it.
+  for line in stopEveryGuardUnit():
+    result.guardUnitPasses.add(line)
+  if removeGuardLock():
+    result.removed.add(guardLockPath)
   block:
     let snaps = deleteEveryAddonSnapshot(stateDir, hostSnapshotSite())
     for n in snaps.deleted: result.removed.add("root snapshot " & n)

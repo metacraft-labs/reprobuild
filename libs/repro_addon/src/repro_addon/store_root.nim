@@ -63,13 +63,18 @@ const
 # the plan it prints names the exact store paths generation 0 will use.
 # ---------------------------------------------------------------------------
 
-proc binaryPrefixId*(binarySha256: string): PrefixIdBytes =
-  computeRealizationHash(BinaryPackage, ReprobuildVersion, "addon-bootstrap",
+proc binaryPrefixId*(binarySha256: string;
+                     version = ReprobuildVersion): PrefixIdBytes =
+  computeRealizationHash(BinaryPackage, version, "addon-bootstrap",
     "", "bin/repro", provenanceChecksum = "sha256:" & binarySha256)
 
-proc binaryPrefixPath*(binarySha256: string): string =
-  StoreRoot / prefixRelativePath(BinaryPackage, ReprobuildVersion,
-                                 binaryPrefixId(binarySha256))
+proc binaryPrefixPath*(binarySha256: string;
+                       version = ReprobuildVersion): string =
+  ## The add-on binary's prefix: content-addressed by the binary's SHA-256
+  ## (and the version that realised it), so the path itself says which
+  ## bytes ``bin/repro`` in it must hold.
+  StoreRoot / prefixRelativePath(BinaryPackage, version,
+                                 binaryPrefixId(binarySha256, version))
 
 proc reproExeFor*(binarySha256: string): string =
   binaryPrefixPath(binarySha256) / "bin" / "repro"

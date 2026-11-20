@@ -44,8 +44,16 @@ type
       ## after the switch's daemon-reload, does not hold the floor it was
       ## rendered under (spec §10.1): nothing was started.
     adNetworkGuard = "EAddOnNetworkGuard"
-      ## A `network` generation failed one of the guard's invariants and was
-      ## reverted.
+      ## The network guard (spec §4.5): a `network` generation failed one of
+      ## the guard's invariants, or its timer fired, and was reverted
+      ## (recorded `rolled-back`); or, before the switch, an address another
+      ## LAN device holds answered the duplicate-address probe, or what the
+      ## guard checks is not on the host.
+    adGuardTimer = "EAddOnGuardTimer"
+      ## Arming a network-guard timer failed (`systemd-run` refused, or the
+      ## guard's static `repro` copy is missing and the store is unreadable;
+      ## spec §4.5 step 4, §13 decisions 125-128). Before a switch the apply
+      ## refuses; during a revert it is reported and the revert goes on.
     adSwitchPending = "EAddOnSwitchPending"
       ## Uninstall refused because a switch's pending marker exists (spec
       ## §6.4 step 0, §8.4): finish the switch or run `repro system addon

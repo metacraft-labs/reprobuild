@@ -1431,6 +1431,11 @@ proc unitReach*(r: SystemResource; p: SystemProfile; lookup: AccountLookup;
     # (sysusers does not create a home), /etc/localtime, /etc/hostname, a
     # sysctl.d file, a firewall rule, a wrapper in /etc/repro/bin.
     result = UnitReach()
+  of srkLinuxNetworkLink:
+    # Its own keyfile in NetworkManager's connection directory and the
+    # link it creates (§4.5); it runs nothing and reaches no service's
+    # state.
+    result = UnitReach()
   of srkEnvSystemVariable, srkLinuxUdevRule, srkLinuxPolkitRule,
      srkLinuxSudoersRule, srkPasswdGroup, srkLinuxNixDaemonSetting,
      srkLinuxNixosSystemModule, srkLinuxFhsSandbox:

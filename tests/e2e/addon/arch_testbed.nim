@@ -190,6 +190,8 @@ const ArchBootVariance* = ["active-units:dev-disk-by*.swap", "mounts:/dev",
                           "mounts:/run", "mounts:/tmp", "mounts:/efi",
                           "sysctl:net.ipv4.tcp_rmem", "sysctl:net.ipv4.tcp_wmem",
                           "sysctl:net.ipv4.tcp_mem", "sysctl:net.ipv4.udp_mem",
+                          "sysctl:fs.fanotify.max_user_marks",
+                          "sysctl:user.max_fanotify_marks",
                           "active-units:snapperd.service",
                           "active-units:NetworkManager-dispatcher.service",
                           "active-units:efi.mount", "mounts:/efi#*"]
@@ -201,7 +203,9 @@ const ArchBootVariance* = ["active-units:dev-disk-by*.swap", "mounts:/dev",
   ## name the descriptor and pipe inode systemd gave it at this boot; and
   ## the TCP and UDP buffer limits the kernel derives from the memory free
   ## at boot (``tcp_rmem``'s maximum moved by 32 bytes; ip-sysctl in the
-  ## kernel's documentation). And, on the Omarchy VM, whether snapper's
+  ## kernel's documentation), and the fanotify mark limits it sizes the
+  ## same way (``fs.fanotify.max_user_marks`` moved by 4 across two boots
+  ## of the Omarchy VM, AR5's guard gate, 2026-11-20). And, on the Omarchy VM, whether snapper's
   ## D-Bus service is up: any ``snapper`` call starts it (the switch's own
   ## root snapshot among them) and its idle timeout stops it, so within one
   ## boot as across two it is a matter of timing; so is whether

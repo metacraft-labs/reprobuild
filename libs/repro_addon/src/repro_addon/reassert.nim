@@ -64,6 +64,8 @@ import ./addon_secrets
 import ./secrets_ops
 import ./switch
 import ./transitions
+import ./network_guard
+import ./network_switch
 
 type
   ReassertReport* = object
@@ -170,7 +172,10 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   let dropped = pruneGenerationRoots(current, previous,
     held = heldGenerations(stateDir, ledger, current))
   var notes = deleteGenerationSnapshots(stateDir, dropped, hostSnapshotSite())
-  if m.purpose == "revert":
+  if m.purpose == "revert" and not (m.guardAttempt.len > 0 and
+      hasRolledBackRecord(stateDir, m.revertOf)):
+    # (A guarded revert records it at its own step 9, before its marker
+    # goes; only one that died before doing so is recorded here.)
     recordRolledBack(stateDir, m.revertOf, m.fromGeneration, current,
       m.revertReason & " (the revert was finished at boot)", false)
     # This recovery completed the revert: the reverted attempt's root
@@ -184,6 +189,134 @@ proc finishCommittedSwitch(stateDir: string; m: PendingMarker): seq[string] =
   if fileExists(floorHoldPath(stateDir)): removeFile(floorHoldPath(stateDir))
   @["the switch to " & current & " had committed (marker at step " &
     $m.step & "); finished its step 9"] & notes
+
+proc commitStagedGeneration(stateDir, attempt: string): string =
+  ## Commit ``attempt`` from the envelope its apply staged before the
+  ## after-hook (``ApplyPhaseHooks.stageEnvelope``): the envelope durably
+  ## in place, then `current` moved by a rename. "" on success, else why
+  ## not. Neither replays nor re-confirms anything (§13 decision 117).
+  let staged = stagedEnvelopePath(stateDir, attempt)
+  if not fileExists(staged):
+    return "no staged envelope at " & staged
+  try:
+    let env = readGenerationEnvelope(staged)
+    if env.generationId != attempt:
+      return staged & " stages generation " & env.generationId & ", not " &
+        attempt
+    writeGenerationEnvelope(pointerPath(stateDir, attempt), env)
+    writeCurrentGenerationId(stateDir, attempt)
+  except CatchableError as e:
+    return "the commit failed: " & e.msg
+  ""
+
+proc recoverGuardedMarker(stateDir: string; m: PendingMarker; atBoot: bool;
+                          driver: CollisionDriver;
+                          confirmCap: int): RecoveryOutcome =
+  ## A network switch's marker (spec §4.5 step 4 and its table; §13
+  ## decisions 87, 102, 117, 121, 123, 125, 126), decided before anything
+  ## else. The caller holds the host apply lock, so the owner is dead (or
+  ## this is its own recovery).
+  ##
+  ## - ``disarmed``: its checks passed; it is committed (from the staged
+  ##   envelope when `current` does not name it yet) without a replay or a
+  ##   re-confirmation, and any timer of the attempt is stopped. A commit
+  ##   that fails leaves the marker ``disarmed``, reported.
+  ## - ``armed`` in this boot with a timer of the attempt pending: the
+  ##   timer is the actor; recovery reports it and changes nothing.
+  ## - every other un-disarmed state is reverted, never replayed: ``armed``
+  ##   with no timer ("armed, its timer gone") or from an earlier boot
+  ##   ("armed across a reboot"), ``fired`` and ``reverting`` (their
+  ##   reason, with "; revert interrupted by a reboot" after a reboot). A
+  ##   fresh guard timer is armed first when none of the attempt's is
+  ##   loaded -- always after a reboot -- and the network objects are put
+  ##   back from the guard's record before the revert. The attempt's
+  ##   timers are stopped last.
+  let g = readGuardedMarker(stateDir)
+  let mm = if g.present: g.marker else: m
+  let attempt = mm.guardAttempt
+  let boot = currentBootId()
+  let armedBoot = if mm.guardBoot.len > 0: mm.guardBoot else: mm.ownerBoot
+  let sameBoot = armedBoot.len > 0 and armedBoot == boot
+  let current = readCurrentGenerationId(stateDir)
+  if mm.guard == "disarmed":
+    if mm.attempt.len == 0:
+      return RecoveryOutcome(resolved: false, lines: @["the network guard " &
+        "is disarmed but the marker names no attempt to commit; the marker " &
+        "stays"])
+    if current != mm.attempt:
+      let why = commitStagedGeneration(stateDir, mm.attempt)
+      if why.len > 0:
+        return RecoveryOutcome(resolved: false, lines: @["the network " &
+          "generation " & mm.attempt & " was disarmed; committing it failed (" &
+          why & "); the marker stays `disarmed`, nothing is reverted, and " &
+          "the next recovery retries the commit (§13 decision 117)"])
+    result.lines.add(finishCommittedSwitch(stateDir, mm))
+    result.lines.add("committed the disarmed network generation " &
+      mm.attempt & " without replaying or re-confirming it (§13 decision 117)")
+    for n in finishGuardRevert(stateDir, attempt): result.lines.add(n)
+    result.resolved = true
+    return
+  if mm.guard == "armed" and sameBoot and loadedGuardTimers(attempt).len > 0:
+    return RecoveryOutcome(resolved: true, deferred: true, lines: @["the " &
+      "network guard of attempt " & attempt & " is armed and its timer is " &
+      "pending: the timer is the actor; recovery changes nothing"])
+  var reason =
+    case mm.guard
+    of "armed": (if sameBoot: TimerGoneReason else: ArmedAcrossRebootReason)
+    else:
+      (if mm.guardReason.len > 0: mm.guardReason else: mm.guard) &
+        (if sameBoot: "" else: InterruptedByRebootSuffix)
+  let b = beginGuardRevert(stateDir, mm, reason)
+  result.lines.add(b.notes)
+  if mm.guard == "armed": reason = b.reason
+  try:
+    for p in restoreNetworkObjects(readGuardRecord(stateDir)):
+      result.lines.add("network restore: " & p)
+  except CatchableError as e:
+    result.lines.add("network restore: the guard record is unreadable: " &
+      e.msg)
+  if mm.purpose == "revert":
+    # The revert of the attempt was itself interrupted: it is finished by
+    # replaying it (a revert is never reverted).
+    let cap = if atBoot: BootConfirmCapSec else: 0
+    try:
+      # The replayed revert records `rolled-back` itself, with this
+      # reason, before its marker goes (spec §4.5 step 4).
+      let r = runAddonApply(AddonApplyOptions(stateDir: stateDir,
+        hostIdentity: readHostname(), replay: true, purpose: "replay",
+        driver: driver, nonBlockingStarts: atBoot,
+        revertOf: mm.revertOf, revertReason: guardDiagnostic(reason) &
+          " (the revert was finished by recovery)",
+        replayOf: mm.purpose, confirmCapSec: cap))
+      if mm.revertSnapshot.len > 0:
+        result.lines.add(deleteSnapshotByKey(stateDir, mm.revertSnapshot,
+          "the recovery's revert", hostSnapshotSite()).left)
+      result.lines.add("finished the network guard's revert: generation " &
+        r.generationId & " is current (" & reason & ")")
+    except CatchableError as e:
+      result.lines.add("the network guard's revert could not be finished " &
+        "(" & e.msg & "); the marker keeps its state and the attempt's " &
+        "timer, or the next recovery, finishes it")
+      return
+  else:
+    try:
+      let rv = revertAfterFailedReplay(stateDir, mm, "", driver,
+        nonBlockingStarts = atBoot, confirmCapSec = confirmCap,
+        guardReason = reason)
+      if not rv.reverted:
+        result.lines.add("the network switch could not be reverted: " &
+          rv.why & "; the marker stays for an operator")
+        return
+      result.lines.add("reverted the network switch (" & reason & ") to " &
+        mm.fromGeneration & ", re-applied as generation " & rv.generationId)
+      result.lines.add(rv.snapshotLeft)
+    except CatchableError as e:
+      result.lines.add("the network guard's revert could not be completed " &
+        "(" & e.msg & "); the marker keeps its state and the attempt's " &
+        "timer, or the next recovery, finishes it")
+      return
+  for n in finishGuardRevert(stateDir, attempt): result.lines.add(n)
+  result.resolved = true
 
 proc recoverMarker(stateDir: string; atBoot: bool;
                    driver: CollisionDriver = nil): RecoveryOutcome =
@@ -210,7 +343,29 @@ proc recoverMarker(stateDir: string; atBoot: bool;
   # interrupted switch is not silently left to the next boot.
   var (hostLock, holder, holderPids) =
     tryAcquireHostApplyLock("add-on switch recovery")
-  if holder.len > 0:
+  if holder.len > 0 and m.guardAttempt.len > 0 and not atBoot:
+    # `repro system addon recover` (or an apply's pending check) while the
+    # owner of a network switch is alive waits for the host apply lock as
+    # any apply does, bounded, and then acts on whatever the marker says,
+    # or finds it gone (spec §4.5 step 4's table). The re-assert unit
+    # defers to it instead (below).
+    try:
+      hostLock = acquireHostApplyLock("add-on switch recovery")
+    except ELockTimeout as e:
+      return RecoveryOutcome(resolved: false,
+        lines: @["the network switch's owner holds the host apply lock: " &
+                 e.msg & "; nothing was changed"])
+    if not hasPendingMarker(stateDir):
+      hostLock.release()
+      return RecoveryOutcome(resolved: true, lines: @["waited for the " &
+        "switch that held the host apply lock; its marker is gone, so " &
+        "there is nothing to recover"])
+    try: m = readPendingMarker(stateDir)
+    except CatchableError as e:
+      hostLock.release()
+      return RecoveryOutcome(resolved: false,
+        lines: @["the pending marker is unreadable: " & e.msg])
+  elif holder.len > 0:
     if markerOwnerLive(m) and m.ownerPid in holderPids:
       return RecoveryOutcome(resolved: true, deferred: true,
         lines: @["the switch that owns the pending marker (pid " &
@@ -240,6 +395,22 @@ proc recoverMarker(stateDir: string; atBoot: bool;
     m.status & ", last step completed " & $m.step & ")"
   result.lines.add(header)
   let current = readCurrentGenerationId(stateDir)
+  # A network switch's guard is decided before anything below (spec §7.2
+  # *Recovery*, §4.5 step 4): it is committed only once disarmed, and
+  # otherwise reverted, never replayed.
+  var guardedHere = m.guardAttempt.len > 0
+  when mutated("recovery-replays-armed"):
+    # FALSIFYING MUTATION (e2e_omarchy_addon_network_guard_reverts_lost_address,
+    # control (a) after a reboot): an `armed` network marker falls through
+    # to the replay below, re-applying the generation that cut the host off.
+    if m.guard == "armed": guardedHere = false
+  if guardedHere:
+    let r = recoverGuardedMarker(stateDir, m, atBoot, driver,
+                                 if atBoot: BootConfirmCapSec else: 0)
+    result.lines.add(r.lines)
+    result.resolved = r.resolved
+    result.deferred = r.deferred
+    return
   if m.attempt.len > 0 and current == m.attempt:
     try:
       result.lines.add(finishCommittedSwitch(stateDir, m))
@@ -691,3 +862,112 @@ proc runAddonReassert*(stateDir = DefaultStateDir; atBoot = false;
   except CatchableError:
     discard
   recordReassertEvidence(result, stateDir, atBoot)
+
+# ---------------------------------------------------------------------------
+# The guard's verbs: `revert-network` (the timer's) and `confirm`.
+# ---------------------------------------------------------------------------
+
+proc runRevertNetwork*(stateDir, previous, attempt, reason: string): int =
+  ## ``repro system addon revert-network <previous> --attempt <id>
+  ## [--reason <text>]``: what a guard timer runs, from the out-of-store
+  ## copy ``/var/lib/repro/bin/repro`` (spec §4.5 step 4, "revert-network,
+  ## when its timer fires"):
+  ##
+  ## 1. arm the successor (10 s, decision 109) before waiting for anything;
+  ## 2. take the guard lock (blocking); with no marker of this attempt, or
+  ##    a ``disarmed`` one, stop the successor and exit 0 changing nothing
+  ##    else; otherwise name the successor as the current timer;
+  ## 3. on ``armed``: write ``fired`` with its own reason ("guard timer
+  ##    fired", or ``--reason`` for a fresh timer) and put the previous
+  ##    generation's network objects back from the guard's record -- no
+  ##    store needed;
+  ## 4. try the host apply lock without waiting: with it (the owner is
+  ##    dead), complete the revert as recovery does, which stops the
+  ##    attempt's timers last; without it, or when the revert cannot
+  ##    complete (the store unreadable), leave the successor armed.
+  ##
+  ## Never refuses: always exit 0, everything said on stdout (the journal).
+  let own = ownGuardUnit()
+  let tag = if own.len > 0: own else: "revert-network"
+  proc say(s: string) = stdout.writeLine(tag & ": " & s)
+  # 1.
+  let succ = armGuardTimer(stateDir, attempt, previous, reason,
+                           SuccessorIntervalSec)
+  if succ.problem.len > 0:
+    say(succ.problem & "; going on with no successor (§13 decisions 125, 126)")
+  else:
+    say("armed the successor " & succ.unit & " (" & $SuccessorIntervalSec & " s)")
+  seamPause(stateDir, "revert-network-before-lock")
+  # 2-3.
+  var before = ""
+  let firedReason = if reason.len > 0: reason else: GuardTimerReason
+  let u = updateGuardedMarker(stateDir, attempt,
+    proc (m: var PendingMarker): bool =
+      before = m.guard
+      if m.guard == "disarmed": return false
+      if succ.unit.len > 0: m.guardTimer = succ.unit
+      if m.guard == "armed":
+        m.guard = "fired"
+        m.guardReason = firedReason
+      true)
+  if not u.found or before == "disarmed":
+    if succ.unit.len > 0: stopGuardUnit(succ.unit)
+    say((if not u.found: "no pending marker names attempt " & attempt
+         else: "the guard of attempt " & attempt & " is disarmed") &
+        "; stopped the successor, changed nothing else")
+    return 0
+  if before == "armed":
+    say("the guard of attempt " & attempt & " fired (" & firedReason & ")")
+    try:
+      let problems = restoreNetworkObjects(readGuardRecord(stateDir))
+      if problems.len == 0:
+        say("restored the previous generation's network objects")
+      for p in problems: say("network restore: " & p)
+    except CatchableError as e:
+      say("network restore: the guard record is unreadable: " & e.msg)
+  else:
+    say("the guard of attempt " & attempt & " is " & before &
+        "; its network restore is done or the reverting actor's")
+  seamPause(stateDir, "revert-network-mid-revert")
+  # 4.
+  var (hostLock, holder, _) = tryAcquireHostApplyLock("network guard revert")
+  if holder.len > 0:
+    say("the host apply lock is held (" & holder & "); the successor stays " &
+        "armed")
+    return 0
+  defer: hostLock.release()
+  let r = recoverPendingSwitch(stateDir, atBoot = false)
+  for l in r.lines: say(l)
+  if not r.resolved:
+    say("the revert did not complete; the successor stays armed")
+  0
+
+proc runConfirm*(stateDir, generation: string): int =
+  ## ``repro system addon confirm <gen>`` (spec §4.5 step 3): from an SSH
+  ## session created after the switch began (logind's creation time,
+  ## threat model T55), confirm the pending network generation; the
+  ## watching apply disarms on it once every invariant holds.
+  if not hasPendingMarker(stateDir):
+    stderr.writeLine("confirm: no switch is pending")
+    return 2
+  let m = readPendingMarker(stateDir)
+  if m.guardAttempt.len == 0 or m.guard != "armed":
+    stderr.writeLine("confirm: the pending switch has no armed network " &
+      "guard (" & (if m.guard.len > 0: m.guard else: "none") & ")")
+    return 2
+  if generation != m.attempt:
+    stderr.writeLine("confirm: the pending network generation is " &
+      (if m.attempt.len > 0: m.attempt else: "(not yet allocated)") &
+      ", not " & generation)
+    return 2
+  let s = readLogindSession(sessionOfPid(getCurrentProcessId()))
+  let why = confirmProblem(s, m.guardStartMono)
+  if why.len > 0:
+    stderr.writeLine("confirm: refused: " & why & "; the switch is not " &
+      "confirmed (spec §4.5 step 3)")
+    return 1
+  writeConfirm(stateDir, m.guardAttempt, s.id)
+  stdout.writeLine("confirm: generation " & generation & " confirmed from " &
+    "SSH session " & s.id & " (" & s.remoteHost & "); the apply disarms " &
+    "the guard once every invariant holds")
+  0

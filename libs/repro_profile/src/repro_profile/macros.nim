@@ -1143,10 +1143,76 @@ proc parseAddOnSection(body: NimNode; profileVar: NimNode): NimNode =
         result.add quote do:
           `profileVar`.addOn.rootSnapshot = `setting`
         continue
+      if entry[0].kind == nnkIdent and $entry[0] == "networkGuard":
+        # `networkGuard:` (§4.5, §8.5): `timeout: <seconds>`, `keep:` a
+        # block of `- { interface: "eno1", prefix: "192.168.100.0/24" }`
+        # records (or `"eno1 192.168.100.0/24"` strings), `outOfBand:` a
+        # list of link names. Validated as the text form's stanza when
+        # the compiled profile is rendered to it.
+        if entry.len < 2 or entry[1].kind != nnkStmtList:
+          error("networkGuard: expects an indented block", entry)
+        result.add quote do:
+          `profileVar`.addOn.networkGuardDeclared = true
+        for g in entry[1]:
+          if g.kind == nnkCommentStmt: continue
+          if g.kind != nnkCall or g[0].kind != nnkIdent or g.len < 2 or
+              g[1].kind != nnkStmtList:
+            error("networkGuard: expected `timeout:`, `keep:` or " &
+                  "`outOfBand:`", g)
+          case $g[0]
+          of "timeout":
+            if g[1].len != 1 or g[1][0].kind notin {nnkIntLit .. nnkInt64Lit}:
+              error("networkGuard timeout: expects a whole number of " &
+                    "seconds", g)
+            let secs = newIntLitNode(g[1][0].intVal)
+            result.add quote do:
+              `profileVar`.addOn.networkGuardTimeoutSec = `secs`
+          of "keep":
+            for k in g[1]:
+              if k.kind == nnkCommentStmt: continue
+              var iface, prefix = ""
+              var rendered = ""
+              if k.kind in {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+                rendered = k.strVal
+              elif k.kind == nnkPrefix and $k[0] == "-" and
+                  k[1].kind == nnkTableConstr:
+                for kv in k[1]:
+                  if kv.kind != nnkExprColonExpr or kv[0].kind != nnkIdent or
+                      kv[1].kind notin {nnkStrLit, nnkRStrLit}:
+                    error("networkGuard keep: expects `interface:` and " &
+                          "`prefix:` string fields", kv)
+                  case $kv[0]
+                  of "interface": iface = kv[1].strVal
+                  of "prefix": prefix = kv[1].strVal
+                  else: error("networkGuard keep: unknown field " &
+                              $kv[0], kv)
+                if iface.len == 0 or prefix.len == 0:
+                  error("networkGuard keep: needs interface and prefix", k)
+                rendered = iface & " " & prefix
+              else:
+                error("networkGuard keep: expected `- { interface: ..., " &
+                      "prefix: ... }`", k)
+              let lit = newStrLitNode(rendered)
+              result.add quote do:
+                `profileVar`.addOn.networkGuardKeep.add `lit`
+          of "outOfBand":
+            let items = if g[1].len == 1 and g[1][0].kind == nnkBracket: g[1][0]
+                        else: g[1]
+            for l in items:
+              if l.kind == nnkCommentStmt: continue
+              if l.kind notin {nnkStrLit, nnkRStrLit}:
+                error("networkGuard outOfBand: expects link names", l)
+              let lit = newStrLitNode(l.strVal)
+              result.add quote do:
+                `profileVar`.addOn.networkGuardOutOfBand.add `lit`
+          else:
+            error("networkGuard: unknown field " & $g[0] &
+                  " (known: timeout, keep, outOfBand)", g)
+        continue
       if entry[0].kind != nnkIdent or $entry[0] != "managedEtcPrefixes":
         error("addOn: unknown field " & entry[0].repr &
               " (known: managedEtcPrefixes, confirmTimeout, " &
-              "omarchyAccount, rootSnapshot)", entry)
+              "omarchyAccount, rootSnapshot, networkGuard)", entry)
       if entry.len < 2 or entry[1].kind != nnkStmtList:
         error("managedEtcPrefixes must be an indented block of string " &
               "literals", entry)

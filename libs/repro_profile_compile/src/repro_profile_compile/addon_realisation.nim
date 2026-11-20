@@ -161,6 +161,21 @@ proc archCollisionCheck(value: FieldValue): string =
       "other package file has no opt-in (spec §4.3.1)"
   ""
 
+proc routingOnlyDomainsCheck(value: FieldValue): string =
+  ## `linux.networkLink.dnsDomains`: every domain must be routing-only
+  ## (`~home.arpa`); a plain domain is a search domain for every name on
+  ## the host, which the class may not declare (spec §4.5).
+  let items = case value.kind
+    of fvkList: value.items
+    of fvkString: value.s.split(',')
+    else: @[]
+  for d in items:
+    let t = d.strip()
+    if t.len > 0 and not t.startsWith("~"):
+      return "`" & t & "` is a search domain for every name on the host; " &
+        "a link's DNS domains are routing-only (`~" & t & "`), spec §4.5"
+  ""
+
 proc shared(fields: varargs[string]): seq[FieldRule] =
   for f in fields:
     result.add FieldRule(field: f, class: fcShared)
@@ -254,6 +269,20 @@ proc addOnDebianProfile*(): RealisationProfile =
           reason: "must name a chain of `" & AddOnFirewallTable & "`",
           check: firewallChainCheck)] &
         shared("name", "protocol", "direction", "localPort", "action")),
+    KindRule(kind: "linux.networkLink", class: fcAddOnSpecific,
+      reason: "the opt-in `network` class: an additional ipvlan, macvlan " &
+        "or dummy link with static addresses, realised as a " &
+        "NetworkManager keyfile under the network guard, applied only by " &
+        "an operator (spec §4.5)",
+      fields: shared("name", "kind", "parentMac", "addresses",
+                     "dnsServers") &
+        @[FieldRule(field: "dnsDomains", class: fcAddOnSpecific,
+            reason: "routing-only DNS domains served by the link's own " &
+              "servers (spec §4.5); a gateway, DHCP, a parent setting, a " &
+              "global DNS server or search domain and a dependency on a " &
+              "foreign connection have no constructor field, and the text " &
+              "form's are refused at plan time (`EAddOnOutOfScope`)",
+            check: routingOnlyDomainsCheck)]),
     KindRule(kind: "linux.dpkgDiversion", class: fcAddOnSpecific,
       reason: "the opt-in diversion class: a package-owned file the add-on " &
         "replaces through `dpkg-divert --local --rename`, recorded in the " &

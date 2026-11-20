@@ -104,6 +104,13 @@ const
     ## (ReproOS-Add-On-Mode §7.2, §8.5), as the text `required`,
     ## `ifConfigured` or `off`. Optional; omitted when not declared, so a
     ## section without it encodes as before.
+  KeyNetworkGuard = "networkGuard"
+    ## Inside the `addOn` map: the network guard (ReproOS-Add-On-Mode §4.5,
+    ## §8.5), a map of `timeout` (unsigned), `keep` and `outOfBand` (text
+    ## arrays). Optional; omitted when not declared.
+  KeyGuardTimeout = "timeout"
+  KeyGuardKeep = "keep"
+  KeyGuardOutOfBand = "outOfBand"
   KeyConfirmTimeout = "confirmTimeout"
     ## Inside the `addOn` map: the add-on switch's `confirmTimeout` in
     ## seconds (ReproOS-Add-On Mode §7.5), as an unsigned integer. Optional;
@@ -375,6 +382,13 @@ proc encodeProfileIntent(p: ProfileIntent): DynamicValue =
       ao.add entry(KeyOmarchyAccount, cborText(p.addOn.omarchyAccount))
     if p.addOn.rootSnapshot.len > 0:
       ao.add entry(KeyRootSnapshot, cborText(p.addOn.rootSnapshot))
+    if p.addOn.networkGuardDeclared:
+      ao.add entry(KeyNetworkGuard, cborMap(@[
+        entry(KeyGuardTimeout,
+              cborUInt(uint64(max(p.addOn.networkGuardTimeoutSec, 0)))),
+        entry(KeyGuardKeep, encodeStringArray(p.addOn.networkGuardKeep)),
+        entry(KeyGuardOutOfBand,
+              encodeStringArray(p.addOn.networkGuardOutOfBand))]))
     entries.add entry(KeyAddOn, cborMap(ao))
   if p.baseOs.declared:
     entries.add entry(KeyBaseOs, cborText(encodeBaseOs(p.baseOs)))
@@ -727,6 +741,22 @@ proc decodeProfileIntentFromBytes*(bytes: openArray[byte]): ProfileIntent =
         raiseRbpiCorrupt("body", "addOn.rootSnapshot must be required, " &
           "ifConfigured or off")
       result.addOn.rootSnapshot = setting
+    var ngFound = false
+    let ng = lookupOpt(ao, KeyNetworkGuard, ngFound)
+    if ngFound:
+      let g = expectMap(ng, KeyNetworkGuard)
+      let t = lookup(g, KeyGuardTimeout, KeyNetworkGuard)
+      if t.kind != dvUInt or t.uintValue > 86400'u64:
+        raiseRbpiCorrupt("body", "addOn.networkGuard.timeout must be a " &
+          "number of seconds")
+      result.addOn.networkGuardDeclared = true
+      result.addOn.networkGuardTimeoutSec = int(t.uintValue)
+      for it in expectArray(lookup(g, KeyGuardKeep, KeyNetworkGuard),
+                            KeyGuardKeep):
+        result.addOn.networkGuardKeep.add expectText(it, KeyGuardKeep)
+      for it in expectArray(lookup(g, KeyGuardOutOfBand, KeyNetworkGuard),
+                            KeyGuardOutOfBand):
+        result.addOn.networkGuardOutOfBand.add expectText(it, KeyGuardOutOfBand)
   # ReproOS add-on mode A16: the `baseOs:` section is OPTIONAL on the wire.
   # A malformed one is corrupt, never dropped.
   var boFound = false

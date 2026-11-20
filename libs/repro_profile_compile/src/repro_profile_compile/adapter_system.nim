@@ -682,6 +682,20 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       seHome: fieldString(r, "home"),
       seShell: fieldString(r, "shell"))
     checkSysusersEntryResource(result)
+  of "linux.networkLink":
+    # The text form's own field checks (`repro_infra.parseNetworkLinkFields`),
+    # fed the intent's fields as the text form would carry them, so a
+    # compiled and a hand-written link are judged by one routine.
+    var fields, rawFields = initTable[string, string]()
+    for k, v in r.fields:
+      fields[k] = fieldString(r, k)
+      if v.kind == fvkList:
+        var items: seq[string]
+        for it in v.items: items.add(quoteSystemValue(it))
+        rawFields[k] = "[" & items.join(", ") & "]"
+      else:
+        rawFields[k] = quoteSystemValue(fields[k])
+    result = parseNetworkLinkFields(fields, rawFields)
   of "linux.fhsSandbox":
     # Linux-Third-Party-Sandbox-MVP M1. The closed-set / shape checks
     # mirror the `parseSystemProfile` arm in repro_infra/profile.nim
@@ -1094,6 +1108,21 @@ proc adaptSystemProfile*(p: ProfileIntent;
       result.profile.addOn.rootSnapshot =
         parseRootSnapshotSetting("\"" & p.addOn.rootSnapshot & "\"")
       result.profile.addOn.rootSnapshotDeclared = true
+    if p.addOn.networkGuardDeclared:
+      # Rendered and parsed as the text form's stanza, so a compiled
+      # profile is held to exactly the hand-written one's rules (§8.5).
+      var body = ""
+      if p.addOn.networkGuardTimeoutSec > 0:
+        body.add("timeout = " & $p.addOn.networkGuardTimeoutSec & "\n")
+      var keep, oob: seq[string]
+      for k in p.addOn.networkGuardKeep: keep.add(quoteSystemValue(k))
+      for l in p.addOn.networkGuardOutOfBand: oob.add(quoteSystemValue(l))
+      body.add("keep = [" & keep.join(", ") & "]\n")
+      body.add("outOfBand = [" & oob.join(", ") & "]\n")
+      try:
+        result.profile.addOn.networkGuard = parseNetworkGuardStanza(body)
+      except ESystemProfileInvalid as e:
+        raise newException(ValueError, "addOn: " & e.msg)
   for r in selected:
     if r.kind == SecretFileStanzaTag:
       # A declaration, not a resource (`SecretFileDecl`): it is carried
@@ -1212,7 +1241,12 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
        else: "") &
       (if sp.addOn.rootSnapshotDeclared:
          "  rootSnapshot = " & quoteSystemValue($sp.addOn.rootSnapshot) & "\n"
-       else: "") & "}\n\n")
+       else: "") &
+      (block:
+        var g = ""
+        for line in renderNetworkGuardStanza(sp.addOn.networkGuard):
+          g.add(line & "\n")
+        g) & "}\n\n")
   # The secrets the profile declares (`secrets.secretFile`), each once and
   # in profile order: they are not resources, but a unit's `credentials`
   # must name one, and the apply materialises exactly these (spec
@@ -1466,6 +1500,22 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("home", quoteSystemValue(r.seHome)))
       if r.seShell.len > 0:
         pairs.add(("shell", quoteSystemValue(r.seShell)))
+    of srkLinuxNetworkLink:
+      pairs.add(("name", quoteSystemValue(r.nlName)))
+      pairs.add(("kind", quoteSystemValue(r.nlKind)))
+      if r.nlParentMac.len > 0:
+        pairs.add(("parentMac", quoteSystemValue(r.nlParentMac)))
+      pairs.add(("addresses", renderListLiteral(r.nlAddresses)))
+      if r.nlDnsServers.len > 0:
+        pairs.add(("dnsServers", renderListLiteral(r.nlDnsServers)))
+      if r.nlDnsDomains.len > 0:
+        pairs.add(("dnsDomains", renderListLiteral(r.nlDnsDomains)))
+      # What §4.5 refuses is carried, so the add-on's plan refuses it by
+      # name rather than the profile losing it on the way.
+      for (f, v) in r.nlUndeclarable:
+        # (A server with no routing domain is re-derived from dnsServers.)
+        if f != "globalDnsServers":
+          pairs.add((f, quoteSystemValue(v)))
     of srkLinuxFhsSandbox:
       pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
       pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))

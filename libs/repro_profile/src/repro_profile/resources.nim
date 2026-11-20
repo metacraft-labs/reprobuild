@@ -1399,6 +1399,40 @@ template linuxSysctl*(targetResources: var seq[ResourceIntent];
     pushResource(targetResources, "linux.sysctl", addr0, fields,
       dependsOn)
 
+template linuxNetworkLink*(targetResources: var seq[ResourceIntent];
+                           name: string;
+                           kind: string;
+                           addresses: seq[string];
+                           parentMac: string = "";
+                           dnsServers: seq[string] = @[];
+                           dnsDomains: seq[string] = @[];
+                           address: string = "";
+                           dependsOn: seq[string] = @[]) =
+  ## ReproOS add-on mode's `network` class (ReproOS-Add-On-Mode §4.5): an
+  ## ADDITIONAL link the distribution does not manage -- `ipvlan` (L2) or
+  ## `macvlan` on the parent whose MAC is `parentMac`, or `dummy` -- with
+  ## static `addresses` (CIDR) and, optionally, `dnsServers` for the
+  ## routing-only `dnsDomains` (`~home.arpa`). The link is named `name`;
+  ## its NetworkManager connection is `repro-<name>`. Applied only by an
+  ## operator, under the network guard (`addOn: networkGuard:`).
+  ##
+  ## Address default: `linux.networkLink:<name>`.
+  block:
+    var fields = initTable[string, FieldValue]()
+    fields["name"] = strField(name)
+    fields["kind"] = strField(kind)
+    if parentMac.len > 0:
+      fields["parentMac"] = strField(parentMac)
+    fields["addresses"] = listField(addresses)
+    if dnsServers.len > 0:
+      fields["dnsServers"] = listField(dnsServers)
+    if dnsDomains.len > 0:
+      fields["dnsDomains"] = listField(dnsDomains)
+    let addr0 = if address.len > 0: address
+                else: autoAddress("linux.networkLink", name)
+    pushResource(targetResources, "linux.networkLink", addr0, fields,
+      dependsOn)
+
 template linuxUdevRule*(targetResources: var seq[ResourceIntent];
                         name: string;
                         content: string;

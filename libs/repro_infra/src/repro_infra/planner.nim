@@ -259,6 +259,10 @@ proc observeResource*(r: SystemResource): ResourceObservation =
         observeLinuxFhsSandbox(op)
       of srkLinuxDpkgDiversion:
         observeLinuxDpkgDiversion(op)
+      of srkLinuxNetworkLink:
+        # Unreachable: `toPrivilegedOperation` above refuses the kind.
+        raise newException(ValueError, "linux.networkLink is observed " &
+          "by the add-on switch, not the planner")
   except ENotImplementedPlatform:
     obs.present = false
     obs.digestHex = ZeroDigestHex
@@ -443,6 +447,9 @@ proc summaryLine(r: SystemResource; action: string): string =
       ".conf" & (if r.diRestartHeld: " (restart held)" else: "")
   of srkLinuxSysusersEntry:
     action & " sysusers-entry " & r.seKind & " " & r.seName
+  of srkLinuxNetworkLink:
+    action & " network-link " & r.nlName & " (" & r.nlKind & ", " &
+      r.nlAddresses.join(" ") & ")"
   of srkLinuxFhsSandbox:
     action & " fhs-sandbox " & r.fsbBinPath &
       " (" & $r.fsbFhsTreeRoots.len & " tree-root" &

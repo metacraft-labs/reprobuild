@@ -107,6 +107,22 @@ type
       ## egress observer; owner decision 2026-11-04): ``path`` is
       ## ``<family> <name>``. Created by generation 0's observer unit,
       ## removed by uninstall; no other table is ever the add-on's.
+    lcNetwork = "network"
+      ## A NetworkManager keyfile a `linux.networkLink` generation wrote
+      ## (spec §4.5): ``path`` is
+      ## ``/etc/NetworkManager/system-connections/repro-<name>.nmconnection``,
+      ## a root-owned 0600 copy; ``unit`` is the link's interface name,
+      ## ``value`` the connection's UUID, ``kindHint`` the link kind. Its
+      ## bytes are kept under the state directory (``preserved``), so the
+      ## network guard restores it without the store (§13 decision 127).
+    lcGuardBinary = "guardBinary"
+      ## The out-of-store copy of the static add-on ``repro`` the network
+      ## guard's transient units run, ``/var/lib/repro/bin/repro`` (spec
+      ## §4.5 step 1, §5.3; §13 decisions 127-129): ``sha256`` is the
+      ## digest of the add-on binary it was last written from. Never drift
+      ## (decision 128): every apply, recovery and revert verifies it
+      ## against the store's current add-on binary and repairs it. Removed
+      ## with ``/var/lib/repro`` by uninstall.
 
   LedgerEntry* = object
     class*: LedgerClass
@@ -404,6 +420,27 @@ proc observeDrift*(e: LedgerEntry): string =
     if not l.ok: return "unreadable: " & l.why
     if e.path notin l.tables: return "missing"
     ""
+  of lcNetwork:
+    # A copy NetworkManager reads: a regular file, root-owned, 0600.
+    if symlinkExists(e.path):
+      return "replaced by a symbolic link (ledger: a regular file)"
+    if dirExists(e.path):
+      return "replaced by a directory (ledger: a regular file)"
+    if not fileExists(e.path):
+      return "missing"
+    let digest = sha256OfFile(e.path)
+    if digest != e.sha256:
+      return "content changed (sha256 " & digest[0 ..< 12] & ", ledger " &
+             e.sha256[0 ..< min(12, e.sha256.len)] & ")"
+    let st = statOwner(e.path)
+    if st.mode != e.mode or st.owner != e.owner:
+      return "mode " & st.mode & " owner " & st.owner & ", ledger " &
+             e.mode & " " & e.owner
+    ""
+  of lcGuardBinary:
+    # Repaired, never drift (spec §13 decision 128): the guard's own
+    # verification rewrites it from the store before every arm.
+    ""
   of lcMount, lcDiversion, lcStorePrefix, lcAccount, lcUnitState:
     ""
 
@@ -576,7 +613,19 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
       # load) is not undone when it is deleted.
       result.add(ExpectedRecord(component: fcSysctl,
         key: "net.netfilter.nf_log.*", value: "*", coupled: true))
-    of lcKey, lcStorePrefix, lcKept, lcLateKey:
+    of lcNetwork:
+      result.add(ExpectedRecord(component: fcEtc, key: e.path,
+        value: fileValue(e), baseValue: e.replaced))
+      # The link the connection creates brings its own kernel parameters
+      # (``/proc/sys/net/<family>/{conf,neigh}/<link>/``), present while
+      # the link exists and gone with it.
+      for k in ["net.ipv4.conf." & e.unit & ".*",
+                "net.ipv6.conf." & e.unit & ".*",
+                "net.ipv4.neigh." & e.unit & ".*",
+                "net.ipv6.neigh." & e.unit & ".*"]:
+        result.add(ExpectedRecord(component: fcSysctl, key: k, value: "*",
+                                  coupled: true))
+    of lcKey, lcStorePrefix, lcKept, lcLateKey, lcGuardBinary:
       discard  # under /var/lib/repro and /repro: not fingerprinted
 
 proc expectedDelta*(before, after: Ledger): seq[Expectation] =

@@ -57,15 +57,21 @@ const AddonTestSeams* {.booldefine: "reproAddonTestSeams".} = false
 proc seamControlDir*(stateDir: string): string = stateDir / "addon"
 
 proc waitResume(dir, point: string) =
+  ## Also ``test-paused-at-<point>`` and ``test-resume-<point>``: two
+  ## processes can be paused at once (the network guard's gate holds the
+  ## owner and a ``revert-network`` firing), each resumed by its own file.
   when AddonTestSeams:
     let paused = dir / "test-paused-at"
+    let pausedHere = dir / ("test-paused-at-" & point)
     let resume = dir / "test-resume"
+    let resumeHere = dir / ("test-resume-" & point)
     writeFile(paused, point & "\n")
+    writeFile(pausedHere, point & "\n")
     stderr.writeLine("repro-addon test seam: paused at " & point)
-    while not fileExists(resume):
+    while not fileExists(resume) and not fileExists(resumeHere):
       sleep(100)
-    removeFile(resume)
-    removeFile(paused)
+    for f in [resume, resumeHere, paused, pausedHere]:
+      try: removeFile(f) except OSError: discard
     stderr.writeLine("repro-addon test seam: resumed at " & point)
 
 proc seamPause*(stateDir, point: string) =
@@ -103,3 +109,28 @@ proc seamSleepCommand*(args: seq[string]): int =
     0
   else:
     2
+
+proc seamFlag*(stateDir, name: string): bool =
+  ## Seam builds only: true while ``<state dir>/addon/test-<name>`` exists.
+  ## The network guard's gate uses it to make an act fail on purpose
+  ## (``guard-arm-fails``: arming a guard timer, spec §4.5 step 4 control
+  ## (x); ``network-step-fails``: a switch step after the network writes,
+  ## control (g)). Always false in the product build.
+  when AddonTestSeams:
+    fileExists(seamControlDir(stateDir) / ("test-" & name))
+  else:
+    false
+
+proc seamText*(stateDir, name: string): string =
+  ## Seam builds only: the content of ``<state dir>/addon/test-<name>``, ""
+  ## when absent. ``network-inject`` carries the MS-2 run's connection:
+  ## its first line names a link, the rest is the keyfile the switch writes
+  ## for that link instead of the one the planner rendered (spec §4.5, §13
+  ## decision 86: the gate's own test program hands the switch a
+  ## generation the planner refuses). Always "" in the product build.
+  when AddonTestSeams:
+    let p = seamControlDir(stateDir) / ("test-" & name)
+    if not fileExists(p): return ""
+    try: readFile(p) except IOError, OSError: ""
+  else:
+    ""

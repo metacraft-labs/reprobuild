@@ -89,6 +89,12 @@ proc generationsRoot*(stateDir: string): string =
 proc generationDir*(stateDir, generationId: string): string =
   stateDir / GenerationsDirName / generationId
 
+proc stagedEnvelopePath*(stateDir, generationId: string): string =
+  ## The envelope an apply that stages its commit wrote before its
+  ## after-hook (``ApplyPhaseHooks.stageEnvelope``): beside the
+  ## generation's audit log, never read as a generation by ``history``.
+  generationDir(stateDir, generationId) / "envelope.staged"
+
 proc pointerPath*(stateDir, generationId: string): string =
   generationDir(stateDir, generationId) / PointerFileName
 

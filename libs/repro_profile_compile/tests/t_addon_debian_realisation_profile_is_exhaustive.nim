@@ -160,6 +160,10 @@ suite "add-on-debian realisation profile":
     systemdUnitState(r, name = "avahi-daemon.service", enabled = true,
       state = "Running")
     addOnTool(r, command = "wakeonlan", aptClosureLock = LockText)
+    # The network class (AR5).
+    linuxNetworkLink(r, name = "home0", kind = "ipvlan",
+      addresses = @["10.100.0.4/24"], parentMac = "52:54:00:12:34:56",
+      dnsServers = @["10.100.0.1"], dnsDomains = @["~home.arpa"])
     # The diversion class has no profile constructor yet (its kind exists
     # on the apply side, A2); the intent is what the text form carries.
     r.add ResourceIntent(kind: "linux.dpkgDiversion",

@@ -1037,6 +1037,49 @@
 ##                                            reverts
 ## ``recovery-skips-snapshot-sweep``          a recovery runs no orphan
 ##                                            sweep of the root snapshots
+## ``network-skips-arping-probe``             the duplicate-address probe
+##                                            answers "free" without
+##                                            sending one (AR5, G49)
+## ``network-manager-by-config-files``        any manager state passes, as
+##                                            if files decided it
+## ``network-undeclarable-accepted``          a gateway, DHCP, a parent
+##                                            setting or a global DNS item
+##                                            is let through the plan
+## ``network-link-name-in-use-accepted``      a link name the host uses is
+##                                            not refused
+## ``network-host-address-accepted``          an address the host holds is
+##                                            not refused
+## ``guard-skips-arm``                        no guard timer is armed and
+##                                            the arm reports success
+##                                            (AR5's falsifier, G47)
+## ``guard-disarms-on-success``               the guard disarms as soon as
+##                                            the switch reports success,
+##                                            without the invariants or a
+##                                            new SSH session (AR5's
+##                                            falsifier, G47)
+## ``recovery-replays-armed``                 recovery replays an ``armed``
+##                                            network marker instead of
+##                                            reverting it (AR5's
+##                                            falsifier, G48)
+## ``guard-skips-write-check``                the switch writes every
+##                                            network object without
+##                                            reading the guard first
+##                                            (decision 103)
+## ``guard-ignores-default-route``            the default-route invariant
+##                                            is not checked
+## ``guard-trusts-syslog-identifier``         the SSH evidence is read by
+##                                            ``SYSLOG_IDENTIFIER``, so
+##                                            ``logger -t sshd`` counts
+## ``guard-confirm-any-session``              ``confirm`` counts from a
+##                                            session created before the
+##                                            switch
+## ``guard-binary-unverified``                the store's add-on binary is
+##                                            not checked against its
+##                                            prefix's name
+## ``guard-stops-timer-first``                a failure path stops the
+##                                            attempt's timer before its
+##                                            revert completes (decision
+##                                            106)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1721,7 +1764,24 @@ const
                           "snapshot-sweep-ignores-retention",
                           "uninstall-keeps-snapshots",
                           "snapshot-sweep-ignores-revert-marker",
-                          "recovery-skips-snapshot-sweep"]
+                          "recovery-skips-snapshot-sweep",
+                          # The network class and its guard (AR5;
+                          # network_link.nim, network_guard.nim, the switch
+                          # and recovery).
+                          "network-skips-arping-probe",
+                          "network-manager-by-config-files",
+                          "network-undeclarable-accepted",
+                          "network-link-name-in-use-accepted",
+                          "network-host-address-accepted",
+                          "guard-skips-arm",
+                          "guard-disarms-on-success",
+                          "recovery-replays-armed",
+                          "guard-skips-write-check",
+                          "guard-ignores-default-route",
+                          "guard-trusts-syslog-identifier",
+                          "guard-confirm-any-session",
+                          "guard-binary-unverified",
+                          "guard-stops-timer-first"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:
