@@ -183,7 +183,9 @@ def _short_sentence(help_text: str) -> str:
     return cleaned.replace("|", "\\|")
 
 
-ROOT_BLOCK_OPENER = re.compile(r"^  result = unbound quote do:\s*$")
+# `cliUnbound` since the description moved its macro helpers into clispec
+# (`1e3153c423`); `unbound` before.
+ROOT_BLOCK_OPENER = re.compile(r"^  result = (?:cliUnbound|unbound) quote do:\s*$")
 
 
 def _root_command_block(all_lines: list[str]) -> list[str]:
@@ -195,14 +197,14 @@ def _root_command_block(all_lines: list[str]) -> list[str]:
     the same four-space indent, so scanning the whole file would publish their
     ``list``/``enable``/``add`` as top-level ``repro`` commands. Only the block
     the root macro returns describes the top level; it runs from its
-    ``result = unbound quote do:`` to the first non-blank line indented less
+    ``result = cliUnbound quote do:`` to the first non-blank line indented less
     than four spaces.
     """
     openers = [i for i, line in enumerate(all_lines) if ROOT_BLOCK_OPENER.match(line)]
     if len(openers) != 1:
         raise RuntimeError(
             f"{CLI_DESC}: expected exactly one root command block "
-            f"(`result = unbound quote do:`), found {len(openers)}; "
+            f"(`result = cliUnbound quote do:`), found {len(openers)}; "
             "update ROOT_BLOCK_OPENER in scripts/render_user_docs_generated.py"
         )
     start = openers[0] + 1
