@@ -16,6 +16,9 @@
 ##      `repos/core.toml` and `repo.profile`;
 ##   c. `core` is a `repo.v2` fragment with no mainline, naming no profile,
 ##      in a workspace with no default profile -> `repo.mainline`;
+##   c2. `core` declares `mainline = false` -> `repo.mainline`, from `list`
+##      and from `projects resolve --json`, whose report must not carry a
+##      branch named "false";
 ##   d. `core`'s mainline is a commit id -> `repo.mainline`;
 ##   e. the settings file's custom roles fall back in a cycle -> stderr names
 ##      `repro-workspace.toml`, `branch-roles.alpha.fallback` and the chain;
@@ -159,6 +162,25 @@ suite "branch-role validation through repro":
       writeFile(fragment, fragmentToml("unstable = \"agents\""))
       checkRefused("no mainline", list(),
         [fragment, "repo.mainline", "has no mainline"])
+
+      # c2. `mainline = false`: refused like a missing one, never loaded as
+      # the branch named "false" (which `projects resolve --json` would then
+      # report as the repo's branch, and `sync` would try to clone).
+      writeFile(fragment, fragmentToml("mainline = false"))
+      checkRefused("mainline = false", list(),
+        [fragment, "repo.mainline", "`mainline` cannot be `false`"])
+      let resolved = runRepro(["workspace", "projects", "resolve", "--json",
+        "demo", "--workspace-root=" & root])
+      # `projects resolve --json` reports a refused load in its JSON report
+      # (`status: error`), on stdout, with a non-zero exit.
+      checkpoint("mainline = false, projects resolve exit=" & $resolved.code &
+        "\nstdout: " & resolved.stdout & "\nstderr: " & resolved.stderr)
+      check resolved.code != 0
+      let report = parseJson(resolved.stdout)
+      check report["status"].getStr() == "error"
+      check report["repos"].len == 0
+      for needle in [fragment, "repo.mainline", "`mainline` cannot be `false`"]:
+        check needle in report["error"].getStr()
 
       # d. A commit id where a branch belongs.
       writeFile(fragment, fragmentToml(
