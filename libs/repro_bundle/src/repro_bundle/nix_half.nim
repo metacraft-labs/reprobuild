@@ -8,6 +8,7 @@ when defined(posix):
   import std/posix
 import nimcrypto/sha2
 import repro_core/ambient_execution
+import repro_core/scratch_env
 import repro_local_store/store_bundle
 import repro_local_store/tar_members
 import ./exec
@@ -62,14 +63,37 @@ proc storePathOf*(path: string): string =
   let slash = rest.find('/')
   "/nix/store/" & (if slash < 0: rest else: rest[0 ..< slash])
 
+proc isNixShellScratchExport(line: string): bool =
+  ## True for one of the lines `nix print-dev-env` ends its script with to
+  ## set up the SESSION rather than the environment:
+  ## `export NIX_BUILD_TOP="$(mktemp -d -t nix-shell.XXXXXX)"` and
+  ## `export TMP="$NIX_BUILD_TOP"` for each temp-directory name (Nix 2.34,
+  ## `src/nix/develop.cc`, `makeRcScript`). Only that form, at the start of a
+  ## line, is matched: Nix leaves these names out of the variable section it
+  ## writes above them, and an indented line is part of a function body.
+  if not line.startsWith("export "):
+    return false
+  let eq = line.find('=')
+  eq > 0 and line["export ".len ..< eq] in NixShellScratchNames
+
 proc normaliseDevEnv*(text: string): string =
   ## §2.1. `NIX_BUILD_CORES` names the building machine's cores; the
   ## shellHook installs git hooks, which repro owns. The working-directory
   ## dependence is removed by running `print-dev-env` in the member's
   ## checkout, not here.
+  ##
+  ## nix-shell's scratch lines (`NixShellScratchNames`) are left out, as the
+  ## dev-env capture leaves them out: kept, every sourcing of the captured
+  ## shell made a fresh `/tmp/nix-shell.XXXXXX` directory and pointed
+  ## `TMPDIR`, `TMP`, `TEMP` and `TEMPDIR` at it, so a producer that reads one
+  ## of them (a C compiler does) never hit a record made in another
+  ## activation, which is the work a restored bundle exists not to run again.
+  ## Without them the activating shell's own temp directory stands.
   for line in text.splitLines(keepEol = true):
     let s = line.strip()
     if s.startsWith("eval \"${shellHook") or s.startsWith("eval \"$shellHook"):
+      continue
+    if isNixShellScratchExport(line):
       continue
     if line.startsWith("NIX_BUILD_CORES='"):
       result.add("NIX_BUILD_CORES=\"$(nproc 2>/dev/null || echo 1)\"\n")
