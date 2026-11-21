@@ -27155,6 +27155,44 @@ proc findRunQuotaDaemonBin*(): string =
     return cwdSibling
   result = ""
 
+var invocationRunQuotaDaemonBin {.threadvar.}: string
+  ## The last `runquotad` this process's auto-start found (see
+  ## `invocationRunQuotaDaemonBinFor`).
+
+proc invocationRunQuotaDaemonBinFor*(found: string): string =
+  ## The daemon this invocation's auto-start uses, given `found`, what
+  ## `findRunQuotaDaemonBin` answered just now.
+  ##
+  ## One invocation runs the auto-start more than once: `repro test` and
+  ## `repro build` prepare the dev env (one adopt-or-start, released when the
+  ## preparation ends) and then open the build's own session (another). The
+  ## first runs under the caller's `PATH`; the second can run after the
+  ## preparation has changed this process's environment, and the search then
+  ## missed the install's `runquotad` the first search had found and the
+  ## handover had digested. A daemon from another build, adopted by the
+  ## first and retiring once this invocation let go of it, was then gone
+  ## with nothing to start in its place: "runquota daemon unreachable and
+  ## bypass is disabled" (reprobuild-pm issue 2026-11-21,
+  ## `repro-test-on-a-long-lived-runner-adopts-a-retiring-runquotad-...`).
+  ##
+  ## So a fresh answer always wins and is remembered, and an empty one falls
+  ## back to the remembered daemon while it is still an executable file. A
+  ## search that finds nothing therefore never forgets a daemon this
+  ## invocation already named, and one that finds something (an operator's
+  ## `RUNQUOTAD_BIN`, a changed `PATH`) is never overridden by it.
+  if found.len > 0:
+    invocationRunQuotaDaemonBin = found
+    return found
+  if invocationRunQuotaDaemonBin.len > 0 and
+      executableFile(invocationRunQuotaDaemonBin):
+    return invocationRunQuotaDaemonBin
+  ""
+
+proc resetInvocationRunQuotaDaemonBin*() =
+  ## Forget the remembered daemon. For tests that drive several auto-starts
+  ## in one process under different discovery environments.
+  invocationRunQuotaDaemonBin = ""
+
 const
   ## Compatibility inventory of operational variables historically forwarded
   ## from the user-facing CLI into the daemon-hosted build executor. Request
@@ -27983,9 +28021,9 @@ when defined(windows):
       # before, and is told why. See `decideRunQuotaHandover` and
       # reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from
       # another build makes way".
-      let candidate =
+      let candidate = invocationRunQuotaDaemonBinFor(
         try: findRunQuotaDaemonBin()
-        except OSError: ""
+        except OSError: "")
       let report = decideRunQuotaHandover(candidate)
       if report.note.len > 0:
         stderr.writeLine("repro: note: " & report.note)
@@ -28073,7 +28111,7 @@ when defined(windows):
         # (``isRunQuotaDaemonReachable`` already returned false to get
         # us here); unchanged from before this fix.
         discard
-    let runquotad = findRunQuotaDaemonBin()
+    let runquotad = invocationRunQuotaDaemonBinFor(findRunQuotaDaemonBin())
     if runquotad.len == 0:
       # No daemon binary discovered. Return nil silently — downstream
       # ``tryEnsureInlineRunQuotaSession`` will probe ``connectDefault``,
@@ -28247,10 +28285,11 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     # filesystem and the effective uid; a malformed
     # `RUNQUOTA_USER_ENDPOINT_DIR` raises here.
     let userSocket = userEndpoint().path
-    # Found once, used as the handover's candidate and as what is started.
-    let runquotad =
+    # Found once, used as the handover's candidate and as what is started,
+    # and remembered for this invocation's later auto-starts.
+    let runquotad = invocationRunQuotaDaemonBinFor(
       try: findRunQuotaDaemonBin()
-      except OSError: ""
+      except OSError: "")
     if inheritedSocket.len > 0 and inheritedSocket == userSocket:
       return adoptOrStartUserRunQuota(runquotad)
     if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
