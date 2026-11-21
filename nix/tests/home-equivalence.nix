@@ -6,9 +6,11 @@
 #
 #   * equivalent: the two agree on the profile's packages (bash, cmake, and
 #     patchelf on Linux), its `fs.userFile` (`xdg.configFile` on the Nix
-#     side), its variable and its stow file (an out-of-store link into the
-#     profile on the Nix side, digested through `outOfStoreRoots`). What Home
-#     Manager adds on its own is allowlisted, each row with its reason
+#     side), its variable, its PATH entry (the absolute home directory in the
+#     profile, `$HOME` on the Nix side: one id only when `repro home facts`
+#     is given `home.homeDirectory`) and its stow file (an out-of-store link
+#     into the profile on the Nix side, digested through `outOfStoreRoots`).
+#     What Home Manager adds on its own is allowlisted, each row with its reason
 #     (tests/fixtures/host-facts/equivalence-allow-{linux,darwin}.toml) -- the
 #     check must build, and a row matching nothing would fail it as stale;
 #   * negative control: the same pair with the variable changed on the Nix
@@ -50,6 +52,9 @@ let
               ]
               ++ lib.optional isLinux pkgs.patchelf;
               sessionVariables.GM6_EDITOR = editor;
+              # The profile spells this entry `${homeDir}/.local/bin`; both
+              # sides must name it `~/.local/bin` (one entry, `same`).
+              sessionPath = [ "$HOME/.local/bin" ];
               # The stow package, linked the way zah/dotfiles links it.
               file.".gm6rc".source =
                 config.lib.file.mkOutOfStoreSymlink "${homeDir}/profile/stow/gm6/.gm6rc";

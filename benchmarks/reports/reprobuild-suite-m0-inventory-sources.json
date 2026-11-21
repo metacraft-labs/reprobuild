@@ -5879,6 +5879,8 @@
             "actual",
             "alias",
             "allowed",
+            "body",
+            "bodyEnd",
             "bypass",
             "cacheRoot",
             "cachedMonitorToolsReady",
@@ -5901,6 +5903,7 @@
             "daemon",
             "daemonBin",
             "declared",
+            "defAt",
             "description",
             "devEnvEngine",
             "devSession",
@@ -5941,6 +5944,7 @@
             "items",
             "keyword",
             "launchPathDrives",
+            "lineAt",
             "lines",
             "lowered",
             "lp",
@@ -6002,7 +6006,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1429,
+          "line": 1445,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -7754,7 +7758,7 @@
             "hcmd",
             "pcmd"
           ],
-          "line": 303,
+          "line": 309,
           "path": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
           "patterns": [
             "nim-variable-argv"
@@ -9181,7 +9185,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 357,
+          "line": 376,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -9200,7 +9204,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 358,
+          "line": 377,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -9219,7 +9223,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 375,
+          "line": 394,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -9238,7 +9242,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 380,
+          "line": 399,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -14380,7 +14384,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40350,7 +40354,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55704,7 +55708,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_runquota_test_threads_follow_grant.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64135,7 +64139,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_nix_propagated_store_paths.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
