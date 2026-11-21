@@ -300,7 +300,14 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
       let hostSrc = writeSource(tempRoot / "host", "host_driver.nim",
         hostDriverBody)
       let hb = tempRoot / "host_driver"
+      # The driver imports the project DSL from a main file outside this
+      # tree, so it does not read the tree's `config.nims`, and with no mode
+      # define the DSL is the thin mode, which has no `ExtensionBox`. It
+      # names the in-process mode itself (`repro_test_support`'s
+      # `ReproEvalModeFlag`, spelled here so that this test's import
+      # closure stays what it is).
       var hcmd = @[nimBin, "c", "-d:release", "--mm:orc",
+        "--define:reproEvalMode",
         "-d:reproNimRtlShared", "-d:useNimRtl",
         "--passL:-L" & tempRoot, "--passL:-lnimrtl",
         "--passL:-Wl,-rpath," & tempRoot,

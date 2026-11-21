@@ -2767,6 +2767,10 @@ type
     queuedAtMs: int
       ## When a candidate's offer came back QUEUED (engine monotonic ms);
       ## how long it waited is what sizes the advertised frontier.
+    bypassWidth: int
+      ## The width an ``rpkBypassProcess`` sized action runs at, held out of
+      ## the host's cores until it is reaped (``bypassWidthMilli``); 0 for
+      ## every other action.
     monitorSlot: int
       ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
       ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
@@ -17707,25 +17711,48 @@ proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction
 
-proc bypassWidthMilli*(hostCores, maxParallelism: int): uint32 =
+proc bypassWidthMilli*(hostCores, heldCores, contenders: int): uint32 =
   ## The width a sized action runs at when no RunQuota lease is taken: an
-  ## equal share of the host's cores among the actions the engine runs at
-  ## once, and at least one slot. Left as declared, a Nim compile has no
-  ## ``--parallelBuild`` and starts one C compiler per core, so twelve
-  ## concurrent test-binary compiles on a 32-core host ran ~250 ``cc1``
-  ## (full run 53, 2026-11-15) where the host has 32 cores for everyone.
-  let share = max(1, hostCores) div max(1, maxParallelism)
+  ## equal share of the cores the running sized actions do not already hold
+  ## (``hostCores - heldCores``) among the ``contenders`` that can launch now,
+  ## this one included, and at least one slot.
+  ##
+  ## Left as declared, a Nim compile has no ``--parallelBuild`` and starts one
+  ## C compiler per core, so twelve concurrent test-binary compiles on a
+  ## 32-core host ran ~250 ``cc1`` (full run 53, 2026-11-15) where the host
+  ## has 32 cores for everyone. A STATIC share (``hostCores div
+  ## maxParallelism``) fixed that and starved the tail: in full run 54 the
+  ## build's last action, the main ``reprobuild`` compile, ran alone at
+  ## ``--parallelBuild:2`` for over 80 minutes on 32 cores. Sharing what is
+  ## free among what is ready gives twelve simultaneous launches about
+  ## ``hostCores / 12`` each, as before, and a lone action every free core.
+  ##
+  ## The sum of the widths held stays within ``hostCores`` at every launch,
+  ## EXCEPT for the one-slot floor: an action launched while the running ones
+  ## already hold every core still gets one slot, so the sum can exceed the
+  ## host by at most one slot per such launch. A width is fixed for the
+  ## action's life (a running compiler cannot be widened), so an action that
+  ## launches while others run keeps its smaller share after they finish.
+  let free = max(1, hostCores) - max(0, heldCores)
+  let share = free div max(1, contenders)
   uint32(max(1, share)) * 1000'u32
 
 proc startBypassRunQuotaProcess(action: BuildAction;
-                                config: BuildEngineConfig):
+                                config: BuildEngineConfig;
+                                widthMilli: uint32;
+                                heldWidth: var int):
     ReproDirectRunningProcess =
   ## Use RunQuota's native process backend without acquiring a lease. On
   ## Windows this preserves argument boundaries instead of expanding valid
   ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
   ##
-  ## A sized action still gets its width flag: ``bypassWidthMilli``, filled
-  ## in as a grant of that size would be.
+  ## A sized action still gets its width flag: ``widthMilli``, which the
+  ## scheduler sizes with ``bypassWidthMilli``, filled in as a grant of that
+  ## size would be. ``heldWidth`` receives the width the command actually
+  ## runs at (a smaller value it already asks for is kept), which the
+  ## scheduler counts as held until the action is reaped; 0 for an unsized
+  ## action.
+  heldWidth = 0
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
@@ -17740,16 +17767,15 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     return startDirect(preparedRunQuotaCommand(action, config))
   var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
   command.widthFlag = action.widthFlag
-  let width = bypassWidthMilli(countProcessors(),
-    int(max(1'u32, config.maxParallelism)))
-  return startDirect(command.applyGrantedWidth(width))
+  heldWidth = filledWidth(command.argv, grantedSlots(widthMilli))
+  return startDirect(command.applyGrantedWidth(widthMilli))
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction =
   ## The action with a placeholder where its width flag's value goes, before
   ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
   ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
-  ## launch paths and the bypass use it; the bypass fills it with
-  ## ``bypassWidthMilli``.
+  ## launch paths and the bypass use it; the bypass fills it with the width
+  ## ``bypassWidthMilli`` sizes.
   ##
   ## The flag is placed in the command the action EXECUTES: on the wrapped
   ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
@@ -25286,6 +25312,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var process: Process
         var directProcess: ReproDirectRunningProcess
         var monitorSlot = -1
+        var bypassWidth = 0
         var processKind =
           if plan.hostInProcess: rpkMonitorHost
           elif bypassRunQuota: rpkBypassProcess
@@ -25301,7 +25328,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
               cacheRoot, siteTablePath)
           elif bypassRunQuota:
-            directProcess = startBypassRunQuotaProcess(plan.action, config)
+            # The width is an equal share of the cores the running sized
+            # actions do not hold, among the sized actions that can launch
+            # now: this one, and the sized ones still ahead of it in this
+            # wave's ready queue, as many as there are free parallel slots.
+            # Those ahead may yet turn out to be cache hits; counting them
+            # errs towards narrower widths, never past the host.
+            var widthMilli = 0'u32
+            if plan.action.widthFlag.len > 0:
+              var held = 0
+              for item in running:
+                held += item.bypassWidth
+              let freeSlots = int(maxParallel) -
+                (running.len + stagedInlineLaunches.len)
+              var contenders = 1
+              var k = i
+              while k < ready.len and contenders < freeSlots:
+                if actionsById[ready[k]].widthFlag.len > 0:
+                  inc contenders
+                inc k
+              widthMilli = bypassWidthMilli(countProcessors(), held,
+                contenders)
+            directProcess = startBypassRunQuotaProcess(plan.action, config,
+              widthMilli, bypassWidth)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath,
               runQuotaPoolCaps.getOrDefault(plan.action.pool, 0'u32))
@@ -25342,6 +25391,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           process: process,
           directProcess: directProcess,
           resultPath: resultPath,
+          bypassWidth: bypassWidth,
           monitorSlot: monitorSlot
         )
         when defined(posix):

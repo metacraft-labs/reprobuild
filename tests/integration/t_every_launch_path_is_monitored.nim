@@ -2202,8 +2202,11 @@ suite "every_launch_path_is_monitored":
     # pins below use the definition and call-site forms rather than a
     # raw name count, which would move whenever a comment is reworded.)
     check countOccurrences(src, "proc startBypassRunQuotaProcess(") == 1
+    # The L1 call site takes the width the scheduler sized for a sized
+    # action and returns the width it holds, so the needle stops at the
+    # shared prefix, as L2's does.
     check countOccurrences(src,
-      "startBypassRunQuotaProcess(plan.action, config)") == 1          # L1
+      "startBypassRunQuotaProcess(plan.action, config,") == 1          # L1
     check countOccurrences(src, "proc startRunQuotaProcess(") == 1
     # The L2 call site takes the action pool's declared capacity as a
     # fourth argument since 8dd3ac277 (the helper declares that pool on its
