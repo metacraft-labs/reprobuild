@@ -181,6 +181,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker isMainModule"),
   TestSpec(
+    source: "libs/ct_test_nim_unittest/tests/t_tests_fragment_records.nim",
+    binary: "build/test-bin/t_tests_fragment_records",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_ct_test_nim_unittest_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/ct_test_surface/tests/t_ct_test_surface_locator.nim",
     binary: "build/test-bin/t_ct_test_surface_locator",
     defines: @[],
@@ -503,7 +515,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-egress-\" & $getCurrentProc..."),
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_engine_agent_route.nim",
     binary: "build/test-bin/t_addon_engine_agent_route",
@@ -25402,7 +25414,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_installed_engine_reaches_the_catalog_its_release_ships.nim",
@@ -26158,7 +26170,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_issued_certificate_lands_in_the_standard_local_store.nim",
@@ -26818,7 +26830,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_refresh_refuses_a_solve_missing_a_develop_sibling_recipe.nim",
@@ -27490,7 +27502,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_mixed_public_clean_team_unpublished_refuses.nim",
@@ -28258,7 +28270,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_commit_gate_names_the_re_pin_as_the_cause.nim",
@@ -28990,7 +29002,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim",
@@ -29650,7 +29662,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_runtime_dlopen_without_library_path.nim",
@@ -30466,7 +30478,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sc_typed_cross_project_consumption_both_modes.nim",
@@ -31378,7 +31390,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_sync_scoped_to_named_project_touches_only_that_project.nim",
@@ -32146,7 +32158,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unpublished_evidence_names_the_search_that_ran.nim",
@@ -32878,7 +32890,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_manifests_snapshot_round_trip.nim",
@@ -33540,6 +33552,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "module-level statement runs at every start-up: let scratchRoot = getTempDir() /"),
+  TestSpec(
+    source: "tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim",
+    binary: "build/test-bin/test_cs_m14_repro_collects_tests_per_entry",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g17",
+    singleReason: ""),
   TestSpec(
     source: "tests/unit/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable.nim",
     binary: "build/test-bin/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable",

@@ -65,6 +65,8 @@ import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
 import repro_core/variant_assignments
+from ct_test_nim_unittest/tests_fragment import PerTestRequest,
+  TestsFragmentProducerName, producerListArgv, producerCheckArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -4049,6 +4051,97 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       env = mergedEnv,
       envPassthrough = mergedEnvPassthrough)
+
+  # ``NimUnittestBinary.runPerTest``'s two edges
+  # (``libs/ct_test_nim_unittest``). Both run the per-test producer
+  # (``repro-tests-fragment``, from beside this engine's image unless the
+  # recipe named another):
+  #
+  #   subcommand "listTests"    -> [producer, --binary=<binary>,
+  #                                 --out=<fragment>, --id-prefix=<collector>,
+  #                                 --collector=<collector>,
+  #                                 --stats-name=<binary as declared>,
+  #                                 --cwd=<cwd>]
+  #   subcommand "collectTests" -> [producer, --check=<fragment>]
+  #
+  # The command lines come from ``ct_test_nim_unittest/tests_fragment``, the
+  # module the producer parses them with. The producer is run by absolute
+  # path, so, as at the HCR site above, the edge makes no ``PATH`` decision.
+  if executableName == NimUnittestToolId and
+      payload.call.subcommand in ["listTests", "collectTests"]:
+    var binaryPath = ""
+    var fragmentPath = ""
+    var collectorId = ""
+    var producerPath = ""
+    for arg in payload.call.arguments:
+      case arg.name
+      of "binary": binaryPath = arg.encodedValue
+      of "fragment": fragmentPath = arg.encodedValue
+      of "collector": collectorId = arg.encodedValue
+      of "producer": producerPath = arg.encodedValue
+      else: discard
+    if fragmentPath.len == 0:
+      raise newException(ValueError,
+        "tool-resolution failed: action " & payload.id & " (" &
+          NimUnittestToolId & "." & payload.call.subcommand &
+          ") names no fragment")
+    let producer =
+      if producerPath.len > 0:
+        materialProjectPath(projectRoot, producerPath)
+      else:
+        parentDir(publicCliImagePath()) /
+          addFileExt(TestsFragmentProducerName, ExeExt)
+    let cwd = resolveCanonicalExecRoot(payload.cwdKind,
+      payload.cwdCustomPath, projectRoot)
+    var argv: seq[string]
+    if payload.call.subcommand == "listTests":
+      if binaryPath.len == 0 or collectorId.len == 0:
+        raise newException(ValueError,
+          "tool-resolution failed: action " & payload.id & " (" &
+            NimUnittestToolId & ".listTests) needs the ``binary`` and " &
+            "``collector`` slots")
+      argv = producerListArgv(producer, PerTestRequest(
+        binary: materialProjectPath(projectRoot, binaryPath),
+        fragment: fragmentPath,
+        idPrefix: collectorId,
+        collectorId: collectorId,
+        statsName: binaryPath,
+        cwd: cwd))
+    else:
+      argv = producerCheckArgv(producer, fragmentPath)
+    var translatedInputs: seq[string] = @[]
+    for input in payload.inputs:
+      translatedInputs.add(materialProjectPath(projectRoot, input))
+    let fingerprintText = [
+      "reprobuild.localProjectAction.v1",
+      payload.id,
+      NimUnittestToolId,
+      NimUnittestToolId,
+      payload.call.subcommand,
+      node.payload
+    ].join("\n")
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
+      cwd = cwd,
+      deps = payload.deps,
+      inputs = translatedInputs,
+      outputs = payload.outputs,
+      pool = payload.pool,
+      poolUnits = payload.poolUnits,
+      dynamicDepsFile = payload.dynamicDepsFile,
+      cacheable = payload.cacheable,
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      envPassthrough = withEdgeEnvPassthrough(@[], payload.envPassthrough,
+        payload.id),
+      commandStatsId =
+        if payload.commandStatsId.len > 0: payload.commandStatsId
+        else: payload.id)
 
   # M9.R.12.2 — fall back to ``packageName`` alone when the recipe's
   # ``nativeBuildDeps:`` declares the tool by its package selector

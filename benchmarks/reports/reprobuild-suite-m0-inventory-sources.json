@@ -1,15 +1,15 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3062,
+    "nimTestBinaries": 3064,
     "pureUnitConsolidationGroups": 88,
-    "pureUnitTests": 810,
+    "pureUnitTests": 811,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3112
+    "testEntries": 3114
   },
   "pureUnitConsolidationCandidates": [
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "ct_test_nim_unittest"
@@ -17,7 +17,8 @@
       "owner": "libs/ct_test_nim_unittest",
       "sources": [
         "libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim",
-        "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim"
+        "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim",
+        "libs/ct_test_nim_unittest/tests/t_tests_fragment_records.nim"
       ],
       "targetOs": "soAny"
     },
@@ -1725,9 +1726,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1703,
+      "integration": 1704,
       "platform/destructive": 199,
-      "pure unit": 810,
+      "pure unit": 811,
       "unclassified": 374
     },
     "graphOwnedTestArtifacts": [
@@ -1948,9 +1949,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3062,
+    "nimTestBinaryCount": 3064,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3112
+    "testEntryCount": 3114
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9291,6 +9292,23 @@
       "source": "libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 37,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tests_fragment_records",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "ct_test_nim_unittest"
+      ],
+      "owner": "libs/ct_test_nim_unittest",
+      "requiresReproBinary": false,
+      "source": "libs/ct_test_nim_unittest/tests/t_tests_fragment_records.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59834,6 +59852,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_cs_m14_repro_collects_tests_per_entry",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
     {
