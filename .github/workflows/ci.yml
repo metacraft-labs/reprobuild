@@ -414,7 +414,9 @@ jobs:
     # against the measurements recorded in it; change a number here and
     # there together. Self-hosted jobs may run up to 7200 minutes; this
     # stays under 24h, the lifetime of the job's GITHUB_TOKEN.
-    timeout-minutes: 1425
+    # timeout-justify: the suite's measured worst (see check_ci_test_budget.py)
+    # needs most of a day on the slower host class; 1440 is the 24h cap above.
+    timeout-minutes: 1440
     env:
       # REPROBUILD_MAX_PARALLELISM governs the BUILD phase. Twelve is not a
       # placeholder and must not be raised to track `nproc`: the bare-metal
@@ -630,6 +632,13 @@ jobs:
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
           flake-override-inputs: |
             runquota-src=../runquota
+          # App credentials start setup-dev-env's job credential broker, which
+          # re-mints the Nix GitHub token before the hour an installation
+          # token lives. The refresh steps below re-mint between phases,
+          # but `just test` alone runs for hours, and a Nix fetch inside it
+          # after minute ~60 would answer `401 Bad credentials`.
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
 
       # Installation tokens expire after one hour. Mint replacements immediately
       # before each long phase and expose them only to that step environment and
@@ -1150,7 +1159,9 @@ jobs:
       # backstops fire first, with their legible messages ("Timed out building
       # ... the build did NOT fail"; a runner summary marked cut_short), then
       # this step's limit, then the job's -- never GitHub's silent default.
-      # The backstops are sized to the slower class: 5h over the 4h08m graph,
+      # The backstops are sized to the slower class: 335m over the 4h08m graph
+      # and over the cold build of job 136450661089, which was still at
+      # 946/966 when the old 5h backstop stopped it on 2026-11-21,
       # 330m over the runner's 5h19m projection. scripts/check_ci_test_budget.py
       # holds these numbers to each other and to the measurements in it. The
       # "Declare suite coverage" step after this one then states, from the
@@ -1218,13 +1229,15 @@ jobs:
       # not a workflow edit, and is documented here rather than acted on.
       - name: just test
         id: just_test
-        timeout-minutes: 750
+        # timeout-justify: REPROBUILD_BUILD_TIMEOUT + REPROBUILD_RUNNER_TIMEOUT
+        # + the in-step allowance (335 + 330 + 120), per WHAT BOUNDS THIS STEP.
+        timeout-minutes: 785
         env:
           # run_tests.sh's backstops, pinned so that they fire before this
           # step's limit (see WHAT BOUNDS THIS STEP above). coreutils
           # `timeout` durations: a single number and suffix, so 330m, not
           # 5h30m. The build one applies to each collection build in turn.
-          REPROBUILD_BUILD_TIMEOUT: "5h"
+          REPROBUILD_BUILD_TIMEOUT: "335m"
           REPROBUILD_RUNNER_TIMEOUT: "330m"
           CT_BIN: ${{ env.CT_BIN }}
           # The RDMF cross-implementation cases need the Python producer (the
