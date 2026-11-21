@@ -4372,6 +4372,97 @@ proc removalParentOf(spelling: string): string =
       suffix = ancestor.substr(slash) & suffix
       ancestor = ancestor[0 ..< slash]
 
+proc splitLastEntry(path: string): tuple[parent, name: string] =
+  ## `path` (an `outputRemovalLocation` answer, `/`-separated) split at its
+  ## last separator. The parent of `/x` is `/`.
+  let slash = path.rfind('/')
+  if slash < 0:
+    return (parent: "", name: path)
+  (parent: (if slash == 0: "/" else: path[0 ..< slash]),
+   name: path[slash + 1 .. ^1])
+
+proc isSameEntryOnDisk(a, b: string): bool =
+  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers)
+  ## name ONE directory entry on disk, whatever their spellings.
+  ##
+  ## A removal location's parent is resolved through the filesystem, which
+  ## answers in the on-disk spelling, but its last component is kept as the
+  ## output spells it. On a filesystem that folds case (macOS's default APFS,
+  ## Windows, a Linux `casefold` directory) or normalization, `<d>/WORK` and
+  ## `<d>/work` are then one entry with two spellings, and only the
+  ## filesystem can say so. It is asked by identity: the device and file id
+  ## of the entry itself (`lstat`, a final link not followed, because the
+  ## removal takes the link and not its target).
+  ##
+  ## A directory has exactly one entry, so equal identities settle it. A
+  ## non-directory may have several (hard links): two entries of one parent
+  ## that share a file id are the same entry only when the parent does not
+  ## list both names, i.e. one of them is merely another spelling of the
+  ## other. Removing one hard link leaves the other, so it must not count.
+  ## A location that does not exist names nothing to remove: `false`.
+  if a == b:
+    return true
+  var infoA, infoB: FileInfo
+  try:
+    infoA = getFileInfo(a, followSymlink = false)
+    infoB = getFileInfo(b, followSymlink = false)
+  except OSError:
+    return false
+  if infoA.id != infoB.id:
+    return false
+  if infoA.kind == pcDir:
+    return true
+  let (parentA, nameA) = splitLastEntry(a)
+  let (parentB, nameB) = splitLastEntry(b)
+  if parentA.len == 0 or parentB.len == 0 or
+      not isSameEntryOnDisk(parentA, parentB):
+    return false
+  if nameA == nameB:
+    return true
+  var listedA, listedB = false
+  try:
+    for kind, name in walkDir(parentA, relative = true, checkDir = true):
+      when defined(windows):
+        let listed = name.toLowerAscii()
+      else:
+        let listed = name
+      if listed == nameA: listedA = true
+      if listed == nameB: listedB = true
+  except OSError:
+    # The parent cannot be listed: whether these are two hard links or one
+    # entry is unknown, and the safe answer for a removal check is "one".
+    return true
+  not (listedA and listedB)
+
+proc entryAtDepthOf(path, like: string): string =
+  ## The ancestor-or-self of `path` with as many components as `like`, or ""
+  ## when `path` is shallower. Both are `outputRemovalLocation` answers.
+  let want = like.count('/')
+  var seen = 0
+  for i, ch in path:
+    if ch == '/':
+      inc seen
+      if seen > want:
+        return path[0 ..< i]
+  if seen == want: path else: ""
+
+proc removalTakesEntry(removalRoot, targetRoot: string): bool =
+  ## Whether removing the entry at `removalRoot` removes `targetRoot`: it IS
+  ## that location or a directory containing it. Both are
+  ## `outputRemovalLocation` answers. Their spellings are compared first; a
+  ## spelling that differs is still the same entry when the filesystem says
+  ## so (`isSameEntryOnDisk`): another letter case on a case-folding volume
+  ## names the same directory. Only the target's ancestor at the removal's
+  ## depth can be it, since both parents are resolved to their physical,
+  ## on-disk directory and differ at most in the last component's spelling.
+  ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+  if removalRoot.len == 0 or targetRoot.len == 0:
+    return false
+  if removalRoot == targetRoot or targetRoot.startsWith(removalRoot & "/"):
+    return true
+  let entry = entryAtDepthOf(targetRoot, removalRoot)
+  entry.len > 0 and isSameEntryOnDisk(removalRoot, entry)
+
 var
   containmentMemoDepth {.threadvar.}: int
   containmentMemo {.threadvar.}: Table[string, Option[string]]
@@ -4905,7 +4996,7 @@ proc validateGraph(g: BuildGraph) =
         absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
       when defined(windows):
         cwdRoot = cwdRoot.toLowerAscii()
-      if removalRoot == cwdRoot or cwdRoot.startsWith(removalRoot & "/"):
+      if removalTakesEntry(removalRoot, cwdRoot):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
       indexRoot(raw, optional = true)
@@ -4921,7 +5012,7 @@ proc validateGraph(g: BuildGraph) =
           else: action.cwd / raw
         let inputRoot = outputRemovalLocation("", physicalInput)
         let outputRoot = outputRemovalLocation("", physicalOutput)
-        if inputRoot == outputRoot or inputRoot.startsWith(outputRoot & "/"):
+        if removalTakesEntry(outputRoot, inputRoot):
           raiseEngine("optional output contains a declared input: " & raw &
             " contains " & input & " for " & action.id)
     if hasOptionalCandidates:
@@ -4959,12 +5050,12 @@ proc validateGraph(g: BuildGraph) =
       let root = outputRemovalLocation(action.cwd, raw)
       if root notin owned:
         continue
-      if root == cwdRoot or cwdRoot.startsWith(root & "/"):
+      if removalTakesEntry(root, cwdRoot):
         raiseEngine("output removed before run contains the action's cwd: " &
           raw & " for " & action.id)
       for input in action.inputs:
         let inputRoot = outputRemovalLocation(action.cwd, input)
-        if inputRoot == root or inputRoot.startsWith(root & "/"):
+        if removalTakesEntry(root, inputRoot):
           raiseEngine("output removed before run contains a declared input: " &
             raw & " contains " & input & " for " & action.id)
       removalRoots.add((actionId: action.id, raw: raw, root: root))
