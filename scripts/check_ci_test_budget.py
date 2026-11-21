@@ -163,6 +163,10 @@ MEASURED_INNER_WORST: tuple[Measurement, ...] = (
     Measurement(ENV_BUILD_TIMEOUT, 249,
                 "run 36583430437: the 1759-action .#test-builds graph took "
                 "4h08m51s"),
+    Measurement(ENV_BUILD_TIMEOUT, 300,
+                "run 44372733087 (job 136450661089): a cold .#test-builds on "
+                "gpu-server-002 hit the 5h backstop at 946/966 with no action "
+                "failed -- a LOWER bound; the build needed a little longer"),
     Measurement(ENV_RUNNER_TIMEOUT, 320,
                 "run 36583430437: 51m06s elapsed + runner ETA 4h28m15s = "
                 "5h19m21s (a projection on the slower host class; the "

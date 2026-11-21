@@ -4,10 +4,11 @@
 ##
 ## The prefix ships the catalog's `nim-fork` under `nim/`, and an installed
 ## reprobuild compiles with the compiler it was built by, so the images'
-## compiler must BE that fork. Path mode takes whatever `nim` PATH offers and
-## falls back to the stock tarball Nim 2.2.10 when PATH has none (measured
-## 2026-11-03: an armv7 `.#release` run outside the dev shell generated C
-## "by Nim Compiler v2.2.10"). The guard refuses then, naming the compiler.
+## compiler must BE that fork. Path mode takes whatever `nim` PATH offers; until
+## 2026-11-17 it also fell back to the stock tarball Nim 2.2.10 when PATH had
+## none (measured 2026-11-03: an armv7 `.#release` run outside the dev shell
+## generated C "by Nim Compiler v2.2.10"). The guard refuses a stock Nim,
+## naming the compiler.
 ##
 ## What it compares, and why: the fork binary records no revision, so the
 ## guard checks (1) the catalog fork's recorded revision against

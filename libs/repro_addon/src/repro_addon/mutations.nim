@@ -2046,6 +2046,23 @@ const
                           # the boot-hold unit's minimal hold is judged as a
                           # planted drop-in by the next check.
                           "boot-hold-minimal-hold-judged",
+                          # A9 review round 21: ExecStart= carries ``-``
+                          # again, so a kill or a failed exec succeeds.
+                          "boot-hold-dash-prefix",
+                          # the conservative branch ignores a failed
+                          # ``ls`` and holds nothing.
+                          "boot-hold-ls-failure-ignored",
+                          # the fetch unit drops MemoryDenyWriteExecute=.
+                          "fetch-unit-without-mdwe",
+                          # the record of none is written in two steps,
+                          # leaving a window with a marker and no record.
+                          "boot-hold-clear-record-two-step",
+                          # the triggers are stopped before their holds are
+                          # in the record.
+                          "boot-hold-triggers-before-record",
+                          # an EnvironmentFile= path is checked lexically,
+                          # skipping the targets of symlinked directories.
+                          "environment-file-traversal-lexical",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",

@@ -5816,6 +5816,13 @@ const
     ## ``dependencyPolicy.kind`` of a ``create-action`` record whose action
     ## reports its reads in make-format depfiles, as the DSL's
     ## ``makeDepfilePolicy(...)``. The record lists them in ``depfiles``.
+  CreatedActionTimestampCheck* = "timestamp"
+    ## ``actionCachePolicy`` of a ``create-action`` record (the default):
+    ## ``ffpTimestamp``.
+  CreatedActionHybridCheck* = "hybrid"
+    ## ``actionCachePolicy`` of a ``create-action`` record: ``ffpHybrid``.
+  CreatedActionChecksumCheck* = "checksum"
+    ## ``actionCachePolicy`` of a ``create-action`` record: ``ffpChecksum``.
 
 proc keyedOnCreatedActionPolicy*(fingerprint: ContentDigest; kind: string;
                                  depfiles: openArray[string]): ContentDigest =
@@ -5922,6 +5929,13 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let outputs = stringSeqField("outputs")
   let deps = stringSeqField("deps")
   let env = stringSeqField("env")
+  # Names whose value is the host's, as a declared edge's `envPassthrough`
+  # (a nim compile's temp-directory names, for one): the names are keyed by
+  # `action()`, the values are not.
+  let envPassthrough = stringSeqField("envPassthrough")
+  for name in envPassthrough:
+    if name.len == 0 or '=' in name:
+      fail("field 'envPassthrough' holds variable names, not '" & name & "'")
   let pool = stringField("pool", required = false)
   let poolUnits = uintField("poolUnits", 1'u32)
   let cpuMilli = uintField("cpuMilli", 1000'u32)
@@ -5930,6 +5944,23 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let widthFlag = stringField("widthFlag", required = false)
   let commandStatsId = stringField("commandStatsId", required = false)
   let cacheable = boolField("cacheable", default = false)
+  # The input-check policy, as a declared edge's `actionCachePolicy`:
+  # `timestamp` (the default) trusts an input whose metadata is unchanged
+  # and misses when it moved; `hybrid` re-hashes an input whose metadata
+  # moved and is a hit when its content did not (a per-test binary rebuilt
+  # byte-identical); `checksum` always hashes. As for a declared edge, the
+  # policy is not mixed into the key: a lookup is served only records made
+  # under the same policy (`repro_local_store`).
+  let cachePolicyName = stringField("actionCachePolicy", required = false)
+  let actionCachePolicy =
+    case cachePolicyName
+    of "", CreatedActionTimestampCheck: ffpTimestamp
+    of CreatedActionHybridCheck: ffpHybrid
+    of CreatedActionChecksumCheck: ffpChecksum
+    else:
+      fail("unknown 'actionCachePolicy' '" & cachePolicyName &
+        "'; expected '" & CreatedActionTimestampCheck & "', '" &
+        CreatedActionHybridCheck & "' or '" & CreatedActionChecksumCheck & "'")
 
   # The dependency policy, in the vocabulary of the DSL's static edges:
   #   {"kind": "automaticMonitor"}
@@ -6000,6 +6031,8 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
     widthFlag = widthFlag,
     commandStatsId = commandStatsId, cacheable = cacheable,
     weakFingerprint = weakFingerprint, env = env,
+    envPassthrough = envPassthrough,
+    actionCachePolicy = actionCachePolicy,
     dependencyPolicy = dependencyPolicy,
     governingLockIdentity = governingLockIdentity)
 
@@ -11256,7 +11289,39 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
 
 proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool
 
-proc isRemovedOutputTreePath(action: BuildAction; path: string): bool =
+proc linkEntryLocation(path: string): string =
+  ## Where a recorded entry that is itself a symbolic link IS: its ancestors
+  ## resolved, its own name kept. Empty when `path` is not such an entry, and
+  ## the caller then places it as before.
+  ##
+  ## `canonicalPolicyPath` is a `realpath` for a path with no parent walk, so
+  ## it follows the last component too and answers where the link LEADS. The
+  ## link is the entry: where it points does not place it inside or outside a
+  ## root (Monitor-Hook-Shim.md §"Metadata, Probe, And Symlink APIs", "Both
+  ## sides in one resolution").
+  ##
+  ## Not on Windows, where `canonicalPolicyPath` is lexical and follows no
+  ## link. Not for a relative path, which it does not resolve at all, nor for
+  ## one with a `..` component, which it resolves only through the last
+  ## parent walk and so never through the last component. A `.` component
+  ## and a trailing `/` are dropped first, as `canonicalPolicyPath` drops
+  ## them before its `realpath`: `<cwd>/./src/link` is the same entry.
+  when defined(windows):
+    discard
+  else:
+    let entry = normalizeWriteRoot(path)
+    if not entry.isAbsolute or "/../" in (entry & "/") or
+        not symlinkExists(entry):
+      return ""
+    let slash = entry.rfind('/')
+    if slash < 0 or slash == entry.high:
+      return ""
+    let parent = canonicalPolicyPath(if slash == 0: "/" else: entry[0 ..< slash])
+    result = (if parent.endsWith("/"): parent else: parent & "/") &
+      entry[slash + 1 .. ^1]
+
+proc isRemovedOutputTreePath(action: BuildAction; path: string;
+                             enumerated = false): bool =
   ## Whether `path` is at or under an output the engine REMOVES before the
   ## action runs: an optional candidate (a conditional byproduct) or a
   ## ``removeBeforeRun`` entry (an opaque output directory, Build-Engine-And-
@@ -11267,6 +11332,39 @@ proc isRemovedOutputTreePath(action: BuildAction; path: string): bool =
   ## find the "input" absent). BuildXL adds an opaque directory to the
   ## untracked scope for the same reason (Opaque-Sealed-Directories.md
   ## §Internals).
+  ##
+  ## A symbolic link OUTSIDE every such tree is never one of these paths,
+  ## wherever it points. The engine did not remove it, it was there when the
+  ## action started, and its own state is a prior input: `src/link ->
+  ## ../gen/a.txt`, with `gen` an optional candidate, used to resolve to a
+  ## path under `gen` and leave the key, so retargeting the link at another
+  ## file of the tree was a false hit (reprobuild-pm issues/2026-11-18-
+  ## output-tree-input-filter-drops-a-symlink-that-points-into-the-tree.md).
+  ## A link INSIDE a tree is decided below exactly as before this test
+  ## existed, by where it leads: one the action made that leads out of the
+  ## tree is the only recorded trace of what was read through it.
+  ##
+  ## `enumerated` is the membership channel, and it asks about the directory
+  ## that was LISTED. Listing follows the link, so a link to a removed tree
+  ## names that tree's entries, which are this run's writes: the listing is
+  ## placed by where it leads, as before. The link itself stays an input
+  ## through the read and probe channels.
+  if not enumerated and
+      (action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0):
+    let linkLocation = path.linkEntryLocation()
+    if linkLocation.len > 0:
+      var insideATree = false
+      for candidate in action.optionalOutputs & action.removeBeforeRun:
+        let root = materialPath(action.cwd, candidate)
+        # The candidate itself, when it is a link: the engine removed it.
+        if path == root.replace('\\', '/'):
+          return true
+        # Both sides resolved the same way: the link's ancestors above, and
+        # the root's here.
+        if recordedPathUnderRoot(linkLocation, canonicalPolicyPath(root)):
+          insideATree = true
+      if not insideATree:
+        return false
   for candidate in action.optionalOutputs & action.removeBeforeRun:
     let root = materialPath(action.cwd, candidate)
     if path == root.replace('\\', '/'):
@@ -13084,7 +13182,8 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # A directory inside a tree removed before the action ran: its entries
     # are all this run's writes, and `cacheInputPaths` drops the directory
     # from the key for the same reason (`isRemovedOutputTreePath`).
-    if action.isRemovedOutputTreePath(location.replace('\\', '/')):
+    if action.isRemovedOutputTreePath(location.replace('\\', '/'),
+                                      enumerated = true):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -23229,6 +23328,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         inc waitingDeps
     remaining[newAction.id] = waitingDeps
     runResult.trace(newAction.id, "action-create", "producer=" & producerId)
+    # The command the record created, as a JSON array, so a build report
+    # says what each created action ran (a per-test run names its test
+    # here). The record's argv, not the expanded one: an `@FILE:` token is
+    # substituted only at launch and its contents never reach a report.
+    if runResult.traceEnabled:
+      # Rendered only when the trace is kept.
+      runResult.trace(newAction.id, "action-create-argv",
+        $(%incomingAction.argv))
     if blockedBy.len > 0:
       statuses[newAction.id] = asBlocked
       let blockedIdx = idToIndex.resultIndex(newAction.id)

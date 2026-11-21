@@ -105,6 +105,10 @@ proc reprobuildComponents(targetOs: TargetOs): seq[DistComponent] =
   for helper in ["repro-standard-provider",
                  "repro-cmake-dyndep-fragment",
                  "repro-cmake-trycompile-provider",
+                 # The producer of ``runPerTest``'s listing edge: the
+                 # engine runs it from beside its own image, so a
+                 # ``repro test`` of a per-test package needs it here.
+                 "repro-tests-fragment",
                  "repro-install-mirror-publish"]:
     result.add(component(crHelperExecutable, PrebuiltBin & "/" & helper & sfx))
   # ``reprobuild-nix-daemon`` is the ``tool-provisioning=nix`` bridge and

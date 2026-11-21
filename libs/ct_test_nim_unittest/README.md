@@ -9,7 +9,49 @@ Exposes:
 - `buildNimUnittest` — a reprobuild DSL `executable` that builds a Nim
   unittest test binary from a `.nim` source file.
 - UFCS dispatch procs: `run(self: NimUnittestBinary; …)`,
-  `list(self: NimUnittestBinary; …)`, `runTest(self: NimUnittestBinary; …)`.
+  `list(self: NimUnittestBinary; …)`, `runTest(self: NimUnittestBinary; …)`,
+  `runPerTest(self: NimUnittestBinary; …)`.
+
+## Running a binary's tests one by one
+
+A test binary built with
+[nim-entrypoints](https://github.com/metacraft-labs/nim-entrypoints)
+(`import entrypoints/tests`, `testCase`s and a `main:`) answers its `tests`
+entry: `--entrypoint=tests --list` names its tests and
+`--entrypoint=tests --run-exact=<name>` runs one of them. `runPerTest` turns
+that into the build graph:
+
+```nim
+let edge = buildNimUnittest.build(
+  source = "tests/suite.nim",
+  binary = "build/test-bin/suite",
+  paths = @["<nim-entrypoints>/src"])
+discard collect("test", [edge.testBinary.runPerTest(actionId = "suite")])
+```
+
+A listing edge (`suite.list`) runs `repro-tests-fragment`, which lists the
+binary's tests and writes a dynamic graph fragment with one action per test
+(`suite.test.<name>`). The returned collector (`suite`) creates those actions
+when it is about to run and waits for every one. Each test is monitored,
+cached and reported on its own, keyed on the binary and what it read, and a
+failing test fails only its own action. A binary that lists no tests, or a
+name twice, fails the listing edge. `libs/ct_test_nim_unittest/src/
+ct_test_nim_unittest/tests_fragment.nim` describes the records.
+
+All tests of one binary share its bytes, so an edit of any of them reruns
+every one. `runPerTest(..., perTestBinaries = true)` opts into one binary per
+test instead: the listing still comes from this binary, and the fragment also
+creates a compile per test (`suite.compile.<name>`), the binary's own compile
+with nim-entrypoints' `-d:entrypointsTest=<name>` and its own output
+(`build/test-bin/suite.per-test/<name>/suite`) and nimcache. That define
+compiles the one `testCase` and expands the others to nothing, so the binary
+of a test whose code did not change comes out byte-identical, and its run,
+which re-hashes an input whose metadata moved (the `hybrid` input-check
+policy), is a cache hit: changing one test reruns only that test. It costs
+a compile per test; it covers `testCase` tests only (the listing edge fails,
+naming every test that belongs to a `tests:` block, before any compile is
+created); and a test whose lines an edit moves reruns too, because its line
+numbers are in its binary.
 
 ## Usage from a reprobuild package
 

@@ -80,6 +80,21 @@ const
     ## The name help, errors and completion scripts use: the command a user
     ## types, whichever image answers it.
 
+proc toolProvisioningForFlagDecl(): NimNode {.compileTime.} =
+  ## `--tool-provisioning-for=<package>=<mode>`, the per-tool provisioning
+  ## override, on every command
+  ## that takes `--tool-provisioning` and on `repro tool realize`. It
+  ## declares no environment variable: `$REPRO_TOOL_PROVISIONING_OVERRIDES`
+  ## is a level of its own below the flag, read with the configuration
+  ## where the overrides are composed, and the flag beats it per package.
+  quote do:
+    flag toolProvisioningFor is seq[string], valueName = "PACKAGE=MODE",
+      help = "Provision one package's tools in another mode than the " &
+        "rest, `PACKAGE=MODE` (repeatable); it wins over " &
+        "`--tool-provisioning`, `$REPRO_TOOL_PROVISIONING_OVERRIDES` and " &
+        "the `[tool-provisioning.overrides]` configuration, and never " &
+        "falls through to another mode"
+
 proc graphInspectionFlags(): NimNode {.compileTime.} =
   ## The flags of every command that materializes the project's build graph
   ## to inspect it (`graph`, `why`, `stats`): how the graph's tools are
@@ -92,6 +107,7 @@ proc graphInspectionFlags(): NimNode {.compileTime.} =
   ## root and the action-cache root declare theirs, as on `repro build`:
   ## the flag wins over `$REPROBUILD_WORK_ROOT` and
   ## `$REPROBUILD_ACTION_CACHE_ROOT`.
+  let toolProvisioningForFlag = toolProvisioningForFlagDecl()
   quote do:
     # Every spelling `parseToolProvisioning` accepts: the five modes, and the
     # other two spellings of `from-source` (`fromSource`, the project DSL's
@@ -101,6 +117,7 @@ proc graphInspectionFlags(): NimNode {.compileTime.} =
       help = "How the graph's tools are provisioned (`from-source` is also " &
         "spelt `fromSource` or `source`); default: the project's " &
         "`defaultToolProvisioning`"
+    `toolProvisioningForFlag`
     flag workRoot is string, env = "REPROBUILD_WORK_ROOT",
       help = "The work root the project's build state lives under " &
         "(default: the project's `.repro/`)"
@@ -874,8 +891,9 @@ proc branchFlags(): NimNode {.compileTime.} =
 
 proc hooksActionFlags(): NimNode {.compileTime.} =
   ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
-  ## no selector `--vcs`, `--shell-direnv` and `--shell-autocomplete` are
-  ## implied.
+  ## no selector every type is implied: `--vcs`, `--shell-direnv`,
+  ## `--shell-autocomplete` and the native integration (`--shell`) of each
+  ## shell found.
   let root = workspaceRootFlag()
   let report = workspaceReportFlags()
   quote do:
@@ -921,6 +939,9 @@ proc membershipSetFlags(): NimNode {.compileTime.} =
       boolFlag enabled is bool, help = "Only the sets enabled here"
       boolFlag disabled is bool, help = "Only the sets not enabled here"
       boolFlag all is bool, help = "Every defined set (the default)"
+      flag at is Option[string], format = equals,
+        help = "List the sets this commit of the manifest repository " &
+          "defines instead of its working tree's"
       boolFlag json is bool, help = "Print the list as JSON"
   let callList = listFlags()
   let list = listFlags()
@@ -1397,7 +1418,8 @@ proc daemonModeFlag(what: string): NimNode {.compileTime.} =
 proc buildToolProvisioningFlag(): NimNode {.compileTime.} =
   ## `--tool-provisioning`, over `$REPRO_TOOL_PROVISIONING`, of the commands
   ## that build: `repro build` (and every command that takes its command
-  ## line) and `repro watch`.
+  ## line) and `repro watch`; and the per-tool `--tool-provisioning-for`.
+  let toolProvisioningForFlag = toolProvisioningForFlagDecl()
   quote do:
     flag toolProvisioning is string, values = ["path", "nix", "tarball",
         "scoop", "from-source", "fromSource", "source"],
@@ -1406,6 +1428,7 @@ proc buildToolProvisioningFlag(): NimNode {.compileTime.} =
         "spelt `fromSource` or `source`); the flag wins over " &
         "`$REPRO_TOOL_PROVISIONING` (default: the project's " &
         "`defaultToolProvisioning`)"
+    `toolProvisioningForFlag`
 
 proc buildWorkRootFlag(): NimNode {.compileTime.} =
   ## `--work-root` of the commands that build: the flag wins over
@@ -1824,7 +1847,7 @@ const
         "launch-plan"]),
     ReproCommandGroup(title: "Dependencies & Workspaces",
       primary: @["develop", "add", "why", "lock", "workspace"],
-      secondary: @["remove", "sync", "pull", "branch", "switch", "push",
+      secondary: @["tool", "remove", "sync", "pull", "branch", "switch", "push",
         "check", "hooks", "locking", "flake", "gateway", "bundle",
         "catalog", "nimble"]),
     ReproCommandGroup(title: "Machines & Diagnostics",
@@ -2179,6 +2202,7 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
   ## (``arrangeCommandGroups``). The ``# ---- ... ----`` comments below
   ## only organise the declarations; they are not the help's sections.
   let graphInspection = graphInspectionFlags()
+  let toolRealizeFor = toolProvisioningForFlagDecl()
   let devEnvSelection = devEnvSelectionFlags()
   # The role processes: each command line twice, under `internal` (`i...`)
   # and as its hidden `__repro-<name>` spelling (`h...`).
@@ -2545,6 +2569,33 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         pos modules is seq[string], required = false,
           help = "Provider modules, relative to the root (default: every " &
             "packages/{interfaces,vendor,source}/<name>/repro.nim)"
+    subcmd "tool", help = "Realize one provisioned tool of the project":
+      # Realize one `uses:` package (and its provisioning dependencies) and
+      # print its verified prefix.
+      # Exit codes: 0 realized, 1 realization failed, 2 usage error or
+      # unknown package, 3 no arm for the effective mode on this host.
+      subcmd "realize",
+          help = "Realize one package of the project's `uses:` under the " &
+            "resolved provisioning mode and print its prefix (exit 1: the " &
+            "realization failed; 2: usage error or unknown package; 3: the " &
+            "package has no arm for that mode on this host)":
+        flag project is string,
+          help = "The project whose `uses:` name the package (default: " &
+            "the current directory)"
+        flag toolProvisioning is string, values = ["path", "nix", "tarball",
+            "scoop", "from-source", "fromSource", "source"],
+          env = "REPRO_TOOL_PROVISIONING",
+          help = "The invocation-wide provisioning mode; the flag wins over " &
+            "`$REPRO_TOOL_PROVISIONING` (default: the project's " &
+            "`defaultToolProvisioning`)"
+        `toolRealizeFor`
+        boolFlag json is bool,
+          help = "Print the realized tool as one JSON document"
+        pos package is string,
+          help = "The package, as the project's `uses:` names it"
+      # `repro tool help`: the same as `repro tool --help`.
+      subcmd "help", visibility = hidden:
+        pos topic is seq[string], required = false
     subcmd "nimble",
         help = "Work with the Nimble packages a lock pins":
       subcmd "verify",

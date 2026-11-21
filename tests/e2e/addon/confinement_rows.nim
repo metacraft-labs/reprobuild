@@ -41,6 +41,12 @@ type
                             ## cannot remove: a unit setting one is skipped
     unlessValueHas*: string ## a unit whose value of the key contains this
                             ## allows what the probe tries, by design
+    unprivilegedOnly*: bool ## the probe is for a unit that runs as a
+                            ## non-root user (the root form is another row)
+    denyLinesOnly*: bool ## REMOVED drops only the unit's ``~`` lines of the
+                         ## key, keeping its allow lines (``removedLines``)
+    notObservableAsRoot*: bool ## the setting has no effect on root
+                               ## (``NotObservable`` says why)
 
 const
   ProbePath* = "/usr/local/lib/a9probe/a9_confinement_probe"
@@ -108,7 +114,7 @@ let ProbeRows*: seq[ProbeRow] = @[
     probe: "realtime", held: @[FilterReset, "CapabilityBoundingSet=CAP_SYS_NICE"],
     removed: @["RestrictRealtime=no"], rootOnly: true),
   ProbeRow(name: "restrict-suid-sgid", setting: "RestrictSUIDSGID", probe: "suid",
-    held: @["ReadWritePaths=/var/lib/a9probe"],
+    arg: "/var/lib/a9probe/suid-mode", held: @["ReadWritePaths=/var/lib/a9probe"],
     removed: @["RestrictSUIDSGID=no"], rootOnly: true),
   ProbeRow(name: "lock-personality", setting: "LockPersonality",
     probe: "personality", held: @[FilterReset], removed: @["LockPersonality=no"]),
@@ -122,6 +128,38 @@ let ProbeRows*: seq[ProbeRow] = @[
   ProbeRow(name: "system-call-filter", setting: "SystemCallFilter",
     probe: "filter", held: @["CapabilityBoundingSet=CAP_SYS_ADMIN"],
     removed: @[FilterReset], expect: exFilter, rootOnly: true),
+  # The deny side of the filter (A9 review round 21, M2): calls the
+  # ``@system-service`` allow list lets through and the unit's
+  # ``~@privileged @resources ...`` line takes away -- setuid(2) to the
+  # caller's own uid (``@setuid`` in the allow list, ``@privileged`` in
+  # the deny line) and sched_setaffinity(2) to the caller's own mask
+  # (``@resources``). Both succeed for any user once they reach the kernel,
+  # so no other layer is in the way; REMOVED keeps the allow lines and
+  # drops only the ``~`` line, so it is that line the row falsifies.
+  ProbeRow(name: "system-call-filter-deny-privileged", setting: "SystemCallFilter",
+    probe: "setuid", removed: @[FilterReset], denyLinesOnly: true,
+    expect: exFilter),
+  ProbeRow(name: "system-call-filter-deny-resources", setting: "SystemCallFilter",
+    probe: "affinity", removed: @[FilterReset], denyLinesOnly: true,
+    expect: exFilter),
+  # ProtectProc=invisible (M3): another user's process -- PID 1, root --
+  # is not there at all. Observable in a unit that runs as another user
+  # than root (the fetch and evidence units, dynamic users); root is
+  # unaffected (``NotObservable``).
+  ProbeRow(name: "protect-proc", setting: "ProtectProc", probe: "exists",
+    arg: "/proc/1", removed: @["ProtectProc=default"],
+    notObservableAsRoot: true),
+  # RestrictSUIDSGID= for an unprivileged unit (L4): the owner sets the
+  # setuid bit on a file of its own in its state directory. DynamicUser=
+  # implies RestrictSUIDSGID= and no drop-in can lift that, so REMOVED runs
+  # the same copy as the static user nobody. Both runs use a scratch state
+  # directory, so the unit's own is never migrated between a dynamic and a
+  # static owner.
+  ProbeRow(name: "restrict-suid-sgid-unprivileged", setting: "RestrictSUIDSGID",
+    probe: "suid", arg: "/var/lib/a9probe-suid/suid-mode",
+    held: @["StateDirectory=", "StateDirectory=a9probe-suid"],
+    removed: @["RestrictSUIDSGID=no", "DynamicUser=no", "User=nobody"],
+    unprivilegedOnly: true),
   # The three network layers, each alone with the other two disabled
   # (C78: each is enough to stop a connect).
   ProbeRow(name: "private-network", setting: "PrivateNetwork", probe: "net",
@@ -135,11 +173,41 @@ let ProbeRows*: seq[ProbeRow] = @[
     removed: @["RestrictAddressFamilies="], unlessValueHas: "AF_INET")]
 
 const NotObservable* = [
-  ("ProtectProc", "a root unit holding CAP_SYS_PTRACE sees every process " &
-    "whatever hidepid= says (proc(5)), so =invisible has no effect a probe " &
-    "inside the add-on's root units can observe"),
+  ("ProtectProc", "=invisible hides the processes of other users, and " &
+    "root is unaffected by it (systemd.exec(5), ProtectProc=: \"the root " &
+    "user is unaffected by this option, so to be effective it has to be " &
+    "used together with User= or DynamicUser=yes, and also without the " &
+    "CAP_SYS_PTRACE capability\"); measured: a copy of the boot-hold " &
+    "unit, root with an empty bounding set, sees /proc/1 with it (debian-13, " &
+    "58445fa836). So it has no effect in the add-on's root units -- the " &
+    "five privilegedConfinement units and the boot-hold unit -- and is " &
+    "observed in the fetch and evidence units (the protect-proc row)"),
   ("ReadWritePaths", "not a restriction but the exception to ProtectSystem=strict; " &
     "its extent is what the protect-system row writes outside of")]
+
+const UnsetByDesign* = [
+  ("repro-addon-boot-hold.service", "PrivateTmp",
+    "the /tmp mounts it needs are not up before sysinit.target (the unit's " &
+    "own X-Repro-Floor-Unset)"),
+  ("repro-agent-fetch.service", "PrivateNetwork",
+    "it fetches the manifest and the store paths over the network; " &
+    "IPAddressDeny= with its allow-list and RestrictAddressFamilies= bound it"),
+  ("repro-addon-evidence.service", "PrivateNetwork",
+    "it ships records to the Evidence sink over the network; IPAddressDeny= " &
+    "with the sink's address alone and RestrictAddressFamilies= bound it")]
+  ## The settings a unit the gate runs does not set, each with its reason
+  ## (A9 review round 21, M1). Every other key the table tries is expected
+  ## in every unit: a unit that does not set one fails the gate, whatever
+  ## the unit (``missingSettings``).
+
+proc expectedSettings*(unit: string): seq[string] =
+  ## Every key ``ProbeRows`` tries, but those ``UnsetByDesign`` gives
+  ## ``unit`` a reason not to set.
+  for row in ProbeRows:
+    var excused = false
+    for (u, k, _) in UnsetByDesign:
+      if u == unit and k == row.setting: excused = true
+    if not excused and row.setting notin result: result.add(row.setting)
 
 const DroppedKeys = ["ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop",
   "ExecStopPost", "ExecReload", "ExecCondition", "Type", "Restart", "RestartSec",
@@ -193,22 +261,51 @@ proc probeUnitCopy*(unit, probeArgs, outFile: string;
              "\nExecStart=" & ProbePath & " " & probeArgs & "\n")
   for l in extra: result.add(l & "\n")
 
+proc valuesOf(unit, key: string): seq[string] =
+  ## Every value the unit's ``[Service]`` assigns ``key``, in order.
+  for l in serviceLines(unit):
+    if keyOf(l) == key: result.add(l[l.find('=') + 1 .. ^1].strip())
+
+proc setsSetting*(unit, key: string): bool =
+  ## ``setsKey``, but an empty ``CapabilityBoundingSet=`` is the strictest
+  ## value (no capability), not an unset one.
+  if key == "CapabilityBoundingSet": valuesOf(unit, key).len > 0
+  else: setsKey(unit, key)
+
+proc missingSettings*(unitName, unit: string): seq[string] =
+  ## The ``expectedSettings`` of ``unitName`` its text does not set (M1).
+  for k in expectedSettings(unitName):
+    if not setsSetting(unit, k): result.add(k)
+
+proc removedLines*(row: ProbeRow; unit: string): seq[string] =
+  ## The lines that remove the row's setting from ``unit``: the row's own,
+  ## or, for a ``denyLinesOnly`` row, a reset followed by the unit's allow
+  ## lines of the key again, so only its ``~`` lines go.
+  if not row.denyLinesOnly: return row.removed
+  result = @[row.setting & "="]
+  for v in valuesOf(unit, row.setting):
+    if v.len > 0 and not v.startsWith("~"): result.add(row.setting & "=" & v)
+
 proc rowApplies*(row: ProbeRow; unit: string; amd64: bool): tuple[ok: bool; why: string] =
   ## Whether ``row`` runs in ``unit``, and why not.
-  # An empty CapabilityBoundingSet= is the strictest value (no capability),
-  # not an unset one.
-  let present =
-    if row.setting == "CapabilityBoundingSet":
-      (block:
-        var found = false
-        for l in serviceLines(unit):
-          if keyOf(l) == row.setting: found = true
-        found)
-    else: setsKey(unit, row.setting)
-  if not present:
+  if not setsSetting(unit, row.setting):
     return (false, "the unit does not set " & row.setting & "=")
   if row.rootOnly and not runsAsRoot(unit):
     return (false, "the probe needs root, and the unit runs unprivileged")
+  if row.unprivilegedOnly and runsAsRoot(unit):
+    return (false, "the probe is for a unit that runs unprivileged (the root " &
+      "form is its own row)")
+  if row.denyLinesOnly:
+    var deny = false
+    for v in valuesOf(unit, row.setting):
+      if v.startsWith("~"): deny = true
+    if not deny:
+      return (false, "the unit's " & row.setting & "= has no deny (~) line")
+  if row.notObservableAsRoot and runsAsRoot(unit):
+    var why = ""
+    for (k, r) in NotObservable:
+      if k == row.setting: why = r
+    return (false, "not observable: " & why)
   if row.amd64Only and not amd64:
     return (false, "the probe is amd64 only")
   for k in row.impliedBy:
@@ -226,16 +323,23 @@ proc rowApplies*(row: ProbeRow; unit: string; amd64: bool): tuple[ok: bool; why:
 
 type Outcome* = tuple[ran: bool; rc, errno: int; killed: bool]
 
-proc parseOutcome*(line, unitResult: string): Outcome =
-  ## The probe's line ("A9PROBE <probe> <rc> <errno>") and the unit's
-  ## ``Result=``: no line and a signal result is a kill.
+const SigSys* = 31
+  ## SIGSYS on every architecture the add-on supports (signal(7)): the
+  ## signal a seccomp filter's kill action delivers (seccomp(2)).
+
+proc parseOutcome*(line, unitResult: string; mainStatus = ""): Outcome =
+  ## The probe's line ("A9PROBE <probe> <rc> <errno>"), the unit's
+  ## ``Result=`` and its ``ExecMainStatus=``: no line, a signal result and
+  ## SIGSYS as the status is a filter's kill. Any other signal -- a crash,
+  ## an OOM kill, a timeout's SIGTERM -- is not (A9 review round 21, L2).
   let w = line.strip().splitWhitespace()
   if w.len == 4 and w[0] == "A9PROBE":
     try: return (true, parseInt(w[2]), parseInt(w[3]), false)
     except ValueError: discard
   # systemd reports a seccomp kill as "signal", or "core-dump" where the
   # base dumps cores on SIGSYS (Ubuntu 24.04).
-  (false, 0, 0, unitResult.strip() in ["signal", "core-dump"])
+  (false, 0, 0, unitResult.strip() in ["signal", "core-dump"] and
+                mainStatus.strip() == $SigSys)
 
 proc heldOk*(e: Expect; o: Outcome): bool =
   case e
