@@ -7822,8 +7822,8 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_interface_artifacts_tests_g01",
-    singleReason: ""),
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim",
     binary: "build/test-bin/t_interface_nimcache_slots",

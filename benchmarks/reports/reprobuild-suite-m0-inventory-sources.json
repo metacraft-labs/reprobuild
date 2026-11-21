@@ -1773,10 +1773,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1720,
+      "integration": 1722,
       "platform/destructive": 200,
       "pure unit": 821,
-      "unclassified": 375
+      "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
       {
@@ -21400,18 +21400,19 @@
     },
     {
       "binary": "build/test-bin/t_interface_nimcache_pool_is_this_users_alone",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_interface_artifacts"
       ],
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -65999,8 +66000,8 @@
     },
     {
       "binary": "",
-      "class": "unclassified",
-      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -66008,7 +66009,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_staged_data_files.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
