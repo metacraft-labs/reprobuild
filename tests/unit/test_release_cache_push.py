@@ -50,7 +50,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = ROOT / "scripts" / "release" / "attic_push_with_retry.sh"
-RELEASE_YML = ROOT / ".github" / "workflows" / "release.yml"
+RELEASE_YML = ROOT / ".github" / "workflows" / "release-pipeline.yml"
 BASH = shutil.which("bash")
 TIMEOUT = shutil.which("timeout")
 
@@ -76,7 +76,7 @@ UNKNOWN = "Error: something nobody has seen before"
 
 
 def _job(name: str) -> str:
-    """Return the text of one job of release.yml, up to the next job."""
+    """Return the text of one job of release-pipeline.yml, up to the next job."""
     text = RELEASE_YML.read_text(encoding="utf-8")
     start = text.index(f"\n  {name}:\n") + 1
     nxt = re.search(r"\n  [A-Za-z0-9_-]+:\n", text[start + len(name) + 4:])
@@ -300,8 +300,10 @@ class CachePushJobShapeTests(unittest.TestCase):
 
     def test_the_cache_job_builds_the_package_the_consumers_ask_for(self):
         job = _job("publish-nix-cache")
-        self.assertNotRegex(job, re.compile(r"^    needs:", re.M),
-                            "it needs nothing a leg built")
+        # `plan` only: it carries the release-lane guard and must take the
+        # lane's warm runner first. Nothing a leg built.
+        needs = re.findall(r"^    needs: (.*)$", job, re.M)
+        self.assertEqual(needs, ["plan"], "it needs `plan` and nothing a leg built")
         self.assertRegex(job, re.compile(r"^    runs-on: \[self-hosted, linux, x64\]$", re.M))
         steps = _steps(job)
         build = _run_block(steps["Build the Nix package of this revision"])

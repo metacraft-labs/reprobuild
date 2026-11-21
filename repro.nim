@@ -1228,7 +1228,7 @@ package reprobuild:
     # 2026-11-02).
     #
     # Linux only: Windows stages its own sqlite3.dll (the `firstExistingDll`
-    # probe in the apps collection) and macOS falls back to Homebrew's
+    # probe at `windowsRuntimeDllStagings`) and macOS falls back to Homebrew's
     # prefixes in `config.nims`, so neither host should be refused for an
     # unset *_PREFIX variable it never needed.
     when defined(linux):
@@ -1735,6 +1735,109 @@ package reprobuild:
     const reprobuildEngineBinaryPath =
       when defined(windows): "build/bin/reprobuild.exe"
       else: "build/bin/reprobuild"
+
+    # WINDOWS RUNTIME DLLS: WHAT IS STAGED INTO build/bin, AND WHO DEPENDS ON IT.
+    #
+    # B5: previously ~200 lines of shell inside the build_apps.sh wrapper.
+    # Every non-system library reprobuild uses on Windows is dlopen'd by leaf
+    # name, and Win32 searches the .exe's own directory first, so these have
+    # to sit in build/bin next to the binaries.
+    #
+    # The interesting part is WHERE the resolution happens. The shell version
+    # probed PATH at run time inside an opaque action; here the probing is
+    # ordinary Nim executed while the graph is being constructed, and what
+    # reaches the graph is a declarative `fs.copyFile` edge with a concrete
+    # source and a declared output. The engine can therefore see the dependency
+    # instead of watching a shell script for side effects.
+    #
+    # An unresolved library emits NO edge rather than failing graph
+    # construction — graph evaluation runs for every `repro` command, including
+    # ones that build none of this, and a missing optional DLL must not make the
+    # whole project unloadable. The gates stay where they were: scripts/build_apps.sh
+    # still hard-errors on a missing clingo for `just bootstrap`, and
+    # scripts/verify_release.sh fails any archive whose bin/ is incomplete.
+    #
+    # WHY THE LIST IS BUILT HERE AND NOT WHERE THE EDGES ARE EMITTED. The
+    # staging edges are members of ``apps`` and are emitted with it, below.
+    # They used to be reachable ONLY through that collection: a test execute
+    # edge that runs the CLI depends on the two image edges, and nothing made
+    # an image edge depend on the libraries the image loads when it starts. So
+    # a narrow ``repro build '.#test#<name>'`` in a fresh checkout built a
+    # ``build\bin\repro.exe`` that could not start (``could not load:
+    # libcrypto-3-x64.dll``), and the test passed only when an earlier
+    # ``.#apps`` or ``build_apps.sh`` run had left the DLLs behind
+    # (reprobuild-pm ``issues/2026-11-17-windows-test-closure-builds-a-repro-
+    # exe-that-cannot-load-openssl.md``). On Linux and macOS the same closure
+    # is complete, because the images find their libraries through the
+    # link-time RPATH. The execute edges below therefore name every staged
+    # library, which needs the list before the test loop runs.
+    var windowsRuntimeDllStagings:
+      seq[tuple[source, output, actionId: string]] = @[]
+    when defined(windows):
+      proc firstExistingDll(candidates: openArray[string]): string =
+        for candidate in candidates:
+          if candidate.len > 0 and fileExists(candidate):
+            return candidate
+        ""
+
+      proc siblingOf(exeName, dllName: string): string =
+        let exe = uncontrolledFindExe(exeName)
+        if exe.len == 0: "" else: exe.parentDir / dllName
+
+      # clingo — dlopen'd at MODULE INIT by repro_solver, so a repro.exe
+      # without it beside the binary has no working subcommand at all.
+      let clingoDir = getEnv("REPRO_WINDOWS_CLINGO_DIR")
+      let clingoSrc = firstExistingDll([
+        (if clingoDir.len > 0: clingoDir / "clingo.dll" else: ""),
+        siblingOf("clingo", "clingo.dll")])
+      if clingoSrc.len > 0:
+        windowsRuntimeDllStagings.add((clingoSrc, "build/bin/clingo.dll",
+          "reprobuild.apps.stage_clingo_dll"))
+
+      # libzstd — lazily loaded by `repro cache substitute`. Two upstream
+      # layouts: MSYS2 co-locates the DLL with zstd.exe; the facebook/zstd
+      # win64 release puts it under a sibling dll/ directory.
+      let zstdExe = uncontrolledFindExe("zstd")
+      let zstdDir = if zstdExe.len == 0: "" else: zstdExe.parentDir
+      let zstdSrc = firstExistingDll([
+        (if zstdDir.len > 0: zstdDir / "libzstd.dll" else: ""),
+        (if zstdDir.len > 0: zstdDir / "dll" / "libzstd.dll" else: "")])
+      if zstdSrc.len > 0:
+        windowsRuntimeDllStagings.add((zstdSrc, "build/bin/libzstd.dll",
+          "reprobuild.apps.stage_libzstd_dll"))
+
+      # sqlite3 — repro_local_store's dynlib. The Windows Nim distribution
+      # ships it inside its own tree; probe the layouts Nim has used, then the
+      # bare DLL on PATH. Staged under BOTH names because the Nim binding's
+      # candidate list tries `sqlite3_64.dll` and `sqlite3.dll`.
+      let nimExe = uncontrolledFindExe("nim")
+      let nimBinDir = if nimExe.len == 0: "" else: nimExe.parentDir
+      let nimRootDir = if nimBinDir.len == 0: "" else: nimBinDir.parentDir
+      let sqliteSrc = firstExistingDll([
+        (if nimBinDir.len > 0: nimBinDir / "sqlite3_64.dll" else: ""),
+        (if nimRootDir.len > 0: nimRootDir / "dist" / "sqlite3_64.dll" else: ""),
+        (if nimRootDir.len > 0: nimRootDir / "dlls" / "sqlite3_64.dll" else: ""),
+        (if nimRootDir.len > 0: nimRootDir / "bin" / "sqlite3_64.dll" else: ""),
+        uncontrolledFindExe("sqlite3_64.dll")])
+      if sqliteSrc.len > 0:
+        windowsRuntimeDllStagings.add((sqliteSrc, "build/bin/sqlite3_64.dll",
+          "reprobuild.apps.stage_sqlite3_64_dll"))
+        windowsRuntimeDllStagings.add((sqliteSrc, "build/bin/sqlite3.dll",
+          "reprobuild.apps.stage_sqlite3_dll"))
+
+      # OpenSSL — the --define:ssl entry points dlopen these. release.yml also
+      # stages them with a recursive PowerShell scavenge of Program Files,
+      # which reaches installs this narrow probe does not. Both are kept on
+      # purpose: this edge covers the ordinary dev machine, and because an
+      # unresolved probe emits no edge at all, the workflow's scavenge remains
+      # the fallback rather than being contradicted by an empty copy.
+      for opensslDll in ["libcrypto-3-x64.dll", "libssl-3-x64.dll"]:
+        let opensslSrc = firstExistingDll([
+          siblingOf("openssl", opensslDll), uncontrolledFindExe(opensslDll)])
+        if opensslSrc.len > 0:
+          windowsRuntimeDllStagings.add((opensslSrc, "build/bin/" & opensslDll,
+            "reprobuild.apps.stage_" &
+              opensslDll.replace("-", "_").replace(".dll", "")))
 
     # OPT-IN TEST LAYERS, AND WHY THEY NEEDED A SECOND EDGE.
     #
@@ -2453,6 +2556,22 @@ package reprobuild:
           executeDeps.add("reprobuild.test_fixtures.install_mirror_openmp_probe")
           requiredBinaries.add(installMirrorFixtureRoot & "/libc-probe.so")
           executeDeps.add("reprobuild.test_fixtures.install_mirror_libc_library")
+      # THE LIBRARIES AN IMAGE IN build/bin LOADS, on Windows.
+      #
+      # Any ``build/bin`` program this test runs -- the two CLI images, or a
+      # fixture row's helper -- resolves its DLLs from its own directory, so
+      # the test needs every staged library there, not only the image. Both
+      # halves, as for a fixture row: the PATH as a typed input (a different
+      # DLL re-runs the test), the ACTION ID as an ordering dep (a narrow
+      # selection stages it first). See ``windowsRuntimeDllStagings`` for the
+      # failure this prevents. The list is empty off Windows, where the images
+      # find their libraries through RPATH.
+      if requiredBinaries.anyIt(it.startsWith("build/bin/")):
+        for staging in windowsRuntimeDllStagings:
+          if staging.output notin requiredBinaries:
+            requiredBinaries.add(staging.output)
+          if staging.actionId notin executeDeps:
+            executeDeps.add(staging.actionId)
       if groupIndex >= 0:
         # A grouped member's execute requirements go to its group's edge,
         # emitted after this loop. Union, without duplicates.
@@ -2713,7 +2832,7 @@ package reprobuild:
         elif releaseSmokeTest:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
-            ".github/workflows/release.yml",
+            ".github/workflows/release-pipeline.yml",
             "scripts/verify_release.sh", "repro.nim",
             # The Windows monitor-shim snapshot it runs, and the artefact
             # names it checks that snapshot against.
@@ -2723,12 +2842,12 @@ package reprobuild:
           # The guard, and the workflow whose publish-job steps the test runs.
           # It copies the guard into the runner clone it builds.
           @["scripts/release/assert_tag_names_commit.sh",
-            ".github/workflows/release.yml"]
+            ".github/workflows/release-pipeline.yml"]
         elif releaseCachePushTest:
           # The retry script, and the workflow whose `publish-nix-cache` job
           # shape the test checks and whose push step's `run:` block it runs.
           @["scripts/release/attic_push_with_retry.sh",
-            ".github/workflows/release.yml"]
+            ".github/workflows/release-pipeline.yml"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
           # threshold and lease-floor inputs and header they read.
@@ -3313,98 +3432,19 @@ package reprobuild:
     reprobuildAppsActions.add(reprobuildNixDaemon)
     discard target("reprobuild-nix-daemon", reprobuildNixDaemon)
 
-    # B5: Windows runtime-DLL staging, previously ~200 lines of shell inside the
-    # wrapper. Every non-system library reprobuild uses on Windows is dlopen'd
-    # by leaf name, and Win32 searches the .exe's own directory first, so these
-    # have to sit in build/bin next to the binaries.
-    #
-    # The interesting part is WHERE the resolution happens. The shell version
-    # probed PATH at run time inside an opaque action; here the probing is
-    # ordinary Nim executed while the graph is being constructed, and what
-    # reaches the graph is a declarative `fs.copyFile` edge with a concrete
-    # source and a declared output. The engine can therefore see the dependency
-    # instead of watching a shell script for side effects.
+    # B5: Windows runtime-DLL staging. The probing and the reasons are at
+    # ``windowsRuntimeDllStagings``, above the test edges, because an execute
+    # edge that runs an image out of build/bin declares these same files.
+    # Here each resolved library becomes its ``fs.copyFile`` edge. (The list
+    # is empty off Windows.)
     #
     # Not cacheable: the source is a machine-specific absolute path outside the
     # repo (a provisioned toolchain), so its content is not addressed by
     # anything in the action key.
-    #
-    # An unresolved library emits NO edge rather than failing graph
-    # construction — graph evaluation runs for every `repro` command, including
-    # ones that build none of this, and a missing optional DLL must not make the
-    # whole project unloadable. The gates stay where they were: scripts/build_apps.sh
-    # still hard-errors on a missing clingo for `just bootstrap`, and
-    # scripts/verify_release.sh fails any archive whose bin/ is incomplete.
-    when defined(windows):
-      proc firstExistingDll(candidates: openArray[string]): string =
-        for candidate in candidates:
-          if candidate.len > 0 and fileExists(candidate):
-            return candidate
-        ""
-
-      proc siblingOf(exeName, dllName: string): string =
-        let exe = uncontrolledFindExe(exeName)
-        if exe.len == 0: "" else: exe.parentDir / dllName
-
-      # clingo — dlopen'd at MODULE INIT by repro_solver, so a repro.exe
-      # without it beside the binary has no working subcommand at all.
-      let clingoDir = getEnv("REPRO_WINDOWS_CLINGO_DIR")
-      let clingoSrc = firstExistingDll([
-        (if clingoDir.len > 0: clingoDir / "clingo.dll" else: ""),
-        siblingOf("clingo", "clingo.dll")])
-      if clingoSrc.len > 0:
-        reprobuildAppsActions.add(dslfs.copyFile(clingoSrc,
-          "build/bin/clingo.dll", cacheable = false,
-          actionId = "reprobuild.apps.stage_clingo_dll"))
-
-      # libzstd — lazily loaded by `repro cache substitute`. Two upstream
-      # layouts: MSYS2 co-locates the DLL with zstd.exe; the facebook/zstd
-      # win64 release puts it under a sibling dll/ directory.
-      let zstdExe = uncontrolledFindExe("zstd")
-      let zstdDir = if zstdExe.len == 0: "" else: zstdExe.parentDir
-      let zstdSrc = firstExistingDll([
-        (if zstdDir.len > 0: zstdDir / "libzstd.dll" else: ""),
-        (if zstdDir.len > 0: zstdDir / "dll" / "libzstd.dll" else: "")])
-      if zstdSrc.len > 0:
-        reprobuildAppsActions.add(dslfs.copyFile(zstdSrc,
-          "build/bin/libzstd.dll", cacheable = false,
-          actionId = "reprobuild.apps.stage_libzstd_dll"))
-
-      # sqlite3 — repro_local_store's dynlib. The Windows Nim distribution
-      # ships it inside its own tree; probe the layouts Nim has used, then the
-      # bare DLL on PATH. Staged under BOTH names because the Nim binding's
-      # candidate list tries `sqlite3_64.dll` and `sqlite3.dll`.
-      let nimExe = uncontrolledFindExe("nim")
-      let nimBinDir = if nimExe.len == 0: "" else: nimExe.parentDir
-      let nimRootDir = if nimBinDir.len == 0: "" else: nimBinDir.parentDir
-      let sqliteSrc = firstExistingDll([
-        (if nimBinDir.len > 0: nimBinDir / "sqlite3_64.dll" else: ""),
-        (if nimRootDir.len > 0: nimRootDir / "dist" / "sqlite3_64.dll" else: ""),
-        (if nimRootDir.len > 0: nimRootDir / "dlls" / "sqlite3_64.dll" else: ""),
-        (if nimRootDir.len > 0: nimRootDir / "bin" / "sqlite3_64.dll" else: ""),
-        uncontrolledFindExe("sqlite3_64.dll")])
-      if sqliteSrc.len > 0:
-        reprobuildAppsActions.add(dslfs.copyFile(sqliteSrc,
-          "build/bin/sqlite3_64.dll", cacheable = false,
-          actionId = "reprobuild.apps.stage_sqlite3_64_dll"))
-        reprobuildAppsActions.add(dslfs.copyFile(sqliteSrc,
-          "build/bin/sqlite3.dll", cacheable = false,
-          actionId = "reprobuild.apps.stage_sqlite3_dll"))
-
-      # OpenSSL — the --define:ssl entry points dlopen these. release.yml also
-      # stages them with a recursive PowerShell scavenge of Program Files,
-      # which reaches installs this narrow probe does not. Both are kept on
-      # purpose: this edge covers the ordinary dev machine, and because an
-      # unresolved probe emits no edge at all, the workflow's scavenge remains
-      # the fallback rather than being contradicted by an empty copy.
-      for opensslDll in ["libcrypto-3-x64.dll", "libssl-3-x64.dll"]:
-        let opensslSrc = firstExistingDll([
-          siblingOf("openssl", opensslDll), uncontrolledFindExe(opensslDll)])
-        if opensslSrc.len > 0:
-          reprobuildAppsActions.add(dslfs.copyFile(opensslSrc,
-            "build/bin/" & opensslDll, cacheable = false,
-            actionId = "reprobuild.apps.stage_" &
-              opensslDll.replace("-", "_").replace(".dll", "")))
+    for staging in windowsRuntimeDllStagings:
+      reprobuildAppsActions.add(dslfs.copyFile(staging.source,
+        staging.output, cacheable = false,
+        actionId = staging.actionId))
 
     when defined(linux):
       # The images link sqlite and, in system-hash mode, libblake3 and

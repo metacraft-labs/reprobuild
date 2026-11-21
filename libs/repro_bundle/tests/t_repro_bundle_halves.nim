@@ -101,6 +101,54 @@ suite "nix half identity":
     check "export FOO='x'" in norm
     check normaliseDevEnv(raw.replace("'4'", "'64'")) == norm
 
+  test "print-dev-env normalisation keeps the activating shell's TMPDIR":
+    # The tail `nix print-dev-env` writes (Nix 2.34): a scratch directory
+    # made on every sourcing, and the four temp-directory names pointed at
+    # it. A producer that reads TMPDIR (a C compiler does) recorded that
+    # random path, so its edge never hit in a later activation.
+    let raw = "export FOO='x'\n" &
+      "body () \n{ \n    export TMPDIR=\"$1\"\n}\n" &
+      "PATH=\"$PATH${nix_saved_PATH:+:$nix_saved_PATH}\"\n" &
+      "export NIX_BUILD_TOP=\"$(mktemp -d -t nix-shell.XXXXXX)\"\n" &
+      "export TMP=\"$NIX_BUILD_TOP\"\n" &
+      "export TMPDIR=\"$NIX_BUILD_TOP\"\n" &
+      "export TEMP=\"$NIX_BUILD_TOP\"\n" &
+      "export TEMPDIR=\"$NIX_BUILD_TOP\"\n" &
+      "eval \"${shellHook:-}\"\n"
+    let norm = normaliseDevEnv(raw)
+    check "NIX_BUILD_TOP" notin norm
+    check "mktemp" notin norm
+    for name in ["TMP", "TMPDIR", "TEMP", "TEMPDIR"]:
+      check ("\nexport " & name & "=") notin norm
+    # A function body's own export is the shell's code, not the session's.
+    check "    export TMPDIR=\"$1\"\n" in norm
+    check "export FOO='x'" in norm
+    check "nix_saved_PATH" in norm
+
+    # Sourced by a real bash twice, as two activations of a restored bundle
+    # are: both see the caller's TMPDIR, and no scratch directory is made.
+    let dir = createTempDir("repro-bundle-env-", "")
+    defer: removeDir(dir)
+    let script = dir / "env.sh"
+    writeFile(script, norm)
+    let callerTmp = dir / "tmp"
+    createDir(callerTmp)
+    let bash = findExe("bash")
+    let mktemp = findExe("mktemp")
+    check bash.len > 0
+    check mktemp.len > 0
+    for _ in 1 .. 2:
+      # PATH reaches `mktemp`, so a scratch line left in would run as it
+      # does in a real activation.
+      let res = execCmdEx("env -i PATH=" & quoteShell(mktemp.parentDir) &
+        " TMPDIR=" & quoteShell(callerTmp) & " " &
+        quoteShell(bash) & " -c " & quoteShell(". " & quoteShell(script) &
+        " && printf '%s|%s|%s|%s' \"$TMPDIR\" \"${TMP-unset}\" " &
+        "\"${TEMP-unset}\" \"${NIX_BUILD_TOP-unset}\""))
+      check res.exitCode == 0
+      check res.output.strip() == callerTmp & "|unset|unset|unset"
+    check toSeq(walkDir(callerTmp)).len == 0
+
   test "the id is a function of the path set, not its order":
     let a = @["/nix/store/bbb-x", "/nix/store/aaa-y"]
     check nixHalfId(a) == nixHalfId(@[a[1], a[0]])

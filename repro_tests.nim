@@ -3299,7 +3299,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "its binary is named by tests/integration/t_test_execute_edge_declares_repro_binary_reached_via_helper.nim"),
+    singleReason: "its binary is named by tests/integration/t_b3_test_template_emits_two_edges.nim"),
   TestSpec(
     source: "libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim",
     binary: "build/test-bin/test_umask_wrap_both_spawn_paths",

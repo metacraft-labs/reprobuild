@@ -144,7 +144,14 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: metacraft-labs/reprobuild-cmake
-          ref: reprobuild
+          # Pinned, not the moving `reprobuild` branch. The fork writes
+          # trycompile.rbsz, and this tree's reader
+          # (libs/repro_cmake_trycompile, TryCompileMetadataVersion) accepts
+          # versions up to 6. 5ac5a800ca writes version 6. An unpinned fork
+          # that moves past the reader fails this job with
+          # "unsupported trycompile.rbsz version". Move this pin together
+          # with TryCompileMetadataVersion.
+          ref: 5ac5a800ca0b284e76670759a23f5beb72e0fbe6
           path: reprobuild-cmake
           token: ${{ steps.ci_token.outputs.token }}
           persist-credentials: false

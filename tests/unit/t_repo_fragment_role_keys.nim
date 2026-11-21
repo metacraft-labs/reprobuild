@@ -15,7 +15,11 @@
 ##   custom role name (a built-in name, upper case) are refused naming the
 ##   key;
 ## * a `[repo.<sub-table>]` a v2 fragment does not define is refused rather
-##   than silently dropped.
+##   than silently dropped;
+## * a boolean, number or other non-string written for a string key — at the
+##   top of `[repo]`, in a string array, or in a `remotes` / `copyfile` /
+##   `linkfile` entry — is refused naming the key, rather than read as text
+##   (Workspace-Manifests.md §"`repos/<repo>.toml` — Repository Descriptor").
 ##
 ## No mocks: real files in a temporary directory, the real reader.
 
@@ -188,3 +192,46 @@ mainline = "dev"
 beta = "beta"
 """))
     check e.keyPath == "repo.branch-rolez"
+
+  test "a non-string value written for a string [repo] key is refused naming the key":
+    # The typed decoder turns a TOML boolean or number into text when the field
+    # it fills is a string, so without a check against the generic tree
+    # `revision = false` loaded as the revision "false" and `profile = 7` as
+    # the profile named "7". Every key below is a string (or holds strings)
+    # in `RepoBody`; each wrong-typed value must be refused at its key.
+    let dir = createTempDir("repro-repo-roles-", "")
+    defer: removeDir(dir)
+    let base = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+      "mainline = \"dev\"\n"
+    let named = "name = \"x\"\npath = \"x\"\n"
+    var n = 0
+    for (extra, keyPath) in [
+        (named & "revision = false\n", "repo.revision"),
+        # Shaped like a short commit id: unquoted, it would pin a checkout.
+        (named & "revision = 1234567\n", "repo.revision"),
+        (named & "profile = false\n", "repo.profile"),
+        (named & "profile = 7\n", "repo.profile"),
+        (named & "url_suffix = 7\n", "repo.url_suffix"),
+        (named & "url_prefix = true\n", "repo.url_prefix"),
+        (named & "remote = 1.5\n", "repo.remote"),
+        (named & "vcs = false\n", "repo.vcs"),
+        (named & "stability = 2\n", "repo.stability"),
+        (named & "participation = true\n", "repo.participation"),
+        (named & "clone_filter = 0\n", "repo.clone_filter"),
+        ("name = 7\npath = \"x\"\n", "repo.name"),
+        ("name = \"x\"\npath = false\n", "repo.path"),
+        (named & "tags = [\"a\", 3]\n", "repo.tags[1]"),
+        (named & "depends = [true]\n", "repo.depends[0]"),
+        (named & "remotes = [{ name = \"origin\", url_suffix = 7 }]\n",
+         "repo.remotes[0].url_suffix"),
+        (named & "copyfile = [{ src = 1, dest = \"d\" }]\n",
+         "repo.copyfile[0].src"),
+        (named & "linkfile = [{ src = \"s\", dest = false }]\n",
+         "repo.linkfile[0].dest")]:
+      inc n
+      let file = fragmentAt(dir, "wrong-type-" & $n, base & extra)
+      let e = refusal(file)
+      checkpoint(extra)
+      check e.path == file
+      check e.keyPath == keyPath
+      check "`" & keyPath & "` must be a string, not " in e.msg
