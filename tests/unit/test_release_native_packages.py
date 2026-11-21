@@ -39,6 +39,17 @@ rpm2cpio, cpio and bsdtar; it is skipped, which counts as not passed, when
 one is missing. Run it as
   nix shell nixpkgs#dpkg nixpkgs#rpm nixpkgs#cpio nixpkgs#libarchive -c \
     python3 -m unittest tests.unit.test_release_native_packages
+
+test_cs_m8b_macos_packages_carry_completion_files is the macOS counterpart. It
+builds the component .pkg with pkgbuild from a darwin fixture archive and reads
+it back with `pkgutil --payload-files` and `pkgutil --expand-full`; and it
+generates the Homebrew formula with scripts/release/repro-publish-repos.sh,
+the code path a release uses, and runs the formula's `install` method over the
+fixture archive against a small stand-in for Homebrew's Formula class, which
+puts files where Homebrew's own helpers do. It needs macOS's pkgbuild and
+pkgutil, ruby (macOS ships one), sha256sum and a shell; it is skipped, which
+counts as not passed, anywhere else. brew itself is not used: running a real
+`brew install` writes to the machine's Homebrew prefix.
 """
 
 import json
@@ -132,10 +143,13 @@ class DeclaredPackagesTests(unittest.TestCase):
 class PackagerFixture(unittest.TestCase):
     """A fixture archive shaped like the release archive, in a fresh temp dir."""
 
+    PLATFORM = "linux"
+    ASSET_ARCH = "x86_64"
+
     def setUp(self):
         self.work = Path(tempfile.mkdtemp(prefix="repro-pkg-"))
         self.addCleanup(shutil.rmtree, self.work, True)
-        top = f"reprobuild-{VERSION}-linux-x86_64"
+        top = f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}"
         root = self.work / top
         (root / "bin").mkdir(parents=True)
         (root / "lib").mkdir()
@@ -183,11 +197,12 @@ class PackagerFixture(unittest.TestCase):
         with tarfile.open(self.tarball, "w:gz") as tf:
             tf.add(self.archive_root, arcname=self.archive_top)
 
-    def build(self, ecosystem):
+    def build(self, ecosystem, packager=None):
         return subprocess.run(
-            ["sh", str(PACKAGER), "--version", VERSION, "--tarball", str(self.tarball),
+            ["sh", str(packager or PACKAGER), "--version", VERSION,
+             "--tarball", str(self.tarball),
              "--out", str(self.out), "--ecosystem", ecosystem,
-             "--platform", "linux", "--asset-arch", "x86_64"],
+             "--platform", self.PLATFORM, "--asset-arch", self.ASSET_ARCH],
             capture_output=True, text=True, check=False,
         )
 
@@ -390,6 +405,253 @@ class CompletionFilesTests(PackagerFixture):
             run = self.build(fmt)
             self.assertNotEqual(0, run.returncode, f"{fmt} built without _repro")
             self.assertIn("share/repro/completions/_repro", run.stderr, fmt)
+
+
+# ---------------------------------------------------------------------------
+# macOS: the component .pkg and the Homebrew formula
+# ---------------------------------------------------------------------------
+PUBLISHER = REPO_ROOT / "scripts" / "release" / "repro-publish-repos.sh"
+
+# Where the .pkg installs each archive script: under /usr/local, because
+# macOS's /usr is read-only.
+MACOS_PKG_COMPLETIONS = {
+    "usr/local/share/bash-completion/completions/repro": "repro.bash",
+    "usr/local/share/zsh/site-functions/_repro": "_repro",
+    "usr/local/share/fish/vendor_completions.d/repro.fish": "repro.fish",
+}
+# Where Homebrew's completion helpers put them, inside the formula's keg
+# (Formula#bash_completion, #zsh_completion and #fish_completion): `brew link`
+# then links each into $(brew --prefix)/etc/bash_completion.d,
+# share/zsh/site-functions and share/fish/vendor_completions.d.
+HOMEBREW_COMPLETIONS = {
+    "etc/bash_completion.d/repro": "repro.bash",
+    "share/zsh/site-functions/_repro": "_repro",
+    "share/fish/vendor_completions.d/repro.fish": "repro.fish",
+}
+
+# A stand-in for the part of Homebrew's Formula API the generated formula
+# uses, run by the system ruby. It follows Homebrew's definitions
+# (Library/Homebrew/formula.rb and extend/pathname.rb): `bash_completion` is
+# prefix/"etc/bash_completion.d", `zsh_completion` share/"zsh/site-functions",
+# `fish_completion` share/"fish/vendor_completions.d", and Pathname#install
+# takes paths, arrays of paths, or a {source => new name} hash and raises when
+# a source does not exist. The prefix is the scratch keg given in
+# STUB_PREFIX; the working directory is the archive's top directory, which is
+# where brew runs `install` for a tarball with one top-level directory.
+HOMEBREW_STUB = r"""
+require 'fileutils'
+require 'pathname'
+
+class Pathname
+  def install(*sources)
+    sources.flatten.each do |src|
+      if src.is_a?(Hash)
+        src.each { |from, to| install_one(from, to) }
+      else
+        install_one(src, File.basename(src.to_s))
+      end
+    end
+  end
+
+  def install_one(from, to)
+    raise Errno::ENOENT, from.to_s unless File.exist?(from.to_s)
+    mkpath
+    FileUtils.cp_r(from.to_s, (self + to).to_s)
+  end
+end
+
+class Formula
+  class << self
+    %i[desc homepage url sha256 version license].each { |m| define_method(m) { |*a| } }
+    def test(&block); end
+  end
+
+  def prefix;           Pathname.new(ENV.fetch('STUB_PREFIX')); end
+  def bin;              prefix + 'bin'; end
+  def lib;              prefix + 'lib'; end
+  def share;            prefix + 'share'; end
+  def bash_completion;  prefix + 'etc/bash_completion.d'; end
+  def zsh_completion;   share + 'zsh/site-functions'; end
+  def fish_completion;  share + 'fish/vendor_completions.d'; end
+end
+
+load ENV.fetch('STUB_FORMULA')
+Reprobuild.new.install
+"""
+
+_MACOS_TOOLS = ("pkgbuild", "pkgutil", "ruby", "sha256sum", "sh")
+
+
+@unittest.skipUnless(all(shutil.which(t) for t in _MACOS_TOOLS),
+                     "needs " + ", ".join(_MACOS_TOOLS) + " (macOS)")
+class MacosCompletionFilesTests(PackagerFixture):
+    """The macOS .pkg and the Homebrew formula install repro's shell
+    completion where macOS's shells look for it."""
+
+    PLATFORM = "darwin"
+    ASSET_ARCH = "aarch64"
+
+    def archive_bytes(self, name):
+        return (self.archive_root / "share" / "repro" / "completions" / name).read_bytes()
+
+    # ------------------------------------------------------------ the .pkg
+    def pkg_payload(self, pkg, tag):
+        """(listing, {path: (mode, bytes)} of every regular file under
+        usr/local/share): the payload as pkgutil lists it, and as pkgutil
+        expands it. Paths have no leading './'."""
+        listing = subprocess.run(["pkgutil", "--payload-files", str(pkg)],
+                                 capture_output=True, text=True, check=True).stdout
+        # `._name` entries are AppleDouble records of a file's extended
+        # attributes (pkgbuild writes one for each attribute holder, such as
+        # the provenance mark macOS puts on files a sandboxed process made,
+        # which `xattr -c` cannot remove). The installer applies them as
+        # attributes; they are not files, so they are not listed here.
+        paths = sorted(line[2:] if line.startswith("./") else line
+                       for line in listing.splitlines()
+                       if line not in ("", ".") and not os.path.basename(line).startswith("._"))
+        expanded = self.work / f"pkg-expanded-{tag}"
+        subprocess.run(["pkgutil", "--expand-full", str(pkg), str(expanded)], check=True)
+        payload = expanded / "Payload"
+        shared = {}
+        for path in payload.joinpath("usr", "local", "share").rglob("*"):
+            if path.is_file() and not path.is_symlink():
+                shared[str(path.relative_to(payload))] = (
+                    stat.S_IMODE(path.stat().st_mode), path.read_bytes())
+        return paths, shared, expanded
+
+    def assert_pkg_completions(self, paths, shared):
+        # Exactly the three files under /usr/local/share, none elsewhere under
+        # /usr (macOS's /usr is read-only) outside /usr/local.
+        self.assertEqual(sorted(MACOS_PKG_COMPLETIONS), sorted(shared))
+        for path, source in MACOS_PKG_COMPLETIONS.items():
+            mode, data = shared[path]
+            self.assertEqual(self.archive_bytes(source), data,
+                             f"pkg: {path} differs from the archive's {source}")
+            self.assertIn(b"__complete", data, f"pkg: {path}")
+            self.assertEqual(0o644, mode, f"pkg: {path} mode {oct(mode)}")
+            self.assertIn(path, paths, f"pkgutil --payload-files lists no {path}")
+        for path in paths:
+            self.assertTrue(path == "usr" or path.startswith("usr/local"),
+                            f"the package installs {path} outside /usr/local")
+
+    def test_cs_m8b_macos_packages_carry_completion_files(self):
+        # (1) The .pkg: its payload holds, under /usr/local, the archive tree
+        # intact, the command's wrapper, and the three completion files
+        # byte-identical to the archive's, mode 0644.
+        with self.subTest(package="pkg"):
+            run = self.build("pkg")
+            self.assertEqual(0, run.returncode, f"pkg: {run.stderr}")
+            pkg = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.pkg"
+            self.assertTrue(pkg.is_file(), sorted(os.listdir(self.out)))
+            paths, shared, expanded = self.pkg_payload(pkg, "good")
+            self.assert_pkg_completions(paths, shared)
+            self.assertIn("usr/local/bin/repro", paths)
+            self.assertIn("usr/local/lib/reprobuild/lib/marker", paths)
+            info = (expanded / "PackageInfo").read_text(encoding="utf-8")
+            self.assertIn('install-location="/"', info)
+            self.assertIn('identifier="com.metacraft-labs.reprobuild"', info)
+            wrapper = (expanded / "Payload" / "usr" / "local" / "bin" / "repro"
+                       ).read_text(encoding="utf-8")
+            self.assertIn("exec /usr/local/lib/reprobuild/bin/repro", wrapper)
+
+        # (2) Negative controls. A packager whose install list lacks the zsh
+        # file produces a package the assertion above rejects. The packager
+        # reads its own output back and refuses such a package, so the copy
+        # loses that check too, to show the assertion itself catches it.
+        text = PACKAGER.read_text(encoding="utf-8")
+        pair = '    "_repro:$_zsh_dir/_repro" \\\n'
+        readback = '      ./usr/local/share/zsh/site-functions/_repro \\\n'
+        self.assertEqual(1, text.count(pair), "the packager's install list changed")
+        self.assertEqual(1, text.count(readback), "the packager's read-back changed")
+        without_pair = self.work / "packager-without-zsh.sh"
+        without_pair.write_text(text.replace(pair, ""), encoding="utf-8")
+        self.out = self.work / "out-no-zsh-checked"
+        run = self.build("pkg", packager=without_pair)
+        self.assertNotEqual(0, run.returncode, "the packager built a .pkg without _repro")
+        self.assertIn("_repro", run.stderr)
+        without_both = self.work / "packager-without-zsh-or-readback.sh"
+        without_both.write_text(text.replace(pair, "").replace(readback, ""),
+                                encoding="utf-8")
+        self.out = self.work / "out-no-zsh"
+        run = self.build("pkg", packager=without_both)
+        self.assertEqual(0, run.returncode, run.stderr)
+        pkg = next(self.out.glob("*.pkg"))
+        paths, shared, _ = self.pkg_payload(pkg, "mutant")
+        with self.assertRaises(AssertionError):
+            self.assert_pkg_completions(paths, shared)
+        # An archive without the zsh script makes the packager fail and name it.
+        (self.archive_root / "share" / "repro" / "completions" / "_repro").unlink()
+        self.pack()
+        self.out = self.work / "out-no-archive-zsh"
+        run = self.build("pkg")
+        self.assertNotEqual(0, run.returncode, "pkg built without _repro")
+        self.assertIn("share/repro/completions/_repro", run.stderr)
+
+    # ------------------------------------------------------ the Homebrew formula
+    def generate_formula(self):
+        """The Homebrew formula repro-publish-repos.sh generates for the
+        fixture's darwin archive, as text."""
+        packages = self.work / "release-assets"
+        packages.mkdir()
+        shutil.copy(self.tarball, packages / self.tarball.name)
+        repo_root = self.work / "tap-repo"
+        run = subprocess.run(
+            ["sh", str(PUBLISHER), "--version", VERSION, "--packages", str(packages),
+             "--ecosystem", "homebrew", "--repo-root", str(repo_root),
+             "--target", "none", "--scoop-downloads-base", "https://downloads.example"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(0, run.returncode, run.stderr)
+        return (repo_root / "homebrew" / "Formula" / "reprobuild.rb").read_text(encoding="utf-8")
+
+    def run_formula_install(self, formula_text, tag):
+        """Run the formula's `install` over the fixture archive's top
+        directory, into a scratch keg; return the keg's {path: bytes}."""
+        formula = self.work / f"formula-{tag}.rb"
+        formula.write_text(formula_text, encoding="utf-8")
+        stub = self.work / "homebrew_stub.rb"
+        stub.write_text(HOMEBREW_STUB, encoding="utf-8")
+        keg = self.work / f"keg-{tag}"
+        keg.mkdir()
+        run = subprocess.run(
+            ["ruby", str(stub)], cwd=str(self.archive_root), capture_output=True,
+            text=True, check=False,
+            env={**os.environ, "STUB_PREFIX": str(keg), "STUB_FORMULA": str(formula)})
+        return run, {str(p.relative_to(keg)): p.read_bytes()
+                     for p in keg.rglob("*") if p.is_file()}
+
+    def assert_homebrew_completions(self, run, tree):
+        self.assertEqual(0, run.returncode, run.stderr)
+        completions = {p: b for p, b in tree.items() if p.startswith(("etc/", "share/"))}
+        self.assertEqual(sorted(HOMEBREW_COMPLETIONS), sorted(completions))
+        for path, source in HOMEBREW_COMPLETIONS.items():
+            self.assertEqual(self.archive_bytes(source), completions[path],
+                             f"formula: {path} differs from the archive's {source}")
+            self.assertIn(b"__complete", completions[path], f"formula: {path}")
+
+    def test_cs_m8b_homebrew_formula_installs_completion_files(self):
+        # The formula repro-publish-repos.sh generates, installed from the
+        # fixture archive: the command, its lib/, and the three completion
+        # files at the places Homebrew's helpers use.
+        formula = self.generate_formula()
+        run, tree = self.run_formula_install(formula, "good")
+        self.assert_homebrew_completions(run, tree)
+        self.assertIn("bin/repro", tree)
+        self.assertIn("lib/marker", tree)
+        # Negative control: the formula without one shell's line installs no
+        # file for that shell, and the assertion rejects it.
+        for shell, line in (("zsh", '    zsh_completion.install "share/repro/completions/_repro"\n'),
+                            ("fish", '    fish_completion.install "share/repro/completions/repro.fish"\n'),
+                            ("bash", '    bash_completion.install "share/repro/completions/repro.bash" => "repro"\n')):
+            self.assertEqual(1, formula.count(line), f"the formula's {shell} line changed")
+            mutant_run, mutant_tree = self.run_formula_install(formula.replace(line, ""), f"no-{shell}")
+            with self.assertRaises(AssertionError, msg=f"formula without {shell} passed"):
+                self.assert_homebrew_completions(mutant_run, mutant_tree)
+        # An archive that lacks a completion file fails the install, as brew's
+        # own helper does for a missing source, rather than installing less.
+        (self.archive_root / "share" / "repro" / "completions" / "_repro").unlink()
+        broken_run, _ = self.run_formula_install(formula, "no-archive-zsh")
+        self.assertNotEqual(0, broken_run.returncode)
+        self.assertIn("_repro", broken_run.stderr)
 
 
 if __name__ == "__main__":
