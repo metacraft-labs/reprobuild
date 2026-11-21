@@ -29,7 +29,7 @@ import unittest
 
 ROOT = Path(__file__).resolve().parents[2]
 GUARD = ROOT / "scripts" / "release" / "assert_tag_names_commit.sh"
-RELEASE_YML = ROOT / ".github" / "workflows" / "release.yml"
+RELEASE_YML = ROOT / ".github" / "workflows" / "release-pipeline.yml"
 GIT = shutil.which("git")
 BASH = shutil.which("bash")
 

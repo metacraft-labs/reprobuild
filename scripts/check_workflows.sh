@@ -133,6 +133,13 @@ echo "ok: all workflow files load"
 #
 # Everything else fails, including a `uses:` with no `@ref` at all. There is no
 # exemption list on purpose: an exemption is how `@main` would come back.
+#
+# ONE EXACT EXCEPTION, which is not a shared action: release.yml calls this
+# repository's own release-pipeline.yml at `@agents`, because that one string is
+# what metacraft-labs/infra's `release-lane` runner group admits (release.yml
+# explains why `agents` and not `dev`). It is matched as the whole `uses:`
+# value, in release.yml only, so it cannot excuse any other file, path or ref;
+# the self-test below proves `@main` and `@agents` on anything else still fail.
 # =============================================================================
 echo "== shared metacraft-labs action refs =="
 
@@ -159,6 +166,9 @@ shared_action_ref_violations() {
           if (substr(spec, i, 1) == "@") { at = i; break }
         if (at == 0) { print; next }        # unpinned `uses:` -- also a defect
         ref = substr(spec, at + 1)
+        file = substr($0, 1, index($0, ":") - 1)
+        if (file ~ /(^|\/)workflows\/release\.yml$/ &&
+            spec == "metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@agents") next
         if (ref == "dev") next
         if (ref ~ /^[0-9a-f]{40}$/) next
         print
@@ -192,15 +202,23 @@ cat >"${shared_ref_selftest:?}/workflows/bad.yml" <<'BAD'
       - uses: "metacraft-labs/metacraft-github-actions/setup-dev-env@main"
       - uses: 'metacraft-labs/metacraft-github-actions/setup-dev-env@main'
       - uses: metacraft-labs/metacraft-github-actions/setup-nix
+    uses: metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@agents
 BAD
+# The release-lane exception holds in release.yml, and only for its exact pin.
+cat >"${shared_ref_selftest:?}/workflows/release.yml" <<'LANE'
+    uses: metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@agents
+    uses: metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@main
+    uses: metacraft-labs/reprobuild/.github/workflows/ci.yml@agents
+LANE
 selftest_hits="$(shared_action_ref_violations "${shared_ref_selftest:?}" | wc -l | tr -d ' ')"
 good_hits="$(shared_action_ref_violations "${shared_ref_selftest:?}/workflows/good.yml" | wc -l | tr -d ' ')"
 rm -rf -- "${shared_ref_selftest:?}"
-if [ "${selftest_hits}" != "5" ]; then
-  echo "FAIL: the shared-action-ref scanner found ${selftest_hits} of 5 planted" >&2
-  echo "      violations (@main bare, double-quoted and single-quoted, plus an" >&2
-  echo "      unpinned \`uses:\`). It is not scanning what it claims to; fix it" >&2
-  echo "      before trusting a clean run." >&2
+if [ "${selftest_hits}" != "8" ]; then
+  echo "FAIL: the shared-action-ref scanner found ${selftest_hits} of 8 planted" >&2
+  echo "      violations (@main bare, double-quoted and single-quoted, an" >&2
+  echo "      unpinned \`uses:\`, the release-lane pin outside release.yml, and" >&2
+  echo "      @main / another file at @agents inside it). It is not scanning" >&2
+  echo "      what it claims to; fix it before trusting a clean run." >&2
   exit 1
 fi
 if [ "${good_hits}" != "0" ]; then
@@ -237,6 +255,98 @@ if [ -n "${violations}" ]; then
   exit 1
 fi
 echo "ok: all ${found_refs} shared-action reference(s) name @dev or a SHA"
+
+# =============================================================================
+# The release-lane shape (release.yml -> release-pipeline.yml@agents).
+#
+# metacraft-labs/infra's `release-lane` runner group admits every job DEFINED in
+# release-pipeline.yml loaded from `refs/heads/agents`. Two properties of that
+# file keep the admission to this repository's own releases, and neither is
+# visible to actionlint:
+#
+#   * it is `on: workflow_call` only. A `push` (or any other) trigger would
+#     make the file a workflow in its own right, and every push to `agents`
+#     would be an admitted run;
+#   * every job with no `needs:` carries the guard, which reads the caller's
+#     context: anything in the organisation may call the file at `@agents`,
+#     a fork pull request's own workflow included.
+# =============================================================================
+echo "== release-lane shape =="
+
+# The keys under the top-level `on:` block of $1, one per line.
+workflow_triggers() {
+  awk '
+    /^on:[[:space:]]*$/ { inon = 1; next }
+    inon && /^[^[:space:]#]/ { inon = 0 }
+    inon && /^  [A-Za-z_]+:/ { sub(/^  /, ""); sub(/:.*/, ""); print }
+  ' "$1"
+}
+
+# The text of job $2 in workflow $1, up to the next job.
+workflow_job() {
+  awk -v job="$2" '
+    $0 == "  " job ":" { injob = 1; print; next }
+    injob && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { injob = 0 }
+    injob && /^[^[:space:]#]/ { injob = 0 }
+    injob { print }
+  ' "$1"
+}
+
+lane_guard_line="startsWith(github.workflow_ref, 'metacraft-labs/reprobuild/.github/workflows/release.yml@') &&"
+
+# $1 = pipeline file. Prints one line per defect; nothing when the shape holds.
+release_lane_defects() {
+  local pipeline="$1" triggers job body
+  triggers="$(workflow_triggers "${pipeline}" | tr '\n' ' ')"
+  if [ "${triggers}" != "workflow_call " ]; then
+    echo "${pipeline}: on: must be exactly workflow_call, found: ${triggers:-nothing}"
+  fi
+  for job in plan publish-release; do
+    # Captured first: `grep -q` exits at its first match, and under pipefail
+    # the writer's SIGPIPE would fail the pipeline and report a guard missing.
+    body="$(workflow_job "${pipeline}" "${job}")"
+    if ! grep -qF "${lane_guard_line}" <<<"${body}"; then
+      echo "${pipeline}: job ${job} does not carry the release-lane guard"
+    fi
+  done
+}
+
+# Self-test: a planted push trigger and a dropped guard must both be caught,
+# and the real file must parse to at least one job, so the checks cannot pass
+# by matching nothing.
+lane_selftest="$(mktemp -d)"
+# awk rather than sed: BSD sed (macOS) has no `\n` in a replacement.
+awk -v guard="${lane_guard_line}" '
+  $0 == "  workflow_call:" { print; print "  push:"; next }
+  { i = index($0, guard); if (i) $0 = substr($0, 1, i - 1) "true &&" substr($0, i + length(guard)); print }
+' .github/workflows/release-pipeline.yml >"${lane_selftest:?}/pipeline.yml"
+lane_planted="$(release_lane_defects "${lane_selftest:?}/pipeline.yml" | wc -l | tr -d ' ')"
+rm -rf -- "${lane_selftest:?}"
+if [ "${lane_planted}" != "3" ]; then
+  echo "FAIL: the release-lane shape check found ${lane_planted} of 3 planted defects" >&2
+  echo "      (a push trigger, and the guard removed from plan and publish-release)." >&2
+  echo "      It is not checking what it claims to; fix it before trusting it." >&2
+  exit 1
+fi
+if [ -z "$(workflow_job .github/workflows/release-pipeline.yml plan)" ]; then
+  echo "FAIL: found no \`plan\` job in release-pipeline.yml; the shape check is vacuous." >&2
+  exit 1
+fi
+
+lane_defects="$(release_lane_defects .github/workflows/release-pipeline.yml)"
+if [ -n "${lane_defects}" ]; then
+  echo "FAIL: release-pipeline.yml no longer keeps the release lane to this" >&2
+  echo "      repository's own releases:" >&2
+  printf '%s\n' "${lane_defects}" | sed 's/^/      /' >&2
+  exit 1
+fi
+if ! grep -qxF "    uses: metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@agents" \
+    .github/workflows/release.yml; then
+  echo "FAIL: release.yml does not call release-pipeline.yml at exactly @agents," >&2
+  echo "      the one ref infra's \`release-lane\` group admits." >&2
+  exit 1
+fi
+echo "ok: release-pipeline.yml is workflow_call-only and guards plan and publish-release"
 
 # =============================================================================
 # flake.lock: every revision-pinned node carries its derived fields

@@ -2821,7 +2821,7 @@ package reprobuild:
         elif releaseSmokeTest:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
-            ".github/workflows/release.yml",
+            ".github/workflows/release-pipeline.yml",
             "scripts/verify_release.sh", "repro.nim",
             # The Windows monitor-shim snapshot it runs, and the artefact
             # names it checks that snapshot against.
@@ -2831,12 +2831,12 @@ package reprobuild:
           # The guard, and the workflow whose publish-job steps the test runs.
           # It copies the guard into the runner clone it builds.
           @["scripts/release/assert_tag_names_commit.sh",
-            ".github/workflows/release.yml"]
+            ".github/workflows/release-pipeline.yml"]
         elif releaseCachePushTest:
           # The retry script, and the workflow whose `publish-nix-cache` job
           # shape the test checks and whose push step's `run:` block it runs.
           @["scripts/release/attic_push_with_retry.sh",
-            ".github/workflows/release.yml"]
+            ".github/workflows/release-pipeline.yml"]
         elif confinementSystemdAnalyzeTest:
           # The two CONF-3/CONF-4 scripts it imports, and the real unit,
           # threshold and lease-floor inputs and header they read.

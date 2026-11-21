@@ -169,8 +169,8 @@
   confutilsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-confutils";
-    rev = "ffd5d9a6cf8481b2e696be3704f14b315a10aed9";
-    hash = "sha256-+/i93sfFGAfVkrJc/KswSW8wfsIHEPmhWWyAxETnSsE=";
+    rev = "f85c716c50f29344d9d28747632897c1ebc03ada";
+    hash = "sha256-ruZnbDwPit3onO/aJfWMgWwEawcA0mf5dNQ7X+Fcy9s=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
