@@ -83381,6 +83381,8 @@ type
       ## The shared-clone detector's reports (``rewire``, ``migrate``).
     poolExpiry*: seq[(string, string)]
       ## ``migrate`` only: each pool and its ``gc.pruneExpire`` afterwards.
+    poolExpiryReasons*: seq[(string, string)]
+      ## ``migrate`` only: why each pool left at ``never`` stays there.
     sweep*: seq[SharedBareSweepEntry]
       ## ``gc`` and ``rewire``: every bare in the cache root, with the state
       ## found before the eager sweep repaired it.
@@ -83432,8 +83434,12 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
   result["repos"] = repos
   var pools = newJArray()
   for (pool, expiry) in report.poolExpiry:
-    pools.add(%*{"pool": pool, "pruneExpire": expiry,
-      "borrowers": readBorrowers(pool).len})
+    var entry = %*{"pool": pool, "pruneExpire": expiry,
+      "borrowers": readBorrowers(pool).len}
+    for (reasonPool, reason) in report.poolExpiryReasons:
+      if reasonPool == pool:
+        entry["pruneExpireReason"] = %reason
+    pools.add(entry)
   result["pools"] = pools
   var leaves = newJArray()
   for lr in report.leafReports:
@@ -83452,9 +83458,12 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
   result["sweep"] = sweep
   var others = newJArray()
   for m in report.otherBares:
-    others.add(%*{"bare": m.sharedBarePath, "ok": m.ok,
+    var other = %*{"bare": m.sharedBarePath, "ok": m.ok,
       "maintenanceRan": m.ran, "looseBefore": m.looseBefore,
-      "looseAfter": m.looseAfter, "diagnostic": m.diagnostic})
+      "looseAfter": m.looseAfter, "diagnostic": m.diagnostic}
+    if m.expiryNotReadyReason.len > 0:
+      other["pruneExpireReason"] = %m.expiryNotReadyReason
+    others.add(other)
   result["otherBares"] = others
   result["gatewaySummary"] = %report.gatewaySummary
   result["warnings"] = %report.warnings
@@ -83472,6 +83481,9 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
     for (pool, expiry) in report.poolExpiry:
       result.add("workspace shared-clones: pool " & pool & " gc.pruneExpire=" &
         expiry & " borrowers=" & $readBorrowers(pool).len)
+    for (pool, reason) in report.poolExpiryReasons:
+      result.add("workspace shared-clones: pool " & pool &
+        " keeps every object: " & reason)
     for lr in report.leafReports:
       var line = "workspace shared-clones: leaf " & lr.leaf &
         " registered=" & $lr.registered & " configured=" & $lr.configured
@@ -83539,6 +83551,11 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
         " loose=" & $m.looseBefore & "->" & $m.looseAfter
       if m.diagnostic.len > 0:
         line.add(" diagnostic=" & m.diagnostic)
+      elif m.expiryNotReadyReason.len > 0:
+        # The same wording as the per-repo entries: a pool whose gc prunes
+        # nothing says why (Shared-Clone-Pool-Integrity §3.2).
+        line.add(" diagnostic=pool keeps every object: " &
+          m.expiryNotReadyReason)
       result.add(line)
   if report.gatewaySummary.len > 0:
     # §7.6.6's summary line: "the answer to the question" the row exists for,
@@ -83697,6 +83714,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       result.cacheRoot, candidates)
     result.leafReports = migration.leaves
     result.poolExpiry = migration.poolExpiry
+    result.poolExpiryReasons = migration.poolExpiryReasons
     result.diagnostics = migration.diagnostics
     if migration.diagnostics.len > 0:
       result.exitCode = 1
@@ -83886,6 +83904,9 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         if not m.ok:
           entry.diagnostic = "maintenance failed: " & m.diagnostic
           result.exitCode = 1
+        elif m.expiryNotReadyReason.len > 0:
+          entry.diagnostic = "pool keeps every object: " &
+            m.expiryNotReadyReason
     # Additive wiring is not migration: the old pool can still own safety
     # refs, tags and graph bases even when wired=true. Name the dependency.
     if parsed.verb in ["list", "rewire"]:

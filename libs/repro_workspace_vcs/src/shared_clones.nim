@@ -1112,7 +1112,8 @@ proc ensureSharedBareRefspec*(gitBin, barePath: string): bool =
   runGit(gitBin, ["-C", barePath, "config", "--replace-all",
     "remote.origin.prune", "true"]).code == 0
 
-proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] {.gcsafe.}
+proc poolIntegrityConfig*(gitBin, pool: string; readinessPass: bool;
+                          notReadyReason: var string): seq[(string, string)] {.gcsafe.}
 proc checkRegisteredLeaves*(gitBin, pool: string;
                             mode = lcmRepair): seq[LeafCheckReport] {.gcsafe.}
 proc registerLeafWithPool*(gitBin, leaf, pool: string): string {.gcsafe.}
@@ -1169,7 +1170,16 @@ proc sharedBareSafetyArgs*(): seq[string] =
     result.add("-c")
     result.add(key & "=" & value)
 
-proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
+const
+  PoolPruneExpire* = "2.weeks.ago"
+    ## ``gc.pruneExpire`` of a pool whose retention hook can protect its
+    ## registered leaves (§3.1). Git's own default.
+  PoolNeverExpire* = "never"
+    ## ``gc.pruneExpire`` of every other pool: an old git, an empty registry,
+    ## or a hook that could not be written (§3.6, §5).
+
+proc ensureSharedBareSafety*(gitBin, barePath: string; readinessPass: bool;
+                             notReadyReason: var string): bool =
   ## Idempotently install ``SharedBareSafetyConfig`` and the pool's
   ## integrity config (``poolIntegrityConfig``: the retention hook, the
   ## partial-clone keys of the refetch chain, and ``gc.pruneExpire``) into
@@ -1180,15 +1190,36 @@ proc ensureSharedBareSafety*(gitBin, barePath: string): bool =
   ## ``gc.pruneExpire`` is written LAST, so a run that fails part-way never
   ## leaves a pool expiring objects without the hook that protects them.
   ##
+  ## ``readinessPass`` says whether this call may ENABLE the expiry window,
+  ## which costs a complete borrower discovery pass over every sibling
+  ## workspace (Shared-Clone-Pool-Integrity §3.2). Only the callers about to
+  ## prune, or asked to migrate, pass ``true``: ``maintainSharedBare`` and
+  ## ``migrateSharedClones``. Every checkout path (``prepareSharedBare``:
+  ## refresh, clone, sync, branch, enable) passes ``false``, starts no pass,
+  ## and never enables the window; see ``poolIntegrityConfig``. When the
+  ## pool is left at ``never``, ``notReadyReason`` says why.
   result = true
-  for (key, value) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
-      barePath):
+  for (key, wanted) in @SharedBareSafetyConfig & poolIntegrityConfig(gitBin,
+      barePath, readinessPass, notReadyReason):
+    # A key written earlier in this run failed: the hook or the refetch chain
+    # may be missing, so the pool must not expire objects. A checkout path
+    # keeps a window it finds, so without this an earlier failure would leave
+    # one in place.
+    var value = wanted
+    if key == "gc.pruneExpire" and not result and value != PoolNeverExpire:
+      value = PoolNeverExpire
+      notReadyReason = "the pool's safety config could not be written in full"
     let current = runGit(gitBin, ["-C", barePath, "config", "--get", key])
     if current.code == 0 and current.output.strip() == value:
       continue
     if runGit(gitBin, ["-C", barePath, "config", "--replace-all", key,
         value]).code != 0:
       result = false
+
+proc ensureSharedBareSafety*(gitBin, barePath: string;
+                             readinessPass = false): bool =
+  var ignored = ""
+  ensureSharedBareSafety(gitBin, barePath, readinessPass, ignored)
 
 proc prepareSharedBare*(gitBin, barePath: string): string =
   ## Install everything an existing shared bare must carry before anything
@@ -1818,12 +1849,6 @@ const
     ## Marker so the below-2.42 condition is reported once per pool (§3.6).
   DroppedRefsLogFileName* = "dropped-refs.log"
     ## ``<leaf git dir>/repro/dropped-refs.log``: one line per removed ref.
-  PoolPruneExpire* = "2.weeks.ago"
-    ## ``gc.pruneExpire`` of a pool whose retention hook can protect its
-    ## registered leaves (§3.1). Git's own default.
-  PoolNeverExpire* = "never"
-    ## ``gc.pruneExpire`` of every other pool: an old git, an empty registry,
-    ## or a hook that could not be written (§3.6, §5).
   RetentionHookMinGit* = (major: 2, minor: 42)
     ## First git release that runs ``gc.recentObjectsHook``.
   LeafPoolRemoteName* = "repro-pool"
@@ -2657,7 +2682,20 @@ registry="$pool/repro/borrowers"
 [ -f "$registry" ] || exit 1
 work="$pool/repro/retain.$$"
 rm -rf "$work" && mkdir "$work" "$work/empty" || exit 1
-trap 'rm -rf "$work"' EXIT
+# A refusal names the path it stopped at: a pass that fails without saying
+# where leaves this pool unpruned, and nobody able to tell why. `candidate`
+# is the directory or checkout being examined; it is empty outside the walk
+# and the readiness check, and a pass that merely registered new checkouts
+# (exit 2) is not a refusal.
+candidate=
+finish() {
+  code=$?
+  rm -rf "$work"
+  if [ "$code" = 1 ] && [ -n "$candidate" ]; then
+    printf '%s\n' "retain-borrowed.sh: cannot vouch for $candidate: it, its object store or its alternates could not be read, git could not open the repository there, or its refs are not stored as files" >&2
+  fi
+}
+trap finish EXIT
 git --git-dir="$pool" for-each-ref --format='^%(objectname)' > "$work/pooltips" || exit 1
 
 # Snapshot the registry for this invocation. Discovery is repeated on every gc.
@@ -2713,7 +2751,9 @@ discover_leaf() {
     case $alternate in /* | [A-Za-z]:/*) ;; *) alternate="$objects/$alternate" ;; esac
     resolved=$(cd "$alternate" && pwd -P) || return 1
     if [ "$resolved" = "$poolobjects" ]; then
-      printf '%s\n' "$candidate" >> "$work/found" || return 1
+      # A failed write here is this hook's own scratch file, not the
+      # checkout: name no path for it.
+      printf '%s\n' "$candidate" >> "$work/found" || { candidate=; return 1; }
       break
     fi
   done < "$alternates"
@@ -2724,6 +2764,7 @@ discover_leaf() {
 # domain cost a fork for every directory in it. The glob list is expanded once,
 # before the loop, so the recursion overwriting `child` does not disturb it.
 scan_dir() {
+  candidate=$1
   [ -r "$1" ] && [ -x "$1" ] || return 1
   discover_leaf "$1" || return 1
   [ "$2" -gt 0 ] || return 0
@@ -2750,12 +2791,14 @@ poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
 : > "$work/found"
 while IFS= read -r parent || [ -n "$parent" ]; do
   [ -d "$parent" ] || continue
+  candidate=$parent
   [ -r "$parent" ] && [ -x "$parent" ] || exit 1
   for workspace in "$parent"/* "$parent"/.[!.]* "$parent"/..?*; do
     [ -d "$workspace" ] || continue
     scan_dir "$workspace" 2 || exit 1
   done
 done < "$work/parents"
+candidate=
 sort -u "$work/found" > "$work/discovered" || exit 1
 incomplete=0
 while IFS= read -r leaf || [ -n "$leaf" ]; do
@@ -2773,9 +2816,11 @@ if [ "${1-}" = --discover ]; then
   # readability is checked by the gc pass alone, which refuses safely.)
   while IFS= read -r leaf || [ -n "$leaf" ]; do
     [ -n "$leaf" ] && [ -d "$leaf" ] && [ -e "$leaf/.git" ] || continue
+    candidate=$leaf
     common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 1
     ref_storage_files "$common" || exit 1
   done < "$work/leaves"
+  candidate=
   exit 0
 fi
 
@@ -3039,32 +3084,100 @@ proc retentionDiscoveryArgs*(pool: string): seq[string] =
       retentionHookConfigValue(pool) & " --discover",
     RetentionDiscoverAlias]
 
-proc poolRetentionReady*(gitBin, pool: string): bool =
+const PoolDiscoveryRegisteredNewReason* =
+  "borrower discovery registered checkouts it had not seen; " &
+  "the next complete pass may enable expiry"
+  ## ``poolRetentionReadiness``'s reason for a pass that found nothing wrong
+  ## but appended to the registry (the hook's exit 2).
+
+proc poolRetentionReadiness*(gitBin, pool: string):
+    tuple[ready: bool; reason: string] =
+  ## Run the complete borrower discovery pass that §3.2 requires before
+  ## expiry is enabled. ``ready`` is true only when it completed; otherwise
+  ## ``reason`` says why the pool keeps ``gc.pruneExpire=never``.
+  ##
   ## The hook and readiness share one discovery implementation. A newly
   ## found borrower is registered, but this pass still keeps ``never``; only
-  ## a later complete pass can enable expiry. Discovery errors fail closed.
+  ## a later complete pass can enable expiry. Discovery errors fail closed,
+  ## and the hook names the path it could not vouch for.
+  ##
+  ## The pass walks every sibling workspace of every registered borrower, so
+  ## it is run only where its answer is needed: before a gc that may prune,
+  ## and in the explicit migration (``poolIntegrityConfig``). Measured on a
+  ## host with 42 sibling workspaces: 475 s for one pool, repeated for each
+  ## of the 20 pools of one ``repro ws enable`` while every checkout path
+  ## ran it (reprobuild-pm
+  ## ``issues/2026-11-16-repro-ws-enable-runs-a-full-sibling-workspace-discovery-pass-once-per-repo.md``).
   ##
   ## ``gitBin`` runs the pass (``retentionDiscoveryArgs``), so it gets the
   ## shell and search path that Git gives the hook under gc, whatever ``sh``
   ## comes first on this process's search path. Git propagates the alias's
   ## exit status.
-  if not gitSupportsRetentionHook(gitBin) or
-      not fileExists(retentionHookPath(pool)) or readBorrowers(pool).len == 0:
-    return false
+  if not gitSupportsRetentionHook(gitBin):
+    return (false, "this git is older than " & $RetentionHookMinGit.major &
+      "." & $RetentionHookMinGit.minor & " and has no gc.recentObjectsHook")
+  if not fileExists(retentionHookPath(pool)):
+    return (false, "the retention hook is not written")
+  if readBorrowers(pool).len == 0:
+    return (false, "no checkout is registered as a borrower")
   var command = quoteShell(gitBin)
   for arg in retentionDiscoveryArgs(pool):
     command.add(" " & quoteShell(arg))
   try:
-    execCmdExCloseOnce(command,
-      env = retentionDiscoveryEnv(gitBin)).exitCode == 0
+    let pass = execCmdExCloseOnce(command, env = retentionDiscoveryEnv(gitBin))
+    case pass.exitCode
+    of 0:
+      (true, "")
+    of 2:
+      (false, PoolDiscoveryRegisteredNewReason)
+    else:
+      # One line: the reason is printed inside single-line reports.
+      let said = pass.output.strip().splitLines().join("; ")  # git-merged-text: the hook's refusal is on stderr; quoted, never parsed
+      (false, "borrower discovery failed (exit " & $pass.exitCode & ")" &
+        (if said.len > 0: ": " & said else: ""))
   except CatchableError:
     # Git that cannot be started is a discovery failure too.
-    false
+    (false, "borrower discovery could not be started: " &
+      getCurrentExceptionMsg())
 
-proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
+proc poolRetentionReady*(gitBin, pool: string): bool =
+  ## ``poolRetentionReadiness`` without the reason.
+  poolRetentionReadiness(gitBin, pool).ready
+
+proc poolExpiryWithoutDiscovery(gitBin, pool: string;
+                                notReadyReason: var string): string =
+  ## The ``gc.pruneExpire`` value a checkout path asserts. It starts no
+  ## discovery pass, so it can never ENABLE the window: a pool at ``never``
+  ## stays there until maintenance or migration completes a pass. A window
+  ## an earlier complete pass enabled is left in place while its cheap
+  ## preconditions still hold. That is safe without a new pass because the
+  ## hook itself discovers and protects borrowers on every gc, and refuses
+  ## -- so git prunes nothing -- when it cannot (§3.3).
+  if not gitSupportsRetentionHook(gitBin):
+    notReadyReason = "this git is older than " & $RetentionHookMinGit.major &
+      "." & $RetentionHookMinGit.minor & " and has no gc.recentObjectsHook"
+    return PoolNeverExpire
+  if readBorrowers(pool).len == 0:
+    notReadyReason = "no checkout is registered as a borrower"
+    return PoolNeverExpire
+  # The pool's own value only: a user's global ``gc.pruneExpire`` is not a
+  # window that a discovery pass enabled.
+  let current = runGit(gitBin, ["--git-dir=" & pool, "config", "--local",
+    "--get", "gc.pruneExpire"])
+  if current.code == 0 and current.output.strip() == PoolPruneExpire:
+    return PoolPruneExpire
+  notReadyReason = "no complete borrower discovery pass has run yet; " &
+    "pool maintenance runs it before pruning"
+  PoolNeverExpire
+
+proc poolIntegrityConfig*(gitBin, pool: string; readinessPass: bool;
+                          notReadyReason: var string): seq[(string, string)] =
   ## The pool-specific rows of §3.1, beyond the static
-  ## ``SharedBareSafetyConfig``. ``gc.pruneExpire`` is computed: see
-  ## ``poolRetentionReady``.
+  ## ``SharedBareSafetyConfig``. ``gc.pruneExpire`` is computed: with
+  ## ``readinessPass`` by the complete discovery pass
+  ## (``poolRetentionReadiness``), which is the only way the window is
+  ## enabled; without it by ``poolExpiryWithoutDiscovery``, which walks
+  ## nothing. ``notReadyReason`` is set when the value is ``never``.
   let hookWritten = ensureRetentionHook(pool)
   # Refreshed with the hook, so a pool's leaves keep a current launcher even
   # when no leaf is touched. A failure is reported again, and acted on, by
@@ -3076,9 +3189,22 @@ proc poolIntegrityConfig*(gitBin, pool: string): seq[(string, string)] =
     ("remote.origin.promisor", "true")]
   if hookWritten:
     result.add(("gc.recentObjectsHook", retentionHookConfigValue(pool)))
-  result.add(("gc.pruneExpire",
-    if hookWritten and poolRetentionReady(gitBin, pool): PoolPruneExpire
-    else: PoolNeverExpire))
+  notReadyReason = ""
+  var expiry = PoolNeverExpire
+  if not hookWritten:
+    notReadyReason = "the retention hook could not be written"
+  elif readinessPass:
+    let readiness = poolRetentionReadiness(gitBin, pool)
+    if readiness.ready: expiry = PoolPruneExpire
+    else: notReadyReason = readiness.reason
+  else:
+    expiry = poolExpiryWithoutDiscovery(gitBin, pool, notReadyReason)
+  result.add(("gc.pruneExpire", expiry))
+
+proc poolIntegrityConfig*(gitBin, pool: string;
+                          readinessPass = false): seq[(string, string)] =
+  var ignored = ""
+  poolIntegrityConfig(gitBin, pool, readinessPass, ignored)
 
 # -- the leaf: refetch chain and fetch.hideRefs (§3.4, §3.5) -------------------
 
@@ -3936,6 +4062,10 @@ type
       ## Every pool found under the cache root.
     poolExpiry*: seq[(string, string)]
       ## ``(pool, gc.pruneExpire)`` after the pass.
+    poolExpiryReasons*: seq[(string, string)]
+      ## ``(pool, reason)`` for each pool left at ``never``: an empty
+      ## registry, borrowers the discovery pass had not seen, or the path
+      ## the pass could not vouch for.
     leaves*: seq[LeafCheckReport]
       ## The detector's report for every leaf that was migrated.
     diagnostics*: seq[string]
@@ -4017,9 +4147,21 @@ proc migrateSharedClones*(gitBin, cacheRoot: string;
       result.diagnostics.add(report.diagnostic)
     result.leaves.add(report)
   for pool in result.pools:
-    if not ensureSharedBareSafety(gitBin, pool):
+    var notReady = ""
+    var installed = ensureSharedBareSafety(gitBin, pool,
+      readinessPass = true, notReady)
+    if installed and notReady == PoolDiscoveryRegisteredNewReason:
+      # The pass registered a sibling checkout that was neither a candidate
+      # nor already registered. Migration is the command that converges a
+      # machine in one run, so it makes the "later complete pass" of §3.2
+      # itself, once, rather than leave the pool waiting for maintenance.
+      installed = ensureSharedBareSafety(gitBin, pool, readinessPass = true,
+        notReady)
+    if not installed:
       result.diagnostics.add("could not install the shared-bare safety " &
         "config on " & pool)
+    if notReady.len > 0:
+      result.poolExpiryReasons.add((pool, notReady))
     let expiry = runGit(gitBin, ["--git-dir=" & pool, "config", "--get",
       "gc.pruneExpire"]).output.strip()
     result.poolExpiry.add((pool, expiry))
@@ -4407,6 +4549,11 @@ type
     looseAfter*: int
     prunedRefs*: seq[string]
     diagnostic*: string
+    expiryNotReadyReason*: string
+      ## Set when the pass reached the gc with the pool at
+      ## ``gc.pruneExpire=never``: why (an empty registry, borrowers the
+      ## discovery pass had not seen, or the path it could not vouch for).
+      ## Not an error: such a gc prunes nothing.
 
 const
   DefaultLooseObjectLimit* = 500
@@ -4612,8 +4759,14 @@ proc maintainSharedBare*(gitBin, barePath: string;
     # registry fills or empties. If that cannot be written the gc does not
     # run: a pool whose config we could not establish is a pool we do not
     # prune (SPI-GOAL-5).
+    #
+    # This is where the borrower discovery pass of §3.2 runs: it is needed
+    # only to decide whether this gc may prune, so no checkout path pays for
+    # it. A pass that does not complete leaves ``never``, and the gc below
+    # then prunes nothing.
     discard pruneBorrowers(barePath)
-    if not ensureSharedBareSafety(gitBin, barePath):
+    if not ensureSharedBareSafety(gitBin, barePath, readinessPass = true,
+        result.expiryNotReadyReason):
       result.ok = false
       result.ran = false
       result.looseAfter = result.looseBefore

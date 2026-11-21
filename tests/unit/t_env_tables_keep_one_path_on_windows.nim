@@ -393,7 +393,7 @@ suite "env tables keep one search path under Windows name semantics":
       repeat('0', kept.len) & " " & kept &
       " t <t@t> 1700000000 +0000\tbranch: deleted later\n")
     # Expiry on: the hook written, git >= 2.42, a complete discovery pass.
-    let config = poolIntegrityConfig(f.gitBin, f.pool)
+    let config = poolIntegrityConfig(f.gitBin, f.pool, readinessPass = true)
     checkpoint($config)
     check ("gc.pruneExpire", PoolPruneExpire) in config
     for (key, value) in config:
