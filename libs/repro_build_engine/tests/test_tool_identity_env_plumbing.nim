@@ -498,6 +498,170 @@ suite "M9.N Batch B — engine tool-identity env plumbing":
       check subPkgConfig notin fields[3]
       check suspectBin notin fields[4]
 
+  when defined(posix):
+    # A Nix compiler wrapper records the libc it links against
+    # (``nix-support/orig-libc``) and passes it to its own linker. The cases
+    # below build that layout from plain directories and files -- a wrapper
+    # with ``bin/cc`` and a ``nix-support/orig-libc`` naming a libc whose
+    # ``lib/`` holds ``libc.so.6``, and a host-style ``bin/cc`` without one.
+    # The engine reads exactly these files; nothing is mocked beyond the
+    # resolver table described in the header.
+    type CompilerLibcFixture = object
+      libcLib, wrapperBin, hostBin, sourceLibcLib: string
+
+    proc writeExecutable(path: string) =
+      createDir(parentDir(path))
+      writeFile(path, "#!/bin/sh\nexit 0\n")
+      setFilePermissions(path, {fpUserRead, fpUserWrite, fpUserExec})
+
+    proc compilerLibcFixture(): CompilerLibcFixture =
+      let root = absolutePath(TmpDir / "compiler-libc")
+      let libc = root / "nix-glibc"
+      let wrapper = root / "clang-wrapper"
+      result = CompilerLibcFixture(libcLib: libc / "lib",
+        wrapperBin: wrapper / "bin", hostBin: root / "host" / "bin",
+        sourceLibcLib: root / "source-glibc" / "usr" / "lib64")
+      createDir(result.libcLib)
+      writeFile(result.libcLib / "libc.so.6", "synthetic libc")
+      createDir(wrapper / "nix-support")
+      writeFile(wrapper / "nix-support" / "orig-libc", libc & "\n")
+      for name in ["cc", "gcc"]:
+        writeExecutable(result.wrapperBin / name)
+        writeExecutable(result.hostBin / name)
+      createDir(result.sourceLibcLib)
+      writeFile(result.sourceLibcLib / "libc.so.6", "synthetic source libc")
+
+    test "a compiler wrapper's own libc reaches only its dedicated variable":
+      resetTmp()
+      let f = compilerLibcFixture()
+      let cacheRoot = TmpDir / "cache-compiler-libc-channel"
+      createDir(cacheRoot)
+      let subLib = "/synthetic/sub-tool/libiconv/lib"
+      var table = initTable[string, ResolvedToolIdentity]()
+      var clang = mockedIdentity(@[f.wrapperBin], libDirs = @[subLib])
+      clang.compilerLibcDirs = @[f.libcLib]
+      table["clang"] = clang
+      table["libfoo"] = mockedIdentity(@[],
+        libDirs = @["/synthetic/ref/libfoo/lib"])
+      let probe = "printf '%s|%s|%s' \"$LIBRARY_PATH\" " &
+        "\"$REPRO_COMPILER_LIBC_DIRS\" \"$LD_LIBRARY_PATH\""
+      let g = oneAction("compiler-libc-channel", @["libfoo"],
+        fingerprintToken = "compiler-libc-channel",
+        actionEnv = @["LIBRARY_PATH=", "REPRO_COMPILER_LIBC_DIRS=",
+          "PATH=" & f.hostBin & ":/usr/bin:/bin"],
+        argvOverride = @["sh", "-c", probe], subTools = @["clang"])
+      let res = runBuild(g, runnerCfg(cacheRoot, makeResolver(table)))
+      require res.results.len == 1
+      check res.results[0].status == asSucceeded
+      let fields = readBypassStdout(cacheRoot,
+        "compiler-libc-channel").split('|')
+      require fields.len == 3
+      check fields[0] == "/synthetic/ref/libfoo/lib:" & subLib
+      check fields[1] == f.libcLib
+      check f.libcLib notin fields[2]
+
+    test "a recorded compiler libc on LIBRARY_PATH is refused unless cc uses it":
+      resetTmp()
+      let f = compilerLibcFixture()
+      var table = initTable[string, ResolvedToolIdentity]()
+      # The libc arrives on the link channel through the sub-tool (as a cached
+      # realization from before the catalog stopped following ``orig-libc``
+      # would bring it), and the same wrapper records it as its own.
+      var clang = mockedIdentity(@[f.wrapperBin], libDirs = @[f.libcLib])
+      clang.compilerLibcDirs = @[f.libcLib]
+      table["clang"] = clang
+      table["cargo"] = mockedIdentity(@[])
+      let resolver = makeResolver(table)
+      let action = oneAction("compiler-libc-guard", @["cargo"],
+        subTools = @["clang"]).actions[0]
+      let paths = collectResolvedAuxPaths(action, resolver)
+      check paths.linkOnlyLibDirs == @[f.libcLib]
+      check paths.compilerLibcDirs == @[f.libcLib]
+
+      # A host compiler resolves as ``cc``: the libc is not its own.
+      var refused = ""
+      try:
+        refuseForeignCompilerLibc(action, paths,
+          @["PATH=" & f.hostBin & ":" & f.wrapperBin], isolatedEnv = true)
+      except BuildEngineError as err:
+        refused = err.msg
+      check refused.len > 0
+      check f.libcLib in refused
+      check "tool 'clang'" in refused
+      check (f.hostBin / "cc") in refused
+      check (f.wrapperBin / "cc") notin refused
+
+      # No compiler on PATH at all: nothing vouches for the libc either.
+      expect BuildEngineError:
+        refuseForeignCompilerLibc(action, paths, @["PATH="],
+          isolatedEnv = true)
+
+      # The wrapper itself resolves as ``cc`` and ``gcc``: its own libc is
+      # what it links against anyway.
+      refuseForeignCompilerLibc(action, paths,
+        @["PATH=" & f.wrapperBin & ":" & f.hostBin], isolatedEnv = true)
+
+      # The same wrapper reached through a profile of symlinks
+      # (``~/.nix-profile/bin/cc``): the prefix of the resolved file vouches.
+      let profileBin = absolutePath(TmpDir / "compiler-libc" / "profile" / "bin")
+      createDir(profileBin)
+      for name in ["cc", "gcc"]:
+        createSymlink(f.wrapperBin / name, profileBin / name)
+      refuseForeignCompilerLibc(action, paths,
+        @["PATH=" & profileBin & ":" & f.hostBin], isolatedEnv = true)
+
+      # A recorded directory without a libc in it is not a C runtime.
+      removeFile(f.libcLib / "libc.so.6")
+      refuseForeignCompilerLibc(action, paths,
+        @["PATH=" & f.hostBin], isolatedEnv = true)
+
+    test "a libc the edge declares stays linkable whatever cc resolves to":
+      # A source-built glibc (or a compiler bootstrap prefix) declared as a
+      # dependency is the edge's own statement, and no wrapper record ties it
+      # to a compiler, so the guard leaves it on LIBRARY_PATH as before.
+      resetTmp()
+      let f = compilerLibcFixture()
+      var table = initTable[string, ResolvedToolIdentity]()
+      var clang = mockedIdentity(@[f.wrapperBin])
+      clang.compilerLibcDirs = @[f.libcLib]
+      table["clang"] = clang
+      table["glibc"] = mockedIdentity(@[], libDirs = @[f.sourceLibcLib])
+      let action = oneAction("declared-libc", @["glibc"],
+        subTools = @["clang"]).actions[0]
+      let paths = collectResolvedAuxPaths(action, makeResolver(table))
+      check paths.libDirs == @[f.sourceLibcLib]
+      refuseForeignCompilerLibc(action, paths,
+        @["PATH=" & f.hostBin], isolatedEnv = true)
+
+    test "a refused compiler libc fails the launch, not the link":
+      resetTmp()
+      let f = compilerLibcFixture()
+      let cacheRoot = TmpDir / "cache-compiler-libc-refused"
+      createDir(cacheRoot)
+      var table = initTable[string, ResolvedToolIdentity]()
+      var clang = mockedIdentity(@[f.wrapperBin], libDirs = @[f.libcLib])
+      clang.compilerLibcDirs = @[f.libcLib]
+      table["clang"] = clang
+      table["cargo"] = mockedIdentity(@[])
+      let marker = absolutePath(TmpDir / "ran")
+      let g = oneAction("compiler-libc-refused", @["cargo"],
+        fingerprintToken = "compiler-libc-refused",
+        actionEnv = @["PATH=" & f.hostBin & ":/usr/bin:/bin"],
+        argvOverride = @["sh", "-c", "touch " & quoteShell(marker)],
+        subTools = @["clang"])
+      var failedWith = ""
+      try:
+        let res = runBuild(g, runnerCfg(cacheRoot, makeResolver(table)))
+        require res.results.len == 1
+        check res.results[0].status != asSucceeded
+        failedWith = res.results[0].reason & res.results[0].stderr
+      except BuildEngineError as err:
+        failedWith = err.msg
+      checkpoint failedWith
+      check "refusing to launch compiler-libc-refused" in failedWith
+      check f.libcLib in failedWith
+      check not fileExists(marker)
+
   test "the set PATH reader finds one PATH line in any casing and reports duplicates":
     ## The Windows PATH cases below read the child's ``set PATH`` output
     ## through ``setOutputPathValues`` and require exactly one value. This

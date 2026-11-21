@@ -8322,6 +8322,16 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
   ## writes the refreshed evidence back so the next hit is a stat again.
   if not identity.toolIdentityRealizationsUsable():
     return (servable: false, refreshed: false)
+  # An identity resolved while a Nix compiler wrapper's libc was still
+  # followed as a propagated input carries that libc in its link channels.
+  # Re-resolve it rather than hand the libc to every compiler of the action.
+  # Only a Nix realization is checked: a from-source closure merges its
+  # dependencies' store paths, where a libc can be a dependency of its own.
+  for actionIdentity in identity.actionIdentities:
+    if actionIdentity.installMethod == "nix" and
+        nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
+          actionIdentity.selectedStorePath):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 
@@ -9530,6 +9540,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedCompilerLibcDirs: seq[string] = @[]
     var mergedPrefixVars: seq[(string, string)] = @[]
     var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
@@ -9605,6 +9616,13 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       for path in actionIdy.libraryPathList:
         if path.len > 0 and path notin mergedLibDirs:
           mergedLibDirs.add(path)
+      # The libc a Nix compiler wrapper of this realization records. It
+      # travels apart from ``libDirs``: it is for install normalization,
+      # and on the link channel it would reach every compiler the action
+      # runs, not only this wrapper (which passes it to its own linker).
+      for path in nixCompilerWrapperLibcDirs(actionIdy.realizedStorePaths):
+        if path notin mergedCompilerLibcDirs:
+          mergedCompilerLibcDirs.add(path)
       # A LIBRARY realization (it carries include or library dirs) names its
       # prefix to the consuming action as `DEP_<NAME>_PREFIX`
       # (Package-Model.md §"Environment-provided library prefixes"): the
@@ -9663,6 +9681,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         cmakePrefixDirs: mergedCmakePrefixDirs,
         includeDirs: mergedIncludeDirs,
         libDirs: mergedLibDirs,
+        compilerLibcDirs: mergedCompilerLibcDirs,
         nimPathDirs: nimPathDirs,
         prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
