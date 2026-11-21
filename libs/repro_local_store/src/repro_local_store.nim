@@ -5183,7 +5183,8 @@ proc loadPerEdgeRecords*(cache: ActionCache; weak: ContentDigest;
         result.add(rec)
 
 proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
-                            records: openArray[ActionResultRecord]) =
+                            records: openArray[ActionResultRecord];
+                            ranAction = false) =
   ## Encode `records` (one path-set's bounded set) to a fresh temp file and
   ## atomically `rename()` it to `dirPath/finalName`. fsync-less: a cache needs
   ## consistency, not durability. Never clobbers a sibling `.rec` of a distinct
@@ -5191,6 +5192,14 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
   ## Stamps a FRESH write sequence, allocated above every container already in
   ## `dirPath` (`nextWriteSequence`), so a convergent rewrite of the same
   ## path-set becomes strictly newest (higher sequence) than every sibling.
+  ##
+  ## `ranAction` says the write comes from `recordActionResult`: the records
+  ## describe outputs just observed on disk as this edge's result (an
+  ## execution, or the one caller that adopts outputs a tool already wrote,
+  ## `seedCmakeRegenerationCache`), as opposed to a re-store of a record that
+  ## already existed. It decides one thing: whether a determinism sidecar the
+  ## records do not carry themselves may be carried forward from the record
+  ## being replaced (see the determinism sidecar below).
   createDir(extendedPath(dirPath))
   # Read the sequence of the record we are replacing BEFORE the rename, so a
   # witness-free republish can tell "the sidecar belongs to the record I am
@@ -5289,14 +5298,25 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
           try: removeFile(extendedPath(witnessTmp))
           except OSError: discard
 
-    # The determinism sidecar. Same carry-forward rule as the witness one and
-    # for the same reason: the cache daemon and the peer-cache installer both
+    # The determinism sidecar. For a re-store, the same carry-forward rule as
+    # the witness one and for the same reason: the cache daemon and the
+    # peer-cache installer both
     # republish records decoded from a plain frame, which is
     # determinism-metadata-free by construction. Letting such a republish
     # write an UNDECLARED sidecar would erase the class of a `volatile` entry
     # seconds after it was recorded, and the entry would then be served
     # forever with no retention at all -- the exact defect this metadata
     # exists to prevent, arrived at silently.
+    #
+    # A write that RAN the action is not such a republish, and never carries
+    # a sidecar forward (`Edge-Determinism-And-Soft-Rebuild.md` §3.2 rule 3):
+    # the bytes are new, so the entry records the running edge's class, and an
+    # unlabelled edge's run records none. Both kinds of write arrive here as
+    # records with no class, which is why the caller has to say which it is.
+    # Carrying the sidecar onto a run's bytes labelled them with a class, a
+    # host and a retention clause that described the bytes they replaced,
+    # first run's write time included, and every reader of the sidecar (the
+    # publishers, the host check, the retention GC) judged the new bytes by it.
     let detPath = dirPath / determinismFileName(finalName.splitFile.name)
     let meta = metaOf(records)
     var detPayload: seq[byte] = @[]
@@ -5304,7 +5324,8 @@ proc writeRecFileAtomically(cache: ActionCache; dirPath, finalName: string;
     if meta.declared:
       detPayload = encodeDeterminism(meta, writeSequence)
       writeDet = true
-    elif priorWriteSequence != 0'u64 and fileExists(extendedPath(detPath)):
+    elif not ranAction and priorWriteSequence != 0'u64 and
+        fileExists(extendedPath(detPath)):
       try:
         let prior = decodeDeterminism(bytes(readFile(detPath)))
         # Another host's sidecar is never carried forward
@@ -5545,7 +5566,8 @@ proc indexBypassOnce(cache: ActionCache) =
   cache.shm.bypassNoted = true
   if cache.shm.idx != nil: cache.shm.idx.noteBypassWrite()
 
-proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
+proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord;
+                        ranAction = false) =
   ## Publish ONE path-set's record into its edge directory
   ## `hot-records/<key>/<strongFp>.rec` via temp-file + atomic rename, WITHOUT
   ## touching any sibling `.rec` from a distinct concurrent path-set (AC-1b).
@@ -5558,11 +5580,15 @@ proc writePerEdgeRecord(cache: ActionCache; record: ActionResultRecord) =
   ## sees an element finds the file); cap before insert (so a record can never
   ## be published to the index and then immediately capped by its own writer);
   ## unlink before tombstone.
+  ##
+  ## `ranAction`: see `writeRecFileAtomically`. Only `recordActionResult`
+  ## passes true.
   cache.indexBypassOnce()
   cache.migrateLegacyFile(record.weakFingerprint)
   let dirPath = cache.perEdgeDirPath(record.weakFingerprint)
   cache.writeRecFileAtomically(dirPath,
-    recFileNameForStrong(record.strongFingerprint), @[record])
+    recFileNameForStrong(record.strongFingerprint), @[record],
+    ranAction = ranAction)
   let evicted = cache.capRecFiles(dirPath)
   cache.indexEvictByHex(record.weakFingerprint, evicted)
   cache.indexRecord(record.weakFingerprint, record.strongFingerprint)
@@ -6381,8 +6407,9 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   result.policy = policy
   # §3's write column. Stamped here, at the one moment the wall clock means
   # what the retention clause needs it to mean: the instant the realization
-  # was produced. Defaulted-empty, so every existing caller records exactly
-  # what it recorded before and writes no sidecar.
+  # was produced. Defaulted-empty: such a caller writes no sidecar, and
+  # removes the one beside a record it replaces (§3.2 rule 3: these bytes
+  # were not produced under that class).
   result.determinism = determinism
   var enumerated = initHashSet[string]()
   for path in enumeratedDirectories:
@@ -6454,7 +6481,7 @@ proc recordActionResult*(cache: var ActionCache; cas: LocalCas;
   # This cache root is where the execution just happened: the one place the
   # execution-observation mark is set (see `observedExecution`).
   result.observedExecution = true
-  cache.writePerEdgeRecord(result)
+  cache.writePerEdgeRecord(result, ranAction = true)
 
 proc recordActionResult*(cache: var ActionCache; cas: var Store;
                          weak: ContentDigest; policy: FileFingerprintPolicy;
@@ -6471,8 +6498,9 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
   result.policy = policy
   # §3's write column. Stamped here, at the one moment the wall clock means
   # what the retention clause needs it to mean: the instant the realization
-  # was produced. Defaulted-empty, so every existing caller records exactly
-  # what it recorded before and writes no sidecar.
+  # was produced. Defaulted-empty: such a caller writes no sidecar, and
+  # removes the one beside a record it replaces (§3.2 rule 3: these bytes
+  # were not produced under that class).
   result.determinism = determinism
   var enumerated = initHashSet[string]()
   for path in enumeratedDirectories:
@@ -6540,7 +6568,7 @@ proc recordActionResult*(cache: var ActionCache; cas: var Store;
   # This cache root is where the execution just happened: the one place the
   # execution-observation mark is set (see `observedExecution`).
   result.observedExecution = true
-  cache.writePerEdgeRecord(result)
+  cache.writePerEdgeRecord(result, ranAction = true)
 
 proc sameContentIdentity(recorded, current: FileFingerprint): bool =
   ## Whether a content-keyed input still has the identity it was recorded
