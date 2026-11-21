@@ -14461,7 +14461,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
       "sourceSuiteCount": 19,
-      "staticCaseCount": 41,
+      "staticCaseCount": 42,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
