@@ -204,6 +204,14 @@ type
       ## so a test can serve the release tree from a loopback listener and
       ## an air-gapped site from its own mirror; whatever base is used, the
       ## URL it resolved to is what the lock records.
+    documentHook*: proc (document: string): string {.closure.}
+      ## NPC-M6: applied to the finished document by the writing doors
+      ## (``runLockSolve``, ``runLockRefresh``) before anything is landed --
+      ## the CLI adds the `nimble:` `LockedDep` rows of the packages the solve
+      ## chose (their coordinates and digests come from the index records,
+      ## which the solve does not carry). Raising refuses the write. Nil for
+      ## every caller that has none; it is not a solve input and is not part
+      ## of any fingerprint.
     recordCertificatePolicy*: bool
       ## Test-Certificates TC-9b: whether this generation records the
       ## ``[certificate_policy]`` snapshot (``certificatePolicySection``) in
@@ -353,6 +361,31 @@ proc renderPackageDecl(p: PackageDecl): string =
   result.add(framed("depends", deps))
   result.add("source=" & p.source & "\x1e")
   result.add("pinned=" & (if p.pinned: "1" else: "0") & "\x1e")
+  # NPC-M6 — a catalog package's per-version requirements, its on-demand
+  # activation and its newest-first preference are solve inputs: two
+  # requests that differ only there must not share a fingerprint (a path-set
+  # hit would hand back the other's lock). Rendered only when set, so every
+  # request without them keeps the weak fingerprint it had.
+  if p.versionDepends.len > 0:
+    var vds: seq[string] = @[]
+    for vd in p.versionDepends:
+      var ds: seq[string] = @[]
+      for d in vd.depends:
+        let gate =
+          if d.conditional.isSome:
+            d.conditional.get().variantName & "=" &
+              d.conditional.get().triggerValue
+          else:
+            "*"
+        ds.add(d.name & "|" & d.range & "|" & gate)
+      ds.sort()
+      vds.add(vd.version & "\x1f" & ds.join("\x1d"))
+    vds.sort()
+    result.add(framed("version-depends", vds))
+  if p.onDemand:
+    result.add("on-demand=1\x1e")
+  if p.preferNewest:
+    result.add("prefer-newest=1\x1e")
 
 proc canonicalSolveInputs*(req: LockGenerationRequest): string =
   ## The solve edge's WEAK fingerprint material — "what is known before it
@@ -1154,6 +1187,10 @@ proc runLockSolve*(req: LockGenerationRequest; writeTo: string):
   r.entryPoint = lgeLockSolve
   result = generateLock(r)
   result.lockDocument = withCertificatePolicy(r, result.lockDocument)
+  if r.documentHook != nil:
+    result.lockDocument = r.documentHook(result.lockDocument)
+    result.lockIdentity = lockIdentityOf(parseLockedDependencies(
+      result.lockDocument))
   if writeTo.len > 0:
     landCommittedLock(result, writeTo)
 
@@ -1195,6 +1232,10 @@ proc runLockRefresh*(req: LockGenerationRequest; writeTo: string):
   r.entryPoint = lgeLockRefresh
   result = generateLock(r)
   result.lockDocument = withCertificatePolicy(r, result.lockDocument)
+  if r.documentHook != nil:
+    result.lockDocument = r.documentHook(result.lockDocument)
+    result.lockIdentity = lockIdentityOf(parseLockedDependencies(
+      result.lockDocument))
   if writeTo.len > 0:
     landCommittedLock(result, writeTo)
 

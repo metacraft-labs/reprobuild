@@ -264,6 +264,7 @@ import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 import repro_cli_support/catalog_generate
 import repro_cli_support/nimble_verify
+import repro_cli_support/nimble_lock
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -441,6 +442,7 @@ const
     ## Nix's flake-input override option, the word `repro flake
     ## override-args` writes before each override triple.
 export provisioning_lock_selection
+export nimble_lock
 export catalog_publication
 export cli_hardware.runHardwareCommand
 export cli_disk.runDiskCommand,
@@ -32078,6 +32080,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       putEnv(LockPinsEnvVar,
              renderLockPins(graph.solution.packages, graph.solution.variants))
       putEnv(LockPathEnvVar, graph.lockPath)
+      # NPC-M6 — a lock that pins Nimble packages: its `nimble-index` pin
+      # is verified, every `nimble:` row is checked against a record of the
+      # pinned index, and every tree is made present in the source store
+      # (verified in place when it is already there: a warm build evaluates
+      # no fetch edge). A lock without Nimble packages does nothing here.
+      try:
+        discard prepareLockedNimbleSources(projDir, graph.lockPath,
+          NimbleSourcesOptions())
+      except CatchableError as e:
+        stderr.writeLine(reproBuildErrorText(e.msg))
+        return 1
 
   # ``--tool-provisioning`` carries ``REPRO_TOOL_PROVISIONING`` (the flag
   # declares it and wins over it), so both ``--list-targets`` and the engine
@@ -94609,6 +94622,13 @@ type
       ## ``--repin=<package>[,<package>…]`` (refresh only): the targeted
       ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
       ## ordinary whole-lock refresh.
+    excludeNewer: int64
+      ## ``--exclude-newer <time>`` (solve, refresh): catalog versions first
+      ## seen after this Unix time are excluded (NPC-AREQ18). Negative: none.
+    allowRewind: seq[string]
+      ## ``--allow-rewind=<import>[,<import>…]`` (refresh --provisioning):
+      ## catalog imports whose ref may move to a revision that does not
+      ## descend from the pin (NPC-AREQ15).
 
 type
   LockVerbInputs = object
@@ -94643,7 +94663,8 @@ proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
   ## none given the generation emits no ``netFetch`` edge at all and the
   ## declared candidate versions are the whole universe, which is the
   ## behaviour every pre-NLF-M5 invocation had.
-  r.gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
+  r.gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false,
+    excludeNewer: -1)
   r.inputsOverride = c.inputs
   r.lockOverride = c.lock
   r.platformOverride = c.platform
@@ -94668,6 +94689,27 @@ proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
     r.gen.registries.add(registry)
   r.gen.write = c.write
   r.asJson = c.json
+  when compiles(c.excludeNewer):
+    if c.excludeNewer.len > 0:
+      let defect = parseExcludeNewer(c.excludeNewer, r.gen.excludeNewer)
+      if defect.len > 0:
+        stderr.writeLine("repro lock " & verb & ": " & defect)
+        return 2
+  when compiles(c.allowRewind):
+    for raw in c.allowRewind:
+      for part in raw.split(','):
+        let name = part.strip()
+        if name.len == 0:
+          stderr.writeLine("repro lock " & verb & ": --allow-rewind names " &
+            "catalog imports (--allow-rewind=<import>[,<import>…]); '" & raw &
+            "' contains an empty name")
+          return 2
+        if name notin r.gen.allowRewind: r.gen.allowRewind.add(name)
+    if r.gen.allowRewind.len > 0 and not c.provisioning:
+      stderr.writeLine("repro lock " & verb & ": --allow-rewind applies to " &
+        "a catalog import's ref, which only --provisioning moves; add " &
+        "--provisioning")
+      return 2
   when compiles(c.provisioning):
     # `refresh` only. Re-selection rewrites the
     # committed lock's provisioning records, so it belongs to the verb that
@@ -94708,6 +94750,8 @@ proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
   if c.highest: r.solveFlags.add("--highest")
   if c.inputs.len > 0: r.solveFlags.add("--inputs")
   if c.registry.len > 0: r.solveFlags.add("--registry")
+  when compiles(c.excludeNewer):
+    if c.excludeNewer.len > 0: r.solveFlags.add("--exclude-newer")
   r.projectDir = absolutePath(
     if c.projectDir.len > 0: c.projectDir else: getCurrentDir())
   return 0
@@ -96633,8 +96677,10 @@ proc inspectSiblingRemovals(projectDir, lockPath: string;
   var reported: seq[string]
   proc collect(text: string; committed: bool; report: var SiblingRemovalReport) =
     for dep in parseLockedDependencies(text).deps:
+      # A `nimble:` row is a catalog package, not a sibling: the solve
+      # re-derives it (or drops it) from the Nimble index (NPC-M6).
       if isSelfLockedDep(dep) or dep.coordinates.kind != ckVcs or
-          dep.name in names: continue
+          dep.name in names or dep.name.startsWith("nimble:"): continue
       if committed: report.committedDrops = true
       if dep.name in reported: continue
       reported.add(dep.name)
@@ -96955,6 +97001,53 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
         "package(s) the solve does not have: '" & unknown.join("', '") &
         "' (it has: " & listing.join(", ") & "); nothing was written")
       return 2
+  # NPC-M6 — `nimble:` requirements resolve through the imported Nimble
+  # index: the lock's pin of it, or, under `--provisioning`, the revision its
+  # ref names now (which must descend from the pin, NPC-AREQ15). The closure
+  # is read from the index's shards and lowered into the solve's
+  # declarations; the solved packages become `LockedDep` rows through the
+  # request's document hook. Nothing here runs for a solve that requires no
+  # `nimble:` package.
+  var nimbleSetup: NimbleSolveSetup
+  if requestsNimble(request.packages):
+    if gen.repin.len > 0:
+      stderr.writeLine("repro lock " & verb & ": --repin does not support " &
+        "`nimble:` packages yet; run `repro lock " & verb & "` without it " &
+        "(nothing was written)")
+      return 2
+    var incumbentPins: seq[LockedCatalogImport]
+    var incumbentRows: seq[LockedDep]
+    if fileExists(extendedPath(lockP)):
+      try:
+        let incumbent = parseLockedDependencies(readFile(extendedPath(lockP)))
+        incumbentPins = incumbent.lockedCatalogImportPins()
+        incumbentRows = incumbent.deps
+      except CatchableError as e:
+        stderr.writeLine("repro lock " & verb & ": cannot read the catalog " &
+          "import pins of " & lockP & ": " & e.msg & " (nothing was written)")
+        return 1
+    try:
+      nimbleSetup = prepareNimbleSolve(projectDir, request.packages,
+        incumbentPins,
+        reselect = gen.reselectProvisioning and entryPoint == lgeLockRefresh,
+        allowRewind = gen.allowRewind, platform = request.platform,
+        excludeNewer = gen.excludeNewer, incumbentRows = incumbentRows)
+    except CatchableError as e:
+      stderr.writeLine("repro lock " & verb & ": " & e.msg &
+        " (nothing was written)")
+      return 1
+    for note in nimbleSetup.notes:
+      stderr.writeLine("repro lock " & verb & ": " & note)
+    let ageLine = "repro lock " & verb & ": " &
+      nimbleIndexAgeLine(nimbleSetup.index, getTime().toUnix)
+    if asJson: stderr.writeLine(ageLine) else: stdout.writeLine(ageLine)
+    let setup = nimbleSetup
+    request.documentHook = proc (document: string): string =
+      let applied = applyNimbleRows(setup, document)
+      if applied.refusals.len > 0:
+        raise newException(NimbleLockError, "the solved Nimble closure " &
+          "cannot be locked:\n  " & applied.refusals.join("\n  "))
+      applied.document
   let writeTo = if writeByDefault or gen.write: lockP else: ""
   var removals = SiblingRemovalReport(droppedPins: newJArray(),
     behindManifests: newJArray())
@@ -97090,11 +97183,30 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
         else: currentPlatformId()
       let outcome = reselectCommittedProvisioning(projectDir, lockP,
         incumbentExists, incumbentText, generated.lockDocument, platform,
-        platform)
+        platform, gen.allowRewind)
       if not outcome.reselected:
         stderr.writeLine(renderReselectionRefusal(verb, lockP,
           outcome.refusals))
         return 1
+      if nimbleSetup.active:
+        # The solve read the index at the revision resolved above; the pin
+        # re-selection writes must be that same revision, or the rows would
+        # be anchored to an index the lock does not pin (the ref moved in
+        # between).
+        let written = parseLockedDependencies(outcome.document).
+          lockedCatalogImportPins()
+        var agrees = false
+        for p in written:
+          if p.repo == nimbleSetup.index.repo and
+              p.revision == nimbleSetup.index.revision and
+              p.interfaceArtifact == nimbleSetup.index.indexIdentity:
+            agrees = true
+        if not agrees:
+          stderr.writeLine("repro lock " & verb & ": the Nimble index \"" &
+            nimbleSetup.index.repo & "\" moved while the lock was being " &
+            "solved (the solve read " & nimbleSetup.index.revision & "); run " &
+            "the refresh again (" & lockP & " was not written)")
+          return 1
       if asJson: stderr.writeLine(outcome.report)
       else: stdout.writeLine(outcome.report)
       createDir(parentDir(lockP))
@@ -97124,9 +97236,15 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
   except EUnsatisfiable as e:
     stderr.writeLine("repro lock " & verb & ": solver UNSAT — cannot pin a " &
       "lock: " & e.msg)
+    if nimbleSetup.active:
+      stderr.writeLine(nimbleFailureText(nimbleSetup))
     return 3
   except CatchableError as e:
     stderr.writeLine("repro lock " & verb & ": generation failed: " & e.msg)
+    if nimbleSetup.active and not (e of NimbleLockError):
+      # NPC-AREQ18: the index revision, the missing names and the excluded
+      # candidates, each with its requirement chain.
+      stderr.writeLine(nimbleFailureText(nimbleSetup))
     return 1
 
 proc runReproLockRefresh(r: LockVerbInputs): int =
@@ -97756,9 +97874,21 @@ proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
   let diff = diffProvisioningLockDocuments(oldText, newText, evidence)
   if diff.refused:
     return (2, "repro lock diff: " & renderProvisioningDiff(diff))
+  # NPC-M6: the `nimble:` packages -- version, digest, commit and origin
+  # changes, the Nimble index each lock pins with its generation time and
+  # age (threat model G34), and the origin events published since the old
+  # pin (NPC-AREQ19). Empty for two locks without Nimble packages, which
+  # keeps every existing report byte-identical.
+  let nimble = nimbleLockDiff(oldText, newText, anchor, getTime().toUnix)
   if diff.unchanged:
-    return (0, "repro lock diff: no provisioning selection changed")
+    if nimble.lines.len == 0:
+      return (0, "repro lock diff: no provisioning selection changed")
+    return ((if nimble.changed: 1 else: 0),
+      "repro lock diff: no provisioning selection changed\n" &
+        nimble.lines.join("\n"))
   var text = renderProvisioningDiff(diff)
+  for line in nimble.lines:
+    text.add("\n" & line)
   # ReproOS M6 D4: a cause the diff could not determine says WHY -- the
   # catalogs that could not be read at the recorded revisions, each with
   # its cause and the command that makes it readable -- rather than only

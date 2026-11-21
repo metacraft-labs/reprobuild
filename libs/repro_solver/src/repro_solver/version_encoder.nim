@@ -52,6 +52,16 @@
 ##    ``variant_assigned`` gate in the body so a DORMANT arm propagates
 ##    nothing. See ``encodeSelectionRoots`` for why this is derived in the
 ##    ASP rather than post-computed in Nim.
+## 8. **Per-version dependencies, on-demand activation, exact
+##    pseudo-versions** (NPC-M6, for catalog packages such as Nimble's).
+##    ``PackageDecl.versionDepends`` gives each candidate version its own
+##    edges, gated on ``package_chosen("p", "<that version>")``
+##    (``encodeVersionDependencyEdges``); ``onDemand`` makes a package active
+##    only when a chosen parent requires it (``encodeOnDemandActivation``);
+##    a range spelled ``#...`` admits exactly the candidate spelled the same
+##    (``rangeAdmits``); ``preferNewest`` makes the search try a package's
+##    newest version first under ``vpNone``. A declaration set that uses none of them encodes
+##    byte-for-byte as before.
 ##
 ## ## Why a separate encoder
 ##
@@ -88,6 +98,18 @@ type
     ## common bool case).
     variantName*: string
     triggerValue*: string
+
+  VersionDependencies* = object
+    ## NPC-M6 — the dependency list of ONE candidate version of a package.
+    ##
+    ## A package whose versions each declare their own requirements (a
+    ## Nimble package: one `.nimble` per commit, read at that commit) cannot
+    ## be described by one ``PackageDecl.depends`` list: version 1.0 may
+    ## require ``b >=1`` while 2.0 requires ``c``. Each entry here applies
+    ## only while ``version`` is the chosen version of its package; the
+    ## package-level ``depends`` still apply to every version.
+    version*: string
+    depends*: seq[DependencyDecl]
 
   PackageDecl* = object
     ## One package in the encoder's input registry. The encoder reads
@@ -157,6 +179,28 @@ type
       ## A package set with no instances emits NO objective and NO join
       ## facts, so its program text is byte-for-byte what it was. That is
       ## NLF-STAT-4, and it is why this is a field rather than a mode.
+    versionDepends*: seq[VersionDependencies]
+      ## NPC-M6 — per-version dependency lists (see ``VersionDependencies``).
+      ## Empty for every package declared before them, which therefore
+      ## encodes byte-for-byte as before (NLF-STAT-4).
+    onDemand*: bool
+      ## NPC-M6 — the package is ACTIVE (must choose a version) only when
+      ## something that is chosen requires it: a package whose
+      ## package-level ``depends`` names it, or a chosen version whose
+      ## ``versionDepends`` names it. Without this every declared package
+      ## chooses a version, which is right for a recipe's own declarations
+      ## and wrong for a catalog closure: the closure holds every package any
+      ## candidate version could reach, and a package only an UNCHOSEN version
+      ## requires must not be forced into the answer -- nor make it
+      ## unsatisfiable when it has no candidate at all (a name the index does
+      ## not hold).
+    preferNewest*: bool
+      ## NPC-M6 — under ``vpNone`` (no strategy), prefer this package's
+      ## newest admissible version (a search heuristic, see
+      ## ``PreferNewestHeuristic``). A catalog package's universe is every
+      ## published version, and "the first model clingo finds" is not an
+      ## answer anyone asked for. Ignored under any other preference, which
+      ## already orders every package.
 
   VersionPreference* = enum
     ## Named-Lock-Files NLF-M6 (§5.5) — the *version-selection rule* a solve
@@ -243,6 +287,48 @@ proc newPinnedPackage*(name, version: string;
   ## exists to avoid it.
   newPackage(name, [version], depends, variants, pinned = true)
 
+proc newVersionDependencies*(version: string;
+                             depends: openArray[DependencyDecl]):
+    VersionDependencies =
+  VersionDependencies(version: version, depends: @depends)
+
+proc allDependencies*(p: PackageDecl): seq[DependencyDecl] =
+  ## Every dependency edge ``p`` declares: the package-level ``depends``,
+  ## then each version's ``versionDepends`` in order. The STRUCTURAL view
+  ## (which packages ``p`` can reach); which edges apply is the solve's.
+  result = p.depends
+  for vd in p.versionDepends:
+    result.add(vd.depends)
+
+proc dependenciesOf*(p: PackageDecl; version: string): seq[DependencyDecl] =
+  ## The dependency edges that apply when ``version`` is ``p``'s chosen
+  ## version: the package-level ``depends`` and that version's own.
+  result = p.depends
+  for vd in p.versionDepends:
+    if vd.version == version:
+      result.add(vd.depends)
+
+const ExactVersionRangePrefix* = "#"
+  ## NPC-M6 — a range that begins with ``#`` names exactly ONE candidate,
+  ## compared as text: the candidate whose version string equals the range.
+  ## A pseudo-version (a branch head, a branch, a commit) is offered under
+  ## such a string; it parses as no semver version, so no ordinary range
+  ## admits it, and only a requirement that names it selects it.
+
+proc rangeAdmits*(rangeText, version: string): bool =
+  ## Does the dependency range ``rangeText`` admit candidate ``version``?
+  ## An exact pseudo-version range (``#...``) admits the candidate spelled
+  ## the same; any other range is a semver range, and a candidate or range
+  ## that does not parse is admitted by nothing (the encoder's historical
+  ## rule, kept).
+  if rangeText.startsWith(ExactVersionRangePrefix):
+    return version == rangeText
+  let rng = try: parseSemverRange(rangeText)
+            except ESemverParse: return false
+  let parsed = try: parseSemver(version)
+               except ESemverParse: return false
+  satisfies(parsed, rng)
+
 # ---------------------------------------------------------------------------
 # Encoding helpers
 # ---------------------------------------------------------------------------
@@ -276,7 +362,10 @@ proc encodePackageUniverse*(p: PackageDecl): string =
   ## the M2c encoder declares every package active up front.
   var parts: seq[string] = @[]
   parts.add("package(\"" & aspQuote(p.name) & "\").")
-  parts.add("package_active(\"" & aspQuote(p.name) & "\").")
+  if not p.onDemand:
+    # An on-demand package is activated by the rules
+    # ``encodeOnDemandActivation`` emits, never by a fact.
+    parts.add("package_active(\"" & aspQuote(p.name) & "\").")
   for v in p.versions:
     parts.add("package_version(\"" & aspQuote(p.name) & "\", \"" &
               aspQuote(v) & "\").")
@@ -331,7 +420,9 @@ proc groundVersionInRange*(packages: openArray[PackageDecl]): string =
   # once.
   var seen: HashSet[string]
   for p in packages:
-    for d in p.depends:
+    # ``allDependencies``: a version's own edges need their ranges grounded
+    # too (NPC-M6); for a package without them it is ``p.depends``.
+    for d in allDependencies(p):
       let key = d.name & "::" & d.range
       if key in seen: continue
       seen.incl(key)
@@ -340,12 +431,8 @@ proc groundVersionInRange*(packages: openArray[PackageDecl]): string =
         # downstream integrity constraint will fail closed via the
         # missing ``package_version`` atom.
         continue
-      let rng = try: parseSemverRange(d.range)
-                except ESemverParse: continue
       for v in pkgVersions[d.name]:
-        let parsed = try: parseSemver(v)
-                     except ESemverParse: continue
-        if satisfies(parsed, rng):
+        if rangeAdmits(d.range, v):
           lines.add("version_in_range(\"" & aspQuote(d.name) & "\", \"" &
                     aspQuote(v) & "\", \"" & aspQuote(d.range) & "\").")
   lines.join("\n")
@@ -409,6 +496,88 @@ proc encodeDependencyEdges*(p: PackageDecl): string =
               selBody.join(", ") & ".")
   lines.join("\n")
 
+proc encodeVersionDependencyEdges*(p: PackageDecl): string =
+  ## NPC-M6 — the per-version edges of ``p`` (``versionDepends``). Each is
+  ## the shape ``encodeDependencyEdges`` emits, with the parent's
+  ## ``package_chosen`` atom naming the version the edge belongs to, so the
+  ## range binds -- and selection propagates -- only while that version is
+  ## the one chosen:
+  ##
+  ##   :- package_chosen("A", "1.0.0"), package_chosen("B", V),
+  ##      not version_in_range("B", V, ">=2.0.0").
+  ##   package_selected("B") :- package_selected("A"),
+  ##      package_chosen("A", "1.0.0").
+  ##
+  ## Empty for a package without per-version edges.
+  var lines: seq[string] = @[]
+  let parent = "\"" & aspQuote(p.name) & "\""
+  for vd in p.versionDepends:
+    let chosen = "package_chosen(" & parent & ", \"" & aspQuote(vd.version) &
+      "\")"
+    for d in vd.depends:
+      let child = "\"" & aspQuote(d.name) & "\""
+      let rangeAtom = "\"" & aspQuote(d.range) & "\""
+      lines.add("depends_on(" & parent & ", " & child & ").")
+      lines.add("package_required(" & parent & ", " & child & ", " &
+                rangeAtom & ").")
+      var body = @[chosen]
+      var selBody = @["package_selected(" & parent & ")", chosen]
+      if d.conditional.isSome:
+        let g = d.conditional.get
+        let gate = "variant_assigned(\"" & aspQuote(g.variantName) &
+          "\", \"" & aspQuote(g.triggerValue) & "\")"
+        body.add(gate)
+        selBody.add(gate)
+      body.add("package_chosen(" & child & ", V)")
+      body.add("not version_in_range(" & child & ", V, " & rangeAtom & ")")
+      lines.add(":- " & body.join(", ") & ".")
+      lines.add("package_selected(" & child & ") :- " &
+                selBody.join(", ") & ".")
+  lines.join("\n")
+
+proc encodeOnDemandActivation*(packages: openArray[PackageDecl]): string =
+  ## NPC-M6 — activation of the ``onDemand`` packages: one rule per edge
+  ## that names one, active when the edge's parent participates (any chosen
+  ## version for a package-level edge, the edge's own version for a
+  ## per-version one) and its variant gate, if any, holds:
+  ##
+  ##   package_active("B") :- package_chosen("A", _).
+  ##   package_active("B") :- package_chosen("A", "1.0.0").
+  ##
+  ## So an on-demand package nothing chosen requires has no
+  ## ``package_active`` atom, no cardinality obligation, and no version in
+  ## the answer; one with no candidate at all only removes the versions
+  ## that require it. Empty when no package is on demand (NLF-STAT-4).
+  var onDemand: HashSet[string]
+  for p in packages:
+    if p.onDemand: onDemand.incl(p.name)
+  if onDemand.len == 0:
+    return ""
+  var lines: seq[string] = @[]
+  var seen: HashSet[string]
+  proc emit(parentAtom, child: string; d: DependencyDecl) =
+    var body = @[parentAtom]
+    if d.conditional.isSome:
+      let g = d.conditional.get
+      body.add("variant_assigned(\"" & aspQuote(g.variantName) & "\", \"" &
+               aspQuote(g.triggerValue) & "\")")
+    let line = "package_active(\"" & aspQuote(child) & "\") :- " &
+      body.join(", ") & "."
+    if line notin seen:
+      seen.incl(line)
+      lines.add(line)
+  for p in packages:
+    let parent = "\"" & aspQuote(p.name) & "\""
+    for d in p.depends:
+      if d.name in onDemand:
+        emit("package_chosen(" & parent & ", _)", d.name, d)
+    for vd in p.versionDepends:
+      for d in vd.depends:
+        if d.name in onDemand:
+          emit("package_chosen(" & parent & ", \"" & aspQuote(vd.version) &
+               "\")", d.name, d)
+  lines.join("\n")
+
 # ---------------------------------------------------------------------------
 # Selection roots (NLF-M9, design §5.6)
 # ---------------------------------------------------------------------------
@@ -439,7 +608,7 @@ proc encodeSelectionRoots*(packages: openArray[PackageDecl]): string =
   ## plausible answer.
   var depended: HashSet[string]
   for p in packages:
-    for d in p.depends:
+    for d in allDependencies(p):
       depended.incl(d.name)
   var lines: seq[string] = @[]
   for p in packages:
@@ -508,7 +677,7 @@ proc rootPackageNames*(packages: openArray[PackageDecl]): HashSet[string] =
   ## second definition of "root" is a second thing to drift.
   var depended: HashSet[string]
   for p in packages:
-    for d in p.depends:
+    for d in allDependencies(p):
       depended.incl(d.name)
   for p in packages:
     if p.name notin depended:
@@ -535,10 +704,11 @@ proc directDependencyNames*(packages: openArray[PackageDecl]): HashSet[string] =
   let roots = rootPackageNames(packages)
   for p in packages:
     if p.name notin roots: continue
-    for d in p.depends:
+    for d in allDependencies(p):
       result.incl(d.name)
 
-proc encodeVersionRanks*(packages: openArray[PackageDecl]): string =
+proc encodeVersionRanks*(packages: openArray[PackageDecl];
+                         onlyPreferNewest = false): string =
   ## Emit `version_rank("pkg", "version", N).` — the position of each candidate
   ## in that package's semver-ascending order.
   ##
@@ -557,9 +727,13 @@ proc encodeVersionRanks*(packages: openArray[PackageDecl]): string =
   ## preference term over it could only ever evaluate to a constant, and
   ## emitting one would put a constant in the objective sum that a reader would
   ## reasonably mistake for a live choice.
+  ##
+  ## ``onlyPreferNewest`` (NPC-M6) restricts the ranks to the packages that
+  ## ask for ``preferNewest``: the only ones a ``vpNone`` objective orders.
   var lines: seq[string] = @[]
   for p in packages:
     if p.pinned: continue
+    if onlyPreferNewest and not p.preferNewest: continue
     var sorted = p.versions
     sorted.sort(proc(a, b: string): int =
       try:
@@ -651,6 +825,21 @@ proc encodeUnificationObjective*(packages: openArray[PackageDecl]): string =
   lines.add("#minimize { 1@-1, B, V : instance_version(B, V) }.")
   lines.join("\n")
 
+const PreferNewestHeuristic* =
+  "#heuristic package_chosen(P, V) : version_rank(P, V, R), " &
+    "version_prefer_newest(P). [R + 1, true]"
+  ## NPC-M6 — how ``preferNewest`` is encoded: a clingo domain heuristic
+  ## (https://potassco.org/clingo/, "Heuristic-driven solving") that makes
+  ## the solver try a package's higher-ranked versions first, with the
+  ## program solved under ``--heuristic=Domain`` (``solve`` passes it only
+  ## when this text is in the program). It is a SEARCH ORDER, not an
+  ## objective: the answer is the first model, which takes the newest
+  ## admissible version of each package unless a constraint forces an older
+  ## one. An objective (`#maximize` over the summed ranks) was measured
+  ## first: optimality proof made it exponential in the closure (a chain of
+  ## 15 packages with 6 versions each took over 60 s; this encoding solves
+  ## 200 in about 0.5 s). `--highest` remains the proven optimum.
+
 proc encodeVersionPreference*(packages: openArray[PackageDecl];
                               preference: VersionPreference;
                               levelBase = -1): string =
@@ -685,7 +874,18 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
   ## the default path, and a renumbering applied unconditionally would move
   ## the text of every existing `--strategy` invocation for no reason.
   if preference == vpNone:
-    return ""
+    # NPC-M6 — no strategy, but some packages ask to prefer their newest
+    # admissible version (``preferNewest``). Only they are ranked and only
+    # they carry the search heuristic, so a program without such a package
+    # is byte-unchanged (NLF-STAT-4).
+    var newest: seq[string] = @[]
+    for p in packages:
+      if p.preferNewest and not p.pinned:
+        newest.add("version_prefer_newest(\"" & aspQuote(p.name) & "\").")
+    if newest.len == 0:
+      return ""
+    return encodeVersionRanks(packages, onlyPreferNewest = true) & "\n" &
+      newest.join("\n") & "\n" & PreferNewestHeuristic
   let l1 = "@" & $levelBase
   let l2 = "@" & $(levelBase - 1)
   var sections: seq[string] = @[]
@@ -749,9 +949,15 @@ proc encodePackages*(packages: openArray[PackageDecl]): string =
     let edges = encodeDependencyEdges(p)
     if edges.len > 0:
       sections.add(edges)
+    let versionEdges = encodeVersionDependencyEdges(p)
+    if versionEdges.len > 0:
+      sections.add(versionEdges)
   let ranges = groundVersionInRange(packages)
   if ranges.len > 0:
     sections.add(ranges)
+  let activation = encodeOnDemandActivation(packages)
+  if activation.len > 0:
+    sections.add(activation)
   # NLF-M9 — the selection seed. Emitted after the edges so the whole
   # ``package_selected`` block reads together in a dumped program.
   let roots = encodeSelectionRoots(packages)

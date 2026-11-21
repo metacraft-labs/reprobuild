@@ -622,7 +622,10 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
   for p in packages:
     pkgVersions[p.name] = p.versions
     sections.add("package(\"" & aspQuoteE(p.name) & "\").")
-    sections.add("package_active(\"" & aspQuoteE(p.name) & "\").")
+    if not p.onDemand:
+      # NPC-M6: an on-demand package is activated by the rules below, as in
+      # the solving program (``encodeOnDemandActivation``).
+      sections.add("package_active(\"" & aspQuoteE(p.name) & "\").")
     for ver in p.versions:
       sections.add("package_version(\"" & aspQuoteE(p.name) &
                    "\", \"" & aspQuoteE(ver) & "\").")
@@ -642,17 +645,13 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
   # Range membership facts (no guards — purely structural).
   var seenRange: HashSet[string]
   for p in packages:
-    for d in p.depends:
+    for d in allDependencies(p):
       let key = d.name & "::" & d.range
       if key in seenRange: continue
       seenRange.incl(key)
       if d.name notin pkgVersions: continue
-      let rng = try: parseSemverRange(d.range)
-                except ESemverParse: continue
       for ver in pkgVersions[d.name]:
-        let parsed = try: parseSemver(ver)
-                     except ESemverParse: continue
-        if satisfies(parsed, rng):
+        if rangeAdmits(d.range, ver):
           sections.add("version_in_range(\"" & aspQuoteE(d.name) &
                        "\", \"" & aspQuoteE(ver) & "\", \"" &
                        aspQuoteE(d.range) & "\").")
@@ -682,6 +681,34 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
       body.add("not version_in_range(" & child & ", V, " &
                rangeAtom & ")")
       sections.add(":- " & body.join(", ") & ".")
+
+  # NPC-M6 — per-version edges (guarded), the solving program's
+  # ``encodeVersionDependencyEdges`` with an annotation naming the version.
+  for p in packages:
+    let parent = "\"" & aspQuoteE(p.name) & "\""
+    for vd in p.versionDepends:
+      let chosen = "package_chosen(" & parent & ", \"" &
+        aspQuoteE(vd.version) & "\")"
+      for d in vd.depends:
+        let child = "\"" & aspQuoteE(d.name) & "\""
+        let rangeAtom = "\"" & aspQuoteE(d.range) & "\""
+        sections.add("depends_on(" & parent & ", " & child & ").")
+        let id = registerAnnotation(
+          "depends_on",
+          p.name & " " & vd.version & " -> " & d.name & " " & d.range)
+        sections.add(externalLine(id))
+        var body = @[guardAtom(id), chosen]
+        if d.conditional.isSome:
+          let g = d.conditional.get
+          body.add("variant_assigned(\"" & aspQuoteE(g.variantName) &
+                   "\", \"" & aspQuoteE(g.triggerValue) & "\")")
+        body.add("package_chosen(" & child & ", V)")
+        body.add("not version_in_range(" & child & ", V, " & rangeAtom & ")")
+        sections.add(":- " & body.join(", ") & ".")
+  # NPC-M6 — on-demand activation (structural, unguarded), as solved.
+  let activation = encodeOnDemandActivation(packages)
+  if activation.len > 0:
+    sections.add(activation)
 
   # Cross-package propagation (guarded).
   var packageOfVariant: Table[string, seq[string]]

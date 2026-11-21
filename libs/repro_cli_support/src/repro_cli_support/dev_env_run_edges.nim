@@ -62,6 +62,7 @@ import repro_provider_runtime
 import repro_dev_env_activation
 import repro_project_dsl
 from repro_core/codec import toBytes
+import repro_core/process_env
 
 const
   RunEdgeCollectionNames* = ["test", "bench"]
@@ -142,15 +143,11 @@ proc digestText(digest: ContentDigest): string =
   for b in digest.bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
 
-proc sameEnvName(a, b: string): bool =
-  ## Windows environment names are case-insensitive; POSIX ones are not.
-  when defined(windows): cmpIgnoreCase(a, b) == 0
-  else: a == b
-
 proc applyDevEnvToRunEdge*(action: var BuildAction;
                            ops: openArray[DevEnvShellOp];
                            identity: ContentDigest;
-                           inheritedValue: proc (name: string): string):
+                           inheritedValue: proc (name: string): string;
+                           caseInsensitive = HostEnvNamesAreCaseInsensitive):
     seq[string] =
   ## Apply the contribution ``ops`` to ``action`` and fold ``identity``
   ## (``devEnvRunEdgeIdentity(ops)``) into its weak fingerprint. See the
@@ -161,63 +158,70 @@ proc applyDevEnvToRunEdge*(action: var BuildAction;
   ## unset). It is a parameter so the rules can be tested without touching
   ## the process environment.
   ##
+  ## ``caseInsensitive`` is how environment names compare: an op, the edge's
+  ## own declaration, a passthrough entry and the inherited environment name
+  ## one variable when ``repro_core/process_env`` says they do (``Path`` and
+  ## ``PATH`` on Windows). It defaults to the host's rule and is a parameter,
+  ## as everywhere in that module, so the Windows rule runs in a test on any
+  ## host; ``inheritedValue`` must answer by the same rule.
+  ##
   ## Returns the names an ``unsetEnv`` op could not remove: the launch
   ## layers the action's environment over the inherited one, so an inherited
   ## value has no removal channel. The caller reports them.
   if ops.len == 0:
     return
-  var declared = initTable[string, string]()
+  # The LAST entry naming a variable is the edge's declaration: the launch
+  # reads ``action.env`` last-write-wins. ``declaredSpelling`` is the name
+  # as that entry spells it.
+  let declared = newEnvTable(caseInsensitive)
+  let declaredSpelling = newEnvTable(caseInsensitive)
   for entry in action.env:
     let eq = entry.find('=')
     if eq > 0:
       declared[entry[0 ..< eq]] = entry[eq + 1 .. ^1]
-  proc declaredName(name: string): string =
-    for key in declared.keys:
-      if sameEnvName(key, name):
-        return key
-    ""
-  var passthrough = initHashSet[string]()
-  for name in action.envPassthrough:
-    passthrough.incl(name)
+      declaredSpelling[entry[0 ..< eq]] = entry[0 ..< eq]
+  let passthrough = action.envPassthrough
   proc isPassthrough(name: string): bool =
     for item in passthrough:
-      if sameEnvName(item, name):
+      if sameEnvName(item, name, caseInsensitive):
         return true
     false
 
-  let env =
-    when defined(windows): newStringTable(modeCaseInsensitive)
-    else: newStringTable(modeCaseSensitive)
+  let env = newEnvTable(caseInsensitive)
   var touched: seq[string] = @[]
   var composedOnInherited = initHashSet[string]()
   var ignoredCwd = ""
   for op in ops:
     if op.kind == deskSetWorkingDirectory:
       continue
-    let edgeName = declaredName(op.name)
-    let edgeDeclares = edgeName.len > 0
-    var seen = false
+    let edgeDeclares = declared.hasKey(op.name)
+    # The variable is tracked under one spelling, whatever later ops call
+    # it: the edge's own when the edge declares it, otherwise the first
+    # op's.
+    var touchedName = ""
     for name in touched:
-      if sameEnvName(name, op.name):
-        seen = true
+      if sameEnvName(name, op.name, caseInsensitive):
+        touchedName = name
         break
-    if not seen:
-      touched.add(op.name)
+    if touchedName.len == 0:
+      touchedName =
+        if edgeDeclares: declaredSpelling[op.name] else: op.name
+      touched.add(touchedName)
       # Seed the base value the first time a name is touched: the edge's
       # declaration when it has one, otherwise what it would inherit.
       if edgeDeclares:
-        env[op.name] = declared[edgeName]
+        env[touchedName] = declared[op.name]
       else:
         let inherited = inheritedValue(op.name)
         if inherited.len > 0:
-          env[op.name] = inherited
-          composedOnInherited.incl(op.name)
+          env[touchedName] = inherited
+          composedOnInherited.incl(touchedName)
     case op.kind
     of deskSetEnv, deskSetPathList, deskUnsetEnv:
       if edgeDeclares:
         continue
       env.applyShellOp(op, ignoredCwd)
-      composedOnInherited.excl(op.name)
+      composedOnInherited.excl(touchedName)
     of deskPrependPath, deskAppendPath:
       env.applyShellOp(op, ignoredCwd)
     of deskSetWorkingDirectory:
@@ -227,7 +231,7 @@ proc applyDevEnvToRunEdge*(action: var BuildAction;
     var kept: seq[string] = @[]
     for entry in action.env:
       let eq = entry.find('=')
-      if eq > 0 and sameEnvName(entry[0 ..< eq], name):
+      if eq > 0 and sameEnvName(entry[0 ..< eq], name, caseInsensitive):
         continue
       kept.add(entry)
     action.env = kept
