@@ -7758,7 +7758,7 @@
             "hcmd",
             "pcmd"
           ],
-          "line": 303,
+          "line": 309,
           "path": "tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim",
           "patterns": [
             "nim-variable-argv"
