@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3085,
+    "nimTestBinaries": 3086,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 820,
-    "staticallyDetectedRuntimeCompilerFlowTests": 157,
-    "testEntries": 3135
+    "staticallyDetectedRuntimeCompilerFlowTests": 158,
+    "testEntries": 3136
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1773,7 +1773,7 @@
     "classificationCounts": {
       "graph-fixture": 26,
       "integration": 1715,
-      "platform/destructive": 199,
+      "platform/destructive": 200,
       "pure unit": 820,
       "unclassified": 375
     },
@@ -1995,9 +1995,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3085,
+    "nimTestBinaryCount": 3086,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3135
+    "testEntryCount": 3136
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2095,6 +2095,28 @@
         }
       ],
       "source": "libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim"
+    },
+    {
+      "class": "platform/destructive",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "enclosingCallable": "",
+          "executedVariables": [],
+          "line": 88,
+          "path": "libs/repro_cli_support/tests/t_profile_compile_refuses_a_state_dir_past_the_windows_path_budget.nim",
+          "patterns": [
+            "repro-compile-home-profile"
+          ],
+          "runtimeCompilerApi": "compileAndAdaptHomeProfile",
+          "runtimeCompilerApiModule": "repro_cli_support/home",
+          "snippet": "let outcome = cli_home.compileAndAdaptHomeProfile("
+        }
+      ],
+      "source": "libs/repro_cli_support/tests/t_profile_compile_refuses_a_state_dir_past_the_windows_path_budget.nim"
     },
     {
       "class": "graph-fixture",
@@ -2681,7 +2703,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 522,
+          "line": 580,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2697,7 +2719,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 538,
+          "line": 596,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2713,7 +2735,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 543,
+          "line": 601,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2729,7 +2751,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 546,
+          "line": 604,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-edge"
@@ -2745,7 +2767,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 834,
+          "line": 892,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -2761,7 +2783,7 @@
           "directExecutionLine": true,
           "enclosingCallable": "",
           "executedVariables": [],
-          "line": 853,
+          "line": 911,
           "path": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
           "patterns": [
             "repro-compile-profile-binary"
@@ -15890,6 +15912,26 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_profile_compile_refuses_a_state_dir_past_the_windows_path_budget",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_profile_compile",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cli_support/tests/t_profile_compile_refuses_a_state_dir_past_the_windows_path_budget.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_provider_compile_entry_points_publish_bootstrap_toolchain",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -25666,7 +25708,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_profile_compile/tests/t_smoke_repro_profile_compile.nim",
       "sourceSuiteCount": 10,
-      "staticCaseCount": 43,
+      "staticCaseCount": 45,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
