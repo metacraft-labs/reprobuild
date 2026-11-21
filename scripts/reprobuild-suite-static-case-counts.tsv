@@ -982,6 +982,7 @@ libs/repro_project_dsl/tests/dsl_port/t_l9_supervision_surface_refuses_near_miss
 libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim	nim	17
 libs/repro_project_dsl/tests/t_canonical_work_key.nim	nim	5
 libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim	nim	8
+libs/repro_project_dsl/tests/t_completion_files.nim	nim	6
 libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim	nim	7
 libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim	nim	5
@@ -2831,6 +2832,7 @@ tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
+tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_cs_m14_shim_answers_tests_entry.nim	nim	2
 tests/integration/test_dev_env_local_flake_root.py	python	3

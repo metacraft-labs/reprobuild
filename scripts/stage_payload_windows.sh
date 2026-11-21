@@ -53,7 +53,7 @@ mkdir -p "$PRE/bin" "$PRE/lib" "$PRE/tree"
 # is absent too, and by design -- tool-provisioning=nix is a Unix path.
 for b in repro repro-binary-cache repro-standard-provider \
          repro-cmake-dyndep-fragment repro-cmake-trycompile-provider \
-         repro-tests-fragment \
+         repro-tests-fragment repro-completion-files \
          repro-install-mirror-publish; do
   [ -f "$RB/build/bin/$b.exe" ] || { echo "missing build/bin/$b.exe" >&2; exit 1; }
   cp "$RB/build/bin/$b.exe" "$PRE/bin/$b.exe"

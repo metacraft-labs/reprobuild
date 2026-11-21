@@ -10399,7 +10399,25 @@ macro package*(name: untyped; body: untyped): untyped =
   # The thin mode emits the same ones and nothing else; here they are emitted
   # besides the package, and never expanded in the recipe itself, so the
   # package's registration, interface and provider are what they were.
+  #
+  # In provider mode only, each such executable is also registered with the
+  # program name its template uses, so the provider can give its compile a
+  # completion edge (``runtime_provider``). The other modes' output is
+  # unchanged.
+  var cliPrograms = newStmtList()
+  for section in thinCliSections(body):
+    cliPrograms.add(newCall(ident("registerCliProgram"),
+      newLit(packageNameText(name)), newLit(identText(section.executable)),
+      newLit(section.program)))
+  let providerRegistrations =
+    if cliPrograms.len == 0: newEmptyNode()
+    else: nnkWhenStmt.newTree(nnkElifBranch.newTree(
+      newCall(ident("defined"), ident("reproProviderMode")), cliPrograms))
+  # The registrations come first: in provider mode the package's expansion
+  # ends by serving the provider protocol, so nothing after it runs before
+  # the build body is evaluated.
   return newStmtList(
+    providerRegistrations,
     newCall(ident("packageImpl"), name, declaredExpr, provisioningExpr,
       usesExpr, body),
     cliDescriptionTemplates(body))

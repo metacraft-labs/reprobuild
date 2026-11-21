@@ -539,6 +539,14 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/bin/repro-tests-fragment",
         actionId: "reprobuild.apps.repro-tests-fragment")]),
+    # The engine runs the completion edge's producer from beside its own
+    # image, so a build of a package with a `cli:` executable needs it.
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m14_package_build_generates_completion_files.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-completion-files",
+        actionId: "reprobuild.apps.repro-completion-files")]),
     TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(
@@ -1587,6 +1595,9 @@ package reprobuild:
 
   executable reproTestsFragment:
     name: "repro-tests-fragment"
+
+  executable reproCompletionFiles:
+    name: "repro-completion-files"
 
   executable reproCmakeTrycompileProvider:
     name: "repro-cmake-trycompile-provider"
@@ -3008,6 +3019,19 @@ package reprobuild:
       nimcache = "build/nimcache/repro-tests-fragment",
       runInSourceDir = true,
       actionId = "reprobuild.apps.repro-tests-fragment"))
+
+    # The producer of the completion edge of an executable with a `cli:`
+    # section (run from beside the engine image), so it ships wherever the
+    # engine does.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-completion-files/repro_completion_files.nim",
+      binary = "build/bin/repro-completion-files",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-completion-files",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-completion-files"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
     # third field on their ``apps/entrypoints.txt`` line.

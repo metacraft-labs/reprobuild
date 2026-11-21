@@ -68,6 +68,8 @@ import repro_core/variant_assignments
 from ct_test_nim_unittest/tests_fragment import PerTestRequest,
   PerTestCompile, TestsFragmentProducerName, producerListArgv,
   producerCheckArgv
+from repro_project_dsl/completion_files import
+  CompletionFilesProducerName, producerArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -3805,6 +3807,62 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
             argValue("snippet"), scope = argValue("scope"))
         else:
           argSeqValue("entries"))
+
+  # The completion edge of an executable with a ``cli:`` section
+  # (``repro_project_dsl/runtime_provider``, ``withCompletionEdges``). It runs
+  # ``repro-completion-files`` from beside this engine's image, as the
+  # per-test producer below is run, and never the program it describes:
+  #
+  #   subcommand "write" -> [producer, --program=<name>,
+  #                          --entry-list=<file>, --out-dir=<dir>]
+  #
+  # The producer is run by absolute path, so the edge makes no ``PATH``
+  # decision. Its inputs are what the record declares (none: the program's
+  # name is on the argv, so it is in the key) and what the monitor sees it
+  # read, which is the entry list or, when the compile wrote none, the probe
+  # that found it absent.
+  if payload.call.packageName == "reprobuild.builtin" and
+      payload.call.executableName == "completionFiles":
+    if payload.call.subcommand != "write":
+      raise newException(ValueError,
+        "unknown built-in completion-files operation: " &
+          payload.call.subcommand)
+    let program = argValue("program")
+    let outDir = argValue("outDir")
+    if program.len == 0 or outDir.len == 0:
+      raise newException(ValueError,
+        "tool-resolution failed: action " & payload.id &
+          " (completion files) needs the ``program`` and ``outDir`` slots")
+    let producer = parentDir(publicCliImagePath()) /
+      addFileExt(CompletionFilesProducerName, ExeExt)
+    let argv = producerArgv(producer, program, argValue("entryList"),
+      outDir)
+    let fingerprintText = [
+      "reprobuild.localBuiltinCompletionFilesAction.v1",
+      payload.id,
+      payload.call.subcommand,
+      node.payload
+    ].join("\n")
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
+      cwd = resolveCanonicalExecRoot(payload.cwdKind,
+        payload.cwdCustomPath, projectRoot),
+      deps = payload.deps,
+      inputs = payload.inputs.mapIt(materialProjectPath(projectRoot, it)),
+      outputs = payload.outputs,
+      cacheable = payload.cacheable,
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      envPassthrough = withEdgeEnvPassthrough(@[], payload.envPassthrough,
+        payload.id),
+      commandStatsId =
+        if payload.commandStatsId.len > 0: payload.commandStatsId
+        else: payload.id)
 
   if payload.call.packageName == "reprobuild.builtin" and
       payload.call.executableName == "hcr":
