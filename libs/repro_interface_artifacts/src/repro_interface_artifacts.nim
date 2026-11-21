@@ -2273,7 +2273,10 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
   if version >= 21'u16:
     result.detail = readTarballArchiveDetail(bytes, pos, version)
   if version >= 34'u16:
-    let count = int(readU32Le(bytes, pos))
+    # Bounded before the loop: a count the payload cannot hold is refused
+    # as malformed here, not after entries have been decoded and appended.
+    # An entry is at least four string length prefixes and one u32.
+    let count = readElementCount(bytes, pos, 20)
     for _ in 0 ..< count:
       var entry: ClosureEntry
       entry.path = readString(bytes, pos)

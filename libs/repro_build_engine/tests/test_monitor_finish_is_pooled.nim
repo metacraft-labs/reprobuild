@@ -590,6 +590,30 @@ else:
         # in what was kept. Paths, normalised like any other.
         for root in value.exemptRoots:
           entries.add normalisePath(root, workDir)
+      elif value is int and
+          name in ["runtimeStateDrops", "kernelStateDrops"]:
+        # COMPARED VERBATIM, and matched BY NAME as well as by type, so a
+        # new `int` field still reaches the `{.error.}` below instead of
+        # being rendered here unreviewed. These are the volatile-runtime
+        # fold's elision counters: how many entries under `/run`, and under
+        # `/dev`, `/proc` and `/sys`, the fold left out. Both arms run the
+        # same action with the same declarations, so a difference is a
+        # difference in what the two hosting mechanisms captured.
+        #
+        # NOT SHOWN NON-VACUOUS. Nothing here requires either counter to be
+        # non-zero, so on a fixture that touches none of those trees both
+        # arms render `0` and the comparison proves nothing about them. The
+        # fields are rendered so they cannot leave the comparison silently;
+        # their own coverage is `t_zero_evidence_edge_is_not_cacheable` and
+        # `test_m9r73_narrow_invalidation`.
+        entries.add $value
+      elif value is string and name == "hostBoundInput":
+        # COMPARED AS A PATH, matched by name for the same reason as the
+        # counters above. `hostBoundInput` is the first input the fold
+        # dropped as a runtime object under `/run`, or "". VACUOUS on this
+        # fixture, which reads nothing there: both arms render the empty
+        # string.
+        entries.add normalisePath(value, workDir)
       else:
         {.error: "renderEvidence has no rendering for a new " &
           "PathSetEvidence field of this shape. Add an arm — do NOT add " &

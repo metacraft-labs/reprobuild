@@ -5,9 +5,10 @@
 ##
 ## Real files in a real temporary directory and the real path-mode resolver;
 ## nothing is mocked. The library package's only arm is an archive for a
-## platform no host is, so the fall-through to it fails offline, without
-## touching Nix or the network: what the test observes is that the PATH
-## program is not taken.
+## platform no host is. Path mode never takes an archive (it is strictly
+## PATH-only since 2026-11-17), so without an environmentPrefix arm the
+## selection is refused by name, offline: what the test observes is that the
+## PATH program is not taken.
 
 import std/[os, strutils, unittest]
 

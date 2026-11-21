@@ -22,13 +22,16 @@ export gzip
 #
 # The same archive also serves `dirname`, `basename`, `readlink`, `head`,
 # `tail`, `cat`, `ls`, `od`, `tr`, `wc`, `cut`, `uname`, `ln`, `sort` (all
-# coreutils 8.32) and `grep` (GNU grep 3.0). Without a Windows arm, a Windows
-# recipe that `uses:` one of them failed tool resolution whenever the host's
-# PATH lacked Git's `usr/bin`, because path mode's next fallback is the host
-# archive and there was none (measured: codetracer-ton-recorder's
+# coreutils 8.32) and `grep` (GNU grep 3.0). They were added because a
+# Windows recipe that `uses:` one of them failed tool resolution whenever the
+# host's PATH lacked Git's `usr/bin`, and path mode then fell back to the host
+# archive, of which there was none (measured: codetracer-ton-recorder's
 # `repro test` on a Windows runner, "dirname requested by uses \"dirname\"
-# was not found in PATH"). Versions were read with `--version` from this
-# archive's own binaries, run under Wine on Linux.
+# was not found in PATH"). Path mode no longer falls back at all (operator
+# decision of 2026-11-17): these arms now serve tarball and scoop mode, and a
+# path-mode host must put Git's `usr/bin` on PATH or override the tool's
+# provisioning. Versions were read with `--version` from this archive's own
+# binaries, run under Wine on Linux.
 #
 # `mktemp` (coreutils 8.32), `cmp` and `diff` (GNU diffutils 3.12) came
 # later, for the same failure ("mktemp requested by uses \"mktemp\" was not

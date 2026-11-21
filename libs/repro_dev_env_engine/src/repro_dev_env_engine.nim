@@ -1,4 +1,4 @@
-import std/[options, os, sets, strutils, times]
+import std/[options, os, sets, strutils, tables, times]
 
 import repro_build_engine
 import repro_core
@@ -14,6 +14,8 @@ import repro_interface_artifacts
 import repro_local_store/pattern_scoped_enumeration
 import repro_runquota
 import repro_tool_profiles
+import repro_dev_env_engine/tool_provisioning
+export tool_provisioning
 # The helpers' command lines are declared in repro's description; only their
 # spellings are read here, at compile time.
 from repro_cli_support/cli_description import reproLongFlags
@@ -66,6 +68,11 @@ type
     lockSliceId*: string
     developOverridesPath*: string
     toolProvisioning*: ToolProvisioningMode
+    toolProvisioningOverrides*: ToolProvisioningOverrides
+      ## The per-tool overrides the activation applies: an activation
+      ## resolves every tool through the same resolver as a build, so both
+      ## realize the same prefix. They decide which uses
+      ## get a Nix provisioning edge here.
     renderShell*: bool
     statsEnabled*: bool
     progressCallback*: BuildProgressCallback
@@ -383,46 +390,11 @@ proc commonMonitorEnv(config: DevEnvEdgeConfig): seq[string] =
     result.add("REPRO_DEVELOP_OVERRIDES_FILE=" &
       config.developOverridesPath)
 
-proc parseDevEnvToolProvisioning(value: string): ToolProvisioningMode =
-  case value.normalize()
-  of "path":
-    tpmPathOnly
-  of "nix":
-    tpmNix
-  of "tarball":
-    tpmTarball
-  of "scoop":
-    tpmScoop
-  of "from-source", "fromsource", "source":
-    tpmFromSource
-  else:
-    raiseDevEnvEdge("unsupported dev-env tool provisioning mode: " & value)
-
-proc effectiveToolProvisioning*(requested: ToolProvisioningMode;
-                                artifact: ProjectInterfaceArtifact):
-    ToolProvisioningMode =
-  ## The provisioning mode an activation of ``artifact`` runs under.
-  ##
-  ## Precedence: an explicitly requested mode, then
-  ## ``REPRO_TOOL_PROVISIONING``, then the recipe's own
-  ## ``defaultToolProvisioning``. Taking a bare mode rather than a whole
-  ## ``DevEnvEdgeConfig`` is what lets the CLI's activation surfaces resolve
-  ## the SAME mode the edge ran under without rebuilding the config — two
-  ## spellings of this precedence is exactly how an activation ends up
-  ## realizing tools under one mode and reporting another.
-  if requested != tpmUnspecified:
-    return requested
-  let envMode = getEnv("REPRO_TOOL_PROVISIONING").strip()
-  if envMode.len > 0:
-    return parseDevEnvToolProvisioning(envMode)
-  let defaultMode = artifact.projectInterface.defaultToolProvisioning.strip()
-  if defaultMode.len > 0:
-    return parseDevEnvToolProvisioning(defaultMode)
-  tpmUnspecified
-
 proc effectiveToolProvisioning*(config: DevEnvEdgeConfig;
                                 artifact: ProjectInterfaceArtifact):
     ToolProvisioningMode =
+  ## The invocation-wide mode of an activation (``tool_provisioning``'s
+  ## ``effectiveToolProvisioning``, the one implementation).
   effectiveToolProvisioning(config.toolProvisioning, artifact)
 
 proc fingerprintText(parts: openArray[string]): ContentDigest =
@@ -850,14 +822,24 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
 
 proc devEnvNixProvisioningActions*(toolUses: openArray[InterfaceToolUse];
     effectiveProvisioning: ToolProvisioningMode;
-    outDir, workDir: string; projectRoot = ""): seq[BuildAction] =
+    outDir, workDir: string; projectRoot = "";
+    selections: ToolModeSelections = initTable[string, ToolModeSelection]()):
+    seq[BuildAction] =
   ## ``workDir`` is the engine's compiler/library directory. A relative Nix
   ## selector belongs to the caller's project, whose root must travel to the
   ## provisioner independently of that compilation directory.
+  ##
+  ## ``selections``: the uses a per-tool override moved to another mode
+  ## (``toolModeSelections``). A use overridden to ``nix`` gets its edge in
+  ## any invocation mode, and one overridden away from it gets none.
   let selectorRoot = absolutePath(if projectRoot.len > 0: projectRoot else: workDir)
   var seen: seq[string]
   for useDef in toolUses:
-    if effectiveProvisioning in {tpmUnspecified, tpmNix} and
+    let useMode =
+      if selections.hasKey(useDef.packageSelector):
+        selections[useDef.packageSelector].mode
+      else: effectiveProvisioning
+    if useMode in {tpmUnspecified, tpmNix} and
         useDef.nixProvisioning.len > 0 and
         nixServesTarget(hostRealizationTarget()) and
         # A package declared for other platforms provisions nothing here; its
@@ -1015,7 +997,9 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
 
   let provisioningActions = devEnvNixProvisioningActions(
     interfaceArtifact.projectInterface.toolUses, effectiveProvisioning,
-    active.outDir, workDir, active.projectRoot)
+    active.outDir, workDir, active.projectRoot,
+    toolModeSelections(effectiveProvisioning, active.toolProvisioningOverrides,
+      interfaceArtifact.projectInterface.toolUses))
   var provisioningReceipts: seq[string]
   for provision in provisioningActions:
     provisioningReceipts.add(provision.outputs)

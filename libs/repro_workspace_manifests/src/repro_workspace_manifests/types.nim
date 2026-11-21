@@ -10,6 +10,7 @@
 import std/[options, strutils, tables]
 import toml_serialization
 import toml_serialization/types as toml_types
+import serialization/object_serialization
 
 export toml_types.TomlValueRef, toml_types.TomlTableRef, toml_types.TomlKind
 export tables
@@ -39,6 +40,37 @@ proc readValue*(r: var TomlReader, v: var Extensions) =
   ## fields, finds none, and would reject every key. Walking the table
   ## via `parseTable` + `readValue(.., var TomlValueRef)` lets every
   ## sub-key pass through irrespective of name.
+  parseTable(r, key):
+    if v.raw.isNil:
+      v.raw = TomlTableRef()
+    var inner: TomlValueRef
+    r.readValue(inner)
+    v.raw[key] = inner
+
+type
+  ToolProvisioningConfigEntry* = object
+    ## One `[tool-provisioning.overrides]` entry of a configuration file
+    ## (a per-tool provisioning override), read by
+    ## `tool_provisioning_config.nim`. `mode` is the text as written; the
+    ## resolver checks it against the mode vocabulary.
+    package*: string
+    mode*: string
+    path*: string
+      ## The file the entry is written in.
+    line*: int
+      ## The 1-based line it is written on, or 0 when it was not located.
+
+  ToolProvisioningConfigBody* = object
+    ## What the typed strict decoder of `reprobuild.config.v1` keeps of the
+    ## `tool-provisioning` table: nothing it validates. The table is read and
+    ## checked from the generic tree (`tool_provisioning_config.nim`), which
+    ## sees the dotted `[tool-provisioning.overrides]` header the typed
+    ## decoder cannot; this body only stops the strict decoder from refusing
+    ## the key.
+    raw*: TomlTableRef
+
+proc readValue*(r: var TomlReader, v: var ToolProvisioningConfigBody) =
+  ## Accept every key, as `Extensions` does; the tree reader validates.
   parseTable(r, key):
     if v.raw.isNil:
       v.raw = TomlTableRef()
@@ -896,6 +928,12 @@ type
     develop*: BootstrapDevelopBody
     locking*: BootstrapLockingBody
     foreign_env*: BootstrapForeignEnvBody
+    toolProvisioningOverrides*: seq[ToolProvisioningConfigEntry]
+      ## The shared file's `[tool-provisioning.overrides]`: an override every
+      ## checkout of the workspace needs.
+    localToolProvisioningOverrides*: seq[ToolProvisioningConfigEntry]
+      ## The local file's `[tool-provisioning.overrides]`: this checkout's
+      ## own. It outranks the shared file's.
     extensions*: Extensions
 
   # --- reprobuild.config.v1 (HL-1 layered configuration file) -----------------
@@ -956,6 +994,16 @@ type
     locking*: BootstrapLockingBody
     foreign_env*: BootstrapForeignEnvBody
     extensions*: Extensions
+    tool_provisioning* {.serializedFieldName: "tool-provisioning".}:
+      ToolProvisioningConfigBody
+      ## The user scope's
+      ## `[tool-provisioning.overrides]`, in its `[tool-provisioning]` +
+      ## inline-table spelling. Read through `tool_provisioning_config.nim`.
+    tool_provisioning_overrides*
+        {.serializedFieldName: "tool-provisioning.overrides".}:
+      ToolProvisioningConfigBody
+      ## The same table in its `[tool-provisioning.overrides]` header
+      ## spelling, which the typed decoder sees as one dotted top-level key.
 
   # NOTE on the schema probe: the reader does NOT define a typed "probe"
   # record. Instead it calls
