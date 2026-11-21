@@ -368,7 +368,7 @@ libs/repro_cli_support/tests/t_publish_refuses_a_dirty_prefix.nim	nim	2
 libs/repro_cli_support/tests/t_refresh_flake_lock_text_writes_the_fields_nix_reports.nim	nim	11
 libs/repro_cli_support/tests/t_reused_result_refused_when_key_does_not_cover_reads.nim	nim	1
 libs/repro_cli_support/tests/t_revocation_takes_effect_on_the_next_frame.nim	nim	1
-libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim	nim	15
+libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim	nim	21
 libs/repro_cli_support/tests/t_runquota_auto_spawn_defers_to_host_config.nim	nim	8
 libs/repro_cli_support/tests/t_s7_build_paths_reach_the_restore_config.nim	nim	6
 libs/repro_cli_support/tests/t_strategy_unknown_name_refused.nim	nim	8
@@ -1381,6 +1381,7 @@ tests/e2e/addon/t_addon_agent_apply_unit_lacks_cap_net_admin.nim	nim	2
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
 tests/e2e/addon/t_addon_plan_only_write_allowlist.nim	nim	4
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
+tests/e2e/addon/t_addon_testbed_guests_boot_without_display_adapter.nim	nim	6
 tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	3
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
@@ -3104,7 +3105,7 @@ tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	15
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_flake_lock_derived_fields.py	python	11
 tests/unit/test_generated_artifact_merge_policy.py	python	19
-tests/unit/test_graph_owned_test_artifacts.py	python	26
+tests/unit/test_graph_owned_test_artifacts.py	python	27
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5

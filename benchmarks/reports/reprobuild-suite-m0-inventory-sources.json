@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3077,
+    "nimTestBinaries": 3078,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 818,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3127
+    "testEntries": 3128
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1771,7 +1771,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1710,
+      "integration": 1711,
       "platform/destructive": 199,
       "pure unit": 818,
       "unclassified": 374
@@ -1994,9 +1994,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3077,
+    "nimTestBinaryCount": 3078,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3127
+    "testEntryCount": 3128
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15957,8 +15957,8 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -34419,6 +34419,23 @@
       "source": "tests/e2e/addon/t_addon_registry_mode_round_trip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_testbed_guests_boot_without_display_adapter",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_addon_testbed_guests_boot_without_display_adapter.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -65332,7 +65349,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 26,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

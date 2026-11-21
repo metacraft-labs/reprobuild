@@ -16489,6 +16489,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_e2e_addon_g01",
     singleReason: ""),
   TestSpec(
+    source: "tests/e2e/addon/t_addon_testbed_guests_boot_without_display_adapter.nim",
+    binary: "build/test-bin/t_addon_testbed_guests_boot_without_display_adapter",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_addon_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim",
     binary: "build/test-bin/t_e2e_addon_adopt_hand_configured_service",
     defines: @[],
@@ -16990,7 +17002,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_e2e_addon_g01",
+    group: "t_group_tests_e2e_addon_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/e2e/addon/t_e2e_addon_gc_keeps_current_and_previous.nim",
