@@ -585,17 +585,22 @@ proc runPerTest*(self: NimUnittestBinary;
   ## through its ``tests`` entry and runs, caches and reports each of them
   ## as an action of its own.
   ##
-  ## The binary must be built with nim-entrypoints
-  ## (https://github.com/metacraft-labs/nim-entrypoints): ``import
-  ## entrypoints/tests``, ``testCase`` (or a ``tests:`` block), and a
-  ## ``main:``. Build it with ``main`` (not ``-d:entrypoint=tests``), so
-  ## that listing runs no test: in a tests-only build the ``tests:`` blocks
-  ## run when the process starts, listing included.
+  ## The binary must answer nim-entrypoints' ``tests`` entry
+  ## (https://github.com/metacraft-labs/nim-entrypoints). Either build it
+  ## with nim-entrypoints: ``import entrypoints/tests``, ``testCase`` (or a
+  ## ``tests:`` block), and a ``main:``, built with ``main`` (not
+  ## ``-d:entrypoint=tests``), so that listing runs no test: in a tests-only
+  ## build the ``tests:`` blocks run when the process starts, listing
+  ## included. Or write its tests with ``ct_test_unittest_parallel``'s
+  ## ``suite`` / ``test``, which answers the entry itself (in a program
+  ## that also uses nim-entrypoints, put them in a ``tests:`` block).
   ##
   ## Two edges are recorded:
   ##
   ## * a LISTING edge, ``<actionId>.list``. It runs ``repro-tests-fragment``,
-  ##   which runs ``<binary> --entrypoint=tests --list`` and writes, to
+  ##   which asks ``<binary> --entrypoint=list`` whether the binary has the
+  ##   ``tests`` entry, runs ``<binary> --entrypoint=tests --list`` and
+  ##   writes, to
   ##   ``fragment``, a dynamic graph fragment with one ``create-action``
   ##   record per listed test: argv ``[<binary>, "--entrypoint=tests",
   ##   "--run-exact=<name>"]``, the binary as its input, the monitor as its
@@ -618,9 +623,16 @@ proc runPerTest*(self: NimUnittestBinary;
   ## saw it read. Every test of one binary shares that binary, so a change
   ## to any of them reruns all of them.
   ##
-  ## The listing edge fails, and nothing runs, when the binary has no
-  ## ``tests`` entry, lists no tests, or lists a name twice (two tests with
-  ## one name cannot be run one at a time).
+  ## The listing edge fails, and nothing runs, when the binary has entries
+  ## but no ``tests`` entry, lists no tests, or lists a name twice (two tests
+  ## with one name cannot be run one at a time). A binary with no entries at
+  ## all (``--entrypoint=list`` exits 0 without an ``entrypoints/1``
+  ## document: a plain ``std/unittest`` binary, say) is not listed: the
+  ## fragment creates one run of the whole binary,
+  ## ``<actionId>.whole-binary``, because its answer to ``--entrypoint=tests
+  ## --list`` cannot be trusted to mean the entry (see
+  ## ``ct_test_nim_unittest/tests_fragment``). One binary per test refuses
+  ## such a binary.
   ##
   ## ONE BINARY PER TEST (``perTestBinaries = true``, an opt-in). The
   ## listing still comes from this binary, but every test is then compiled

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3092,
+    "nimTestBinaries": 3093,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 821,
     "staticallyDetectedRuntimeCompilerFlowTests": 158,
-    "testEntries": 3142
+    "testEntries": 3143
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1773,7 +1773,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1722,
+      "integration": 1723,
       "platform/destructive": 200,
       "pure unit": 821,
       "unclassified": 373
@@ -1996,9 +1996,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3092,
+    "nimTestBinaryCount": 3093,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3142
+    "testEntryCount": 3143
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9501,8 +9501,8 @@
       "owner": "libs/ct_test_nim_unittest",
       "requiresReproBinary": false,
       "source": "libs/ct_test_nim_unittest/tests/t_tests_fragment_records.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 16,
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -60517,6 +60517,23 @@
       "source": "tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_cs_m14_shim_answers_tests_entry",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/test_cs_m14_shim_answers_tests_entry.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
