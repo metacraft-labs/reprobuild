@@ -2825,6 +2825,12 @@
             # would shadow the host's, which must match the running manager.
             REPRO_SYSTEMD_ANALYZE =
               pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.systemd}/bin/systemd-analyze";
+            # The POSIX shell the add-on's boot-hold unit runs under on Debian
+            # and Ubuntu (/bin/sh is dash there). The add-on's unit tests run
+            # that unit's script under THIS binary, so a bashism in it fails
+            # here instead of on a guest's boot; the ambient sh is bash on
+            # NixOS and accepts what dash would not.
+            REPRO_DASH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.dash}/bin/dash";
             # The MinGW-w64 gcc that scripts/check_portable_engine_closure.sh
             # compiles the engine's generated Windows C with, syntax only, so a
             # binding to a function Windows lacks (POSIX `realpath`, reprobuild-pm

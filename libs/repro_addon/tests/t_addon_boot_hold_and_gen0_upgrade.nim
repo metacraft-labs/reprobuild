@@ -75,7 +75,8 @@ suite "§13 decision 159: the boot-hold unit":
     # The base's shell, never the store binary, which may predate it.
     let exec = u.split("ExecStart=")[1].split("\n")[0]
     # No outer timeout (A9 review round 20): an overrun is TimeoutStartSec=.
-    check exec.startsWith("-/bin/sh -c '") and "timeout -k" notin exec and
+    # No ``-`` either (decision 172 as amended 2026-11-21).
+    check exec.startsWith("/bin/sh -c '") and "timeout -k" notin exec and
       "/repro/store" notin exec and "system addon" notin exec
 
 suite "§13 decision 159: generation 0's upgrade path":

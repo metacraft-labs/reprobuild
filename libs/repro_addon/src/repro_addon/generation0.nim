@@ -9,8 +9,10 @@
 ##   by ``multi-user.target``. Nothing of the base ``Requires=`` it, so a
 ##   broken add-on target cannot hold up the base's boot. The one exception
 ##   is ``repro-addon-boot-hold.service``, which ``sysinit.target``
-##   requires (§13 decision 172): it never fails (its script exits 0 under
-##   ``ExecStart=-`` and ``timeout``), so the boot waits only for it to run;
+##   requires (§13 decision 172): it fails closed (every path its script
+##   means exits 0; anything else -- an overrun, a kill, a failed exec --
+##   fails it, and sysinit.target with it; decision 172 as amended
+##   2026-11-17 and 2026-11-21);
 ##   what it cannot cover -- a missing or unloadable unit file while the
 ##   ``sysinit.target.requires`` link remains, a hang setting up its
 ##   namespace past ``TimeoutStartSec=``, a fork or resource failure -- is
@@ -680,9 +682,11 @@ proc bootHoldScript*(): string =
   ##   free: the script then logs why and waits, so the unit overruns
   ##   ``TimeoutStartSec=`` and fails, and ``sysinit.target`` with it --
   ##   the boot stops rather than starting an activator unheld (the
-  ##   boot-freeze residual the owner accepted in decision 172). Its exit
-  ##   status is never the signal: ``ExecStart=``'s ``-`` would turn it
-  ##   into success.
+  ##   boot-freeze residual the owner accepted in decision 172). Every
+  ##   path the script means exits 0, and the unit has no ``-`` prefix
+  ##   (decision 172 as amended 2026-11-21): a kill, a failed exec or a
+  ##   listing of the units to hold that fails (the conservative branch
+  ##   reads ``ls``'s status) fails the unit too.
   ##
   ## Absolute paths for every tool; ``set -f`` so no expansion globs. No
   ## double quote, ``#``, brace or backslash: the canonical profile text
@@ -698,10 +702,23 @@ proc bootHoldScript*(): string =
   # The fail-closed wait: longer than TimeoutStartSec=, so systemd ends it
   # and fails the unit.
   let failClosed = "exec /usr/bin/sleep " & $(BootHoldTimeoutSec * 2)
+  # The units to hold conservatively. A failed listing is not "nothing to
+  # hold" (A9 review round 21, M4): ``&&`` makes ``ls``'s status the
+  # status of the subshell that writes the list, which then takes the
+  # fail-closed path; otherwise the loop's status is 0 (every branch of its
+  # ``case`` ends in a command that succeeds).
   let conservative =
-    "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
-    essentialActivatorPattern() & ") continue;; " &
-    "*.socket|*.timer|*.path) echo $u.d;; esac; done"
+    when mutated("boot-hold-ls-failure-ignored"):
+      # FALSIFYING MUTATION: round 20's loop over the listing's output,
+      # whose status nothing reads.
+      "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
+      essentialActivatorPattern() & ") continue;; " &
+      "*.socket|*.timer|*.path) echo $u.d;; esac; done"
+    else:
+      "us=$(/usr/bin/ls -1 " & ConservativeHoldDir & ") && " &
+      "for u in $us; do case $u in " &
+      essentialActivatorPattern() & ") continue;; " &
+      "*.socket|*.timer|*.path) echo $u.d;; esac; done"
   let recordAbsent =
     when mutated("boot-hold-record-absent-skips"):
       # FALSIFYING MUTATION: round 19's script -- a pending marker with no
@@ -754,7 +771,8 @@ proc bootHoldScript*(): string =
     "regular file: holding every socket, timer and path unit in " &
     ConservativeHoldDir & " but the essential ones; src=c; fi; " &
   "if ( if [ $src = c ]; then " & conservative & "; else /usr/bin/cat $r; fi ) > $l; " &
-    "then :; else " & say & "cannot write the list " & l & ": failing the unit " &
+    "then :; else " & say & "cannot list the units to hold or write the list " & l &
+    ": failing the unit " &
     "so sysinit.target is not reached with an activator free; " & failClosed & "; fi; " &
   "n=0; f=0; " &
   "while read -r d; do case x$d in x|x.*|*[!A-Za-z0-9@._:-]*) " & say &
@@ -819,18 +837,22 @@ proc bootHoldUnit*(): string =
   "TimeoutStartSec=" & $BootHoldTimeoutSec & "\n" &
   # systemd expands $NAME in ExecStart= (systemd.service(5), "Command
   # lines"); $$ passes a single $ to the shell.
-  # ``-``: an exit status is recorded and treated as success
-  # (systemd.service(5), "ExecStart="), and nothing the script runs exits
-  # non-zero anyway. No outer ``timeout`` (A9 review round 20; §13
-  # decision 172 as amended 2026-11-17): a script that overruns, or that
-  # chooses to wait because a hold or the reload failed, is ended by
-  # TimeoutStartSec=, which fails the unit -- and sysinit.target, which
-  # requires it -- so the boot never goes on with an activator free.
+  # No ``-`` prefix (§13 decision 172 as amended 2026-11-21 by the owner,
+  # A9 review round 21, M4): every path the script means exits 0, so a
+  # script killed by a signal, an exec that fails (127) or any other
+  # unexpected exit fails the unit, and sysinit.target with it; ``-``
+  # turned each of those into success (measured on systemd 260). No outer
+  # ``timeout`` (round 20): an overrun, or the wait the script chooses when
+  # a hold or the reload failed, is ended by TimeoutStartSec=.
   (when mutated("boot-hold-outer-timeout"):
      # FALSIFYING MUTATION: round 19's wrapper -- an overrun is killed by
      # ``timeout`` and the ``-`` prefix reports success.
      "ExecStart=-/usr/bin/timeout -k 5 " & $(BootHoldTimeoutSec - 15) & " /bin/sh -c '"
-   else: "ExecStart=-/bin/sh -c '") &
+   elif mutated("boot-hold-dash-prefix"):
+     # FALSIFYING MUTATION: round 20's ``-``, under which a signal kill or a
+     # failed exec reports success.
+     "ExecStart=-/bin/sh -c '"
+   else: "ExecStart=/bin/sh -c '") &
     bootHoldScript().replace("$", "$$") & "'\n" &
   # Its own floor (CONF-1): it reads the state directory, writes under
   # /run only, and reloads systemd over its private socket, which checks
@@ -1376,7 +1398,8 @@ proc unobservedFetchUnit(reproExe: string; a: AgentUnitsInputs): string =
   "RestrictRealtime=yes\n" &
   "RestrictSUIDSGID=yes\n" &
   "LockPersonality=yes\n" &
-  "MemoryDenyWriteExecute=yes\n" &
+  (when mutated("fetch-unit-without-mdwe"): ""
+   else: "MemoryDenyWriteExecute=yes\n") &
   "SystemCallArchitectures=native\n" &
   FetchSyscallFilter &
   "SystemCallErrorNumber=EPERM\n" &
