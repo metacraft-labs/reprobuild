@@ -231,7 +231,7 @@ require_contains .github/workflows/ci.yml "dev-exec nix flake metadata --no-upda
 require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-lock-file --log-lines 200 .#default"
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "Linux", "X64", "benchmark"]'\'''
+require_contains .github/workflows/benchmark.yml 'runner: '\''["linux", "x64", "benchmark"]'\'''
 # The macOS benchmark leg uses capability labels. The Linux benchmark leg
 # retains its dedicated persistent benchmark runner requirement above.
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64"]'\'''
