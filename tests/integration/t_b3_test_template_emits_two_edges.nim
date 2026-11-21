@@ -9,6 +9,8 @@
 
 import std/[json, os, osproc, sequtils, sets, strtabs, strutils, unittest]
 
+import repro_core/process_env
+
 const RepoMarker = "repro.nim"
 
 const SampleStems = [
@@ -41,11 +43,15 @@ proc findRepoRoot(): string =
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
   let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  # ``inheritedEnvTable`` keeps the host's name semantics. Windows spells the
+  # variable ``Path`` and compares names case-insensitively; a case-sensitive
+  # copy followed by ``env["PATH"] = …`` held a ``Path`` and a second ``PATH``
+  # with the runquota directory alone, so the engine started with a ``PATH``
+  # that found neither ``nim`` nor any DLL the caller's ``PATH`` supplied
+  # (measured on Windows: ``tool-resolution failed: nim ... was not found in
+  # PATH``).
+  let env = inheritedEnvTable()
+  env.prependPathEntry(runquotaBin)
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
 proc countOccurrences(haystack, needle: string): int =
@@ -81,6 +87,97 @@ proc graphJsonFor(reproBin, repoRoot, selector: string):
     except JsonParsingError:
       return (nil, output, 1)
   (nil, output, exitCode)
+
+const
+  ## The two CLI images a ``requiresReproBinary`` execute edge declares.
+  ReproImage = "build/bin/" & addFileExt("repro", ExeExt)
+  EngineImage = "build/bin/" & addFileExt("reprobuild", ExeExt)
+  ## ``repro.nim`` names every Windows runtime-DLL copy edge with this prefix.
+  StagePrefix = "reprobuild.apps.stage_"
+  ## A single (ungrouped) test that runs the CLI: the route the defect was
+  ## observed on.
+  SingleCliConsumer = "test_tool_identity_env_plumbing"
+  ## A test whose generated row puts it in a group, and whose fixture row
+  ## names a third ``build/bin`` image (``repro-peer-cache-admin``). Its
+  ## group's execute edge is the union of its members' requirements.
+  GroupedCliConsumerSource =
+    "libs/repro_peer_cache/tests/t_peer_cache_admin_cli_status.nim"
+
+type ClosureView = object
+  ok: bool                       ## ``repro graph`` answered with actions
+  stageIds: HashSet[string]      ## staging edges in the closure
+  stagedOutputs: HashSet[string] ## the files those edges write
+  consumerFound: bool            ## the named execute edge is in the closure
+  consumerInputs: seq[string]    ## its declared inputs, ``/``-separated
+  consumerDeps: seq[string]      ## the action ids it is ordered after
+
+proc declaresFile(inputs: seq[string]; repoRelative: string): bool =
+  ## An input may be spelled repo-relative or absolute.
+  inputs.anyIt(it == repoRelative or it.endsWith("/" & repoRelative))
+
+proc closureView(reproBin, repoRoot, selector,
+    consumerId: string): ClosureView =
+  result.stageIds = initHashSet[string]()
+  result.stagedOutputs = initHashSet[string]()
+  let (graph, output, exitCode) = graphJsonFor(reproBin, repoRoot, selector)
+  checkpoint(selector & " graph exit=" & $exitCode)
+  if exitCode != 0 or graph.isNil:
+    checkpoint(output)
+    return
+  let actions = graph{"actions"}
+  if actions.isNil or actions.kind != JArray:
+    return
+  result.ok = true
+  for action in actions:
+    let id = action{"id"}.getStr()
+    if id == consumerId:
+      result.consumerFound = true
+      let inputs = action{"inputs"}
+      if not inputs.isNil and inputs.kind == JArray:
+        for input in inputs:
+          result.consumerInputs.add(input.getStr().replace('\\', '/'))
+      let deps = action{"deps"}
+      if not deps.isNil and deps.kind == JArray:
+        for dep in deps:
+          result.consumerDeps.add(dep.getStr())
+    if id.startsWith(StagePrefix):
+      result.stageIds.incl(id)
+      for outputPath in actionOutputs(action):
+        result.stagedOutputs.incl(outputPath.getStr().replace('\\', '/'))
+
+proc groupOfSource(repoRoot, source: string): string =
+  ## The ``group:`` of ``source``'s row in the generated ``repro_tests.nim``,
+  ## or "" for a single test. Read rather than spelled here, because the
+  ## grouping plan is regenerated and group names move with it.
+  let text = readFile(repoRoot / "repro_tests.nim")
+  let rowPos = text.find("source: \"" & source & "\"")
+  if rowPos < 0:
+    raise newException(ValueError, source & " has no row in repro_tests.nim")
+  let nextRow = text.find("source: \"", rowPos + 1)
+  const GroupField = "group: \""
+  let groupPos = text.find(GroupField, rowPos)
+  if groupPos < 0 or (nextRow >= 0 and groupPos > nextRow):
+    return ""
+  let start = groupPos + GroupField.len
+  text[start ..< text.find('"', start)]
+
+proc startInMinimalEnvironment(image: string): tuple[output: string;
+    exitCode: int] =
+  ## Start ``image --version`` with nothing from the caller's environment that
+  ## could locate a library for it: no ``PATH`` entry outside the system
+  ## directories on Windows (where ``PATH`` is the last DLL search location),
+  ## no ``PATH`` and no ``LD_LIBRARY_PATH`` / ``DYLD_*`` elsewhere. So it
+  ## starts only if every library it loads sits where the image itself says:
+  ## beside it on Windows, behind its link-time RPATH on Linux and macOS.
+  let env = newEnvTable()
+  when defined(windows):
+    let systemRoot = getEnv("SystemRoot", r"C:\Windows")
+    env["SystemRoot"] = systemRoot
+    env["PATH"] = systemRoot / "System32" & ";" & systemRoot
+  else:
+    env["PATH"] = "/nonexistent-minimal-path"
+  execCmdEx(image.quoteShell & " --version", env = env,
+    workingDir = getTempDir())
 
 suite "Bootstrap-And-Self-Build B3: test template emits two edges":
 
@@ -210,3 +307,89 @@ suite "Bootstrap-And-Self-Build B3: test template emits two edges":
       check missingBuild.len == 0
       check missingExecute.len == 0
       check missingLaunch.len == 0
+
+  test "engine: a test that runs a build/bin image gets the libraries it loads":
+    # The property: the closure of an execute edge that runs a ``build/bin``
+    # image is enough to START that image. On Windows the images load
+    # ``clingo.dll``, ``libzstd.dll``, ``sqlite3*.dll`` and the OpenSSL pair
+    # from their own directory, and ``repro.nim`` stages each one it can
+    # resolve with a ``reprobuild.apps.stage_*`` copy edge. Those edges were
+    # members of ``.#apps`` only, so ``repro build '.#test#<name>'`` in a
+    # fresh checkout built a ``build\bin\repro.exe`` that failed with
+    # ``could not load: libcrypto-3-x64.dll`` (reprobuild-pm issue
+    # 2026-11-17-windows-test-closure-builds-a-repro-exe-that-cannot-load-
+    # openssl). On Linux and macOS the images carry an RPATH instead, and
+    # there are no staging edges.
+    #
+    # Three parts, each meaningful on every host:
+    #
+    #   1. The two CLI images in this tree start with ``--version`` in a
+    #      minimal environment, so nothing outside what the build put in
+    #      place (beside the image, or in its RPATH) supplies a library. Run
+    #      through ``repro build '.#test#t_b3_test_template_emits_two_edges'``
+    #      the images are this test's own closure's, so on Windows before the
+    #      fix this part failed in a fresh checkout.
+    #   2. Two consumers -- a single test and a GROUP edge -- declare both CLI
+    #      images as inputs (the group through its member's fixture row as
+    #      well), so part 3 checks edges that really run them.
+    #   3. Every staging edge ``.#apps`` has on this host is a direct dep of
+    #      each consumer's execute edge (so a narrow selection stages it
+    #      first), and every file it writes is a declared input of that edge
+    #      (so a different DLL re-runs the test).
+    #      On Windows the reference is not empty: the engine is linked with
+    #      ``--define:ssl``, so a host that compiled it has the OpenSSL pair.
+    let repoRoot = findRepoRoot()
+    let reproBin = repoRoot / ReproImage
+    let engineBin = repoRoot / EngineImage
+    check fileExists(reproBin)
+    check fileExists(engineBin)
+
+    if fileExists(reproBin) and fileExists(engineBin):
+      for image in [reproBin, engineBin]:
+        let (output, exitCode) = startInMinimalEnvironment(image)
+        checkpoint(image & " --version in a minimal environment: exit=" &
+          $exitCode & "\n" & output)
+        check exitCode == 0
+
+      let apps = closureView(reproBin, repoRoot, ".#apps", "")
+      check apps.ok
+      checkpoint("staging edges in .#apps: " & $toSeq(apps.stageIds))
+      when defined(windows):
+        check apps.stageIds.len > 0
+        when defined(amd64):
+          check (StagePrefix & "libcrypto_3_x64") in apps.stageIds
+          check (StagePrefix & "libssl_3_x64") in apps.stageIds
+
+      let peerGroup = groupOfSource(repoRoot, GroupedCliConsumerSource)
+      checkpoint(GroupedCliConsumerSource & " group: " & peerGroup)
+      check peerGroup.len > 0
+      let consumers = [
+        (id: "reprobuild.test_execute." & SingleCliConsumer,
+          fixture: ""),
+        (id: "reprobuild.test_execute." & peerGroup,
+          fixture: "build/bin/" &
+            addFileExt("repro-peer-cache-admin", ExeExt))]
+      for consumer in consumers:
+        let view = closureView(reproBin, repoRoot, ".#" & consumer.id,
+          consumer.id)
+        check view.ok
+        check view.consumerFound
+        checkpoint(consumer.id & " inputs: " & $view.consumerInputs)
+        check view.consumerInputs.declaresFile(ReproImage)
+        check view.consumerInputs.declaresFile(EngineImage)
+        if consumer.fixture.len > 0:
+          check view.consumerInputs.declaresFile(consumer.fixture)
+        var missingIds: seq[string] = @[]
+        for stageId in apps.stageIds:
+          if stageId notin view.consumerDeps or stageId notin view.stageIds:
+            missingIds.add(stageId)
+        var undeclared: seq[string] = @[]
+        for staged in apps.stagedOutputs:
+          if not view.consumerInputs.declaresFile(staged):
+            undeclared.add(staged)
+        checkpoint(consumer.id & " is not ordered after staging edges: " &
+          $missingIds)
+        checkpoint(consumer.id & " does not declare staged files: " &
+          $undeclared)
+        check missingIds.len == 0
+        check undeclared.len == 0
