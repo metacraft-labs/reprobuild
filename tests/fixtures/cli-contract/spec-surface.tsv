@@ -518,6 +518,7 @@ flag	repro home export	--target
 env	repro home export	REPRO_HOST
 command	repro home facts
 flag	repro home facts	--host
+flag	repro home facts	--home-dir
 flag	repro home facts	--nixos
 flag	repro home facts	--output
 flag	repro home facts	--target

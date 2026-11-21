@@ -101,11 +101,15 @@ once.
   Nix side, a file whose content is unknown (above) has `mode` `null` as
   well.
 - **A `PATH` entry** under the home is named `~/<rel>` when it spells the home
-  `$HOME`, `${HOME}` or `~`, on both sides. The Nix side also recognises the
-  absolute `home.homeDirectory`. `repro home facts` runs against a private
-  scratch home, so on the reprobuild side an entry that spells the machine's
-  real home as an absolute path keeps that path as its id, and differs from
-  the Nix side's `~/<rel>`.
+  `$HOME`, `${HOME}`, `~` or the host's home directory as an absolute path,
+  on both sides, so `/home/alice/.local/bin` and `$HOME/.local/bin` are one
+  entry. The host's home directory is `home.homeDirectory` on the Nix side.
+  On the reprobuild side it is `repro home facts --home-dir DIR`, and the home
+  of the user running the command when the flag is absent. Pass `--home-dir`
+  when the facts describe another machine, or run in a build sandbox, as
+  `reprobuild.lib.homeEquivalenceCheck` does with the configuration's
+  `home.homeDirectory`. The directory only names entries: nothing under it is
+  read.
 - **Two producers with the same id on one side** describe one fact when they
   agree on every compared field, and the first entry is kept. When they
   disagree, the producer refuses, naming both origins and each differing
