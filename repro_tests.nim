@@ -1921,6 +1921,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath("),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_a_run_records_the_class_of_the_edge_that_ran.nim",
+    binary: "build/test-bin/t_a_run_records_the_class_of_the_edge_that_ran",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_build_engine_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_action_cache_output_integrity.nim",
     binary: "build/test-bin/t_action_cache_output_integrity",
     defines: @[],
