@@ -17,8 +17,11 @@
 ## directory and state directory (`repro home facts` creates both): the
 ## plan computes target paths under that home and every path is reported
 ## relative to it, so nothing about the machine's real home enters the
-## document. The Nix side is produced by `reprobuild.lib.homeManagerFacts`
-## (nix/lib/host-facts.nix) with the same schema.
+## document. The host's real home enters only as a name: a PATH entry that
+## spells it by its absolute path is named `~/<rel>` (`hostHomeDir`,
+## `homeRelativePathEntry`). The Nix side is produced by
+## `reprobuild.lib.homeManagerFacts` (nix/lib/host-facts.nix) with the same
+## schema.
 ##
 ## Content digests are SHA-256 (`sha256:<hex>`) because the Nix producer
 ## computes them with coreutils over Home Manager's `home-files` tree.
@@ -51,17 +54,31 @@ const
     ## itself, where an entry came from, and the package version (spec
     ## Open question 2: identity only).
 
-proc homeRelativePathEntry*(entry, homeDir: string): string =
+proc homeRelativePathEntry*(entry, homeDir: string; hostHomeDir = ""):
+    string =
   ## The logical id of a PATH entry: `~/<rel>` for an entry under the home
   ## directory however it spells the home (`$HOME`, `${HOME}`, `~`, the
   ## absolute directory), the entry as written otherwise. The Nix producer
   ## (nix/lib/host-facts.nix, `pathEntryId`) names `home.sessionPath`
   ## entries the same way, so one directory has one id on both sides.
+  ##
+  ## Two absolute directories are the home. `homeDir` is the one the plan
+  ## ran against (for `repro home facts` a private scratch directory, which
+  ## the planner itself may write into an entry). `hostHomeDir` is the
+  ## host's real home -- what the Nix side knows as `home.homeDirectory` --
+  ## which a profile spells when it writes `/home/alice/.local/bin`; without
+  ## it that entry would keep its absolute path here and be `~/.local/bin`
+  ## on the Nix side (reprobuild-pm spec Gradual-Nix-To-Reprobuild-
+  ## Migration.md §Host facts, "logical id"). "" when unknown.
   for spelling in ["$HOME", "${HOME}", "~"]:
     if entry == spelling:
       return "~"
     if entry.startsWith(spelling & "/"):
       return "~/" & entry[spelling.len + 1 .. ^1]
+  if hostHomeDir.len > 0:
+    let id = homeRelativeId(entry, hostHomeDir)
+    if id.startsWith("~"):
+      return id
   homeRelativeId(entry, homeDir)
 
 proc entry(id, origin: string): JsonNode =
@@ -88,12 +105,14 @@ proc sortedArray(items: seq[JsonNode]): JsonNode =
 type
   FactsBuilder = object
     homeDir: string
+    hostHomeDir: string   ## the host's real home (`homeRelativePathEntry`)
     categories: OrderedTable[string, OrderedTable[string, JsonNode]]
     unmapped: seq[JsonNode]
     uncategorized: seq[JsonNode]
 
-proc initFactsBuilder(homeDir: string): FactsBuilder =
+proc initFactsBuilder(homeDir, hostHomeDir: string): FactsBuilder =
   result.homeDir = homeDir
+  result.hostHomeDir = hostHomeDir
   for c in HostFactsCategories:
     result.categories[c] = initOrderedTable[string, JsonNode]()
 
@@ -156,7 +175,7 @@ proc addResource(b: var FactsBuilder; r: Resource) =
   of rkEnvUserPath:
     for p in r.pathEntries:
       b.add("environment", entry("path:" & homeRelativePathEntry(p,
-        b.homeDir), origin))
+        b.homeDir, b.hostHomeDir), origin))
   of rkShellIntegration:
     var e = entry("block:" & homeRelativeId(r.shellHostFilePath, b.homeDir) &
       "#" & r.shellBlockId, origin)
@@ -191,12 +210,15 @@ proc addResource(b: var FactsBuilder; r: Resource) =
     b.uncategorized.add unmappedEntry("", r.address, origin,
       "no host-facts category covers resource kind `" & $r.kind & "`")
 
-proc hostFactsFromState*(state: PlannedDesiredState; system: string):
-    JsonNode =
+proc hostFactsFromState*(state: PlannedDesiredState; system: string;
+                         hostHomeDir = ""): JsonNode =
   ## The Reprobuild-side host-facts document for an already planned state.
   ## `system` is the target platform name (`x86_64-linux`, ...).
+  ## `hostHomeDir` is the host's real home directory, used only to name the
+  ## PATH entries that spell it absolutely (`homeRelativePathEntry`); ""
+  ## when unknown.
   let opts = state.options
-  var b = initFactsBuilder(opts.homeDir)
+  var b = initFactsBuilder(opts.homeDir, hostHomeDir)
 
   for p in state.plan.packages:
     var e = entry(p.packageId, "activity " & p.fromActivity)
@@ -246,8 +268,10 @@ proc hostFactsFromState*(state: PlannedDesiredState; system: string):
   result["concerns"] = %*{"declared": state.applied.declared,
     "applied": applied}
 
-proc collectHostFacts*(opts: ApplyOptions; system: string): JsonNode =
+proc collectHostFacts*(opts: ApplyOptions; system: string;
+                       hostHomeDir = ""): JsonNode =
   ## Plan `opts` (`planDesiredState`) and report its host facts. The
   ## caller chooses `opts.homeDir` / `opts.stateDir`; `repro home facts`
-  ## always passes fresh private directories.
-  hostFactsFromState(planDesiredState(opts), system)
+  ## always passes fresh private directories, and the host's real home as
+  ## `hostHomeDir` (see `hostFactsFromState`).
+  hostFactsFromState(planDesiredState(opts), system, hostHomeDir)
