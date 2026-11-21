@@ -49,7 +49,7 @@ libs/repro_addon/tests/t_addon_detector_controls_run_on_the_host.nim	nim	9
 libs/repro_addon/tests/t_addon_diagnostic_names_are_defined_once.nim	nim	4
 libs/repro_addon/tests/t_addon_drill_findings.nim	nim	7
 libs/repro_addon/tests/t_addon_egress_control_proves_the_observer.nim	nim	4
-libs/repro_addon/tests/t_addon_egress_observer.nim	nim	14
+libs/repro_addon/tests/t_addon_egress_observer.nim	nim	15
 libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	4
 libs/repro_addon/tests/t_addon_engine_agent_tick_records.nim	nim	1
 libs/repro_addon/tests/t_addon_entry_type_checks_on_every_release_architecture.nim	nim	1
@@ -1143,7 +1143,7 @@ libs/repro_system_apply/tests/t_b1_dsl_lowering.nim	nim	10
 libs/repro_system_apply/tests/t_b1_dsl_parse.nim	nim	12
 libs/repro_system_apply/tests/t_b2_pipeline.nim	nim	15
 libs/repro_system_rollback/tests/t_b3_rollback_unit.nim	nim	14
-libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	36
+libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	nim	38
 libs/repro_test_support/tests/t_home_apply_guard.nim	nim	9
 libs/repro_test_support/tests/t_owned_processes_stop_only_what_the_test_started.nim	nim	4
 libs/repro_test_support/tests/t_passthrough_monitor_parses_the_engine_wrapper_argv.nim	nim	2
@@ -3140,7 +3140,7 @@ tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
 tests/unit/test_release_native_packages.py	python	9
 tests/unit/test_release_smoke_dev_exec.py	python	21
-tests/unit/test_release_staged_data_files.py	python	11
+tests/unit/test_release_staged_data_files.py	python	12
 tests/unit/test_release_tag_names_build.py	python	11
 tests/unit/test_reprobuild_suite_inventory.py	python	110
 tests/unit/test_sibling_lock_pins.py	python	10

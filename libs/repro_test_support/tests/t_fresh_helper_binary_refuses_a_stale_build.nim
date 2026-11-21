@@ -111,6 +111,17 @@
 ## 44. (round 12) A relative ``--path`` is recorded absolute, and the
 ##     helper is accepted from ``/`` and from a directory with its own
 ##     ``vendor/``.
+## 45. Built with ``--noNimblePath``, as scripts/build_apps.sh builds a
+##     guarded helper, a package installed into the nimble directory the
+##     installed nim.cfg names (``$HOME/.nimble/pkgs2``) neither refuses
+##     the helper nor can supply one of its imports. Run 53 (2026-11-16):
+##     an unrelated ``nimble build`` elsewhere on the host installed two
+##     packages into ``~/.nimble/pkgs2``, and every test that runs
+##     ``repro-evidence-sink`` refused it as built from a changed listing
+##     of that directory. The control: the same ``$HOME`` without the flag
+##     does resolve an import from there.
+## 46. A helper built without ``--noNimblePath`` is refused, and its list
+##     shows the nimble directory was on its search path.
 ##
 ## Falsifying builds: ``stale-helper-accepted`` (cases 2-5 and 8-10 red),
 ## ``fresh-skips-included`` (case 4), ``fresh-skips-outside-tree`` (case
@@ -144,7 +155,10 @@
 ## (case 42), ``configs-fail-unreadable`` (case 43), ``relative-search-paths``
 ## (case 44); and the builds ``-d:reproAddonMutation=fresh-accepts-user-config``
 ## (case 41) and ``helper-built-without-skip-user-cfg`` (case 40, this
-## test's own: its fixture built without the flag).
+## test's own: its fixture built without the flag);
+## ``-d:reproAddonMutation=fresh-accepts-nimble-path`` (case 46) and
+## ``helper-built-with-nimble-path`` (case 45, this test's own: its fixture
+## built without ``--noNimblePath``, as the helpers were before run 53).
 ##
 ## Cases 22, 23 and 28 run the real strace behind a wrapper script named by
 ## ``REPRO_STRACE``. The wrapper is justified: it is how the writer's
@@ -160,7 +174,8 @@ import repro_test_support/fresh_binary
 
 const RepoRoot = currentSourcePath().parentDir.parentDir.parentDir.parentDir
 const TestMutation {.strdefine: "reproAddonMutation".} = ""
-  ## Case 40's own falsifier, ``helper-built-without-skip-user-cfg``.
+  ## Case 40's own falsifier, ``helper-built-without-skip-user-cfg``, and
+  ## case 45's, ``helper-built-with-nimble-path``.
 
 let base = createTempDir("fresh-binary-", "")
 let tree = base / "tree"
@@ -248,7 +263,7 @@ proc build() =
     setLastModificationTime(src, getTime() - initDuration(seconds = 60))
   # --skipUserCfg as scripts/build_apps.sh builds a guarded helper (§13
   # decision 142).
-  let flags = @["--skipUserCfg", "--path:" & tree / "libs" / "foolib" / "src",
+  let flags = @["--skipUserCfg", "--noNimblePath", "--path:" & tree / "libs" / "foolib" / "src",
                 "--path:" & parentDir(outside)]
   let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
     "--warnings:off"] & flags & @["--nimcache:" & tree / "build" / "nimcache" / "foo-helper",
@@ -462,7 +477,7 @@ suite "a helper binary is used only when built from the tree under test":
     let env = "REPRO_STRACE=" & quoteShell(strace) & " "
     execCmdEx(env & quoteShellCommand(@["bash",
       RepoRoot / "scripts" / "write_helper_deps.sh", "foo-helper", app,
-      "--skipUserCfg", "--path:" & tree / "libs" / "foolib" / "src",
+      "--skipUserCfg", "--noNimblePath", "--path:" & tree / "libs" / "foolib" / "src",
       "--path:" & parentDir(outside)]), workingDir = tree)
 
   test "22: a trace in a format the writer does not parse fails the list":
@@ -568,7 +583,7 @@ suite "a helper binary is used only when built from the tree under test":
       "print(\\\"made\\\")'\")\necho t\n")
     let bin3 = t3 / "build" / "bin" / "tmpf"
     let (o1, c1) = execCmdEx(quoteShellCommand(@["nim", "c", "--hints:off",
-      "--warnings:off", "--skipUserCfg",
+      "--warnings:off", "--skipUserCfg", "--noNimblePath",
       "--nimcache:" & t3 / "build" / "nimcache" / "tmpf",
       "--out:" & bin3, app3]))
     doAssert c1 == 0, o1
@@ -576,7 +591,7 @@ suite "a helper binary is used only when built from the tree under test":
     doAssert cb == 0 and "made" in ob, ob
     let (o2, c2) = execCmdEx(quoteShellCommand(@["bash",
       RepoRoot / "scripts" / "write_helper_deps.sh", "tmpf", app3,
-      "--skipUserCfg"]),
+      "--skipUserCfg", "--noNimblePath"]),
       workingDir = t3)
     checkpoint o2
     check c2 == 0
@@ -612,12 +627,13 @@ suite "a helper binary is used only when built from the tree under test":
   let rApp = rt / "apps" / "foo" / "foo.nim"
   let rBin = rt / "build" / "bin" / "rfoo"
   proc buildResolve(paths = @["vendor"]; skipUserCfg = true;
-                    relative = false) =
+                    relative = false; noNimblePath = true) =
     ## ``paths``: the ``--path`` directories under ``rt``, in order (Nim
     ## searches a later one first). ``relative``: given relative to ``rt``,
     ## where the compiler and the writer run.
     var flags: seq[string]
     if skipUserCfg: flags.add("--skipUserCfg")
+    if noNimblePath: flags.add("--noNimblePath")
     for d in paths: flags.add("--path:" & (if relative: d else: rt / d))
     createDir(rt / "vendor" / "pkgx")
     createDir(parentDir(rApp))
@@ -801,7 +817,7 @@ suite "a helper binary is used only when built from the tree under test":
       # Built the same way again, the helper does not change: the flag
       # keeps the file out (without it, the rebuild prints "flag").
       let (o, c) = execCmdEx(quoteShellCommand(@["nim", "c", "-r",
-        "--hints:off", "--warnings:off", "--skipUserCfg",
+        "--hints:off", "--warnings:off", "--skipUserCfg", "--noNimblePath",
         "--path:" & rt / "vendor", "--nimcache:" & rt / "build" / "probe40",
         "--out:" & rt / "build" / "probe40" / "p", rApp]))
       checkpoint o
@@ -829,7 +845,7 @@ suite "a helper binary is used only when built from the tree under test":
     writeFile(t / "vend2" / "pkgx" / "other.nim", "discard\n")
     let app = t / "apps" / "b" / "b.nim"
     writeFile(app, "import pkgx/build/util\necho which()\n")
-    let flags = @["--skipUserCfg", "--path:" & t / "vend1", "--path:" & t / "vend2"]
+    let flags = @["--skipUserCfg", "--noNimblePath", "--path:" & t / "vend1", "--path:" & t / "vend2"]
     let built = buildIn(t, "bfoo", app, flags)
     checkpoint built
     check built == ""
@@ -855,7 +871,7 @@ suite "a helper binary is used only when built from the tree under test":
     writeFile(app, "when defined(probeFlag): echo \"flag\"\necho \"u\"\n")
     setFilePermissions(xo, {fpUserWrite, fpUserExec, fpGroupExec, fpOthersExec})
     defer: setFilePermissions(xo, {fpUserRead, fpUserWrite, fpUserExec})
-    let built = buildIn(t, "ufoo", app, @["--skipUserCfg"])
+    let built = buildIn(t, "ufoo", app, @["--skipUserCfg", "--noNimblePath"])
     checkpoint built
     check built == ""
     check refusalOf(t, "ufoo") == ""
@@ -890,6 +906,71 @@ suite "a helper binary is used only when built from the tree under test":
       let why = rRefusal()
       checkpoint d & ": " & why
       check why == ""
+
+  # ---- The host's nimble directories. Nim's installed nim.cfg names
+  # ``$home/.nimble/pkgs2`` (``$home`` is ``$HOME``), so a fake ``$HOME``
+  # stands for the host's: one package there before the build, two more
+  # installed after it.
+  let fakeHome = base / "home"
+  let pkgs2 = fakeHome / ".nimble" / "pkgs2"
+  proc installPackage(pkg, checksum: string) =
+    ## What ``nimble install`` leaves: ``<name>-<version>-<sha1>/<name>.nim``.
+    let d = pkgs2 / (pkg & "-0.1.0-" & checksum)
+    createDir(d)
+    writeFile(d / (pkg & ".nim"), "proc " & pkg & "Value*(): int = 7\n")
+  installPackage("pkgy", "0123456789abcdef0123456789abcdef01234567")
+  let probe = base / "probe45" / "probe.nim"
+  createDir(parentDir(probe))
+  writeFile(probe, "import pkgy\necho pkgyValue()\n")
+  proc probeCompile(extra: seq[string]): (string, int) =
+    ## Compile and run ``import pkgy``, which only the nimble path can find.
+    execCmdEx(quoteShellCommand(@["nim", "c", "-r", "--hints:off",
+      "--warnings:off", "--skipUserCfg"] & extra & @[
+      "--nimcache:" & base / "probe45" / "nimcache",
+      "--out:" & base / "probe45" / "probe", probe]))
+
+  test "45: a nimble install on the host neither refuses nor changes a helper built with --noNimblePath":
+    # The test's own falsifier, -d:reproAddonMutation=helper-built-with-
+    # nimble-path, builds the fixture without the flag (the build before
+    # run 53): the install then refuses it as a changed listing.
+    let home = getEnv("HOME")
+    putEnv("HOME", fakeHome)
+    defer: putEnv("HOME", home)
+    # The control: without the flag this $HOME's nimble directory is on the
+    # search path, and an import resolves from it.
+    var (o, c) = probeCompile(@[])
+    checkpoint o
+    check c == 0 and "7" in o
+    buildResolve(noNimblePath = TestMutation != "helper-built-with-nimble-path")
+    var why = rRefusal()
+    checkpoint why
+    check why == ""
+    # What run 53 saw: an unrelated install adds two package directories.
+    installPackage("clispec", "214b56b180ecc318946960c1fc2cebdd7f53b75c")
+    installPackage("confutils", "95a520ba42e335f6e474d9a4a77bc34442bbff51")
+    why = rRefusal()
+    checkpoint why
+    check why == ""
+    let sp = helperSearchPath(rt, "rfoo")
+    checkpoint $sp
+    check not sp.anyIt(it.startsWith(fakeHome))
+    # With the flag the directory supplies nothing: the same import fails.
+    (o, c) = probeCompile(@["--noNimblePath"])
+    checkpoint o
+    check c != 0 and "cannot open file: pkgy" in o
+    removeDir(pkgs2 / "clispec-0.1.0-214b56b180ecc318946960c1fc2cebdd7f53b75c")
+    removeDir(pkgs2 / "confutils-0.1.0-95a520ba42e335f6e474d9a4a77bc34442bbff51")
+
+  test "46: a helper built with the host's nimble directories on its search path is refused":
+    # Falsifier: -d:reproAddonMutation=fresh-accepts-nimble-path.
+    let home = getEnv("HOME")
+    putEnv("HOME", fakeHome)
+    defer: putEnv("HOME", home)
+    buildResolve(noNimblePath = false)
+    check helperSearchPath(rt, "rfoo").anyIt(it.startsWith(pkgs2))
+    let why = rRefusal()
+    checkpoint why
+    check "was built without --noNimblePath" in why
 
   test "7: no binary, or no dependency list, is refused":
     build()
