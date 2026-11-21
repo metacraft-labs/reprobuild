@@ -1169,6 +1169,7 @@ libs/repro_tool_profiles/tests/t_realization_selection.nim	nim	30
 libs/repro_tool_profiles/tests/t_sibling_resolves_for_its_side_of_the_split.nim	nim	14
 libs/repro_tool_profiles/tests/t_tar_listing_ignores_tar_warnings.nim	nim	3
 libs/repro_tool_profiles/tests/t_tool_archive_missing_decompressor_is_named.nim	nim	3
+libs/repro_tool_profiles/tests/t_tool_prefix_identity_and_leak_scan.nim	nim	10
 libs/repro_tool_profiles/tests/t_uses_realization_version_range.nim	nim	38
 libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progress_records.nim	nim	6
 libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim	nim	4
@@ -2687,6 +2688,7 @@ tests/integration/t_ti2_thin_interface_consumer_reads_cached_artifact.nim	nim	1
 tests/integration/t_ti3_fingerprint_split.nim	nim	3
 tests/integration/t_tool_acquisition_does_not_inherit_the_loader_env.nim	nim	3
 tests/integration/t_tool_consumer_declares_provisioning_receipt.nim	nim	3
+tests/integration/t_tool_prefix_cache_round_trip_post_extract.nim	nim	5
 tests/integration/t_tool_probe_stdin.nim	nim	3
 tests/integration/t_tool_realize_cli.nim	nim	7
 tests/integration/t_top_level_sync_pull_shortcuts_match_workspace_forms.nim	nim	1

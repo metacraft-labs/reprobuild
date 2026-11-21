@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3094,
+    "nimTestBinaries": 3096,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 821,
+    "pureUnitTests": 822,
     "staticallyDetectedRuntimeCompilerFlowTests": 158,
-    "testEntries": 3144
+    "testEntries": 3146
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1773,9 +1773,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1724,
+      "integration": 1725,
       "platform/destructive": 200,
-      "pure unit": 821,
+      "pure unit": 822,
       "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
@@ -1996,9 +1996,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3094,
+    "nimTestBinaryCount": 3096,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3144
+    "testEntryCount": 3146
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30924,6 +30924,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_tool_prefix_identity_and_leak_scan",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_binary_cache_client",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_tool_prefix_identity_and_leak_scan.nim",
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_uses_realization_version_range",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -57993,6 +58012,26 @@
       "source": "tests/integration/t_tool_consumer_declares_provisioning_receipt.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tool_prefix_cache_round_trip_post_extract",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_peer_cache",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_tool_prefix_cache_round_trip_post_extract.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
