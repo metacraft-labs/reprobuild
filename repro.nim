@@ -445,6 +445,22 @@ const
       rows.add TestGraphArtifacts(source: source, artifacts: artifacts)
     rows
 
+  shellHookCountingShimConsumers = block:
+    ## Every test that opens a case through
+    ## `tests/e2e/dev-env/shell_hook_helper.prepareShellHookCase`, which
+    ## requires the graph-built counting shim.
+    var rows: seq[TestGraphArtifacts]
+    for name in ["t_e2e_shell_hook_noop_io_bounded",
+                 "t_e2e_shell_hook_noop_latency",
+                 "t_e2e_shell_hook_realistic_workload",
+                 "t_e2e_shell_hook_cd_activate_deactivate"]:
+      rows.add TestGraphArtifacts(
+        source: "tests/e2e/dev-env/" & name & ".nim",
+        artifacts: @[TestGraphArtifact(
+          path: "build/test-bin/repro_shell_hook_counting_shim",
+          actionId: "reprobuild.test_fixtures.shell_hook_counting_shim")])
+    rows
+
   profileCompileNimSpyConsumers = block:
     var rows: seq[TestGraphArtifacts]
     for name in ["t_e2e_profile_compile_staticread_payload_change",
@@ -634,7 +650,25 @@ const
           actionId: "reprobuild.test_helpers.repro_trampoline"),
         TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
           actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
-  ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
+    # The tests below executed a graph-built helper with no row here, so a
+    # run that had not built the whole `test-helpers` / `test-fixtures`
+    # collections first failed on the missing file, and a rebuilt helper did
+    # not re-run them (reprobuild-pm `issues/2026-11-18-ten-tests-fail-on-
+    # agents-d3cf033b8c-when-each-is-run-alone.md`).
+    TestGraphArtifacts(
+      source: "tests/integration/t_repro_test_runner_catalog_selection.nim",
+      artifacts: @[TestGraphArtifact(path: "build/bin/repro_test_runner",
+        actionId: "reprobuild.test_helpers.repro_test_runner")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_local_daemons_control_plane_m2.nim",
+      artifacts: @[TestGraphArtifact(path: "build/test-bin/live_endpoint_helper",
+        actionId: "reprobuild.test_helpers.live_endpoint_helper")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_local_daemons_control_plane_m11.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/test-bin/fake_protocol_daemon_helper",
+        actionId: "reprobuild.test_helpers.fake_protocol_daemon_helper")]),
+  ] & shellHookCountingShimConsumers & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
     cvmTestKeysRows & @[
     TestGraphArtifacts(
       source: "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim",
