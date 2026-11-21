@@ -53,6 +53,7 @@ mkdir -p "$PRE/bin" "$PRE/lib" "$PRE/tree"
 # ---- 1. bin: the unwrapped payload -----------------------------------
 for b in repro repro-binary-cache repro-standard-provider \
          repro-cmake-dyndep-fragment repro-cmake-trycompile-provider \
+         repro-tests-fragment \
          repro-install-mirror-publish; do
   cp -L "$OUT/bin/.$b-wrapped" "$PRE/bin/$b"
 done

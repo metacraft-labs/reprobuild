@@ -187,6 +187,6 @@ proc emitRustTargetSysrootAction*(projectRoot, packageName, triple: string;
     # `cargo` beside `rustc`: the pinned toolchain is one rust-installer
     # archive realized as one prefix that carries both, and naming `cargo`
     # puts that prefix on the edge's PATH even when the `rustc` selector
-    # resolved to another arm (the path-mode nix arm, see the merge script).
+    # resolved to another realization (a PATH rustc, see the merge script).
     toolIdentityRefs = @["sh", "rustc", "cargo", "cp", "ln", "mkdir", "rm",
                          "dirname", "basename", "grep", "chmod"])

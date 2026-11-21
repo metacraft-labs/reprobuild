@@ -1,8 +1,8 @@
 ## Acquisition plans must select only realizations satisfying a recipe's range.
 ## No mocks: pure production planning over declared interface records; no
-## download. The last suite drives path mode end to end against real
-## executables on a temporary ``$PATH`` and a real archive realized through the
-## realizer's own ``file://`` arm into a temporary store.
+## download. The last two suites drive path mode and nix mode end to end
+## against real executables on a temporary ``$PATH`` and a real archive
+## realized through the realizer's own ``file://`` arm into a temporary store.
 import std/[options, os, osproc, strutils, tempfiles, unittest]
 import repro_interface_artifacts
 import repro_tool_profiles
@@ -402,7 +402,7 @@ suite "tool-provisioning=nix falls back to an in-range archive":
 
   test "a tool with no nixPackage arm is realized from its archive":
     # zig: the catalog pins release archives only. Under nix mode that is
-    # the realization, as it is in path mode; a tool with a nix arm, or
+    # the realization, as it is in tarball mode; a tool with a nix arm, or
     # with no archive for the host, is not redirected.
     let zigUse = goUse("go >=1.26.5")
     check nixModeTakesTarballArm(zigUse, linuxX86)
@@ -414,24 +414,30 @@ suite "tool-provisioning=nix falls back to an in-range archive":
     check not nixModeTakesTarballArm(withNix, linuxX86)
 
 # ---------------------------------------------------------------------------
-# Path mode holds the first match on $PATH to the declared range (reprobuild-pm
+# Path mode is strictly PATH-only (operator decision of 2026-11-17 on
+# reprobuild-pm issue 2026-11-12-per-mode-fallback-semantics-disagree, option
+# (b)). It holds the first match on $PATH to the declared range (reprobuild-pm
 # issue 2026-10-27-path-provisioned-gcc-is-not-probed-so-fpc-gcc-2-95-fails-c-
-# builds-cryptically). On a Windows CI runner Free Pascal's bundled gcc 2.95
-# sat on PATH ahead of every usable gcc, and `uses "gcc >=12"` recipes were
-# compiled with it. The fixture below is that host in miniature: a tool on
-# PATH whose `--version` prints `2.95`, against `>=12`.
+# builds-cryptically: on a Windows CI runner Free Pascal's bundled gcc 2.95
+# sat on PATH ahead of every usable gcc), and a tool that is absent, or
+# refused for its version, fails resolution with a refusal naming the tool,
+# what was found and the remedy. It is never realized from an archive or Nix,
+# even when the package declares one inside the range. The fixture below is
+# the FPC host in miniature: a tool on PATH whose `--version` prints `2.95`,
+# against `>=12`.
 #
 # No mocks: the tool is a real executable run by the real version probe, the
 # resolution goes through `toolBuildIdentity` -- the entry point the build
-# uses -- and the in-range archive is a real tar.gz this test builds, realized
-# through the `file://` arm into a temporary store with the shared cache
-# switched off, so nothing is downloaded or published.
+# uses -- and the in-range archive is a real tar.gz this test builds. Where a
+# mode does realize it (the nix-mode fallback suite at the end), it is
+# realized through the `file://` arm into a temporary store with the shared
+# cache switched off, so nothing is downloaded or published.
 # ---------------------------------------------------------------------------
 
 const PathFixtureTool = "pathrange-fixture-cc"
   ## Not `gcc`: a real `gcc` name would let a sibling source recipe or the
   ## stdlib's own `gcc` provisioning answer, and the point is to see which
-  ## arm path mode takes for exactly the arms this fixture declares.
+  ## arm each mode takes for exactly the arms this fixture declares.
 
 proc toolFileName(name: string): string =
   when defined(windows): name & ".cmd" else: name
@@ -464,17 +470,43 @@ proc withArchive(useDef: InterfaceToolUse; archive, version: string):
     lockIdentity: "fixture:" & PathFixtureTool & "@" & version))
   result.tarballProvisioning[^1].detail.version = version
 
-proc pathModeProfile(useDef: InterfaceToolUse;
-                     pathValue, store: string): PathOnlyToolProfile =
+proc modeProfile(useDef: InterfaceToolUse; mode: ToolProvisioningMode;
+                 pathValue, store: string): PathOnlyToolProfile =
   let artifact = ProjectInterfaceArtifact(projectInterface: ProjectInterface(
     projectName: "pathrange-fixture", packageName: "pathrange-fixture",
     toolUses: @[useDef]))
-  let identity = toolBuildIdentity(artifact, tpmPathOnly,
+  let identity = toolBuildIdentity(artifact, mode,
     pathValue = pathValue, storeRoot = store)
   require identity.profiles.len == 1
   identity.profiles[0]
 
-suite "path mode holds the tool on PATH to the declared range":
+proc pathModeProfile(useDef: InterfaceToolUse;
+                     pathValue, store: string): PathOnlyToolProfile =
+  modeProfile(useDef, tpmPathOnly, pathValue, store)
+
+proc pathModeRefusal(useDef: InterfaceToolUse;
+                     pathValue, store: string): string =
+  ## The message path mode refuses ``useDef`` with; "" (and a failed check)
+  ## when it realizes it instead.
+  try:
+    let profile = pathModeProfile(useDef, pathValue, store)
+    checkpoint("expected a refusal, got " & profile.installMethod & " " &
+      profile.resolvedExecutablePath)
+    check false
+  except OSError as err:
+    result = err.msg
+  checkpoint("message: " & result)
+
+proc storeHoldsNothing(store: string): bool =
+  ## No realization was attempted: path mode never writes the tool store.
+  not dirExists(store) or (block:
+    var empty = true
+    for _ in walkDirRec(store):
+      empty = false
+      break
+    empty)
+
+suite "path mode takes tools from PATH only":
   setup:
     let root = createTempDir("repro-path-range-", "")
     let savedCacheDisable = getEnv("REPRO_CACHE_DISABLE")
@@ -487,6 +519,8 @@ suite "path mode holds the tool on PATH to the declared range":
     let currentBin = root / "current" / "bin"
     writeTool(currentBin, PathFixtureTool,
       PathFixtureTool & " (GCC) 13.2.0")
+    let emptyBin = root / "empty" / "bin"     # a PATH without the tool
+    createDir(emptyBin)
     # The in-range archive: the same tool, reporting 13.2.0.
     let tree = root / "tree"
     writeTool(tree / "bin", PathFixtureTool, PathFixtureTool & " 13.2.0")
@@ -518,52 +552,63 @@ suite "path mode holds the tool on PATH to the declared range":
     check (oldBin / toolFileName(PathFixtureTool)) in message  # the path
     check "reports version 2.95" in message                # what it said
     check "ahead of it on PATH" in message                 # the PATH remedy
+    check "per-tool provisioning override" in message      # the override
     check "nixpkgs" notin message
 
-  test "with no archive declared, path mode's answer is the refusal":
-    var message = ""
-    try:
-      discard pathModeProfile(pathFixtureUse(">=12"), oldBin, store)
-      checkpoint("expected a refusal, got a realization")
-      check false
-    except UsesVersionOutOfRange as err:
-      message = err.msg
-    checkpoint("message: " & message)
+  test "a tool out of range on PATH fails the build, naming the remedy":
+    let message = pathModeRefusal(pathFixtureUse(">=12"), oldBin, store)
     check "reports version 2.95" in message
     check (oldBin / toolFileName(PathFixtureTool)) in message
+    check "PATH only" in message
+    # No arm is declared, so no mode is named as able to realize it.
+    check "declares no nix or tarball realization" in message
+    check "per-tool provisioning override" in message
 
-  test "with an in-range archive declared, path mode realizes the archive":
+  test "an in-range archive does not replace a refused PATH tool":
     require packed.exitCode == 0
     let useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
-    let profile = pathModeProfile(useDef, oldBin, store)
-    checkpoint("realized: " & profile.resolvedExecutablePath)
-    check profile.installMethod == "tarball"
-    check profile.resolvedExecutablePath.startsWith(absolutePath(store))
-    check not profile.resolvedExecutablePath.startsWith(oldBin)
-    check realizedVersionOf(profile) == "13.2.0"
-
-  test "an archive outside the range does not replace it: the refusal stands":
-    require packed.exitCode == 0
-    # The archive is declared at 11.0.0 (its bytes do not matter: the range
-    # filter refuses the record before acquisition).
-    let useDef = pathFixtureUse(">=12").withArchive(archive, "11.0.0")
-    var message = ""
+    var refused = false
     try:
       discard pathModeProfile(useDef, oldBin, store)
-      checkpoint("expected a refusal, got a realization")
-      check false
     except UsesVersionOutOfRange as err:
-      message = err.msg
-    checkpoint("message: " & message)
-    check "reports version 2.95" in message
-    check "No other realization inside the range" in message
+      refused = true
+      checkpoint("message: " & err.msg)
+      check "reports version 2.95" in err.msg
+      # The archive is named as the remedy, not taken.
+      check "--tool-provisioning=tarball" in err.msg
+    check refused
+    check storeHoldsNothing(store)
 
-  test "controls: an in-range PATH tool, no range, and no reported version":
-    # In range on PATH: taken from PATH, as before.
-    let inRange = pathModeProfile(pathFixtureUse(">=12"), currentBin, store)
+  test "a tool absent from PATH fails the build, naming the remedy":
+    require packed.exitCode == 0
+    # Declares an archive in range; before 2026-11-17 path mode realized it.
+    let useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
+    let message = pathModeRefusal(useDef, emptyBin, store)
+    check PathFixtureTool in message                        # the tool
+    check "was not found in PATH" in message                # what was found
+    check "--tool-provisioning=tarball" in message          # a mode that can
+    check "per-tool provisioning override" in message       # the override
+    check storeHoldsNothing(store)
+
+  test "a tool absent from PATH with no arm says no mode declares one":
+    let message = pathModeRefusal(pathFixtureUse(">=12"), emptyBin, store)
+    check "was not found in PATH" in message
+    check "declares no nix or tarball realization" in message
+    check "--tool-provisioning=tarball" notin message
+
+  test "an in-range tool on PATH is taken from PATH":
+    require packed.exitCode == 0
+    # Declares an archive too: an answering PATH is never second-guessed.
+    let useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
+    let inRange = pathModeProfile(useDef, currentBin, store)
     check inRange.installMethod == "path"
     check inRange.resolvedExecutablePath ==
       currentBin / toolFileName(PathFixtureTool)
+    check inRange.adapterStrength == asWeak
+    check inRange.cachePortability == cpLocalOnly
+    check storeHoldsNothing(store)
+
+  test "controls: no range, and no reported version":
     # No declared range: 2.95 is accepted, as before.
     let noRange = InterfaceToolUse(packageSelector: PathFixtureTool,
       executableName: PathFixtureTool, rawConstraint: PathFixtureTool)
@@ -580,3 +625,77 @@ suite "path mode holds the tool on PATH to the declared range":
     expect UsesVersionOutOfRange:
       discard pathModeProfile(pathFixtureUse(">=12"),
         oldBin & $PathSep & currentBin, store)
+
+# ---------------------------------------------------------------------------
+# The fallbacks that remain are logged by name, and the profile records the
+# arm that actually realized the tool (operator decision of 2026-11-17). Nix
+# mode is the fixture: the recipe's range refuses the release the nix arm
+# declares (refused before anything is built, so no Nix is needed), and the
+# in-range archive realizes the tool through the `file://` arm.
+# ---------------------------------------------------------------------------
+
+suite "a nix-mode fallback is logged by name and recorded in the profile":
+  setup:
+    let root = createTempDir("repro-nix-fallback-", "")
+    let savedCacheDisable = getEnv("REPRO_CACHE_DISABLE")
+    putEnv("REPRO_CACHE_DISABLE", "1")
+    let store = root / "store"
+    let tree = root / "tree"
+    writeTool(tree / "bin", PathFixtureTool, PathFixtureTool & " 13.2.0")
+    let archive = root / "fixture-13.2.0.tar.gz"
+    let packed = execCmdEx("tar -czf " & quoteShell(archive) &
+      " -C " & quoteShell(tree) & " bin")
+    clearToolFallbackNotices()
+
+  teardown:
+    if savedCacheDisable.len > 0:
+      putEnv("REPRO_CACHE_DISABLE", savedCacheDisable)
+    else:
+      delEnv("REPRO_CACHE_DISABLE")
+    clearToolFallbackNotices()
+    removeDir(root)
+
+  test "an out-of-range nix arm falls back to the in-range archive, by name":
+    require packed.exitCode == 0
+    var useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
+    useDef.nixProvisioning.add(InterfaceNixProvisioning(
+      selector: "nixpkgs#" & PathFixtureTool,
+      executablePath: "bin/" & PathFixtureTool, version: "2.95"))
+    let profile = modeProfile(useDef, tpmNix, "", store)
+    # The profile names the arm that realized it, with that arm's class.
+    check profile.installMethod == "tarball"
+    check profile.resolvedExecutablePath.startsWith(absolutePath(store))
+    check realizedVersionOf(profile) == "13.2.0"
+    let notices = toolFallbackNotices()
+    checkpoint("notices: " & $notices)
+    require notices.len == 1
+    check notices[0].fallback == ToolFallbackNixRangeToArchive
+    check notices[0].mode == "nix"
+    check notices[0].packageSelector == PathFixtureTool
+    check notices[0].installMethod == profile.installMethod
+    check notices[0].adapterStrength == profile.adapterStrength
+    check notices[0].cachePortability == profile.cachePortability
+    let line = formatToolFallbackNotice(notices[0])
+    check ToolFallbackNixRangeToArchive in line
+    check "--tool-provisioning=nix" in line
+    check "tarball arm" in line
+
+  test "a tool with no nix arm is realized from its archive, by name":
+    require packed.exitCode == 0
+    let useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
+    let profile = modeProfile(useDef, tpmNix, "", store)
+    check profile.installMethod == "tarball"
+    let notices = toolFallbackNotices()
+    require notices.len == 1
+    check notices[0].fallback == ToolFallbackNixArchiveOnly
+    check notices[0].installMethod == "tarball"
+    # Resolved again (a per-tool retry, the dev environment): logged once.
+    discard modeProfile(useDef, tpmNix, "", store)
+    check toolFallbackNotices().len == 1
+
+  test "control: a mode's own arm is no fallback and logs nothing":
+    require packed.exitCode == 0
+    let useDef = pathFixtureUse(">=12").withArchive(archive, "13.2.0")
+    let profile = modeProfile(useDef, tpmTarball, "", store)
+    check profile.installMethod == "tarball"
+    check toolFallbackNotices().len == 0

@@ -1763,6 +1763,16 @@ proc runSystemRollbackCmd(flags: InfraCliFlags; positional: seq[string]): int =
 # Dispatch.
 # ---------------------------------------------------------------------------
 
+proc installRootOptionsOf*(c: ReproCommandLineInfraInstallRoot):
+    InstallRootOptions =
+  ## What ``repro infra install-root`` was given, its command line parsed
+  ## from repro's description (``repro_cli_support/cli_description``, which
+  ## holds the defaults: ``/mnt``, ``/``, ``reproos``).
+  InstallRootOptions(target: c.target, source: c.source, device: c.device,
+    diskoSource: c.disko, hostName: c.hostname, kernelSource: c.kernel,
+    initrdSource: c.initrd, skipRsync: c.noRsync, skipGrub: c.noGrub,
+    skipFstab: c.noFstab, extraExcludes: c.exclude, dryRun: c.dryRun)
+
 proc runInfraInstallRootCli(c: ReproCommandLineInfraInstallRoot): int =
   ## ``repro infra install-root --target /mnt --device /dev/vda``.
   ##

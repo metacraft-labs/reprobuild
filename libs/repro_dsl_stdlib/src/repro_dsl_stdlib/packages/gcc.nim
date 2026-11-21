@@ -389,34 +389,11 @@ proc gccArchive*(opts: ArchiveOptions): BuildActionDef =
     archive = opts.target, objects = objects, after = opts.objects)
 
 proc gccStrip*(opts: StripOptions): BuildActionDef =
-  ## ``strip`` invocation.
-  result = BuildActionDef(
-    call: PublicCliCall(
-      packageName: "binutils",
-      executableName: "strip",
-      subcommand: "",
-      arguments: @[]))
-  if opts.target.len > 0:
-    result.call.arguments.add(PublicCliArg(
-      name: "output",
-      kind: cpkFlag,
-      alias: "-o",
-      format: cafSeparate,
-      role: carOutput,
-      encodedValue: opts.target))
-    result.outputs.add(opts.target)
-  for sym in opts.keepSymbols:
-    result.call.arguments.add(PublicCliArg(
-      name: "keep",
-      kind: cpkFlag,
-      alias: "-K",
-      format: cafSeparate,
-      encodedValue: sym))
-  let inputPath =
-    if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
-  result.call.arguments.add(PublicCliArg(
-    name: "input",
-    kind: cpkPositional,
-    position: 0,
-    role: carInput,
-    encodedValue: inputPath))
+  ## The canonical ``strip`` package's typed call and provisioning identity,
+  ## as ``gccArchive`` does for ``ar``: the aggregate binutils selector
+  ## declares no ``strip`` and may resolve to ld. An empty ``target`` strips
+  ## in place (no ``-o``, no declared output). The edge runs after the edge
+  ## that produces its input.
+  let input = if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
+  binutilsModule.strip(output = opts.target, keepSymbols = opts.keepSymbols,
+    input = input, after = [opts.input])

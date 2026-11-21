@@ -658,6 +658,12 @@ suite "CS-M6: the specification pages match the declarations":
     check "flag\trepro develop\t--except" in Declared
     check "flag\trepro flake override-status\t--lock-store" in Declared
     check "flag\trepro flake refresh-lock\t--record-downgrade" in Declared
+    # The Nimble package catalog's lock flags (NPC-M6): a flag one lock verb
+    # declares beside the shared ones, and one only `refresh` has.
+    check "flag\trepro lock solve\t--exclude-newer" in Declared
+    check "flag\trepro lock refresh\t--exclude-newer" in Declared
+    check "flag\trepro lock refresh\t--allow-rewind" in Declared
+    check "flag\trepro lock validate\t--allow-rewind" notin Declared
     check "verb\tws" notin Declared
     # The build family: a flag of the declaration `build`, `bench` and
     # `lint` share, in each of them, with the variable it declares.

@@ -312,6 +312,12 @@ type
     archive*: LockedArchive
       ## The pinned upstream archive a store-sourced dependency is realized
       ## from, when ``repro lock refresh`` resolved one. See ``LockedArchive``.
+    catalog*: string
+      ## The catalog import (its ``repo``, as ``catalog_imports`` pins it) a
+      ## catalog package was resolved from: a `nimble:` row names the Nimble
+      ## index it came from (Nimble-Package-Catalog.md NPC-AREQ19). Empty for
+      ## every other dependency, and then not written, so every lock written
+      ## before it re-serializes byte-identically.
 
   LockedDependencies* = object
     ## The unified locked-dependency model (MO-8). It SUBSUMES the
@@ -1033,6 +1039,9 @@ proc serializeDepInline(d: LockedDep): string =
     result.add(", archive_type = \"" & tomlEscape(d.archive.archiveType) &
       "\"")
     result.add(", archive_build = \"" & tomlEscape(d.archive.build) & "\"")
+  # Written only when set, and last, for the same reason as the archive pin.
+  if d.catalog.len > 0:
+    result.add(", catalog = \"" & tomlEscape(d.catalog) & "\"")
   result.add(" }")
 
 proc serializeLockedDependencies*(ld: LockedDependencies): string =
@@ -1276,7 +1285,8 @@ proc parseLockedDependencies*(content: string): LockedDependencies =
           url: f.getOrDefault("archive_url", ""),
           sha256: f.getOrDefault("archive_sha256", ""),
           archiveType: f.getOrDefault("archive_type", ""),
-          build: f.getOrDefault("archive_build", ""))))
+          build: f.getOrDefault("archive_build", "")),
+        catalog: f.getOrDefault("catalog", "")))
   if solved.schema == SolvedGraphLockSchemaV3:
     validateV3Deps(result.deps)
 

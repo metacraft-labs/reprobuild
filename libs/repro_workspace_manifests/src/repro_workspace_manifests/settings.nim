@@ -33,6 +33,7 @@ import diagnostics
 import reader
 import roles
 import retired_names
+import tool_provisioning_config
 import repro_core/workspace_root
 
 export workspace_root.settingsFileIn
@@ -295,7 +296,7 @@ proc lockingFromTree(c: TreeCtx; n: TomlValueRef): BootstrapLockingBody =
 const settingsTopLevelKeys = ["schema", "push_gateway", "workspace",
   "projects", "records",
   "manifest", "profiles", "branch-roles", "verify", "develop", "locking",
-  "foreign_env", "extensions"]
+  "foreign_env", "extensions", ToolProvisioningTableKey]
 
 proc decodeSettingsTree(path, content: string): WorkspaceSettings =
   ## A `settings.v1` file, decoded and checked on its own. Cross-file rules
@@ -307,6 +308,8 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
   result.schema = schemaWorkspaceSettingsV1
   result.push_gateway = c.optString("", tree, "push_gateway")
   checkPushGatewayValue(path, schemaWorkspaceSettingsV1, result.push_gateway)
+  result.toolProvisioningOverrides = toolProvisioningOverridesFromTree(path,
+    content, schemaWorkspaceSettingsV1, tree)
   let settingsDir = parentDir(absolutePath(path))
 
   let ws = child(tree, "workspace")
@@ -458,9 +461,14 @@ proc readLocalSettingsLayers*(localPath, sharedPath: string;
     raiseManifestError(localPath, "schema", schemaWorkspaceSettingsLocalV1,
       observed, "schema version mismatch")
   for k in sortedKeys(tree):
-    if k notin ["schema", "manifest"]:
+    # `[tool-provisioning.overrides]` is the one table besides the layers a
+    # checkout may set for itself: the workspace-local layer of the per-tool
+    # provisioning overrides. It is read by
+    # ``readLocalToolProvisioningOverrides``.
+    if k notin ["schema", "manifest", ToolProvisioningTableKey]:
       c.fail(k, "`" & k & "` cannot be declared in " & localSettingsFileName &
-        ": the local file may carry `[[manifest]]` layers only. Profiles, " &
+        ": the local file may carry `[[manifest]]` layers and " &
+        "`[tool-provisioning.overrides]` only. Profiles, " &
         "custom roles, project defaults, verification and routing are shared " &
         "policy and belong in " & settingsFileName &
         " (Workspace-Settings-Files.md §4)")
@@ -512,6 +520,14 @@ proc requireSettingsSchema(path, content: string) =
     raiseManifestError(path, "schema", schemaWorkspaceSettingsV1, s.stringVal,
       "schema version mismatch")
 
+proc readLocalToolProvisioningOverrides*(localPath: string):
+    seq[ToolProvisioningConfigEntry] =
+  ## The `[tool-provisioning.overrides]` of `repro-workspace.local.toml`
+  ## (this checkout's own per-tool overrides). The rest of the file is
+  ## ``readLocalSettingsLayers``'s, which refuses any other table.
+  toolProvisioningOverridesFromContent(localPath, readFile(localPath),
+    schemaWorkspaceSettingsLocalV1)
+
 proc decodeWorkspaceSettingsContent*(path, content: string): WorkspaceSettings =
   ## Decode a shared settings file supplied as TEXT — one read from a source
   ## other than the filesystem, such as a commit of the metadata repository.
@@ -540,6 +556,8 @@ proc readWorkspaceSettings*(path: string): WorkspaceSettings =
     result.localPath = localPath
     result.localLayers = readLocalSettingsLayers(localPath, path,
       result.sharedLayers)
+    result.localToolProvisioningOverrides =
+      readLocalToolProvisioningOverrides(localPath)
 
 proc findWorkspaceSettings*(workspaceRoot: string): Option[WorkspaceSettings] =
   ## `findWorkspaceSettingsPath` + `readWorkspaceSettings`; `none` when the
@@ -576,6 +594,8 @@ proc readLoneLocalSettings*(workspaceRoot: string): Option[WorkspaceSettings] =
     localPath: localPath)
   s.localLayers = readLocalSettingsLayers(localPath,
     absolutePath(workspaceRoot) / settingsFileName & " (absent)", @[])
+  s.localToolProvisioningOverrides =
+    readLocalToolProvisioningOverrides(localPath)
   some(s)
 
 # ---- layer resolution ---------------------------------------------------------

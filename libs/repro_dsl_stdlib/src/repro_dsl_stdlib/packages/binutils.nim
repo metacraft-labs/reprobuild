@@ -22,11 +22,12 @@
 ## / etc. The ergonomic ``binutils.ld(...)`` form is deferred to a
 ## future milestone that lifts the one-executable restriction.
 ##
-## All command selectors retain their Nix provisioning shape. The Windows
-## archiver additionally selects its own version-correct view of the same
-## pinned WinLibs distribution GCC uses; normal sibling realization reuse
-## shares the verified payload without a second extraction. Other command
-## selectors keep their existing provisioning channels.
+## All command selectors retain their Nix provisioning shape. ``ar`` and
+## ``strip`` additionally select their own version-correct views of the
+## pinned distributions GCC uses (WinLibs on Windows x64, the Bootlin
+## toolchain on Linux x86_64); normal sibling realization reuse shares the
+## verified payload without a second extraction. Other command selectors keep
+## their existing provisioning channels.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
@@ -197,6 +198,7 @@ package ranlib:
 # strip — discard symbols.
 #   strip -s -o <output> <input>        # strip all symbols (-s)
 #   strip -S -o <output> <input>        # strip debug symbols only (-S)
+#   strip -o <output> -K <symbol>... <input>   # keep the named symbols
 # ---------------------------------------------------------------------------
 
 package strip:
@@ -204,6 +206,36 @@ package strip:
     nixPackage "nixpkgs#binutils", executablePath = "bin/strip",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+
+    # Views of the compiler bundles, as ``ar`` above: the same pin and lock
+    # identity as ``gcc``, ``strip``'s own program, the Binutils version.
+    tarball url = WinLibsX64Url,
+      sha256 = WinLibsX64Sha256,
+      archiveType = "7z",
+      stripComponents = 1,
+      executablePath = "bin/strip.exe",
+      packageId = WinLibsX64PackageId,
+      cpu = "x86_64",
+      os = "windows",
+      lockIdentity = WinLibsX64LockIdentity,
+      version = WinLibsBinutilsVersion
+
+    tarball url = LinuxToolchainX64Url,
+      sha256 = LinuxToolchainX64Sha256,
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = LinuxToolchainStrip,
+      elfInterpreter = LinuxToolchainLoader,
+      elfRunpath = LinuxToolchainRuntimeDir,
+      elfPatchDir = LinuxToolchainPatchDirs[0],
+      elfPatchDir = LinuxToolchainPatchDirs[1],
+      elfPatchDir = LinuxToolchainPatchDirs[2],
+      elfPatchDir = LinuxToolchainPatchDirs[3],
+      packageId = LinuxToolchainX64PackageId,
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = LinuxToolchainX64LockIdentity,
+      version = LinuxToolchainBinutilsVersion
 
   executable stripBin:
     cli:
@@ -217,6 +249,10 @@ package strip:
           alias = "-o",
           format = separate,
           role = output
+        flag keepSymbols is seq[string],
+          alias = "-K",
+          format = separate,
+          repeated = true
         pos input is string,
           position = 0,
           role = input

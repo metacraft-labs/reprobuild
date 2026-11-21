@@ -161,8 +161,8 @@
   entrypointsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-entrypoints";
-    rev = "8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
-    hash = "sha256-2zjGCBISzkUw3tim4kUzm6sPPxyeLeX+PCrKYzbPjGk=";
+    rev = "d7edafaa9df1c7ae77d469754a463d4a512ec928";
+    hash = "sha256-yYOvfH+g94Fr7APdF0oYVlQiX38AWcEYXOiiqYJ+K2U=";
   },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.
@@ -258,7 +258,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.29";
+  version = "0.2.31";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above

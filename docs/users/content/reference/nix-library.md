@@ -250,6 +250,13 @@ derivation a [realization source](#realization-sources) resolves to is
 reported by its canonical name, never as an unknown derivation.
 `.evaluated` holds the part known without building.
 
+When the configuration reports one id twice, the entries are one fact if they
+agree on every compared field, and the first is kept: a package installed by
+two routes, or a `PATH` entry spelled two ways. Two `launchd.agents` with the
+same `config.Label` that differ in their command (`ProgramArguments` or
+`Program`), `RunAtLoad` or `KeepAlive` are refused: the error names both
+agents and each differing field.
+
 ### `reprobuild.lib.reprobuildFacts`
 
 ```nix

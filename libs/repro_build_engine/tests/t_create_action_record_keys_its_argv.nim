@@ -18,7 +18,10 @@ proc record(argv: openArray[string]; cwd = "/work"): BuildAction =
     "argv": argv,
     "cwd": cwd,
     "outputs": ["synth.o"],
-    "cacheable": true
+    "cacheable": true,
+    # A cacheable record must say how its reads are gathered
+    # (`t_create_action_record_carries_dependency_policy`).
+    "dependencyPolicy": {"kind": "automaticMonitor"}
   })
   parseCreateActionRecord(payload, "consumer.rbdyn", 2,
     lockIdentityOutsideSolvedGraph())

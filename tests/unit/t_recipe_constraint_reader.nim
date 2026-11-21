@@ -343,6 +343,26 @@ suite "repro.nim uses: constraints":
     check c.selector == "git"
     check c.admits("0.0.1")
 
+  test "an ecosystem namespace is part of the selector (NPC-M6)":
+    # Package-Model.md § Ecosystem namespaces: `nimble:chronicles` is the
+    # selector, split into its namespace and name; a plain name is unchanged.
+    let c = parseReproUsesConstraint("nimble:chronicles >=0.10")
+    check c.selector == "nimble:chronicles"
+    check c.namespace == "nimble"
+    check c.name == "chronicles"
+    check c.kind == uckRange
+    check c.admits("0.10.3")
+    let plain = parseReproUsesConstraint("zip >=1")
+    check plain.selector == "zip"
+    check plain.namespace == ""
+    check plain.name == "zip"
+    check parseReproUsesConstraint("nimble:zip").kind == uckUnconstrained
+    for bad in ["cargo:serde", ":zip", "nimble:", "nimble:a:b >=1"]:
+      let d = parseReproUsesConstraint(bad)
+      checkpoint(bad & ": " & d.diagnostic)
+      check d.kind == uckUnparseable
+      check d.diagnostic.len > 0
+
   test "an unparseable version is reported, not admitted":
     let c = parseReproUsesConstraint("x >=banana")
     check c.kind == uckUnparseable

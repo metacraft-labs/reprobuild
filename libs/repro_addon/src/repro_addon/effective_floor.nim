@@ -664,21 +664,159 @@ proc limitValue*(v: string): uint64 =
   if v == "infinity" or v.len == 0: return high(uint64)
   try: uint64(parseBiggestUInt(v)) except ValueError: high(uint64)
 
-proc ownedChainProblem(path: string): string =
-  ## Why the directories above ``path`` are not all root-owned and closed
-  ## to their group and others, or "".
-  var d = parentDir(path)
-  while d.len > 0:
-    var ds: Stat
-    if lstat(d.cstring, ds) != 0: return "its directory " & d & " cannot be read"
-    if not S_ISDIR(ds.st_mode) and not S_ISLNK(ds.st_mode):
-      return d & " is not a directory"
-    if ds.st_uid != 0: return "its directory " & d & " is not owned by root"
-    if not S_ISLNK(ds.st_mode) and (ds.st_mode.cint and 0o022) != 0:
+type
+  PathKind* = enum pkMissing, pkDir, pkLink, pkRegular, pkOther
+  PathMeta* = tuple[kind: PathKind; uid: int; mode: int]
+    ## What ``lstat(2)`` says of one path: its kind, owner and permission
+    ## bits. ``pkMissing`` stands for any failure to read it.
+  PathProbe* = object
+    ## The metadata source of ``ownedTraversal``. The real one reads the
+    ## file system (``realPathProbe``); a test passes a table, because the
+    ## metadata the walker refuses on -- a root-owned link into a directory
+    ## an ordinary user may write -- is what an ordinary user cannot make.
+    meta*: proc (path: string): PathMeta {.closure, gcsafe.}
+    readlink*: proc (path: string): string {.closure, gcsafe.}
+      ## The link's target, or "" when it cannot be read.
+
+const MaxTraversalLinks* = 40
+  ## The links one resolution may follow, Linux's own bound (path_resolution(7):
+  ## "a maximum of 40 symbolic links" per resolution, ``ELOOP`` beyond).
+
+proc realPathProbe*(): PathProbe =
+  ## ``lstat(2)`` and ``readlink(2)`` on the live file system.
+  result.meta = proc (path: string): PathMeta {.closure, gcsafe.} =
+    var st: Stat
+    if lstat(path.cstring, st) != 0: return (pkMissing, -1, 0)
+    let k = if S_ISLNK(st.st_mode): pkLink
+            elif S_ISDIR(st.st_mode): pkDir
+            elif S_ISREG(st.st_mode): pkRegular
+            else: pkOther
+    (k, int(st.st_uid), int(st.st_mode.cint and 0o7777))
+  result.readlink = proc (path: string): string {.closure, gcsafe.} =
+    try: expandSymlink(path) except OSError: ""
+
+proc ownedTraversal*(path: string; probe = realPathProbe()):
+    tuple[problem, resolved: string] =
+  ## Resolve ``path`` one component at a time, as the kernel does
+  ## (path_resolution(7)), and say why some directory the resolution
+  ## passes through is not root-owned and closed to its group and others,
+  ## or some link it follows is not root-owned; or "" with the path it
+  ## resolves to (A9 review round 21; §10.1's all-parents duty).
+  ##
+  ## Every directory traversed is checked, on both sides of every link:
+  ## the directories above a link, the target a link in the middle of the
+  ## path leads to (``/trusted/alias`` -> ``/mutable`` checks ``/mutable``),
+  ## and the directories a link's own target passes through
+  ## (``/trusted/link`` -> ``/mutable/alias/env`` checks ``/mutable`` even
+  ## when ``alias`` leads somewhere safe). A lexical walk of the parents
+  ## and a ``realpath(3)`` of the end each miss one of the two. The last
+  ## component is not checked here: the caller checks the file it resolves
+  ## to. More than ``MaxTraversalLinks`` links, a dangling or unreadable
+  ## link, or a component that cannot be read refuses (default-deny).
+  if not path.startsWith("/"):
+    return ("the path " & path & " is not absolute", "")
+  proc dirProblem(d: string; m: PathMeta): string =
+    if m.uid != 0: return "its directory " & d & " is not owned by root"
+    if (m.mode and 0o022) != 0:
       return "its directory " & d & " is writable by its group or others"
-    if d == "/": break
-    d = parentDir(d)
-  ""
+    ""
+  when mutated("environment-file-traversal-lexical"):
+    # Falsifying build: round 20's walk -- the lexical parents of a final
+    # link, then the lexical parents of what realpath(3) answers. A
+    # directory reached only through a link in the middle of a link's
+    # target is never looked at.
+    proc lexical(p: string): string =
+      var d = parentDir(p)
+      while d.len > 0:
+        let m = probe.meta(d)
+        if m.kind == pkMissing: return "its directory " & d & " cannot be read"
+        if m.kind notin {pkDir, pkLink}: return d & " is not a directory"
+        if m.uid != 0: return "its directory " & d & " is not owned by root"
+        if m.kind == pkDir and (m.mode and 0o022) != 0:
+          return "its directory " & d & " is writable by its group or others"
+        if d == "/": break
+        d = parentDir(d)
+      ""
+    proc realpath(p: string): string =
+      var pending: seq[string]
+      for c in p.split('/'):
+        if c.len > 0: pending.insert(c, 0)
+      var cur = "/"
+      var hops = 0
+      while pending.len > 0:
+        let c = pending.pop()
+        if c == "." : continue
+        if c == "..":
+          cur = parentDir(cur)
+          if cur.len == 0: cur = "/"
+          continue
+        let next = if cur == "/": "/" & c else: cur & "/" & c
+        if probe.meta(next).kind == pkLink:
+          inc hops
+          if hops > MaxTraversalLinks: return ""
+          let t = probe.readlink(next)
+          if t.len == 0: return ""
+          if t.startsWith("/"): cur = "/"
+          var parts: seq[string]
+          for x in t.split('/'):
+            if x.len > 0: parts.add(x)
+          for i in countdown(parts.high, 0): pending.add(parts[i])
+        else: cur = next
+      cur
+    if probe.meta(path).kind == pkLink:
+      let w = lexical(path)
+      if w.len > 0: return (w, "")
+    let rpath = realpath(path)
+    if rpath.len == 0: return ("the path cannot be resolved", "")
+    let w = lexical(rpath)
+    if w.len > 0: return (w, "")
+    return ("", rpath)
+  let root = probe.meta("/")
+  if root.kind != pkDir: return ("its directory / cannot be read", "")
+  let rp = dirProblem("/", root)
+  if rp.len > 0: return (rp, "")
+  var pending: seq[string]      # the components still to resolve, reversed
+  for c in path.split('/'):
+    if c.len > 0: pending.insert(c, 0)
+  var cur = "/"
+  var links = 0
+  while pending.len > 0:
+    let c = pending.pop()
+    if c == ".": continue
+    if c == "..":
+      # Already checked on the way down; ``/..`` is ``/``.
+      cur = parentDir(cur)
+      if cur.len == 0: cur = "/"
+      continue
+    let next = if cur == "/": "/" & c else: cur & "/" & c
+    let last = pending.len == 0
+    let m = probe.meta(next)
+    case m.kind
+    of pkMissing:
+      return ((if last: "it does not exist (or cannot be read): " & next
+               else: "its directory " & next & " cannot be read"), "")
+    of pkLink:
+      if m.uid != 0: return ("the link " & next & " is not owned by root", "")
+      inc links
+      if links > MaxTraversalLinks:
+        return ("resolving it follows more than " & $MaxTraversalLinks &
+                " links", "")
+      let t = probe.readlink(next)
+      if t.len == 0: return ("the link " & next & " cannot be read", "")
+      if t.startsWith("/"): cur = "/"
+      var parts: seq[string]
+      for p in t.split('/'):
+        if p.len > 0: parts.add(p)
+      for i in countdown(parts.high, 0): pending.add(parts[i])
+    of pkDir:
+      if not last:
+        let why = dirProblem(next, m)
+        if why.len > 0: return (why, "")
+      cur = next
+    of pkRegular, pkOther:
+      if not last: return (next & " is not a directory", "")
+      cur = next
+  ("", cur)
 
 proc firstComponentPaths*(show: ShowProps): seq[tuple[key, path: string]] =
   ## The first component of every ``*Directory=`` value and link systemd
@@ -1320,7 +1458,7 @@ proc environmentFileProblem*(path: string; service = "";
     if st.st_uid != 0: return "the adopted file is not owned by root"
     if (st.st_mode.cint and 0o022) != 0:
       return "the adopted file is writable by its group or others"
-    let chain = ownedChainProblem(path)
+    let (chain, _) = ownedTraversal(path)
     if chain.len > 0: return chain
     when not mutated("adopted-files-unverified"):
       var now = ""
@@ -1338,20 +1476,24 @@ proc environmentFileProblem*(path: string; service = "";
     # Falsifying build: round 5's lstat, which refused the add-on's own
     # /etc files (links into the store) as "not a regular file".
     if S_ISLNK(st.st_mode): return "it is not a regular file"
-  if S_ISLNK(st.st_mode):
-    when not mutated("environment-file-links-unchecked"):
-      if st.st_uid != 0: return "the link is not owned by root"
-      let why = ownedChainProblem(path)
-      if why.len > 0: return why
-  # Every link on the way, not only the last component.
-  try: target = expandFilename(path)
-  except OSError: return "the path cannot be resolved"
-  if stat(target.cstring, st) != 0: return "its target " & target & " cannot be read"
-  if not S_ISREG(st.st_mode): return "it is not a regular file"
+  if S_ISLNK(st.st_mode) and st.st_uid != 0 and
+      not mutated("environment-file-links-unchecked"):
+    return "the link is not owned by root"
+  # Every directory on the way, through every link (``ownedTraversal``).
+  var walked = path
+  when mutated("environment-file-links-unchecked"):
+    # Falsifying build: a final link and the directories above it go
+    # unchecked; only its target's are.
+    if S_ISLNK(st.st_mode):
+      try: walked = expandFilename(path)
+      except OSError: return "the path cannot be resolved"
+  let (chain, resolved) = ownedTraversal(walked)
+  if chain.len > 0: return chain
+  target = resolved
+  if lstat(target.cstring, st) != 0: return "its target " & target & " cannot be read"
+  if S_ISLNK(st.st_mode) or not S_ISREG(st.st_mode): return "it is not a regular file"
   if st.st_uid != 0: return "it is not owned by root"
   if (st.st_mode.cint and 0o022) != 0: return "it is writable by its group or others"
-  let chain = ownedChainProblem(target)
-  if chain.len > 0: return chain
   when not mutated("environment-files-by-mode"):
     let rt = normalisedPath(target)
     if service.len > 0 and rt.startsWith(CredentialRoot & "/" & service & "/"):

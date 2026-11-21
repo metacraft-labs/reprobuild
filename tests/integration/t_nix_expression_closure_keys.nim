@@ -276,8 +276,9 @@ suite "every workspace expressionFile is uncacheable":
     # appears twice.
     check exprs.mapIt(it.parentDir.extractFilename) == @[
       "appimage-runtime-20251108", "appimagetool-1.9.1", "go-1.25.4",
-      "python3-with-modules-1.0.0", "rust-1.94.0", "rust-1.94.0",
-      "rust-1.97.1", "rust-1.97.1", "stylus-0.64.0"]
+      "python3-opentelemetry-1.34.0", "python3-with-modules-1.0.0",
+      "rust-1.94.0", "rust-1.94.0", "rust-1.97.1", "rust-1.97.1",
+      "stylus-0.64.0"]
     for expr in exprs:
       checkpoint(expr)
       check fileExists(expr)

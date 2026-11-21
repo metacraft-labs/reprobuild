@@ -43,7 +43,21 @@
 ##    link are recorded, and after it the unit's condition result, exit
 ##    status, start time and whole journal.
 ##
-## Falsifying builds, red here: ``boot-hold-record-absent-skips`` (step 7),
+## 8. (round 21; §13 decision 172 as amended 2026-11-21, "Drop `-`") the
+##    unit started on the running host under a runtime drop-in that lifts
+##    its condition, shortens ``TimeoutStartSec=`` and makes a tool
+##    inaccessible, its record naming one scratch drop-in directory: the
+##    ``sleep`` of the fail-closed wait cannot be executed; ``ls`` fails in
+##    the conservative branch (the record a link); the script is killed by
+##    a signal while it waits. Each must fail the unit (``Result=`` not
+##    ``success``); the drop-in's ``systemctl`` made inaccessible -- so the
+##    is-active test and the reload both fail -- is the control, which the
+##    timeout fails.
+##
+## Falsifying builds, red here: ``boot-hold-dash-prefix`` (step 8: the
+## failed exec and the kill succeed), ``boot-hold-ls-failure-ignored``
+## (step 8: the failed listing holds nothing and succeeds),
+## ``boot-hold-record-absent-skips`` (step 7),
 ## ``boot-hold-systemdropin-unchecked`` and
 ## ``boot-hold-systemdropin-effective-unchecked`` (step 7's drop-in cases),
 ## ``boot-hold-wanted`` (step 2: the unit is
@@ -57,7 +71,7 @@
 ## *Mocking.* None: the real add-on, the base's own systemd and its boot
 ## transaction.
 
-import std/[json, strutils, times, unittest]
+import std/[json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -280,6 +294,69 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("the parse half refuses a socket ordered before -.mount, writing nothing",
          r.exitCode != 0 and "ordering cycle" in (r.stdout & r.stderr) and
          g.ledgerOf() == before, r.stdout & r.stderr)
+    # Step 8 (round 21): how the unit ends when something it relies on is
+    # not there. Only on a host with no switch pending: the record is the
+    # gate's own for the length of the step.
+    let pendingNow = g.exec("test -e " & Pending).exitCode == 0
+    step("no switch is pending before the boot-hold unit's failure cases",
+         not pendingNow, "")
+    if not pendingNow:
+      let dropDir = "/run/systemd/system/" & Unit & ".d"
+      let scratch = "a9r21-scratch.socket.d"
+      let results = newJObject()
+      proc failCase(label, extra: string; recordLink = false; kill = false): string =
+        ## The unit started under a drop-in with ``extra`` lines; its
+        ## Result=, ExecMainCode= and ExecMainStatus= and its journal.
+        discard g.run("rm -f " & Record & " /root/a9r21-record; " &
+          "echo " & scratch & " > /root/a9r21-record; " &
+          (if recordLink: "ln -s /root/a9r21-record " & Record
+           else: "cp /root/a9r21-record " & Record) & "; " &
+          "mkdir -p " & dropDir & "; printf '[Unit]\\nConditionPathExists=\\n" &
+          "[Service]\\nTimeoutStartSec=15\\n" & extra.replace("\n", "\\n") &
+          "' > " & dropDir & "/zz-a9r21.conf; systemctl daemon-reload; " &
+          "systemctl reset-failed " & Unit & " 2>/dev/null; true")
+        # The journal from this case on: a second's gap, then its start.
+        let since = g.run("sleep 1; date +%s").strip()
+        if kill:
+          # Killed while it waits: once the script has said it is failing
+          # the unit, its main process is the wait.
+          discard g.exec("systemctl start --no-block " & Unit & "; " &
+            "for i in $(seq 1 100); do journalctl -u " & Unit & " -o cat --no-pager " &
+            "--since=@" & since & " | grep -q 'failing the unit' && break; " &
+            "sleep 0.1; done; systemctl kill -s SEGV --kill-who=main " & Unit & "; " &
+            "for i in $(seq 1 100); do s=$(systemctl show -p ActiveState --value " & Unit &
+            "); [ $s = activating ] || break; sleep 0.2; done; true", timeoutSec = 120)
+        else:
+          discard g.exec("systemctl start " & Unit & "; true", timeoutSec = 120)
+        let shown = g.exec("systemctl show -p Result -p ExecMainCode -p ExecMainStatus " &
+          Unit & "; journalctl -u " & Unit & " -o cat --no-pager --since=@" &
+          since & "; true").stdout
+        results[label] = %shown
+        shown
+      let noCtl = "InaccessiblePaths=/usr/bin/systemctl\n"
+      let control = failCase("reload-fails", noCtl)
+      step("control: the reload fails and the wait overruns TimeoutStartSec=: the unit " &
+           "fails (round 20)", "Result=timeout" in control and
+           "systemd was not reloaded" in control, control)
+      let noSleep = failCase("sleep-exec-fails", noCtl & "InaccessiblePaths=/usr/bin/sleep\n")
+      step("the fail-closed sleep cannot be executed: the unit fails, not succeeds " &
+           "(the boot-hold unit has no `-`: decision 172 as amended 2026-11-21)",
+           "Result=" in noSleep and "Result=success" notin noSleep and
+           "systemd was not reloaded" in noSleep, noSleep)
+      let noLs = failCase("ls-fails", noCtl & "InaccessiblePaths=/usr/bin/ls\n",
+                          recordLink = true)
+      step("ls fails in the conservative branch: the listing is not nothing to hold, " &
+           "and the unit fails (A9 review round 21, M4)",
+           "the record is a link" in noLs and "cannot list the units to hold" in noLs and
+           "Result=success" notin noLs and "nothing to hold" notin noLs, noLs)
+      let killed = failCase("killed-by-signal", noCtl, kill = true)
+      step("the script killed by a signal while it waits: the unit fails",
+           ("Result=signal" in killed or "Result=core-dump" in killed) and
+           "ExecMainStatus=11" in killed, killed)
+      record["failureCases"] = results
+      discard g.run("rm -rf " & dropDir & " /run/systemd/system/" & scratch & " /root/a9r21-record; " &
+        "rm -f " & Record & "; sed -i '/" & scratch & "/d' /run/repro-addon/boot-holds-written " &
+        "2>/dev/null; systemctl daemon-reload; systemctl reset-failed " & Unit & "; true")
   except CatchableError as e:
     fails.add(b.name & ": " & e.msg)
     steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})

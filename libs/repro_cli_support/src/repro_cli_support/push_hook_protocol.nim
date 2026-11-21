@@ -7,6 +7,7 @@ import std/[json, os, osproc, strutils, times]
 import nimcrypto/sysrand
 import blake3
 import git_tool
+import repro_core/remedy_words
 from shared_clones import canonicalRemoteIdentity
 
 when defined(posix):
@@ -1007,7 +1008,7 @@ proc prePushProtocolRemediation*(cause: PrePushProtocolCause;
       "run it to see Git's error, repair the repository, and retry the push"
   of ppcRefsStream, ppcNone:
     "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-      repoRoot & "' and retry the push"
+      remedyPathWord(repoRoot) & "' and retry the push"
 
 proc prePushProtocolEvidence*(diagnostic: string;
     cause: PrePushProtocolCause; observationEvidence: string): string =

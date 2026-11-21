@@ -13,6 +13,7 @@
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_build_engine
+import repro_test_support/reasoned_skip
 
 proc fixtureWrite(path, content: string) =
   createDir(path.splitPath.head)
@@ -204,6 +205,141 @@ suite "opaque output directories":
         sawManifest = true
     check sawManifest
     check act.cacheEnumeratedDirectories(evidence).len == 0
+
+  test "a link outside a removed tree that points into it stays an input":
+    # A tree removed before the run holds only this run's writes, so what the
+    # action observes INSIDE it is not an input. A symbolic link that sits
+    # outside the tree is not inside it wherever it points: the link is the
+    # entry, and its own state is a prior input. Monitor-Hook-Shim.md
+    # §"Metadata, Probe, And Symlink APIs", "Both sides in one resolution".
+    # The filter used to place a recorded path by `realpath`, which follows
+    # the last component too, so `src/link -> ../gen/a.txt` read as a path
+    # under `gen`, left the key, and retargeting it was a false hit
+    # (reprobuild-pm issues/2026-11-18-output-tree-input-filter-drops-a-
+    # symlink-that-points-into-the-tree.md).
+    when defined(windows):
+      # The filter resolves no link spelling on Windows (reprobuild-pm
+      # issues/2026-10-27-restore-gate-symlink-spellings-are-not-resolved-on-
+      # windows.md), so a link is never placed by its target there.
+      skip("Windows resolves no link spelling in this filter, so a link " &
+        "is never placed by its target there")
+    else:
+      let sh = findExe("sh")
+      require sh.len > 0
+      # Physical spelling, and an alias of it built here, so both are held
+      # whatever `TMPDIR` is.
+      let tempRoot = expandFilename(createTempDir("repro-opaque-link", ""))
+      let alias = tempRoot & "-alias"
+      defer:
+        if symlinkExists(alias):
+          removeFile(alias)
+        removeDir(tempRoot)
+      createSymlink(tempRoot, alias)
+      fixtureWrite(tempRoot / "src" / "plain", "plain\n")
+      createSymlink("../gen/a.txt", tempRoot / "src" / "link")
+      createSymlink("../out", tempRoot / "src" / "dirlink")
+
+      # The filter itself, on the monitor's channels, for an optional
+      # candidate (`gen`) and an opaque directory (`out`).
+      createDir(tempRoot / "gen")
+      createDir(tempRoot / "out")
+      writeFile(tempRoot / "gen" / "a.txt", "A\n")
+      writeFile(tempRoot / "out" / "made.txt", "made\n")
+      createSymlink("../src/plain", tempRoot / "out" / "inner")
+      for work in [tempRoot, alias]:
+        var act = action("build", ["unused"], cwd = work, outputs = ["out"],
+          cacheable = true, monitorDepfile = work / "build.rdep",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        act.optionalOutputs = @["gen"]
+        act.removeBeforeRun = @["out"]
+        for channel in ["read", "probe"]:
+          var evidence: PathSetEvidence
+          evidence.declaredOutputs = act.outputs
+          # Every spelling of the same entries a tool or the monitor may
+          # report: a trailing `/`, a `.` component, a parent walk.
+          let observed = [work / "src/plain", work / "src/link",
+                          work / "src/dirlink", work / "src/link/",
+                          work & "/./src/link", work & "/src/./link",
+                          work & "/src/../src/link"]
+          if channel == "read":
+            evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+              evcMonitorCapture, observed)
+          else:
+            evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+              evcMonitorCapture, observed)
+          let inputs = act.cacheInputPaths(evidence)
+          checkpoint work & " " & channel & ": " & $inputs
+          check work / "src/plain" in inputs
+          check work / "src/link" in inputs
+          check work / "src/dirlink" in inputs
+          check work / "src/link/" in inputs
+          check inputs.len == observed.len
+      # Controls, in the physical spelling: the filter has not gone blind.
+      # What is inside a tree is still dropped, and so is a path that reaches
+      # the tree THROUGH a link (its ancestors are resolved; only a last
+      # component is the entry). A link INSIDE a tree that leads out of it
+      # is kept, as it was before: the action made it, but it is the only
+      # recorded trace of the source file read through it.
+      block:
+        var act = action("build", ["unused"], cwd = tempRoot, outputs = ["out"],
+          cacheable = true, monitorDepfile = tempRoot / "build.rdep",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        act.optionalOutputs = @["gen"]
+        act.removeBeforeRun = @["out"]
+        var evidence: PathSetEvidence
+        evidence.declaredOutputs = act.outputs
+        evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+          evcMonitorCapture, [tempRoot / "gen/a.txt", tempRoot / "out/made.txt",
+                              tempRoot / "src/dirlink/made.txt",
+                              tempRoot / "src/plain", tempRoot / "out/inner"])
+        check act.cacheInputPaths(evidence) ==
+          @[tempRoot / "src/plain", tempRoot / "out/inner"]
+        # The membership channel asks about the directory that was LISTED,
+        # and listing follows a link: through `src/dirlink` it is the tree's
+        # own entries, this run's writes. The listing is dropped; the link
+        # stays an input as a probe (above). A directory that is not a tree
+        # is still handed over.
+        evidence.monitorDirectoryEnumerations.observeAll(
+          evidence.evidenceProvenance, evcMonitorCapture,
+          [tempRoot / "src/dirlink", tempRoot / "src/dirlink/",
+           tempRoot / "out", tempRoot / "src"])
+        check act.cacheEnumeratedDirectories(evidence, [tempRoot]) ==
+          @[tempRoot / "src"]
+      removeFile(tempRoot / "out" / "inner")
+      removeDir(tempRoot / "gen")
+      removeDir(tempRoot / "out")
+
+      # End to end, through the depfile channel: the action reads through
+      # the link, and retargeting the link must run it again.
+      var config = defaultBuildEngineConfig(tempRoot / "cache")
+      config.bypassRunQuota = true
+      config.enableCachedOutputRestore()
+      config.maxParallelism = 1
+      var build = action("build", [sh, "-c",
+        "mkdir -p gen; echo A > gen/a.txt; echo B > gen/other.txt; " &
+        "cat src/link > product.txt; " &
+        "printf 'product.txt: src/link src/plain\\n' > build.d"],
+        cwd = tempRoot, inputs = ["src/plain"], outputs = ["product.txt"],
+        depfile = "build.d", cacheable = true,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      build.optionalOutputs = @["gen"]
+      let first = runBuild(graph([build]), config)
+      checkpoint first.results[0].stderr
+      require first.results[0].status == asSucceeded
+      check readFile(tempRoot / "product.txt") == "A\n"
+      # Unchanged: the link is keyed and still answers.
+      let unchanged = runBuild(graph([build]), config)
+      check unchanged.results[0].status == asCacheHit
+      # Retargeted: same tree, another file of it. The target text has
+      # another length, so the default timestamp policy sees the link change
+      # whatever the filesystem's mtime granularity is
+      # (Incremental-Invalidation.md §"Symlink inputs").
+      removeFile(tempRoot / "src" / "link")
+      createSymlink("../gen/other.txt", tempRoot / "src" / "link")
+      let retargeted = runBuild(graph([build]), config)
+      checkpoint retargeted.results[0].stderr
+      check retargeted.results[0].status == asSucceeded
+      check readFile(tempRoot / "product.txt") == "B\n"
 
   test "a tree may not contain its action's cwd or declared inputs":
     let tempRoot = createTempDir("repro-opaque-containment", "")

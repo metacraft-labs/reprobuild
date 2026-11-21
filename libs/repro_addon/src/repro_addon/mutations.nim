@@ -1048,6 +1048,30 @@
 ##                                            flush leaves the table
 ##                                            deleted (reprobuild-pm issue
 ##                                            2026-11-16)
+## ``egress-ignores-counter-reset``           a count of the egress table
+##                                            that went down in place is not
+##                                            noticed, so the check does not
+##                                            start over and unattributed
+##                                            packets after it stay hidden
+##                                            (reprobuild-pm issue
+##                                            2026-11-18)
+## ``egress-shortfall-while-set-not-full``  the egress check reports a
+##                                            shortfall as unattributed
+##                                            packets while no set is
+##                                            full (reprobuild-pm issue
+##                                            2026-11-21)
+## ``egress-reset-bound-ignores-set-reset``   the check that sees the
+##                                            egress counter fall takes
+##                                            each element's gain since
+##                                            the last check, though an
+##                                            element's count fell with
+##                                            it (reprobuild-pm issue
+##                                            2026-11-21)
+## ``egress-unread-instance-compared``        two egress checks that could
+##                                            not read the table's
+##                                            instance compare their
+##                                            counts (reprobuild-pm issue
+##                                            2026-11-21)
 ## ``sink-close-in-finally``                  the sink's connection handler
 ##                                            awaits its close in a finally,
 ##                                            as before; red under Nim 2.2.4
@@ -1143,6 +1167,8 @@
 ## ``fresh-accepts-user-config``              fresh_binary accepts a helper
 ##                                            built without --skipUserCfg
 ##                                            (decision 142)
+## ``fresh-accepts-nimble-path``              fresh_binary accepts a helper
+##                                            built without --noNimblePath
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
 ## ``override-rollback-removes-sig``         an intent record whose write
@@ -2037,6 +2063,23 @@ const
                           # the boot-hold unit's minimal hold is judged as a
                           # planted drop-in by the next check.
                           "boot-hold-minimal-hold-judged",
+                          # A9 review round 21: ExecStart= carries ``-``
+                          # again, so a kill or a failed exec succeeds.
+                          "boot-hold-dash-prefix",
+                          # the conservative branch ignores a failed
+                          # ``ls`` and holds nothing.
+                          "boot-hold-ls-failure-ignored",
+                          # the fetch unit drops MemoryDenyWriteExecute=.
+                          "fetch-unit-without-mdwe",
+                          # the record of none is written in two steps,
+                          # leaving a window with a marker and no record.
+                          "boot-hold-clear-record-two-step",
+                          # the triggers are stopped before their holds are
+                          # in the record.
+                          "boot-hold-triggers-before-record",
+                          # an EnvironmentFile= path is checked lexically,
+                          # skipping the targets of symlinked directories.
+                          "environment-file-traversal-lexical",
                           # what a revert stopped is not started again
                           # once its hold is cleared.
                           "revert-stopped-not-restarted",
@@ -2342,6 +2385,14 @@ const
                           # reprobuild-pm issue 2026-11-16: the observer
                           # is not tied to the host's nftables.service.
                           "egress-unit-ignores-host-ruleset",
+                          # reprobuild-pm issue 2026-11-18: a reset of the
+                          # egress table's counters in place.
+                          "egress-ignores-counter-reset",
+                          # reprobuild-pm issue 2026-11-21: a set reset,
+                          # and two unread instances compared.
+                          "egress-shortfall-while-set-not-full",
+                          "egress-reset-bound-ignores-set-reset",
+                          "egress-unread-instance-compared",
                           # The A11 code review, round 3.
                           "sink-close-in-finally", "egress-owed-by-listing",
                           "egress-owed-dropped-at-reload",
@@ -2444,6 +2495,7 @@ const
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
                           "fresh-accepts-user-config",
+                          "fresh-accepts-nimble-path",
                           # An agent apply may weaken a unit's confinement
                           # (a new whole-floor waiver, a new exception, a
                           # waived unit moved onto root) unattended: the

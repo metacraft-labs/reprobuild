@@ -97,17 +97,32 @@ proc analyse(root, name: string; extra: openArray[string] = []): (string, int) =
   argv.add name
   execCmdEx(quoteShellCommand(argv))
 
-proc level(output: string): string =
+proc level(output, name: string): string =
+  ## The number on systemd's verdict line for ``name`` -- the pattern
+  ## ``Overall exposure level for <name>: ([0-9.]+)`` -- or "". The line
+  ## goes on with a word and an emoji ("2.3 OK 🙂"); a split on ``:`` would
+  ## return all of that, and a line for another unit would be read as this
+  ## one's (A9 review round 21, M5).
+  let key = "Overall exposure level for " & name & ": "
   for l in output.splitLines():
-    if "Overall exposure level" in l:
-      result = l.split(':')[^1].strip()
+    let i = l.find(key)
+    if i < 0: continue
+    var j = i + key.len
+    var num = ""
+    while j < l.len and l[j] in {'0'..'9', '.'}:
+      num.add(l[j])
+      inc j
+    if num.len == 0: continue
+    try: discard parseFloat(num)
+    except ValueError: continue
+    return num
 
 proc exposure(name, content: string): tuple[level: string; withinOf: proc(t: int): bool] =
   ## The level systemd prints, and a check against a threshold.
   let root = privateRoot(name, content)
   let (o, c) = analyse(root, name)
   doAssert c == 0, "systemd-analyze security failed on " & name & ": " & o
-  result.level = level(o)
+  result.level = level(o, name)
   doAssert result.level.len > 0, "no exposure verdict for " & name & ": " & o
   result.withinOf = proc(t: int): bool =
     let (_, rc) = analyse(root, name, ["--threshold=" & $t])
@@ -149,6 +164,11 @@ suite "t_addon_units_meet_confinement_floor":
       let e = exposure(name, content)
       checkpoint name & ": " & e.level & ", threshold " & $threshold
       echo name, ": ", e.level
+      # The level itself, on the --threshold= scale (the level times ten),
+      # and systemd's own verdict at that threshold: the two must agree.
+      check e.level.len > 0
+      if e.level.len > 0:
+        check parseFloat(e.level) * 10.0 <= float(threshold) + 1e-9
       check e.withinOf(threshold)
       seen.add(name)
     for (n, _) in Thresholds:
@@ -180,10 +200,12 @@ suite "t_addon_units_meet_confinement_floor":
       writeFile(path, apply)
       let (o, _) = execCmdEx(quoteShellCommand([analyser(), "security",
         "--offline=yes", "--no-pager", path]))
-      checkpoint "without a private root: " & level(o) & ", alone: " & clean
-      check level(o).len > 0
+      let hostLevel = level(o, AgentApplyUnit)
+      checkpoint "without a private root: " & hostLevel & ", alone: " & clean
+      check hostLevel.len > 0
       # The drop-in relaxes settings, so it can only raise the exposure.
-      check parseFloat(level(o).split(' ')[0]) > parseFloat(clean.split(' ')[0])
+      if hostLevel.len > 0:
+        check parseFloat(hostLevel) > parseFloat(clean)
       check exposure(AgentApplyUnit, apply).level == clean
     finally:
       if hadSaved: putEnv("SYSTEMD_UNIT_PATH", saved)

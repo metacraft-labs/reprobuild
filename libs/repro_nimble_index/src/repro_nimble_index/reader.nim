@@ -73,6 +73,10 @@ proc shardRefFor(idx: NimbleIndex; bucket: uint32): int =
   idx.root.shards.binarySearch(bucket, proc (s: ShardRef; b: uint32): int =
     cmp(s.bucket, b))
 
+proc loadedShardCount*(idx: NimbleIndex): int =
+  ## How many shards have been fetched and decoded so far (each once).
+  idx.shards.len
+
 proc loadShard*(idx: var NimbleIndex; bucket: uint32): Option[NimbleShard] =
   ## The shard of ``bucket``: none when the root lists no shard there (no
   ## package of the index hashes to it). Fetched, verified and decoded once.
@@ -200,6 +204,55 @@ proc directorySource*(dir: string): IndexObjectSource =
       for i, c in s: result[i] = byte(ord(c))
       if result.len > maxBytes:
         refuse(nrOversize, path & " grew while it was read"))
+
+proc cacheIndexObject*(cacheDir: string; id: IndexObjectId;
+                       bytes: openArray[byte]) =
+  ## File ``bytes`` under ``cacheDir/objects/<id>`` when they hash to
+  ## ``id`` (atomically: a private temporary file renamed into place). Best
+  ## effort: a cache that cannot be written only costs a later re-read.
+  if indexObjectId(bytes) != id:
+    return
+  let path = objectPath(cacheDir, id)
+  try:
+    createDir(cacheDir / IndexObjectsDir)
+    let tmp = path & ".tmp-" & $getCurrentProcessId()
+    var s = newString(bytes.len)
+    for i, b in bytes: s[i] = char(b)
+    writeFile(tmp, s)
+    moveFile(tmp, path)
+  except CatchableError:
+    discard
+
+proc cachingSource*(cacheDir: string;
+                    inner: proc (): IndexObjectSource {.closure.}):
+    IndexObjectSource =
+  ## Objects read from a local cache (``cacheDir/objects/<id>``, the layout
+  ## of an index directory), and from ``inner`` -- created on the first
+  ## miss, so a fully cached read never opens it -- when absent; what
+  ## ``inner`` returns is written to the cache once it hashes to its id.
+  ## A cached file that does not hash to its name is ignored, not trusted
+  ## (the reader checks every object again anyway). This is how a lock that
+  ## names an index root resolves without reading the index repository
+  ## (spec § 1.1, "Index by hash").
+  let cached = directorySource(cacheDir)
+  var opened = false
+  var source: IndexObjectSource
+  IndexObjectSource(description: cacheDir & " (cache)",
+    fetch: proc (id: IndexObjectId; maxBytes: int): seq[byte] =
+      var hit = false
+      try:
+        result = cached.fetch(id, maxBytes)
+        hit = indexObjectId(result) == id
+      except NimbleIndexError:
+        hit = false
+      if hit:
+        return
+      if not opened:
+        source = inner()
+        opened = true
+      result = source.fetch(id, maxBytes)
+      cacheIndexObject(cacheDir, id, result)
+    )
 
 proc indexDirRootId*(dir: string): IndexObjectId =
   ## The identity of the index in ``dir``: the hash of its ``root`` file,

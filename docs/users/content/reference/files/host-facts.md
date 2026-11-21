@@ -106,11 +106,14 @@ once.
   scratch home, so on the reprobuild side an entry that spells the machine's
   real home as an absolute path keeps that path as its id, and differs from
   the Nix side's `~/<rel>`.
-- **Two producers with the same id on the reprobuild side** describe one
-  fact when they agree on every compared field, and the first entry is kept.
-  When they disagree, `repro home facts` refuses, naming both origins and
-  each differing field. `homeManagerFacts` keeps the first entry for an id
-  without comparing the others.
+- **Two producers with the same id on one side** describe one fact when they
+  agree on every compared field, and the first entry is kept. When they
+  disagree, the producer refuses, naming both origins and each differing
+  field: `repro home facts` on the reprobuild side, `homeManagerFacts` on the
+  Nix side, where the one such case is two `launchd.agents` with the same
+  `config.Label`. The `unmapped` and `uncategorized` lists are not
+  compared, and an id may repeat there (`homeManagerFacts` keeps the first
+  entry for one).
 - **A stow file and an `fsUserFile` on one path** are settled by the planner
   before the document is written, as `repro home apply` settles them: one
   entry when they agree, a refused plan when they do not.

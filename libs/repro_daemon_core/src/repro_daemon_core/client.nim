@@ -2,6 +2,7 @@ import std/[os, strutils, times]
 
 import repro_core
 
+import ./daemon_lock_probe
 import ./protocol
 
 const
@@ -206,25 +207,76 @@ proc queryUserDaemonStatus*(endpoint = defaultUserDaemonEndpoint()):
   raise newException(UserDaemonClientError,
     "unexpected user-daemon status frame: " & $frame.kind)
 
-proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
+const UserDaemonShutdownWaitSeconds = 5
+  ## How long ``requestUserDaemonShutdown`` waits for the endpoint to close,
+  ## and then again for the lockfile to go.
+
+type
+  UserDaemonShutdownResult* = object
+    ## What ``requestUserDaemonShutdown`` observed of a stop that SUCCEEDED.
+    ## A stop that did not succeed raises instead.
+    staleLockPath*: string
+      ## Non-empty when the daemon is gone but its lockfile is still on
+      ## disk. No process holds the lock, or (``staleLockDetail``) the file
+      ## could not be examined and the daemon process has exited.
+    staleLockDetail*: string
+      ## Why the leftover lockfile could not be examined, when it could not.
+    successorPid*: int64
+      ## Non-zero when ANOTHER daemon had the endpoint or the state
+      ## directory by the time a wait ended, which is why the endpoint or
+      ## the lockfile never went away. A caller must not then clean up after
+      ## "the" daemon: what is registered and recorded now is the successor's.
+
+proc userDaemonShutdownNote*(outcome: UserDaemonShutdownResult): string =
+  ## The line a command prints beside "stopped" when the stop left something
+  ## worth saying; empty when it did not.
+  if outcome.successorPid != 0:
+    return "another daemon (pid " & $outcome.successorPid &
+      ") took over while the stopped one was shutting down; it was left " &
+      "running"
+  if outcome.staleLockPath.len == 0:
+    return ""
+  if outcome.staleLockDetail.len == 0:
+    return "the daemon released its lock but left its lock file " &
+      outcome.staleLockPath & " behind; no process holds the lock, and the " &
+      "next daemon start takes it over"
+  "the daemon process is gone but its lock file " & outcome.staleLockPath &
+    " is still present and could not be examined (" &
+    outcome.staleLockDetail & ")"
+
+proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()):
+    UserDaemonShutdownResult {.discardable.} =
   ## Issue the shutdown request and wait for the daemon to RELEASE
-  ## its endpoint — not just to ACK. The daemon's listener loop sends
-  ## ``sdkShutdownAck`` from inside ``handleClient`` before its outer
-  ## ``defer`` chain runs (close listener, remove endpoint files,
-  ## release lock, remove lockfile). On Windows the lockfile + status
-  ## file removal lags the ACK by a few hundred microseconds; a
-  ## caller that immediately tries ``removeDir(tempRoot)`` then hits
-  ## "The process cannot access the file because it is being used by
-  ## another process." Wait until ``endpointAcceptsConnections``
-  ## flips to false before returning, which guarantees both the
-  ## listener AND the cleanup defers have run.
-  # Grab the daemon's state-dir BEFORE issuing the shutdown so we can
-  # poll for its lockfile to disappear once the endpoint flips quiet —
+  ## its endpoint and its state-directory lock — not just to ACK. The
+  ## daemon's listener loop sends ``sdkShutdownAck`` from inside
+  ## ``handleClient`` before its outer ``defer`` chain runs (close listener,
+  ## remove endpoint files, release lock, remove lockfile). On Windows the
+  ## lockfile + status file removal lags the ACK by a few hundred
+  ## microseconds; a caller that immediately tries ``removeDir(tempRoot)``
+  ## then hits "The process cannot access the file because it is being used
+  ## by another process."
+  ##
+  ## A failure says which thing was observed, because they are different
+  ## faults: the endpoint still accepting connections (the daemon never left
+  ## its accept loop), or the endpoint closed with the lock still HELD (a
+  ## process is still alive behind it). A lockfile that is merely still on
+  ## disk, held by nobody, is not a failure of the stop: the daemon has let
+  ## go of the state directory. Nor is a different daemon having taken over.
+  ## That is returned, not raised (reprobuild-pm issue 2026-11-16, "`repro
+  ## daemon stop` reports 'did not release its endpoint within 5 s' even
+  ## when the daemon exited": all three used to raise that one sentence).
+  # Ask the daemon for its state-dir and pid BEFORE issuing the shutdown so
+  # we can poll for its lockfile to disappear once the endpoint flips quiet —
   # querying after shutdown loses the race (the daemon might already
   # be tearing down the listener when the status request lands).
-  let stateDir =
-    try: queryUserDaemonStatus(endpoint).stateDir
-    except CatchableError: ""
+  var stateDir = ""
+  var daemonPid = 0'i64
+  try:
+    let before = queryUserDaemonStatus(endpoint)
+    stateDir = before.stateDir
+    daemonPid = before.pid
+  except CatchableError:
+    discard
   block:
     var socket = connectUserDaemon(endpoint, commandMode = "stop")
     defer: socket.closeIpcConn()
@@ -253,36 +305,122 @@ proc requestUserDaemonShutdown*(endpoint = defaultUserDaemonEndpoint()) =
   # status response) to disappear — that file's removal IS the final
   # action of ``releaseUserDaemonLock`` and is the canonical signal
   # the cleanup chain has fully drained.
-  proc lockfileGone(stateDir: string): bool =
-    not fileExists(stateDir / ".repro-daemon.lock")
-  let deadline = epochTime() + 5.0
+  let waitText = $UserDaemonShutdownWaitSeconds & " s"
+
+  proc successorOnEndpoint(): int64 =
+    ## The pid of a DIFFERENT daemon answering on the endpoint, else 0.
+    if daemonPid <= 0:
+      return 0
+    try:
+      let now = queryUserDaemonStatus(endpoint)
+      if now.running and now.pid > 0 and now.pid != daemonPid:
+        return now.pid
+    except CatchableError:
+      discard
+    0
+
+  proc successorInLockfile(lockPath: string): int64 =
+    ## The pid a DIFFERENT, still-running daemon wrote into the lockfile,
+    ## else 0. A daemon writes its metadata as soon as it holds the lock
+    ## (``lockMetadata``). Unreadable while locked on Windows, which answers
+    ## 0. A pid established to be gone is no successor: one that started and
+    ## died left the file, and is reported as the leftover it is.
+    if daemonPid <= 0:
+      return 0
+    try:
+      for line in readFile(lockPath).splitLines():
+        if line.startsWith("pid="):
+          let pid = parseBiggestInt(line["pid=".len .. ^1].strip())
+          if pid > 0 and pid != daemonPid and not userDaemonProcessGone(pid):
+            return pid
+    except CatchableError:
+      discard
+    0
+
+  var endpointClosed = false
+  let deadline = epochTime() + float(UserDaemonShutdownWaitSeconds)
   while epochTime() < deadline:
     if not endpointAcceptsConnections(endpoint):
-      if stateDir.len == 0:
-        # We never got a state-dir from the pre-shutdown status
-        # query. Fall back to a fixed wait long enough for the
-        # daemon's lockfile defer to land on a busy Windows host.
-        sleep(1500)
-        return
-      let lockDeadline = epochTime() + 5.0
-      while epochTime() < lockDeadline:
-        if lockfileGone(stateDir):
-          # Lockfile is gone — and on Windows ``fileExists`` only
-          # returns false once the kernel has finalised the delete
-          # (no pending-delete state), so the lockfile handle is
-          # truly closed and ``removeDir(stateDir)`` can proceed.
-          return
-        sleep(25)
-      # The lockfile is still on disk 5 s after the endpoint went
-      # quiet — something is wedging the daemon's release defer.
-      # Surface it as the same time-out error as the outer loop.
+      endpointClosed = true
       break
     sleep(10)
-  # Time-out: the daemon is still listening 5 s after ACK. That's a
-  # real bug — surface it instead of silently returning.
-  raise newException(UserDaemonClientError,
-    "user-daemon at " & endpoint & " accepted shutdown ACK but " &
-    "did not release its endpoint within 5 s")
+  if not endpointClosed:
+    # Something is still listening after the ACK. If it is another daemon
+    # (one bound the endpoint between two polls), the one we asked is gone.
+    let successor = successorOnEndpoint()
+    if successor != 0:
+      return UserDaemonShutdownResult(successorPid: successor)
+    # Otherwise the daemon never left its accept loop. That's a real bug —
+    # surface it instead of silently returning.
+    raise newException(UserDaemonClientError,
+      "user-daemon at " & endpoint & " acknowledged the shutdown request " &
+      "but is still accepting connections " & waitText & " later")
+  if stateDir.len == 0:
+    # We never got a state-dir from the pre-shutdown status
+    # query. Fall back to a fixed wait long enough for the
+    # daemon's lockfile defer to land on a busy Windows host.
+    sleep(1500)
+    return
+  let lockPath = stateDir / UserDaemonLockFileName
+  let lockDeadline = epochTime() + float(UserDaemonShutdownWaitSeconds)
+  while epochTime() < lockDeadline:
+    if not fileExists(lockPath):
+      # Lockfile is gone: removing it is the daemon's last act, after it
+      # closed its own handle. (On Windows a file whose delete is still
+      # pending behind ANOTHER process's handle also reads as gone here.)
+      return
+    sleep(25)
+
+  # The endpoint closed, yet the lockfile is still on disk. Find out which
+  # of the things that can mean is the case, and say that one.
+  #
+  # 1. Another daemon took the state directory over in the meantime (a
+  #    concurrent `repro build` auto-started one). Its lockfile is the one
+  #    we are looking at, and the daemon we stopped is gone. Asked first,
+  #    so the probe below never touches the lock of a daemon that is
+  #    starting up; the lockfile is read as well because the successor may
+  #    serve another endpoint or not have bound this one yet.
+  var successor = successorOnEndpoint()
+  if successor == 0:
+    successor = successorInLockfile(lockPath)
+  if successor != 0:
+    return UserDaemonShutdownResult(successorPid: successor)
+  let pidText =
+    if daemonPid > 0: "pid " & $daemonPid
+    else: "pid unknown"
+  let probe = probeUserDaemonLock(lockPath)
+  case probe.state
+  of udlAbsent:
+    return
+  of udlFree:
+    # 2. Nobody holds the lock: the daemon let go of it (or died), and only
+    #    the file was left. Not removed here: a daemon starting right now
+    #    may already have this very file open, and unlinking it under that
+    #    daemon would let a second one lock a fresh file beside it.
+    return UserDaemonShutdownResult(staleLockPath: lockPath)
+  of udlHeld:
+    # 3. A process is alive behind the closed endpoint. Which one is only
+    #    known when the daemon's own pid is established to be gone.
+    let holder =
+      if userDaemonProcessGone(daemonPid):
+        "the daemon process (" & pidText & ") is gone, so another " &
+          "process holds the lock"
+      else:
+        "the daemon process (" & pidText & ") still exists"
+    raise newException(UserDaemonClientError,
+      "user-daemon at " & endpoint & " closed its endpoint after the " &
+      "shutdown request, but its lock " & lockPath & " is still held " &
+      waitText & " later: " & holder)
+  of udlUnexamined:
+    if userDaemonProcessGone(daemonPid):
+      return UserDaemonShutdownResult(staleLockPath: lockPath,
+        staleLockDetail: probe.detail)
+    raise newException(UserDaemonClientError,
+      "user-daemon at " & endpoint & " closed its endpoint after the " &
+      "shutdown request, but its lock file " & lockPath & " is still " &
+      "present " & waitText & " later and could not be examined (" &
+      probe.detail & "); the daemon process (" & pidText &
+      ") still exists or could not be checked")
 
 proc requestUserDaemonSessions*(endpoint = defaultUserDaemonEndpoint()):
     seq[UserDaemonSession] =
