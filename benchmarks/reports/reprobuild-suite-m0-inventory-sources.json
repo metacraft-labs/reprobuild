@@ -5828,6 +5828,8 @@
             "actual",
             "alias",
             "allowed",
+            "body",
+            "bodyEnd",
             "bypass",
             "cacheRoot",
             "cachedMonitorToolsReady",
@@ -5850,6 +5852,7 @@
             "daemon",
             "daemonBin",
             "declared",
+            "defAt",
             "description",
             "devEnvEngine",
             "devSession",
@@ -5890,6 +5893,7 @@
             "items",
             "keyword",
             "launchPathDrives",
+            "lineAt",
             "lines",
             "lowered",
             "lp",
@@ -5951,7 +5955,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1429,
+          "line": 1440,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
