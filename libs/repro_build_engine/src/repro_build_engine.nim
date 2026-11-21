@@ -2905,7 +2905,7 @@ proc actionOutputPath(outputRoot, path: string): string =
   if path.isAbsolute or outputRoot.len == 0:
     path
   else:
-    outputRoot / path
+    joinUnderCwd(outputRoot, path)
 
 proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
   if blob.digest.algorithm != haBlake3_256:
@@ -4290,7 +4290,7 @@ proc outputRemovalLocation(root, path: string): string =
     return ""
   var physical =
     if path.isAbsolute or root.len == 0: path
-    else: root / path
+    else: joinUnderCwd(root, path)
   if not physical.isAbsolute:
     physical = getCurrentDir() & "/" & physical
   # Split the last component off WITHOUT `parentDir`: the stdlib collapses a
@@ -4990,7 +4990,7 @@ proc validateGraph(g: BuildGraph) =
     let actionId = action.id
     proc indexRoot(raw: string; optional = false; ordinary = false) =
       let physical = if raw.isAbsolute or actionCwd.len == 0: raw
-        else: actionCwd / raw
+        else: joinUnderCwd(actionCwd, raw)
       let root = outputRemovalLocation("", physical)
       if root.len > 0:
         declaredIndex.add((actionId: actionId, root: root,
@@ -5016,9 +5016,9 @@ proc validateGraph(g: BuildGraph) =
             " for " & action.id)
       for input in action.inputs:
         let physicalInput = if input.isAbsolute or action.cwd.len == 0: input
-          else: action.cwd / input
+          else: joinUnderCwd(action.cwd, input)
         let physicalOutput = if raw.isAbsolute or action.cwd.len == 0: raw
-          else: action.cwd / raw
+          else: joinUnderCwd(action.cwd, raw)
         let inputRoot = outputRemovalLocation("", physicalInput)
         let outputRoot = outputRemovalLocation("", physicalOutput)
         if removalTakesEntry(outputRoot, inputRoot):
@@ -5178,7 +5178,7 @@ proc allOutputsExist(action: BuildAction): bool =
   if action.outputs.len == 0:
     return false
   for output in action.outputs:
-    let path = if output.isAbsolute or action.cwd.len == 0: output else: action.cwd / output
+    let path = if output.isAbsolute or action.cwd.len == 0: output else: joinUnderCwd(action.cwd, output)
     if not action.outputPathReady(path):
       return false
   true
@@ -5838,7 +5838,7 @@ proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
     path
   else:
-    root / path
+    joinUnderCwd(root, path)
 
 proc materialContainmentPath(root, path: string): string =
   ## `joinPath` folds relative parent walks before the filesystem sees them.
@@ -19999,7 +19999,7 @@ proc measuredOutputBytes(action: BuildAction): int64 =
   for output in action.outputs:
     let path =
       if output.isAbsolute or action.cwd.len == 0: output
-      else: action.cwd / output
+      else: joinUnderCwd(action.cwd, output)
     try:
       if fileExists(extendedPath(path)):
         result += int64(getFileSize(extendedPath(path)))
@@ -20711,7 +20711,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for output in action.outputs:
       let path =
         if output.isAbsolute or action.cwd.len == 0: output
-        else: action.cwd / output
+        else: joinUnderCwd(action.cwd, output)
       result.add(absolutePath(path))
 
   proc nixRecordOutputs(action: BuildAction; absentIsLost: bool) =

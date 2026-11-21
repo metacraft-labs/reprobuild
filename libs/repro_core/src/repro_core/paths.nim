@@ -1,4 +1,4 @@
-import std/[strutils]
+import std/[os, strutils]
 from ./relocation import isRealDirectory
 when defined(posix):
   import std/[posix, sha1]
@@ -10,6 +10,22 @@ type
   NormalizedPath* = object
     kind*: NormalizedPathKind
     value*: string
+
+proc joinUnderCwd*(root, path: string): string =
+  ## Join a relative `path` onto an action's `root` (its cwd). Nim's `/`
+  ## cancels a `<x>/..` inside `root` lexically, but the kernel starts the
+  ## action in the directory the spelling reaches through the filesystem:
+  ## with `detour -> far/deep` and cwd `<T>/detour/../work`, the action runs
+  ## in `<T>/far/work` while `<T>/detour/../work / "stage"` folds to
+  ## `<T>/work/stage`. A root carrying a parent walk is therefore kept
+  ## verbatim, so whoever opens the result resolves it as the action does.
+  var hasWalk = false
+  for part in root.replace('\\', '/').split('/'):
+    if part == "..":
+      hasWalk = true
+      break
+  if hasWalk: root & "/" & path
+  else: root / path
 
 proc normalizeSeparators(path: string): string =
   path.replace('\\', '/')

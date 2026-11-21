@@ -12587,7 +12587,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_declared_output_not_produced_fails_the_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
