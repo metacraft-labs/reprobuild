@@ -489,7 +489,7 @@
       # vendored here); the package root (no ``src/``) is the import path. config.nims reads CONFUTILS_SRC (after a ``../nim-confutils``
       # sibling) exactly like CLI_SPEC_SRC. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-confutils/ffd5d9a6cf8481b2e696be3704f14b315a10aed9";
+      url = "github:metacraft-labs/nim-confutils/f85c716c50f29344d9d28747632897c1ebc03ada";
       flake = false;
     };
     nimcrypto-src = {
