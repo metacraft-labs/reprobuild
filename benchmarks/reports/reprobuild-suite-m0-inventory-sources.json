@@ -1773,10 +1773,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1720,
+      "integration": 1721,
       "platform/destructive": 200,
       "pure unit": 821,
-      "unclassified": 375
+      "unclassified": 374
     },
     "graphOwnedTestArtifacts": [
       {
@@ -21349,18 +21349,19 @@
     },
     {
       "binary": "build/test-bin/t_interface_nimcache_pool_is_this_users_alone",
-      "class": "unclassified",
-      "classificationReason": "mutates the process environment",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_interface_artifacts"
       ],
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

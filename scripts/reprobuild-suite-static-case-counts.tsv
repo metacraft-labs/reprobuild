@@ -658,7 +658,7 @@ libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	
 libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim	nim	8
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
-libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim	nim	14
+libs/repro_interface_artifacts/tests/t_interface_nimcache_pool_is_this_users_alone.nim	nim	21
 libs/repro_interface_artifacts/tests/t_interface_nimcache_slots.nim	nim	3
 libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim	nim	15
 libs/repro_interface_artifacts/tests/t_l3_lifted_symbols_compile_in_a_consumer.nim	nim	9

@@ -27,9 +27,11 @@
 ## owned by another account can only be made as root, so that case runs only
 ## there. The other mode and symlink cases need no privilege.
 
-import std/[os, strutils, tempfiles, unittest]
+import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
+when defined(posix):
+  import repro_core/owned_directory
 
 when defined(posix):
   import std/posix
@@ -51,6 +53,15 @@ when defined(posix):
       ""
     except OwnedDirectoryError as err:
       err.msg
+
+when defined(linux):
+  const ChildEnv = "REPRO_TEST_NIMCACHE_WALK_CHILD"
+  # Child mode of the user-namespace case below: this binary, re-executed under
+  # `unshare --user`, walks the real ancestors of a pool and reports the
+  # refusal ("" = admitted) on stdout.
+  if getEnv(ChildEnv).len > 0:
+    echo "WALK:" & refusal(getEnv(ChildEnv) / "repro-nimcache-interface" / "config")
+    quit(0)
 
 suite "the interface nimcache pool is this user's alone":
 
@@ -319,3 +330,100 @@ suite "the interface nimcache pool is this user's alone":
     checkpoint(refused)
     check runner in refused
     check readFile(runner) == Planted
+
+  when defined(linux):
+    # Inside a Nix build sandbox, or any user namespace that maps only the
+    # builder, `/` and the directories the sandbox was made from belong to
+    # accounts the namespace cannot name, so the kernel shows them as the
+    # overflow uid. Before the fix the ancestor walk refused the pool there
+    # ("/ above it belongs to another account (owned by uid 65534"), which
+    # made every sandboxed `repro home export` fail. The real-sandbox case is
+    # dotfiles' flake check `home-export-snapshot`; this one needs no Nix.
+    test "inside a user namespace, an ancestor of an unmapped owner is admitted":
+      if execCmd("unshare --user --map-current-user true") != 0:
+        # Unprivileged user namespaces are off on this host. That removes the
+        # end-to-end signal, so say so loudly, and fail where CI is supposed to
+        # have it (a `CI` variable), rather than pass silently.
+        checkpoint("SKIPPED: `unshare --user --map-current-user` does not " &
+          "work here, so the user-namespace walk is not exercised")
+        check getEnv("CI").len == 0
+      else:
+        let base = createTempDir("repro-ifpool-ns-", "")
+        defer: removeDir(base)
+        putEnv(ChildEnv, base)
+        defer: delEnv(ChildEnv)
+        let (output, code) = execCmdEx("unshare --user --map-current-user " &
+          quoteShell(getAppFilename()))
+        checkpoint(output)
+        check code == 0
+        check "WALK:\n" in output or output.strip().endsWith("WALK:")
+        check not ("belongs to another account" in output)
+
+    test "outside a user namespace the same walk still sees `/` as root's":
+      # The control: no namespace, `/` is root's, the walk admits it as it
+      # always did.
+      let base = createTempDir("repro-ifpool-ns-", "")
+      defer: removeDir(base)
+      check refusal(base / "repro-nimcache-interface" / "config") == ""
+
+  when defined(posix):
+    # What counts as an owner the namespace cannot name. Careful with what this
+    # does NOT say: every account of the host that the namespace cannot name
+    # shows as the overflow uid, an attacker's included, so being unmapped is
+    # not by itself a reason to trust a directory (the next suite does that).
+    const Initial = "         0          0 4294967295\n"
+    const Sandbox = "      1000       1000          1\n"  # one mapped uid
+    test "the overflow uid is unmapped only inside a namespace that does not map it":
+      check namespaceMapsOwnerAway(65534, Sandbox, 65534)
+      # Outside a namespace 65534 is an ordinary account (`nobody`).
+      check not namespaceMapsOwnerAway(65534, Initial, 65534)
+      check not namespaceMapsOwnerAway(65534, "0 0 4294967296\n", 65534)
+      check not namespaceMapsOwnerAway(65534, "  0   0   4294967295  \n\n", 65534)
+      # A namespace that maps 65534 to a real account of its own.
+      check not namespaceMapsOwnerAway(65534, "     65534     1234          1\n", 65534)
+      check not namespaceMapsOwnerAway(65534, "         0     1234      65536\n", 65534)
+      check not namespaceMapsOwnerAway(65534, Sandbox & "     65000     2000       1000\n", 65534)
+      # A nested namespace of a sandbox, mapping only the builder.
+      check namespaceMapsOwnerAway(65534, "         0       1000          1\n", 65534)
+    test "any other owner is another account, in a namespace or not":
+      for uid in [1, 999, 1001, 4242, 65533, 65535]:
+        check not namespaceMapsOwnerAway(uid, Sandbox, 65534)
+        check not namespaceMapsOwnerAway(uid, Initial, 65534)
+      # A reconfigured overflow uid is the one that counts, not 65534.
+      check namespaceMapsOwnerAway(1234, Sandbox, 1234)
+      check not namespaceMapsOwnerAway(65534, Sandbox, 1234)
+    test "a map that cannot be read widens nothing":
+      check not namespaceMapsOwnerAway(65534, "", 65534)
+      check not namespaceMapsOwnerAway(65534, "garbage\n", 65534)
+      check not namespaceMapsOwnerAway(65534, "a b c\n", 65534)
+      check not namespaceMapsOwnerAway(65534, "-1 0 5\n", 65534)
+      check not namespaceMapsOwnerAway(65534, "0 0 0\n", 65534)
+      check not namespaceMapsOwnerAway(65534, Sandbox, -1)
+
+  when defined(posix):
+    # The walk's owner rule. The purpose of the ancestor walk is that no other
+    # account can swap a directory above the pool. An unmapped owner may be host
+    # root or ANY host account, so it is trusted only where an unprivileged
+    # account could not have created the entry: its container is not writable
+    # by group or others.
+    test "an unmapped owner is trusted only under a container others cannot write":
+      const Me = 1000
+      const Gone = 65534
+      # `/` (no container), and entries under a 0755 / 0750 / 0700 directory.
+      check ancestorOwnerIsTrustedFor(Gone, Me, -1, true)
+      check ancestorOwnerIsTrustedFor(Gone, Me, 0o755, true)
+      check ancestorOwnerIsTrustedFor(Gone, Me, 0o750, true)
+      # An attacker's directory, or the link they left, in a shared directory:
+      # sticky (`/tmp`) or not, group- or world-writable.
+      check not ancestorOwnerIsTrustedFor(Gone, Me, 0o1777, true)
+      check not ancestorOwnerIsTrustedFor(Gone, Me, 0o777, true)
+      check not ancestorOwnerIsTrustedFor(Gone, Me, 0o775, true)
+      check not ancestorOwnerIsTrustedFor(Gone, Me, 0o2775, true)
+    test "root and this user are trusted as before, any other owner is not":
+      check ancestorOwnerIsTrustedFor(0, 1000, 0o1777, false)
+      check ancestorOwnerIsTrustedFor(1000, 1000, 0o1777, false)
+      for owner in [1, 999, 1001, 65534]:
+        # Not unmapped (outside a namespace, or a mapped account): refused
+        # whatever the container.
+        check not ancestorOwnerIsTrustedFor(owner, 1000, -1, false)
+        check not ancestorOwnerIsTrustedFor(owner, 1000, 0o755, false)
