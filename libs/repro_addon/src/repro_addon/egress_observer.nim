@@ -254,7 +254,14 @@ proc readState(path: string; table: string): EgressState =
     raise newException(EgressStateError, "the egress check's state " & path &
       " is malformed: " & e.msg)
   when not mutated("egress-state-survives-reload"):
-    if instance != table:
+    # ``-`` is an instance that could not be read: it matches none, the
+    # next ``-`` included, since a reload may fall between two checks that
+    # both read ``-`` (reprobuild-pm issue
+    # ``2026-11-21-addon-egress-check-reports-packets-a-set-held-after-a-set-reset-and-compares-two-unread-instances.md``).
+    # FALSIFYING BUILD: two unread instances match, as before.
+    let unread = (instance == "-" or table == "-") and
+                 not mutated("egress-unread-instance-compared")
+    if instance != table or unread:
       result.counts.clear()
       result.control = 0
       result.reported = 0
@@ -298,7 +305,8 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
                  controlPackets = -1'i64;
                  controlBefore: ptr int64 = nil;
                  kernelCounted = -1'i64;
-                 counterReset: ptr string = nil): seq[RefusedDestination] =
+                 counterReset: ptr string = nil;
+                 setFull = true): seq[RefusedDestination] =
   ## The destinations to record since the check before, in the order the
   ## check records them, which ``statePath`` then reflects. Raises
   ## ``EgressStateError`` (nothing written) when the state is unusable.
@@ -355,19 +363,48 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
   ## a destination whose count went down is new or grown again by its new
   ## count once that is above zero, and the control's earlier count is
   ## zero. The check that sees the counter itself fall reports the least
-  ## it can prove: the counter's new value, all counted after the reset,
-  ## less what the sets and the control's element gained since the last
-  ## check. Limits. Packets no set added before the reset and after the
+  ## it can prove (``setFull`` below): the counter's new value, all
+  ## counted after the reset, less what the elements can have gained
+  ## since it. Limits. Packets no set added before the reset and after the
   ## last check cannot be told any more; nor can any, when what fell was
   ## not the counter. The shortfall that check reads errs low by packets
   ## sent between its two reads, as every check's does, and here nothing
-  ## above it absorbs the error: the check after may report those few as
-  ## unattributed. A reset the counts have outgrown by the next check is
-  ## not seen. And nothing is judged while the table's instance cannot be
-  ## read (``table`` is ``-``), since a reload lowers the counts too. When
+  ## above it absorbs the error: while a set is full, the check after may
+  ## report those few as unattributed. A reset the counts have outgrown by
+  ## the next check is not seen: while no set is full that costs nothing;
+  ## while one is, a reset of a set every element of which has outgrown
+  ## it may be reported as unattributed packets, up to what those elements
+  ## held before it.
+  ## And nothing is judged while the table's instance cannot be
+  ## read (``table`` is ``-``), since a reload lowers the counts too, and
+  ## a state keyed to ``-`` is compared with nothing (``readState``). When
   ## the counter cannot be read at the check that sees a count go down,
   ## the next check that reads it starts over (``starting-over`` in the
   ## state) and reports none either.
+  ##
+  ## ``setFull`` says whether a set (the control's element counted) holds
+  ## ``EgressSetSize`` elements now. A set adds every packet until it is
+  ## full and only grows, so while none is full and no destination has
+  ## left one, no refused packet since the last check went unadded, and
+  ## ``unattributed`` is zero whatever the counts say; a shortfall read
+  ## then (a reset of the sets' counts that they have since outgrown) only
+  ## raises the amount already reported. The caller that cannot tell
+  ## passes nothing: a full set is assumed, and nothing is hidden.
+  ## Limits: a set also fails to add a packet when the kernel cannot
+  ## allocate the new element (``nft_dynset_new`` allocates with
+  ## ``GFP_ATOMIC``), and a deletion (``CAP_NET_ADMIN``, threat T65) of
+  ## elements added since the last check is not seen; such packets are
+  ## not reported while no set is full.
+  ##
+  ## The check that sees the counter fall reports what it can prove from
+  ## the counts it reads. When the counter alone fell, that is what the
+  ## counter holds less what the sets and the control's element gained;
+  ## when an element's count fell with it (``nft reset set``, which zeroes
+  ## every element), any element may have been reset and outgrown its old
+  ## count, so each element's gain is at most its whole count, and the
+  ## least is what the counter holds less what the sets and the control's
+  ## element hold; when a destination left its set, the packets it was
+  ## sent since are not known, and the least is none.
   ##
   ## ``controlPackets`` (the control address's count now, when known) is
   ## kept in the state as its own line, and ``controlBefore`` is set to the
@@ -380,6 +417,10 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
   # named, the others counted.
   var wentDown: string
   var wentDownMore = 0
+  # Besides the counter: an element's count fell (``elementFell``), or a
+  # destination left its set (``left``). Each bounds what the check that
+  # sees the counter fall can prove (above).
+  var elementFell, left = false
   # Not judged when the instance could not be read (``-``): a reload is
   # then not told from a reset. FALSIFYING BUILD: never judged, so a count
   # that went down is compared as any other.
@@ -402,12 +443,14 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
   if noticed and controlPackets >= 0 and controlPackets < before.control:
     fell("the control address's count", before.control, controlPackets)
     controlWas = 0
+    elementFell = true
   if controlBefore != nil: controlBefore[] = controlWas
   var now = initTable[string, int64]()
   for d in refused: now[d.address] = d.packets
   if noticed:
     for a, was in before.counts:
       if a != " counter" and a notin now:
+        left = true
         if wentDown.len == 0:
           wentDown = "the destination " & a & " (" & $was &
             " packet(s)) left its set"
@@ -435,6 +478,7 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
     if noticed and was > d.packets:
       fell("the count of " & d.address, was, d.packets)
       was = 0
+      elementFell = true
     gained += d.packets - was
     if was < d.packets:
       if d.address in owedSet: continue
@@ -473,20 +517,33 @@ proc freshSince*(refused: seq[RefusedDestination]; statePath: string;
       let lacking = (if kernelCounted >= 0:
                        kernelCounted - max(0'i64, controlPackets)
                      else: counted) - held
+      # A set that is not full added every packet (see ``setFull``).
+      # FALSIFYING BUILD: a shortfall is reported whether or not a set is
+      # full.
+      let canLack = setFull or mutated("egress-shortfall-while-set-not-full")
       if startOver:
         # Changed in place: start over from the shortfall read now. When
         # it is the counter that fell, what it holds was counted after the
-        # reset, and each of those packets is in what the sets and the
-        # control gained since the last check or in no set: the difference
-        # is the least that no set added, and is reported.
-        if unattributed != nil:
-          unattributed[] = if counterFell: max(0'i64, kernelNow - gained)
-                           else: 0'i64
+        # reset, and each of those packets is in what an element or the
+        # control's element gained since the reset or in no set. That
+        # gain is at most what each gained since the last check while no
+        # element was reset, at most what each holds when one was, and
+        # unknown when a destination left. FALSIFYING BUILD: the gain since
+        # the last check, whatever else fell.
+        let proven =
+          if not counterFell or not canLack: 0'i64
+          elif mutated("egress-reset-bound-ignores-set-reset"):
+            kernelNow - gained
+          elif left: 0'i64
+          elif elementFell: lacking
+          else: kernelNow - gained
+        if unattributed != nil: unattributed[] = max(0'i64, proven)
         reported = lacking
         startOver = false
       else:
         if unattributed != nil:
-          unattributed[] = max(0'i64, lacking - reported)
+          unattributed[] = if canLack: max(0'i64, lacking - reported)
+                           else: 0'i64
         reported = max(reported, lacking)
       text.add("counter refused " & $counted & "\n")
     # Kept when the counter could not be read this time, so a later check
@@ -594,7 +651,8 @@ proc checkEgress*(nft, statePath: string): EgressCheck =
                               controlPackets = result.controlPackets,
                               controlBefore = addr controlBefore,
                               kernelCounted = kernelCounted,
-                              counterReset = addr result.counterReset)
+                              counterReset = addr result.counterReset,
+                              setFull = result.setFull)
   except EgressStateError as e:
     # Fail closed: nothing is judged from a state the check cannot trust,
     # and the state is left as it is for the operator (A11 review round 3).
