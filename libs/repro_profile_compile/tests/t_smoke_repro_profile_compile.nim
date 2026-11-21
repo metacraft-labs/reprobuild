@@ -185,8 +185,9 @@ suite "M83 Phase C: cache layout":
     # 2026-11-15-three-windows-test-cases-fail-on-eli-pc-at-a7e1b2b79d).
     # Pure arithmetic over the real layout and the real module names, so it
     # holds on every host: a layout that gives the room back up fails here
-    # on Linux too, not only when a Windows compile reaches the limit.
-    const WindowsMaxPathChars = 259
+    # on Linux too, not only when a Windows compile reaches the limit. The
+    # limit, the reserve and the state-directory budget are the ones the
+    # compile's up-front refusal reads (`sources.maxProfileStateDirChars`).
     # Nim names a module outside the main project `@p` + its path below the
     # search path, `/` spelled `@s`, then `.c` and the object's `.o`. Every
     # `libs/<lib>/src` is on the profile compile's search path, so its
@@ -211,11 +212,15 @@ suite "M83 Phase C: cache layout":
       "@prepro_project_dsl@sinstall_mirror_resolver.nim.c.o".len
     check longest.len >=
       "@prepro_project_dsl@sreprobuild_packages_catalog.nim.c.o".len
+    # The reserve the budget is computed from covers every module of this
+    # tree; a longer module must raise it, which lowers the budget.
+    check longest.len <= ProfileNimcacheModuleNameReserveChars
     let key = profileCompileKey("/home/someone/.config/repro/home.nim")
     check key.len == 64
-    # The state directory that failed (121 characters), and the deepest
-    # the layout promises to leave room for (`cachedNimcacheDir`).
-    for stateLen in [121, 148]:
+    # The state directory that failed (121 characters) must stay inside
+    # the budget, and the deepest the budget promises must fit.
+    check maxProfileStateDirChars() >= 121
+    for stateLen in [121, maxProfileStateDirChars()]:
       let stateDir = "C:" & DirSep & repeat('s', stateLen - 3)
       check stateDir.len == stateLen
       let nimcache = cachedNimcacheDir(stateDir, key)
@@ -226,6 +231,59 @@ suite "M83 Phase C: cache layout":
       # Still the profile's own directory under the state directory.
       check nimcache.startsWith(profileCacheDir(stateDir) / "nimcache")
       check nimcache.endsWith(key[0 ..< ProfileNimcacheKeyChars])
+      check profileStateDirBudgetProblem(stateDir) == ""
+      # The other profile-cache paths the budget must cover: the lock and
+      # the binary (full key, whole path under MAX_PATH), and the platform
+      # probe's per-platform working directory, which `CreateProcessW`
+      # takes only up to MAX_PATH less its trailing `\` and NUL.
+      check cachedProfileLockPath(stateDir, key).len <= WindowsMaxPathChars
+      check cachedProfileBinaryPath(stateDir, key).len <= WindowsMaxPathChars
+      for t in ProfileTargetPlatforms:
+        check (cachedPlatformProbeScratch(stateDir, key) / t.system).len <=
+          WindowsMaxPathChars - 1
+    # One character past the budget no longer fits, and is refused.
+    let over = "C:" & DirSep & repeat('s', maxProfileStateDirChars() - 2)
+    check over.len == maxProfileStateDirChars() + 1
+    check (cachedNimcacheDir(over, key) /
+      repeat('m', ProfileNimcacheModuleNameReserveChars)).len >
+      WindowsMaxPathChars
+    check profileStateDirBudgetProblem(over) != ""
+
+  test "the diagnostic names the length, the limit and the remedy":
+    let limit = maxProfileStateDirChars()
+    # The state directory reprobuild-pm issue
+    # 2026-10-27-windows-profile-compile-fails-when-the-state-dir-is-long
+    # observed failing lies past the budget; otherwise
+    # `t_profile_compile_refuses_a_state_dir_past_the_windows_path_budget`
+    # would not exercise the refusal on Windows.
+    check limit < 171
+    let base = "C:" & DirSep
+    let fits = base & repeat('s', limit - base.len)
+    check windowsPathChars(fits) == limit
+    check profileStateDirBudgetProblem(fits) == ""
+    let long = base & repeat('s', 171 - base.len)
+    let problem = profileStateDirBudgetProblem(long)
+    checkpoint(problem)
+    check long in problem
+    check ($171 & " characters long") in problem
+    check ("at most " & $limit & " characters") in problem
+    check $WindowsMaxPathChars in problem
+    check "REPRO_HOME_STATE_DIR" in problem
+    check "--state-dir" in problem
+    check "TEMP" in problem
+
+  test "the length is counted as Windows counts it, in UTF-16 units":
+    let limit = maxProfileStateDirChars()
+    let base = "C:" & DirSep
+    # `é` is two UTF-8 bytes and one UTF-16 unit: a state directory under
+    # a non-ASCII user name that fits must not be refused for its bytes.
+    let accented = base & repeat("é", limit - base.len)
+    check accented.len > limit
+    check windowsPathChars(accented) == limit
+    check profileStateDirBudgetProblem(accented) == ""
+    # U+1F600 is four UTF-8 bytes and two UTF-16 units (a surrogate pair).
+    check windowsPathChars("\u{1F600}") == 2
+    check profileStateDirBudgetProblem(accented & "\u{1F600}") != ""
 
   test "the output name follows the profile path, never its content":
     # The declared output must not move when the profile's content does: an

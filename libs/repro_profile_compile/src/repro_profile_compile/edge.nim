@@ -773,6 +773,14 @@ proc compileProfileToRbpi*(profileRoot: string;
   if opts.publicCliPath.len == 0:
     raiseProfileCompile("compileProfileToRbpi: publicCliPath is required" &
       MissingPublicCliPathReason)
+  when defined(windows):
+    # Refuse a state directory too long for the nimcache under it BEFORE
+    # anything is created or `nim` runs: past the budget the compile failed
+    # inside `nim` / `cc1` with a message that named neither the length nor
+    # the remedy (reprobuild-pm `spec/Profile-Compilation-Model.md` step 2).
+    let budgetProblem = profileStateDirBudgetProblem(opts.stateDir)
+    if budgetProblem.len > 0:
+      raiseProfileCompile(budgetProblem)
 
   let absProfile = absolutePath(profileRoot)
   if not fileExists(extendedPath(absProfile)):
@@ -1034,6 +1042,17 @@ proc probeProfilePlatforms*(profileRoot: string;
   if opts.publicCliPath.len == 0:
     raiseProfileCompile("probeProfilePlatforms: publicCliPath is required" &
       MissingPublicCliPathReason)
+  when defined(windows):
+    # The compile's refusal, for the same state directory: the probe's
+    # per-platform working directories
+    # (`<state-dir>\profile-cache\platform-probe\<key>\<system>`, 110
+    # characters past it) reach the 258 characters `CreateProcessW` takes
+    # for a working directory at exactly the budget, so a longer state
+    # directory fails here too, inside the spawn of `nim check`.
+    let budgetProblem = profileStateDirBudgetProblem(
+      absolutePath(opts.stateDir))
+    if budgetProblem.len > 0:
+      raiseProfileCompile(budgetProblem)
   let absProfile = absolutePath(profileRoot)
   if not fileExists(extendedPath(absProfile)):
     raiseProfileCompile("probeProfilePlatforms: profile root does not " &

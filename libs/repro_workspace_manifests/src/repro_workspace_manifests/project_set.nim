@@ -25,7 +25,7 @@
 # developer happened to add projects in, so a genuine disagreement is refused
 # instead — see `Workspace-And-Develop-Mode.md` §"Multi-Project Workspaces".
 
-import std/[os, strutils, tables]
+import std/[algorithm, os, strutils, tables]
 
 import types
 import diagnostics
@@ -47,6 +47,23 @@ proc ladderRelPaths(name: string):
   (project: "projects/" & name & ".toml",
    variant: "variants/" & name & ".toml",
    repoSet: repoSetsDirName & "/" & name & ".toml")
+
+proc definedSetNamesAt*(source: ManifestSource): seq[string] =
+  ## Every name ``source`` DEFINES: the basename of each ``.toml`` directly
+  ## inside the three directories the ladder consults (``projects/``,
+  ## ``variants/``, ``repo-sets/``), once each, sorted.
+  ##
+  ## A listing and not a resolve: a set whose manifest is malformed still
+  ## exists, and a name listed here is exactly a name ``resolveManifestNameAt``
+  ## looks a file up for. Over a git source this reads the commit's tree and
+  ## nothing else, so the names a revision defines are knowable without a
+  ## working tree.
+  for dir in ["projects", "variants", repoSetsDirName]:
+    for relPath in source.listTomlFiles(dir):
+      let name = relPath.splitFile.name
+      if name notin result:
+        result.add(name)
+  result.sort()
 
 proc namesOnlyVariantOrRepoSetAt*(source: ManifestSource;
                                   name: string): bool =

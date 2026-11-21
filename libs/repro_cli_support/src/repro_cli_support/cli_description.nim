@@ -891,8 +891,9 @@ proc branchFlags(): NimNode {.compileTime.} =
 
 proc hooksActionFlags(): NimNode {.compileTime.} =
   ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
-  ## no selector `--vcs`, `--shell-direnv` and `--shell-autocomplete` are
-  ## implied.
+  ## no selector every type is implied: `--vcs`, `--shell-direnv`,
+  ## `--shell-autocomplete` and the native integration (`--shell`) of each
+  ## shell found.
   let root = workspaceRootFlag()
   let report = workspaceReportFlags()
   quote do:
@@ -938,6 +939,9 @@ proc membershipSetFlags(): NimNode {.compileTime.} =
       boolFlag enabled is bool, help = "Only the sets enabled here"
       boolFlag disabled is bool, help = "Only the sets not enabled here"
       boolFlag all is bool, help = "Every defined set (the default)"
+      flag at is Option[string], format = equals,
+        help = "List the sets this commit of the manifest repository " &
+          "defines instead of its working tree's"
       boolFlag json is bool, help = "Print the list as JSON"
   let callList = listFlags()
   let list = listFlags()

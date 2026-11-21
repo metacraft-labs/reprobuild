@@ -4,6 +4,8 @@ import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
 
 import repro_core/cli_images
 import repro_test_support
+when defined(windows):
+  import repro_test_support/real_file_guard
 
 proc q(value: string): string =
   "'" & value.replace("'", "'\\''") & "'"
@@ -11,6 +13,15 @@ proc q(value: string): string =
 when defined(windows):
   proc psQuote(value: string): string =
     "'" & value.replace("'", "''") & "'"
+
+  proc windowsDocumentsFromPowerShell(pwsh: string): string =
+    ## The Documents folder as Windows reports it, asked of PowerShell
+    ## itself (not computed by the code under test).
+    let res = execCmdEx(quoteShellCommand([pwsh, "-NoProfile",
+      "-NonInteractive", "-Command",
+      "[Environment]::GetFolderPath('MyDocuments')"]))
+    doAssert res.exitCode == 0 and res.output.strip().len > 0, res.output
+    res.output.strip()
 
 # prepareMonitorTools is exported from libs/repro_test_support and now
 # threads the ct_interpose source path through the Windows shim build.
@@ -94,6 +105,10 @@ proc envFor(c: M6Case): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
     if key.startsWith("__REPRO_"):
+      continue
+    # The invoking shell's own direnv state must not leak in: the native
+    # hook reads DIRENV_DIR to stand down.
+    if key.startsWith("DIRENV_"):
       continue
     result[key] = value
   result["HOME"] = c.homeDir
@@ -333,7 +348,189 @@ proc requireFishHook(c: M6Case; fish: string) =
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireNativeStats(statsPath)
 
-when isNixSupported:
+
+# ---------------------------------------------------------------------------
+# Standing down for direnv (a bare `repro hooks ensure` installs both the
+# direnv `.envrc` block and the native hook; in a directory direnv manages
+# the native hook does nothing).
+# ---------------------------------------------------------------------------
+
+proc requireDirenv(): string =
+  result = findExe("direnv")
+  if result.len == 0:
+    raise newException(OSError,
+      "the direnv stand-down gate requires a real direnv binary on PATH")
+
+proc direnvEnv(c: M6Case): StringTableRef =
+  result = c.envFor()
+  result["DIRENV_LOG_FORMAT"] = ""
+
+proc prepareDirenvProjects(c: M6Case; direnv: string) =
+  ## project-a: the generated `.envrc`, allowed, so direnv manages it.
+  ## project-b: the same `.envrc`, NOT allowed, so direnv loads nothing there
+  ## and the native hook must activate.
+  for project in [c.projectA, c.projectB]:
+    discard requireRepro(c, @["hooks", "ensure", "--shell-direnv", project])
+    check "__repro-direnv-activate" in readFile(project / ".envrc")
+  let res = runProgram(direnv, @["allow", "."], c.projectA, c.direnvEnv())
+  if res.exitCode != 0:
+    raise newException(OSError, "direnv allow failed: " & res.output)
+
+proc posixStandDownProbe(c: M6Case; shell, direnv: string): string =
+  ## Loads direnv's hook, then the native block, then visits project-a
+  ## (direnv's), project-b (blocked `.envrc`: native) and leaves.
+  let hook = "eval \"$(" & q(direnv) & " hook " & shell & ")\"\n"
+  let rc = if shell == "zsh": c.homeDir / ".zshrc" else: c.homeDir / ".bashrc"
+  let count = "printf '%s' \"$PATH\" | tr ':' '\\n' | grep -c 'tools/bin$'"
+  hook & "source " & q(rc) & "\n" &
+    "__repro_probe_path0=$PATH\n" &
+    "cd " & q(c.projectA) & "\n" &
+    "printf 'DA:%s|%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"${DIRENV_DIR-unset}\" \"$(" & count & ")\" \"$(fixture-tool)\"\n" &
+    "printf 'DASTATS:%s\\n' \"$(test -e \"$REPRO_NATIVE_SHELL_STATS\" && echo native || echo none)\"\n" &
+    "cd " & q(c.projectB) & "\n" &
+    "printf 'NB:%s|%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"${DIRENV_DIR-unset}\" \"$(" & count & ")\" \"$(fixture-tool)\"\n" &
+    "cd " & q(parentDir(c.projectA)) & "\n" &
+    "printf 'OUT:%s|%s|%s\\n' \"${AUX_VALUE-unset}\" \"${FIXTURE_MODE-unset}\" \"${DIRENV_DIR-unset}\"\n" &
+    "if [ \"$PATH\" = \"$__repro_probe_path0\" ]; then echo PATHRESTORED:yes; else printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; fi\n"
+
+proc fishStandDownProbe(c: M6Case; direnv: string): string =
+  let count = "(count (string match -- '*tools/bin' $PATH))"
+  q(direnv) & " hook fish | source\n" &
+    "source " & q(c.xdgConfig / "fish" / "config.fish") & "\n" &
+    "set -g __repro_probe_path0 (string join : $PATH)\n" &
+    "cd " & q(c.projectA) & "\n" &
+    "printf 'DA:%s|%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$DIRENV_DIR\" " & count & " (fixture-tool)\n" &
+    "if test -e \"$REPRO_NATIVE_SHELL_STATS\"; echo DASTATS:native; else; echo DASTATS:none; end\n" &
+    "cd " & q(c.projectB) & "\n" &
+    "printf 'NB:%s|%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$DIRENV_DIR\" " & count & " (fixture-tool)\n" &
+    "cd " & q(parentDir(c.projectA)) & "\n" &
+    "printf 'OUT:%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$DIRENV_DIR\"\n" &
+    "if test (string join : $PATH) = \"$__repro_probe_path0\"; echo PATHRESTORED:yes; else; printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; end\n"
+
+proc requireStandDown(c: M6Case; shell, program: string;
+                      args: seq[string]; unset: string) =
+  ## In project-a direnv activates once and the native hook writes no stats;
+  ## in project-b (blocked `.envrc`) the native hook activates; leaving
+  ## restores PATH.
+  let env = c.direnvEnv()
+  let nativeStats = c.tempRoot / (shell & "-standdown-native-stats.json")
+  let direnvStats = c.tempRoot / (shell & "-standdown-direnv-stats.json")
+  env["REPRO_NATIVE_SHELL_STATS"] = nativeStats
+  env["REPRO_DIRENV_STATS"] = direnvStats
+  let res = runProgram(program, args, c.tempRoot, env)
+  checkpoint(shell & " stand-down probe:\n" & res.output)
+  check res.exitCode == 0
+  # Activated once, by direnv: its values, ONE tools/bin on PATH, direnv's
+  # stats written and the native hook's not.
+  requireShellValue(res.output, "DA:",
+    "DA:alpha|one|-" & c.projectA & "|1|tool:alpha:one")
+  requireShellValue(res.output, "DASTATS:", "DASTATS:none")
+  check fileExists(direnvStats)
+  # A blocked `.envrc` activates nothing, so the native hook does. direnv
+  # still sets DIRENV_DIR for it (the blocked directory), which is why the
+  # stand-down also asks `direnv status` whether that RC is allowed.
+  requireShellValue(res.output, "NB:",
+    "NB:beta|two|-" & c.projectB & "|1|tool:beta:two")
+  check fileExists(nativeStats)
+  if fileExists(nativeStats):
+    let stats = parseJson(readFile(nativeStats))
+    check stats["command"].getStr() == "hooks shell-native"
+  requireShellValue(res.output, "OUT:",
+    "OUT:" & unset & "|" & unset & "|" & unset)
+  requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
+
+proc direnvLoadedVars(c: M6Case; direnv, project: string):
+    seq[tuple[name, value: string]] =
+  ## What a real direnv exports once it has loaded `project`'s `.envrc`:
+  ## `DIRENV_FILE` and `DIRENV_WATCHES`, the two variables `direnv status`
+  ## reads to describe the loaded RC (`LoadedRC` in direnv's
+  ## `internal/cmd/config.go`). Read from `direnv export json`, stdout only
+  ## (the `.envrc`'s own diagnostics go to stderr).
+  var process = startProcess(direnv, args = @["export", "json"],
+    workingDir = project, env = c.direnvEnv(), options = {poUsePath})
+  let output = drainStream(process.outputStream)
+  let code = process.waitForExit()
+  process.close()
+  if code != 0 or output.strip().len == 0:
+    raise newException(OSError, "direnv export json failed in " & project &
+      " (exit " & $code & "):\n" & output)
+  let exported = parseJson(output)
+  for name in ["DIRENV_FILE", "DIRENV_WATCHES"]:
+    if not exported.hasKey(name) or exported[name].kind != JString:
+      raise newException(OSError, "direnv export json set no " & name &
+        " in " & project & ":\n" & output)
+    result.add((name: name, value: exported[name].getStr()))
+
+proc pathWithout(c: M6Case; exe, path: string): string =
+  ## `path` with every directory that holds `exe` replaced by a directory of
+  ## links to everything else in it, so `exe` alone is missing.
+  var dirs: seq[string]
+  for dir in path.split(PathSep):
+    if dir.len > 0 and fileExists(dir / exe):
+      let farm = c.tempRoot / ("path-without-" & exe & "-" & $dirs.len)
+      createDir(farm)
+      for _, entry in walkDir(dir):
+        let name = entry.extractFilename
+        if name != exe and not symlinkExists(farm / name):
+          createSymlink(entry, farm / name)
+      dirs.add(farm)
+    else:
+      dirs.add(dir)
+  dirs.join($PathSep)
+
+proc requireHelperStandsDown(c: M6Case; shell: string;
+                             loaded: seq[tuple[name, value: string]];
+                             withoutDirenvPath = "") =
+  ## The activation helper itself, as every template runs it. It stands down
+  ## (prints nothing) only when BOTH halves hold: `DIRENV_DIR` names the
+  ## directory or an ancestor, and `direnv status` reports the loaded RC
+  ## allowed. `loaded` is what a real direnv exported for project-a's
+  ## allowed `.envrc` (empty where no direnv drives the case: then nothing
+  ## is loaded and no case stands down). `withoutDirenvPath`, when given, is
+  ## a `PATH` with no direnv on it, for the case where `direnv status`
+  ## cannot be run.
+  type HelperCase = tuple[direnvDir, cwd: string; withLoaded: bool;
+                          path: string; standsDown: bool]
+  let canStand = loaded.len > 0
+  var cases: seq[HelperCase] = @[
+    ("-" & c.projectA, c.projectA, true, "", canStand),
+    ("-" & c.projectA, c.projectA / "tools", true, "", canStand),
+    ("-" & parentDir(c.projectA), c.projectA, true, "", canStand),
+    ("-" & c.projectB, c.projectA, true, "", false),
+    # "project" is a string prefix of "project-a", not an ancestor.
+    ("-" & c.tempRoot / "project", c.projectA, true, "", false),
+    # DIRENV_DIR alone, with no RC loaded (as a shell that inherited it
+    # carries it): direnv does not confirm anything, so the hook activates.
+    ("-" & c.projectA, c.projectA, false, "", false)]
+  if withoutDirenvPath.len > 0:
+    # direnv is not on PATH: `direnv status` cannot be run, so the hook
+    # activates even with an allowed RC described.
+    cases.add(("-" & c.projectA, c.projectA, true, withoutDirenvPath, false))
+  for (direnvDir, cwd, withLoaded, path, standsDown) in cases:
+    let env = c.direnvEnv()
+    env["DIRENV_DIR"] = direnvDir
+    if withLoaded:
+      for (name, value) in loaded:
+        env[name] = value
+    if path.len > 0:
+      env["PATH"] = path
+    var process = startProcess(c.reproBin,
+      args = @["__repro-native-shell-activate", cwd, "--shell", shell],
+      workingDir = c.repoRoot, env = env, options = {poUsePath})
+    let output = drainStream(process.outputStream)
+    let code = process.waitForExit()
+    process.close()
+    checkpoint(shell & " DIRENV_DIR=" & direnvDir & " cwd=" & cwd &
+      " loaded=" & $withLoaded & " path=" & path & ":\n" & output)
+    check code == 0
+    if standsDown:
+      check output.len == 0
+    else:
+      check "AUX_VALUE" in output
+
+# The suite also runs on Windows, for its PowerShell case (the other cases
+# are gated on Nix inside it); until it did, that case never ran anywhere.
+when isNixSupported or defined(windows):
   suite "e2e_native_shell_hooks":
     when isNixSupported:
       test "e2e_native_shell_hooks_bash_zsh_fish":
@@ -350,6 +547,36 @@ when isNixSupported:
         writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
         discard requireRepro(c, @["hooks", "uninstall", "--shell", "bash"])
         check readFile(c.homeDir / ".bashrc") == "export USER_OWNED=1\n"
+
+      test "e2e_native_shell_hooks_stand_down_where_direnv_manages":
+        # Both cases of the stand-down, in each shell direnv supports: a
+        # directory direnv manages is activated once, by direnv, the native
+        # hook doing nothing; a directory direnv does not manage (its
+        # `.envrc` blocked) is activated by the native hook.
+        let c = prepareCase("repro-m7b-native-direnv")
+        defer: removeDir(c.tempRoot)
+        let fish = requireFish()
+        let direnv = requireDirenv()
+        installNativeHooks(c)
+        prepareDirenvProjects(c, direnv)
+        let loaded = c.direnvLoadedVars(direnv, c.projectA)
+        requireHelperStandsDown(c, "bash", loaded,
+          c.pathWithout("direnv", c.envFor()["PATH"]))
+        c.requireStandDown("bash", findExe("bash"), @["--noprofile",
+          "--norc", "-c", posixStandDownProbe(c, "bash", direnv)], "unset")
+        let zsh = findExe("zsh")
+        if zsh.len == 0:
+          raise newException(OSError,
+            "the direnv stand-down gate requires a real zsh binary on PATH")
+        c.requireStandDown("zsh", zsh, @["-f", "-c",
+          posixStandDownProbe(c, "zsh", direnv)], "unset")
+        c.requireStandDown("fish", fish, @["--no-config", "-c",
+          fishStandDownProbe(c, direnv)], "")
+        # Each shell's direnv run activated project-a and each native run
+        # project-b: both kinds of statistics are there for every shell.
+        for shell in ["bash", "zsh", "fish"]:
+          check fileExists(c.tempRoot / (shell & "-standdown-direnv-stats.json"))
+          check fileExists(c.tempRoot / (shell & "-standdown-native-stats.json"))
 
       test "e2e_native_shell_hooks_nix_managed_rc_refused":
         let c = prepareCase("repro-m6-native-nix-rc")
@@ -373,6 +600,11 @@ when isNixSupported:
 
     when defined(windows):
       test "e2e_native_shell_hooks_powershell":
+        # `hooks ensure --shell powershell` writes the profile under the
+        # Documents folder Windows reports, which no environment variable
+        # redirects: this leg WRITES THE INVOKING USER'S REAL PowerShell
+        # profiles, saved to an on-disk journal first and restored after
+        # (`repro_test_support/real_file_guard`).
         let c = prepareCase("repro-m6-native-powershell")
         defer: removeDir(c.tempRoot)
         let pwsh =
@@ -380,19 +612,40 @@ when isNixSupported:
         if pwsh.len == 0:
           raise newException(OSError,
             "M6 PowerShell gate requires a real PowerShell binary")
-        discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
-        let env = c.envFor()
-        let statsPath = c.tempRoot / "powershell-native-stats.json"
-        env["REPRO_NATIVE_SHELL_STATS"] = statsPath
-        let script =
-          "cd " & psQuote(c.projectA) & "; " &
-          "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
-          "cd " & psQuote(parentDir(c.projectA)) & "; " &
-          "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
-        let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
-          c.tempRoot, env)
-        check res.exitCode == 0
-        requireShellValue(res.output, "A:",
-          "A:alpha|one|" & c.projectA)
-        requireShellValue(res.output, "OUT:", "OUT:||")
-        requireNativeStats(statsPath)
+        let docs = windowsDocumentsFromPowerShell(pwsh)
+        withRealFilesSaved([docs / "PowerShell" / "Profile.ps1",
+            docs / "PowerShell" / "Microsoft.PowerShell_profile.ps1",
+            docs / "WindowsPowerShell" / "Profile.ps1",
+            docs / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"],
+            defaultRealFilesJournal("native-shell-hooks-powershell-profiles")):
+          discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
+          let env = c.envFor()
+          let statsPath = c.tempRoot / "powershell-native-stats.json"
+          env["REPRO_NATIVE_SHELL_STATS"] = statsPath
+          let script =
+            "cd " & psQuote(c.projectA) & "; " &
+            "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
+            "cd " & psQuote(parentDir(c.projectA)) & "; " &
+            "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
+          let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
+            c.tempRoot, env)
+          check res.exitCode == 0
+          requireShellValue(res.output, "A:",
+            "A:alpha|one|" & c.projectA)
+          requireShellValue(res.output, "OUT:", "OUT:||")
+          requireNativeStats(statsPath)
+          # DIRENV_DIR alone (no RC that direnv reports loaded and allowed)
+          # does not stand the hook down: it activates as before.
+          let aloneStats = c.tempRoot / "powershell-direnv-dir-alone-stats.json"
+          let aloneEnv = c.envFor()
+          aloneEnv["REPRO_NATIVE_SHELL_STATS"] = aloneStats
+          aloneEnv["DIRENV_DIR"] = "-" & c.projectA
+          let alone = runProgram(pwsh, @["-NoLogo", "-Command", script],
+            c.tempRoot, aloneEnv)
+          checkpoint(alone.output)
+          check alone.exitCode == 0
+          requireShellValue(alone.output, "A:", "A:alpha|one|" & c.projectA)
+          check fileExists(aloneStats)
+          requireHelperStandsDown(c, "powershell", @[])
+          discard requireRepro(c, @["hooks", "uninstall", "--shell",
+            "powershell"])
