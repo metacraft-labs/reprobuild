@@ -19,7 +19,9 @@
 ## contract version, the digest of its manifest, its build configuration, the
 ## digests of the files it reads, its declared prunes and rewrites, the
 ## normalisation contract, and the complete cache identity of every
-## provisioned tool it runs with (``depClosure``). When any of those tools has
+## provisioned tool it runs with (one ``buildInputs`` option, not
+## ``depClosure``: a consumer does not fetch the tools that built a prefix).
+## When any of those tools has
 ## no complete identity, the prefix's identity is incomplete and the prefix is
 ## realized locally but neither substituted nor published.
 ##
@@ -35,7 +37,7 @@
 ## change would go unnoticed. ``validatePostExtractStepDecl`` refuses such a
 ## declaration before any edge runs.
 
-import std/[algorithm, os, strutils, tables]
+import std/[os, strutils, tables]
 
 import repro_interface_artifacts
 from repro_core/paths import extendedPath
@@ -275,8 +277,9 @@ proc validatePostExtractStepDecl*(decl: PostExtractStepDecl;
 proc postExtractStepIdentityOptions*(decl: PostExtractStepDecl):
     seq[tuple[name: string; value: string]] =
   ## The step's contribution to the prefix's cache-entry options, excluding
-  ## the tools it runs with (those enter ``depClosure``). Every value is a
-  ## digest or a declared, host-independent string: no path.
+  ## the tools it runs with (the caller adds their keys as ``buildInputs``).
+  ## Every value is a digest or a declared, host-independent string: no
+  ## path.
   if not hasPostExtractStep(decl):
     return
   result.add((name: "postExtractStep",
@@ -284,10 +287,13 @@ proc postExtractStepIdentityOptions*(decl: PostExtractStepDecl):
   result.add((name: "postExtractManifest", value: decl.manifestDigest))
   result.add((name: "postExtractBuildConfig",
     value: decl.buildConfig.join("\n")))
+  # In declaration order, NOT sorted: the step receives its input files as
+  # an ordered list (``PostExtractStepContext.inputFiles``), so two
+  # declarations naming the same files in a different order can produce
+  # different bytes and must not share a key.
   var digests: seq[string]
   for input in decl.inputFiles:
     digests.add(input.sha256.toLowerAscii)
-  digests.sort()
   result.add((name: "postExtractInputs", value: digests.join("\n")))
   if decl.prunePaths.len > 0:
     result.add((name: "postExtractPrunes", value: decl.prunePaths.join("\n")))

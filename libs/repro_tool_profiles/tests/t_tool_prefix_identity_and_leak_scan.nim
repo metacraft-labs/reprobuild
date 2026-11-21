@@ -165,6 +165,14 @@ suite "composite identity of a build step":
     c.inputFiles[0].sha256 = repeat('d', 64)
     check postExtractStepIdentityOptions(a) != postExtractStepIdentityOptions(c)
     check postExtractStepIdentityOptions(PostExtractStepDecl()).len == 0
+    # The step receives its inputs in order, so the order keys the entry.
+    var two = a
+    two.inputFiles.add(PostExtractStepInputFile(path: "/one/patch.diff",
+      sha256: repeat('e', 64)))
+    var swapped = two
+    swapped.inputFiles = @[two.inputFiles[1], two.inputFiles[0]]
+    check postExtractStepIdentityOptions(two) !=
+      postExtractStepIdentityOptions(swapped)
 
 suite "post-extraction step declarations":
 

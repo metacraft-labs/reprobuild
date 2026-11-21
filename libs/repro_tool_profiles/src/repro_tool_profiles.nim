@@ -4412,7 +4412,21 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
     for option in postExtractStepIdentityOptions(plan.postExtract):
       result.addOption(option.name, option.value)
     result.addOption("buildInputs", buildInputKeys(plan.stepInputs))
-    let incomplete = incompleteReasons(plan.stepInputs)
+    var incomplete = incompleteReasons(plan.stepInputs)
+    # Every tool the step declares must have been resolved to an identity
+    # by the edge executor. One that was not would simply be absent from
+    # ``buildInputs``, and the key would then claim a complete identity for
+    # bytes built with a tool it does not name; so a missing one makes the
+    # identity incomplete rather than silently smaller.
+    for dependency in plan.postExtract.dependencies:
+      var resolved = false
+      for input in plan.stepInputs:
+        if input.role == dependency.packageSelector:
+          resolved = true
+          break
+      if not resolved:
+        incomplete.add(dependency.packageSelector &
+          " has no resolved identity")
     if incomplete.len > 0:
       result.addOption(PendingCacheIdentityOptionKey,
         "the post-extraction step ran with inputs whose identity is " &
@@ -6993,10 +7007,11 @@ proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
   ## Nim whose lock entry names a source archive.
   let dest = nimSourceBuildDest(storeRoot, version, sha256)
   let nimExe = dest / "bin" / "nim"
-  let identity = nimSourceBuildCacheIdentity(version, sha256, cc, sdkRoot)
   let marker = dest / ".repro-built"
   if fileExists(extendedPath(marker)) and fileExists(extendedPath(nimExe)):
     return nimExe
+  # Derived only when a build is due, so a warm call pays nothing for it.
+  let identity = nimSourceBuildCacheIdentity(version, sha256, cc, sdkRoot)
   createDir(extendedPath(dest.parentDir))
   let work = dest & ".build-" & $getCurrentProcessId()
   if dirExists(extendedPath(work)):
