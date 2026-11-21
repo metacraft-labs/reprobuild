@@ -517,6 +517,12 @@ const
         path: "build/bin/repro-tests-fragment",
         actionId: "reprobuild.apps.repro-tests-fragment")]),
     TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m14_shim_answers_tests_entry.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-tests-fragment",
+        actionId: "reprobuild.apps.repro-tests-fragment")]),
+    TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(
         path: "build/test-fixtures/macos-no-bundle/no_bundle_launch",
