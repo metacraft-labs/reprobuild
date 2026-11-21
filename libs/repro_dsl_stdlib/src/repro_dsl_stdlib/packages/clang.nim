@@ -7,6 +7,7 @@
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/packages/binutils as binutilsModule
 import repro_dsl_stdlib/types/library
 import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/operations/buildtype
@@ -397,33 +398,10 @@ proc clangArchive*(opts: ArchiveOptions): BuildActionDef =
   result.outputs.add(opts.target)
 
 proc clangStrip*(opts: StripOptions): BuildActionDef =
-  result = BuildActionDef(
-    call: PublicCliCall(
-      packageName: "binutils",
-      executableName: "strip",
-      subcommand: "",
-      arguments: @[]))
-  if opts.target.len > 0:
-    result.call.arguments.add(PublicCliArg(
-      name: "output",
-      kind: cpkFlag,
-      alias: "-o",
-      format: cafSeparate,
-      role: carOutput,
-      encodedValue: opts.target))
-    result.outputs.add(opts.target)
-  for sym in opts.keepSymbols:
-    result.call.arguments.add(PublicCliArg(
-      name: "keep",
-      kind: cpkFlag,
-      alias: "-K",
-      format: cafSeparate,
-      encodedValue: sym))
-  let inputPath =
-    if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
-  result.call.arguments.add(PublicCliArg(
-    name: "input",
-    kind: cpkPositional,
-    position: 0,
-    role: carInput,
-    encodedValue: inputPath))
+  ## Mirrors ``gccStrip``: the canonical ``strip`` package's typed call and
+  ## provisioning identity, never the aggregate ``binutils`` selector, which
+  ## declares no ``strip`` and provisions ``ld``. GNU ``strip`` keeps the gcc
+  ## path's symmetry; clang's own ``llvm-strip`` is a separate package.
+  let input = if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
+  binutilsModule.strip(output = opts.target, keepSymbols = opts.keepSymbols,
+    input = input, after = [opts.input])

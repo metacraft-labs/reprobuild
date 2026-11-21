@@ -463,6 +463,7 @@ const
                  "t_e2e_nix_reads_intent_like_export",
                  "t_e2e_profile_compile_clang_first_run_published",
                  "t_e2e_profile_compile_ignores_ancestor_membership",
+                 "t_e2e_profile_resave_without_edit_does_not_recompile",
                  "t_e2e_home_facts_from_isolated_plan",
                  "t_e2e_activity_scoped_resource_follows_host_selection",
                  "t_e2e_profile_compiles_of_one_profile_are_serialised"]:
@@ -507,6 +508,14 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/bin/repro-agent-conformance",
         actionId: "reprobuild.apps.repro-agent-conformance")]),
+    # The engine runs the per-test producer from beside its own image, so a
+    # `repro test` of a package that uses `runPerTest` needs the shipped app.
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m14_repro_collects_tests_per_entry.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-tests-fragment",
+        actionId: "reprobuild.apps.repro-tests-fragment")]),
     TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(
@@ -1049,11 +1058,12 @@ package reprobuild:
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
     # Linux and macOS (so path mode finds it there); on Windows there is no
-    # flake shell, and the path-mode resolver realizes it from the release
-    # archives reprobuild-packages' ``packages/interfaces/actionlint``
-    # declares -- as it does ``just`` from the stdlib's. Without it the
-    # repository's local gate, the only gate ``agents`` has, could not pass
-    # in a Windows dev shell.
+    # flake shell. Path mode takes tools from PATH only (2026-11-17), so a
+    # Windows dev shell needs ``actionlint`` and ``just`` on PATH, or tarball
+    # mode / a per-tool override to realize them from the release archives
+    # reprobuild-packages' ``packages/interfaces/actionlint`` and the stdlib
+    # declare. Without it the repository's local gate, the only gate
+    # ``agents`` has, could not pass in a Windows dev shell.
     "actionlint"
     "sh"
     "bash"
@@ -1533,6 +1543,9 @@ package reprobuild:
 
   executable reproCmakeDyndepFragment:
     name: "repro-cmake-dyndep-fragment"
+
+  executable reproTestsFragment:
+    name: "repro-tests-fragment"
 
   executable reproCmakeTrycompileProvider:
     name: "repro-cmake-trycompile-provider"
@@ -2942,6 +2955,18 @@ package reprobuild:
       nimcache = "build/nimcache/repro-cmake-dyndep-fragment",
       runInSourceDir = true,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
+
+    # The producer `runPerTest`'s listing edge runs (from beside the engine
+    # image), so it ships wherever the engine does.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-tests-fragment/repro_tests_fragment.nim",
+      binary = "build/bin/repro-tests-fragment",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-tests-fragment",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-tests-fragment"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
     # third field on their ``apps/entrypoints.txt`` line.
@@ -4630,8 +4655,9 @@ package reprobuild:
             # Decision N (amended 2026-11-03): the prefix ships the catalog
             # fork under nim/, so the images must have been compiled by that
             # fork -- refused, naming the compiler, when the `nim` the edges
-            # resolve is not it (path mode falls back to the stock tarball
-            # Nim when the fork is not on PATH).
+            # resolve is not it (a stock Nim on PATH, or, before path mode
+            # became PATH-only on 2026-11-17, the stock tarball Nim it fell
+            # back to when the fork was not on PATH).
             nimForkGuardScript(catalogMirror("nim-fork") / "nim",
               projectRoot / "flake.lock")])
         let prefix = installedPrefix(spec, projectRoot)

@@ -411,15 +411,15 @@ when defined(linux) or defined(macosx):
       ##      MODE ALONE rather than about the mode next to the field — see
       ##      `EnablingModes` below for the two one-line edits that walk past
       ##      the weaker version, both of them measured.
-      ##   2. The only shipped file that names the field AT ALL is the one
-      ##      named below, by path. A SECOND shipped site — even one that
+      ##   2. The only shipped files that name the field AT ALL are the two
+      ##      named below, by path. ANOTHER shipped site — even one that
       ##      assigns a variable rather than a literal, which assertion 1
       ##      cannot see — reddens here. The permission is a named file, not
       ##      a widened rule: "anything under repro_cli_support" or "any line
       ##      that also mentions a flag" would have re-admitted exactly the
       ##      class this case exists to refuse.
       ##
-      ## And the allowlist is itself pinned NOT VACUOUS: the file it names has
+      ## And the allowlist is itself pinned NOT VACUOUS: each file it names has
       ## to actually carry the surface (assertion 3 below). An allowlist entry
       ## whose plumbing was deleted would otherwise sit there permanently
       ## permitting a mention nobody is making.
@@ -468,7 +468,7 @@ when defined(linux) or defined(macosx):
       #   config.monitorHosting =       # names the field, not a mode
       #     mhmRequired                 # names a mode, not the field
       #
-      # Neither is caught by a line-local conjunction. In the ONE file the
+      # Neither is caught by a line-local conjunction. In a file the
       # allowlist below permits to name the field, neither would be caught by
       # anything else either — which would leave the "no exceptions" claim
       # true only of the spelling nobody uses to be sneaky. MEASURED: with
@@ -488,12 +488,25 @@ when defined(linux) or defined(macosx):
       # THE ALLOWLIST, BY PATH AND FOR ONE REASON EACH. Adding an entry here
       # is the visible edit P1(b) asks for.
       #   * repro_cli_support.nim — `--monitor-hosting` /
-      #     `REPROBUILD_MONITOR_HOSTING`: the local variable, the flag branch,
-      #     the `executeBuildTarget` parameter and call, and the field on the
-      #     two main `BuildEngineConfig`s. Every one of those carries the
-      #     OPERATOR's value; none of them names an enabling mode.
+      #     `REPROBUILD_MONITOR_HOSTING`: the local variable, the decode of
+      #     the declared flag's value, the `executeBuildTarget` parameter and
+      #     call, and the field on the two main `BuildEngineConfig`s. Every
+      #     one of those carries the OPERATOR's value; none of them names an
+      #     enabling mode.
+      #   * repro_cli_support/cli_description.nim — the DECLARATION of that
+      #     same flag. `repro build` is parsed from the command-line
+      #     description, so the flag is no longer a hand-written
+      #     `arg == "--monitor-hosting"` arm in the CLI: it is
+      #     `flag monitorHosting is string, env = "REPROBUILD_MONITOR_HOSTING"`
+      #     there, and the field's name is the flag's name. It carries the
+      #     operator's STRING and nothing else; the decode into a mode stays
+      #     beside the enum. It is still subject to assertion 1, which has no
+      #     allowlist: an enabling mode named in the description is refused
+      #     like one named anywhere else.
+      let descriptionSource = getCurrentDir() / "libs" / "repro_cli_support" /
+        "src" / "repro_cli_support" / "cli_description.nim"
       let optInPlumbing = [getCurrentDir() / "libs" / "repro_cli_support" /
-        "src" / "repro_cli_support.nim"]
+        "src" / "repro_cli_support.nim", descriptionSource]
       # The module that DECLARES the field names it in its own type, in three
       # comments and in the hosting decision, so it cannot be scanned for a
       # bare mention. It needs no scanning: the only config it constructs is
@@ -503,7 +516,9 @@ when defined(linux) or defined(macosx):
         "src" / "repro_build_engine.nim"
       var enablingSites: seq[string] = @[]
       var unpermittedMentions: seq[string] = @[]
-      var permittedMentions = 0
+      # One count per allowlist entry, in `optInPlumbing`'s order: an entry
+      # is honest only while ITS file names the field (assertion 3).
+      var permittedMentions = newSeq[int](optInPlumbing.len)
       var scanned = 0
       let cliSource = getCurrentDir() / "libs" / "repro_cli_support" / "src" /
         "repro_cli_support.nim"
@@ -526,9 +541,11 @@ when defined(linux) or defined(macosx):
       for path in sources:
         inc scanned
         var permittedHere = false
-        for permitted in optInPlumbing:
+        var permittedIndex = -1
+        for index, permitted in optInPlumbing:
           if fileExists(permitted) and sameFile(path, permitted):
             permittedHere = true
+            permittedIndex = index
             break
         for line in readFile(path).splitLines():
           # ASSERTION 1 — no allowlist, not even for the plumbing, and the
@@ -541,7 +558,7 @@ when defined(linux) or defined(macosx):
             continue
           # ASSERTION 2 — the mention itself, permitted only by name.
           if permittedHere:
-            inc permittedMentions
+            inc permittedMentions[permittedIndex]
           else:
             unpermittedMentions.add path.extractFilename & ": " & line.strip()
       # NOT VACUOUS, and `scanned > 1` is not enough to say so: a walk that
@@ -584,12 +601,13 @@ when defined(linux) or defined(macosx):
       if unpermittedMentions.len > 0:
         echo "a shipped source outside the P1(b) opt-in plumbing names ",
           Field, ":\n  ", unpermittedMentions.join("\n  "),
-          "\n  Exactly one shipped file is allowed to name it — the CLI, ",
-          "which carries `--monitor-hosting` / `REPROBUILD_MONITOR_HOSTING` ",
-          "into the engine config. A second site is how the default gets ",
-          "flipped for one code path without flipping the default: it needs ",
-          "a named entry in `optInPlumbing` above and a reason, not a ",
-          "silent mention."
+          "\n  Exactly two shipped files are allowed to name it — the ",
+          "command-line description, which declares `--monitor-hosting` / ",
+          "`REPROBUILD_MONITOR_HOSTING`, and the CLI, which carries the ",
+          "declared value into the engine config. Another site is how the ",
+          "default gets flipped for one code path without flipping the ",
+          "default: it needs a named entry in `optInPlumbing` above and a ",
+          "reason, not a silent mention."
       check unpermittedMentions.len == 0
 
       # ASSERTION 3, AND IT IS WHAT KEEPS ASSERTION 2's ALLOWLIST HONEST.
@@ -606,49 +624,77 @@ when defined(linux) or defined(macosx):
       #
       # THAT WAS NOT HYPOTHETICAL. This file previously said so and stopped
       # there: "a CLI that had lost the flag but kept a comment naming it
-      # would satisfy it". The CLI carries two such comments TODAY, at
-      # `repro_cli_support.nim:8356` and `:18769`, and either satisfies a
-      # raw-text `contains` on its own — so the weakness was live, not
-      # prospective. The identical defect was measured, and fixed the same
-      # way, in `t_s7_build_paths_reach_the_restore_config`.
+      # would satisfy it". The CLI carried two such comments when this was
+      # written, and either satisfied a raw-text `contains` on its own — so
+      # the weakness was live, not prospective. The identical defect was
+      # measured, and fixed the same way, in
+      # `t_s7_build_paths_reach_the_restore_config`.
       let cliCode = nimSourceCommentsBlanked(readFile(cliSource))
-      if permittedMentions == 0:
-        echo "the P1(b) allowlist permits ", Field,
-          " in the CLI, but the CLI does not name it: the entry is now a ",
-          "standing exemption for a plumbing that no longer exists. Remove ",
-          "the entry, or restore the surface."
-      check permittedMentions > 0
+      for index, permitted in optInPlumbing:
+        if permittedMentions[index] == 0:
+          echo "the P1(b) allowlist permits ", Field, " in ", permitted,
+            ", but that file does not name it: the entry is now a ",
+            "standing exemption for a plumbing that no longer exists. ",
+            "Remove the entry, or restore the surface."
+        check permittedMentions[index] > 0
       if not cliCode.contains("--monitor-hosting"):
-        echo "the CLI does not carry the `--monitor-hosting` flag, so the ",
-          "P1(b) operator surface this case's allowlist was relaxed for is ",
+        echo "the CLI's code no longer spells `--monitor-hosting` (it names ",
+          "the flag when it decodes the declared value), so the P1(b) ",
+          "operator surface this case's allowlist was relaxed for is ",
           "gone; the HM-6 verdict is once again unreproducible without a ",
           "harness."
       check cliCode.contains("--monitor-hosting")
       # ... AND IT IS WIRED, NOT MERELY SPELLED. Blanking comments alone is
-      # not sufficient here, because the flag also appears in the `build`
-      # usage string and in the daemon's argument forwarder: a CLI that had
-      # lost the PARSE ARM but kept its help text would still satisfy the
-      # match above. So the chain is pinned link by link, and the three links
-      # are three different kinds of thing, which is what stops one edit
-      # satisfying all of them by accident:
+      # not sufficient here, because the token also appears as the LABEL the
+      # decode passes to `parseMonitorHostingMode` for its error message: a
+      # CLI that had lost the declaration but kept a string naming the flag
+      # would still satisfy the match above. So the chain is pinned link by
+      # link, and the links are different kinds of thing, which is what stops
+      # one edit satisfying all of them by accident:
       #
-      #   1. the token is RECOGNISED as a flag by an argument parser,
-      #   2. its value is DECODED by the parser that owns the enum, and
-      #   3. the decoded value REACHES the engine config field.
+      #   1. the flag is DECLARED on the command-line description, with its
+      #      environment variable, so the typed parser recognises it,
+      #   2. the CLI asks which source WON for it (command line, environment
+      #      or neither),
+      #   3. its value is DECODED by the parser that owns the enum, when the
+      #      command line won AND when the environment won, and
+      #   4. the decoded value REACHES the engine config field.
       #
-      # Link 3 is also what `permittedMentions > 0` above was reaching for,
-      # said as code rather than as a line count that a comment can move.
+      # Link 3 is two strings because the CLI has two decode arms and one
+      # match cannot tell them apart: without the environment arm
+      # `REPROBUILD_MONITOR_HOSTING` is declared, documented and ignored.
       #
-      # LINK 1 IS THE WEAKEST OF THE THREE AND IS DELIBERATELY NOT SHARPENED.
-      # Two parsers in this file recognise the token — `repro build`'s own,
-      # and the daemon client's forwarder — so link 1 survives the deletion of
-      # either. That is measured, not assumed: removing the `repro build` arm
-      # left link 1 green and link 2 red, which is exactly what "three links,
-      # three different kinds of thing" buys. Counting the arms instead would
-      # pin a number that moves whenever a third surface learns the flag,
-      # which is a change this audit has no opinion about.
-      for link in ["arg == \"--monitor-hosting\"",
-                   "parseMonitorHostingMode(",
+      # A DEFAULT ON THE DECLARATION WOULD NOT TURN HOSTING ON. The CLI
+      # decodes only when the command line or the environment won, so a
+      # `default = "where-supported"` written into the description is inert
+      # today. Nothing here pins that; the first check of this case, on the
+      # default config, is what would have to change with it.
+      #
+      # Link 4 is also what the per-file mention counts above were reaching
+      # for, said as code rather than as a line count that a comment can move.
+      #
+      # LINK 1 USED TO BE A HAND-WRITTEN ARM, `arg == "--monitor-hosting"`,
+      # in the CLI itself. `repro build` is now parsed from the description,
+      # so that arm is gone and the declaration is what recognises the token.
+      # It is matched over the description's CODE, comments blanked, for the
+      # reason given above: a sentence about the flag declares nothing. The
+      # declaration and its `env` are matched as ONE string because the
+      # description writes them on one line, and a flag that had lost its
+      # `env` would leave `REPROBUILD_MONITOR_HOSTING` documented and inert.
+      let descriptionCode = nimSourceCommentsBlanked(
+        readFile(descriptionSource))
+      const DeclaredFlag = "flag monitorHosting is string, " &
+        "env = \"REPROBUILD_MONITOR_HOSTING\""
+      if not descriptionCode.contains(DeclaredFlag):
+        echo "the command-line description does not declare the ",
+          "monitor-hosting flag with its environment variable: the missing ",
+          "link is `", DeclaredFlag, "`. Without it the typed parser refuses ",
+          "`--monitor-hosting`, and the P1(b) operator surface this case's ",
+          "allowlist was relaxed for is gone."
+      check descriptionCode.contains(DeclaredFlag)
+      for link in ["origin.monitorHosting.winner.kind",
+                   "parseMonitorHostingMode(c.monitorHosting,",
+                   "MonitorHostingEnvVar)",
                    "monitorHosting: monitorHosting"]:
         if not cliCode.contains(link):
           echo "the CLI names `--monitor-hosting` but does not wire it: ",
@@ -665,11 +711,13 @@ when defined(linux) or defined(macosx):
       # flag, and `--no-runquota --monitor-hosting=where-supported` produces a
       # `.host.stdout` where the default produces none.
       #
-      # The environment half is pinned at RUNTIME rather than by a source
-      # match, because a source match for an env-var name would pass on a
-      # mention of it in a comment. `configuredMonitorHostingMode` is what
-      # the CLI's `var monitorHosting = …` initialiser calls, so this is the
-      # decode the flag falls back to.
+      # The environment variable's VOCABULARY is pinned at RUNTIME, through
+      # the engine's own reader of it, `configuredMonitorHostingMode`. The
+      # CLI no longer calls that reader: it takes the variable through the
+      # declared flag and decodes it with `parseMonitorHostingMode`, the
+      # parser the reader uses too, which is what the links above pin. So
+      # these checks say what each spelling of the variable means, and the
+      # links say the CLI asks.
       let priorEnv = getEnv(MonitorHostingEnvVar)
       let priorEnvSet = existsEnv(MonitorHostingEnvVar)
       delEnv(MonitorHostingEnvVar)

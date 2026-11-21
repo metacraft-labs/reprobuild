@@ -277,10 +277,10 @@ nim-stackable-hooks
 # keep release archives and CI overrides on the same API as the Nix pin.
 runquota=6ff973131e7f715f0237cb0f08b8dd16cbeba0dc
 nim-shm-queue
-# Moved to 34ef30c (2026-11-20), nim-shm-gset's `agents` tip, with
-# `nim-shm-gset-src` in flake.nix and flake.lock: unmappable shards are
-# counted in growthFailed on insert and on every reader walk.
-nim-shm-gset=34ef30cba47ac93304078a101796a6283230e8cc
+# Moved to fc0c744 (2026-11-21), nim-shm-gset's `agents` tip, with
+# `nim-shm-gset-src` in flake.nix and flake.lock: a flatten never drains
+# the shard inserts target (`insertShardIndex`, which flattenChain calls).
+nim-shm-gset=fc0c74478d945161574a9fc49389c8fd65f09d2e
 # clispec, the `cli:` language and typed CLI model repro_project_dsl builds
 # on. Cloned at repro.lock's revision, like nim-shm-queue.
 nim-cli-spec
@@ -343,11 +343,13 @@ test-certificates-spec=9ebbcb3c9e539f294dbe125dea87c445b270523e
 # workspace as `gosti` or, before the rename, `vm-harness`). The add-on mode
 # VM gates (tests/e2e/addon/) drive QEMU and Incus guests through it, and
 # their crash gate needs the QMP hard reset, and the conversion gate the
-# caller-owned data disks (BootMediaSpec.dataDiskPaths) of this revision.
+# caller-owned data disks (BootMediaSpec.dataDiskPaths), and every QEMU
+# guest boots without an emulated display adapter
+# (BootMediaSpec.noDisplayDevice) of this revision.
 # Pinned to the SAME 40-hex revision as tests/e2e/addon/gosti.pin, which
 # scripts/run_addon_gate.sh resolves and every gate record carries; move
 # both together.
-gosti=24d481f29b2d350dcb95f702c55190823642d52a
+gosti=cf435b3ca8abbceaf3db547f86cdc67d03994d1e
 
 # The deployment repository (private; mainline `live`), cloned for ONE file:
 # `services/repro-deploy-manifest/render-deploy-manifest.py`, the independent

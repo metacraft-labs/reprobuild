@@ -72,12 +72,32 @@
 ##     ``gc.pruneExpire=never``; with a leaf registered and git >= 2.42 it is
 ##     ``2.weeks.ago``.
 ##
-## Mocks: one. The below-2.42 half of the last case runs ``prepareSharedBare``
+##   - ``checkout_paths_start_no_borrower_discovery_pass`` — refreshing a pool
+##     (``refreshSharedBare``, ``prepareSharedBare``: what clone, sync, branch
+##     and ``ws enable`` run for every repo) starts no discovery pass, never
+##     enables the window, and leaves an enabled one in place; the pass runs
+##     once, in ``maintainSharedBare``, which is where a gc may prune. Each
+##     pass walks every sibling workspace, and a workspace's repos each have
+##     their own pool, so a pass per refresh made one ``repro ws enable`` of
+##     20 repos take about two hours (reprobuild-pm
+##     ``issues/2026-11-16-repro-ws-enable-runs-a-full-sibling-workspace-discovery-pass-once-per-repo.md``).
+##   - ``refused_discovery_names_the_path_it_stopped_at`` — a pass that fails
+##     says which checkout it could not vouch for, on stderr and in
+##     ``poolRetentionReadiness``'s reason, so a pool that stays at ``never``
+##     can be explained.
+##
+## Mocks: two, both thin wrappers around the real git. The below-2.42 half
+## of ``empty_registry_or_old_git_keeps_never`` runs ``prepareSharedBare``
 ## through a two-line shell wrapper that answers ``git version`` with
 ## ``2.41.0`` and passes every other command to the real git. A real git
 ## 2.41 is not something a test host can be expected to carry, and the
 ## property under test is only that the version the tool REPORTS selects the
 ## fallback; everything the wrapper forwards is real git.
+## ``checkout_paths_start_no_borrower_discovery_pass`` drives the production
+## procs through a wrapper that appends a line to a log whenever it is asked
+## to run the discovery alias, then runs the real git with the same
+## arguments. Counting passes needs an observer at the process boundary, and
+## the wrapper changes nothing git does.
 ##
 ## ``concurrent_engine_recordings_keep_every_engine`` covers the pool's other
 ## registry, ``<pool>/repro/engines`` (§3.4): eight real child processes of
@@ -234,6 +254,17 @@ proc setUp(root: string; siblingBorrower = false; splitGraphs = false): Fixture 
   doAssert refreshed.ok, refreshed.diagnostic
   doAssert gitIn(result.pool, "rev-parse", "-q", "--verify",
     "refs/heads/feat").code != 0
+  # A refresh starts no borrower discovery pass, so it cannot enable the
+  # expiry window. Run the pass the way maintenance and migration do (the
+  # same production call), once: the cases below that gc the pool by hand
+  # rest on the window being enabled, and would otherwise pass by pruning
+  # nothing. With a sibling borrower this one pass registers B and keeps
+  # ``never``, which is the state those cases start from.
+  doAssert ensureSharedBareSafety(result.gitBin, result.pool,
+    readinessPass = true)
+  if not siblingBorrower:
+    doAssert must(result.pool, "config", "--get", "gc.pruneExpire") ==
+      PoolPruneExpire
   ageObjects(result.pool)
 
 proc tearDown() =
@@ -385,11 +416,130 @@ suite "SPI-1: the pool retains what registered leaves name":
       removeDir(root)
     let f = setUp(root, siblingBorrower = true)
     writeFile(borrowersPath(f.pool), f.a & "\n")
-    check prepareSharedBare(f.gitBin, f.pool) == ""
+    # The pass runs where a gc is about to prune (``maintainSharedBare``) and
+    # in migration, which is what ``readinessPass = true`` selects.
+    check ensureSharedBareSafety(f.gitBin, f.pool, readinessPass = true)
     check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
     check f.b in readBorrowers(f.pool)
-    check prepareSharedBare(f.gitBin, f.pool) == ""
+    check ensureSharedBareSafety(f.gitBin, f.pool, readinessPass = true)
     check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
+
+  test "checkout_paths_start_no_borrower_discovery_pass":
+    let root = createTempDir("repro-spi1-discovery-count-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    let url = "file://" & f.up
+    let log = root / "discovery-passes.log"
+    let counting = root / "git-counting-discovery"
+    writeFile(counting, "#!/bin/sh\n" &
+      "for arg in \"$@\"; do\n" &
+      "  if [ \"$arg\" = " & RetentionDiscoverAlias & " ]; then " &
+      "echo pass >> " & q(log) & "; fi\n" &
+      "done\n" &
+      "exec " & q(f.gitBin) & " \"$@\"\n")
+    setFilePermissions(counting, {fpUserRead, fpUserWrite, fpUserExec})
+    proc passes(): int =
+      (if fileExists(log): readFile(log).count("pass\n") else: 0)
+    # Positive control: the wrapper does see a pass when one is run.
+    check poolRetentionReady(counting, f.pool)
+    check passes() == 1
+    removeFile(log)
+
+    # A pool at ``never`` with a registered borrower: the state of every pool
+    # of a freshly enabled workspace. Refreshing it, as each repo of a clone,
+    # sync, branch or enable does, walks nothing and enables nothing.
+    discard must(f.pool, "config", "gc.pruneExpire", PoolNeverExpire)
+    for round in 1 .. 3:
+      check prepareSharedBare(counting, f.pool) == ""
+      let refreshed = refreshSharedBare(counting, f.cache, url)
+      check refreshed.ok
+    check passes() == 0
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
+
+    # The pass runs where a gc may prune: once per maintenance, and that is
+    # what enables the window.
+    let m = maintainSharedBare(counting, f.pool, ["ws-a"], force = true)
+    checkpoint(m.diagnostic)
+    check m.ok and m.ran
+    check m.expiryNotReadyReason == ""
+    check passes() == 1
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
+
+    # An enabled window survives later refreshes, again without a pass: the
+    # hook discovers borrowers itself on every gc.
+    removeFile(log)
+    check prepareSharedBare(counting, f.pool) == ""
+    check refreshSharedBare(counting, f.cache, url).ok
+    check passes() == 0
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
+
+    # ... but not the loss of its cheap preconditions: an emptied registry
+    # goes back to ``never`` on the next refresh, still without a pass.
+    writeFile(borrowersPath(f.pool), "")
+    check prepareSharedBare(counting, f.pool) == ""
+    check passes() == 0
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
+
+  test "refused_discovery_names_the_path_it_stopped_at":
+    let root = createTempDir("repro-spi1-discovery-names-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    writeFile(f.b / ".git" / "config", "[broken\n")
+    let hook = execCmdEx("sh " & q(retentionHookPath(f.pool)) & " --discover")
+    checkpoint(hook.output)
+    check hook.exitCode == 1
+    check ("retain-borrowed.sh: cannot vouch for " & f.b & ":") in hook.output
+    let readiness = poolRetentionReadiness(f.gitBin, f.pool)
+    checkpoint(readiness.reason)
+    check not readiness.ready
+    check ("cannot vouch for " & f.b & ":") in readiness.reason
+    check '\n' notin readiness.reason
+    # Maintenance carries the same reason, so a pool whose gc prunes nothing
+    # says why.
+    let m = maintainSharedBare(f.gitBin, f.pool, ["ws-a"], force = true)
+    check ("cannot vouch for " & f.b & ":") in m.expiryNotReadyReason
+    # A pass that only registered a checkout it had not seen is not a
+    # refusal, and names no path.
+    writeFile(f.b / ".git" / "config", "")
+    let incomplete = execCmdEx("sh " & q(retentionHookPath(f.pool)) &
+      " --discover")
+    checkpoint(incomplete.output)
+    check incomplete.exitCode == 2
+    check "cannot vouch" notin incomplete.output
+    let complete = poolRetentionReadiness(f.gitBin, f.pool)
+    check complete.ready
+    check complete.reason == ""
+
+  test "migration_converges_past_a_sibling_it_was_not_told_about":
+    # ``migrateSharedClones`` runs the one discovery pass per pool. A sibling
+    # checkout that is neither a candidate nor registered makes that pass
+    # incomplete; migration then makes the later complete pass itself, so
+    # one run still leaves the pool with the window enabled.
+    let root = createTempDir("repro-spi1-migrate-converges-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root, siblingBorrower = true)
+    writeFile(borrowersPath(f.pool), f.a & "\n")
+    discard must(f.pool, "config", "gc.pruneExpire", PoolNeverExpire)
+    let migration = migrateSharedClones(f.gitBin, f.cache, [f.a])
+    checkpoint($migration.diagnostics)
+    check f.b in readBorrowers(f.pool)
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
+    check migration.poolExpiryReasons.len == 0
+    # A pool nothing borrows from says why it stays at ``never``.
+    writeFile(borrowersPath(f.pool), "")
+    removeDir(f.a)
+    removeDir(f.b)
+    let emptied = migrateSharedClones(f.gitBin, f.cache, [])
+    check must(f.pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
+    check emptied.poolExpiryReasons.len == 1
+    check "no checkout is registered" in emptied.poolExpiryReasons[0][1]
 
   test "hook_discovers_unregistered_sibling_and_retains_its_history":
     let root = createTempDir("repro-spi1-discovery-gc-", "")
@@ -1041,7 +1191,10 @@ suite "SPI-1: the pool retains what registered leaves name":
       let f = setUp(root)
       let r = reftableLeaf(f)
       check not poolRetentionReady(f.gitBin, f.pool)
-      check prepareSharedBare(f.gitBin, f.pool) == ""
+      # The pass that maintenance runs before a gc takes the window away.
+      var why = ""
+      check ensureSharedBareSafety(f.gitBin, f.pool, readinessPass = true, why)
+      check ("cannot vouch for " & r & ":") in why
       check must(f.pool, "config", "--get", "gc.pruneExpire") ==
         PoolNeverExpire
       discard must(f.pool, "config", "gc.pruneExpire", PoolPruneExpire)
@@ -1187,6 +1340,12 @@ suite "SPI-1: the pool retains what registered leaves name":
       let leaf = root / "ws" / "leaf"
       discard must(root, "clone", "-q", "--reference", pool, url, leaf)
       check wireAlternates(leaf, pool, gitBin).ok
+      # A refresh alone never enables the window (it runs no discovery).
+      check prepareSharedBare(gitBin, pool) == ""
+      check must(pool, "config", "--get", "gc.pruneExpire") == PoolNeverExpire
+      check ensureSharedBareSafety(gitBin, pool, readinessPass = true)
+      check must(pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
+      # ... and a later refresh leaves an enabled window in place.
       check prepareSharedBare(gitBin, pool) == ""
       check must(pool, "config", "--get", "gc.pruneExpire") == PoolPruneExpire
       # The same pool through a git that reports 2.41: back to never.

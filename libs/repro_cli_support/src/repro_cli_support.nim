@@ -65,6 +65,9 @@ import repro_core/cli_images
 import repro_core/nix_configuration_env
 import repro_core/source_root
 import repro_core/variant_assignments
+from ct_test_nim_unittest/tests_fragment import PerTestRequest,
+  PerTestCompile, TestsFragmentProducerName, producerListArgv,
+  producerCheckArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -85,6 +88,11 @@ import repro_dev_env_activation
 import repro_depfile
 import repro_dev_env_artifacts
 import repro_dev_env_engine
+# The provisioning-mode vocabulary moved to ``repro_dev_env_engine``'s
+# ``tool_provisioning`` (beside the one per-tool resolver); this module
+# re-exports it so callers that import only the CLI support keep spelling
+# ``parseToolProvisioning`` as before.
+export parseToolProvisioning
 import repro_dev_env_engine/directory_trust
 import repro_interface_artifacts
 # Incremental-Test-Runner M7: shim discovery comes from the shared ``io-mon``
@@ -262,6 +270,7 @@ import repro_cli_support/provisioning_lock_selection
 import repro_cli_support/catalog_publication
 import repro_cli_support/catalog_generate
 import repro_cli_support/nimble_verify
+import repro_cli_support/nimble_lock
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -353,6 +362,7 @@ import repro_home_resources/drivers/managed_block
 import repro_cli_support/shell_detect
 import repro_cli_support/shell_rc_files
 import repro_cli_support/completion_hooks
+import repro_cli_support/direnv_stand_down
 # Peer-Cache M2: parse the `--peer-cache=lan://CIDR[:port]` form into a
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
@@ -439,6 +449,7 @@ const
     ## Nix's flake-input override option, the word `repro flake
     ## override-args` writes before each override triple.
 export provisioning_lock_selection
+export nimble_lock
 export catalog_publication
 export cli_hardware.runHardwareCommand
 export cli_disk.runDiskCommand,
@@ -534,57 +545,53 @@ proc runVersionCommand*(programName: string; asJson: bool): int =
     echo renderVersion(programName)
   0
 
-proc parseToolProvisioning*(value: string): ToolProvisioningMode =
-  case value
-  of "path":
-    tpmPathOnly
-  of "nix":
-    tpmNix
-  of "tarball":
-    tpmTarball
-  of "scoop":
-    tpmScoop
-  of "from-source", "fromSource", "source":
-    # M9.Q: principled from-source provisioning. Maps each ``uses:
-    # <name>`` selector onto a sibling recipe at
-    # ``recipes/packages/source/<name>/``; threads the recipe's
-    # output bin dir into ``pathSearchList``. v1 hard-fails when the
-    # sibling recipe or its artefact is missing — auto-recurse is
-    # the M9.Q.1 follow-up. Accepts the spelling ``from-source``
-    # (CLI canonical), ``fromSource`` (Nim/DSL canonical), and
-    # ``source`` (shorthand).
-    tpmFromSource
-  else:
-    raise newException(ValueError, "unsupported --tool-provisioning=" & value)
+# The provisioning-mode vocabulary (``parseToolProvisioning``) and the
+# invocation-wide precedence (``requestedToolProvisioning`` /
+# ``effectiveToolProvisioning``) live in ``repro_dev_env_engine``'s
+# ``tool_provisioning`` module, beside the per-tool resolver, so that every
+# surface resolves a tool's mode through ONE implementation: two spellings
+# of the precedence would let a build and an activation disagree.
 
-const ToolProvisioningEnvVar = "REPRO_TOOL_PROVISIONING"
+proc userConfigPath(): string
+  ## Forward declaration: the layered-configuration paths are declared with
+  ## the rest of that plane far below.
 
-proc resolveToolProvisioningWithEnv(cliMode: ToolProvisioningMode):
-    ToolProvisioningMode =
-  ## Apply the ``REPRO_TOOL_PROVISIONING`` env var when the CLI did not pin
-  ## ``--tool-provisioning`` explicitly. Precedence is: explicit CLI flag >
-  ## env var > the package's ``defaultToolProvisioning`` (resolved later, in
-  ## ``executeBuildTarget``).
-  ##
-  ## Today the in-repo ``repro.nim`` project files declare
-  ## ``defaultToolProvisioning "path"`` on Linux/macOS (toolchains supplied
-  ## by Nix on ``$PATH`` via ``nix develop``) and ``scoop`` is the intended
-  ## Windows default — a deliberately temporary arrangement. This env var
-  ## lets a developer opt a Linux/macOS checkout into reprobuild-managed Nix
-  ## provisioning (``REPRO_TOOL_PROVISIONING=nix``) without editing every
-  ## project's ``repro.nim`` or threading ``--tool-provisioning=nix`` through
-  ## every invocation. An explicit flag still wins, so scripted callers are
-  ## unaffected. Accepts the same ``path|nix|tarball|scoop|from-source``
-  ## vocabulary as the flag; an unset/empty value is a no-op. M9.Q adds
-  ## the ``from-source`` mode that maps each ``uses:`` selector onto a
-  ## sibling recipe at ``recipes/packages/source/<name>/`` and threads
-  ## the recipe's output bin dir into ``pathSearchList``.
-  if cliMode != tpmUnspecified:
-    return cliMode
-  let raw = getEnv(ToolProvisioningEnvVar).strip()
-  if raw.len == 0:
-    return cliMode
-  parseToolProvisioning(raw)
+var toolProvisioningForFlags: seq[string] = @[]
+  ## This invocation's ``--tool-provisioning-for`` values, as given, set by
+  ## the command-line parse of the commands that declare the flag (``build``
+  ## and the commands that take its command line, ``watch``, ``graph``,
+  ## ``why``, ``stats``, ``tool realize``). Empty for every other command:
+  ## ``exec``, ``shell`` and ``run`` deliberately take no flag; overrides
+  ## reach them through the variable and the configuration only.
+
+var activeToolProvisioningOverrides*: ToolProvisioningOverrides
+  ## The per-tool overrides of the invocation being served, from every
+  ## source (flag, variable, configuration), loaded once per invocation by
+  ## ``activateToolProvisioningOverrides`` for its project. Every tool
+  ## resolution below reads it -- the build's, the activation's and ``tool
+  ## realize``'s -- the way they read ``producerMaterializedBinDirs``: the
+  ## invocation sets it, and a sub-build of a sibling recipe inherits it.
+
+proc setToolProvisioningForFlags*(values: openArray[string]) =
+  ## Record this invocation's ``--tool-provisioning-for`` values. Called on
+  ## every parse of a command that declares the flag, so a value never
+  ## outlives the invocation that gave it (a daemon worker parses each
+  ## request's own arguments).
+  toolProvisioningForFlags = @values
+
+proc activateToolProvisioningOverrides*(projectRoot: string;
+                                        includeFlags = true):
+    ToolProvisioningOverrides =
+  ## Load and install the overrides of an invocation over ``projectRoot``:
+  ## the flag's values (unless ``includeFlags`` is false, for the surfaces
+  ## that take no flag), ``REPRO_TOOL_PROVISIONING_OVERRIDES``, and the
+  ## configuration layers the workspace and the user declare. A malformed
+  ## override raises ``ToolProvisioningOverrideError`` (or the configuration
+  ## reader's error) before anything runs.
+  let flags = if includeFlags: toolProvisioningForFlags else: @[]
+  activeToolProvisioningOverrides = loadToolProvisioningOverrides(flags,
+    projectRoot, userConfigPath())
+  activeToolProvisioningOverrides
 
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -4049,6 +4056,169 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
       commandStatsId = commandStatsId,
       env = mergedEnv,
       envPassthrough = mergedEnvPassthrough)
+
+  # ``NimUnittestBinary.runPerTest``'s two edges
+  # (``libs/ct_test_nim_unittest``). Both run the per-test producer
+  # (``repro-tests-fragment``, from beside this engine's image unless the
+  # recipe named another):
+  #
+  #   subcommand "listTests"    -> [producer, --binary=<binary>,
+  #                                 --out=<fragment>, --id-prefix=<collector>,
+  #                                 --collector=<collector>,
+  #                                 --stats-name=<binary as declared>,
+  #                                 --cwd=<cwd>]
+  #   subcommand "collectTests" -> [producer, --check=<fragment>]
+  #
+  # With ``perTestBinaries = true`` the listing call also carries the
+  # payload of the binary's compile edge (``compileEdge``, hex). It is
+  # lowered here by this same procedure, so each test's own compile is the
+  # command the compile edge itself runs, and handed to the producer as
+  # ``--compile-*`` arguments (``tests_fragment``, "ONE BINARY PER TEST").
+  #
+  # The command lines come from ``ct_test_nim_unittest/tests_fragment``, the
+  # module the producer parses them with. The producer is run by absolute
+  # path, so, as at the HCR site above, the edge makes no ``PATH`` decision.
+  if executableName == NimUnittestToolId and
+      payload.call.subcommand in ["listTests", "collectTests"]:
+    var binaryPath = ""
+    var fragmentPath = ""
+    var collectorId = ""
+    var producerPath = ""
+    var compileEdgeHex = ""
+    for arg in payload.call.arguments:
+      case arg.name
+      of "binary": binaryPath = arg.encodedValue
+      of "fragment": fragmentPath = arg.encodedValue
+      of "collector": collectorId = arg.encodedValue
+      of "producer": producerPath = arg.encodedValue
+      of "compileEdge": compileEdgeHex = arg.encodedValue
+      else: discard
+    if fragmentPath.len == 0:
+      raise newException(ValueError,
+        "tool-resolution failed: action " & payload.id & " (" &
+          NimUnittestToolId & "." & payload.call.subcommand &
+          ") names no fragment")
+    let producer =
+      if producerPath.len > 0:
+        materialProjectPath(projectRoot, producerPath)
+      else:
+        parentDir(publicCliImagePath()) /
+          addFileExt(TestsFragmentProducerName, ExeExt)
+    let cwd = resolveCanonicalExecRoot(payload.cwdKind,
+      payload.cwdCustomPath, projectRoot)
+    var argv: seq[string]
+    if payload.call.subcommand == "listTests":
+      if binaryPath.len == 0 or collectorId.len == 0:
+        raise newException(ValueError,
+          "tool-resolution failed: action " & payload.id & " (" &
+            NimUnittestToolId & ".listTests) needs the ``binary`` and " &
+            "``collector`` slots")
+      var compile = PerTestCompile()
+      if compileEdgeHex.len > 0:
+        var compilePayload = ""
+        try:
+          compilePayload = parseHexStr(compileEdgeHex)
+        except ValueError:
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests) carries a malformed " &
+              "``compileEdge``")
+        let compiled = lowerGraphAction(GraphNode(kind: gnkAction,
+          payload: compilePayload), profiles, projectRoot)
+        if compiled.kind != bakProcess or compiled.argv.len == 0:
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests): the compile of " &
+              binaryPath & " (" & compiled.id & ") is not a process, so " &
+              "it cannot be run once per test")
+        if compiled.isolateHostEnvironment:
+          # A created action has no field for it, and launching the
+          # per-test compile with the host's environment would not be the
+          # same command.
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests): the compile of " &
+              binaryPath & " (" & compiled.id & ") isolates the host " &
+              "environment, which a per-test compile cannot reproduce")
+        # A created record has no field for any of these either, and each
+        # changes how the engine runs the compile or where its record may
+        # go (a tool-owned cache or a determinism class keeps it on this
+        # host; a relocated or canonical work tree changes where it runs).
+        # Dropping one would give the per-test compile a looser record
+        # than the compile it copies, so the copy is refused instead.
+        var unreproducible: seq[string] = @[]
+        if compiled.contentKeyedToolCaches.len > 0:
+          unreproducible.add("content-keyed tool caches")
+        if compiled.determinism.isSome:
+          unreproducible.add("a declared determinism class")
+        if compiled.nonDeterminism != ndpUnblessed or
+            compiled.entropyBlessedImages.len > 0:
+          unreproducible.add("a non-determinism blessing")
+        if compiled.relocatable or compiled.canonicalWorkKey.len > 0:
+          unreproducible.add("a relocated or canonical work tree")
+        if compiled.requiresElevation:
+          unreproducible.add("elevation")
+        if compiled.optionalOutputs.len > 0:
+          unreproducible.add("optional outputs")
+        if unreproducible.len > 0:
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests): the compile of " &
+              binaryPath & " (" & compiled.id & ") declares " &
+              unreproducible.join(", ") & ", which a per-test compile " &
+              "(a created action) cannot carry; build one binary for " &
+              "every test instead (perTestBinaries = false)")
+        compile = PerTestCompile(argv: compiled.argv, cwd: compiled.cwd,
+          env: compiled.env, envPassthrough: compiled.envPassthrough,
+          inputs: compiled.inputs, uncacheable: not compiled.cacheable,
+          actionCachePolicy:
+            case compiled.actionCachePolicy
+            of ffpTimestamp: CreatedActionTimestampCheck
+            of ffpHybrid: CreatedActionHybridCheck
+            of ffpChecksum: CreatedActionChecksumCheck)
+      argv = producerListArgv(producer, PerTestRequest(
+        binary: materialProjectPath(projectRoot, binaryPath),
+        fragment: fragmentPath,
+        idPrefix: collectorId,
+        collectorId: collectorId,
+        statsName: binaryPath,
+        cwd: cwd,
+        compile: compile))
+    else:
+      argv = producerCheckArgv(producer, fragmentPath)
+    var translatedInputs: seq[string] = @[]
+    for input in payload.inputs:
+      translatedInputs.add(materialProjectPath(projectRoot, input))
+    let fingerprintText = [
+      "reprobuild.localProjectAction.v1",
+      payload.id,
+      NimUnittestToolId,
+      NimUnittestToolId,
+      payload.call.subcommand,
+      node.payload
+    ].join("\n")
+    return repro_build_engine.action(
+      payload.id,
+      argv,
+      governingLockIdentity = workspaceGoverningLockIdentity(projectRoot),
+      cwd = cwd,
+      deps = payload.deps,
+      inputs = translatedInputs,
+      outputs = payload.outputs,
+      pool = payload.pool,
+      poolUnits = payload.poolUnits,
+      dynamicDepsFile = payload.dynamicDepsFile,
+      cacheable = payload.cacheable,
+      weakFingerprint = keyedOnArgv(weakFingerprintFromText(fingerprintText),
+        argv),
+      actionCachePolicy = actionCachePolicy,
+      dependencyPolicy = lowerDependencyPolicy(payload.id, payload.depfile,
+        payload.dependencyPolicy),
+      envPassthrough = withEdgeEnvPassthrough(@[], payload.envPassthrough,
+        payload.id),
+      commandStatsId =
+        if payload.commandStatsId.len > 0: payload.commandStatsId
+        else: payload.id)
 
   # M9.R.12.2 — fall back to ``packageName`` alone when the recipe's
   # ``nativeBuildDeps:`` declares the tool by its package selector
@@ -7889,33 +8059,49 @@ proc runCmakeRegenerationHelper*(metadataFile, depfilePath,
     $(providerBefore.len > 0 and providerBefore != providerAfter)
   0
 
-proc identityPaths(outDir: string; mode: ToolProvisioningMode):
+proc identityPaths(outDir: string; mode: ToolProvisioningMode;
+                   overrideDigest = ""):
     tuple[identityPath: string; inspectionPath: string] =
-  case mode
-  of tpmNix:
-    (identityPath: outDir / "nix-tool-identities.rbtp",
-      inspectionPath: outDir / "nix-tool-identities.inspect.json")
-  of tpmTarball:
-    (identityPath: outDir / "tarball-tool-identities.rbtp",
-      inspectionPath: outDir / "tarball-tool-identities.inspect.json")
-  of tpmScoop:
-    (identityPath: outDir / "scoop-tool-identities.rbtp",
-      inspectionPath: outDir / "scoop-tool-identities.inspect.json")
-  of tpmFromSource:
-    (identityPath: outDir / "from-source-tool-identities.rbtp",
-      inspectionPath: outDir / "from-source-tool-identities.inspect.json")
-  else:
-    (identityPath: outDir / "path-only-tool-identities.rbtp",
-      inspectionPath: outDir / "path-only-tool-identities.inspect.json")
+  ## The stable identity files of ``mode`` in ``outDir``. With per-tool
+  ## overrides they are keyed by the invocation mode PLUS a digest of the
+  ## sorted override set (``overrideDigest``), so a run under one mix of
+  ## kinds never reads back another's. Without overrides the
+  ## names are the historical ones.
+  let stem =
+    case mode
+    of tpmNix: "nix"
+    of tpmTarball: "tarball"
+    of tpmScoop: "scoop"
+    of tpmFromSource: "from-source"
+    else: "path-only"
+  let tagged =
+    if overrideDigest.len == 0: stem
+    else: stem & "+overrides-" & overrideDigest[0 ..< min(16, overrideDigest.len)]
+  (identityPath: outDir / (tagged & "-tool-identities.rbtp"),
+    inspectionPath: outDir / (tagged & "-tool-identities.inspect.json"))
 
 proc modeName(mode: ToolProvisioningMode): string =
-  case mode
-  of tpmPathOnly: "path"
-  of tpmNix: "nix"
-  of tpmTarball: "tarball"
-  of tpmScoop: "scoop"
-  of tpmFromSource: "from-source"
-  else: "unspecified"
+  provisioningModeName(mode)
+
+proc activeToolModeSelections(artifact: ProjectInterfaceArtifact;
+                              mode: ToolProvisioningMode): ToolModeSelections =
+  ## The per-tool selections the active overrides make for ``artifact``'s
+  ## uses under the invocation mode ``mode`` (the one resolver,
+  ## ``toolModeSelections``).
+  toolModeSelections(mode, activeToolProvisioningOverrides,
+    artifact.projectInterface.toolUses)
+
+proc activeOverrideDigest(artifact: ProjectInterfaceArtifact;
+                          mode: ToolProvisioningMode): string =
+  overrideSetDigest(activeToolModeSelections(artifact, mode))
+
+proc identityModeTag(artifact: ProjectInterfaceArtifact;
+                     mode: ToolProvisioningMode): string =
+  ## The name the per-mode stamp files (``<tag>.current-key``) and the warm
+  ## table use: the mode, plus the override digest when overrides apply.
+  let digest = activeOverrideDigest(artifact, mode)
+  if digest.len == 0: modeName(mode)
+  else: modeName(mode) & "+overrides-" & digest[0 ..< min(16, digest.len)]
 
 proc addCacheField(payload: var string; value: string) =
   payload.add($value.len)
@@ -8026,9 +8212,10 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
   ## uses. v5 bound the expression by its PATH only (through the codec
   ## bytes), so bumping the nixpkgs pin or editing a lock file the
   ## expression reads served the stale identity. Bound in EVERY mode: Nix is
-  ## reached from path mode (the Linux/macOS fallback) and from-source mode
-  ## (the stdlib fall-through) as well as nix mode. Every v5 key changes
-  ## once (a one-time miss, approved).
+  ## reached from from-source mode (the stdlib fall-through) as well as nix
+  ## mode, and was reached from path mode until path mode became strictly
+  ## PATH-only (2026-11-17). Every v5 key changes once (a one-time miss,
+  ## approved).
   ##
   ## v7 (owner decision, 2026-10-14; Edge-Derived-Identities.md §7 rider):
   ## the expression-closure scanner behind v6 PREDICTED what the Nix
@@ -8069,8 +8256,29 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField($framed.len)
     for one in framed:
       payload.addCacheField(one)
-  if mode == tpmPathOnly:
-    payload.addCacheField(pathModeResolutionSignature(artifact, pathValue))
+  # Per-tool overrides: the sorted override set enters the key, so a change
+  # of overrides is a miss, not a stale identity reused under another mix of
+  # kinds. Absent when nothing is overridden, so those keys are unchanged.
+  let selections = activeToolModeSelections(artifact, mode)
+  let overrideDigest = overrideSetDigest(selections)
+  if overrideDigest.len > 0:
+    payload.addCacheField("tool-provisioning-overrides.v1")
+    payload.addCacheField(overrideDigest)
+  # What ``$PATH`` decides, for every use resolved from it: all of them in a
+  # path invocation except those overridden to another mode, and in any
+  # invocation those overridden TO path. With no overrides this is the whole
+  # artifact in path mode and nothing otherwise, as before.
+  var pathResolved = artifact
+  pathResolved.projectInterface.toolUses = @[]
+  for useDef in artifact.projectInterface.toolUses:
+    let useMode =
+      if selections.hasKey(useDef.packageSelector):
+        selections[useDef.packageSelector].mode
+      else: mode
+    if useMode == tpmPathOnly:
+      pathResolved.projectInterface.toolUses.add(useDef)
+  if mode == tpmPathOnly or pathResolved.projectInterface.toolUses.len > 0:
+    payload.addCacheField(pathModeResolutionSignature(pathResolved, pathValue))
   # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
   # consumer") — fold each materialized cross-repo LIBRARY producer's realized
   # producer directories into the tool-identity cache key. Both channels are
@@ -8260,7 +8468,8 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   let key = keyInfo.key
   let cacheDir = outDir / "tool-identity-cache"
   let keyed = keyedToolIdentityPaths(outDir, key)
-  let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
+  let stableKeyPath = cacheDir / (identityModeTag(artifact, mode) &
+    ".current-key")
   # Only the keyed entry is read back. The stable files are refreshed from
   # it below for readers that want "the latest identity in this outDir",
   # but they are never the cache: checking ``current-key`` and then reading
@@ -8774,6 +8983,64 @@ proc loweredGraphCacheKey*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(pathEnv)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
+proc buildToolStoreRoot*(mode: ToolProvisioningMode;
+                         overridden = false): string =
+  ## The tool store ``repro build`` (and ``repro graph``, which must show the
+  ## same actions) realizes tools into, or "" for the historical store under
+  ## the invocation's ``outDir``.
+  ##
+  ## Under ``tarball`` it is the user's tool store inside the reprobuild
+  ## store root, ``<store root>/tool-store``, the one dev-env activation
+  ## already uses. Two reasons. A realized prefix is keyed on the archive
+  ## digest, not on the project, so a per-project store re-downloads and
+  ## re-extracts the same bytes for every checkout (the C toolchain archive
+  ## is 240 MB extracted). And the store root is a logical root of the
+  ## portable identity while a project's ``.repro`` directory is not a
+  ## content identity: a toolchain realized there is read from the store
+  ## root, so a compile with the provisioned toolchain can be shared between
+  ## checkouts and projects. The other modes keep the per-``outDir`` store:
+  ## Nix mode roots its realizations under the tool store, and a tool request
+  ## is keyed by package and executable rather than by pin, so a shared store
+  ## would let two projects that pin different versions take each other's
+  ## roots away.
+  ##
+  ## ``overridden``: ``mode`` is the tool's OWN mode, chosen by a per-tool
+  ## override, and the store follows that effective kind, not the
+  ## invocation's. An overridden ``tarball`` or ``from-source`` tool realizes
+  ## into the shared tool store even in a ``path`` invocation, for the
+  ## reasons above: a content-keyed prefix is not a per-checkout thing.
+  ## ``nix`` and ``scoop`` keep their per-``outDir`` store, for the reason
+  ## given for Nix roots. A ``from-source`` INVOCATION keeps its store: only
+  ## an overridden tool moves.
+  if not (mode == tpmTarball or (overridden and mode == tpmFromSource)):
+    return ""
+  let storeRoot = resolvedStoreRootOrEmpty()
+  if storeRoot.len == 0: "" else: storeRoot / "tool-store"
+
+proc overriddenToolStoreRoot*(everyToolStore: string; ownStore = ""):
+    proc (mode: ToolProvisioningMode): string {.closure.} =
+  ## The ``storeRootFor`` of ``toolBuildIdentity``: where a tool a per-tool
+  ## override moved to ``mode`` realizes.
+  ##
+  ## * ``everyToolStore`` non-empty: the caller keeps every tool in that one
+  ##   store (the activation surfaces' user store), the overridden ones too.
+  ## * Otherwise the overridden tool's own kind decides. ``tarball`` and
+  ##   ``from-source`` realize into the shared tool store
+  ##   (``buildToolStoreRoot``). ``nix`` and ``scoop`` realize into
+  ##   ``ownStore``, the per-``outDir`` store an invocation of their own mode
+  ##   uses, and never into the shared store a ``tarball`` invocation names
+  ##   for its archives: a Nix root there is keyed by package and executable
+  ##   rather than by pin, so two projects that pin different versions would
+  ##   take each other's roots away. An empty answer leaves the tool in the
+  ##   invocation's store.
+  let fixed = everyToolStore
+  let own = ownStore
+  result = proc (mode: ToolProvisioningMode): string =
+    if fixed.len > 0:
+      return fixed
+    let shared = buildToolStoreRoot(mode, overridden = true)
+    if shared.len > 0: shared else: own
+
 proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
                                   outDir: string;
                                   mode: ToolProvisioningMode;
@@ -8804,7 +9071,7 @@ proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
   ## identity CACHE stays under ``outDir`` either way: it is keyed on the
   ## recipe's interface, which is a per-project fact, while a realized prefix
   ## is keyed on the archive digest, which is not.
-  let paths = identityPaths(outDir, mode)
+  let paths = identityPaths(outDir, mode, activeOverrideDigest(artifact, mode))
   let cached = cachedToolIdentity(outDir, mode, artifact,
     paths.identityPath, paths.inspectionPath, keyInfo)
   if cached.hit:
@@ -8828,13 +9095,27 @@ proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
   for selector, binDirs in producerMaterializedBinDirs.pairs:
     producerExecutableSelectors[selector] = ProducerExecutableDirs(
       binDirs: binDirs)
+  # Per-tool overrides: an overridden tool realizes into the store of its
+  # OWN kind (``overriddenToolStoreRoot``), not the invocation mode's, except
+  # where the caller names one store for every tool (the activation
+  # surfaces). A build names a store only for a ``tarball`` invocation, and
+  # that store (``buildToolStoreRoot(mode)``) is the shared one for archives,
+  # not one for every tool.
+  let everyToolStore =
+    if storeRootOverride.len > 0 and
+        storeRootOverride != buildToolStoreRoot(mode):
+      storeRootOverride
+    else: ""
   let identity = toolBuildIdentity(artifact, mode,
     storeRoot =
       (if storeRootOverride.len > 0: storeRootOverride
        else: outDir / "tool-store"),
     producerExecutableSelectors = producerExecutableSelectors,
     producerAuxSelectors = producerAuxSelectors,
-    pins = pins)
+    pins = pins,
+    selections = activeToolModeSelections(artifact, mode),
+    storeRootFor = overriddenToolStoreRoot(everyToolStore,
+      ownStore = outDir / "tool-store"))
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
   writeToolIdentityCache(outDir, mode, artifact, identity, keyInfo)
@@ -8842,7 +9123,8 @@ proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
   # The key computed BEFORE resolution (see ``cachedToolIdentity``), not a
   # fresh one: re-deriving it here would stamp an identity resolved from
   # the old inputs with the key of inputs edited meanwhile.
-  writeFile(extendedPath(outDir / "tool-identity-cache" / (mode.modeName & ".current-key")),
+  writeFile(extendedPath(outDir / "tool-identity-cache" /
+      (identityModeTag(artifact, mode) & ".current-key")),
     keyInfo.key & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
@@ -8858,30 +9140,6 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   resolveAndWriteIdentityKeyed(artifact, outDir, mode, storeRootOverride,
     pins, toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
 
-proc buildToolStoreRoot*(mode: ToolProvisioningMode): string =
-  ## The tool store ``repro build`` (and ``repro graph``, which must show the
-  ## same actions) realizes tools into, or "" for the historical store under
-  ## the invocation's ``outDir``.
-  ##
-  ## Under ``tarball`` it is the user's tool store inside the reprobuild
-  ## store root, ``<store root>/tool-store``, the one dev-env activation
-  ## already uses. Two reasons. A realized prefix is keyed on the archive
-  ## digest, not on the project, so a per-project store re-downloads and
-  ## re-extracts the same bytes for every checkout (the C toolchain archive
-  ## is 240 MB extracted). And the store root is a logical root of the
-  ## portable identity while a project's ``.repro`` directory is not a
-  ## content identity: a toolchain realized there is read from the store
-  ## root, so a compile with the provisioned toolchain can be shared between
-  ## checkouts and projects. The other modes keep the per-``outDir`` store:
-  ## Nix mode roots its realizations under the tool store, and a tool request
-  ## is keyed by package and executable rather than by pin, so a shared store
-  ## would let two projects that pin different versions take each other's
-  ## roots away.
-  if mode != tpmTarball:
-    return ""
-  let storeRoot = resolvedStoreRootOrEmpty()
-  if storeRoot.len == 0: "" else: storeRoot / "tool-store"
-
 proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
                                   outDir: string;
                                   mode: ToolProvisioningMode;
@@ -8893,10 +9151,11 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   ## The warm resolver under a key computed ONCE by the caller (see the
   ## exported overloads below).
   let key = keyInfo.key
-  let paths = identityPaths(outDir, mode)
-  let tableKey = outDir & "\0" & mode.modeName & "\0" & key
+  let tag = identityModeTag(artifact, mode)
+  let paths = identityPaths(outDir, mode, activeOverrideDigest(artifact, mode))
+  let tableKey = outDir & "\0" & tag & "\0" & key
   let stableKeyPath = outDir / "tool-identity-cache" /
-    (mode.modeName & ".current-key")
+    (tag & ".current-key")
   if keyInfo.cacheable and warmToolIdentities.hasKey(tableKey):
     let warm = warmToolIdentities[tableKey]
     if warm.key == key and warm.identity.interfaceFingerprint ==
@@ -8924,7 +9183,7 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   result = resolveAndWriteIdentityKeyed(artifact, outDir, mode,
     storeRootOverride, pins, keyInfo)
   warmToolIdentities.dropWarmEntriesWithPrefix(
-    outDir & "\0" & mode.modeName & "\0")
+    outDir & "\0" & tag & "\0")
   # An uncacheable key (a nonce) is never looked up again: nothing is kept
   # under it.
   if keyInfo.cacheable:
@@ -12509,8 +12768,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
                           nil;
                         actionOutcomeSink: BuildActionOutcomeSink = nil;
-                        graphAugmenter: BuildGraphAugmenter = nil):
+                        graphAugmenter: BuildGraphAugmenter = nil;
+                        checkOverrideTargets = false):
     BuildCommandOutcome =
+  ## ``checkOverrideTargets``: this is the invocation's own target, not a
+  ## sub-build of a sibling or producer, so a per-tool override that names a
+  ## package none of its selected ``uses:`` entries references is reported:
+  ## an error from the flag, which the caller gave for this invocation, and a
+  ## note from the environment or configuration, which are shared across
+  ## invocations and projects. A sub-build inherits the
+  ## invocation's overrides and never reports them.
+  ##
   ## ``actionOutcomeSink`` receives the per-action outcome of the engine pass
   ## this invocation runs over its lowered graph (``ExecutedActionRecord``),
   ## for certificate issuance. It is not called when no graph ran.
@@ -13603,11 +13871,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode (the lowest precedence level, below every
+  # per-tool override), through the one resolver.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact)
+  # Per-tool overrides: an override to a mode its package has no arm for
+  # on this host fails HERE, before
+  # the provider compile and every graph action, naming the override.
+  requireOverriddenArms(artifact.projectInterface.toolUses,
+    activeToolModeSelections(artifact, effectiveMode))
+  if mode == tpmUnspecified and effectiveMode != tpmUnspecified:
     # M1 N11: this assignment is a NARROWING for ``path``/``scoop`` and
     # a no-op otherwise, because ``fallbackToRunQuotaBypass`` no longer
     # starts true for an unspecified mode. That matters for the case
@@ -13649,6 +13921,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
+  if checkOverrideTargets and not materializedOnly:
+    var overrideNotes: seq[string] = @[]
+    checkOverridesMatch(activeToolProvisioningOverrides,
+      buildArtifact.projectInterface.toolUses &
+        buildArtifact.projectInterface.runtimeToolUses, overrideNotes)
+    for note in overrideNotes:
+      stderr.writeLine(note)
 
   # DSL-port M9.R.9 — auto-recurse pass for from-source provisioning.
   # When the active mode is ``tpmFromSource`` we probe every tool use
@@ -14140,7 +14419,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           producerRuntimeIdentity = toolBuildIdentity(runtimeArtifact,
             effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store",
             pins = producerRuntimeProvisioningPins(runtimeArtifact,
-              producerRootAbs))
+              producerRootAbs),
+            selections = activeToolModeSelections(runtimeArtifact,
+              effectiveMode),
+            storeRootFor = overriddenToolStoreRoot(""))
         # Decide whether the producer sub-build is required for the CONSUMED
         # artifact. A build is needed only when the producer exposes a
         # COMPILED artifact on disk:
@@ -16286,7 +16568,12 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
       progress.renderProgress(event)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
-  let toolProvisioning = resolveToolProvisioningWithEnv(tpmUnspecified)
+  let toolProvisioning = requestedToolProvisioning(tpmUnspecified)
+  # Per-tool overrides reach an activation through the environment and the
+  # configuration, never a flag, and it resolves every tool through the same
+  # resolver as a build, so a shell and a build realize the same prefix.
+  let toolProvisioningOverrides = activateToolProvisioningOverrides(
+    selection.projectRoot, includeFlags = false)
   # MR5, applied to the dev-env path. `computeDevEnvEdge` may compile the
   # recipe provider, and that compile is the SAME provider compile edge the
   # build uses (Development-Environments-And-Control-API.md). `build`,
@@ -16322,6 +16609,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
     toolProvisioning: toolProvisioning,
+    toolProvisioningOverrides: toolProvisioningOverrides,
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0)
   try:
@@ -16858,7 +17146,8 @@ proc writePartialToolInspection(artifact: ProjectInterfaceArtifact;
   ## The fallback's observations are diagnostics, never a complete identity.
   ## Reuse the full profile serializer, including failed probe results, but
   ## touch none of the binary/keyed identity or current-key publication paths.
-  let path = identityPaths(outDir, mode).inspectionPath
+  let path = identityPaths(outDir, mode,
+    activeOverrideDigest(artifact, mode)).inspectionPath
   try:
     let doc = parseJson(inspectionJson(identity))
     doc["partial"] = %true
@@ -16905,16 +17194,15 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## Path-mode contributes only what the caller's PATH could NOT supply. Its
   ## contract is "resolve against the caller's PATH", so a tool found there is
   ## left where it is -- prepending the resolver's own search list would merely
-  ## re-order the host's PATH against itself. But the path-mode resolver does
-  ## not stop at the caller's PATH: a tool missing from it whose package
-  ## declares a release archive is realized from that archive, which is how
-  ## `repro build` obtains it. An activation that skipped path mode outright
-  ## therefore provided less than the build it is the environment for:
-  ## reprobuild's own Windows shell, entered from a minimal PATH, had neither
-  ## `just` nor anything else its `uses:` declares, and `just lint` could not
-  ## start. So path mode now runs the same resolution and contributes the
-  ## directories of every tool it REALIZED (any install method other than
-  ## `path`), and nothing for a tool the caller's PATH already had.
+  ## re-order the host's PATH against itself. Path mode still runs the same
+  ## resolution `repro build` does and contributes what that resolution
+  ## realizes by other means (an environment-prefix library, a cross-repo
+  ## producer's bin dirs: any install method other than `path`), so the
+  ## shell is the environment of the build. Path mode no longer realizes a
+  ## tool missing from PATH from its archive or Nix (operator decision of
+  ## 2026-11-17, reprobuild-pm issue
+  ## 2026-11-12-per-mode-fallback-semantics-disagree): such a tool is
+  ## reported absent here, exactly as the build refuses it.
   ##
   ## Never fatal. A recipe that names a package with no realization for this
   ## platform must leave the developer with a WORKING shell that says what it
@@ -16958,8 +17246,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # `uses:` has no toolchain to provide.
     return
 
-  let mode = effectiveToolProvisioning(
-    resolveToolProvisioningWithEnv(tpmUnspecified), interfaceArtifact)
+  let mode = effectiveToolProvisioning(tpmUnspecified, interfaceArtifact)
+  if selection.projectRoot.len > 0:
+    # The overrides of THIS project, so the shell matches a build: the same
+    # sources the edge applied, read again because the path-addressed form
+    # has no edge.
+    try:
+      discard activateToolProvisioningOverrides(selection.projectRoot,
+        includeFlags = false)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env: warning: the per-tool provisioning " &
+        "overrides could not be read (" & err.msg & "); the activated " &
+        "shell will resolve tools from the ambient PATH.")
+      return
   if mode == tpmUnspecified:
     # Declared packages and no mode to realize them with. Silence here reads
     # as a working environment that quietly provisions none of what the
@@ -17036,7 +17335,9 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
         # contribution record, so a pin for another package is accepted and
         # stamped nowhere, and this package stays pinned.
         let singleIdentity = toolBuildIdentity(single, mode,
-          storeRoot = storeRoot, pins = provisioningPins)
+          storeRoot = storeRoot, pins = provisioningPins,
+          selections = activeToolModeSelections(single, mode),
+          storeRootFor = overriddenToolStoreRoot(storeRoot))
         # PATH-only filtering is an activation decision. Keep the unfiltered
         # profiles in inspection, including tools already supplied by PATH.
         partial.profiles.add(singleIdentity.profiles)
@@ -17051,11 +17352,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       except CatchableError as toolErr:
         unresolved.add(%*{"packageSelector": useDef.packageSelector,
           "rawConstraint": useDef.rawConstraint, "reason": toolErr.msg})
-        # In path mode a tool that is neither on the caller's PATH nor
-        # realizable is merely absent -- that mode's ordinary state, and what
-        # it reported before it provided anything at all. Only a tool the
-        # resolver COULD have realized and did not is worth a warning.
-        if mode == tpmPathOnly and not pathModeCanRealize(useDef):
+        # In path mode a tool that is not on the caller's PATH is merely
+        # absent -- that mode's ordinary state: path mode is strictly
+        # PATH-only and realizes nothing else (operator decision of
+        # 2026-11-17, reprobuild-pm issue
+        # 2026-11-12-per-mode-fallback-semantics-disagree). A tool that IS
+        # on PATH but outside its declared range is refused, and that is
+        # worth a warning: the shell would otherwise run it unannounced.
+        # An OVERRIDDEN tool is never "merely absent": its override named
+        # an arm that failed, and that is reported: a failed realization of
+        # an overridden tool is never replaced by the ambient PATH.
+        if mode == tpmPathOnly and not (toolErr of UsesVersionOutOfRange) and
+            not winningOverride(activeToolProvisioningOverrides,
+              useDef.packageSelector).found:
           inc absentInPathMode
           continue
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
@@ -21107,6 +21416,9 @@ type
                              ## system path (tests).
     recordStore: bool      ## Explicit Git-local backend registration.
     nativeShells: seq[NativeShellKind]
+    nativeDetected: bool   ## A bare command: the native shell integration
+                           ## for every shell found on PATH (uninstall: every
+                           ## shell whose rc file holds the block).
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
     report: ReportSpec     ## Opt-in ``--write-report[=PATH]`` artifact.
@@ -21154,7 +21466,12 @@ proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string
   of nskBash:
     homeDir / ".bashrc"
   of nskZsh:
-    homeDir / ".zshrc"
+    # zsh reads its startup files from $ZDOTDIR when it is set (zsh manual,
+    # "Startup/Shutdown Files",
+    # https://zsh.sourceforge.io/Doc/Release/Files.html), as the completion
+    # block does too.
+    let zdot = getEnv("ZDOTDIR")
+    (if zdot.len > 0: zdot else: homeDir) / ".zshrc"
   of nskFish:
     let xdg = getEnv("XDG_CONFIG_HOME")
     if xdg.len > 0:
@@ -21171,7 +21488,13 @@ proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string
         else: getEnv("USERPROFILE", homeDir) / "Documents"
       documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
     else:
-      homeDir / ".config" / "powershell" /
+      # PowerShell takes its profile directory from XDG_CONFIG_HOME outside
+      # Windows when it is set (`Platform.SelectProductNameForDirectory`,
+      # https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs;
+      # about_Profiles names only the default ~/.config), as the completion
+      # block does too.
+      let xdg = getEnv("XDG_CONFIG_HOME")
+      (if xdg.len > 0: xdg else: homeDir / ".config") / "powershell" /
         "Microsoft.PowerShell_profile.ps1"
 
 proc posixLiteral(value: string): string =
@@ -21539,6 +21862,14 @@ proc nativePosixHookContent(shell: NativeShellKind): string =
   result.add("  if [ -n \"${" & NativeShellActivationGuard & ":-}\" ]; then\n")
   result.add("    return 0\n")
   result.add("  fi\n")
+  # direnv first, when its hook is loaded in this shell: its DIRENV_DIR then
+  # names what it manages for this directory, and the activation helper
+  # stands down there (direnv_stand_down.nim).
+  case shell
+  of nskZsh:
+    result.add("  if (( ${+functions[_direnv_hook]} )); then _direnv_hook; fi\n")
+  else:
+    result.add("  if declare -F _direnv_hook >/dev/null 2>&1; then _direnv_hook; fi\n")
   result.add("  export " & NativeShellActivationGuard & "=1\n")
   result.add("  local __repro_native_repro=\"${REPROBUILD_REPRO:-repro}\"\n")
   result.add("  if ! command -v \"$__repro_native_repro\" >/dev/null 2>&1 && [ ! -x \"$__repro_native_repro\" ]; then\n")
@@ -21579,6 +21910,10 @@ proc nativeFishHookContent(): string =
   result.add("function __repro_native_shell_hook --on-variable PWD\n")
   result.add("  if set -q " & NativeShellActivationGuard & "\n")
   result.add("    return 0\n")
+  result.add("  end\n")
+  # direnv first, when its hook is loaded (see the POSIX template).
+  result.add("  if functions -q __direnv_export_eval\n")
+  result.add("    __direnv_export_eval\n")
   result.add("  end\n")
   result.add("  set -gx " & NativeShellActivationGuard & " 1\n")
   result.add("  set -l __repro_native_repro \"$REPROBUILD_REPRO\"\n")
@@ -25589,11 +25924,13 @@ proc reportSpecOf[T](c: T): ReportSpec =
 
 proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   ## ``repro hooks ensure|reinstall|uninstall`` from its configuration.
-  ## With no selector flag ``--vcs``, ``--shell-direnv`` and
-  ## ``--shell-autocomplete`` are implied (the native ``--shell``
-  ## integration is not part of the bare set). Raises ``HooksUsageError``
-  ## for contradictory flags: two scopes, or a scope with only the hooks
-  ## that have none.
+  ## With no selector flag every hook type is implied: ``--vcs``,
+  ## ``--shell-direnv``, ``--shell-autocomplete`` and the native shell
+  ## integration for each shell found (which stands down wherever direnv
+  ## manages the directory, so the two never both activate). Raises
+  ## ``HooksUsageError`` for contradictory flags: two scopes, a scope with
+  ## only the hooks that have none, or ``--system`` with an explicit
+  ## ``--shell``.
   result.action = action
   result.shellDirenv = c.shellDirenv
   result.vcs = c.vcs
@@ -25628,6 +25965,7 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
     result.shellDirenv = true
     result.vcs = true
     result.shellAutocomplete = true
+    result.nativeDetected = true
   if result.scope != hsDefault and not result.shellAutocomplete and
       result.nativeShells.len == 0:
     # VCS hooks are per repository and the direnv block per project: a scope
@@ -26123,6 +26461,67 @@ proc emitCompletionReport(parsed: ParsedHooksCommand;
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   report.exitCode
 
+proc nativeShellBlockPresent(shell: NativeShellKind): bool =
+  ## Whether the shell's rc file holds the native shell block.
+  let rcPath = nativeShellRcPath(shell)
+  try:
+    fileExists(rcPath) and
+      ("repro:home:" & nativeShellBlockId(shell) & " ") in readFile(rcPath)
+  except IOError, OSError:
+    false
+
+proc nativeShellTargets(parsed: ParsedHooksCommand): seq[NativeShellKind] =
+  ## The shells whose native integration this invocation acts on: those
+  ## named by ``--shell``, and for a bare command every shell found on PATH
+  ## (the detector completion uses), or, to uninstall, every shell whose rc
+  ## file holds the block, found or not. Each once. Under ``--system`` a
+  ## bare command acts on none (``runNativeShellHooks`` says why).
+  for shell in parsed.nativeShells:
+    if shell notin result:
+      result.add(shell)
+  if not parsed.nativeDetected or parsed.scope == hsSystem:
+    return
+  if parsed.action == hakUninstall:
+    for shell in NativeShellKind:
+      if shell notin result and nativeShellBlockPresent(shell):
+        result.add(shell)
+  else:
+    for found in detectShells(getEnv("PATH")):
+      if found.kind notin result:
+        result.add(found.kind)
+
+proc runNativeShellHooks(parsed: ParsedHooksCommand): int =
+  ## Installs, reinstalls or removes the native shell integration of
+  ## ``nativeShellTargets``. A shell whose rc file cannot be written (a
+  ## Nix-managed symlink, a read-only file) is reported on stderr and the
+  ## others are still visited; the result is then 1.
+  if parsed.nativeDetected and parsed.scope == hsSystem:
+    # A bare command's scope applies to its shell hooks, and the native
+    # integration has no system-wide file: it is skipped, not refused, so
+    # the rest of the bare set still runs. An explicit `--shell --system`
+    # is a usage error instead (hooksCommandOf).
+    stderr.writeLine("repro hooks: NOTE the native shell integration " &
+      "has no system-wide file, so --system skipped it; run `repro hooks " &
+      "ensure --shell <shell>` as each user who wants it")
+  let targets = nativeShellTargets(parsed)
+  if targets.len == 0 and parsed.nativeDetected and
+      parsed.scope != hsSystem and parsed.action != hakUninstall:
+    stderr.writeLine("repro hooks: NOTE no shell found for the native " &
+      "shell integration (looked for bash, zsh, fish and pwsh on PATH); " &
+      "nothing was installed")
+  for shell in targets:
+    try:
+      case parsed.action
+      of hakEnsure: ensureNativeShellHook(shell)
+      of hakReinstall: ensureNativeShellHook(shell, reinstall = true)
+      of hakUninstall: uninstallNativeShellHook(shell)
+    except CatchableError as err:
+      stderr.writeLine("repro hooks: could NOT " &
+        (if parsed.action == hakUninstall: "remove" else: "write") &
+        " the native " & shell.nativeShellName() & " shell block: " &
+        err.msg)
+      result = 1
+
 proc runHooksCommand(c: ReproCommandLineHooks): int =
   ## ``repro hooks <ensure|reinstall|uninstall|protocol|dispatch|cache-push>``
   ## from its configuration.
@@ -26187,8 +26586,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       let vcsCode = runVcsHooksEnsureCommand(parsed, completion, reported)
       if vcsCode != 0:
         return max(vcsCode, code)
-    for shell in parsed.nativeShells:
-      ensureNativeShellHook(shell)
+    code = max(code, runNativeShellHooks(parsed))
   of hakReinstall:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
@@ -26196,8 +26594,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       let vcsCode = runVcsHooksCommand(parsed.action, parsed)
       if vcsCode != 0:
         return max(vcsCode, code)
-    for shell in parsed.nativeShells:
-      ensureNativeShellHook(shell, reinstall = true)
+    code = max(code, runNativeShellHooks(parsed))
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
@@ -26205,8 +26602,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       let vcsCode = runVcsHooksCommand(parsed.action, parsed)
       if vcsCode != 0:
         return max(vcsCode, code)
-    for shell in parsed.nativeShells:
-      uninstallNativeShellHook(shell)
+    code = max(code, runNativeShellHooks(parsed))
   if parsed.shellAutocomplete and not reported:
     code = max(code, emitCompletionReport(parsed, completion))
   code
@@ -26224,6 +26620,24 @@ proc nativeShellActivationRequestOf[T](c: T): NativeShellActivationRequest =
 proc runReproNativeShellActivationHelper(
     request: NativeShellActivationRequest; publicCliPath: string): int =
   let format = nativeShellFormat(request.shell)
+  let direnvStatus = proc (cwd: string): tuple[ok: bool; output: string] =
+    # The user's own direnv, the one whose hook set DIRENV_DIR in this
+    # shell: genuinely ambient. stderr is not captured (its log lines are
+    # not part of the status).
+    try:
+      let res = uncontrolledExecArgvEx(["direnv", "status"],
+        options = {poUsePath}, workingDir = cwd)
+      (ok: res.exitCode == 0, output: res.output)
+    except CatchableError:
+      (ok: false, output: "")
+  if nativeShellStandsDown(request.cwd,
+      proc (name: string): string = getEnv(name), direnvStatus):
+    # direnv has loaded the environment of this directory (its DIRENV_DIR
+    # names it or an ancestor): the environment is direnv's to activate, so
+    # the native hook prints nothing at all. It does not unload a previous
+    # native activation either: the hook ran direnv first, so the
+    # REPRO_DEV_ENV_* the shell passed may be the ones direnv just set.
+    return 0
   let projectRoot = findDevEnvProjectRoot(request.cwd)
   if projectRoot.len == 0:
     stdout.write(renderNativeShellTransition(request.previousArtifact,
@@ -26778,10 +27192,14 @@ const
     # Tool-provisioning selection. The daemon-hosted executor re-parses the
     # request's rawArgs (which carry no --tool-provisioning when the user
     # selected the mode via the env var), so REPRO_TOOL_PROVISIONING must
-    # follow the user into the daemon for resolveToolProvisioningWithEnv to
+    # follow the user into the daemon for requestedToolProvisioning to
     # observe it there. Without forwarding, an env-only selection is silently
     # ignored under the default daemon-hosted build path.
     "REPRO_TOOL_PROVISIONING",
+    # The per-tool overrides' variable, for the same reason: the
+    # daemon-hosted executor loads the overrides itself, and an override set
+    # only in the environment would otherwise be silently ignored there.
+    "REPRO_TOOL_PROVISIONING_OVERRIDES",
     # Solver-participating variant overrides. ``--variant name=value`` /
     # ``--release`` write the selection into ``REPRO_VARIANTS``; like
     # ``REPRO_TOOL_PROVISIONING`` above, the daemon-hosted executor re-parses
@@ -31552,6 +31970,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   listTargetsPackage = c.package
   if c.toolProvisioning.len > 0:
     mode = parseToolProvisioning(c.toolProvisioning)
+  setToolProvisioningForFlags(c.toolProvisioningFor)
   workRoot = c.workRoot
   if givenOnCommandLine(origin.actionCacheRoot):
     # Phase 1 cache-scope split: user-level action cache + CAS root.
@@ -31985,6 +32404,17 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       putEnv(LockPinsEnvVar,
              renderLockPins(graph.solution.packages, graph.solution.variants))
       putEnv(LockPathEnvVar, graph.lockPath)
+      # NPC-M6 — a lock that pins Nimble packages: its `nimble-index` pin
+      # is verified, every `nimble:` row is checked against a record of the
+      # pinned index, and every tree is made present in the source store
+      # (verified in place when it is already there: a warm build evaluates
+      # no fetch edge). A lock without Nimble packages does nothing here.
+      try:
+        discard prepareLockedNimbleSources(projDir, graph.lockPath,
+          NimbleSourcesOptions())
+      except CatchableError as e:
+        stderr.writeLine(reproBuildErrorText(e.msg))
+        return 1
 
   # ``--tool-provisioning`` carries ``REPRO_TOOL_PROVISIONING`` (the flag
   # declares it and wins over it), so both ``--list-targets`` and the engine
@@ -32114,6 +32544,18 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         else:
           stdout.writeLine(summary)
       releaseBuildPeerCacheWiring(peerCacheBuildWiring)
+    # Per-tool provisioning overrides: the flag's values, the variable and
+    # the configuration of the
+    # target's workspace, loaded once for the invocation and checked before
+    # anything runs. A malformed one is a usage error.
+    try:
+      discard activateToolProvisioningOverrides(
+        try: projectRootForModule(absolutePath(
+               parseBuildTarget(target).modulePath))
+        except CatchableError: getCurrentDir())
+    except CatchableError as err:
+      stderr.writeLine("repro build: error: " & err.msg)
+      return 2
     try:
       result = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
@@ -32158,7 +32600,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         peerCachePublisher = peerCacheBuildWiring.publisher,
         peerCacheInstaller = peerCacheBuildWiring.installer,
         actionOutcomeSink = actionOutcomeSink,
-        graphAugmenter = graphAugmenter).exitCode
+        graphAugmenter = graphAugmenter,
+        checkOverrideTargets = true).exitCode
       if result == 0 and publishEdgeSpec.len > 0 and not dryRun and
           not prepareOnly:
         let projectRoot =
@@ -32700,7 +33143,9 @@ proc recordMaterializedProducersForInspection(
       runtimeIdentity = toolBuildIdentity(runtimeArtifact, mode,
         storeRoot = producerOutDir / "runtime-tool-store",
         pins = producerRuntimeProvisioningPins(runtimeArtifact,
-          sourceRootAbs))
+          sourceRootAbs),
+        selections = activeToolModeSelections(runtimeArtifact, mode),
+        storeRootFor = overriddenToolStoreRoot(""))
     if not recordProducerMaterialization(selector, sourceRootAbs,
         producerArtifact, runtimeIdentity, binding):
       raise newException(IOError,
@@ -32758,11 +33203,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
   result.interfacePath = interfacePath
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode through the one resolver; the graph-inspection
+  # commands read their flag and the recipe's default, not the variable.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact,
+    consultEnv = false)
   if artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
@@ -33070,11 +33514,10 @@ proc refreshRecipeProviderSnapshot(target: string;
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode through the one resolver; the graph-inspection
+  # commands read their flag and the recipe's default, not the variable.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact,
+    consultEnv = false)
   # NOTE: deliberately NO tool-identity resolution here — pool metadata does
   # not depend on it, and it is exactly the step that throws for an
   # unresolved-sibling CONSUMER at spawn time.
@@ -34996,6 +35439,13 @@ proc runCleanCommand(projectRoot, workRoot: string; dryRun: bool): int =
   echo "repro clean: " & verb & $count & " output(s) of " & projectRoot
   if res.failed > 0: 1 else: 0
 
+proc overrideProjectRootFor(target: string): string =
+  ## The project whose workspace configuration supplies an inspection's
+  ## per-tool overrides: the target's, or the current directory when the
+  ## target does not name a project file.
+  try: projectRootForModule(absolutePath(parseBuildTarget(target).modulePath))
+  except CatchableError: getCurrentDir()
+
 proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
   ## ``repro stats [view]``. The command line is parsed from repro's
   ## description (``repro_cli_support/cli_description``): ``view`` is one of
@@ -35018,6 +35468,8 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
       parseToolProvisioning(conf.toolProvisioning)
     else:
       tpmUnspecified
+  setToolProvisioningForFlags(conf.toolProvisioningFor)
+  discard activateToolProvisioningOverrides(absolutePath(projectRoot))
   if conf.actionCacheRoot.len > 0:
     setActionCacheRootOverride(conf.actionCacheRoot)
   let top = conf.top
@@ -35717,6 +36169,9 @@ proc runGraphCommand(conf: ReproCommandLineGraph; publicCliPath: string): int =
       parseToolProvisioning(conf.toolProvisioning)
     else:
       tpmUnspecified
+  setToolProvisioningForFlags(conf.toolProvisioningFor)
+  discard activateToolProvisioningOverrides(
+    overrideProjectRootFor(if target.len > 0: target else: "."))
   let workRoot = conf.workRoot
   if conf.actionCacheRoot.len > 0:
     setActionCacheRootOverride(conf.actionCacheRoot)
@@ -36186,6 +36641,9 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
       parseToolProvisioning(conf.toolProvisioning)
     else:
       tpmUnspecified
+  setToolProvisioningForFlags(conf.toolProvisioningFor)
+  discard activateToolProvisioningOverrides(
+    overrideProjectRootFor(if target.len > 0: target else: "."))
   let workRoot = conf.workRoot
   if conf.actionCacheRoot.len > 0:
     setActionCacheRootOverride(conf.actionCacheRoot)
@@ -37435,6 +37893,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # cycle inside ``executeBuildTarget``.
   if c.toolProvisioning.len > 0:
     mode = parseToolProvisioning(c.toolProvisioning)
+  setToolProvisioningForFlags(c.toolProvisioningFor)
   workRoot = c.workRoot
   if givenOnCommandLine(origin.maxCycles):
     if c.maxCycles <= 0:
@@ -37876,6 +38335,17 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         else:
           proc(kind, message, payloadJson: string) =
             eventSink(kind, message, payloadJson, false, 0, @[], "")
+      # Per-tool overrides, re-read every cycle (an edited configuration
+      # applies to the next cycle, as an edited recipe does); a malformed
+      # one ends the watch as a usage error, before the cycle builds.
+      try:
+        discard activateToolProvisioningOverrides(
+          try: projectRootForModule(absolutePath(
+                 parseBuildTarget(target).modulePath))
+          except CatchableError: getCurrentDir())
+      except CatchableError as err:
+        emitWatchLine("repro watch: error: " & err.msg)
+        return 2
       let outcome = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
         workRoot = workRoot,
@@ -37895,7 +38365,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         wantsInputEvidencePaths = true,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
-        extraNameSelectors = extraNameSelectors)
+        extraNameSelectors = extraNameSelectors,
+        checkOverrideTargets = true)
       emitWatchLine("repro watch: cycle " & $cycle & " result exitCode=" &
         $outcome.exitCode,
         payloadJson = "{\"watchEvent\":\"cycle-result\",\"cycle\":" & $cycle &
@@ -41137,11 +41608,10 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop;
     compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
     stablePublicCliPath(), outDir / "build-engine-cache", developStats)
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode through the one resolver; the graph-inspection
+  # commands read their flag and the recipe's default, not the variable.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact,
+    consultEnv = false)
 
   if artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
@@ -41186,6 +41656,183 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop;
   runInDevelopEnvironment(command, projectRootForModule(modulePath),
     resolved.identity, resolved.identityPath, resolved.inspectionPath,
     interfacePath)
+
+# ---------------------------------------------------------------------------
+# `repro tool realize`.
+#
+# Realize ONE package of a project's `uses:` -- and its provisioning
+# dependencies, as the provisioning edges of that tool -- under the mode the
+# one resolver selects for it, and print the verified prefix. It exists for
+# the callers that need a tool on PATH without an activation, and that must
+# FAIL when the tool cannot be realized (an activation never fails: it warns
+# and leaves the ambient PATH). Exit codes: 0 realized; 1 any realization
+# failure; 2 usage error or unknown package; 3 the package has no arm for
+# the effective mode on this host (an override never falls through).
+# ---------------------------------------------------------------------------
+
+const
+  ToolRealizeExitFailed* = 1
+  ToolRealizeExitUsage* = 2
+  ToolRealizeExitNoArm* = 3
+
+proc toolRealizePrefix(profile: PathOnlyToolProfile): string =
+  ## The realized prefix of ``profile``: the store prefix a provisioning arm
+  ## realized, or, for a tool taken from PATH, the directory above its
+  ## ``bin``.
+  if profile.selectedStorePath.len > 0:
+    return profile.selectedStorePath
+  let binDir = parentDir(profile.resolvedExecutablePath)
+  if lastPathPart(binDir).cmpIgnoreCase("bin") == 0: parentDir(binDir)
+  else: binDir
+
+proc toolRealizeClosureDigest(profile: PathOnlyToolProfile): string =
+  ## The closure digest the lock identity carries (``:closure:<hex>``), or
+  ## "" when the realization has no closure.
+  let marker = ":closure:"
+  let at = profile.lockIdentity.find(marker)
+  if at < 0: ""
+  else: profile.lockIdentity[at + marker.len .. ^1].split(':')[0]
+
+proc toolRealizeJson(identity: PathOnlyBuildIdentity;
+                     profile: PathOnlyToolProfile; storeRoot: string): JsonNode =
+  ## The ``--json`` document of one realized tool: package, version, kind,
+  ## overriddenBy, prefix, executable, receipt and env.
+  var env = newJObject()
+  var pathDirs = newJArray()
+  for dir in binDirsForDevelop(identity, storeRoot = storeRoot):
+    pathDirs.add(%dir)
+  env["PATH"] = %*{"prepend": pathDirs}
+  for op in prefixEnvOpsForDevelop(identity):
+    case op.kind
+    of deskSetEnv: env[op.name] = %op.value
+    of deskPrependPath: env[op.name] = %*{"prepend": [op.value]}
+    of deskAppendPath: env[op.name] = %*{"append": [op.value]}
+    else: env[op.name] = %op.value
+  %*{
+    "package": profile.packageSelector,
+    "version": realizedVersionOf(profile),
+    "kind": profile.kind,
+    "overriddenBy": profile.overriddenBy,
+    "prefix": toolRealizePrefix(profile),
+    "executable": profile.resolvedExecutablePath,
+    "receipt": {
+      "cacheKey": profile.lockIdentity,
+      "archiveDigest": profile.tarballSha256,
+      "closureDigest": toolRealizeClosureDigest(profile),
+      # The binary-cache leg (substitution and publication of provisioned
+      # prefixes) is not implemented on this path yet, so a realization
+      # is never reported as substituted or published.
+      "source": (if profile.installMethod == "path" or
+                    profile.tarballCacheHit: "local"
+                 else: "realized"),
+      "published": false
+    },
+    "env": env
+  }
+
+proc runToolRealizeCommand*(packageName, project, toolProvisioning: string;
+                            toolProvisioningFor: seq[string]; asJson: bool;
+                            publicCliPath: string): int =
+  ## ``repro tool realize <package>``. Diagnostics go to stderr; stdout gets
+  ## the prefix (or, with ``--json``, the document) and only once the
+  ## declared executable has been verified present.
+  proc usage(msg: string): int =
+    stderr.writeLine("repro tool realize: error: " & msg)
+    ToolRealizeExitUsage
+  if packageName.strip().len == 0:
+    return usage("missing <package>")
+  let projectRoot = absolutePath(
+    if project.len > 0: project else: getCurrentDir())
+  let modulePath = resolveProjectFile(projectRoot).path
+  if modulePath.len == 0 or not fileExists(extendedPath(modulePath)):
+    return usage("no project file (" & CanonicalProjectFileName &
+      ") in " & projectRoot)
+  var requested = tpmUnspecified
+  try:
+    if toolProvisioning.len > 0:
+      requested = parseToolProvisioning(toolProvisioning)
+    setToolProvisioningForFlags(toolProvisioningFor)
+    discard activateToolProvisioningOverrides(projectRoot)
+  except CatchableError as err:
+    return usage(err.msg)
+  let outDir = projectRoot / ".repro" / "tool-realize"
+  var artifact: ProjectInterfaceArtifact
+  try:
+    ensureBootstrapToolchainEnv(requestedToolProvisioning(requested),
+      resolveStoreRoot() / "tool-store")
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    defer: releaseAutoRunQuotaProcess(autoRunQuota)
+    var stats: BuildStats
+    artifact = extractInterfaceEdge(modulePath,
+      outDir / "project-interface.rbsz", outDir / "project-interface.nim",
+      reprobuildLibraryWorkDir(), outDir / "provider-work", projectRoot,
+      publicCliPath, outDir / "build-engine-cache", stats)
+  except CatchableError as err:
+    stderr.writeLine("repro tool realize: error: the project interface " &
+      "could not be read: " & err.msg)
+    return ToolRealizeExitFailed
+  var selected = artifact
+  selected.projectInterface.toolUses = @[]
+  selected.projectInterface.runtimeToolUses = @[]
+  for useDef in artifact.projectInterface.toolUses &
+      artifact.projectInterface.runtimeToolUses:
+    if useDef.packageSelector == packageName and
+        useDef notin selected.projectInterface.toolUses:
+      selected.projectInterface.toolUses.add(useDef)
+  if selected.projectInterface.toolUses.len == 0:
+    return usage("the project at " & projectRoot & " has no `uses:` entry " &
+      "for package `" & packageName & "`")
+  var notes: seq[string] = @[]
+  var mode = tpmUnspecified
+  try:
+    checkOverridesMatch(activeToolProvisioningOverrides,
+      artifact.projectInterface.toolUses &
+        artifact.projectInterface.runtimeToolUses, notes)
+    mode = effectiveToolProvisioning(requested, artifact)
+  except CatchableError as err:
+    return usage(err.msg)
+  for note in notes:
+    stderr.writeLine(note)
+  let selections = activeToolModeSelections(selected, mode)
+  if mode == tpmUnspecified and selections.len == 0:
+    return usage("no tool provisioning mode is resolved for `" &
+      packageName & "`: pass --tool-provisioning, set " &
+      "REPRO_TOOL_PROVISIONING, or give the package an override")
+  let storeRootOverride = buildToolStoreRoot(mode)
+  var identity: PathOnlyBuildIdentity
+  try:
+    identity = resolveAndWriteIdentity(selected, outDir, mode,
+      storeRootOverride = storeRootOverride,
+      pins = buildProvisioningPins(artifact, projectRoot)).identity
+  except ToolProvisioningNoArm as err:
+    stderr.writeLine("repro tool realize: error: " & err.msg)
+    return ToolRealizeExitNoArm
+  except CatchableError as err:
+    stderr.writeLine("repro tool realize: error: `" & packageName &
+      "` could not be realized: " & err.msg)
+    return ToolRealizeExitFailed
+  if identity.profiles.len == 0:
+    stderr.writeLine("repro tool realize: error: `" & packageName &
+      "` resolved to no tool")
+    return ToolRealizeExitFailed
+  let profile = identity.profiles[0]
+  # Never print a prefix that was not verified: the declared executable must
+  # be present in it (as ``substituteToolPrefix`` checks a substitution).
+  for each in identity.profiles:
+    if each.resolvedExecutablePath.len == 0 or
+        not fileExists(extendedPath(each.resolvedExecutablePath)):
+      stderr.writeLine("repro tool realize: error: `" & packageName &
+        "` was resolved, but its executable " &
+        (if each.resolvedExecutablePath.len > 0: each.resolvedExecutablePath
+         else: "(none)") & " is not present")
+      return ToolRealizeExitFailed
+  let storeRoot =
+    if storeRootOverride.len > 0: storeRootOverride else: outDir / "tool-store"
+  if asJson:
+    stdout.writeLine($toolRealizeJson(identity, profile, storeRoot))
+  else:
+    stdout.writeLine(toolRealizePrefix(profile))
+  0
 
 proc runStoreDaemonCommand(conf: ReproCommandLineStoreDaemon): int =
   ## ``repro store daemon start|status|stop --dev [--store-root PATH]
@@ -41826,22 +42473,33 @@ proc runUserDaemonCliCommand(conf: ReproCommandLineDaemon): int =
         discard cleanupStaleUserDaemonDiscovery(config)
         echo renderUserDaemonStatus(status)
         return 0
-      stopUserDaemon(config.endpoint)
-      cleanupPlatformBackgroundRegistration(config)
-      discard cleanupStaleUserDaemonDiscovery(config)
+      let stopped = stopUserDaemon(config.endpoint)
+      let stopNote = userDaemonShutdownNote(stopped)
+      # A successor's registration and discovery records are its own.
+      if stopped.successorPid == 0:
+        cleanupPlatformBackgroundRegistration(config)
+        discard cleanupStaleUserDaemonDiscovery(config)
       echo "repro daemon: stopped"
+      if stopNote.len > 0:
+        stderr.writeLine("repro daemon: note: " & stopNote)
       return 0
     of ReproCommandLineDaemonCommand.restart:
       let status = queryUserDaemonStatus(config.endpoint)
       if status.running:
-        stopUserDaemon(config.endpoint)
-        cleanupPlatformBackgroundRegistration(config)
-        let deadline = epochTime() + 10.0
-        while epochTime() < deadline:
-          if not queryUserDaemonStatus(config.endpoint).running:
-            break
-          sleep(25)
-        discard cleanupStaleUserDaemonDiscovery(config)
+        let stopped = stopUserDaemon(config.endpoint)
+        let stopNote = userDaemonShutdownNote(stopped)
+        if stopNote.len > 0:
+          stderr.writeLine("repro daemon: note: " & stopNote)
+        # A successor's registration and discovery records are its own;
+        # `startUserDaemon` below decides what to do with it.
+        if stopped.successorPid == 0:
+          cleanupPlatformBackgroundRegistration(config)
+          let deadline = epochTime() + 10.0
+          while epochTime() < deadline:
+            if not queryUserDaemonStatus(config.endpoint).running:
+              break
+            sleep(25)
+          discard cleanupStaleUserDaemonDiscovery(config)
       let started = startUserDaemon(stablePublicCliPath(), config)
       echo renderUserDaemonStatus(started)
       return 0
@@ -82829,6 +83487,8 @@ type
       ## The shared-clone detector's reports (``rewire``, ``migrate``).
     poolExpiry*: seq[(string, string)]
       ## ``migrate`` only: each pool and its ``gc.pruneExpire`` afterwards.
+    poolExpiryReasons*: seq[(string, string)]
+      ## ``migrate`` only: why each pool left at ``never`` stays there.
     sweep*: seq[SharedBareSweepEntry]
       ## ``gc`` and ``rewire``: every bare in the cache root, with the state
       ## found before the eager sweep repaired it.
@@ -82880,8 +83540,12 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
   result["repos"] = repos
   var pools = newJArray()
   for (pool, expiry) in report.poolExpiry:
-    pools.add(%*{"pool": pool, "pruneExpire": expiry,
-      "borrowers": readBorrowers(pool).len})
+    var entry = %*{"pool": pool, "pruneExpire": expiry,
+      "borrowers": readBorrowers(pool).len}
+    for (reasonPool, reason) in report.poolExpiryReasons:
+      if reasonPool == pool:
+        entry["pruneExpireReason"] = %reason
+    pools.add(entry)
   result["pools"] = pools
   var leaves = newJArray()
   for lr in report.leafReports:
@@ -82900,9 +83564,12 @@ proc toJsonNode*(report: SharedClonesReport): JsonNode =
   result["sweep"] = sweep
   var others = newJArray()
   for m in report.otherBares:
-    others.add(%*{"bare": m.sharedBarePath, "ok": m.ok,
+    var other = %*{"bare": m.sharedBarePath, "ok": m.ok,
       "maintenanceRan": m.ran, "looseBefore": m.looseBefore,
-      "looseAfter": m.looseAfter, "diagnostic": m.diagnostic})
+      "looseAfter": m.looseAfter, "diagnostic": m.diagnostic}
+    if m.expiryNotReadyReason.len > 0:
+      other["pruneExpireReason"] = %m.expiryNotReadyReason
+    others.add(other)
   result["otherBares"] = others
   result["gatewaySummary"] = %report.gatewaySummary
   result["warnings"] = %report.warnings
@@ -82920,6 +83587,9 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
     for (pool, expiry) in report.poolExpiry:
       result.add("workspace shared-clones: pool " & pool & " gc.pruneExpire=" &
         expiry & " borrowers=" & $readBorrowers(pool).len)
+    for (pool, reason) in report.poolExpiryReasons:
+      result.add("workspace shared-clones: pool " & pool &
+        " keeps every object: " & reason)
     for lr in report.leafReports:
       var line = "workspace shared-clones: leaf " & lr.leaf &
         " registered=" & $lr.registered & " configured=" & $lr.configured
@@ -82987,6 +83657,11 @@ proc renderSharedClonesTextLines*(report: SharedClonesReport): seq[string] =
         " loose=" & $m.looseBefore & "->" & $m.looseAfter
       if m.diagnostic.len > 0:
         line.add(" diagnostic=" & m.diagnostic)
+      elif m.expiryNotReadyReason.len > 0:
+        # The same wording as the per-repo entries: a pool whose gc prunes
+        # nothing says why (Shared-Clone-Pool-Integrity §3.2).
+        line.add(" diagnostic=pool keeps every object: " &
+          m.expiryNotReadyReason)
       result.add(line)
   if report.gatewaySummary.len > 0:
     # §7.6.6's summary line: "the answer to the question" the row exists for,
@@ -83145,6 +83820,7 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
       result.cacheRoot, candidates)
     result.leafReports = migration.leaves
     result.poolExpiry = migration.poolExpiry
+    result.poolExpiryReasons = migration.poolExpiryReasons
     result.diagnostics = migration.diagnostics
     if migration.diagnostics.len > 0:
       result.exitCode = 1
@@ -83334,6 +84010,9 @@ proc executeSharedClones(parsed: SharedClonesArgs): SharedClonesReport =
         if not m.ok:
           entry.diagnostic = "maintenance failed: " & m.diagnostic
           result.exitCode = 1
+        elif m.expiryNotReadyReason.len > 0:
+          entry.diagnostic = "pool keeps every object: " &
+            m.expiryNotReadyReason
     # Additive wiring is not migration: the old pool can still own safety
     # refs, tags and graph bases even when wired=true. Name the dependency.
     if parsed.verb in ["list", "rewire"]:
@@ -94516,6 +95195,13 @@ type
       ## ``--repin=<package>[,<package>…]`` (refresh only): the targeted
       ## re-pin of `Locking-And-Solver.md` §"Targeted re-pin". Empty is the
       ## ordinary whole-lock refresh.
+    excludeNewer: int64
+      ## ``--exclude-newer <time>`` (solve, refresh): catalog versions first
+      ## seen after this Unix time are excluded (NPC-AREQ18). Negative: none.
+    allowRewind: seq[string]
+      ## ``--allow-rewind=<import>[,<import>…]`` (refresh --provisioning):
+      ## catalog imports whose ref may move to a revision that does not
+      ## descend from the pin (NPC-AREQ15).
 
 type
   LockVerbInputs = object
@@ -94550,7 +95236,8 @@ proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
   ## none given the generation emits no ``netFetch`` edge at all and the
   ## declared candidate versions are the whole universe, which is the
   ## behaviour every pre-NLF-M5 invocation had.
-  r.gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false)
+  r.gen = LockVerbOptions(strategy: lsDefault, registries: @[], write: false,
+    excludeNewer: -1)
   r.inputsOverride = c.inputs
   r.lockOverride = c.lock
   r.platformOverride = c.platform
@@ -94575,6 +95262,27 @@ proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
     r.gen.registries.add(registry)
   r.gen.write = c.write
   r.asJson = c.json
+  when compiles(c.excludeNewer):
+    if c.excludeNewer.len > 0:
+      let defect = parseExcludeNewer(c.excludeNewer, r.gen.excludeNewer)
+      if defect.len > 0:
+        stderr.writeLine("repro lock " & verb & ": " & defect)
+        return 2
+  when compiles(c.allowRewind):
+    for raw in c.allowRewind:
+      for part in raw.split(','):
+        let name = part.strip()
+        if name.len == 0:
+          stderr.writeLine("repro lock " & verb & ": --allow-rewind names " &
+            "catalog imports (--allow-rewind=<import>[,<import>…]); '" & raw &
+            "' contains an empty name")
+          return 2
+        if name notin r.gen.allowRewind: r.gen.allowRewind.add(name)
+    if r.gen.allowRewind.len > 0 and not c.provisioning:
+      stderr.writeLine("repro lock " & verb & ": --allow-rewind applies to " &
+        "a catalog import's ref, which only --provisioning moves; add " &
+        "--provisioning")
+      return 2
   when compiles(c.provisioning):
     # `refresh` only. Re-selection rewrites the
     # committed lock's provisioning records, so it belongs to the verb that
@@ -94615,6 +95323,8 @@ proc lockVerbInputsOf[T](c: T; verb: string; r: var LockVerbInputs): int =
   if c.highest: r.solveFlags.add("--highest")
   if c.inputs.len > 0: r.solveFlags.add("--inputs")
   if c.registry.len > 0: r.solveFlags.add("--registry")
+  when compiles(c.excludeNewer):
+    if c.excludeNewer.len > 0: r.solveFlags.add("--exclude-newer")
   r.projectDir = absolutePath(
     if c.projectDir.len > 0: c.projectDir else: getCurrentDir())
   return 0
@@ -96540,8 +97250,10 @@ proc inspectSiblingRemovals(projectDir, lockPath: string;
   var reported: seq[string]
   proc collect(text: string; committed: bool; report: var SiblingRemovalReport) =
     for dep in parseLockedDependencies(text).deps:
+      # A `nimble:` row is a catalog package, not a sibling: the solve
+      # re-derives it (or drops it) from the Nimble index (NPC-M6).
       if isSelfLockedDep(dep) or dep.coordinates.kind != ckVcs or
-          dep.name in names: continue
+          dep.name in names or dep.name.startsWith("nimble:"): continue
       if committed: report.committedDrops = true
       if dep.name in reported: continue
       reported.add(dep.name)
@@ -96862,6 +97574,53 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
         "package(s) the solve does not have: '" & unknown.join("', '") &
         "' (it has: " & listing.join(", ") & "); nothing was written")
       return 2
+  # NPC-M6 — `nimble:` requirements resolve through the imported Nimble
+  # index: the lock's pin of it, or, under `--provisioning`, the revision its
+  # ref names now (which must descend from the pin, NPC-AREQ15). The closure
+  # is read from the index's shards and lowered into the solve's
+  # declarations; the solved packages become `LockedDep` rows through the
+  # request's document hook. Nothing here runs for a solve that requires no
+  # `nimble:` package.
+  var nimbleSetup: NimbleSolveSetup
+  if requestsNimble(request.packages):
+    if gen.repin.len > 0:
+      stderr.writeLine("repro lock " & verb & ": --repin does not support " &
+        "`nimble:` packages yet; run `repro lock " & verb & "` without it " &
+        "(nothing was written)")
+      return 2
+    var incumbentPins: seq[LockedCatalogImport]
+    var incumbentRows: seq[LockedDep]
+    if fileExists(extendedPath(lockP)):
+      try:
+        let incumbent = parseLockedDependencies(readFile(extendedPath(lockP)))
+        incumbentPins = incumbent.lockedCatalogImportPins()
+        incumbentRows = incumbent.deps
+      except CatchableError as e:
+        stderr.writeLine("repro lock " & verb & ": cannot read the catalog " &
+          "import pins of " & lockP & ": " & e.msg & " (nothing was written)")
+        return 1
+    try:
+      nimbleSetup = prepareNimbleSolve(projectDir, request.packages,
+        incumbentPins,
+        reselect = gen.reselectProvisioning and entryPoint == lgeLockRefresh,
+        allowRewind = gen.allowRewind, platform = request.platform,
+        excludeNewer = gen.excludeNewer, incumbentRows = incumbentRows)
+    except CatchableError as e:
+      stderr.writeLine("repro lock " & verb & ": " & e.msg &
+        " (nothing was written)")
+      return 1
+    for note in nimbleSetup.notes:
+      stderr.writeLine("repro lock " & verb & ": " & note)
+    let ageLine = "repro lock " & verb & ": " &
+      nimbleIndexAgeLine(nimbleSetup.index, getTime().toUnix)
+    if asJson: stderr.writeLine(ageLine) else: stdout.writeLine(ageLine)
+    let setup = nimbleSetup
+    request.documentHook = proc (document: string): string =
+      let applied = applyNimbleRows(setup, document)
+      if applied.refusals.len > 0:
+        raise newException(NimbleLockError, "the solved Nimble closure " &
+          "cannot be locked:\n  " & applied.refusals.join("\n  "))
+      applied.document
   let writeTo = if writeByDefault or gen.write: lockP else: ""
   var removals = SiblingRemovalReport(droppedPins: newJArray(),
     behindManifests: newJArray())
@@ -96997,11 +97756,30 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
         else: currentPlatformId()
       let outcome = reselectCommittedProvisioning(projectDir, lockP,
         incumbentExists, incumbentText, generated.lockDocument, platform,
-        platform)
+        platform, gen.allowRewind)
       if not outcome.reselected:
         stderr.writeLine(renderReselectionRefusal(verb, lockP,
           outcome.refusals))
         return 1
+      if nimbleSetup.active:
+        # The solve read the index at the revision resolved above; the pin
+        # re-selection writes must be that same revision, or the rows would
+        # be anchored to an index the lock does not pin (the ref moved in
+        # between).
+        let written = parseLockedDependencies(outcome.document).
+          lockedCatalogImportPins()
+        var agrees = false
+        for p in written:
+          if p.repo == nimbleSetup.index.repo and
+              p.revision == nimbleSetup.index.revision and
+              p.interfaceArtifact == nimbleSetup.index.indexIdentity:
+            agrees = true
+        if not agrees:
+          stderr.writeLine("repro lock " & verb & ": the Nimble index \"" &
+            nimbleSetup.index.repo & "\" moved while the lock was being " &
+            "solved (the solve read " & nimbleSetup.index.revision & "); run " &
+            "the refresh again (" & lockP & " was not written)")
+          return 1
       if asJson: stderr.writeLine(outcome.report)
       else: stdout.writeLine(outcome.report)
       createDir(parentDir(lockP))
@@ -97031,9 +97809,15 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
   except EUnsatisfiable as e:
     stderr.writeLine("repro lock " & verb & ": solver UNSAT — cannot pin a " &
       "lock: " & e.msg)
+    if nimbleSetup.active:
+      stderr.writeLine(nimbleFailureText(nimbleSetup))
     return 3
   except CatchableError as e:
     stderr.writeLine("repro lock " & verb & ": generation failed: " & e.msg)
+    if nimbleSetup.active and not (e of NimbleLockError):
+      # NPC-AREQ18: the index revision, the missing names and the excluded
+      # candidates, each with its requirement chain.
+      stderr.writeLine(nimbleFailureText(nimbleSetup))
     return 1
 
 proc runReproLockRefresh(r: LockVerbInputs): int =
@@ -97663,9 +98447,21 @@ proc lockDiffReport*(oldPath, newPath: string): tuple[rc: int; text: string] =
   let diff = diffProvisioningLockDocuments(oldText, newText, evidence)
   if diff.refused:
     return (2, "repro lock diff: " & renderProvisioningDiff(diff))
+  # NPC-M6: the `nimble:` packages -- version, digest, commit and origin
+  # changes, the Nimble index each lock pins with its generation time and
+  # age (threat model G34), and the origin events published since the old
+  # pin (NPC-AREQ19). Empty for two locks without Nimble packages, which
+  # keeps every existing report byte-identical.
+  let nimble = nimbleLockDiff(oldText, newText, anchor, getTime().toUnix)
   if diff.unchanged:
-    return (0, "repro lock diff: no provisioning selection changed")
+    if nimble.lines.len == 0:
+      return (0, "repro lock diff: no provisioning selection changed")
+    return ((if nimble.changed: 1 else: 0),
+      "repro lock diff: no provisioning selection changed\n" &
+        nimble.lines.join("\n"))
   var text = renderProvisioningDiff(diff)
+  for line in nimble.lines:
+    text.add("\n" & line)
   # ReproOS M6 D4: a cause the diff could not determine says WHY -- the
   # catalogs that could not be read at the recorded revisions, each with
   # its cause and the command that makes it readable -- rather than only
@@ -98472,22 +99268,11 @@ proc definedProjectNames*(workspaceRoot: string): seq[string] =
   ## set and a project are one namespace here as they are in resolution
   ## (`resolveWorkspaceProjectByName`). An unconverted manifest repo has no
   ## `repo-sets/` directory and the listing is unchanged for it.
-  let manifests = manifestsRoot(workspaceRoot)
-  var seen: seq[string]
-  for sub in ["projects", "variants", "repo-sets"]:
-    let dir = manifests / sub
-    if not dirExists(dir):
-      continue
-    for kind, path in walkDir(dir):
-      if kind notin {pcFile, pcLinkToFile}:
-        continue
-      if path.splitFile.ext != ".toml":
-        continue
-      let name = path.splitFile.name
-      if name notin seen:
-        seen.add(name)
-  sort(seen)
-  seen
+  ##
+  ## The listing itself is `definedSetNamesAt`, shared with
+  ## `sets list --at=REV`, so the working tree and a revision cannot disagree
+  ## about which files are names.
+  definedSetNamesAt(newDirectorySource(manifestsRoot(workspaceRoot)))
 
 proc manifestDefinitionsAreVisible*(workspaceRoot: string): bool =
   ## Whether this workspace can tell a defined project from an undefined one.
@@ -106212,7 +106997,7 @@ type
     names: seq[string]
       ## ``resolve``'s set names.
     at: Option[string]
-      ## ``resolve --at=REV``.
+      ## ``list --at=REV`` and ``resolve --at=REV``.
     name: string
       ## ``add`` / ``remove``'s set name.
     message: string
@@ -106230,12 +107015,14 @@ template setsRequestOfImpl(c: untyped; Cmd: typedesc): WorkspaceSetsRequest =
     req.enabled = c.call.enabled
     req.disabled = c.call.disabled
     req.all = c.call.all
+    req.at = c.call.at
     req.json = c.call.json
   of Cmd.list:
     req.workspaceRoot = c.list.workspaceRoot
     req.enabled = c.list.enabled
     req.disabled = c.list.disabled
     req.all = c.list.all
+    req.at = c.list.at
     req.json = c.list.json
   of Cmd.resolve:
     req.sub = "resolve"
@@ -106293,6 +107080,54 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
     let wantEnabled = req.enabled and not req.all
     let wantDisabled = req.disabled and not req.all
     let asJson = req.json
+    if req.at.isSome:
+      # `--at=REV`: the names the manifest repository defines AT A COMMIT, read
+      # from its objects through the same git-revision source `resolve --at`
+      # reads (reprobuild-pm issue 2026-11-17 "projects list cannot read the
+      # projects of a metadata revision"). Without this a caller holding a
+      # repository and a commit could resolve only a name it already knew.
+      #
+      # Membership is a fact about THIS workspace's state file, which has no
+      # revision: every set a revision defines is reported not enabled, there
+      # is no primary, and a selector that asks about membership is refused
+      # rather than answered with an always-empty or always-full listing.
+      # `--all` overrides a selector here as it does without `--at`.
+      let atRevision = req.at.get
+      if atRevision.len == 0:
+        stderr.writeLine(verb & " list: --at= needs a revision " &
+          "(a commit id, branch or tag of the manifest repository)")
+        return 2
+      if wantEnabled or wantDisabled:
+        stderr.writeLine(verb & " list: --enabled and --disabled select by " &
+          "this workspace's membership, which a revision does not have; " &
+          "--at=REV lists every set the revision defines")
+        return 2
+      var revisionSource: ManifestSource = nil
+      defer: revisionSource.close()
+      var names: seq[string]
+      try:
+        revisionSource = openGitRevisionSource(manifestsRoot(workspaceRoot),
+          atRevision)
+        names = definedSetNamesAt(revisionSource)
+      except CatchableError as exc:
+        stderr.writeLine(verb & " list: " & exc.msg)
+        return 1
+      if asJson:
+        var arr = newJArray()
+        for name in names:
+          arr.add(%*{"name": name, "enabled": false, "defined": true})
+        # The same schema as the working-tree listing; `metadataRevision` is
+        # additive and present exactly when the listing was read at a
+        # revision, as it is for `resolve --at`.
+        echo (%*{"schema": "reprobuild.workspace-sets-list.v1",
+                 "workspaceRoot": workspaceRoot,
+                 "primary": "",
+                 "sets": arr,
+                 "metadataRevision": revisionSource.resolvedCommit}).pretty
+        return 0
+      for name in names:
+        stdout.writeLine(name & "\tdisabled")
+      return 0
     let active = readWorkspaceProjects(workspaceRoot)
     let defined = definedProjectNames(workspaceRoot)
     # Ordering is meaning, not cosmetics: the primary project answers "what am
@@ -107962,6 +108797,19 @@ proc runReproCommandLine(programName: string; args: seq[string];
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
         r.state)
+  of ReproCommandLineCommand.tool:
+    case conf.tool.command
+    of ReproCommandLineToolCommand.realize:
+      let r = conf.tool.realize
+      try:
+        return runToolRealizeCommand(r.package, r.project, r.toolProvisioning,
+          r.toolProvisioningFor, r.json, publicCliPath)
+      except CatchableError as err:
+        stderr.writeLine("repro tool realize: error: " & err.msg)
+        return ToolRealizeExitFailed
+    of ReproCommandLineToolCommand.help:
+      return runReproHelp(programName, @["tool"] & conf.tool.help.topic,
+        publicCliPath)
   of ReproCommandLineCommand.nimble:
     case conf.nimble.command
     of ReproCommandLineNimbleCommand.verify:

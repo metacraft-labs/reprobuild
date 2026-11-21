@@ -428,7 +428,11 @@
       # present but would not map, both bump `growthFailed`, so enumerateEdge
       # no longer honours a completeness claim from a walk that missed
       # elements. Generation-stamped counters saturate instead of wrapping.
-      url = "github:metacraft-labs/nim-shm-gset/34ef30cba47ac93304078a101796a6283230e8cc";
+      # Bumped 34ef30c -> fc0c744 (2026-11-21, `agents`): `markShardDrained` refuses
+      # the shard inserts target, `insertShardIndex` names it, and an insert
+      # into a drained target counts a growth failure and grows past it.
+      # flattenChain bounds its range by `insertShardIndex`.
+      url = "github:metacraft-labs/nim-shm-gset/fc0c74478d945161574a9fc49389c8fd65f09d2e";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -471,7 +475,7 @@
       # package build + override-free CI jobs have no sibling, so seed it from
       # here, exactly like nim-cli-spec-src. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-entrypoints/8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
+      url = "github:metacraft-labs/nim-entrypoints/d7edafaa9df1c7ae77d469754a463d4a512ec928";
       flake = false;
     };
     nim-confutils-src = {
@@ -2825,6 +2829,12 @@
             # would shadow the host's, which must match the running manager.
             REPRO_SYSTEMD_ANALYZE =
               pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.systemd}/bin/systemd-analyze";
+            # The POSIX shell the add-on's boot-hold unit runs under on Debian
+            # and Ubuntu (/bin/sh is dash there). The add-on's unit tests run
+            # that unit's script under THIS binary, so a bashism in it fails
+            # here instead of on a guest's boot; the ambient sh is bash on
+            # NixOS and accepts what dash would not.
+            REPRO_DASH = pkgs.lib.optionalString pkgs.stdenv.isLinux "${pkgs.dash}/bin/dash";
             # The MinGW-w64 gcc that scripts/check_portable_engine_closure.sh
             # compiles the engine's generated Windows C with, syntax only, so a
             # binding to a function Windows lacks (POSIX `realpath`, reprobuild-pm

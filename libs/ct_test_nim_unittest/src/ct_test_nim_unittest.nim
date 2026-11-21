@@ -48,7 +48,7 @@
 ## handles RUN/LIST/ENUMERATE at engine execution time.
 
 import std/os
-from std/strutils import endsWith
+from std/strutils import endsWith, toHex
 
 import ct_test_interface
 export ct_test_interface
@@ -543,3 +543,147 @@ proc list*(self: NimUnittestBinary;
     registerImplicitTargetExports(result.id,
       NimUnittestToolId, implicitNames,
       "ct_test_nim_unittest.nim", 0)
+
+proc perTestIdPart(value: string): string =
+  ## ``value`` with every character outside ``[A-Za-z0-9._-]`` replaced by
+  ## ``_``, so a path can name an action and a file.
+  for ch in value:
+    result.add(if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}: ch
+      else: '_')
+
+proc perTestCompileEdge(binary: string): BuildActionDef =
+  ## The recorded action that compiles ``binary``, for
+  ## ``runPerTest(perTestBinaries = true)``: a ``nim c`` that declares it
+  ## as an output (``buildNimUnittest.build``). Raises ``ValueError`` when
+  ## there is none, or more than one.
+  var found = 0
+  for action in registeredBuildActions():
+    if binary in action.outputs:
+      inc found
+      result = action
+  if found != 1:
+    raise newException(ValueError, "runPerTest(perTestBinaries = true): " &
+      (if found == 0: "no recorded action" else: $found & " actions") &
+      " declare " & binary & " as an output. Each test's binary is " &
+      "compiled like the listed one, so record its compile " &
+      "(buildNimUnittest.build) once, before runPerTest")
+  if result.call.executableName != "nim" or result.call.subcommand != "c":
+    raise newException(ValueError, "runPerTest(perTestBinaries = true): " &
+      binary & " is produced by " & result.id & ", which is not a nim " &
+      "compile (nim c); one binary per test needs nim-entrypoints' " &
+      "-d:entrypointsTest=<name>")
+
+proc runPerTest*(self: NimUnittestBinary;
+                 actionId = "";
+                 fragment = "";
+                 producer = "";
+                 perTestBinaries = false;
+                 deps: openArray[string] = [];
+                 after: openArray[BuildActionDef] = []): BuildActionDef
+    {.discardable.} =
+  ## The per-test form of ``run``: the build graph lists the binary's tests
+  ## through its ``tests`` entry and runs, caches and reports each of them
+  ## as an action of its own.
+  ##
+  ## The binary must be built with nim-entrypoints
+  ## (https://github.com/metacraft-labs/nim-entrypoints): ``import
+  ## entrypoints/tests``, ``testCase`` (or a ``tests:`` block), and a
+  ## ``main:``. Build it with ``main`` (not ``-d:entrypoint=tests``), so
+  ## that listing runs no test: in a tests-only build the ``tests:`` blocks
+  ## run when the process starts, listing included.
+  ##
+  ## Two edges are recorded:
+  ##
+  ## * a LISTING edge, ``<actionId>.list``. It runs ``repro-tests-fragment``,
+  ##   which runs ``<binary> --entrypoint=tests --list`` and writes, to
+  ##   ``fragment``, a dynamic graph fragment with one ``create-action``
+  ##   record per listed test: argv ``[<binary>, "--entrypoint=tests",
+  ##   "--run-exact=<name>"]``, the binary as its input, the monitor as its
+  ##   dependency policy, cacheable, and ``<binary>::<name>`` as its
+  ##   ``commandStatsId``. The created action's id is
+  ##   ``<actionId>.test.<name>`` (see ``ct_test_nim_unittest/tests_fragment``
+  ##   for how a name is spelled in an id). The edge is monitored and keyed
+  ##   on the binary, so an unchanged binary replays its fragment from the
+  ##   cache.
+  ## * a COLLECTOR edge, ``actionId``, which is returned. Its
+  ##   ``dynamicDepsFile`` is the fragment, so the engine creates the
+  ##   per-test actions when the collector is about to run, and the
+  ##   fragment makes the collector depend on each of them. Put it where
+  ##   ``run``'s edge would go (``collect("test", ...)``): building it runs
+  ##   every test, each a cache entry of its own, and a failing test fails
+  ##   its own action and blocks the collector.
+  ##
+  ## A test run is keyed as a declared execute edge is: its argv (which
+  ## names the test), its input's content (the binary) and what the monitor
+  ## saw it read. Every test of one binary shares that binary, so a change
+  ## to any of them reruns all of them.
+  ##
+  ## The listing edge fails, and nothing runs, when the binary has no
+  ## ``tests`` entry, lists no tests, or lists a name twice (two tests with
+  ## one name cannot be run one at a time).
+  ##
+  ## ONE BINARY PER TEST (``perTestBinaries = true``, an opt-in). The
+  ## listing still comes from this binary, but every test is then compiled
+  ## into a binary of its own and run from it: the fragment also creates a
+  ## compile per test, ``<actionId>.compile.<name>``, which is this
+  ## binary's compile (the recorded ``buildNimUnittest.build`` edge that
+  ## declares it, as the engine lowers it) with nim-entrypoints'
+  ## ``-d:entrypointsTest=<name>``, its own output
+  ## (``<dir>/<stem>.per-test/<name>/<file>``) and its own nimcache. That
+  ## define compiles the one ``testCase`` and expands every other to
+  ## nothing, so the binary of a test whose code did not change comes out
+  ## byte-identical, and its run, which checks its inputs by content when
+  ## their metadata moved (the ``hybrid`` input-check policy), is a cache
+  ## hit: changing one test reruns only that test. It costs a compile per
+  ## test, and it covers ``testCase`` tests only: the listing edge fails,
+  ## naming every listed test of a ``tests:`` block, before any compile is
+  ## created.
+  ## A test still reruns when an edit moves its lines, since its line
+  ## numbers are in its binary. Record the compile before calling this.
+  ##
+  ## ``actionId`` defaults to ``tests-per-entry.<binary>`` (the binary's
+  ## path with ``/`` and other punctuation spelled ``_``); ``fragment`` to
+  ## ``build/tests-per-entry/<actionId>.rbdyn``. ``producer`` names the
+  ## program the listing edge and the collector run, in place of the
+  ## ``repro-tests-fragment`` installed beside ``repro``; it must take that
+  ## program's arguments and write the same fragment.
+  let binary = nimUnittestExecutablePath(self.path)
+  let collectorId =
+    if actionId.len > 0: actionId
+    else: "tests-per-entry." & perTestIdPart(binary)
+  let listingId = collectorId & ".list"
+  let fragmentPath =
+    if fragment.len > 0: fragment
+    else: "build" / "tests-per-entry" / (perTestIdPart(collectorId) & ".rbdyn")
+
+  var listArgs: seq[PublicCliArg] = @[]
+  listArgs.add(inputArg("binary", binary))
+  listArgs.add(outputArg(name = "fragment", value = fragmentPath))
+  listArgs.add(cliArg("collector", collectorId))
+  if producer.len > 0:
+    listArgs.add(inputArg("producer", producer))
+  if perTestBinaries:
+    # The compile edge rides along as its payload (hex, so the call's
+    # string slot carries any byte), and the engine lowers it exactly as it
+    # lowers the edge itself; the listing edge is keyed on it too, so a
+    # change to the compile's flags rekeys the listing.
+    listArgs.add(cliArg("compileEdge",
+      toHex(actionPayload(perTestCompileEdge(binary)))))
+  let listCall = publicCliCall(NimUnittestToolId, NimUnittestToolId,
+    "listTests", NimUnittestToolId & ".listTests", listArgs)
+  let listing = recordToolInvocation(listingId, listCall,
+    deps = combineActionDeps(deps, after),
+    dependencyPolicy = automaticMonitorPolicy())
+
+  var collectArgs: seq[PublicCliArg] = @[]
+  collectArgs.add(inputArg("fragment", fragmentPath))
+  if producer.len > 0:
+    collectArgs.add(inputArg("producer", producer))
+  let collectCall = publicCliCall(NimUnittestToolId, NimUnittestToolId,
+    "collectTests", NimUnittestToolId & ".collectTests", collectArgs)
+  result = buildAction(collectorId, collectCall,
+    # The listing edge already waits for ``deps`` and ``after``.
+    deps = [listing.id],
+    inputs = [fragmentPath],
+    dynamicDepsFile = fragmentPath,
+    dependencyPolicy = automaticMonitorPolicy())

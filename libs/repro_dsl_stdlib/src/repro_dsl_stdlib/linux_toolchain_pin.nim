@@ -1,5 +1,5 @@
 ## The one pinned Linux x86_64 C toolchain archive, shared by every package
-## that is a view of it (``gcc`` realizes its driver, ``ar`` its archiver).
+## that is a view of it (``gcc`` realizes its driver, ``ar`` its archiver, ``strip`` its ``strip``).
 ##
 ## WHAT IT IS. Bootlin's ``x86-64--glibc--stable-2026.08-1``
 ## (https://toolchains.bootlin.com, built with Buildroot): GCC 15.3.0,
@@ -79,6 +79,8 @@ const
   LinuxToolchainBinutilsVersion* = "2.45.1"
   LinuxToolchainGccDriver* = "bin/x86_64-buildroot-linux-gnu-gcc.br_real"
   LinuxToolchainArchiver* = "x86_64-buildroot-linux-gnu/bin/ar"
+  LinuxToolchainStrip* = "x86_64-buildroot-linux-gnu/bin/strip"
+    ## Binutils installs ``strip`` beside ``ar`` in its tool directory.
   LinuxToolchainLoader* = "x86_64-buildroot-linux-gnu/sysroot/lib/ld-linux-x86-64.so.2"
     ## The sysroot glibc's loader, the ``PT_INTERP`` relocation gives every
     ## host program and the ``-dynamic-linker`` of a linked executable.

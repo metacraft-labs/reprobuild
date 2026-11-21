@@ -1003,9 +1003,10 @@ proc nimForkGuardScript*(forkTree, flakeLock: string): string =
   ##   resolve, since every edge resolves `nim` the same way -- is not
   ##   that fork: its installation's `lib/` differs from the fork's. The
   ##   fork binary records no revision, so its standard library is what
-  ##   identifies it; stock Nim's differs. This is the case path mode
-  ##   produces when the fork is not on PATH: it falls back to the stock
-  ##   tarball Nim silently.
+  ##   identifies it; stock Nim's differs. This is the case a stock Nim on
+  ##   PATH produces (and, until path mode became PATH-only on 2026-11-17,
+  ##   its silent fall-back to the stock tarball Nim when the fork was not
+  ##   on PATH).
   proc q(value: string): string =
     "'" & value.replace("'", "'\\''") & "'"
   "want=$(awk '/\"nim-fork-src\": \\{/ { f = 1 } f && /\"rev\":/ " &

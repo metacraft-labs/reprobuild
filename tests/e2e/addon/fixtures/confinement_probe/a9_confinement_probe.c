@@ -163,12 +163,29 @@ int main(int argc, char **argv) {
     return report(p, (int)syscall(SYS_sched_setscheduler, 0, SCHED_FIFO, &sp));
   }
   if (!strcmp(p, "suid")) {
-    const char *f = "/var/lib/a9probe/suid-mode";
+    /* The setuid bit on a file the probe owns, under the directory the
+     * argument names (a root unit's ReadWritePaths=, an unprivileged
+     * unit's state directory). */
+    const char *f = *arg ? arg : "/var/lib/a9probe/suid-mode";
     int fd = open(f, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) return report("suid-setup", -1);
     if (fd >= 0) close(fd);
     int r = chmod(f, 04755);
     unlink(f);
     return report(p, r);
+  }
+  if (!strcmp(p, "setuid")) {
+    /* setuid(2) to the caller's own uid: allowed for every user without a
+     * capability, so only a filter refuses it. The raw call: libc wrappers
+     * may broadcast it to other threads or pick setuid32. */
+    return report(p, (int)syscall(SYS_setuid, getuid()));
+  }
+  if (!strcmp(p, "affinity")) {
+    /* sched_setaffinity(2) to the mask the caller already has. */
+    cpu_set_t m;
+    CPU_ZERO(&m);
+    if (sched_getaffinity(0, sizeof m, &m) != 0) return report("affinity-setup", -1);
+    return report(p, (int)syscall(SYS_sched_setaffinity, 0, sizeof m, &m));
   }
   if (!strcmp(p, "personality")) {
     int r = personality(PER_LINUX32);

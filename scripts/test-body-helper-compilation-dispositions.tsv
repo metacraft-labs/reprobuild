@@ -113,6 +113,13 @@
 # whose compile error is the assertion) and
 # t_cs_m6b_derivation_once_per_description (nim check of N-block fixtures whose
 # compile-time derivation count and compile time are the assertion).
+# 2026-11-19 added one migrate-pending row, blocked on the C edge:
+# t_cmake_trycompile_probes_are_served_across_configures (a stand-in older
+# `repro` compiled from a fixed const).  It was first entered, the same day, as
+# `dynamic-source` because the test writes the C text at run time; under the
+# criterion below a fixed const written verbatim is migrate-pending, so it was
+# moved on 2026-11-21.  test_a_fixed_const_stub_is_counted_as_migration_debt in
+# tests/unit/test_graph_owned_test_artifacts.py pins the row to the source.
 # 2026-11-20 added one compiler-is-subject row:
 # test_cs_m12_program_imports_repro_nim (programs compiled against a
 # project's repro.nim in the DSL's thin mode; the compile errors it asserts
@@ -184,9 +191,15 @@
 # STANDING BLOCKER, counted rather than estimated: repro.nim has no C-compiler
 # build edge at all -- every nim.c(...) edge is Nim-only -- so a fixture built
 # with cc/gcc/clang cannot be lifted into the graph today no matter how static
-# its source is. That blocks ELEVEN of the migrate-pending rows (eleven of the 34
-# before 2026-11-07, ten after it, eleven again from 2026-11-11):
+# its source is. The list below names the migrate-pending rows it blocks as
+# counted when the list was kept (eleven of the 34 before 2026-11-07, ten after
+# it, eleven again from 2026-11-11), plus the row added on 2026-11-19 -- twelve.
+# It is not a full count today: other migrate-pending rows say BLOCKED ON THE C
+# EDGE in their own justification (the two GM7 rows, the hcr-linux-* rows,
+# t_installed_prefix_assembly_is_recorded, t_execution_lease_confinement) and
+# were never added here.
 #
+#   tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim
 #   tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim
 #   tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim
 #   tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim
@@ -199,8 +212,9 @@
 #   tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim
 #   tests/integration/t_stackable_hooks_extracted_process_tree.nim
 #
-# (The first is blocked only in part: its `nim c` half is liftable today, its
-# `clang -c` half is not.) The other twenty-three are blocked on nothing but
+# (t_e2e_hcr_direct_patch_debug_unwind_replay is blocked only in part: its
+# `nim c` half is liftable today, its `clang -c` half is not.) The other
+# twenty-three of the 34 counted then are blocked on nothing but
 # the work, except t_spec_example_fixtures_compile and
 # t_b0_runquota_repro_nim_compiles, whose rows name their own blockers.
 #
@@ -228,7 +242,8 @@
 # run time rather than spelled.  Drop that pattern and the count is nine, with
 # 2 compiler-is-subject; it is kept here because a compiler reached through a
 # variable is still a compiler.  The same join over the `migrate-pending` rows
-# returns exactly the eleven listed above, which is an independent check on
+# returns exactly the eleven listed above at that commit (the 2026-11-19 row is
+# later and was not part of that join), which is an independent check on
 # that list.  (Earlier revisions of this header said seventeen -- counting the
 # eight rows moved above as if they were staying -- then ten, then nine.  Nine
 # was the narrow basis reported as if it were the stated one.)
@@ -241,6 +256,7 @@ libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim	graph-owned	The
 libs/repro_build_engine/tests/test_monitor_finish_handoff_is_exclusive.nim	compiler-is-subject	The compiler's ACCEPT/REJECT verdict is the assertion: probes() (:91) returns six probes carrying mustCompile true/false and the loop (:275) fails when compiled != probe.mustCompile. FOUR OF THE SIX MUST NOT COMPILE, so no build edge can produce them -- an edge that fails is a broken build, not a passing test. Newly detected: the fragment is ' c --threads:on ...' on a continuation line of an open execCmdEx( call (:268-271), which the pre-fix detector matched and then discarded.
 libs/repro_cli_support/tests/t_in_process_profile_compile_never_spawns_its_caller.nim	product-api	compileAndAdaptHomeProfile from an embedded caller; the subject is which image the profile compile spawns as its monitor driver (the caller must be refused, a named repro must compile).
 libs/repro_cli_support/tests/t_installed_prefix_assembly_is_recorded.nim	migrate-pending	MIGRATABLE: cc builds a library with debug info and an app from fixed C text written by the test, as in libs/repro_dsl_stdlib/tests/t_installed_prefix.nim; the assertions are on the assembly edge's cache record under the real monitor, not on the compiler. BLOCKED ON THE C EDGE: repro.nim has no C-compiler fixture edge to build them as declared graph inputs.
+libs/repro_cli_support/tests/t_profile_compile_refuses_a_state_dir_past_the_windows_path_budget.nim	product-api	compileAndAdaptHomeProfile and probeProfilePlatforms are the product entry points and their behaviour under a 171-character state directory is the subject: on Windows both must refuse it before creating anything under it, naming the length, the limit and the remedy; elsewhere both must succeed. The product compiles -- that is the subject.
 libs/repro_core/tests/t_zig_target_vendored_hash.nim	compiler-is-subject	The subject is what config.nims defines for a compile: `nim check` of a probe, with and without -d:reproZigTarget, reports reproVendoredHash at compile time. No artifact is produced, and the flag that varies is the assertion.
 libs/repro_dsl_stdlib/tests/t_cs_m6b_derivation_once_per_description.nim	compiler-is-subject	The COMPILE ITSELF is the subject: compile (:69) runs an out-of-process `nim check` on generated fixtures with N configuration blocks and asserts the number of tables clispec derived during that compile (printed by the fixture at compile time) and the compile time the checks add per block. Neither is an artifact a build edge produces; the fixture is generated per N.
 libs/repro_dsl_stdlib/tests/t_cs_m6b_snippet_checked_at_compile_time.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: checkFixture (:32) runs an out-of-process `nim check` on a generated recipe module writing a cargo configuration block against cargo's description, and the cases assert the compile error naming the key and its line (or that the corrected block compiles). A build edge cannot produce a compile that is required to fail; `compiles(...)` cannot observe a `{.error.}` raised inside a macro's expansion.
@@ -258,7 +274,7 @@ libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	product-a
 libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim	product-api	compileProfileBinary is reprobuild's own profile compiler; the subject is the baseOs: section its profile macro builds from the operator's source (a staticRead body included) and the CompileFailure diagnostic it gives for a malformed field. The profiles are written at run time; the test body compiles no helper.
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_names_sharing_an_identifier_are_refused.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: checkModules (:19) runs an out-of-process `nim check` on generated package modules and the cases assert the `package` macro's refusal naming both colliding packages (or that a distinct pair compiles). A build edge cannot produce a compile that is required to fail; `compiles(...)` is vacuous for `package` blocks.
 libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	compiler-is-subject	The compiler's own dependency list is the subject: build() (:53) compiles a tree into build/bin and runs scripts/write_helper_deps.sh (nim --genDeps) over it, and the cases assert what freshRepoBinary reads from build/nimcache/foo/foo.deps -- a library module, the app's module after an incremental build, a file it includes and a module from outside the tree, each dated after the binary, refused. Each case rebuilds after editing source timestamps, so a shared read-only graph output cannot serve.
-tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim	dynamic-source	The older-repro case cc's the const StubSource C string, written into the test's scratch root at run time, into a stand-in `repro` that answers without the relocatable-probes feature; there is no checked-in source to give a graph edge.
+tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim	migrate-pending	MIGRATABLE: the older-repro case writes the fixed const StubSource (:90) verbatim (:229) then cc (:230) into a stand-in `repro` that answers `capabilities` without the relocatable-probes feature and forwards every other command to the real binary. No substitution anywhere: the real binary's path reaches the stub through REPRO_TEST_REAL_REPRO at run time, not through the compiled text. The forked cmake and the real repro are found on disk, not built here. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static its source is.
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	product-api	compileFloorProvider is extractInterfaceFromModule + compileProviderBinary.
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	product-api	compileFixtureProvider is extractInterfaceFromModule + compileProviderBinary over a provider recipe written per test.
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	migrate-pending	MIGRATABLE IN PART: 'nim c --threads:on --out:build/test-bin/hcr_m28_target' on the git-tracked hcr_m28_target.nim is a plain fixture materialization. The OTHER compile in this file -- buildDebugObject's 'clang -c' of a .s written at run time -- must stay, and there is no cc/clang graph edge in repro.nim today.
@@ -290,6 +306,7 @@ tests/e2e/m83/t_e2e_profile_compile_refuses_noexec_state_dir.nim	product-api	com
 tests/e2e/m83/t_e2e_profile_compile_runtime_read_tracked.nim	product-api	compileProfileToRbpi is the product entry point and its per-edge re-run decision is the subject: after a file the profile reads only at RUN time changes, the run edge must re-run and the compile edge must be a cdHit with nim not spawned. The profile is written at run time and edited between calls; the test body compiles no helper.
 tests/e2e/m83/t_e2e_profile_compile_staticread_payload_change.nim	product-api	compileProfileToRbpi is the product entry point and its re-run decision is the subject: the library case asserts the engine answers an unchanged staticRead payload from the action cache (cdHit, nim not spawned) and re-runs the edge when only the payload changes. The profile is written at run time and edited between calls, so no pre-built artifact can stand in for the compile.
 tests/e2e/m83/t_e2e_profile_modules.nim	product-api	Six compileProfileToRbpi calls; the docstring names it 'the production library entry point'.
+tests/e2e/m83/t_e2e_profile_resave_without_edit_does_not_recompile.nim	product-api	compileProfileToRbpi and probeProfilePlatforms are the product entry points and their re-run decision is the subject: after every profile source is written again with the bytes it holds, the profile must be answered from the action cache with nim not spawned, and a same-length edit of the staticRead payload must still re-run the compile. The profile is written at run time and its sources are rewritten between calls; the test body compiles no helper.
 tests/e2e/m83/t_e2e_profile_run_edge_is_unblessed.nim	product-api	compileProfileToRbpi is the product entry point and its publish decision per edge is the subject: a profile that draws std/sysrand entropy at run time must leave the unblessed run edge unpublished while the blessed compile edge in the same graph publishes. The profile is written at run time; the test body compiles no helper.
 tests/e2e/m83/t_e2e_repro_profile_compile.nim	migrate-pending	MIGRATABLE IN PART: compileAndRun over seven tracked tests/fixtures/m83 sources. One of them, home_compile_fail.nim, asserts a compile FAILURE and must stay out of the graph -- a graph edge that fails is a broken build, not a passing test.
 tests/e2e/m83/t_e2e_repro_profile_compile_via_action.nim	product-api	Drives compileProfileToRbpi across cache miss/hit/force/failure plus the repro __repro-compile-profile helper subcommand.

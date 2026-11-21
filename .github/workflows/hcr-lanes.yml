@@ -135,6 +135,13 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          # App credentials start setup-dev-env's job credential broker, which
+          # re-mints the Nix GitHub token before the hour an installation
+          # token lives. This job runs past that hour: without the broker,
+          # every gate that fetched through Nix after minute ~60 failed with
+          # `401 Bad credentials` (run 44372733079, five gates refused).
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
       # The manifest-vs-tree check first: it is a source scan that answers in
       # seconds, and if the work list disagrees with the tree there is no point
       # compiling 46 gate binaries to find out.

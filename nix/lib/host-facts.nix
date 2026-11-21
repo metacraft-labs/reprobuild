@@ -53,7 +53,6 @@ let
     filter
     head
     length
-    listToAttrs
     match
     toJSON
     ;
@@ -79,25 +78,66 @@ let
     "masApps"
   ];
 
-  # First occurrence of each `id` wins (one entry per logical id).
-  uniqueById =
-    entries:
-    map (n: n.value) (
-      builtins.sort (a: b: a.name < b.name) (
-        let
-          set = listToAttrs (
-            map (e: {
-              name = e.id;
-              value = e;
-            }) entries
-          );
-        in
-        map (n: {
-          name = n;
-          value = set.${n};
-        }) (attrNames set)
-      )
+  # Fields that say where an entry came from, never compared (spec §Host
+  # facts, "Compared fields"); every other field of an entry is compared.
+  # `host_facts.nim` holds the same list (`HostFactsInformationalFields`).
+  informationalFields = [
+    "id"
+    "origin"
+    "version"
+  ];
+
+  # The compared fields on which two entries for one id differ, in
+  # field-name order. A field one entry has and the other lacks differs.
+  differingComparedFields =
+    a: b:
+    filter (k: !(elem k informationalFields) && !(a ? ${k} && b ? ${k} && a.${k} == b.${k})) (
+      attrNames (a // b)
     );
+
+  # One entry per logical id, in id order, for a compared category. Two
+  # entries for one id describe the same fact when they agree on every
+  # compared field: the first is kept. When they differ, keeping one would
+  # describe one of two declared things as the fact, so the facts are
+  # refused, naming both origins and each differing field -- the rule
+  # `repro home facts` applies on the Reprobuild side (host_facts.nim,
+  # `add`). (For two agents with one label, Home Manager itself installs
+  # one plist per label, chosen by attribute name.)
+  #
+  # Where a Home Manager configuration can report one id twice: a canonical
+  # package installed by two routes (any two of the `home.packages`
+  # derivations and the Homebrew casks and formulae) and a PATH entry
+  # spelled two ways -- neither has a compared field, so they always agree
+  # -- and two `launchd.agents` whose `config.Label` is the same, which are
+  # compared. (A systemd fact's internal `unitTarget` counts as compared
+  # here; systemd ids come from attribute names and never repeat.)
+  mergeById =
+    category: entries:
+    let
+      groups = builtins.groupBy (e: e.id) entries;
+      show = e: k: if e ? ${k} then toJSON e.${k} else "(absent)";
+      check =
+        first: e:
+        let
+          differing = differingComparedFields first e;
+        in
+        if differing == [ ] then
+          first
+        else
+          throw "reprobuild.lib.homeManagerFacts: two ${category} entries for `${first.id}` (${first.origin}; ${e.origin}) that disagree on ${
+            builtins.concatStringsSep ", " (map (k: "${k} ${show first k} vs ${show e k}") differing)
+          }";
+    in
+    map (id: builtins.foldl' check (head groups.${id}) (builtins.tail groups.${id})) (attrNames groups);
+
+  # One entry per id, in id order, for the `unmapped` and `uncategorized`
+  # lists, which are never compared (spec §Host facts): the first is kept.
+  firstById =
+    entries:
+    let
+      groups = builtins.groupBy (e: e.id) entries;
+    in
+    map (id: head groups.${id}) (attrNames groups);
 
   # A launchd boolean key: absent and null both mean false (launchd.plist(5)).
   launchdBool = c: key: if (c.${key} or null) == null then false else c.${key};
@@ -138,6 +178,10 @@ let
 
     files = {}
     def add_file(fid, origin, real, why):
+        # Two `home.file` entries can name one file (a directory entry and
+        # an entry for a file inside it). Both are read from the same path
+        # of the one `home-files` tree, so they cannot differ: the first is
+        # kept.
         if fid in files:
             return
         if real is None or not os.path.exists(real):
@@ -449,12 +493,12 @@ let
         inherit format schemaVersion host;
         system = targetSystem;
         homeDirectory = homeDir;
-        packages = uniqueById (pick "package" allPackageResults);
-        unmapped = uniqueById (pick "unmapped" allPackageResults);
-        environment = uniqueById environment;
-        services = uniqueById (systemdFacts ++ launchdFacts);
+        packages = mergeById "packages" (pick "package" allPackageResults);
+        unmapped = firstById (pick "unmapped" allPackageResults);
+        environment = mergeById "environment" environment;
+        services = mergeById "services" (systemdFacts ++ launchdFacts);
         files = fileSpecs;
-        uncategorized = uniqueById uncategorized;
+        uncategorized = firstById uncategorized;
       };
 
       spec = pkgs.writeText "host-facts-spec-${host}.json" (

@@ -391,7 +391,9 @@ proc parseDependencyRequest*(arg: string): DependencyRequest =
   ## ``arg`` as the `uses:` entry it becomes. Accepts the entry as `uses:`
   ## writes it (`openssl`, `openssl >=3.3 <4.0`) and `name@<constraint>`
   ## (`openssl@>=3.3 <4.0`, `openssl@3.3.1`), which is the same entry with
-  ## `@` for the space. Refuses what an entry cannot express: an empty
+  ## `@` for the space. A name may carry an ecosystem namespace
+  ## (`nimble:chronicles@>=0.10` is the entry `nimble:chronicles >=0.10`).
+  ## Refuses what an entry cannot express: an empty
   ## name, a name with characters a package name does not have, `@` with
   ## nothing after it, `@latest` (an entry states a constraint, not a
   ## resolution), a quote or backslash, and a constraint the version grammar
@@ -421,11 +423,19 @@ proc parseDependencyRequest*(arg: string): DependencyRequest =
   if name.len == 0:
     result.diagnostic = "'" & text & "' names no package"
     return
-  if name[0] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+  # An ecosystem namespace (`nimble:chronicles`) is part of the name and is
+  # written into `uses:` exactly as given (Package-Model.md § Ecosystem
+  # namespaces): the package's identity is the same in both places.
+  let ns = splitNamespace(name)
+  if ns.defect.len > 0:
+    result.diagnostic = ns.defect
+    return
+  let bareName = ns.name
+  if bareName[0] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
     result.diagnostic = "'" & name & "' is not a package name (it must " &
       "start with a letter, a digit or `_`)"
     return
-  for ch in name:
+  for ch in bareName:
     if ch notin PackageNameChars:
       result.diagnostic = "'" & name & "' is not a package name (`" & $ch &
         "` is not allowed in one)"

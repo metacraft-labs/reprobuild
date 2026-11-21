@@ -2,9 +2,13 @@ import std/[algorithm, os, strutils, tables, times]
 
 import blake3
 
-const CacheKeySchema* = "reprobuild.dev-env.cache-key.v2"
+const CacheKeySchema* = "reprobuild.dev-env.cache-key.v3"
   ## v2: the key folds in the prompt watch manifest (``promptWatch=``, the
   ## last part). See ``promptWatchState``.
+  ## v3: the key folds in the per-tool provisioning overrides
+  ## (``REPRO_TOOL_PROVISIONING_OVERRIDES`` and
+  ## ``toolProvisioningOverrideConfig=``), so changing an override
+  ## re-activates.
 
 const
   CanonicalProjectFileName = "repro.nim"
@@ -73,6 +77,42 @@ proc envVarPart(name: string): string =
     name & "=" & getEnv(name)
   else:
     name & "=<unset>"
+
+proc toolProvisioningOverrideConfigPart*(projectRoot: string): string =
+  ## The configuration files that may carry ``[tool-provisioning.overrides]``
+  ## for an activation of ``projectRoot``, each by path and content: the
+  ## user configuration, the workspace settings file found from
+  ## ``projectRoot`` and the local file beside it.
+  ## Whole files rather than the parsed table: this module parses no TOML,
+  ## and a key that moves on any edit of those files only costs a
+  ## re-activation, never a stale one.
+  ##
+  ## Spelled out rather than imported, like the project-file names above:
+  ## the user path is ``repro_cli_support``'s ``userConfigPath``
+  ## (``REPROBUILD_USER_CONFIG``, else ``<config dir>/reprobuild/config.toml``)
+  ## and the discovery is ``repro_workspace_manifests``'
+  ## ``findWorkspaceSettingsPath`` (``REPRO_WORKSPACE_CONFIG``, else the
+  ## nearest ``repro-workspace.toml`` at or above the project).
+  let userConfig =
+    if getEnv("REPROBUILD_USER_CONFIG").len > 0: getEnv("REPROBUILD_USER_CONFIG")
+    else: getConfigDir() / "reprobuild" / "config.toml"
+  var settings = getEnv("REPRO_WORKSPACE_CONFIG")
+  if settings.len == 0 and projectRoot.len > 0:
+    var dir = absolutePath(projectRoot)
+    while true:
+      if fastFileExists(dir / "repro-workspace.toml"):
+        settings = dir / "repro-workspace.toml"
+        break
+      let parent = parentDir(dir)
+      if parent.len == 0 or parent == dir:
+        break
+      dir = parent
+  let localSettings =
+    if settings.len > 0: parentDir(settings) / "repro-workspace.local.toml"
+    else: ""
+  "user=" & fileFingerprintPart(userConfig) & "\nsettings=" &
+    fileFingerprintPart(settings) & "\nlocal=" &
+    fileFingerprintPart(localSettings)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -726,6 +766,11 @@ proc computeDevEnvEdgeCacheKey*(projectRoot, activity, lockSliceId,
     "developOverrides=" & fileFingerprintPart(resolvedOverridesPath),
     envVarPart("REPRO_DEVELOP_OVERRIDES_FILE"),
     envVarPart("REPRO_TOOL_PROVISIONING"),
+    # The per-tool overrides, so changing one re-activates: the variable,
+    # and the configuration files that may carry them.
+    envVarPart("REPRO_TOOL_PROVISIONING_OVERRIDES"),
+    "toolProvisioningOverrideConfig=" &
+      toolProvisioningOverrideConfigPart(projectRoot),
     # WHERE the realized prefixes live, alongside WHICH provisioning mode
     # produced them. Both change the PATH an activation emits, so both have
     # to key it.

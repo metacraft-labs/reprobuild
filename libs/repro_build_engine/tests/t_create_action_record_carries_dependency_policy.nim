@@ -21,11 +21,25 @@
 ##   "key moves" cases go red;
 ## * stop passing `dependencyPolicy` to `action()` and the depfile case reads
 ##   back the monitor.
+##
+## A record also carries `envPassthrough`, as a declared edge does: the names
+## of variables whose value is the host's (a per-test compile created from a
+## nim compile edge carries that edge's temp-directory names). The names
+## reach the action and its key; a malformed name is refused. Falsifier:
+## stop passing `envPassthrough` to `action()` and those cases go red.
+##
+## And an `actionCachePolicy` (`timestamp`, the default; `hybrid`;
+## `checksum`), as a declared edge's: a per-test binary's run is `hybrid`, so
+## a binary rebuilt byte-identical is a hit. Like a declared edge's, the
+## policy is not in the key (a lookup is served only records made under the
+## same policy). Falsifier: stop passing it to `action()` and the `hybrid`
+## case reads back `ffpTimestamp`.
 
 import std/[json, strutils, unittest]
 
 import repro_build_engine {.all.}
 import repro_core
+import repro_core/input_check_policy
 from repro_depfile import MakeDepfileFormatName
 
 proc decode(node: JsonNode): BuildAction =
@@ -153,3 +167,56 @@ suite "create-action record: the key moves with the policy":
     check keyedOnCreatedActionPolicy(seed, "automaticMonitor", []) != seed
     check keyedOnCreatedActionPolicy(seed, "automaticMonitor", []) !=
       keyedOnCreatedActionPolicy(seed, "makeDepfile", ["a.d"])
+
+suite "create-action record: environment passthrough":
+
+  test "the names reach the action, beside the declared environment":
+    var node = record(monitor)
+    node["env"] = %["PATH=/tools"]
+    node["envPassthrough"] = %["TMPDIR", "TEMP"]
+    let created = decode(node)
+    check created.env == @["PATH=/tools"]
+    check created.envPassthrough == @["TMPDIR", "TEMP"]
+    check decode(record(monitor)).envPassthrough.len == 0
+
+  test "the names key the action":
+    var node = record(monitor)
+    node["envPassthrough"] = %["TMPDIR"]
+    check decode(node).weakFingerprint !=
+      decode(record(monitor)).weakFingerprint
+    var other = record(monitor)
+    other["envPassthrough"] = %["TEMP"]
+    check decode(node).weakFingerprint != decode(other).weakFingerprint
+    check decode(node).weakFingerprint == decode(node).weakFingerprint
+
+  test "a name that is not a variable name is refused":
+    for bad in [%[""], %["TMPDIR=/tmp"], %[1], %"TMPDIR"]:
+      var node = record(monitor)
+      node["envPassthrough"] = bad
+      let message = refusal(node)
+      checkpoint($bad & " -> " & message)
+      check "envPassthrough" in message
+
+suite "create-action record: input-check policy":
+
+  test "the policy reaches the action, timestamp by default":
+    check decode(record(monitor)).actionCachePolicy == ffpTimestamp
+    for (name, policy) in [("timestamp", ffpTimestamp),
+        ("hybrid", ffpHybrid), ("checksum", ffpChecksum)]:
+      var node = record(monitor)
+      node["actionCachePolicy"] = %name
+      check decode(node).actionCachePolicy == policy
+
+  test "the policy is not in the key, as for a declared edge":
+    var node = record(monitor)
+    node["actionCachePolicy"] = %"hybrid"
+    check decode(node).weakFingerprint ==
+      decode(record(monitor)).weakFingerprint
+
+  test "an unknown policy is refused":
+    for bad in [%"content", %1]:
+      var node = record(monitor)
+      node["actionCachePolicy"] = bad
+      let message = refusal(node)
+      checkpoint($bad & " -> " & message)
+      check "actionCachePolicy" in message

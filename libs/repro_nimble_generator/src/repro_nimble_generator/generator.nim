@@ -602,12 +602,9 @@ proc publishSources(run: Run; built: BuiltIndex) =
       lines.join("\n  "))
 
 proc unlistedName(url, subdir: string): string =
-  var u = url.toLowerAscii()
-  let sep = u.find("://")
-  if sep >= 0: u = u[sep + 3 .. ^1]
-  while u.endsWith("/"): u.setLen(u.len - 1)
-  if u.endsWith(".git"): u.setLen(u.len - 4)
-  u & (if subdir.len > 0: "?subdir=" & subdir else: "")
+  ## The name an unlisted source is indexed under; resolution looks it up
+  ## by the same function (``repro_nimble_index.unlistedSourceName``).
+  unlistedSourceName(url, subdir)
 
 proc generate*(config: GeneratorConfig): GenerationResult =
   ## One generation (see the module docstring).

@@ -788,11 +788,30 @@ proc clearBootHoldRecord*(stateDir: string) =
   ## The switch's start holds are lifted: a boot then puts back nothing.
   ## While its marker stays, the record stays too, listing no hold
   ## (``ensureBootHoldRecord``); without a marker it goes.
-  discard removeLeafNoFollow(bootHoldRecordPath(stateDir))
-  when not mutated("boot-hold-marker-without-record"):
-    if fileExists(pendingMarkerPath(stateDir)) or
-        symlinkExists(pendingMarkerPath(stateDir)):
-      ensureBootHoldRecord(stateDir)
+  ##
+  ## With a marker the record of none replaces the old one in one rename
+  ## (``writeHoldFile``), so there is no moment at which the marker is on
+  ## disk without a record (A9 review round 21, L1): a crash between a
+  ## removal and a rewrite would leave exactly that, and the boot-hold unit
+  ## would hold every activator for a switch that had lifted its holds.
+  let p = bootHoldRecordPath(stateDir)
+  let marked = fileExists(pendingMarkerPath(stateDir)) or
+               symlinkExists(pendingMarkerPath(stateDir))
+  when mutated("boot-hold-marker-without-record"):
+    discard removeLeafNoFollow(p)
+  elif mutated("boot-hold-clear-record-two-step"):
+    # Falsifying build: round 20's remove-then-rewrite.
+    discard removeLeafNoFollow(p)
+    if marked: ensureBootHoldRecord(stateDir)
+  else:
+    if marked:
+      # A symlink or directory in the record's place is not ours to
+      # follow: the rename replaces a symlink itself, and a directory
+      # makes it fail, which raises.
+      createDir(parentDir(p))
+      writeHoldFile(p, "")
+    else:
+      discard removeLeafNoFollow(p)
 
 proc clearPendingMarker*(stateDir: string) =
   ## Step 9's last act. The marker goes first, then the record of its
