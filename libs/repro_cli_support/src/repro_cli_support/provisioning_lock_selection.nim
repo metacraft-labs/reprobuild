@@ -158,6 +158,10 @@ type
     lockClaims*: seq[LockedRealization]
       ## The committed lock's provisioning records, all platform pairs: the
       ## coordinates a source may read diagnostic evidence at.
+    allowRewind*: seq[string]
+      ## Re-selection only: the catalog imports (by ``repo``) whose ref may
+      ## move to a revision that does not descend from the lock's pin
+      ## (``repro lock refresh --allow-rewind``; NPC-AREQ15).
 
   ProvisioningCatalogInputs* = object
     ## The resolver inputs a build cannot read out of its own artifact.
@@ -191,6 +195,9 @@ type
     evidenceFailures*: seq[CatalogEvidenceFailure]
       ## OPTIONAL, diagnostics only: catalogs that could not be read at a
       ## locked record's own revision for ``previous``, with the cause.
+    notes*: seq[string]
+      ## OPTIONAL: what re-selection reports beside the pin changes (a
+      ## rewind ``allowRewind`` accepted).
 
   ProvisioningCatalogSource* = proc (request: ProvisioningCatalogRequest):
     ProvisioningCatalogInputs {.closure.}
@@ -231,12 +238,13 @@ proc productionProvisioningCatalogSource*(request: ProvisioningCatalogRequest):
         request.lockClaims, provisioningReselectCommand(request.projectRoot,
           request.lockPath))
     of pcpLockReselect:
-      catalogsForReselect(request.projectRoot, request.lockClaims)
+      catalogsForReselect(request.projectRoot, request.lockClaims,
+        request.catalogImportPins, request.allowRewind)
   ProvisioningCatalogInputs(imports: answer.imports, offered: answer.offered,
     policy: answer.policy, resolver: answer.resolver,
     previous: answer.previous, catalogImportPins: answer.pins,
     declaration: answer.declaration,
-    evidenceFailures: answer.evidenceFailures)
+    evidenceFailures: answer.evidenceFailures, notes: answer.notes)
 
 var catalogSource: ProvisioningCatalogSource =
   productionProvisioningCatalogSource
@@ -489,7 +497,8 @@ proc renderReselectionRefusal*(verb, lockPath: string;
 proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
                                     incumbentExists: bool;
                                     incumbentText, freshDocument: string;
-                                    hostPlatform, targetPlatform: string):
+                                    hostPlatform, targetPlatform: string;
+                                    allowRewind: seq[string] = @[]):
     CommittedReselection =
   ## Explicit re-selection of the committed lock's provisioning records on
   ## one platform pair, over ``freshDocument`` (the lock the refresh just
@@ -542,7 +551,8 @@ proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
       projectRoot: projectRoot, lockPath: lockPath,
       artifact: ProjectInterfaceArtifact(), hostPlatform: hostPlatform,
       targetPlatform: targetPlatform, purpose: pcpLockReselect,
-      catalogImportPins: incumbentPins, lockClaims: incumbent))
+      catalogImportPins: incumbentPins, lockClaims: incumbent,
+      allowRewind: allowRewind))
   except CatchableError as err:
     return CommittedReselection(refusals: @["the catalogs to re-select " &
       "from could not be obtained: " & err.msg])
@@ -588,5 +598,7 @@ proc reselectCommittedProvisioning*(projectRoot, lockPath: string;
   # M6 D1: how the catalog import pins moved (nothing when unchanged).
   for line in renderCatalogPinChanges(incumbentPins, inputs.catalogImportPins):
     report.add("\n" & line)
+  for note in inputs.notes:
+    report.add("\n" & note)
   CommittedReselection(document: document, report: report,
     diff: outcome.diff)

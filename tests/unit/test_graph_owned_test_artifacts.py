@@ -225,6 +225,64 @@ class NoTestBodyHelperCompilation(unittest.TestCase):
                 f"{source} is recorded as graph-owned but still spawns a compiler",
             )
 
+    def test_a_fixed_const_stub_is_counted_as_migration_debt(self):
+        """A fixed const compiled verbatim is `migrate-pending`, not KEEP.
+
+        The disposition list states the criterion: compiled text that never
+        varies is a checked-in fixture that has not been checked in yet, and
+        `dynamic-source` is for text that differs run to run. The try_compile
+        reuse test compiles a stand-in older `repro` from the const
+        ``StubSource``. Its row was first entered as `dynamic-source`, which
+        parks the debt in a bucket nobody counts (reprobuild-pm issue
+        2026-11-19-reprobuild-agents-fails-just-lint-at-bb8752745).
+
+        Both halves are asserted, so the row and the source cannot drift
+        apart silently: while the stub is written verbatim the row must say
+        `migrate-pending`; once StubSource stops being one literal written
+        verbatim, this test names the row to re-review. It reads only the
+        StubSource lines, so a define added to the cc argv is not caught here.
+        """
+        source = (
+            "tests/e2e/cmake-trycompile-reuse/"
+            "t_cmake_trycompile_probes_are_served_across_configures.nim"
+        )
+        text = (REPO_ROOT / source).read_text(encoding="utf-8")
+        self.assertEqual(
+            len(re.findall(r'^\s*StubSource\s*=\s*"""', text, re.M)),
+            1,
+            f"{source} no longer defines StubSource as one string literal; "
+            "re-review its disposition row and this test",
+        )
+        uses = [
+            line.strip()
+            for line in text.splitlines()
+            if re.search(r"\bStubSource\b", line)
+            and not re.match(r'\s*StubSource\s*=\s*"""', line)
+            and not line.lstrip().startswith("#")
+        ]
+        self.assertTrue(
+            uses,
+            f"{source} no longer writes StubSource anywhere; re-review its "
+            "disposition row and this test",
+        )
+        verbatim = all(
+            re.fullmatch(r"writeFile\([^,]+,\s*StubSource\)", use) for use in uses
+        )
+        self.assertTrue(
+            verbatim,
+            f"{source} now does more with StubSource than write it verbatim "
+            f"({uses}); re-review its disposition row and this test",
+        )
+        rows, errors = audit.read_dispositions(audit.DISPOSITIONS)
+        self.assertEqual(errors, [], "the tracked disposition list does not parse")
+        self.assertIn(source, rows, f"{source} has lost its disposition row")
+        self.assertEqual(
+            rows[source][0],
+            "migrate-pending",
+            f"{source} compiles the fixed const StubSource, written verbatim; "
+            "by the list's own criterion that is migration debt",
+        )
+
     def test_a_compile_hidden_behind_an_include_is_still_found(self):
         """One of the detector's four declared blind spots, closed.
 

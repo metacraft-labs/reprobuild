@@ -113,6 +113,13 @@
 # whose compile error is the assertion) and
 # t_cs_m6b_derivation_once_per_description (nim check of N-block fixtures whose
 # compile-time derivation count and compile time are the assertion).
+# 2026-11-19 added one migrate-pending row, blocked on the C edge:
+# t_cmake_trycompile_probes_are_served_across_configures (a stand-in older
+# `repro` compiled from a fixed const).  It was first entered, the same day, as
+# `dynamic-source` because the test writes the C text at run time; under the
+# criterion below a fixed const written verbatim is migrate-pending, so it was
+# moved on 2026-11-21.  test_a_fixed_const_stub_is_counted_as_migration_debt in
+# tests/unit/test_graph_owned_test_artifacts.py pins the row to the source.
 # 2026-11-20 added one compiler-is-subject row:
 # test_cs_m12_program_imports_repro_nim (programs compiled against a
 # project's repro.nim in the DSL's thin mode; the compile errors it asserts
@@ -184,9 +191,15 @@
 # STANDING BLOCKER, counted rather than estimated: repro.nim has no C-compiler
 # build edge at all -- every nim.c(...) edge is Nim-only -- so a fixture built
 # with cc/gcc/clang cannot be lifted into the graph today no matter how static
-# its source is. That blocks ELEVEN of the migrate-pending rows (eleven of the 34
-# before 2026-11-07, ten after it, eleven again from 2026-11-11):
+# its source is. The list below names the migrate-pending rows it blocks as
+# counted when the list was kept (eleven of the 34 before 2026-11-07, ten after
+# it, eleven again from 2026-11-11), plus the row added on 2026-11-19 -- twelve.
+# It is not a full count today: other migrate-pending rows say BLOCKED ON THE C
+# EDGE in their own justification (the two GM7 rows, the hcr-linux-* rows,
+# t_installed_prefix_assembly_is_recorded, t_execution_lease_confinement) and
+# were never added here.
 #
+#   tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim
 #   tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim
 #   tests/e2e/hcr-watch/t_e2e_hcr_watch_inference.nim
 #   tests/e2e/hcr-watch/t_e2e_repro_watch_hcr_multi_target_independent_patches.nim
@@ -199,8 +212,9 @@
 #   tests/integration/t_monitor_fault_fails_the_action_not_the_daemon.nim
 #   tests/integration/t_stackable_hooks_extracted_process_tree.nim
 #
-# (The first is blocked only in part: its `nim c` half is liftable today, its
-# `clang -c` half is not.) The other twenty-three are blocked on nothing but
+# (t_e2e_hcr_direct_patch_debug_unwind_replay is blocked only in part: its
+# `nim c` half is liftable today, its `clang -c` half is not.) The other
+# twenty-three of the 34 counted then are blocked on nothing but
 # the work, except t_spec_example_fixtures_compile and
 # t_b0_runquota_repro_nim_compiles, whose rows name their own blockers.
 #
@@ -228,7 +242,8 @@
 # run time rather than spelled.  Drop that pattern and the count is nine, with
 # 2 compiler-is-subject; it is kept here because a compiler reached through a
 # variable is still a compiler.  The same join over the `migrate-pending` rows
-# returns exactly the eleven listed above, which is an independent check on
+# returns exactly the eleven listed above at that commit (the 2026-11-19 row is
+# later and was not part of that join), which is an independent check on
 # that list.  (Earlier revisions of this header said seventeen -- counting the
 # eight rows moved above as if they were staying -- then ten, then nine.  Nine
 # was the narrow basis reported as if it were the stated one.)
@@ -258,7 +273,7 @@ libs/repro_profile_compile/tests/t_template_in_template_named_args.nim	product-a
 libs/repro_profile_compile/tests/t_base_os_section_round_trip.nim	product-api	compileProfileBinary is reprobuild's own profile compiler; the subject is the baseOs: section its profile macro builds from the operator's source (a staticRead body included) and the CompileFailure diagnostic it gives for a malformed field. The profiles are written at run time; the test body compiles no helper.
 libs/repro_project_dsl/tests/dsl_port/t_dsl_package_names_sharing_an_identifier_are_refused.nim	compiler-is-subject	The compiler's DIAGNOSTIC is the assertion: checkModules (:19) runs an out-of-process `nim check` on generated package modules and the cases assert the `package` macro's refusal naming both colliding packages (or that a distinct pair compiles). A build edge cannot produce a compile that is required to fail; `compiles(...)` is vacuous for `package` blocks.
 libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim	compiler-is-subject	The compiler's own dependency list is the subject: build() (:53) compiles a tree into build/bin and runs scripts/write_helper_deps.sh (nim --genDeps) over it, and the cases assert what freshRepoBinary reads from build/nimcache/foo/foo.deps -- a library module, the app's module after an incremental build, a file it includes and a module from outside the tree, each dated after the binary, refused. Each case rebuilds after editing source timestamps, so a shared read-only graph output cannot serve.
-tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim	dynamic-source	The older-repro case cc's the const StubSource C string, written into the test's scratch root at run time, into a stand-in `repro` that answers without the relocatable-probes feature; there is no checked-in source to give a graph edge.
+tests/e2e/cmake-trycompile-reuse/t_cmake_trycompile_probes_are_served_across_configures.nim	migrate-pending	MIGRATABLE: the older-repro case writes the fixed const StubSource (:90) verbatim (:229) then cc (:230) into a stand-in `repro` that answers `capabilities` without the relocatable-probes feature and forwards every other command to the real binary. No substitution anywhere: the real binary's path reaches the stub through REPRO_TEST_REAL_REPRO at run time, not through the compiled text. The forked cmake and the real repro are found on disk, not built here. BLOCKED ON THE C EDGE: repro.nim has no C-compiler edge at all, so this cannot be lifted today no matter how static its source is.
 tests/e2e/dev-env/t_e2e_provider_dev_env_implicit_floor.nim	product-api	compileFloorProvider is extractInterfaceFromModule + compileProviderBinary.
 tests/e2e/dev-env/t_e2e_provider_dev_env_introspection.nim	product-api	compileFixtureProvider is extractInterfaceFromModule + compileProviderBinary over a provider recipe written per test.
 tests/e2e/hcr-debug-unwind/t_e2e_hcr_direct_patch_debug_unwind_replay.nim	migrate-pending	MIGRATABLE IN PART: 'nim c --threads:on --out:build/test-bin/hcr_m28_target' on the git-tracked hcr_m28_target.nim is a plain fixture materialization. The OTHER compile in this file -- buildDebugObject's 'clang -c' of a .s written at run time -- must stay, and there is no cc/clang graph edge in repro.nim today.

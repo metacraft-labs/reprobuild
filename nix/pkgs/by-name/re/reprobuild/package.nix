@@ -161,8 +161,8 @@
   entrypointsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-entrypoints";
-    rev = "8f2aa9253a5ce481ae92c4c6efb04e539df9ead4";
-    hash = "sha256-2zjGCBISzkUw3tim4kUzm6sPPxyeLeX+PCrKYzbPjGk=";
+    rev = "eef1ca3fac2e873fb8a65a3bfea92619f31d23ce";
+    hash = "sha256-sfop5Uwm786eZcpxrFxxcy8o7DLpM3Z/GvhQha4omwA=";
   },
   # Added after the `src` commit too: confutils over a clispec description,
   # which repro's own command line is.

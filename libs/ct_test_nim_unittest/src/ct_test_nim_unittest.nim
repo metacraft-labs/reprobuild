@@ -543,3 +543,98 @@ proc list*(self: NimUnittestBinary;
     registerImplicitTargetExports(result.id,
       NimUnittestToolId, implicitNames,
       "ct_test_nim_unittest.nim", 0)
+
+proc perTestIdPart(value: string): string =
+  ## ``value`` with every character outside ``[A-Za-z0-9._-]`` replaced by
+  ## ``_``, so a path can name an action and a file.
+  for ch in value:
+    result.add(if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}: ch
+      else: '_')
+
+proc runPerTest*(self: NimUnittestBinary;
+                 actionId = "";
+                 fragment = "";
+                 producer = "";
+                 deps: openArray[string] = [];
+                 after: openArray[BuildActionDef] = []): BuildActionDef
+    {.discardable.} =
+  ## The per-test form of ``run``: the build graph lists the binary's tests
+  ## through its ``tests`` entry and runs, caches and reports each of them
+  ## as an action of its own.
+  ##
+  ## The binary must be built with nim-entrypoints
+  ## (https://github.com/metacraft-labs/nim-entrypoints): ``import
+  ## entrypoints/tests``, ``testCase`` (or a ``tests:`` block), and a
+  ## ``main:``. Build it with ``main`` (not ``-d:entrypoint=tests``), so
+  ## that listing runs no test: in a tests-only build the ``tests:`` blocks
+  ## run when the process starts, listing included.
+  ##
+  ## Two edges are recorded:
+  ##
+  ## * a LISTING edge, ``<actionId>.list``. It runs ``repro-tests-fragment``,
+  ##   which runs ``<binary> --entrypoint=tests --list`` and writes, to
+  ##   ``fragment``, a dynamic graph fragment with one ``create-action``
+  ##   record per listed test: argv ``[<binary>, "--entrypoint=tests",
+  ##   "--run-exact=<name>"]``, the binary as its input, the monitor as its
+  ##   dependency policy, cacheable, and ``<binary>::<name>`` as its
+  ##   ``commandStatsId``. The created action's id is
+  ##   ``<actionId>.test.<name>`` (see ``ct_test_nim_unittest/tests_fragment``
+  ##   for how a name is spelled in an id). The edge is monitored and keyed
+  ##   on the binary, so an unchanged binary replays its fragment from the
+  ##   cache.
+  ## * a COLLECTOR edge, ``actionId``, which is returned. Its
+  ##   ``dynamicDepsFile`` is the fragment, so the engine creates the
+  ##   per-test actions when the collector is about to run, and the
+  ##   fragment makes the collector depend on each of them. Put it where
+  ##   ``run``'s edge would go (``collect("test", ...)``): building it runs
+  ##   every test, each a cache entry of its own, and a failing test fails
+  ##   its own action and blocks the collector.
+  ##
+  ## A test run is keyed as a declared execute edge is: its argv (which
+  ## names the test), its input's content (the binary) and what the monitor
+  ## saw it read. Every test of one binary shares that binary, so a change
+  ## to any of them reruns all of them.
+  ##
+  ## The listing edge fails, and nothing runs, when the binary has no
+  ## ``tests`` entry, lists no tests, or lists a name twice (two tests with
+  ## one name cannot be run one at a time).
+  ##
+  ## ``actionId`` defaults to ``tests-per-entry.<binary>`` (the binary's
+  ## path with ``/`` and other punctuation spelled ``_``); ``fragment`` to
+  ## ``build/tests-per-entry/<actionId>.rbdyn``. ``producer`` names the
+  ## program the listing edge and the collector run, in place of the
+  ## ``repro-tests-fragment`` installed beside ``repro``; it must take that
+  ## program's arguments and write the same fragment.
+  let binary = nimUnittestExecutablePath(self.path)
+  let collectorId =
+    if actionId.len > 0: actionId
+    else: "tests-per-entry." & perTestIdPart(binary)
+  let listingId = collectorId & ".list"
+  let fragmentPath =
+    if fragment.len > 0: fragment
+    else: "build" / "tests-per-entry" / (perTestIdPart(collectorId) & ".rbdyn")
+
+  var listArgs: seq[PublicCliArg] = @[]
+  listArgs.add(inputArg("binary", binary))
+  listArgs.add(outputArg(name = "fragment", value = fragmentPath))
+  listArgs.add(cliArg("collector", collectorId))
+  if producer.len > 0:
+    listArgs.add(inputArg("producer", producer))
+  let listCall = publicCliCall(NimUnittestToolId, NimUnittestToolId,
+    "listTests", NimUnittestToolId & ".listTests", listArgs)
+  let listing = recordToolInvocation(listingId, listCall,
+    deps = combineActionDeps(deps, after),
+    dependencyPolicy = automaticMonitorPolicy())
+
+  var collectArgs: seq[PublicCliArg] = @[]
+  collectArgs.add(inputArg("fragment", fragmentPath))
+  if producer.len > 0:
+    collectArgs.add(inputArg("producer", producer))
+  let collectCall = publicCliCall(NimUnittestToolId, NimUnittestToolId,
+    "collectTests", NimUnittestToolId & ".collectTests", collectArgs)
+  result = buildAction(collectorId, collectCall,
+    # The listing edge already waits for ``deps`` and ``after``.
+    deps = [listing.id],
+    inputs = [fragmentPath],
+    dynamicDepsFile = fragmentPath,
+    dependencyPolicy = automaticMonitorPolicy())
