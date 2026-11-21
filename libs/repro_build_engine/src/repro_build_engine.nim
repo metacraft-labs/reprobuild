@@ -23229,6 +23229,14 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         inc waitingDeps
     remaining[newAction.id] = waitingDeps
     runResult.trace(newAction.id, "action-create", "producer=" & producerId)
+    # The command the record created, as a JSON array, so a build report
+    # says what each created action ran (a per-test run names its test
+    # here). The record's argv, not the expanded one: an `@FILE:` token is
+    # substituted only at launch and its contents never reach a report.
+    if runResult.traceEnabled:
+      # Rendered only when the trace is kept.
+      runResult.trace(newAction.id, "action-create-argv",
+        $(%incomingAction.argv))
     if blockedBy.len > 0:
       statuses[newAction.id] = asBlocked
       let blockedIdx = idToIndex.resultIndex(newAction.id)

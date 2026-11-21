@@ -507,6 +507,14 @@ const
       artifacts: @[TestGraphArtifact(
         path: "build/bin/repro-agent-conformance",
         actionId: "reprobuild.apps.repro-agent-conformance")]),
+    # The engine runs the per-test producer from beside its own image, so a
+    # `repro test` of a package that uses `runPerTest` needs the shipped app.
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m14_repro_collects_tests_per_entry.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-tests-fragment",
+        actionId: "reprobuild.apps.repro-tests-fragment")]),
     TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(
@@ -1534,6 +1542,9 @@ package reprobuild:
 
   executable reproCmakeDyndepFragment:
     name: "repro-cmake-dyndep-fragment"
+
+  executable reproTestsFragment:
+    name: "repro-tests-fragment"
 
   executable reproCmakeTrycompileProvider:
     name: "repro-cmake-trycompile-provider"
@@ -2943,6 +2954,18 @@ package reprobuild:
       nimcache = "build/nimcache/repro-cmake-dyndep-fragment",
       runInSourceDir = true,
       actionId = "reprobuild.apps.repro-cmake-dyndep-fragment"))
+
+    # The producer `runPerTest`'s listing edge runs (from beside the engine
+    # image), so it ships wherever the engine does.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/repro-tests-fragment/repro_tests_fragment.nim",
+      binary = "build/bin/repro-tests-fragment",
+      defines = @["release"],
+      paths = sourceOnlyNimPaths,
+      extraEnv = sourceOnlyEnv,
+      nimcache = "build/nimcache/repro-tests-fragment",
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.repro-tests-fragment"))
 
     # Provider-mode entries carry ``-d:reproProviderMode`` per the
     # third field on their ``apps/entrypoints.txt`` line.
