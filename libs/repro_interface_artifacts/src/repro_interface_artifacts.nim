@@ -7328,25 +7328,73 @@ proc resolveSqliteLibDir*(explicitLibDir, explicitPrefix, builtPrefix,
       return stored
   firstExistingLibDir(hostDirs, SqliteLibraryNames)
 
+proc topLevelModuleNames(root: string): HashSet[string] =
+  ## The names a `--path:` root contributes to Nim's module namespace: each
+  ## `<name>.nim` directly under it, and each directory directly under it (a
+  ## package's modules, `import name/module`). Nim resolves `import x` and
+  ## `import x/y` by searching each root for `x.nim` or `x/` in turn
+  ## (https://nim-lang.org/docs/manual.html#modules-module-names-in-imports).
+  result = initHashSet[string]()
+  if root.len == 0 or not dirExists(extendedPath(root)):
+    return
+  for kind, path in walkDir(extendedPath(root)):
+    let name = path.extractFilename
+    if name.len == 0 or name.startsWith("."):
+      continue
+    case kind
+    of pcFile, pcLinkToFile:
+      if name.endsWith(".nim"):
+        result.incl(name[0 ..< name.len - ".nim".len])
+    of pcDir, pcLinkToDir:
+      result.incl(name)
+
 proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string;
                             packageFlags: openArray[string]) =
   ## Recipe/configuration paths remain usable, but may not replace the SDK's
   ## selected libraries or their bootstrap dependencies. Do not promote a
   ## consumer's other auto-discovered/declared package roots with the SDK.
+  ##
+  ## A package the SDK vendors under its own `libs/` always resolves to the
+  ## SDK's copy in an SDK-internal compile. A root outside the SDK's own
+  ## library roots that provides a module name one of them also provides (an
+  ## explicit `*_SRC` override, a sibling checkout's copy, a declared or
+  ## producer package root such as codetracer's `libs/nim-json-serialization`)
+  ## is therefore never reasserted: it stays on the search path where the
+  ## command put it, behind the SDK's reasserted roots, so the SDK's copy wins
+  ## whenever both are present, and every member of a vendored library family
+  ## (faststreams, stew, the serialization family) comes from the one tree the
+  ## SDK was written against. Reasserting such a root put it AHEAD of the SDK's
+  ## copy and paired two releases of one family in a single compile
+  ## (reprobuild-pm issue 2026-11-18-codetracer-recipe-extraction-mixes-
+  ## reprobuild-serialization-with-codetracer-json-serialization, option 2).
+  ## A root providing no SDK-vendored name is reasserted as before.
   let sdkLibs =
     if workDirIsReprobuildTree(workDir): workDir / "libs"
     else: reprobuildExternalLibsRoot(workDir)
   var protectedFlags = initHashSet[string]()
+  var sdkRootFlags = initHashSet[string]()
+  var sdkModules = initHashSet[string]()
   if sdkLibs.len > 0:
     var roots: seq[string]
     walkLibSrcPathsInto(sdkLibs, roots)
     for root in roots:
       protectedFlags.incl("--path:" & root)
+      sdkRootFlags.incl("--path:" & root)
+      for name in topLevelModuleNames(root):
+        sdkModules.incl(name)
     for flag in bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
         workDir.parentDir):
       if flag.startsWith("--path:"): protectedFlags.incl(flag)
   for flag in packageFlags:
     if flag.startsWith("--path:"): protectedFlags.incl(flag)
+  # Option 2: an override of an SDK-vendored package is not promoted.
+  var overrides: seq[string]
+  for flag in protectedFlags:
+    if flag notin sdkRootFlags and
+        (topLevelModuleNames(flag["--path:".len .. ^1]) * sdkModules).len > 0:
+      overrides.add(flag)
+  for flag in overrides:
+    protectedFlags.excl(flag)
   var selected: seq[string]
   var remaining: seq[string]
   var beforeModule = true

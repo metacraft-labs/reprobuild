@@ -2629,6 +2629,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_build_engine_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_output_removal_check_folds_case.nim",
+    binary: "build/test-bin/t_output_removal_check_folds_case",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim",
     binary: "build/test-bin/t_package_identity_is_the_producing_action",
     defines: @[],

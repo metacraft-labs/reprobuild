@@ -27,15 +27,24 @@
 ## Vacuity: every category has at least one entry in the native run, and
 ## both runs differ exactly where the guards say.
 ##
+## `e2e_home_facts_names_absolute_home_path_entry` (reprobuild-pm issue
+## 2026-11-20-repro-home-facts-names-a-path-entry-spelled-as-the-real-home-by-its-absolute-path):
+## a PATH entry spelled as the host's real home by its absolute path must be
+## named `~/<rel>`, as the Nix producer names the same `home.sessionPath`
+## entry, so `repro home compare` reports it `same` rather than once on each
+## side. The host's home is `--home-dir`, else the running user's `$HOME`;
+## a relative or empty `--home-dir` is a usage error.
+##
 ## No mocks: the real `repro`, the real Nim compiler and profile compile edge
 ## (through the shared harness), a real filesystem. Windows: not compiled in
 ## -- the gate's targets are the two Nix platforms, where the comparison is
 ## made (spec §Platforms); home-pc and m1 run it.
 
-import std/[json, os, sequtils, strutils, unittest]
+import std/[algorithm, json, os, sequtils, strutils, unittest]
 from repro_core/paths import extendedPath
 
 import ./profile_compile_edge_harness
+import ./compare_support
 
 const
   Host = "gm6-host"
@@ -213,3 +222,86 @@ when defined(linux) or defined(macosx):
         "--target", native], host = "")
       check defaultOnly.exitCode == 0
       check parseJson(defaultOnly.stdout).ids("packages") == @["bash", "jq"]
+
+    test "e2e_home_facts_names_absolute_home_path_entry":
+      # A PATH entry that spells the host's real home as an absolute path
+      # is named `~/<rel>`, as `homeManagerFacts` names the same
+      # `home.sessionPath` entry (`pathEntryId` matches
+      # `home.homeDirectory`), so `repro home compare` sees ONE entry. The
+      # host's home is `--home-dir`, else the home of the user running the
+      # command (`$HOME`, the sandbox home here). The private scratch home
+      # the plan runs against is never in a profile, so it cannot name it.
+      var sb = newProfileSandbox("gm6-facts-abs-path", "")
+      defer: sb.dispose()
+      const DeclaredHome = "/home/gm6-declared"
+      sb.writeProfileFile("home.nim", """
+import repro_profile
+
+profile "gm6AbsolutePath":
+  activity default:
+    bash
+
+  hosts:
+    "gm6-host": [default]
+
+  resources:
+    envUserPath(entries = "$1/.local/bin, $1, $2/tools, /opt/gm6/bin")
+""" % [sb.homeDir, DeclaredHome])
+      let native = when defined(macosx): "aarch64-darwin" else: "x86_64-linux"
+
+      # The running user's home: the sandbox's `$HOME`.
+      let run = sb.runRepro(["home", "facts", "--host", Host,
+        "--target", native], host = "")
+      check run.exitCode == 0
+      if run.exitCode != 0:
+        echo run.stderr
+      let doc = parseJson(run.stdout)
+      check doc.ids("environment") == @["path:" & DeclaredHome & "/tools",
+        "path:/opt/gm6/bin", "path:~", "path:~/.local/bin"]
+      # No id names the home (an entry's informational `origin` quotes the
+      # profile's declaration as written, so it does).
+      for id in doc.ids("environment"):
+        check not id.contains(sb.homeDir)
+
+      # The Nix side of the same host: Home Manager's `pathEntryId` names
+      # `<home.homeDirectory>/.local/bin` `~/.local/bin`, the home itself
+      # `~`. Compared, the PATH entries are `same`, none on one side only.
+      var nixDoc = doc.asSide("nix")
+      nixDoc["categories"]["environment"] = %*[
+        {"id": "path:" & DeclaredHome & "/tools", "origin": "home.sessionPath"},
+        {"id": "path:/opt/gm6/bin", "origin": "home.sessionPath"},
+        {"id": "path:~", "origin": "home.sessionPath"},
+        {"id": "path:~/.local/bin", "origin": "home.sessionPath"}]
+      let dir = newScratch("abs-path")
+      defer: removeDir(dir)
+      let nixPath = dir.writeDoc("nix.json", nixDoc)
+      let reproPath = dir.writeDoc("reprobuild.json", doc)
+      let cmp = runCompare(["--facts", nixPath, "--facts", reproPath,
+        "--format", "json"])
+      check cmp.exitCode == 0
+      let report = parseJson(cmp.stdout)
+      check report.statusIds("environment", "same") ==
+        @["path:" & DeclaredHome & "/tools", "path:/opt/gm6/bin", "path:~",
+          "path:~/.local/bin"]
+      for status in ["only-in-nix", "only-in-reprobuild", "different"]:
+        check report.statusIds("environment", status).len == 0
+
+      # `--home-dir` names the host's home: the facts of a host whose home
+      # is not the running user's (a trailing `/` is the same directory).
+      # The running user's home is then an ordinary directory.
+      for spelling in [DeclaredHome, DeclaredHome & "/"]:
+        let declared = sb.runRepro(["home", "facts", "--host", Host,
+          "--target", native, "--home-dir", spelling], host = "")
+        check declared.exitCode == 0
+        if declared.exitCode != 0:
+          echo declared.stderr
+        check parseJson(declared.stdout).ids("environment") == sorted(@[
+          "path:" & sb.homeDir, "path:" & sb.homeDir & "/.local/bin",
+          "path:/opt/gm6/bin", "path:~/tools"])
+
+      # A relative or empty `--home-dir` names no directory: usage error.
+      for bad in ["home/gm6", ""]:
+        let refused = sb.runRepro(["home", "facts", "--host", Host,
+          "--target", native, "--home-dir", bad], host = "")
+        check refused.exitCode == 2
+        check refused.stderr.contains("--home-dir")

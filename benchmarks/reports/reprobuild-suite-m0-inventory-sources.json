@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3093,
+    "nimTestBinaries": 3094,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 821,
     "staticallyDetectedRuntimeCompilerFlowTests": 158,
-    "testEntries": 3143
+    "testEntries": 3144
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1773,7 +1773,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1723,
+      "integration": 1724,
       "platform/destructive": 200,
       "pure unit": 821,
       "unclassified": 373
@@ -1996,9 +1996,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3093,
+    "nimTestBinaryCount": 3094,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3143
+    "testEntryCount": 3144
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -13303,6 +13303,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_output_removal_check_folds_case",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_output_removal_check_folds_case.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_package_identity_is_the_producing_action",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -21800,7 +21818,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_sdk_package_roots_come_from_the_sdk.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -40354,7 +40372,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/m83/t_e2e_home_facts_from_isolated_plan.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
