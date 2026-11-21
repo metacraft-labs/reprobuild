@@ -6,6 +6,7 @@ from repro_core/source_root import declareRunningImageSource
 import blake3
 
 import ./client
+import ./daemon_lock_probe
 import ./daemon_log
 # `repro daemon`'s command line is declared in repro's description; only its
 # spellings are read here, at compile time. The thin client links this
@@ -264,8 +265,6 @@ type
     stop*: proc() {.closure.}
     active*: proc(): bool {.closure.}
     pollIntervalMs*: int
-
-const UserDaemonLockFileName = ".repro-daemon.lock"
 
 var userDaemonBackgroundService: UserDaemonBackgroundService
 
@@ -4047,7 +4046,8 @@ proc startUserDaemon*(publicCliPath: string;
       "launch requested backend=windows-handle-list pid=" & $pid)
   waitForUserDaemonStatus(launchConfig.endpoint)
 
-proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()) =
+proc stopUserDaemon*(endpoint = defaultUserDaemonEndpoint()):
+    UserDaemonShutdownResult {.discardable.} =
   requestUserDaemonShutdown(endpoint)
 
 const UserDaemonBinaryVersionNote* =

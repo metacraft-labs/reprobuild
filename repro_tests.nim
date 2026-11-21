@@ -5125,6 +5125,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "libs/repro_daemon_core/tests/t_daemon_stop_reports_what_it_observed.nim",
+    binary: "build/test-bin/t_daemon_stop_reports_what_it_observed",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim",
     binary: "build/test-bin/t_daemon_transient_unit_name",
     defines: @[],

@@ -434,6 +434,7 @@ libs/repro_daemon_core/tests/t_daemon_missing_feature_refusal.nim	nim	2
 libs/repro_daemon_core/tests/t_daemon_runtime_log_retention.nim	nim	3
 libs/repro_daemon_core/tests/t_daemon_status_binary_identity.nim	nim	6
 libs/repro_daemon_core/tests/t_daemon_status_file_per_endpoint.nim	nim	8
+libs/repro_daemon_core/tests/t_daemon_stop_reports_what_it_observed.nim	nim	6
 libs/repro_daemon_core/tests/t_daemon_transient_unit_name.nim	nim	7
 libs/repro_daemon_core/tests/t_daemon_writer_identity.nim	nim	21
 libs/repro_daemon_core/tests/t_ipc_endpoint_is_bounded_to_the_socket_address_limit.nim	nim	4

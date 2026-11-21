@@ -41932,22 +41932,33 @@ proc runUserDaemonCliCommand(conf: ReproCommandLineDaemon): int =
         discard cleanupStaleUserDaemonDiscovery(config)
         echo renderUserDaemonStatus(status)
         return 0
-      stopUserDaemon(config.endpoint)
-      cleanupPlatformBackgroundRegistration(config)
-      discard cleanupStaleUserDaemonDiscovery(config)
+      let stopped = stopUserDaemon(config.endpoint)
+      let stopNote = userDaemonShutdownNote(stopped)
+      # A successor's registration and discovery records are its own.
+      if stopped.successorPid == 0:
+        cleanupPlatformBackgroundRegistration(config)
+        discard cleanupStaleUserDaemonDiscovery(config)
       echo "repro daemon: stopped"
+      if stopNote.len > 0:
+        stderr.writeLine("repro daemon: note: " & stopNote)
       return 0
     of ReproCommandLineDaemonCommand.restart:
       let status = queryUserDaemonStatus(config.endpoint)
       if status.running:
-        stopUserDaemon(config.endpoint)
-        cleanupPlatformBackgroundRegistration(config)
-        let deadline = epochTime() + 10.0
-        while epochTime() < deadline:
-          if not queryUserDaemonStatus(config.endpoint).running:
-            break
-          sleep(25)
-        discard cleanupStaleUserDaemonDiscovery(config)
+        let stopped = stopUserDaemon(config.endpoint)
+        let stopNote = userDaemonShutdownNote(stopped)
+        if stopNote.len > 0:
+          stderr.writeLine("repro daemon: note: " & stopNote)
+        # A successor's registration and discovery records are its own;
+        # `startUserDaemon` below decides what to do with it.
+        if stopped.successorPid == 0:
+          cleanupPlatformBackgroundRegistration(config)
+          let deadline = epochTime() + 10.0
+          while epochTime() < deadline:
+            if not queryUserDaemonStatus(config.endpoint).running:
+              break
+            sleep(25)
+          discard cleanupStaleUserDaemonDiscovery(config)
       let started = startUserDaemon(stablePublicCliPath(), config)
       echo renderUserDaemonStatus(started)
       return 0
