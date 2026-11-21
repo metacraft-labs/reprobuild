@@ -1383,17 +1383,17 @@
     "nim-entrypoints-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795214441,
-        "narHash": "sha256-sfop5Uwm786eZcpxrFxxcy8o7DLpM3Z/GvhQha4omwA=",
+        "lastModified": 1795243834,
+        "narHash": "sha256-yYOvfH+g94Fr7APdF0oYVlQiX38AWcEYXOiiqYJ+K2U=",
         "owner": "metacraft-labs",
         "repo": "nim-entrypoints",
-        "rev": "eef1ca3fac2e873fb8a65a3bfea92619f31d23ce",
+        "rev": "d7edafaa9df1c7ae77d469754a463d4a512ec928",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "nim-entrypoints",
-        "rev": "eef1ca3fac2e873fb8a65a3bfea92619f31d23ce",
+        "rev": "d7edafaa9df1c7ae77d469754a463d4a512ec928",
         "type": "github"
       }
     },
