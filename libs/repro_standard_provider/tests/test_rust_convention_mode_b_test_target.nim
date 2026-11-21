@@ -41,6 +41,7 @@ import std/[os, osproc, sequtils, streams, strtabs, strutils, tables,
 import repro_test_support/reasoned_skip
 
 import repro_core
+import repro_core/process_streams
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
@@ -94,7 +95,7 @@ proc runCapture(exe: string; args: openArray[string]; workingDir: string):
     envTab[k] = v
   let p = startProcess(exe, workingDir = workingDir, args = args,
     env = envTab, options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (output, code)
