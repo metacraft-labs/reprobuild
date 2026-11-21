@@ -9185,7 +9185,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 357,
+          "line": 376,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -9204,7 +9204,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 358,
+          "line": 377,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -9223,7 +9223,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 375,
+          "line": 394,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -9242,7 +9242,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 380,
+          "line": 399,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -14402,7 +14402,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64157,7 +64157,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_nix_propagated_store_paths.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
