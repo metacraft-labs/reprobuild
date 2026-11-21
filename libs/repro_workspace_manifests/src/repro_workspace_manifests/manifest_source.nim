@@ -528,6 +528,10 @@ proc listTomlFiles*(source: ManifestSource; relDir: string): seq[string] =
   ## Entries are listed as the directory holds them — a link is listed under
   ## its own name and resolved when it is read — so the order is the order of
   ## the names a reader sees, for every source alike.
+  ##
+  ## Every source lists the same entries for the same tree: a regular file or
+  ## a link that does not lead to a directory, whose `splitFile` extension is
+  ## `.toml`.
   let dir = normalizeRelPath(relDir)
   case source.kind
   of mskDirectory:
@@ -543,10 +547,27 @@ proc listTomlFiles*(source: ManifestSource; relDir: string): seq[string] =
       return
     let prefix = found.get().path & "/"
     for path, entry in source.entries.pairs:
-      if path.startsWith(prefix) and '/' notin path[prefix.len .. ^1] and
-          path.endsWith(".toml") and entry.kind == "blob" and
-          entry.mode != gitModeGitlink:
-        result.add(dir & "/" & path[prefix.len .. ^1])
+      if not path.startsWith(prefix) or '/' in path[prefix.len .. ^1] or
+          entry.kind != "blob" or entry.mode == gitModeGitlink:
+        continue
+      # The same two tests the directory branch applies, so a revision and a
+      # working tree of it list the same names: `splitFile`'s extension (a
+      # bare `.toml` is a dot-file with no extension, not a name), and a link
+      # is listed unless it leads to a directory. A link that leads nowhere,
+      # or out of the tree, is still listed, as the directory branch lists a
+      # dangling one; reading it is what refuses it.
+      if path.splitFile.ext != ".toml":
+        continue
+      if entry.mode == gitModeSymlink:
+        var leadsToTree = false
+        try:
+          let target = source.resolveTreePath(path)
+          leadsToTree = target.isSome and target.get().entry.kind == "tree"
+        except CatchableError:
+          leadsToTree = false
+        if leadsToTree:
+          continue
+      result.add(dir & "/" & path[prefix.len .. ^1])
   of mskOverlay:
     result = listTomlFiles(source.base, dir)
     let parent = source.overlayPath.rsplit('/', maxsplit = 1)
