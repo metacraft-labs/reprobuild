@@ -6006,7 +6006,7 @@
             "workRoot",
             "wrapped"
           ],
-          "line": 1440,
+          "line": 1445,
           "path": "tests/integration/t_every_launch_path_is_monitored.nim",
           "patterns": [
             "cc"
@@ -55708,7 +55708,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_runquota_test_threads_follow_grant.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

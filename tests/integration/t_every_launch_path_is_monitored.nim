@@ -49,8 +49,9 @@
 ##       spawns from TWO arms since ``5ca890504`` (a sized action keeps a
 ##       width with no lease): an action with no width flag is started as
 ##       prepared, and a sized one is prepared with width placeholders and
-##       started after ``applyGrantedWidth`` fills them with
-##       ``bypassWidthMilli``. Both arms are this one path — same proc, same
+##       started after ``applyGrantedWidth`` fills them with the width
+##       the scheduler sized with ``bypassWidthMilli`` (passed in as
+##       ``widthMilli`` since ``c867b3f37``). Both arms are this one path — same proc, same
 ##       spec builder, same ``startDirect`` — and both are pinned by their
 ##       call-site text, so a third ``startDirect`` is not absorbed by them.
 ##       backend label ``runquota-bypass``.
@@ -615,8 +616,9 @@ const SpawnPrimitives: array[47, tuple[name: string; expected: int;
   ("finishMonitor", 1, "HM-4: consumes a hosted monitor; SPAWNS on Windows"),
   ("uncontrolledStartProcess", 0, "the escape hatch; unused by the engine"),
   # TWO calls, ONE launch path: ``startBypassRunQuotaProcess`` starts an
-  # unsized action as prepared and a sized one with ``bypassWidthMilli``
-  # filled into its width placeholders (``5ca890504``). The enumeration case
+  # unsized action as prepared and a sized one with the scheduler's
+  # ``widthMilli`` filled into its width placeholders (``5ca890504``,
+  # ``c867b3f37``). The enumeration case
   # pins both arms inside that proc by their call-site text.
   ("startDirect", 2, "L1 bypass-runquota: its unsized and its sized arm"),
   ("offerWithRunQuotaBatch", 1, "L3 inline-runquota"),
@@ -988,8 +990,11 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # `applyGrant` and `withParentLease` add the lease as the
                # parent of the command's own RunQuota clients: one more
                # environment entry on a command the launch below starts.
+               # `filledWidth` (`c867b3f37`) reads back the width a filled
+               # argv will run at, so the bypass can count it as held: a
+               # scan of the argv strings and an integer out.
                "applyGrantedWidth", "applyGrant", "withParentLease",
-               "fillWidthPlaceholders",
+               "fillWidthPlaceholders", "filledWidth",
                "widthPlaceholderArgv", "withWidthFlag", "grantedSlots",
                "frontierWaitMillis", "initFrontierSizer",
                "noteGrantedAtOnce", "noteOldestWait", "noteQueuedGrant"]),
@@ -2158,8 +2163,8 @@ suite "every_launch_path_is_monitored":
     # ``startBypassRunQuotaProcess`` in two: an action with no width flag is
     # prepared as-is and started; a sized one is prepared with width
     # placeholders — the same spelling L2 and L3 use, because it is the same
-    # contract a lease would fill — and started once ``bypassWidthMilli``
-    # fills them. That commit left this pin at 7; no new launch path was
+    # contract a lease would fill — and started once the width the
+    # scheduler sized (``widthMilli``, ``c867b3f37``) fills them. That commit left this pin at 7; no new launch path was
     # added, and the per-arm pins below say so instead of a bare 8.
     check countOccurrences(src, "preparedRunQuotaCommand(") == 8
     # Definition + forward declaration. Both are spelled `proc`; neither is
@@ -2212,7 +2217,7 @@ suite "every_launch_path_is_monitored":
       check countOccurrences(body,
         "return startDirect(preparedRunQuotaCommand(action, config))") == 1
       check countOccurrences(body,
-        "return startDirect(command.applyGrantedWidth(width))") == 1
+        "return startDirect(command.applyGrantedWidth(widthMilli))") == 1
 
     # SEAM 3 (HM-4, hosting): the engine becomes io-mon's host in exactly
     # one proc, called from exactly one site, and the three decomposed
@@ -2269,8 +2274,11 @@ suite "every_launch_path_is_monitored":
     # pins below use the definition and call-site forms rather than a
     # raw name count, which would move whenever a comment is reworded.)
     check countOccurrences(src, "proc startBypassRunQuotaProcess(") == 1
+    # The L1 call site takes the width the scheduler sized for a sized
+    # action and returns the width it holds, so the needle stops at the
+    # shared prefix, as L2's does.
     check countOccurrences(src,
-      "startBypassRunQuotaProcess(plan.action, config)") == 1          # L1
+      "startBypassRunQuotaProcess(plan.action, config,") == 1          # L1
     check countOccurrences(src, "proc startRunQuotaProcess(") == 1
     # The L2 call site takes the action pool's declared capacity as a
     # fourth argument since 8dd3ac277 (the helper declares that pool on its
