@@ -20,6 +20,20 @@ proc request(): PerTestRequest =
     idPrefix: "pkg.tests", collectorId: "pkg.tests",
     statsName: "build/test-bin/suite", cwd: "/abs")
 
+proc compileTemplate(): PerTestCompile =
+  ## A listed binary's compile as the engine lowers a
+  ## ``buildNimUnittest.build`` edge.
+  PerTestCompile(
+    argv: @["/tools/nim", "c", "--threads:on",
+      "--nimcache:build/nimcache/suite", "--out:build/test-bin/suite",
+      "src/suite.nim"],
+    cwd: "/abs", env: @["PATH=/tools"], envPassthrough: @["TMPDIR"],
+    inputs: @["src/suite.nim"], actionCachePolicy: "timestamp")
+
+proc strings(node: JsonNode): seq[string] =
+  for item in node:
+    result.add(item.getStr())
+
 proc records(text: string): seq[JsonNode] =
   for line in text.splitLines():
     if line.startsWith("create-action\t"):
@@ -85,6 +99,9 @@ suite "a listing becomes one exact run per test":
       check rec["cacheable"].getBool()
       check rec["commandStatsId"].getStr() ==
         "build/test-bin/suite::" & names[i]
+      # One binary for every test: the engine's default checks, no deps.
+      check not rec.hasKey("actionCachePolicy")
+      check not rec.hasKey("deps")
     # The tab is escaped inside the JSON, so each record is one line.
     check text.splitLines().len == 1 + 3 + 3 + 1
     check depLines(text) == @[
@@ -104,6 +121,93 @@ suite "a listing becomes one exact run per test":
     expect TestsFragmentError:
       discard countFragmentRuns(dir / "missing.rbdyn")
 
+suite "one binary per test":
+
+  test "each test gets its own compile, and its run uses that binary":
+    var req = request()
+    req.compile = compileTemplate()
+    let names = @["alpha", "a*b"]
+    let text = perTestFragmentText(req, names)
+    let recs = records(text)
+    check recs.len == 4
+    for i, (name, key) in [("alpha", "alpha"), ("a*b", "a_b")]:
+      let compile = recs[2 * i]
+      let run = recs[2 * i + 1]
+      checkpoint($compile & "\n" & $run)
+      let output = "build/test-bin/suite.per-test/" & key & "/suite"
+      check compile["id"].getStr() == "pkg.tests.compile." & key
+      check compile["argv"].strings == @["/tools/nim", "c", "--threads:on",
+        "--nimcache:build/nimcache/suite.per-test/" & key,
+        "-d:entrypointsTest=" & name, "--out:" & output, "src/suite.nim"]
+      check compile["cwd"].getStr() == "/abs"
+      check compile["env"].strings == @["PATH=/tools"]
+      check compile["envPassthrough"].strings == @["TMPDIR"]
+      check compile["inputs"].strings == @["src/suite.nim"]
+      check compile["outputs"].strings == @[output]
+      check compile["dependencyPolicy"] == %*{"kind": "automaticMonitor"}
+      check compile["cacheable"].getBool()
+      check compile["actionCachePolicy"].getStr() == "timestamp"
+      check run["id"].getStr() == "pkg.tests.test." & key
+      check run["argv"].strings == @["/abs/" & output, "--entrypoint=tests",
+        "--run-exact=" & name]
+      check run["inputs"].strings == @["/abs/" & output]
+      check run["deps"].strings == @["pkg.tests.compile." & key]
+      check run["cacheable"].getBool()
+      # The binary is rewritten whenever the source changes; the run is a
+      # hit when its bytes are the recorded ones.
+      check run["actionCachePolicy"].getStr() == "hybrid"
+    # The collector waits for the runs (which wait for their compiles).
+    check depLines(text) == @[
+      "dep\tpkg.tests\tpkg.tests.test.alpha",
+      "dep\tpkg.tests\tpkg.tests.test.a_b"]
+    let dir = createTempDir("tests-fragment-per-test-", "")
+    defer: removeDir(dir)
+    writeFile(dir / "f.rbdyn", text)
+    check countFragmentRuns(dir / "f.rbdyn") == 2
+
+  test "an uncacheable compile gives uncacheable per-test compiles":
+    var req = request()
+    req.compile = compileTemplate()
+    req.compile.uncacheable = true
+    let recs = records(perTestFragmentText(req, ["alpha"]))
+    check not recs[0]["cacheable"].getBool(true)
+    check recs[1]["cacheable"].getBool()
+    # A compile without a stated policy states none.
+    req.compile.actionCachePolicy = ""
+    check not records(perTestFragmentText(req, ["alpha"]))[0].hasKey(
+      "actionCachePolicy")
+
+  test "a listed test that is not a testCase is refused, by name":
+    # Every listed name is a testCase: nothing to refuse.
+    check notBuildableAlone(["alpha", "a*b"], ["alpha", "a*b"]) == ""
+    # A tests: block's test is listed but not among the testCases.
+    let message = notBuildableAlone(["alpha", "block::framework", "s::t"],
+      ["alpha"], "build/test-bin/suite")
+    checkpoint(message)
+    check "build/test-bin/suite" in message
+    check "\"block::framework\"" in message
+    check "\"s::t\"" in message
+    check "\"alpha\"" notin message
+    check "testCase" in message
+    check "perTestBinaries off" in message
+    # The listing that asks for testCases alone keeps --list first, so an
+    # older tests entry only lists.
+    check listTestCasesArgv("/b") ==
+      @["/b", "--entrypoint=tests", "--list", "--list-test-cases"]
+
+  test "a compile it cannot rewrite is refused":
+    let base = compileTemplate().argv
+    for bad in [
+        @["/tools/nim", "c", "--nimcache:n", "src/suite.nim"],
+        @["/tools/nim", "c", "--out:o", "src/suite.nim"],
+        @["/tools/nim", "c", "--nimcache:n", "--out:o", "--out:p", "s.nim"],
+        base & @["-d:entrypointsTest=beta"]]:
+      checkpoint($bad)
+      expect TestsFragmentError:
+        discard perTestCompileArgv(bad, "alpha", "alpha")
+    expect TestsFragmentError:
+      discard perTestCompileArgv(base, "", "alpha")
+
 suite "the producer's command line":
 
   test "the engine's command line parses back to the same request":
@@ -112,6 +216,13 @@ suite "the producer's command line":
     let command = parseProducerArgs(argv[1 .. ^1])
     check command.kind == pckList
     check command.request == request()
+    var perTest = request()
+    perTest.compile = compileTemplate()
+    perTest.compile.uncacheable = true
+    let perTestCommand = parseProducerArgs(
+      producerListArgv("/bin/repro-tests-fragment", perTest)[1 .. ^1])
+    check perTestCommand.kind == pckList
+    check perTestCommand.request == perTest
     let collect = parseProducerArgs(
       producerCheckArgv("/p", "f.rbdyn")[1 .. ^1])
     check collect.kind == pckCheck
@@ -124,6 +235,15 @@ suite "the producer's command line":
       discard parseProducerArgs(["--bogus"])
     expect TestsFragmentError:
       discard parseProducerArgs(["--check=f", "--binary=/b"])
+    let listing = @["--binary=/b", "--out=f", "--id-prefix=p", "--collector=p"]
+    # A compile's details without its command line, and a command line
+    # without the directory it runs in.
+    expect TestsFragmentError:
+      discard parseProducerArgs(listing & @["--compile-cwd=/abs"])
+    expect TestsFragmentError:
+      discard parseProducerArgs(listing & @["--compile-arg=nim"])
+    expect TestsFragmentError:
+      discard parseProducerArgs(["--check=f", "--compile-arg=nim"])
     check runProducer(["--bogus"]) == 64
     check runProducer([]) == 64
     check runProducer(["--help"]) == 0
@@ -183,3 +303,30 @@ when defined(posix):
       check runProducer(["--binary=" & binary, "--out=" & outPath,
         "--id-prefix=p", "--collector=p"]) == 1
       check not fileExists(outPath)
+
+    test "one binary per test: a tests: block's test writes no fragment":
+      let dir = createTempDir("tests-fragment-block-", "")
+      defer: removeDir(dir)
+      # `--list` names a testCase and a tests: block's test;
+      # `--list --list-test-cases` names the testCase alone.
+      let binary = script(dir, "mixed",
+        "if [ \"$3\" = \"--list-test-cases\" ]; then printf 'alpha\\n'; " &
+        "else printf 'alpha\\nblock::framework\\n'; fi\n")
+      let outPath = dir / "suite.rbdyn"
+      var req = request()
+      req.binary = binary
+      req.fragment = outPath
+      req.compile = compileTemplate()
+      var message = ""
+      try:
+        discard writePerTestFragment(req)
+      except TestsFragmentError as err:
+        message = err.msg
+      checkpoint(message)
+      check "\"block::framework\"" in message
+      check "perTestBinaries" in message
+      check not fileExists(outPath)
+      # Control: one binary for every test lists and writes both.
+      req.compile = PerTestCompile()
+      check writePerTestFragment(req) == 2
+      check fileExists(outPath)

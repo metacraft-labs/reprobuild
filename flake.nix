@@ -471,7 +471,7 @@
       # package build + override-free CI jobs have no sibling, so seed it from
       # here, exactly like nim-cli-spec-src. Keep this URL, flake.lock,
       # repro.lock and .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-entrypoints/eef1ca3fac2e873fb8a65a3bfea92619f31d23ce";
+      url = "github:metacraft-labs/nim-entrypoints/d7edafaa9df1c7ae77d469754a463d4a512ec928";
       flake = false;
     };
     nim-confutils-src = {

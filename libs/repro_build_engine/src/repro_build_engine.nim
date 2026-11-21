@@ -5816,6 +5816,13 @@ const
     ## ``dependencyPolicy.kind`` of a ``create-action`` record whose action
     ## reports its reads in make-format depfiles, as the DSL's
     ## ``makeDepfilePolicy(...)``. The record lists them in ``depfiles``.
+  CreatedActionTimestampCheck* = "timestamp"
+    ## ``actionCachePolicy`` of a ``create-action`` record (the default):
+    ## ``ffpTimestamp``.
+  CreatedActionHybridCheck* = "hybrid"
+    ## ``actionCachePolicy`` of a ``create-action`` record: ``ffpHybrid``.
+  CreatedActionChecksumCheck* = "checksum"
+    ## ``actionCachePolicy`` of a ``create-action`` record: ``ffpChecksum``.
 
 proc keyedOnCreatedActionPolicy*(fingerprint: ContentDigest; kind: string;
                                  depfiles: openArray[string]): ContentDigest =
@@ -5922,6 +5929,13 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let outputs = stringSeqField("outputs")
   let deps = stringSeqField("deps")
   let env = stringSeqField("env")
+  # Names whose value is the host's, as a declared edge's `envPassthrough`
+  # (a nim compile's temp-directory names, for one): the names are keyed by
+  # `action()`, the values are not.
+  let envPassthrough = stringSeqField("envPassthrough")
+  for name in envPassthrough:
+    if name.len == 0 or '=' in name:
+      fail("field 'envPassthrough' holds variable names, not '" & name & "'")
   let pool = stringField("pool", required = false)
   let poolUnits = uintField("poolUnits", 1'u32)
   let cpuMilli = uintField("cpuMilli", 1000'u32)
@@ -5930,6 +5944,23 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
   let widthFlag = stringField("widthFlag", required = false)
   let commandStatsId = stringField("commandStatsId", required = false)
   let cacheable = boolField("cacheable", default = false)
+  # The input-check policy, as a declared edge's `actionCachePolicy`:
+  # `timestamp` (the default) trusts an input whose metadata is unchanged
+  # and misses when it moved; `hybrid` re-hashes an input whose metadata
+  # moved and is a hit when its content did not (a per-test binary rebuilt
+  # byte-identical); `checksum` always hashes. As for a declared edge, the
+  # policy is not mixed into the key: a lookup is served only records made
+  # under the same policy (`repro_local_store`).
+  let cachePolicyName = stringField("actionCachePolicy", required = false)
+  let actionCachePolicy =
+    case cachePolicyName
+    of "", CreatedActionTimestampCheck: ffpTimestamp
+    of CreatedActionHybridCheck: ffpHybrid
+    of CreatedActionChecksumCheck: ffpChecksum
+    else:
+      fail("unknown 'actionCachePolicy' '" & cachePolicyName &
+        "'; expected '" & CreatedActionTimestampCheck & "', '" &
+        CreatedActionHybridCheck & "' or '" & CreatedActionChecksumCheck & "'")
 
   # The dependency policy, in the vocabulary of the DSL's static edges:
   #   {"kind": "automaticMonitor"}
@@ -6000,6 +6031,8 @@ proc parseCreateActionRecord(payload, path: string; lineNo: int;
     widthFlag = widthFlag,
     commandStatsId = commandStatsId, cacheable = cacheable,
     weakFingerprint = weakFingerprint, env = env,
+    envPassthrough = envPassthrough,
+    actionCachePolicy = actionCachePolicy,
     dependencyPolicy = dependencyPolicy,
     governingLockIdentity = governingLockIdentity)
 

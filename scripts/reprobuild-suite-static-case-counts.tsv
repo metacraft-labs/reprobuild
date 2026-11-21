@@ -22,7 +22,7 @@ libs/ct_test_interface/tests/t_smoke_ct_test_interface.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_nim_unittest_execute_edge_launches_declared_output.nim	nim	3
 libs/ct_test_nim_unittest/tests/t_smoke_ct_test_nim_unittest.nim	nim	1
 libs/ct_test_nim_unittest/tests/t_test_binary_grouping_plan.nim	nim	37
-libs/ct_test_nim_unittest/tests/t_tests_fragment_records.nim	nim	11
+libs/ct_test_nim_unittest/tests/t_tests_fragment_records.nim	nim	16
 libs/ct_test_surface/tests/t_ct_test_surface_locator.nim	nim	9
 libs/ct_test_unittest_parallel/tests/t_backward_compat_std_unittest_test_runs_unchanged.nim	nim	1
 libs/ct_test_unittest_parallel/tests/t_ct_test_runner_full_suite_parity.nim	nim	1
@@ -177,7 +177,7 @@ libs/repro_build_engine/tests/t_cache_refusal_always_names_its_reason.nim	nim	5
 libs/repro_build_engine/tests/t_canonical_work_tree_reproduces_split_bundle.nim	nim	2
 libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	7
 libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim	nim	2
-libs/repro_build_engine/tests/t_create_action_record_carries_dependency_policy.nim	nim	13
+libs/repro_build_engine/tests/t_create_action_record_carries_dependency_policy.nim	nim	19
 libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim	nim	6
 libs/repro_build_engine/tests/t_cross_checkout_sharing_refusal.nim	nim	11
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	30
@@ -2819,7 +2819,7 @@ tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
-tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	3
+tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	3
 tests/test_dev_env_m9_policy.py	python	11

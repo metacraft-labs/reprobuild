@@ -15,6 +15,8 @@
 ##   macOS), which the compile edge names as a tool it uses;
 ## * `__TESTS_FRAGMENT_PRODUCER__`: empty, so the listing edge runs the
 ##   `repro-tests-fragment` beside the engine, or another producer.
+## * `__PER_TEST_BINARIES__`: `false` for one binary for every test (the
+##   default), `true` for one binary per test.
 
 import repro_project_dsl
 import ct_test_nim_unittest
@@ -38,5 +40,6 @@ package cs_m14_tests_per_entry:
       actionId = "cs_m14.compile")
     let perTest = suite.testBinary.runPerTest(
       actionId = "cs_m14.tests",
-      producer = TestsFragmentProducer)
+      producer = TestsFragmentProducer,
+      perTestBinaries = __PER_TEST_BINARIES__)
     discard collect("test", [perTest])
