@@ -88,6 +88,11 @@ import repro_dev_env_activation
 import repro_depfile
 import repro_dev_env_artifacts
 import repro_dev_env_engine
+# The provisioning-mode vocabulary moved to ``repro_dev_env_engine``'s
+# ``tool_provisioning`` (beside the one per-tool resolver); this module
+# re-exports it so callers that import only the CLI support keep spelling
+# ``parseToolProvisioning`` as before.
+export parseToolProvisioning
 import repro_dev_env_engine/directory_trust
 import repro_interface_artifacts
 # Incremental-Test-Runner M7: shim discovery comes from the shared ``io-mon``
@@ -539,57 +544,53 @@ proc runVersionCommand*(programName: string; asJson: bool): int =
     echo renderVersion(programName)
   0
 
-proc parseToolProvisioning*(value: string): ToolProvisioningMode =
-  case value
-  of "path":
-    tpmPathOnly
-  of "nix":
-    tpmNix
-  of "tarball":
-    tpmTarball
-  of "scoop":
-    tpmScoop
-  of "from-source", "fromSource", "source":
-    # M9.Q: principled from-source provisioning. Maps each ``uses:
-    # <name>`` selector onto a sibling recipe at
-    # ``recipes/packages/source/<name>/``; threads the recipe's
-    # output bin dir into ``pathSearchList``. v1 hard-fails when the
-    # sibling recipe or its artefact is missing — auto-recurse is
-    # the M9.Q.1 follow-up. Accepts the spelling ``from-source``
-    # (CLI canonical), ``fromSource`` (Nim/DSL canonical), and
-    # ``source`` (shorthand).
-    tpmFromSource
-  else:
-    raise newException(ValueError, "unsupported --tool-provisioning=" & value)
+# The provisioning-mode vocabulary (``parseToolProvisioning``) and the
+# invocation-wide precedence (``requestedToolProvisioning`` /
+# ``effectiveToolProvisioning``) live in ``repro_dev_env_engine``'s
+# ``tool_provisioning`` module, beside the per-tool resolver, so that every
+# surface resolves a tool's mode through ONE implementation: two spellings
+# of the precedence would let a build and an activation disagree.
 
-const ToolProvisioningEnvVar = "REPRO_TOOL_PROVISIONING"
+proc userConfigPath(): string
+  ## Forward declaration: the layered-configuration paths are declared with
+  ## the rest of that plane far below.
 
-proc resolveToolProvisioningWithEnv(cliMode: ToolProvisioningMode):
-    ToolProvisioningMode =
-  ## Apply the ``REPRO_TOOL_PROVISIONING`` env var when the CLI did not pin
-  ## ``--tool-provisioning`` explicitly. Precedence is: explicit CLI flag >
-  ## env var > the package's ``defaultToolProvisioning`` (resolved later, in
-  ## ``executeBuildTarget``).
-  ##
-  ## Today the in-repo ``repro.nim`` project files declare
-  ## ``defaultToolProvisioning "path"`` on Linux/macOS (toolchains supplied
-  ## by Nix on ``$PATH`` via ``nix develop``) and ``scoop`` is the intended
-  ## Windows default — a deliberately temporary arrangement. This env var
-  ## lets a developer opt a Linux/macOS checkout into reprobuild-managed Nix
-  ## provisioning (``REPRO_TOOL_PROVISIONING=nix``) without editing every
-  ## project's ``repro.nim`` or threading ``--tool-provisioning=nix`` through
-  ## every invocation. An explicit flag still wins, so scripted callers are
-  ## unaffected. Accepts the same ``path|nix|tarball|scoop|from-source``
-  ## vocabulary as the flag; an unset/empty value is a no-op. M9.Q adds
-  ## the ``from-source`` mode that maps each ``uses:`` selector onto a
-  ## sibling recipe at ``recipes/packages/source/<name>/`` and threads
-  ## the recipe's output bin dir into ``pathSearchList``.
-  if cliMode != tpmUnspecified:
-    return cliMode
-  let raw = getEnv(ToolProvisioningEnvVar).strip()
-  if raw.len == 0:
-    return cliMode
-  parseToolProvisioning(raw)
+var toolProvisioningForFlags: seq[string] = @[]
+  ## This invocation's ``--tool-provisioning-for`` values, as given, set by
+  ## the command-line parse of the commands that declare the flag (``build``
+  ## and the commands that take its command line, ``watch``, ``graph``,
+  ## ``why``, ``stats``, ``tool realize``). Empty for every other command:
+  ## ``exec``, ``shell`` and ``run`` deliberately take no flag; overrides
+  ## reach them through the variable and the configuration only.
+
+var activeToolProvisioningOverrides*: ToolProvisioningOverrides
+  ## The per-tool overrides of the invocation being served, from every
+  ## source (flag, variable, configuration), loaded once per invocation by
+  ## ``activateToolProvisioningOverrides`` for its project. Every tool
+  ## resolution below reads it -- the build's, the activation's and ``tool
+  ## realize``'s -- the way they read ``producerMaterializedBinDirs``: the
+  ## invocation sets it, and a sub-build of a sibling recipe inherits it.
+
+proc setToolProvisioningForFlags*(values: openArray[string]) =
+  ## Record this invocation's ``--tool-provisioning-for`` values. Called on
+  ## every parse of a command that declares the flag, so a value never
+  ## outlives the invocation that gave it (a daemon worker parses each
+  ## request's own arguments).
+  toolProvisioningForFlags = @values
+
+proc activateToolProvisioningOverrides*(projectRoot: string;
+                                        includeFlags = true):
+    ToolProvisioningOverrides =
+  ## Load and install the overrides of an invocation over ``projectRoot``:
+  ## the flag's values (unless ``includeFlags`` is false, for the surfaces
+  ## that take no flag), ``REPRO_TOOL_PROVISIONING_OVERRIDES``, and the
+  ## configuration layers the workspace and the user declare. A malformed
+  ## override raises ``ToolProvisioningOverrideError`` (or the configuration
+  ## reader's error) before anything runs.
+  let flags = if includeFlags: toolProvisioningForFlags else: @[]
+  activeToolProvisioningOverrides = loadToolProvisioningOverrides(flags,
+    projectRoot, userConfigPath())
+  activeToolProvisioningOverrides
 
 proc bytesOf(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -8057,33 +8058,49 @@ proc runCmakeRegenerationHelper*(metadataFile, depfilePath,
     $(providerBefore.len > 0 and providerBefore != providerAfter)
   0
 
-proc identityPaths(outDir: string; mode: ToolProvisioningMode):
+proc identityPaths(outDir: string; mode: ToolProvisioningMode;
+                   overrideDigest = ""):
     tuple[identityPath: string; inspectionPath: string] =
-  case mode
-  of tpmNix:
-    (identityPath: outDir / "nix-tool-identities.rbtp",
-      inspectionPath: outDir / "nix-tool-identities.inspect.json")
-  of tpmTarball:
-    (identityPath: outDir / "tarball-tool-identities.rbtp",
-      inspectionPath: outDir / "tarball-tool-identities.inspect.json")
-  of tpmScoop:
-    (identityPath: outDir / "scoop-tool-identities.rbtp",
-      inspectionPath: outDir / "scoop-tool-identities.inspect.json")
-  of tpmFromSource:
-    (identityPath: outDir / "from-source-tool-identities.rbtp",
-      inspectionPath: outDir / "from-source-tool-identities.inspect.json")
-  else:
-    (identityPath: outDir / "path-only-tool-identities.rbtp",
-      inspectionPath: outDir / "path-only-tool-identities.inspect.json")
+  ## The stable identity files of ``mode`` in ``outDir``. With per-tool
+  ## overrides they are keyed by the invocation mode PLUS a digest of the
+  ## sorted override set (``overrideDigest``), so a run under one mix of
+  ## kinds never reads back another's. Without overrides the
+  ## names are the historical ones.
+  let stem =
+    case mode
+    of tpmNix: "nix"
+    of tpmTarball: "tarball"
+    of tpmScoop: "scoop"
+    of tpmFromSource: "from-source"
+    else: "path-only"
+  let tagged =
+    if overrideDigest.len == 0: stem
+    else: stem & "+overrides-" & overrideDigest[0 ..< min(16, overrideDigest.len)]
+  (identityPath: outDir / (tagged & "-tool-identities.rbtp"),
+    inspectionPath: outDir / (tagged & "-tool-identities.inspect.json"))
 
 proc modeName(mode: ToolProvisioningMode): string =
-  case mode
-  of tpmPathOnly: "path"
-  of tpmNix: "nix"
-  of tpmTarball: "tarball"
-  of tpmScoop: "scoop"
-  of tpmFromSource: "from-source"
-  else: "unspecified"
+  provisioningModeName(mode)
+
+proc activeToolModeSelections(artifact: ProjectInterfaceArtifact;
+                              mode: ToolProvisioningMode): ToolModeSelections =
+  ## The per-tool selections the active overrides make for ``artifact``'s
+  ## uses under the invocation mode ``mode`` (the one resolver,
+  ## ``toolModeSelections``).
+  toolModeSelections(mode, activeToolProvisioningOverrides,
+    artifact.projectInterface.toolUses)
+
+proc activeOverrideDigest(artifact: ProjectInterfaceArtifact;
+                          mode: ToolProvisioningMode): string =
+  overrideSetDigest(activeToolModeSelections(artifact, mode))
+
+proc identityModeTag(artifact: ProjectInterfaceArtifact;
+                     mode: ToolProvisioningMode): string =
+  ## The name the per-mode stamp files (``<tag>.current-key``) and the warm
+  ## table use: the mode, plus the override digest when overrides apply.
+  let digest = activeOverrideDigest(artifact, mode)
+  if digest.len == 0: modeName(mode)
+  else: modeName(mode) & "+overrides-" & digest[0 ..< min(16, digest.len)]
 
 proc addCacheField(payload: var string; value: string) =
   payload.add($value.len)
@@ -8194,9 +8211,10 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
   ## uses. v5 bound the expression by its PATH only (through the codec
   ## bytes), so bumping the nixpkgs pin or editing a lock file the
   ## expression reads served the stale identity. Bound in EVERY mode: Nix is
-  ## reached from path mode (the Linux/macOS fallback) and from-source mode
-  ## (the stdlib fall-through) as well as nix mode. Every v5 key changes
-  ## once (a one-time miss, approved).
+  ## reached from from-source mode (the stdlib fall-through) as well as nix
+  ## mode, and was reached from path mode until path mode became strictly
+  ## PATH-only (2026-11-17). Every v5 key changes once (a one-time miss,
+  ## approved).
   ##
   ## v7 (owner decision, 2026-10-14; Edge-Derived-Identities.md §7 rider):
   ## the expression-closure scanner behind v6 PREDICTED what the Nix
@@ -8237,8 +8255,29 @@ proc toolIdentityCacheKeyInfo*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField($framed.len)
     for one in framed:
       payload.addCacheField(one)
-  if mode == tpmPathOnly:
-    payload.addCacheField(pathModeResolutionSignature(artifact, pathValue))
+  # Per-tool overrides: the sorted override set enters the key, so a change
+  # of overrides is a miss, not a stale identity reused under another mix of
+  # kinds. Absent when nothing is overridden, so those keys are unchanged.
+  let selections = activeToolModeSelections(artifact, mode)
+  let overrideDigest = overrideSetDigest(selections)
+  if overrideDigest.len > 0:
+    payload.addCacheField("tool-provisioning-overrides.v1")
+    payload.addCacheField(overrideDigest)
+  # What ``$PATH`` decides, for every use resolved from it: all of them in a
+  # path invocation except those overridden to another mode, and in any
+  # invocation those overridden TO path. With no overrides this is the whole
+  # artifact in path mode and nothing otherwise, as before.
+  var pathResolved = artifact
+  pathResolved.projectInterface.toolUses = @[]
+  for useDef in artifact.projectInterface.toolUses:
+    let useMode =
+      if selections.hasKey(useDef.packageSelector):
+        selections[useDef.packageSelector].mode
+      else: mode
+    if useMode == tpmPathOnly:
+      pathResolved.projectInterface.toolUses.add(useDef)
+  if mode == tpmPathOnly or pathResolved.projectInterface.toolUses.len > 0:
+    payload.addCacheField(pathModeResolutionSignature(pathResolved, pathValue))
   # Cross-Repo-Source-Consumption SC-6 (§5.2 "a changed pin invalidates the
   # consumer") — fold each materialized cross-repo LIBRARY producer's realized
   # producer directories into the tool-identity cache key. Both channels are
@@ -8428,7 +8467,8 @@ proc cachedToolIdentity(outDir: string; mode: ToolProvisioningMode;
   let key = keyInfo.key
   let cacheDir = outDir / "tool-identity-cache"
   let keyed = keyedToolIdentityPaths(outDir, key)
-  let stableKeyPath = cacheDir / (mode.modeName & ".current-key")
+  let stableKeyPath = cacheDir / (identityModeTag(artifact, mode) &
+    ".current-key")
   # Only the keyed entry is read back. The stable files are refreshed from
   # it below for readers that want "the latest identity in this outDir",
   # but they are never the cache: checking ``current-key`` and then reading
@@ -8942,6 +8982,64 @@ proc loweredGraphCacheKey*(artifact: ProjectInterfaceArtifact;
     payload.addCacheField(pathEnv)
   digestHex(blake3DomainDigest(payload.bytesOf(), hdMetadataEnvelope))
 
+proc buildToolStoreRoot*(mode: ToolProvisioningMode;
+                         overridden = false): string =
+  ## The tool store ``repro build`` (and ``repro graph``, which must show the
+  ## same actions) realizes tools into, or "" for the historical store under
+  ## the invocation's ``outDir``.
+  ##
+  ## Under ``tarball`` it is the user's tool store inside the reprobuild
+  ## store root, ``<store root>/tool-store``, the one dev-env activation
+  ## already uses. Two reasons. A realized prefix is keyed on the archive
+  ## digest, not on the project, so a per-project store re-downloads and
+  ## re-extracts the same bytes for every checkout (the C toolchain archive
+  ## is 240 MB extracted). And the store root is a logical root of the
+  ## portable identity while a project's ``.repro`` directory is not a
+  ## content identity: a toolchain realized there is read from the store
+  ## root, so a compile with the provisioned toolchain can be shared between
+  ## checkouts and projects. The other modes keep the per-``outDir`` store:
+  ## Nix mode roots its realizations under the tool store, and a tool request
+  ## is keyed by package and executable rather than by pin, so a shared store
+  ## would let two projects that pin different versions take each other's
+  ## roots away.
+  ##
+  ## ``overridden``: ``mode`` is the tool's OWN mode, chosen by a per-tool
+  ## override, and the store follows that effective kind, not the
+  ## invocation's. An overridden ``tarball`` or ``from-source`` tool realizes
+  ## into the shared tool store even in a ``path`` invocation, for the
+  ## reasons above: a content-keyed prefix is not a per-checkout thing.
+  ## ``nix`` and ``scoop`` keep their per-``outDir`` store, for the reason
+  ## given for Nix roots. A ``from-source`` INVOCATION keeps its store: only
+  ## an overridden tool moves.
+  if not (mode == tpmTarball or (overridden and mode == tpmFromSource)):
+    return ""
+  let storeRoot = resolvedStoreRootOrEmpty()
+  if storeRoot.len == 0: "" else: storeRoot / "tool-store"
+
+proc overriddenToolStoreRoot*(everyToolStore: string; ownStore = ""):
+    proc (mode: ToolProvisioningMode): string {.closure.} =
+  ## The ``storeRootFor`` of ``toolBuildIdentity``: where a tool a per-tool
+  ## override moved to ``mode`` realizes.
+  ##
+  ## * ``everyToolStore`` non-empty: the caller keeps every tool in that one
+  ##   store (the activation surfaces' user store), the overridden ones too.
+  ## * Otherwise the overridden tool's own kind decides. ``tarball`` and
+  ##   ``from-source`` realize into the shared tool store
+  ##   (``buildToolStoreRoot``). ``nix`` and ``scoop`` realize into
+  ##   ``ownStore``, the per-``outDir`` store an invocation of their own mode
+  ##   uses, and never into the shared store a ``tarball`` invocation names
+  ##   for its archives: a Nix root there is keyed by package and executable
+  ##   rather than by pin, so two projects that pin different versions would
+  ##   take each other's roots away. An empty answer leaves the tool in the
+  ##   invocation's store.
+  let fixed = everyToolStore
+  let own = ownStore
+  result = proc (mode: ToolProvisioningMode): string =
+    if fixed.len > 0:
+      return fixed
+    let shared = buildToolStoreRoot(mode, overridden = true)
+    if shared.len > 0: shared else: own
+
 proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
                                   outDir: string;
                                   mode: ToolProvisioningMode;
@@ -8972,7 +9070,7 @@ proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
   ## identity CACHE stays under ``outDir`` either way: it is keyed on the
   ## recipe's interface, which is a per-project fact, while a realized prefix
   ## is keyed on the archive digest, which is not.
-  let paths = identityPaths(outDir, mode)
+  let paths = identityPaths(outDir, mode, activeOverrideDigest(artifact, mode))
   let cached = cachedToolIdentity(outDir, mode, artifact,
     paths.identityPath, paths.inspectionPath, keyInfo)
   if cached.hit:
@@ -8996,13 +9094,27 @@ proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
   for selector, binDirs in producerMaterializedBinDirs.pairs:
     producerExecutableSelectors[selector] = ProducerExecutableDirs(
       binDirs: binDirs)
+  # Per-tool overrides: an overridden tool realizes into the store of its
+  # OWN kind (``overriddenToolStoreRoot``), not the invocation mode's, except
+  # where the caller names one store for every tool (the activation
+  # surfaces). A build names a store only for a ``tarball`` invocation, and
+  # that store (``buildToolStoreRoot(mode)``) is the shared one for archives,
+  # not one for every tool.
+  let everyToolStore =
+    if storeRootOverride.len > 0 and
+        storeRootOverride != buildToolStoreRoot(mode):
+      storeRootOverride
+    else: ""
   let identity = toolBuildIdentity(artifact, mode,
     storeRoot =
       (if storeRootOverride.len > 0: storeRootOverride
        else: outDir / "tool-store"),
     producerExecutableSelectors = producerExecutableSelectors,
     producerAuxSelectors = producerAuxSelectors,
-    pins = pins)
+    pins = pins,
+    selections = activeToolModeSelections(artifact, mode),
+    storeRootFor = overriddenToolStoreRoot(everyToolStore,
+      ownStore = outDir / "tool-store"))
   writePathOnlyBuildIdentity(paths.identityPath, identity)
   writeInspectionJson(paths.inspectionPath, identity)
   writeToolIdentityCache(outDir, mode, artifact, identity, keyInfo)
@@ -9010,7 +9122,8 @@ proc resolveAndWriteIdentityKeyed(artifact: ProjectInterfaceArtifact;
   # The key computed BEFORE resolution (see ``cachedToolIdentity``), not a
   # fresh one: re-deriving it here would stamp an identity resolved from
   # the old inputs with the key of inputs edited meanwhile.
-  writeFile(extendedPath(outDir / "tool-identity-cache" / (mode.modeName & ".current-key")),
+  writeFile(extendedPath(outDir / "tool-identity-cache" /
+      (identityModeTag(artifact, mode) & ".current-key")),
     keyInfo.key & "\n")
   (identity: identity, identityPath: paths.identityPath,
     inspectionPath: paths.inspectionPath)
@@ -9026,30 +9139,6 @@ proc resolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   resolveAndWriteIdentityKeyed(artifact, outDir, mode, storeRootOverride,
     pins, toolIdentityCacheKeyInfo(artifact, mode, pins = pins))
 
-proc buildToolStoreRoot*(mode: ToolProvisioningMode): string =
-  ## The tool store ``repro build`` (and ``repro graph``, which must show the
-  ## same actions) realizes tools into, or "" for the historical store under
-  ## the invocation's ``outDir``.
-  ##
-  ## Under ``tarball`` it is the user's tool store inside the reprobuild
-  ## store root, ``<store root>/tool-store``, the one dev-env activation
-  ## already uses. Two reasons. A realized prefix is keyed on the archive
-  ## digest, not on the project, so a per-project store re-downloads and
-  ## re-extracts the same bytes for every checkout (the C toolchain archive
-  ## is 240 MB extracted). And the store root is a logical root of the
-  ## portable identity while a project's ``.repro`` directory is not a
-  ## content identity: a toolchain realized there is read from the store
-  ## root, so a compile with the provisioned toolchain can be shared between
-  ## checkouts and projects. The other modes keep the per-``outDir`` store:
-  ## Nix mode roots its realizations under the tool store, and a tool request
-  ## is keyed by package and executable rather than by pin, so a shared store
-  ## would let two projects that pin different versions take each other's
-  ## roots away.
-  if mode != tpmTarball:
-    return ""
-  let storeRoot = resolvedStoreRootOrEmpty()
-  if storeRoot.len == 0: "" else: storeRoot / "tool-store"
-
 proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
                                   outDir: string;
                                   mode: ToolProvisioningMode;
@@ -9061,10 +9150,11 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   ## The warm resolver under a key computed ONCE by the caller (see the
   ## exported overloads below).
   let key = keyInfo.key
-  let paths = identityPaths(outDir, mode)
-  let tableKey = outDir & "\0" & mode.modeName & "\0" & key
+  let tag = identityModeTag(artifact, mode)
+  let paths = identityPaths(outDir, mode, activeOverrideDigest(artifact, mode))
+  let tableKey = outDir & "\0" & tag & "\0" & key
   let stableKeyPath = outDir / "tool-identity-cache" /
-    (mode.modeName & ".current-key")
+    (tag & ".current-key")
   if keyInfo.cacheable and warmToolIdentities.hasKey(tableKey):
     let warm = warmToolIdentities[tableKey]
     if warm.key == key and warm.identity.interfaceFingerprint ==
@@ -9092,7 +9182,7 @@ proc warmResolveAndWriteIdentity(artifact: ProjectInterfaceArtifact;
   result = resolveAndWriteIdentityKeyed(artifact, outDir, mode,
     storeRootOverride, pins, keyInfo)
   warmToolIdentities.dropWarmEntriesWithPrefix(
-    outDir & "\0" & mode.modeName & "\0")
+    outDir & "\0" & tag & "\0")
   # An uncacheable key (a nonce) is never looked up again: nothing is kept
   # under it.
   if keyInfo.cacheable:
@@ -12677,8 +12767,17 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                         peerCacheInstaller: PeerCacheActionBundleInstaller =
                           nil;
                         actionOutcomeSink: BuildActionOutcomeSink = nil;
-                        graphAugmenter: BuildGraphAugmenter = nil):
+                        graphAugmenter: BuildGraphAugmenter = nil;
+                        checkOverrideTargets = false):
     BuildCommandOutcome =
+  ## ``checkOverrideTargets``: this is the invocation's own target, not a
+  ## sub-build of a sibling or producer, so a per-tool override that names a
+  ## package none of its selected ``uses:`` entries references is reported:
+  ## an error from the flag, which the caller gave for this invocation, and a
+  ## note from the environment or configuration, which are shared across
+  ## invocations and projects. A sub-build inherits the
+  ## invocation's overrides and never reports them.
+  ##
   ## ``actionOutcomeSink`` receives the per-action outcome of the engine pass
   ## this invocation runs over its lowered graph (``ExecutedActionRecord``),
   ## for certificate issuance. It is not called when no graph ran.
@@ -13771,11 +13870,15 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     interfaceStart)
   recordInterfaceArtifactWarmStats(buildStats, statsEnabled)
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode (the lowest precedence level, below every
+  # per-tool override), through the one resolver.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact)
+  # Per-tool overrides: an override to a mode its package has no arm for
+  # on this host fails HERE, before
+  # the provider compile and every graph action, naming the override.
+  requireOverriddenArms(artifact.projectInterface.toolUses,
+    activeToolModeSelections(artifact, effectiveMode))
+  if mode == tpmUnspecified and effectiveMode != tpmUnspecified:
     # M1 N11: this assignment is a NARROWING for ``path``/``scoop`` and
     # a no-op otherwise, because ``fallbackToRunQuotaBypass`` no longer
     # starts true for an unspecified mode. That matters for the case
@@ -13817,6 +13920,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       "typed tool provisioning is required for uses declarations; refusing " &
         "implicit PATH fallback. Pass --tool-provisioning=path to use the " &
         "explicit weak local profile.")
+  if checkOverrideTargets and not materializedOnly:
+    var overrideNotes: seq[string] = @[]
+    checkOverridesMatch(activeToolProvisioningOverrides,
+      buildArtifact.projectInterface.toolUses &
+        buildArtifact.projectInterface.runtimeToolUses, overrideNotes)
+    for note in overrideNotes:
+      stderr.writeLine(note)
 
   # DSL-port M9.R.9 — auto-recurse pass for from-source provisioning.
   # When the active mode is ``tpmFromSource`` we probe every tool use
@@ -14308,7 +14418,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           producerRuntimeIdentity = toolBuildIdentity(runtimeArtifact,
             effectiveMode, storeRoot = producerOutDirBase / "runtime-tool-store",
             pins = producerRuntimeProvisioningPins(runtimeArtifact,
-              producerRootAbs))
+              producerRootAbs),
+            selections = activeToolModeSelections(runtimeArtifact,
+              effectiveMode),
+            storeRootFor = overriddenToolStoreRoot(""))
         # Decide whether the producer sub-build is required for the CONSUMED
         # artifact. A build is needed only when the producer exposes a
         # COMPILED artifact on disk:
@@ -16454,7 +16567,12 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
       progress.renderProgress(event)
   var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
   defer: releaseAutoRunQuotaProcess(autoRunQuota)
-  let toolProvisioning = resolveToolProvisioningWithEnv(tpmUnspecified)
+  let toolProvisioning = requestedToolProvisioning(tpmUnspecified)
+  # Per-tool overrides reach an activation through the environment and the
+  # configuration, never a flag, and it resolves every tool through the same
+  # resolver as a build, so a shell and a build realize the same prefix.
+  let toolProvisioningOverrides = activateToolProvisioningOverrides(
+    selection.projectRoot, includeFlags = false)
   # MR5, applied to the dev-env path. `computeDevEnvEdge` may compile the
   # recipe provider, and that compile is the SAME provider compile edge the
   # build uses (Development-Environments-And-Control-API.md). `build`,
@@ -16490,6 +16608,7 @@ proc computePublicDevEnv(selection: DevEnvCliSelection;
     lockSliceId: selection.lockSliceId,
     developOverridesPath: selection.developOverridesPath,
     toolProvisioning: toolProvisioning,
+    toolProvisioningOverrides: toolProvisioningOverrides,
     renderShell: renderShell,
     statsEnabled: selection.statsPath.len > 0)
   try:
@@ -17026,7 +17145,8 @@ proc writePartialToolInspection(artifact: ProjectInterfaceArtifact;
   ## The fallback's observations are diagnostics, never a complete identity.
   ## Reuse the full profile serializer, including failed probe results, but
   ## touch none of the binary/keyed identity or current-key publication paths.
-  let path = identityPaths(outDir, mode).inspectionPath
+  let path = identityPaths(outDir, mode,
+    activeOverrideDigest(artifact, mode)).inspectionPath
   try:
     let doc = parseJson(inspectionJson(identity))
     doc["partial"] = %true
@@ -17073,16 +17193,15 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
   ## Path-mode contributes only what the caller's PATH could NOT supply. Its
   ## contract is "resolve against the caller's PATH", so a tool found there is
   ## left where it is -- prepending the resolver's own search list would merely
-  ## re-order the host's PATH against itself. But the path-mode resolver does
-  ## not stop at the caller's PATH: a tool missing from it whose package
-  ## declares a release archive is realized from that archive, which is how
-  ## `repro build` obtains it. An activation that skipped path mode outright
-  ## therefore provided less than the build it is the environment for:
-  ## reprobuild's own Windows shell, entered from a minimal PATH, had neither
-  ## `just` nor anything else its `uses:` declares, and `just lint` could not
-  ## start. So path mode now runs the same resolution and contributes the
-  ## directories of every tool it REALIZED (any install method other than
-  ## `path`), and nothing for a tool the caller's PATH already had.
+  ## re-order the host's PATH against itself. Path mode still runs the same
+  ## resolution `repro build` does and contributes what that resolution
+  ## realizes by other means (an environment-prefix library, a cross-repo
+  ## producer's bin dirs: any install method other than `path`), so the
+  ## shell is the environment of the build. Path mode no longer realizes a
+  ## tool missing from PATH from its archive or Nix (operator decision of
+  ## 2026-11-17, reprobuild-pm issue
+  ## 2026-11-12-per-mode-fallback-semantics-disagree): such a tool is
+  ## reported absent here, exactly as the build refuses it.
   ##
   ## Never fatal. A recipe that names a package with no realization for this
   ## platform must leave the developer with a WORKING shell that says what it
@@ -17126,8 +17245,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
     # `uses:` has no toolchain to provide.
     return
 
-  let mode = effectiveToolProvisioning(
-    resolveToolProvisioningWithEnv(tpmUnspecified), interfaceArtifact)
+  let mode = effectiveToolProvisioning(tpmUnspecified, interfaceArtifact)
+  if selection.projectRoot.len > 0:
+    # The overrides of THIS project, so the shell matches a build: the same
+    # sources the edge applied, read again because the path-addressed form
+    # has no edge.
+    try:
+      discard activateToolProvisioningOverrides(selection.projectRoot,
+        includeFlags = false)
+    except CatchableError as err:
+      stderr.writeLine("repro dev-env: warning: the per-tool provisioning " &
+        "overrides could not be read (" & err.msg & "); the activated " &
+        "shell will resolve tools from the ambient PATH.")
+      return
   if mode == tpmUnspecified:
     # Declared packages and no mode to realize them with. Silence here reads
     # as a working environment that quietly provisions none of what the
@@ -17204,7 +17334,9 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
         # contribution record, so a pin for another package is accepted and
         # stamped nowhere, and this package stays pinned.
         let singleIdentity = toolBuildIdentity(single, mode,
-          storeRoot = storeRoot, pins = provisioningPins)
+          storeRoot = storeRoot, pins = provisioningPins,
+          selections = activeToolModeSelections(single, mode),
+          storeRootFor = overriddenToolStoreRoot(storeRoot))
         # PATH-only filtering is an activation decision. Keep the unfiltered
         # profiles in inspection, including tools already supplied by PATH.
         partial.profiles.add(singleIdentity.profiles)
@@ -17219,11 +17351,19 @@ proc devEnvToolShellOpsImpl(edge: DevEnvEdgeResult;
       except CatchableError as toolErr:
         unresolved.add(%*{"packageSelector": useDef.packageSelector,
           "rawConstraint": useDef.rawConstraint, "reason": toolErr.msg})
-        # In path mode a tool that is neither on the caller's PATH nor
-        # realizable is merely absent -- that mode's ordinary state, and what
-        # it reported before it provided anything at all. Only a tool the
-        # resolver COULD have realized and did not is worth a warning.
-        if mode == tpmPathOnly and not pathModeCanRealize(useDef):
+        # In path mode a tool that is not on the caller's PATH is merely
+        # absent -- that mode's ordinary state: path mode is strictly
+        # PATH-only and realizes nothing else (operator decision of
+        # 2026-11-17, reprobuild-pm issue
+        # 2026-11-12-per-mode-fallback-semantics-disagree). A tool that IS
+        # on PATH but outside its declared range is refused, and that is
+        # worth a warning: the shell would otherwise run it unannounced.
+        # An OVERRIDDEN tool is never "merely absent": its override named
+        # an arm that failed, and that is reported: a failed realization of
+        # an overridden tool is never replaced by the ambient PATH.
+        if mode == tpmPathOnly and not (toolErr of UsesVersionOutOfRange) and
+            not winningOverride(activeToolProvisioningOverrides,
+              useDef.packageSelector).found:
           inc absentInPathMode
           continue
         failures.add(useDef.packageSelector & " (" & toolErr.msg & ")")
@@ -26946,10 +27086,14 @@ const
     # Tool-provisioning selection. The daemon-hosted executor re-parses the
     # request's rawArgs (which carry no --tool-provisioning when the user
     # selected the mode via the env var), so REPRO_TOOL_PROVISIONING must
-    # follow the user into the daemon for resolveToolProvisioningWithEnv to
+    # follow the user into the daemon for requestedToolProvisioning to
     # observe it there. Without forwarding, an env-only selection is silently
     # ignored under the default daemon-hosted build path.
     "REPRO_TOOL_PROVISIONING",
+    # The per-tool overrides' variable, for the same reason: the
+    # daemon-hosted executor loads the overrides itself, and an override set
+    # only in the environment would otherwise be silently ignored there.
+    "REPRO_TOOL_PROVISIONING_OVERRIDES",
     # Solver-participating variant overrides. ``--variant name=value`` /
     # ``--release`` write the selection into ``REPRO_VARIANTS``; like
     # ``REPRO_TOOL_PROVISIONING`` above, the daemon-hosted executor re-parses
@@ -31720,6 +31864,7 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   listTargetsPackage = c.package
   if c.toolProvisioning.len > 0:
     mode = parseToolProvisioning(c.toolProvisioning)
+  setToolProvisioningForFlags(c.toolProvisioningFor)
   workRoot = c.workRoot
   if givenOnCommandLine(origin.actionCacheRoot):
     # Phase 1 cache-scope split: user-level action cache + CAS root.
@@ -32293,6 +32438,18 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         else:
           stdout.writeLine(summary)
       releaseBuildPeerCacheWiring(peerCacheBuildWiring)
+    # Per-tool provisioning overrides: the flag's values, the variable and
+    # the configuration of the
+    # target's workspace, loaded once for the invocation and checked before
+    # anything runs. A malformed one is a usage error.
+    try:
+      discard activateToolProvisioningOverrides(
+        try: projectRootForModule(absolutePath(
+               parseBuildTarget(target).modulePath))
+        except CatchableError: getCurrentDir())
+    except CatchableError as err:
+      stderr.writeLine("repro build: error: " & err.msg)
+      return 2
     try:
       result = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
@@ -32337,7 +32494,8 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
         peerCachePublisher = peerCacheBuildWiring.publisher,
         peerCacheInstaller = peerCacheBuildWiring.installer,
         actionOutcomeSink = actionOutcomeSink,
-        graphAugmenter = graphAugmenter).exitCode
+        graphAugmenter = graphAugmenter,
+        checkOverrideTargets = true).exitCode
       if result == 0 and publishEdgeSpec.len > 0 and not dryRun and
           not prepareOnly:
         let projectRoot =
@@ -32879,7 +33037,9 @@ proc recordMaterializedProducersForInspection(
       runtimeIdentity = toolBuildIdentity(runtimeArtifact, mode,
         storeRoot = producerOutDir / "runtime-tool-store",
         pins = producerRuntimeProvisioningPins(runtimeArtifact,
-          sourceRootAbs))
+          sourceRootAbs),
+        selections = activeToolModeSelections(runtimeArtifact, mode),
+        storeRootFor = overriddenToolStoreRoot(""))
     if not recordProducerMaterialization(selector, sourceRootAbs,
         producerArtifact, runtimeIdentity, binding):
       raise newException(IOError,
@@ -32937,11 +33097,10 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
   result.interfacePath = interfacePath
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode through the one resolver; the graph-inspection
+  # commands read their flag and the recipe's default, not the variable.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact,
+    consultEnv = false)
   if artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
     raise newException(ValueError,
@@ -33249,11 +33408,10 @@ proc refreshRecipeProviderSnapshot(target: string;
     fallbackToRunQuotaBypass =
       mode in {tpmPathOnly, tpmScoop, tpmUnspecified})
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode through the one resolver; the graph-inspection
+  # commands read their flag and the recipe's default, not the variable.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact,
+    consultEnv = false)
   # NOTE: deliberately NO tool-identity resolution here — pool metadata does
   # not depend on it, and it is exactly the step that throws for an
   # unresolved-sibling CONSUMER at spawn time.
@@ -35175,6 +35333,13 @@ proc runCleanCommand(projectRoot, workRoot: string; dryRun: bool): int =
   echo "repro clean: " & verb & $count & " output(s) of " & projectRoot
   if res.failed > 0: 1 else: 0
 
+proc overrideProjectRootFor(target: string): string =
+  ## The project whose workspace configuration supplies an inspection's
+  ## per-tool overrides: the target's, or the current directory when the
+  ## target does not name a project file.
+  try: projectRootForModule(absolutePath(parseBuildTarget(target).modulePath))
+  except CatchableError: getCurrentDir()
+
 proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
   ## ``repro stats [view]``. The command line is parsed from repro's
   ## description (``repro_cli_support/cli_description``): ``view`` is one of
@@ -35197,6 +35362,8 @@ proc runStatsCommand(conf: ReproCommandLineStats; publicCliPath: string): int =
       parseToolProvisioning(conf.toolProvisioning)
     else:
       tpmUnspecified
+  setToolProvisioningForFlags(conf.toolProvisioningFor)
+  discard activateToolProvisioningOverrides(absolutePath(projectRoot))
   if conf.actionCacheRoot.len > 0:
     setActionCacheRootOverride(conf.actionCacheRoot)
   let top = conf.top
@@ -35896,6 +36063,9 @@ proc runGraphCommand(conf: ReproCommandLineGraph; publicCliPath: string): int =
       parseToolProvisioning(conf.toolProvisioning)
     else:
       tpmUnspecified
+  setToolProvisioningForFlags(conf.toolProvisioningFor)
+  discard activateToolProvisioningOverrides(
+    overrideProjectRootFor(if target.len > 0: target else: "."))
   let workRoot = conf.workRoot
   if conf.actionCacheRoot.len > 0:
     setActionCacheRootOverride(conf.actionCacheRoot)
@@ -36365,6 +36535,9 @@ proc runWhyCommand(conf: ReproCommandLineWhy; publicCliPath: string): int =
       parseToolProvisioning(conf.toolProvisioning)
     else:
       tpmUnspecified
+  setToolProvisioningForFlags(conf.toolProvisioningFor)
+  discard activateToolProvisioningOverrides(
+    overrideProjectRootFor(if target.len > 0: target else: "."))
   let workRoot = conf.workRoot
   if conf.actionCacheRoot.len > 0:
     setActionCacheRootOverride(conf.actionCacheRoot)
@@ -37614,6 +37787,7 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
   # cycle inside ``executeBuildTarget``.
   if c.toolProvisioning.len > 0:
     mode = parseToolProvisioning(c.toolProvisioning)
+  setToolProvisioningForFlags(c.toolProvisioningFor)
   workRoot = c.workRoot
   if givenOnCommandLine(origin.maxCycles):
     if c.maxCycles <= 0:
@@ -38055,6 +38229,17 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         else:
           proc(kind, message, payloadJson: string) =
             eventSink(kind, message, payloadJson, false, 0, @[], "")
+      # Per-tool overrides, re-read every cycle (an edited configuration
+      # applies to the next cycle, as an edited recipe does); a malformed
+      # one ends the watch as a usage error, before the cycle builds.
+      try:
+        discard activateToolProvisioningOverrides(
+          try: projectRootForModule(absolutePath(
+                 parseBuildTarget(target).modulePath))
+          except CatchableError: getCurrentDir())
+      except CatchableError as err:
+        emitWatchLine("repro watch: error: " & err.msg)
+        return 2
       let outcome = executeBuildTarget(target, mode, publicCliPath,
         selectDefaultAction = targetWasOmitted,
         workRoot = workRoot,
@@ -38074,7 +38259,8 @@ proc runWatchCommand(args: openArray[string]; publicCliPath: string;
         wantsInputEvidencePaths = true,
         eventSink = buildEventSink,
         cancelCheck = cancelCheck,
-        extraNameSelectors = extraNameSelectors)
+        extraNameSelectors = extraNameSelectors,
+        checkOverrideTargets = true)
       emitWatchLine("repro watch: cycle " & $cycle & " result exitCode=" &
         $outcome.exitCode,
         payloadJson = "{\"watchEvent\":\"cycle-result\",\"cycle\":" & $cycle &
@@ -41316,11 +41502,10 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop;
     compileWorkDir, compileScratchDir, projectRootForModule(modulePath),
     stablePublicCliPath(), outDir / "build-engine-cache", developStats)
 
-  var effectiveMode = mode
-  if effectiveMode == tpmUnspecified and
-      artifact.projectInterface.defaultToolProvisioning.len > 0:
-    effectiveMode = parseToolProvisioning(
-      artifact.projectInterface.defaultToolProvisioning)
+  # The invocation-wide mode through the one resolver; the graph-inspection
+  # commands read their flag and the recipe's default, not the variable.
+  let effectiveMode = effectiveToolProvisioning(mode, artifact,
+    consultEnv = false)
 
   if artifact.projectInterface.toolUses.len > 0 and
       effectiveMode == tpmUnspecified:
@@ -41365,6 +41550,183 @@ proc runDevelopCommand*(c: ReproCommandLineDevelop;
   runInDevelopEnvironment(command, projectRootForModule(modulePath),
     resolved.identity, resolved.identityPath, resolved.inspectionPath,
     interfacePath)
+
+# ---------------------------------------------------------------------------
+# `repro tool realize`.
+#
+# Realize ONE package of a project's `uses:` -- and its provisioning
+# dependencies, as the provisioning edges of that tool -- under the mode the
+# one resolver selects for it, and print the verified prefix. It exists for
+# the callers that need a tool on PATH without an activation, and that must
+# FAIL when the tool cannot be realized (an activation never fails: it warns
+# and leaves the ambient PATH). Exit codes: 0 realized; 1 any realization
+# failure; 2 usage error or unknown package; 3 the package has no arm for
+# the effective mode on this host (an override never falls through).
+# ---------------------------------------------------------------------------
+
+const
+  ToolRealizeExitFailed* = 1
+  ToolRealizeExitUsage* = 2
+  ToolRealizeExitNoArm* = 3
+
+proc toolRealizePrefix(profile: PathOnlyToolProfile): string =
+  ## The realized prefix of ``profile``: the store prefix a provisioning arm
+  ## realized, or, for a tool taken from PATH, the directory above its
+  ## ``bin``.
+  if profile.selectedStorePath.len > 0:
+    return profile.selectedStorePath
+  let binDir = parentDir(profile.resolvedExecutablePath)
+  if lastPathPart(binDir).cmpIgnoreCase("bin") == 0: parentDir(binDir)
+  else: binDir
+
+proc toolRealizeClosureDigest(profile: PathOnlyToolProfile): string =
+  ## The closure digest the lock identity carries (``:closure:<hex>``), or
+  ## "" when the realization has no closure.
+  let marker = ":closure:"
+  let at = profile.lockIdentity.find(marker)
+  if at < 0: ""
+  else: profile.lockIdentity[at + marker.len .. ^1].split(':')[0]
+
+proc toolRealizeJson(identity: PathOnlyBuildIdentity;
+                     profile: PathOnlyToolProfile; storeRoot: string): JsonNode =
+  ## The ``--json`` document of one realized tool: package, version, kind,
+  ## overriddenBy, prefix, executable, receipt and env.
+  var env = newJObject()
+  var pathDirs = newJArray()
+  for dir in binDirsForDevelop(identity, storeRoot = storeRoot):
+    pathDirs.add(%dir)
+  env["PATH"] = %*{"prepend": pathDirs}
+  for op in prefixEnvOpsForDevelop(identity):
+    case op.kind
+    of deskSetEnv: env[op.name] = %op.value
+    of deskPrependPath: env[op.name] = %*{"prepend": [op.value]}
+    of deskAppendPath: env[op.name] = %*{"append": [op.value]}
+    else: env[op.name] = %op.value
+  %*{
+    "package": profile.packageSelector,
+    "version": realizedVersionOf(profile),
+    "kind": profile.kind,
+    "overriddenBy": profile.overriddenBy,
+    "prefix": toolRealizePrefix(profile),
+    "executable": profile.resolvedExecutablePath,
+    "receipt": {
+      "cacheKey": profile.lockIdentity,
+      "archiveDigest": profile.tarballSha256,
+      "closureDigest": toolRealizeClosureDigest(profile),
+      # The binary-cache leg (substitution and publication of provisioned
+      # prefixes) is not implemented on this path yet, so a realization
+      # is never reported as substituted or published.
+      "source": (if profile.installMethod == "path" or
+                    profile.tarballCacheHit: "local"
+                 else: "realized"),
+      "published": false
+    },
+    "env": env
+  }
+
+proc runToolRealizeCommand*(packageName, project, toolProvisioning: string;
+                            toolProvisioningFor: seq[string]; asJson: bool;
+                            publicCliPath: string): int =
+  ## ``repro tool realize <package>``. Diagnostics go to stderr; stdout gets
+  ## the prefix (or, with ``--json``, the document) and only once the
+  ## declared executable has been verified present.
+  proc usage(msg: string): int =
+    stderr.writeLine("repro tool realize: error: " & msg)
+    ToolRealizeExitUsage
+  if packageName.strip().len == 0:
+    return usage("missing <package>")
+  let projectRoot = absolutePath(
+    if project.len > 0: project else: getCurrentDir())
+  let modulePath = resolveProjectFile(projectRoot).path
+  if modulePath.len == 0 or not fileExists(extendedPath(modulePath)):
+    return usage("no project file (" & CanonicalProjectFileName &
+      ") in " & projectRoot)
+  var requested = tpmUnspecified
+  try:
+    if toolProvisioning.len > 0:
+      requested = parseToolProvisioning(toolProvisioning)
+    setToolProvisioningForFlags(toolProvisioningFor)
+    discard activateToolProvisioningOverrides(projectRoot)
+  except CatchableError as err:
+    return usage(err.msg)
+  let outDir = projectRoot / ".repro" / "tool-realize"
+  var artifact: ProjectInterfaceArtifact
+  try:
+    ensureBootstrapToolchainEnv(requestedToolProvisioning(requested),
+      resolveStoreRoot() / "tool-store")
+    var autoRunQuota = startAutoRunQuotaIfNeeded(runQuotaBypassedByEnv())
+    defer: releaseAutoRunQuotaProcess(autoRunQuota)
+    var stats: BuildStats
+    artifact = extractInterfaceEdge(modulePath,
+      outDir / "project-interface.rbsz", outDir / "project-interface.nim",
+      reprobuildLibraryWorkDir(), outDir / "provider-work", projectRoot,
+      publicCliPath, outDir / "build-engine-cache", stats)
+  except CatchableError as err:
+    stderr.writeLine("repro tool realize: error: the project interface " &
+      "could not be read: " & err.msg)
+    return ToolRealizeExitFailed
+  var selected = artifact
+  selected.projectInterface.toolUses = @[]
+  selected.projectInterface.runtimeToolUses = @[]
+  for useDef in artifact.projectInterface.toolUses &
+      artifact.projectInterface.runtimeToolUses:
+    if useDef.packageSelector == packageName and
+        useDef notin selected.projectInterface.toolUses:
+      selected.projectInterface.toolUses.add(useDef)
+  if selected.projectInterface.toolUses.len == 0:
+    return usage("the project at " & projectRoot & " has no `uses:` entry " &
+      "for package `" & packageName & "`")
+  var notes: seq[string] = @[]
+  var mode = tpmUnspecified
+  try:
+    checkOverridesMatch(activeToolProvisioningOverrides,
+      artifact.projectInterface.toolUses &
+        artifact.projectInterface.runtimeToolUses, notes)
+    mode = effectiveToolProvisioning(requested, artifact)
+  except CatchableError as err:
+    return usage(err.msg)
+  for note in notes:
+    stderr.writeLine(note)
+  let selections = activeToolModeSelections(selected, mode)
+  if mode == tpmUnspecified and selections.len == 0:
+    return usage("no tool provisioning mode is resolved for `" &
+      packageName & "`: pass --tool-provisioning, set " &
+      "REPRO_TOOL_PROVISIONING, or give the package an override")
+  let storeRootOverride = buildToolStoreRoot(mode)
+  var identity: PathOnlyBuildIdentity
+  try:
+    identity = resolveAndWriteIdentity(selected, outDir, mode,
+      storeRootOverride = storeRootOverride,
+      pins = buildProvisioningPins(artifact, projectRoot)).identity
+  except ToolProvisioningNoArm as err:
+    stderr.writeLine("repro tool realize: error: " & err.msg)
+    return ToolRealizeExitNoArm
+  except CatchableError as err:
+    stderr.writeLine("repro tool realize: error: `" & packageName &
+      "` could not be realized: " & err.msg)
+    return ToolRealizeExitFailed
+  if identity.profiles.len == 0:
+    stderr.writeLine("repro tool realize: error: `" & packageName &
+      "` resolved to no tool")
+    return ToolRealizeExitFailed
+  let profile = identity.profiles[0]
+  # Never print a prefix that was not verified: the declared executable must
+  # be present in it (as ``substituteToolPrefix`` checks a substitution).
+  for each in identity.profiles:
+    if each.resolvedExecutablePath.len == 0 or
+        not fileExists(extendedPath(each.resolvedExecutablePath)):
+      stderr.writeLine("repro tool realize: error: `" & packageName &
+        "` was resolved, but its executable " &
+        (if each.resolvedExecutablePath.len > 0: each.resolvedExecutablePath
+         else: "(none)") & " is not present")
+      return ToolRealizeExitFailed
+  let storeRoot =
+    if storeRootOverride.len > 0: storeRootOverride else: outDir / "tool-store"
+  if asJson:
+    stdout.writeLine($toolRealizeJson(identity, profile, storeRoot))
+  else:
+    stdout.writeLine(toolRealizePrefix(profile))
+  0
 
 proc runStoreDaemonCommand(conf: ReproCommandLineStoreDaemon): int =
   ## ``repro store daemon start|status|stop --dev [--store-root PATH]
@@ -42005,22 +42367,33 @@ proc runUserDaemonCliCommand(conf: ReproCommandLineDaemon): int =
         discard cleanupStaleUserDaemonDiscovery(config)
         echo renderUserDaemonStatus(status)
         return 0
-      stopUserDaemon(config.endpoint)
-      cleanupPlatformBackgroundRegistration(config)
-      discard cleanupStaleUserDaemonDiscovery(config)
+      let stopped = stopUserDaemon(config.endpoint)
+      let stopNote = userDaemonShutdownNote(stopped)
+      # A successor's registration and discovery records are its own.
+      if stopped.successorPid == 0:
+        cleanupPlatformBackgroundRegistration(config)
+        discard cleanupStaleUserDaemonDiscovery(config)
       echo "repro daemon: stopped"
+      if stopNote.len > 0:
+        stderr.writeLine("repro daemon: note: " & stopNote)
       return 0
     of ReproCommandLineDaemonCommand.restart:
       let status = queryUserDaemonStatus(config.endpoint)
       if status.running:
-        stopUserDaemon(config.endpoint)
-        cleanupPlatformBackgroundRegistration(config)
-        let deadline = epochTime() + 10.0
-        while epochTime() < deadline:
-          if not queryUserDaemonStatus(config.endpoint).running:
-            break
-          sleep(25)
-        discard cleanupStaleUserDaemonDiscovery(config)
+        let stopped = stopUserDaemon(config.endpoint)
+        let stopNote = userDaemonShutdownNote(stopped)
+        if stopNote.len > 0:
+          stderr.writeLine("repro daemon: note: " & stopNote)
+        # A successor's registration and discovery records are its own;
+        # `startUserDaemon` below decides what to do with it.
+        if stopped.successorPid == 0:
+          cleanupPlatformBackgroundRegistration(config)
+          let deadline = epochTime() + 10.0
+          while epochTime() < deadline:
+            if not queryUserDaemonStatus(config.endpoint).running:
+              break
+            sleep(25)
+          discard cleanupStaleUserDaemonDiscovery(config)
       let started = startUserDaemon(stablePublicCliPath(), config)
       echo renderUserDaemonStatus(started)
       return 0
@@ -108258,6 +108631,19 @@ proc runReproCommandLine(programName: string; args: seq[string];
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
         r.state)
+  of ReproCommandLineCommand.tool:
+    case conf.tool.command
+    of ReproCommandLineToolCommand.realize:
+      let r = conf.tool.realize
+      try:
+        return runToolRealizeCommand(r.package, r.project, r.toolProvisioning,
+          r.toolProvisioningFor, r.json, publicCliPath)
+      except CatchableError as err:
+        stderr.writeLine("repro tool realize: error: " & err.msg)
+        return ToolRealizeExitFailed
+    of ReproCommandLineToolCommand.help:
+      return runReproHelp(programName, @["tool"] & conf.tool.help.topic,
+        publicCliPath)
   of ReproCommandLineCommand.nimble:
     case conf.nimble.command
     of ReproCommandLineNimbleCommand.verify:

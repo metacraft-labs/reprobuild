@@ -31,14 +31,16 @@
 ##      ``--delete``-free so existing content under /mnt is kept;
 ##   3. regenerate ``/mnt/etc/fstab`` from the disko mount plan stored
 ##      in ``/mnt/etc/repro/hardware.nim`` (every (device, mountpoint)
-##      pair the M9.R.22b ``collectMountPlan`` driver returns);
+##      pair the M9.R.22b ``collectMountPlan`` driver returns), naming
+##      each filesystem on ``--device`` by its UUID;
 ##   4. install GRUB onto the target's UEFI/ESP via
 ##      ``grub-install --target=x86_64-efi --efi-directory=<esp> \
 ##                     --boot-directory=<esp> --no-nvram --removable``
 ##      with the device path from ``--device``;
 ##   5. write a target-side ``/mnt/boot/grub/grub.cfg`` pointing at
 ##      ``/vmlinuz`` + ``/initrd.img`` on the ESP root (matching the
-##      M9.R.37.8 ESP-root layout the live ISO uses).
+##      M9.R.37.8 ESP-root layout the live ISO uses), with ``root=`` the
+##      root filesystem's UUID.
 ##
 ## ``--target`` defaults to ``/mnt`` and ``--source`` defaults to ``/``.
 ## ``--kernel`` and ``--initrd`` provide explicit boot artifacts when they
@@ -51,8 +53,7 @@ import repro_profile/disk_tools
 import repro_profile/disk_apply
 import repro_profile/types
 import repro_profile/hardware_probe  # childEnvWithoutLdLibPath
-import repro_cli_support/disk        # DiskPlanOutcome / loadDiskoFromSource
-import repro_cli_support/cli_program
+import repro_cli_support/disko_source  # DiskPlanOutcome
 
 type
   InstallRootOptions* = object
@@ -102,16 +103,6 @@ const DefaultExcludes* = @[
   # Avoid recursing INTO the target if --source ends up being a parent.
   "/mnt", "/media",
 ]
-
-proc installRootOptionsOf*(c: ReproCommandLineInfraInstallRoot):
-    InstallRootOptions =
-  ## What ``repro infra install-root`` was given, its command line parsed
-  ## from repro's description (``repro_cli_support/cli_description``, which
-  ## holds the defaults: ``/mnt``, ``/``, ``reproos``).
-  InstallRootOptions(target: c.target, source: c.source, device: c.device,
-    diskoSource: c.disko, hostName: c.hostname, kernelSource: c.kernel,
-    initrdSource: c.initrd, skipRsync: c.noRsync, skipGrub: c.noGrub,
-    skipFstab: c.noFstab, extraExcludes: c.exclude, dryRun: c.dryRun)
 
 # ---------------------------------------------------------------------
 # rsync invocation.
@@ -183,10 +174,57 @@ proc inferFsTypeForMount(layout: DiskLayout; device: string): string =
       inc n
   "ext4"
 
-proc renderFstab*(layout: DiskLayout): string =
+# ---------------------------------------------------------------------
+# Stable filesystem identifiers.
+#
+# A device node names a partition only as long as the disks enumerate the
+# same way. A machine whose disks come up in another order at first boot
+# (a second disk added, a controller probed earlier, an NVMe drive moved)
+# would mount -- or fail to find -- the wrong root. So the filesystems on
+# the disk being installed onto are named by their UUID: the ReproOS disk
+# initramfs resolves ``root=UUID=`` with BusyBox findfs, and systemd
+# resolves ``UUID=`` in fstab. Not by PARTUUID, which the kernel would
+# resolve by itself: that initramfs always runs, and BusyBox findfs knows
+# only ``LABEL=`` and ``UUID=``.
+#
+# Only partitions of ``--device`` are looked up: the layout's other device
+# paths may name disks of the BUILD host (a directory target, an image
+# built elsewhere), and reading their identifiers would bake a stranger's
+# disk into the installed system. Those keep their device path.
+# ---------------------------------------------------------------------
+
+type FsUuidQuery* = proc(partition: string): string
+
+proc blkidFsUuid*(partition: string): string =
+  ## The UUID of the filesystem on ``partition`` as blkid reads it, or ""
+  ## when there is none (or no blkid).
+  let (o, code) = execCmdEx("blkid -s UUID -o value " &
+    quoteShell(partition), env = childEnvWithoutLdLibPath())
+  if code == 0: o.strip() else: ""
+
+proc stablePartitionNames*(layout: DiskLayout; device: string;
+                           query: FsUuidQuery): Table[string, string] =
+  ## ``UUID=<id>`` for every partition of ``device`` the layout declares,
+  ## keyed by the partition's device path. A partition whose identifier
+  ## cannot be read is left out, so it renders as its path.
+  if device.len == 0: return
+  for _, d in layout.disks:
+    if d.device != device: continue
+    for n in 1 .. d.partitions.len:
+      let dev = partitionDevicePath(d.device, n)
+      let id = query(dev)
+      if id.len > 0:
+        result[dev] = "UUID=" & id
+
+proc nameOf(stable: Table[string, string]; device: string): string =
+  stable.getOrDefault(device, device)
+
+proc renderFstab*(layout: DiskLayout;
+                  stable = initTable[string, string]()): string =
   ## Build the full /etc/fstab text.  The mount plan is computed with
   ## ``target=""`` so the mountpoints are absolute on-target paths
   ## (``/``, ``/boot``, ...) — same shape Debian's installer writes.
+  ## ``stable`` renames partitions (see ``stablePartitionNames``).
   let plan = collectMountPlan(layout, "")
   result = "# /etc/fstab — generated by `repro infra install-root` " &
            "(M9.R.41).\n" &
@@ -194,13 +232,14 @@ proc renderFstab*(layout: DiskLayout): string =
   for (dev, mp) in plan:
     let fsType = inferFsTypeForMount(layout, dev)
     let mountPath = if mp.len == 0: "/" else: mp
-    result.add fstabLineForMount(dev, mountPath, fsType)
+    result.add fstabLineForMount(stable.nameOf(dev), mountPath, fsType)
 
 # ---------------------------------------------------------------------
 # GRUB config emission.
 # ---------------------------------------------------------------------
 
-proc renderInstalledGrubCfg*(layout: DiskLayout): string =
+proc renderInstalledGrubCfg*(layout: DiskLayout;
+                             stable = initTable[string, string]()): string =
   ## The post-install GRUB config.  Kept consistent with the live ISO's
   ## M9.R.37.7+8 shape: serial + console terminals, hidden timeout=3,
   ## ESP-rooted vmlinuz + initrd.img paths (the ESP is mounted at
@@ -214,6 +253,7 @@ proc renderInstalledGrubCfg*(layout: DiskLayout): string =
         rootDev = partitionDevicePath(d.device, n)
       inc n
   if rootDev.len == 0: rootDev = "/dev/vda2"
+  rootDev = stable.nameOf(rootDev)
   result = "serial --unit=0 --speed=115200 --word=8 --parity=no --stop=1\n" &
     "terminal_input console serial\n" &
     "terminal_output console serial\n" &
@@ -274,13 +314,13 @@ proc resolveDiskoSource(opts: InstallRootOptions): string =
   if opts.diskoSource.len > 0: opts.diskoSource
   else: opts.target / "etc" / "repro" / "hardware.nim"
 
-proc writeFstab(layout: DiskLayout;
+proc writeFstab(layout: DiskLayout; stable: Table[string, string];
                 opts: InstallRootOptions;
                 outcome: var InstallRootOutcome) =
   if opts.skipFstab: return
   let path = opts.target / "etc" / "fstab"
   outcome.fstabPath = path
-  let text = renderFstab(layout)
+  let text = renderFstab(layout, stable)
   if opts.dryRun:
     stderr.writeLine("repro infra install-root: [dry-run] would write " &
       path)
@@ -408,12 +448,12 @@ proc runGrubInstall(opts: InstallRootOptions;
     outcome.failureKind = irfGrubInstallFailed
     outcome.failureMsg = "grub-install exited " & $outcome.grubInstallExit
 
-proc writeGrubCfg(layout: DiskLayout;
+proc writeGrubCfg(layout: DiskLayout; stable: Table[string, string];
                   opts: InstallRootOptions;
                   outcome: var InstallRootOutcome) =
   let path = opts.target / "boot" / "grub" / "grub.cfg"
   outcome.grubCfgPath = path
-  let text = renderInstalledGrubCfg(layout)
+  let text = renderInstalledGrubCfg(layout, stable)
   if opts.dryRun:
     stderr.writeLine("repro infra install-root: [dry-run] would write " &
       path)
@@ -480,9 +520,19 @@ proc runInstallRoot*(opts: InstallRootOptions;
     return
   let layout = dpo.spec.disko.get()
   result.mountPlan = collectMountPlan(layout, "")
+  # The target's partitions exist by now (formatted before install-root
+  # runs); a dry run has touched nothing, so it names them by path.
+  let stable =
+    if opts.dryRun: initTable[string, string]()
+    else: stablePartitionNames(layout, opts.device, blkidFsUuid)
+  for (dev, _) in result.mountPlan:
+    if dev.startsWith(opts.device) and opts.device.len > 0 and
+        dev notin stable and not opts.dryRun:
+      stderr.writeLine("repro infra install-root: WARNING: no filesystem UUID " &
+        "for " & dev & "; the installed system names it by device path")
 
   # Phase 3: fstab.
-  writeFstab(layout, opts, result)
+  writeFstab(layout, stable, opts, result)
   if result.failure: return
 
   # Phase 4: hostname (non-fatal; the rsync'd copy is a fallback).
@@ -497,4 +547,4 @@ proc runInstallRoot*(opts: InstallRootOptions;
   # Phase 6: GRUB install + cfg.
   runGrubInstall(opts, result)
   if result.failure: return
-  writeGrubCfg(layout, opts, result)
+  writeGrubCfg(layout, stable, opts, result)

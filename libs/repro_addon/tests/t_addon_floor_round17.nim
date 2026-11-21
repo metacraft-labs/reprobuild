@@ -236,11 +236,13 @@ suite "§13 decision 172: the boot-hold unit is required by sysinit.target":
     # RefuseManualStop= is a [Unit] key: in [Service] systemd ignores it.
     let unitSection = u.split("\n[Service]\n")[0]
     check "\nRefuseManualStop=yes\n" in unitSection
-  test "RequiredBy=, and nothing it runs can fail the unit":
+  test "RequiredBy=, and every path the script means exits 0":
     check "RequiredBy=sysinit.target\n" in u
     check "WantedBy=sysinit.target" notin u
-    # A9 review round 20: no outer timeout; ``-`` for exit codes only.
-    check "ExecStart=-/bin/sh -c '" in u
+    # A9 review round 20: no outer timeout. Round 21 (decision 172 as
+    # amended 2026-11-21): no ``-`` either; every intended path exits 0.
+    check "ExecStart=/bin/sh -c '" in u
+    check "ExecStart=-" notin u
     check "TimeoutStartSec=60\n" in u
     let sc = bootHoldScript()
     for c in 1 .. 9:

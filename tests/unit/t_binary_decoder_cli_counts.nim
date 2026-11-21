@@ -21,10 +21,10 @@ suite "lowered graph bounded count decoding":
     writeBuildAction(encoded, action)
     checkCountMutations(encoded, proc(data: seq[byte]) =
       var pos = 0
-      discard readBuildAction(data, pos), expectedCounts = 28)
+      discard readBuildAction(data, pos), expectedCounts = 30)
   test "outer pool and action counts":
     var value: LoweredGraphCacheRecord
     value.pools = @[BuildPool()]
     value.actions = @[populatedBuildAction("outer-count-regression")]
     checkCountMutations(encodeLoweredGraphCache(value), proc(data: seq[byte]) =
-      discard decodeLoweredGraphCache(data), expectedCounts = 30)
+      discard decodeLoweredGraphCache(data), expectedCounts = 32)

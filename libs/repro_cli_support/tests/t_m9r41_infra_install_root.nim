@@ -11,6 +11,7 @@ import std/[tables, strutils, unittest]
 
 import repro_cli_support/infra_install_root
 import repro_cli_support/cli_program
+import repro_cli_support/infra  # installRootOptionsOf
 
 proc parseInstallRootArgs(args: seq[string]): InstallRootOptions =
   ## The options `repro infra install-root <args>` runs with, read by
@@ -172,6 +173,47 @@ suite "M9.R.41 grub.cfg emission":
     let cfg = renderInstalledGrubCfg(layout)
     check "set timeout_style=hidden" in cfg
     check "set timeout=3" in cfg
+
+suite "install-root names the install device's filesystems by UUID":
+  # What blkid would read from the freshly made filesystems.
+  let uuids = {"/dev/vda1": "8C2E-41F7",
+               "/dev/vda2": "3f0b8d2e-6c1a-4e57-9d2b-7a4c1e9f0b63",
+               "/dev/vdb1": "0badd15c-0000-4000-8000-000000000001"}.toTable
+  let query: FsUuidQuery = proc(dev: string): string =
+    uuids.getOrDefault(dev, "")
+
+  test "fstab and root= carry UUID= for the device being installed":
+    let layout = canonicalLayout()
+    let stable = stablePartitionNames(layout, "/dev/vda", query)
+    let text = renderFstab(layout, stable)
+    check "UUID=3f0b8d2e-6c1a-4e57-9d2b-7a4c1e9f0b63\t/\text4\t" in text
+    check "UUID=8C2E-41F7\t/boot\tvfat\t" in text
+    check "/dev/vda" notin text
+    let cfg = renderInstalledGrubCfg(layout, stable)
+    check "root=UUID=3f0b8d2e-6c1a-4e57-9d2b-7a4c1e9f0b63 " in cfg
+    check "/dev/vda" notin cfg
+
+  test "a disk other than --device is never looked up":
+    # A layout device that is not the install target may be a disk of
+    # the build host; its identifier must not reach the installed system.
+    var asked: seq[string]
+    let recording: FsUuidQuery = proc(dev: string): string =
+      asked.add dev
+      query(dev)
+    let layout = canonicalLayout()
+    check stablePartitionNames(layout, "/dev/vdb", recording).len == 0
+    check stablePartitionNames(layout, "", recording).len == 0
+    check asked.len == 0
+    check "root=/dev/vda2 " in renderInstalledGrubCfg(layout,
+      stablePartitionNames(layout, "/dev/vdb", recording))
+
+  test "a partition without a readable UUID keeps its device path":
+    let partial: FsUuidQuery = proc(dev: string): string =
+      if dev == "/dev/vda2": "3f0b8d2e-6c1a-4e57-9d2b-7a4c1e9f0b63" else: ""
+    let layout = canonicalLayout()
+    let text = renderFstab(layout, stablePartitionNames(layout, "/dev/vda", partial))
+    check "UUID=3f0b8d2e-6c1a-4e57-9d2b-7a4c1e9f0b63\t/\t" in text
+    check "/dev/vda1\t/boot\t" in text
 
 suite "M9.R.41 fstab covers swap + ZFS data partitions":
   test "swap partitions render with type 'swap' + defaults options":

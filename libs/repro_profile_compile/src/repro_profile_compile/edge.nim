@@ -482,6 +482,16 @@ proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
   ##
   ## Entropy: blessed exactly as the provider compile is (see the section
   ## comment above).
+  ##
+  ## Input-check policy: `ffpHybrid`, stated here rather than left to the
+  ## `timestamp` default. Under `timestamp` a file whose mtime moved is a
+  ## changed input whatever its bytes are, so an editor's save without an
+  ## edit, a formatter that rewrites what it read, a `git checkout` or a
+  ## generator that re-emits `home.nim` cost a full compile of an unchanged
+  ## profile (measured 330 s under load where the cached answer takes 12 s;
+  ## reprobuild-pm `spec/Profile-Compilation-Model.md` §2.2). `ffpHybrid`
+  ## compares metadata first, so an untouched input still costs one `lstat`,
+  ## and hashes the content only of an input whose metadata moved.
   # The helper's command line in the words the CLI's generated parser reads
   # back to these values: each value attached to its declared flag.
   var argv = @[
@@ -510,6 +520,7 @@ proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
     # the command line (the profile, the nimcache, the libraries under
     # `--repo-root`) is keyed here.
     weakFingerprint = keyedOnArgv(weak, argv, cwd),
+    actionCachePolicy = ffpHybrid,
     envPassthrough = ProfileCompileEnvPassthrough,
     nonDeterminism = ndpEntropyBlessed,
     nonDeterminismJustification = ProviderCompilerEntropyJustification,
@@ -969,6 +980,11 @@ proc profilePlatformProbeBuildAction*(absProfile, outPath, scratch,
                                       weak: ContentDigest): BuildAction =
   ## Build the platform-probe edge's `BuildAction`: the internal
   ## `__repro-probe-profile-platforms` helper, writing `outPath`.
+  ##
+  ## Input-check policy: `ffpHybrid`, for the compile edge's reason (see
+  ## `profileCompileBuildAction`). This edge reads the same profile sources
+  ## and runs one `nim check` per target platform, so a save that changes no
+  ## byte must not re-run it either.
   let argv = @[
     publicCliPath,
     "internal", "probe-profile-platforms",
@@ -988,6 +1004,7 @@ proc profilePlatformProbeBuildAction*(absProfile, outPath, scratch,
     commandStatsId = "repro profile platform probe edge",
     cacheable = true,
     weakFingerprint = keyedOnArgv(weak, argv, cwd),
+    actionCachePolicy = ffpHybrid,
     envPassthrough = ProfileCompileEnvPassthrough,
     # The compile edge's blessing, for the compile edge's reason: this
     # edge's tree is the helper and `nim dump` / `nim check` -- a compiler

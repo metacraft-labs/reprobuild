@@ -32,7 +32,7 @@ import blake3
 const
   FrameMagic = "reprobuild.hash.v1\0"
   Tag = "action-fingerprint"
-  CacheKeySchemaLiteral = "reprobuild.dev-env.cache-key.v2"
+  CacheKeySchemaLiteral = "reprobuild.dev-env.cache-key.v3"
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)
@@ -110,6 +110,29 @@ suite "dev-env cache key frame":
 
     putEnv("REPRO_DEVELOP_OVERRIDES_FILE", "/some/where")
     delEnv("REPRO_TOOL_PROVISIONING")
+    # Cache-key v3: the per-tool overrides' variable and the configuration
+    # files that may carry them, pinned with known values (a user file that
+    # exists, a workspace settings file named by REPRO_WORKSPACE_CONFIG and
+    # no local file beside it).
+    putEnv("REPRO_TOOL_PROVISIONING_OVERRIDES", "sdk=tarball")
+    let userConfig = root / "user-config.toml"
+    writeFile(userConfig, "schema = \"reprobuild.config.v1\"\n")
+    let settingsDir = root / "ws"
+    createDir(settingsDir)
+    let settingsFile = settingsDir / "repro-workspace.toml"
+    writeFile(settingsFile, "[tool-provisioning.overrides]\nsdk = \"nix\"\n")
+    let savedUserConfig = getEnv("REPROBUILD_USER_CONFIG")
+    let hadUserConfig = existsEnv("REPROBUILD_USER_CONFIG")
+    let savedWsConfig = getEnv("REPRO_WORKSPACE_CONFIG")
+    let hadWsConfig = existsEnv("REPRO_WORKSPACE_CONFIG")
+    putEnv("REPROBUILD_USER_CONFIG", userConfig)
+    putEnv("REPRO_WORKSPACE_CONFIG", settingsFile)
+    defer:
+      delEnv("REPRO_TOOL_PROVISIONING_OVERRIDES")
+      if hadUserConfig: putEnv("REPROBUILD_USER_CONFIG", savedUserConfig)
+      else: delEnv("REPROBUILD_USER_CONFIG")
+      if hadWsConfig: putEnv("REPRO_WORKSPACE_CONFIG", savedWsConfig)
+      else: delEnv("REPRO_WORKSPACE_CONFIG")
     # The ambient store root must not leak into the pinned payload: set it
     # to a known value so the `REPRO_STORE_ROOT` part is exercised with a
     # value rather than only as `<unset>`, and restore it afterwards.
@@ -147,6 +170,13 @@ suite "dev-env cache key frame":
             fingerprintPart(os.normalizedPath(absolutePath(overrides))),
           envPart("REPRO_DEVELOP_OVERRIDES_FILE"),
           envPart("REPRO_TOOL_PROVISIONING"),
+          # Keyed since cache-key v3 (per-tool provisioning overrides).
+          envPart("REPRO_TOOL_PROVISIONING_OVERRIDES"),
+          "toolProvisioningOverrideConfig=" &
+            "user=" & fingerprintPart(userConfig) &
+            "\nsettings=" & fingerprintPart(settingsFile) &
+            "\nlocal=" & fingerprintPart(settingsDir /
+              "repro-workspace.local.toml"),
           envPart("REPRO_STORE_ROOT"),
           # Keyed since c71f33495: the extracted interface depends on which
           # reprobuild libs the recipe is compiled against.
@@ -195,6 +225,22 @@ suite "dev-env cache key frame":
     putEnv("REPRO_TOOL_PROVISIONING", "on")
     note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
     delEnv("REPRO_TOOL_PROVISIONING")
+    # Per-tool provisioning overrides: changing an override
+    # re-activates, from the variable and from the configuration.
+    putEnv("REPRO_TOOL_PROVISIONING_OVERRIDES", "sdk=tarball")
+    note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
+    delEnv("REPRO_TOOL_PROVISIONING_OVERRIDES")
+    let savedWsConfig = getEnv("REPRO_WORKSPACE_CONFIG")
+    let hadWsConfig = existsEnv("REPRO_WORKSPACE_CONFIG")
+    let settingsFile = root / "repro-workspace.toml"
+    putEnv("REPRO_WORKSPACE_CONFIG", settingsFile)
+    writeFile(settingsFile, "[tool-provisioning.overrides]\nsdk = \"nix\"\n")
+    note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
+    writeFile(root / "repro-workspace.local.toml",
+      "[tool-provisioning.overrides]\nsdk = \"tarball\"\n")
+    note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
+    if hadWsConfig: putEnv("REPRO_WORKSPACE_CONFIG", savedWsConfig)
+    else: delEnv("REPRO_WORKSPACE_CONFIG")
     let savedStoreRoot = getEnv("REPRO_STORE_ROOT")
     let hadStoreRoot = existsEnv("REPRO_STORE_ROOT")
     putEnv("REPRO_STORE_ROOT", root / "other-store")
