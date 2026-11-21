@@ -48,7 +48,7 @@ libs/repro_addon/tests/t_addon_detector_controls_run_on_the_host.nim	nim	9
 libs/repro_addon/tests/t_addon_diagnostic_names_are_defined_once.nim	nim	4
 libs/repro_addon/tests/t_addon_drill_findings.nim	nim	7
 libs/repro_addon/tests/t_addon_egress_control_proves_the_observer.nim	nim	4
-libs/repro_addon/tests/t_addon_egress_observer.nim	nim	10
+libs/repro_addon/tests/t_addon_egress_observer.nim	nim	14
 libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	4
 libs/repro_addon/tests/t_addon_engine_agent_tick_records.nim	nim	1
 libs/repro_addon/tests/t_addon_entry_type_checks_on_every_release_architecture.nim	nim	1
@@ -176,6 +176,7 @@ libs/repro_build_engine/tests/t_cache_refusal_always_names_its_reason.nim	nim	5
 libs/repro_build_engine/tests/t_canonical_work_tree_reproduces_split_bundle.nim	nim	2
 libs/repro_build_engine/tests/t_child_cpu_stats_row.nim	nim	7
 libs/repro_build_engine/tests/t_container_output_is_not_restored_from_a_snapshot.nim	nim	2
+libs/repro_build_engine/tests/t_create_action_record_carries_dependency_policy.nim	nim	13
 libs/repro_build_engine/tests/t_create_action_record_keys_its_argv.nim	nim	6
 libs/repro_build_engine/tests/t_cross_checkout_sharing_refusal.nim	nim	11
 libs/repro_build_engine/tests/t_da1i_evidence_scope.nim	nim	30
@@ -293,6 +294,7 @@ libs/repro_cli_support/tests/t_a_bare_selector_is_a_name_beside_a_same_named_pat
 libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim	nim	1
 libs/repro_cli_support/tests/t_a_lock_rewrite_that_does_not_parse_is_refused.nim	nim	6
 libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
+libs/repro_cli_support/tests/t_a_producer_fetch_ignores_the_callers_loader_path.nim	nim	1
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_addon_platform_dispatch.nim	nim	7
 libs/repro_cli_support/tests/t_anywhere_plan_digest_covers_what_it_applies.nim	nim	6
@@ -1108,6 +1110,7 @@ libs/repro_standard_provider/tests/test_python_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_rust_convention.nim	nim	15
+libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim	nim	5
 libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim	nim	2
 libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim	nim	12
 libs/repro_standard_provider/tests/test_rust_convention_target_edition.nim	nim	1
@@ -2025,6 +2028,7 @@ tests/integration/t_edited_input_under_dev_shm_is_not_served_or_certified.nim	ni
 tests/integration/t_emit_refuses_rather_than_guessing_when_the_workspace_is_unreadable.nim	nim	1
 tests/integration/t_emitted_overrides_match_the_develop_set.nim	nim	1
 tests/integration/t_emulator_is_not_a_verifier_bypass.nim	nim	15
+tests/integration/t_engine_created_action_replays_and_rekeys.nim	nim	6
 tests/integration/t_engine_embeds_the_trees_source_revision.nim	nim	1
 tests/integration/t_entrypoints.nim	nim	1
 tests/integration/t_enumerated_directory_evidence_producers.nim	nim	5
@@ -2432,6 +2436,7 @@ tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim	nim	5
 tests/integration/t_recipe_lock_consistency_refuses.nim	nim	4
 tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim	nim	4
 tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	6
+tests/integration/t_remedies_quote_paths_for_the_hook_shell.nim	nim	1
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
 tests/integration/t_remote_unseal_boot.nim	nim	7
 tests/integration/t_remote_unseal_broker_refusal_fails_closed.nim	nim	6
@@ -2688,6 +2693,7 @@ tests/integration/t_unrouted_private_repo_refuses_loudly.nim	nim	1
 tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim	nim	6
 tests/integration/t_unsigned_or_wrong_key_certificate_is_rejected.nim	nim	1
 tests/integration/t_untracked_inputs_flag_read_set_and_strict.nim	nim	1
+tests/integration/t_user_docs_command_rows_carry_one_line_help.nim	nim	5
 tests/integration/t_uses_refuses_a_package_declared_for_another_platform.nim	nim	9
 tests/integration/t_uses_resolves_reprobuild_packages_interface.nim	nim	3
 tests/integration/t_uses_resolves_sqlite3_from_real_reprobuild_packages.nim	nim	3
@@ -2797,6 +2803,7 @@ tests/integration/t_worktree_state_reads_stdout_not_git_diagnostics.nim	nim	4
 tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
+tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	2
 tests/test_dev_env_m9_policy.py	python	11

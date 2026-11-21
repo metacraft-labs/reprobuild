@@ -70,6 +70,8 @@
 import std/[json, os, sequtils, strutils, tables]
 
 import repro_lock
+import repro_core/remedy_words
+export remedy_words
 import repro_cli_support/recipe_constraints
 import repro_cli_support/recipe_conditions
 
@@ -169,19 +171,6 @@ proc recipePinsExactly*(v: ConsistencyViolation): bool =
 
 proc flakeRevPinFile*(flakeRoot: string): string =
   if flakeRoot.len > 0: flakeRoot / "flake.nix" else: "the flake's flake.nix"
-
-proc remedyPathWord*(path: string; windowsHost = defined(windows)): string =
-  ## ``path`` as ONE word of a remedy the operator pastes into the shell the
-  ## managed hooks run under — `sh`, Git's own on Windows — so it is quoted
-  ## for a POSIX shell on every host. ``quoteShell`` quotes for the host the
-  ## generator runs on, and an unquoted `M:\m\ws` reaches `sh` as `M:mws`.
-  ##
-  ## On Windows every separator is spelled `/` as well, so every path in one
-  ## message is spelled the same way. Every remedy path goes through here;
-  ## a remedy that quotes one path with ``quoteShell`` and its neighbour with
-  ## this spells them two ways on Windows and leaves the first broken in `sh`.
-  let spelled = if windowsHost: path.replace('\\', '/') else: path
-  quoteShellPosix(spelled)
 
 proc lockUpdateCommand*(dependency, rev, repoRoot: string): string =
   ## THE spelling of `repro lock update` in every message: the dependency,
@@ -504,7 +493,8 @@ proc checkReproH1(inputs: ConsistencyInputs;
           ":), but " & lockFile & " resolves package '" & c.selector &
           "' at version " & resolved & ", which that range does not admit"
         v.remedies.add("To resolve it inside the range the recipe states, " &
-          "re-solve the lock. From " & root & " run: `repro lock refresh`")
+          "re-solve the lock. From " & remedyProsePath(root) &
+          " run: `repro lock refresh`")
         v.remedies.add("If " & resolved & " is the intended version, widen " &
           "the range at " & where & " so it admits " & resolved &
           ", then re-solve the same way")

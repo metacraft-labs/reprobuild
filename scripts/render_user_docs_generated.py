@@ -171,6 +171,58 @@ def _extract_quoted(text: str) -> str:
     return "".join(re.findall(r'"([^"]*)"', text)).strip()
 
 
+STRING_LITERAL = re.compile(r'"((?:[^"\\]|\\.)*)"')
+CONCATENATION = re.compile(r"\s*&\s*")
+# What may follow the last literal of a value: the comma before the next
+# argument, the colon that opens the body, a closing parenthesis, or the end.
+VALUE_END = re.compile(r"\s*(?:[,:)]|$)")
+
+
+def _string_argument(text: str, name: str) -> str | None:
+    """The value of the named string argument ``name = "..." & "..."`` in a
+    declaration, or None when the declaration does not pass it.
+
+    The value is the string literals joined by ``&`` that follow ``name =``,
+    and it ends at the first token that is neither: the comma before the next
+    named argument, or the colon that opens the body. Any other value (a
+    constant, a triple-quoted string) is refused, not shortened. Reading every quoted
+    string to the end of the declaration instead would append whatever string
+    arguments follow, so a command's ``longHelp`` would land in its one-line
+    ``help``.
+    """
+    opener = re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}\s*=\s*", text)
+    if not opener:
+        return None
+    parts: list[str] = []
+    pos = opener.end()
+    while True:
+        literal = STRING_LITERAL.match(text, pos)
+        # A value this reader cannot follow to its end (a constant, a call, a
+        # triple-quoted or raw string) stops the run: returning the literals
+        # read so far would publish a truncated help.
+        if not literal or text.startswith('"', literal.end()):
+            raise RuntimeError(
+                f"{CLI_DESC}: the value of `{name} =` in `{text[:80]}` is not "
+                "made of plain string literals joined by `&`, the only shape "
+                "scripts/render_user_docs_generated.py reads"
+            )
+        parts.append(literal.group(1))
+        joiner = CONCATENATION.match(text, literal.end())
+        if not joiner:
+            # Anything else after the literal (`% args`, `.dedent`) changes the
+            # value, so dropping it would publish a different help.
+            if not VALUE_END.match(text, literal.end()):
+                raise RuntimeError(
+                    f"{CLI_DESC}: the value of `{name} =` in `{text[:80]}` "
+                    "continues past its string literals; "
+                    "scripts/render_user_docs_generated.py reads only plain "
+                    "string literals joined by `&`"
+                )
+            break
+        pos = joiner.end()
+    return "".join(parts).strip()
+
+
 def _short_sentence(help_text: str) -> str:
     """Keep index table cells concise while preserving exact meaning."""
     cleaned = re.sub(r"\s+", " ", help_text).strip()
@@ -292,9 +344,7 @@ def parse_cli_commands() -> list[CliCommand]:
         elif "visibility = hidden" in header:
             vis = "hidden"
 
-        help_text = ""
-        if "help =" in header:
-            help_text = _extract_quoted(header.split("help =", 1)[1])
+        help_text = _string_argument(header, "help") or ""
 
         alias_m = re.search(r"aliases\s*=\s*\[([^\]]+)\]", header)
         aliases = re.findall(r'"([^"]+)"', alias_m.group(1)) if alias_m else []
@@ -320,10 +370,8 @@ def parse_cli_commands() -> list[CliCommand]:
                     sub_hdr_lines.append(lines[k])
                 sub_hdr = " ".join(x.strip() for x in sub_hdr_lines)
                 if "visibility = internal" not in sub_hdr and "visibility = hidden" not in sub_hdr:
-                    sub_help = ""
-                    if "help =" in sub_hdr:
-                        sub_help = _extract_quoted(sub_hdr.split("help =", 1)[1])
-                    elif k + 1 < len(lines) and re.match(r'^        help "', lines[k + 1]):
+                    sub_help = _string_argument(sub_hdr, "help") or ""
+                    if not sub_help and k + 1 < len(lines) and re.match(r'^        help "', lines[k + 1]):
                         hl = [lines[k + 1]]
                         m_idx = k + 1
                         while m_idx + 1 < len(lines) and lines[m_idx + 1].startswith("          "):
@@ -344,7 +392,7 @@ def parse_cli_commands() -> list[CliCommand]:
                     k += 1
                     flines.append(lines[k])
                 fjoined = " ".join(x.strip() for x in flines)
-                fhelp = _extract_quoted(fjoined.split("help =", 1)[1]) if "help =" in fjoined else ""
+                fhelp = _string_argument(fjoined, "help") or ""
                 flags.append(CliFlag(name=f"--{kebab}", kind="bool" if fkind == "boolFlag" else ftype, help=fhelp))
                 j = k + 1
                 continue

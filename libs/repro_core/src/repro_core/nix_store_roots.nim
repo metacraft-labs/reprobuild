@@ -83,6 +83,7 @@ when defined(posix):
 import ./ambient_execution
 import ./link_target
 import ./paths
+import ./process_env
 import ./process_close
 
 const
@@ -419,16 +420,11 @@ proc hostNixEnvironment(): StringTableRef =
   ## The caller's environment minus loader controls. A build may run with a
   ## provisioned profile's `LD_LIBRARY_PATH` / `DYLD_*` exported, and Nix is
   ## a host bootstrap tool that must not load those libraries (the same
-  ## reason `repro_tool_profiles.hostToolEnvironment` drops them).
+  ## reason `repro_tool_profiles.systemToolEnv` drops them).
   result = newStringTable(modeCaseSensitive)
   for key, value in envPairs():
-    case key
-    of "LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT", "LD_DEBUG",
-       "LD_DEBUG_OUTPUT", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
-       "DYLD_INSERT_LIBRARIES":
-      discard
-    else:
-      result[key] = value
+    result[key] = value
+  dropLoaderControls(result)
 
 var rootNameCounter {.threadvar.}: int
 

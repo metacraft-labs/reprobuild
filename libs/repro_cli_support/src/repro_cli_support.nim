@@ -52,6 +52,7 @@ import repro_cli_support/daemon_cli
 # `fsContainment` in the namespace of every module that touches `repro_core`.
 import repro_core/link_target
 import repro_core/path_identity
+import repro_core/process_env
 import repro_core/relocation
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
 # did NOT produce (that is the entire measurement: seventeen store paths on one
@@ -278,7 +279,7 @@ import repro_cli_support/recipe_constraints
 # refusal that sends the operator to `flake.nix` prints.
 import repro_cli_support/lock_consistency
 export lock_consistency.flakeRevPinEditRemedy, lock_consistency.lockUpdateCommand,
-  lock_consistency.remedyPathWord,
+  lock_consistency.remedyPathWord, lock_consistency.remedyProsePath,
   lock_consistency.H1Property,
   lock_consistency.H2Property
 # HL-11 M4: the recipe rewrites `repro lock update` makes (an exact pin in
@@ -5689,6 +5690,23 @@ proc lockPinnedProducerCacheRoot(workspaceRoot: string): string =
   ## per-producer + per-revision below so a refreshed pin fetches a fresh tree.
   absolutePath(workspaceRoot) / ".repro" / "cross-repo-producers"
 
+proc lockPinnedProducerGitEnv(): StringTableRef =
+  ## The environment of the host ``git`` that fetches and verifies a
+  ## lock-pinned producer: the caller's, minus Git's repository-local bindings
+  ## (a ``GIT_DIR`` must not redirect the fetch into an unrelated tree) and
+  ## minus the loader controls. The ``git`` is the one found on ``PATH`` -- on
+  ## a CI runner the distribution's ``/usr/bin/git`` -- and the engine runs it
+  ## for its own work, not as a command the user asked for. A caller inside a
+  ## Nix dev shell can export an ``LD_LIBRARY_PATH`` naming Nix's krb5 and
+  ## OpenSSL; ``git-remote-https`` then loads those against the host's older
+  ## glibc and every fetch dies with ``version `GLIBC_2.38' not found``
+  ## (reprobuild-pm issue 2026-11-18, a lock-pinned producer fetch hands the
+  ## caller's LD_LIBRARY_PATH to the host git). The engine's other host-tool
+  ## calls (``curl``, ``nix``, ``nix-store``) drop them the same way.
+  ## A fresh table each call, so this process's environment is never changed.
+  result = scrubbedGitRepositoryEnv()
+  dropLoaderControls(result)
+
 proc verifyLockPinnedProducerSource(dep: LockedDep;
                                     sourceRoot, consumerRoot: string) =
   ## A pin identifies the checked-out source, not merely an object present in
@@ -5708,7 +5726,7 @@ proc verifyLockPinnedProducerSource(dep: LockedDep;
     # become part of a SHA compared against the pin; a failure carries git's
     # merged message, which the refusal below quotes.
     let execution = gitRunSeparated(gitBin, @["-C", sourceRoot] & @args,
-      scrubbedGitRepositoryEnv())
+      lockPinnedProducerGitEnv())
     if execution.code == 0: (execution.code, execution.output.strip())
     else: (execution.code, execution.diagnostic)
   let top = gitRev(["rev-parse", "--show-toplevel"])
@@ -5728,13 +5746,13 @@ proc verifyLockPinnedProducerSource(dep: LockedDep;
       sourceRoot & ": consumer lock " & lockPath & " expects " & expected &
       ", actual checkout HEAD is " & actual & ". " & detail &
       (if ownsRepository:
-        " Check out the pin with `git -C " & quoteShell(sourceRoot) &
-        " checkout --detach " & quoteShell(revision) &
-        "`, or update the consumer lock with `repro lock update " &
-        quoteShell(dep.name) & " --to=" &
-        quoteShell(if head.code == 0: actual else: revision) & "` in " &
-        quoteShell(consumerRoot) & "."
-       else: " Restore a producer Git checkout at " & quoteShell(sourceRoot) & "."))
+        " Check out the pin with `git -C " & remedyPathWord(sourceRoot) &
+        " checkout --detach " & quoteShellPosix(revision) &
+        "`, or update the consumer lock with `" &
+        lockUpdateCommand(dep.name,
+          (if head.code == 0: actual else: revision), consumerRoot) & "`."
+       else: " Restore a producer Git checkout at " &
+         remedyProsePath(sourceRoot) & "."))
   if not ownsRepository:
     refuse("Cannot verify the producer repository root: " & top.output & ".")
   if revision.len == 0 or head.code != 0 or pinned.code != 0:
@@ -5804,7 +5822,7 @@ proc fetchLockPinnedProducer*(dep: LockedDep; workspaceRoot: string): string =
     # failure then read "fetch failed from <url> at pinned revision <rev>: "
     # with no cause at all.
     let r = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
-      workingDir = cwd, env = scrubbedGitRepositoryEnv())
+      workingDir = cwd, env = lockPinnedProducerGitEnv())
     (code: r.exitCode, output: r.output)  # git-merged-text: only quoted in failures, never parsed
 
   proc verifyRevisionIntegrity() =
@@ -19710,8 +19728,10 @@ proc ownerSharedServiceReadiness(copy: LiftedInterfaceCopy;
     raise newException(ValueError,
       "the owner's effective service readiness declaration is unavailable " &
       "or stale at " & path & ": " & err.msg &
-      " Run `REPRO_ENVIRONMENT=" & quoteShell(environment) & " repro shell --print-env=json" &
-      (if activityName.len > 0: " --activity=" & activityName else: "") &
+      " Run `REPRO_ENVIRONMENT=" & quoteShellPosix(environment) &
+      " repro shell --print-env=json" &
+      (if activityName.len > 0: " --activity=" & quoteShellPosix(activityName)
+       else: "") &
       "` in " & ownerRecipeDir & " to refresh it; refusing to assume readiness none.")
 
 proc resolveSharedServiceReferences(parsed: ParsedDevSessionCommand;
@@ -22044,7 +22064,7 @@ proc hooksPathDiagnosisLines*(repoRoot: string;
   ## trains is ``--no-verify``.
   if finding.previous.len == 0:
     return
-  result.add("repro hooks: core.hooksPath in " & repoRoot &
+  result.add("repro hooks: core.hooksPath in " & remedyProsePath(repoRoot) &
     " is the relative path '" & finding.previous &
     "', which Git resolves against each worktree's own top level and which " &
     "therefore names nothing in a linked worktree (its '.git' is a FILE) — " &
@@ -22054,14 +22074,15 @@ proc hooksPathDiagnosisLines*(repoRoot: string;
     "and you ran no hooks command here.")
   if finding.resolved.len > 0:
     result.add("repro hooks:   fix it with:  repro hooks ensure --vcs " &
-      repoRoot)
-    result.add("repro hooks:   or directly:  git -C " & repoRoot &
-      " config --local core.hooksPath " & finding.resolved)
+      remedyPathWord(repoRoot))
+    result.add("repro hooks:   or directly:  git -C " &
+      remedyPathWord(repoRoot) & " config --local core.hooksPath " &
+      remedyPathWord(finding.resolved))
   else:
     result.add("repro hooks:   the absolute path it should hold could not be " &
       "computed here: " & finding.diagnostic)
     result.add("repro hooks:   fix it with:  repro hooks ensure --vcs " &
-      repoRoot)
+      remedyPathWord(repoRoot))
   # What the next push does, stated as what `pre-push` really does: it makes
   # the value absolute itself (`ensureWorktreeSafeHooksPath`) and refuses only
   # when that repair cannot be made. A push from a LINKED worktree runs no hook
@@ -22108,8 +22129,8 @@ proc hooksPathRefusalLines*(repoRoot: string;
   if repair.resolved.len > 0:
     result.add("repro hooks: Remedy — make the shared value absolute, then " &
       "retry the push:")
-    result.add("repro hooks:      git -C " & repoRoot &
-      " config --local core.hooksPath " & repair.resolved)
+    result.add("repro hooks:      git -C " & remedyPathWord(repoRoot) &
+      " config --local core.hooksPath " & remedyPathWord(repair.resolved))
 
 proc gitHooksDir(targetPath: string): string =
   let repoRoot = gitTopLevel(targetPath)
@@ -24588,8 +24609,9 @@ proc hookContractWriteRefusal(hooksDir, hookName, oldContract,
       "environment\n" &
     "  To install from the build that will run them, point both at one " &
       "binary:\n" &
-    "    REPROBUILD_REPRO=" & interpreterPath & " " & interpreterPath &
-      " hooks ensure --vcs --re-anchor " & repoRoot)
+    "    REPROBUILD_REPRO=" & remedyPathWord(interpreterPath) & " " &
+      remedyPathWord(interpreterPath) & " hooks ensure --vcs --re-anchor " &
+      remedyPathWord(repoRoot))
 
 proc foreignContractRefusalLines*(repoLabel, repoPath, hookName,
     managedPath: string): seq[string] =
@@ -24628,8 +24650,8 @@ proc foreignContractRefusalLines*(repoLabel, repoPath, hookName,
   result.add("repro hooks:   remedy: reconcile what supplies 'repro' first " &
     "(direnv reload, or a new shell; then the reprobuild pin). Only if THIS " &
     "build is the one this repository should run, re-anchor it:")
-  result.add("repro hooks:     " & self & " hooks ensure --vcs --re-anchor " &
-    repoPath)
+  result.add("repro hooks:     " & remedyPathWord(self) &
+    " hooks ensure --vcs --re-anchor " & remedyPathWord(repoPath))
 
 type
   CertificateGatePlan* = object
@@ -24770,7 +24792,7 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
             "hand: merge the checks you want into " & local &
             " (which the dispatcher runs first), delete " & standard &
             ", then re-run 'repro hooks ensure --vcs " &
-            parentDir(parentDir(hooksDir)) & "'.")
+            remedyPathWord(parentDir(parentDir(hooksDir))) & "'.")
     else:
       moveFileReplacing(standard, local)
       ensureExecutable(local)
@@ -25429,8 +25451,9 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
       entry.build = describeReproBuild(reproBuildIdentity(self))
       entry.installedAuthor = managedHookAuthorBin(body)
       entry.remedy = "reconcile what supplies 'repro' first (direnv " &
-        "reload, then the reprobuild pin); only then: " & self &
-        " hooks ensure --vcs --re-anchor " & repoPath
+        "reload, then the reprobuild pin); only then: " &
+        remedyPathWord(self) & " hooks ensure --vcs --re-anchor " &
+        remedyPathWord(repoPath)
     result.entries.add(entry)
 
 proc ensureWorkspaceHooks(workspaceRoot: string;
@@ -29333,9 +29356,11 @@ proc announceBulkOverrideNotSubstituted(selector, projectRoot: string;
       (if entry.provenance.isSome: "'" & entry.provenance.get() & "'"
        else: "none") & "), which does not substitute an exact recipe pin; " &
       "it is resolved from the lock instead. Run `repro develop --only=" &
-      selector & " --workspace-root=" & quoteShell(projectRoot) &
-      "` to substitute it explicitly, or `repro develop --drop=" & selector &
-      " --workspace-root=" & quoteShell(projectRoot) & "` to remove the " &
+      quoteShellPosix(selector) & " --workspace-root=" &
+      remedyPathWord(projectRoot) &
+      "` to substitute it explicitly, or `repro develop --drop=" &
+      quoteShellPosix(selector) & " --workspace-root=" &
+      remedyPathWord(projectRoot) & "` to remove the " &
       "override")
 
 proc resolveProducerBinding*(selector: string;
@@ -39735,8 +39760,8 @@ proc bulkSkipNote(name, pinnedBy: string): string =
   ## skipped because a recipe pins it exactly (§16.4).
   "pinned by recipe at " & pinnedBy & ": '" & name & "' is not substituted " &
     "by a bulk selection, because an exact recipe pin means that revision, " &
-    "not whatever is checked out; `repro develop --only=" & name &
-    "` substitutes it"
+    "not whatever is checked out; `repro develop --only=" &
+    quoteShellPosix(name) & "` substitutes it"
 
 proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
   ## L1 driver, DS-1..DS-5 shape. (1) Resolve the git tool. (2) COMPOSE the
@@ -40130,9 +40155,11 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
       "and repro build resolves it from the lock rather than the checkout. " &
       "Run " &
       "`repro develop --only=" &
-      node.name & " --workspace-root=" & quoteShell(root) &
+      quoteShellPosix(node.name) & " --workspace-root=" &
+      remedyPathWord(root) &
       "` to substitute it explicitly, or `repro develop --drop=" &
-      node.name & " --workspace-root=" & quoteShell(root) &
+      quoteShellPosix(node.name) & " --workspace-root=" &
+      remedyPathWord(root) &
       "` to remove the entry"
 
   # ---- DS-6 — ``--list``: print the resolved lock set and exit. -----------
@@ -44273,13 +44300,14 @@ proc announceMissingRecordStoreCheckout(workspaceRoot: string;
       if store.branch.len > 0: " (branch '" & store.branch & "')"
       else: ""
     let branchFlag =
-      if store.branch.len > 0: "-b " & quoteShell(store.branch) & " "
+      if store.branch.len > 0: "-b " & quoteShellPosix(store.branch) & " "
       else: ""
     stderr.writeLine("repro: `[records] url` declares the lock record " &
       "store " & store.url & branchNote & ", but no checkout of it exists " &
       "at " & dest & ", so no lock record is written there (nor into the " &
       "root repository in its place). Run `git clone " & branchFlag &
-      quoteShell(store.url) & " " & quoteShell(dest) & "` to keep records")
+      quoteShellPosix(store.url) & " " & remedyPathWord(dest) &
+      "` to keep records")
 
 proc bootstrapManifestCache(args: WorkspaceInitArgs): seq[
     WorkspaceInitClonedEntry] =
@@ -46424,7 +46452,8 @@ proc noNameableProjectError(workspaceRoot, opLabel: string;
       "record store, " & opLabel & " does not apply to it -- run it from " &
       "the workspace that consumes these records. If you meant THIS " &
       "directory to become a workspace, `repro workspace init <project> " &
-      "--workspace-root " & workspaceRoot & "` is what establishes the " &
+      "--workspace-root " & remedyPathWord(workspaceRoot) &
+      "` is what establishes the " &
       "`.repro/` shell that makes it one.")
 
 proc committedLockDirectDependencyNames(checkout: string): seq[string] =
@@ -47608,7 +47637,7 @@ proc remedyPath(workspaceRoot, relPath: string): string =
   ## directory (``--workspace-root``, or a hook running inside one repo), and a
   ## relative ``lib-b`` resolved against that directory names the wrong repo or
   ## nothing.
-  quoteShell(absolutePath(workspaceRoot / relPath).replace('\\', '/'))
+  remedyPathWord(absolutePath(workspaceRoot / relPath))
 
 proc repinRemedies(finding: CoherenceFinding; workspaceRoot: string;
                    relations: set[CoherenceRelation]; dbText: string;
@@ -48532,7 +48561,8 @@ proc workspaceLockCommand*(workspaceRoot: string): string =
   ## current directory with no upward search: without the flag the command
   ## works only if the operator first guesses a ``cd``.
   if workspaceRoot.len == 0: "repro workspace lock"
-  else: "repro workspace lock --workspace-root=" & workspaceRoot
+  else: "repro workspace lock --workspace-root=" &
+    remedyPathWord(workspaceRoot)
 
 proc firstNamedReproCommand*(message: string): string =
   ## The first backtick-quoted ``repro …`` invocation a diagnostic names, or
@@ -48559,7 +48589,7 @@ proc committedLockCommand*(workspaceRoot: string): string =
   ## The copy-pasteable ``repro lock refresh`` invocation that re-pins the
   ## COMMITTED ``repro.lock``. It takes the workspace as a positional.
   if workspaceRoot.len == 0: "repro lock refresh"
-  else: "repro lock refresh " & workspaceRoot
+  else: "repro lock refresh " & remedyPathWord(workspaceRoot)
 
 proc withoutRootEntryAtIssuance*(ld: LockedDependencies;
                                  issuing: bool): LockedDependencies =
@@ -50085,7 +50115,7 @@ proc unreadableCommittedLockMessage(lockPath, diagnostic: string): string =
   "public lock backend (kind=committed-lock location=" & lockPath &
     ") could not be read: " & diagnostic &
     " — inspect the file and its access permissions, then run `repro lock " &
-    "validate --lock=" & quoteShell(lockPath) & "`"
+    "validate --lock=" & remedyPathWord(lockPath) & "`"
 
 type
   PublicTierCommittedLocks = object
@@ -50741,7 +50771,8 @@ proc composeDevelopLockSet(workspaceRoot: string; identity: GitToolIdentity;
         "in the workspace root repository at " & root &
         " — commit-addressed lock backends are keyed on a commit of THIS " &
         "repository, and this command never silently keys on a different one. " &
-        "Fetch the commit (e.g. `git -C " & root & " fetch --unshallow`) or " &
+        "Fetch the commit (e.g. `git -C " & remedyPathWord(root) &
+        " fetch --unshallow`) or " &
         "pass a revision this repository has.")
       return
     if rootRepoName.len == 0:
@@ -52336,10 +52367,11 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     let operation = inProgressOperation(probe, candidateAbs)
     if operation.len > 0:
       result[repoIdx] = relocationRefusal("candidate_in_progress_operation",
-        "the checkout at '" & prior.path & "' is in the middle of a " &
-          operation & "; finish it (`git -C " & prior.path & " " & operation &
-          " --continue`) or abandon it (`git -C " & prior.path & " " &
-          operation & " --abort`) and re-run. Nothing was moved.")
+        "the checkout at '" & remedyProsePath(prior.path) & "' is in the middle of a " &
+          operation & "; finish it (`git -C " & remedyPathWord(prior.path) &
+          " " & operation & " --continue`) or abandon it (`git -C " &
+          remedyPathWord(prior.path) & " " & operation &
+          " --abort`) and re-run. Nothing was moved.")
       continue
 
     # §4 `submodule_absolute_gitdir`. The one refusal in the table that buys
@@ -52351,10 +52383,10 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     let absoluteGitdirs = absoluteSubmoduleGitdirs(candidateAbs)
     if absoluteGitdirs.len > 0:
       result[repoIdx] = relocationRefusal("submodule_absolute_gitdir",
-        "the checkout at '" & prior.path &
+        "the checkout at '" & remedyProsePath(prior.path) &
           "' has submodule(s) whose `.git` file holds an ABSOLUTE gitdir " &
           "pointer that the move would break: " & absoluteGitdirs.join(", ") &
-          ". Run `git -C " & prior.path &
+          ". Run `git -C " & remedyPathWord(prior.path) &
           " submodule absorbgitdirs` and re-run. Nothing was moved.")
       continue
 
@@ -52438,25 +52470,26 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
       continue
     if agreement.verdict == raNoRemotes:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
-        "the checkout at '" & prior.path & "' has no remote configured, so " &
+        "the checkout at '" & remedyProsePath(prior.path) & "' has no remote configured, so " &
           "nothing identifies it as '" & repo.name & "': a move needs its " &
           "remote URL to match the URL this fragment resolves to or one " &
           "derived from a declared previous identity (accepted URLs are " &
           agreement.acceptedUrls.join(", ") & "). If it really is '" &
-          repo.name & "', run `git -C " & prior.path &
+          repo.name & "', run `git -C " & remedyPathWord(prior.path) &
           " remote add origin <url>` with one of them and re-run; otherwise " &
           "move it aside. Nothing was moved.")
       continue
     if agreement.verdict == raCaseOnly:
       result[repoIdx] = relocationRefusal("previous_remote_mismatch",
-        "the checkout at '" & prior.path & "' has remote URL '" &
+        "the checkout at '" & remedyProsePath(prior.path) & "' has remote URL '" &
           agreement.foundUrl &
           "' which differs from an accepted URL ONLY IN PATH CASE. The " &
           "forges in use fold case and this tool deliberately does not (two " &
           "spellings of one path may be two repositories on a server that " &
           "does not fold), so the difference has to be settled by a human: " &
           "accepted URLs are " & agreement.acceptedUrls.join(", ") &
-          ". Run `git -C " & prior.path & " remote set-url <name> <url>` " &
+          ". Run `git -C " & remedyPathWord(prior.path) &
+          " remote set-url <name> <url>` " &
           "with the declared spelling and re-run. Nothing was moved.")
       continue
     if agreement.verdict == raMismatch:
@@ -53751,7 +53784,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         "' but could not wire its managed hooks, so that repo is UNGATED: " &
         "its pre-push publication check and post-commit cache push will not " &
         "run. The clone itself succeeded. Remedy: `repro hooks ensure --vcs " &
-        args.workspaceRoot & "`")
+        remedyPathWord(args.workspaceRoot) & "`")
 
   for repoIdx, decision in planned.report.decisions:
     var status = ""
@@ -56788,7 +56821,7 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
           let remedy =
             if mismatchedNames.len > 0:
               workspaceLockCommand(args.workspaceRoot) &
-                " --trigger-repo=" & mismatchedNames[0]
+                " --trigger-repo=" & quoteShellPosix(mismatchedNames[0])
             else:
               workspaceLockCommand(args.workspaceRoot)
           raise newException(ValueError,
@@ -57439,8 +57472,9 @@ proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     return (1, err.msg)
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
-    return (1, hook.diagnostic & "; run '" & publicCliImagePath() &
-      " hooks ensure --vcs " & repoRoot & "'")
+    return (1, hook.diagnostic & "; run '" &
+      remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "'")
   var capability = ""
   if hook.kind == ephReproV2:
     let location = configuredPushLocation(identity, repoRoot, target.remote)
@@ -57923,7 +57957,8 @@ proc publishedLockKeyCollision(identity: GitToolIdentity; repoRoot,
         localBlob.output.strip() & "); published records are immutable and " &
         "this one is not rewritten. Two sources disagree about the " &
         "workspace state at that commit — bring this store up to date " &
-        "('git -C " & repoRoot & " pull --ff-only') and re-read the " &
+        "('git -C " & remedyPathWord(repoRoot) &
+        " pull --ff-only') and re-read the " &
         "published record before deciding which answer is right"
   ""
 
@@ -58494,7 +58529,7 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
       "lock record(s) missing from the manifest working tree (" &
         vanishedRecords.join(", ") &
         "); lock records are immutable — restore them with 'git -C " &
-        manifestRepoRoot & " checkout -- locks' and re-run"
+        remedyPathWord(manifestRepoRoot) & " checkout -- locks' and re-run"
     return
 
   # Collect the staged lock paths and reject empty/zero-byte locks.
@@ -59330,8 +59365,8 @@ proc withheldLockRecordLine(item: WithheldLockRecord;
   "workspace lock: not publishing '" & item.relPath & "': it pins " &
     item.repoName & " @ " & item.revision & ", which " & item.evidence &
     ", so nobody else can obtain it. The record stays in the store as a " &
-    "local draft. Publish the commit with `git -C " & item.checkout &
-    " push`, then re-run `" & workspaceLockCommand(workspaceRoot) & "`."
+    "local draft. Publish the commit with `git -C " &
+    remedyPathWord(item.checkout) & " push`, then re-run `" & workspaceLockCommand(workspaceRoot) & "`."
 
 proc runWorkspaceLockCommand*(c: ReproCommandLineWorkspaceLock): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
@@ -61239,7 +61274,7 @@ proc renderPinRegressionRefusal*(refused: openArray[PinRegression];
     else:
       result.add("  " & pinRegressionSubject(r) & ": " &
         pinRegressionDistance(r) & " — pinned " & r.pinned & ", observed " &
-        r.observed & " (checkout " & r.path & ")")
+        r.observed & " (checkout " & remedyProsePath(r.path) & ")")
     let forward = pinRegressionForwardCommands(r, workspaceRoot, identity)
     for i, cmd in forward:
       let lead =
@@ -63521,7 +63556,8 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
           "revision " & shortRev(o.pinned) & " IS published, so the lock " &
           "this push publishes is reproducible; record the new revision on " &
           "the next commit here (the pre-commit hook re-pins it, or run " &
-          "`repro lock refresh " & root & "`) [sibling=" & o.name &
+          "`repro lock refresh " & remedyPathWord(root) & "`) [sibling=" &
+          o.name &
           " pinned=" & o.pinned & " observed=" & o.observed &
           " relation=ahead deferred=component-peer]")
         continue
@@ -63574,8 +63610,7 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
       # input's closure through nix, nixpkgs included, hence the warning.
       var commands: seq[string]
       for n in updatable:
-        commands.add("`repro lock update " & n & " --repo-root=" &
-          remedyPathWord(root) & "`")
+        commands.add("`" & lockUpdateCommand(n, "", root) & "`")
       remedyParts.add("flake.lock resolves the same repository as " &
         "repro.lock's " & updatable.mapIt("'" & it & "'").join(", ") &
         ", and `repro lock refresh` moves repro.lock alone (it holds that " &
@@ -69583,7 +69618,7 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
       stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running " &
         "as pre-commit.legacy under another hook manager, so this gate " &
         "cannot refuse. Restore it with 'repro hooks ensure --vcs " &
-        repoRoot & "'")
+        remedyPathWord(repoRoot) & "'")
       return 0
     stderr.writeLine(prefix & "the commit is REFUSED: the certificate " &
       "policy this commit carries cannot be read. This is early feedback, " &
@@ -69709,7 +69744,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
       "pre-commit.legacy under another hook manager, whose hooks run after " &
       "this gate and may still change the index, so this gate cannot refuse. " &
-      "Restore it with 'repro hooks ensure --vcs " & repoRoot & "'")
+      "Restore it with 'repro hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "'")
   if refuses:
     stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
       "required). This is early feedback, which `git commit " &
@@ -73424,8 +73460,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
           "from this checkout); this checkout is not one the workspace " &
           "gates or locks"
       else:
-        "run 'repro hooks ensure --vcs " & parsed.currentRepo &
-          "' from a checkout declared by this workspace, or repair the " &
+        "run 'repro hooks ensure --vcs " &
+          remedyPathWord(parsed.currentRepo) & "' from a checkout declared by this workspace, or repair the " &
           "workspace membership before retrying the push"
     result.failures.add(CheckFailure(
       repo: "",
@@ -73578,8 +73614,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: parsed.currentRepo,
         property: "membership-push-scope",
         remediation: "make the pushed commits readable in " &
-          parsed.currentRepo & " (run 'git -C " & parsed.currentRepo &
-          " fsck' and fetch the remote), then retry the push — the gate " &
+          remedyProsePath(parsed.currentRepo) & " (run 'git -C " &
+          remedyPathWord(parsed.currentRepo) & " fsck' and fetch the remote), then retry the push — the gate " &
           "cannot tell which repos this manifest push re-pins without them",
         evidence: membership.diagnostic))
       result.exitCode = 2
@@ -74007,9 +74043,11 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: obs.path,
         property: "dirty",
         # Principle 2: name the offender AND a copy-pasteable command.
-        remediation: "commit or stash changes in " & obs.path &
-          " — run 'git -C " & obs.path & " commit -a' (or 'git -C " &
-          obs.path & " stash') then 'repro push'",
+        remediation: "commit or stash changes in " &
+          remedyProsePath(obs.path) &
+          " — run 'git -C " & remedyPathWord(obs.path) &
+          " commit -a' (or 'git -C " & remedyPathWord(obs.path) &
+          " stash') then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
 
@@ -74208,10 +74246,10 @@ proc executeCheckPrePush(parsed: CheckArgs;
           # Issuance only: 'repro push' publishes it with its own closure and
           # obtains the certificate its gate may ask for; a raw 'git push' of
           # it can be refused for exactly that certificate.
-          "publish it first: run 'repro push' in " & obs.path &
-          ", then certify again"
+          "publish it first: run 'repro push' in " &
+          remedyProsePath(obs.path) & ", then certify again"
         else:
-          "run 'git push' in " & obs.path & " first"
+          "run 'git push' in " & remedyProsePath(obs.path) & " first"
       result.failures.add(CheckFailure(
         repo: obs.path,
         property: "unpublished",
@@ -74259,8 +74297,12 @@ proc executeCheckPrePush(parsed: CheckArgs;
         result.failures.add(CheckFailure(
           repo: repoLabel,
           property: "history-rewrite-unverifiable",
-          remediation: "run 'git -C " & parsed.currentRepo & " fetch " &
-            remoteLabel & " " & pushedBranch & "' so the commits this update " &
+          remediation: "run 'git -C " & remedyPathWord(parsed.currentRepo) &
+            " fetch " &
+            (if outgoing.remoteName.len > 0:
+               quoteShellPosix(outgoing.remoteName)
+             else: "<remote>") & " " &
+            quoteShellPosix(pushedBranch) & "' so the commits this update " &
             "would replace are present locally, then retry the push — HEAD " &
             outgoing.headOid & " is publishable; this is refused only because " &
             "the gate cannot see what the update would discard",
@@ -74455,8 +74497,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
           repo: entry.package,
           property: "develop_override_missing",
           remediation: "the develop-override at " & sourcePath &
-            " no longer exists; run 'repro develop " & entry.package &
-            " --source=PATH' to update it",
+            " no longer exists; run 'repro develop " &
+            quoteShellPosix(entry.package) & " --source=PATH' to update it",
           evidence: "override source path does not exist",
           source: sourcePath))
         result.exitCode = 2
@@ -74509,7 +74551,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
         result.failures.add(CheckFailure(
           repo: entry.package,
           property: "develop_override_unpublished",
-          remediation: "run 'git push' in " & sourcePath & " first",
+          remediation: "run 'git push' in " & remedyProsePath(sourcePath) &
+            " first",
           evidence: "publish-probe-failed: " & pubRes.diagnostic,
           source: sourcePath))
         result.exitCode = 2
@@ -74541,7 +74584,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
         result.failures.add(CheckFailure(
           repo: entry.package,
           property: "develop_override_unpublished",
-          remediation: "run 'git push' in " & sourcePath & " first",
+          remediation: "run 'git push' in " & remedyProsePath(sourcePath) &
+            " first",
           evidence: evidence,
           source: sourcePath))
         result.exitCode = 2
@@ -76089,8 +76133,8 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       of ephReproIncompatible: hook.diagnostic
       of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
       of ephReproV2: ""
-    return (false, reason & "; run '" & publicCliImagePath() &
-      " hooks ensure --vcs " & repoRoot & "'")
+    return (false, reason & "; run '" & remedyPathWord(publicCliImagePath()) &
+      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "'")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
     return (false, "the hook-resolved repro executable is unavailable; run `" &
@@ -76404,8 +76448,10 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
       result.diagnostic = "merge of " & rName & "/" & branch & " into " &
         repo.path &
         " hit a conflict: " & m.output.strip()
-      result.remediation = "resolve the conflict in " & repo.path &
-        " (git -C " & repo.path & " merge " & rName & "/" & branch &
+      result.remediation = "resolve the conflict in " &
+        remedyProsePath(repo.path) &
+        " (git -C " & remedyPathWord(repo.path) & " merge " &
+        quoteShellPosix(rName & "/" & branch) &
         "), commit, then re-run 'repro push'"
       return
     result.action = "merge"
@@ -76423,8 +76469,10 @@ proc reconcileMemberForPush(identity: GitToolIdentity; workspaceRoot: string;
       result.diagnostic = "rebase onto " & rName & "/" & branch & " in " &
         repo.path &
         " hit a conflict: " & r.output.strip()
-      result.remediation = "resolve the conflict in " & repo.path &
-        " (git -C " & repo.path & " rebase " & rName & "/" & branch &
+      result.remediation = "resolve the conflict in " &
+        remedyProsePath(repo.path) &
+        " (git -C " & remedyPathWord(repo.path) & " rebase " &
+        quoteShellPosix(rName & "/" & branch) &
         "), then re-run 'repro push'"
       return
     result.action = "rebase"
@@ -76769,7 +76817,8 @@ proc preflightPushRepo(identity: GitToolIdentity; workspaceRoot: string;
   let hook = protocolV2HookReady(identity, repoAbs)
   if not hook.ok:
     return (false, PushPreflightRepo(), "hook-preflight", hook.diagnostic,
-      publicCliImagePath() & " hooks ensure --vcs " & repoAbs)
+      remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+        remedyPathWord(repoAbs))
   let head = gitRunPlainQuery(identity,
     ["-C", repoAbs, "rev-parse", "--verify", "HEAD^{commit}"])
   if head.code != 0 or head.output.strip().len == 0:
@@ -78081,9 +78130,10 @@ proc executePush(args: PushArgs): PushReport =
       "--hook-contract=" & managedHookContract("pre-push")]),
       options = {poStdErrToStdOut, poUsePath}, env = scrubbedGitChildEnv())
     if probe.exitCode != 0 or probe.output.strip() != "2":
-      let remedy = "set REPROBUILD_REPRO=" & publicCliImagePath() &
-        " (or update PATH), run '" & publicCliImagePath() &
-        " hooks ensure --vcs " & repoAbs & "', then retry 'repro push'"
+      let remedy = "set REPROBUILD_REPRO=" &
+        remedyPathWord(publicCliImagePath()) & " (or update PATH), run '" &
+        remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+        remedyPathWord(repoAbs) & "', then retry 'repro push'"
       result.repos.add(PushRepoResult(name: name, path: byName[name].path,
         branch: preflight[name].branch, headSha: preflight[name].headSha,
         outcome: proFailed,
@@ -78120,7 +78170,8 @@ proc executePush(args: PushArgs): PushReport =
       result.lockDiagnostic = diagnostic
       result.retryCommand =
         if "hook" in backend.diagnostic.toLowerAscii():
-          publicCliImagePath() & " hooks ensure --vcs " & plan.root
+          remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+            remedyPathWord(plan.root)
         else:
           "repair the lock backend and retry 'repro push --sync --rebase'"
       result.exitCode = 2
@@ -78205,8 +78256,8 @@ proc executePush(args: PushArgs): PushReport =
             path: byName[name].path, action: "re-pin", stopped: true,
             diagnostic: "could not plan the re-pin of " &
               memberAbs / CommittedLockFileName & ": " & err.msg,
-            remediation: "run `repro lock refresh " & memberAbs &
-              "`, commit repro.lock, then retry 'repro push'"))
+            remediation: "run `repro lock refresh " &
+              remedyPathWord(memberAbs) & "`, commit repro.lock, then retry 'repro push'"))
           result.stoppedRepo = name
           result.stoppedStage = "sync"
           result.retryCommand = "repro push"
@@ -78323,7 +78374,8 @@ proc executePush(args: PushArgs): PushReport =
         result.lockDiagnostic = diagnostic
         result.retryCommand =
           if "hook" in backend.diagnostic.toLowerAscii():
-            publicCliImagePath() & " hooks ensure --vcs " & plan.root
+            remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
+              remedyPathWord(plan.root)
           else:
             "repair the lock backend and retry " &
               "'repro push --sync --rebase'"
@@ -78496,8 +78548,8 @@ proc executePush(args: PushArgs): PushReport =
       entry.outcome = proSkippedDirty
       entry.diagnostic = "HEAD " & entry.headSha &
         " is unpublished but the checkout is on a detached HEAD"
-      entry.remediation = "attach " & repo.path &
-        " to a branch (git -C " & repo.path &
+      entry.remediation = "attach " & remedyProsePath(repo.path) &
+        " to a branch (git -C " & remedyPathWord(repo.path) &
         " switch -c <branch>) then re-run 'repro push'"
       result.repos.add(entry)
       result.exitCode = 2
@@ -78727,8 +78779,10 @@ proc executePush(args: PushArgs): PushReport =
           missingRepo = item.repoName
           break
       if missingRepo.len > 0:
-        result.retryCommand = "repro workspace lock " & result.project &
-          " --trigger-repo=" & missingRepo & " && repro push --sync --rebase"
+        result.retryCommand = "repro workspace lock " &
+          (if result.project.len > 0: quoteShellPosix(result.project) & " "
+           else: "") & "--trigger-repo=" &
+          quoteShellPosix(missingRepo) & " && repro push --sync --rebase"
         result.lockDiagnostic.add("; expected record was never created; run '" &
           result.retryCommand & "'")
       else:
@@ -80365,7 +80419,7 @@ proc currentRepositoryCertificateState(workspaceRoot: string;
     stalenessError = err.msg
   if stalenessError.len > 0:
     result.stale = true
-    result.remedy = "repro lock refresh " & quoteShell(top)
+    result.remedy = "repro lock refresh " & remedyPathWord(top)
     state = "snapshot staleness UNKNOWN (" & stalenessError & ")"
   elif staleness.stale:
     result.stale = true
@@ -80493,7 +80547,10 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   var ctx: HealthContext
   ctx.workspaceRoot = parsed.workspaceRoot
   var checks: seq[HealthCheck]
-  let self = reproSelfPath()
+  # Every remedy below names this binary, so it is spelled once as ONE word
+  # of the hooks' `sh` (Unified-Locking-And-Hooks.md §"The named command
+  # must RUN where the message is printed", rule 3).
+  let self = remedyPathWord(reproSelfPath())
 
   # 0. Stale auto-generated binary-cache producer keys. Until reprobuild
   #    1c2752eef9 the apply-time substitute path minted an ECDSA-P256
@@ -80521,7 +80578,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           "(REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH unset). Nothing uses " &
           "it: the apply path stopped minting and publishing under such " &
           "keys at reprobuild 1c2752eef9, and no cache allowlists it",
-        remedy: "rm -r " & quoteShell(credDir) &
+        remedy: "rm -r " & remedyPathWord(credDir) &
           "   # unless `repro build` publishing on this host relies on it; " &
           "then point REPRO_BINARY_CACHE_KEY_PATH / _CERT_PATH at it",
         fixKind: hfNone))
@@ -80673,8 +80730,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           status: hsFail,
           detail: digested,
           fullDetail: if digested != full: full else: "",
-          remedy: self & " reap --once --state-root=" & storeRoot &
-            "   # then act on what it names",
+          remedy: self & " reap --once --state-root=" &
+            remedyPathWord(storeRoot) & "   # then act on what it names",
           fixKind: hfNone))
       else:
         # A sweep completing unobstructed is the healthy state, and an idle
@@ -80749,7 +80806,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
               "this store (a daemon started with a different --state-root " &
               "writes its verdict beside THAT store) or it cannot write " &
               "the verdict file. Its log names the reason once per run.",
-            remedy: self & " reap --once --state-root=" & storeRoot,
+            remedy: self & " reap --once --state-root=" &
+              remedyPathWord(storeRoot),
             fixKind: hfNone))
         else:
           # No daemon is a supported path (§4.3: the store, not the daemon,
@@ -80764,7 +80822,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
               ". No user daemon is running, so nothing is sweeping it on a " &
               "wall clock; the records stay until a sweep runs by hand or a " &
               "reconcile reaps them.",
-            remedy: self & " reap --once --state-root=" & storeRoot,
+            remedy: self & " reap --once --state-root=" &
+              remedyPathWord(storeRoot),
             fixKind: hfNone))
       of lrsUnreadable:
         checks.add(HealthCheck(
@@ -80802,7 +80861,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     else:
       checks.add(HealthCheck(
         name: "store", status: hsFail, detail: detail,
-        remedy: self & " store recover --store-root=" & storeRoot,
+        remedy: self & " store recover --store-root=" &
+          remedyPathWord(storeRoot),
         fixKind: hfNone))
 
   # 4. direnv — installed, and the workspace .envrc is trusted.
@@ -80828,7 +80888,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         name: "direnv",
         status: hsFail,
         detail: ".envrc present but not trusted",
-        remedy: "direnv allow " & parsed.workspaceRoot,
+        remedy: "direnv allow " & remedyPathWord(parsed.workspaceRoot),
         fixKind: hfDirenvAllow))
     else:
       checks.add(HealthCheck(
@@ -81227,7 +81287,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
              else: ""))
         else:
           missing.add(repo.name & "/" & hookName)
-    let remedy = self & " hooks ensure --vcs " & parsed.workspaceRoot
+    let remedy = self & " hooks ensure --vcs " &
+      remedyPathWord(parsed.workspaceRoot)
     # Reported with every non-ok arm, so a count is never readable as the whole
     # population: "4 wired" means nothing without "of 5 present in 1 repo".
     let census = $okCount & " managed hook(s) wired across " &
@@ -81281,7 +81342,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           # The same command the workspace arm names; on a single repo it
           # rewrites the value through the same ``ensureWorktreeSafeHooksPath``
           # (``runVcsHooksCommand``), and ``--fix`` repairs the value directly.
-          remedy: self & " hooks ensure --vcs " & target,
+          remedy: self & " hooks ensure --vcs " &
+            remedyPathWord(target),
           fixKind: hfEnsureVcsHooks))
       else:
         checks.add(HealthCheck(
@@ -81329,7 +81391,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         # (``refused-foreign-contract``), so the re-anchoring step offered
         # last is the explicit ``--re-anchor`` (CLI/hooks.md §"Checks").
         remedy: "direnv reload   # then, only once hook-interpreter agrees: " &
-          self & " hooks ensure --vcs --re-anchor " & parsed.workspaceRoot,
+          self & " hooks ensure --vcs --re-anchor " &
+          remedyPathWord(parsed.workspaceRoot),
         fixKind: hfNone))
     elif pathUnsafe.len > 0:
       # SECOND. Its remedy is the same ``--fix``-able ``hooks ensure --vcs`` as
@@ -81560,7 +81623,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         "suppresses WIRING and not REPORTING"
       else: "")
     let remedy = self & " gateway migrate --workspace-root=" &
-      parsed.workspaceRoot
+      remedyPathWord(parsed.workspaceRoot)
     # §7.6.6's summary sentence, and the ONE number in this row that is not a
     # raw observation: "policy would gate 0 of 172 (all advisory)". The spec's
     # own example settles what "gate" means here — a repo is gated when its
@@ -81770,7 +81833,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           "not be enumerated (" & err.msg & "), so the policy each push " &
           "would be judged against could not be read. This build " &
           verifiedCertificateShape(),
-        remedy: self & " sync --workspace-root=" & parsed.workspaceRoot,
+        remedy: self & " sync --workspace-root=" &
+          remedyPathWord(parsed.workspaceRoot),
         fixKind: hfNone))
       break certificatePolicyCheck
     if enumeratedCount == 0 and not ctx.resolvedOk:
@@ -81961,8 +82025,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           "and credentialed urls and is never committed, so it is also " &
           "left out of the " &
           "managed ignore block while git tracks it",
-        remedy: "git -C " & quoteShell(parsed.workspaceRoot) &
-          " rm --cached " & localSettingsFileName & " (then commit)",
+        remedy: "git -C " & remedyPathWord(parsed.workspaceRoot) &
+          " rm --cached " & quoteShellPosix(localSettingsFileName) &
+          " (then commit)",
         fixKind: hfNone))
 
   # 13. F0.3 — participating checkouts whose HEAD is on no remote.
@@ -82040,7 +82105,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
             (ancestry.disjoint or ancestry.diagnostic.len > 0)):
           remedies.add("do not push " & repo.path & "; inspect disjoint-local-branches and migrate unique work before retiring old history")
         else:
-          remedies.add("git -C " & repo.path & " push")
+          remedies.add("git -C " & remedyPathWord(repo.path) & " push")
       of hpsUnknown:
         unconfirmed.add(where & ": " & verdict.diagnostic)
     if offenders.len == 0 and unconfirmed.len == 0:
@@ -82511,7 +82576,10 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
   ## emitted first, then each action's line is emitted BEFORE the action
   ## runs (``emit`` flushes) and its outcome after. Never performs a
   ## destructive or ambiguous fix.
-  let self = reproSelfPath()
+  # Every remedy below names this binary, so it is spelled once as ONE word
+  # of the hooks' `sh` (Unified-Locking-And-Hooks.md, "The named command
+  # must RUN where the message is printed", rule 3).
+  let self = remedyPathWord(reproSelfPath())
   for line in healthFixPlanLines(parsed, checks, ctx):
     emit(line)
   for c in checks:
@@ -82523,7 +82591,7 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
       emit("fix: skip " & c.name &
         " (no safe auto-fix; remedy: " & c.remedy & ")")
     of hfDirenvAllow:
-      emit("fix: running `direnv allow " & parsed.workspaceRoot & "`")
+      emit("fix: running `direnv allow " & remedyPathWord(parsed.workspaceRoot) & "`")
       let direnvBin = resolveDirenvBin()
       if direnvBin.len == 0:
         emit("fix: direnv not on PATH; cannot allow")
@@ -84148,10 +84216,10 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     # closing half) and point at the readiness check.
     if report.sourceWorkspaceRoot.len > 0:
       result.add("workspace branch: forked from " &
-        report.sourceWorkspaceRoot & " (left untouched) into " &
-        report.workspaceRoot)
-      result.add("workspace branch: cd " & report.workspaceRoot &
-        " && repro health")
+        remedyProsePath(report.sourceWorkspaceRoot) &
+        " (left untouched) into " & remedyProsePath(report.workspaceRoot))
+      result.add("workspace branch: cd " &
+        remedyPathWord(report.workspaceRoot) & " && repro health")
   else:
     # Failure. There are two shapes and they must not be worded the same way.
     #
@@ -85532,8 +85600,9 @@ proc executeWorkspaceSwitch(parsed: SwitchArgs): SwitchReport =
       state.reason = "branch '" & state.target & "' in repo '" & repo.path &
         "' has diverged from '" & remoteNameForRepo & "/" & state.target &
         "' (both carry commits the other does not) — `switch` will not " &
-        "repoint a branch. Reconcile it (`git -C " & repo.path &
-        " rebase " & remoteNameForRepo & "/" & state.target &
+        "repoint a branch. Reconcile it (`git -C " &
+        remedyPathWord(repo.path) & " rebase " &
+        quoteShellPosix(remoteNameForRepo & "/" & state.target) &
         "`), or pass --no-fetch to switch without consulting the remote."
       states.add(state)
       continue
@@ -87187,8 +87256,8 @@ proc refuseWorkspaceFlags(verb, target: string; flags, words: seq[string];
   ## <verb>` command line carrying them. Exit 2; nothing has been read or
   ## written.
   var tip = @["repro", "ws", verb,
-    (if target.len > 0: quoteShell(target) else: "<repo>")]
-  for w in words: tip.add(quoteShell(w))
+    (if target.len > 0: quoteShellPosix(target) else: "<repo>")]
+  for w in words: tip.add(quoteShellPosix(w))
   if dryRun: tip.add("--dry-run")
   var plural = flags.len > 1
   var quoted: seq[string]
@@ -87240,7 +87309,7 @@ proc projectRecipeOrTip(verb, target: string): string =
       "the current project's repro.nim")
     stderr.writeLine("tip: to " & verb & " a workspace repository, run: " &
       "repro ws " & verb & " " &
-      (if target.len > 0: quoteShell(target) else: "<repo>") &
+      (if target.len > 0: quoteShellPosix(target) else: "<repo>") &
       (if verb == "add": " --remote=<url>" else: ""))
 
 proc printLockFollowUp(verb, recipe, package, edited: string;
@@ -87252,7 +87321,7 @@ proc printLockFollowUp(verb, recipe, package, edited: string;
   ## sections edited, by name and version range), says which of the outcomes
   ## holds, and names the command that re-solves it.
   let dir = recipe.parentDir
-  let refresh = "repro lock refresh " & quoteShell(dir)
+  let refresh = "repro lock refresh " & remedyPathWord(dir)
   let lockPath = dir / CommittedLockFileName
   if not fileExists(lockPath):
     stdout.writeLine("repro " & verb & ": the project has no repro.lock; " &
@@ -87407,7 +87476,8 @@ proc runPackageRemoveCommand*(c: ReproCommandLineRemove): int =
       if fragment.len > 0:
         stderr.writeLine("tip: '" & request.selector & "' is a repository " &
           "of this workspace (" & fragment & "); to remove it from the " &
-          "workspace, run: repro ws remove " & quoteShell(request.selector))
+          "workspace, run: repro ws remove " &
+          quoteShellPosix(request.selector))
     return 1
   of desChanged:
     let label = relativePath(recipe, getCurrentDir())
@@ -88301,7 +88371,8 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           ". Forking here would create a workspace in which `repro check " &
           "--mode=pre-push` refuses every push whose develop-set closure " &
           "reaches this repo. Choose: publish it first " &
-          "(`git -C " & state.repo.path & " push`), or re-run with " &
+          "(`git -C " & remedyPathWord(state.repo.path) &
+          " push`), or re-run with " &
           "`--unpublished=carry` to bring the commits (the source branch " &
           "name is preserved in the new workspace), or " &
           "`--unpublished=declared` to start this repo from its " &
@@ -88834,7 +88905,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         outcome: "hooks_failed",
         diagnostic: "the managed git hooks could not be installed in every " &
           "repo of '" & parsed.forkPath & "'; run `repro hooks ensure --vcs " &
-          parsed.forkPath & "` and read what it reports"))
+          remedyPathWord(parsed.forkPath) & "` and read what it reports"))
       return
   except CatchableError as err:
     result.exitCode = 1
@@ -91018,7 +91089,9 @@ proc confirmTestedState*(pre: IssuancePreconditions;
         "exempt): " & readOffending.join(", ") & " (read set: " &
         readSet.source & ")"
       result.remedy = "add the file so its content is part of what is " &
-        "certified ('git add " & readOffending.join(" ") & "', with -f for " &
+        "certified ('git add " &
+        readOffending.mapIt(quoteShellPosix(it)).join(" ") &
+        "', with -f for " &
         "an ignored one), produce it with an action the certified node " &
         "depends on (a file a test writes and reads back, or a tool cache, " &
         "belongs under a directory that action declares as an output or " &
@@ -91032,7 +91105,7 @@ proc confirmTestedState*(pre: IssuancePreconditions;
         "untracked_inputs = \"strict\" withholds on any: " &
         presentOnly.join(", ")
       result.remedy = "add each file the tests need ('git add " &
-        presentOnly.join(" ") & "') and ignore (.gitignore) or " &
+        presentOnly.mapIt(quoteShellPosix(it)).join(" ") & "') and ignore (.gitignore) or " &
         "delete the rest, then re-run 'repro test'; \"read-set\" withholds " &
         "only for untracked files a captured read set shows the tests read"
     return
@@ -96219,7 +96292,8 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
     except CatchableError: true  # ambiguous: still a recipe to derive from
   if not hasLock and not hasRecipe: return
   result.examined = true
-  let refresh = "run `repro lock refresh " & root & "`, commit repro.lock, " &
+  let refresh = "run `repro lock refresh " & remedyPathWord(root) &
+    "`, commit repro.lock, " &
     "then re-push"
   var pinned: seq[string] = @[]
   if hasLock:
@@ -96251,7 +96325,7 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
     result.evidence = "the dependency set " & root / CanonicalProjectFileName &
       " derives could not be computed: " & derived.diagnostic
     result.remediation = "make the recipe readable — `repro lock refresh " &
-      root & "` reports the same error — then commit repro.lock and re-push"
+      remedyPathWord(root) & "` reports the same error — then commit repro.lock and re-push"
     return
   var derivedNames: seq[string] = @[]
   for d in derived.deps:
@@ -96565,7 +96639,7 @@ proc certificatePolicyStaleness*(projectDir: string): CertificatePolicyStaleness
   if committed.len == 0 and not mentions:
     return
   result.relevant = true
-  result.remedy = "repro lock refresh " & quoteShell(root)
+  result.remedy = "repro lock refresh " & remedyPathWord(root)
   if committed.len > 0:
     try:
       discard parseCertificatePolicySnapshot(committed)
@@ -99723,7 +99797,8 @@ proc runWorkspaceDisableCommand*(c: ReproCommandLineWorkspaceDisable): int =
         (workspaceRoot / normalized) & " IS the workspace root and removing " &
         "it would delete the workspace itself. The project is still " &
         "disabled; this one checkout is left in place. Remedy: inspect it " &
-        "with `git -C " & workspaceRoot & " status` and remove only what you " &
+        "with `git -C " & remedyPathWord(workspaceRoot) &
+        " status` and remove only what you " &
         "mean to — reprobuild will not delete the directory it is running in.")
       continue
     let dir = workspaceRoot / normalized
@@ -99741,7 +99816,8 @@ proc runWorkspaceDisableCommand*(c: ReproCommandLineWorkspaceDisable): int =
         "declared checkout path '" & path & "' — it " & landing & ". The " &
         "project is still disabled; this one checkout is left in place. " &
         "Remedy: inspect what it actually points at with " &
-        "`git -C " & dir & " status` and remove only what you mean to — " &
+        "`git -C " & remedyPathWord(dir) &
+        " status` and remove only what you mean to — " &
         "reprobuild will not delete a directory it cannot prove is the " &
         "repo's own tree.")
       continue
@@ -102885,10 +102961,7 @@ proc fetchFlakeRevisionFields*(nixExe: string;
   # Loader controls of a provisioned profile must not reach a host tool that
   # was not built against them (the reason `hostNixEnvironment` drops them
   # for `nix-store`).
-  for key in ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
-              "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
-              "DYLD_INSERT_LIBRARIES"]:
-    if env.hasKey(key): env.del(key)
+  dropLoaderControls(env)
   var errPath = ""
   try:
     let created = createTempFile("repro-nix-fetch-", ".stderr")
@@ -103237,7 +103310,7 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "nix-direnv reports by falling back to the PREVIOUS dev shell rather " &
       "than by failing — so the pin was LEFT ALONE. This is a warning, not " &
       "an error: nothing was written and no operation was refused. From " &
-      flakeRoot & " run: `" & cmds.join("` then `") &
+      remedyProsePath(flakeRoot) & " run: `" & cmds.join("` then `") &
       "` — or, if you believe this revision is already published and only " &
       "this checkout has not seen it, `" &
       flakeReconcileAlternative(row, flakeRoot, workspaceRoot) &
@@ -103250,7 +103323,8 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "chose — a sibling behind its pin almost always means the checkout is " &
       "stale, not that anyone decided to go back — so the pin was LEFT " &
       "ALONE. This is a warning, not an error: nothing was written and no " &
-      "operation was refused. From " & flakeRoot & " run: `" &
+      "operation was refused. From " & remedyProsePath(flakeRoot) &
+      " run: `" &
       flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
       "` — or, to record the downgrade deliberately, `" &
       flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
@@ -103260,7 +103334,7 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "force-pushed or rewritten, or the checkout is on another branch — so " &
       "the pin was LEFT ALONE. This is a warning, not an error: nothing was " &
       "written for this input and no operation was refused. From " &
-      flakeRoot & " run: `" &
+      remedyProsePath(flakeRoot) & " run: `" &
       flakeReconcileCommands(row, flakeRoot, workspaceRoot).join("` then `") &
       "` — or, to record this revision deliberately, `" &
       flakeReconcileAlternative(row, flakeRoot, workspaceRoot) & "`")
@@ -103269,7 +103343,7 @@ proc flakeWithheldNotice(row: FlakeOverrideStateRow;
       "this checkout's HEAD would commit to whichever direction happened to " &
       "be true, unexamined. The pin was LEFT ALONE. This is a warning, not " &
       "an error: nothing was written and no operation was refused. From " &
-      flakeRoot & " run: `" &
+      remedyProsePath(flakeRoot) & " run: `" &
       flakeReconcileCommand(row, flakeRoot, workspaceRoot) &
       "`, then re-run the refresh to learn where this sibling really stands.")
 
@@ -104705,7 +104779,8 @@ proc executeLockUpdate*(req: LockUpdateRequest): LockUpdateOutcome =
       " already names " & target & "; nothing was written")
   else:
     if checkoutHead.len > 0 and target != checkoutHead:
-      result.notes.add("the sibling checkout " & checkout & " is at " &
+      result.notes.add("the sibling checkout " & remedyProsePath(checkout) &
+        " is at " &
         checkoutHead & ", not " & target & ": unless a recipe pins it " &
         "exactly, the commit-time re-pin records whatever is checked out, " &
         "so check it out at " & target & " before committing (`git -C " &
@@ -105368,11 +105443,12 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     result.examined = true
     result.stale = true
     result.evidence = "flake-inputs-unreadable: " & declared.refusals.join("; ")
-    result.remediation = "the lock at " & flakeRoot & "/flake.lock declares " &
+    result.remediation = "the lock at " & remedyProsePath(flakeRoot) &
+      "/flake.lock declares " &
       $(lockInputs.pins.len + lockInputs.unpinned.len) & " input(s), but " &
-      declared.refusals.join("; ") & " From " & flakeRoot &
+      declared.refusals.join("; ") & " From " & remedyProsePath(flakeRoot) &
       " run: `nix flake metadata` to see what nix reads there; make " &
-      declared.flakePath & " parseable, then re-push."
+      remedyProsePath(declared.flakePath) & " parseable, then re-push."
     result.summary = "flake.lock could not be verified: " &
       declared.refusals.join("; ")
     return
@@ -105616,7 +105692,8 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     (if blocked.len > 0: " " & blocked.join(". ") & "." else: "") &
     (if edits.len > 0: " " & edits.join(". ") & "." else: "") &
     (if remedies.len > 0:
-       " From " & flakeRoot & " run: `" & remedies.join("` and `") &
+       " From " & remedyProsePath(flakeRoot) & " run: `" &
+         remedies.join("` and `") &
          "`, then commit the refreshed flake.lock and re-push."
      else:
        " Then commit both files and re-push.")

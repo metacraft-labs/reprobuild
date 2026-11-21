@@ -254,6 +254,24 @@ suite "confirm (§7.5)":
     check r.exitCode == 0
     check r.output.len == BoundedOutputBytes
     check epochTime() - start < 10
+    # A caller that parses a larger answer names its own bound and gets
+    # all of it (the egress check's ``nft -j list set`` of a full set).
+    let all = runHostTool(["/bin/sh", "-c",
+      "i=0; while [ $i -lt 20000 ]; do " &
+      "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; " &
+      "i=$((i+1)); done"],
+      timeoutSec = 20, maxOutputBytes = 2 * 1024 * 1024)
+    check all.exitCode == 0
+    check all.output.len == 20000 * 50
+    # ... and exactly its bound of a longer one, which is how the caller
+    # knows the answer was cut short.
+    let cut = runHostTool(["/bin/sh", "-c",
+      "i=0; while [ $i -lt 2000 ]; do " &
+      "echo xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx; " &
+      "i=$((i+1)); done"],
+      timeoutSec = 20, maxOutputBytes = 70_001)
+    check cut.exitCode == 0
+    check cut.output.len == 70_001
 
   test "no checks: confirmed at once":
     let runner: ProbeRunner = proc(c: UnitHealthCheck; budgetSec: int): string = "never"
