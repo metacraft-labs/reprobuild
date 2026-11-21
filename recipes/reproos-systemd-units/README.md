@@ -52,7 +52,7 @@ The `apps/reproos-rebuild` binary lives at `/usr/local/bin/reproos-rebuild`.
 
 ## Local-test caveat
 
-Real boot validation runs through `vm-harness` (Hyper-V Gen-2 UEFI).
+Real boot validation runs through `gosti` (Hyper-V Gen-2 UEFI).
 The B3 P5 integration tests **simulate** the boot path by invoking
 `reproos-rebuild confirm` / `reproos-rebuild watchdog` directly; a
 real reboot test is part of Phase D's `t_d1_boot_reproos_mvp.nim`.

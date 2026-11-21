@@ -10,10 +10,12 @@
 ##     repos/<r2>.toml
 ##     repos/<r3>.toml
 ##
-## The project sets `default_revision = "main"` and a `[[remote]]` table
-## with two remotes (`metacraft-labs` and `github`). At least one fragment
-## relies on the project-default remote (omits its `remote` field); at
-## least one fragment overrides the revision.
+## The project sets `default_remote` and a `[[remote]]` table with two
+## remotes (`metacraft-labs` and `github`). Every fragment declares its
+## `mainline`, which supplies the checkout revision unless the fragment pins a
+## `revision` beside it. At least one fragment relies on the project-default
+## remote (omits its `remote` field); at least one fragment pins a revision
+## that is not its mainline.
 
 import std/[os, strutils, tempfiles, unittest]
 
@@ -24,9 +26,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "reprobuild"
-default_revision = "main"
 default_remote = "metacraft-labs"
-trunk = "main"
 
 [[remote]]
 name = "metacraft-labs"
@@ -43,37 +43,40 @@ includes = [
 ]
 """
 
-# Fragment 1: explicit remote, explicit revision override (revision is NOT
-# `main`), explicit vcs and stability.
+# Fragment 1: explicit remote, a `revision` pin that overrides its mainline
+# (the pin is NOT `main`), explicit vcs and stability.
 const repoReprobuildToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "reprobuild"
 path = "reprobuild"
 remote = "metacraft-labs"
+mainline = "main"
 revision = "phase-2"
 vcs = "git"
 stability = "tracked"
 """
 
-# Fragment 2: relies on project-default revision AND project-default
-# remote (omits both `remote` and `revision`). Also omits `vcs` and
+# Fragment 2: its mainline supplies the revision (no `revision` pin), and it
+# relies on the project-default remote (omits `remote`). Also omits `vcs` and
 # `stability` so the resolver applies the documented defaults.
 const repoRunquotaToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "runquota"
 path = "runquota"
 """
 
-# Fragment 3: explicit non-default remote (`github`), relies on
-# project-default revision.
+# Fragment 3: explicit non-default remote (`github`); its mainline supplies
+# the revision.
 const repoReprobuildCmakeToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "reprobuild-cmake"
 path = "reprobuild-cmake"
 remote = "github"
@@ -82,9 +85,10 @@ remote = "github"
 # Variant of fragment 3 that references a remote the project doesn't
 # declare. Drives the "unknown remote" diagnostic case.
 const repoReprobuildCmakeUnknownRemoteToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
+mainline = "main"
 name = "reprobuild-cmake"
 path = "reprobuild-cmake"
 remote = "missing-remote-name"
@@ -116,8 +120,9 @@ suite "M6 — resolveProject against a metacraft-shaped fixture":
 
     # ---- project-level facts ----
     check resolved.projectName == "reprobuild"
-    check resolved.defaultRevision == "main"
-    check resolved.trunk == "main"
+    # The project names no branch: the workspace branch is the root
+    # repository's mainline, and this fixture's root declares none.
+    check resolved.workspaceMainline == ""
     check resolved.projectFile == projectFile
     check resolved.repos.len == 3
 
@@ -131,7 +136,8 @@ suite "M6 — resolveProject against a metacraft-shaped fixture":
     check r0.path == "reprobuild"
     check r0.projectRemote == "metacraft-labs"
     check r0.fetchUrl == "https://github.com/metacraft-labs/reprobuild"
-    check r0.revision == "phase-2"  # override, NOT the project default
+    check r0.branch == "main"  # the mainline it follows
+    check r0.revision == "phase-2"  # the pin, NOT the mainline
     check r0.vcs == "git"
     check r0.stability == "tracked"
     check r0.fragmentPath == root / "repos" / "reprobuild.toml"
@@ -141,17 +147,17 @@ suite "M6 — resolveProject against a metacraft-shaped fixture":
     check r1.path == "runquota"
     check r1.projectRemote == "metacraft-labs"  # project default
     check r1.fetchUrl == "https://github.com/metacraft-labs/runquota"
-    check r1.revision == "main"  # project default
+    check r1.revision == "main"  # from its mainline
     check r1.vcs == "git"  # resolver default
     check r1.stability == "tracked"  # resolver default
     check r1.fragmentPath == root / "repos" / "runquota.toml"
 
-    # ---- fragment 3: explicit remote (not the default), default revision ----
+    # ---- fragment 3: explicit remote (not the default), mainline revision ----
     let r2 = resolved.repos[2]
     check r2.path == "reprobuild-cmake"
     check r2.projectRemote == "github"  # explicit, overriding the default
     check r2.fetchUrl == "https://github.com/reprobuild-cmake"
-    check r2.revision == "main"  # project default
+    check r2.revision == "main"  # from its mainline
     check r2.vcs == "git"
     check r2.stability == "tracked"
     check r2.fragmentPath == root / "repos" / "reprobuild-cmake.toml"
@@ -206,7 +212,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "reprobuild"
-default_revision = "main"
 default_remote = "metacraft-labs"
 
 [[remote]]

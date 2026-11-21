@@ -9,7 +9,9 @@ import std/[tables, unittest]
 from std/strutils as su import nil
 
 import repro_profile
+import repro_profile/predicates
 from repro_profile/strings as profileStrings import nil
+from repro_home_intent/predicate as intentPredicate import nil
 
 # ---------------------------------------------------------------------
 # JSON encode / decode round-trip.
@@ -1471,6 +1473,41 @@ suite "Predicate combinators":
   test "raw predicate escape hatch":
     let p = predicate("user-defined-pred")
     check p.expr == "user-defined-pred"
+
+  test "every combinator has an evaluator, and headless() is gone":
+    # reprobuild-pm issue
+    # 2026-10-13-headless-predicate-template-has-no-evaluator: the
+    # combinators offered `headless()`, which the grammar does not
+    # evaluate, so a profile using it compiled and failed at plan time.
+    # The combinators are now generated from the grammar's own list.
+    check not compiles(headless())
+    check not compiles(predicates.headless())
+    # The grammar evaluates every combinator's output without a
+    # user-predicate evaluator (no `nil` callback raise), on every
+    # platform/arch a host can report.
+    let combinators = [windows(), macos(), linux(), bsd(), wsl(),
+      x86_64(), arm64(), arm32()]
+    var names: seq[string]
+    for c in combinators:
+      names.add c.expr
+    check names == @(intentPredicate.StandardPlatformIdents) &
+      @(intentPredicate.StandardArchIdents)
+    for c in combinators:
+      let ast = intentPredicate.parsePredicate("home.nim", c.expr)
+      var holdsSomewhere = false
+      for platform in intentPredicate.StandardPlatformIdents:
+        for arch in intentPredicate.StandardArchIdents:
+          let ctx = intentPredicate.HostContext(platform: platform,
+            arch: arch, host: "h", isWsl: platform == "wsl")
+          if intentPredicate.predicateHolds(ast, ctx):
+            holdsSomewhere = true
+      check holdsSomewhere
+    # The raw escape hatch still reaches the user-predicate path, which is
+    # where `headless` used to land.
+    expect CatchableError:
+      let raw = intentPredicate.parsePredicate("home.nim", "headless")
+      discard intentPredicate.predicateHolds(raw,
+        intentPredicate.HostContext(platform: "linux", arch: "x86_64"))
 
 # ---------------------------------------------------------------------
 # unindent + interpolate.

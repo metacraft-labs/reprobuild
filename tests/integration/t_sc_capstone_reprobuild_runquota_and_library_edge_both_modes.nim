@@ -30,8 +30,9 @@
 ## capstone claim, and this test asserts it by driving the SAME consumer sources
 ## through both mode setups.
 ##
-## Fixture (built ``./build/bin/repro``, black-box; every path in a fresh tempdir
-## so nothing touches $HOME):
+## Fixture (built ``./build/bin/repro``, black-box; the checked-in recipes under
+## ``tests/fixtures/sc7-capstone/`` copied into a fresh tempdir, so nothing
+## touches $HOME or the checkout):
 ##
 ##   <scratch>/
 ##     develop/
@@ -79,12 +80,22 @@
 ## consume fail) is inherited from SC-2/SC-3/SC-5/SC-6's own falsifiable seams and
 ## is re-confirmed for SC-7 by disabling a splice and observing this test fail.
 ##
+## Declared producers and tools: every consuming edge names the producers it
+## consumes plus the tools it runs in its tool-identity refs, and each producer
+## edge names the tools it runs, as the SC-2/SC-3/SC-5 fixtures do. Package-level
+## ``uses:`` is the DISCOVERY set; ADMISSION (build + splice) follows the selected
+## edge's own declaration (Cross-Repo-Source-Consumption.md §4.2b.3, since
+## 776517b31 "build: scope producer tools to consuming actions"). Without the refs
+## the producers are never built and the consume step fails, which is the
+## "under-declaring fails loudly" case of §4.2b.4, not a splice defect.
+##
 ## Skip rule: ``cc``/``sh``/``git`` missing on PATH, or ``./build/bin/repro``
 ## unbuilt, or a non-Linux host (the ``.so`` layout assumed here is Linux; kept
 ## Linux-only to stay hermetic, matching SC-3/SC-5/SC-6).
 
-import std/[os, osproc, strutils, unittest]
+import std/[os, osproc, strtabs, strutils, unittest]
 
+import repro_core/file_lock
 import repro_lock
 
 const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir()
@@ -101,7 +112,8 @@ const ReprobuildRepoRoot = currentSourcePath().parentDir().parentDir().parentDir
 const reproBinary = ReprobuildRepoRoot / "build/bin/repro".addFileExt(ExeExt)
 
 # The executable producer's UNIQUE stamp — the built ``exeprod`` binary echoes
-# exactly this. It cannot appear unless the sibling was built from source AND its
+# exactly this (spelled in ``tests/fixtures/sc7-capstone/exeprod/repro.nim``).
+# It cannot appear unless the sibling was built from source AND its
 # binary ran (via the SC-2 PATH splice).
 const exeStamp = "SC7-EXEPRODUCER-STAMP-9d1e4b"
 
@@ -114,109 +126,49 @@ const libStamp = "SC7-LIBPRODUCER-STAMP-6c2f80"
 const libStampDevEdited = "SC7-LIBPRODUCER-STAMP-DEV-EDITED-1a7c33"
 const libStampLockEdited = "SC7-LIBPRODUCER-STAMP-LOCK-EDITED-4b9d21"
 
-# ---- The sibling EXECUTABLE producer repo (the runquota:runquotad shape). ----
-const exeProducerRepro = """
-import repro_project_dsl
-import repro_dsl_stdlib/packages/sh
+# ---- The fixture recipes. ----
+#
+# The producers' and consumers' ``repro.nim`` files, the library header and the
+# consumer's ``main.c`` are CHECKED IN under ``tests/fixtures/sc7-capstone/``
+# and copied into the scratch tree, rather than written from string literals:
+#
+#   exeprod/repro.nim          the sibling EXECUTABLE producer (the
+#                              runquota:runquotad shape); its binary echoes
+#                              ``exeStamp``
+#   libprod/repro.nim          the sibling LIBRARY producer (the native-backend
+#   libprod/greeting.h         cdylib shape); ``greeting.c`` is written by this
+#                              test, because each arm stamps it differently
+#   consumer/repro.nim         ONE action consuming BOTH producers: runs
+#   consumer/main.c            ``exeprod`` by bare name (SC-2) and compiles,
+#                              links and runs ``main.c`` against the library
+#                              with no -I/-L and no LD_LIBRARY_PATH (SC-3); the
+#                              SAME files in both modes -- that invariance IS
+#                              the capstone claim (§5 "only materialization
+#                              differs")
+#   noedge-consumer/repro.nim  the falsifiability consumer: runs ``exeprod``
+#                              with no override and no lock naming it
+#
+# WHY FILES. The engine keys a recipe's provider compile and interface
+# extraction on the recipe's bytes and runs them recipe-relative, so a
+# byte-identical recipe at another path is served from the action cache. With
+# the texts fixed on disk and the builds sharing the run-wide action cache, the
+# producers' recipe compiles are paid once rather than on every run. Every
+# edge in these recipes is ``cacheable = false``, so the producers and the
+# consumer still EXECUTE on every build: assertion (2) -- materialized from
+# source by THIS run -- does not depend on what the cache holds.
+#
+# The execute edge of this test declares every file there as an input
+# (``testFixtureArtifacts`` in ``repro.nim``), so editing one re-runs the test.
+const FixtureRoot = ReprobuildRepoRoot / "tests" / "fixtures" / "sc7-capstone"
 
-package exeprod:
-  defaultToolProvisioning "path"
-
-  uses:
-    "sh"
-
-  executable exeprod:
-    name: "exeprod"
-
-  build:
-    discard shell(
-      command = "mkdir -p build/bin && " &
-        "printf '#!/bin/sh\necho """ & exeStamp & """\n' > build/bin/exeprod && " &
-        "chmod +x build/bin/exeprod",
-      actionId = "exeprod.build.exeprod",
-      extraOutputs = @["build/bin/exeprod"])
-"""
-
-# ---- The sibling LIBRARY producer repo (the native-backend cdylib shape). ----
-const libProducerHeader = """
-#ifndef SCPRODLIB_GREETING_H
-#define SCPRODLIB_GREETING_H
-const char *scprodlib_greeting(void);
-#endif
-"""
+proc copyFixture(relPath, destDir: string) =
+  ## Copy ``FixtureRoot / relPath`` to ``destDir`` under its own file name.
+  createDir(destDir)
+  copyFile(FixtureRoot / relPath, destDir / extractFilename(relPath))
 
 proc libProducerSource(stamp: string): string =
   "#include \"greeting.h\"\n" &
   "const char *scprodlib_greeting(void) { return \"" & stamp & "\"; }\n"
-
-const libProducerRepro = """
-import repro_project_dsl
-import repro_dsl_stdlib/packages/sh
-
-package libprod:
-  defaultToolProvisioning "path"
-
-  uses:
-    "sh"
-
-  library scprodlib:
-    kind: shared
-
-  build:
-    discard shell(
-      command = "mkdir -p build/lib build/include && " &
-        "cc -shared -fPIC -o build/lib/libscprodlib.so greeting.c && " &
-        "cp greeting.h build/include/greeting.h",
-      actionId = "libprod.build.scprodlib",
-      extraInputs = @["greeting.c", "greeting.h"],
-      extraOutputs = @["build/lib/libscprodlib.so", "build/include/greeting.h"],
-      cacheable = false)
-"""
-
-# ---- The consuming C program. #include <greeting.h> (via CPATH), calls the
-# library function (linked via -lscprodlib on LIBRARY_PATH, loaded via
-# LD_LIBRARY_PATH), writes the returned stamp to build/consumed.txt. ----
-const consumerSource = """
-#include <stdio.h>
-#include <greeting.h>
-int main(void) {
-  FILE *f = fopen("build/consumed.txt", "w");
-  if (!f) return 2;
-  fputs(scprodlib_greeting(), f);
-  fclose(f);
-  return 0;
-}
-"""
-
-# ---- The consumer repo. ONE action consumes BOTH producers: invokes the sibling
-# EXECUTABLE by bare name (SC-2) AND compiles/links/runs against the sibling
-# LIBRARY (SC-3), WITHOUT any -I/-L path and WITHOUT any LD_LIBRARY_PATH — it only
-# works if BOTH the SC-2 PATH splice and the SC-3 aux-channel splice fire. This
-# SAME text is used verbatim in the develop-mode tree AND the lock-pinned tree —
-# that invariance IS the capstone claim (§5 "only materialization differs"). ----
-const consumerRepro = """
-import repro_project_dsl
-import repro_dsl_stdlib/packages/sh
-
-package consumer:
-  defaultToolProvisioning "path"
-
-  uses:
-    "sh"
-    "exeprod"
-    "libprod"
-
-  build:
-    discard shell(
-      command = "mkdir -p build && " &
-        "exeprod > build/exe.txt && " &
-        "cc -o build/consume main.c -lscprodlib && " &
-        "./build/consume",
-      actionId = "consumer.build.consume",
-      extraInputs = @["main.c"],
-      extraOutputs = @["build/exe.txt", "build/consume", "build/consumed.txt"],
-      cacheable = false)
-"""
 
 proc q(value: string): string = quoteShell(value)
 
@@ -266,19 +218,53 @@ proc run(command: string; cwd = ""): tuple[code: int; output: string] =
     $(elapsedMs div 1000) & "s")
   flushFile(stdout)
 
-proc buildCmdFor(reproAbs, consumerRoot, cacheRoot: string): string =
+proc buildCmdFor(reproAbs, consumerRoot: string): string =
+  ## No ``--action-cache-root``: the build uses the run-wide root
+  ## (``REPROBUILD_ACTION_CACHE_ROOT``, exported by ``scripts/run_tests.sh``),
+  ## so the fixture recipes' compiles are served from it. Nothing this test
+  ## asserts can be served from it: every edge in the fixture recipes is
+  ## ``cacheable = false``.
   q(reproAbs) & " build " & q(consumerRoot / "repro.nim") &
     " --tool-provisioning=path --daemon=off --log=quiet" &
-    " --progress=quiet --measure=none" &
-    " --action-cache-root=" & q(cacheRoot)
+    " --progress=quiet --measure=none"
 
 # ---- git helpers for the lock-pinned mode "remotes" (SC-6 shape). ----
-proc gitRun(gitBin: string; args: openArray[string]; repoDir: string) =
-  var cmd = q(gitBin)
+#
+# REPEATABLE LOCK BYTES. The consumer's recipe compiles read its `repro.lock`,
+# so a lock whose bytes change between runs makes every lock-pinned recipe
+# compile of this test miss the run-wide action cache (reprobuild-pm issue
+# 2026-10-14-sibling-import-shims-in-tmpdir-make-consumer-recipe-compiles-
+# miss-every-run.md, option C, test side). The lock names each producer by its
+# remote's path and a commit, so both are made to repeat: the remotes live at
+# a fixed name under the test's scratch root (`LockPinnedRemotesDir`, not the
+# per-process scratch), and every commit carries a fixed identity and fixed
+# dates, so the same tree yields the same commit id on every run.
+const LockPinnedRemotesDir = "sc7-lockpinned-remotes"
+const FixedGitIdentity = [
+  ("GIT_AUTHOR_NAME", "SC7 Fixture"),
+  ("GIT_AUTHOR_EMAIL", "sc7@example.invalid"),
+  ("GIT_COMMITTER_NAME", "SC7 Fixture"),
+  ("GIT_COMMITTER_EMAIL", "sc7@example.invalid")]
+
+proc gitEnv(date: string): StringTableRef =
+  result = newStringTable(modeCaseSensitive)
+  for key, value in envPairs():
+    result[key] = value
+  for (key, value) in FixedGitIdentity:
+    result[key] = value
+  result["GIT_AUTHOR_DATE"] = date
+  result["GIT_COMMITTER_DATE"] = date
+
+proc gitRun(gitBin: string; args: openArray[string]; repoDir: string;
+            date = "2026-07-03T00:00:00Z") =
+  # A signed commit embeds a fresh signature, so the commit id would not
+  # repeat; the fixture never signs.
+  var cmd = q(gitBin) & " -c commit.gpgsign=false"
   for a in args:
     cmd.add(" ")
     cmd.add(q(a))
-  let r = execCmdEx(cmd, options = {poUsePath}, workingDir = repoDir)
+  let r = execCmdEx(cmd, options = {poUsePath}, workingDir = repoDir,
+    env = gitEnv(date))
   doAssert r.exitCode == 0, "git " & args.join(" ") & " failed: " & r.output
 
 proc gitInit(repoDir, gitBin: string) =
@@ -288,9 +274,9 @@ proc gitInit(repoDir, gitBin: string) =
   gitRun(gitBin, ["add", "-A"], repoDir)
   gitRun(gitBin, ["commit", "--quiet", "-m", "sc7 producer"], repoDir)
 
-proc gitCommitAll(repoDir, gitBin, message: string) =
+proc gitCommitAll(repoDir, gitBin, message: string; date: string) =
   gitRun(gitBin, ["add", "-A"], repoDir)
-  gitRun(gitBin, ["commit", "--quiet", "-m", message], repoDir)
+  gitRun(gitBin, ["commit", "--quiet", "-m", message], repoDir, date)
 
 proc gitHead(repoDir, gitBin: string): string =
   let r = execCmdEx(q(gitBin) & " -C " & q(repoDir) & " rev-parse HEAD",
@@ -310,14 +296,12 @@ proc writeConsumerLock(consumerRoot, exeUrl, exeRev, libUrl, libRev: string;
     inputsDigest: inputsDigestOf("sc7-fixture-" & tag))
   ld.deps.add(LockedDep(
     name: "exeprod", path: "",
-    coordinates: Coordinates(kind: ckVcs, url: exeUrl, gitRef: "main",
-      revision: exeRev),
+    coordinates: Coordinates(kind: ckVcs, url: exeUrl, revision: exeRev),
     integrity: gitObjectMultihash("sha1", exeRev),
     visibility: "public"))
   ld.deps.add(LockedDep(
     name: "libprod", path: "",
-    coordinates: Coordinates(kind: ckVcs, url: libUrl, gitRef: "main",
-      revision: libRev),
+    coordinates: Coordinates(kind: ckVcs, url: libUrl, revision: libRev),
     integrity: gitObjectMultihash("sha1", libRev),
     visibility: "public"))
   writeFile(consumerRoot / "repro.lock", serializeLockedDependencies(ld))
@@ -360,19 +344,16 @@ suite "SC-7: capstone — consume sibling exe AND lib from source in BOTH modes"
         createDir(root)
 
         let exeProdRoot = root / "exeprod"
-        createDir(exeProdRoot)
-        writeFile(exeProdRoot / "repro.nim", exeProducerRepro)
+        copyFixture("exeprod" / "repro.nim", exeProdRoot)
 
         let libProdRoot = root / "libprod"
-        createDir(libProdRoot)
-        writeFile(libProdRoot / "repro.nim", libProducerRepro)
-        writeFile(libProdRoot / "greeting.h", libProducerHeader)
+        copyFixture("libprod" / "repro.nim", libProdRoot)
+        copyFixture("libprod" / "greeting.h", libProdRoot)
         writeFile(libProdRoot / "greeting.c", libProducerSource(libStamp))
 
         let consumerRoot = root / "consumer"
-        createDir(consumerRoot)
-        writeFile(consumerRoot / "repro.nim", consumerRepro)
-        writeFile(consumerRoot / "main.c", consumerSource)
+        copyFixture("consumer" / "repro.nim", consumerRoot)
+        copyFixture("consumer" / "main.c", consumerRoot)
         createDir(consumerRoot / ".repro")
         writeFile(consumerRoot / ".repro" / "develop-overrides.toml", """
 schema = "reprobuild.workspace.develop-overrides.v1"
@@ -400,13 +381,7 @@ created_at = "2026-07-03T00:00:00Z"
         let exeMarker = consumerRoot / "build" / "exe.txt"
         let libMarker = consumerRoot / "build" / "consumed.txt"
 
-        # Hermetic action-cache root (SC-5/SC-6): a fresh empty per-test cache so
-        # the test is immune to a co-tenant-bloated shared cache and does not
-        # pollute it. (highest-precedence ``--action-cache-root``,
-        # ``repro_cli_support.nim:377``.)
-        let cacheRoot = absolutePath(scratch / "develop-cache")
-        createDir(cacheRoot)
-        let buildCmd = buildCmdFor(reproAbs, consumerRoot, cacheRoot)
+        let buildCmd = buildCmdFor(reproAbs, consumerRoot)
 
         checkpoint("develop (1): " & buildCmd)
         let (code, output) = run(buildCmd, repoRoot)
@@ -454,29 +429,38 @@ created_at = "2026-07-03T00:00:00Z"
         let root = absolutePath(scratch / "lockpinned")
         createDir(root)
 
-        # Producer "remotes" live under <root>/remotes (NOT beside the consumer),
-        # so ``findSiblingProjectFile`` can NOT bypass the fetch.
-        let remotes = root / "remotes"
+        # Producer "remotes" live outside <root> (NOT beside the consumer), so
+        # ``findSiblingProjectFile`` can NOT bypass the fetch. Their path is
+        # FIXED rather than per-process, so the lock that names them repeats
+        # between runs (see `LockPinnedRemotesDir`). Two overlapping runs of
+        # this test in one scratch root would then share it, so the whole mode
+        # holds an exclusive lock beside it, and recreates it from nothing
+        # under that lock: each run's builds fetch from remotes no other run
+        # can rewrite, and the content never depends on what an earlier run
+        # left behind.
+        let remotes = getTempDir() / LockPinnedRemotesDir
+        var remotesLock = acquireExclusiveFileLock(remotes & ".lock")
+        defer:
+          removeDir(remotes)
+          releaseExclusiveFileLock(remotesLock)
+        removeDir(remotes)
         createDir(remotes)
 
         let exeRemote = remotes / "exeprod"
-        createDir(exeRemote)
-        writeFile(exeRemote / "repro.nim", exeProducerRepro)
+        copyFixture("exeprod" / "repro.nim", exeRemote)
         gitInit(exeRemote, gitBin)
         let exeRev = gitHead(exeRemote, gitBin)
 
         let libRemote = remotes / "libprod"
-        createDir(libRemote)
-        writeFile(libRemote / "repro.nim", libProducerRepro)
-        writeFile(libRemote / "greeting.h", libProducerHeader)
+        copyFixture("libprod" / "repro.nim", libRemote)
+        copyFixture("libprod" / "greeting.h", libRemote)
         writeFile(libRemote / "greeting.c", libProducerSource(libStamp))
         gitInit(libRemote, gitBin)
         let libRev = gitHead(libRemote, gitBin)
 
         let consumerRoot = root / "consumer"
-        createDir(consumerRoot)
-        writeFile(consumerRoot / "repro.nim", consumerRepro)
-        writeFile(consumerRoot / "main.c", consumerSource)
+        copyFixture("consumer" / "repro.nim", consumerRoot)
+        copyFixture("consumer" / "main.c", consumerRoot)
         writeConsumerLock(consumerRoot, exeRemote, exeRev, libRemote, libRev, "v1")
 
         # NO develop overrides, NO sibling checkout beside the consumer.
@@ -493,9 +477,7 @@ created_at = "2026-07-03T00:00:00Z"
         let exeMarker = consumerRoot / "build" / "exe.txt"
         let libMarker = consumerRoot / "build" / "consumed.txt"
 
-        let cacheRoot = absolutePath(scratch / "lockpinned-cache")
-        createDir(cacheRoot)
-        let buildCmd = buildCmdFor(reproAbs, consumerRoot, cacheRoot)
+        let buildCmd = buildCmdFor(reproAbs, consumerRoot)
 
         checkpoint("lock-pinned (1): " & buildCmd)
         let (code, output) = run(buildCmd, repoRoot)
@@ -525,7 +507,8 @@ created_at = "2026-07-03T00:00:00Z"
         # (4) Changed pin -> re-fetch + rebuild from the NEW revision (§5.2 "a
         # changed pin invalidates the consumer").
         writeFile(libRemote / "greeting.c", libProducerSource(libStampLockEdited))
-        gitCommitAll(libRemote, gitBin, "sc7 producer edit")
+        gitCommitAll(libRemote, gitBin, "sc7 producer edit",
+          "2026-07-04T00:00:00Z")
         let libRev2 = gitHead(libRemote, gitBin)
         check libRev2 != libRev
         writeConsumerLock(consumerRoot, exeRemote, exeRev, libRemote, libRev2, "v2")
@@ -562,36 +545,15 @@ created_at = "2026-07-03T00:00:00Z"
         # override and NO lock entry for it — so ``resolveProducerBinding`` yields
         # ``pbkNotProducer`` and nothing is built/spliced for ``exeprod``.
         let exeProdRoot = root / "exeprod"
-        createDir(exeProdRoot)
-        writeFile(exeProdRoot / "repro.nim", exeProducerRepro)
+        copyFixture("exeprod" / "repro.nim", exeProdRoot)
 
-        let consumerRoot = root / "consumer"
-        createDir(consumerRoot)
         # A minimal consumer that ONLY runs the bare-name exe (no library, to
         # isolate the exe channel), with NO override + NO lock naming exeprod.
-        writeFile(consumerRoot / "repro.nim", """
-import repro_project_dsl
-import repro_dsl_stdlib/packages/sh
-
-package consumer:
-  defaultToolProvisioning "path"
-
-  uses:
-    "sh"
-    "exeprod"
-
-  build:
-    discard shell(
-      command = "mkdir -p build && exeprod > build/exe.txt",
-      actionId = "consumer.build.consume",
-      extraOutputs = @["build/exe.txt"],
-      cacheable = false)
-""")
+        let consumerRoot = root / "consumer"
+        copyFixture("noedge-consumer" / "repro.nim", consumerRoot)
 
         let exeMarker = consumerRoot / "build" / "exe.txt"
-        let cacheRoot = absolutePath(scratch / "noedge-cache")
-        createDir(cacheRoot)
-        let buildCmd = buildCmdFor(reproAbs, consumerRoot, cacheRoot)
+        let buildCmd = buildCmdFor(reproAbs, consumerRoot)
         checkpoint("no-producer-edge (falsifiability): " & buildCmd)
         let (code, output) = run(buildCmd, repoRoot)
         checkpoint("no-producer-edge exit=" & $code)

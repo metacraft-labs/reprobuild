@@ -169,9 +169,17 @@ proc profileInlineExecActionEdge*(
     toolIdentityRefs: openArray[string] = [];
     requiresElevation = false;
     cacheable = true;
-    commandStatsId = "") =
+    commandStatsId = "";
+    substituteOnly = false;
+    expectedOutputDigest = "") =
   ## Profile-scope shim for ``inlineExecCall(...)`` used inside a
-  ## profile's ``resources:`` block. Assembles a ``BuildActionDef``
+  ## profile's ``resources:`` block.
+  ##
+  ## ``substituteOnly`` / ``expectedOutputDigest`` are the substitute-only
+  ## edge of Binary-Caches.md §"Publishing for a host that cannot build":
+  ## see ``ProfileBuildAction``. ``substituteOnly`` without a digest is
+  ## refused here, at profile compile time, so a profile that would make a
+  ## cache publisher the authority over the bytes it runs never compiles. Assembles a ``BuildActionDef``
   ## around the inline-exec call and pushes its flattened mirror onto
   ## ``target``.
   ##
@@ -215,6 +223,21 @@ proc profileInlineExecActionEdge*(
     if commandStatsId.len > 0: commandStatsId
     else: "inlineExecCall"
   let call = inlineExecCall(argv, cwd = cwd)
+  if substituteOnly and expectedOutputDigest.len == 0:
+    raise newException(ValueError,
+      "inlineExecCall '" & id & "': substituteOnly = true needs " &
+      "expectedOutputDigest = \"blake3:<hex>\" (the profile, not the cache " &
+      "publisher, pins the bytes)")
+  if expectedOutputDigest.len > 0:
+    let ok = expectedOutputDigest.startsWith("blake3:") and
+      expectedOutputDigest.len == "blake3:".len + 64 and
+      expectedOutputDigest["blake3:".len .. ^1].allCharsInSet(
+        {'0' .. '9', 'a' .. 'f'})
+    if not ok:
+      raise newException(ValueError,
+        "inlineExecCall '" & id & "': expectedOutputDigest must be " &
+        "`blake3:` followed by 64 lowercase hex digits, got '" &
+        expectedOutputDigest & "'")
   let action = buildAction(
     id = id,
     call = call,
@@ -225,4 +248,7 @@ proc profileInlineExecActionEdge*(
     commandStatsId = statsId,
     toolIdentityRefs = toolIdentityRefs,
     requiresElevation = requiresElevation)
-  target.add(toProfileBuildAction(action))
+  var mirrored = toProfileBuildAction(action)
+  mirrored.substituteOnly = substituteOnly
+  mirrored.expectedOutputDigest = expectedOutputDigest
+  target.add(mirrored)

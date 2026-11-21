@@ -96,21 +96,20 @@ proc projectToml(appUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"personal\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"app-origin\"\nfetch = \"" & appUrl & "\"\n\n" &
   "includes = [\n  \"repos/app.toml\",\n]\n"
 
 proc repoFragment(): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"app\"\n" &
   "path = \"app\"\n" &
   "remote = \"app-origin\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc workspaceLocal(): string =
-  "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.state.v1\"\n\n" &
   "[workspace]\n" &
   "project = \"personal\"\n" &
   "branch = \"main\"\n"
@@ -187,7 +186,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
         projectToml(fileUrl(appOrigin)))
       writeFile(manifestsRoot / "repos" / "app.toml", repoFragment())
       createDir(ws / ".repro")
-      writeFile(ws / ".repro" / "workspace.toml", workspaceLocal())
+      writeFile(ws / ".repro" / "workspace-state.toml", workspaceLocal())
 
       # The dotfiles config: apply-if scoped under the workspace path.
       let userCfg = scratch / "dotfiles.toml"
@@ -226,7 +225,7 @@ suite "HL-7 — personal workspace restores on a fresh machine":
       var appEntry: JsonNode = nil
       for e in report["repos"]:
         if e["path"].getStr() == "app": appEntry = e
-      check appEntry != nil
+      check not appEntry.isNil
       check appEntry["executionStatus"].getStr() == "cloned"
 
       # =================================================================

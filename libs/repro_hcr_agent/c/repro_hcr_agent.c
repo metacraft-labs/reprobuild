@@ -2006,14 +2006,6 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
   repro_hcr_hex32(hash_after, repro_hcr_last_code_patch.code_hash_after_hex);
   repro_hcr_hex32(hash_bundle, repro_hcr_last_code_patch.patch_bundle_hex);
 
-  repro_hcr_last_code_patch.bridge_present =
-      (ct_repro_hcr_agent_did_patch_v2 != NULL) ? 1 : 0;
-  if (!repro_hcr_last_code_patch.bridge_present) {
-    /* No `libct_interpose` in this process: nothing is recording, so there is
-     * no trace for the event to be missing from. */
-    return;
-  }
-
   symbol_blob_len = repro_hcr_build_symbol_blob(changed_function, target_symbol,
                                                 symbol_blob,
                                                 sizeof(symbol_blob));
@@ -2050,8 +2042,16 @@ static void repro_hcr_notify_code_patch(const char *patch_id,
   note.patchBundleHash = hash_bundle;
   note.sites = &site;
 
-  repro_hcr_last_code_patch.bridge_result =
-      ct_repro_hcr_agent_did_patch_v2(&note);
+  /* `repro_hcr_mcr_did_patch` binds the recorder's symbol, or reaches a
+   * recorder that is in no link map through the recorder call.  With neither,
+   * nothing is recording, so there is no trace for the event to be missing
+   * from. */
+  {
+    int present = 0;
+    int result = repro_hcr_mcr_did_patch(&note, &present);
+    repro_hcr_last_code_patch.bridge_present = present;
+    repro_hcr_last_code_patch.bridge_result = present ? result : 0;
+  }
 }
 
 #else

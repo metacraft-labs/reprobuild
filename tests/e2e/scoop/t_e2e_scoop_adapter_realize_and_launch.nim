@@ -29,8 +29,10 @@
 import std/[json, os, osproc, sequtils, strutils, tempfiles]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import repro_tool_profiles
+from repro_project_dsl/selector_names import selectorModuleName
 
 import ./scoop_sandbox
 
@@ -201,26 +203,12 @@ proc shellCmd2(args: openArray[string]): string =
   args.mapIt(q2(it)).join(" ")
 
 proc snakeCaseSelectorModule(selector: string): string =
-  ## Mirror the package DSL's `selectorModuleName`: camelCase to snake_case,
-  ## lowercased. The reprobuild `uses` declaration produces an import path
-  ## using this exact transformation, so the package file under
-  ## `reprobuild/packages/` MUST be named accordingly.
-  var previousWasWord = false
-  for ch in selector:
-    if ch.isAlphaNumeric():
-      if ch.isUpperAscii() and previousWasWord and
-          result.len > 0 and result[^1] != '_':
-        result.add('_')
-      result.add(ch.toLowerAscii())
-      previousWasWord = true
-    else:
-      if result.len > 0 and result[^1] != '_':
-        result.add('_')
-      previousWasWord = false
-  while result.len > 0 and result[^1] == '_':
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    result = "package"
+  ## The package DSL's own `selectorModuleName`. The reprobuild `uses`
+  ## declaration produces an import path using this exact transformation, so
+  ## the package file under `reprobuild/packages/` MUST be named accordingly.
+  ## It used to be a hand copy, which drifted: it never learned the `pkg_`
+  ## prefix for a digit-led or keyword name.
+  selectorModuleName(selector)
 
 proc writeScoopInstallFixtureProject(projectRoot, bucket, app, version,
                                     manifestChecksum, executableName: string) =
@@ -335,9 +323,13 @@ suite "e2e_scoop_repro_build_drives_real_install":
 
       # Shell out the public CLI. `$env:SCOOP` is already pointing at
       # the sandboxed root (setupScoopSandbox sets it), so real
-      # scoop.exe will read/write only inside tempRoot.
+      # scoop.exe will read/write only inside tempRoot. The assertions below
+      # read status and action lines, so ``--log=actions`` is explicit: the
+      # quiet default prints neither on either route (reprobuild-pm
+      # issues/2026-10-17-daemon-hosted-build-ignores-log-and-direct-fallback-
+      # is-silent.md).
       let buildOutput = requireSuccessShell(shellCmd2([reproBin, "build",
-        projectRoot, "--tool-provisioning=scoop"]), repoRoot)
+        projectRoot, "--tool-provisioning=scoop", "--log=actions"]), repoRoot)
 
       # Public-CLI evidence the spec requires.
       check buildOutput.contains("tool-provisioning=scoop")

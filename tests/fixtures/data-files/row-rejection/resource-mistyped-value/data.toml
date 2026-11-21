@@ -1,0 +1,7 @@
+[[resource]]
+kind = "linux.kdeConfigKey"
+file = "kdeglobals"
+group = "General"
+key = "K"
+value = "v"
+kdeVersion = "6"

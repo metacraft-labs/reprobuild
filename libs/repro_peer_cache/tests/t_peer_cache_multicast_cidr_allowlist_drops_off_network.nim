@@ -13,10 +13,20 @@
 ##
 ## The test also sends a second announcement from the same peer ID
 ## and asserts the warning counter does NOT increment (dedup).
+##
+## Distributed-Execution M1 (landing-review carry-over): `repro-daemon`
+## sends its stdout and stderr to /dev/null, so a warning written to stderr
+## by a daemon-hosted node is lost. The second case drives the production
+## wiring (`startPeerCacheHost`, which the daemon calls with its log as
+## `diagnosticLog`): the warning reaches the node's diagnostic log, once per
+## peer.
 
-import std/[asyncdispatch, asyncnet, nativesockets, os, unittest]
+import std/[asyncdispatch, asyncnet, nativesockets, os, strutils, unittest]
 
 import repro_peer_cache
+import repro_cli_support/peer_cache_wiring
+
+import ./m7_test_pki
 
 const
   MulticastAddress = "239.255.42.43"
@@ -112,3 +122,51 @@ suite "peer-cache multicast CIDR allowlist":
     finally:
       try: attackerSock.close() except CatchableError: discard
       server.stop()
+
+  test "a daemon-hosted node's off-CIDR warning reaches its diagnostic log":
+    let base = normalizedPath(absolutePath(getTempDir() /
+      ("repro-m1-mcast-log-" & $getCurrentProcessId())))
+    removeDir(base)
+    createDir(base)
+    defer: removeDir(base)
+    let node = newTestNode(base, "n")
+    mutualTrust([node, newTestNode(base, "peer")])   # a pinned peer
+    var cfg = tlsConfig(node, cidr = "192.168.99.0/24", profile = tpTrusted)
+    cfg.discoveryMode = pdmMulticast
+    cfg.multicastDisabled = false
+    cfg.multicastGroup = loopbackMulticastGroup(MulticastAddress,
+      Port(MulticastPort + 1))
+    let lines = new(seq[string])
+    let host = startPeerCacheHost(cfg, node.identity.hostId,
+      cacheRoot = base / "cache",
+      diagnosticLog = proc(line: string) {.gcsafe, closure.} =
+        {.cast(gcsafe).}:
+          lines[].add(line))
+    let attacker = makePeerId(0x30)
+    let packet = encodeHelloPacket(Hello(peerId: attacker, listenPort: 0'u16,
+      capabilities: 0'u32))
+    let sock = newMulticastSenderSocket(cfg.multicastGroup)
+    try:
+      for round in 0 ..< 2:
+        # The same peer twice: one warning (dedup), on the diagnostic log.
+        let drops = host.server.droppedAnnounceCount
+        sendMulticastPacket(sock, cfg.multicastGroup, packet)
+        var waited = 0
+        while waited < MaxWaitMs and
+            host.server.droppedAnnounceCount == drops:
+          try: poll(0) except ValueError: discard
+          sleep(PollIntervalMs)
+          waited += PollIntervalMs
+        check host.server.droppedAnnounceCount > drops
+      checkpoint("diagnostic log lines: " & $lines[])
+      # Every warning went to the diagnostic log (the node's own loopback
+      # announcement is off-CIDR here too, so there may be one for it).
+      check lines[].len == host.server.warningEmitCount
+      var forAttacker = 0
+      for line in lines[]:
+        check "dropping multicast announcement" in line
+        if $attacker in line: inc forAttacker
+      check forAttacker == 1
+    finally:
+      try: sock.close() except CatchableError: discard
+      host.stop()

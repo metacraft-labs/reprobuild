@@ -1,12 +1,12 @@
-## Builtin-adapter zip extraction through PowerShell: correctness, and a
+## Shared tarball zip extraction through PowerShell: correctness, and a
 ## per-entry cost budget.
 ##
 ## Test-double policy: this test uses no mocks or test doubles. Every case
 ## runs a real PowerShell against real zip archives on the real filesystem,
-## through the adapter's own command line (`powershellZipExtractCommand`).
+## through the adapter's own command line (`zipExtractCommand`).
 ## On Windows the PowerShell is `powershell.exe` (Windows PowerShell 5.1),
-## the one `extractZip` chooses, and the first case also goes through
-## `extractZip` itself. Elsewhere the adapter prefers `unzip`, so the cases
+## the one the shared edge chooses, and the first case also goes through
+## `extractTarballArchive` itself. Elsewhere the adapter prefers `unzip`, so the cases
 ## use `pwsh`. If no PowerShell is present, the cases skip and give that as
 ## the reason.
 ##
@@ -22,8 +22,9 @@
 ## is 3,000 entries in 60 s.
 
 import std/[os, osproc, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
-import repro_home_apply/builtin_adapter {.all.}
+import repro_tool_profiles
 
 const FixtureScript = """
 $ProgressPreference = 'SilentlyContinue'
@@ -72,7 +73,7 @@ proc extractZipWith(ps, archive, destination: string): string =
   ## Runs the adapter's PowerShell zip command line and returns the captured
   ## output. Raises if extraction fails.
   createDir(destination)
-  let res = execCmdEx(powershellZipExtractCommand(ps, archive, destination))
+  let res = execCmdEx(zipExtractCommand((exe: ps, kind: "powershell"), archive, destination))
   if res.exitCode != 0:
     raise newException(OSError,
       "zip extraction failed (exit " & $res.exitCode & "):\n" & res.output)
@@ -106,7 +107,7 @@ suite "builtin-adapter zip extraction through PowerShell":
         # And through the adapter's own entry point, which picks
         # PowerShell on Windows and raises on a non-zero exit.
         let viaAdapter = root / "small via adapter"
-        extractZip("fixture", archive, viaAdapter)
+        extractTarballArchive(archive, viaAdapter, "zip", 0)
         check readFile(viaAdapter / "pkg" / "share" / "it's here.txt") ==
           "quoted"
 
@@ -119,8 +120,8 @@ suite "builtin-adapter zip extraction through PowerShell":
       expect OSError:
         discard extractZipWith(ps, archive, root / "corrupt dest")
       when defined(windows):
-        expect EBuiltinExtractFailed:
-          extractZip("fixture", archive, root / "corrupt via adapter")
+        expect OSError:
+          extractTarballArchive(archive, root / "corrupt via adapter", "zip", 0)
 
   test "3,000 entries extract within 60 s and emit no progress records":
     if ps.len == 0:

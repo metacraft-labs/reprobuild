@@ -46,8 +46,8 @@ proc certWithTargets(targets: seq[string]): TestCertificate =
     issuedAt: "2026-06-23T10:14:33Z",
     issuer: "repro-test@build-host-7",
     vcs: TestCertificateVcs(repo: "example",
-      commit: "a858633c1f4d7bb4b7c2e2b6a1c0d9e8f7a6b5c4",
-      clean: true, untracked: false),
+      content: "git-tree-sha1:9f8e7d6c5b4a3928170695e4d3c2b1a099887766",
+      untracked: false, base: "a858633c1f4d7bb4b7c2e2b6a1c0d9e8f7a6b5c4"),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])])
 
 proc targetsLine(cert: TestCertificate): string =

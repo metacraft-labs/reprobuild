@@ -82,6 +82,14 @@ proc findRepoRoot(): string =
   raise newException(IOError,
     "cannot locate reprobuild repo root from " & currentSourcePath())
 
+proc engineBinary(repoRoot: string): string =
+  ## The ENGINE, `apps/repro/repro.nim`. `build/bin/repro` is the thin daemon
+  ## client, which loads neither clingo nor OpenSSL; the engine loads both, so
+  ## a loader guard that only ran the client could not see either go missing.
+  result = repoRoot / "build" / "bin" / addFileExt("reprobuild", ExeExt)
+  doAssert fileExists(result),
+    "engine binary not found at " & result & "; build it with `just build` first"
+
 proc reproBinary(repoRoot: string): string =
   result = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
   doAssert fileExists(result),
@@ -174,3 +182,29 @@ suite "repro resolves its dlopen'd libraries without LD_LIBRARY_PATH":
       scrubbedEnvironment())
     assertLoaded(res, "repro home __receive-bundle --query over a clean env")
     check "bundlePresent: false" in res.output
+
+  test "the engine starts with only the system directories on PATH":
+    # The engine `dynlib`-loads OpenSSL (`std/openssl`, `--define:ssl`) and
+    # clingo at module init. On Windows LoadLibrary looks beside the .exe,
+    # then in the system directories, then on PATH -- so a build/bin that
+    # lacks a DLL works wherever the caller's PATH supplies one and fails in
+    # a clean environment (a dev shell's minimal PATH, a service). build_apps.sh
+    # staged clingo.dll and sqlite3_64.dll but not libssl-3-x64.dll /
+    # libcrypto-3-x64.dll, and every engine it built died with
+    # `could not load: libssl-3-x64.dll` under `repro exec`'s minimal PATH.
+    # On POSIX the same PATH is a no-op for the loader (it does not consult
+    # PATH), so the case holds there trivially.
+    let repoRoot = findRepoRoot()
+    let binary = engineBinary(repoRoot)
+    var env = minimalEnvironment()
+    when defined(windows):
+      let systemRoot = getEnv("SystemRoot", getEnv("SYSTEMROOT", r"C:\Windows"))
+      env["PATH"] = systemRoot / "System32" & ";" & systemRoot
+    let res = runRepro(binary, ["--version"], env)
+    # Checked inline rather than through `assertLoaded`: a `check` inside a
+    # helper proc does not mark the CASE failed on a stock std/unittest (it
+    # only sets the exit code), so this case read [OK] with its checks failing.
+    checkpoint("the engine's --version with a system-only PATH (exit " &
+      $res.exitCode & "):\n" & res.output)
+    check "could not load:" notin res.output
+    check res.exitCode == 0

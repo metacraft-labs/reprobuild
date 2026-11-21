@@ -1,6 +1,5 @@
-import std/tables
 import repro_project_dsl
-import repro_dsl_stdlib/nixpkgs_pin
+import repro_dsl_stdlib/go_toolchain_pins
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
@@ -10,9 +9,18 @@ export packages_schema
 
 package go:
   provisioning:
-    nixPackage "nixpkgs#go", executablePath = "bin/go",
-      nixpkgsRev = CanonicalNixpkgsRev,
-      nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # The Nix channel realises go.dev's own 1.25.4 release, the same archive
+    # as this platform's `tarball` arm below, unpacked as-is (decision 36).
+    # Not `nixpkgs#go`: nixpkgs patches the standard library to read tzdata,
+    # iana-etc and mailcap from fixed /nix/store paths, which every binary
+    # it compiles then embeds -- and a binary the catalog ships to a Debian
+    # host would look them up in a store that host does not have. With one
+    # compiler in both modes, Nix and tarball mode build identical bytes.
+    # See `nix/go-1.25.4/default.nix` and `go_toolchain_pins`.
+    nixPackage "reprobuild-stdlib-go-1.25.4",
+      executablePath = "bin/go",
+      expressionFile = "nix/go-1.25.4/default.nix",
+      lockIdentity = GoNixLockIdentity
     # Windows: go.dev's own release zip. It carries a `go/` wrapper holding
     # bin, pkg and src; the toolchain locates GOROOT relative to the
     # executable, so stripComponents=1 flattens the wrapper and keeps that
@@ -25,61 +33,111 @@ package go:
       packageId = "go@1.25.11",
       cpu = "x86_64",
       os = "windows",
-      lockIdentity = "tarball:go@1.25.11:windows-x86_64:sha256:b7401f1b41517428e537493316256fb7cf03c66a130a0103ab07f3a2152e2112"
-
-# ---------------------------------------------------------------------------
-# Versioned catalog (M63/M67 shape) consumed by the cakBuiltin adapter on
-# non-Nix hosts and by the env.ps1 migration classifier (``GO_VERSION`` in
-# ``windows/toolchain-versions.env`` pins the version below). The official
-# go.dev archives unpack to a top-level ``go/`` directory; strip it via
-# ``extract_path`` so the binary resolves at ``bin/go(.exe)``. Windows ships
-# a ``.zip``; Linux/macOS ship ``.tar.gz`` (per-platform override).
-# SHA-256s are the upstream values published at https://go.dev/dl/.
-# Versions (newest-first): 1.23.4
-# ---------------------------------------------------------------------------
-
-let goCatalog* = @[
-  VersionedProvisioning(
-    version: "1.23.4",
-    archive_format: afZip,
-    install_method: imExtract,
-    bin_relpath: @["bin\\go.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows,
-        url: "https://go.dev/dl/go1.23.4.windows-amd64.zip",
-        sha256: "16c59ac9196b63afb872ce9b47f945b9821a3e1542ec125f16f6085a1c0f3c39",
-        sha512: "", extract_path: "go"),
-      PlatformBinary(cpu: pcAArch64, os: poWindows,
-        url: "https://go.dev/dl/go1.23.4.windows-arm64.zip",
-        sha256: "db69cae5006753c785345c3215ad941f8b6224e2f81fec471c42d6857bee0e6f",
-        sha512: "", extract_path: "go"),
-      PlatformBinary(cpu: pcX86_64, os: poLinux,
-        url: "https://go.dev/dl/go1.23.4.linux-amd64.tar.gz",
-        sha256: "6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971",
-        sha512: "", sha1: "", extract_path: "go",
-        archive_format_override: afTarGz, has_archive_format_override: true,
-        bin_relpath_override: @["bin/go"]),
-      PlatformBinary(cpu: pcAArch64, os: poLinux,
-        url: "https://go.dev/dl/go1.23.4.linux-arm64.tar.gz",
-        sha256: "16e5017863a7f6071363782b1b8042eb12c6ca4f4cd71528b2123f0a1275b13e",
-        sha512: "", sha1: "", extract_path: "go",
-        archive_format_override: afTarGz, has_archive_format_override: true,
-        bin_relpath_override: @["bin/go"]),
-      PlatformBinary(cpu: pcX86_64, os: poMacos,
-        url: "https://go.dev/dl/go1.23.4.darwin-amd64.tar.gz",
-        sha256: "6700067389a53a1607d30aa8d6e01d198230397029faa0b109e89bc871ab5a0e",
-        sha512: "", sha1: "", extract_path: "go",
-        archive_format_override: afTarGz, has_archive_format_override: true,
-        bin_relpath_override: @["bin/go"]),
-      PlatformBinary(cpu: pcAArch64, os: poMacos,
-        url: "https://go.dev/dl/go1.23.4.darwin-arm64.tar.gz",
-        sha256: "87d2bb0ad4fe24d2a0685a55df321e0efe4296419a9b3de03369dbe60b8acd3a",
-        sha512: "", sha1: "", extract_path: "go",
-        archive_format_override: afTarGz, has_archive_format_override: true,
-        bin_relpath_override: @["bin/go"])
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: initTable[string, string]())
-]
+      lockIdentity = "tarball:go@1.25.11:windows-x86_64:sha256:b7401f1b41517428e537493316256fb7cf03c66a130a0103ab07f3a2152e2112",
+      version = "1.25.11"
+    # GM4b: archive realizations formerly held by the retired
+    # `VersionedProvisioning` catalog record (see the conflict notes
+    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    tarball url = "https://go.dev/dl/go1.23.4.windows-amd64.zip",
+      sha256 = "16c59ac9196b63afb872ce9b47f945b9821a3e1542ec125f16f6085a1c0f3c39",
+      archiveType = "zip",
+      executablePath = "bin\\go.exe",
+      version = "1.23.4",
+      packageId = "go@1.23.4",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "windows"
+    tarball url = "https://go.dev/dl/go1.23.4.windows-arm64.zip",
+      sha256 = "db69cae5006753c785345c3215ad941f8b6224e2f81fec471c42d6857bee0e6f",
+      archiveType = "zip",
+      executablePath = "bin\\go.exe",
+      version = "1.23.4",
+      packageId = "go@1.23.4",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "windows"
+    tarball url = "https://go.dev/dl/go1.23.4.linux-amd64.tar.gz",
+      sha256 = "6924efde5de86fe277676e929dc9917d466efa02fb934197bc2eba35d5680971",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.23.4",
+      packageId = "go@1.23.4",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "linux"
+    tarball url = "https://go.dev/dl/go1.23.4.linux-arm64.tar.gz",
+      sha256 = "16e5017863a7f6071363782b1b8042eb12c6ca4f4cd71528b2123f0a1275b13e",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.23.4",
+      packageId = "go@1.23.4",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "linux"
+    # Go 1.26 for Linux, from go.dev's release archives: the pinned
+    # nixpkgs carries Go 1.25, and modules whose `go.mod` declares a 1.26
+    # language version (a `go 1.26.x` line is a minimum toolchain since
+    # Go 1.21, https://go.dev/doc/toolchain) cannot build with it. Digests
+    # from https://go.dev/dl/?mode=json&include=all. The archive's `go/`
+    # directory is GOROOT, located relative to the executable.
+    tarball url = "https://go.dev/dl/go1.26.10.linux-amd64.tar.gz",
+      sha256 = "ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.26.10",
+      packageId = "go@1.26.10",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "linux"
+    tarball url = "https://go.dev/dl/go1.26.10.linux-arm64.tar.gz",
+      sha256 = "3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.26.10",
+      packageId = "go@1.26.10",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "linux"
+    # Go 1.25.4 for Linux in tarball mode: the same go.dev release archives
+    # the Nix channel above unpacks (`nix/go-1.25.4/default.nix`, decision
+    # 36), so a recipe that needs one exact Go (`go ==1.25.4`: geth and
+    # prysm, whose binary digests are pinned) builds with byte-identical
+    # toolchains in both modes. Digests from
+    # https://go.dev/dl/?mode=json&include=all, the same ones
+    # `go_toolchain_pins` gives the Nix expression.
+    tarball url = "https://go.dev/dl/go1.25.4.linux-amd64.tar.gz",
+      sha256 = "9fa5ffeda4170de60f67f3aa0f824e426421ba724c21e133c1e35d6159ca1bec",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.25.4",
+      packageId = "go@1.25.4",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "linux"
+    tarball url = "https://go.dev/dl/go1.25.4.linux-arm64.tar.gz",
+      sha256 = "a68e86d4b72c2c2fecf7dfed667680b6c2a071221bbdb6913cf83ce3f80d9ff0",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.25.4",
+      packageId = "go@1.25.4",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "linux"
+    tarball url = "https://go.dev/dl/go1.23.4.darwin-amd64.tar.gz",
+      sha256 = "6700067389a53a1607d30aa8d6e01d198230397029faa0b109e89bc871ab5a0e",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.23.4",
+      packageId = "go@1.23.4",
+      extractPath = "go",
+      cpu = "x86_64",
+      os = "macos"
+    tarball url = "https://go.dev/dl/go1.23.4.darwin-arm64.tar.gz",
+      sha256 = "87d2bb0ad4fe24d2a0685a55df321e0efe4296419a9b3de03369dbe60b8acd3a",
+      archiveType = "tar.gz",
+      executablePath = "bin/go",
+      version = "1.23.4",
+      packageId = "go@1.23.4",
+      extractPath = "go",
+      cpu = "aarch64",
+      os = "macos"

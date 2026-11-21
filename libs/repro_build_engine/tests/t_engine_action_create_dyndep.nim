@@ -14,6 +14,7 @@
 import std/[json, os, strutils, tempfiles, unittest]
 
 import repro_build_engine
+from repro_local_store import LogicalRoot, lrkTracked
 
 proc fixtureWrite(path, content: string) =
   createDir(path.splitPath.head)
@@ -170,3 +171,122 @@ suite "M25 engine action-create dyndep ingest":
           dynamicDepsFile = "consumer.rbdyn",
           governingLockIdentity = lockIdentityOutsideSolvedGraph())
       ]), config)
+
+  test "dynamic optional byproducts preserve presence and absence through cache":
+    # Real subprocess/depfile, engine and CAS. The fragment represents a
+    # configure tool describing a conditional linker output before execution.
+    let tempRoot = createTempDir("repro-dynamic-optional", "")
+    defer: removeDir(tempRoot)
+    let sh = findExe("sh")
+    require sh.len > 0
+    fixtureWrite(tempRoot / "input", "input")
+    fixtureWrite(tempRoot / "outputs.rbdyn",
+      "repro-dynamic-graph-v1\noptional-output\tlink\tmodule.lib\n")
+    var config = defaultBuildEngineConfig(tempRoot / "cache")
+    config.bypassRunQuota = true
+    config.enableCachedOutputRestore()
+    config.maxParallelism = 1
+    config.portableLookup = true
+    config.portableRoots = @[
+      LogicalRoot(label: "project", path: tempRoot, kind: lrkTracked),
+      LogicalRoot(label: "shell", path: parentDir(sh), kind: lrkTracked)]
+    let link = action("link", [sh, "-c",
+      "echo dll > module.dll; printf 'module.dll: input outputs.rbdyn\\n' > link.d; " &
+      "read flag < input; if test \"$flag\" = exports; then echo lib > module.lib; fi"],
+      cwd = tempRoot, outputs = ["module.dll"],
+      inputs = ["input", "outputs.rbdyn"], depfile = "link.d",
+      dynamicDepsFile = "outputs.rbdyn", cacheable = true,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    # Missing byproduct is a successful cacheable action, and its recorded
+    # absence must remove a stale library on the next lookup.
+    let first = runBuild(graph([link]), config)
+    check first.results[0].status == asSucceeded
+    check not fileExists(tempRoot / "module.lib")
+    fixtureWrite(tempRoot / "module.lib", "stale")
+    removeFile(tempRoot / "module.dll")
+    let hit = runBuild(graph([link]), config)
+    check hit.results[0].status == asCacheHit
+    check fileExists(tempRoot / "module.dll")
+    check not fileExists(tempRoot / "module.lib")
+    fixtureWrite(tempRoot / "input", "exports\n")
+    let withExports = runBuild(graph([link]), config)
+    check withExports.results[0].status == asSucceeded
+    check fileExists(tempRoot / "module.lib")
+    checkpoint withExports.results[0].portableReason
+    check withExports.results[0].portable
+    check withExports.results[0].portableOutputs.len == 2
+    removeFile(tempRoot / "module.dll")
+    removeFile(tempRoot / "module.lib")
+    let withExportsHit = runBuild(graph([link]), config)
+    check withExportsHit.results[0].status == asCacheHit
+    check readFile(tempRoot / "module.lib").strip == "lib"
+
+  test "optional trees cannot erase independent producers or declared inputs":
+    let tempRoot = createTempDir("repro-optional-ownership", "")
+    defer: removeDir(tempRoot)
+    var config = defaultBuildEngineConfig(tempRoot / "cache")
+    config.bypassRunQuota = true
+    config.dryRun = true
+    let owner = action("install", ["unused"], cwd = tempRoot,
+      optionalOutputs = ["stage"],
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    let other = action("other", ["unused"], cwd = tempRoot,
+      outputs = ["stage/other.txt"],
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    expect BuildEngineError:
+      discard runBuild(graph([owner, other]), config)
+    var malformed = owner
+    malformed.optionalOutputs = @[""]
+    expect BuildEngineError:
+      discard runBuild(graph([malformed]), config)
+    for candidate in [".", "..", tempRoot]:
+      malformed.optionalOutputs = @[candidate]
+      expect BuildEngineError:
+        discard runBuild(graph([malformed]), config)
+    malformed.optionalOutputs = @["stage/./product"]
+    malformed.outputs = @["stage/product"]
+    expect BuildEngineError:
+      discard runBuild(graph([malformed]), config)
+    fixtureWrite(tempRoot / "malformed.rbdyn", "repro-dynamic-graph-v1\ncreate-action\t" &
+      $(%*{"id": "created", "argv": ["unused"], "cwd": tempRoot,
+        "optionalOutputs": [""]}) & "\n")
+    let dynamic = action("trigger", ["unused"], cwd = tempRoot,
+      dynamicDepsFile = "malformed.rbdyn",
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    expect BuildEngineError:
+      discard runBuild(graph([dynamic]), config)
+    var alternateSpelling = owner
+    for candidate in ["stage/.", "elsewhere/../stage"]:
+      alternateSpelling.optionalOutputs = @[candidate]
+      expect BuildEngineError:
+        discard runBuild(graph([alternateSpelling, other]), config)
+    when not defined(windows):
+      createDir(tempRoot / "real")
+      createSymlink(tempRoot / "real", tempRoot / "alias")
+      var throughAlias = owner
+      throughAlias.optionalOutputs = @["alias/stage"]
+      var throughReal = other
+      throughReal.outputs = @["real/stage/other.txt"]
+      expect BuildEngineError:
+        discard runBuild(graph([throughAlias, throughReal]), config)
+      throughAlias.inputs = @["real/stage/source.txt"]
+      expect BuildEngineError:
+        discard runBuild(graph([throughAlias]), config)
+      # A final symlink is removed as a link, without owning its target.
+      throughAlias.optionalOutputs = @["alias"]
+      let linkOnly = runBuild(graph([throughAlias, throughReal]), config)
+      check linkOnly.results.len == 2
+    var selfRead = owner
+    selfRead.inputs = @["stage"]
+    expect BuildEngineError:
+      discard runBuild(graph([selfRead]), config)
+    selfRead.inputs = @["stage/nested/source"]
+    expect BuildEngineError:
+      discard runBuild(graph([selfRead]), config)
+    # Explicit ordering retains the established sequential-writer contract.
+    var ordered = other
+    ordered.deps = @[owner.id]
+    let valid = runBuild(graph([owner, ordered]), config)
+    check valid.results.len == 2
+    check valid.results[0].status == asWouldRun
+    check valid.results[1].status == asWouldRun

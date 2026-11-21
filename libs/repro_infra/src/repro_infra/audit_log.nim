@@ -60,11 +60,15 @@
 ## `repro system audit` and by the planner's drift baseline.
 
 import std/[os]
+when not defined(windows):
+  import std/posix
 
 import blake3
 import repro_core
 
 import ./errors
+when not defined(windows):
+  from ./state_dir import fsyncDirPath
 
 const
   AuditMagic* = "RBSL"
@@ -232,12 +236,22 @@ proc appendAuditRecord*(logPath: string; rec: AuditRecord) =
   var s = newString(bytes.len)
   for i, b in bytes:
     s[i] = char(b)
+  let created = not fileExists(logPath)
   var f: File
   if not open(f, logPath, fmAppend):
     raiseAuditLogCorrupt("file", "could not open the audit log for append: " &
       logPath)
   defer: close(f)
   f.write(s)
+  # Durable before the caller goes on: the log is the record of what an
+  # apply did (`rolled-back` among it), and a power cut right after must
+  # not lose it. A new log's directory entry is synced too.
+  f.flushFile()
+  when not defined(windows):
+    if posix.fsync(getOsFileHandle(f)) != 0:
+      raiseAuditLogCorrupt("file", "could not fsync the audit log: " & logPath)
+    if created and parent.len > 0:
+      fsyncDirPath(parent)
 
 # ---------------------------------------------------------------------------
 # Whole-log reader (`repro system audit`).

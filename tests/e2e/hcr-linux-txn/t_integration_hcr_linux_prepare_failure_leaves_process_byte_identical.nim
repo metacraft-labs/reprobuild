@@ -19,8 +19,16 @@
 ##
 ## `allowed_mocks: none`. Real process, real GCC with the real patchable
 ## profile, real replacement bodies extracted from a real relocatable object,
-## the production transaction reached through the no-mock probe shim, and the
-## real cross-patcher claim map from the recorder's repository.
+## and the production transaction reached through the no-mock probe shim.
+##
+## The claim-map arm of this gate (a refused prepare leaves no claim behind)
+## moved to codetracer-native-recorder
+## `tests/reprobuild-hcr/t_integration_hcr_linux_txn_claim_map.nim` on
+## 2026-11-07: the claim map is the recorder's, and the recorder runs it
+## against this checkout (`.github/workflows/downstream-tests.yml` runs it
+## against every reprobuild commit). This gate builds without the map
+## (`m3_fixture.nim`), so the provider's claim calls take the bridge's no-map
+## path and every assertion below is about text, values and pages.
 ##
 ## ------------------------------------------------------------------------
 ## HOW THIS GATE IS SHOWN TO DISCRIMINATE, rather than asserted to.
@@ -66,16 +74,6 @@ when defined(linux) and defined(amd64):
   suite "integration_hcr_linux_prepare_failure_leaves_process_byte_identical":
     setup:
       let repoRoot = getCurrentDir()
-
-    test "the claim map the leak check needs is present":
-      # A LOUD failure, not a skip. The arms below read
-      # `ct_claimed_guest_text_count()` to assert a refused prepare leaves no
-      # claim behind; without the sibling checkout there is nothing to read.
-      let path = claimMapPath(repoRoot)
-      if not fileExists(path):
-        checkpoint("HLX-M3 gate needs the codetracer-native-recorder " &
-          "checkout beside this repo: " & path & " is not there.")
-      require fileExists(path)
 
     test "every prepare-phase failure class leaves the text byte-identical":
       let bodies = buildPatchBodies(repoRoot)
@@ -159,11 +157,8 @@ when defined(linux) and defined(amd64):
           check victim["value"].getInt() == victim["originalValue"].getInt()
 
         # Nothing provider-owned survived the refusal: the kernel's own
-        # accounting of this process's anonymous executable bytes is unchanged,
-        # and the claim map holds no claim for a window nobody is using.
+        # accounting of this process's anonymous executable bytes is unchanged.
         check arm["anonExecAfter"].getInt() == arm["anonExecBefore"].getInt()
-        check arm["claimsAfter"].getInt() == arm["claimsBefore"].getInt()
-        check arm["claimsAfter"].getInt() == 0
         observedRefusals.add(expected)
 
       # The `non-nop-sled` arm must have pointed at bytes that really are not

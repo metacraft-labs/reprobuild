@@ -67,6 +67,18 @@
 ##     it answer true. Deleting the ``stderrIsTerminal()`` arm of
 ##     ``shouldRouteToDaemon`` reddens it — verified, not assumed.
 ##
+##   * ``thin_client_never_routes_to_a_daemon_running_another_engine`` — the
+##     identity contract: a routed build runs the engine a hand-over would
+##     have run. A daemon resident from a different engine image is replaced,
+##     even when the client names its engine by a RELATIVE ``REPRO_FULL_CLI``
+##     (whose digest could not be taken, and which therefore used to keep the
+##     stale daemon), and the replaced daemon's staged image copy is removed
+##     from ``<state>/dev-bin``. Reverting both ``resolveFullCli``'s anchoring
+##     of ``REPRO_FULL_CLI`` and ``startUserDaemon``'s fail-closed reuse
+##     reddens the identity checks; reverting the anchoring alone reddens the
+##     served-not-handed-over check; removing the dev-bin sweep from the serve
+##     path reddens the retention check — each verified, not assumed.
+##
 ##   * ``thin_client_does_not_link_the_build_engine`` — the structural
 ##     property the milestone's number depends on. Importing
 ##     ``repro_cli_support`` from ``apps/repro-client`` reddens it.
@@ -106,7 +118,7 @@ const
     "NIM_SERIALIZATION_SRC", "NIM_JSON_SERIALIZATION_SRC",
     "NIM_TOML_SERIALIZATION_SRC", "SSZ_SERIALIZATION_SRC", "NIMCRYPTO_SRC",
     "BEARSSL_SRC", "RESULTS_SRC", "STINT_SRC", "IO_MON_SRC",
-    "STACKABLE_HOOKS_SRC", "VM_HARNESS_SRC", "SHM_QUEUE_SRC", "SHM_GSET_SRC",
+    "STACKABLE_HOOKS_SRC", "GOSTI_SRC", "SHM_QUEUE_SRC", "SHM_GSET_SRC",
     "REPRO_CT_TEST_RUNNER_SRC", "CODETRACER_PINNED_SRC", "RUNQUOTA_SRC"
   ]
     ## ``repro_interface_artifacts.BuiltSourcePackageRoots``. Removing these
@@ -237,30 +249,37 @@ proc daemonBuildSessionProjectRoots(tempRoot, endpoint: string): seq[string] =
   ## The ``projectRoot`` column of ``repro daemon sessions``, one entry per
   ## recorded BUILD session, in the order the daemon recorded them.
   ##
-  ## This exists to keep the parity case from passing for the wrong reason.
-  ## Comparing two byte streams says nothing about WHERE the second one came
-  ## from, and the thin client's whole failure mode is silent: when anything
-  ## goes wrong it ``execv``s the full ``repro``, which then produces exactly
-  ## the bytes the comparison is looking for. A parity case that only compared
-  ## output would therefore stay green if the thin client never served a
-  ## single build — verified, not assumed: making ``shouldRouteToDaemon``
-  ## return ``false`` unconditionally leaves the byte comparisons passing and
-  ## reddens only the check below.
-  ##
-  ## ``projectRoot`` is the discriminator because it is the ONE request field
-  ## the two clients are documented to fill differently (see the module header
-  ## of ``apps/repro-client/repro_client.nim``): the full client derives it by
-  ## parsing the build target, and the thin client leaves it empty so the
-  ## daemon's ``workingDir`` fallback applies. Both runs below build the SAME
-  ## project path, so a thin run that had fallen back would record the same
-  ## ``projectRoot`` as the full run, and a thin run that was served records
-  ## the working directory instead.
+  ## Both clients now record the PROJECT here (the daemon derives the thin
+  ## client's root from its raw arguments), so this column no longer tells
+  ## the clients apart; ``daemonBuildRequestRootSources`` does. It still
+  ## counts the build sessions the daemon actually recorded.
   let res = runShell(shellCommand(@[fullCliBin(), "daemon", "sessions",
     "--endpoint", endpoint, "--state-dir", tempRoot / "state"]), repoRoot())
   for raw in res.output.splitLines():
     let fields = raw.split('\t')
     if fields.len >= 5 and fields[1] == "build":
       result.add(fields[4])
+
+proc daemonBuildRequestRootSources(tempRoot: string): seq[string] =
+  ## The ``projectRootSource`` of every accepted build request, in order, from
+  ## the daemon log. THIS is what tells the two clients apart now: the full
+  ## image fills ``projectRoot`` from its own target parse (``request``), the
+  ## thin client leaves it empty and the daemon derives it from the raw
+  ## arguments (``derived``). The recorded ROOT no longer discriminates -- both
+  ## clients now record the project, which is the point of deriving it -- so
+  ## a thin run that had quietly handed over to the full image would show up
+  ## here as a second ``request``.
+  let logPath = tempRoot / "state" / "logs" / "repro-daemon.log"
+  if not fileExists(logPath):
+    return
+  for line in readFile(logPath).splitLines():
+    if "build request accepted" notin line:
+      continue
+    let at = line.find("projectRootSource=")
+    if at < 0:
+      result.add("")
+      continue
+    result.add(line[at + "projectRootSource=".len .. ^1].splitWhitespace()[0])
 
 proc buildArgs(projectRoot, tempRoot: string): seq[string] =
   @[
@@ -364,10 +383,15 @@ suite "MAC-1 thin daemon client":
       checkpoint("daemon build sessions: " & roots.join(" | "))
       check roots.len == 2
       if roots.len == 2:
-        # Same project path built twice, two DIFFERENT recorded project roots:
-        # the full client's parsed target and the thin client's working-dir
-        # fallback. Equal roots means the same client composed both requests.
-        check roots[0] != roots[1]
+        # Same project path built twice, and both sessions now name it: the
+        # daemon derives the thin client's root from its raw arguments.
+        check roots[0] == roots[1]
+      # Which client composed each request: the full image's own parse, then
+      # the daemon's derivation for the thin client. Two ``request`` entries
+      # would mean the thin run handed over to the full image.
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources == @["request", "derived"]
 
     test "integration_thin_client_serves_an_install_layout_with_no_environment":
       # WHAT THIS IS FOR. MAC-1's saving is only real if something a user
@@ -430,17 +454,19 @@ suite "MAC-1 thin daemon client":
       check fileExists(project / "dist" / "copied.txt")
 
       # ...and it was SERVED, not quietly handed over. Same discriminator as
-      # the parity case: the thin client leaves `projectRoot` empty so the
-      # daemon's `workingDir` fallback applies, and the full client fills it
-      # from the parsed target. Exactly one build session, recorded against
-      # the WORKING DIRECTORY rather than the project path, is a session the
-      # thin client composed.
+      # the parity case: the thin client leaves `projectRoot` empty and the
+      # daemon derives it from the raw arguments (`derived`); the full client
+      # fills it from its own parse (`request`). Exactly one build session,
+      # recorded against the project, whose root the DAEMON derived, is a
+      # session the thin client composed.
       let roots = daemonBuildSessionProjectRoots(tempRoot, endpoint)
       checkpoint("daemon build sessions: " & roots.join(" | "))
       check roots.len == 1
       if roots.len == 1:
-        check roots[0] != project
-        check roots[0].endsWith(lastPathPart(tempRoot))
+        check roots[0] == project
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources == @["derived"]
 
     test "integration_thin_client_falls_back_to_a_working_build_when_the_daemon_cannot_be_reached":
       let tempRoot = createTempDir("repro-mac1-fallback", "")
@@ -731,6 +757,154 @@ suite "MAC-1 thin daemon client":
       let logText = if fileExists(logPath): readFile(logPath) else: ""
       checkpoint("daemon log:\n" & logText)
       check not logText.contains("restarting outdated daemon")
+
+    test "integration_thin_client_never_routes_to_a_daemon_running_another_engine":
+      # THE DEFECT THIS PINS (reprobuild-pm issue 2026-09-30, "the `repro`
+      # thin client routes to a resident daemon running an older engine
+      # image"). A routed build must run the engine a hand-over would have
+      # run. The resident daemon here is started from a DIFFERENT engine image
+      # -- a copy of `reprobuild` with bytes appended, so it still executes
+      # but digests differently, which is all a rebuilt engine looks like to
+      # the identity check -- and the thin client is then pointed at the real
+      # engine through a RELATIVE `REPRO_FULL_CLI`.
+      #
+      # WHY RELATIVE. `expectedDaemonRunningDigestHex` digests only an
+      # absolute path and answers "" otherwise. `startUserDaemon` used to read
+      # an unknown digest as "cannot prove staleness, keep the daemon", so a
+      # relative override silently routed every build to whatever image was
+      # resident. Two fixes close it: `startUserDaemon` FAILS CLOSED -- it
+      # reuses a running daemon only when both digests are known and equal --
+      # and `resolveFullCli` anchors the override against the working
+      # directory (as it already did for `REPRO_PUBLIC_CLI_PATH`). The first
+      # alone keeps the stale daemon from serving, but by refusing to route:
+      # the client hands over and the ENGINE restarts the daemon. The second
+      # is what lets the thin client itself verify, restart and be served, and
+      # the request-source check below pins it.
+      #
+      # THE SECOND HALF: RETENTION. Every dev-mode start stages a copy of its
+      # image under `<state>/dev-bin/`, and before the fix only a dev
+      # SELF-restart removed its predecessor's copy. A daemon replaced by a
+      # client's staleness restart (this case) or by `daemon stop` left its
+      # copy behind forever; the issue counted 260 of them. The daemon that
+      # wins the state directory's lock now sweeps every generation but its
+      # own, so after the restart exactly ONE generation may remain.
+      #
+      # WHAT MAKES THIS FAIL, each measured: on the unfixed tree the status
+      # after the thin build still names the copy as its source image and
+      # running hash. With only the fail-closed reuse in place the identity
+      # checks pass but the request source is the engine's `request`. With
+      # both identity fixes and no dev-bin sweep, `dev-bin` holds two
+      # generations.
+      # Keep macOS's /tmp alias in the fixture even when TMPDIR already
+      # names /private/tmp. Status resolves it, and getCurrentDir() in the
+      # child reports the physical directory rather than this spelling.
+      let tempParent = when defined(macosx): "/tmp" else: ""
+      let tempRoot = createTempDir("repro-mac1-stale", "", tempParent)
+      when defined(macosx):
+        check tempRoot != expandFilename(tempRoot)
+      let endpoint = daemonSocketEndpoint("mac1-stale")
+      defer:
+        stopDaemon(tempRoot, endpoint)
+        removeDirEventually(tempRoot)
+      createDir(tempRoot / "state")
+      createDir(tempRoot / "store")
+
+      # The OTHER engine. Appended bytes leave an ELF executable (the loader
+      # reads only what the program headers name) and change its digest.
+      let otherBin = tempRoot / "other-bin"
+      createDir(otherBin)
+      let otherEngine = otherBin / reprobuildEngineExeName()
+      copyFile(fullCliBin(), otherEngine)
+      block:
+        var f = open(otherEngine, fmAppend)
+        defer: f.close()
+        f.write("\nstale-engine-marker\n")
+      setFilePermissions(otherEngine, {fpUserRead, fpUserWrite, fpUserExec})
+
+      let project = freshProject(tempRoot)
+      let shim = monitorShimPath(repoRoot())
+      require fileExists(shim)
+      let shimEnv = @[("REPRO_MONITOR_SHIM_LIB", shim)]
+      let baseEnv = @[
+        ("REPRO_DAEMON_ENDPOINT", endpoint),
+        ("REPRO_DAEMON_STATE_DIR", tempRoot / "state"),
+        ("REPROBUILD_STORE_ROOT", tempRoot / "store")] & shimEnv
+
+      proc daemonStatus(): string =
+        runShell(shellCommand(@[fullCliBin(), "daemon", "status",
+          "--endpoint", endpoint, "--state-dir", tempRoot / "state"]),
+          repoRoot()).output
+
+      proc statusField(text, name: string): string =
+        for line in text.splitLines():
+          if line.startsWith(name & ": "):
+            return line[name.len + 2 .. ^1].strip()
+
+      proc devBinGenerations(): seq[string] =
+        let root = tempRoot / "state" / "dev-bin"
+        if dirExists(root):
+          for kind, path in walkDir(root):
+            result.add(path)
+
+      # Leave the OTHER engine's daemon resident. Its build's own outcome is
+      # not the subject (a copied engine outside the checkout may resolve its
+      # providers differently); the daemon it leaves behind is.
+      let viaOther = runCaptured(otherEngine, buildArgs(project, tempRoot),
+        tempRoot, baseEnv & @[("REPRO_FULL_CLI", otherEngine)])
+      checkpoint("other-engine stdout:\n" & viaOther.output)
+      checkpoint("other-engine stderr:\n" & viaOther.errors)
+      let before = daemonStatus()
+      checkpoint("status with the other engine resident:\n" & before)
+      check expandFilename(statusField(before, "source-image-path")) ==
+        expandFilename(otherEngine)
+      let otherHash = statusField(before, "running-hash")
+      check otherHash.len > 0
+
+      # The THIN CLIENT, told about the real engine by a RELATIVE path that
+      # resolves from its working directory.
+      # Relative overrides resolve from the actual cwd. Computing this from
+      # /tmp instead of /private/tmp drops a required parent traversal and
+      # names /private/Users/... rather than the engine under /Users/....
+      let relativeEngine = relativePath(expandFilename(fullCliBin()),
+        expandFilename(tempRoot))
+      check not relativeEngine.isAbsolute
+      check expandFilename(tempRoot / relativeEngine) ==
+        expandFilename(fullCliBin())
+      let viaThin = runCaptured(thinCliBin(), buildArgs(project, tempRoot),
+        tempRoot, baseEnv & @[("REPRO_FULL_CLI", relativeEngine)])
+      checkpoint("thin stdout:\n" & viaThin.output)
+      checkpoint("thin stderr:\n" & viaThin.errors)
+      check viaThin.code == 0
+      check fileExists(project / "dist" / "copied.txt")
+      # ...and SERVED, not handed over: the last accepted request is one the
+      # daemon had to derive the project root for, which only the thin client
+      # sends (see `daemonBuildRequestRootSources`). Without the anchoring in
+      # `resolveFullCli` the fail-closed `startUserDaemon` refuses the
+      # unverifiable relative path, the client hands over, and the engine's
+      # own `request` lands here instead.
+      let sources = daemonBuildRequestRootSources(tempRoot)
+      checkpoint("build request root sources: " & sources.join(" | "))
+      check sources.len > 0 and sources[^1] == "derived"
+
+      # THE ASSERTIONS THIS CASE EXISTS FOR. The resident daemon is now the
+      # real engine's, by path and by content.
+      let after = daemonStatus()
+      checkpoint("status after the thin build:\n" & after)
+      check expandFilename(statusField(after, "source-image-path")) ==
+        expandFilename(fullCliBin())
+      let runningHash = statusField(after, "running-hash")
+      check runningHash.len > 0
+      check runningHash != otherHash
+      check runningHash == statusField(after, "source-hash")
+
+      # ...and the replaced daemon's staged copy is gone: only the running
+      # generation is left in dev-bin.
+      let generations = devBinGenerations()
+      checkpoint("dev-bin: " & generations.join(" | "))
+      check generations.len == 1
+      if generations.len == 1:
+        check generations[0] ==
+          statusField(after, "staged-generation-dir")
 
   when isNixSupported and defined(posix):
     test "integration_thin_client_interactive_terminal_build_still_builds":

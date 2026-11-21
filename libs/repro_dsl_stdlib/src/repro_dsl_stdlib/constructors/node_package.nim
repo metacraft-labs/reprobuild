@@ -35,6 +35,7 @@ import repro_project_dsl
 import repro_project_dsl/npm_vendor
 
 import ../types/package_result
+import ../active_context
 
 const
   DeliveredPathRewriter = """
@@ -159,6 +160,7 @@ proc node_package*(srcDir = "src";
   ## defaults to the entry's basename (`bundle/gemini.js` -> `gemini`); it is
   ## NOT the owning package's name, which for a source recipe is an internal
   ## identifier like `geminiCliSource` that no user types.
+  requireCrossTargetConsulted("node_package")
   let pkgName = currentOwningPackage()
   let projectRoot = activeProviderProjectRoot()
 

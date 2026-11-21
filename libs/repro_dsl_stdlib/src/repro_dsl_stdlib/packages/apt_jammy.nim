@@ -213,47 +213,110 @@ proc installFingerprint*(snapshot: string;
 type
   DebMemberInfo = object
     name: string         ## member name, trimmed
-    size: int            ## payload size in bytes
-    offset: int          ## payload offset in the .deb
+    size: int64          ## payload size in bytes
+    offset: int64        ## payload offset in the .deb
 
 const ArMagic = "!<arch>\n"
 const ArHeaderSize = 60   ## 16+12+6+6+8+10+2 = 60
+const DebCopyChunk = 256 * 1024
+  ## The ``.deb`` reader copies a member in pieces of this size: its
+  ## memory does not grow with the archive (an add-on apply unit runs under
+  ## ``MemoryMax=``, and a closure member can be hundreds of MB).
 
-proc parseDebMembers(debBytes: string): seq[DebMemberInfo] =
-  ## Parse an ar archive into a sequence of member infos. Stops on the
-  ## first malformed header. Used to locate ``debian-binary`` /
-  ## ``control.tar.*`` / ``data.tar.*`` within a .deb.
+const AptJammyMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-build switch (``repro_addon/mutations``, which
+  ## this package cannot import). ``apt-deb-reader-reads-whole-file``
+  ## restores the reader that loaded the whole ``.deb`` into memory.
+
+proc parseDebMembers(f: File; fileSize: int64): seq[DebMemberInfo] =
+  ## Parse the ``ar`` archive open as ``f`` into its members' names, sizes
+  ## and payload offsets, reading only the 8-byte magic and each 60-byte
+  ## header (ar(5): name 16, mtime 12, uid 6, gid 6, mode 8, size 10,
+  ## terminator "`\n"; payloads padded to even offsets). Stops on the
+  ## first malformed header or a member that runs past the end of the
+  ## file. Used to locate ``debian-binary`` / ``control.tar.*`` /
+  ## ``data.tar.*`` within a .deb without loading it.
   result = @[]
-  if debBytes.len < ArMagic.len or
-      debBytes[0 ..< ArMagic.len] != ArMagic:
+  if fileSize < ArMagic.len: return
+  var magic = newString(ArMagic.len)
+  f.setFilePos(0)
+  if f.readBuffer(addr magic[0], ArMagic.len) != ArMagic.len or
+      magic != ArMagic:
     return
-  var pos = ArMagic.len
-  while pos + ArHeaderSize <= debBytes.len:
-    var name = debBytes[pos ..< pos + 16].strip(leading = false,
-      trailing = true, chars = {' ', '/'})
-    let sizeStr = debBytes[pos + 48 ..< pos + 58].strip(leading = false,
-      trailing = true, chars = {' '})
-    let sentinel = debBytes[pos + 58 ..< pos + 60]
-    if sentinel != "`\n":
-      break
-    let size = try: parseInt(sizeStr) except ValueError: break
+  var pos = int64(ArMagic.len)
+  var hdr = newString(ArHeaderSize)
+  while pos + ArHeaderSize <= fileSize:
+    f.setFilePos(pos)
+    if f.readBuffer(addr hdr[0], ArHeaderSize) != ArHeaderSize: break
+    let name = hdr[0 ..< 16].strip(leading = false, trailing = true,
+      chars = {' ', '/'})
+    let sizeStr = hdr[48 ..< 58].strip(leading = false, trailing = true,
+      chars = {' '})
+    if hdr[58 ..< 60] != "`\n": break
+    let size = try: parseBiggestInt(sizeStr) except ValueError: break
+    if size < 0: break
     let payloadStart = pos + ArHeaderSize
-    if payloadStart + size > debBytes.len:
-      break
+    if payloadStart + size > fileSize: break
     result.add(DebMemberInfo(name: name, size: size, offset: payloadStart))
     # Even byte alignment per ar spec.
-    let advance = if (size and 1) == 1: size + 1 else: size
-    pos = payloadStart + advance
+    pos = payloadStart + size + (size and 1)
 
-proc locateDataMember(debBytes: string;
-                      members: seq[DebMemberInfo]):
-                    tuple[name: string, offset: int, size: int] =
+proc locateDataMember(members: seq[DebMemberInfo]):
+                    tuple[name: string, offset: int64, size: int64] =
   ## Locate the ``data.tar.*`` member. .deb spec allows
   ## data.tar / data.tar.gz / data.tar.xz / data.tar.bz2 / data.tar.zst.
   for m in members:
     if m.name.startsWith("data.tar"):
       return (m.name, m.offset, m.size)
-  return ("", -1, 0)
+  return ("", -1'i64, 0'i64)
+
+proc copyDebMember(f: File; offset, size: int64; dest: string) =
+  ## Write ``size`` bytes of ``f`` from ``offset`` to the new file ``dest``,
+  ## in ``DebCopyChunk`` pieces. Raises ``IOError`` on a short read.
+  let o = open(dest, fmWrite)
+  try:
+    f.setFilePos(offset)
+    var buf = newString(DebCopyChunk)
+    var remaining = size
+    while remaining > 0:
+      let want = int(min(remaining, int64(DebCopyChunk)))
+      let got = f.readBuffer(addr buf[0], want)
+      if got != want:
+        raise newException(IOError, "short read in the .deb member at " &
+          $offset)
+      if o.writeBuffer(addr buf[0], got) != got:
+        raise newException(IOError, "cannot write " & dest)
+      remaining -= got
+  finally:
+    o.close()
+
+proc writeDebMember(debPath: string; offset, size: int64; dest: string) =
+  ## The data member of the ``.deb`` at ``debPath`` written to ``dest``.
+  when AptJammyMutation == "apt-deb-reader-reads-whole-file":
+    # Falsifying build: the whole archive in memory, as before.
+    let debBytes = readFile(debPath)
+    let o = open(dest, fmWrite)
+    try:
+      if size > 0:
+        discard o.writeBuffer(
+          cast[ptr UncheckedArray[byte]](debBytes[int(offset)].unsafeAddr),
+          int(size))
+    finally:
+      o.close()
+  else:
+    let f = open(debPath, fmRead)
+    try: copyDebMember(f, offset, size, dest)
+    finally: f.close()
+
+proc debDataMember(debPath: string):
+    tuple[name: string, offset: int64, size: int64] =
+  ## The ``data.tar.*`` member of the ``.deb`` at ``debPath``, from its
+  ## headers alone; ``offset`` is -1 when there is none.
+  let f = open(debPath, fmRead)
+  try:
+    result = locateDataMember(parseDebMembers(f, getFileSize(f)))
+  finally:
+    f.close()
 
 proc tarFlagFor(memberName: string): string =
   ## Map a ``data.tar.*`` member name to the appropriate ``tar`` flag.
@@ -375,8 +438,8 @@ proc walkStoreRelFiles(root: string): seq[string] =
     result.add(rel)
   result.sort(cmp[string])
 
-proc tarExtractDataMember(debPath, debBytes, memberName: string;
-                          memberOffset, memberSize: int;
+proc tarExtractDataMember(debPath, memberName: string;
+                          memberOffset, memberSize: int64;
                           outDir: string) =
   ## Write the ``data.tar.*`` payload to a temp file then invoke ``tar``
   ## to extract it into ``outDir``. Raises ``AptExtractError`` if tar
@@ -385,12 +448,7 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
     raise newException(AptExtractError,
       "no data.tar.* member in " & debPath)
   let tmpData = outDir / ("__apt_jammy_data_" & memberName)
-  let f = open(tmpData, fmWrite)
-  if memberSize > 0:
-    discard f.writeBuffer(
-      cast[ptr UncheckedArray[byte]](debBytes[memberOffset].unsafeAddr),
-      memberSize)
-  f.close()
+  writeDebMember(debPath, memberOffset, memberSize, tmpData)
   defer:
     try: removeFile(tmpData)
     except OSError: discard
@@ -452,6 +510,15 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
   # and no reader of this code could tell. ``resolveHostTar`` reproduces that
   # order explicitly so the binary that runs is named, without changing WHICH
   # binary runs; see ``repro_core/host_tar``.
+  # Modes and owners are whatever tar restores. As root, GNU tar restores
+  # the archive's owners AND its setuid/setgid bits (``--preserve-permissions``
+  # is the default for root; measured 2026-10-30 on Raspberry Pi OS trixie:
+  # ``sudo tar --no-same-owner -xf`` still produced a 4755 root-owned
+  # ``usr/bin/su``). So this path is for build-time extraction into a
+  # store that nothing runs as a privileged service. The Add-On closure
+  # realiser (``apt_closure.nim``) does not use it: it takes the plain tar
+  # from ``extractDebDataMemberToTar`` and unpacks it in-process with its
+  # own policy on names, link targets, entry kinds and modes.
   let tailArgs = [flag, tarOperand(tarInput), "-C", tarOperand(outDir)]
   let hostTar = resolveHostTar()
   if hostTar.exe.len == 0:
@@ -491,6 +558,78 @@ proc tarExtractDataMember(debPath, debBytes, memberName: string;
     e.exitCode = res.exitCode
     e.stderrText = res.output
     raise e
+
+proc extractDebDataMemberToTar*(debPath: string; outTarPath: string) =
+  ## Write the ``data.tar.*`` member of the ``.deb`` at ``debPath`` to
+  ## ``outTarPath`` as a PLAIN (decompressed) tar stream, through the same
+  ## ``ar`` parser ``extractAptDeb`` uses and the host ``xz``, ``gzip`` or
+  ## ``zstd`` for the compression the member carries. Nothing is unpacked
+  ## and nothing is verified here: the caller owns digest verification, the
+  ## destination directory, and the policy with which the tar is unpacked.
+  ##
+  ## This is the archive-level primitive the Add-On ``package(apt, ...)``
+  ## closure realiser (``apt_closure.realiseAptClosure``) builds on,
+  ## independent of suite, architecture or archive: it reads armhf trixie
+  ## ``.deb``s exactly as this module reads amd64 jammy ones. Raises
+  ## ``AptExtractError`` when the archive has no data member, carries a
+  ## compression no host tool can decode, or the decompressor fails.
+  ##
+  ## The archive is never loaded whole: its ``ar`` headers are read by
+  ## offset and the data member is copied in fixed-size chunks, so the
+  ## memory used does not grow with the ``.deb``'s size.
+  let (memName, memOff, memSize) = debDataMember(debPath)
+  if memOff < 0:
+    var e = newException(AptExtractError, "no data.tar.* member in " & debPath)
+    e.debPath = debPath
+    raise e
+  let outDir = parentDir(outTarPath)
+  if not dirExists(outDir):
+    raise newException(IOError, "directory missing: " & outDir)
+  if fileExists(outTarPath): removeFile(outTarPath)
+  template fail(msg: string; cmd = ""; code = 0; text = "") =
+    var e = newException(AptExtractError, msg)
+    e.debPath = debPath
+    e.command = cmd
+    e.exitCode = code
+    e.stderrText = text
+    raise e
+  template writeMember(path: string) =
+    writeDebMember(debPath, memOff, memSize, path)
+  case memName
+  of "data.tar":
+    writeMember(outTarPath)
+  of "data.tar.zst":
+    let packed = outTarPath & ".zst"
+    writeMember(packed)
+    defer:
+      try: removeFile(packed)
+      except OSError: discard
+    let res = decompressZstdToFile(packed, outTarPath)
+    if not res.ok:
+      fail("zstd decompression failed (exit " & $res.exitCode & "): " &
+        res.output, res.command, res.exitCode, res.output)
+  of "data.tar.xz", "data.tar.gz", "data.tar.bz2":
+    # ``<tool> -d <file.ext>`` replaces the file with its decompression,
+    # so the member is written under the name the tool expects and the
+    # output lands at ``outTarPath``.
+    let (tool, ext) =
+      if memName == "data.tar.xz": ("xz", ".xz")
+      elif memName == "data.tar.gz": ("gzip", ".gz")
+      else: ("bzip2", ".bz2")
+    let exe = findExe(tool)
+    if exe.len == 0:
+      fail("no '" & tool & "' on PATH to decompress " & memName)
+    let packed = outTarPath & ext
+    writeMember(packed)
+    let cmd = quoteShell(exe) & " -d -q -f " & quoteShell(packed)
+    let res = execCmdEx(cmd)
+    if res.exitCode != 0 or not fileExists(outTarPath):
+      try: removeFile(packed)
+      except OSError: discard
+      fail(tool & " decompression failed (exit " & $res.exitCode & "): " &
+        res.output, cmd, res.exitCode, res.output)
+  else:
+    fail("unsupported data.tar variant: " & memName)
 
 proc extractAptDeb*(debPath: string;
                     sha256: string;
@@ -543,10 +682,8 @@ proc extractAptDeb*(debPath: string;
     removeDir(storePath)
   createDir(storePath)
 
-  let debBytes = readFile(debPath)
-  let members = parseDebMembers(debBytes)
-  let (memName, memOff, memSize) = locateDataMember(debBytes, members)
-  tarExtractDataMember(debPath, debBytes, memName, memOff, memSize, storePath)
+  let (memName, memOff, memSize) = debDataMember(debPath)
+  tarExtractDataMember(debPath, memName, memOff, memSize, storePath)
 
   # Write the marker file last so a crashed extraction is re-done.
   writeFile(marker, sha256)
@@ -629,10 +766,8 @@ proc installAptDeb*(snapshot: string;
       e.expectedSha = d.sha256
       e.observedSha = observedSha
       raise e
-    let debBytes = readFile(d.debPath)
-    let members = parseDebMembers(debBytes)
-    let (memName, memOff, memSize) = locateDataMember(debBytes, members)
-    tarExtractDataMember(d.debPath, debBytes, memName, memOff, memSize,
+    let (memName, memOff, memSize) = debDataMember(d.debPath)
+    tarExtractDataMember(d.debPath, memName, memOff, memSize,
                          storePath)
 
   # expectedFiles assertion (spec §1: fail-closed at build time).

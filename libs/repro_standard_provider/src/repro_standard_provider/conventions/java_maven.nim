@@ -3,8 +3,8 @@
 ## First JVM-ecosystem standard-provider convention. Recognises a
 ## ``pom.xml`` at the project root and shells out to a stock ``mvn``
 ## binary for an offline ``mvn package`` invocation. The action graph
-## is intentionally coarse: one ``mvn package -o`` build action that
-## produces ``target/<artifactId>-<version>.jar`` per declared member.
+## is intentionally coarse: one ``mvn package -o`` build action, whose
+## products Maven itself names (see **Output paths**).
 ##
 ## **Distinction from a hypothetical future Tier 2c Maven provider.**
 ## A Tier 2c Maven provider would parse Maven's effective-pom / build-
@@ -31,30 +31,40 @@
 ##     BEFORE the convention dispatches: ``mvn dependency:go-offline -f
 ##     <projectRoot>/pom.xml`` from a context with network access (the
 ##     warm-step). The convention itself never reaches the network.
-##   * The M40 fixture ships a self-contained Hello.java (stdlib only)
-##     so the warm-step is a no-op; the convention can be exercised
-##     end-to-end without provisioning external deps.
+##   * Output discovery runs the pinned ``maven-help-plugin``
+##     (``output_discovery.MavenHelpEvaluate``), which ``go-offline`` does
+##     not resolve: the warm step also runs ``mvn <MavenHelpEvaluate>
+##     -Dexpression=project.version`` once online.
+##   * The M40 fixture ships a self-contained Hello.java (stdlib only),
+##     so the only plugins to warm are Maven's defaults and the help
+##     plugin.
 ##
 ## **Emitted actions**:
-##   1. ``java-maven-package`` — single ``mvn package -o -q -f
-##      <projectRoot>/pom.xml`` action. Inputs: ``pom.xml`` plus every
-##      ``.java`` source file under ``src/main/java/`` (conservative
-##      enumeration; header tweaks aren't a Java concept so we miss
-##      nothing by limiting to ``.java``). Outputs: one
-##      ``target/<artifactId>-<version>.jar`` per declared member (M40
-##      assumes the project produces a single jar — ``<artifactId>`` is
-##      parsed from ``pom.xml``). Uses ``automaticMonitorPolicy``
-##      (automatic monitoring is the spec baseline for opaque tools,
-##      Reprobuild-Development M17): ``mvn`` spawns a fan-out of plugin
-##      processes and the engine monitors their real read-set instead of
-##      trusting only statically declared inputs.
+##   1. ``java-maven-outputs`` -- asks Maven where the build puts its
+##      products: three ``help:evaluate`` queries (``project.build.directory``,
+##      ``project.build.finalName``, the packaging's artifact-handler
+##      extension), run by the standard provider itself
+##      (``output_discovery.mavenOutputs``). Writes a dynamic-output
+##      fragment. Monitored, so the parent POMs and settings Maven reads key
+##      the answer.
+##   2. ``java-maven-package`` -- a single ``mvn package -o -q -f
+##      <projectRoot>/pom.xml`` action. Inputs: ``pom.xml``, every ``.java``
+##      source file under ``src/main/java/`` and the fragment, which is also
+##      its ``dynamicDepsFile``. Its outputs come from the fragment. Uses
+##      ``automaticMonitorPolicy``: ``mvn`` spawns a fan-out of plugin
+##      processes and the engine monitors their real read-set.
 ##
-## **Output paths**:
-##   * Executable / library: ``target/<artifactId>-<version>.jar``.
-##     Maven's default ``maven-jar-plugin`` lays the produced jar at
-##     ``target/${project.artifactId}-${project.version}.jar`` under the
-##     project root. The convention parses ``<artifactId>`` and
-##     ``<version>`` from the root ``pom.xml`` to predict the path.
+## **Output paths** (Build-Engine-And-Scheduler.md §"Outputs a delegated
+## build decides"):
+##   * ``${project.build.directory}`` (``target/`` by default) is an opaque
+##     output directory: removed before ``mvn package`` runs, recorded whole
+##     and restored exactly.
+##   * ``${project.build.directory}/${project.build.finalName}.<extension>``
+##     is the obligatory main artifact: ``<finalName>``, a ``<directory>``
+##     override, a version inherited from a parent POM and a non-``jar``
+##     packaging are Maven's to apply, not this convention's to predict.
+##   * A ``pom``-packaging project builds no artifact of its own and is
+##     refused at discovery.
 ##
 ## **Honest scope** (deferred):
 ##   * Multi-module Maven projects (``<modules>`` in pom.xml). Single-
@@ -79,18 +89,16 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 
 const
   ScratchDirName* = ".repro/build"
-    ## Top-level scratch directory under the project root. Identical to
-    ## the C/C++ conventions' value, but M40 doesn't actually use it as
-    ## a build dir — Maven writes to ``<projectRoot>/target/`` (its own
-    ## convention). The constant is retained for consistency.
+    ## Top-level scratch directory under the project root. Maven builds
+    ## into its own build directory; this convention keeps its output
+    ## discovery's fragment here.
 
-  MavenTargetSubdir* = "target"
-    ## Sub-directory under the project root where Maven lays its build
-    ## outputs (jars). Hard-coded in Maven; the convention predicts the
-    ## jar path under this directory.
+  ConventionName = "java-maven"
+  PackageActionId = ConventionName & "-package"
 
 type
   JavaMavenMemberKind = enum
@@ -240,51 +248,6 @@ proc mvnExecutable(): string =
   ## ``mvn.cmd``; ``findExe`` resolves both shapes via PATHEXT.
   findExe("mvn")
 
-proc extractSimpleXmlTag(source, tagName: string): string =
-  ## Return the inner text of the first top-level ``<tagName>...
-  ## </tagName>`` occurrence in ``source``. Intentionally crude —
-  ## avoids pulling in an XML parser for parsing two scalar fields out
-  ## of the M40 pom.xml shape (``<artifactId>`` and ``<version>``). The
-  ## helper assumes the tag's value is on a single line, the standard
-  ## Maven pom.xml layout. Returns the empty string when the tag isn't
-  ## found, when it's nested under a different top-level element (e.g.
-  ## a ``<dependency><artifactId>...</artifactId></dependency>`` block
-  ## — the helper picks the FIRST occurrence; for the standard pom.xml
-  ## shape the project-level ``<artifactId>`` precedes ``<dependencies>``
-  ## so the helper does the right thing), or when the value is empty.
-  let openTag = "<" & tagName & ">"
-  let closeTag = "</" & tagName & ">"
-  let openIdx = source.find(openTag)
-  if openIdx < 0:
-    return ""
-  let valueStart = openIdx + openTag.len
-  let closeIdx = source.find(closeTag, start = valueStart)
-  if closeIdx < 0:
-    return ""
-  source[valueStart ..< closeIdx].strip()
-
-type PomCoordinates = object
-  artifactId: string
-  version: string
-
-proc parsePomCoordinates(projectRoot: string): PomCoordinates =
-  ## Parse ``<artifactId>`` and ``<version>`` from ``pom.xml`` so we
-  ## can predict the produced jar's filename. Returns blank fields when
-  ## the pom.xml is unreadable or the tags are missing — callers detect
-  ## the blank and either raise or fall through (recognize/emitFragment
-  ## treat a blank ``artifactId`` as a hard failure since the output
-  ## path can't be predicted without it).
-  let pomPath = projectRoot / "pom.xml"
-  if not fileExists(extendedPath(pomPath)):
-    return
-  var pomSource = ""
-  try:
-    pomSource = readFile(extendedPath(pomPath))
-  except CatchableError:
-    return
-  result.artifactId = extractSimpleXmlTag(pomSource, "artifactId")
-  result.version = extractSimpleXmlTag(pomSource, "version")
-
 proc javaMavenRecognize(projectRoot: string;
                         request: ProviderGraphRequest): bool {.gcsafe.} =
   ## Recognition contract — see module docstring.
@@ -304,9 +267,6 @@ proc javaMavenRecognize(projectRoot: string;
     return false
   if mvnExecutable().len == 0:
     return false
-  let coords = parsePomCoordinates(projectRoot)
-  if coords.artifactId.len == 0:
-    return false
   true
 
 proc sanitizeNamePart(value: string): string =
@@ -317,22 +277,6 @@ proc sanitizeNamePart(value: string): string =
       result.add('_')
   if result.len == 0:
     result = "x"
-
-proc producedJarPath(projectRoot: string;
-                     coords: PomCoordinates): string =
-  ## Predicted output path for the Maven build's produced jar. Maven's
-  ## default ``maven-jar-plugin`` lays the jar at ``target/<artifactId>-
-  ## <version>.jar``; when the pom omits ``<version>`` (unusual but
-  ## valid for inherited-from-parent flavours) Maven still produces a
-  ## jar named ``<artifactId>-.jar`` — the convention preserves the
-  ## raw string so the prediction matches reality even in that edge
-  ## case.
-  let jarName =
-    if coords.version.len > 0:
-      coords.artifactId & "-" & coords.version & ".jar"
-    else:
-      coords.artifactId & ".jar"
-  projectRoot / MavenTargetSubdir / jarName
 
 proc collectJavaInputs(projectRoot: string): seq[string] =
   ## Conservative input enumeration for the package action: the root
@@ -362,11 +306,12 @@ proc collectJavaInputs(projectRoot: string): seq[string] =
   result = seen
   result.sort(system.cmp[string])
 
-proc emitPackageAction(projectRoot, mvnExe: string;
-                       coords: PomCoordinates): BuildActionDef =
-  ## Emit the single ``mvn package -o -q -f <pom>`` action. Outputs the
-  ## predicted ``target/<artifactId>-<version>.jar`` path under the
-  ## project root.
+proc emitPackageAction(projectRoot, mvnExe, fragment,
+                       discoveryId: string): BuildActionDef =
+  ## Emit the single ``mvn package -o -q -f <pom>`` action. Its outputs are
+  ## the ones ``java-maven-outputs`` discovered: the build directory as an
+  ## opaque output tree and the main artifact inside it as an obligatory
+  ## output.
   ##
   ## ``-o`` (offline) enforces the M40 hermetic contract: Maven MUST
   ## NOT reach the network during the action. ``-q`` (quiet) keeps the
@@ -375,22 +320,19 @@ proc emitPackageAction(projectRoot, mvnExe: string;
   ## action works regardless of which directory the engine spawns mvn
   ## from.
   let pomPath = projectRoot / "pom.xml"
-  let jarPath = producedJarPath(projectRoot, coords)
-  createDir(extendedPath(parentDir(jarPath)))
   let argv = @[mvnExe, "package", "-o", "-q", "-f", pomPath]
-  let inputs = collectJavaInputs(projectRoot)
+  let inputs = collectJavaInputs(projectRoot) & @[fragment]
   buildAction(
-    id = "java-maven-package",
+    id = PackageActionId,
     call = inlineExecCall(argv, projectRoot),
+    deps = @[discoveryId],
     inputs = inputs,
-    outputs = @[jarPath],
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
     # ``mvn`` spawns a fan-out of plugin processes (compiler:compile,
-    # resources:resources, jar:jar, etc.) whose FS reads aren't
-    # reliably observed via the Windows DLL-interpose path. Same
-    # constraint M38/M39's configure actions face. Enumerate inputs
-    # explicitly via ``collectJavaInputs`` so per-source invalidation
-    # still works without monitoring.
+    # resources:resources, jar:jar, etc.); the monitor records their real
+    # read-set on top of the enumerated sources.
     dependencyPolicy = automaticMonitorPolicy(),
     commandStatsId = "java-maven.package")
 
@@ -433,16 +375,15 @@ proc javaMavenEmitFragment(projectRoot: string;
     if mvnExe.len == 0:
       raise newException(ValueError,
         "java-maven convention: no 'mvn' on PATH")
-    let coords = parsePomCoordinates(projectRoot)
-    if coords.artifactId.len == 0:
-      raise newException(ValueError,
-        "java-maven convention: pom.xml missing <artifactId> tag; " &
-          "cannot predict produced jar's output path")
     let pkg = syntheticPackage(projectRoot, members)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
-      let packageAction = emitPackageAction(projectRoot, mvnExe, coords)
-      defaultTarget(target("default", @[packageAction]))
+      let discovery = delegatedOutputsAction(ConventionName, "maven",
+        PackageActionId, projectRoot, mvnExe,
+        inputs = @[projectRoot / "pom.xml"])
+      let packageAction = emitPackageAction(projectRoot, mvnExe,
+        discovery.fragment, discovery.action.id)
+      defaultTarget(target("default", @[discovery.action, packageAction]))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

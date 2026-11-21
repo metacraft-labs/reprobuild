@@ -3,7 +3,7 @@
 This directory holds the kernel + initramfs blobs that R2's typed
 reprobuild recipe consumes as inputs. R2's purpose is to PROVE that the
 typed `package reproosIso` action emits a deterministic hybrid (BIOS +
-UEFI) bootable ISO that the vm-harness boot gate validates end-to-end
+UEFI) bootable ISO that the gosti boot gate validates end-to-end
 on Hyper-V Gen-2 UEFI. The vendored kernel/initramfs let us close that
 loop today, BEFORE the from-source kernel (R8) and initramfs (R7) land.
 
@@ -30,7 +30,7 @@ Choice rationale (vs extracting from R1's vendored cloud VHDX): the
 netinst kernel + initrd are designed to boot a text-mode installer over
 serial -- minimal userspace, no SSH/cloud-init scaffolding -- which is
 the cleanest possible target for "did the kernel + initramfs reach
-userspace?" assertion in R0's vm-harness `bootFromMedia` boot gate. The
+userspace?" assertion in R0's gosti `bootFromMedia` boot gate. The
 cloud-image kernel works too but requires more cloud-init plumbing the
 recipe doesn't yet need.
 

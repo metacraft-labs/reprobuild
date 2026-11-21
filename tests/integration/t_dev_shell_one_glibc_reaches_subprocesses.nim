@@ -350,6 +350,10 @@ suite "dev shell — one glibc reaches a subprocess":
             "check_dev_shell_env.sh")
           copyFile(libScript(), scratch / "scripts" / "lib" /
             "dev_shell_overrides.sh")
+          # Every library the check sources, or it reports a missing file
+          # before it reaches the question this case asks.
+          copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
+            scratch / "scripts" / "lib" / "preloaded_shim_loader.sh")
           copyFile(repoRoot() / ".envrc", scratch / ".envrc")
           copyFile(repoRoot() / "flake.nix", scratch / "flake.nix")
           copyFile(repoRoot() / "scripts" / "dev-shell-pinned-siblings.tsv",
@@ -390,10 +394,17 @@ suite "dev shell — one glibc reaches a subprocess":
               "--set-interpreter", loaderIn(interp), fakeBin / "git"]))
 
           proc runCheck(): CmdResult =
+            # `REPRO_SYSTEMD_ANALYZE` is cleared because the check also
+            # examines the program it names. Inherited from the dev shell, it
+            # is a real binary on the shell's own glibc, and the fabricated
+            # injection below conflicts with it too, so the POSITIVE polarity
+            # was refused for a program this case never set up. The subject
+            # here is the one fabricated tool on PATH.
             runWithEnv(@[toolOnPath("bash"),
                 scratch / "scripts" / "check_dev_shell_env.sh"],
               @[("LD_LIBRARY_PATH", injectDir),
-                ("PATH", fakeBin & $PathSep & getEnv("PATH"))],
+                ("PATH", fakeBin & $PathSep & getEnv("PATH")),
+                ("REPRO_SYSTEMD_ANALYZE", "")],
               scratch)
 
           # NEGATIVE polarity: the tool is on the older glibc.

@@ -42,6 +42,10 @@ import repro_infra/audit_log
 import repro_infra/planner
 import repro_infra/apply
 import repro_infra/rollback
+import repro_infra/service_account
+when defined(posix):
+  import repro_infra/carried_state
+  export carried_state
 
 export errors
 export state_dir
@@ -53,3 +57,4 @@ export audit_log
 export planner
 export apply
 export rollback
+export service_account

@@ -1,0 +1,4 @@
+[[package]]
+name = "nvim"
+activity = "default"
+cask = true

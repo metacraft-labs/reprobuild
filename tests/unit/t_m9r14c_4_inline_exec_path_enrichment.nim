@@ -26,24 +26,18 @@
 ##
 ## ## What this test pins
 ##
-## The fix lives on the LOWERING boundary inside ``lowerGraphAction``;
-## we can't synthesise a GraphNode + lowering call directly without
-## standing up the build engine. Instead we drop in a structural
-## probe: the inline-exec emission in ``autotools_package`` MUST
-## carry a non-empty ``env`` field after the lowering's enrichment
-## pass IF the ``actionPathPrefix`` was non-empty. We can't observe
-## that from the DSL test because the enrichment happens engine-side.
-##
-## Instead this test pins the DSL-side guarantee that the configure
-## action carries the ``inlineExecCall`` shape + the canonical
-## toolIdentityRefs ``["sh"]`` — which is the contract the engine
-## consumes. The end-to-end PATH plumbing is exercised by the smoke
-## driver on Linux (eli-wsl).
+## The constructor emits an inline configure action and intrinsically declares
+## sh, awk, and diff, including provisioning on direct imports. The real
+## subprocess regression lives in integration/t_autotools_configure_tools.nim.
 
-import std/[unittest]
+import std/unittest
 
 import repro_project_dsl
-import repro_dsl_stdlib/constructors
+import repro_dsl_stdlib/constructors/autotools_package
+
+# Exercise the constructor's own imports, rather than the broad constructors
+# aggregator: recipes may import this constructor directly.
+import repro_dsl_stdlib/nixpkgs_pin
 
 suite "DSL-port M9.R.14c.4 — autotools configure inline-exec shape":
 
@@ -61,6 +55,20 @@ suite "DSL-port M9.R.14c.4 — autotools configure inline-exec shape":
       check pkg.buildEdge.call.executableName == "exec"
     finally:
       clearCurrentOwningPackageOverride()
+
+  test "configure intrinsically provisions the Autoconf substitution tools":
+    let action = autotools_package(srcDir = "src").buildEdge
+    for name in ["sh", "awk", "diff"]:
+      check name in action.toolIdentityRefs
+      var found = false
+      for pkg in registeredPackages():
+        if pkg.packageName == name:
+          found = true
+          require pkg.nixProvisioning.len > 0
+          check pkg.nixProvisioning[0].nixpkgsRev == CanonicalNixpkgsRev
+          check pkg.nixProvisioning[0].nixpkgsNarHash == CanonicalNixpkgsNarHash
+          check pkg.nixProvisioning[0].executablePath == "bin/" & name
+      check found
 
   test "configure action declares sh in toolIdentityRefs":
     # ``sh`` rides on the configure action's tool-identity refs so the

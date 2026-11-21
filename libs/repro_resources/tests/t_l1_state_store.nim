@@ -8,8 +8,8 @@
 ##       reaper's standalone-destroy contract);
 ##   (c) atomic-write safety — a partial (temp, un-renamed) write leaves
 ##       the prior record intact;
-##   (d) the lease fields (holders / effectiveDeadline / lastRenewed)
-##       round-trip;
+##   (d) the lease fields (holders / keepHolders / effectiveDeadline /
+##       lastRenewed) round-trip;
 ##   (e) NON-REGRESSION: reconcileResources with NO store configured
 ##       behaves exactly as before (idempotent digest cache-hit), and no
 ##       state files are written.
@@ -199,6 +199,28 @@ suite "L1: persistent resource-state store":
     let nowFar = fromUnix(1_900_000_000)
     check not (pinned.effectiveDeadline.isSome and
                pinned.effectiveDeadline.get < nowFar)
+
+  test "keep holders round-trip through the convenience writer":
+    # The keep holders are lease state like the dated map, so the
+    # `writeStateRecord(store, inst, binding, ...)` overload a reconcile uses
+    # must carry them to disk. A current-format record knows its keep-holder
+    # set (`keepHoldersKnown`) unless the caller says otherwise.
+    discard stubThing("kept", "kv")
+    let inst = collectedResources()[0]
+    let store = scratchStore("keepers")
+    var holders = initTable[string, Time]()
+    holders["run-A"] = fromUnix(1_700_000_100)
+    writeStateRecord(store, inst, ResourceBinding(
+      address: "kept", typeId: inst.typeId, resourceId: stubIdentity(inst),
+      postWriteDigest: stubDigest(inst), present: true),
+      holders = holders, effectiveDeadline = none(Time),
+      lastRenewed = fromUnix(1_700_000_050),
+      keepHolders = @["pin-b", "pin-a"])
+    let rec = readStateRecord(store, "kept")
+    check rec.keepHolders == @["pin-a", "pin-b"]  # canonical order on disk
+    check rec.keepHoldersKnown
+    check rec.holders.len == 1
+    check rec.effectiveDeadline.isNone
 
   test "remove + list round-trip":
     discard stubThing("a", "va")

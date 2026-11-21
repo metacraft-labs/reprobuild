@@ -54,6 +54,10 @@
 ## owned by the proc currently calling them.
 
 import std/[hashes, os, sets, strutils]
+when defined(posix):
+  from std/posix import nil
+when defined(windows):
+  import ./owner_only_file
 
 import bearssl/[ec, hash as bsslHash]
 import bearssl/abi/bearssl_ec as bsslEcAbi
@@ -64,6 +68,7 @@ import nimcrypto/sysrand
 
 import ./types
 import ./key_types
+import ./secret_key
 export key_types
 
 # ---------------------------------------------------------------------------
@@ -122,24 +127,61 @@ proc toHexN(buf: openArray[byte]): string =
 proc toHex32(buf: array[P256PrivLen, byte]): string = toHexN(buf)
 proc toHex65(buf: array[P256PubLen, byte]): string = toHexN(buf)
 
+proc publicKeyHex*(pub: PublicKeyBytes): string =
+  ## The 130-char lower-case hex of the uncompressed point: the one-key-per-
+  ## line form trust-anchor, allowed-signers and recipient-pubkey files hold.
+  toHex65(pub)
+
 proc parseHexBuf(hex: string; expectedBytes: int; what: string):
     seq[byte] =
   if hex.len != expectedBytes * 2:
     raise newException(AuthError,
       what & ": expected " & $(expectedBytes * 2) &
       " hex chars (" & $expectedBytes & " bytes), got " & $hex.len)
+  # Strictly ASCII hex digits. ``parseHexInt`` alone also accepts ``_``,
+  # ``#`` and a ``0x`` prefix inside a pair ("_f", "#f" and "f_" all read
+  # as 15), a wider grammar than infra's Python producer reads; both sides
+  # accept exactly ``[0-9A-Fa-f]{2n}`` (t_rdmf_v3_cross_implementation_
+  # conformance holds them together).
+  for i, c in hex:
+    if c notin HexDigits:
+      raise newException(AuthError,
+        what & ": invalid hex digit at position " & $i)
   result = newSeq[byte](expectedBytes)
   for i in 0 ..< expectedBytes:
-    try:
-      result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
-    except ValueError:
-      raise newException(AuthError,
-        what & ": invalid hex digit at position " & $(2 * i))
+    result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
+
+proc isZeroScalar(value: PrivateKeyBytes): bool =
+  for b in value:
+    if b != 0:
+      return false
+  true
+
+proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
+  for i in 0 ..< P256PrivLen:
+    if value[i] < P256Order[i]:
+      return true
+    if value[i] > P256Order[i]:
+      return false
+  false
 
 proc parsePrivHex(hex: string): PrivateKeyBytes =
+  ## A private scalar read from a file is held to the same range the
+  ## generator samples from, [1, n-1]: a zero scalar has the point at
+  ## infinity for a public key (every ECDH secret derived against it is
+  ## public), and a scalar at or above the group order aliases another
+  ## key. Neither is a key, however well the file is protected, so the
+  ## loader refuses it by name rather than deriving a "public half".
   let buf = parseHexBuf(hex, P256PrivLen, "private-key hex")
   for i in 0 ..< P256PrivLen:
     result[i] = buf[i]
+  if result.isZeroScalar:
+    raise newException(AuthError,
+      "private-key scalar is zero: not a P-256 private key")
+  if not result.scalarLessThanP256Order:
+    raise newException(AuthError,
+      "private-key scalar is not below the P-256 group order: not a " &
+      "P-256 private key")
 
 proc parsePubHex(hex: string): PublicKeyBytes =
   let buf = parseHexBuf(hex, P256PubLen, "public-key hex")
@@ -166,6 +208,7 @@ proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
   ## the 32-byte scalar; the resulting public key is copied out before
   ## the local buffers go out of scope.
   var skBytes: array[P256PrivLen, byte]
+  defer: secureZeroVar(skBytes)
   for i in 0 ..< P256PrivLen:
     skBytes[i] = privateKey[i]
   var sk: bsslEcAbi.EcPrivateKey
@@ -185,20 +228,6 @@ proc derivePublicKey*(privateKey: PrivateKeyBytes): PublicKeyBytes =
   # released.
   for i in 0 ..< P256PubLen:
     result[i] = pkBuf[i]
-
-proc isZeroScalar(value: PrivateKeyBytes): bool =
-  for b in value:
-    if b != 0:
-      return false
-  true
-
-proc scalarLessThanP256Order(value: PrivateKeyBytes): bool =
-  for i in 0 ..< P256PrivLen:
-    if value[i] < P256Order[i]:
-      return true
-    if value[i] > P256Order[i]:
-      return false
-  false
 
 proc randomP256Scalar(): PrivateKeyBytes =
   ## Generate a uniformly distributed P-256 private scalar in [1, n-1] from OS
@@ -231,6 +260,9 @@ proc signMessage*(kp: PeerKeypair; msg: openArray[byte]): SignatureBytes =
   ## live, owned buffer.
   let digest = sha256Digest(msg)
   var skBytes: array[P256PrivLen, byte]
+  # Distributed-Execution M7 (G16): the transient copy of the scalar does
+  # not outlive the signature on this stack frame.
+  defer: secureZeroVar(skBytes)
   for i in 0 ..< P256PrivLen:
     skBytes[i] = kp.privateKey[i]
   var sk: bsslEcAbi.EcPrivateKey
@@ -293,20 +325,65 @@ proc verifySignature*(anchors: TrustAnchors;
 # Key file I/O.
 # ---------------------------------------------------------------------------
 
+proc privateKeyFileText*(priv: PrivateKeyBytes): string =
+  ## The exact contents of an `ecdsa-p256:<hex>` private-key file — what
+  ## `loadPrivateKeyFile` reads. For callers that must create the file
+  ## themselves (exclusively, with a restrictive mode) instead of through
+  ## `loadOrGenerateKeypair`.
+  KeyFilePrefix & toHex32(priv) & "\n"
+
+proc createNewFile(path, content: string; mode: int; ownerOnly: bool) =
+  ## Creates `path` holding `content`, refusing when anything is already
+  ## there: on POSIX `open(O_CREAT|O_EXCL)` with `mode` (so a private key is
+  ## 0600 from the moment it exists, whatever the umask leaves), every write
+  ## checked; on Windows `CREATE_NEW`, with a DACL holding only the current
+  ## user when `ownerOnly`. Never truncates an existing file: a key file a
+  ## caller did not expect to be missing is refused, not replaced. The same
+  ## writer `pki.nim` uses for host CA keys.
+  let parent = parentDir(path)
+  if parent.len > 0 and not dirExists(parent):
+    createDir(parent)
+  when defined(posix):
+    let fd = posix.open(path.cstring, posix.O_WRONLY or posix.O_CREAT or
+      posix.O_EXCL or posix.O_CLOEXEC, posix.Mode(mode))
+    if fd < 0:
+      raise newException(AuthError, "cannot create " & path &
+        " exclusively: " & osErrorMsg(osLastError()))
+    try:
+      var off = 0
+      while off < content.len:
+        let n = posix.write(fd, unsafeAddr content[off], content.len - off)
+        if n < 0:
+          if posix.errno == posix.EINTR: continue
+          raise newException(AuthError, "cannot write " & path & ": " &
+            osErrorMsg(osLastError()))
+        off += n
+    finally:
+      discard posix.close(fd)
+  elif defined(windows):
+    # `CREATE_NEW` itself refuses an existing file or link, so there is no
+    # check-then-create window. The cert gets the same owner-only DACL as
+    # the key: a public key loses nothing by it, and one writer means one
+    # exclusive-create path.
+    discard ownerOnly
+    try:
+      createNewOwnerOnlyFile(path, content)
+    except OwnerOnlyFileError as err:
+      raise newException(AuthError, "cannot create " & path &
+        " exclusively: " & err.msg)
+  else:
+    {.error: "key files need a POSIX or Windows writer".}
+
 proc writeKeyFile(path: string; priv: PrivateKeyBytes) =
   ## Persists the private scalar to `path` as `ecdsa-p256:<hex>` so the
   ## file is unambiguously an ECDSA-P256 key, not an M3 stand-in seed.
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, KeyFilePrefix & toHex32(priv) & "\n")
+  ## Owner-only, created exclusively (`createNewFile`).
+  createNewFile(path, privateKeyFileText(priv), 0o600, ownerOnly = true)
 
 proc writeCertFile(path: string; pub: PublicKeyBytes) =
-  ## Persists the public key to `path` as a single 130-char hex line.
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, toHex65(pub) & "\n")
+  ## Persists the public key to `path` as a single 130-char hex line,
+  ## created exclusively (`createNewFile`); a public key need not be private.
+  createNewFile(path, toHex65(pub) & "\n", 0o644, ownerOnly = false)
 
 proc readSingleHexLine(path: string; what: string): string =
   if not fileExists(path):
@@ -321,18 +398,33 @@ proc readSingleHexLine(path: string; what: string): string =
   raise newException(AuthError,
     what & " file is empty / all-comment: " & path)
 
-proc readKeyFile(path: string): PrivateKeyBytes =
-  ## Parses an `ecdsa-p256:<hex>` file. A file without the prefix is
-  ## treated as a legacy M3 stand-in keypair and rejected (per the
-  ## hard-cutover stance).
-  let line = readSingleHexLine(path, "peer private-key")
+proc parseKeyLine(line, what: string): PrivateKeyBytes =
   if not line.startsWith(KeyFilePrefix):
     raise newException(AuthError,
-      "peer private-key file " & path &
+      "peer private-key file " & what &
       " lacks the `ecdsa-p256:` marker — looks like a legacy M3 " &
       "stand-in keypair. Regenerate the file: this campaign does " &
       "not auto-migrate legacy keys.")
   result = parsePrivHex(line[KeyFilePrefix.len .. ^1])
+
+proc readKeyFile(path: string): PrivateKeyBytes =
+  ## Parses an `ecdsa-p256:<hex>` file. A file without the prefix is
+  ## treated as a legacy M3 stand-in keypair and rejected (per the
+  ## hard-cutover stance).
+  parseKeyLine(readSingleHexLine(path, "peer private-key"), path)
+
+proc parsePrivateKeyText*(text, what: string): PrivateKeyBytes =
+  ## The `ecdsa-p256:<hex>` key in `text`, the bytes of a key file a caller
+  ## read itself -- through a descriptor whose owner and mode it checked
+  ## first, so the check and the read are of the same file. `what` names
+  ## the file in errors. Same rules as `loadPrivateKeyFile`.
+  for rawLine in text.splitLines:
+    let line = rawLine.strip()
+    if line.len == 0 or line.startsWith("#"):
+      continue
+    return parseKeyLine(line, what)
+  raise newException(AuthError,
+    "peer private-key file is empty / all-comment: " & what)
 
 proc readCertFile(path: string): PublicKeyBytes =
   let line = readSingleHexLine(path, "peer public-key (cert)")
@@ -352,6 +444,26 @@ proc loadPrivateKeyFile*(path: string): PrivateKeyBytes =
   ## anything addressed to it and reports no reason why.
   readKeyFile(path)
 
+proc loadExistingKeypair*(certPath, keyPath: string): PeerKeypair =
+  ## Loads a keypair that must already exist: both files present, the key
+  ## an `ecdsa-p256:` private scalar, and the cert the public key it
+  ## derives. Raises `AuthError` naming the file otherwise, and never writes
+  ## anything. For a publisher, whose key is an identity a cache was told to
+  ## trust: a missing file is a mistake to report, not a key to mint.
+  if not fileExists(keyPath):
+    raise newException(AuthError, "publisher private-key file does not " &
+      "exist: " & keyPath)
+  if not fileExists(certPath):
+    raise newException(AuthError, "publisher public-key (cert) file does " &
+      "not exist: " & certPath)
+  let pub = readCertFile(certPath)
+  let priv = readKeyFile(keyPath)
+  if derivePublicKey(priv) != pub:
+    raise newException(AuthError,
+      "peer public-key file does not match ECDSA-P256 derive(" &
+      "privkey): " & certPath & " vs derive(" & keyPath & ")")
+  PeerKeypair(publicKey: pub, privateKey: priv)
+
 proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
   ## Loads the peer's keypair from disk, generating + persisting a
   ## fresh one when either file is missing. The cert file holds the
@@ -361,18 +473,25 @@ proc loadOrGenerateKeypair*(certPath, keyPath: string): PeerKeypair =
   ## When **both** files exist they are read and the public key is
   ## re-derived from the private key + compared with the on-disk
   ## public key; mismatch raises `AuthError`.
+  ##
+  ## Generates only when **neither** file exists. When one exists and the
+  ## other does not -- a typo in one of the two paths is the usual cause --
+  ## it raises `AuthError` naming both instead of minting a pair over the
+  ## file that is there: the private key may be the only copy of a
+  ## publisher identity a cache trusts.
   if fileExists(certPath) and fileExists(keyPath):
-    let pub = readCertFile(certPath)
-    let priv = readKeyFile(keyPath)
-    let derived = derivePublicKey(priv)
-    if derived != pub:
-      raise newException(AuthError,
-        "peer public-key file does not match ECDSA-P256 derive(" &
-        "privkey): " & certPath & " vs derive(" & keyPath & ")")
-    return PeerKeypair(publicKey: pub, privateKey: priv)
+    return loadExistingKeypair(certPath, keyPath)
+  if fileExists(certPath) or fileExists(keyPath) or
+      symlinkExists(certPath) or symlinkExists(keyPath):
+    raise newException(AuthError,
+      "refusing to generate a keypair: only one of the two files exists " &
+      "(cert " & certPath & (if fileExists(certPath): " exists" else:
+      " is missing") & ", key " & keyPath & (if fileExists(keyPath):
+      " exists" else: " is missing") & "); fix the path that is wrong, or " &
+      "remove the remaining file to start a new identity")
   let kp = generateKeypair()
-  writeCertFile(certPath, kp.publicKey)
   writeKeyFile(keyPath, kp.privateKey)
+  writeCertFile(certPath, kp.publicKey)
   kp
 
 # ---------------------------------------------------------------------------
@@ -388,7 +507,9 @@ proc addAnchor*(anchors: TrustAnchors; publicKey: PublicKeyBytes) =
 
 proc loadTrustAnchors*(path: string): TrustAnchors =
   ## Parses a trust-anchor file. Each non-blank, non-`#` line carries a
-  ## hex-encoded uncompressed ECDSA-P256 public key (130 hex chars).
+  ## hex-encoded uncompressed ECDSA-P256 public key (130 hex chars). A
+  ## comment may hold any bytes (UTF-8 such as "§10.3" among them), and a
+  ## leading UTF-8 byte-order mark is skipped.
   ##
   ## The M3 `<pubkey_hex>:<privkey_hex>` shape is rejected with a clear
   ## error so operators know to migrate. Malformed hex lines raise
@@ -397,8 +518,15 @@ proc loadTrustAnchors*(path: string): TrustAnchors =
     raise newException(AuthError,
       "trust anchor file does not exist: " & path)
   result = newTrustAnchors()
+  var text = readFile(path)
+  # A UTF-8 byte-order mark (an editor's, before a comment) is not part of
+  # the first line: kept, it turned a `#` comment into a malformed key and
+  # refused the whole file. Comments are otherwise any bytes, UTF-8
+  # included; key lines stay strictly 130 ASCII hex digits.
+  if text.startsWith("\xEF\xBB\xBF"):
+    text = text[3 .. ^1]
   var lineNo = 0
-  for rawLine in readFile(path).splitLines:
+  for rawLine in text.splitLines:
     inc lineNo
     let line = rawLine.strip()
     if line.len == 0 or line.startsWith("#"):

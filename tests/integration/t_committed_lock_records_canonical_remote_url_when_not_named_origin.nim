@@ -99,12 +99,12 @@ suite "RX Phase-F: committed lock records canonical remote url (not origin)":
         git(gitBin, repo, "remote get-url metacraft-labs").output.strip()
       check canonUrl.len > 0
 
-      # ---- (1) refresh writes a v2 lock. ----
+      # ---- (1) refresh writes a v3 lock. ----
       let refresh = run(reproBinary & " lock refresh " & q(repo))
       check refresh.code == 0
       let lockBody = readFile(repo / "repro.lock")
-      check "reprobuild.solved-graph-lock.v2" in lockBody
-      check "path = \".\"" in lockBody
+      check "reprobuild.solved-graph-lock.v3" in lockBody
+      check "self = \"true\"" in lockBody
       check ("revision = \"" & headSha & "\"") in lockBody
 
       # ---- (2) the dep records the CANONICAL (metacraft-labs) url, NOT "". ----

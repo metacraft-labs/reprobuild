@@ -1,0 +1,34 @@
+# GM9: a [[resource]] row with `activity` belongs to that activity, like a
+# call in `activity <name>: resources:`; it applies only on a host whose
+# selection enables the activity, and where its `when` (if any) holds. A row
+# without `activity` stays profile-wide. An activity no block declares
+# (`gm9_server_extras`, named only here and by the `hosts` map) is created,
+# as for a package row.
+[[package]]
+name = "busybox"
+activity = "desktop_core"
+
+[[resource]]
+kind = "env.userVariable"
+name = "GM9_EVERYWHERE"
+value = "1"
+
+[[resource]]
+kind = "fs.userFile"
+activity = "desktop_core"
+hostFile = "~/.config/gm9/wm.conf"
+content = "wm = 1\n"
+
+[[resource]]
+kind = "fs.userFile"
+activity = "desktop_core"
+when = "linux"
+hostFile = "~/.config/gm9/panel.conf"
+content = "panel = 1\n"
+address = "gm9-linux-panel"
+
+[[resource]]
+kind = "env.userVariable"
+activity = "gm9_server_extras"
+name = "GM9_SERVER"
+value = "1"

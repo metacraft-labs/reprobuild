@@ -48,7 +48,10 @@ proc writeStrSeq(outp: var seq[byte]; values: openArray[string]) =
     outp.writeStr(v)
 
 proc readStrSeq(buf: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(buf, pos))
+  let countRaw = readU32Le(buf, pos)
+  if not elementCountFits(countRaw, buf.len - pos, 4):
+    raise newException(LaunchPlanCodecError, "element count exceeds remaining bytes")
+  let count = int(countRaw)
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readStr(buf, pos)
@@ -151,11 +154,17 @@ proc decodeBody(buf: openArray[byte]): LaunchPlan =
   result.arguments = readStrSeq(buf, pos)
   result.hasWorkingDirectory = readBool(buf, pos)
   result.workingDirectory = readStr(buf, pos)
-  let envCount = int(readU32Le(buf, pos))
+  let envCountRaw = readU32Le(buf, pos)
+  if not elementCountFits(envCountRaw, buf.len - pos, 9):
+    raise newException(LaunchPlanCodecError, "element count exceeds remaining bytes")
+  let envCount = int(envCountRaw)
   result.environmentBindings = newSeq[EnvBinding](envCount)
   for i in 0 ..< envCount:
     result.environmentBindings[i] = readEnvBinding(buf, pos)
-  let execCount = int(readU32Le(buf, pos))
+  let execCountRaw = readU32Le(buf, pos)
+  if not elementCountFits(execCountRaw, buf.len - pos, 8):
+    raise newException(LaunchPlanCodecError, "element count exceeds remaining bytes")
+  let execCount = int(execCountRaw)
   result.executableBindings = newSeq[ExecutableBinding](execCount)
   for i in 0 ..< execCount:
     result.executableBindings[i] = readExecBinding(buf, pos)

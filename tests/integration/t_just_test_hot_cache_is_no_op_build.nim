@@ -41,6 +41,7 @@
 ##   REPRO_M1_LONG_TEST=1 ./build/test-bin/t_just_test_hot_cache_is_no_op_build
 
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 const RepoRootMarker = "repro.nim"
 const LongTestEnv = "REPRO_M1_LONG_TEST"

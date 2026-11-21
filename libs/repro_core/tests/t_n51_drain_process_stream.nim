@@ -49,6 +49,59 @@ import std/[os, osproc, streams, strutils, unittest]
 
 import repro_core/process_streams
 
+# Two child modes for the `drainStdoutAndStderr` cases at the end of this
+# file. The test binary re-invokes itself, so no shell or build-time fixture
+# is needed.
+#
+# `--emit-both O E` writes O bytes of 'o' to stdout and E bytes of 'e' to
+# stderr, interleaved in 4 KiB pieces so neither stream can be read to EOF
+# before the other, then exits 5.
+#
+# `--capture-once O E` starts an `--emit-both O E` grandchild, captures it
+# with `drainStdoutAndStderr`, checks every byte and exits 0 on a match. The
+# captured strings are destroyed when `captureOnce` returns, before `quit`.
+
+proc captureOnce(outBytes, errBytes: int): int =
+  let p = startProcess(getAppFilename(),
+    args = @["--emit-both", $outBytes, $errBytes], options = {})
+  try:
+    let captured = drainStdoutAndStderr(p)
+    let exitCode = p.waitForExit()
+    if exitCode != 5:
+      echo "emitter exited ", exitCode
+      return 2
+    if captured.output != repeat('o', outBytes):
+      echo "stdout capture differs: ", captured.output.len, " of ", outBytes
+      return 3
+    if captured.errorOutput != repeat('e', errBytes):
+      echo "stderr capture differs: ", captured.errorOutput.len, " of ",
+        errBytes
+      return 4
+  finally:
+    p.close()
+  0
+
+if paramCount() == 3 and paramStr(1) == "--capture-once":
+  quit(captureOnce(parseInt(paramStr(2)), parseInt(paramStr(3))))
+
+if paramCount() == 3 and paramStr(1) == "--emit-both":
+  let outBytes = parseInt(paramStr(2))
+  let errBytes = parseInt(paramStr(3))
+  var outLeft = outBytes
+  var errLeft = errBytes
+  while outLeft > 0 or errLeft > 0:
+    let o = min(outLeft, 4096)
+    if o > 0:
+      stdout.write(repeat('o', o))
+      outLeft -= o
+    let e = min(errLeft, 4096)
+    if e > 0:
+      stderr.write(repeat('e', e))
+      errLeft -= e
+  stdout.flushFile()
+  stderr.flushFile()
+  quit(5)
+
 const
   Head = "first"
   Filler = 400
@@ -139,3 +192,58 @@ suite "N51 repro_core/process_streams: drainStream reads a child to EOF":
   test "drainStream on a nil stream is empty, not a crash":
     ## Every call site guards `outputStream != nil` or relies on this.
     check drainStream(nil) == ""
+
+suite "repro_core/process_streams: drainStdoutAndStderr":
+  ## REGRESSION for the cross-thread free. The stderr reader used to be a
+  ## thread that built a Nim string on its own heap; the caller freed that
+  ## string after the thread had exited, which made Nim's ORC allocator
+  ## write into the dead thread's region (`rawDealloc` ->
+  ## `addToSharedFreeList`) and crashed the profile compile on Windows.
+  ## Empty output is included because it crashed too: the old drain
+  ## allocated on the reader even when there was nothing to read.
+  ##
+  ## EACH CAPTURE RUNS IN A FRESH PROCESS (`--capture-once`), because
+  ## whether the write into released memory faults depends on the state of
+  ## the process heap: a fresh process is where it was measured to fault
+  ## reliably on Windows, while a loop inside one long-lived process can
+  ## survive it. The child destroys the captured strings after the reader
+  ## has exited -- the step that used to crash -- so its exit code is the
+  ## assertion, and its byte comparisons keep the capture honest.
+  const FreshProcessRuns = 10
+
+  proc captureInFreshProcesses(outBytes, errBytes: int):
+      seq[tuple[output: string; exitCode: int]] =
+    ## `FreshProcessRuns` children, each running `--capture-once`; returns
+    ## each child's exit code and its own diagnostic output.
+    for i in 1 .. FreshProcessRuns:
+      let p = startProcess(getAppFilename(),
+        args = @["--capture-once", $outBytes, $errBytes],
+        options = {poStdErrToStdOut})
+      try:
+        let output = drainStream(p.outputStream)
+        result.add((output: output, exitCode: p.waitForExit()))
+      finally:
+        p.close()
+
+  test "fresh-process captures are whole: both empty":
+    for run in captureInFreshProcesses(0, 0):
+      checkpoint(run.output)
+      check run.exitCode == 0
+
+  test "fresh-process captures are whole: stdout only":
+    for run in captureInFreshProcesses(100, 0):
+      checkpoint(run.output)
+      check run.exitCode == 0
+
+  test "fresh-process captures are whole: stderr only":
+    for run in captureInFreshProcesses(0, 100):
+      checkpoint(run.output)
+      check run.exitCode == 0
+
+  test "fresh-process captures are whole: both past a pipe buffer":
+    # 300 KB each, past the 64 KiB pipe buffer of the hosts measured, so a
+    # reader that serviced one stream after the other would deadlock here
+    # instead of passing.
+    for run in captureInFreshProcesses(300_000, 300_000):
+      checkpoint(run.output)
+      check run.exitCode == 0

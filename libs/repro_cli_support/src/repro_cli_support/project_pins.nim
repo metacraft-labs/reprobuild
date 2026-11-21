@@ -205,6 +205,11 @@ proc publishPinnedProviderNim*(nimExe: string) =
   ## recipe, and an ambient variable that silently outranked it would be the
   ## "whatever compiler the invocation finds" the pin replaces. Overriding a
   ## DIFFERENT explicit value is said out loud, once.
+  ##
+  ## An inherited ``REPRO_INSTALLED_PREFIX_NIM`` is cleared: it says the
+  ## provider compiler is the installed prefix's Nim, and with the pin
+  ## published it is not, so a later ``uses: nim`` check would judge the
+  ## recipe against the wrong release (N3: "A project pin still wins").
   let existing = getEnv(NimCompilerEnvVar)
   if existing.len > 0 and existing != nimExe:
     try:
@@ -217,6 +222,7 @@ proc publishPinnedProviderNim*(nimExe: string) =
         existing & " is overridden by the project's pinned provider " &
         "compiler " & nimExe)
   putEnv(NimCompilerEnvVar, nimExe)
+  delEnv(InstalledPrefixNimEnvVar)
 
 proc exemptFromPins(args: openArray[string]): bool =
   ## Verbs the bootstrap answers for ITSELF, in any project:
@@ -238,10 +244,11 @@ proc exemptFromPins(args: openArray[string]): bool =
 
 proc needsProviderToolchain(args: openArray[string]): bool =
   ## Whether the invocation may compile a provider, so a non-resident pinned
-  ## compiler is worth realizing now. ``--version`` and help never do.
+  ## compiler is worth realizing now. ``--version``, the ``version`` verb and
+  ## help never do.
   if args.len == 0:
     return false
-  args[0] notin ["--version", "-V", "help", "--help", "-h"]
+  args[0] notin ["--version", "-V", "version", "help", "--help", "-h"]
 
 proc execHandOver(entryPoint: string; args: seq[string]): int =
   ## Replace this process with the pinned entry point (POSIX ``execv``), or

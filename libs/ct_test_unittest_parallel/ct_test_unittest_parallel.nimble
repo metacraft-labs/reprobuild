@@ -1,7 +1,7 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Tier-1 Standard binary-runner protocol shim around std/unittest (--list-json, --run, NIMTEST_RESULT_FILE)"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 
 requires "nim >= 2.2.0"

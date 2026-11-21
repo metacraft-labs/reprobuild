@@ -63,6 +63,7 @@
 ## Skip rule: ``git`` missing on PATH.
 
 import std/[os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_core/cli_images
 import repro_test_support
@@ -106,8 +107,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "lib-a"
-default_revision = "main"
-trunk = "main"
 
 [[remote]]
 name = "lib-a-origin"
@@ -124,23 +123,23 @@ includes = [
 """
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 proc seedOrigin(gitBin, originPath, seedPath, branch: string) =
@@ -259,10 +258,13 @@ proc anyPushurlUnder(gitBin, root: string): seq[string] =
     if value.len > 0:
       result.add(work & " -> " & value)
 
-proc runMigrate(fx: Fixture; runner: string): CmdResult =
+proc runMigrate(fx: Fixture; runner: string; dryRun = false): CmdResult =
+  var argv = @[fx.reproBin, "gateway", "migrate",
+    "--workspace-root=" & fx.workspaceRoot]
+  if dryRun:
+    argv.add("--dry-run")
   runShell(shellCommand(
-    @[fx.reproBin, "gateway", "migrate",
-      "--workspace-root=" & fx.workspaceRoot],
+    argv,
     @[(name: "REPROBUILD_REPRO", value: runner),
       # Keep the gateway tree inside the fixture: `defaultCacheRoot` honours
       # this override verbatim and the gateways root is its sibling.
@@ -351,3 +353,44 @@ suite "PG-14 — migration refuses when the hook writer is not the hook runner":
       check "NOTHING was wired" in afterControl.output
       for repoPath in fx.repoPaths:
         check pushurlOf(gitBin, repoPath).startsWith(fx.scratch / "gateways")
+
+  test "t_gateway_migrate_dry_run_reports_would_wire_and_writes_no_pushurl":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs real repositories with real " &
+        "remotes for the sweep to have push urls to preview or write")
+    else:
+      let fx = setupFixture(gitBin)
+      defer: removeDir(fx.scratch)
+
+      # (1) --dry-run on an unwired workspace previews without mutating.
+      let dry = runMigrate(fx, fx.reproBin, dryRun = true)
+      checkpoint("(1) dry-run migrate output:\n" & dry.output)
+      check dry.code == 0
+      check anyPushurlUnder(gitBin, fx.scratch).len == 0
+      for name in ["lib-a", "lib-b"]:
+        let repoPath = fx.workspaceRoot / name
+        check ("reprobuild gateway: " & name & ": dry-run: would wire " &
+          repoPath & " -> ") in dry.output
+      check ": wired -> " notin dry.output
+
+      # (2) Live sweep without --dry-run actually wires and differs from preview.
+      let live = runMigrate(fx, fx.reproBin, dryRun = false)
+      checkpoint("(2) live migrate output:\n" & live.output)
+      check live.code == 0
+      check dry.output != live.output
+      for name in ["lib-a", "lib-b"]:
+        check ("reprobuild gateway: " & name & ": wired -> ") in live.output
+      check "dry-run: would wire" notin live.output
+      check anyPushurlUnder(gitBin, fx.scratch).len == fx.repoPaths.len
+
+      # (3) Second --dry-run after wiring reports "already wired" for each repo.
+      let dryAfter = runMigrate(fx, fx.reproBin, dryRun = true)
+      checkpoint("(3) dry-run after live migrate output:\n" & dryAfter.output)
+      check dryAfter.code == 0
+      for name in ["lib-a", "lib-b"]:
+        check ("reprobuild gateway: " & name & ": already wired") in
+          dryAfter.output
+      check "would wire" notin dryAfter.output
+      check ": wired -> " notin dryAfter.output
+

@@ -163,8 +163,7 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"lib-a\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-c-origin\"\nfetch = \"" & libCUrl & "\"\n\n" &
@@ -175,33 +174,33 @@ proc projectTomlWith3Remotes(libAUrl, libBUrl, libCUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libCFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
 remote = "lib-c-origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- fixture builder ------------------------------------------------------
@@ -343,7 +342,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
 
       # The on-disk workspace.toml carries
       # ``feature_started = true`` under ``[workspace]``.
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       let parsed = readWorkspaceLocal(tomlPath)
       check parsed.workspace.branch.isSome
       check parsed.workspace.branch.get() == "feature-create"
@@ -611,7 +610,7 @@ suite "M28/WV-5 — repro switch -b <name> marks feature branch":
       check readWorkspaceFeatureStarted(fx.workspaceRoot) == true
       let firstReport = readReport(fx)
 
-      let tomlPath = fx.workspaceRoot / ".repro" / "workspace.toml"
+      let tomlPath = fx.workspaceRoot / ".repro" / "workspace-state.toml"
       let firstBytes = readFile(tomlPath)
 
       # Second invocation: every repo is already on the requested

@@ -1,0 +1,30 @@
+{
+  "format": "repro.host-facts",
+  "schemaVersion": 1,
+  "side": "nix",
+  "host": "gm6-host",
+  "system": "x86_64-linux",
+  "categories": {
+    "packages": [
+      { "id": "bash", "origin": "home.packages bash-5.3p3 (nixpkgs#bash)", "version": "5.3p3" },
+      { "id": "jq", "origin": "home.packages jq-1.8.1 (nixpkgs#jq)", "version": "1.8.1" }
+    ],
+    "files": [
+      { "id": "~/.config/gm6/app.conf", "origin": "home.file .config/gm6/app.conf", "mode": "0644", "digest": "sha256:0a775022744f64c352863f165f2e125898419999bc57c83204772036d0ef6b2e" },
+      { "id": "~/.zshrc", "origin": "home.file .zshrc", "mode": "0644", "digest": "sha256:1111111111111111111111111111111111111111111111111111111111111111" }
+    ],
+    "environment": [
+      { "id": "path:~/.local/bin", "origin": "home.sessionPath" }
+    ],
+    "services": [
+      { "id": "systemd:gm6.service", "origin": "systemd.user gm6.service", "enabled": false, "digest": "sha256:1f454cdbf5f38f97748d61574f646163e50943b9678ed5c015398c757497ce16" },
+      { "id": "systemd:gm6-same.timer", "origin": "systemd.user gm6-same.timer", "enabled": true, "digest": "sha256:2222222222222222222222222222222222222222222222222222222222222222" }
+    ]
+  },
+  "unmapped": [
+    { "category": "packages", "id": "hello-2.12.2", "origin": "home.packages", "reason": "no Nix contribution in reprobuild-nix-packages names an attribute whose package is `hello`" }
+  ],
+  "uncategorized": [
+    { "id": "dconf:org/gnome/desktop/interface/color-scheme", "origin": "dconf.settings", "reason": "dconf settings are written at activation; no host-facts category covers them" }
+  ]
+}

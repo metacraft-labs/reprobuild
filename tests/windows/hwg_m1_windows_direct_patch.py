@@ -45,6 +45,11 @@ from build_windows_agent import (  # noqa: E402
 )
 
 
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+SYNCHRONIZE = 0x00100000
+WAIT_OBJECT_0 = 0
+
+
 def stop_process(pid: int, stop_file: Path) -> None:
     stop_file.touch()
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -59,18 +64,88 @@ def stop_process(pid: int, stop_file: Path) -> None:
         kernel32.CloseHandle(handle)
 
 
+def target_status(pid: int | None) -> str:
+    """Say whether the target is still running, and if not, how it exited.
+
+    A target that died and one that is alive but silent are different
+    defects, and a timeout message is the only place anyone reads the
+    answer. The target exits 3 when it cannot reopen its observations file,
+    so that code distinguishes a lost race from a crash.
+    """
+    if pid is None:
+        return "target pid unknown"
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    # Declare the signatures: a HANDLE is pointer-sized, and ctypes would
+    # otherwise assume a C int and truncate it on 64-bit Windows.
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = (ctypes.c_ulong, ctypes.c_int, ctypes.c_ulong)
+    kernel32.WaitForSingleObject.restype = ctypes.c_ulong
+    kernel32.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_ulong)
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.GetExitCodeProcess.argtypes = (
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_ulong),
+    )
+    kernel32.CloseHandle.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = (ctypes.c_void_p,)
+    handle = kernel32.OpenProcess(
+        PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, False, pid
+    )
+    if not handle:
+        return (
+            f"target pid {pid} cannot be opened "
+            f"(GetLastError={ctypes.get_last_error()}), so it has already exited"
+        )
+    try:
+        if kernel32.WaitForSingleObject(handle, 0) != WAIT_OBJECT_0:
+            return f"target pid {pid} is still running"
+        code = ctypes.c_ulong(0)
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+            return f"target pid {pid} has exited; its exit code is unavailable"
+        return f"target pid {pid} exited with code {code.value}"
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def read_observations_text(path: Path, timeout: float = 2.0) -> str:
+    """Read the target's observations file around its own writes.
+
+    The target appends through ``_wfopen_s``, which holds the file
+    exclusively for each write, about 100 times a second. A read that lands
+    inside one of those writes fails with a sharing violation, a transient
+    the target itself retries on its side. Python's ``open`` reports it as a
+    bare ``PermissionError`` (errno 13, no ``winerror``), so retry that error,
+    and only for ``timeout`` seconds: a file that stays locked or denied is a
+    real failure and is raised.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            return path.read_text(encoding="ascii")
+        except PermissionError:
+            if time.monotonic() >= deadline:
+                raise
+        time.sleep(0.005)
+
+
 def observations(path: Path) -> list[int]:
     if not path.is_file():
         return []
     result: list[int] = []
-    for line in path.read_text(encoding="ascii").splitlines():
+    for line in read_observations_text(path).splitlines():
         fields = line.split(",")
         if len(fields) == 2:
             result.append(int(fields[1]))
     return result
 
 
-def wait_for_value(path: Path, value: int, timeout: float = 10.0) -> list[int]:
+def wait_for_value(
+    path: Path,
+    value: int,
+    timeout: float = 10.0,
+    pid: int | None = None,
+    context: str = "",
+) -> list[int]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         seen = observations(path)
@@ -78,11 +153,18 @@ def wait_for_value(path: Path, value: int, timeout: float = 10.0) -> list[int]:
             return seen
         time.sleep(0.025)
     raise AssertionError(
-        f"timed out waiting for target value {value}; saw {observations(path)}"
+        f"timed out waiting for target value {value}; saw {observations(path)}; "
+        f"{target_status(pid)}{context}"
     )
 
 
-def wait_for_count(path: Path, count: int, timeout: float = 10.0) -> list[int]:
+def wait_for_count(
+    path: Path,
+    count: int,
+    timeout: float = 10.0,
+    pid: int | None = None,
+    context: str = "",
+) -> list[int]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         seen = observations(path)
@@ -90,7 +172,8 @@ def wait_for_count(path: Path, count: int, timeout: float = 10.0) -> list[int]:
             return seen
         time.sleep(0.025)
     raise AssertionError(
-        f"timed out waiting for {count} observations; saw {observations(path)}"
+        f"timed out waiting for {count} observations; saw {observations(path)}; "
+        f"{target_status(pid)}{context}"
     )
 
 
@@ -272,7 +355,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
         launcher_evidence = json.loads(launcher_output.splitlines()[-1])
         pid = int(launcher_evidence["pid"])
         try:
-            before = wait_for_value(observed, 18)
+            before = wait_for_value(
+                observed, 18, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
             self.assertGreaterEqual(before.count(18), 1)
             applied = subprocess.run(
                 self.driver_command(pid, self.target, self.pdb, report),
@@ -285,7 +370,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(applied.returncode, 0, applied.stdout)
-            after = wait_for_value(observed, 77)
+            after = wait_for_value(
+                observed, 77, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
             evidence = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(evidence["outcome"], "applied")
             self.assertIn("direct-patch-injection", evidence["agentCapabilities"])
@@ -357,7 +444,9 @@ class WindowsDirectPatchGate(unittest.TestCase):
         self.assertEqual(launched.returncode, 0, launcher_output)
         pid = int(json.loads(launcher_output.splitlines()[-1])["pid"])
         try:
-            before = wait_for_count(observed, 3)
+            before = wait_for_count(
+                observed, 3, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
             self.assertEqual(set(before), {18})
             applied = subprocess.run(
                 self.driver_command(
@@ -372,13 +461,160 @@ class WindowsDirectPatchGate(unittest.TestCase):
                 check=False,
             )
             self.assertEqual(applied.returncode, 0, applied.stdout)
-            after = wait_for_count(observed, len(before) + 10)
+            after = wait_for_count(
+                observed,
+                len(before) + 10,
+                pid=pid,
+                context=f"\nlauncher:\n{launcher_output}",
+            )
             evidence = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(evidence["outcome"], "applied")
             self.assertEqual(set(after), {18})
             self.assertNotIn(77, after)
         finally:
             stop_process(pid, stop)
+
+    def test_trigger_wait_ends_at_the_requested_trigger_timeout(self) -> None:
+        """The driver gives up --trigger-timeout-ms after it is ready.
+
+        The default wait is 30 s, so a 2000 ms request that ends within
+        a few seconds proves the flag sets it. The target keeps its original
+        behaviour: nothing is published without the trigger.
+        """
+        observed = self.work / "trigger-timeout-observations.csv"
+        stop = self.work / "trigger-timeout.stop"
+        report = self.work / "trigger-timeout-driver.json"
+        ready = self.work / "trigger-timeout.ready"
+        trigger = self.work / "trigger-timeout.trigger"
+        for path in (observed, stop, report, ready, trigger):
+            path.unlink(missing_ok=True)
+        launcher_log = self.work / "trigger-timeout-launcher.txt"
+        with launcher_log.open("w+", encoding="utf-8") as output:
+            launched = subprocess.run(
+                [
+                    str(self.artifacts["launcher"]),
+                    "--agent",
+                    str(self.artifacts["agent"]),
+                    "--",
+                    str(self.target),
+                    str(observed),
+                    str(stop),
+                ],
+                cwd=REPO,
+                env=self.env,
+                text=True,
+                stdout=output,
+                stderr=subprocess.STDOUT,
+                timeout=20,
+                check=False,
+            )
+            output.seek(0)
+            launcher_output = output.read()
+        self.assertEqual(launched.returncode, 0, launcher_output)
+        pid = int(json.loads(launcher_output.splitlines()[-1])["pid"])
+        try:
+            before = wait_for_count(
+                observed, 3, pid=pid, context=f"\nlauncher:\n{launcher_output}"
+            )
+            self.assertEqual(set(before), {18})
+            driver = subprocess.Popen(
+                self.driver_command(pid, self.target, self.pdb, report)
+                + [
+                    "--ready-file",
+                    str(ready),
+                    "--trigger-file",
+                    str(trigger),
+                    "--trigger-timeout-ms",
+                    "2000",
+                ],
+                cwd=REPO,
+                env=self.env,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+            )
+            try:
+                deadline = time.monotonic() + 20.0
+                while not ready.is_file():
+                    if driver.poll() is not None:
+                        self.fail(
+                            "driver exited before signalling ready:\n"
+                            + driver.communicate()[0]
+                        )
+                    if time.monotonic() >= deadline:
+                        self.fail("driver did not signal ready within 20 s")
+                    time.sleep(0.01)
+                ready_at = time.monotonic()
+                driver_output, _ = driver.communicate(timeout=30)
+                waited = time.monotonic() - ready_at
+            finally:
+                if driver.poll() is None:
+                    driver.kill()
+                    driver.wait(timeout=10)
+            self.assertEqual(driver.returncode, 1, driver_output)
+            self.assertIn(
+                "timed out after 2000 ms waiting for trigger file", driver_output
+            )
+            self.assertGreaterEqual(waited, 1.5, driver_output)
+            self.assertLess(waited, 10.0, driver_output)
+            self.assertFalse(report.exists())
+            after = wait_for_count(
+                observed,
+                len(observations(observed)) + 3,
+                pid=pid,
+                context=f"\nlauncher:\n{launcher_output}",
+            )
+            self.assertEqual(set(after), {18})
+        finally:
+            stop_process(pid, stop)
+
+    def test_trigger_timeout_values_are_validated(self) -> None:
+        report = self.work / "trigger-timeout-refused.json"
+        report.unlink(missing_ok=True)
+        base = self.driver_command(1, self.target, self.pdb, report)
+        trigger_files = [
+            "--ready-file",
+            str(self.work / "refused.ready"),
+            "--trigger-file",
+            str(self.work / "refused.trigger"),
+        ]
+        cases = [
+            (
+                base + trigger_files + ["--trigger-timeout-ms", "0"],
+                "--trigger-timeout-ms must be a positive number of milliseconds",
+            ),
+            (
+                base + trigger_files + ["--trigger-timeout-ms", "-5"],
+                "--trigger-timeout-ms must be a positive number of milliseconds",
+            ),
+            (
+                base + trigger_files + ["--trigger-timeout-ms", "1.5"],
+                "--trigger-timeout-ms takes a whole number of milliseconds",
+            ),
+            (
+                base + trigger_files + ["--trigger-timeout-ms", "soon"],
+                "--trigger-timeout-ms takes a whole number of milliseconds",
+            ),
+            (
+                base + ["--trigger-timeout-ms", "5000"],
+                "--trigger-timeout-ms requires --ready-file and --trigger-file",
+            ),
+        ]
+        for command, message in cases:
+            with self.subTest(arguments=command[len(base) :]):
+                refused = subprocess.run(
+                    command,
+                    cwd=REPO,
+                    env=self.env,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    timeout=30,
+                    check=False,
+                )
+                self.assertEqual(refused.returncode, 1, refused.stdout)
+                self.assertIn(message, refused.stdout)
+                self.assertFalse(report.exists())
 
     def test_missing_function_padding_is_a_named_prepublication_refusal(self) -> None:
         report = self.work / "no-padding-driver.json"

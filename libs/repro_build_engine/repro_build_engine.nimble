@@ -1,5 +1,5 @@
 version       = "0.1.0"
 author        = "Metacraft Labs"
 description   = "Reprobuild normalized action graph and local build engine"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "src"

@@ -53,6 +53,7 @@ import repro_attest
 import repro_attest_verify
 import repro_attest_verify/snp_report
 import repro_cli_support/attest as cli_attest
+import repro_test_support/process_fixtures
 
 include ./snp_vectors
 include ./attestation_verifier_harness
@@ -263,11 +264,11 @@ require_challenge = true
    .replace("@BL@", $bootloader).replace("@TEE@", $tee)
    .replace("@SNP@", $snp).replace("@UC@", $microcode)
 
-const Now = 1_790_812_800'i64
-  ## A fixed instant, so nothing below can move because the clock did.
-  ## 2026-10-01T00:00:00Z: inside the pinned Milan revocation list's
-  ## window (2026-09-22 to 2026-11-09) and every certificate's; see
-  ## `snp_vectors`.
+const Now = 1_790_121_600'i64
+  ## 2026-09-23T00:00:00Z. A fixed instant, so nothing below can move
+  ## because the clock did — and the particular instant is derived
+  ## rather than chosen, by the rule `snp_vectors` states: the first UTC
+  ## midnight at which every artifact this gate judges is in force.
 
 proc verdictFor(p: Part; manifestText: string;
                 bootloader, tee, snp, microcode: int;
@@ -549,6 +550,7 @@ suite "the certificate chain the AGENT produced reaches the verdict":
     # it against the vendor root it holds. Nothing in between is
     # hand-assembled.
     let dir = getTempDir() / ("repro-snp-verdict-" & $getCurrentProcessId())
+    releaseDirAtProcessExit(dir)    # nothing else removed it
     createDir(dir)
     writeFile(dir / TsmOutblobAttr, stringOfHex(partA.reportHex))
     writeFile(dir / TsmProviderAttr, SevSnpProviderName & "\n")
@@ -631,7 +633,7 @@ suite "the command line can hand the verifier a vendor revocation list":
   # THE ASSERTION IS DELIBERATELY NOT "the chain row passes". The
   # command line takes its clock from `epochTime()` and has no
   # override, so a case that required an ACCEPTANCE over this pinned
-  # revocation list would turn red on 2026-10-04 when the list expires
+  # revocation list would turn red the day that list expires
   # — which is precisely the two-clock mistake the ledger beside this
   # corpus exists to document. What is asserted instead is
   # clock-independent and is the
@@ -640,6 +642,11 @@ suite "the command line can hand the verifier a vendor revocation list":
   # did not reach the field.
 
   let dir = getTempDir() / ("repro-attest-vendor-crl-" & $getCurrentProcessId())
+  # Removed when THIS process exits. Suite-level code runs in every process
+  # the runner starts -- one per case, plus its ``--list-json`` probe -- and
+  # nothing removed this directory in any of them. Registered before it is
+  # created. See ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(dir)
   createDir(dir)
 
   proc write(name, content: string): string =

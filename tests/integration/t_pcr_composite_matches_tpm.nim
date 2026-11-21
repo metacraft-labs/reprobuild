@@ -72,6 +72,7 @@
 ## what one produced.
 
 import std/[os, osproc, random, strutils, tables, times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_attest
 import ./tpm2_quote_vectors

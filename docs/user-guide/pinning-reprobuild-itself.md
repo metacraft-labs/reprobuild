@@ -38,7 +38,7 @@ as a first-class locked dependency with a content-addressed coordinate:
 
 ```toml
 packages = [ …, { name = "reprobuild", version = "0.1.4", source = "store", selection = "selected" } ]
-deps = [ …, { name = "reprobuild", path = "", coord_kind = "store",
+deps = [ …, { name = "reprobuild", coord_kind = "store",
               store_hash = "cba8eeac…", integrity = "blake3:cba8eeac…",
               version = "0.1.4", … } ]
 ```
@@ -138,7 +138,7 @@ bare `nim` entry most locks already carry pins nothing, and the provider is
 compiled with the bootstrap's own Nim.
 
 ```toml
-deps = [ …, { name = "nim", path = "", coord_kind = "store",
+deps = [ …, { name = "nim", coord_kind = "store",
               store_hash = "…", integrity = "blake3:…", version = "2.2.8", …,
               archive_url = "https://nim-lang.org/download/nim-2.2.8_x64.zip",
               archive_sha256 = "11fe2415a64a791b899cc78e2eeacdde93b5f122f2fabc447db36d38002bfb8c",

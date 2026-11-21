@@ -934,6 +934,76 @@ when defined(posix):
       checkpoint audit.output
       check audit.exitCode == 0
       check audit.output.len == 0
+      removeFile(fixture.metadataPath(fixture.executable, "arm64", "deps"))
+      check fixture.runAudit().exitCode != 0
+
+    test "declared interpreted helper requires a pinned native principal":
+      let fixture = makeFixture(repoRoot)
+      defer: removeDir(fixture.root)
+      # This Linux-hosted fixture uses the real executable store interpreter;
+      # existing inspection adapters model Darwin slices/signatures only.
+      let resolved = execCmdEx(quoteShellCommand(@["realpath", findExe("python3")]))
+      require resolved.exitCode == 0
+      let interpreter = resolved.output.strip()
+      require interpreter.startsWith("/nix/store/")
+      let helper = fixture.packageRoot / "bin" / ".reprobuild-nix-daemon-wrapped"
+      writeExecutable(helper, "#!" & interpreter & "\nprint('helper')\n")
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".archs"),
+        "x86_64 arm64\n")
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".signature"),
+        "valid\n")
+      for arch in ["x86_64", "arm64"]:
+        fixture.writeSlice(interpreter, arch, @[], @["/usr/lib/libSystem.B.dylib"])
+      let valid = fixture.runAudit()
+      checkpoint valid.output
+      check valid.exitCode == 0
+      setFilePermissions(helper, {fpUserRead, fpUserWrite})
+      check fixture.runAudit().exitCode != 0
+      setFilePermissions(helper, {fpUserRead, fpUserWrite, fpUserExec})
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".archs"), "\n")
+      check fixture.runAudit().exitCode != 0
+      # An interpreter has its own closure, not the SDK's six RPATH entries.
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".archs"),
+        "x86_64\n")
+      check fixture.runAudit().exitCode != 0
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".archs"),
+        "x86_64 arm64\n")
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".signature"),
+        "invalid\n")
+      check fixture.runAudit().exitCode != 0
+      writeFile(fixture.metadataRoot / (interpreter.extractFilename & ".signature"),
+        "valid\n")
+      fixture.addDependency(interpreter, "arm64", "/opt/ambient/libpython.dylib")
+      check fixture.runAudit().exitCode != 0
+      fixture.writeSlice(interpreter, "arm64", @[], @[])
+      check fixture.runAudit().exitCode == 0
+      removeFile(fixture.metadataPath(interpreter, "arm64", "deps"))
+      # Failed inspection must not be mistaken for a successfully empty list.
+      check fixture.runAudit().exitCode != 0
+
+    test "interpreted role refuses ambient missing malformed or nonnative principals":
+      let fixture = makeFixture(repoRoot)
+      defer: removeDir(fixture.root)
+      let helper = fixture.packageRoot / "bin" / ".reprobuild-nix-daemon-wrapped"
+      for body in ["#!/usr/bin/env python3\n", "#!/nix/store/missing/bin/python3\n",
+                   "not a script\n", "#!/nix/store/not a valid shebang\n"]:
+        writeExecutable(helper, body)
+        check fixture.runAudit().exitCode != 0
+      # A real executable store path still needs a native principal, rather
+      # than merely an executable bit or an uninspected nested script.
+      writeExecutable(helper, "#!" & findExe("python3") & "\n")
+      check fixture.runAudit().exitCode != 0
+
+    test "other required hidden and library roles remain native":
+      let fixture = makeFixture(repoRoot)
+      defer: removeDir(fixture.root)
+      writeExecutable(fixture.packageRoot / "bin" / ".unexpected-wrapped",
+        "#!" & findExe("python3") & "\n")
+      check fixture.runAudit().exitCode != 0
+      removeFile(fixture.packageRoot / "bin" / ".unexpected-wrapped")
+      writeExecutable(fixture.packageRoot / "lib" / "unexpected.dylib",
+        "#!" & findExe("python3") & "\n")
+      check fixture.runAudit().exitCode != 0
 
     test "missing absolute Nix-store dependency is rejected":
       let fixture = makeFixture(repoRoot)

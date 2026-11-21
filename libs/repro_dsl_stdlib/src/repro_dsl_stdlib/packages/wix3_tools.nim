@@ -1,17 +1,17 @@
 ## WiX Toolset v3 ``candle`` + ``light`` — the MSI producer's tools, as
 ## reprobuild packages.
 ##
-## ``packages/wix3.nim`` already carries the WiX v3.14 upstream zip as a
-## ``VersionedProvisioning`` **catalog** entry, consumed by the M4
-## ``cakBuiltin`` MSI-realize hook to run ``dark.exe``. That entry is a
-## catalog row, not a ``package`` block, so it cannot be the target of a
-## build-graph ``uses:`` dependency and it exposes no typed CLI.
+## ``packages/wix3.nim`` carries the WiX v3.14 upstream zip as the
+## ``tarball`` realization of ``package wix3`` (until GM4b a
+## ``VersionedProvisioning`` catalog row), which the M4 home archive
+## realizer's MSI hook uses to run ``dark.exe``. That package declares a
+## single executable and exposes no typed CLI for ``candle``/``light``.
 ##
 ## Distribution-And-Packaging.md §6 rule 2 requires the MSI producer to
 ## take a REAL build-graph dependency on its tool. This module supplies
 ## that: two ``package`` blocks over the SAME upstream archive
 ## (``wix314-binaries.zip``, byte-identical url + sha256 to
-## ``wix3.nim``'s catalog row, deliberately — the two must not drift),
+## ``wix3.nim``'s realization, deliberately — the two must not drift),
 ## differing only in ``executablePath``.
 ##
 ## The one-executable-per-package split is the ``packages/binutils.nim``
@@ -46,7 +46,7 @@ import repro_dsl_stdlib/types/executable
 const
   Wix3BinariesUrl* =
     "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip"
-    ## Kept byte-identical to ``packages/wix3.nim``'s catalog row so the
+    ## Kept byte-identical to ``packages/wix3.nim``'s realization so the
     ## two provisioning surfaces over the same upstream archive can
     ## never disagree about which archive they mean.
   Wix3BinariesSha256* =
@@ -61,6 +61,7 @@ package `wix-candle`:
       sha256 = Wix3BinariesSha256,
       archiveType = "zip",
       executablePath = "candle.exe",
+      version = "3.14.1",
       packageId = "wix3@3.14.1",
       cpu = "x86_64",
       os = "windows",
@@ -101,6 +102,7 @@ package `wix-light`:
       sha256 = Wix3BinariesSha256,
       archiveType = "zip",
       executablePath = "light.exe",
+      version = "3.14.1",
       packageId = "wix3@3.14.1",
       cpu = "x86_64",
       os = "windows",

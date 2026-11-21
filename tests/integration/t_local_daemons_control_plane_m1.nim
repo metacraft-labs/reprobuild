@@ -88,7 +88,11 @@ suite "Local daemons/control-plane M1 user-daemon lifecycle":
         repoRoot())
       check started.contains("repro daemon: running")
       check started.contains("role: repro-daemon/user")
-      check started.contains("protocol: 1.1")
+      # 1.2 since `udkLeaseReapProviders`/`Ack` were added (a MINOR bump:
+      # additive frames, every earlier request unchanged). The daemon
+      # reports the version it speaks, so this pins the bump rather than a
+      # constant.
+      check started.contains("protocol: 1.2")
       check started.contains("features: lifecycle,status,logs,shutdown")
       check started.contains("active-sessions: 0")
       check not started.contains("reprostored")
@@ -118,8 +122,8 @@ suite "Local daemons/control-plane M1 user-daemon lifecycle":
       let afterStop = requireSuccess(reproDaemonCommand(tempRoot, "status"),
         repoRoot())
       check afterStop.contains("repro daemon: not-running")
-      check not fileExists(tempRoot / "state" / "status" /
-        (daemonEndpoint(tempRoot).extractFilename & ".status"))
+      check not fileExists(statusFileForEndpoint(tempRoot / "state",
+        daemonEndpoint(tempRoot)))
 
       let restarted = requireSuccess(reproDaemonCommand(tempRoot, "restart"),
         repoRoot())

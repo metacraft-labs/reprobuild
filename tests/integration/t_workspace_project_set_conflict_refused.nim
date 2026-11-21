@@ -65,8 +65,8 @@ proc remoteBlock(name, url: string): string =
   "[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url & "\"\n\n"
 
 proc repoFragment(fragmentName, repoName, remote, revision: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-  "[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+  "[repo]\nmainline = \"main\"\n" &
   "name = \"" & repoName & "\"\n" &
   "path = \"" & repoName & "\"\n" &
   "remote = \"" & remote & "\"\n" &
@@ -74,8 +74,8 @@ proc repoFragment(fragmentName, repoName, remote, revision: string): string =
 
 proc projectFile(name, remotes: string; includes: openArray[string]): string =
   var body = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"" & name & "\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" & remotes & "includes = [\n"
+    "[project]\nname = \"" & name & "\"\n" &
+    "\n" & remotes & "includes = [\n"
   for inc in includes:
     body.add("  \"" & inc & "\",\n")
   body.add("]\n")
@@ -156,8 +156,8 @@ suite "PS-4 — a conflicting project set is refused before mutation":
     # A project file the strict reader cannot resolve (no manifest data yet).
     writeFile(workspaceRoot / "projects" / "delta.toml",
       "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-      "[project]\nname = \"delta\"\ndefault_revision = \"main\"\n" &
-      "trunk = \"main\"\n\nincludes = [\n]\n")
+      "[project]\nname = \"delta\"\n" &
+      "\nincludes = [\n]\n")
 
     let added = runShell(shellCommand(@[reproBin, "workspace",
       "enable", "delta", "--workspace-root=" & workspaceRoot]))

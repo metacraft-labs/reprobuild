@@ -25,3 +25,8 @@ self-hosted-runner:
     # Persistent Windows runners with a provisioned dev environment (the
     # Windows leg of release-platforms.json).
     - dev-env-ready
+    # The dedicated single-slot benchmark runner (benchmark.yml, and the HCR
+    # Linux lane in hcr-lanes.yml, whose race gate is calibrated at host
+    # load/CPU <= 2.0). A capability label from the fleet taxonomy
+    # (metacraft-dev-guidelines ci-workflow-standards.md).
+    - benchmark

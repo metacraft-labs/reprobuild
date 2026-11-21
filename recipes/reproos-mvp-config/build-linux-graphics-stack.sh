@@ -406,7 +406,7 @@ done
 # Why this matters
 # ----------------
 #
-# DE-G2 + DE-K2 vm-harness boot tests showed bare /usr/local/bin/<bin>
+# DE-G2 + DE-K2 gosti boot tests showed bare /usr/local/bin/<bin>
 # invocations under agetty miss /etc/ld.so.conf.d/00-reproos-linux.conf
 # because:
 #   1. R9's minimal initramfs ships NO `ldconfig`, so /etc/ld.so.cache

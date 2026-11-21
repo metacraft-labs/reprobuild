@@ -14,6 +14,13 @@ import repro_core/paths
 import repro_local_store/portable_fingerprint
 import repro_local_store/portable_memo
 
+proc rec(fp: PortableFingerprint;
+         outputs: openArray[PortableOutput]): PortableMemoRecord =
+  ## The `rbpm-v2` record the engine stores for a checksum, monitored,
+  ## Level-0 execution with fingerprint `fp`.
+  newPortableMemoRecord(fp.weakHex, fp.inputs, fp.strongHex, outputs,
+    ffpChecksum, elComplete, MonitoredEvidence)
+
 proc roots(project: string): seq[LogicalRoot] =
   @[LogicalRoot(label: "project", path: project, kind: lrkTracked)]
 
@@ -35,17 +42,17 @@ proc execute(project: string): PortableMemoRecord =
     "object(" & readFile(project / "src" / "a.c") & ")")
   let outs = portableOutputs(roots(project), [project / "out" / "a.o"])
   doAssert outs.portable
-  PortableMemoRecord(weakHex: fp.weakHex, pathSet: pathSetOf(fp.inputs),
-    strongHex: fp.strongHex, outputs: outs.outputs)
+  rec(fp, outs.outputs)
 
 suite "portable memo store":
 
   test "path set and memo codecs round-trip and are deterministic":
-    let record = PortableMemoRecord(weakHex: "w", strongHex: "s",
-      pathSet: @[PathSetEntry(kind: pikRead, path: "project:b"),
-                 PathSetEntry(kind: pikProbe, path: "project:a")],
-      outputs: @[PortableOutput(path: "project:o", digest: "d",
-                                directory: true)])
+    let record = newPortableMemoRecord("w", [
+        PortableInput(kind: pikRead, path: "project:b",
+          digest: "file:" & "0".repeat(64)),
+        PortableInput(kind: pikProbe, path: "project:a", digest: "absent")],
+      "s", [PortableOutput(path: "project:o", digest: "d", directory: true)],
+      ffpChecksum, elComplete, MonitoredEvidence)
     let bytes = encodeMemo(record)
     check encodeMemo(record) == bytes
     let back = decodeMemo(bytes)
@@ -100,9 +107,8 @@ suite "portable memo store":
     let fp1 = computePortableFingerprint(roots(project), @["cc", "a.c"],
       project, @[], @[], reads = @[project / "src" / "a.c"],
       probes = @[project / "src" / "a.h"], enumerations = @[])
-    let first = PortableMemoRecord(weakHex: fp1.weakHex,
-      pathSet: pathSetOf(fp1.inputs), strongHex: fp1.strongHex,
-      outputs: @[PortableOutput(path: "project:out/a.o", digest: "first")])
+    let first = rec(fp1,
+      @[PortableOutput(path: "project:out/a.o", digest: "first")])
     recordMemo(store, first)
     # Execution 2 of the SAME static action found the header and read it,
     # producing different bytes.
@@ -112,9 +118,8 @@ suite "portable memo store":
       reads = @[project / "src" / "a.c", project / "src" / "a.h"],
       probes = @[], enumerations = @[])
     check fp2.weakHex == first.weakHex
-    recordMemo(store, PortableMemoRecord(weakHex: fp2.weakHex,
-      pathSet: pathSetOf(fp2.inputs), strongHex: fp2.strongHex,
-      outputs: @[PortableOutput(path: "project:out/a.o", digest: "second")]))
+    recordMemo(store, rec(fp2,
+      @[PortableOutput(path: "project:out/a.o", digest: "second")]))
     check candidatePathSets(store, first.weakHex).len == 2
     # Now the header exists: execution 1's observed absence no longer holds,
     # so only execution 2's path set matches.
@@ -142,9 +147,8 @@ suite "portable memo store":
     let link = computePortableFingerprint(roots(project), @["ld", "a.o"],
       project, @[], @[], reads = @[project / "out" / "a.o"], probes = @[],
       enumerations = @[])
-    recordMemo(store, PortableMemoRecord(weakHex: link.weakHex,
-      pathSet: pathSetOf(link.inputs), strongHex: link.strongHex,
-      outputs: @[PortableOutput(path: "project:out/app", digest: "app")]))
+    recordMemo(store, rec(link,
+      @[PortableOutput(path: "project:out/app", digest: "app")]))
     # Now a FRESH host state: the object file was never built here.
     removeDir(project / "out")
     check lookupMemo(store, roots(project), link.weakHex).isNone
@@ -195,7 +199,7 @@ suite "portable memo store":
     createDir(extendedPath((project / rel).parentDir))
     writeFile(extendedPath(project / rel), "<svg/>")
     check currentIdentity(roots(project),
-      PathSetEntry(kind: pikProbe, path: "project:" & rel)) == some("present")
+      PathSetEntry(kind: pikProbe, path: "project:" & rel)) == some("file")
     check currentIdentity(roots(project),
       PathSetEntry(kind: pikRead, path: "project:" & rel)).isSome
 
@@ -214,8 +218,7 @@ suite "portable memo store":
         reads = @[project / "src" / "a.c", project / "src" / "package.json"],
         probes = @[], enumerations = @[])
       require fp.portable
-      records.add(PortableMemoRecord(weakHex: fp.weakHex,
-        pathSet: pathSetOf(fp.inputs), strongHex: fp.strongHex, outputs: @[]))
+      records.add(rec(fp, @[]))
     check records[0].strongHex == records[1].strongHex
     let store = base / "store"
     recordMemo(store, records[0])

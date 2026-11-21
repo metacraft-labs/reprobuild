@@ -1,5 +1,5 @@
 ## Secure protocol shared by the generated pre-push hook and the lock
-## publisher.  The client hook is advisory (a user can always use
+## publisher and cyclic source-component orchestrator. The client hook is advisory (a user can always use
 ## ``git push --no-verify``), but an ordinary environment variable must never
 ## be enough to disable it.
 
@@ -27,6 +27,7 @@ when defined(posix):
   #include <signal.h>
   #include <string.h>
   #include <stdio.h>
+  #include <stdlib.h>
   #if defined(__linux__)
   #include <sys/syscall.h>
   #endif
@@ -106,44 +107,100 @@ when defined(posix):
     return (long long)st.st_mtime;
   }
 
-  static int rb_pending_cleanup_fd = -1;
-  static char rb_pending_cleanup_name[80];
+  /* Every destination of a plural source push owns a distinct capability.
+     Keep all outstanding records armed until their individual finally path
+     discards them. Block termination signals while changing the list so the
+     handler only traverses a complete, stable set of directory handles. */
+  struct rb_pending_cleanup {
+    int fd;
+    char name[80];
+    struct rb_pending_cleanup *next;
+  };
+  static struct rb_pending_cleanup *rb_pending_cleanups = NULL;
   static int rb_pending_cleanup_armed = 0;
   static struct sigaction rb_old_hup, rb_old_int, rb_old_term;
   static void rb_pending_signal(int sig) {
-    if (rb_pending_cleanup_fd >= 0 && rb_pending_cleanup_name[0] != '\0')
-      unlinkat(rb_pending_cleanup_fd, rb_pending_cleanup_name, 0);
+    struct rb_pending_cleanup *entry = rb_pending_cleanups;
+    while (entry != NULL) {
+      unlinkat(entry->fd, entry->name, 0);
+      entry = entry->next;
+    }
     _exit(128 + sig);
   }
-  static void rb_disarm_pending_cleanup(void) {
-    if (rb_pending_cleanup_armed) {
+  static int rb_block_cleanup_signals(sigset_t *previous) {
+    sigset_t blocked;
+    if (sigemptyset(&blocked) != 0 || sigaddset(&blocked, SIGHUP) != 0 ||
+        sigaddset(&blocked, SIGINT) != 0 || sigaddset(&blocked, SIGTERM) != 0)
+      return 0;
+    return sigprocmask(SIG_BLOCK, &blocked, previous) == 0;
+  }
+  static void rb_disarm_pending_cleanup(const char *name) {
+    sigset_t previous;
+    if (!rb_block_cleanup_signals(&previous)) return;
+    struct rb_pending_cleanup **link = &rb_pending_cleanups;
+    while (*link != NULL) {
+      struct rb_pending_cleanup *entry = *link;
+      if (strcmp(entry->name, name) == 0) {
+        /* Remove through the original held directory before disarming it;
+           termination between disarm and a later path lookup must not leak. */
+        unlinkat(entry->fd, entry->name, 0);
+        *link = entry->next;
+        close(entry->fd);
+        free(entry);
+        break;
+      }
+      link = &entry->next;
+    }
+    if (rb_pending_cleanups == NULL && rb_pending_cleanup_armed) {
       sigaction(SIGHUP, &rb_old_hup, NULL);
       sigaction(SIGINT, &rb_old_int, NULL);
       sigaction(SIGTERM, &rb_old_term, NULL);
       rb_pending_cleanup_armed = 0;
     }
-    if (rb_pending_cleanup_fd >= 0) close(rb_pending_cleanup_fd);
-    rb_pending_cleanup_fd = -1;
-    rb_pending_cleanup_name[0] = '\0';
+    sigprocmask(SIG_SETMASK, &previous, NULL);
   }
   static int rb_arm_pending_cleanup(int dirfd, const char *name) {
-    rb_disarm_pending_cleanup();
-    if (strlen(name) >= sizeof(rb_pending_cleanup_name)) return 0;
-    rb_pending_cleanup_fd = dup(dirfd);
-    if (rb_pending_cleanup_fd < 0) return 0;
-    fcntl(rb_pending_cleanup_fd, F_SETFD, FD_CLOEXEC);
-    strcpy(rb_pending_cleanup_name, name);
-    struct sigaction sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sa_handler = rb_pending_signal;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = SA_RESETHAND;
-    if (sigaction(SIGHUP, &sa, &rb_old_hup) != 0 ||
-        sigaction(SIGINT, &sa, &rb_old_int) != 0 ||
-        sigaction(SIGTERM, &sa, &rb_old_term) != 0) {
-      rb_disarm_pending_cleanup(); return 0;
+    if (strlen(name) >= sizeof(((struct rb_pending_cleanup *)0)->name)) return 0;
+    sigset_t previous;
+    if (!rb_block_cleanup_signals(&previous)) return 0;
+    struct rb_pending_cleanup *entry = malloc(sizeof(*entry));
+    if (entry == NULL) {
+      sigprocmask(SIG_SETMASK, &previous, NULL);
+      return 0;
     }
-    rb_pending_cleanup_armed = 1;
+    entry->fd = dup(dirfd);
+    if (entry->fd < 0 || fcntl(entry->fd, F_SETFD, FD_CLOEXEC) != 0) {
+      if (entry->fd >= 0) close(entry->fd);
+      free(entry);
+      sigprocmask(SIG_SETMASK, &previous, NULL);
+      return 0;
+    }
+    strcpy(entry->name, name);
+    if (!rb_pending_cleanup_armed) {
+      struct sigaction sa;
+      memset(&sa, 0, sizeof(sa));
+      sa.sa_handler = rb_pending_signal;
+      sigemptyset(&sa.sa_mask);
+      sigaddset(&sa.sa_mask, SIGHUP);
+      sigaddset(&sa.sa_mask, SIGINT);
+      sigaddset(&sa.sa_mask, SIGTERM);
+      sa.sa_flags = SA_RESETHAND;
+      int hup = sigaction(SIGHUP, &sa, &rb_old_hup) == 0;
+      int intr = hup && sigaction(SIGINT, &sa, &rb_old_int) == 0;
+      int term = intr && sigaction(SIGTERM, &sa, &rb_old_term) == 0;
+      if (!term) {
+        if (hup) sigaction(SIGHUP, &rb_old_hup, NULL);
+        if (intr) sigaction(SIGINT, &rb_old_int, NULL);
+        close(entry->fd);
+        free(entry);
+        sigprocmask(SIG_SETMASK, &previous, NULL);
+        return 0;
+      }
+      rb_pending_cleanup_armed = 1;
+    }
+    entry->next = rb_pending_cleanups;
+    rb_pending_cleanups = entry;
+    sigprocmask(SIG_SETMASK, &previous, NULL);
     return 1;
   }
   """.}
@@ -162,7 +219,7 @@ when defined(posix):
     {.importc: "rb_cap_mtime_at", nodecl.}
   proc rbArmPendingCleanup(dirfd: cint; name: cstring): cint
     {.importc: "rb_arm_pending_cleanup", nodecl.}
-  proc rbDisarmPendingCleanup()
+  proc rbDisarmPendingCleanup(name: cstring)
     {.importc: "rb_disarm_pending_cleanup", nodecl.}
 when defined(windows):
   import std/winlean
@@ -349,6 +406,7 @@ const
   V2ManagedMarker* = "reprobuild managed pre-push hook protocol=2"
   CapabilitySchema* = "reprobuild.hook-capability.v2"
   CapabilityPurpose* = "nested-lock-publish"
+  SourceComponentCapabilityPurpose* = "source-component-publish"
   CapabilityTtlSeconds* = 30'i64
   CapabilityFutureSkewSeconds* = 2'i64
   CapabilityTtlMilliseconds* = CapabilityTtlSeconds * 1000'i64
@@ -412,6 +470,31 @@ type
     remoteOldOid*: string
     objectFormat*: string
     updateShape*: OutgoingUpdateShape
+    updates*: seq[PrePushRefUpdate]
+      ## Every record of the (well-formed) pre-push stream, whatever the
+      ## outgoing-current verdict. ``headOid`` is the independently observed
+      ## HEAD, which is what provisional publication is about; it is NOT what
+      ## the push publishes. A caller asking "what does this push publish"
+      ## (the membership repo's gate scope) must read these records instead —
+      ## see ``pushedCommitRange``.
+
+  HookPublicationMember* = object
+    ## An exact source commit in a mutually dependent publication component.
+    ## The capability authenticates this plan; the workspace gate independently
+    ## revalidates its graph, checkout state and destinations before using it.
+    name*: string
+    worktree*: string
+    commonDir*: string
+    objectFormat*: string
+    headOid*: string
+    remoteName*: string
+    remoteLocationsDigest*: string
+    branch*: string
+    advertisementFingerprint*: string
+    published*: bool
+    pushable*: bool
+    remoteRef*: string
+    remoteOid*: string
 
   HookCapability* = object
     schema*: string
@@ -431,6 +514,8 @@ type
     remoteOid*: string
     issuerPid*: int
     issuedAtUnixMs*: int64
+    publicationWorkspace*: string
+    publicationMembers*: seq[HookPublicationMember]
 
   CapabilityIssueResult* = object
     ok*: bool
@@ -439,6 +524,11 @@ type
 
   CapabilityConsumeResult* = object
     authorized*: bool
+    purpose*: string
+      ## Only nested-lock-publish authorizes skipping recursive lock work.
+      ## source-component-publish supplies a plan to the ordinary gate instead.
+    publicationWorkspace*: string
+    publicationMembers*: seq[HookPublicationMember]
     claimLost*: bool
       ## The token was well-formed and the capability directory was secure,
       ## but another hook won the atomic pending-to-claimed move (or no pending
@@ -634,6 +724,24 @@ proc validRefName(gitBin, repoRoot, value: string; allowHead: bool): bool =
   if not value.startsWith("refs/"): return false
   runGit(gitBin, repoRoot, ["check-ref-format", value]).code == 0
 
+proc validLocalSource(gitBin, repoRoot, value, oid: string): bool =
+  ## The pre-push ``<local-ref>`` field is the SOURCE side of the refspec as
+  ## Git saw it. Git writes a full ref name only when the source resolved to
+  ## one (``git push origin main`` -> ``refs/heads/main``). Otherwise it
+  ## writes the source text VERBATIM: ``HEAD``, a bare or abbreviated object
+  ## name (``git push origin <sha>:refs/heads/x``), or any revision
+  ## expression (``HEAD~1``, ``@``, ``main^``). Refusing those as "malformed"
+  ## refused ordinary pushes Git itself had accepted. The object id field,
+  ## not this text, is what the push sends; the text is checked only where it
+  ## claims to be a ref.
+  if value == "(delete)":
+    return isZeroOid(oid)
+  if value == "HEAD" or value.startsWith("refs/"):
+    return validRefName(gitBin, repoRoot, value, allowHead = true)
+  # A source expression always names an object, so a zero object id beside
+  # one is not something Git produces.
+  not isZeroOid(oid)
+
 proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
     PrePushRefStream =
   result.objectFormat = storageObjectFormat(gitBin, repoRoot)
@@ -676,8 +784,7 @@ proc parsePrePushRefStream*(gitBin, repoRoot, refsPath: string):
     if fields.len != 4:
       result.diagnostic = "pre-push refs record must contain exactly four fields"
       return
-    if not ((fields[0] == "(delete)" and isZeroOid(fields[1])) or
-        validRefName(gitBin, repoRoot, fields[0], allowHead = true)):
+    if not validLocalSource(gitBin, repoRoot, fields[0], fields[1]):
       result.diagnostic = "pre-push refs record has an invalid local ref"
       return
     if not validRefName(gitBin, repoRoot, fields[2], allowHead = false):
@@ -773,6 +880,7 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
   if not parsed.ok:
     result.diagnostic = parsed.diagnostic
     return
+  result.updates = parsed.updates
   result.headOid = gitValue(gitBin, repoRoot, ["rev-parse", "HEAD^{commit}"])
     .toLowerAscii()
   if not isHexOid(result.headOid, parsed.oidLength):
@@ -809,6 +917,11 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
     return
   if update.localRef == "HEAD":
     discard
+  elif not update.localRef.startsWith("refs/"):
+    # A source EXPRESSION (a bare object name, ``HEAD~0``, ``@``): Git
+    # resolved it to ``localOid``, which was just shown to be HEAD. It names
+    # no other ref that could disagree with HEAD later.
+    discard
   elif update.localRef.startsWith("refs/heads/"):
     let resolved = gitValue(gitBin, repoRoot,
       ["rev-parse", update.localRef & "^{commit}"]).toLowerAscii()
@@ -844,6 +957,69 @@ proc evaluateOutgoingCurrent*(gitBin, repoRoot, refsPath, hookRemoteName,
   result.remoteRef = update.remoteRef
   result.remoteOldOid = update.remoteOid
   result.outgoingCurrent = true
+
+type
+  PushedCommitRange* = object
+    ## The commits ONE pre-push record publishes, as ``git rev-list``
+    ## revision arguments. Empty ``revisions`` means the record publishes no
+    ## commit at all (a deletion, or a ref to a non-commit object).
+    remoteRef*: string
+    revisions*: seq[string]
+    unreadable*: bool
+      ## The pushed object itself could not be found or read. Git only pushes
+      ## objects the checkout has, so this means a damaged repository, a
+      ## failing ``git``, or a hand-written refs stream naming an object that
+      ## does not exist. The caller must refuse: "publishes nothing" would be
+      ## a guess, and a wrong guess is an under-check.
+
+proc pushedCommitRange*(gitBin, repoRoot: string;
+    update: PrePushRefUpdate): PushedCommitRange =
+  ## What a single ``<local ref> <local oid> <remote ref> <remote oid>``
+  ## record publishes, measured against what the remote already has
+  ## (https://git-scm.com/docs/githooks#_pre_push):
+  ##
+  ##   * a DELETION (all-zero local oid) publishes nothing;
+  ##   * a local object that does not peel to a commit (a tag of a tree or a
+  ##     blob) publishes no commit either;
+  ##   * an update whose remote old object peels to a commit present locally
+  ##     publishes ``<new> ^<old>`` — exactly the commits the ref gains, for a
+  ##     fast-forward and a rewrite alike (the commits a rewrite discards are
+  ##     not published by it; the history-rewrite stage judges those);
+  ##   * a NEW remote ref (all-zero remote oid), or an old object this
+  ##     checkout does not have, publishes the commits no remote-tracking ref
+  ##     reaches: ``<new> --not --remotes``. That is the "already published"
+  ##     notion the gate's other publication probes use: a commit some remote
+  ##     already carries reached it through a push of its own, which was
+  ##     gated then. (This holds for a remote-tracking ref that is stale or
+  ##     belongs to another remote too; the exclusion rests on the commit
+  ##     having been published once, not on the destination still having it.)
+  ##
+  ## A local object that cannot be read at all sets ``unreadable``.
+  ##
+  ## The pushed object, not ``HEAD``, is the subject: Git may push any object
+  ## to any ref, and pushing an older commit, another branch, or several refs
+  ## at once are all ordinary.
+  result.remoteRef = update.remoteRef
+  if update.localOid.len == 0 or isZeroOid(update.localOid):
+    return
+  # Only the exit status is read: the oids are already validated hex from the
+  # strict stream parser, and ``<oid>^{commit}`` is itself a revision Git peels
+  # wherever it is used, so no git output is parsed (and no stray diagnostic
+  # on the merged stream can be mistaken for an object name).
+  let newCommit = update.localOid & "^{commit}"
+  if runGit(gitBin, repoRoot,
+      ["rev-parse", "--verify", "--quiet", newCommit]).code != 0:
+    # Not a commit, or not there at all? Only the first publishes nothing.
+    if runGit(gitBin, repoRoot, ["cat-file", "-e", update.localOid]).code != 0:
+      result.unreadable = true
+    return
+  if update.remoteOid.len > 0 and not isZeroOid(update.remoteOid):
+    let oldCommit = update.remoteOid & "^{commit}"
+    if runGit(gitBin, repoRoot,
+        ["rev-parse", "--verify", "--quiet", oldCommit]).code == 0:
+      result.revisions = @[newCommit, "^" & oldCommit]
+      return
+  result.revisions = @[newCommit, "--not", "--remotes"]
 
 proc commitsMadeUnreachable*(gitBin, repoRoot, remoteOldOid,
     headOid: string): seq[string] =
@@ -917,7 +1093,7 @@ proc secureCapabilityDir(path: string): tuple[ok: bool; diagnostic: string] =
   (true, "")
 
 proc capabilityToJson(cap: HookCapability): JsonNode =
-  %*{
+  result = %*{
     "schema": cap.schema, "protocol": cap.protocol, "token": cap.token,
     "purpose": cap.purpose,
     "worktree": cap.worktree, "commonDir": cap.commonDir,
@@ -928,6 +1104,9 @@ proc capabilityToJson(cap: HookCapability): JsonNode =
     "remoteOid": cap.remoteOid, "issuerPid": cap.issuerPid,
     "issuedAtUnixMs": cap.issuedAtUnixMs
   }
+  if cap.purpose == SourceComponentCapabilityPurpose:
+    result["publicationWorkspace"] = %cap.publicationWorkspace
+    result["publicationMembers"] = %cap.publicationMembers
 
 proc capabilityFromJson(node: JsonNode): HookCapability =
   result.schema = node["schema"].getStr()
@@ -947,6 +1126,69 @@ proc capabilityFromJson(node: JsonNode): HookCapability =
   result.remoteOid = node["remoteOid"].getStr()
   result.issuerPid = node["issuerPid"].getInt()
   result.issuedAtUnixMs = node["issuedAtUnixMs"].getBiggestInt().int64
+  if node.hasKey("publicationWorkspace"):
+    result.publicationWorkspace = node["publicationWorkspace"].getStr()
+  if node.hasKey("publicationMembers"):
+    for member in node["publicationMembers"]:
+      result.publicationMembers.add(HookPublicationMember(
+        name: member["name"].getStr(),
+        worktree: member["worktree"].getStr(),
+        commonDir: member["commonDir"].getStr(),
+        objectFormat: member["objectFormat"].getStr(),
+        headOid: member["headOid"].getStr(),
+        remoteName: member["remoteName"].getStr(),
+        remoteLocationsDigest: member["remoteLocationsDigest"].getStr(),
+        branch: member["branch"].getStr(),
+        advertisementFingerprint: member["advertisementFingerprint"].getStr(),
+        published: member["published"].getBool(),
+        pushable: member["pushable"].getBool(),
+        remoteRef: member["remoteRef"].getStr(),
+        remoteOid: member["remoteOid"].getStr()))
+
+proc publicationPlanIsWellFormed(cap: HookCapability): bool =
+  ## Payload-free lock capabilities retain their old contract. A new purpose
+  ## cannot be manufactured by merely relabelling one of those capabilities.
+  if cap.purpose == CapabilityPurpose:
+    return cap.publicationWorkspace.len == 0 and cap.publicationMembers.len == 0
+  if cap.purpose != SourceComponentCapabilityPurpose or
+      cap.publicationWorkspace.len == 0 or
+      not cap.publicationWorkspace.isAbsolute or cap.publicationMembers.len < 2:
+    return false
+  var names, worktrees: seq[string]
+  var containsCurrent = false
+  for member in cap.publicationMembers:
+    let oidLen =
+      if member.objectFormat == "sha1": 40
+      elif member.objectFormat == "sha256": 64
+      else: 0
+    if oidLen == 0 or member.name.len == 0 or member.name in names or
+        member.worktree.len == 0 or not member.worktree.isAbsolute or
+        member.worktree in worktrees or member.commonDir.len == 0 or
+        not member.commonDir.isAbsolute or
+        not isHexOid(member.headOid, oidLen) or
+        member.headOid == repeat('0', oidLen) or
+        not isHexOid(member.remoteOid, oidLen) or member.remoteName.len == 0 or
+        member.remoteLocationsDigest.len == 0 or
+        member.advertisementFingerprint.len == 0:
+      return false
+    if member.branch.len == 0:
+      # A published pinned dependency may legitimately be detached. It takes
+      # part in plan validation but can never be the outgoing source update.
+      if not member.published or member.pushable or member.remoteRef.len > 0:
+        return false
+    elif member.remoteRef != "refs/heads/" & member.branch:
+      return false
+    names.add(member.name)
+    worktrees.add(member.worktree)
+    if member.worktree == cap.worktree:
+      if member.commonDir != cap.commonDir or
+          member.objectFormat != cap.objectFormat or
+          member.headOid != cap.headOid or member.headOid != cap.localOid or
+          member.remoteName != cap.remoteName or member.remoteRef != cap.remoteRef or
+          member.remoteOid != cap.remoteOid:
+        return false
+      containsCurrent = true
+  containsCurrent
 
 proc randomToken(): string =
   var bytes: array[32, byte]
@@ -1015,7 +1257,9 @@ else:
       false
 
 proc issueHookCapability*(gitBin, repoRoot, remoteName, remoteLocation,
-    localRef, localOid, remoteRef, remoteOid: string): CapabilityIssueResult =
+    localRef, localOid, remoteRef, remoteOid: string;
+    publicationMembers: seq[HookPublicationMember] = @[];
+    publicationWorkspace = ""): CapabilityIssueResult =
   let dir = capabilityDir(gitBin, repoRoot)
   let secure = secureCapabilityDir(dir)
   if not secure.ok:
@@ -1029,7 +1273,11 @@ proc issueHookCapability*(gitBin, repoRoot, remoteName, remoteLocation,
   let common = commonGitDir(gitBin, repoRoot)
   let cap = HookCapability(
     schema: CapabilitySchema, protocol: PrePushProtocolVersion, token: token,
-    purpose: CapabilityPurpose,
+    purpose: (if publicationMembers.len > 0:
+      SourceComponentCapabilityPurpose else: CapabilityPurpose),
+    publicationWorkspace: (if publicationWorkspace.len > 0:
+      canonicalPath(publicationWorkspace) else: ""),
+    publicationMembers: publicationMembers,
     worktree: canonicalWorktree(gitBin, repoRoot), commonDir: common,
     userIdentity: currentUserIdentity(), objectFormat: format,
     headOid: gitValue(gitBin, repoRoot, ["rev-parse", "HEAD^{commit}"])
@@ -1040,8 +1288,14 @@ proc issueHookCapability*(gitBin, repoRoot, remoteName, remoteLocation,
     remoteRef: remoteRef, remoteOid: remoteOid.toLowerAscii(),
     issuerPid: getCurrentProcessId(),
     issuedAtUnixMs: int64(getTime().toUnixFloat() * 1000.0))
+  if not publicationPlanIsWellFormed(cap):
+    result.diagnostic = "hook capability publication plan is malformed"
+    return
   let path = dir / (token & ".pending")
   let content = $capabilityToJson(cap) & "\n"
+  if content.len > 65536:
+    result.diagnostic = "hook capability exceeds the secure record size limit"
+    return
   var wrote = false
   when defined(posix):
     let capFd = rbOpenCapDir(common.cstring, 0)
@@ -1068,7 +1322,7 @@ proc discardHookCapability*(gitBin, repoRoot, token: string) =
   if not validTokenName(token): return
   let pendingName = token & ".pending"
   when defined(posix):
-    rbDisarmPendingCleanup()
+    rbDisarmPendingCleanup(pendingName.cstring)
     let common = commonGitDir(gitBin, repoRoot)
     let capFd = rbOpenCapDir(common.cstring, 0)
     if capFd >= 0:
@@ -1196,7 +1450,9 @@ proc consumeHookCapability*(gitBin, repoRoot, token, remoteName,
     if cap.schema != CapabilitySchema: "schema"
     elif cap.protocol != PrePushProtocolVersion: "protocol"
     elif cap.token != token: "token"
-    elif cap.purpose != CapabilityPurpose: "purpose"
+    elif cap.purpose notin [CapabilityPurpose, SourceComponentCapabilityPurpose]:
+      "purpose"
+    elif not publicationPlanIsWellFormed(cap): "publication plan"
     elif cap.worktree != canonicalWorktree(gitBin, repoRoot): "worktree"
     elif cap.commonDir != commonGitDir(gitBin, repoRoot): "common Git directory"
     elif cap.userIdentity != currentUserIdentity(): "user identity"
@@ -1224,6 +1480,9 @@ proc consumeHookCapability*(gitBin, repoRoot, token, remoteName,
     result.diagnostic = "hook capability does not match the pushed ref"
     return
   result.authorized = true
+  result.purpose = cap.purpose
+  result.publicationWorkspace = cap.publicationWorkspace
+  result.publicationMembers = cap.publicationMembers
 
 proc cleanupExpiredCapabilities*(gitBin, repoRoot: string) =
   let dir = capabilityDir(gitBin, repoRoot)

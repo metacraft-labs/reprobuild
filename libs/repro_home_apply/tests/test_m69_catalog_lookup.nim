@@ -1,146 +1,135 @@
-## M69 — catalog_lookup.nim: resolve a PackageReference to a
-## VersionedProvisioning slice (or fail closed).
+## M69 → GM4b — version-pinned profile references.
 ##
-## Two flavours of test:
+## M69's catalog-slice lookup resolved `package(<id>, "<version>")` to a
+## `VersionedProvisioning` catalog slice. GM4b removed the catalog: versions
+## now live on the package's `tarball` (and `scoopApp`) realizations, and a pin
+## filters the selection (Provisioning-Contributions.md §"Profile Package
+## References" → Selection). What the lookup guarded, restated:
 ##
-## 1. Fixture catalog (a `seq[VersionedProvisioning]` built inline)
-##    exercising the resolver's `selectDefault` / `selectVersion`
-##    branches plus the well-formed-version pin gate. This isolates
-##    the resolver from the catalog registry so the test pins the
-##    contract independently of the registered tool list.
-## 2. Live registry calls against `jdk` (the M63 reference catalog)
-##    — bare reference resolves to the catalog's defaultVersion;
-##    a missing version raises `EVersionNotInCatalog`; an
-##    unregistered tool raises `EUnknownPackageId`.
+##   * a pinned reference selects the realization of exactly that version;
+##   * a bare reference selects the FIRST eligible realization in declaration
+##     order — authors list the default version first (the retired catalog
+##     took the LAST entry; the stdlib conversion reordered to keep each
+##     package's old default);
+##   * an unknown version fails closed: a missing realization naming the
+##     versions on offer — never a silent fallback to another version;
+##   * an unknown package id is an unknown package, not a version miss;
+##   * a malformed pin is just a version nobody offers;
+##   * `repro home add <tool>@latest` writes the version an unpinned reference
+##     resolves to on this host (`unpinnedHostVersion`), and `offeredVersions`
+##     lists every pinned version a definition carries.
+##
+## Fixture packages are declared in this module, so they are registered in
+## the test process exactly as the engine registers the stdlib; the live
+## `jdk` definition is checked too. Selection is static metadata — nothing is
+## downloaded. No mocks.
 
-import std/unittest
+import std/[options, strutils, unittest]
 
-import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
-import repro_home_apply/catalog_lookup
+import repro_project_dsl
+import repro_home_apply/package_catalog
 
-proc fixturePlatform(version: string): seq[PlatformBinary] =
-  result.add initPlatformBinary(
-    cpu = pcX86_64, os = poWindows,
-    url = "https://example.invalid/jdk-" & version & ".zip",
-    sha256 = "0000000000000000000000000000000000000000000000000000000000000000",
-    extract_path = "jdk-" & version)
+# Three Windows versions, default (21.0.5) declared first.
+package gm4bversioned:
+  provisioning:
+    tarball url = "https://example.invalid/gm4bversioned-21.0.5.zip",
+      sha256 = "2100000000000000000000000000000000000000000000000000000000000000",
+      archiveType = "zip", executablePath = "bin/tool.exe",
+      version = "21.0.5", cpu = "x86_64", os = "windows"
+    tarball url = "https://example.invalid/gm4bversioned-17.0.13.zip",
+      sha256 = "1700000000000000000000000000000000000000000000000000000000000000",
+      archiveType = "zip", executablePath = "bin/tool.exe",
+      version = "17.0.13", cpu = "x86_64", os = "windows"
+    tarball url = "https://example.invalid/gm4bversioned-11.0.25.zip",
+      sha256 = "1100000000000000000000000000000000000000000000000000000000000000",
+      archiveType = "zip", executablePath = "bin/tool.exe",
+      version = "11.0.25", cpu = "x86_64", os = "windows"
 
-proc fixtureCatalog(): seq[VersionedProvisioning] =
-  # Newest-first per the M63 convention (the last entry is the
-  # `defaultVersion`). The resolver respects the array order via
-  # `selectDefault` (which returns the LAST entry).
-  result.add initVersionedProvisioning(
-    version = "21.0.5",
-    archive_format = afZip,
-    install_method = imExtract,
-    bin_relpath = @["bin/javac.exe", "bin/java.exe"],
-    platforms = fixturePlatform("21.0.5"),
-    env = [("JAVA_HOME", "${prefix}")])
-  result.add initVersionedProvisioning(
-    version = "17.0.13",
-    archive_format = afZip,
-    install_method = imExtract,
-    bin_relpath = @["bin/javac.exe", "bin/java.exe"],
-    platforms = fixturePlatform("17.0.13"),
-    env = [("JAVA_HOME", "${prefix}")])
-  result.add initVersionedProvisioning(
-    version = "11.0.25",
-    archive_format = afZip,
-    install_method = imExtract,
-    bin_relpath = @["bin/javac.exe", "bin/java.exe"],
-    platforms = fixturePlatform("11.0.25"),
-    env = [("JAVA_HOME", "${prefix}")])
+# Catch-all records (any cpu, any os): resolvable on whatever host runs this.
+package gm4bhostversioned:
+  provisioning:
+    tarball url = "https://example.invalid/gm4bhostversioned-2.0.tar.gz",
+      sha256 = "2000000000000000000000000000000000000000000000000000000000000000",
+      executablePath = "bin/tool", version = "2.0"
+    tarball url = "https://example.invalid/gm4bhostversioned-1.0.tar.gz",
+      sha256 = "1000000000000000000000000000000000000000000000000000000000000000",
+      executablePath = "bin/tool", version = "1.0"
 
-suite "M69 catalog_lookup":
+let windowsX64 = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
 
-  test "fixture catalog: pinned `21.0.5` resolves to that exact slice":
-    let cat = fixtureCatalog()
-    let pick = selectVersion(cat, "21.0.5")
-    check pick.found
-    check pick.entry.version == "21.0.5"
-    # The lookup proc wraps this; we re-verify the wrapping below
-    # via the live `jdk` registry path so this branch focuses on
-    # `selectVersion` behavior in isolation.
+proc pinned(pkg, version: string): ProfilePackageResolution =
+  resolveProfilePackage(pkg, windowsX64, DefaultSelectionPolicy,
+    requestedVersion = version)
 
-  test "fixture catalog: pinned `17.0.13` resolves to the 17.x slice":
-    let cat = fixtureCatalog()
-    let pick = selectVersion(cat, "17.0.13")
-    check pick.found
-    check pick.entry.version == "17.0.13"
+suite "M69/GM4b — version-pinned profile references":
 
-  test "fixture catalog: bare reference picks the LAST entry per M63 convention":
-    let cat = fixtureCatalog()
-    let pick = selectDefault(cat)
-    check pick.found
-    # `selectDefault` returns the LAST entry — which in our newest-
-    # first fixture is `11.0.25`. The harvested production catalogs
-    # are also newest-first, but a tool author writing a hand-rolled
-    # catalog could intentionally surface a different default.
-    check pick.entry.version == "11.0.25"
+  test "pinned `21.0.5` selects that exact realization":
+    let r = pinned("gm4bversioned", "21.0.5")
+    check r.selection.kind == rkTarball
+    check r.selection.version == "21.0.5"
+    check r.selection.tarball.url.endsWith("gm4bversioned-21.0.5.zip")
 
-  test "fixture catalog: unknown version `999.0.0` returns no match":
-    let cat = fixtureCatalog()
-    let miss = selectVersion(cat, "999.0.0")
-    check (not miss.found)
+  test "pinned `17.0.13` selects the 17.x realization":
+    let r = pinned("gm4bversioned", "17.0.13")
+    check r.selection.version == "17.0.13"
+    check r.selection.tarball.url.endsWith("gm4bversioned-17.0.13.zip")
 
-  test "lookup proc: registered tool + valid version resolves":
-    # The jdk catalog ships in M63 with version 21.0.5. The lookup
-    # proc returns the slice + the resolved version (== the
-    # requested version for an exact pin).
-    let s = lookupCatalogSlice("jdk", "21.0.5")
-    check s.packageId == "jdk"
-    check s.requestedVersion == "21.0.5"
-    check s.resolvedVersion == "21.0.5"
-    check s.slice.bin_relpath.len > 0
+  test "a bare reference selects the first declared version":
+    let r = pinned("gm4bversioned", "")
+    check r.selection.version == "21.0.5"
 
-  test "lookup proc: bare reference resolves to defaultVersion":
-    let s = lookupCatalogSlice("jdk")
-    check s.packageId == "jdk"
-    check s.requestedVersion == ""
-    check s.resolvedVersion.len > 0
-
-  test "lookup proc: missing version raises EVersionNotInCatalog":
+  test "an unknown version fails closed naming the offered versions":
     var raised = false
     try:
-      discard lookupCatalogSlice("jdk", "999.0.0")
-    except EVersionNotInCatalog as err:
+      discard pinned("gm4bversioned", "999.0.0")
+    except EMissingRealization as err:
       raised = true
-      check err.packageId == "jdk"
-      check err.requestedVersion == "999.0.0"
-      check err.availableVersions.len > 0
+      check err.definitionKnown
+      check err.packageName == "gm4bversioned"
+      check "999.0.0" in err.msg
+      for v in ["21.0.5", "17.0.13", "11.0.25"]:
+        check v in err.msg
     check raised
 
-  test "lookup proc: unknown package id raises EUnknownPackageId":
+  test "a malformed pin is a version nobody offers":
     var raised = false
     try:
-      discard lookupCatalogSlice("nonexistent-tool-xyz")
-    except EUnknownPackageId as err:
+      discard pinned("gm4bversioned", "21.0.5; rm -rf /")
+    except EMissingRealization as err:
       raised = true
-      check err.packageId == "nonexistent-tool-xyz"
-      check err.registered.len > 0
+      check err.definitionKnown
     check raised
 
-  test "lookup proc: malformed version rejected as not-in-catalog":
-    # A version string containing shell metacharacters does NOT pass
-    # the well-formed-pin guard; the resolver treats it as a miss
-    # rather than smuggling the bad bytes into the realize loop.
+  test "the live jdk definition: pin, bare and unknown version":
+    check pinned("jdk", "21.0.5").selection.version == "21.0.5"
+    check pinned("jdk", "").selection.version == "21.0.5"
     var raised = false
     try:
-      discard lookupCatalogSlice("jdk", "21.0.5; rm -rf /")
-    except EVersionNotInCatalog:
+      discard pinned("jdk", "999.0.0")
+    except EMissingRealization as err:
       raised = true
+      check err.definitionKnown
+      check "21.0.5" in err.msg
     check raised
 
-  test "registered tool names snapshot is non-empty":
-    check registeredToolNames().len >= 1
-    check "jdk" in registeredToolNames()
+  test "an unknown package id is an unknown package, not a version miss":
+    var raised = false
+    try:
+      discard pinned("nonexistent-tool-xyz", "1.0")
+    except EMissingRealization as err:
+      raised = true
+      check not err.definitionKnown
+      check "unknown package 'nonexistent-tool-xyz'" in err.msg
+    check raised
 
-  test "latestCatalogVersion returns the highest-SemVer slice":
-    let latest = latestCatalogVersion("jdk")
-    check latest.found
-    check latest.version.len > 0
+  test "offeredVersions lists every pinned version in declaration order":
+    check offeredVersions("gm4bversioned") ==
+      @["21.0.5", "17.0.13", "11.0.25"]
+    check "21.0.5" in offeredVersions("jdk")
+    check offeredVersions("nonexistent-tool-xyz").len == 0
 
-  test "latestCatalogVersion returns false for unregistered tool":
-    let latest = latestCatalogVersion("nonexistent-tool-xyz")
-    check (not latest.found)
+  test "unpinnedHostVersion is the version a bare reference resolves to":
+    let v = unpinnedHostVersion("gm4bhostversioned")
+    check v.isSome
+    check v.get == "2.0"
+    check unpinnedHostVersion("nonexistent-tool-xyz").isNone

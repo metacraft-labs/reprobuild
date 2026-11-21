@@ -21,6 +21,8 @@
 ## CI shells around ``sh -c`` differ enough from POSIX that we gate
 ## those out the same way the existing M31 test does.
 
+import repro_test_support/reasoned_skip
+
 when defined(macosx) or defined(linux):
   import std/[os, osproc, strutils, tempfiles, unittest]
 

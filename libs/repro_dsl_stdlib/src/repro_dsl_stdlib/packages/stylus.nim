@@ -7,7 +7,7 @@ package stylus:
       expressionFile = "nix/stylus-0.64.0/default.nix",
       lockIdentity = "npm:stylus@0.64.0"
     # Windows: stylus is an npm package with no native scoop manifest.
-    # Operators on cakScoop need a Node.js install (covered by `node`'s
+    # Operators on Scoop need a Node.js install (covered by `node`'s
     # scoopApp(...) entry above) and a workspace-local
     # `yarn install`-driven `node_modules/.bin/stylus.cmd`. There is no
     # clean way to surface that through scoopApp's content-addressable

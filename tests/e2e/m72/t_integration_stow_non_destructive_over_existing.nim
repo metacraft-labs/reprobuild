@@ -23,7 +23,9 @@
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles,
   times, unittest]
+import repro_test_support/reasoned_skip
 
+import repro_core/link_target
 import repro_home_generations
 import repro_local_store
 
@@ -153,7 +155,7 @@ else:
         # Record the link's creation time. A delete + recreate would
         # reset it; a true no-op cache-hit leaves it untouched.
         let creationBefore = getCreationTime(target)
-        let resolvedBefore = expandSymlink(target)
+        let resolvedBefore = readSymlinkTarget(target)
 
         let res = runRepro(f.baseEnv, ["home", "apply"])
         check res.exitCode == 0
@@ -161,7 +163,7 @@ else:
 
         # The link still exists and still points at the stow source.
         check symlinkExists(target)
-        check expandSymlink(target) == resolvedBefore
+        check readSymlinkTarget(target) == resolvedBefore
         # The link was NOT deleted-and-recreated: creation time unchanged.
         check getCreationTime(target) == creationBefore
         # The manifest records it as a stow link (cache-hit
@@ -208,7 +210,7 @@ else:
       # The materialized target is either a link resolving to the source
       # or a copy with the source content.
       let liveContent =
-        if symlinkExists(target): readFile(expandSymlink(target))
+        if symlinkExists(target): readFile(readSymlinkTarget(target))
         else: readFile(target)
       check liveContent == stowContent
       # The prior (user) content was recorded: the manifest's stow
@@ -253,7 +255,20 @@ else:
         skip("platform-skip: host cannot create symlinks")
       else:
         check symlinkExists(target)
-        let resolvedBefore = expandSymlink(target)
+        let resolvedBefore = readSymlinkTarget(target)
+        check resolvedBefore == otherSource
+
+        # The plan names where the link REALLY points. `expandSymlink`
+        # returned the link's own path on Windows, so every drift row
+        # printed the target as its own "different source" (reprobuild-pm
+        # issue 2026-10-26-windows-stow-drift-names-the-link-itself-as-
+        # its-different-source).
+        let plan = runRepro(f.baseEnv, ["home", "apply", "--plan"])
+        checkpoint plan.output
+        check plan.output.contains("existing symlink points at a " &
+          "different source (" & otherSource & ")")
+        check not plan.output.contains("different source (" & r"\\?\")
+        check not plan.output.contains("different source (" & target & ")")
 
         # Apply must report drift; the wrong-source link is NOT silently
         # replaced.
@@ -262,9 +277,11 @@ else:
         check (res.output.contains("drift") or
                res.output.contains("conflict"))
         check res.output.contains(".m72stowrc")
+        # The refusal names the link's real target too.
+        check res.output.contains("pointing at '" & otherSource & "'")
         # The link is untouched — still pointing at the different source.
         check symlinkExists(target)
-        check expandSymlink(target) == resolvedBefore
-        check readFile(expandSymlink(target)) ==
+        check readSymlinkTarget(target) == resolvedBefore
+        check readFile(readSymlinkTarget(target)) ==
           "content of a DIFFERENT source\n"
         check readCurrentGenerationId(f.stateDir).len == 0

@@ -134,17 +134,16 @@ stage_loader_libs "$GCC_BIN" $LOADER_LIBS_FROM_GCC
 # shellcheck disable=SC2086 -- the lists are deliberately word-split.
 stage_loader_libs "$VC_REDIST_BIN" $LOADER_LIBS_FROM_VC_REDIST
 
-# ---- 3. tree/share/repro/source: reprobuild's own libs -------------
-SOURCE="$PRE/tree/share/repro/source"
-mkdir -p "$SOURCE/libs"
-(cd "$RB/libs" && find . -type f \
-   -not -path './*/tests/*' -not -path './*/*/tests/*' -print) |
-while IFS= read -r f; do
-  mkdir -p "$SOURCE/libs/$(dirname "$f")"
-  cp "$RB/libs/$f" "$SOURCE/libs/$f"
-done
+# ---- 3. tree/share/repro/source: the $REPROBUILD_SOURCE_ROOT tree -
+# The list is shared with the Linux payload and the release archives
+# (scripts/lib/stage_source_root.sh).
+# shellcheck source=scripts/lib/stage_source_root.sh
+. "$(dirname "$0")/lib/stage_source_root.sh"
+stage_source_root "$RB" "$PRE/tree/share/repro/source"
 
 # ---- 4. tree/share/repro/src/<input> -------------------------------
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "$0")/lib/stage_package_nimble.sh"
 stage_src() { # stage_src <source-dir> <dest-rel>
   from="$1"; dest="$2"
   if [ ! -d "$from" ]; then echo "MISSING SOURCE TREE: $from" >&2; return 1; fi
@@ -168,6 +167,9 @@ stage_src() { # stage_src <source-dir> <dest-rel>
     mkdir -p "$PRE/tree/share/repro/src/$dest/$(dirname "$f")"
     cp "$from/$f" "$PRE/tree/share/repro/src/$dest/$f"
   done
+  # A `<package>/src` tree also gets the package's nimble file beside it: a
+  # module may read it at compile time (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$from" "$PRE/tree/share/repro/src/$dest"
 }
 stage_src "$WS/nimcrypto"                     nimcrypto
 stage_src "$DEVDEPS/nim-bearssl"              bearssl
@@ -179,6 +181,7 @@ stage_src "$WS/nim-shm-queue/src"             nim-shm-queue/src
 stage_src "$WS/codetracer/src"                codetracer/src
 stage_src "$WS/reprobuild-ct-test-runner"     reprobuild-ct-test-runner
 stage_src "$WS/reprobuild-test-adapters/src"  reprobuild-test-adapters/src
+stage_src "$WS/test-certificates-tools/src"   test-certificates-tools/src
 stage_src "$WS/runquota"                      runquota
 
 # ---- 5. tree/libexec/reprobuild/nim --------------------------------

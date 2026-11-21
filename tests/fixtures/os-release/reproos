@@ -1,0 +1,9 @@
+NAME="ReproOS"
+PRETTY_NAME="ReproOS MVP 0.1.0"
+ID=reproos
+VERSION="0.1.0-mvp"
+VERSION_ID="0.1.0-mvp"
+REPROOS_VERSION=0.1.0-mvp
+HOME_URL="https://github.com/agent-harbor/reprobuild"
+SUPPORT_URL="https://github.com/agent-harbor/reprobuild/issues"
+BUG_REPORT_URL="https://github.com/agent-harbor/reprobuild/issues"

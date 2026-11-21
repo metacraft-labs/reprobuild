@@ -202,6 +202,12 @@ proc encodeV1AuditRecord(rec: AuditRecord): seq[byte] =
 # Tests.
 # ---------------------------------------------------------------------------
 
+# The dispatcher under test consults the binary cache through caches.conf.
+# Pin it off so a host /etc/repro/caches.conf (fleet hosts render one with the
+# live cache and its keys) cannot turn a local-build assertion into a network
+# substitute attempt.
+putEnv("REPRO_CACHE_DISABLE", "1")
+
 suite "repro infra apply: the audit log accounts for build-action edges":
 
   test "every counted resource is audited; the two populations stay apart":

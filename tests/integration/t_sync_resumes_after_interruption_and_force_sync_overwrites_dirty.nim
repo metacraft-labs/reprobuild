@@ -90,8 +90,7 @@ proc projectToml(remotes: seq[tuple[name, url: string]];
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "\n"
   for r in remotes:
     result.add("[[remote]]\nname = \"" & r.name & "\"\nfetch = \"" &
       r.url & "\"\n\n")
@@ -101,12 +100,12 @@ proc projectToml(remotes: seq[tuple[name, url: string]];
   result.add("]\n")
 
 proc repoFragment(name, path, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & path & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 # ---- the suite -------------------------------------------------------------
 

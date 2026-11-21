@@ -4,7 +4,7 @@
 ## ``reprobuild-specs/ReproOS-Wayland-DEs-PoC.milestones.org`` §NDEM2 at
 ## the **manifest level** (NOT at the Hyper-V boot level — the real
 ## /etc/ activation runtime + .deb extraction required by the spec's
-## ~vm-harness/tests/e2e/t_vm_harness_hyperv_reproos_native_generations.nim~
+## ~gosti/tests/e2e/t_gosti_hyperv_reproos_native_generations.nim~
 ## are explicitly deferred).
 ##
 ## ## Why this layout
@@ -78,7 +78,7 @@ export logImpl
 package generationLog:
   ## NDEM2 native generation-log persistence + rollback package.
   ##
-  ## Downstream Tier-1 system tooling (reproos-rebuild CLI; vm-harness
+  ## Downstream Tier-1 system tooling (reproos-rebuild CLI; gosti
   ## boot-test gate) ``uses:`` this and consume the exported
   ## ``addGeneration`` / ``activeGeneration`` / ``rollback`` /
   ## ``lookupGeneration`` / ``serializeGenerationLog`` /

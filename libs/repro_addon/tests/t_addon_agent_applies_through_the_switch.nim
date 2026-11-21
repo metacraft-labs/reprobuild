@@ -1,0 +1,402 @@
+## The deploy agent on an add-on host applies through the add-on switch
+## (ReproOS Add-On Mode §9, §7.4, §7.5, §9.3), unit level. The VM gate
+## ``e2e_addon_agent_generations_and_rollback`` drives the same code through
+## real switches; this file pins the decisions that need neither root nor a
+## guest:
+##
+## * the agent record a generation carries (deployment, sequence, the agent
+##   generation a migration took over);
+## * a rollback pauses every agent registered with the add-on (the deploy
+##   agent's own marker), a paused agent's tick reports ``aoPaused`` (exit
+##   0) and applies nothing, and resume lifts it;
+## * the apply hook hands the add-on switch the add-on's state directory,
+##   the manifest's deployment and sequence and its build actions; a source
+##   profile is compiled by the injected (unprivileged) compiler and applied
+##   only at the digest the manifest signs, and the management path and an
+##   action the manifest pins no digest for are refused before the switch
+##   (A8, owner decisions B1 and B3);
+## * migration runs exactly when the add-on store has no agent generation
+##   and the agent's own state directory has one, and switches the profile
+##   that agent last applied, recording what it took over.
+##
+## At reprobuild 3a1068e25b (before this change) the agent's apply on an
+## add-on host was the plain `repro infra apply` into its own state
+## directory: none of these hooks existed, so this file does not compile
+## there.
+##
+## MOCK JUSTIFICATION. The add-on switch itself is replaced by a recorder
+## (``AddonApplyFn``) in the hook and migration cases, and the compiler by a
+## closure (``ManifestCompiler``) that emits chosen text -- the real one is a
+## systemd transient unit, which the VM gate
+## ``e2e_addon_engine_agent_enforces_a8`` runs: a real switch needs
+## root, systemd and a bootstrapped host, which the VM gate provides. What
+## is tested here is what reaches the switch. The agent tick, the record
+## codecs, the generation envelope and the state layout are the production
+## ones, on the real filesystem.
+
+import std/[json, os, strutils, tempfiles, unittest]
+
+import repro_deploy_agent
+import repro_deploy_agent/apply_hook
+import repro_infra
+import repro_infra/addon_diagnostics
+import repro_peer_cache/auth as peerAuth
+import repro_profile
+import repro_addon/addon_apply
+import repro_addon/agent_checks
+import repro_addon/agent_record
+import repro_addon/agent_switch
+import repro_addon/collision
+import repro_addon/fingerprint
+import repro_addon/ledger
+import repro_addon/verified_compile
+from repro_addon/generation0 import agentCompileBounds, agentFetchUnit,
+  AgentUnitsInputs
+
+type Recorder = ref object
+  calls: seq[AddonApplyOptions]
+  raiseBase: bool
+  fail: string
+
+proc recorder(r: Recorder): AddonApplyFn =
+  result = proc(o: AddonApplyOptions): AddonApplyResult {.closure, gcsafe.} =
+    {.cast(gcsafe).}:
+      r.calls.add(o)
+      if r.raiseBase:
+        raise newException(EAddOnUnsupportedBase, "base not in the matrix")
+      if r.fail.len > 0:
+        raise newException(AddonApplyError, r.fail)
+      AddonApplyResult(generationId: "gen-" & $r.calls.len)
+
+proc manifest(seq: uint64; dep, text: string;
+              actions: seq[ProfileBuildAction] = @[]): DeployManifest =
+  DeployManifest(target: "addon-tb", sequence: seq, deploymentId: dep,
+    profileText: text, buildActions: actions)
+
+proc fakeAddonHost(stateDir: string) =
+  createDir(stateDir)
+  writeLedger(ledgerCopyPath(stateDir), Ledger(generation: "", entries: @[]))
+
+suite "the agent record and pausing the agents":
+  test "an agent record round-trips and marks its generation":
+    let tmp = createTempDir("addon-agent-record-", "")
+    defer: removeDir(tmp)
+    let r = AgentRecord(deploymentId: "hms-3-be49", sequence: 3,
+                        migratedFrom: "66ac8b48")
+    check parseAgentRecord(render(r)) == r
+    check not anyAgentGeneration(tmp)
+    createDir(generationDir(tmp, "g1"))
+    writeFile(agentRecordPath(tmp, "g1"), render(r))
+    check anyAgentGeneration(tmp)
+    check readAgentRecord(tmp, "g1") == r
+    check not readAgentRecord(tmp, "g2").present
+    expect AgentRecordError:
+      discard render(AgentRecord(deploymentId: "a\nb"))
+
+  test "a rollback pauses every agent registered here; resume lifts each":
+    let tmp = createTempDir("addon-agent-pause-", "")
+    defer: removeDir(tmp)
+    let addonState = tmp / "system"
+    let agentA = tmp / "agent-a"
+    let agentB = tmp / "agent-b"
+    registerAgentState(addonState, agentA)
+    registerAgentState(addonState, agentB)
+    registerAgentState(addonState, agentA)          # idempotent
+    check registeredAgentStates(addonState) == @[agentA, agentB]
+    check pauseAgents(addonState, "g1", operator = "zahary") ==
+      @[agentA, agentB]
+    for d in [agentA, agentB]:
+      let p = readPauseMarker(d)
+      check p.paused and p.generation == "g1" and p.operator == "zahary"
+    check resumeAgents(addonState) == @[agentA, agentB]
+    check not readPauseMarker(agentA).paused
+    check resumeAgents(addonState).len == 0
+
+suite "a paused agent":
+  test "a tick of a paused agent reports aoPaused, exit 0, and applies nothing":
+    let tmp = createTempDir("addon-agent-paused-", "")
+    defer: removeDir(tmp)
+    let signer = peerAuth.generateKeypair()
+    var m = manifest(2, "d2", "x")
+    signManifest(signer, m)
+    let enc = encodeManifest(m)
+    var bytes = newString(enc.len)
+    for i, x in enc: bytes[i] = char(x)
+    writeFile(tmp / "m2.rdm", bytes)
+    let agentState = tmp / "agent"
+    registerAgentState(tmp / "system", agentState)
+    discard pauseAgents(tmp / "system", "g1", operator = "zahary")
+    var applied = 0
+    let cfg = AgentConfig(target: "addon-tb", sources: @[tmp / "m2.rdm"],
+      anchors: anchorsFromKeypairs(@[signer.publicKey]),
+      stateDir: agentState)
+    let deps = AgentDeps(
+      apply: proc(m: DeployManifest): tuple[ok: bool; message: string]
+          {.gcsafe.} =
+        {.cast(gcsafe).}:
+          inc applied
+          (true, ""))
+    let o = runAgentTick(cfg, deps)
+    check o.kind == aoPaused
+    check "g1" in o.message
+    check deployAgentExitCode(o.kind) == 0
+    check applied == 0
+
+const Canonical = "fs.systemFile {\n  path = \"/etc/a8-x.conf\"\n" &
+  "  content = \"x\"\n}\n"
+  ## Canonical resource text: applied as signed, never compiled.
+
+proc noUnits(unit: string): seq[string] {.gcsafe.} = @[]
+  ## No systemd here: a unit is known by its own name only.
+
+proc pinned(m: var DeployManifest; canonical, actionsJson: string) =
+  ## The producer's side of the compiled-profile pin.
+  m.issuedAt = 1
+  m.maxAgeSeconds = 1
+  # The add-on default selection (mode addOn, no activity): an add-on agent
+  # applies only a pin compiled for the add-on projection
+  # (``addonPinSelectionRefusal``), and the digest frames the selection.
+  var pin = CompiledProfilePin(compilerRevision: "rev-1",
+    platform: "linux", arch: "x86_64", host: "h", systemMode: "addOn")
+  pin.digest = compiledProfileDigest(canonical, actionsJson,
+                                     systemSelectionText(pin))
+  m.compiledProfile = pin
+  # The compile emits one action; the block pins its closure too.
+  m.closureDigests = @[ClosureDigest(actionId: "searxng",
+    digest: "blake3:" & repeat('0', 64))]
+
+suite "the agent's apply goes through the add-on switch":
+  test "the switch gets the add-on state, the deployment, the sequence and the actions":
+    let r = Recorder()
+    let tmp = createTempDir("addon-agent-hook-", "")
+    defer: removeDir(tmp)
+    let action = ProfileBuildAction(id: "llm-api-proxy",
+      cwd: tmp / "store" / "prefixes" / "llm-api-proxy" / "1")
+    let hook = addonAgentApplyHook(tmp / "system", "rpi2",
+      agentStateDir = tmp / "agent", apply = recorder(r), unitNames = noUnits,
+      storeRoot = tmp / "store")
+    let res = hook(manifest(4, "hms-4-aa", Canonical, @[action]))
+    check res.ok
+    check "gen-1" in res.message
+    check r.calls.len == 1
+    let o = r.calls[0]
+    check o.stateDir == tmp / "system"
+    check registeredAgentStates(tmp / "system") == @[tmp / "agent"]
+    check o.hostIdentity == "rpi2"
+    check o.userProfileText == Canonical
+    check o.agentRecord.deploymentId == "hms-4-aa"
+    check o.agentRecord.sequence == 4'u64
+    # The producer-side digests its generation attestation names (A11).
+    check o.agentRecord.profileDigest == "sha256:" & sha256Hex(Canonical)
+    check o.buildActions.len == 1 and o.buildActions[0].id == "llm-api-proxy"
+
+  test "a source profile is compiled elsewhere and applied only at its signed digest (A8 B1/B3)":
+    let r = Recorder()
+    let tmp = createTempDir("addon-agent-compile-", "")
+    defer: removeDir(tmp)
+    let actionsJson = $(%(@[ProfileBuildAction(id: "searxng",
+      cwd: tmp / "store" / "prefixes" / "searxng" / "1")]))
+    var calls = 0
+    var emit = Canonical      # what the (untrusted) compiler emits
+    var revision = "rev-1"    # and the revision it says it is
+    let compiler: ManifestCompiler = proc(m: DeployManifest):
+        tuple[ok: bool; canonical, actionsJson, revision, error: string]
+        {.closure, gcsafe.} =
+      {.cast(gcsafe).}:
+        inc calls
+        if "bad" in m.profileText:
+          return (false, "", "", "", "it does not compile")
+        (true, emit, actionsJson, revision, "")
+    let hook = addonAgentApplyHook(tmp / "s", "h", compiler = compiler,
+      apply = recorder(r), unitNames = noUnits, storeRoot = tmp / "store")
+    var m5 = manifest(5, "d5", "import repro_profile")
+    pinned(m5, Canonical, actionsJson)
+    check hook(m5).ok
+    check r.calls[0].userProfileText == Canonical
+    check r.calls[0].buildActions[0].id == "searxng"
+    # A source profile the producer pinned no compile of: refused, and not
+    # compiled at all (rpi2 compiled a whole profile every tick for a
+    # sequence it then refused; at 0e84765db0 the compiler ran here).
+    let before = calls
+    let unpinned = hook(manifest(6, "d6", "import repro_profile"))
+    check not unpinned.ok and "pins no digest" in unpinned.message
+    check calls == before
+    # A compiler that emits something else (a root unit): refused.
+    emit = Canonical & "systemd.systemUnit {\n  name = \"evil.service\"\n" &
+      "  content = \"[Service]\\nExecStart=/bin/true\\n\"\n}\n"
+    var m7 = manifest(7, "d7", "import repro_profile")
+    pinned(m7, Canonical, actionsJson)
+    let evil = hook(m7)
+    check not evil.ok and CompiledProfileRefusal in evil.message
+    # The next tick of the same sequence, pin and engine is refused again
+    # without compiling again; another sequence compiles.
+    let compiledSoFar = calls
+    let again = hook(m7)
+    check not again.ok and CompiledProfileRefusal in again.message and
+      "not compiled again" in again.message
+    check calls == compiledSoFar
+    # A compiler of another revision: refused as that, not as a digest
+    # mismatch, even when it emits the pinned bytes.
+    emit = Canonical
+    revision = "rev-2"
+    var m9 = manifest(9, "d9", "import repro_profile")
+    pinned(m9, Canonical, actionsJson)
+    let other = hook(m9)
+    check not other.ok and CompilerRevisionMismatch in other.message
+    revision = "rev-1"
+    # A failed compile applies nothing.
+    var m8 = manifest(8, "d8", "bad profile")
+    pinned(m8, Canonical, actionsJson)
+    check not hook(m8).ok
+    # No compiler at all: a source profile is never compiled in-process.
+    let none = addonAgentApplyHook(tmp / "s", "h", apply = recorder(r),
+      unitNames = noUnits)
+    check not none(m5).ok
+    check r.calls.len == 1
+
+  test "the compile unit is bounded in memory, CPU and I/O":
+    # A 1 GB Pi compiled a whole profile in a transient unit with no
+    # ceiling and default weights beside its own services (0e84765db0).
+    let limits = unprivilegedCompileLimits()
+    check "--property=MemoryMax=" & UnprivilegedCompileMemoryMax in limits
+    check "--property=Nice=" & $UnprivilegedCompileNice in limits
+    check "--property=CPUWeight=" & $UnprivilegedCompileWeight in limits
+    check "--property=IOWeight=" & $UnprivilegedCompileWeight in limits
+    # A share of the host's memory, which systemd resolves per host (a
+    # fixed 512M was most of a 1 GB Pi), and the same bounds on the fetch
+    # unit, which compiles too (review of d14cd72e9f).
+    check UnprivilegedCompileMemoryMax.endsWith("%")
+    check "--property=OOMScoreAdjust=500" in limits
+    check "OOMScoreAdjust=500\n" in agentCompileBounds()
+    check agentCompileBounds() in agentFetchUnit("/x/repro", AgentUnitsInputs())
+
+  test "the management path and an unpinned action are refused before the switch":
+    let r = Recorder()
+    let tmp = createTempDir("addon-agent-refuse-", "")
+    defer: removeDir(tmp)
+    let hook = addonAgentApplyHook(tmp / "s", "h", apply = recorder(r),
+      unitNames = noUnits)
+    let sshd = "fs.systemFile {\n  path = \"/etc/ssh/sshd_config.d/x.conf\"\n" &
+      "  content = \"x\"\n}\n"
+    let res = hook(manifest(1, "d1", sshd))
+    check not res.ok and ManagementPathRefusal in res.message
+    var m = manifest(2, "d2", Canonical, @[ProfileBuildAction(id: "a")])
+    m.issuedAt = 1
+    m.maxAgeSeconds = 1
+    m.closureDigests = @[ClosureDigest(actionId: "b",
+      digest: "blake3:" & repeat('0', 64))]
+    let unpinned = hook(m)
+    check not unpinned.ok and "closure digests" in unpinned.message
+    check r.calls.len == 0
+
+  test "a build action is materialised only in a canonical store prefix (spec §9.1)":
+    # The engine's dispatcher builds an action in its `cwd`, as root; a
+    # compiled action's `cwd` is the (unprivileged, untrusted) compiler's
+    # word. It is held to the shape the add-on agent's apply unit holds it
+    # to (`stagedCwdRefusal`). Falsifier: `agent-install-trusts-cwd`, a
+    # string-prefix test, lets the `..` escape through.
+    let r = Recorder()
+    let tmp = createTempDir("addon-agent-cwd-", "")
+    defer: removeDir(tmp)
+    let store = tmp / "store"
+    let hook = addonAgentApplyHook(tmp / "s", "h", apply = recorder(r),
+      unitNames = noUnits, storeRoot = store)
+    proc withCwd(cwd: string): DeployManifest =
+      result = manifest(3, "d3", Canonical,
+        @[ProfileBuildAction(id: "a", cwd: cwd)])
+      result.issuedAt = 1
+      result.maxAgeSeconds = 1
+      result.closureDigests = @[ClosureDigest(actionId: "a",
+        digest: "blake3:" & repeat('0', 64))]
+    # Out of the store by `..`, by a sibling of `prefixes`, by a deeper
+    # path, and through a symbolic link planted on the prefix's name.
+    for cwd in [store & "/../../etc/cron.d", store & "/state/x/1",
+                store & "/prefixes/a/1/bin", store & "/prefixes/a/./1"]:
+      let res = hook(withCwd(cwd))
+      check not res.ok and "may not materialise" in res.message
+    createDir(store / "prefixes")
+    createSymlink(tmp / "elsewhere", store / "prefixes" / "evil")
+    let linked = hook(withCwd(store / "prefixes" / "evil" / "1"))
+    check not linked.ok and "symbolic link" in linked.message
+    check r.calls.len == 0
+    # A canonical prefix reaches the switch.
+    check hook(withCwd(store / "prefixes" / "a" / "1")).ok
+    check r.calls.len == 1
+
+  test "an unsupported base is raised through; any other failure is not ok":
+    let r = Recorder(raiseBase: true)
+    let hook = addonAgentApplyHook("/s", "h", apply = recorder(r),
+      unitNames = noUnits)
+    expect EAddOnUnsupportedBase:
+      discard hook(manifest(1, "d", Canonical))
+    let f = Recorder(fail: "an interrupted switch is pending")
+    let failing = addonAgentApplyHook("/s", "h", apply = recorder(f),
+      unitNames = noUnits)
+    let res = failing(manifest(1, "d", Canonical))
+    check not res.ok and "pending" in res.message
+
+suite "migration of an agent that applied outside the switch":
+  test "it runs once, switches the profile that agent last applied, and records it":
+    let tmp = createTempDir("addon-agent-migrate-", "")
+    defer: removeDir(tmp)
+    let addonState = tmp / "system"
+    let legacy = tmp / "agent-state"
+    check not needsLegacyMigration(addonState, legacy)   # not an add-on host
+    fakeAddonHost(addonState)
+    check not needsLegacyMigration(addonState, legacy)   # no legacy generation
+    # The legacy agent's current generation (what `repro infra apply` into
+    # its state directory leaves), its sequence floor and its last tick.
+    createDir(legacy)
+    writeGenerationEnvelope(pointerPath(legacy, "66ac8b48"),
+      GenerationEnvelope(schemaVersion: 2, generationId: "66ac8b48",
+        hostIdentity: "rpi2", profileText: "systemd.systemUnit {}\n"))
+    writeCurrentGenerationId(legacy, "66ac8b48")
+    let cfg = AgentConfig(target: "rpi2", stateDir: legacy)
+    writeLastAppliedSequence(cfg, 3)
+    createDir(parentDir(tickStatusPath(legacy, "rpi2")))
+    writeFile(tickStatusPath(legacy, "rpi2"),
+      $(%*{"sequence": 3, "deploymentId": "hms-1-be4958"}))
+    check needsLegacyMigration(addonState, legacy)
+    check not needsLegacyMigration(addonState, addonState)
+    let r = Recorder()
+    discard migrateLegacyAgentState(addonState, legacy, "rpi2", "rpi2",
+      apply = recorder(r))
+    check r.calls.len == 1
+    let o = r.calls[0]
+    check o.stateDir == addonState
+    check o.userProfileText == "systemd.systemUnit {}\n"
+    check o.buildActions.len == 0
+    check o.agentRecord == AgentRecord(deploymentId: "hms-1-be4958",
+      sequence: 3, migratedFrom: "66ac8b48")
+    check o.agentSequence == 3 and not o.planOnly
+    # `repro system addon migration-plan`: the same switch, plan only.
+    discard planLegacyMigration(addonState, legacy, "rpi2", "rpi2",
+      apply = recorder(r))
+    check r.calls.len == 2 and r.calls[1].planOnly and
+      r.calls[1].userProfileText == o.userProfileText and
+      r.calls[1].agentRecord == o.agentRecord
+    # Once an agent generation is in the add-on store, never again.
+    createDir(generationDir(addonState, "g1"))
+    writeFile(agentRecordPath(addonState, "g1"), render(o.agentRecord))
+    check not needsLegacyMigration(addonState, legacy)
+
+suite "taking over running units restarts none":
+  # At reprobuild 4cff209e2e a unit the previous ledger did not know was
+  # always a changed definition, so the migration switch restarted every
+  # unit the agent had applied (the VM gate's step 1 measured both MainPIDs
+  # change). An adopted unit is written by nobody: its definition changes
+  # only when systemd has not loaded the bytes on disk yet.
+  test "an adopted unit systemd has loaded is unchanged; anything else is a change":
+    check not unitFileChanged(true, $cvAdopt, "", "s", false, false)
+    check unitFileChanged(true, $cvAdopt, "", "s", false, loadedStale = true)
+    check unitFileChanged(true, $cvCreate, "", "s", false, false)
+    check unitFileChanged(true, $cvAdopt, "", "s", closureMissing = true,
+                          loadedStale = false)
+    check not unitFileChanged(false, $cvNoOp, "s", "s", false, false)
+    check unitFileChanged(false, $cvNoOp, "a", "s", false, false)
+    check unitFileChanged(false, $cvUpdate, "s", "s", false, false)
+
+  test "NeedDaemonReload reads stale unless systemd says no":
+    check not unitProvisionFromShow("LoadState=loaded\nNeedDaemonReload=no\n").needDaemonReload
+    check unitProvisionFromShow("LoadState=loaded\nNeedDaemonReload=yes\n").needDaemonReload
+    check unitProvisionFromShow("LoadState=loaded\n").needDaemonReload

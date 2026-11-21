@@ -52,6 +52,26 @@ function Get-UserPathSnapshot {
 }
 $pathBefore = Get-UserPathSnapshot
 
+# Test home fence (libs/repro_home_resources test_home_fence.nim), as
+# scripts/run_tests.sh sets it: protect the invoking user's real home, so a
+# home-resource write that resolves into it raises instead of landing there.
+# On Windows the fence also refuses writes to the real HKCU registry when a
+# test has not set REPRO_REGISTRY_ROOT (reprobuild-pm issue
+# 2026-10-23-windows-home-apply-gates-leak-store-prefixes-into-the-real-user-path);
+# the before/after PATH snapshot above remains the backstop. %TEMP% is the
+# fence's own carve-out; the checkout is allowed because many home-apply
+# tests keep their fixture homes under build\test-tmp. A fence the caller
+# set is kept.
+if (-not $env:REPRO_TEST_HOME_FENCE) {
+  $env:REPRO_TEST_HOME_FENCE = $env:USERPROFILE
+}
+$fenceAllow = "$RepoRoot"
+if ($env:REPRO_TEST_HOME_FENCE_ALLOW) {
+  $fenceAllow = $fenceAllow + ";" + $env:REPRO_TEST_HOME_FENCE_ALLOW
+}
+$env:REPRO_TEST_HOME_FENCE_ALLOW = $fenceAllow
+Write-Host "run_tests_windows.ps1: home fence REPRO_TEST_HOME_FENCE=$($env:REPRO_TEST_HOME_FENCE)"
+
 $candidates = Get-ChildItem -Path $TestBinDir -Filter "t_$Filter.exe"
 # Skip stale ``.exe`` artifacts whose source has been deleted (e.g.,
 # ``t_catalog_profile_cli`` whose ``.nim`` was rolled back at some
@@ -75,7 +95,7 @@ foreach ($t in $tests) {
   Write-Host -NoNewline "  $name ... "
   $logFile = Join-Path $env:TEMP "reprobuild-test-$name.log"
   $job = Start-Job -ScriptBlock {
-    param($exe, $log, $cwd, $extraPath)
+    param($exe, $log, $cwd, $extraPath, $fence, $fenceAllow)
     # Start-Job spawns a fresh pwsh whose default cwd is the user's
     # home (Documents), not the parent's cwd. Several reprobuild
     # tests use ``getCurrentDir()`` to locate ``build/bin/repro.exe``
@@ -88,13 +108,16 @@ foreach ($t in $tests) {
     # Mutations via ``$env:PATH=...`` only affect the current pwsh
     # session, so re-apply.
     $env:PATH = $extraPath + ";" + $env:PATH
+    # Re-apply the home fence for the same reason (see above).
+    $env:REPRO_TEST_HOME_FENCE = $fence
+    $env:REPRO_TEST_HOME_FENCE_ALLOW = $fenceAllow
     & $exe *> $log
     return $LASTEXITCODE
   } -ArgumentList $t.FullName, $logFile, $RepoRoot, ("D:\metacraft-dev-deps\python\3.12.10;" +
     "D:\metacraft-dev-deps\python\3.12.10\Scripts;" +
     "D:\metacraft-dev-deps\nim\2.2.8\prebuilt\nim-2.2.8\bin;" +
     "D:\metacraft-dev-deps\gcc\15.2.0\bin;" +
-    "D:\metacraft-dev-deps\go\1.23.4\bin")
+    "D:\metacraft-dev-deps\go\1.23.4\bin"), $env:REPRO_TEST_HOME_FENCE, $env:REPRO_TEST_HOME_FENCE_ALLOW
   $finished = Wait-Job -Job $job -Timeout $TimeoutSeconds
   if ($null -eq $finished) {
     Write-Host "TIMEOUT" -ForegroundColor Yellow

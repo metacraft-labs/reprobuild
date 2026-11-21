@@ -54,8 +54,8 @@ proc reproBinary(): string =
 
 proc projectFile(name: string; includes: openArray[string]): string =
   var body = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"" & name & "\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "[project]\nname = \"" & name & "\"\n" &
+    "\n" &
     "[[remote]]\nname = \"acme\"\nfetch = \"https://git.example.invalid/acme\"\n\n" &
     "includes = [\n"
   for inc in includes:

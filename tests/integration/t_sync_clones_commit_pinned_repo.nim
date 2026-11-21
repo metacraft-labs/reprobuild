@@ -87,8 +87,8 @@ proc seedOrigin(gitBin, originPath, workPath: string): string =
   pinned
 
 proc repoFragment(name, remote, revision: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
-  "[repo]\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+  "[repo]\nmainline = \"main\"\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
@@ -96,8 +96,8 @@ proc repoFragment(name, remote, revision: string): string =
 
 proc projectFile(remotes: string; includes: openArray[string]): string =
   var body = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"pinned\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" & remotes & "includes = [\n"
+    "[project]\nname = \"pinned\"\n" &
+    "\n" & remotes & "includes = [\n"
   for inc in includes:
     body.add("  \"" & inc & "\",\n")
   body.add("]\n")

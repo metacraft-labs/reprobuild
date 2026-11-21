@@ -59,8 +59,21 @@
 #   REPROBUILD_TEST_THREADS=1      293 of 1183 cases in 3h57m (~16h implied).
 #   REPROBUILD_TEST_THREADS=8      1183/1183 in ~3h25m.
 #
+# and, on the same 32-core host with the ~11,260-case suite (2026-10), the
+# runner's own summary (`test-logs/parallel-run.json`):
+#
+#   REPROBUILD_TEST_THREADS=8      test phase 5.85h; per-case durations sum to
+#                                  27.4h; 9 failures.
+#   REPROBUILD_TEST_THREADS=12     test phase 9.25h; per-case durations sum to
+#                                  57.5h; 19 failures, the extra ones timing
+#                                  bounds (HCR agent waits, a 5s runner bound).
+#
+# More execution threads did not finish sooner: every case ran about twice as
+# long, because each test thread also drives a nested build and the host was
+# already saturated at 8. Raising the thread count is not the lever.
+#
 # 24 workers on 32 cores is 3/4 of the machine, and 8 execution threads is the
-# only full-suite execution measurement that exists; both numbers below are
+# best full-suite execution configuration measured; both numbers below are
 # chosen so this host reproduces exactly those two configurations.
 
 # Per-worker memory allowance, MiB. One ``nim c`` of a reprobuild test binary

@@ -130,7 +130,7 @@ proc writeWorkspace(root, prefix: string;
   var members: seq[string]
   for f in fragments:
     writeFile(root / "repos" / (f.name & ".toml"),
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"" & f.name & "\"\npath = \"" & f.name & "\"\n" &
       "url_prefix = \"vendor\"\n" & f.extra)
     members.add("\"" & f.name & "\"")
@@ -138,8 +138,8 @@ proc writeWorkspace(root, prefix: string;
     "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
     "[repo-set]\nname = \"demo\"\n\nmember_repos = [" &
     members.join(", ") & "]\n")
-  writeFile(root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
 suite "workspace migrate leaves a pinned checkout on its pin":
@@ -164,9 +164,9 @@ suite "workspace migrate leaves a pinned checkout on its pin":
         # The converted vendored-reference shape: BOTH keys, and they disagree
         # on purpose.
         (name: "pinned-ref",
-         extra: "branch = \"main\"\nrevision = \"" & pinnedSha & "\"\n"),
+         extra: "mainline = \"main\"\nrevision = \"" & pinnedSha & "\"\n"),
         # A repo that lost its pin in the conversion — it must still attach.
-        (name: "tracking-lib", extra: "branch = \"main\"\n")])
+        (name: "tracking-lib", extra: "mainline = \"main\"\n")])
 
       for name in ["pinned-ref", "tracking-lib"]:
         discard requireGit(gitBin, "clone --quiet " &
@@ -237,7 +237,7 @@ suite "workspace migrate leaves a pinned checkout on its pin":
       let root = scratch / "workspace"
       writeWorkspace(root, prefix, [
         (name: "adrift-ref",
-         extra: "branch = \"main\"\nrevision = \"" & pinnedSha & "\"\n")])
+         extra: "mainline = \"main\"\nrevision = \"" & pinnedSha & "\"\n")])
       discard requireGit(gitBin, "clone --quiet " & q(prefix & "/adrift-ref") &
         " " & q(root / "adrift-ref"))
 

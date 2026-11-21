@@ -333,16 +333,28 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           onProgress()
 
       # ---- M4: binary-cache substitute-first / publish-on-miss. ----
-      # When ``REPRO_BINARY_CACHE_URL`` is set we PREFER fetching each
-      # edge's outputs from the cache instead of building locally. Edges
-      # substituted from the cache are removed from the engine's
+      # When a binary cache is configured (``caches.conf`` or
+      # ``REPRO_BINARY_CACHE_URL``) we PREFER fetching each edge's outputs
+      # from the cache instead of building locally; only entries signed by
+      # a key the cache's ``trusted-public-keys`` anchor are accepted.
+      # Edges substituted from the cache are removed from the engine's
       # build-graph; only the misses (and edges with no substitutable
-      # outputs) go through ``runBuild``. On a successful local build we
-      # publish the freshly-built outputs back so a later fresh apply
-      # hits. Off-by-default: an unset URL yields ``configured = false``
-      # and the whole block is a no-op — the local-build path below is
-      # byte-identical to pre-M4 behaviour.
+      # outputs) go through ``runBuild``. On a successful local build a
+      # host configured as a PUBLISHER (operator-supplied keypair) publishes
+      # the freshly-built outputs back so a later fresh apply hits; any
+      # other host publishes nothing. Off-by-default: no configured cache
+      # yields ``configured = false`` and the whole block is a no-op — the
+      # local-build path below is byte-identical to pre-M4 behaviour.
       let cacheCfg = resolveBuildActionCacheConfig()
+      # Say when the cache configuration could not be read. A malformed
+      # caches.conf resolves to "no cache" by design (a config the loader
+      # cannot read grants no trust), but silently building every edge
+      # locally on a host that was given a cache is how a typo in a
+      # trusted-key line goes unnoticed for weeks. Once per dispatch.
+      if cacheCfg.configError.len > 0:
+        stderr.writeLine("repro infra apply: binary cache disabled for this " &
+          "apply: the cache configuration could not be read (" &
+          cacheCfg.configError & "); every build-action edge builds locally")
       # The M4 CAS + scratch lives beside the engine's action-cache
       # under the same apply-scoped cache root so a cache sweep of the
       # action-edge half removes both.
@@ -352,7 +364,12 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
       var substituted = initTable[string, BuildActionApplyOutcome]()
       var toBuild: seq[ProfileBuildAction] = @[]
       for a in actions:
-        if cacheCfg.configured:
+        # A substitute-only edge, or one that pins its output digest, is
+        # consulted even with no cache configured: its present outputs may
+        # verify against the pin, and a substitute-only edge that nothing
+        # verifies FAILS below rather than builds.
+        if cacheCfg.configured or a.substituteOnly or
+            a.expectedOutputDigest.len > 0:
           let attempt = trySubstituteBuildAction(
             a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
           # Beat on the ATTEMPT, not just on the hit. A substitution
@@ -363,6 +380,13 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
           # large profile can exceed the staleness window and make a
           # perfectly healthy apply look hung to the next acquirer.
           beat()
+          # A trust rejection is the one miss an operator must hear about:
+          # the entry exists and would have been served, and the host was
+          # told to refuse it. A plain "not in the cache" miss stays quiet.
+          if attempt.trustRejected:
+            stderr.writeLine("repro infra apply: build-action edge " & a.id &
+              ": a cache entry was refused on trust and the edge builds " &
+              "locally: " & attempt.reason)
           if attempt.hit:
             substituted[a.id] = BuildActionApplyOutcome(
               id: a.id,
@@ -370,8 +394,25 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
               ok: true,
               requiresElevation: a.requiresElevation,
               cacheHit: true,
-              substitutedFromCache: true,
+              # Outputs already present and verified against the pinned
+              # digest are a cache hit that fetched nothing; they are
+              # not counted as substituted.
+              substitutedFromCache: not attempt.verifiedPresent,
               fingerprintHex: buildActionFingerprintHex(a))
+            continue
+          if a.substituteOnly:
+            # Never a local build: the host cannot finish one, and the
+            # edge said so. The diagnostic names the remedy.
+            substituted[a.id] = BuildActionApplyOutcome(
+              id: a.id,
+              address: a.id,
+              ok: false,
+              requiresElevation: a.requiresElevation,
+              fingerprintHex: buildActionFingerprintHex(a),
+              diagnostic: "substitute-only edge " & a.id &
+                " could not be substituted: " & attempt.reason &
+                " (publish its outputs under the key `repro infra " &
+                "cache-keys` prints for this host's platform)")
             continue
         toBuild.add(a)
 
@@ -462,7 +503,8 @@ proc mkBuildActionDispatcher*(cacheRoot: string;
             # HIT from the engine's OWN action-cache (asCacheHit /
             # asUpToDate) is NOT re-published: the bytes are unchanged
             # and were published on the run that produced them.
-            if cacheCfg.configured and outcome.ok and not outcome.cacheHit:
+            if shouldPublishBuildActionOutputs(cacheCfg) and outcome.ok and
+                not outcome.cacheHit:
               discard publishBuildActionOutputs(
                 a, cacheCfg, m4ScratchRoot / sanitizeForPath(a.id))
             matched = true

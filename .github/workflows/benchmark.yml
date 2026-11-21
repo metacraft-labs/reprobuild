@@ -26,10 +26,20 @@ jobs:
         include:
           # EXEMPTION (CIP-5): persistent benchmark runner — real perf hardware
           # is required for meaningful numbers; not migrated to ephemeral eph-linux-x64.
+          #
+          # NO `self-hosted`. The benchmark runner is being moved to dedicated labels
+          # only (registered without GitHub's default `self-hosted`/OS/arch labels) so
+          # that general `[self-hosted, linux, x64]` jobs can no longer take its single
+          # CPU-isolated slot. `[linux, x64, benchmark]` matches it both before and after
+          # that change, and never matches the macOS benchmark runner.
           - platform: linux
-            runner: '["self-hosted", "Linux", "X64", "benchmark"]'
+            runner: '["linux", "x64", "benchmark"]'
+          # Dedicated m3 benchmark runner; continuous-benchmarking policy §4.
+          # GitHub's implicit macOS/ARM64 labels, not the shared runners'
+          # `darwin`/`nix-darwin`/`aarch64-darwin`: the benchmark runner no
+          # longer carries those.
           - platform: macos
-            runner: '["self-hosted", "macos", "arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
+            runner: '["self-hosted", "macOS", "ARM64", "benchmark"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     # Successful runs take <=72 min (linux, 68 runs) and <=30 min (macos, 31 runs);
     # hung runs have held the single benchmark runner for 10h+. Fail them instead.
@@ -184,9 +194,10 @@ jobs:
       # read Username` on a status-im URL indicates the token was REJECTED, not
       # absent. Check the token, not the quota.
       #
-      # It is macOS-only by luck, not by design: the Linux leg
-      # runs on a persistent bare-metal host whose fetcher cache is already warm,
-      # so it never performs the fetch, while `eph-macos-arm64` is cold every job.
+      # The original failure was macOS-only by luck: the Linux leg ran on
+      # a persistent bare-metal host with a warm fetcher cache, while the
+      # former general ephemeral macOS pool was cold every job. Both legs
+      # now use dedicated benchmark runners; cold fetches still need auth.
       #
       # A URL-embedded credential CANNOT fix this: git does not send a URL's
       # userinfo preemptively, and a public repo never issues the 401 that would

@@ -263,11 +263,11 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
     proc buildStandaloneProvider(): string =
       ## The C-ABI standalone provider .so always builds (no useNimRtl).
       result = tempRoot / ("libstandalone." & soExt())
-      var cmd = providerLibraryCompileCommand(modulePath, result,
-        rtlStandaloneCAbi, repoRoot, tempRoot)
-      # Flags go BEFORE the trailing module path (anything after it is a run arg).
-      for flag in selfBindFlags() & @[sharedPath]:
-        cmd.insert(flag, cmd.len - 1)
+      # Extra flags go through `extraFlags`, never inserted afterwards: they
+      # are part of the compile configuration the nimcache is keyed on.
+      let cmd = providerLibraryCompileCommand(modulePath, result,
+        rtlStandaloneCAbi, repoRoot, tempRoot,
+        extraFlags = selfBindFlags() & @[sharedPath])
       let (o, c) = execCmdEx(quoteShellCommand(cmd), workingDir = repoRoot)
       if c != 0 or not fileExists(result):
         raise newException(IOError, "standalone provider build failed (" & $c &
@@ -286,13 +286,10 @@ suite "M4c: resource reconcile over the nimRtl Nim-native fast path (no marshal)
 
       # 2) the nimRtl-shared provider .so (fast-path surface)
       let so = tempRoot / ("libshared." & soExt())
-      var pcmd = providerLibraryCompileCommand(modulePath, so,
-        rtlNimRtlShared, repoRoot, tempRoot)
-      pcmd.insert("--passL:-L" & tempRoot, pcmd.len - 1)
-      pcmd.insert("--passL:-lnimrtl", pcmd.len - 1)
-      pcmd.insert("--passL:-Wl,-rpath," & tempRoot, pcmd.len - 1)
-      for flag in selfBindFlags() & @[sharedPath]:
-        pcmd.insert(flag, pcmd.len - 1)
+      let pcmd = providerLibraryCompileCommand(modulePath, so,
+        rtlNimRtlShared, repoRoot, tempRoot,
+        extraFlags = @["--passL:-L" & tempRoot, "--passL:-lnimrtl",
+          "--passL:-Wl,-rpath," & tempRoot] & selfBindFlags() & @[sharedPath])
       let (po, pc) = execCmdEx(quoteShellCommand(pcmd), workingDir = repoRoot)
       if pc != 0 or not fileExists(so):
         raise newException(IOError, "nimRtl provider build failed (" & $pc &

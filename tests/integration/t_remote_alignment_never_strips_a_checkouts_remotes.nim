@@ -214,9 +214,9 @@ suite "remote alignment never strips a checkout's remotes":
         "schema = \"reprobuild.workspace.url-prefix.v1\"\n\n" &
         "[url-prefix]\nname = \"metacraft-labs\"\nurl = \"" & prefix & "\"\n")
       writeFile(manifestRoot / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "branch = \"dev\"\nurl_prefix = \"metacraft-labs\"\n")
+        "mainline = \"dev\"\nurl_prefix = \"metacraft-labs\"\n")
       writeFile(manifestRoot / "repo-sets" / "demo.toml",
         "schema = \"reprobuild.workspace.repo-set.v1\"\n\n" &
         "[repo-set]\nname = \"demo\"\n\nmember_repos = [\"lib-a\"]\n")

@@ -342,6 +342,9 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.suContent)
     body.writeBool(op.suEnabled)
     body.writeBool(op.suDestroy)
+    body.writeString(op.suAptClosureLock)
+    body.writeBool(op.suRestartHeld)
+    body.writeBool(op.suRestartRequested)
   of pokLaunchdSystemDaemon:
     body.writeString(op.sdaLabel)
     body.writeU32Le(uint32(op.sdaProgramArgs.len))
@@ -394,6 +397,9 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.sysctlValue)
     body.writeString(op.sysctlFilename)
     body.writeBool(op.sysctlDestroy)
+  of pokLinuxDpkgDiversion:
+    body.writeString(op.ddPath)
+    body.writeBool(op.ddDestroy)
   of pokLinuxUdevRule:
     body.writeString(op.udevName)
     body.writeString(op.udevContent)
@@ -445,6 +451,25 @@ proc encodeOperation*(wire: WireOperation): seq[byte] =
     body.writeString(op.darwinModuleName)
     body.writeString(op.darwinModuleContent)
     body.writeBool(op.darwinModuleDestroy)
+  of pokSystemdUnitState:
+    body.writeString(op.usName)
+    body.writeBool(op.usEnabled)
+    body.writeBool(op.usRunning)
+    body.writeBool(op.usDestroy)
+  of pokLinuxAddOnTool:
+    body.writeString(op.atCommand)
+    body.writeString(op.atAptClosureLock)
+    body.writeString(op.atProgram)
+    body.writeBool(op.atDestroy)
+  of pokSystemdSystemDropIn:
+    body.writeString(op.diUnit)
+    body.writeString(op.diName)
+    body.writeString(op.diContent)
+    body.writeBool(op.diDestroy)
+  of pokLinuxSysusersEntry:
+    body.writeString(op.seName)
+    body.writeString(op.seContent)
+    body.writeBool(op.seDestroy)
   of pokLinuxFhsSandbox:
     body.writeString(op.fsbBinPath)
     body.writeU32Le(uint32(op.fsbFhsTreeRoots.len))
@@ -638,6 +663,10 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.suContent = readString(body, pos)
     result.operation.suEnabled = readBool(body, pos, "suEnabled")
     result.operation.suDestroy = readBool(body, pos, "suDestroy")
+    result.operation.suAptClosureLock = readString(body, pos)
+    result.operation.suRestartHeld = readBool(body, pos, "suRestartHeld")
+    result.operation.suRestartRequested =
+      readBool(body, pos, "suRestartRequested")
   of pokLaunchdSystemDaemon:
     result.operation = PrivilegedOperation(kind: pokLaunchdSystemDaemon,
       address: address)
@@ -712,6 +741,11 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.sysctlValue = readString(body, pos)
     result.operation.sysctlFilename = readString(body, pos)
     result.operation.sysctlDestroy = readBool(body, pos, "sysctlDestroy")
+  of pokLinuxDpkgDiversion:
+    result.operation = PrivilegedOperation(kind: pokLinuxDpkgDiversion,
+      address: address)
+    result.operation.ddPath = readString(body, pos)
+    result.operation.ddDestroy = readBool(body, pos, "ddDestroy")
   of pokLinuxUdevRule:
     result.operation = PrivilegedOperation(kind: pokLinuxUdevRule,
       address: address)
@@ -787,6 +821,33 @@ proc decodeOperation*(body: openArray[byte]): WireOperation =
     result.operation.darwinModuleContent = readString(body, pos)
     result.operation.darwinModuleDestroy = readBool(body, pos,
       "darwinModuleDestroy")
+  of pokSystemdUnitState:
+    result.operation = PrivilegedOperation(kind: pokSystemdUnitState,
+      address: address)
+    result.operation.usName = readString(body, pos)
+    result.operation.usEnabled = readBool(body, pos, "usEnabled")
+    result.operation.usRunning = readBool(body, pos, "usRunning")
+    result.operation.usDestroy = readBool(body, pos, "usDestroy")
+  of pokLinuxAddOnTool:
+    result.operation = PrivilegedOperation(kind: pokLinuxAddOnTool,
+      address: address)
+    result.operation.atCommand = readString(body, pos)
+    result.operation.atAptClosureLock = readString(body, pos)
+    result.operation.atProgram = readString(body, pos)
+    result.operation.atDestroy = readBool(body, pos, "atDestroy")
+  of pokSystemdSystemDropIn:
+    result.operation = PrivilegedOperation(kind: pokSystemdSystemDropIn,
+      address: address)
+    result.operation.diUnit = readString(body, pos)
+    result.operation.diName = readString(body, pos)
+    result.operation.diContent = readString(body, pos)
+    result.operation.diDestroy = readBool(body, pos, "diDestroy")
+  of pokLinuxSysusersEntry:
+    result.operation = PrivilegedOperation(kind: pokLinuxSysusersEntry,
+      address: address)
+    result.operation.seName = readString(body, pos)
+    result.operation.seContent = readString(body, pos)
+    result.operation.seDestroy = readBool(body, pos, "seDestroy")
   of pokLinuxFhsSandbox:
     result.operation = PrivilegedOperation(kind: pokLinuxFhsSandbox,
       address: address)

@@ -51,7 +51,7 @@
 ## ``staticExec`` executes the program DIRECTLY — there is no implicit shell,
 ## so a composed command line has to supply one.
 
-import std/os
+import std/[compilesettings, os, strutils]
 
 proc compileTimeShellCommand*(workDir: string; command: string): string =
   ## ``command``, wrapped so that a ``staticExec`` of the result runs it with
@@ -69,3 +69,63 @@ proc compileTimeShellCommand*(workDir: string; command: string): string =
       quoteShell("cd /d " & quoteShell(workDir) & " && " & command)
   else:
     "cd " & quoteShell(workDir) & " && exec " & command
+
+# ---------------------------------------------------------------------------
+# Did ``staticExec`` run at all?
+#
+# ``nim check`` does not execute ``staticExec`` (nor ``gorge`` / ``gorgeEx``,
+# which share its implementation): every call returns the empty string.
+# Measured on nim-fork-2.3.1-codetracer, same dev shell, same file:
+# ``staticExec("echo hi")`` is ``""`` under ``nim check`` and ``"hi"`` under
+# ``nim c``. A macro that reads a ``staticExec`` result as an answer — "the
+# probe did not print REPRO_RW, so the directory is not writable", "the
+# generator printed nothing, so it failed" — therefore turns "the probe did not
+# run" into a false statement about the world, and the refusal built on it
+# names a cause that does not exist.
+#
+# The two helpers below let such a macro tell the cases apart on its FAILURE
+# path. They cost a subprocess each, so they are meant to be called only once a
+# ``staticExec`` result has already come back unexpected, never on the happy
+# path.
+# ---------------------------------------------------------------------------
+
+const StaticExecSentinel = "REPRO_STATICEXEC_RAN"
+
+proc staticExecRuns*(): bool =
+  ## Whether ``staticExec`` executes programs in THIS compile. Compile-time
+  ## only.
+  ##
+  ## The probe is a command that cannot run and print nothing: a shell builtin
+  ## echoing a fixed sentinel. An empty result is therefore "the command did
+  ## not run", never "the command's answer was no". ``contains`` rather than
+  ## ``==`` because a compile under io-mon may interleave the monitor's own
+  ## diagnostics into the captured output.
+  ##
+  ## On Windows ``staticExec`` starts the program directly, with no implicit
+  ## shell, and ``echo`` is internal to ``cmd.exe`` — so the probe names
+  ## ``cmd.exe`` there, as ``compileTimeShellCommand`` does.
+  when defined(windows):
+    staticExec("cmd.exe /d /c echo " & StaticExecSentinel).contains(
+      StaticExecSentinel)
+  else:
+    staticExec("echo " & StaticExecSentinel).contains(StaticExecSentinel)
+
+proc staticExecSuppressedCause*(): string =
+  ## Why ``staticExec`` did not run in this compile, as text a refusal can
+  ## quote. Call it only after `staticExecRuns` returned ``false``.
+  ##
+  ## The compiler skips ``staticExec`` on purpose in two cases: a
+  ## ``nim check`` compile (``querySetting(command)`` is ``check``) and a
+  ## nimsuggest session (which defines ``nimsuggest``). Anything else means
+  ## the compiler tried and the process could not be started — the shell
+  ## ``staticExec`` goes through was not there.
+  if defined(nimsuggest):
+    "this compile runs under nimsuggest, which, like `nim check`, does not " &
+      "execute `staticExec` (every call returns \"\"); `nim c` does"
+  elif querySetting(command) == "check":
+    "this is a `nim check` compile, and `nim check` does not execute " &
+      "`staticExec` (every call returns \"\"); `nim c` does"
+  else:
+    "`staticExec` returned nothing for a probe that always prints output, " &
+      "so the compiler could not start the shell it runs commands through (" &
+      (when defined(windows): "cmd.exe" else: "/bin/sh") & ")"

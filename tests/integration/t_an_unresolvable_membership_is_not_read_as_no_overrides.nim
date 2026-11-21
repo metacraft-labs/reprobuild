@@ -95,20 +95,24 @@ import std/[os, strutils, unittest]
 import nf2_flake_lock_fixture
 
 proc relocateGamma(fx: Nf2Fixture) =
-  ## Move `gamma`'s checkout to `refs/gamma` and say so in the committed lock,
-  ## so its manifest PATH no longer equals its NAME. This is the shape
-  ## `reprobuild/references/nix` has in the real workspace.
+  ## Move `gamma`'s checkout to `refs/gamma`, so its location no longer equals
+  ## its NAME. This is the shape `reprobuild/references/nix` has in the real
+  ## workspace.
+  ##
+  ## The committed lock cannot say so: it pins identity and records no
+  ## checkout path (`reprobuild.solved-graph-lock.v3`; a v2 path is ignored).
+  ## In this committed-lock-only workspace the lock IS the membership, so the
+  ## one place a non-default location is declared is the local develop
+  ## override — the specified home of a materialization (Workspace-Manifests.md
+  ## §"Develop-Mode Override File"). The membership's placement rule honours
+  ## it first, which is what this case exercises.
   createDir(fx.ws / "refs")
   moveDir(fx.ws / "gamma", fx.ws / "refs" / "gamma")
-  let lock = fx.ws / "repro.lock"
-  let text = readFile(lock)
-  let old = "{ name = \"gamma\", path = \"gamma\","
-  let replacement = "{ name = \"gamma\", path = \"refs/gamma\","
-  if old notin text:
-    checkpoint("the fixture's repro.lock no longer carries the `gamma` entry " &
-      "this relocation rewrites; the shape it depends on has changed:\n" & text)
-    quit 1
-  writeFile(lock, text.replace(old, replacement))
+  createDir(fx.ws / ".repro")
+  writeFile(fx.ws / ".repro" / "develop-overrides.toml",
+    "schema = \"reprobuild.workspace.develop-overrides.v1\"\n\n" &
+    "[[override]]\npackage = \"gamma\"\nlocal_path = \"refs/gamma\"\n" &
+    "state = \"editable\"\ncreated_at = \"2026-10-18T00:00:00Z\"\n")
 
 proc membershipClause(line: string): string =
   ## The part of a `flake-lock` log line that carries the REASON the membership

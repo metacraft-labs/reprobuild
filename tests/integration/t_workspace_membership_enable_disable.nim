@@ -68,17 +68,17 @@ proc remoteBlock(name, url: string): string =
   "[[remote]]\nname = \"" & name & "\"\nfetch = \"" & url & "\"\n\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc projectFile(name, remotes: string; includes: openArray[string]): string =
   var body = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"" & name & "\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" & remotes & "includes = [\n"
+    "[project]\nname = \"" & name & "\"\n" &
+    "\n" & remotes & "includes = [\n"
   for inc in includes:
     body.add("  \"" & inc & "\",\n")
   body.add("]\n")

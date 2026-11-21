@@ -194,7 +194,7 @@ proc passthroughMonitorCli(cacheRoot: string): string =
   let dir = cacheRoot / "monitor-cli"
   createDir(dir)
   let rmdfTemplate = dir / "empty.rmdf"
-  writeFile(rmdfTemplate, cast[string](encodeCanonical(@[])))
+  writeFile(rmdfTemplate, encodeCanonical(@[]))
   when defined(windows):
     result = dir / "passthrough-monitor.cmd"
     # ``%1 %2`` are ``--depfile`` and the depfile path; ``%3`` is ``--``;

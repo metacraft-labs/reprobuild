@@ -56,7 +56,7 @@ suite "RDMF v2 envelope":
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
       @[SecretFile(path: "mcl.token", mode: 0o600'u32,
-                   content: bytesOf("REGISTRATION-TOKEN"))])
+                   content: bytesOf("REGISTRATION-TOKEN"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     check m.formatVersion == DeployManifestFormatVersionV2
 
@@ -76,7 +76,7 @@ suite "RDMF v2 envelope":
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     check verifySignature(m)
 
@@ -90,7 +90,7 @@ suite "RDMF v2 envelope":
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
 
     var swappedKey = m
@@ -107,7 +107,17 @@ suite "RDMF v2 envelope":
     signManifest(producer, m)
     var wire = encodeManifest(m)
     # formatVersion is the u16 immediately after the 4-byte magic.
-    wire[4] = 99'u8
+    #
+    # DERIVED FROM THE EXPORTED CONSTS, not poked as a literal. This was
+    # the FOURTH instance of the class the three fixed sites belong to --
+    # a bare integer written into a version field and chosen by hand to
+    # sit above the accepted set. 99 has 97 bumps of headroom, so the
+    # risk here is remote; the reason to fix it anyway is that a class is
+    # closed by having no instances, and an instance left standing
+    # because it is currently harmless is how the class regenerates.
+    let unknown = DeployManifestFormatVersionV2 + 1'u16
+    wire[4] = byte(unknown and 0xff'u16)
+    wire[5] = byte((unknown shr 8) and 0xff'u16)
     expect DeployManifestCodecError:
       discard decodeManifest(wire)
 
@@ -117,7 +127,7 @@ suite "RDMF v2 envelope":
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
     m.secrets = sealSecrets(recipient.publicKey, m.target,
-      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))])
+      @[SecretFile(path: "mcl.token", mode: 0o600'u32, content: bytesOf("t"))], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     var wire = encodeManifest(m)
     wire.add(0'u8)
@@ -132,7 +142,7 @@ suite "RDMF v2 envelope":
     let recipient = peerAuth.generateKeypair()
     var m = baseManifest("win-ci-bare-001")
     m.hasSecrets = true
-    m.secrets = sealSecrets(recipient.publicKey, m.target, @[])
+    m.secrets = sealSecrets(recipient.publicKey, m.target, @[], noRevokedRecipientKeys("test"))
     signManifest(producer, m)
     check m.formatVersion == DeployManifestFormatVersionV2
     let back = decodeManifest(encodeManifest(m))

@@ -15,6 +15,7 @@ import std/[os, strutils]
 from repro_core/paths import extendedPath
 
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 # Sentinel format matches `repro_home_apply/materialize_managed_blocks`
@@ -95,6 +96,7 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
   ## include `\r\n` translation that `writeFile` applies in text
   ## mode, so the recorded digest matches what `observeManagedBlock`
   ## will read back on the next apply.
+  enforceTestHomeFence(hostFile, "fs.managedBlock apply")
   let parent = parentDir(hostFile)
   if parent.len > 0:
     createDir(extendedPath(parent))
@@ -137,6 +139,7 @@ proc applyManagedBlockResource*(hostFile, blockId, content: string):
 proc destroyManagedBlockResource*(hostFile, blockId: string) =
   ## Remove the managed-block sentinels and content from the host
   ## file (leaves the surrounding user content intact).
+  enforceTestHomeFence(hostFile, "fs.managedBlock destroy")
   if not fileExists(extendedPath(hostFile)):
     return
   let content = readFile(extendedPath(hostFile))

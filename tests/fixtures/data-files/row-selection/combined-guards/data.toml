@@ -1,0 +1,24 @@
+[[package]]
+name = "utm"
+activity = "desktop"
+when = "macos and arm64"
+
+[[package]]
+name = "xclip"
+activity = "desktop"
+when = "(linux or bsd) and not wsl"
+
+[[package]]
+name = "ghidra"
+activity = "desktop"
+when = "not windows and host in [\"home-pc\", \"m1\"]"
+
+[[package]]
+name = "never"
+activity = "desktop"
+when = "false"
+
+[[package]]
+name = "always"
+activity = "desktop"
+when = "true"

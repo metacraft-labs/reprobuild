@@ -48,7 +48,7 @@ suite "HL-1 — cross-tier move between layers errors loudly":
       let repos = @[ResolvedRepo(name: "core", path: "core",
         visibility: wvPublic)]
 
-      let teamSource = ws / ".repro-workspace.toml"
+      let teamSource = ws / "repro-workspace.toml"
       let personalSource = ws / ".git" / "repro" / "config.toml"
 
       # ---- (1)-(3) a cross-tier move: team (layer 4) → personal (layer 5) --

@@ -829,3 +829,258 @@ suite "action cache output integrity across a witness-free republish":
     check warmAgain.revalidateDirWalks == 1
     check warmAgain.revalidateDirEntries == 5
     check warmAgain.calls == warm.calls
+
+suite "action cache container directory outputs":
+  ## Same no-mock policy, the same real `runBuild` / real `ActionCache`, and
+  ## the same warm in-place configuration `repro build` uses.
+  ##
+  ## Some built-in actions declare a directory as an output only to say that
+  ## the directory exists. `fs.ensureDir` creates the directory and nothing
+  ## else. `fs.preserveTree` declares its output root together with each entry
+  ## it copies, plus a manifest. Other actions then write their own outputs
+  ## into that directory: CodeTracer's C compiles write into its `build-c-dir`,
+  ## and its `frontend-public-ui-js` copy writes into the
+  ## `frontend-public-resources` tree. The directory's contents therefore
+  ## belong to other writers.
+  ##
+  ## The recursive tree digest that protects an OPAQUE directory output
+  ## (`node_modules/`, a webpack `dist/`) is the wrong check here. It folds in
+  ## every byte another action writes, so a warm build after the first sees
+  ## "directory output contents changed" and re-runs a built-in that has
+  ## nothing to restore (reprobuild-pm issue
+  ## 2026-10-05-codetracer-in-place-frontend-aggregate-and-m52-diverge-from-
+  ## the-pinned-codetracer.md, finding 1). Re-running it cannot change that
+  ## content either: `ensureDir` writes nothing into the directory, and
+  ## `preserveTree` neither owns nor removes entries it did not copy.
+  ##
+  ## Governing spec text: Incremental-Invalidation.md §"Non-regular outputs"
+  ## ("Container directory outputs"), and Failure-Semantics.md §"General
+  ## Rules": a rejected lookup must say why.
+
+  proc writeIntoDirAction(id, dirOutput, fileName: string; dep: string;
+                          workRoot: string): BuildAction =
+    ## A process action that writes ONE declared file into `dirOutput`, the
+    ## shape of a compiler writing `build/c/main.o` into `build-c-dir`.
+    let script = workRoot / (fileName & ".sh")
+    writeFile(script,
+      "#!/bin/sh\n" &
+      "printf 'payload\\n' > " & dirOutput & "/" & fileName & "\n" &
+      "printf '%s: %s\\n' " & dirOutput & "/" & fileName &
+      " src/seed.txt > out/" & fileName & ".dep\n")
+    setFilePermissions(script, {fpUserRead, fpUserWrite, fpUserExec})
+    action(id, [script],
+      cwd = workRoot,
+      deps = [dep],
+      inputs = ["src/seed.txt"],
+      outputs = [dirOutput & "/" & fileName],
+      depfile = "out/" & fileName & ".dep",
+      cacheable = true,
+      weakFingerprint = weak(id),
+      actionCachePolicy = ffpTimestamp,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+
+  proc describe(item: ActionResult): string =
+    item.id & " status=" & $item.status & " launched=" & $item.launched &
+      " cacheDecision=" & $item.cacheDecision & " reason=" & item.reason &
+      " cacheMissReason=" & item.cacheMissReason
+
+  type
+    WarmArm = enum
+      ## The revalidation paths a warm build of an unchanged graph can take.
+      ## Each one checks the record's outputs on its own, so each one must
+      ## be handed the action's containers: a fix wired to one of them takes
+      ## effect or not depending on which arm the graph happened to take.
+      waProbeScan
+        ## The whole-graph fast no-op, `skipCacheHitEvidence = true` arm
+        ## (`scanHotIndexMetadataInputsUnchanged`). What `repro build` runs.
+      waPerRecordScan
+        ## The whole-graph fast no-op, per-record arm (evidence wanted).
+      waScheduler
+        ## The per-edge lookup, reached because a progress callback without
+        ## `fastNoopReportsProgress` disables the whole-graph prefix.
+      waRestoreMode
+        ## The CAS-restore mode (`rebuildMissingOutputsOnCacheHit = false`):
+        ## the per-edge lookup, then `restoreWouldOverwriteMatchingOutputs`.
+
+  proc armConfig(cacheRoot: string; arm: WarmArm): BuildEngineConfig =
+    result = warmConfig(cacheRoot)
+    result.statsEnabled = true
+    case arm
+    of waProbeScan:
+      result.skipCacheHitEvidence = true
+    of waPerRecordScan:
+      result.skipCacheHitEvidence = false
+    of waScheduler:
+      result.progressCallback = proc(event: BuildProgressEvent) = discard
+    of waRestoreMode:
+      result.rebuildMissingOutputsOnCacheHit = false
+      result.deferLocalOutputBlobs = false
+
+  proc answeredByWholeGraphPrefix(run: BuildRunResult): bool =
+    ## Only the whole-graph fast no-op emits this metric, on both of its
+    ## arms, and only when it answered the build. Without it a warm build
+    ## that fell back to the scheduler looks identical from the results.
+    for metric in run.stats.metrics:
+      if metric.name == "repro cache hit result materialize":
+        return true
+    false
+
+  type
+    ContainerFixture = object
+      ## One graph in its own temporary tree: a container built-in and the
+      ## process actions that write into it.
+      root, work, cache: string
+      g: BuildGraph
+      containerId: string
+      otherWriterOutputs: seq[string]
+        ## Absolute paths the OTHER writers put inside the container.
+
+  proc ensureDirFixture(): ContainerFixture =
+    ## `fs.ensureDir("out/c")` and two compiles writing `a.o` / `b.o` into it.
+    result.root = createTempDir("repro-ac-container-ensure-dir", "")
+    result.work = result.root / "work"
+    result.cache = result.root / "cache"
+    createDir(result.work / "src")
+    createDir(result.work / "out")
+    writeFile(result.work / "src" / "seed.txt", "seed\n")
+    result.containerId = "container/ensure-dir"
+    let ensure = builtinAction(bakEnsureDir, result.containerId,
+      cwd = result.work,
+      outputs = ["out/c"],
+      cacheable = true,
+      weakFingerprint = weak(result.containerId),
+      actionCachePolicy = ffpTimestamp,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    result.g = graph([ensure,
+      writeIntoDirAction("container/compile-a", "out/c", "a.o",
+        result.containerId, result.work),
+      writeIntoDirAction("container/compile-b", "out/c", "b.o",
+        result.containerId, result.work)])
+    result.otherWriterOutputs = @[result.work / "out" / "c" / "a.o",
+      result.work / "out" / "c" / "b.o"]
+
+  proc preserveTreeFixture(): ContainerFixture =
+    ## The shape `fs.preserveTree` lowers to -- the output ROOT, each copied
+    ## entry, and the manifest, all declared -- and a copy writing `ui.js`
+    ## into the root, as CodeTracer's `frontend-public-ui-js` does.
+    result.root = createTempDir("repro-ac-container-preserve-tree", "")
+    result.work = result.root / "work"
+    result.cache = result.root / "cache"
+    createDir(result.work / "src" / "tree" / "sub")
+    createDir(result.work / "out")
+    writeFile(result.work / "src" / "seed.txt", "seed\n")
+    writeFile(result.work / "src" / "tree" / "one.txt", "one\n")
+    writeFile(result.work / "src" / "tree" / "sub" / "two.txt", "two\n")
+    result.containerId = "container/preserve"
+    let preserve = builtinAction(bakPreserveTree, result.containerId,
+      cwd = result.work,
+      inputs = ["src/tree/one.txt", "src/tree/sub/two.txt"],
+      outputs = ["out/pub", "out/pub/one.txt", "out/pub/sub/two.txt",
+        ".repro/preserve-tree/container_preserve.manifest"],
+      text = "src/tree\nout/pub",
+      entries = ["file\tone.txt", "file\tsub/two.txt"],
+      cacheable = true,
+      weakFingerprint = weak(result.containerId),
+      actionCachePolicy = ffpTimestamp,
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    result.g = graph([preserve,
+      writeIntoDirAction("container/copy-into", "out/pub", "ui.js",
+        result.containerId, result.work)])
+    result.otherWriterOutputs = @[result.work / "out" / "pub" / "ui.js"]
+
+  proc checkWarmOnEveryArm(makeFixture: proc(): ContainerFixture) =
+    ## On every arm in `WarmArm`: a cold build, then a warm build of the
+    ## unchanged graph that runs nothing, reports the container's edge as a
+    ## hit, and leaves the other writers' entries in place.
+    ##
+    ## Each arm gets a FRESH fixture and cold build. Sharing one would make
+    ## every arm after the first vacuous against a broken engine: the first
+    ## rejection re-runs the built-in, whose new record already describes
+    ## the filled directory, so the next arm sees a matching digest.
+    for arm in WarmArm:
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let config = armConfig(f.cache, arm)
+      let cold = runBuild(f.g, config)
+      require cold.byId(f.containerId).status == asSucceeded
+      require cold.launchedCount == f.g.actions.len
+      let run = runBuild(f.g, config)
+      let item = run.byId(f.containerId)
+      checkpoint($arm & ": " & describe(item))
+      check item.cacheDecision == cdHit
+      check not item.launched
+      check run.launchedCount == 0
+      case arm
+      of waProbeScan, waPerRecordScan:
+        check run.answeredByWholeGraphPrefix()
+        check item.status == asUpToDate
+      of waScheduler:
+        check not run.answeredByWholeGraphPrefix()
+        check item.status == asUpToDate
+        check item.reason == "outputs-present"
+      of waRestoreMode:
+        # `outputs-present`, not `restored`: nothing was materialized over
+        # the container, so nothing another writer put there was touched.
+        check item.status == asCacheHit
+        check item.reason == "outputs-present"
+      for path in f.otherWriterOutputs:
+        check fileExists(path)
+
+  test "an ensureDir that other actions write into is up to date on a warm build":
+    # Before the fix the built-in re-ran on the warm build with `cdRejected`
+    # because the two compiles had written `a.o` and `b.o` into the
+    # directory after it was recorded.
+    checkWarmOnEveryArm(ensureDirFixture)
+
+    let f = ensureDirFixture()
+    defer: removeDir(f.root)
+    let config = warmConfig(f.cache)
+    require runBuild(f.g, config).launchedCount == 3
+
+    # A file nobody declared is not the built-in's either: re-creating the
+    # directory would not remove it, so it must not invalidate the edge.
+    writeFile(f.work / "out" / "c" / "planted.txt", "planted\n")
+    let planted = runBuild(f.g, config).byId(f.containerId)
+    checkpoint(describe(planted))
+    check planted.cacheDecision == cdHit
+    check not planted.launched
+
+    # What the built-in DOES own is the directory's existence. Remove it and
+    # the edge re-runs, with a lookup verdict that says why.
+    removeDir(f.work / "out" / "c")
+    let removed = runBuild(f.g, config).byId(f.containerId)
+    checkpoint(describe(removed))
+    check removed.launched
+    check removed.status == asSucceeded
+    check removed.cacheDecision != cdHit
+    check removed.cacheMissReason.len > 0
+    check dirExists(f.work / "out" / "c")
+
+    # A regular file in its place is not "the directory exists" either: the
+    # kind is checked too. The record is not served, so the built-in runs,
+    # and it cannot create a directory over a file, so the build fails. A
+    # served hit would have returned normally and left the file in place.
+    removeDir(f.work / "out" / "c")
+    writeFile(f.work / "out" / "c", "not a directory\n")
+    expect BuildEngineError:
+      discard runBuild(f.g, config)
+
+  test "a preserveTree root that another action writes into is up to date on a warm build":
+    checkWarmOnEveryArm(preserveTreeFixture)
+
+    let f = preserveTreeFixture()
+    defer: removeDir(f.root)
+    let config = warmConfig(f.cache)
+    require runBuild(f.g, config).launchedCount == 2
+    check readFile(f.work / "out" / "pub" / "sub" / "two.txt") == "two\n"
+
+    # An entry the built-in COPIED is still its own declared output and is
+    # still revalidated: tampering with it re-runs the edge, restores the
+    # entry, and the lookup verdict names the entry.
+    writeFile(f.work / "out" / "pub" / "one.txt", "EVIL\n")
+    let tampered = runBuild(f.g, config).byId(f.containerId)
+    checkpoint(describe(tampered))
+    check tampered.launched
+    check tampered.cacheDecision != cdHit
+    check "out/pub/one.txt" in tampered.cacheMissReason
+    check readFile(f.work / "out" / "pub" / "one.txt") == "one\n"

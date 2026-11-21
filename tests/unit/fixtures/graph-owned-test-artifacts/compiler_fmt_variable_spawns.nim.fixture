@@ -1,0 +1,4 @@
+import std/strformat
+let backend = "gcc"
+let cmd = fmt"{backend} -c input.c -o output.o"
+discard execCmdEx(cmd)

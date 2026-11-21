@@ -27,6 +27,11 @@ var targetExportRegistry: TargetExportTable = TargetExportTable()
   ## emitting the GraphFragment so ``repro graph`` / ``repro why`` and
   ## the M2 CLI resolver consume one source of truth.
 
+var certificateDeclarationRegistry: seq[CertificateExportEntry] = @[]
+  ## Test-Certificates TC-9a: the ``certificate "<name>", <handle>``
+  ## declarations of the package whose ``build:`` body is running,
+  ## resolved by ``resolveCertificateExports``.
+
 var providerStartupBodyDepth = 0
   ## Nesting depth of the STARTUP PASS over a package's ``build:`` body.
   ##
@@ -139,6 +144,7 @@ type
     testRunnerSlot*: RootRef
     toolchainSlot*: RootRef
     crossTargetSlot*: RootRef
+    crossTargetConsulted*: bool
     featureSetSlot*: RootRef
     lockFileSlot*: RootRef
       ## Named-Lock-Files NLF-M7 (§4.4) — the FIFTH slot, and deliberately a
@@ -195,6 +201,16 @@ const ExplicitSlotDesignation* = "\x00explicit"
 
 var activeBuilds {.threadvar.}: seq[PackageBuildState]
 
+var packageTargetObjectExemptions:
+    Table[string, seq[TargetObjectExemption]]
+  ## Per package: the object-check exemptions its recipe declared
+  ## (``declareTargetObjectExemption``). Keyed by the owning package rather
+  ## than the build frame, so an artifact frame nested in the package's
+  ## ``build:`` carries them too.
+var packageEmittedAction: Table[string, bool]
+  ## Per package: whether it has emitted an action, after which a new
+  ## exemption is refused -- the actions already emitted would not carry it.
+
 proc beginBuildBlock*(packageName: string;
                       ownerKind = "package";
                       ownerName = ""): PackageBuildState {.dynOrStatic.} =
@@ -206,6 +222,17 @@ proc beginBuildBlock*(packageName: string;
     ownerKind: ownerKind,
     ownerName: (if ownerName.len > 0: ownerName else: packageName),
     packageName: packageName)
+  # The package's outermost frame starts its exemptions and its
+  # "has emitted an action" seal afresh, so a second evaluation of the same
+  # package in one process is not refused by the first one's seal.
+  var outermost = true
+  for frame in activeBuilds:
+    if frame.packageName == packageName:
+      outermost = false
+      break
+  if outermost:
+    packageTargetObjectExemptions.del(packageName)
+    packageEmittedAction.del(packageName)
   activeBuilds.add(result)
 
 proc endBuildBlock*(state: PackageBuildState) {.dynOrStatic.} =
@@ -238,6 +265,19 @@ proc tryCurrentBuildState*(): PackageBuildState {.dynOrStatic.} =
     return nil
   activeBuilds[^1]
 
+proc enclosingBuildFrames*(): seq[PackageBuildState] {.dynOrStatic.} =
+  ## The active `build:` frames of the innermost frame's package, innermost
+  ## first: the top frame and every frame directly beneath it with the same
+  ## `packageName` (an `executable` / `library` block nested in its
+  ## package's build). Empty when no build block is active.
+  if activeBuilds.len == 0:
+    return
+  let package = activeBuilds[^1].packageName
+  for i in countdown(activeBuilds.high, 0):
+    if activeBuilds[i].packageName != package:
+      break
+    result.add(activeBuilds[i])
+
 
 const fs* = ReproFs()
 const hcr* = ReproHcr()
@@ -255,7 +295,10 @@ when defined(reproProviderMode):
 const
   BuildActionPayloadMagic = [byte(ord('R')), byte(ord('B')), byte(ord('A')),
     byte(ord('P'))]
-  BuildActionPayloadVersion* = 30'u16
+  BuildActionPayloadVersion* = 32'u16
+    ## v32: optional output candidates, appended after removeBeforeRun.
+    ## v31: ``removeBeforeRun`` — declared outputs the engine removes before
+    ## the action runs, a string list appended last.
     ## v30: ``scratchDirs`` — the action's scratch directories (BuildXL's pip
     ## temp directories), a string list appended last.
     ## v29: ``subToolRefs`` — the typed tool's own bare-name sub-tools
@@ -455,6 +498,11 @@ const
     byte(ord('E')), byte(ord('T'))]
     ## Named-Targets M1: tag for the project-scoped target-export table
     ## payload carried as a metadata node on the GraphFragment.
+  CertificateExportTablePayloadMagic = [byte(ord('R')), byte(ord('C')),
+    byte(ord('E')), byte(ord('T'))]
+    ## Test-Certificates TC-9a: tag for a package's certificate-export
+    ## table, carried as a metadata node beside the target-export table.
+  CertificateExportTablePayloadVersion = 1'u16
   TargetExportTablePayloadVersion = 3'u16
     ## Spec-Implementation M5: schema bump per
     ## Build-Graph-Collections.md §"Persistence and the Target-Export
@@ -966,6 +1014,82 @@ proc registeredResourceTypeInterfaces*(): seq[ResourceTypeInterfaceDef]
   ## declaration order. Consumed by ``toProjectInterface``.
   resourceTypeInterfaceRegistry
 
+var activityInterfaceRegistry: seq[ActivityInterfaceDef] = @[]
+  ## Shared-Development-Services L3: module-global set of exported dev-env
+  ## activity SIGNATURES, collected for interface lifting. Shape taken
+  ## from ``resourceTypeInterfaceRegistry`` above, with one deliberate
+  ## difference: each record carries its own ``packageName``, because
+  ## activities ARE declared lexically inside a ``package`` block and the
+  ## extractor can therefore attribute them exactly rather than folding
+  ## the whole registry into whichever project is being lifted.
+  ##
+  ## Populated at MODULE INIT, outside the ``when defined(reproProviderMode)``
+  ## guard that wraps ``devEnv<Pkg>Package()``. That placement is
+  ## load-bearing and was measured: in interface mode the dev-env proc is
+  ## not even compiled, so a registration emitted inside its body would
+  ## never run and the lift would carry nothing.
+
+var serviceInterfaceRegistry: seq[ServiceInterfaceDef] = @[]
+  ## Shared-Development-Services L3: the service half of the same lift.
+  ## See ``activityInterfaceRegistry``.
+
+proc resetActivityInterfaceRegistry*() {.dynOrStatic.} =
+  activityInterfaceRegistry.setLen(0)
+
+proc registerActivityInterface*(packageName: string;
+                                def: ActivityInterfaceDef) {.dynOrStatic.} =
+  ## Append one activity signature. Emitted by the ``package`` macro's
+  ## dev-env walker at module scope, once per constructor-shaped
+  ## ``activity``. Re-registration of the same (package, name) pair
+  ## REPLACES the earlier record rather than appending a second one: a
+  ## module whose ``package`` block is expanded twice (``include``d by a
+  ## sibling shim, which is how ``usesImportCode`` consumes a workspace
+  ## producer) would otherwise lift every activity twice and move the
+  ## interface fingerprint for a reason that has nothing to do with the
+  ## producer's contract.
+  for existing in activityInterfaceRegistry.mitems:
+    if existing.packageName == packageName and existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  activityInterfaceRegistry.add(entry)
+
+proc registeredActivityInterfaces*(): seq[ActivityInterfaceDef]
+    {.dynOrStatic.} =
+  ## The activity signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  activityInterfaceRegistry
+
+proc resetServiceInterfaceRegistry*() {.dynOrStatic.} =
+  serviceInterfaceRegistry.setLen(0)
+
+proc registerServiceInterface*(packageName: string;
+                               def: ServiceInterfaceDef) {.dynOrStatic.} =
+  ## Append one service signature. Same replace-on-duplicate rule, and
+  ## the same reason, as ``registerActivityInterface``; the identity is
+  ## (package, activity, service) because two activities may each declare
+  ## a service of the same bare name.
+  for existing in serviceInterfaceRegistry.mitems:
+    if existing.packageName == packageName and
+        existing.activityName == def.activityName and
+        existing.name == def.name:
+      existing = def
+      existing.packageName = packageName
+      return
+  var entry = def
+  entry.packageName = packageName
+  serviceInterfaceRegistry.add(entry)
+
+proc registeredServiceInterfaces*(): seq[ServiceInterfaceDef]
+    {.dynOrStatic.} =
+  ## The service signatures collected so far, in declaration order.
+  ## Consumed by ``toProjectInterface``, which filters on
+  ## ``packageName``.
+  serviceInterfaceRegistry
+
 proc resetWorkspaceDepRegistry*() {.dynOrStatic.} =
   ## Reset the Mode 3 ``depends_on`` registry. Test helpers call this
   ## between scenarios so registry entries don't leak across cases.
@@ -1178,7 +1302,11 @@ proc packageProjectRoot*(packageName: string): string {.dynOrStatic.} =
     return ""
   for pkg in registry:
     if pkg.packageName == packageName and pkg.sourceFile.len > 0:
-      return parentDir(pkg.sourceFile).replace("\\", "/")
+      # A recipe-relative provider (`recipeSourceName`) names its recipes
+      # relative to the recipe it was compiled from, which is the provider's
+      # working directory: resolve against it, so the root is the copy this
+      # provider runs beside.
+      return parentDir(absolutePath(pkg.sourceFile)).replace("\\", "/")
   ""
 
 proc currentPackageInstallMirrorRoot*(): string {.dynOrStatic.} =
@@ -1263,17 +1391,54 @@ proc currentPackageDependencyRootEnvEntries*(): seq[(string, string)]
     return @[]
   packageDependencyRootEnvEntries(pkgName, packageProjectRoot(pkgName))
 
+proc declareTargetObjectExemption*(path, reason: string) {.dynOrStatic.} =
+  ## Declare that the staged ``path`` (relative to the installed prefix)
+  ## holds a foreign-architecture object the package ships on purpose, and
+  ## why (CLI/build.md §"Cross Targets: `--target`", declared exemptions).
+  ## Refused outside a package, after the package has emitted an action, for
+  ## a malformed path or an empty reason, and for a duplicate path.
+  let state = tryCurrentBuildState()
+  if state == nil:
+    raise newException(ValueError, "targetObjectExemption('" & path &
+      "') outside a package's build: block")
+  let pkg = state.packageName
+  if packageEmittedAction.getOrDefault(pkg, false):
+    raise newException(ValueError, "package '" & pkg &
+      "': targetObjectExemption('" & path & "') after the package emitted " &
+      "an action; declare exemptions first in the build: block, so every " &
+      "action carries them")
+  let e = TargetObjectExemption(path: path, reason: reason)
+  validateTargetObjectExemption(e)
+  var list = packageTargetObjectExemptions.getOrDefault(pkg, @[])
+  for existing in list:
+    if existing.path == path:
+      raise newException(ValueError, "package '" & pkg &
+        "': targetObjectExemption('" & path & "') is declared twice")
+  list.add(e)
+  packageTargetObjectExemptions[pkg] = list
+
 proc currentPackageActionEnvEntries*(): seq[(string, string)]
     {.dynOrStatic.} =
   ## Common package-root env entries injected into every action emitted
   ## while a package build body is active. ``OUT_MIRROR`` keeps typed
   ## shell actions on the mutable producer staging root; DEP_* roots
-  ## remain resolver-backed and follow declared dependency order.
+  ## remain resolver-backed and follow declared dependency order. A
+  ## package's declared object-check exemptions ride here too, so the
+  ## mirror check and the engine's publication check read the same list,
+  ## and the list is part of every action's identity.
   let outMirror = currentPackageInstallMirrorStagingRoot()
   if outMirror.len > 0:
     result.add(("OUT_MIRROR", outMirror))
   for entry in currentPackageDependencyRootEnvEntries():
     result.add(entry)
+  let state = tryCurrentBuildState()
+  if state != nil:
+    let pkg = state.packageName
+    packageEmittedAction[pkg] = true
+    let exemptions = packageTargetObjectExemptions.getOrDefault(pkg, @[])
+    if exemptions.len > 0:
+      result.add((TargetObjectExemptionsEnvVar,
+        encodeTargetObjectExemptions(exemptions)))
 
 proc mergePackageActionEnv(packageActionEnv, explicitEnv:
     openArray[(string, string)]): seq[(string, string)] {.dynOrStatic.} =
@@ -1424,6 +1589,21 @@ when defined(reproProviderMode):
       directoryEnumerationInput(material, memberEntryPointId,
         memberEntryPointBodyHash, memberArgumentRoot = material))
 
+  proc providerFileInput*(path: string) {.dynOrStatic.} =
+    ## Report a file whose CONTENT shaped the graph this evaluation emits.
+    ##
+    ## An emitter that reads a committed file at emission time and bakes
+    ## what it read into an action (a script, a token, a count) has made
+    ## that file an input of the evaluation, not only of the action: the
+    ## action re-running does not help when the program it runs is the one
+    ## emitted for the old content. Recording a `gevFileRead` here is what
+    ## makes an edit to the file invalidate the cached provider graph
+    ## (Project-Provider-Graph-Protocol, "Evaluation Input Changes").
+    ##
+    ## A missing file is recorded too, with the digest `missing`, so a file
+    ## that appears later — an optional committed lock — also invalidates.
+    providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
+
   proc registeredProviderEvaluationInputs(): seq[GraphEvaluationInput] =
     providerEvaluationInputRegistry
 
@@ -1541,6 +1721,72 @@ when defined(reproProviderMode):
           digest: result))
         return
 
+  proc selectableActivityNames(): seq[string] =
+    ## Every activity name a selection can name and have an effect: the
+    ## activities the `devEnv:` body declared (`activity "x"` and the
+    ## `activity x:` block form, which goes through the same proc), every
+    ## name a shell op, tool, task or service record requires (a record
+    ## gated on an undeclared name is still switched on by selecting it),
+    ## and `default`, the implicit selection of every surface. Read after
+    ## the `devEnv:` body ran.
+    result = @["default"]
+    template addName(name: string) =
+      if name.len > 0 and result.find(name) < 0:
+        result.add(name)
+    for name in devEnvActivityRegistry: addName(name)
+    for op in devEnvShellOpsRegistry:
+      for name in op.activityRequirements: addName(name)
+    for tool in devEnvToolRegistry:
+      for name in tool.activityRequirements: addName(name)
+    for task in devEnvTaskRegistry:
+      for name in task.activityRequirements: addName(name)
+    for service in devEnvServiceRegistry:
+      for name in service.activityRequirements: addName(name)
+
+  proc reportUnknownActivitySelection(packageName: string;
+                                      selected: openArray[string]) =
+    ## Record an ERROR diagnostic for every selected activity no record of
+    ## this dev-env can be switched on by (reprobuild-pm issue
+    ## 2026-10-13-unknown-activity-selector-is-silently-ignored).
+    ##
+    ## A selector that names nothing used to be accepted, written into the
+    ## session record and then select nothing -- the declared-looks-wired-
+    ## silently-dropped shape Shared-Development-Services.md §7.2 removes,
+    ## and §10's first criterion refuses for the analogous misspelled
+    ## service reference. Every activating surface (`exec`, `run`,
+    ## `shell`, `tasks`, `dev-env export`, `up`, `dev`) exits non-zero on
+    ## an error diagnostic before it starts anything, and the diagnostic
+    ## travels in the dev-env artifact, so a cached edge refuses too.
+    ##
+    ## THE COMPARISON IS THE GATE'S OWN: verbatim. `activityRecordIsActive`
+    ## and the typed-service gate compare names exactly, and the provider
+    ## runtime checks that the result's selection is the request's, so a
+    ## normalizing comparison here would accept `--activity SSO` and then
+    ## let it select nothing -- the `desktopkind` trap of the L5 binding
+    ## guard, which compared one way and looked up another. A name equal to
+    ## a selectable one under Nim's identifier normalization is named as
+    ## the likely intent instead.
+    let known = selectableActivityNames()
+    var listed: seq[string] = @[]
+    for candidate in known:
+      listed.add("`" & candidate & "`")
+    for name in selected:
+      if known.find(name) >= 0:
+        continue
+      var hint = ""
+      for candidate in known:
+        if candidate.normalize == name.normalize:
+          hint = " (did you mean `" & candidate & "`? activity names " &
+            "are compared exactly)"
+          break
+      diagnostic(
+        "activity `" & name & "` is not declared by package `" &
+        packageName & "`" & hint & "; the activities it declares are: " &
+        listed.join(", ") & ". Refused rather " &
+        "than ignored: an activity selector that names nothing would " &
+        "start nothing and still record the session as selecting it.",
+        dedsError)
+
   proc activityRecordIsActive(requirements, selected: openArray[string]): bool =
     if requirements.len == 0:
       return true
@@ -1572,6 +1818,9 @@ when defined(reproProviderMode):
 
 else:
   proc providerDirectoryInput*(path: string) {.dynOrStatic.} =
+    discard path
+
+  proc providerFileInput*(path: string) {.dynOrStatic.} =
     discard path
 
   proc providerDirectoryInput*(path, memberEntryPointId,
@@ -1861,7 +2110,9 @@ proc buildAction*(id: string; call: PublicCliCall;
                   cwdCustomPath = "";
                   declaredOutputs: openArray[string] = [];
                   readOnlyRoots: openArray[string] = [];
-                  scratchDirs: openArray[string] = []):
+                  scratchDirs: openArray[string] = [];
+                  removeBeforeRun: openArray[string] = [];
+                  optionalOutputs: openArray[string] = []):
     BuildActionDef {.dynOrStatic.} =
   ## ``outputTag`` (Recipe-Val M8): which package-output this edge
   ## contributes to. Defaults to the empty string which the closure
@@ -1920,6 +2171,7 @@ proc buildAction*(id: string; call: PublicCliCall;
     deps: @deps,
     inputs: @inputs,
     outputs: @outputs,
+    optionalOutputs: @optionalOutputs,
     pool: pool,
     poolUnits: poolUnits,
     depfile: depfile,
@@ -1944,7 +2196,8 @@ proc buildAction*(id: string; call: PublicCliCall;
     cwdCustomPath: cwdCustomPath,
     declaredOutputs: @declaredOutputs,
     readOnlyRoots: @readOnlyRoots,
-    scratchDirs: @scratchDirs)
+    scratchDirs: @scratchDirs,
+    removeBeforeRun: @removeBeforeRun)
   buildActionRegistry.add(result)
 
 proc buildPool*(name: string; capacity: uint32): BuildPoolDef {.discardable, dynOrStatic.} =
@@ -2402,6 +2655,272 @@ proc registerRunEdgeExport*(name, owningPackage, actionId: string;
     runArgs: @runArgs,
     consumes: @consumes))
 
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9a — ``certificate "<name>", <handle>``.
+#
+# Test-Certificates.md §"Marking a node": a build-graph node is marked as
+# producing a NAMED certificate. The name is a target name in the same
+# namespace as ``target "<name>", <handle>``, so it is exported into the
+# target-export table, and the marking itself travels in a separate
+# certificate-export table so the engine can ask "does this plan contain a
+# certificate-producing node?" from the stored graph alone.
+#
+# The declarations are collected while the ``build:`` body runs and resolved
+# by ``resolveCertificateExports`` when the package's fragment is assembled,
+# because only then are every target and every implicit name known.
+# ---------------------------------------------------------------------------
+
+proc resetCertificateRegistry*() {.dynOrStatic.} =
+  ## Clear the per-package certificate declarations. Called by
+  ## ``buildPackageFragment`` between package evaluations.
+  certificateDeclarationRegistry.setLen(0)
+
+proc registeredCertificateDeclarations*(): seq[CertificateExportEntry]
+    {.dynOrStatic.} =
+  ## The declarations recorded so far, in declaration order, before
+  ## resolution (``owningPackage`` is still empty).
+  certificateDeclarationRegistry
+
+proc registerCertificateDeclaration*(name: string;
+                                     nodeKind: CertificateNodeKind;
+                                     node, sourceFile: string;
+                                     sourceLine: int) {.dynOrStatic.} =
+  ## Record one ``certificate "<name>", <handle>`` declaration. The
+  ## ``certificate`` templates below call this with the call site, so a
+  ## collision diagnostic can name it.
+  certificateDeclarationRegistry.add(CertificateExportEntry(
+    name: name,
+    nodeKind: nodeKind,
+    node: node,
+    sourceFile: sourceFile,
+    sourceLine: sourceLine))
+
+template certificate*(certName: string; handle: BuildActionDef) =
+  ## Mark a build edge as producing the named certificate
+  ## (Test-Certificates.md §"Marking a node"). ``certName`` becomes a target
+  ## name exactly as ``target certName, handle`` would make it, so
+  ## ``repro test <certName>`` and ``repro build <certName>`` select the edge.
+  block:
+    const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    registerCertificateDeclaration(certName, cnkAction, handle.id,
+      reproCertificateSite.filename, reproCertificateSite.line)
+
+template certificate*(certName: string; handle: BuildTargetDef) =
+  ## Mark a build target — a ``target``, an ``aggregate`` or a ``collect``
+  ## — as producing the named certificate. The usual form names the
+  ## aggregate after the certificate:
+  ## ``certificate "unit-suite", aggregate("unit-suite", @[unit, integration])``.
+  block:
+    const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    registerCertificateDeclaration(certName, cnkTarget, handle.name,
+      reproCertificateSite.filename, reproCertificateSite.line)
+
+const implicitCertificateName* = "test"
+  ## Operator decision D15 (Test-Certificates TC-9a): whatever a plain
+  ## ``repro test`` builds in a package — the node the selector ``test``
+  ## resolves to — is marked ``certificate "test"`` with no declaration.
+
+proc certificateDeclarationSite(file: string; line: int): string =
+  if file.len == 0:
+    "an unrecorded source location"
+  else:
+    file & ":" & $line
+
+proc implicitTestCertificate(owningPackage: string;
+                             targets: openArray[BuildTargetDef]):
+    CertificateExportEntry =
+  ## D15: the node a plain ``repro test`` builds in this package, marked
+  ## ``certificate "test"``; an empty ``name`` when the package has none.
+  ##
+  ## ``repro test`` is ``repro build test``, and nothing synthesises a
+  ## ``test`` selection from test edges: a project with no ``test`` name
+  ## gets the ordinary unknown-target error. So the marking follows the
+  ## selector ``test`` through the order ``lowerProviderSnapshot``
+  ## (``resolveSelectorToActionId`` in ``repro_cli_support``) resolves it:
+  ## an edge whose action id is ``test``, then a build target named
+  ## ``test`` (``target``, ``aggregate`` or ``collect``), then a row of the
+  ## target-export table named ``test`` — an edge whose implicit name is
+  ## ``test``, for instance. Keep the two orders in step.
+  for action in buildActionRegistry:
+    if action.id == implicitCertificateName:
+      return CertificateExportEntry(name: implicitCertificateName,
+        owningPackage: owningPackage, nodeKind: cnkAction, node: action.id,
+        implicit: true)
+  for target in targets:
+    if target.name == implicitCertificateName:
+      return CertificateExportEntry(name: implicitCertificateName,
+        owningPackage: owningPackage, nodeKind: cnkTarget, node: target.name,
+        implicit: true, sourceFile: target.sourceFile,
+        sourceLine: target.sourceLine)
+  for row in targetExportRegistry.entries:
+    if row.name != implicitCertificateName or
+        row.owningPackage != owningPackage:
+      continue
+    var isTarget = false
+    for target in targets:
+      if target.name == row.actionId:
+        isTarget = true
+        break
+    return CertificateExportEntry(name: implicitCertificateName,
+      owningPackage: owningPackage,
+      nodeKind: (if isTarget: cnkTarget else: cnkAction),
+      node: row.actionId, implicit: true, sourceFile: row.sourceFile,
+      sourceLine: row.sourceLine)
+
+proc resolveCertificateExports*(owningPackage: string;
+                                targets: var seq[BuildTargetDef]):
+    CertificateExportTable {.dynOrStatic.} =
+  ## Resolve this package's certificate declarations into its
+  ## certificate-export table, and export each certificate name into the
+  ## target-export table. Called by ``buildPackageFragment`` after the
+  ## ``build:`` body ran and the explicit target rows were registered.
+  ##
+  ## * A name that already selects the marked node needs no new target: the
+  ##   ``aggregate("unit-suite", ...)`` a ``certificate "unit-suite"`` wraps,
+  ##   or the edge an implicit or ``target`` name already points at.
+  ## * Otherwise the name is exported over the handle, appended to
+  ##   ``targets`` as ``target`` (one edge) or as a one-member ``aggregate``
+  ##   (a target), so the package's fragment emits it like any other.
+  ## * A name declared twice, or one another export already uses for a
+  ##   different node, raises naming both sites. ``test`` is the exception
+  ##   to the second rule: an explicit ``certificate "test", h`` replaces the
+  ##   implicit marking of the ``test`` target instead of colliding with it.
+  ## * With no ``certificate "test", ...`` declaration, the node the
+  ##   selector ``test`` resolves to is marked implicitly (D15; see
+  ##   ``implicitTestCertificate``).
+  ##
+  ## The compile-time check in the ``package`` macro reports the literal
+  ## cases first, at the declarations; this is the check for names and
+  ## handles that are only known when the body runs.
+  var declaredTest = false
+  for i in 0 ..< certificateDeclarationRegistry.len:
+    var entry = certificateDeclarationRegistry[i]
+    entry.owningPackage = owningPackage
+    let site = certificateDeclarationSite(entry.sourceFile, entry.sourceLine)
+    if entry.name.len == 0:
+      raise newException(ValueError,
+        "certificate declared with an empty name at " & site)
+    for j in 0 ..< i:
+      let earlier = certificateDeclarationRegistry[j]
+      if earlier.name == entry.name:
+        raise newException(ValueError,
+          "certificate name '" & entry.name & "' is declared twice in " &
+            "package '" & owningPackage & "': first at " &
+            certificateDeclarationSite(earlier.sourceFile,
+              earlier.sourceLine) & ", again at " & site)
+    if entry.name == implicitCertificateName:
+      declaredTest = true
+    var selectsNode = entry.nodeKind == cnkTarget and entry.node == entry.name
+    var hasOther = false
+    var other: TargetExportEntry
+    if not selectsNode:
+      for row in targetExportRegistry.entries:
+        if row.name != entry.name or row.owningPackage != owningPackage:
+          continue
+        if entry.nodeKind == cnkAction and row.actionId == entry.node and
+            row.kind in {tekImplicit, tekExplicit}:
+          selectsNode = true
+        elif not hasOther:
+          hasOther = true
+          other = row
+    if hasOther and not selectsNode:
+      if entry.name == implicitCertificateName:
+        # D15: the explicit handle replaces the implicit marking; the
+        # ``test`` target itself is left as declared.
+        discard
+      else:
+        raise newException(ValueError,
+          "certificate name '" & entry.name & "' declared at " & site &
+            " collides with the target '" & entry.name & "' declared at " &
+            certificateDeclarationSite(other.sourceFile, other.sourceLine) &
+            " in package '" & owningPackage & "': a certificate name is a " &
+            "target name, so it must name the same node or a new name")
+    elif not selectsNode:
+      let exported =
+        case entry.nodeKind
+        of cnkAction:
+          BuildTargetDef(name: entry.name, actions: @[entry.node],
+            kind: btkTarget, sourceFile: entry.sourceFile,
+            sourceLine: entry.sourceLine)
+        of cnkTarget:
+          BuildTargetDef(name: entry.name, targets: @[entry.node],
+            kind: btkAggregate, sourceFile: entry.sourceFile,
+            sourceLine: entry.sourceLine)
+      targets.add(exported)
+      registerExplicitTargetExport(exported, owningPackage)
+    result.entries.add(entry)
+  if not declaredTest:
+    let implicitEntry = implicitTestCertificate(owningPackage, targets)
+    if implicitEntry.name.len > 0:
+      result.entries.add(implicitEntry)
+
+# ---------------------------------------------------------------------------
+# Test-Certificates TC-9b — ``enactCertificatePolicy <policy>``.
+#
+# Test-Certificates.md §"The policy declaration": a repository adopts a shared
+# branch policy by enacting it in its ``repro.nim``. The ``package`` macro
+# lowers the statement to ``registerEnactedCertificatePolicy`` at module
+# initialisation (and checks the policy's literal requirements at compile
+# time, ``emitEnactedCertificatePolicy``). What is registered here reaches the
+# CLI two ways, both carrying ``renderCertificatePolicyEmission``'s text:
+#
+# * written to ``$REPRO_EMIT_CERTIFICATE_POLICY`` when the recipe runs as the
+#   main module of a provider, which is how ``repro lock refresh`` and the
+#   staleness checks read it without building anything;
+# * as a ``reprobuild.certificate-policy.v1`` metadata node of the package's
+#   graph fragment (``buildPackageFragment``), which is how a certifying run's
+#   lock-update node reads it from the graph it already evaluated.
+# ---------------------------------------------------------------------------
+
+var enactedCertificatePolicies: seq[tuple[packageName: string;
+                                          policy: BranchCertificatePolicy]]
+  ## Every policy enacted by a package compiled into this provider, keyed by
+  ## the enacting package.
+var emittedCertificatePolicyPackage = ""
+  ## The main-module package whose policy was written to the emission file.
+
+proc registerEnactedCertificatePolicy*(packageName: string;
+                                       policy: BranchCertificatePolicy;
+                                       mainModule: bool) {.dynOrStatic.} =
+  ## Record ``packageName``'s enacted policy and, for the provider's main
+  ## module only, write it to ``$REPRO_EMIT_CERTIFICATE_POLICY``. A recipe
+  ## imported from a sibling (``uses:``) is not the main module, so a
+  ## sibling's own policy never reaches this repository's lock.
+  ##
+  ## The write is EAGER, at registration, for the reason
+  ## ``LockFilesEmitEnvVar`` documents: an exit proc that reads module
+  ## globals runs after they are destroyed.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      raise newException(ValueError, "package '" & packageName &
+        "' enacts a certificate policy twice")
+  enactedCertificatePolicies.add((packageName: packageName, policy: policy))
+  if not mainModule:
+    return
+  let path = getEnv(CertificatePolicyEmitEnvVar)
+  if path.len == 0:
+    return
+  if emittedCertificatePolicyPackage.len > 0 and
+      emittedCertificatePolicyPackage != packageName:
+    # repro.lock carries one policy per repository; two enacting packages
+    # in one recipe would make which one it records an accident of order.
+    raise newException(ValueError, "packages '" &
+      emittedCertificatePolicyPackage & "' and '" & packageName &
+      "' both enact a certificate policy in one recipe; repro.lock " &
+      "records one policy per repository, so enact it in one package")
+  emittedCertificatePolicyPackage = packageName
+  writeFile(path, renderCertificatePolicyEmission(policy, packageName))
+
+proc enactedCertificatePolicy*(packageName: string;
+                               policy: var BranchCertificatePolicy): bool
+    {.dynOrStatic.} =
+  ## The policy ``packageName`` enacts, if any.
+  for entry in enactedCertificatePolicies:
+    if entry.packageName == packageName:
+      policy = entry.policy
+      return true
+  false
+
 proc resetStateGroupRegistry*() {.dynOrStatic.} =
   ## Named-Runnable-Edges N0: test / re-evaluation seam — clear the
   ## collected named resource subgraphs.
@@ -2535,6 +3054,60 @@ proc appendRegisteredActionToolIdentityRefs*(actionId: string;
             break
         if not found:
           buildActionRegistry[i].toolIdentityRefs.add(refName)
+      return
+
+proc appendRegisteredActionRemoveBeforeRun*(actionId: string;
+                                            call: PublicCliCall;
+                                            flags: openArray[string]) {.dynOrStatic.} =
+  ## Record, on an already-registered action, the output paths a typed tool
+  ## declared with ``cli: removeBeforeRun <flag>...``: the values the call
+  ## supplied for those flags, in declaration order, deduplicated. A flag
+  ## the call did not supply contributes nothing. The generated typed-tool
+  ## wrapper calls this right after ``recordToolInvocation``; the macro has
+  ## already checked that each flag is an output (``role = output``), so
+  ## every path recorded here is one of the action's declared outputs. No-op
+  ## when the id is absent.
+  var paths: seq[string] = @[]
+  for flagName in flags:
+    for arg in call.arguments:
+      if arg.name == flagName:
+        paths.addRoleValues(arg)
+  for i in 0 ..< buildActionRegistry.len:
+    if buildActionRegistry[i].id == actionId:
+      for path in paths:
+        if path.len > 0 and path notin buildActionRegistry[i].removeBeforeRun:
+          buildActionRegistry[i].removeBeforeRun.add(path)
+      return
+
+proc markRegisteredActionOptionalOutputs*(action: var BuildActionDef;
+                                           call: PublicCliCall;
+                                           flags: openArray[string]) {.dynOrStatic.} =
+  ## Reclassify only tool-declared output parameters; present candidates
+  ## remain owned cache artifacts, while an absent candidate is no promise.
+  var paths: seq[string] = @[]
+  for flagName in flags:
+    for arg in call.arguments:
+      if arg.name == flagName:
+        paths.addRoleValues(arg)
+  # The wrapper calls this right after registering ``action``, so the
+  # entry is the LAST one with its id. Searching from the front would find
+  # an earlier registration that reused the id (a typed call repeated with
+  # the same arguments, as in one process's successive package
+  # evaluations) and hand back that entry -- without this call's ``env``
+  # and other fields -- in place of the caller's action.
+  for i in countdown(buildActionRegistry.len - 1, 0):
+    if buildActionRegistry[i].id == action.id:
+      for path in paths:
+        if path.len == 0:
+          continue
+        if path notin buildActionRegistry[i].optionalOutputs:
+          buildActionRegistry[i].optionalOutputs.add(path)
+        var required: seq[string] = @[]
+        for output in buildActionRegistry[i].outputs:
+          if output != path:
+            required.add(output)
+        buildActionRegistry[i].outputs = required
+      action = buildActionRegistry[i]
       return
 
 proc appendRegisteredActionSubToolRefs*(actionId: string;
@@ -3049,10 +3622,16 @@ proc unmonitorableActionDepfile*(tool: ReproFs; output: string;
   ## children either. The only dependency evidence the edge then has is this
   ## file.
   ##
-  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. Today exactly one reason
-  ## qualifies: the action performs library interposition ITSELF, so the
+  ## WHY AN ACTION MIGHT NOT BE MONITORABLE. The action may perform library
+  ## interposition ITSELF, so the
   ## engine's interposer and the action's re-enter each other on the same libc
-  ## entry points and the pair livelocks. "Monitoring is inconvenient", "the
+  ## entry points and the pair livelocks. A recorder-backed test can also
+  ## require an unchanged recorded address space: injecting the monitor
+  ## changes executable mappings and maps mutable shared-memory files, which
+  ## the recorder must refuse. Such a test must additionally be non-cacheable,
+  ## since this declaration-derived depfile cannot observe its runtime input
+  ## closure (Sandbox-And-Monitoring.md, "Tests that record their own children").
+  ## "Monitoring is inconvenient", "the
   ## action is slow", and "the evidence looks noisy" are NOT reasons — those
   ## keep ``automaticMonitorPolicy()``, which is the baseline and the thing
   ## that keeps the action cache sound.
@@ -3135,7 +3714,7 @@ proc collectPreserveTree(root: string):
       of pcFile:
         result.files.add(child)
       of pcLinkToFile, pcLinkToDir:
-        result.symlinks.add((path: child, target: expandSymlink(child)))
+        result.symlinks.add((path: child, target: readSymlinkTarget(child)))
       else:
         discard
   result.dirs.sort(system.cmp[string])
@@ -3160,6 +3739,85 @@ proc shouldExcludePreserveTreeEntry(relative: string;
         normalizedPrefix & "/"):
       return true
 
+proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
+  result = path.replace('\\', '/').strip()
+  while result.startsWith("./"):
+    result = result.substr(2)
+  while result.endsWith("/") and result.len > 1:
+    result.setLen(result.len - 1)
+  if result.len == 0:
+    return
+  if projectRoot.len > 0 and path.isAbsolute:
+    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
+    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
+    if normalizedPathValue == normalizedRoot:
+      return "."
+    let prefix = normalizedRoot & "/"
+    if normalizedPathValue.startsWith(prefix):
+      return normalizedPathValue.substr(prefix.len)
+    result = normalizedPathValue
+
+proc refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId: string;
+                                       deps: openArray[string];
+                                       after: openArray[BuildActionDef]) =
+  ## ``fs.preserveTree`` mirrors a SOURCE tree -- Tup's ``!tup_preserve``
+  ## (Typed-Tool-Definitions.md §Built-In File Operations) -- and it lists
+  ## that tree HERE, when the recipe is evaluated, not when the action runs.
+  ## A tree that an action of the same build generates is read before its
+  ## producer runs, so the mirror is a snapshot of the PREVIOUS build's tree:
+  ## on a fresh checkout it stages nothing and "succeeds", and once the
+  ## producer drops a file the build fails with ``preserveTree source file
+  ## disappeared before execution`` (seen staging CodeTracer's macOS dmg
+  ## from the ``.app`` the same build generates). Refuse it while the
+  ## producer is in hand: one of the actions the call is ordered after
+  ## (``after``, or ``deps`` by id) declares an output that is the source
+  ## root, lies under it, or contains it.
+  ##
+  ## A producer the call is NOT ordered after is not looked for: that graph
+  ## is already wrong for a second reason (the mirror may run first), and
+  ## the registry seen here holds only the actions registered so far.
+  let projectRoot = activeProviderProjectRoot()
+  let source = normalizedDeclaredProjectPath(projectRoot, sourceRoot)
+  if source.len == 0:
+    return
+  proc overlaps(output: string): bool =
+    let produced = normalizedDeclaredProjectPath(projectRoot, output)
+    if produced.len == 0:
+      return false
+    produced == source or source == "." or produced == "." or
+      produced.startsWith(source & "/") or source.startsWith(produced & "/")
+  var producers: seq[BuildActionDef] = @[]
+  for action in after:
+    producers.add(action)
+  for id in deps:
+    for action in buildActionRegistry:
+      if action.id == id:
+        producers.add(action)
+        break
+  for producer in producers:
+    # The registry entry is authoritative: a typed-tool wrapper appends to the
+    # registered action after it returned the value the caller holds.
+    var current = producer
+    for action in buildActionRegistry:
+      if action.id == producer.id:
+        current = action
+        break
+    for output in current.outputs & current.optionalOutputs & current.declaredOutputs:
+      if overlaps(output):
+        let caller =
+          if actionId.len > 0: "fs.preserveTree '" & actionId & "'"
+          else: "fs.preserveTree"
+        raise newException(ValueError,
+          caller & " cannot mirror '" & sourceRoot & "' into '" &
+            outputRoot & "': action '" & current.id &
+            "', which it runs after, declares the output '" & output &
+            "', so that tree is generated in this build. preserveTree " &
+            "mirrors SOURCE trees and lists its source when the recipe is " &
+            "evaluated, before '" & current.id & "' runs, so it would stage " &
+            "the previous build's tree (or nothing). Stage a generated tree " &
+            "in the action that produces it, or in a process action that " &
+            "declares the staging directory as its output.")
+
 proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    actionId = ""; deps: openArray[string] = [];
                    after: openArray[BuildActionDef] = [];
@@ -3167,6 +3825,8 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
                    commandStatsId = ""):
     BuildActionDef {.discardable, dynOrStatic.} =
   discard tool
+  refuseGeneratedPreserveTreeSource(sourceRoot, outputRoot, actionId, deps,
+    after)
   providerDirectoryInput(sourceRoot)
   let tree = collectPreserveTree(sourceRoot)
   for dirPath in tree.dirs:
@@ -3203,31 +3863,29 @@ proc preserveTree*(tool: ReproFs; sourceRoot, outputRoot: string;
     commandStatsId = commandStatsId,
     dependencyPolicy = automaticMonitorPolicy())
 
-proc normalizedDeclaredProjectPath*(projectRoot, path: string): string {.dynOrStatic.} =
-  result = path.replace('\\', '/').strip()
-  while result.startsWith("./"):
-    result = result.substr(2)
-  while result.endsWith("/") and result.len > 1:
-    result.setLen(result.len - 1)
-  if result.len == 0:
-    return
-  if projectRoot.len > 0 and path.isAbsolute:
-    let normalizedRoot = normalizedPath(projectRoot).replace('\\', '/')
-    let normalizedPathValue = normalizedPath(path).replace('\\', '/')
-    if normalizedPathValue == normalizedRoot:
-      return "."
-    let prefix = normalizedRoot & "/"
-    if normalizedPathValue.startsWith(prefix):
-      return normalizedPathValue.substr(prefix.len)
-    result = normalizedPathValue
+proc declaredOutputProjectPath(projectRoot: string; action: BuildActionDef;
+                               output: string): string {.dynOrStatic.} =
+  ## The engine resolves a relative declared output against the action's
+  ## working directory (``normalizedDeclaredActionPath`` in
+  ## ``repro_build_engine``), so an edge that runs in its own directory --
+  ## ``nim.c(runInSourceDir = true)`` -- spells its outputs relative to that
+  ## directory. Index them by the same file here. Inputs are not re-spelled:
+  ## they are materialized against the recipe root.
+  let cwd =
+    if action.cwdKind == acwdRecipeRoot: ""
+    else: action.cwdCustomPath.replace('\\', '/')
+  if cwd.len == 0 or output.len == 0 or output.isAbsolute:
+    return normalizedDeclaredProjectPath(projectRoot, output)
+  normalizedDeclaredProjectPath(projectRoot,
+    normalizedPath(cwd / output).replace('\\', '/'))
 
 proc inferDeclaredActionDeps*(actions: openArray[BuildActionDef];
                               projectRoot = ""): seq[BuildActionDef] {.dynOrStatic.} =
   result = @actions
   var outputProducer = initTable[string, string]()
   for action in actions:
-    for output in action.outputs:
-      let normalized = normalizedDeclaredProjectPath(projectRoot, output)
+    for output in action.outputs & action.optionalOutputs:
+      let normalized = declaredOutputProjectPath(projectRoot, action, output)
       if normalized.len > 0 and not outputProducer.hasKey(normalized):
         outputProducer[normalized] = action.id
   for i in 0 ..< result.len:
@@ -3291,14 +3949,51 @@ proc writeString(outp: var seq[byte]; value: string) =
   for ch in value:
     outp.add(byte(ord(ch)))
 
+const
+  # Smallest encoding of one element of each count-prefixed list, used by
+  # ``readElementCount``. Each is a LOWER bound: a field a later version
+  # appends only makes the element longer, so a bound that is not raised on a
+  # version bump stays safe and merely admits a larger bogus count.
+  StringMinBytes = 4            # u32 length prefix of an empty string
+  StringPairMinBytes = 2 * StringMinBytes
+  CliArgMinBytes = 3 * StringMinBytes  # name, nimType, encodedValue (v1+)
+  TypedOutputMinBytes = 3 * StringMinBytes  # fieldName, types count, path
+  ToolIdentityRefKindMinBytes = 1
+  RunEdgeLeaseMinBytes = 2 * StringMinBytes + 1 + 8
+  TargetExportEntryMinBytes = 4 * StringMinBytes + 1 + 4  # v1 shape
+  CertificateExportEntryMinBytes = 4 * StringMinBytes + 1 + 1 + 4
+
+proc readElementCount(bytes: openArray[byte]; pos: var int;
+                      minElementBytes: int; what: string): int =
+  ## Read the u32 element count of a list and refuse it when the bytes left
+  ## in the payload cannot hold that many elements of at least
+  ## ``minElementBytes`` each.
+  ##
+  ## The check runs BEFORE anything is sized by the count. A corrupted count
+  ## is otherwise trusted up to ``high(uint32)``: ``newSeq`` then asks for
+  ## gigabytes (~68 GB for a string list) and the process dies in the
+  ## allocator or the OOM killer instead of raising the payload error every
+  ## other malformed shape raises. With the check, every allocation a count
+  ## drives is bounded by the payload's own length.
+  assert minElementBytes >= 1
+  let count = readU32Le(bytes, pos)
+  # uint64 arithmetic: a u32 count times a small element size cannot
+  # overflow it, where ``int`` on a 32-bit target could.
+  if uint64(count) * uint64(minElementBytes) > uint64(bytes.len - pos):
+    raisePayload(what & " count exceeds remaining payload bytes")
+  int(count)
+
 proc readString(bytes: openArray[byte]; pos: var int): string =
-  let length = int(readU32Le(bytes, pos))
-  if pos + length > bytes.len:
+  let length = readU32Le(bytes, pos)
+  # Compared as uint64 against the bytes left, so a length near
+  # ``high(uint32)`` can neither overflow ``pos + length`` nor turn negative
+  # when converted to a 32-bit ``int``.
+  if uint64(length) > uint64(bytes.len - pos):
     raisePayload("truncated string in build action payload")
-  result = newString(length)
-  for i in 0 ..< length:
+  result = newString(int(length))
+  for i in 0 ..< int(length):
     result[i] = char(bytes[pos + i])
-  pos += length
+  pos += int(length)
 
 proc fromBytes(bytes: openArray[byte]): string =
   result = newString(bytes.len)
@@ -3314,7 +4009,7 @@ proc writeU32(outp: var seq[byte]; value: uint32) =
   outp.writeU32Le(value)
 
 proc readStringSeq(bytes: openArray[byte]; pos: var int): seq[string] =
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, StringMinBytes, "string list")
   result = newSeq[string](count)
   for i in 0 ..< count:
     result[i] = readString(bytes, pos)
@@ -3390,7 +4085,7 @@ proc readCliCall(bytes: openArray[byte]; pos: var int; version: uint16):
   result.executableName = readString(bytes, pos)
   result.subcommand = readString(bytes, pos)
   result.providerEntrypointId = readString(bytes, pos)
-  let count = int(readU32Le(bytes, pos))
+  let count = readElementCount(bytes, pos, CliArgMinBytes, "CLI argument")
   result.arguments = newSeq[PublicCliArg](count)
   for i in 0 ..< count:
     result.arguments[i] = readCliArg(bytes, pos, version)
@@ -3536,7 +4231,10 @@ proc readCacheEntryIdentity(bytes: openArray[byte]; pos: var int):
   ## v16 codec counterpart of ``writeCacheEntryIdentity``.
   result.packageName = readString(bytes, pos)
   result.packageVersion = readString(bytes, pos)
-  let optionCount = int(readU32Le(bytes, pos))
+  # Nothing is pre-sized here, but a bogus count would still spin the loop
+  # below until a string read runs off the end; refuse it up front instead.
+  let optionCount = readElementCount(bytes, pos, StringPairMinBytes,
+    "selected option")
   result.selectedOptions = newTable[string, string]()
   for _ in 0 ..< optionCount:
     let name = readString(bytes, pos)
@@ -3700,6 +4398,11 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
   # v30: the action's scratch directories.
   if version >= 30'u16:
     payload.writeStringSeq(action.scratchDirs)
+  # v31: declared outputs the engine removes before the action runs.
+  if version >= 31'u16:
+    payload.writeStringSeq(action.removeBeforeRun)
+  if version >= 32'u16:
+    payload.writeStringSeq(action.optionalOutputs)
 
   result.add(BuildActionPayloadMagic)
   result.writeU16Le(version)
@@ -3709,14 +4412,34 @@ proc encodeBuildActionPayloadAtVersion*(action: BuildActionDef;
 proc encodeBuildActionPayload*(action: BuildActionDef): seq[byte] {.dynOrStatic.} =
   encodeBuildActionPayloadAtVersion(action, BuildActionPayloadVersion)
 
-proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
+proc readBuildActionPayloadHeader(bytes: openArray[byte]; pos: var int):
+    uint16 =
+  ## Validate the envelope's magic and return its version word, leaving
+  ## ``pos`` on the payload-length field. The one reader of the header, so
+  ## the decoder and ``buildActionPayloadVersion`` cannot disagree on it.
   if bytes.len < 10:
     raisePayload("truncated build action payload envelope")
   for i in 0 ..< BuildActionPayloadMagic.len:
     if bytes[i] != BuildActionPayloadMagic[i]:
       raisePayload("unknown build action payload magic")
-  var pos = 4
-  let version = readU16Le(bytes, pos)
+  pos = BuildActionPayloadMagic.len
+  readU16Le(bytes, pos)
+
+proc buildActionPayloadVersion*(bytes: openArray[byte]): uint16 {.dynOrStatic.} =
+  ## The envelope version of an encoded action payload, read from its
+  ## header alone. Raises ``BuildActionPayloadError`` when ``bytes`` does not
+  ## start with a payload envelope.
+  ##
+  ## For a cache reader that must decide whether an entry was written by a
+  ## NEWER build before it serves it: checking the version of every action in
+  ## a cached graph costs a header read each, where a full decode would cost
+  ## the decode twice over (once here and once when the graph is lowered).
+  var pos = 0
+  readBuildActionPayloadHeader(bytes, pos)
+
+proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrStatic.} =
+  var pos = 0
+  let version = readBuildActionPayloadHeader(bytes, pos)
   # Every version from 1 up to the current one is readable: each bump either
   # APPENDS a field gated on its own ``version >=`` check below, or — as at
   # v25, which dropped two fields a removed policy kind had carried — REPLACES
@@ -3730,7 +4453,22 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # the constant was bumped — a v24 binary then rejected every graph a v23
   # binary had cached, with "unsupported build action payload version", and
   # the only way back was deleting the cache.
-  if version < 1'u16 or version > BuildActionPayloadVersion:
+  #
+  # The top of the range is closed, and has to be: a newer version may
+  # REPLACE a field, so no prefix of its bytes is safe to read. That refusal
+  # is a different fact from corruption, though -- the bytes are a valid
+  # payload of another reprobuild -- so it raises its own subtype carrying
+  # both versions. A cache reader maps exactly that to a miss
+  # (``BuildActionPayloadTooNewError``); everything else stays an error.
+  if version > BuildActionPayloadVersion:
+    var err = newException(BuildActionPayloadTooNewError,
+      "unsupported build action payload version " & $version &
+        " (newer than version " & $BuildActionPayloadVersion &
+        ", the newest this build reads)")
+    err.foundVersion = version
+    err.supportedVersion = BuildActionPayloadVersion
+    raise err
+  if version < 1'u16:
     raisePayload("unsupported build action payload version")
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
@@ -3762,7 +4500,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   if version >= 11'u16:
     result.targetNames = readStringSeq(bytes, pos)
   if version >= 12'u16:
-    let typedOutputCount = int(readU32Le(bytes, pos))
+    let typedOutputCount = readElementCount(bytes, pos, TypedOutputMinBytes,
+      "typed output")
     result.typedOutputs = newSeq[BuildActionTypedOutput](typedOutputCount)
     for i in 0 ..< typedOutputCount:
       result.typedOutputs[i].fieldName = readString(bytes, pos)
@@ -3774,7 +4513,7 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
   # the closure walker normalises to the default ``"out"`` output —
   # preserving legacy single-output behavior byte-for-byte.
   if version >= 14'u16:
-    let envCount = int(readU32Le(bytes, pos))
+    let envCount = readElementCount(bytes, pos, StringPairMinBytes, "env")
     result.env = newSeq[(string, string)](envCount)
     for i in 0 ..< envCount:
       let name = readString(bytes, pos)
@@ -3811,7 +4550,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     # ``toolIdentityRefs``. v16-and-earlier payloads decode with an
     # empty seq — the engine's resolver block is a no-op when the
     # action carries no refs.
-    let refCount = int(readU32Le(bytes, pos))
+    let refCount = readElementCount(bytes, pos, StringMinBytes,
+      "tool identity ref")
     result.toolIdentityRefs = newSeq[string](refCount)
     for i in 0 ..< refCount:
       result.toolIdentityRefs[i] = readString(bytes, pos)
@@ -3882,7 +4622,8 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.declaredOutputs = @[]
     result.readOnlyRoots = @[]
   if version >= 23'u16:
-    let refKindCount = int(readU32Le(bytes, pos))
+    let refKindCount = readElementCount(bytes, pos,
+      ToolIdentityRefKindMinBytes, "tool identity ref kind")
     result.toolIdentityRefKinds =
       newSeq[ToolIdentityRefKind](refKindCount)
     for i in 0 ..< refKindCount:
@@ -3928,6 +4669,14 @@ proc decodeBuildActionPayload*(bytes: openArray[byte]): BuildActionDef {.dynOrSt
     result.scratchDirs = readStringSeq(bytes, pos)
   else:
     result.scratchDirs = @[]
+  if version >= 31'u16:
+    result.removeBeforeRun = readStringSeq(bytes, pos)
+  else:
+    # Absence of the list is absence of the request: the engine then removes
+    # nothing, which is what every action did before the field existed.
+    result.removeBeforeRun = @[]
+  if version >= 32'u16:
+    result.optionalOutputs = readStringSeq(bytes, pos)
   if pos != bytes.len:
     raisePayload("trailing build action payload bytes")
 
@@ -3985,7 +4734,8 @@ proc decodeBuildTargetPayload*(bytes: openArray[byte]): BuildTargetDef {.dynOrSt
       raisePayload("invalid build target kind in build target payload")
     result.kind = BuildTargetKind(kindByte)
   if version >= 4'u16:
-    let extLen = int(readU32Le(bytes, pos))
+    let extLen = readElementCount(bytes, pos, StringPairMinBytes,
+      "build target extension")
     for _ in 0 ..< extLen:
       let typeId = readString(bytes, pos)
       let jsonStr = readString(bytes, pos)
@@ -4081,7 +4831,8 @@ proc readTargetExportEntry(bytes: openArray[byte]; pos: var int;
   # legacy artifacts decode byte-compatibly.
   if version >= 3'u16:
     result.runArgs = readStringSeq(bytes, pos)
-    let consumeCount = int(readU32Le(bytes, pos))
+    let consumeCount = readElementCount(bytes, pos, RunEdgeLeaseMinBytes,
+      "run-edge lease")
     result.consumes = newSeq[RunEdgeLease](consumeCount)
     for i in 0 ..< consumeCount:
       result.consumes[i] = readRunEdgeLease(bytes, pos)
@@ -4137,11 +4888,13 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
   let payloadLength = int(readU32Le(bytes, pos))
   if pos + payloadLength != bytes.len:
     raisePayload("target export table payload length mismatch")
-  let entryCount = int(readU32Le(bytes, pos))
+  let entryCount = readElementCount(bytes, pos, TargetExportEntryMinBytes,
+    "target export entry")
   result.entries = newSeq[TargetExportEntry](entryCount)
   for i in 0 ..< entryCount:
     result.entries[i] = readTargetExportEntry(bytes, pos, version)
-  let ambiguityCount = int(readU32Le(bytes, pos))
+  let ambiguityCount = readElementCount(bytes, pos, StringPairMinBytes,
+    "target export ambiguity")
   result.ambiguities = newSeq[TargetExportAmbiguity](ambiguityCount)
   for i in 0 ..< ambiguityCount:
     result.ambiguities[i] = readTargetExportAmbiguity(bytes, pos)
@@ -4150,6 +4903,69 @@ proc decodeTargetExportTablePayload*(bytes: openArray[byte]):
 
 proc targetExportTablePayload*(table: TargetExportTable): string {.dynOrStatic.} =
   fromBytes(encodeTargetExportTablePayload(table))
+
+proc encodeCertificateExportTablePayload*(table: CertificateExportTable):
+    seq[byte] {.dynOrStatic.} =
+  ## Test-Certificates TC-9a: SSZ-style frame around a package's
+  ## certificate-export table, the payload of the
+  ## ``reprobuild.certificate-export-table.v1`` metadata node. Same framing
+  ## as the target-export table (magic, u16 version, u32 length).
+  var payload: seq[byte] = @[]
+  payload.writeU32Le(uint32(table.entries.len))
+  for entry in table.entries:
+    payload.writeString(entry.name)
+    payload.writeString(entry.owningPackage)
+    payload.writeByte(byte(ord(entry.nodeKind)))
+    payload.writeString(entry.node)
+    payload.writeByte(if entry.implicit: 1'u8 else: 0'u8)
+    payload.writeString(entry.sourceFile)
+    payload.writeU32Le(uint32(max(entry.sourceLine, 0)))
+  result.add(CertificateExportTablePayloadMagic)
+  result.writeU16Le(CertificateExportTablePayloadVersion)
+  result.writeU32Le(uint32(payload.len))
+  result.add(payload)
+
+proc decodeCertificateExportTablePayload*(bytes: openArray[byte]):
+    CertificateExportTable {.dynOrStatic.} =
+  ## Decode ``encodeCertificateExportTablePayload``. Every malformed shape
+  ## raises; nothing is repaired.
+  if bytes.len < 10:
+    raisePayload("truncated certificate export table envelope")
+  for i in 0 ..< CertificateExportTablePayloadMagic.len:
+    if bytes[i] != CertificateExportTablePayloadMagic[i]:
+      raisePayload("unknown certificate export table payload magic")
+  var pos = 4
+  let version = readU16Le(bytes, pos)
+  if version != CertificateExportTablePayloadVersion:
+    raisePayload("unsupported certificate export table payload version")
+  let payloadLength = int(readU32Le(bytes, pos))
+  if pos + payloadLength != bytes.len:
+    raisePayload("certificate export table payload length mismatch")
+  let entryCount = readElementCount(bytes, pos,
+    CertificateExportEntryMinBytes, "certificate export entry")
+  result.entries = newSeq[CertificateExportEntry](entryCount)
+  for i in 0 ..< entryCount:
+    var entry: CertificateExportEntry
+    entry.name = readString(bytes, pos)
+    entry.owningPackage = readString(bytes, pos)
+    let kindByte = readByte(bytes, pos)
+    if kindByte > byte(ord(high(CertificateNodeKind))):
+      raisePayload("invalid certificate export node kind")
+    entry.nodeKind = CertificateNodeKind(kindByte)
+    entry.node = readString(bytes, pos)
+    let implicitByte = readByte(bytes, pos)
+    if implicitByte > 1'u8:
+      raisePayload("invalid certificate export implicit flag")
+    entry.implicit = implicitByte == 1'u8
+    entry.sourceFile = readString(bytes, pos)
+    entry.sourceLine = int(readU32Le(bytes, pos))
+    result.entries[i] = entry
+  if pos != bytes.len:
+    raisePayload("trailing certificate export table payload bytes")
+
+proc certificateExportTablePayload*(table: CertificateExportTable): string
+    {.dynOrStatic.} =
+  fromBytes(encodeCertificateExportTablePayload(table))
 
 proc callIdentity*(call: PublicCliCall): string {.dynOrStatic.} =
   var parts = @[call.packageName, call.executableName, call.subcommand,

@@ -1,0 +1,14 @@
+{
+  "description": "GM9: a [[resource]] row with `activity` applies only on hosts whose selection enables that activity (and where its `when` holds); a row without one is profile-wide; an activity named only by rows is created.",
+  "hosts": { "desktop": ["desktop_core"], "server": ["gm9_server_extras"], "plain": ["default"] },
+  "evaluations": [
+    { "host": "desktop", "system": "x86_64-linux", "packages": ["busybox"],
+      "resources": ["env.userVariable:GM9_EVERYWHERE", "fs.userFile:~/.config/gm9/wm.conf", "gm9-linux-panel"] },
+    { "host": "desktop", "system": "aarch64-darwin", "packages": ["busybox"],
+      "resources": ["env.userVariable:GM9_EVERYWHERE", "fs.userFile:~/.config/gm9/wm.conf"] },
+    { "host": "server", "system": "x86_64-linux", "packages": [],
+      "resources": ["env.userVariable:GM9_EVERYWHERE", "env.userVariable:GM9_SERVER"] },
+    { "host": "plain", "system": "x86_64-linux", "packages": [],
+      "resources": ["env.userVariable:GM9_EVERYWHERE"] }
+  ]
+}

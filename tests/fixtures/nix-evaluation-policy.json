@@ -1,0 +1,66 @@
+[
+  {
+    "selector": ".#tool",
+    "local": true
+  },
+  {
+    "selector": "./other#tool",
+    "local": true
+  },
+  {
+    "selector": "../other#tool",
+    "local": true
+  },
+  {
+    "selector": "/source/flake#tool",
+    "local": true
+  },
+  {
+    "selector": "path:./other#tool",
+    "local": true
+  },
+  {
+    "selector": "file:///source/flake#tool",
+    "local": true
+  },
+  {
+    "selector": "git+file:///source/flake#tool",
+    "local": true
+  },
+  {
+    "selector": "github:NixOS/nixpkgs/addf7cf5f383a3101ecfba091b98d0a1263dc9b8#bash",
+    "local": false
+  },
+  {
+    "selector": "nixpkgs#bash",
+    "local": false
+  },
+  {
+    "selector": "https://example.org/source.tar.gz#tool",
+    "local": false
+  },
+  {
+    "selector": ".registry#tool",
+    "local": false
+  },
+  {
+    "selector": "registry#tool",
+    "local": false
+  },
+  {
+    "selector": ".",
+    "local": true
+  },
+  {
+    "selector": "..",
+    "local": true
+  },
+  {
+    "selector": "..#tool",
+    "local": true
+  },
+  {
+    "selector": " ./flake#tool ",
+    "local": true
+  }
+]

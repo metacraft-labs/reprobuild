@@ -132,14 +132,14 @@ suite "the pre-push gate writes the lock record it demands":
           " commit -qm " & q("seed " & name))
         discard requireRun(git & " -C " & q(ws / name) & " push -q origin main")
         writeFile(ws / "repos" / (name & ".toml"),
-          "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+          "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
           "[repo]\nname = \"" & name & "\"\npath = \"" & name & "\"\n" &
-          "remote = \"" & name & "-origin\"\nrevision = \"main\"\n")
+          "remote = \"" & name & "-origin\"\nmainline = \"main\"\n")
 
       writeFile(ws / "projects" / "mix.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"mix\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"mix\"\n" &
+        "\n" &
         "[[remote]]\nname = \"anchored-origin\"\nfetch = \"file://" &
           scratch / "origin-anchored.git" & "\"\n\n" &
         "[[remote]]\nname = \"unanchored-origin\"\nfetch = \"file://" &
@@ -161,16 +161,16 @@ suite "the pre-push gate writes the lock record it demands":
       discard requireRun(git & " -C " & q(store) & " commit -qm seed")
       discard requireRun(git & " -C " & q(store) & " push -q origin main")
 
-      writeFile(ws / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(ws / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"mix\"\nbranch = \"main\"\n")
 
       # MO-14 — central lock publication is opt-in. This test proves the
       # published lock record is reachable from the store's upstream, so the
       # workspace opts in via `[manifest] publish_locks = true`.
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"file://" & storeOrigin & "\"\n" &
         "branch = \"main\"\n" &
         "publish_locks = true\n")

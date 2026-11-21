@@ -17,6 +17,16 @@
 ##     simply tracks the target's `realizedPrefixIds` so the new
 ##     pointer reflects the right set.
 ##
+## GM7 (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply): a
+## record of the current generation in a concern the TARGET generation does
+## not apply is RELEASED, not removed -- left in place and listed in
+## `RollbackPlan.released`. Restores and updates come from the target's own
+## records, which are in concerns it applied by construction; a restore of a
+## concern the current generation released is an ordinary restore, which
+## the executor drift-checks like every restore (`restoreDrift`). Launchers
+## live in the generation's bin directory, not in the home, and are diffed
+## as before.
+##
 ## Plan ordering: removes first (so a "remove then restore" sequence
 ## on the SAME path frees disk before re-creating), then restores,
 ## then updates. Within each bucket, lexicographic by primary key
@@ -28,6 +38,8 @@
 import std/[algorithm, tables]
 
 import repro_home_generations
+import repro_home_resources/concerns
+from repro_home_resources/manifest_record import isZeroDigest
 
 # ---------------------------------------------------------------------------
 # Operation kinds.
@@ -109,6 +121,10 @@ type
     ## this list drives ONLY the new pointer's `realizedPrefixIds`
     ## (and via that the store-GC live set).
     targetRealizedPrefixIds*: seq[Digest256]
+    released*: seq[string]
+      ## GM7: what the current generation records in a concern the target
+      ## generation does not apply, as `<kind> <name>` lines: left in
+      ## place, not removed (sorted).
 
 # ---------------------------------------------------------------------------
 # Internal: build keyed tables for set/diff math.
@@ -166,11 +182,14 @@ proc buildRollbackPlan*(currentManifest, targetManifest: ActivationManifest;
   let tgtBlocks = blocksByKey(targetManifest)
   let curLaunchers = launchersByName(currentManifest)
   let tgtLaunchers = launchersByName(targetManifest)
+  let tgtOwned = ownedConcernsOf(targetManifest)
 
   # Files.
   var removes, restores, updates: seq[FileOp]
   for path, rec in curFiles:
-    if path notin tgtFiles:
+    if path notin tgtFiles and GeneratedFileConcern notin tgtOwned:
+      result.released.add("generated-file " & path)
+    elif path notin tgtFiles:
       removes.add(FileOp(kind: rokRemoveFile,
         absoluteOutputPath: path,
         currentRecord: rec, hasCurrentRecord: true,
@@ -197,7 +216,10 @@ proc buildRollbackPlan*(currentManifest, targetManifest: ActivationManifest;
   # Managed blocks.
   var bRemoves, bRestores, bUpdates: seq[BlockOp]
   for key, rec in curBlocks:
-    if key notin tgtBlocks:
+    if key notin tgtBlocks and ManagedBlockRecordConcern notin tgtOwned:
+      result.released.add("managed-block " & rec.hostFilePath & "#" &
+        rec.blockId)
+    elif key notin tgtBlocks:
       bRemoves.add(BlockOp(kind: rokRemoveBlock,
         hostFilePath: rec.hostFilePath, blockId: rec.blockId,
         currentRecord: rec, hasCurrentRecord: true,
@@ -267,8 +289,13 @@ proc buildRollbackPlan*(currentManifest, targetManifest: ActivationManifest;
     if digestsDiffer(a.postWriteDigest, b.postWriteDigest): return true
     if a.resourceKind != b.resourceKind: return true
     false
+  let curApps = applicationPackagesOf(currentManifest)
   for addr1, rec in curResources:
-    if addr1 notin tgtResources:
+    if addr1 notin tgtResources and
+        concernOfBinding(rec, curApps) notin tgtOwned:
+      if not isZeroDigest(rec.postWriteDigest):
+        result.released.add("resource " & addr1)
+    elif addr1 notin tgtResources:
       rRemoves.add(ResourceOp(kind: rokRemoveResource,
         address: addr1,
         currentRecord: rec, hasCurrentRecord: true,
@@ -290,6 +317,8 @@ proc buildRollbackPlan*(currentManifest, targetManifest: ActivationManifest;
   rRestores.sort(proc(a, b: ResourceOp): int = cmp(a.address, b.address))
   rUpdates.sort(proc(a, b: ResourceOp): int = cmp(a.address, b.address))
   result.resourceOps = rRemoves & rRestores & rUpdates
+
+  result.released.sort()
 
   # Realized prefix ids come from the target pointer verbatim.
   result.targetRealizedPrefixIds = targetEnvelope.realizedPrefixIds

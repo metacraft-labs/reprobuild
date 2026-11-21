@@ -1,0 +1,9 @@
+{
+  "description": "host ==, !=, in [...] and not compare the evaluated host name.",
+  "hosts": {},
+  "evaluations": [
+    { "host": "home-pc", "system": "x86_64-linux", "packages": ["nvtop", "obs", "steam"] },
+    { "host": "m1", "system": "aarch64-darwin", "packages": ["fail2ban", "obs"] },
+    { "host": "server", "system": "x86_64-linux", "packages": ["fail2ban", "nvtop"] }
+  ]
+}

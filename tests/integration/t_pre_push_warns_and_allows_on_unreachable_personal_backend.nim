@@ -109,18 +109,17 @@ proc projectToml(coreUrl, projName: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"" & projName & "\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "includes = [\n  \"repos/core.toml\",\n]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 proc seedManifestGitLayer(gitBin, manifestsRoot, bare: string) =
   discard requireGit(q(gitBin) & " init --bare -b main " & q(bare))
@@ -216,9 +215,9 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
         let personalBare = scratch / "personal-backend.git"
         seedGitCheckoutBackend(gitBin, personalBackend, personalBare)
 
-        writeFile(ws / ".repro-workspace.toml",
-          "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-          "[manifest]\n" &
+        writeFile(ws / "repro-workspace.toml",
+          "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+          "[records]\n" &
           "url = \"https://example.invalid/manifests.git\"\n\n" &
           personalRoute())
 
@@ -321,9 +320,9 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
 
         # The route names the committed-lock dep by NAME (``work`` — the repo's
         # own coordinates in its ``repro.lock``) at the personal tier.
-        writeFile(ws / ".repro-workspace.toml",
-          "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-          "[manifest]\n" &
+        writeFile(ws / "repro-workspace.toml",
+          "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+          "[records]\n" &
           "url = \"https://example.invalid/manifests.git\"\n\n" &
           "[locking]\n" &
           "route = [" &
@@ -331,7 +330,7 @@ suite "HL-3 — pre-push warns and allows on an unreachable personal backend":
           "path = \"personal-lockrepo\", repos = [\"work\"] }]\n")
 
         discard requireGit(q(gitBin) & " -C " & q(ws) &
-          " add README.md repro.solver .gitignore .repro-workspace.toml")
+          " add README.md repro.solver .gitignore repro-workspace.toml")
         discard requireGit(q(gitBin) & " -C " & q(ws) & " commit -qm seed")
         discard requireGit(q(gitBin) & " -C " & q(ws) &
           " remote add origin " & q(origin))

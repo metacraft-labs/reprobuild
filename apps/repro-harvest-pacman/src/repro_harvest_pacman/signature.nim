@@ -8,9 +8,12 @@
 ##   2. **Fingerprint allowlist** — fallback for fixture-driven CI when
 ##      no ``gpg`` is on PATH.
 
-import std/[os, osproc, strtabs, strutils]
+import std/[os, osproc, strtabs, strutils, tempfiles]
 
 import blake3
+
+when defined(posix):
+  from repro_core/paths import unixSocketPathFits
 
 type
   SignatureBackend* = enum
@@ -112,12 +115,29 @@ proc resolveGpgBin*(): string =
   if found.len > 0: return found
   ""
 
+const GpgLongestSocketName = "S.gpg-agent.browser"
+  ## The longest socket name gpg-agent binds in its socket directory.
+
+proc gpgTempHome(prefix: string): string =
+  ## A fresh, owner-only ephemeral GNUPGHOME whose agent sockets fit
+  ## ``sun_path``. Even ``gpg --import`` of public keys starts gpg-agent.
+  ## On an account with no ``/run/user/<uid>`` (a service or CI runner's
+  ## system user) the agent binds its sockets in GNUPGHOME itself, and a
+  ## GNUPGHOME under a deep TMPDIR makes those paths too long: the agent
+  ## exits and every gpg call fails with "can't connect to the gpg-agent".
+  ## Such a home is made directly under ``/tmp`` instead. (The same helper
+  ## as repro_harvest_apt/signature's.)
+  result = createTempDir(prefix, "")
+  when defined(posix):
+    if not unixSocketPathFits(result / GpgLongestSocketName):
+      removeDir(result)
+      result = createTempDir("rgpg-", "", "/tmp")
+    setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
+
 proc verifyDbViaExternalGpg*(dbBytes, sigBytes: string;
                             keyBundleDir: string;
                             gpgBin: string): RepoDbVerification =
-  let tmpDir = getTempDir() / ("pacman-harvest-gpg-" &
-    $getCurrentProcessId())
-  createDir(tmpDir)
+  let tmpDir = gpgTempHome("pacman-harvest-gpg-")
   defer:
     try: removeDir(tmpDir)
     except: discard

@@ -168,8 +168,7 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"dev\"\n" &
-  "trunk = \"dev\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
   "[[remote]]\nname = \"c-origin\"\nfetch = \"" & cUrl & "\"\n\n" &
@@ -182,12 +181,12 @@ proc projectToml(aUrl, bUrl, cUrl, dUrl: string): string =
   "]\n"
 
 proc repoToml(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"dev\"\n"
+  "mainline = \"dev\"\n"
 
 type
   Fixture = object

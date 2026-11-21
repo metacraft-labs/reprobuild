@@ -10,8 +10,8 @@
 #      Operators typically provision Haskell on Linux via ghcup
 #      (https://www.haskell.org/ghcup/) or the distro package manager
 #      (apt/yum/pacman). The M9 harness's home-apply step lifts the
-#      cakBuiltin-realized prefix's bin dir onto PATH when LIVE +
-#      catalog Linux URLs are available; the SKIP path covers the
+#      archive-realized prefix's bin dir onto PATH when LIVE + Linux
+#      tarball realizations are available; the SKIP path covers the
 #      vanilla "nothing's been provisioned" case.
 #   3. Warm step: ``cabal v2-update`` (non-fatal — mirrors M40 Maven /
 #      M41 Gradle warm pattern; the M55 fixture only depends on ``base``

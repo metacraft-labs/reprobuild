@@ -40,11 +40,14 @@ package `python-dev`:
     # full Lib/ + include/ + libs/ tree the PyO3 link step needs.
     # Pin (3.12.13, build 20260610) mirrors the
     # PYTHON_DEV_VERSION/PYTHON_DEV_BUILD pair in
-    # ``D:\m\dev\windows\toolchain-versions.env``.
+    # ``D:\m\dev\windows\toolchain-versions.env``. ``version`` is CPython's
+    # alone: as a ``+20260610`` suffix the build date would read as a
+    # pre-release and fall below 3.12.13 in a ``uses:`` range.
     tarball url = "https://github.com/astral-sh/python-build-standalone/releases/download/20260610/cpython-3.12.13+20260610-x86_64-pc-windows-msvc-install_only.tar.gz",
       sha256 = "f5e4d9f856567493776f3d1e832c939fbaba5dcbcc5e0492a82ecfceea83b316",
       archiveType = "tar.gz",
       executablePath = "python/python.exe",
+      version = "3.12.13",
       packageId = "python-dev@3.12.13+20260610",
       cpu = "x86_64",
       os = "windows",
@@ -63,6 +66,7 @@ package `python-dev`:
       sha256 = "c218f50baeb2c06a30c2f03db5986b2bad6ab7c8a52faad2d5a59bda0677b93a",
       archiveType = "tar.gz",
       executablePath = "python/bin/python3.12",
+      version = "3.12.13",
       packageId = "python-dev@3.12.13+20260610",
       cpu = "x86_64",
       os = "linux",
@@ -77,6 +81,7 @@ package `python-dev`:
       sha256 = "e18ddd4c1e8f4a1d6c4590b37f423d76aec734447edc20ed08e93983d95f2132",
       archiveType = "tar.gz",
       executablePath = "python/bin/python3.12",
+      version = "3.12.13",
       packageId = "python-dev@3.12.13+20260610",
       cpu = "aarch64",
       os = "macos",

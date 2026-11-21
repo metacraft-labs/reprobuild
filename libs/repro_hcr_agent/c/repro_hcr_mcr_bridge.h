@@ -43,6 +43,21 @@
  * no other claim a claim could conflict with. The refusal path that matters —
  * a real conflict with a real recorder claim — is reachable exactly when the
  * recorder is present, which is when the symbol is non-NULL.
+ *
+ * WHEN THE RECORDER IS IN NO LINK MAP: THE RECORDER CALL.
+ *
+ * CodeTracer's default Linux recorder runs inside the process from its first
+ * instruction without being loaded by the dynamic linker, so nothing binds
+ * these weak references and they stay NULL even while a recording is in
+ * progress. That recorder patches every `syscall` instruction in the process
+ * and answers one reserved system call number itself (the "recorder call",
+ * codetracer-native-recorder `ct_interpose/exec_range.h`); natively the kernel
+ * answers it -ENOSYS. So each hook below falls back to that call when its
+ * symbol is NULL (`repro_hcr_mcr_*`): -ENOSYS means "no recorder", exactly
+ * what a NULL symbol meant before. The same call lets the agent tell that
+ * recorder about the code it writes into its executable pages
+ * (`repro_hcr_mcr_report_code`), which that recorder needs because the pages
+ * are written through a second mapping without any system call.
  */
 #ifndef REPRO_HCR_MCR_BRIDGE_H
 #define REPRO_HCR_MCR_BRIDGE_H
@@ -135,5 +150,107 @@ REPRO_HCR_WEAK int ct_repro_hcr_agent_did_patch_v2(
 
 typedef int (*ct_repro_hcr_agent_did_patch_v2_fn)(
     const ct_repro_hcr_patch_note_v1 *note);
+
+#if defined(__linux__) && defined(__x86_64__)
+/* ---------------------------------------------------------------------------
+ * The recorder call (see the header comment). Register convention:
+ * rax = 0x4354, rdi = magic, rsi = op, rdx = address, r10 = length,
+ * r8 = flags. A raw `syscall`, never libc: the recorder recognises the call at
+ * the instruction, and a libc wrapper would add nothing but a second path.
+ * ------------------------------------------------------------------------- */
+#define REPRO_HCR_RECORDER_CALL_NR 0x4354L
+#define REPRO_HCR_RECORDER_CALL_MAGIC 0x4c4c41432d54435aULL
+#define REPRO_HCR_RECORDER_OP_NEW_CODE 1L
+#define REPRO_HCR_RECORDER_OP_REPORTER 2L
+#define REPRO_HCR_RECORDER_OP_PATCH_NOTE 12L
+#define REPRO_HCR_RECORDER_OP_CLAIM_TEXT 13L
+#define REPRO_HCR_RECORDER_OP_RELEASE_TEXT 14L
+#define REPRO_HCR_RECORDER_FLAG_GATED 0x1L
+#define REPRO_HCR_RECORDER_ENOSYS 38L
+#define REPRO_HCR_RECORDER_EBUSY 16L
+
+static inline long repro_hcr_recorder_call(long op, uint64_t address,
+                                           uint64_t length, long flags) {
+  long ret;
+  register long r10 __asm__("r10") = (long)length;
+  register long r8 __asm__("r8") = flags;
+  __asm__ volatile("syscall"
+                   : "=a"(ret)
+                   : "0"(REPRO_HCR_RECORDER_CALL_NR),
+                     "D"(REPRO_HCR_RECORDER_CALL_MAGIC), "S"(op),
+                     "d"(address), "r"(r10), "r"(r8)
+                   : "rcx", "r11", "memory");
+  return ret;
+}
+
+/* Claim [start, start+len) for this provider. 0 claimed (or no other patcher
+ * exists), -1 degenerate, -2 refused with *holder_out set (0 when the
+ * recorder call path cannot say which patcher holds it). */
+static inline int repro_hcr_mcr_claim(uintptr_t start, size_t len,
+                                      unsigned owner, unsigned *holder_out) {
+  long rc;
+  if (ct_claimed_guest_text_claim != NULL)
+    return ct_claimed_guest_text_claim(start, len, owner, holder_out);
+  rc = repro_hcr_recorder_call(REPRO_HCR_RECORDER_OP_CLAIM_TEXT,
+                               (uint64_t)start, (uint64_t)len, (long)owner);
+  if (rc == 0 || rc == -REPRO_HCR_RECORDER_ENOSYS) return 0;
+  if (rc == -REPRO_HCR_RECORDER_EBUSY) {
+    *holder_out = 0;
+    return -2;
+  }
+  return -1;
+}
+
+static inline void repro_hcr_mcr_release(uintptr_t start) {
+  if (ct_claimed_guest_text_release != NULL) {
+    ct_claimed_guest_text_release(start);
+    return;
+  }
+  (void)repro_hcr_recorder_call(REPRO_HCR_RECORDER_OP_RELEASE_TEXT,
+                                (uint64_t)start, 0, 0);
+}
+
+/* Hand the recorder the note. Returns what `ct_repro_hcr_agent_did_patch_v2`
+ * returns; *present is 0 when no recorder is in the process (NULL symbol and
+ * a recorder call answered -ENOSYS), in which case the result is 0. */
+static inline int repro_hcr_mcr_did_patch(const ct_repro_hcr_patch_note_v1 *note,
+                                          int *present) {
+  long rc;
+  if (ct_repro_hcr_agent_did_patch_v2 != NULL) {
+    *present = 1;
+    return ct_repro_hcr_agent_did_patch_v2(note);
+  }
+  rc = repro_hcr_recorder_call(REPRO_HCR_RECORDER_OP_PATCH_NOTE,
+                               (uint64_t)(uintptr_t)note, 0, 0);
+  if (rc == -REPRO_HCR_RECORDER_ENOSYS) {
+    *present = 0;
+    return 0;
+  }
+  *present = 1;
+  return (int)rc;
+}
+
+/* Tell the recorder that [start, start+len) of an executable code page now
+ * holds instructions, starting at `start`, that no thread can reach yet (the
+ * publishing store comes later). The first report also declares this process
+ * a runtime that reports every code change it makes. No effect natively. */
+static int repro_hcr_mcr_reporter_declared = 0;
+/* Declare, once, that this process reports every code change it makes. Done
+ * before the agent maps its first executable memfd page (the capability probe
+ * included): the recorder refuses, at the program's exit, a recording that
+ * had such pages and no reporting runtime. */
+static inline void repro_hcr_mcr_declare_reporter(void) {
+  if (repro_hcr_mcr_reporter_declared) return;
+  repro_hcr_mcr_reporter_declared = 1;
+  (void)repro_hcr_recorder_call(REPRO_HCR_RECORDER_OP_REPORTER, 0, 0, 0);
+}
+static inline void repro_hcr_mcr_report_code(const void *start, size_t len) {
+  if (len == 0) return;
+  repro_hcr_mcr_declare_reporter();
+  (void)repro_hcr_recorder_call(REPRO_HCR_RECORDER_OP_NEW_CODE,
+                                (uint64_t)(uintptr_t)start, (uint64_t)len,
+                                REPRO_HCR_RECORDER_FLAG_GATED);
+}
+#endif /* __linux__ && __x86_64__ */
 
 #endif /* REPRO_HCR_MCR_BRIDGE_H */

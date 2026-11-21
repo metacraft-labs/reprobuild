@@ -150,6 +150,49 @@ proc tally(r: var OutputCleanupResult; outcome: OutputCleanupOutcome) =
   of ocoSkippedPolicy, ocoSkippedShared, ocoSkippedKind, ocoSkippedNotEmpty:
     inc r.skipped
 
+proc executeCleanupAction(act: var OutputCleanupAction;
+                          removeOwnedTrees: bool) =
+  ## Carry out one ``ocoWouldDelete`` decision and record its outcome.
+  ##
+  ## ``removeOwnedTrees`` decides what a FILE-kind claim found as a directory
+  ## on disk means. During a graph refresh it is a mismatch worth failing on:
+  ## the claim and the filesystem disagree about what the edge produced. For
+  ## ``repro clean`` it is the ordinary case of an action that declares a
+  ## directory as its output (the DSL claims every declared output as
+  ## ``oekFile``), and the whole tree is that action's product, so it is
+  ## removed. Nim's ``removeDir`` unlinks symlinks it meets instead of
+  ## following them, so the removal stays inside the resolved path.
+  try:
+    if act.claim.kind == oekDirectory:
+      if symlinkExists(act.resolvedPath):
+        removeFile(act.resolvedPath)          # remove the link, not its target
+        act.outcome = ocoDeleted
+      elif dirExists(act.resolvedPath):
+        if removeOwnedTrees or dirIsEmpty(act.resolvedPath):
+          removeDir(act.resolvedPath)
+          act.outcome = ocoDeleted
+        else:
+          act.outcome = ocoSkippedNotEmpty
+          act.detail = "directory not empty after member cleanup"
+      else:
+        act.outcome = ocoAlreadyAbsent
+    else:
+      if fileExists(act.resolvedPath) or symlinkExists(act.resolvedPath):
+        removeFile(act.resolvedPath)
+        act.outcome = ocoDeleted
+      elif dirExists(act.resolvedPath):
+        if removeOwnedTrees:
+          removeDir(act.resolvedPath)
+          act.outcome = ocoDeleted
+        else:
+          act.outcome = ocoFailed
+          act.detail = "declared a file/member but found a directory on disk"
+      else:
+        act.outcome = ocoAlreadyAbsent
+  except OSError as e:
+    act.outcome = ocoFailed
+    act.detail = e.msg
+
 proc applyOutputCleanup*(report: ProviderRefreshReport; projectRoot: string;
                          dryRun = false): OutputCleanupResult =
   ## Execute the cleanup plan produced by `planOutputCleanup`. With `dryRun`,
@@ -157,32 +200,46 @@ proc applyOutputCleanup*(report: ProviderRefreshReport; projectRoot: string;
   result.actions = planOutputCleanup(report, projectRoot)
   for act in result.actions.mitems:
     if act.outcome == ocoWouldDelete and not dryRun:
-      try:
-        if act.claim.kind == oekDirectory:
-          if symlinkExists(act.resolvedPath):
-            removeFile(act.resolvedPath)          # remove the link, not its target
-            act.outcome = ocoDeleted
-          elif dirExists(act.resolvedPath):
-            if dirIsEmpty(act.resolvedPath):
-              removeDir(act.resolvedPath)
-              act.outcome = ocoDeleted
-            else:
-              act.outcome = ocoSkippedNotEmpty
-              act.detail = "directory not empty after member cleanup"
-          else:
-            act.outcome = ocoAlreadyAbsent
-        else:
-          if fileExists(act.resolvedPath) or symlinkExists(act.resolvedPath):
-            removeFile(act.resolvedPath)
-            act.outcome = ocoDeleted
-          elif dirExists(act.resolvedPath):
-            act.outcome = ocoFailed
-            act.detail = "declared a file/member but found a directory on disk"
-          else:
-            act.outcome = ocoAlreadyAbsent
-      except OSError as e:
-        act.outcome = ocoFailed
-        act.detail = e.msg
+      executeCleanupAction(act, removeOwnedTrees = false)
+    result.tally(act.outcome)
+
+proc projectCleanReport*(
+    snapshots: openArray[ProviderGraphSnapshot]): ProviderRefreshReport =
+  ## The cleanup candidates of ``repro clean``: every owned effect claimed by
+  ## any fragment of ``snapshots``, as if each had just lost its owner.
+  ##
+  ## The returned report's own snapshot is empty on purpose. The
+  ## shared-ownership guard of `planOutputCleanup` protects an effect a
+  ## SURVIVING fragment still claims; a clean removes the outputs of the whole
+  ## selected build state, so no fragment of it survives. Every other rule of
+  ## the executor still applies unchanged: the claim's ``CleanupPolicy``
+  ## decides whether it may be deleted at all, non-file effects are left to
+  ## the resource-state planner, and a path that resolves outside the project
+  ## root is refused.
+  for snapshot in snapshots:
+    for fragment in snapshot.fragments:
+      for claim in fragment.effectClaims:
+        result.staleEffects.add(StaleOwnedEffect(
+          invocationKey: fragment.invocationKey, claim: claim))
+
+proc applyProjectClean*(snapshots: openArray[ProviderGraphSnapshot];
+                        projectRoot: string;
+                        dryRun = false): OutputCleanupResult =
+  ## Remove the materialised outputs that ``snapshots`` record as owned by the
+  ## project at ``projectRoot``. This is the deletion step of ``repro clean``;
+  ## the caller chooses which build state's snapshots to pass.
+  ##
+  ## Only the claimed paths are touched. The snapshots themselves, the action
+  ## cache, the content store and any other file under the project are left
+  ## in place, which is what lets the next build reuse the cache (a build that
+  ## stored payload-backed records restores the outputs instead of
+  ## re-executing). A declared output that is a directory on disk is removed
+  ## with its contents (see `executeCleanupAction`). With ``dryRun`` nothing
+  ## is removed and each deletion is reported as ``ocoWouldDelete``.
+  result.actions = planOutputCleanup(projectCleanReport(snapshots), projectRoot)
+  for act in result.actions.mitems:
+    if act.outcome == ocoWouldDelete and not dryRun:
+      executeCleanupAction(act, removeOwnedTrees = true)
     result.tally(act.outcome)
 
 proc summaryLine*(r: OutputCleanupResult): string =

@@ -1,0 +1,51 @@
+# CONF-3 derivation input for the EXECUTION-LEASE floor
+# (libs/repro_distributed_worker/c/repro_lease_linux.c, threat model G30).
+#
+# The floor's seccomp ALLOW-LIST is derived, not hand-picked:
+#
+#   allowed = expand(@system-service)        systemd's curated set for services,
+#                                            expanded group by group by
+#                                            `systemd-analyze syscall-filter`
+#           + every `allow` line below       observed in the profiled lease
+#                                            workload and not in that set
+#           - every `deny` line below        removed from it, each with its reason
+#
+# and every other syscall is reported and refused (`syscall-denied`). Numbers
+# come from the kernel UAPI headers of each architecture, not from the libc
+# `SYS_*` macros of the build host, so no entry silently vanishes when a
+# header is old. scripts/derive_lease_floor_syscalls.py turns this file into
+# libs/repro_distributed_worker/c/repro_lease_floor_syscalls.h; `just lint`
+# regenerates it on Linux and fails when the committed header differs.
+#
+# Argument-dependent rules live in the filter itself, beside the allow-list:
+# socket() only for AF_INET/AF_INET6/AF_UNIX (creating a unix socket grants
+# nothing; the supervisor refuses and reports a connect/sendto/sendmsg to any
+# unix socket that EXISTS in the lease's view, and answers one that reaches
+# nothing — the libc's nscd probe — with the kernel's own error, unreported:
+# threat model G38); clone() never with a CLONE_NEW* flag;
+# clone3() answered ENOSYS (its flags are in memory the filter cannot read;
+# the C library falls back to clone()); personality() only the query and
+# PER_LINUX.
+#
+# Profile: the lease workload of the five M7 worker tests and the lease
+# confinement test (compilers, the shell, git-free test scripts, bash
+# /dev/tcp egress probes), run under this floor with every denial reported;
+# re-run whenever the workload changes (CONF-3).
+
+# --- removed from @system-service -------------------------------------------
+deny unshare             namespace construction: a lease's namespaces are the worker's to make (CONF-5), never the action's
+deny setns               joining another namespace
+deny kcmp                compares kernel objects across processes (process introspection)
+deny process_madvise     acts on another process's memory
+deny process_vm_readv    reads another process's memory
+deny process_vm_writev   writes another process's memory
+deny io_uring_setup      a second syscall interface the filter cannot see into
+deny io_uring_enter      (io_uring)
+deny io_uring_register   (io_uring)
+deny userfaultfd         a kernel-exploitation primitive; no build or test needs it
+deny keyctl              the kernel keyring (credentials that are not the lease's)
+deny add_key             (keyring)
+deny request_key         (keyring)
+
+# --- observed in the lease workload, outside @system-service ----------------
+# (none: the profiled workload stays inside @system-service minus the above)

@@ -24,14 +24,17 @@
 ##      responsibility (the seam wiring); the decision logic itself is owned and
 ##      tested by codetracer.
 ##   2. WHEN ``$CT_BIN`` points at a REAL ``ct`` (CI builds it in the codetracer
-##      sibling): a genuine end-to-end over codetracer's committed
-##      ``m0_three_funcs`` fixture — ``recordWatchTestEdge`` builds the cache via
+##      sibling): a genuine end-to-end over codetracer's ``m0_three_funcs``
+##      fixture (its recording built with codetracer's own builder, see
+##      ``threeFuncsTrace``) — ``recordWatchTestEdge`` builds the cache via
 ##      ``ct --watch-record``, then ``watchTestEdgeDecision`` decides via
 ##      ``ct --watch-decide`` — asserting an unchanged source skips, editing an
 ##      executed function re-runs naming it, and editing a non-executed function
 ##      skips. This proves the real engine decides through the subprocess seam.
 
-import std/[unittest, os, strutils, times]
+import std/[unittest, os, osproc, strutils, times]
+import repro_test_support/reasoned_skip
+from repro_test_support import testCaseScratchSlug
 
 # Imported EXACTLY as ``repro_cli_support`` imports it. The adapter exposes
 # ``watchTestEdgeDecision`` / ``recordWatchTestEdge`` / ``defaultCachePath`` +
@@ -44,9 +47,14 @@ import ct_incremental_adapter
 # is asserted standalone (no codetracer, no real engine).
 # ---------------------------------------------------------------------------
 
-let fakeCt = getTempDir() / "repro_watch_fake_ct.sh"
+# Private to the process running ONE case: every case's `setup` rewrites the
+# script, and with one shared path a case truncated it while a sibling case
+# was executing it (`Text file busy`, or an empty script that prints nothing).
+let fakeCt = absolutePath("build/test-tmp/repro_watch_fake_ct" /
+  testCaseScratchSlug() / "fake_ct.sh")
 
 proc installFakeCt() =
+  createDir(fakeCt.parentDir)
   writeFile(fakeCt,
     "#!/bin/sh\nprintf '%s\\n' \"$CT_FAKE_OUT\"\nexit ${CT_FAKE_CODE:-0}\n")
   inclFilePermissions(fakeCt, {fpUserExec, fpGroupExec, fpOthersExec})
@@ -126,9 +134,54 @@ proc ctTestSrcDir(): string =
 
 let
   threeFuncsFixture = ctTestSrcDir() / "incremental" / "fixtures" / "m0_three_funcs"
-  threeFuncsTrace = threeFuncsFixture / "trace"
+  committedThreeFuncsTrace = threeFuncsFixture / "trace"
+  threeFuncsBuilder = ctTestSrcDir() / "incremental" / "m0_three_funcs_trace.nim"
   relSourcePath = "fixtures/m0_three_funcs/src/three_funcs.rb"
   realTestId = "fixture::three_funcs"
+
+proc traceFormatSrcDir(): string =
+  ## The trace-format checkout codetracer builds against: its sibling,
+  ## else the dev shell's pin.
+  let sibling = ctTestSrcDir().parentDir.parentDir.parentDir /
+    "codetracer-trace-format-nim" / "src"
+  if dirExists(sibling): sibling
+  else: getEnv("CODETRACER_TRACE_FORMAT_NIM_SRC")
+
+proc threeFuncsTrace(): tuple[dir, problem: string] =
+  ## The m0_three_funcs recording. codetracer used to commit it as a
+  ## ``trace.json`` event stream under ``fixtures/m0_three_funcs/trace``; it
+  ## now refuses that format and builds a CTFS ``.ct`` at test time with
+  ## ``m0_three_funcs_trace.nim``, so the recording always matches the
+  ## container version its reader expects. This builds it the same way, in
+  ## a separate compile, so this test's own build still carries none of
+  ## codetracer's engine or trace-format code. A checkout that still
+  ## commits the recording is used as it is.
+  if dirExists(committedThreeFuncsTrace):
+    return (committedThreeFuncsTrace, "")
+  if not fileExists(threeFuncsBuilder):
+    return ("", "neither a committed m0_three_funcs recording at " &
+      committedThreeFuncsTrace & " nor its builder at " & threeFuncsBuilder)
+  let traceFormat = traceFormatSrcDir()
+  if traceFormat.len == 0 or not dirExists(traceFormat):
+    return ("", "no codetracer-trace-format-nim source to build the " &
+      "m0_three_funcs recording with (sibling checkout or " &
+      "$CODETRACER_TRACE_FORMAT_NIM_SRC)")
+  let work = getTempDir() / ("repro_watch_m0_trace_" & $getCurrentProcessId())
+  createDir(work)
+  let driver = work / "build_m0_trace.nim"
+  writeFile(driver, "import std/os\nimport results\n" &
+    "import m0_three_funcs_trace\n" &
+    "let built = buildThreeFuncsTrace(paramStr(1))\n" &
+    "if built.isErr: quit(built.error, 1)\n")
+  let dir = work / "trace"
+  let (output, code) = execCmdEx(quoteShellCommand([getCurrentCompilerExe(),
+    "c", "-r", "--hints:off", "--warnings:off",
+    "--nimcache:" & work / "nimcache", "--out:" & work / "build_m0_trace",
+    "--path:" & threeFuncsBuilder.parentDir, "--path:" & traceFormat,
+    driver, dir]))
+  if code != 0:
+    return ("", "building the m0_three_funcs recording failed:\n" & output)
+  (dir, "")
 
 var counter = 0
 proc makeSourceRoot(): string =
@@ -159,27 +212,31 @@ suite "repro watch seam — real ct end-to-end (gated on $CT_BIN)":
       # suite above already asserts the seam's exec/parse/map + fail-safe; CI sets
       # CT_BIN to the ct built in the codetracer sibling, where this runs for real.
       skip("no built ct on this host — set CT_BIN to the ct built in the codetracer sibling")
-    elif not dirExists(threeFuncsTrace):
-      checkpoint("CT_BIN set but m0_three_funcs fixture missing at " & threeFuncsTrace)
-      fail()
     else:
-      let root = makeSourceRoot()
-      let cachePath = defaultCachePath(root)
-      # cycle 1: record the baseline via `ct --watch-record`.
-      check recordWatchTestEdge(realTestId, threeFuncsTrace, root, cachePath).ok
-      # unchanged ⇒ skip
-      let d0 = watchTestEdgeDecision(realTestId, threeFuncsTrace, root, cachePath)
-      check d0.action == weaSkip
-      check d0.reason == "unchanged"
-      # edit an EXECUTED function ⇒ re-run naming it
-      editFunctionBody(root, "used_a", "42 + 99")
-      let d1 = watchTestEdgeDecision(realTestId, threeFuncsTrace, root, cachePath)
-      check d1.action == weaRun
-      check "used_a" in d1.changedFuncs
-      # a fresh root with a NON-executed function edited ⇒ skip
-      let root2 = makeSourceRoot()
-      let cache2 = defaultCachePath(root2)
-      check recordWatchTestEdge(realTestId, threeFuncsTrace, root2, cache2).ok
-      editFunctionBody(root2, "unused_c", "777 + 777")
-      let d2 = watchTestEdgeDecision(realTestId, threeFuncsTrace, root2, cache2)
-      check d2.action == weaSkip
+      let trace = threeFuncsTrace()
+      if trace.dir.len == 0:
+        checkpoint("CT_BIN set but the m0_three_funcs recording is " &
+          "unavailable: " & trace.problem)
+        fail()
+      else:
+        let traceDir = trace.dir
+        let root = makeSourceRoot()
+        let cachePath = defaultCachePath(root)
+        # cycle 1: record the baseline via `ct --watch-record`.
+        check recordWatchTestEdge(realTestId, traceDir, root, cachePath).ok
+        # unchanged ⇒ skip
+        let d0 = watchTestEdgeDecision(realTestId, traceDir, root, cachePath)
+        check d0.action == weaSkip
+        check d0.reason == "unchanged"
+        # edit an EXECUTED function ⇒ re-run naming it
+        editFunctionBody(root, "used_a", "42 + 99")
+        let d1 = watchTestEdgeDecision(realTestId, traceDir, root, cachePath)
+        check d1.action == weaRun
+        check "used_a" in d1.changedFuncs
+        # a fresh root with a NON-executed function edited ⇒ skip
+        let root2 = makeSourceRoot()
+        let cache2 = defaultCachePath(root2)
+        check recordWatchTestEdge(realTestId, traceDir, root2, cache2).ok
+        editFunctionBody(root2, "unused_c", "777 + 777")
+        let d2 = watchTestEdgeDecision(realTestId, traceDir, root2, cache2)
+        check d2.action == weaSkip

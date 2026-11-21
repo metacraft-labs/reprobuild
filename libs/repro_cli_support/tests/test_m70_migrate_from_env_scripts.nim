@@ -22,6 +22,10 @@
 ##   6. End-to-end CLI invocation: scaffolds a fresh home.nim, applies
 ##      the migration twice, and asserts idempotence (the second run
 ##      adds zero lines).
+##   7. The default ``--env-file`` path is derived from
+##      ``$METACRAFT_ROOT`` alone: empty (and the command refuses) when
+##      it is unset, never a machine-specific fallback; plus a source
+##      scan that keeps such a path out of the shipped sources.
 ##
 ## Two cases here were carried over from
 ## ``test_m2_env_ps1_migration_clean.nim`` when that file was retired
@@ -39,8 +43,10 @@ import std/[options, os, sets, strutils, unittest]
 
 import repro_cli_support/migrate_from_env_scripts
 import repro_cli_support/home
+from repro_test_support import testCaseScratchSlug
 
-const TmpDir = "build/test-tmp/m70-migrate-from-env-scripts"
+let TmpDir = "build/test-tmp/m70-migrate-from-env-scripts" /
+  testCaseScratchSlug()
 
 proc resetTmp() =
   if dirExists(TmpDir):
@@ -403,7 +409,7 @@ suite "M70 line rendering":
 
   test "renderTodoComment names the env-var and the tool":
     let line = renderTodoComment("SWIFT_VERSION", "swift", "5.10.1",
-      "deferred until cakBuiltin supports swift", indent = 4)
+      "deferred until the archive realizer supports swift", indent = 4)
     check "TODO migrate swift@5.10.1" in line
     check "SWIFT_VERSION" in line
     check "deferred" in line
@@ -503,3 +509,67 @@ suite "M70 CLI end-to-end":
     let rc = runHomeCommand(@["migrate-from-env-scripts",
       "--env-file", TmpDir / "does-not-exist.env"])
     check rc == 1
+
+# ---------------------------------------------------------------------------
+# Default --env-file resolution: no machine-specific fallback
+# ---------------------------------------------------------------------------
+
+suite "M70 default env-file path is machine-neutral":
+
+  test "an unset METACRAFT_ROOT yields no default env-file path":
+    # The only legitimate source of a default is the workspace root the
+    # user's environment names. Without one there is nothing to derive a
+    # path from, so the default is empty and the command must ask for
+    # ``--env-file`` rather than guess a location.
+    check defaultEnvFilePathFor("") == ""
+
+  test "a set METACRAFT_ROOT yields <root>/windows/toolchain-versions.env":
+    let root = TmpDir / "workspace-root"
+    check defaultEnvFilePathFor(root) ==
+      root / "windows" / "toolchain-versions.env"
+
+  test "CLI without --env-file and with METACRAFT_ROOT empty exits 2":
+    resetTmp()
+    let profileDir = TmpDir / "profile-no-env-file"
+    createDir(profileDir)
+    setupCliEnv(profileDir, "")
+    let rc = runHomeCommand(@["migrate-from-env-scripts", "--dry-run"])
+    check rc == 2
+    check not fileExists(profileDir / "home.nim")
+
+  test "usage text names no drive letter and says --env-file is required":
+    putEnv("METACRAFT_ROOT", "")
+    let usage = renderMigrateUsage()
+    check "D:/" notin usage
+    check "D:\\" notin usage
+    check "$METACRAFT_ROOT/windows/toolchain-versions.env" in usage
+    check "required when METACRAFT_ROOT is unset" in usage
+    # The old text rendered "Default: " followed by the resolved path,
+    # which is an empty string whenever METACRAFT_ROOT is unset, so the
+    # --env-file line ended in a dangling "Default: " with nothing after
+    # it. (The --activity entry wraps after "Default:" with no trailing
+    # space, which is why the needle includes the space.)
+    check "Default: \n" notin usage
+
+  test "shipped sources contain no D:/metacraft machine path":
+    # The default-path fallback this guards against was compiled only
+    # under ``when defined(windows)``, so on every non-Windows host the
+    # behavioural cases above pass whether or not the literal is still
+    # in the code — and the CI that runs this file is Linux. Scanning
+    # the source is the only check that fails on that host when a
+    # one-machine path (a developer's drive letter and checkout layout)
+    # reappears in shipped code or in its doc comments.
+    let srcDir = currentSourcePath().parentDir.parentDir / "src" /
+      "repro_cli_support"
+    for name in ["home.nim", "migrate_from_env_scripts.nim"]:
+      let path = srcDir / name
+      check fileExists(path)
+      let content = readFile(path)
+      for needle in ["D:/metacraft", "D:\\metacraft"]:
+        # A bool rather than ``needle notin content`` so a failure
+        # names the file and needle instead of dumping the whole file.
+        let leaked = needle in content
+        if leaked:
+          checkpoint name & " contains the machine-specific path " &
+            needle
+        check not leaked

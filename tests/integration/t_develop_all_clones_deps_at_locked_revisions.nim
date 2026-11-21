@@ -105,7 +105,7 @@ proc initDepRepo(gitBin, scratch, name: string): tuple[origin, sha: string] =
 
 proc depInline(name, path, url, sha, depends: string): string =
   "{ name = \"" & name & "\", path = \"" & path &
-    "\", coord_kind = \"vcs\", url = \"" & url & "\", ref = \"main\"" &
+    "\", coord_kind = \"vcs\", url = \"" & url & "\"" &
     ", revision = \"" & sha & "\", integrity = \"" &
     (if sha.len > 0: "git-sha1:" & sha else: "") &
     "\", version = \"\", visibility = \"public\", participation = \"\"" &

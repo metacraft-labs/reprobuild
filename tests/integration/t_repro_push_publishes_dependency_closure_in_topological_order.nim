@@ -98,8 +98,7 @@ proc projectToml(appUrl, libUrl, coreUrl, otherUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"app\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"app-origin\"\nfetch = \"" & appUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
     "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
@@ -116,45 +115,45 @@ proc projectToml(appUrl, libUrl, coreUrl, otherUrl: string): string =
 # so a naive "push in declaration order" would publish app before lib/core
 # and fail the order assertion.
 const appFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "app"
 path = "app"
 remote = "app-origin"
-revision = "main"
+mainline = "main"
 depends = ["lib"]
 """
 
 const libFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib"
 path = "lib"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 depends = ["core"]
 """
 
 const coreFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "core"
 path = "core"
 remote = "core-origin"
-revision = "main"
+mainline = "main"
 """
 
 const otherFragment = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "other"
 path = "other"
 remote = "other-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -237,9 +236,9 @@ proc setupFixture(gitBin, slug: string): Fixture =
   # `[manifest] publish_locks = true` each member's gate writes its record and
   # does NOT publish it, so the lock-published and lock-in-the-bare assertions
   # below would be asking for something this workspace never enabled.
-  writeFile(workspaceRoot / ".repro-workspace.toml",
-    "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-    "[manifest]\n" &
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+    "[records]\n" &
     "url = \"" & fileUrl(result.manifestBare) & "\"\n" &
     "publish_locks = true\n")
 

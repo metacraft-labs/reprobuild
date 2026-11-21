@@ -73,6 +73,11 @@ type
     tier*: string
     measurementManifest*: string
     provisionedSecretsDir*: string
+    tpmDevice*: string
+      ## Empty unless the tier reads it. The renderer emits a flag for
+      ## each non-empty value and nothing for an empty one, so a unit
+      ## never carries a flag the daemon would refuse.
+    tpmEventLog*: string
 
 proc defaultUnitOptions*(): UnitOptions =
   UnitOptions(
@@ -80,7 +85,9 @@ proc defaultUnitOptions*(): UnitOptions =
     listen: DefaultListen,
     tier: "mock",
     measurementManifest: "",
-    provisionedSecretsDir: DefaultProvisionedSecretsDir)
+    provisionedSecretsDir: DefaultProvisionedSecretsDir,
+    tpmDevice: "",
+    tpmEventLog: "")
 
 proc renderServiceUnit*(o: UnitOptions): string =
   ## The unit file, exactly as it is installed.
@@ -120,6 +127,10 @@ proc renderServiceUnit*(o: UnitOptions): string =
     " --provisioned-secrets-dir=" & o.provisionedSecretsDir
   if o.measurementManifest.len > 0:
     exec.add " --measurement-manifest=" & o.measurementManifest
+  if o.tpmDevice.len > 0:
+    exec.add " --tpm-device=" & o.tpmDevice
+  if o.tpmEventLog.len > 0:
+    exec.add " --tpm-event-log=" & o.tpmEventLog
 
   result = """[Unit]
 Description=ReproOS attestation agent

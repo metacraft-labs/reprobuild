@@ -181,7 +181,7 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
 
 proc lockDep(name, url, sha: string): string =
   "{ name = \"" & name & "\", path = \"" & name & "\", coord_kind = \"vcs\"" &
-  ", url = \"" & url & "\", ref = \"main\", revision = \"" & sha &
+  ", url = \"" & url & "\", revision = \"" & sha &
   "\", integrity = \"git-sha1:" & sha &
   "\", version = \"\", visibility = \"public\", participation = \"\"" &
   ", depends = \"\", groups = \"\" }"

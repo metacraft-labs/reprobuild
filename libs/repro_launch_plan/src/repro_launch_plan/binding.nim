@@ -106,8 +106,9 @@ proc generatePosixLauncherScript*(plan: LaunchPlan; pathVar: string): string =
   ## macOS — the caller picks based on the chosen binding.
   doAssert isPosixScriptBinding(plan.binding),
     "generatePosixLauncherScript: plan binding is " & $plan.binding
-  result = LaunchScriptMagicPosix & "\n"
-  result.add("#!/bin/sh\n")
+  # The kernel recognizes interpreter scripts only when #! starts the file.
+  result = "#!/bin/sh\n"
+  result.add(LaunchScriptMagicPosix & "\n")
   result.add("# command: " & plan.exportedCommand & "\n")
   result.add("# realizedPrefix: " & plan.realizedPrefix & "\n")
   result.add("# strategy: " & $plan.binding & "\n")

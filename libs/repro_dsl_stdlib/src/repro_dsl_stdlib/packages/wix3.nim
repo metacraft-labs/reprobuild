@@ -1,5 +1,5 @@
 ## M4 (Realize-Closure-And-Catalog-Expansion spec) — WiX Toolset v3
-## catalog entry. **Hand-authored** rather than harvested from a Scoop
+## tarball realization. **Hand-authored** rather than harvested from a Scoop
 ## bucket because:
 ##
 ##   * Scoop's ``main/wixtoolset`` ships WiX **v7** (NuGet ``.nupkg``
@@ -18,7 +18,7 @@
 ##
 ##   * is a single .zip carrying every WiX v3 tool at the archive root
 ##     (``dark.exe``, ``candle.exe``, ``light.exe``, ``heat.exe``, …)
-##     — fits cakBuiltin's M64 baseline ``afZip + imExtract`` path
+##     — fits the home archive realizer's M64 baseline ``zip + extract`` path
 ##     without any new dispatch surface;
 ##   * ships ``dark.exe`` — the WiX decompiler — which the M4 MSI
 ##     realize hook uses to turn an ``.msi`` into a file tree without
@@ -30,26 +30,26 @@
 ##   * has zero installer footprint (no MSI, no registry writes).
 ##
 ## **License**: Microsoft Reciprocal License (MS-RL). The reprobuild
-## distribution does NOT redistribute the WiX binaries — this catalog
+## distribution does NOT redistribute the WiX binaries — this realization
 ## file only carries the upstream URL + sha256. The operator's host
 ## fetches WiX v3.14 from the upstream GitHub release at realize time.
 ##
 ## **Discovery contract** (per the M4 ``discoverDarkExe`` order):
-## the cakBuiltin MSI realize loop probes the M4 store FIRST for a
+## the home archive realizer MSI realize loop probes the M4 store FIRST for a
 ## ``wix3``-registered prefix containing ``dark.exe`` at the prefix
 ## root. Falls back to PATH ``dark.exe`` (Scoop wix3 historical install,
 ## Chocolatey wix.portable, manual install) and finally raises
 ## ``EBuiltinDarkUnavailable``.
 ##
-## **Bootstrap-order**: this catalog was hand-authored pre-M7. M7's
+## **Bootstrap-order**: this realization was hand-authored pre-M7. M7's
 ## ``--source gh-releases:wixtoolset/wix3`` mode CAN re-harvest the
 ## release shape, BUT the wix3 release uses non-semver tag
 ## ``wix3141rtm`` and asset name ``wix314-binaries.zip`` (no version
-## token) — neither maps cleanly to the catalog's ``version: "3.14.1"``
+## token) — neither maps cleanly to the realization's ``version: "3.14.1"``
 ## via a single ``--version-extract`` regex. A re-harvest would either
 ## record the version as ``wix3141rtm`` (drift from existing
 ## consumers' ``selectVersion("3.14.1")`` lookups) or require an
-## operator override. The hand-authored entry is kept; the catalog's
+## operator override. The hand-authored entry is kept; the realization's
 ## URL + sha256 match upstream and re-verification is one ``curl``
 ## away.
 ##
@@ -58,24 +58,17 @@
 ## hand-author until M7 (or until a Scoop bucket adopts WiX v3 again).
 ## That drift is EXPECTED.
 
-import std/tables
+import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 export packages_schema
 
-let wix3Catalog* = @[
-  VersionedProvisioning(
-    version: "3.14.1",
-    archive_format: afZip,
-    install_method: imExtract,
-    bin_relpath: @["dark.exe"],
-    platforms: @[
-      PlatformBinary(cpu: pcAny, os: poWindows,
-        url: "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip",
-        sha256: "6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31",
-        sha512: "", sha1: "", extract_path: "")
-    ],
-    installer_args: @[],
-    pacman_packages: @[],
-    bootstrap_argv: @[],
-    env: initTable[string, string]())
-]
+package wix3:
+  platforms [windows], msg = "WiX Toolset v3 is a Windows Installer toolchain. It has no POSIX build, so there is nothing to catalogue for Linux or macOS."
+  provisioning:
+    tarball url = "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip",
+      sha256 = "6ac824e1642d6f7277d0ed7ea09411a508f6116ba6fae0aa5f2c7daa2ff43d31",
+      archiveType = "zip",
+      executablePath = "dark.exe",
+      version = "3.14.1",
+      packageId = "wix3@3.14.1",
+      os = "windows"

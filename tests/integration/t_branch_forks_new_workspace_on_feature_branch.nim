@@ -180,8 +180,7 @@ proc projectTomlWith2Remotes(libAUrl, libBUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
   "includes = [\n" &
@@ -190,23 +189,23 @@ proc projectTomlWith2Remotes(libAUrl, libBUrl: string): string =
   "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -764,8 +763,8 @@ suite "M27/WV-6 — repro branch <path> forks a new workspace":
       # lib-b remote does not advertise. The target root clone therefore sees
       # the same invalid bill of materials as source resolution does.
       writeFile(fx.workspaceRoot / "repos" / "lib-b.toml",
-        libBFragmentToml.replace("revision = \"main\"",
-          "branch = \"missing-declared\""))
+        libBFragmentToml.replace("mainline = \"main\"",
+          "mainline = \"missing-declared\""))
       discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &
         " add repos/lib-b.toml")
       discard requireGit(q(gitBin) & " -C " & q(fx.workspaceRoot) &

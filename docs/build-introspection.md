@@ -22,16 +22,28 @@ would execute are reported with:
 The `reason` field is intended for cache invalidation diagnosis. Typical values
 include:
 
-- `dependency-launched`
 - `missing-output`
 - `not-cacheable`
 - `policy-requires-execution`
+- `cache-miss`
+- `force-rebuild`
 - `input changed: PATH`
 - `no cache record for weak fingerprint`
 
+A dry run does not need a reachable RunQuota daemon. `--dry-run` implies
+`--no-runquota`: no graph action is launched, so there is nothing to admit
+against the machine's budget, and `repro build --dry-run` therefore works on a
+host where `runquotad` cannot be started — which is where an introspection run
+is most useful. Pass `--runquota` to ask for the daemon handshake anyway.
+
+The one process a dry run does run is the project's own provider compile, when
+no current provider artifact is available, and under that implication it runs
+with no lease. The build header's `runQuota:` line reports the bypass for the
+whole invocation, so a dry run never claims a lease authority it did not use.
+
 The same fields are present in normal build reports for actions that do execute
 or are skipped. Normal builds also keep the scheduler `trace` array, which
-records cache-skipped events such as `dependency-launched` and `missing-output`.
+records cache-skipped events such as `force-rebuild` and `missing-output`.
 
 For quiet terminal output with full diagnostics, combine:
 

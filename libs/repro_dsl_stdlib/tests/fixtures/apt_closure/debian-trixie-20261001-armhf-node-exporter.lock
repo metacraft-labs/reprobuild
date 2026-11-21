@@ -1,0 +1,76 @@
+repro-apt-closure-lock v1
+archive http://snapshot.debian.org/archive/debian/20261001T000000Z
+suite trixie
+components main
+architecture armhf
+snapshot 20261001T000000Z
+inrelease-sha256 0584fba32e13e0ab8285fb16c27adea1ec03a73669c18702821094fd6ca86675
+index main/binary-armhf/Packages.xz 2ec499ef1d8375da19217b500d389c3d40410d930fe709013758c1746aba5cec
+root prometheus-node-exporter
+deb adduser 3.152 all pool/main/a/adduser/adduser_3.152_all.deb 190932 e50984d2e1ef6300e3fd51303839842189a077b10cb5cadff1923df10c61c493
+deb base-files 13.8+deb13u7 armhf pool/main/b/base-files/base-files_13.8+deb13u7_armhf.deb 88248 f2cd88b15da27030be9b8faa5a81d03461fd574fc5fd313e3375aff223fb4304
+deb base-passwd 3.6.7 armhf pool/main/b/base-passwd/base-passwd_3.6.7_armhf.deb 52520 ea516ac1edb8239a3d4341699caa732979b9fc1b1bef058d3d35bc5df291728d
+deb bash 5.2.37-2+b10 armhf pool/main/b/bash/bash_5.2.37-2+b10_armhf.deb 1433836 6c5083dc7361f6d162186d1290f66cf597069f4aeb5cb95798fc1d125dc67c6d
+deb bsdutils 1:2.41.5-0+deb13u1 armhf pool/main/u/util-linux/bsdutils_2.41.5-0+deb13u1_armhf.deb 101576 0e6593903aef20a5a148adb0999b0446c2516f5484eea66fbfe0f2e8e770b15e
+deb coreutils 9.7-3 armhf pool/main/c/coreutils/coreutils_9.7-3_armhf.deb 2868896 6df222dd53265e43122806fe23194f0c75ef2367ca63fb40b3e1853285675f46
+deb dash 0.5.12-12 armhf pool/main/d/dash/dash_0.5.12-12_armhf.deb 90420 777df74a12caf923bc4d1e786f6c21e80e068cf2101ff545bb4ebcab1740a624
+deb debconf 1.5.91 all pool/main/d/debconf/debconf_1.5.91_all.deb 121088 1ddc7e6c5925f748eefb7ca811d98e049f18c158bb21fbc7e122262ce6011e49
+deb debianutils 5.23.2 armhf pool/main/d/debianutils/debianutils_5.23.2_armhf.deb 91408 62348987b22713f8abcaec12d419ad257277e3f2249c5920c80c89cb8ccac6b2
+deb diffutils 1:3.10-4 armhf pool/main/d/diffutils/diffutils_3.10-4_armhf.deb 369476 f92684e6a62ded2e42d86ba8d5ea8e8c397696b6d825cad5efab58184634a362
+deb dpkg 1.22.22 armhf pool/main/d/dpkg/dpkg_1.22.22_armhf.deb 1487744 871eb4a1b9f739303ee0fc93cba048e1fb865d5b98a5e700bcc65fcfa7a4e430
+deb findutils 4.10.0-3 armhf pool/main/f/findutils/findutils_4.10.0-3_armhf.deb 686648 87f927eae269dafa0fbeaa2f154f252898adea82a14e53b5589099cb9f1ab466
+deb gcc-14-base 14.2.0-19 armhf pool/main/g/gcc-14/gcc-14-base_14.2.0-19_armhf.deb 49392 0f702fdd5e5471efda9fece892e09ce73e3447968083e1f8c341f8b66b1fb340
+deb grep 3.11-4 armhf pool/main/g/grep/grep_3.11-4_armhf.deb 420212 6aa6bce8acdc35968c3b4b3bd2f2e2102d81b3a767f803c0d91b9b5a4ca69bc4
+deb gzip 1.13-1+deb13u1 armhf pool/main/g/gzip/gzip_1.13-1+deb13u1_armhf.deb 133912 c29325d80bed4acb903267951fac21007560c71b36ac9907ed49ff95f5e2bddb
+deb hostname 3.25 armhf pool/main/h/hostname/hostname_3.25_armhf.deb 10008 ba1a1b7b377d7f7439313f9f5474025a012bd21892bdaf95ff8b9bac3235d9e5
+deb init-system-helpers 1.69~deb13u1 all pool/main/i/init-system-helpers/init-system-helpers_1.69~deb13u1_all.deb 39360 addf78073e1cbc5a5508937e11d2571055e29835e00ee8fab52a66775649378f
+deb libacl1 2.3.2-2+b1 armhf pool/main/a/acl/libacl1_2.3.2-2+b1_armhf.deb 30040 8c4e89f40315151f0fce03cc6fcbc9ed0e21c71d8e485cd8a4c65e8a89f783f6
+deb libattr1 1:2.5.2-3 armhf pool/main/a/attr/libattr1_2.5.2-3_armhf.deb 21972 e71f785fd8bc31144a95ac2f763b5383fdaf47242f79714b12e6200c8a366a3c
+deb libaudit-common 1:4.0.2-2+deb13u1 all pool/main/a/audit/libaudit-common_4.0.2-2+deb13u1_all.deb 12812 b9d32e5ff04fd747aacb7d6b3ebbbbf734ddefb2f1695f0b1b2a4b5e51b1052e
+deb libaudit1 1:4.0.2-2+deb13u1 armhf pool/main/a/audit/libaudit1_4.0.2-2+deb13u1_armhf.deb 51276 0c549d6d3424592f4ae792933b5d271b54d97a3f26bdec0e78ea73e65f6464b6
+deb libblkid1 2.41.5-0+deb13u1 armhf pool/main/u/util-linux/libblkid1_2.41.5-0+deb13u1_armhf.deb 156020 6372515565c97d522eed8e732e70b58501e27ca626b29fcdbcccc9ac0fbb6142
+deb libbsd0 0.12.2-2 armhf pool/main/libb/libbsd/libbsd0_0.12.2-2_armhf.deb 127036 9c0d043ee895b508ea8aad3c08501be6e05343a3a2148139d0569020f0fd06b8
+deb libbz2-1.0 1.0.8-6 armhf pool/main/b/bzip2/libbz2-1.0_1.0.8-6_armhf.deb 34952 26f1ff3f79069f1f9bbbf2f6fb6d61694560500d9eb803cf31669a678d3b5212
+deb libc-bin 2.41-12+deb13u4 armhf pool/main/g/glibc/libc-bin_2.41-12+deb13u4_armhf.deb 524592 8f4e65b8f4ebb5ad047a1e2c3a1709b24bf30034607c5704a82cc85027d33dc3
+deb libc6 2.41-12+deb13u4 armhf pool/main/g/glibc/libc6_2.41-12+deb13u4_armhf.deb 2260832 4fc6fed8d77d01c0dacb5fda8b880a8c8a669575936de5761b693077a6f6c2ec
+deb libcap-ng0 0.8.5-4+b1 armhf pool/main/libc/libcap-ng/libcap-ng0_0.8.5-4+b1_armhf.deb 16120 2c7c21ab1840feb9c1fdc781b1fd62884a4ae771ad3d57f136c88710eca39517
+deb libcap2 1:2.75-10+deb13u1+b3 armhf pool/main/libc/libcap2/libcap2_2.75-10+deb13u1+b3_armhf.deb 25080 657d0b1d0f43bac7143f6166bd1efd9e13619c9d0c68a2d98bf5bbc15a9a09b0
+deb libcrypt1 1:4.4.38-1 armhf pool/main/libx/libxcrypt/libcrypt1_4.4.38-1_armhf.deb 95644 42cb49bb5dbc41d8f2df55b60f4d3fb7c08b1146f59b3584d498c4858bdc9ade
+deb libdb5.3t64 5.3.28+dfsg2-9 armhf pool/main/d/db5.3/libdb5.3t64_5.3.28+dfsg2-9_armhf.deb 602320 804cb8e64f904841c10d8d0c1b04ed8889d69c9f6c77885cc07736a5964c5f9a
+deb libdebconfclient0 0.280 armhf pool/main/c/cdebconf/libdebconfclient0_0.280_armhf.deb 10304 d0ff438f0108a6130cff1ff2abab53480aa3c0976721f1cbb368001adbd61067
+deb libgcc-s1 14.2.0-19 armhf pool/main/g/gcc-14/libgcc-s1_14.2.0-19_armhf.deb 37008 25910c3a0bce3985e388de445244578b7922dc670c9bba1c8673779b89447873
+deb libgmp10 2:6.3.0+dfsg-3 armhf pool/main/g/gmp/libgmp10_6.3.0+dfsg-3_armhf.deb 512384 b74d0fa0aa9d1e2f7addae5d3c235fc881e1507d98559ab158362bef56877a56
+deb liblastlog2-2 2.41.5-0+deb13u1 armhf pool/main/u/util-linux/liblastlog2-2_2.41.5-0+deb13u1_armhf.deb 28104 567d74d068e48000084a0e7854cae7924ec20b3fcb89cbf6bcf7ed96ba8e642c
+deb liblzma5 5.8.1-1+deb13u1 armhf pool/main/x/xz-utils/liblzma5_5.8.1-1+deb13u1_armhf.deb 296084 a79a1f9f0fc939636a9ec227b27a50395b051ea98e1df87f1fa412a90724fab0
+deb libmd0 1.1.0-2+b1 armhf pool/main/libm/libmd/libmd0_1.1.0-2+b1_armhf.deb 31908 b0defe39166ab5308b9d234f81fc5b473ee562003413506549d2b96037182827
+deb libmount1 2.41.5-0+deb13u1 armhf pool/main/u/util-linux/libmount1_2.41.5-0+deb13u1_armhf.deb 190668 bdf34cbc99cf1bb07f1b64e70ddd1c9d6d80e399415eba7864b89f117eba726d
+deb libpam-modules 1.7.0-5 armhf pool/main/p/pam/libpam-modules_1.7.0-5_armhf.deb 164240 0a18de63cdbe005cd8b1cb253a9decd137c5e72d896048f0cf701ae9decca65b
+deb libpam-modules-bin 1.7.0-5 armhf pool/main/p/pam/libpam-modules-bin_1.7.0-5_armhf.deb 45176 3bcf2079f629761a34f6613933562f49c898f83ad2cd8cd61a21932755613d96
+deb libpam-runtime 1.7.0-5 all pool/main/p/pam/libpam-runtime_1.7.0-5_all.deb 248720 b02792c9ed6174db695a653b95ef3629fdac3a73ba1eff1754ab161b5711bfbf
+deb libpam0g 1.7.0-5 armhf pool/main/p/pam/libpam0g_1.7.0-5_armhf.deb 64496 5e9afea301b24c0fc4642016784004664442493b686bfbfe38eeb7e1db87c2ca
+deb libpcre2-8-0 10.46-1~deb13u2 armhf pool/main/p/pcre2/libpcre2-8-0_10.46-1~deb13u2_armhf.deb 259744 fa6e62fbfd2f348079d515c196e58b1ed287229d47c477648b04d8af2910e1ae
+deb libselinux1 3.8.1-1 armhf pool/main/libs/libselinux/libselinux1_3.8.1-1_armhf.deb 74792 9b58d1e5608466c90d3cf948b0dce2b1436d8f1b0f585937e9665b3227f2175a
+deb libsemanage-common 3.8.1-1 all pool/main/libs/libsemanage/libsemanage-common_3.8.1-1_all.deb 7812 65375d886749c236bd1da4d9990b7c2469d2fe66019a28e5614f6814376d3dcb
+deb libsemanage2 3.8.1-1 armhf pool/main/libs/libsemanage/libsemanage2_3.8.1-1_armhf.deb 81172 0cfd6dcc8ccd9f40c57d4d6a91f79fd0190d5623dc537ec31b887cefb785e4ee
+deb libsepol2 3.8.1-1 armhf pool/main/libs/libsepol/libsepol2_3.8.1-1_armhf.deb 256324 f7d3bdebc88a1acca9ba3efc51691023da8208bedfa8d5e54ca5ef4f9be2ec5b
+deb libsmartcols1 2.41.5-0+deb13u1 armhf pool/main/u/util-linux/libsmartcols1_2.41.5-0+deb13u1_armhf.deb 127460 5bb9c5c7978fac63cc6eb14424dd47eb4fb4315ef98e4751142bd8632223ae86
+deb libsqlite3-0 3.46.1-7+deb13u2 armhf pool/main/s/sqlite3/libsqlite3-0_3.46.1-7+deb13u2_armhf.deb 803088 15d6a91264010e8ee439d0b3e95782dd87e31fea71aee379deca53fbb99ea957
+deb libssl3t64 3.5.7-1~deb13u2 armhf pool/main/o/openssl/libssl3t64_3.5.7-1~deb13u2_armhf.deb 1999964 94538529b1471c2055476df47fbc29a67a734c7c9d7f1fb44fd54c97e43c40c5
+deb libsystemd0 257.13-1~deb13u1 armhf pool/main/s/systemd/libsystemd0_257.13-1~deb13u1_armhf.deb 418864 4f16f1d40fc759cd7bf40295a3515d5ea11273aac10ab1da96701b0e36adf645
+deb libtinfo6 6.5+20250216-2 armhf pool/main/n/ncurses/libtinfo6_6.5+20250216-2_armhf.deb 333044 d8965ad5782c6e1c69383dbedc722c561c662b0930586a26e937a23a19776e06
+deb libudev1 257.13-1~deb13u1 armhf pool/main/s/systemd/libudev1_257.13-1~deb13u1_armhf.deb 142380 11dfc3d8f63cecba13e526d4d129a5435a15d6aba5a9aa9f5f8a6d877ec866cf
+deb libuuid1 2.41.5-0+deb13u1 armhf pool/main/u/util-linux/libuuid1_2.41.5-0+deb13u1_armhf.deb 36632 a33526c90db21b85b700d72a979dac8c515449fe0f621b0bf76ed112aa60a397
+deb libzstd1 1.5.7+dfsg-1 armhf pool/main/libz/libzstd/libzstd1_1.5.7+dfsg-1_armhf.deb 264236 da5238dd84fc51f782f39d435821bff556409b3dbc82d232e4e81f427fb1ca65
+deb login.defs 1:4.17.4-2 all pool/main/s/shadow/login.defs_4.17.4-2_all.deb 186124 b4bbb8242cbf5588de7aafeb9d578a3dee1db2891f444ab454fd30bd80ccf2b4
+deb mawk 1.3.4.20250131-1 armhf pool/main/m/mawk/mawk_1.3.4.20250131-1_armhf.deb 130628 c67c8383b3e3eaf47cab8af2d341becb41073417604769a27549965504f97208
+deb ncurses-base 6.5+20250216-2 all pool/main/n/ncurses/ncurses-base_6.5+20250216-2_all.deb 273216 190e775260a38973c415a36ae99f33ad1b37ea6ca99929d7c5d53843fc23e914
+deb ncurses-bin 6.5+20250216-2 armhf pool/main/n/ncurses/ncurses-bin_6.5+20250216-2_armhf.deb 429332 f70c44d10f19be726c3e5d1d11c9670e966ea13676b1b85587f222969ce3ace2
+deb openssl-provider-legacy 3.5.7-1~deb13u2 armhf pool/main/o/openssl/openssl-provider-legacy_3.5.7-1~deb13u2_armhf.deb 307436 eefa69b451e991b52daeef669114dd23956c2d14d3bd4e5a1b4cc0c5ca62111d
+deb passwd 1:4.17.4-2 armhf pool/main/s/shadow/passwd_4.17.4-2_armhf.deb 1181288 5a11c392134c3344d52635844df2373253a9bdabb4f5192dc6984479e7618dc9
+deb perl-base 5.40.1-6+deb13u1 armhf pool/main/p/perl/perl-base_5.40.1-6+deb13u1_armhf.deb 1515944 0086a1585ff135c4caa57ae03e1195e9d861b7d8a88c69db4498f1f945aa2f39
+deb prometheus-node-exporter 1.9.0-1+b4 armhf pool/main/p/prometheus-node-exporter/prometheus-node-exporter_1.9.0-1+b4_armhf.deb 4077640 670b44787498ae8b59664b3d0d1c4d3a5843317e75f7e4e99786d2448b1aefd9
+deb sed 4.9-2+deb13u1 armhf pool/main/s/sed/sed_4.9-2+deb13u1_armhf.deb 321948 880861d60e3fe8b5ddcd41153cef5b64ec99fc834a752c70081b77ec05c2dd94
+deb sysvinit-utils 3.14-4 armhf pool/main/s/sysvinit/sysvinit-utils_3.14-4_armhf.deb 32776 b2673cf5e455fd126d789cd157742a528fbbd804a31f7f7548f25a13c148e4b4
+deb tar 1.35+dfsg-3.1 armhf pool/main/t/tar/tar_1.35+dfsg-3.1_armhf.deb 794392 d32aed8471cdc6196f2d27d04f917e282a7b2524f745e0a289e8350ac391cab2
+deb util-linux 2.41.5-0+deb13u1 armhf pool/main/u/util-linux/util-linux_2.41.5-0+deb13u1_armhf.deb 1142592 854b0c3c049dd6f92ccef6cd072e4a10a0f200af6914390f41342bd49b367a32
+deb zlib1g 1:1.3.dfsg+really1.3.1-1+b1 armhf pool/main/z/zlib/zlib1g_1.3.dfsg+really1.3.1-1+b1_armhf.deb 75196 81c55a59e1570477ecef6a449bf6dce44dad67ba4ce9e04760451d4cfe200534

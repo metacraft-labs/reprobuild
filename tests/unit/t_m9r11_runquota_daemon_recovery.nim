@@ -60,7 +60,11 @@ proc makeTempDaemonFile(): string =
   ## Lay down an executable sentinel file the discovery helper can find. We
   ## check executable resolution + path correctness; no actual process spawn
   ## happens here.
-  let temp = getTempDir() / "m9r11-runquotad-sentinel.exe"
+  # Per process: cases run concurrently as separate processes and each one
+  # removes its sentinel when done, so a shared name vanished under a sibling.
+  let temp = getTempDir() / ("m9r11-runquotad-sentinel-" &
+    $getCurrentProcessId() &
+    ".exe")
   writeFile(temp, "#!/bin/sh\necho synthetic runquotad\n")
   when defined(posix):
     setFilePermissions(temp, {fpUserRead, fpUserWrite, fpUserExec,

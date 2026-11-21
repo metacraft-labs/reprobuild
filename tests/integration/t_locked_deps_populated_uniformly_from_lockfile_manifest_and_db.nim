@@ -106,8 +106,7 @@ suite "MO-9 — populateLockedDeps fills one model uniformly from any source":
       block committedLockSource:
         let dep = LockedDep(
           name: "app", path: ".",
-          coordinates: Coordinates(kind: ckVcs, url: appUrl, gitRef: "main",
-            revision: appSha),
+          coordinates: Coordinates(kind: ckVcs, url: appUrl, revision: appSha),
           integrity: gitObjectMultihash("sha1", appSha),
           visibility: "public")
         let ld = LockedDependencies(schema: SolvedGraphLockSchemaV2,

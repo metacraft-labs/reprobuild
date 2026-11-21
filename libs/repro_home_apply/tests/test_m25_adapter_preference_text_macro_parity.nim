@@ -5,7 +5,9 @@
 ##
 ## The test uses a small fixture as the bridge:
 ##
-##   text-form home.nim: `adapterPreference: windows: [scoop, builtin, path]`
+##   text-form home.nim: `adapterPreference: windows: [scoop, tarball, path]`
+##                       (GM4b: `tarball` and its former spelling `builtin`
+##                       are both exercised — `linux:` keeps `builtin`)
 ##                       parsed via `loadProfile` → `Profile.adapterPreference`
 ##
 ##   macro-form: the same OS keys + chains constructed in-process via the
@@ -41,7 +43,7 @@ import repro/profile
 
 profile "bridge":
   adapterPreference:
-    windows: [scoop, builtin, path]
+    windows: [scoop, tarball, path]
     linux: [nix, builtin, path]
     darwin: [nix, path]
 
@@ -54,7 +56,7 @@ import repro_profile
 
 profile "bridge":
   adapterPreference:
-    windows: [scoop, builtin, path]
+    windows: [scoop, tarball, path]
     linux: [nix, builtin, path]
     darwin: [nix, path]
 
@@ -126,7 +128,7 @@ suite "M2.5 — text/macro adapterPreference parity":
     let profile = loadProfile(path)
     check profile.adapterPreference.len == 3
     check profile.adapterPreference["windows"] ==
-      @["scoop", "builtin", "path"]
+      @["scoop", "tarball", "path"]
     check profile.adapterPreference["linux"] ==
       @["nix", "builtin", "path"]
     check profile.adapterPreference["darwin"] ==
@@ -151,7 +153,7 @@ suite "M2.5 — text/macro adapterPreference parity":
       let intent = parseProfileIntentJson(js)
       check intent.adapterPreference.len == 3
       check intent.adapterPreference["windows"] ==
-        @["scoop", "builtin", "path"]
+        @["scoop", "tarball", "path"]
       check intent.adapterPreference["linux"] ==
         @["nix", "builtin", "path"]
       check intent.adapterPreference["darwin"] ==

@@ -10,6 +10,7 @@ import std/[strutils, unittest]
 import repro_solver/variant_encoder
 import repro_solver/version_encoder
 import repro_solver/solver_api
+import repro_solver/explainer
 
 suite "unified solve unsatisfiable":
   test "variant trigger forces a range with no satisfying version":
@@ -90,3 +91,61 @@ suite "unified solve unsatisfiable":
     # 2. The unsat core mentions the empty-catalog package since it
     #    sits on an edge.
     check coreHasEmpty
+
+suite "an unsatisfiable solve names its core in the message":
+  # The exception's message is the one part of it every route prints: an
+  # uncaught raise out of a recipe's module-init solve shows `msg` and
+  # nothing else, and `repro lock solve` / `refresh` quote `msg` in their
+  # refusal. So the constraints that cannot hold together must be IN the
+  # message, not only in `coreAtoms` for a caller that knows to decode them.
+
+  test "a dependency range no version satisfies is named by its edge":
+    let openssl = newPackage("openssl", versions = ["1.1.0"])
+    let app = newPackage("app",
+      versions = ["0.1.0"],
+      depends = [newDependency("openssl", ">=3.0")])
+
+    var message = ""
+    try:
+      discard solve([], [openssl, app])
+    except EUnsatisfiable as e:
+      message = e.msg
+
+    check message.len > 0
+    check "app -> openssl >=3.0" in message
+
+  test "contradictory variant constraints are named by variant":
+    # a=on requires b=on; b=on conflicts with c=on; c is forced on.
+    let a = newEnumVariant("a", ["on"],
+      contributions = [contribution(vpForce, "on")],
+      constraints = [requiresExpr("on", "b", "on")])
+    let b = newEnumVariant("b", ["on", "off"],
+      contributions = [contribution(vpDefault, "off")],
+      constraints = [conflictsExpr("on", "c", "on")])
+    let c = newEnumVariant("c", ["on"],
+      contributions = [contribution(vpForce, "on")])
+    let d = newEnumVariant("d", ["x", "y"],
+      contributions = [contribution(vpDefault, "x")],
+      constraints = [requiresExpr("x", "d", "x")])
+
+    var message = ""
+    var coreAtoms: seq[string] = @[]
+    try:
+      discard solve([a, b, c, d], [])
+    except EUnsatisfiable as e:
+      message = e.msg
+      coreAtoms = e.coreAtoms
+
+    check coreAtoms.len >= 1
+    # Every decoded core entry appears in the message, verbatim.
+    for entry in explainUnsat(coreAtoms, [a, b, c, d], []):
+      check entry.source in message
+    check "a requires b==on" in message
+
+  test "with no minimal core the best-effort participants are listed":
+    # The renderer must not claim a fallback it does not perform: when the
+    # assumption re-solve produced nothing, the participants the encoder
+    # identified are what the reader gets.
+    let text = renderUnsatCore(@[], @["app", "openssl"])
+    check "app" in text
+    check "openssl" in text

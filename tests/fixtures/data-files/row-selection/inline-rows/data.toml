@@ -1,0 +1,9 @@
+# Rows written as an inline array of inline tables are the same TOML data as
+# `[[package]]` rows (https://toml.io/en/v1.0.0#array-of-tables); Nix's
+# builtins.fromTOML cannot tell the two apart, so both readers accept both.
+# An empty array is zero rows.
+package = [
+  { name = "jq", activity = "default" },
+  { name = "nvim", activity = "dev", when = "linux" },
+]
+resource = []

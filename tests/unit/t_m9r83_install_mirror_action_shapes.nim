@@ -5,6 +5,7 @@ import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
 import repro_core
 import repro_core/ambient_execution
+import repro_core/target_object_check
 import repro_test_support
 import repro_project_dsl
 import repro_dsl_stdlib/types/package_result
@@ -250,8 +251,71 @@ suite "M9.R.83 install mirror emitted action shape":
         "install").replace("\\", "/") & "\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
         "\"; : > \"" & sidecar.replace("\\", "/") in script
+      # The platform line, then the declared object-check exemptions appended
+      # one per line (CLI/build.md), then the end of the legacy branch.
+      let sidecarQ = "\"" & sidecar.replace("\\", "/") & "\""
       check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
-        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "' > " & sidecarQ & "; printf '%s\\n' \"${" &
+        TargetObjectExemptionsEnvVar & ":-}\" | while IFS= read -r l;" in script
+      check "printf '" & TargetObjectExemptionSidecarKey &
+        "=%s\\n' \"$l\"; fi; done >> " & sidecarQ & "; ;; esac" in script
+    else:
+      check true
+
+  test "the mirror action clears the previous mirror in every read-only mode":
+    # Every mode but legacy leaves the recipe's mirror read-only, so the next
+    # build's action must unlock and remove it before the clobber of `usr/`;
+    # without that step such a recipe cannot be rebuilt. Legacy mode never
+    # makes the mirror read-only and its action must stay as it was.
+    when defined(reproProviderMode):
+      let scratch = createTempDir("m9r83-mirror-clear-", "")
+      defer: removeDir(scratch)
+      let priorModeSet = existsEnv(InstallMirrorModeEnvVar)
+      let priorMode = getEnv(InstallMirrorModeEnvVar)
+      defer:
+        if priorModeSet: putEnv(InstallMirrorModeEnvVar, priorMode)
+        else: delEnv(InstallMirrorModeEnvVar)
+
+      for mode in InstallMirrorMode:
+        checkpoint $mode
+        putEnv(InstallMirrorModeEnvVar, $mode)
+        # One package per mode: the mirror gate emits once per package.
+        let packageName = "m9r83ClearPkg" & ($mode).replace("-", "")
+        let projectRoot = scratch / packageName
+        createRecipeRoot(projectRoot)
+        let pkg = PackageDef(
+          packageName: packageName,
+          sourceFile: projectRoot / "repro.nim",
+          hasDevEnv: false,
+          devEnvBodyHash: "",
+          toolUses: @[])
+        let fragment = buildPackageFragment(pkg, dummyRequest(projectRoot),
+          proc() =
+            registerVersion(packageName, DslVersionInfo(version: "1.0.0"))
+            let installEdge = buildAction(
+              id = "m9r83-clear-install-" & packageName,
+              call = inlineExecCall(@["sh", "-c", "true"], projectRoot),
+              outputs = @[projectRoot / "build" / "dest" /
+                ".install.stamp"],
+              pool = "compile",
+              toolIdentityRefs = @["sh"])
+            emitInstallTreeMirror(installEdge, "build", "dest", packageName,
+              "autotools"),
+          includeDefault = false)
+
+        let mirrorRoot = projectRoot / installMirrorSubpath()
+        let script = inlineScriptOf(findById(extractActions(fragment),
+          "install-mirror-" & packageName))
+        let clobber = "rm -rf \"" &
+          (mirrorRoot / "usr").replace("\\", "/") & "\""
+        check clobber in script
+        if mode == immLegacy:
+          check "_repro_unlock_dirs" notin script
+        else:
+          let clear = emitInstallMirrorClearPrevious(mirrorRoot, mode)
+          check clear.len > 0
+          check clear in script
+          check script.find(clear) < script.find(clobber)
     else:
       check true
 
@@ -323,8 +387,14 @@ suite "M9.R.83 install mirror emitted action shape":
       check "--version \"8.3.0\"" in script
       check "*) mkdir -p \"" & parentDir(sidecar).replace("\\", "/") &
         "\"; : > \"" & sidecar.replace("\\", "/") in script
+      # The platform line, then the declared object-check exemptions appended
+      # one per line (CLI/build.md), then the end of the legacy branch.
+      let sidecarQ = "\"" & sidecar.replace("\\", "/") & "\""
       check "printf '%s\\n' 'platform=" & currentRealizationPlatformTag() &
-        "' > \"" & sidecar.replace("\\", "/") & "\"; ;; esac" in script
+        "' > " & sidecarQ & "; printf '%s\\n' \"${" &
+        TargetObjectExemptionsEnvVar & ":-}\" | while IFS= read -r l;" in script
+      check "printf '" & TargetObjectExemptionSidecarKey &
+        "=%s\\n' \"$l\"; fi; done >> " & sidecarQ & "; ;; esac" in script
     else:
       check true
 

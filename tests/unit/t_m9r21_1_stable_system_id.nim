@@ -16,8 +16,9 @@
 import std/[os, strutils, unittest]
 
 import repro_profile
+from repro_test_support import testCaseScratchSlug
 
-const TmpRoot = "build/m9r21_1_tmp"
+let TmpRoot = "build/m9r21_1_tmp" / testCaseScratchSlug()
 
 proc resetTmp(sub: string): string =
   let dir = TmpRoot / sub

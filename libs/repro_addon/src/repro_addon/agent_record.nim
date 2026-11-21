@@ -1,0 +1,309 @@
+## What a deploy-agent apply records in the add-on generation it commits
+## (ReproOS Add-On Mode §7.4: "the deploy-agent `deploymentId` and sequence,
+## when the apply came from the agent"), and the operator's `pause` marker
+## that holds the agent after a local rollback (§9.3).
+##
+## The record is `generations/<id>/addon-agent`, beside the generation's
+## ledger, profiles and base identity, written when the generation commits.
+## A generation without one was applied by an operator (or by bootstrap).
+##
+## The pause itself is the deploy agent's own marker; this module finds every
+## agent of the host so an operator rollback can pause all of them (see the
+## section below).
+
+import std/[os, posix, strutils]
+
+import repro_deploy_agent/agent
+import repro_infra
+
+import ./ledger
+
+const
+  AgentRecordName* = "addon-agent"
+  AgentRecordHeader* = "# repro-addon-agent v1"
+
+type
+  AgentRecord* = object
+    deploymentId*: string
+    sequence*: uint64
+    migratedFrom*: string
+      ## The agent generation (in the agent's own state directory) this
+      ## add-on generation took over, when it is the migration of a host
+      ## whose agent applied outside the add-on switch (§9, "Migration").
+    profileDigest*: string
+      ## The producer-side digest the apply verified the profile against
+      ## (``attestation.manifestProfileDigestOf``), so the generation's
+      ## attestation can name it (spec §10.5). "" in a record written
+      ## before it existed.
+    closuresDigest*: string
+      ## ``attestation.closureDigestsDigest`` of the manifest's pinned
+      ## closures; "" when it pinned none.
+
+  AgentRecordError* = object of CatchableError
+
+proc present*(r: AgentRecord): bool =
+  r.deploymentId.len > 0 or r.sequence > 0'u64 or r.migratedFrom.len > 0
+
+proc oneLine(v, what: string): string =
+  if '\n' in v or '\r' in v or '\t' in v:
+    raise newException(AgentRecordError, what & " holds a line break or " &
+      "a tab: " & v.escape)
+  v
+
+proc render*(r: AgentRecord): string =
+  result = AgentRecordHeader & "\n"
+  result.add("deployment\t" & oneLine(r.deploymentId, "deploymentId") & "\n")
+  result.add("sequence\t" & $r.sequence & "\n")
+  if r.migratedFrom.len > 0:
+    result.add("migrated-from\t" & oneLine(r.migratedFrom, "migratedFrom") &
+      "\n")
+  if r.profileDigest.len > 0:
+    result.add("profile-digest\t" & oneLine(r.profileDigest, "profileDigest") &
+      "\n")
+  if r.closuresDigest.len > 0:
+    result.add("closures-digest\t" &
+      oneLine(r.closuresDigest, "closuresDigest") & "\n")
+
+proc parseAgentRecord*(text: string): AgentRecord =
+  let lines = text.splitLines()
+  if lines.len == 0 or lines[0] != AgentRecordHeader:
+    raise newException(AgentRecordError, "not a repro-addon agent record")
+  for i in 1 ..< lines.len:
+    if lines[i].len == 0: continue
+    let f = lines[i].split('\t', 1)
+    if f.len != 2:
+      raise newException(AgentRecordError, "malformed agent record line " &
+        $(i + 1))
+    case f[0]
+    of "deployment": result.deploymentId = f[1]
+    of "sequence":
+      try: result.sequence = parseBiggestUInt(f[1]).uint64
+      except ValueError:
+        raise newException(AgentRecordError, "malformed sequence " & f[1])
+    of "migrated-from": result.migratedFrom = f[1]
+    of "profile-digest": result.profileDigest = f[1]
+    of "closures-digest": result.closuresDigest = f[1]
+    else: discard              # a later field; this build does not need it
+
+proc agentRecordPath*(stateDir, generationId: string): string =
+  generationDir(stateDir, generationId) / AgentRecordName
+
+proc readAgentRecord*(stateDir, generationId: string): AgentRecord =
+  ## The generation's agent record; an empty one (``present`` false) when
+  ## the generation did not come from the agent or the record is unreadable.
+  try: parseAgentRecord(readFile(agentRecordPath(stateDir, generationId)))
+  except CatchableError: AgentRecord()
+
+proc anyAgentGeneration*(stateDir: string): bool =
+  ## Whether any generation of this add-on state carries an agent record:
+  ## the agent has applied through the switch here at least once.
+  let root = generationsRoot(stateDir)
+  if not dirExists(root): return false
+  for kind, p in walkDir(root):
+    if kind == pcDir and fileExists(p / AgentRecordName):
+      return true
+  false
+
+# ---------------------------------------------------------------------------
+# Pausing the agents of this host (§9.3).
+#
+# The marker is the deploy agent's own (`repro_deploy_agent/agent`,
+# `<agent state>/deploy-agent/pause`): every tick of that agent reads it and
+# reports ``aoPaused``. The operator's `repro system rollback` knows the
+# add-on's state directory, not the agents' flags, so every agent that
+# applies through the switch registers its state directory with the add-on
+# (`<stateDir>/addon/agent-state-dirs`), and a rollback pauses each one
+# registered there, together with the two agent states an add-on host has
+# by construction (the A8 split's `/var/lib/repro/agent` and the
+# single-process agent's `/var/lib/repro/agent/state`) where they exist.
+# ---------------------------------------------------------------------------
+
+const
+  AgentStatesName* = "agent-state-dirs"
+  WellKnownAgentStates* = ["/var/lib/repro/agent",
+                           "/var/lib/repro/agent/state"]
+
+proc agentStatesPath*(stateDir: string): string =
+  stateDir / "addon" / AgentStatesName
+
+proc registeredAgentStates*(stateDir: string): seq[string] =
+  try:
+    for l in readFile(agentStatesPath(stateDir)).splitLines():
+      let d = l.strip()
+      if d.len > 0 and d.isAbsolute and d notin result: result.add(d)
+  except IOError, OSError:
+    discard
+
+proc registerAgentState*(stateDir, agentStateDir: string) =
+  ## Record that an agent with state ``agentStateDir`` applies here (the
+  ## agent's apply hook calls this on every apply; idempotent).
+  let d = absolutePath(agentStateDir)
+  var known = registeredAgentStates(stateDir)
+  if d in known: return
+  known.add(d)
+  let path = agentStatesPath(stateDir)
+  createDir(parentDir(path))
+  # Durable like every other add-on record (the file and its directory
+  # fsynced around the rename): a power cut after the agent's apply must
+  # not lose the registration a later rollback pauses it through.
+  writeFileAtomic(path, known.join("\n") & "\n", 0o644)
+
+proc agentStatesToPause*(stateDir: string): seq[string] =
+  ## Every agent state directory on this host a pause must reach.
+  result = registeredAgentStates(stateDir)
+  for d in WellKnownAgentStates:
+    if dirExists(d) and d notin result: result.add(d)
+
+const MaxOperatorNameLen = 64
+  ## Longer than any login name a Debian or Ubuntu host accepts (32).
+
+proc isSafeOperatorName(s: string): bool =
+  ## A name that can stand alone as the value of a ``key=value`` line of a
+  ## pause marker or an evidence record: printable ASCII, no space, no
+  ## ``=``, bounded. Anything else is not trusted as a user name.
+  if s.len == 0 or s.len > MaxOperatorNameLen: return false
+  for c in s:
+    if c <= ' ' or c > '~' or c == '=': return false
+  true
+
+proc currentOperator*(): string =
+  ## Who ran the command, for the pause marker and the records (spec §9.3):
+  ## the sudo caller when there is one (``SUDO_USER``), then ``LOGNAME``,
+  ## then ``USER``. A value that is not a plain user name (control
+  ## characters, spaces, ``=``, more than 64 bytes) is skipped, and with no
+  ## usable name the real user id is reported as ``uid <n>``.
+  for v in ["SUDO_USER", "LOGNAME", "USER"]:
+    let s = getEnv(v).strip()
+    if isSafeOperatorName(s): return s
+  "uid " & $getuid()
+
+proc pauseAgents*(stateDir, generation: string;
+                  operator = currentOperator()): seq[string] =
+  ## Pause every agent of this host (an operator rollback, §9.3); returns
+  ## the agent state directories paused.
+  for d in agentStatesToPause(stateDir):
+    writePauseMarker(d, generation, operator)
+    result.add(d)
+
+proc resumeAgents*(stateDir: string): seq[string] =
+  ## ``repro system addon resume``: the agent states whose pause was lifted.
+  for d in agentStatesToPause(stateDir):
+    if clearPauseMarker(d): result.add(d)
+
+# ---------------------------------------------------------------------------
+# The legacy secrets directory of a full-engine agent (§10.3, "Legacy
+# delivery", approved by the operator 2026-10-31).
+#
+# A deploy agent that keeps its `--secrets-dir` delivery (§9) writes units
+# that load their secrets with hand-written `LoadCredential=` lines naming
+# files in that directory. The switch accepts such a line only when its
+# source is under a directory registered here. The agent's apply hook
+# registers its own `--secrets-dir` on every apply, so a later operator
+# rollback, recovery or replay of one of its generations accepts the same
+# lines without knowing the agent's flags.
+# ---------------------------------------------------------------------------
+
+const LegacySecretsDirsName* = "legacy-secrets-dirs"
+
+proc legacySecretsDirsPath*(stateDir: string): string =
+  stateDir / "addon" / LegacySecretsDirsName
+
+const LegacySecretsRoot* = "/var/lib/repro/agent"
+  ## Every agent secrets directory lies below this one (spec §10.3,
+  ## "Legacy delivery"): one root `--secrets-dir /etc` cannot widen the
+  ## accepted sources to all of /etc.
+
+proc legacySecretsPathError*(path: string): string =
+  ## "" when ``path`` is an absolute, normalised path a unit directive
+  ## carries verbatim: no `.`, `..`, empty segment or trailing `/`, and none
+  ## of `%` (a specifier), `\` or `"` (systemd C-unescapes a LoadCredential=
+  ## path, so `\x2e\x2e` would read as `..`), `:`, or a line break.
+  if path.len < 2 or not path.isAbsolute:
+    return path & " is not an absolute path"
+  if path.endsWith("/") or "//" in path: return path & " is not normalised"
+  for seg in path[1 .. ^1].split('/'):
+    if seg in ["", ".", ".."]: return path & " is not normalised"
+  for c in ['%', '\\', '"', ':', '\n', '\r']:
+    if c in path:
+      return path & " holds a character a unit directive does not carry " &
+        "verbatim (" & escape($c) & ")"
+  ""
+
+proc legacySecretsDirError*(dir: string): string =
+  ## "" when ``dir`` may be an agent secrets directory by its text: a clean
+  ## path (``legacySecretsPathError``) strictly below ``LegacySecretsRoot``.
+  result = legacySecretsPathError(dir)
+  if result.len == 0 and not dir.startsWith(LegacySecretsRoot & "/"):
+    result = dir & " is not below " & LegacySecretsRoot
+
+proc legacySecretsTrustError*(isDir, isLink: bool; uid: int; mode: int):
+    string =
+  ## "" when a directory with these properties may be trusted as an agent
+  ## secrets directory: a real directory (not a link), owned by root, and
+  ## neither group- nor world-writable.
+  if isLink: return "is a symbolic link"
+  if not isDir: return "is not a directory"
+  if uid != 0: return "is not owned by root (uid " & $uid & ")"
+  if (mode and 0o022) != 0:
+    return "is group- or world-writable (mode " & toOct(mode and 0o7777, 4) & ")"
+  ""
+
+type
+  LegacyStat* = tuple[exists, isDir, isLink: bool; uid, mode: int]
+  LegacyStatFn* = proc(path: string): LegacyStat {.gcsafe.}
+
+proc lstatLegacy*(path: string): LegacyStat =
+  ## ``lstat`` of ``path`` as the trust check reads it.
+  var st: Stat
+  if lstat(path.cstring, st) != 0: return (false, false, false, -1, 0)
+  (true, S_ISDIR(st.st_mode), S_ISLNK(st.st_mode), int(st.st_uid),
+   int(st.st_mode))
+
+proc legacySecretsDirTrustError*(dir: string;
+                                 statOf: LegacyStatFn = lstatLegacy): string =
+  ## ``legacySecretsDirError``, then ``legacySecretsTrustError`` of every
+  ## directory from /var/lib/repro down to ``dir`` as it is on the host now
+  ## (``statOf``, ``lstat`` by default): a group-writable /var/lib/repro or
+  ## /var/lib/repro/agent would let someone other than root swap the
+  ## directory under the check.
+  result = legacySecretsDirError(dir)
+  if result.len > 0: return
+  var chain = @[parentDir(LegacySecretsRoot), LegacySecretsRoot]
+  var cur = LegacySecretsRoot
+  for seg in dir[LegacySecretsRoot.len + 1 .. ^1].split('/'):
+    cur = cur & "/" & seg
+    chain.add(cur)
+  for p in chain:
+    let st = statOf(p)
+    if not st.exists: return p & " does not exist"
+    let why = legacySecretsTrustError(st.isDir, st.isLink, st.uid, st.mode)
+    if why.len > 0: return p & " " & why
+
+proc registeredLegacySecretsDirs*(stateDir: string): seq[string] =
+  ## The current agent's secrets directory, when it is registered and still
+  ## trusted (``legacySecretsDirTrustError``); empty otherwise. At most one:
+  ## a registration replaces the one before.
+  try:
+    for l in readFile(legacySecretsDirsPath(stateDir)).splitLines():
+      let d = l.strip()
+      if d.len > 0 and legacySecretsDirTrustError(d).len == 0:
+        return @[d]
+  except IOError, OSError:
+    discard
+
+proc registerLegacySecretsDir*(stateDir, dir: string) =
+  ## Record the agent's `--secrets-dir`, replacing any directory registered
+  ## before (only the current agent's is accepted; durable like the
+  ## agent-state registry). Refuses one ``legacySecretsDirTrustError``
+  ## names.
+  let why = legacySecretsDirTrustError(dir)
+  if why.len > 0:
+    raise newException(AgentRecordError, "cannot register the legacy " &
+      "secrets directory: " & why)
+  let path = legacySecretsDirsPath(stateDir)
+  if fileExists(path):
+    try:
+      if readFile(path) == dir & "\n": return
+    except IOError, OSError: discard
+  createDir(parentDir(path))
+  writeFileAtomic(path, dir & "\n", 0o644)

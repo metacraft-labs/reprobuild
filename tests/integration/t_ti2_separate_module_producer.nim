@@ -1,5 +1,5 @@
 ## TI2 (Production Thin Interface Mode consumer) — the SEPARATE-RESOURCE-MODULE
-## producer path (the RP5c2 vm-harness shape). A producer keeps its
+## producer path (the RP5c2 gosti shape). A producer keeps its
 ## ``resourceType`` blocks in a SEPARATE subdirectory module
 ## (``repro/resources.nim``) and NAMES it from ``repro.nim`` via a
 ## ``resourceModule "<path>": path "<dir>"`` surface entry — NOT inline in
@@ -11,7 +11,7 @@
 ##
 ## Spec: Project-Interface-Artifacts-And-Import-Modes.md §"Import Modes" (Thin
 ## Interface Mode); Project-Provider-Runtime-Protocol.milestones.org §TI2 (the
-## separate-resource-module fix); RP5c2 vm-harness layout.
+## separate-resource-module fix); RP5c2 gosti layout.
 ##
 ## This is the non-inline counterpart of
 ## ``t_ti2_thin_interface_consumer_reads_cached_artifact`` (which uses an inline
@@ -52,7 +52,7 @@ proc accessorCacheDir(workspaceRoot, producerSelector: string): string =
 
 # ---------------------------------------------------------------------------
 # The SEPARATE resource module — carries the ``resourceType`` block + its
-# driver. Lives in a SUBDIRECTORY (``repro/resources.nim``), the vm-harness
+# driver. Lives in a SUBDIRECTORY (``repro/resources.nim``), the gosti
 # shape. NOT inline in the producer ``repro.nim``.
 # ---------------------------------------------------------------------------
 
@@ -84,7 +84,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -197,7 +197,7 @@ proc compileConsumer(consumerDir, witnessPath, producerSelector, bindStmt,
   let (output, code) = execCmdEx("cd " & quoteShell(repoRoot) & " && " & cmd)
   (code == 0, output)
 
-suite "TI2: separate-module producer (vm-harness shape)":
+suite "TI2: separate-module producer (gosti shape)":
 
   test "cold accessor generation locates the DSL for an external consumer":
     let base = getTempDir() /
@@ -255,7 +255,7 @@ suite "TI2: separate-module producer (vm-harness shape)":
     let cachedAccessors = readFile(accCache /
       (producerSelector & ".accessors.nim"))
     check cachedAccessors.contains("proc container*")
-    check cachedAccessors.contains("\"vm_harness.container\"")
+    check cachedAccessors.contains("\"gosti.container\"")
     check not cachedAccessors.contains("containerDriver")
     check not cachedAccessors.contains("registerResourceProvider")
 

@@ -197,6 +197,32 @@ suite "M9.Q from-source provisioning resolver":
 
     check fromSourceRecipeRoot() == sourceRoot
 
+  test "test_m9q_sub_build_inside_a_catalog_recipe_finds_its_siblings":
+    # A from-source sub-build runs in `.../packages/source/<pkg>`. Before the
+    # fix the root resolved to `<pkg>/recipes/packages/source`, which does not
+    # exist, so a library dependency such as zstd's zlib missed its sibling
+    # recipe and fell through to a header-less stdlib nix package.
+    let scratch = createTempDir("repro-m9q-in-recipe-", "")
+    defer: removeDir(scratch)
+    let sourceRoot = scratch / "reprobuild-packages" / "packages" / "source"
+    createDir(sourceRoot / "zstd" / "build")
+    createDir(sourceRoot / "zlib")
+    writeFile(sourceRoot / "zstd" / "repro.nim", "discard\n")
+    writeFile(sourceRoot / "zlib" / "repro.nim", "discard\n")
+
+    let savedCwd = getCurrentDir()
+    let savedRoot = getEnv(FromSourceRootEnvVar)
+    delEnv(FromSourceRootEnvVar)
+    defer:
+      setCurrentDir(savedCwd)
+      if savedRoot.len > 0: putEnv(FromSourceRootEnvVar, savedRoot)
+      else: delEnv(FromSourceRootEnvVar)
+    for cwd in [sourceRoot / "zstd", sourceRoot / "zstd" / "build"]:
+      setCurrentDir(cwd)
+      check fromSourceRecipeRoot() == sourceRoot
+      check tryResolveFromSourceTool(syntheticUseDef("zlib")).recipeDir ==
+        sourceRoot / "zlib"
+
   test "test_m9q_product_app_composes_with_federated_catalog":
     let scratch = createTempDir("repro-m9q-federated-app-", "")
     defer: removeDir(scratch)

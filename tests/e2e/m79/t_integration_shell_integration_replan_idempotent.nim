@@ -31,6 +31,7 @@
 ## `update`, not `no-op`).
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_home_generations
 import repro_home_resources

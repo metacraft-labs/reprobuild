@@ -293,6 +293,32 @@ proc gateMentionsFlake*(report: JsonNode): bool =
       if n.getStr().toLowerAscii().contains("flake"): return true
   false
 
+proc overrideExplicitly*(fx: Nf2Fixture; repo: string) =
+  ## Substitute ``repo`` with an EXPLICIT develop override, the way a developer
+  ## debugging a pinned dependency does: the real `repro develop --only=<repo>`
+  ## run at the workspace root, which adopts the existing checkout and records
+  ## it in `<ws>/.repro/develop-overrides.toml`.
+  ##
+  ## Needed by every case about an input `flake.nix` pins BY REVISION whose
+  ## sibling is compared with the pin: without an explicit override such an
+  ## input is not compared with its checkout at all
+  ## (Unified-Locking-And-Hooks.md §16.5), and the case would be asserting
+  ## about a comparison that no longer happens. Call it before the sibling
+  ## moves, while the checkout is still at the revision the workspace lock
+  ## names, so the run adopts the checkout instead of resetting it.
+  let res = run(q(fx.repro) & " develop --only=" & repo &
+    " --workspace-root=" & q(fx.ws) & " --tool-provisioning=path",
+    cwd = fx.ws)
+  let overrides = fx.ws / ".repro" / "develop-overrides.toml"
+  let recorded = fileExists(overrides) and
+    ("package = \"" & repo & "\"") in readFile(overrides)
+  if res.code != 0 or not recorded:
+    stderr.writeLine("FIXTURE ABORT: `repro develop --only=" & repo &
+      "` did not record an explicit override (exit " & $res.code & "):\n" &
+      res.output)
+    checkpoint("repro develop --only=" & repo & " failed:\n" & res.output)
+    quit 1
+
 proc flakeStatus*(fx: Nf2Fixture; extra = ""; cwd = ""):
     tuple[code: int; stdout: string; stderr: string] =
   ## `repro flake override-status`, with the two streams kept APART.

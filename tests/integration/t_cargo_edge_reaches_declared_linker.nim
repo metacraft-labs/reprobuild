@@ -44,6 +44,7 @@
 ## Skip rule: POSIX only; skipped when cargo, rustc or gcc is not on PATH.
 
 import std/[json, os, sequtils, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 import repro_cli_support
 import repro_core
 import repro_interface_artifacts

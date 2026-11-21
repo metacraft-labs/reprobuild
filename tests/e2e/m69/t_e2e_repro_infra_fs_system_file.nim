@@ -307,7 +307,7 @@ suite "fs.systemFile: PHASE-5 macOS driver-direct + symlink check":
       echo "  [sandbox-gated] REPRO_PHASE5_MACOS_FS_VM not set (or " &
         "not on macOS) - the macOS-specific /private/etc symlink " &
         "resolution scenario is NOT EXERCISED on this host. Run " &
-        "this gate inside a disposable macOS VM (via vm-harness " &
+        "this gate inside a disposable macOS VM (via gosti " &
         "tart-macos) with REPRO_PHASE5_MACOS_FS_VM=1 to exercise " &
         "the real driver-direct apply + verify + destroy path."
     else:
@@ -350,7 +350,7 @@ suite "fs.systemFile: PHASE-5 macOS driver-direct + symlink check":
           address: "systemFile:" & targetEtc,
           sfPath: targetEtc, sfContent: content1, sfDestroy: false)
         doAssert operationValidationError(opApply).len == 0
-        let post1 = applyFsSystemFile(opApply)
+        let post1 = applyFsSystemFile(FixtureContext(), opApply)
         doAssert post1.present
         doAssert post1.digestHex == posixDigestHexOfText(content1)
 
@@ -392,7 +392,7 @@ suite "fs.systemFile: PHASE-5 macOS driver-direct + symlink check":
         let opUpdate = PrivilegedOperation(kind: pokFsSystemFile,
           address: "systemFile:" & targetEtc,
           sfPath: targetEtc, sfContent: content2, sfDestroy: false)
-        let post2 = applyFsSystemFile(opUpdate)
+        let post2 = applyFsSystemFile(FixtureContext(), opUpdate)
         doAssert post2.present
         doAssert post2.digestHex == posixDigestHexOfText(content2)
         doAssert readFile(targetEtc) == content2
@@ -417,7 +417,7 @@ suite "fs.systemFile: PHASE-5 macOS driver-direct + symlink check":
         let opDestroy = PrivilegedOperation(kind: pokFsSystemFile,
           address: "systemFile:" & targetEtc,
           sfPath: targetEtc, sfContent: "", sfDestroy: true)
-        let postDestroy = applyFsSystemFile(opDestroy)
+        let postDestroy = applyFsSystemFile(FixtureContext(), opDestroy)
         doAssert not postDestroy.present
         doAssert not fileExists(targetEtc),
           "post-destroy: /etc file still present"

@@ -1,0 +1,5 @@
+import std/strformat
+let nimExe = findExe("nim")
+let verb = " c --compileOnly fixture.nim"
+let cmd = fmt"{nimExe}{verb}"
+discard execCmdEx(cmd)

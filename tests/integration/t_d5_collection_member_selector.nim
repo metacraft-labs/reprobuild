@@ -175,7 +175,7 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
         if action{"id"}.getStr() == ExecuteActionId:
           executeAction = action
           break
-      check executeAction != nil
+      check not executeAction.isNil
       if executeAction != nil:
         let status = executeAction{"status"}.getStr()
         let launched = executeAction{"launched"}.getBool()
@@ -253,7 +253,7 @@ suite "Deferred Item D5: .#<collection>#<member> selector resolves through the e
         if action{"id"}.getStr() == AppsActionId:
           appsAction = action
           break
-      check appsAction != nil
+      check not appsAction.isNil
       if appsAction != nil:
         let status = appsAction{"status"}.getStr()
         checkpoint(AppsActionId & " status=" & status)

@@ -1,8 +1,16 @@
+## These endpoints belong to the test invocation, including the directories
+## runquotaRendezvousDir creates. Select RunQuota's official private policy for
+## the entire case so the real daemon, connecting clients and helper agree on
+## owner-only modes even when the host has a runquota service account/group.
+## Restore the caller's scope after each case; no host owner/group override or
+## shared fixture helper is changed. All daemons and connections remain real.
 import std/[monotimes, os, osproc, streams, strutils, tempfiles, times, unittest]
 import repro_core/paths
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 when defined(posix):
+  from std/posix import Sockaddr_un
   import runquota_client
   import runquota_ipc
 
@@ -81,6 +89,16 @@ when defined(posix):
       path & ": " & diagnostic)
 
 suite "RunQuota long temp rendezvous":
+  setup:
+    when defined(posix):
+      let scopeWasSet = existsEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      let priorScope = getEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+  teardown:
+    when defined(posix):
+      if scopeWasSet: putEnv("RUNQUOTA_ENDPOINT_SCOPE", priorScope)
+      else: delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+
   test "two callers connect to independent real daemons under a long TMPDIR":
     when defined(posix):
       withLongTemp:
@@ -100,8 +118,9 @@ suite "RunQuota long temp rendezvous":
         awaitDaemon(a, first)
         awaitDaemon(b, second)
         for path in [first, second]:
-          check fpGroupWrite notin getFilePermissions(path.parentDir)
-          check fpOthersWrite notin getFilePermissions(path.parentDir)
+          check getFilePermissions(path.parentDir) ==
+            {fpUserRead, fpUserWrite, fpUserExec}
+          check getFilePermissions(path) == {fpUserRead, fpUserWrite}
           check endpointDirectoryRefusal(unixEndpoint(path)).len == 0
         var clientA = connect(unixEndpoint(first), "long-temp-first")
         defer: clientA.close()
@@ -113,6 +132,58 @@ suite "RunQuota long temp rendezvous":
         check clientB.daemonStatus(timeoutMs = 5_000).activeLeases == 0
     else:
       skip()
+
+  test "a test fixture's rendezvous under an over-long scratch root still binds":
+    ## ``repro_test_support.runquotaRendezvousDir`` is how engine and
+    ## integration fixtures pick their private ``runquotad`` endpoint under
+    ## a scratch root they own. Under the suite TMPDIR on macOS (104-byte
+    ## ``sun_path``) ``<root>/ep/runquota.sock`` ran to 105 bytes and every
+    ## case of two engine fixtures died in ``bind``. This drives the long
+    ## branch on EVERY POSIX host with a root too long for either limit,
+    ## against a real daemon, and keeps the short branch's contract pinned.
+    when defined(posix):
+      let scratch = createTempDir("rq-fixture-ep-", "")
+      defer: removeDir(scratch)
+      # The short branch is unchanged: a root with room keeps ``<root>/ep``.
+      let shortRoot = "/tmp" / ("rq-s-" & $getCurrentProcessId())
+      defer: removeDir(shortRoot)
+      check runquotaRendezvousDir(shortRoot) == shortRoot / "ep"
+      let longRoot = scratch / repeat('r', 120)
+      let otherRoot = scratch / repeat('s', 120)
+      createDir(longRoot)
+      createDir(otherRoot)
+      let dir = runquotaRendezvousDir(longRoot)
+      let otherDir = runquotaRendezvousDir(otherRoot)
+      checkpoint("long root rendezvous: " & dir)
+      let longestName = repeat('n', RunquotaRendezvousSocketNameBudget)
+      check (dir / longestName).len < sizeof(Sockaddr_un().sun_path)
+      check (otherDir / longestName).len < sizeof(Sockaddr_un().sun_path)
+      check dir != otherDir
+      check dir == runquotaRendezvousDir(longRoot)
+      check dir.isAbsolute
+      check dirExists(dir)
+      check getFilePermissions(dir) == {fpUserRead, fpUserWrite, fpUserExec}
+      let socket = dir / "runquota.sock"
+      check endpointDirectoryRefusal(unixEndpoint(socket)).len == 0
+      let state = scratch / "daemon-state"
+      createDir(state)
+      var daemon = startDaemon(socket, state)
+      defer: stopDaemon(daemon)
+      awaitDaemon(daemon, socket)
+      check getFilePermissions(socket) == {fpUserRead, fpUserWrite}
+      var client = connect(unixEndpoint(socket), "fixture-long-root")
+      defer: client.close()
+      check client.daemonStatus(timeoutMs = 5_000).activeLeases == 0
+      # Relocating the endpoint relaxed no trust rule: the same helper
+      # refuses a relocated directory that is no longer private.
+      let priorMode = getFilePermissions(otherDir)
+      setFilePermissions(otherDir, priorMode + {fpOthersWrite})
+      defer: setFilePermissions(otherDir, priorMode)
+      expect EndpointTrustError:
+        discard runquotaRendezvousDir(otherRoot)
+    else:
+      skip("Windows RunQuota endpoints are named pipes: there is no " &
+        "sockaddr_un length limit and no rendezvous directory to relocate")
 
   test "the daemon still refuses a preexisting world-writable parent":
     when defined(posix):
@@ -133,6 +204,7 @@ suite "RunQuota long temp rendezvous":
         checkpoint(output)
         check "refusing" in output
         check "endpoint directory" in output
+        check "required 0700" in output
     else:
       skip()
 
@@ -147,6 +219,8 @@ suite "RunQuota long temp rendezvous":
           if dirExists(path.parentDir): removeDir(path.parentDir)
         awaitDaemon(daemon, path)
         let priorMode = getFilePermissions(path.parentDir)
+        check priorMode == {fpUserRead, fpUserWrite, fpUserExec}
+        check getFilePermissions(path) == {fpUserRead, fpUserWrite}
         setFilePermissions(path.parentDir, priorMode + {fpOthersWrite})
         defer: setFilePermissions(path.parentDir, priorMode)
         expect EndpointTrustError:

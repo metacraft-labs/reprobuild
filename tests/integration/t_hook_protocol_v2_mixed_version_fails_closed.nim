@@ -104,19 +104,19 @@ proc setupFixture(gitBin: string): Fixture =
   let manifests = result.workspace / ".repro" / "manifests"
   createDir(manifests / "projects")
   createDir(manifests / "repos")
-  writeFile(result.workspace / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.workspace / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"app\"\nbranch = \"main\"\n")
   writeFile(manifests / "projects" / "app.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n[[remote]]\nname = \"origin\"\n" &
+    "[project]\nname = \"app\"\n" &
+    "\n[[remote]]\nname = \"origin\"\n" &
     "fetch = \"" & result.origin.replace('\\', '/') & "\"\n\n" &
     "includes = [\"repos/app.toml\"]\n")
   writeFile(manifests / "repos" / "app.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\nname = \"app\"\npath = \"app\"\n" &
-    "remote = \"origin\"\nrevision = \"main\"\n")
+    "remote = \"origin\"\nmainline = \"main\"\n")
   let ensureCmd = runShell(shellCommand(@[result.reproBin, "hooks", "ensure",
     "--vcs", "--workspace-root=" & result.workspace, result.workspace]))
   let ensure = (code: ensureCmd.code, output: ensureCmd.output)

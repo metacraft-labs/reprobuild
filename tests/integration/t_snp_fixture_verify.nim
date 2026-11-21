@@ -223,18 +223,29 @@ let milanArk = milanChain[1]
 let milanCrl = @[bytesOfHex(KdsMilanCrlDerHex)]
 
 const
-  # Inside the vendor revocation list's window (thisUpdate 2026-09-22,
-  # nextUpdate 2026-11-09) and inside every certificate's window. Fixed,
-  # not read from the host: a gate that used the real clock would start
-  # failing on a date nobody chose.
-  Now = 1_790_812_800'i64
-    ## 2026-10-01T00:00:00Z. Chosen to sit inside the vendor revocation
-    ## list's own window — it states a this-update of 2026-09-22 and a
-    ## next-update of 2026-11-09 — and inside every certificate's window.
-    ## Fixed rather than read from the host: a gate that consulted the
-    ## real clock would pass today and start failing on 2026-11-09,
-    ## which is a date nobody chose and a failure nobody would connect
-    ## to this file.
+  Now = 1_790_121_600'i64
+    ## 2026-09-23T00:00:00Z. NOT chosen — derived, by the clock rule
+    ## `snp_vectors` states: the first UTC midnight at which every
+    ## artifact this gate judges is in force. The latest of them is the
+    ## Milan revocation list above, which came into force at
+    ## 2026-09-22T07:35:42Z. `t_attestation_fixture_lifecycle` recomputes
+    ## this from the ledger and requires equality, so it cannot be
+    ## nudged by hand to make something here pass.
+    ##
+    ## This gate judges MILAN material only, and the reason to say so is
+    ## that the number is the same as the one `t_snp_chain_requires_amd_root`
+    ## states while the material is not. That gate also judges
+    ## `KdsTurinCrlDerHex`, four minutes later into the same morning, and
+    ## both round up to the same midnight. The earlier reading of this
+    ## comment named the Turin list as what fixes the clock HERE, which
+    ## was false and survived because it named the right midnight —
+    ## that is what a hand-kept list of what a gate judges costs, and the
+    ## ledger gate now derives that list from this file instead.
+    ##
+    ## Fixed rather than read from the host for the usual reason: a gate
+    ## that consulted the real clock would pass today and start failing
+    ## on 2026-11-09, which is a date nobody chose and a failure nobody
+    ## would connect to this file.
 
 proc pointOf(vcekDer: seq[byte]): seq[byte] =
   parseAmdCertificate(vcekDer).ecPoint

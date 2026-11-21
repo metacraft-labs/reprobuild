@@ -267,6 +267,73 @@ fi
 echo
 
 # =========================================================================
+# ARM 4b — "conditions not met" is NO VERDICT: neither a pass nor a refusal,
+# and only when the gate itself says so for exactly that skip.
+#
+# reprobuild-pm issues/2026-09-26-hcr-concurrent-patch-gate-verdict-depends-on-
+# host-load.md: a statistical gate run outside its calibrated conditions
+# asserts what is unconditional, prints `HCR-CONDITIONS-NOT-MET: ...` and
+# skips the rest. The logs below are WRITTEN, not produced by that gate, and
+# that is a justified substitution rather than a mock of convenience: whether
+# the gate misses its conditions depends on the host's load at the time, so a
+# real such log cannot be produced on demand. Each log has the exact shape the
+# gate prints (its `[OK]` second case, its `[SKIPPED]` first case, the marker
+# line), and every variant differs from the first in ONE line, so each verdict
+# is attributable to that line.
+# =========================================================================
+echo "[arm 4b/5] a skip the gate reports as CONDITIONS NOT MET is NO VERDICT, nothing more"
+ARMS=$((ARMS + 1))
+source "$REPO_ROOT/scripts/lib/hcr_lane_verdict.sh"
+CN_GATE=e2e_hcr_linux_concurrent_patch_no_torn_instruction
+cat > "$WORK_DIR/cn.log" <<LOG
+
+[Suite] ${CN_GATE}
+HCR-CONDITIONS-NOT-MET: ${CN_GATE}: conditions not met (HLX-M4 calibrated at load/CPU <= 2.0): tier1: 3/24 runs started at load/CPU <= 2.0 in 72 attempts (highest 5.50)
+  [SKIPPED] tier-2 publication survives concurrent execution; tier-1 does not
+  [OK] the AGENT chooses tier 2 over the wire for a multithreaded target
+LOG
+cn_rc=0
+hcr_lane_verdict "$CN_GATE" 0 "$WORK_DIR/cn.log" 2 0 || cn_rc=$?
+if [[ $cn_rc -ne 2 ]]; then
+    fail "conditions arm: expected NO VERDICT (2), got $cn_rc: $HCR_VERDICT_REASONS"
+elif [[ "$HCR_VERDICT_REASONS" != *"${CN_GATE}: CONDITIONS NOT MET — "*"highest 5.50"* ]]; then
+    fail "conditions arm: NO VERDICT, but the diagnostic does not carry the gate's readings: $HCR_VERDICT_REASONS"
+elif [[ "$HCR_VERDICT_CASES" -ne 2 ]]; then
+    fail "conditions arm: the skipped case's unconditional checks ran, so it counts toward the floor of 2; counted $HCR_VERDICT_CASES"
+else
+    pass "conditions: NO VERDICT (2), naming the gate and the readings, floor of 2 met"
+fi
+# The same log without the marker: an ordinary undeclared skip, refused.
+grep -v '^HCR-CONDITIONS-NOT-MET: ' "$WORK_DIR/cn.log" > "$WORK_DIR/cn-bare.log"
+cn_rc=0
+hcr_lane_verdict "$CN_GATE" 0 "$WORK_DIR/cn-bare.log" 2 0 || cn_rc=$?
+if [[ $cn_rc -ne 1 || "$HCR_VERDICT_REASONS" != *"SKIP-AS-GREEN"* ]]; then
+    fail "conditions arm: a skip WITHOUT the marker was not refused as SKIP-AS-GREEN (rc $cn_rc): $HCR_VERDICT_REASONS"
+else
+    pass "conditions: the same skip without the gate's marker is refused as SKIP-AS-GREEN"
+fi
+# The same log with the other case FAILED: a failure is a failure, whatever
+# the conditions, and the conditions line is still reported beside it.
+sed 's/^  \[OK\] the AGENT/  [FAILED] the AGENT/' "$WORK_DIR/cn.log" > "$WORK_DIR/cn-failed.log"
+cn_rc=0
+hcr_lane_verdict "$CN_GATE" 1 "$WORK_DIR/cn-failed.log" 2 0 || cn_rc=$?
+if [[ $cn_rc -ne 1 || "$HCR_VERDICT_REASONS" != *"[FAILED]"* || "$HCR_VERDICT_REASONS" != *"CONDITIONS NOT MET"* ]]; then
+    fail "conditions arm: a FAILED case beside a conditions skip was not refused with both reasons (rc $cn_rc): $HCR_VERDICT_REASONS"
+else
+    pass "conditions: a FAILED case beside it is still refused, with the conditions reported too"
+fi
+# One marker cannot excuse two skips.
+sed 's/^  \[OK\] the AGENT/  [SKIPPED] the AGENT/' "$WORK_DIR/cn.log" > "$WORK_DIR/cn-two.log"
+cn_rc=0
+hcr_lane_verdict "$CN_GATE" 0 "$WORK_DIR/cn-two.log" 2 0 || cn_rc=$?
+if [[ $cn_rc -ne 1 || "$HCR_VERDICT_REASONS" != *"SKIP-AS-GREEN"* ]]; then
+    fail "conditions arm: one marker excused two skips (rc $cn_rc): $HCR_VERDICT_REASONS"
+else
+    pass "conditions: one marker excuses one skip; a second skip is refused"
+fi
+echo
+
+# =========================================================================
 # ARM 5 — the census. A gate in the tree with no row must stop the lane BEFORE
 # any gate runs, and must name the undeclared file.
 #

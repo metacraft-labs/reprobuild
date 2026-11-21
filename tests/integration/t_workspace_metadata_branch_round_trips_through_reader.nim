@@ -2,14 +2,14 @@
 ##
 ## Round-trip test for the new ``workspace_branch`` module: the
 ## ``writeWorkspaceBranch`` helper records the active workspace branch
-## into ``<workspaceRoot>/.repro/workspace.toml`` under
+## into the state file ``<workspaceRoot>/.repro/workspace-state.toml`` under
 ## ``[workspace].branch``, and ``readWorkspaceBranch`` reads it back
 ## through the M5 strict reader. Three checkpoints:
 ##
-##   1. Writing a fresh ``.repro/workspace.toml`` in single-project
+##   1. Writing a fresh state file in single-project
 ##      mode (no manifest layers) and reading the branch back yields
 ##      the value that was written.
-##   2. Reading a workspace.toml that has no ``[workspace].branch``
+##   2. Reading a state file that has no ``[workspace].branch``
 ##      yields ``none`` (NOT an error). This is the on-disk shape M9
 ##      init produced before M13 landed.
 ##   3. Re-writing the same branch value is idempotent — the file
@@ -17,11 +17,18 @@
 ##      accepting the file. Updating to a different branch replaces
 ##      the value in place without disturbing the project name.
 ##
-## A fourth check exercises composer-mode workspaces: a workspace.toml
-## that already declares ``[[manifest]]`` layers must keep them when
-## the writer updates the branch field — single-source-of-truth
-## semantics require that the writer never silently drops manifest
-## layers it doesn't understand.
+## A fourth check exercises composer-mode workspaces: a checkout whose
+## state still sits in the RETIRED state file (``.repro/workspace.toml``,
+## ``local.v1``), which also kept the ``[[manifest]]`` layer list, must keep
+## those layers across a branch write — the writer must never silently drop
+## manifest layers it doesn't understand. The state file now carries no
+## layers (Workspace-Settings-Files.md §5) and the writer no longer reads the
+## retired file: it REFUSES it, changing nothing, and ``repro health --fix``
+## (``migrateWorkspaceStateFile``, §8 step 2) moves the state to the current
+## file and the layers to ``repro-workspace.local.toml``, after which the
+## branch write succeeds and the layers still compose. A layer that cannot
+## live in the local file (a ``local_path`` under ``.repro/``, §4) makes the
+## migration refuse and change nothing rather than drop it.
 ##
 ## This is a pure-library round-trip; no ``git`` and no compiled
 ## ``repro`` binary are involved.
@@ -36,11 +43,11 @@ suite "M13 — workspace branch round-trips through reader":
     let workspaceRoot = createTempDir("repro-m13-round-trip-", "")
     defer: removeDir(workspaceRoot)
 
-    # Pre-condition: no workspace.toml on disk → readWorkspaceBranch
+    # Pre-condition: no state file on disk → readWorkspaceBranch
     # returns ``none`` cleanly (not an error).
     check readWorkspaceBranch(workspaceRoot).isNone
 
-    # Single-project-mode write: creates a metadata-only workspace.toml
+    # Single-project-mode write: creates a metadata-only state file
     # carrying just the project + branch keys.
     writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
@@ -68,12 +75,12 @@ suite "M13 — workspace branch round-trips through reader":
     let workspaceRoot = createTempDir("repro-m13-no-branch-", "")
     defer: removeDir(workspaceRoot)
 
-    # Hand-roll a workspace.toml that has ``[workspace] project`` but
+    # Hand-roll a state file that has ``[workspace] project`` but
     # NO ``branch`` key — the shape M9 init wrote before M13 landed.
     createDir(workspaceRoot / ".repro")
-    let tomlPath = workspaceRoot / ".repro" / "workspace.toml"
+    let tomlPath = workspaceRoot / ".repro" / "workspace-state.toml"
     writeFile(tomlPath,
-      "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.state.v1\"\n\n" &
       "[workspace]\n" &
       "project = \"legacy-project\"\n")
 
@@ -117,12 +124,12 @@ suite "M13 — workspace branch round-trips through reader":
     let workspaceRoot = createTempDir("repro-m13-composer-", "")
     defer: removeDir(workspaceRoot)
 
-    # Hand-roll a composer-mode workspace.toml with two manifest
-    # layers. M13's writer must keep them intact when it updates the
-    # branch field — otherwise re-running init on a composed workspace
-    # would silently drop the user's manifest configuration.
+    # Hand-roll a composer-mode RETIRED state file with two manifest
+    # layers. They must survive the branch update — otherwise re-running
+    # init on a composed workspace would silently drop the user's manifest
+    # configuration.
     createDir(workspaceRoot / ".repro")
-    let tomlPath = workspaceRoot / ".repro" / "workspace.toml"
+    let tomlPath = retiredWorkspaceStatePath(workspaceRoot)
     writeFile(tomlPath,
       "schema = \"reprobuild.workspace.local.v1\"\n\n" &
       "[workspace]\n" &
@@ -133,27 +140,69 @@ suite "M13 — workspace branch round-trips through reader":
       "visibility = \"public\"\n" &
       "branch = \"main\"\n\n" &
       "[[manifest]]\n" &
-      "local_path = \".repro/manifests-personal\"\n" &
+      "local_path = \"manifests-personal\"\n" &
       "visibility = \"personal\"\n")
+    let oldBytes = readFile(tomlPath)
+    check readStateFileForMigration(tomlPath).manifest.len == 2
 
-    check isCompositionalWorkspaceToml(workspaceRoot) == true
+    # The writer refuses the retired file rather than reading it as "no
+    # state" (which would forget the project) or dropping its layers, and
+    # changes nothing.
+    expect WorkspaceManifestParseError:
+      writeWorkspaceBranch(workspaceRoot,
+        project = "reprobuild", branch = "develop")
+    check readFile(tomlPath) == oldBytes
+    check not fileExists(workspaceStatePath(workspaceRoot))
+    check not fileExists(workspaceRoot / "repro-workspace.local.toml")
+
+    # `repro health --fix`'s migration moves the state and the layers.
+    check migrateWorkspaceStateFile(workspaceRoot).len > 0
+    check not fileExists(tomlPath)
 
     # Update the branch field; the manifest layers must survive.
     writeWorkspaceBranch(workspaceRoot,
       project = "reprobuild", branch = "develop")
 
-    let parsed = readWorkspaceLocal(tomlPath)
+    # The write lands in the state file's NEW name, without the layers,
+    # which are now in the local settings file.
+    check workspaceTomlPath(workspaceRoot) == workspaceStatePath(workspaceRoot)
+    let parsed = readWorkspaceLocal(workspaceTomlPath(workspaceRoot))
     check parsed.workspace.project == "reprobuild"
     check parsed.workspace.branch.isSome
     check parsed.workspace.branch.get() == "develop"
-    check parsed.manifest.len == 2
-    check parsed.manifest[0].url.isSome
-    check parsed.manifest[0].url.get() ==
-      "https://github.com/metacraft-labs/metacraft-manifests"
-    check parsed.manifest[0].visibility == "public"
-    check parsed.manifest[0].branch.isSome
-    check parsed.manifest[0].branch.get() == "main"
-    check parsed.manifest[1].local_path.isSome
-    check parsed.manifest[1].local_path.get() == ".repro/manifests-personal"
-    check parsed.manifest[1].visibility == "personal"
+    check parsed.manifest.len == 0
+    let local = readLoneLocalSettings(workspaceRoot)
+    require local.isSome
+    let layers = local.get().localLayers
+    check layers.len == 2
+    check layers[0].url ==
+      some("https://github.com/metacraft-labs/metacraft-manifests")
+    check layers[0].visibility == some("public")
+    check layers[0].branch == some("main")
+    check layers[1].local_path == some("manifests-personal")
+    check layers[1].visibility == some("personal")
     check isCompositionalWorkspaceToml(workspaceRoot) == true
+
+  test "test_m13_writer_refuses_a_layer_it_cannot_move":
+    let workspaceRoot = createTempDir("repro-m13-unmovable-", "")
+    defer: removeDir(workspaceRoot)
+    createDir(workspaceRoot / ".repro")
+    let tomlPath = retiredWorkspaceStatePath(workspaceRoot)
+    writeFile(tomlPath,
+      "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      "[workspace]\nproject = \"reprobuild\"\nbranch = \"main\"\n\n" &
+      "[[manifest]]\nlocal_path = \".repro/manifests-personal\"\n" &
+      "visibility = \"personal\"\n")
+    let oldBytes = readFile(tomlPath)
+    # The writer refuses the retired file outright ...
+    expect WorkspaceManifestParseError:
+      writeWorkspaceBranch(workspaceRoot,
+        project = "reprobuild", branch = "develop")
+    check readFile(tomlPath) == oldBytes
+    # ... and the migration that would move its layers refuses the one it
+    # cannot move, writing nothing.
+    expect StateMigrationError:
+      discard migrateWorkspaceStateFile(workspaceRoot)
+    check readFile(tomlPath) == oldBytes
+    check not fileExists(workspaceStatePath(workspaceRoot))
+    check not fileExists(workspaceRoot / "repro-workspace.local.toml")

@@ -45,11 +45,19 @@ else:
 import repro_build_engine
 import repro_core/codec
 import repro_core/path_identity
+# ``execCmdExCloseOnce``: ``execCmdEx`` without ``osproc.close``'s double close
+# of the merged stdout/stderr descriptor. These helpers run inside the build
+# engine's workspace-VCS executor, on the scheduler thread, while the engine's
+# worker pool may be live; see ``repro_core/process_close``.
+from repro_core/process_exec import execCmdExCloseOnce
 import repro_hash
 
 import git_tool
+import git_fast_forward
 from shared_clones import prepareSharedBare, sharedBareFetchArgs,
-  checkRegisteredLeaves, messages, registerLeafWithPool
+  checkRegisteredLeaves, messages, registerLeafWithPool,
+  withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention,
+  leafFetchNeedsPromisor
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -603,12 +611,12 @@ proc runGit(payload: GitVcsPayload; args: openArray[string];
   for arg in args:
     cmd.add(" ")
     cmd.add(quoteShell(arg))
-  let res = execCmdEx(cmd, workingDir = workingDir,
+  let res = execCmdExCloseOnce(cmd, workingDir = workingDir,
     env = scrubbedGitRepositoryEnv())
   (exitCode: res.exitCode, output: res.output)
 
 proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
-                     workingDir = ""):
+                     workingDir = ""; exactStdout = false):
     tuple[exitCode: int; stdoutText, stderrText: string] =
   ## Invoke git capturing stdout and stderr as SEPARATE strings.
   ##
@@ -664,12 +672,33 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
       cmd.add(" ")
       cmd.add(quoteShell(arg))
     var errPath = ""
+    var outPath = ""
+    defer:
+      for path in [errPath, outPath]:
+        if path.len > 0 and fileExists(path):
+          try: removeFile(path)
+          except OSError: discard
     try:
       let created = createTempFile("repro-git-", ".stderr")
       created.cfile.close()
       errPath = created.path
     except CatchableError, Defect:
       errPath = ""
+    if exactStdout:
+      try:
+        let created = createTempFile("repro-git-", ".stdout")
+        created.cfile.close()
+        outPath = created.path
+      except CatchableError, Defect:
+        outPath = ""
+      if outPath.len == 0 or errPath.len == 0:
+        if outPath.len > 0: removeFile(outPath)
+        if errPath.len > 0: removeFile(errPath)
+        return (exitCode: -1, stdoutText: "", stderrText:
+          "cannot capture exact Git query output")
+      # NUL-delimited paths cannot pass through execCmdEx's line rebuilding,
+      # which appends a newline and normalizes embedded CRLF bytes.
+      cmd.add(" >" & quoteShell(outPath))
     if errPath.len > 0:
       cmd.add(" 2>" & quoteShell(errPath))
     # Without the redirect the child's stderr would be an unread pipe that
@@ -679,13 +708,22 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
     let options =
       if errPath.len > 0: {poUsePath}
       else: {poUsePath, poStdErrToStdOut}
-    let res = execCmdEx(cmd, options = options, workingDir = workingDir,
+    let res = execCmdExCloseOnce(cmd, options = options, workingDir = workingDir,
       env = scrubbedGitRepositoryEnv())
     result.exitCode = res.exitCode
     result.stdoutText = res.output
+    if outPath.len > 0:
+      try:
+        result.stdoutText = readFile(outPath)
+      except CatchableError as err:
+        result.exitCode = -1
+        result.stdoutText = ""
+        result.stderrText = "cannot read exact Git query output: " & err.msg
+      finally:
+        removeFile(outPath)
     if errPath.len > 0:
       try:
-        result.stderrText = readFile(errPath)
+        result.stderrText.add(readFile(errPath))
       except CatchableError:
         discard
       try:
@@ -694,7 +732,7 @@ proc runGitSeparated(payload: GitVcsPayload; args: openArray[string];
         discard
 
 proc runGitQuery(payload: GitVcsPayload; args: openArray[string];
-                 workingDir = ""):
+                 workingDir = ""; exactStdout = false):
     tuple[exitCode: int; output: string; diagnostic: string] =
   ## Invoke git for an answer that will be PARSED.
   ##
@@ -710,7 +748,7 @@ proc runGitQuery(payload: GitVcsPayload; args: openArray[string];
   ## ``diagnostic`` is the merged, trimmed text — what ``runGit``'s
   ## ``output`` would have held — so a caller reporting a FAILURE still
   ## surfaces git's message, which lives on stderr.
-  let res = runGitSeparated(payload, args, workingDir)
+  let res = runGitSeparated(payload, args, workingDir, exactStdout)
   (exitCode: res.exitCode, output: res.stdoutText,
    diagnostic: (res.stderrText & res.stdoutText).strip())
 
@@ -731,7 +769,13 @@ proc workingTreeIsClean(payload: GitVcsPayload; repoPath: string): tuple[ok: boo
   # every git command print ``warning: unable to find all commit-graph
   # files`` on stderr; merged into stdout that one line made a pristine tree
   # read as dirty and the pre-push gate refuse the push.
-  let res = runGitQuery(payload, ["-C", repoPath, "status", "--porcelain"])
+  #
+  # ``--no-optional-locks``: this is an observation. A plain ``git status``
+  # refreshes the index's stat data and writes the index back when it can
+  # take the lock, which races a user staging in another terminal while a
+  # push gate, or a certificate issuance reusing it, observes the tree.
+  let res = runGitQuery(payload,
+    ["--no-optional-locks", "-C", repoPath, "status", "--porcelain"])
   if res.exitCode != 0:
     return (ok: false, clean: false,
       diagnostic: "git status --porcelain failed (" & $res.exitCode & "): " &
@@ -985,6 +1029,55 @@ proc cloneBranchRef(revision: string): string =
       return revision[prefix.len .. ^1]
   revision
 
+const ThinBaseRemoteName = "repro-thin-base"
+  ## The per-invocation promisor remote ``borrowedBaseFetchArgs`` declares.
+  ## Never written to any config.
+
+proc borrowedBaseFetchArgs(payload: GitVcsPayload; target,
+                           remoteName: string): seq[string] =
+  ## Git global options (they go BEFORE ``fetch``) that a fetch into
+  ## ``target`` from ``remoteName`` needs so it can resolve a thin pack
+  ## (Shared-Clone-Pool-Integrity §3.7).
+  ##
+  ## When ``target`` borrows from a partial-clone pool through its alternates
+  ## (directly, or through an alternate's own alternates: git follows them)
+  ## and has no promisor remote of its own, the server may delta a new object
+  ## against a blob of a commit ``target`` "has" through the alternate but
+  ## the pool only promised; ``index-pack`` then dies with "unresolved deltas
+  ## left after unpacking" (see ``shared_clones.leafFetchNeedsPromisor``).
+  ## Declaring, for this one invocation, a promisor remote with the URL of the
+  ## remote being fetched lets ``index-pack`` fetch that base lazily from it.
+  ##
+  ## It is a SEPARATE remote (``ThinBaseRemoteName``), not
+  ## ``remote.<remoteName>.promisor=true``. Measured with git 2.54.0: marking
+  ## the fetched remote itself a promisor makes the lazy fetch's child
+  ## ``git fetch --filter=blob:none`` register that filter
+  ## (``partial_clone_register``) and write
+  ## ``remote.<remoteName>.partialclonefilter=blob:none`` into the leaf's
+  ## config, after which every fetch carrying the promisor flag would be a
+  ## blob-less one. The separate remote's ``partialclonefilter`` is given
+  ## here so that registration finds a filter already set and writes nothing;
+  ## and since ``remoteName`` stays a non-promisor remote, the main fetch is
+  ## an ordinary unfiltered one.
+  ##
+  ## Per invocation, so no config is written: the persistent mechanism stays
+  ## the §3.4 refetch chain (Shared-Clone-Pool-Integrity), and a leaf that
+  ## carries it never takes this path. Nothing of a foreign pool's config is
+  ## trusted either: the lazy fetch goes to the URL already being fetched,
+  ## not to whatever repository the pool names.
+  if not leafFetchNeedsPromisor(payload.binaryPath, target):
+    return @[]
+  let url = runGitQuery(payload, ["-C", target, "remote", "get-url",
+    remoteName])
+  if url.exitCode != 0 or url.output.strip().len == 0:
+    # Not a configured remote: nothing to name. The fetch runs as before
+    # and reports its own error if it hits the thin-pack case.
+    return @[]
+  let prefix = "remote." & ThinBaseRemoteName & "."
+  @["-c", prefix & "url=" & url.output.strip(),
+    "-c", prefix & "promisor=true",
+    "-c", prefix & "partialclonefilter=blob:none"]
+
 proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
   let parent = target.splitPath.head
@@ -1030,7 +1123,9 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
       result.add("--depth")
       result.add($payload.depth)
 
-  var args = @["clone"]
+  # A local source may itself borrow objects. Disable Git's local copying
+  # shortcut so only the explicitly selected reference can become an alternate.
+  var args = @["clone", "--no-local"]
   # RA-5: accelerate via the shared bare clone. ``--reference <bare>``
   # leaves ``objects/info/alternates`` pointing at the shared pool (no
   # ``--dissociate``), so the clone reads objects already present in the
@@ -1060,7 +1155,7 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     # broken/locked shared bare never breaks init. The RA-14 accelerators
     # are kept — they are independent of the shared bare.
     discard removeCloneTargetSafely(target, cwd)
-    var plain = @["clone"]
+    var plain = @["clone", "--no-local"]
     for f in accelFlags():
       plain.add(f)
     plain.add(payload.remoteUrl)
@@ -1139,8 +1234,14 @@ proc executeClone(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     let present = runGit(payload,
       ["-C", target, "cat-file", "-e", wanted & "^{commit}"])
     if present.exitCode != 0:
+      # The clone may still borrow from the pool without the §3.4 chain:
+      # registration above can fail to write the leaf's config, or the
+      # dissociating repack can fail, and both leave the alternates entry in
+      # place. A pinned commit newer than the pool is then the thin-pack case
+      # ``borrowedBaseFetchArgs`` describes.
       let fetched = runGit(payload,
-        ["-C", target, "fetch", "--no-tags", "origin", wanted])
+        borrowedBaseFetchArgs(payload, target, "origin") &
+          @["-C", target, "fetch", "--no-tags", "origin", wanted])
       if fetched.exitCode != 0:
         discardPartial()
         return failed("clone-revision-fetch-failed",
@@ -1172,7 +1273,12 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
   if not dirExists(target / ".git"):
     return failed("fetch-target-missing",
       "fetch target is not a git working tree: " & target)
-  var fetchArgs = @["-C", target, "fetch"]
+  # A checkout that borrows from a partial-clone pool -- a foreign one, or an
+  # owned one the detector has not configured yet -- needs a promisor remote
+  # to resolve a thin pack. ``borrowedBaseFetchArgs`` declares one for this
+  # invocation only (Shared-Clone-Pool-Integrity §3.7).
+  var fetchArgs = borrowedBaseFetchArgs(payload, target, payload.remoteName) &
+    @["-C", target, "fetch"]
   # RA-14 — carry the partial-clone filter and shallow depth onto the
   # fetch so a develop-mode "deepen on demand" (``--depth``/``--unshallow``)
   # or a widening of the promisor filter is expressible as the same
@@ -1184,16 +1290,25 @@ proc executeFetch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResul
     fetchArgs.add("--depth")
     fetchArgs.add($payload.depth)
   fetchArgs.add(payload.remoteName)
-  let res = runGit(payload, fetchArgs)
-  if res.exitCode != 0:
-    return failed("fetch-failed",
-      "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
-  let headRes = resolveHeadSha(payload, target)
-  if not headRes.ok:
-    return failed("fetch-head-probe-failed", headRes.diagnostic)
-  let receipt = renderFetchReceipt(payload, headRes.sha, res.output)
-  writeReceipt(receiptPath, receipt)
-  succeeded()
+  withCheckoutVcsLock(target,
+      (block: return failed("fetch-lock-failed", "could not lock checkout: " & target))):
+    var res: tuple[exitCode: int; output: string]
+    const MaxFetchLockRetries = 5
+    for attempt in 0 .. MaxFetchLockRetries:
+      res = runGit(payload, fetchArgs)
+      if res.exitCode == 0 or attempt == MaxFetchLockRetries or
+          not isTransientGitLockContention(res.output):
+        break
+      sleep(25 * (attempt + 1))
+    if res.exitCode != 0:
+      return failed("fetch-failed",
+        "git fetch exited " & $res.exitCode & ": " & res.output.trimmed)
+    let headRes = resolveHeadSha(payload, target)
+    if not headRes.ok:
+      return failed("fetch-head-probe-failed", headRes.diagnostic)
+    let receipt = renderFetchReceipt(payload, headRes.sha, res.output)
+    writeReceipt(receiptPath, receipt)
+    return succeeded()
 
 proc executeSwitch(payload: GitVcsPayload; cwd, receiptPath: string): ActionResult =
   let target = absoluteRepoPath(payload, cwd)
@@ -1374,7 +1489,8 @@ proc executeRefreshBare(payload: GitVcsPayload;
   ## than the serial in-line loop it replaces) is safe because each unique URL
   ## maps to its OWN bare directory: the race the serial loop guarded against is
   ## per-bare, and distinct bares share no state. The caller deduplicates by
-  ## URL, so two actions never target the same directory.
+  ## URL, so two actions in the same graph never target the same directory;
+  ## ``withCacheEntryVcsLock`` additionally serializes concurrent processes.
   ##
   ## Both arms go through ``shared_clones.prepareSharedBare`` -- the same
   ## preparation ``refreshSharedBare`` does. This action used to fetch with
@@ -1385,44 +1501,76 @@ proc executeRefreshBare(payload: GitVcsPayload;
   ## for every refresh path is what keeps the two from drifting apart again.
   let bare = payload.repoPath
   var outcome = "fetched"
+  var checkLeaves = false
+  withCacheEntryVcsLock(bare,
+      (block: return failed("refresh-bare-lock-failed", "could not lock shared bare: " & bare))):
+    if dirExists(bare / "objects") or dirExists(bare / ".git"):
+      let prepared = prepareSharedBare(payload.binaryPath, bare)
+      if prepared.len > 0:
+        return failed("refresh-bare-prepare-failed", prepared)
+      var res: tuple[exitCode: int; output: string]
+      const MaxRefreshLockRetries = 5
+      for attempt in 0 .. MaxRefreshLockRetries:
+        res = runGit(payload, sharedBareFetchArgs(bare))
+        if res.exitCode == 0 or attempt == MaxRefreshLockRetries or
+            not isTransientGitLockContention(res.output):
+          break
+        sleep(25 * (attempt + 1))
+      if res.exitCode != 0:
+        return failed("refresh-bare-fetch-failed",
+          "git fetch in shared bare failed (" & $res.exitCode & "): " &
+            res.output.trimmed)
+      checkLeaves = true
+    else:
+      let parent = bare.splitPath.head
+      if parent.len > 0:
+        try: createDir(parent)
+        except OSError as e:
+          return failed("refresh-bare-parent-failed",
+            "could not create cache parent " & parent & ": " & e.msg)
+      let res = runGit(payload,
+        ["clone", "--bare", "--no-local", "--quiet", payload.remoteUrl, bare])
+      if res.exitCode != 0:
+        if dirExists(bare / "objects") or dirExists(bare / ".git"):
+          let prepared = prepareSharedBare(payload.binaryPath, bare)
+          if prepared.len > 0:
+            return failed("refresh-bare-prepare-failed", prepared)
+          var fetched: tuple[exitCode: int; output: string]
+          const MaxRefreshLockRetries = 5
+          for attempt in 0 .. MaxRefreshLockRetries:
+            fetched = runGit(payload, sharedBareFetchArgs(bare))
+            if fetched.exitCode == 0 or attempt == MaxRefreshLockRetries or
+                not isTransientGitLockContention(fetched.output):
+              break
+            sleep(25 * (attempt + 1))
+          if fetched.exitCode != 0:
+            return failed("refresh-bare-fetch-failed",
+              "git fetch in shared bare failed (" & $fetched.exitCode & "): " &
+                fetched.output.trimmed)
+          checkLeaves = true
+        else:
+          # Leave no half-populated bare behind so the next attempt re-clones.
+          if dirExists(bare):
+            try: removeDir(bare)
+            except OSError: discard
+          return failed("refresh-bare-clone-failed",
+            "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
+              res.output.trimmed)
+      else:
+        let prepared = prepareSharedBare(payload.binaryPath, bare)
+        if prepared.len > 0:
+          return failed("refresh-bare-prepare-failed",
+            "cloned the shared bare but " & prepared)
+        outcome = "cloned"
+  # Shared-Clone-Pool-Integrity §4.2: a refresh is what strands a rewritten
+  # upstream's old commits, so every leaf registered with this pool is
+  # checked right after it (outside the bare lock so lock ordering remains
+  # strictly checkout -> pool). The fetches that depend on this action
+  # therefore run in leaves that have already been repaired. The messages
+  # travel on stdout; ``repro sync`` prints them.
   var leafMessages: seq[string]
-  if dirExists(bare / "objects") or dirExists(bare / ".git"):
-    let prepared = prepareSharedBare(payload.binaryPath, bare)
-    if prepared.len > 0:
-      return failed("refresh-bare-prepare-failed", prepared)
-    let res = runGit(payload, sharedBareFetchArgs(bare))
-    if res.exitCode != 0:
-      return failed("refresh-bare-fetch-failed",
-        "git fetch in shared bare failed (" & $res.exitCode & "): " &
-          res.output.trimmed)
-    # Shared-Clone-Pool-Integrity §4.2: a refresh is what strands a rewritten
-    # upstream's old commits, so every leaf registered with this pool is
-    # checked right after it. The fetches that depend on this action
-    # therefore run in leaves that have already been repaired. The messages
-    # travel on stdout; ``repro sync`` prints them.
+  if checkLeaves:
     leafMessages = messages(checkRegisteredLeaves(payload.binaryPath, bare))
-  else:
-    let parent = bare.splitPath.head
-    if parent.len > 0:
-      try: createDir(parent)
-      except OSError as e:
-        return failed("refresh-bare-parent-failed",
-          "could not create cache parent " & parent & ": " & e.msg)
-    let res = runGit(payload,
-      ["clone", "--bare", "--quiet", payload.remoteUrl, bare])
-    if res.exitCode != 0:
-      # Leave no half-populated bare behind so the next attempt re-clones.
-      if dirExists(bare):
-        try: removeDir(bare)
-        except OSError: discard
-      return failed("refresh-bare-clone-failed",
-        "git clone --bare into shared cache failed (" & $res.exitCode & "): " &
-          res.output.trimmed)
-    let prepared = prepareSharedBare(payload.binaryPath, bare)
-    if prepared.len > 0:
-      return failed("refresh-bare-prepare-failed",
-        "cloned the shared bare but " & prepared)
-    outcome = "cloned"
   var receipt = RefreshBareReceiptHeader & "\n"
   receipt.add("kind\t" & WorkspaceVcsKind & "\n")
   receipt.add("operation\trefresh-bare\n")
@@ -1511,12 +1659,17 @@ proc executeMergeFf(payload: GitVcsPayload;
     return failed("dirty",
       "git merge --ff-only refused: working tree is dirty at " & target)
   let ref0 = "refs/remotes/" & payload.remoteName & "/" & payload.branchName
-  let res = runGit(payload,
-    ["-C", target, "merge", "--ff-only", ref0])
-  if res.exitCode != 0:
-    return failed("merge-ff-failed",
-      "git merge --ff-only exited " & $res.exitCode & ": " &
-        res.output.trimmed)
+  let res = atomicFastForward(target, ref0,
+    proc(args: seq[string]; query: bool): FastForwardGitResult {.gcsafe.} =
+      if query:
+        let answer = runGitQuery(payload, args, exactStdout = true)
+        (answer.exitCode, answer.output, answer.diagnostic)
+      else:
+        let answer = runGit(payload, args)
+        (answer.exitCode, answer.output, answer.output))
+  if not res.ok:
+    return failed((if res.refused: "merge-ff-refused" else: "merge-ff-failed"),
+      res.diagnostic)
   # After the fast-forward the superproject's submodule gitlinks may point at
   # new commits. Bring already-checked-out submodules in line so the
   # superproject does not end up dirty with a stale ``M <submodule>`` gitlink
@@ -2335,7 +2488,8 @@ proc queryGitState*(query: GitQueryAction;
     # 2. File Status
     if query.queryFiles:
       let statusRes = runGitQuery(payload,
-        ["-C", query.repoPath, "status", "--porcelain"])
+        ["--no-optional-locks", "-C", query.repoPath, "status",
+         "--porcelain"])
       if statusRes.exitCode == 0:
         isClean = true
         for rawLine in statusRes.output.splitLines():
@@ -2398,9 +2552,11 @@ proc queryGitState*(query: GitQueryAction;
           except CatchableError:
             discard
 
-    # 6. Unmerged Branches
-    if query.queryUnmerged:
-      let trunkBranch = if query.trunkBranch.len > 0: query.trunkBranch else: "main"
+    # 6. Unmerged Branches. A legacy pin-only manifest can declare no
+    # comparison branch at all. Do not turn that absence into an inferred
+    # `main`: it may exist while being unrelated to the intended mainline.
+    if query.queryUnmerged and query.trunkBranch.len > 0:
+      let trunkBranch = query.trunkBranch
       let remoteName = if query.remoteName.len > 0: query.remoteName else: "origin"
       let remoteRef = remoteName & "/" & trunkBranch
       var targetRef = trunkBranch

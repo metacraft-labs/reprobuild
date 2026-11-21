@@ -1,0 +1,38 @@
+[Unit]
+Description=x
+
+[Service]
+User=a
+ExecStart=/repro/store/prefixes/svc/1.0/bin/svc \\
+  --flag
+Environment=A=1 \\
+# serviceFloor (ReproOS add-on hardening default)
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @obsolete
+CapabilityBoundingSet=
+AmbientCapabilities=
+UMask=0077
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+NoExecPaths=/
+ExecPaths=/repro/store/prefixes/svc/1.0
+
+[Install]
+WantedBy=multi-user.target

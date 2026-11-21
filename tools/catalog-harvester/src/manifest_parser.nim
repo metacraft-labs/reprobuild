@@ -100,10 +100,10 @@ type
       ## flag.
     dkPreInstallAllowlistEntry = "HPreInstallAllowlistEntry"
       ## Recognized a Scoop ``pre_install`` line that matches the
-      ## cakBuiltin allowlist; translated into a structured
+      ## archive-realizer allowlist; translated into a structured
       ## ``PreInstallAction``.
     dkPreInstallUnrecognized = "HPreInstallUnrecognized"
-      ## A ``pre_install`` line that escaped the cakBuiltin allowlist;
+      ## A ``pre_install`` line that escaped the archive-realizer allowlist;
       ## captured verbatim in the slice's
       ## ``pre_install_unrecognized`` for the realize loop to surface
       ## as a ``WPreInstallUnrecognized`` warning at apply time.
@@ -116,13 +116,13 @@ type
       ## The manifest's primary download is an ``.msi`` URL (or the
       ## inferred ``archive_format`` is ``afInstallerMsi``); the
       ## harvester emits ``install_method = imInstallerMsi`` so the
-      ## cakBuiltin realize loop dispatches through the M4 dark.exe
+      ## home archive realizer dispatches through the M4 dark.exe
       ## extractor (vs M3's NSIS imInstallerSilent path).
     dkInstallMethodInnoSetup = "HInstallMethodInnoSetup"
       ## The manifest carries ``"innosetup": true`` (regardless of
       ## whether an ``installer:`` block is present); the harvester
       ## emits ``install_method = imInstallerInnoSetup`` so the
-      ## cakBuiltin realize loop dispatches through the M4 innounp.exe
+      ## home archive realizer dispatches through the M4 innounp.exe
       ## extractor. Required for the freepascal/fpc shape per M1's
       ## Outstanding Task note.
     dkInstallMethodNsisBundle = "HInstallMethodNsisBundle"
@@ -130,7 +130,7 @@ type
       ## ``Expand-DarkArchive`` / ``Expand-MsiArchive`` pattern — i.e.
       ## the outer ``.exe`` is an NSIS bundle wrapping inner MSIs
       ## (the python3 + swift shape). The harvester emits
-      ## ``install_method = imInstallerNsisBundle`` so the cakBuiltin
+      ## ``install_method = imInstallerNsisBundle`` so the archive realizer
       ## realize loop dispatches through the M4 NSIS-unwrap + per-MSI
       ## dark extractor.
     dkInstallerScriptAllowlistEntry = "HInstallerScriptAllowlistEntry"
@@ -418,9 +418,9 @@ proc binRelpathsOf(node: JsonNode; app: string; diags: var seq[Diagnostic]):
 ##
 ## Scoop manifests carry ``pre_install: [...]`` blocks of PowerShell.
 ## The harvester translates each LINE into either a structured
-## ``PreInstallAction`` (cakBuiltin allowlist hit) or records it
-## verbatim in ``pre_install_unrecognized``. The cakBuiltin realize
-## loop replays actions; unrecognized lines surface as
+## ``PreInstallAction`` (archive-realizer allowlist hit) or records it
+## verbatim in ``pre_install_unrecognized``. The home archive realizer
+## replays actions; unrecognized lines surface as
 ## ``WPreInstallUnrecognized`` stderr warnings at apply time.
 ##
 ## The harvester does NOT execute PowerShell — it only does shape
@@ -638,7 +638,7 @@ proc translatePreInstallLine(line: string;
   of "expand-darkarchive", "expand-msiarchive":
     # M4: ``Expand-DarkArchive <msi> <dir>`` / ``Expand-MsiArchive
     # <msi> <dir>``. Scoop's installer.script primitives for MSI
-    # extraction; both dispatch through the same cakBuiltin path.
+    # extraction; both dispatch through the same archive-realizer path.
     # The harvester maps both into the matching PreInstallActionKind
     # variant (piaExpandDark vs piaExpandMsi) so the realize loop's
     # diagnostic can distinguish them, but the runtime dispatch is

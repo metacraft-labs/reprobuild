@@ -1,4 +1,5 @@
-import std/[json, os, osproc, streams, strutils, tempfiles, times, unittest]
+import std/[json, monotimes, os, osproc, streams, strutils, tempfiles, times,
+  unittest]
 
 import repro_test_support
 
@@ -33,21 +34,27 @@ proc valueAfter(output, prefix: string): string =
       return line[prefix.len .. ^1].strip()
   ""
 
-proc copySelectedCodeTracerFiles(codeTracerRoot, projectRoot: string) =
-  createDir(projectRoot / "src" / "frontend" / "tests")
-  createDir(projectRoot / "src" / "frontend" / "index")
-  createDir(projectRoot / "src" / "frontend" / "lib")
+proc writeMultiInputProjectSources(projectRoot: string) =
+  ## The first session's inputs: two sources of two languages in nested
+  ## directories, which its action declares as inputs and checks for before it
+  ## parks on the release gate. Synthetic on purpose: this gate is about two
+  ## sessions sharing one RunQuota daemon, and nothing it measures depends on
+  ## whose source the inputs are. They used to be copied out of a CodeTracer
+  ## checkout, which made the case need one beside this repository; the
+  ## CodeTracer-facing tests now live in CodeTracer (2026-11-07).
+  createDir(projectRoot / "src" / "nim" / "tests")
   createDir(projectRoot / "src" / "c")
-  copyFile(codeTracerRoot / "src" / "frontend" / "tests" /
-    "ipc_registry_test.nim",
-    projectRoot / "src" / "frontend" / "tests" / "ipc_registry_test.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "index" /
-    "ipc_registry.nim",
-    projectRoot / "src" / "frontend" / "index" / "ipc_registry.nim")
-  copyFile(codeTracerRoot / "src" / "frontend" / "lib" / "jslib.nim",
-    projectRoot / "src" / "frontend" / "lib" / "jslib.nim")
-  copyFile(codeTracerRoot / "test-programs" / "c_sudoku_solver" / "main.c",
-    projectRoot / "src" / "c" / "main.c")
+  writeFile(projectRoot / "src" / "nim" / "tests" / "session_input_test.nim",
+    "import std/unittest\n\n" &
+    "suite \"session input\":\n" &
+    "  test \"is read by the first session\":\n" &
+    "    check 1 + 1 == 2\n")
+  writeFile(projectRoot / "src" / "c" / "main.c",
+    "#include <stdio.h>\n\n" &
+    "int main(void) {\n" &
+    "  puts(\"session input\");\n" &
+    "  return 0;\n" &
+    "}\n")
 
 proc writeTimingHelper(path: string) =
   writeFile(path,
@@ -133,6 +140,9 @@ proc writeProject(path, packageName, actionId, helperPath, stampPath, gatePath,
     "        outputs = @[" & nimString(outputRel) & "],\n" &
     "        cacheable = false)\n")
 
+const DaemonStartDeadlineMs = 30_000
+  ## How long a freshly started runquotad may take to bind its socket.
+
 proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     socket: string; cli: string] =
   let daemonBin = requireRunQuotaDaemonBin(repoRoot)
@@ -150,12 +160,33 @@ proc ensureRunQuotaDaemon(repoRoot: string): tuple[process: owned(Process);
     "--no-write-stats"
   ], options = {poUsePath, poStdErrToStdOut})
   putEnv("RUNQUOTA_SOCKET", socketPath)
-  for _ in 0 ..< 200:
+  # The deadline is for a daemon that is starting, on a host that may be
+  # running a full suite beside this case. Five seconds was not enough there
+  # once (full run 37, eight cases in parallel at a load average above 100),
+  # and the case then said only that the socket "did not appear". A daemon
+  # that has EXITED is a different failure and is reported at once, with its
+  # status and output, rather than waited out.
+  let deadline = getMonoTime() + initDuration(milliseconds =
+    DaemonStartDeadlineMs)
+  while getMonoTime() < deadline:
     if pathExists(socketPath):
       return (process: daemon, socket: socketPath, cli: cliBin)
+    if not daemon.running:
+      let code = daemon.peekExitCode()
+      let output =
+        if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+      daemon.close()
+      raise newException(OSError, "runquotad exited with status " & $code &
+        " before its socket appeared (" & daemonBin & "): " & output)
     sleep(25)
   daemon.terminate()
-  raise newException(OSError, "runquotad socket did not appear")
+  discard daemon.waitForExit()
+  let output =
+    if daemon.outputStream != nil: daemon.outputStream.readAll() else: ""
+  daemon.close()
+  raise newException(OSError, "runquotad socket did not appear within " &
+    $DaemonStartDeadlineMs & " ms (" & daemonBin & "); daemon output: " &
+    output)
 
 proc runQuotaJson(cliPath: string; args: openArray[string]): JsonNode =
   let res = runShell(shellCommand(@[cliPath] & @args))
@@ -226,12 +257,6 @@ suite "integration_reprobuild_sessions_share_runquota":
   when isNixSupported:
     test "two repro build sessions serialize default 1000 milliCPU actions through one daemon":
       let repoRoot = getCurrentDir()
-      let codeTracerRoot = requireCodeTracerSourceRoot(repoRoot)
-      check fileExists(codeTracerRoot / "src" / "frontend" / "tests" /
-        "ipc_registry_test.nim")
-      check fileExists(codeTracerRoot / "test-programs" / "c_sudoku_solver" /
-        "main.c")
-
       let tempRoot = createTempDir("repro-m22-shared-runquota", "")
       let previousSocket = getEnv("RUNQUOTA_SOCKET", "")
       defer:
@@ -252,20 +277,23 @@ suite "integration_reprobuild_sessions_share_runquota":
 
       let stampsDir = tempRoot / "stamps"
       let gatePath = tempRoot / "release-gate"
-      let codeProject = tempRoot / "codetracer-project"
+      let multiInputProject = tempRoot / "multi-input-project"
       let fixtureProject = tempRoot / "fixture-project"
-      createDir(codeProject)
+      createDir(multiInputProject)
       createDir(fixtureProject)
-      copySelectedCodeTracerFiles(codeTracerRoot, codeProject)
+      writeMultiInputProjectSources(multiInputProject)
+      check fileExists(multiInputProject / "src" / "nim" / "tests" /
+        "session_input_test.nim")
+      check fileExists(multiInputProject / "src" / "c" / "main.c")
       writeFile(fixtureProject / "input.txt", "fixture\n")
 
-      const CodeAction = "m22-codetracer-sleep"
+      const MultiInputAction = "m22-multi-input-sleep"
       const FixtureAction = "m22-fixture-sleep"
-      writeProject(codeProject / "reprobuild.nim", "codeTracerM22", CodeAction,
-        helperBin, stampsDir / "codetracer.stamp", gatePath, "codetracer",
-        "build/codetracer.done",
-        ["src/frontend/tests/ipc_registry_test.nim", "src/c/main.c"],
-        "test -f src/frontend/tests/ipc_registry_test.nim\n" &
+      writeProject(multiInputProject / "reprobuild.nim", "multiInputM22",
+        MultiInputAction, helperBin, stampsDir / "multi-input.stamp", gatePath,
+        "multi-input", "build/multi-input.done",
+        ["src/nim/tests/session_input_test.nim", "src/c/main.c"],
+        "test -f src/nim/tests/session_input_test.nim\n" &
           "test -f src/c/main.c\n")
       writeProject(fixtureProject / "reprobuild.nim", "fixtureM22", FixtureAction,
         helperBin, stampsDir / "fixture.stamp", gatePath, "fixture",
@@ -293,28 +321,57 @@ suite "integration_reprobuild_sessions_share_runquota":
       # ``t_e2e_repro_build_named_target`` (30a7ce6) and
       # ``t_e2e_repro_build_multiple_named_targets`` (86be3f1).
       let codeBuild = startProcess(reproBin, workingDir = repoRoot,
-        args = ["build", codeProject, "--daemon=off",
+        args = ["build", multiInputProject, "--daemon=off",
           "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
-      let codeStartStamp = stampsDir / "codetracer.stamp.start"
+      let codeStartStamp = stampsDir / "multi-input.stamp.start"
       # Wait for the first session's action to actually start (its helper
       # writes the .start stamp). On a shared runner the cold provider
       # compile that precedes the action can be slow, so poll against a
       # generous deadline rather than a fixed iteration count. If the action
       # never starts, ``check pathExists`` below still fails.
-      let startStampDeadline = nowMillis() + 300000
+      #
+      # The wait follows the first session: it ends at once if that build
+      # exits, so the cap is only the backstop for one alive and stuck. A
+      # 300 s cap was a wall-clock budget on the cold interface extraction and
+      # provider compile of the first session's project (each case writes it
+      # to a fresh temp dir, so both always run cold). Measured when its
+      # inputs were still copied CodeTracer sources: alone at load
+      # ~20 the action started at ~190 s (extraction ~140 s, compile ~40 s);
+      # at load 55-68 it missed 300 s while every later assertion -- the
+      # action ran, the second session queued behind it, the two intervals
+      # did not overlap -- still passed.
+      let startStampDeadline = nowMillis() + 1_200_000
       while nowMillis() < startStampDeadline:
         if pathExists(codeStartStamp) or codeBuild.peekExitCode() != -1:
           break
         sleep(25)
+      if not pathExists(codeStartStamp):
+        checkpoint("first session's action never started; build " &
+          (if codeBuild.peekExitCode() == -1: "still running at the backstop"
+           else: "exited with " & $codeBuild.peekExitCode()))
       check pathExists(codeStartStamp)
 
+      # The two sessions must OVERLAP: the second is launched while the first
+      # is still alive (its action is parked on the release gate, holding the
+      # only slot). That is what the original ``launchEnd - launchStart <
+      # 1000`` check established when both sessions were launched back to
+      # back (34b16ebb8). e9a91a7c8 put the wait for the first session's
+      # action start between the two launches and widened the bound to
+      # 150 s, which turned it into a wall-clock budget on the first
+      # session's cold interface extraction, provider compile and lease waits
+      # under a one-slot daemon -- none of which is what this gate claims.
+      # Assert the overlap itself; the 300 s wait above stays a liveness
+      # bound, enforced by ``check pathExists(codeStartStamp)``.
+      let firstSessionAlive = codeBuild.peekExitCode() == -1
       let fixtureBuild = startProcess(reproBin, workingDir = repoRoot,
         args = ["build", fixtureProject, "--daemon=off",
           "--tool-provisioning=path", "--log=actions", "--write-report"],
         options = {poUsePath, poStdErrToStdOut})
       let launchEnd = nowMillis()
-      check launchEnd - launchStart < 150000
+      checkpoint("first session reached its action after " &
+        $(launchEnd - launchStart) & " ms")
+      check firstSessionAlive
 
       var lastLeases = ""
       var observedQueue = false
@@ -356,9 +413,9 @@ suite "integration_reprobuild_sessions_share_runquota":
         check output.contains("runquota=posix-fork-exec-poll")
         check output.contains("lease=")
 
-      let codeInterval = readInterval(stampsDir / "codetracer.stamp")
+      let codeInterval = readInterval(stampsDir / "multi-input.stamp")
       let fixtureInterval = readInterval(stampsDir / "fixture.stamp")
-      check codeInterval.label == "codetracer"
+      check codeInterval.label == "multi-input"
       check fixtureInterval.label == "fixture"
       check codeInterval.gateSeen
       check fixtureInterval.gateSeen
@@ -368,7 +425,7 @@ suite "integration_reprobuild_sessions_share_runquota":
 
       let codeReport = valueAfter(codeResult.output, "buildReport:")
       let fixtureReport = valueAfter(fixtureResult.output, "buildReport:")
-      checkRunQuotaReportDiagnostics(reportAction(codeReport, CodeAction),
+      checkRunQuotaReportDiagnostics(reportAction(codeReport, MultiInputAction),
         daemon.socket)
       checkRunQuotaReportDiagnostics(reportAction(fixtureReport, FixtureAction),
         daemon.socket)

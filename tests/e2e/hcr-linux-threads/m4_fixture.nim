@@ -26,6 +26,7 @@ import "../hcr-linux-direct/elf_rel_reader"
 # without `--build-id` is refused `absent-sled (sled-object-build-id-mismatch)`
 # before anything about threads is exercised.
 import repro_project_dsl
+from repro_test_support import testScratchSlug
 
 const
   PatchSymbolA* = "hcr_lx_m4_patch_body_a"
@@ -71,7 +72,11 @@ proc runOrFail*(command, cwd: string): string =
   res.output
 
 proc m4WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m4"
+  # Private to the process running ONE case of ONE binary: several binaries
+  # import this helper and the suite runs them (and their cases) concurrently,
+  # so a shared directory had one process relink a fixture or rewrite a patch
+  # object while another was executing or parsing it.
+  result = repoRoot / "build" / "hcr-linux-m4" / testScratchSlug()
   createDir(result)
 
 proc m4CaseDir*(repoRoot: string): string =
@@ -156,6 +161,33 @@ proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
     except CatchableError:
       result.payload = nil
 
+  # Deliberate crash controls emit HCR-M4-CRASH and are inspected by the
+  # concurrent-publication gate. Every other missing result is a fixture
+  # failure: name its fate before a caller can dereference nil JSON and hide
+  # the original signal behind the test process's own SIGSEGV.
+  if result.payload == nil and not result.crashed:
+    var fate = "fixture " & binary & " exited " & $result.exitCode
+    if result.exitCode > 128:
+      fate.add " (signal " & $(result.exitCode - 128) & ")"
+    raise newException(IOError, fate & "; no valid JSON result\n" &
+      result.stderrText & result.output)
+
 proc hex*(bytes: seq[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
+
+proc hostLoadPerCpu*(): float =
+  ## The host condition the HLX-M4 gate's statistical thresholds are
+  ## calibrated against (`m4_verdict.MaxLoadPerCpu`): the 1-minute load average
+  ## from `/proc/loadavg` (proc(5)) divided by the online CPU count. An
+  ## unreadable or unparsable reading is reported as +Inf — "outside the
+  ## conditions" — so a host this cannot measure never has its runs counted as
+  ## calibrated evidence.
+  try:
+    let fields = readFile("/proc/loadavg").splitWhitespace()
+    let cpus = countProcessors()
+    if fields.len == 0 or cpus <= 0:
+      return Inf
+    parseFloat(fields[0]) / float(cpus)
+  except CatchableError:
+    Inf

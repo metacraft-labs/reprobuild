@@ -17,6 +17,10 @@ import std/[tables]
 
 import repro_home_generations
 
+import ./drivers/app_bundle
+export app_bundle.AppBundleExpectation, app_bundle.AppTrustPolicy,
+  app_bundle.AppTrustRelaxation
+
 type
   ResourceKind* = enum
     ## The variant tag for `Resource`. The string form is what we
@@ -93,6 +97,20 @@ type
       ## --cask`; observe is `brew list --cask --versions <name>`;
       ## destroy is `brew uninstall --cask <name>`. macOS-only;
       ## raises `ENotImplementedPlatform` elsewhere.
+    rkMacosAppBundle = "macos.appBundle"
+      ## GM4c. A macOS application bundle placed in an Applications
+      ## directory: COPIED from the verified bundle in the package's store
+      ## prefix (`drivers/app_bundle.placeAppBundle`), the staged copy
+      ## verified before it is renamed into place. Not written in a
+      ## profile: the apply synthesizes one per realized `app-bundle`
+      ## package or macOS installer application
+      ## (`repro_home_apply/app_activation`), at address
+      ## `home.package.<id>.app`. The placed item is the bundle, or the
+      ## folder an installer application's product bundle lives in. The
+      ## recorded payload is its identity (`readPlacedItemIdentityBytes`);
+      ## a path the previous
+      ## generation did not record is never replaced. Store-And-
+      ## Installation-Layout.md § macOS Application Bundles.
 
   SystemdUnitState* = enum
     ## M83 step 4b: desired runtime state for a `systemd.userUnit`.
@@ -324,6 +342,32 @@ type
         ## `'prefer-dark'` (string), `true`/`false` (bool), bare
         ## decimal (int), `['a', 'b']` (array). The driver writes it
         ## verbatim via `dconf write`.
+    of rkMacosAppBundle:
+      appBundleSource*: string
+        ## The verified placed item in the store prefix
+        ## (`<prefix>/<Name>.app`, or `<prefix>/<Folder>` for an installer
+        ## application whose product bundle lives in a folder).
+      appBundleTargetDir*: string
+        ## The Applications directory: `~/Applications` at home scope
+        ## (`applicationsDir(apsHome, homeDir)`).
+      appBundleName*: string
+        ## The name it is placed under: `<Name>.app`, or a folder name.
+      appBundleMainPath*: string
+        ## For a folder, the product bundle's path inside it
+        ## (`OpenWebStart javaws.app`), which the expectation describes;
+        ## "" when the placed item is the bundle itself.
+        ## Store-And-Installation-Layout.md § Installer applications.
+      appBundleExpectation*: AppBundleExpectation
+        ## The contribution's declarations (bundle id, version, team),
+        ## re-checked on the staged copy (its product bundle, for a
+        ## folder).
+      appBundleTrust*: AppTrustPolicy
+        ## `{}` in production; only a test relaxes the Developer ID and
+        ## notarization checks.
+      appBundleIdentity*: seq[byte]
+        ## `readPlacedItemIdentityBytes` of the store item (a bundle's
+        ## `appBundleCanonicalBytes`, or a folder's identity): the desired
+        ## state, and the identity the placed copy must carry.
     of rkHomebrewCask:
       caskName*: string
         ## Homebrew cask identifier (e.g. `iterm2`, `firefox`,
@@ -420,6 +464,12 @@ type
       ## Populated for `rakDriftBlocked` / `rakUpdate` (when
       ## `--reconcile-drift` clobbered a drift).
     driftObservedHex*: string
+    deferred*: bool
+      ## A no-op that stands in for an update / replace / destroy the live
+      ## object's use (`ResourceState.busy`) deferred to a later apply.
+    keptVendorUpdate*: bool
+      ## A no-op that keeps a newer vendor update of a placed application
+      ## (`ResourceState.vendorUpdate`).
 
   ObservedState* = object
     ## What the driver saw in the real world when refreshing the
@@ -458,6 +508,21 @@ type
     observed*: ObservedState
     recorded*: RecordedBinding
     hasRecorded*: bool
+    vendorUpdate*: bool
+      ## `macos.appBundle`: the observed bundle is its vendor's own update
+      ## of the recorded one (`isAcceptedVendorUpdate`), not drift
+      ## (Store-And-Installation-Layout.md § macOS Application Bundles,
+      ## "Vendor updates").
+    desiredSupersedesObserved*: bool
+      ## With `vendorUpdate`: the desired bundle is newer than the observed
+      ## one, so the apply replaces the vendor update with it. Otherwise the
+      ## newer observed build is kept (never downgraded).
+    busy*: string
+      ## Non-empty: the live object is in use and must not be replaced or
+      ## removed now -- for `macos.appBundle`, the ids of the processes
+      ## running from the placed bundle ("Running applications"). An update,
+      ## replace or destroy is deferred (planned as a no-op that keeps the
+      ## record); the next apply does it.
 
   DesiredSet* = object
     ## A collection of resources the apply pipeline plans to
@@ -503,6 +568,7 @@ proc resourceKindFromString*(s: string): ResourceKind =
   of $rkLinuxKdeConfigKey: rkLinuxKdeConfigKey
   of $rkHomebrewFormula: rkHomebrewFormula
   of $rkHomebrewCask: rkHomebrewCask
+  of $rkMacosAppBundle: rkMacosAppBundle
   else:
     raise newException(ValueError,
       "unknown resource kind tag: '" & s & "'")
@@ -687,3 +753,7 @@ proc realWorldIdentity*(r: Resource): string =
     # namespaces disjoint, so a formula and a cask with the same
     # name do NOT collide.
     return "homebrew:cask:" & r.caskName
+  of rkMacosAppBundle:
+    # The placed bundle's absolute path: one bundle per path, and the path
+    # is what removal and rollback act on.
+    return r.appBundleTargetDir & "/" & r.appBundleName

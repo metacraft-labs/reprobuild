@@ -1,86 +1,67 @@
-## M9.5 smoke — chainResolvePackage('gh', hostOs = poLinux) returns
-## the Linux URL via cakBuiltin.
+## M9.5 smoke → GM4b — a profile reference to `gh` resolved for an
+## x86_64-linux target selects the Linux archive.
 ##
-## This is the per-operator "Manual smoke" gate from the M9.5 hand-off
-## verification list. Runs on Windows (resolver-only; no realize-side
-## work) and confirms the M9.5 cross-OS catalog wiring end-to-end:
-## the chain probes the catalog, selectPlatformBinary picks the
-## (pcX86_64, poLinux) slice, and the resolution carries the Linux URL
-## + Linux sha256 + Linux bin_relpath_override forward to the realize
-## stage.
+## The per-operator "Manual smoke" gate from the M9.5 hand-off list,
+## restated for GM4b: the M9.5 cross-OS archives are `tarball`
+## realizations of each package (formerly per-platform catalog slices), and
+## `resolveProfilePackage` with the `[tarball]` policy picks the
+## x86_64-linux record and carries its URL, digest, archive type and
+## executable forward to the realize stage. Resolver-only (no realize, no
+## network), with a stated target, so it runs identically on any host.
+## No mocks.
 
 import std/[strutils, unittest]
 
-import repro_dsl_stdlib/catalog_registry
-import repro_dsl_stdlib/packages_schema
 import repro_home_apply/package_catalog
 
-suite "M9.5 smoke: chain resolves cakBuiltin Linux slice":
+proc resolveTarball(pkg: string; cpu: PlatformCpu; os: PlatformOs):
+    ProfilePackageResolution =
+  resolveProfilePackage(pkg, realizationTargetFor(cpu, os, mlX86_64_v1),
+    @[rkTarball])
 
-  test "gh resolves via cakBuiltin on Linux":
-    var cat = openProductionCatalog()
-    let res = chainResolvePackage(cat, "gh",
-      chain = @[cakBuiltin],
-      hostCpu = pcX86_64, hostOs = poLinux)
-    check res.adapter == cakBuiltin
-    check "linux_amd64.tar.gz" in res.urlUsed
-    # The realize loop will key off archiveFormat to dispatch the
-    # tar.gz extractor — confirm the per-platform override flowed
-    # through.
-    check res.archiveFormat == afTarGz
-    # The binRelpath should be the Linux variant (no .exe suffix).
-    check res.binRelpath.len > 0
-    for b in res.binRelpath:
-      check ".exe" notin b
-    # digest matches the harvested sha256.
-    check res.digestAlgorithm == "sha256"
-    check res.digestValue.len == 64
+suite "M9.5/GM4b smoke: Linux archives resolve":
 
-  test "crystal resolves via cakBuiltin on Linux (Phase-2 fixture)":
-    var cat = openProductionCatalog()
-    let res = chainResolvePackage(cat, "crystal",
-      chain = @[cakBuiltin],
-      hostCpu = pcX86_64, hostOs = poLinux)
-    check res.adapter == cakBuiltin
-    check "linux-x86_64" in res.urlUsed
-    check res.archiveFormat == afTarGz
-    # Crystal Linux tarball nests; extractPath strips it.
-    check res.extractPath == "crystal-1.20.2-1"
+  test "gh resolves to its Linux archive":
+    let res = resolveTarball("gh", pcX86_64, poLinux)
+    check res.selection.kind == rkTarball
+    let record = res.selection.tarball
+    check "linux_amd64.tar.gz" in record.url
+    check parseArchiveFormatToken(record.archiveType).format == afTarGz
+    # The executable is the Linux variant (no .exe suffix).
+    check record.executablePath.len > 0
+    check ".exe" notin record.executablePath
+    for extra in record.detail.extraExecutables:
+      check ".exe" notin extra
+    check record.sha256.len == 64
+    # A plain archive: realized by the `uses:` provisioning edge.
+    check res.archiveRoute == arExtract
 
-  test "ghc resolves via cakBuiltin on Linux (Phase-2 fixture)":
-    var cat = openProductionCatalog()
-    let res = chainResolvePackage(cat, "ghc",
-      chain = @[cakBuiltin],
-      hostCpu = pcX86_64, hostOs = poLinux)
-    check res.adapter == cakBuiltin
-    check "centos7-linux" in res.urlUsed
-    # ghc Linux tarball stays afTarXz (same as Windows mingw32 variant).
-    check res.archiveFormat == afTarXz
+  test "crystal resolves to its Linux archive (Phase-2 fixture)":
+    let res = resolveTarball("crystal", pcX86_64, poLinux)
+    check "linux-x86_64" in res.selection.tarball.url
+    check parseArchiveFormatToken(res.selection.tarball.archiveType).format ==
+      afTarGz
+    # Crystal's Linux tarball nests; extractPath flattens it, which the home
+    # archive realizer performs.
+    check res.selection.tarball.detail.extractPath == "crystal-1.20.2-1"
+    check res.archiveRoute == arExtract
+    check res.archive.extractPath == "crystal-1.20.2-1"
 
-  test "cabal resolves via cakBuiltin on Linux (Phase-2 fixture)":
-    var cat = openProductionCatalog()
-    let res = chainResolvePackage(cat, "cabal",
-      chain = @[cakBuiltin],
-      hostCpu = pcX86_64, hostOs = poLinux)
-    check res.adapter == cakBuiltin
-    check "linux-deb10" in res.urlUsed
-    check res.archiveFormat == afTarXz
+  test "ghc resolves to its Linux archive (Phase-2 fixture)":
+    let res = resolveTarball("ghc", pcX86_64, poLinux)
+    check "centos7-linux" in res.selection.tarball.url
+    check parseArchiveFormatToken(res.selection.tarball.archiveType).format ==
+      afTarXz
+
+  test "cabal resolves to its Linux archive (Phase-2 fixture)":
+    let res = resolveTarball("cabal", pcX86_64, poLinux)
+    check "linux-deb10" in res.selection.tarball.url
+    check parseArchiveFormatToken(res.selection.tarball.archiveType).format ==
+      afTarXz
 
   test "Windows resolution still works (no regression on existing tools)":
-    ## Defensive: the M9.5 schema extension MUST NOT break existing
-    ## Windows-only flows. Resolve gh on Windows and confirm the
-    ## Windows URL flows.
-    var cat = openProductionCatalog()
-    let res = chainResolvePackage(cat, "gh",
-      chain = @[cakBuiltin],
-      hostCpu = pcX86_64, hostOs = poWindows)
-    check res.adapter == cakBuiltin
-    check "windows_amd64.zip" in res.urlUsed
-    check res.archiveFormat == afZip
-    # Windows bin_relpath retains the .exe suffix.
-    var sawExe = false
-    for b in res.binRelpath:
-      if ".exe" in b:
-        sawExe = true
-        break
-    check sawExe
+    let res = resolveTarball("gh", pcX86_64, poWindows)
+    check "windows_amd64.zip" in res.selection.tarball.url
+    check parseArchiveFormatToken(res.selection.tarball.archiveType).format ==
+      afZip
+    check ".exe" in res.selection.tarball.executablePath

@@ -28,6 +28,7 @@ import std/[json, os, strutils, tempfiles, unittest]
 import repro_build_engine
 import repro_interface_artifacts
 import repro_tool_profiles
+import repro_test_support/process_fixtures
 
 proc writeRawTool(dir, name, body: string): tuple[url, sha256: string] =
   createDir(dir)
@@ -69,6 +70,11 @@ proc resultFor(run: BuildRunResult; id: string): ActionResult =
 suite "tarball provisioning edges":
   putEnv("REPRO_CACHE_DISABLE", "1")
   let tempRoot = createTempDir("repro-provision-edges-", "")
+  # Removed when THIS process exits. Suite-level code runs in every
+  # process the runner starts -- one per case, plus its ``--list-json``
+  # probe -- and nothing removed this directory in any of them. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(tempRoot)
   let storeRoot = tempRoot / "store"
 
   test "a 7z archive depends on the 7-Zip provisioning edge":

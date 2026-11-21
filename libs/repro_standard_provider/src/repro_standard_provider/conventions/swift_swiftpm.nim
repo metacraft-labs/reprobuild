@@ -5,10 +5,9 @@
 ## siblings. Recognises a ``Package.swift`` at the project root and
 ## shells out to the stock ``swift`` driver for a single offline
 ## ``swift build -c release --quiet`` invocation. The action graph is
-## intentionally coarse: one build action that produces
-## ``.build/release/<target>`` (or ``.build/release/<target>.exe`` on
-## Windows) per declared executable, and ``.build/release/lib<target>.a``
-## per declared library.
+## intentionally coarse: one discovery edge asks SwiftPM for its release
+## output directory, then one build edge owns that complete output tree.
+## This covers executable, static, dynamic and automatic library products.
 ##
 ## **Distinction from a hypothetical future Tier 2c Swift provider.**
 ## A Tier 2c Swift provider would intercept the SwiftPM build plan and
@@ -51,30 +50,15 @@
 ##     external deps.
 ##
 ## **Emitted actions**:
-##   1. ``swift-swiftpm-build`` — single ``<swift> build -c release
-##      --quiet`` action under the project root. Inputs: ``Package.swift``
-##      plus every ``.swift`` source file recursively walked under
-##      ``Sources/`` (excluding ``.build/`` / ``.repro/`` / ``.git/``).
-##      Outputs: one ``.build/release/<target>[.exe]`` per declared
-##      executable, ``.build/release/lib<target>.a`` per declared
-##      library. Uses ``automaticMonitorPolicy`` (automatic monitoring is
-##      the spec baseline for opaque tools, Reprobuild-Development M17):
-##      ``swift build`` spawns ``swiftc`` worker processes and the engine
-##      monitors their real read-set instead of trusting only statically
-##      declared inputs.
-##
-## **Output paths**:
-##   * Executable: ``<projectRoot>/.build/release/<targetName>`` (on
-##     POSIX) or ``<projectRoot>/.build/release/<targetName>.exe`` (on
-##     Windows). The Swift Windows toolchain produces ``.exe`` files.
-##   * Library: ``<projectRoot>/.build/release/lib<targetName>.a``
-##     (static archive — SwiftPM's default product for ``.library``
-##     targets when ``type: .static`` is declared or when no type is
-##     specified for a library product).
-##   * NB: on some toolchain shapes SwiftPM may write into
-##     ``.build/<arch>-<os>-<vendor>/release/<target>`` with a symlink
-##     at ``.build/release/`` pointing into it; the convention predicts
-##     the symlink path which is stable across toolchain hosts.
+##   1. ``swift-swiftpm-outputs`` asks ``swift build -c release
+##      --show-bin-path`` for the actual triple-specific release directory,
+##      then writes a pre-execution dynamic-output fragment.
+##   2. ``swift-swiftpm-build`` runs ``swift build -c release --quiet``.
+##      Its obligatory output is that complete directory. SwiftPM's
+##      ``.build/release`` convenience symlink is an optional companion.
+##      The directory contains native executable/library products and the
+##      modules/objects of automatic libraries, which emit no archive.
+##      Both edges use ``automaticMonitorPolicy``.
 ##
 ## **Honest scope** (deferred):
 ##   * External SwiftPM dependencies — the convention assumes a
@@ -116,6 +100,7 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 
 const
   ScratchDirName* = ".repro/build"
@@ -271,7 +256,14 @@ proc swiftExecutable(): string =
   ## Resolve a ``swift`` driver on PATH. On Windows the binary is
   ## usually ``swift.exe``; ``findExe`` resolves both shapes via
   ## PATHEXT.
-  findExe("swift")
+  ##
+  ## The link is kept, not followed. A toolchain may ship ``swift`` as a
+  ## symlink to a multi-call driver that dispatches on ``argv[0]`` (the
+  ## nixpkgs Swift 6.3.3 toolchain has ``bin/swift -> swift-driver``).
+  ## Following it makes both edges run ``swift-driver build ...``, which
+  ## the driver refuses with "invalid driver name: swift-driver". Same rule
+  ## as ``repro_core/host_tar.nim`` §"WHY followSymlinks = false".
+  findExe("swift", followSymlinks = false)
 
 proc swiftSwiftpmRecognize(projectRoot: string;
                            request: ProviderGraphRequest): bool {.gcsafe.} =
@@ -314,10 +306,13 @@ proc producedExecutablePath*(projectRoot, targetName: string): string =
 
 proc producedLibraryPath*(projectRoot, targetName: string): string =
   ## Predicted output path for a SwiftPM static-library target.
-  ## SwiftPM's ``-c release`` build writes static libraries as
-  ## ``.build/release/lib<targetName>.a`` (the ``lib`` prefix is added
-  ## automatically by SwiftPM's build system, matching the cross-
-  ## platform Unix archive-naming convention).
+  ## SwiftPM's ``-c release`` build writes a static library product as
+  ## ``.build/release/lib<targetName>.a`` on every platform, Windows
+  ## included: ``BuildParameters.binaryRelativePath`` names it
+  ## ``lib<name>`` + ``Triple.staticLibraryExtension``, which is ``.a``
+  ## for every triple (swift-package-manager
+  ## ``Sources/SPMBuildCore/BuildParameters/BuildParameters.swift`` and
+  ## ``Sources/Basics/Triple+Basics.swift``, release/5.10 through main).
   let libName = "lib" & targetName & ".a"
   projectRoot / SwiftBuildSubdir / SwiftReleaseSubdir / libName
 
@@ -370,33 +365,20 @@ proc collectSwiftInputs(projectRoot: string): seq[string] =
 
 proc emitBuildAction(projectRoot, swiftExe: string;
                      members: seq[SwiftSwiftpmMember]): BuildActionDef =
-  ## Emit the single ``swift build -c release --quiet`` action. Outputs
-  ## the predicted ``.build/release/<target>[.exe]`` path under the
-  ## project root for each declared executable, plus
-  ## ``.build/release/lib<target>.a`` for each declared library.
-  ##
-  ## ``-c release`` enforces the Release-configuration build (debug
-  ## builds use ``.build/debug/``; the convention hard-pins release so
-  ## predicted output paths are stable). ``--quiet`` keeps per-action
-  ## logs readable — SwiftPM's default chatter (one line per source
-  ## file compiled, plus link summary) is verbose for non-trivial
-  ## packages.
-  var outputs: seq[string] = @[]
-  for m in members:
-    case m.kind
-    of ssmExecutable:
-      outputs.add(producedExecutablePath(projectRoot, m.name))
-    of ssmLibrary:
-      outputs.add(producedLibraryPath(projectRoot, m.name))
-  if outputs.len > 0:
-    createDir(extendedPath(parentDir(outputs[0])))
+  ## Build the complete release tree named by SwiftPM's own path query.
+  ## A directory output preserves all product forms and automatic-library
+  ## module files without inventing a static archive obligation.
+  discard members
+  let fragment = projectRoot / ScratchDirName / "swift-outputs.dyndep"
   let argv = @[swiftExe, "build", "-c", "release", "--quiet"]
   let inputs = collectSwiftInputs(projectRoot)
   buildAction(
     id = "swift-swiftpm-build",
     call = inlineExecCall(argv, projectRoot),
-    inputs = inputs,
-    outputs = outputs,
+    deps = @["swift-swiftpm-outputs"],
+    inputs = inputs & @[fragment],
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
     # ``swift build`` spawns ``swiftc`` worker processes (one per
     # source file, plus the linker invocation) whose FS reads aren't
@@ -453,9 +435,18 @@ proc swiftSwiftpmEmitFragment(projectRoot: string;
     let pkg = syntheticPackage(projectRoot, members)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
+      let outputFragment = projectRoot / ScratchDirName / "swift-outputs.dyndep"
+      let discovery = buildAction(
+        id = "swift-swiftpm-outputs",
+        call = inlineExecCall(@[getAppFilename(), "--swift-output-directory",
+          swiftExecutable(), projectRoot, outputFragment], projectRoot),
+        inputs = collectSwiftInputs(projectRoot),
+        outputs = @[outputFragment], pool = "compile",
+        dependencyPolicy = automaticMonitorPolicy(),
+        commandStatsId = "swift-swiftpm.outputs")
       let buildAct = emitBuildAction(projectRoot,
         swiftExecutable(), members)
-      defaultTarget(target("default", @[buildAct]))
+      defaultTarget(target("default", @[discovery, buildAct]))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

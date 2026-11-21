@@ -21,6 +21,8 @@ import ../../repro_binary_cache_server/src/repro_binary_cache_server/index as bc
 import ../../repro_peer_cache/src/repro_peer_cache/auth as peerAuth
 import ../../blake3/src/blake3
 import ../../repro_daemon_core/src/repro_daemon_core
+when not defined(windows):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 const ServerBinary = "build/test-bin" / addFileExt("repro_binary_cache", ExeExt)
 
@@ -161,7 +163,13 @@ proc pickEmbeddedEndpoint(tag: string): string =
   when defined(windows):
     r"\\.\pipe\repro-daemon-test-" & tag & "-" & $rand(999_999_999)
   else:
-    getTempDir() / ("repro-daemon-test-" & tag & "-" & $rand(999_999) & ".sock")
+    # Not under getTempDir(): under the persistent runner's long TMPDIR
+    # (`/var/lib/github-runner-work/<runner>/.cache/reprobuild-test-tmp/<n>`)
+    # the "ipc-cc" endpoint and its atomic-publish staging name exceed the
+    # 107-byte sun_path limit and the embedded daemon never listens
+    # (process_fixtures.shortSocketDirAtProcessExit says why).
+    shortSocketDirAtProcessExit("p6-") /
+      ("daemon-" & tag & "-" & $rand(999_999) & ".sock")
 
 suite "A2.5 P6 — daemon substitute over real IPC":
   test "substituteViaDaemon traverses the IPC codec end-to-end":

@@ -205,15 +205,33 @@ suite "e2e_dev_env_provider_compile_edge":
       check fileExists(second.providerArtifactPath & ".inputs")
 
       # These entries are not read by the recipe. The discovery helper must
-      # not turn its own directory scan into a monitored compile dependency.
+      # not turn its own directory scan into a monitored compile dependency,
+      # and the compiler's own scan of the project root, glob(3) looking for
+      # `*.nimble`, depends only on the entries that match it
+      # (`Incremental-Invalidation.md` §"Validation Criteria", pattern-scoped
+      # enumerations).
       createDir(c.projectRoot / "build")
       createDir(c.projectRoot / "src")
       writeFile(c.projectRoot / "unused.nim", "const unused = true\n")
       let afterBuildDirectories = computeDevEnvEdge(cfg)
+      # Name the input when this misses, rather than leaving the reader a
+      # bare `cdMiss`: the engine's own reason is the diagnosis.
+      checkpoint("after build directories: cacheMissReason=" &
+        afterBuildDirectories.providerCompileAction.cacheMissReason)
       check not afterBuildDirectories.stats.providerBuildLaunched
       check afterBuildDirectories.stats.providerBuildSkippedFresh
       check afterBuildDirectories.providerCompileAction.cacheDecision == cdHit
       check afterBuildDirectories.artifactPath.bakedValue() == "alpha"
+
+      # The other direction of that scan: a `.nimble` appearing beside the
+      # recipe changes how Nim resolves the recipe's package, so the compile
+      # must run again. Without it the hit above could come from a project
+      # root that is in no key at all.
+      writeFile(c.projectRoot / "fixture.nimble", "# a package file\n")
+      let afterNimble = computeDevEnvEdge(cfg)
+      check afterNimble.stats.providerBuildLaunched
+      check afterNimble.providerCompileAction.cacheDecision == cdMiss
+      check afterNimble.artifactPath.bakedValue() == "alpha"
 
     test "provider_compile_rebuilds_when_the_recipe_reads_directory_membership":
       let c = prepareCase("repro-provider-directory-read", "alpha")

@@ -17,7 +17,7 @@
 ## plan is declared. Until then those modes raise ``EGitToolUnresolved``
 ## with a clear message naming the active ``--tool-provisioning=`` mode.
 
-import std/[os, osproc, strtabs, strutils]
+import std/[os, osproc, streams, strtabs, strutils]
 
 import repro_core/codec
 import repro_hash
@@ -215,6 +215,49 @@ proc receivedObjectStoreEnv*(store: ReceivedObjectStore): StringTableRef =
   ## ``scrubbedGitRepositoryEnv()``, so a non-hook caller is unaffected.
   withReceivedObjectStore(scrubbedGitRepositoryEnv(), store)
 
+proc forwardingObjectStoreEnv*(store: ReceivedObjectStore): StringTableRef =
+  ## The environment for a ``pre-receive``-time push of the RECEIVED objects to
+  ## a DIFFERENT repository: the gateway forwarding a push upstream before it
+  ## lets its own refs move.
+  ##
+  ## This is the narrow exception to the rule on ``withReceivedObjectStore``
+  ## ("never for a child that touches a different repository"), and it needs
+  ## its own shape rather than either of the two above:
+  ##
+  ##   - ``scrubbedGitRepositoryEnv`` alone cannot see the objects being
+  ##     forwarded: until the hook accepts they exist only in the quarantine.
+  ##   - ``receivedObjectStoreEnv`` passes ``GIT_OBJECT_DIRECTORY`` through, so
+  ##     the forwarding git would treat this repository's quarantine as its
+  ##     primary object store; and it passes ``GIT_QUARANTINE_PATH``, under
+  ##     which git refuses every ref update ("ref updates forbidden inside
+  ##     quarantine environment").
+  ##
+  ## So both of those are DROPPED, and the quarantine is offered back only as a
+  ## read-only alternate (``GIT_ALTERNATE_OBJECT_DIRECTORIES``), which is all
+  ## the sending side needs to read the objects it is forwarding. With nothing
+  ## captured this is exactly ``scrubbedGitRepositoryEnv()``.
+  ##
+  ## The alternate is the SENDER's only. On a local-path upstream the
+  ## receiving ``receive-pack`` is a child of the forward, and git clears the
+  ## repository variables (``GIT_ALTERNATE_OBJECT_DIRECTORIES`` included) for
+  ## a local transport's child, so the upstream neither advertises the
+  ## gateway's refs nor satisfies its connectivity check from objects that
+  ## exist only here. ``t_gateway_push_fails_when_the_upstream_rejects_the_
+  ## forward`` (``upstream_receive_side_never_borrows_the_gateways_objects``)
+  ## pins that: the upstream must end up self-contained.
+  result = scrubbedGitRepositoryEnv()
+  if not store.captured:
+    return
+  var alternates: seq[string]
+  for binding in store.bindings:
+    if binding.name == "GIT_OBJECT_DIRECTORY" and binding.value.len > 0:
+      alternates.insert(binding.value, 0)
+    elif binding.name == "GIT_ALTERNATE_OBJECT_DIRECTORIES" and
+        binding.value.len > 0:
+      alternates.add(binding.value)
+  if alternates.len > 0:
+    result["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = alternates.join($PathSep)
+
 proc modeName(mode: ToolProvisioningMode): string =
   case mode
   of tpmUnspecified: "unspecified"
@@ -348,3 +391,21 @@ proc ensureGitToolResolvable*(mode: ToolProvisioningMode;
   ## invoke this helper — that wiring is M9's responsibility. M1's
   ## scope is the library and this helper.
   resolveGitTool(mode, pathEnv)
+
+proc queryGit*(identity: GitToolIdentity; args: openArray[string]):
+    tuple[code: int; output: string] =
+  ## Run a control-plane query through an already resolved Git profile.
+  ## Keep argv separate from the executable; neither PATH nor a shell may
+  ## select a different program. Build/cache actions still use git_actions,
+  ## which incorporates this identity's digest in their fingerprints.
+  ## Repository-local hook variables must not redirect a query to a different
+  ## checkout. Preserve the remaining environment for Git's runtime libraries.
+  if identity.binaryPath.len == 0 or not identity.binaryPath.isAbsolute:
+    raise newException(EGitToolUnresolved,
+      "a Git query requires an absolute resolved executable path")
+  let child = startProcess(identity.binaryPath, args = @args,
+    env = scrubbedGitRepositoryEnv(), options = {poStdErrToStdOut})
+  defer: child.close()
+  child.inputStream.close()
+  result.output = child.outputStream.readAll()
+  result.code = child.waitForExit()

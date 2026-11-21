@@ -10,12 +10,14 @@
 ##
 ##   1. ``test_switch_mainline_sends_each_repo_to_its_declared_branch``
 ##      Three fragments declaring `dev` / `latest` / `live`; every repo lands
-##      on its own, the report's per-entry ``targetBranch`` records which, and
-##      ``[workspace].branch`` is deliberately NOT rewritten because no single
-##      branch describes the workspace.
+##      on its own, the report's per-entry ``targetBranch`` and role fields
+##      (``role``, ``resolvedRole``, ``roleBranch``, ``fallbackPath``) record
+##      which, and ``[workspace].branch`` is deliberately NOT rewritten because
+##      no single branch describes the workspace.
 ##   2. ``test_switch_mainline_refuses_fragment_without_branch``
-##      A revision-only fragment has no ``branch`` to target — exit 2, named
-##      with its fragment path, nothing mutated.
+##      A revision-only fragment declares no mainline, so it does not load:
+##      the switch is refused before anything moves, naming the fragment and
+##      ``repo.mainline`` — not reported per repo under a refusal tag.
 ##   3. ``test_switch_mainline_rejects_branch_positional``
 ##      ``--mainline dev`` is a usage error, not a precedence question.
 ##   4. ``test_switch_fetch_by_default_fast_forwards_behind_branch``
@@ -139,7 +141,7 @@ proc projectToml(seeds: seq[RepoSeed]): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"mainline-fixture\"\n" &
-    "default_revision = \"main\"\n\n"
+    "\n"
   for s in seeds:
     result.add("[[remote]]\nname = \"" & s.name & "-origin\"\nfetch = \"" &
       fileUrl(s.origin) & "\"\n\n")
@@ -149,17 +151,17 @@ proc projectToml(seeds: seq[RepoSeed]): string =
   result.add("]\n")
 
 proc fragmentToml(name, branch: string; useBranchField: bool): string =
-  ## ``useBranchField = false`` writes a revision-only fragment, which is the
-  ## shape that leaves ``ResolvedRepo.branch`` empty and so has no
-  ## ``--mainline`` target.
+  ## ``useBranchField = false`` writes a revision-only fragment: it declares no
+  ## mainline, which no fragment may omit (Workspace-Branch-Roles.md §3.3), so
+  ## the manifest does not load.
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"" & name & "\"\n" &
     "path = \"" & name & "\"\n" &
     "remote = \"" & name & "-origin\"\n"
   if useBranchField:
-    result.add("branch = \"" & branch & "\"\n")
+    result.add("mainline = \"" & branch & "\"\n")
   else:
     result.add("revision = \"" & branch & "\"\n")
 
@@ -245,6 +247,15 @@ suite "repro switch --mainline / --fetch":
       check entryByName(report, "prod")["targetBranch"].getStr() == "dev"
       check entryByName(report, "specs")["targetBranch"].getStr() == "latest"
       check entryByName(report, "infra")["targetBranch"].getStr() == "live"
+      # §4.4's role fields name the role each target came from.
+      check report["role"].getStr() == "mainline"
+      for (name, branch) in [("prod", "dev"), ("specs", "latest"),
+                             ("infra", "live")]:
+        let entry = entryByName(report, name)
+        check entry["role"].getStr() == "mainline"
+        check entry["resolvedRole"].getStr() == "mainline"
+        check entry["roleBranch"].getStr() == branch
+        check entry["fallbackPath"].len == 0
 
       # Each repo was already on its own mainline (that is what `git clone`
       # leaves you on), so this is the no-op arm — the value under test is
@@ -275,21 +286,21 @@ suite "repro switch --mainline / --fetch":
 
       cloneAll(gitBin, fx)
       seedMetadata(fx, "main")
+      let prodBefore = currentBranch(gitBin, fx.workspaceRoot / "prod")
 
       let res = invokeSwitch(fx, @["--mainline"])
-      check res.code == 2
+      checkpoint(res.output)
+      check res.code != 0
+      # Principle 2: the diagnostic must name the offending FRAGMENT and the
+      # key it lacks, since that is the file and the line the operator has to
+      # edit.
+      check (fx.workspaceRoot / "repos" / "specs.toml") in res.output
+      check "repo.mainline" in res.output
+      # The retired per-repo refusal tag is gone with the shape it reported.
+      check "no_mainline_branch_refused" notin res.output
 
-      let report = readReport(fx)
-      check report["exitCode"].getInt() == 2
-      let specsEntry = entryByName(report, "specs")
-      check specsEntry["outcome"].getStr() == "no_mainline_branch_refused"
-      # Principle 2: the diagnostic must name the offending FRAGMENT, since
-      # that is the file the operator has to edit.
-      check specsEntry["diagnostic"].getStr().contains("specs")
-      check specsEntry["diagnostic"].getStr().contains("branch")
-
-      # Refuse-and-report mutated nothing.
-      check currentBranch(gitBin, fx.workspaceRoot / "prod") == "dev"
+      # Refused before anything moved.
+      check currentBranch(gitBin, fx.workspaceRoot / "prod") == prodBefore
 
   test "test_switch_mainline_rejects_branch_positional":
     let gitBin = findExe("git")

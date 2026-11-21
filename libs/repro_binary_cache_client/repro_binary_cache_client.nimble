@@ -13,7 +13,7 @@
 version       = "0.1.0"
 author        = "Metacraft Labs"
 description   = "Binary-cache substitution client (ReproOS-Generations-And-Foreign-Packages A2.5)"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "src"
 
 requires "nim >= 2.2.0"

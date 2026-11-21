@@ -1,0 +1,58 @@
+{
+  "format": "repro.provisioning-contributions",
+  "schemaVersion": 1,
+  "contributions": [
+    {
+      "targetPackage": "gm5-home-pc-only",
+      "targetInterfaceFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "contributor": "github:example/gm5b-brew-fixture",
+      "developInterface": false,
+      "nixProvisioning": [],
+      "tarballProvisioning": [],
+      "scoopProvisioning": [],
+      "homebrewProvisioning": [
+        {
+          "packageName": "gm5-home-pc-only",
+          "contributor": "github:example/gm5b-brew-fixture",
+          "kind": "formula",
+          "token": "gm5b-only",
+          "tap": "example/tap",
+          "location": {
+            "file": "repro.nim",
+            "line": 13
+          }
+        }
+      ],
+      "location": {
+        "file": "repro.nim",
+        "line": 10
+      }
+    },
+    {
+      "targetPackage": "ripgrep",
+      "targetInterfaceFingerprint": "0000000000000000000000000000000000000000000000000000000000000000",
+      "contributor": "github:example/gm5b-brew-fixture",
+      "developInterface": false,
+      "nixProvisioning": [],
+      "tarballProvisioning": [],
+      "scoopProvisioning": [],
+      "homebrewProvisioning": [
+        {
+          "packageName": "ripgrep",
+          "contributor": "github:example/gm5b-brew-fixture",
+          "kind": "cask",
+          "token": "gm5b-ripgrep",
+          "tap": "",
+          "location": {
+            "file": "repro.nim",
+            "line": 23
+          }
+        }
+      ],
+      "location": {
+        "file": "repro.nim",
+        "line": 20
+      }
+    }
+  ]
+}

@@ -39,6 +39,34 @@ proc stableBinDir*(stateDir: string): string =
 proc generationBinDir*(stateDir, generationId: string): string =
   generationDir(stateDir, generationId) / "bin"
 
+proc profileBinComponents*(platform: string): seq[string] =
+  ## The directory a user's `PATH` carries to reach the active
+  ## generation's launchers, relative to the state directory, on
+  ## `platform` (`linux`, `macos`, `windows`): `current/bin` through the
+  ## `current` symlink on POSIX, the stable mirror `bin` on Windows
+  ## (Home-Profile-Generations-And-State.md "State Directory"). It never
+  ## names a generation, so it survives every apply and rollback.
+  if platform == "windows": @[StableBinDirName]
+  else: @[CurrentSymlinkName, "bin"]
+
+proc profileBinDir*(stateDir: string): string =
+  ## `profileBinComponents` of the platform this binary runs on, under
+  ## `stateDir`.
+  result = stateDir
+  for component in profileBinComponents(HostStatePlatform):
+    result = result / component
+
+proc defaultProfileBinLocation*(platform: string): StateDirLocation =
+  ## The profile bin directory of a host of `platform` that uses the
+  ## OS-default state directory (`defaultStateDirLocation`): what
+  ## `repro home export` publishes as `concerns.profileBin`, so the Nix side
+  ## of a concern split can put the launchers of the concerns Reprobuild
+  ## applies on `PATH` without restating the layout
+  ## (Gradual-Nix-To-Reprobuild-Migration.md §Concern-scoped apply).
+  result = defaultStateDirLocation(platform)
+  for component in profileBinComponents(platform):
+    result.components.add component
+
 proc clearDirEntries(dir: string) =
   if not dirExists(extendedPath(dir)):
     return

@@ -71,6 +71,10 @@
 #
 #   scripts/check_suite_case_counts.sh [repo-root]
 #
+#   SUITE_CASE_COUNTS_BASE=<rev>  the revision to ATTRIBUTE drift against (see
+#                                 below). Optional; resolved automatically when
+#                                 unset.
+#
 # Exit codes:
 #   0 -- both artifacts match the tree.
 #   1 -- one or both are stale; stderr names the sources that moved and the
@@ -80,6 +84,24 @@
 # fails: they name different things for different reasons, and a contributor
 # who has to build to fix one of them wants to know that on the first attempt
 # rather than after regenerating another and pushing again.
+#
+# WHY A REFUSAL SAYS WHOSE DRIFT IT IS
+#
+# A stale baseline on the mainline is inherited by every push and pull request
+# after it, and a refusal naming files the pusher never touched teaches them to
+# read the whole job as noise -- which is observably what happened for five
+# consecutive `dev` commits (reprobuild-pm issue 2026-10-01). So on drift the
+# two artifact checks measure the same drift at a base revision and print an
+# attribution block: what this change introduced, and what was already stale
+# at the base. The verdict is unchanged -- the tree being published is stale
+# either way. The base is, in order:
+#   1. $SUITE_CASE_COUNTS_BASE, when set and non-empty (CI sets it);
+#   2. $PRE_COMMIT_FROM_REF -- the remote's current sha, which the pre-commit
+#      framework sets at the pre-push stage -- unless empty or all zeros (a
+#      new branch);
+#   3. `git merge-base HEAD @{upstream}`;
+#   4. none: the refusal says so and how to supply one.
+# A candidate that is not a commit in this repository is skipped, not used.
 #
 # Wired in four places, deliberately:
 #   - flake.nix's `pre-commit-check`, at the `pre-push` stage (this hook);
@@ -135,12 +157,37 @@ if ! command -v "${python_bin}" >/dev/null 2>&1; then
   exit 1
 fi
 
+is_commit() {
+  [ -n "$1" ] && git rev-parse --verify --quiet "$1^{commit}" >/dev/null 2>&1
+}
+attribution_base=""
+attribution_source=""
+if [ -n "${SUITE_CASE_COUNTS_BASE:-}" ] && is_commit "${SUITE_CASE_COUNTS_BASE}"; then
+  attribution_base="${SUITE_CASE_COUNTS_BASE}"
+  attribution_source="SUITE_CASE_COUNTS_BASE"
+elif [ -n "${PRE_COMMIT_FROM_REF:-}" ] &&
+     [ -n "${PRE_COMMIT_FROM_REF//0/}" ] &&
+     is_commit "${PRE_COMMIT_FROM_REF}"; then
+  attribution_base="${PRE_COMMIT_FROM_REF}"
+  attribution_source="the remote ref being pushed over"
+else
+  merge_base="$(git merge-base HEAD '@{upstream}' 2>/dev/null || true)"
+  if is_commit "${merge_base}"; then
+    attribution_base="${merge_base}"
+    attribution_source="the merge base with @{upstream}"
+  fi
+fi
+attribute_args=()
+if [ -n "${attribution_base}" ]; then
+  attribute_args=(--attribute-to "${attribution_base}")
+fi
+
 # `set -e` is in force, so each check is run with its status captured rather
 # than as a bare command: both have to run even when the first one fails.
 counts_status=0
-"${python_bin}" "${inventory}" --check-static-case-counts || counts_status=$?
+"${python_bin}" "${inventory}" --check-static-case-counts ${attribute_args[@]+"${attribute_args[@]}"} || counts_status=$?
 entries_status=0
-"${python_bin}" "${inventory}" --check-inventory || entries_status=$?
+"${python_bin}" "${inventory}" --check-inventory ${attribute_args[@]+"${attribute_args[@]}"} || entries_status=$?
 # The third check is not a third view of the same set. The two above both
 # derive what they compare from repro_tests.nim, so a test file that was
 # never enrolled is outside both by construction: it is not reported as
@@ -175,6 +222,19 @@ fi
 {
   echo
   echo "push refused: the checked-in description of the test suite is stale."
+  if [ "${counts_status}" -ne 0 ] || [ "${entries_status}" -ne 0 ]; then
+    if [ -n "${attribution_base}" ]; then
+      echo "  The \"attribution against\" block(s) above separate what this"
+      echo "  change introduced from what was already stale at"
+      echo "  $(git rev-parse --short "${attribution_base}") (${attribution_source}). Either way the tree"
+      echo "  is stale and the remedy below is the same."
+    else
+      echo "  note: no base revision to attribute the drift against, so it"
+      echo "  cannot say which entries this change introduced. Set"
+      echo "  SUITE_CASE_COUNTS_BASE=<rev> (e.g. the branch you started from),"
+      echo "  or give this branch an upstream."
+    fi
+  fi
   if [ "${counts_status}" -ne 0 ]; then
     echo
     echo "  ${baseline}"
@@ -190,10 +250,11 @@ fi
   fi
   if [ "${sources_status}" -ne 0 ]; then
     echo
-    echo "  A test source in the tree is in no build edge, so nothing"
-    echo "  compiles it and nothing runs it. Enrol it by regenerating the"
-    echo "  edge table and commit repro_tests.nim alongside your change:"
+    echo "  A test source in the tree is in no build edge or is an uninvoked"
+    echo "  shell test script. Enrol Nim sources by regenerating the edge table:"
     echo "    ${regenerate_edges}"
+    echo "  For shell scripts, enrol them, delete them if obsolete, or record"
+    echo "  them in scripts/uninvoked-shell-tests-baseline.txt."
   fi
   if [ "${parity_status}" -ne 0 ]; then
     echo

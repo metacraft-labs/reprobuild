@@ -15,6 +15,7 @@
 ##     is reclaimed — we check `gc/pending-deletion/` exists at most)
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_home_generations
 import repro_local_store

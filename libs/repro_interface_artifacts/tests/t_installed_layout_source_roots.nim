@@ -15,6 +15,7 @@
 import std/[os, osproc, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
+from repro_core/source_root import resolveReprobuildSourceRoot
 
 const ChildFlag = "--installed-layout-child"
 
@@ -26,6 +27,12 @@ if paramCount() == 1 and paramStr(1) == ChildFlag:
   delEnv(SeededSourceEnvironmentVar)
   for (name, _) in InstalledSourcePackageTrees:
     delEnv(name)
+  delEnv("REPROBUILD_REPO_ROOT")
+  delEnv("REPROBUILD_LIBS_DIR")
+  # Before any seeding: the resolver's own installed-layout arm, which the
+  # profile compile relies on (GM1w), must reach the same root the seeding
+  # is about to export.
+  echo "RESOLVED_BEFORE_SEEDING=", resolveReprobuildSourceRoot()
   ensureInstalledSourcePackageEnvironment()
   echo "REPROBUILD_SOURCE_ROOT=", getEnv("REPROBUILD_SOURCE_ROOT")
   echo "REPRO_TEST_ADAPTERS_SRC=", getEnv("REPRO_TEST_ADAPTERS_SRC")
@@ -90,6 +97,8 @@ suite "installed-layout source roots":
     let expectedAdapters = prefix / InstalledSourceTreesSubdir /
       "reprobuild-test-adapters/src"
     check output.contains("REPROBUILD_SOURCE_ROOT=" & expectedRoot)
+    # The seeded root and the resolver's answer are one definition.
+    check output.contains("RESOLVED_BEFORE_SEEDING=" & expectedRoot)
     check output.contains("REPRO_TEST_ADAPTERS_SRC=" & expectedAdapters)
     # Not shipped in this prefix, so not seeded from it.
     check output.contains("IO_MON_SRC=\n") or

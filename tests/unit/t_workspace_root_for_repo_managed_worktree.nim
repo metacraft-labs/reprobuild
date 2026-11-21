@@ -47,4 +47,13 @@ suite "workspace root discovery for repo-managed worktrees":
         q(worktree) & " main")
 
       check sameFile(workspaceRootForRepo(worktree), workspace)
+      # ``runquotaSourceRoot`` prefers $RUNQUOTA_SRC when it names a real
+      # checkout, and the dev shell now exports the sibling checkout itself
+      # (not a /nix/store copy). This case is about discovery from the
+      # worktree, so the harness's own value must not answer for it.
+      let savedRunquotaSrc = getEnv("RUNQUOTA_SRC")
+      let hadRunquotaSrc = existsEnv("RUNQUOTA_SRC")
+      delEnv("RUNQUOTA_SRC")
+      defer:
+        if hadRunquotaSrc: putEnv("RUNQUOTA_SRC", savedRunquotaSrc)
       check sameFile(runquotaSourceRoot(worktree), workspace / "runquota")

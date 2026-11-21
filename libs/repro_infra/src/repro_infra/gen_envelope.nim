@@ -34,6 +34,17 @@
 ##   6. profileText         length-prefixed UTF-8 (the applied system.nim)
 ##   7. appliedCount        u32 LE
 ##   8. noOpCount           u32 LE
+##   9. previousGenerationId length-prefixed UTF-8 (schema 2 only; the
+##                          generation `current` named when this one was
+##                          committed, "" for the first)
+##
+## Schema 2 added field 9. It is an input to the generation id, so two
+## commits within one second get distinct ids (reprobuild-pm issue
+## 2026-10-18-system-generation-ids-collide-within-one-second), and it
+## orders generations whose whole-second `activationTimestamp`s tie. The
+## reader accepts schema 1 (no field 9, read as "") so generations written
+## by earlier builds stay listed and remain rollback targets; the writer
+## always writes schema 2.
 ##
 ## The writer / reader are STRICT — extra body bytes, a bad checksum,
 ## or an unsupported schema version fail closed via `EPlanCorrupt`
@@ -41,6 +52,8 @@
 ## envelope).
 
 import std/[algorithm, os, strutils]
+when defined(posix):
+  import std/posix
 
 import blake3
 import repro_core
@@ -50,7 +63,9 @@ import ./state_dir
 
 const
   GenMagic* = "RBSG"
-  GenSchemaVersion*: uint16 = 1
+  GenSchemaVersion*: uint16 = 2
+  GenSchemaVersionV1: uint16 = 1
+    ## Readable, never written: carries no `previousGenerationId`.
   GenHeaderSize = 4 + 2 + 4
   GenTrailerSize = 32
 
@@ -66,6 +81,9 @@ type
     profileText*: string
     appliedCount*: int
     noOpCount*: int
+    previousGenerationId*: string
+      ## The generation `current` named when this one was committed ("" for
+      ## the first generation of a state dir, and for schema-1 envelopes).
 
   GenerationRecord* = object
     ## One enumerated system-scope generation. `isActive` is true when
@@ -88,6 +106,7 @@ proc encodeBody(env: GenerationEnvelope): seq[byte] =
   result.writeString(env.profileText)
   result.writeU32Le(uint32(env.appliedCount))
   result.writeU32Le(uint32(env.noOpCount))
+  result.writeString(env.previousGenerationId)
 
 proc encodeGeneration*(env: GenerationEnvelope): seq[byte] =
   ## Serialize a generation envelope to RBSG bytes. Deterministic for
@@ -120,7 +139,7 @@ proc decodeGenerationBytes*(bytes: openArray[byte];
       raisePlanCorrupt("magic", filePath & ": expected '" & GenMagic & "'")
   var pos = 4
   let version = readU16Le(bytes, pos)
-  if version != GenSchemaVersion:
+  if version != GenSchemaVersion and version != GenSchemaVersionV1:
     raisePlanCorrupt("schemaVersion",
       filePath & ": unsupported RBSG schema version " & $version)
   let bodyLen = int(readU32Le(bytes, pos))
@@ -146,6 +165,8 @@ proc decodeGenerationBytes*(bytes: openArray[byte];
   result.profileText = readString(bytes, pos)
   result.appliedCount = int(readU32Le(bytes, pos))
   result.noOpCount = int(readU32Le(bytes, pos))
+  if version >= GenSchemaVersion:
+    result.previousGenerationId = readString(bytes, pos)
   if pos != bodyEnd:
     raisePlanCorrupt("body",
       filePath & ": trailing " & $(bodyEnd - pos) &
@@ -157,7 +178,11 @@ proc decodeGenerationBytes*(bytes: openArray[byte];
 
 proc writeGenerationEnvelope*(pointerFilePath: string;
                               env: GenerationEnvelope) =
-  ## Atomically write the generation envelope (tmp-then-rename).
+  ## Atomically and durably write the generation envelope: a temporary
+  ## file, fsynced, renamed over the target, and the directory fsynced, so
+  ## a power cut after this returns cannot bring back a missing or
+  ## zero-length envelope (the generation would exist under `current` with
+  ## no record of what it is).
   let bytes = encodeGeneration(env)
   let parent = parentDir(pointerFilePath)
   if parent.len > 0:
@@ -166,10 +191,24 @@ proc writeGenerationEnvelope*(pointerFilePath: string;
   for i, b in bytes:
     s[i] = char(b)
   let tmp = pointerFilePath & ".tmp"
-  writeFile(tmp, s)
-  if fileExists(pointerFilePath):
-    removeFile(pointerFilePath)
-  moveFile(tmp, pointerFilePath)
+  when defined(posix):
+    var f: File
+    if not open(f, tmp, fmWrite):
+      raise newException(IOError, "cannot write " & tmp)
+    try:
+      f.write(s)
+      f.flushFile()
+      if posix.fsync(f.getFileHandle()) != 0:
+        raiseOSError(osLastError(), "fsync " & tmp)
+    finally:
+      f.close()
+    moveFile(tmp, pointerFilePath)    # rename(2) over the old envelope
+    if parent.len > 0: fsyncDirPath(parent)
+  else:
+    writeFile(tmp, s)
+    if fileExists(pointerFilePath):
+      removeFile(pointerFilePath)
+    moveFile(tmp, pointerFilePath)
 
 proc readGenerationEnvelope*(pointerFilePath: string): GenerationEnvelope =
   if not fileExists(pointerFilePath):
@@ -183,6 +222,43 @@ proc readGenerationEnvelope*(pointerFilePath: string): GenerationEnvelope =
 # ---------------------------------------------------------------------------
 # Generation enumeration (`repro system history`).
 # ---------------------------------------------------------------------------
+
+proc orderTiesByCommitChain(sorted: seq[GenerationRecord]):
+    seq[GenerationRecord] =
+  ## `activationTimestamp` has whole-second resolution, so generations
+  ## committed within one second tie. Within each run of tied records, put
+  ## them in commit order: a record whose `previousGenerationId` names
+  ## another record of the same run comes after that record. Records with
+  ## no such link keep the id order `sorted` already has (the only order
+  ## schema-1 envelopes, which record no predecessor, can have). The
+  ## result is deterministic for a fixed directory.
+  var i = 0
+  while i < sorted.len:
+    var j = i
+    while j + 1 < sorted.len and
+        sorted[j + 1].envelope.activationTimestamp ==
+        sorted[i].envelope.activationTimestamp:
+      inc j
+    var pending = sorted[i .. j]
+    while pending.len > 0:
+      # The first pending record whose predecessor is not itself still
+      # pending. Should no record qualify (a cycle, which this writer
+      # cannot produce: a predecessor is always committed first), the
+      # first in id order is taken so the walk always terminates.
+      var pick = 0
+      for k, rec in pending:
+        var waits = false
+        for other in pending:
+          if other.generationId != rec.generationId and
+              other.generationId == rec.envelope.previousGenerationId:
+            waits = true
+            break
+        if not waits:
+          pick = k
+          break
+      result.add(pending[pick])
+      pending.delete(pick)
+    i = j + 1
 
 proc enumerateSystemGenerations*(stateDir: string): seq[GenerationRecord] =
   ## Walk `<state-dir>/generations/` and return one record per
@@ -214,6 +290,7 @@ proc enumerateSystemGenerations*(stateDir: string): seq[GenerationRecord] =
     if a.envelope.activationTimestamp < b.envelope.activationTimestamp: -1
     elif a.envelope.activationTimestamp > b.envelope.activationTimestamp: 1
     else: cmp(a.generationId, b.generationId))
+  result = orderTiesByCommitChain(result)
 
 proc resolveGenerationId*(stateDir, requested: string): string =
   ## Resolve a (possibly partial) generation id to a full id. An empty

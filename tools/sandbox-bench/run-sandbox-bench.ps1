@@ -31,8 +31,8 @@ if (-not (Test-Path $WsbFile)) {
   Fail "bench.wsb not found at $WsbFile"; exit 1
 }
 
-# VC++ DLL prep - shared with the migration harness.
-$vcDstDir = Join-Path (Split-Path $ScriptDir -Parent) 'sandbox-migration\vcruntime'
+# VC++ DLL prep - local to sandbox-bench.
+$vcDstDir = Join-Path $ScriptDir 'vcruntime'
 if (-not (Test-Path $vcDstDir)) { New-Item -ItemType Directory -Path $vcDstDir -Force | Out-Null }
 $vcDlls = @('vcruntime140.dll','vcruntime140_1.dll','msvcp140.dll',
             'msvcp140_1.dll','msvcp140_2.dll','concrt140.dll','vccorlib140.dll')

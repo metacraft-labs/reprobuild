@@ -13,7 +13,7 @@ KScreenLocker session-bus wiring, plasma-discover updater, plasma-pa
 audio applet) are called out as post-PoC follow-ups but not implemented
 in this milestone.
 
-* DE-K2 - vm-harness Hyper-V Plasma boot test (consumes the rootfs
+* DE-K2 - gosti Hyper-V Plasma boot test (consumes the rootfs
   layout decided here).
 * DE-H1 / DE-G1 - parallel Hyprland / GNOME architecture docs.
 * DEM - Multi-DE composition (single ISO + GRUB / login-time selection).
@@ -330,7 +330,7 @@ DesktopNames=KDE
 `TryExec=` lets SDDM hide the session entry if the startplasma-wayland
 binary isn't on PATH (defensive; the symlink-farm always plants it).
 
-## Risks for DE-K2 (vm-harness boot test)
+## Risks for DE-K2 (gosti boot test)
 
 1. **Cascade G blocks the actual boot gate uniformly (same as DE-H2 /
    DE-G2).** The R9 systemd dbus.socket non-activation issue surfaced by

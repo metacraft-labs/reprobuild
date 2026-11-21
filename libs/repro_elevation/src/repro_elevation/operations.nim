@@ -20,6 +20,8 @@
 
 import std/[strutils]
 
+import repro_dsl_stdlib/packages/apt_closure
+
 import ./errors
 import ./os_system_parse
 import ./posix_system_parse
@@ -331,6 +333,29 @@ type
       ## set, NO `--cap-drop`, NO `--seccomp`. The user-namespace +
       ## mount-namespace bubblewrap creates are MECHANISM (the privilege
       ## needed to bind-mount without root), not an isolation policy.
+    pokLinuxDpkgDiversion = "linux.dpkgDiversion"
+      ## A local dpkg diversion of a package-owned path (ReproOS add-on
+      ## mode): `dpkg-divert --local --rename --divert <path>.distrib
+      ## --add <path>` moves the package's file aside, so dpkg installs
+      ## every later version of it at `<path>.distrib` and the path itself
+      ## is free for a file the profile owns. The destroy direction is
+      ## `dpkg-divert --local --rename --remove <path>`, which moves the
+      ## package's file back. Debian and Ubuntu only (refused where dpkg is
+      ## absent). See dpkg-divert(1).
+    pokSystemdUnitState = "systemd.unitState"
+      ## Enable/disable and start/stop a unit the add-on does not own, and
+      ## nothing else about it (ReproOS Add-On Mode §4.1, `unitState`).
+    pokLinuxAddOnTool = "linux.addOnTool"
+      ## A wrapper under `/etc/repro/bin` running a command from a
+      ## `package(apt)` closure through the sandbox launcher (§4.1).
+    pokSystemdSystemDropIn = "systemd.systemDropIn"
+      ## A drop-in of a unit the profile does not own:
+      ## `/etc/systemd/system/<unit>.d/50-repro-<name>.conf`, followed by
+      ## `systemctl daemon-reload` (ReproOS Add-On Mode §4.1, `dropIn`).
+    pokLinuxSysusersEntry = "linux.sysusersEntry"
+      ## One sysusers.d(5) fragment, `/etc/sysusers.d/repro-<name>.conf`,
+      ## applied with `systemd-sysusers <file>` (§4.1, `sysusers`). The
+      ## destroy direction removes the fragment and never the account.
     pokInlineExecCall = "reprobuild.inlineExecCall"
       ## Windows-System-Resources Phase E: the cross-cutting privileged
       ## execution of an `inlineExecCall(...)` build-graph edge tagged
@@ -527,6 +552,21 @@ type
       suContent*: string
       suEnabled*: bool
       suDestroy*: bool
+      suAptClosureLock*: string
+        ## A `package(apt)` closure lock (`repro-apt-closure-lock v1`), or
+        ## "". When set, `suContent` is the RENDERED unit (it already binds
+        ## the closure prefix) and the driver realises the closure into
+        ## `/repro/store` before writing it. ReproOS Add-On Mode §8.3.
+      suRestartHeld*: bool
+        ## `restartIfChanged = false` in the profile: a RUNNING unit whose
+        ## file, closure or dependency changed is NOT restarted; the apply
+        ## reports "pending restart" instead (Add-On spec §7.3). Default
+        ## false, so an omitted flag restarts.
+      suRestartRequested*: bool
+        ## Set by the apply step when a resource this unit `depends_on` was
+        ## not a no-op in the same apply. The unit file is unchanged, so
+        ## the dispatch would otherwise take the cache-hit path and the new
+        ## configuration would wait for an unrelated restart (§7.3).
     of pokLaunchdSystemDaemon:
       ## Write `/Library/LaunchDaemons/<sdaLabel>.plist` and
       ## `launchctl bootstrap system`. `sdaProgramArgs` is the daemon
@@ -742,6 +782,42 @@ type
       darwinModuleName*: string
       darwinModuleContent*: string
       darwinModuleDestroy*: bool
+    of pokLinuxDpkgDiversion:
+      ## Divert `ddPath` (absolute, below `/etc/` or `/usr/local/etc/`)
+      ## to `ddPath & ".distrib"`. `ddDestroy` selects the removal.
+      ddPath*: string
+      ddDestroy*: bool
+    of pokSystemdUnitState:
+      ## Converge only `systemctl enable|disable` and `start|stop` of
+      ## `usName`, a unit the add-on does not own. `usDestroy` forgets the
+      ## requirement and changes nothing on the host.
+      usName*: string
+      usEnabled*: bool
+      usRunning*: bool
+      usDestroy*: bool
+    of pokLinuxAddOnTool:
+      ## Write `/etc/repro/bin/<atCommand>` and the launcher manifest beside
+      ## it, so an operator runs `atProgram` from the closure
+      ## `atAptClosureLock` pins; the driver realises the closure first.
+      atCommand*: string
+      atAptClosureLock*: string
+      atProgram*: string
+      atDestroy*: bool
+    of pokSystemdSystemDropIn:
+      ## Write `diContent` to `systemDropInPath(diUnit, diName)` and
+      ## `systemctl daemon-reload`. `diDestroy` removes the file (and its
+      ## `.d` directory when that leaves it empty) and reloads.
+      diUnit*: string
+      diName*: string
+      diContent*: string
+      diDestroy*: bool
+    of pokLinuxSysusersEntry:
+      ## Write `seContent` (one rendered sysusers.d line) to
+      ## `sysusersFragmentPath(seName)` and run `systemd-sysusers <file>`.
+      ## `seDestroy` removes the fragment only.
+      seName*: string
+      seContent*: string
+      seDestroy*: bool
     of pokLinuxFhsSandbox:
       ## Launch `fsbBinPath` under bubblewrap with the M0-locked
       ## transparency-posture invocation shape:
@@ -1064,6 +1140,11 @@ proc requiresElevation*(kind: PrivilegedOperationKind): bool =
   of pokLinuxNixosSystemModule: true
   of pokMacosDarwinSystemModule: true
   of pokLinuxFhsSandbox: true
+  of pokLinuxDpkgDiversion: true
+  of pokSystemdUnitState: true
+  of pokLinuxAddOnTool: true
+  of pokSystemdSystemDropIn: true
+  of pokLinuxSysusersEntry: true
   of pokInlineExecCall: true
 
 # ---------------------------------------------------------------------------
@@ -1106,6 +1187,11 @@ proc privilegedOperationKindFromString*(s: string): PrivilegedOperationKind =
   of $pokLinuxNixosSystemModule: pokLinuxNixosSystemModule
   of $pokMacosDarwinSystemModule: pokMacosDarwinSystemModule
   of $pokLinuxFhsSandbox: pokLinuxFhsSandbox
+  of $pokLinuxDpkgDiversion: pokLinuxDpkgDiversion
+  of $pokSystemdUnitState: pokSystemdUnitState
+  of $pokLinuxAddOnTool: pokLinuxAddOnTool
+  of $pokSystemdSystemDropIn: pokSystemdSystemDropIn
+  of $pokLinuxSysusersEntry: pokLinuxSysusersEntry
   of $pokInlineExecCall: pokInlineExecCall
   else:
     raise newException(ValueError,
@@ -1873,7 +1959,11 @@ proc isSafeDropInBasename*(name: string): bool =
   ## profile carrying `name = "../etc/shadow"` cannot escape the fixed
   ## `/etc/X.d/` directory and so a `name = "x; rm -rf /"` cannot
   ## smuggle a shell metacharacter past the closed-set validator.
-  let n = name.strip()
+  # Validated as written, never stripped: a caller that derived a path
+  # or an argv element from the unstripped text would name something
+  # else than what was checked (a name with surrounding whitespace is
+  # refused by the charset below).
+  let n = name
   if n.len == 0:
     return false
   if n == "." or n == "..":
@@ -1891,7 +1981,11 @@ proc isSafeSysctlKey*(key: string): bool =
   ## key flows into `sysctl -n <key>` AND into a `<key> = <value>` file
   ## line; both surfaces need a closed charset so neither path can
   ## smuggle a shell metacharacter or a stray `=` past validation.
-  let k = key.strip()
+  # Validated as written, never stripped: a caller that derived a path
+  # or an argv element from the unstripped text would name something
+  # else than what was checked (a name with surrounding whitespace is
+  # refused by the charset below).
+  let k = key
   if k.len == 0:
     return false
   for ch in k:
@@ -1931,7 +2025,11 @@ proc isSafePosixUserOrGroupName*(name: string): bool =
   ## Refuses `.` and `..` explicitly as defence-in-depth. The trailing
   ## `$` that Samba accounts use is permitted only at the end of the
   ## name (a `$` mid-string is refused).
-  let n = name.strip()
+  # Validated as written, never stripped: a caller that derived a path
+  # or an argv element from the unstripped text would name something
+  # else than what was checked (a name with surrounding whitespace is
+  # refused by the charset below).
+  let n = name
   if n.len == 0:
     return false
   if n == "." or n == "..":
@@ -2254,6 +2352,18 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not isSafeUnitName(op.suName):
       return "systemd.systemUnit name '" & op.suName &
         "' is not a safe single-segment unit file name"
+    if op.suAptClosureLock.len > 0 and not op.suDestroy:
+      # The broker realises whatever the lock pins, as root, so the lock
+      # must parse and the unit must pass every refusal of the renderer
+      # (``checkUnitForAptClosure``) with the closure's lines present and
+      # binding exactly the prefix the lock pins: a frame whose content and
+      # lock disagree is refused before any write.
+      try:
+        checkUnitForAptClosureLock(op.suContent, op.suAptClosureLock,
+          unitName = op.suName)
+      except EAptClosureLock, EAptClosureUnit:
+        return "systemd.systemUnit '" & op.suName & "': " &
+          getCurrentExceptionMsg()
   of pokLaunchdSystemDaemon:
     if not isSafeDaemonLabel(op.sdaLabel):
       return "launchd.systemDaemon label '" & op.sdaLabel &
@@ -2525,6 +2635,62 @@ proc operationValidationError*(op: PrivilegedOperation): string =
     if not op.darwinModuleName.endsWith(".nix"):
       return "macos.darwinSystemModule name '" & op.darwinModuleName &
         "' must end with '.nix' (Nix module convention)"
+  of pokLinuxDpkgDiversion:
+    # A diversion is limited to the same roots `fs.systemFile` may write:
+    # the file the profile puts at the diverted path is an `fs.systemFile`,
+    # so a diversion anywhere else would be a diversion nothing may fill.
+    if not op.ddPath.startsWith("/") or "/../" in op.ddPath or
+        op.ddPath.endsWith("/..") or op.ddPath.endsWith("/"):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' must be an absolute file path without '..' segments"
+    # Canonical as well: dpkg's diversion database and the add-on's
+    # ownership lookups compare the path text, so `/etc//x` would divert a
+    # name no package lists while the kernel resolves it to the package's
+    # file.
+    let canon = nonCanonicalPathError("linux.dpkgDiversion path", op.ddPath)
+    if canon.len > 0:
+      return canon
+    if not (op.ddPath.startsWith("/etc/") or
+            op.ddPath.startsWith("/usr/local/etc/")):
+      return "linux.dpkgDiversion path '" & op.ddPath &
+        "' is outside /etc/ and /usr/local/etc/"
+    for c in op.ddPath:
+      if c in {'\0', '\n', '\r'}:
+        return "linux.dpkgDiversion path contains a control character"
+  of pokSystemdUnitState:
+    if not isSafeUnitName(op.usName) or not hasKnownUnitSuffix(op.usName):
+      return "systemd.unitState name '" & op.usName &
+        "' is not a safe unit name with a unit-type suffix"
+  of pokLinuxAddOnTool:
+    if not isSafeAddOnToolCommand(op.atCommand):
+      return "linux.addOnTool command '" & op.atCommand &
+        "' is not a safe command name (letters, digits, '.', '-', '_', '+')"
+    if not isPosixAbsolutePath(op.atProgram):
+      return "linux.addOnTool program '" & op.atProgram &
+        "' is not an absolute path inside the closure"
+    if not op.atDestroy:
+      try:
+        discard parseAptClosureLock(op.atAptClosureLock)
+      except EAptClosureLock as ex:
+        return "linux.addOnTool '" & op.atCommand & "': " & ex.msg
+  of pokSystemdSystemDropIn:
+    if not isSafeUnitName(op.diUnit) or not hasKnownUnitSuffix(op.diUnit):
+      return "systemd.systemDropIn unit '" & op.diUnit &
+        "' is not a safe unit name with a unit-type suffix"
+    if not isSafeFragmentName(op.diName):
+      return "systemd.systemDropIn name '" & op.diName &
+        "' is not a safe single-segment fragment name"
+  of pokLinuxSysusersEntry:
+    if not isSafePosixUserOrGroupName(op.seName):
+      return "linux.sysusersEntry name '" & op.seName &
+        "' is not a safe account name"
+    if not op.seDestroy:
+      # One line, no second entry smuggled in: the fragment is exactly
+      # the entry the profile declared.
+      let body = op.seContent.strip(leading = false, chars = {'\n'})
+      if '\n' in body or body.len == 0 or body[0] notin {'u', 'g'}:
+        return "linux.sysusersEntry '" & op.seName &
+          "' content is not one sysusers.d entry line"
   of pokLinuxFhsSandbox:
     # `fsbBinPath` must be a POSIX absolute path (leading `/`). The
     # driver does NOT canonicalize — `..` collapse / symlink resolve

@@ -61,7 +61,7 @@ suite "t_test_binary_run_one_writes_result_file":
     let (exitCode, doc) = runOne(binary, "arithmetic::addition",
       resultFilePath("pass"))
     check exitCode == 0
-    check doc != nil
+    check not doc.isNil
     if doc != nil:
       assertResultShape(doc)
       check doc["status"].getStr() == "PASS"
@@ -71,7 +71,7 @@ suite "t_test_binary_run_one_writes_result_file":
     let (exitCode, doc) = runOne(binary, "arithmetic::subtraction_fails",
       resultFilePath("fail"))
     check exitCode == 1
-    check doc != nil
+    check not doc.isNil
     if doc != nil:
       assertResultShape(doc)
       check doc["status"].getStr() == "FAIL"
@@ -82,7 +82,7 @@ suite "t_test_binary_run_one_writes_result_file":
     let (exitCode, doc) = runOne(binary, "markers::skipped",
       resultFilePath("skip"))
     check exitCode == 2
-    check doc != nil
+    check not doc.isNil
     if doc != nil:
       assertResultShape(doc)
       check doc["status"].getStr() == "SKIP"
@@ -92,7 +92,7 @@ suite "t_test_binary_run_one_writes_result_file":
     let (exitCode, doc) = runOne(binary, "nonexistent::test",
       resultFilePath("missing"))
     check exitCode != 0
-    check doc != nil
+    check not doc.isNil
     if doc != nil:
       assertResultShape(doc)
       check doc["status"].getStr() == "FAIL"

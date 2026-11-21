@@ -88,6 +88,8 @@ type
     conflicts*: seq[AptDependencyAtom]    ## ``Conflicts:``
     descriptionFirstLine*: string  ## first line of ``Description:``
       ## (rest discarded for parser memory)
+    essential*: bool               ## ``Essential: yes`` (Debian Policy
+                                   ## §3.8: depended on implicitly)
 
   AptIndex* = object
     ## The parsed Packages index. Two lookup tables back the closure
@@ -318,6 +320,8 @@ proc parsePackageRecord(stanza: string): AptPackageRecord =
     result.replaces = parseSimpleAtomList(fields["replaces"])
   if fields.hasKey("conflicts"):
     result.conflicts = parseSimpleAtomList(fields["conflicts"])
+  if fields.hasKey("essential"):
+    result.essential = fields["essential"].strip().toLowerAscii() == "yes"
   if fields.hasKey("description"):
     let d = fields["description"]
     let nl = d.find('\n')

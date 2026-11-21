@@ -28,7 +28,7 @@
 ## being re-executed with ``__repro-extract-interface`` on its argv, running
 ## its suite again, and spawning the next generation without bound.
 
-import std/[os, unittest]
+import std/[os, tempfiles, unittest]
 import repro_cli_support
 
 suite "self-spawn image identity":
@@ -64,11 +64,26 @@ suite "self-spawn image identity":
         # Portable Linux launchers run through ld-linux, so the actual image
         # path can name the loader. The configured public launcher must win
         # even after the running engine has declared its role.
-        let launcher = getTempDir() / "repro-release-launcher"
-        putEnv("REPRO_PUBLIC_CLI_PATH", launcher)
-        check internalReproHelperCliPathForTest() == launcher
-        check internalReproHelperCliPathForTest(launcher) == launcher
-        delEnv("REPRO_PUBLIC_CLI_PATH")
+        # The variable is honoured only when it names an existing file, so
+        # the stand-in launcher is created for real.
+        let launcherDir = createTempDir("repro-release-launcher-", "")
+        let launcher = launcherDir / "reprobuild"
+        writeFile(launcher, "#!/bin/sh\n")
+        try:
+          putEnv("REPRO_PUBLIC_CLI_PATH", launcher)
+          check internalReproHelperCliPathForTest() == launcher
+          check internalReproHelperCliPathForTest(launcher) == launcher
+          check selfSpawnIoMonitorPath("") == launcher
+
+          # A stale variable naming nothing is ignored, not trusted: the
+          # self-spawn falls back to the declared running image instead of
+          # handing every helper spawn a path that does not exist.
+          putEnv("REPRO_PUBLIC_CLI_PATH", launcherDir / "moved-away")
+          check internalReproHelperCliPathForTest() ==
+            os.normalizedPath(getAppFilename())
+        finally:
+          delEnv("REPRO_PUBLIC_CLI_PATH")
+          removeDir(launcherDir)
       finally:
         resetRunningImageReproCliMarkForTest()
 

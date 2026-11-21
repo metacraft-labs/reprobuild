@@ -393,6 +393,52 @@ proc failedResolution(path, reason: string): PathResolution =
   PathResolution(status: prsFailed, path: path, existing: "", missing: 0,
                  reason: reason)
 
+proc resolveExistingTraversal*(path: string): PathResolution =
+  ## Resolve an EXISTING path without lexically removing a parent walk.
+  ## Unlike `resolveCanonicalPath`, no absent prefix may be reconstructed.
+  ## Monitor consumers use this through the last `..`, then append a possibly
+  ## absent suffix. Windows normalizes parent components before opening a
+  ## path, so resolve each component first and apply a parent to its physical
+  ## directory; a junction is traversed before the parent is considered.
+  if path.len == 0:
+    return failedResolution(path, "an empty path cannot be resolved")
+  var candidate = path
+  when defined(windows):
+    let spelling = (if path.isAbsolute: path else: getCurrentDir() & "/" & path).
+      replace('\\', '/')
+    var parts = spelling.split('/')
+    var first = 0
+    if spelling.startsWith("//"):
+      if parts.len < 4:
+        return failedResolution(path, "incomplete UNC path")
+      candidate = "//" & parts[2] & "/" & parts[3] & "/"
+      first = 4
+    elif parts.len > 0 and parts[0].endsWith(":"):
+      candidate = parts[0] & "/"
+      first = 1
+    else:
+      return failedResolution(path, "path has no absolute volume root")
+    for index in first ..< parts.len:
+      let component = parts[index]
+      if component.len == 0 or component == ".":
+        continue
+      # Resolve BEFORE appending any next component. Thus neither Win32's
+      # path parser nor extendedPath can pop an unresolved junction.
+      let prefix = rawResolve(candidate)
+      if prefix.kind != rrkResolved or not dirExists(prefix.value):
+        return failedResolution(path, "path prefix is not an existing directory")
+      if component == "..":
+        candidate = ancestorOf(prefix.value)
+        if candidate.len == 0:
+          candidate = prefix.value
+      else:
+        candidate = prefix.value / component
+  let resolved = rawResolve(candidate)
+  if resolved.kind != rrkResolved:
+    return failedResolution(path, "path cannot be resolved: " & resolved.reason)
+  PathResolution(status: prsResolved, path: resolved.value,
+    existing: resolved.value, missing: 0, reason: "")
+
 proc resolveCanonicalPath*(path: string): PathResolution =
   ## The canonical spelling of `path` as the FILESYSTEM states it: every
   ## reparse point traversed, every component in its on-disk case (Windows),

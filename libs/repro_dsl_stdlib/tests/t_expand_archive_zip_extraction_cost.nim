@@ -27,6 +27,9 @@
 ## destination itself. Both are pinned here.
 
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
+from std/sysrand import urandom
+import repro_test_support/process_fixtures
+import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/packages/expand_archive
 
@@ -53,6 +56,39 @@ $zip.Dispose()
 $fs.Dispose()
 """
 
+proc fixtureRoot(): string =
+  # Acquire only inside an executing case; register cleanup before creation.
+  var nonce: string
+  for value in urandom(8):
+    nonce.add(toHex(value, 2))
+  result = getTempDir() / ("repro expand o'archive " & $getCurrentProcessId() & "-" & nonce)
+  doAssert not dirExists(result) and not fileExists(result) and not symlinkExists(result)
+  releaseDirAtProcessExit(result)
+  createDir(result)
+
+const SingleEntryFixtureScript = """
+$ProgressPreference = 'SilentlyContinue'
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$encoding = if ($env:REPRO_ZIP_FIXTURE_UTF8 -eq '1') {
+  [System.Text.Encoding]::UTF8
+} else {
+  [System.Text.Encoding]::GetEncoding(437)
+}
+$fs = [System.IO.File]::Open($env:REPRO_ZIP_FIXTURE_PATH, 'CreateNew')
+try {
+  $zip = New-Object System.IO.Compression.ZipArchive($fs, 'Create', $false, $encoding)
+  try {
+    $entry = $zip.CreateEntry($env:REPRO_ZIP_FIXTURE_NAME)
+    $stream = $entry.Open()
+    try {
+      $body = [System.Text.Encoding]::ASCII.GetBytes('encoded-body')
+      $stream.Write($body, 0, $body.Length)
+    } finally { $stream.Dispose() }
+  } finally { $zip.Dispose() }
+} finally { $fs.Dispose() }
+"""
+
 type RunResult = object
   exitCode: int
   output: string
@@ -63,13 +99,16 @@ proc findPowerShell(): string =
   else:
     findExe("pwsh")
 
-proc runArgv(argv: seq[string]; tempDir = ""): RunResult =
+proc runArgv(argv: seq[string]; tempDir = ""; extraEnv: StringTableRef = nil): RunResult =
   ## Runs `argv` with no shell in between, as the engine spawns an
   ## `inlineExecCall`. With `tempDir` set, the child's temporary directory
   ## is pointed there so a scratch file would be observable.
   var env = newStringTable(modeCaseInsensitive)
   for key, value in envPairs():
     env[key] = value
+  if not extraEnv.isNil:
+    for key, value in extraEnv:
+      env[key] = value
   if tempDir.len > 0:
     env["TEMP"] = tempDir
     env["TMP"] = tempDir
@@ -116,16 +155,12 @@ proc zipFilesUnder(dir: string): seq[string] =
 
 suite "expandArchive Windows zip extraction, run for real":
   let ps = findPowerShell()
-  # The paths carry a space and an apostrophe. Both must survive the argv
-  # and the single-quoted PowerShell literals.
-  let root = getTempDir() / ("repro expand o'archive " & $getCurrentProcessId())
-  removeDir(root)
-  createDir(root)
 
   test "an extension-less archive extracts completely with no scratch copy":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       let archive = root / "small.archive"
       makeFixture(ps, archive, 10)
       let dest = root / "small dest"
@@ -149,6 +184,7 @@ suite "expandArchive Windows zip extraction, run for real":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       let archive = root / "overwrite.archive"
       makeFixture(ps, archive, 5)
       let dest = root / "overwrite dest"
@@ -169,6 +205,7 @@ suite "expandArchive Windows zip extraction, run for real":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       let archive = root / "escape.archive"
       makeFixture(ps, archive, 0, escape = true)
       let parent = root / "escape parent"
@@ -182,6 +219,7 @@ suite "expandArchive Windows zip extraction, run for real":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       check runArgv(lowered(ps, root / "missing.archive",
         root / "missing dest")).exitCode != 0
       let corrupt = root / "corrupt.archive"
@@ -192,6 +230,7 @@ suite "expandArchive Windows zip extraction, run for real":
     if ps.len == 0:
       skip("no PowerShell on this host; install pwsh to run this case")
     else:
+      let root = fixtureRoot()
       const entries = 3000
       let archive = root / "many.archive"
       makeFixture(ps, archive, entries)
@@ -209,4 +248,57 @@ suite "expandArchive Windows zip extraction, run for real":
       check "S=\"progress\"" notin res.output
       check elapsed < 60.0
 
-  removeDir(root)
+  test "CP437 and flagged UTF-8 names survive the actual lowered reader":
+    if ps.len == 0:
+      skip("no PowerShell on this host; install pwsh to run this case")
+    else:
+      let root = fixtureRoot()
+      for utf8 in [false, true]:
+        let label = if utf8: "utf8" else: "cp437"
+        let name = if utf8: "pkg/雪.nim" else: "pkg/åäö.nim"
+        let archive = root / (label & ".archive")
+        let fixtureEnv = newStringTable(modeCaseInsensitive)
+        fixtureEnv["REPRO_ZIP_FIXTURE_PATH"] = archive
+        fixtureEnv["REPRO_ZIP_FIXTURE_NAME"] = name
+        fixtureEnv["REPRO_ZIP_FIXTURE_UTF8"] = if utf8: "1" else: "0"
+        let made = runArgv(@[ps, "-NoProfile", "-NonInteractive", "-Command",
+          SingleEntryFixtureScript], extraEnv = fixtureEnv)
+        doAssert made.exitCode == 0, made.output
+        let raw = readFile(archive)
+        doAssert raw.len >= 30 and raw[0 .. 3] == "PK\x03\x04"
+        let flags = ord(raw[6]) or (ord(raw[7]) shl 8)
+        let length = ord(raw[26]) or (ord(raw[27]) shl 8)
+        doAssert length > 0 and length <= raw.len - 30
+        check ((flags and 0x800) != 0) == utf8
+        check raw[30 ..< 30 + length] == (if utf8: name else: "pkg/\x86\x84\x94.nim")
+        let destination = root / label
+        createDir(destination)
+        writeFile(destination / "keep.txt", "unrelated-body")
+        for pass in 0 .. 1:
+          let extracted = runArgv(lowered(ps, archive, destination))
+          check extracted.exitCode == 0
+          if extracted.exitCode != 0: echo extracted.output
+          check countFiles(destination) == 2
+          check readFile(destination / name) == "encoded-body"
+          check readFile(destination / "keep.txt") == "unrelated-body"
+
+        # Exercise the actual canonical SDK function as well as the lowered
+        # DSL script; its destination contract is exclusive, not overwrite.
+        let helper = currentSourcePath().parentDir.parentDir.parentDir.parentDir /
+          "windows" / "toolchain-utils.ps1"
+        doAssert fileExists(helper), "canonical SDK helper is required"
+        let bootstrapDestination = root / (label & "-bootstrap")
+        let bootstrapScript = ". " & powershellSingleQuotedLiteral(helper) &
+          "; Expand-ZipArchive -ArchivePath " & powershellSingleQuotedLiteral(archive) &
+          " -Destination " & powershellSingleQuotedLiteral(bootstrapDestination)
+        let bootstrapped = runArgv(@[ps, "-NoProfile", "-NonInteractive", "-Command",
+          bootstrapScript])
+        check bootstrapped.exitCode == 0
+        if bootstrapped.exitCode != 0: echo bootstrapped.output
+        check countFiles(bootstrapDestination) == 1
+        check readFile(bootstrapDestination / name) == "encoded-body"
+        let repeated = runArgv(@[ps, "-NoProfile", "-NonInteractive", "-Command",
+          bootstrapScript])
+        check repeated.exitCode != 0
+        check countFiles(bootstrapDestination) == 1
+        check readFile(bootstrapDestination / name) == "encoded-body"
