@@ -1111,8 +1111,10 @@ libs/repro_standard_provider/tests/test_python_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_rust_convention.nim	nim	15
+libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim	nim	5
 libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim	nim	2
 libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim	nim	12
+libs/repro_standard_provider/tests/test_rust_convention_mode_b_test_target.nim	nim	2
 libs/repro_standard_provider/tests/test_rust_convention_target_edition.nim	nim	1
 libs/repro_standard_provider/tests/test_rust_convention_unit_test_crates.nim	nim	1
 libs/repro_standard_provider/tests/test_rust_direct_convention.nim	nim	14
@@ -2805,7 +2807,7 @@ tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	3
 tests/integration/test_dev_env_local_flake_root.py	python	3
-tests/integration/test_nix_daemon_cache.py	python	2
+tests/integration/test_nix_daemon_cache.py	python	3
 tests/test_dev_env_m9_policy.py	python	11
 tests/unit/t_a_read_only_store_prefix_is_published_read_only_and_still_collectable.nim	nim	10
 tests/unit/t_action_compatibility_key.nim	nim	4

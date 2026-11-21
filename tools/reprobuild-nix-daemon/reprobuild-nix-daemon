@@ -5,6 +5,7 @@ import hashlib
 import json
 import signal
 import os
+import re
 from pathlib import Path
 import shutil
 import socket
@@ -35,9 +36,44 @@ HOST_DYNAMIC_LOADER_ENV = (
 def is_mutable_local_nix_selector(selector: str) -> bool:
     # Same policy as repro_core/nix_evaluation_policy; the cross-language
     # regression exercises this helper and the Nim cache layers together.
-    value = selector.strip()
-    return value in (".", "..") or value.startswith(
-        ("./", "../", ".#", "..#", "/", "path:", "file:", "git+file:"))
+    # Local is decided by where the source is read from, not by a list of
+    # flake types (Foreign-Provisioning-And-Nix-Evaluation-Daemon.md §3
+    # item 4). Nix tries each reading of a reference in turn and, when the
+    # registry and URL readings fail, reads it as a path relative to its
+    # working directory (the workspace). So "remote" is decided positively,
+    # from the exact string ``nix`` receives (nothing is stripped first):
+    # - a reference with no scheme is remote only when the whole string
+    #   matches Nix's registry-name pattern (``id``, ``id/ref``,
+    #   ``id/ref/rev``, then an optional ``#fragment`` in Nix's fragment
+    #   characters, and no ``?query``); ``sub/#x``, ``sub.d#x``,
+    #   ``id?dir=x#y`` and `` id#x`` are paths;
+    # - a reference with a scheme is local for ``path:`` and any ``file``
+    #   transport (``file:``, ``git+file:``, ``hg+file:``,
+    #   ``tarball+file:``, ...), and for any string Nix's URL parser would
+    #   reject (whitespace, a character outside the URL alphabet, a second
+    #   ``#``), which also falls back to a path.
+    # https://github.com/NixOS/nix/blob/master/src/libflake/flakeref.cc
+    # (parseFlakeIdRef, parseURLFlakeRef, parsePathFlakeRefWithFragment).
+    scheme = NIX_SELECTOR_SCHEME.match(selector)
+    if scheme is None:
+        return NIX_REGISTRY_REFERENCE.fullmatch(selector) is None
+    name = scheme.group(1).lower()
+    if name in ("path", "file") or name.endswith("+file"):
+        return True
+    return (selector.count("#") > 1
+            or NIX_URL_REFERENCE.fullmatch(selector) is None)
+
+
+# A URL scheme; Nix's flake-registry reference (its flake-id regex, an
+# optional ``/ref`` whose characters may include ``/``, and its URL fragment
+# characters: RFC 3986 pchar plus ``/ ? " ^`` and space); and the characters
+# a URL reference may carry without Nix's URL parser rejecting it.
+NIX_SELECTOR_SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*):")
+NIX_FRAGMENT_CHARS = r"(?:[A-Za-z0-9._~!$&'()*+,;=:@/? \"^-]|%[0-9A-Fa-f]{2})*"
+NIX_REGISTRY_REFERENCE = re.compile(
+    r"[A-Za-z][A-Za-z0-9_-]*(?:/[A-Za-z0-9@][A-Za-z0-9_./@+-]*)?"
+    r"(?:#" + NIX_FRAGMENT_CHARS + r")?")
+NIX_URL_REFERENCE = re.compile(r"[A-Za-z0-9._~!$&'()*+,;=:@/?#%^-]*")
 
 
 def close_inherited_descriptors() -> None:
