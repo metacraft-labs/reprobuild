@@ -13153,6 +13153,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_solver_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_solver/tests/t_version_strategy_solves_package_by_package.nim",
+    binary: "build/test-bin/t_version_strategy_solves_package_by_package",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_solver_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_standard_provider/tests/test_ada_direct_convention.nim",
     binary: "build/test-bin/test_ada_direct_convention",
     defines: @["reproProviderMode"],
