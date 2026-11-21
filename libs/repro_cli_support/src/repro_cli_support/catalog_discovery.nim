@@ -116,6 +116,13 @@ type
     objectStore*: string
     store: GitStore
     blobs: Table[string, string] ## object id (hex) -> blob id
+    objectCache*: string
+      ## the local index-object cache objects are read through first
+      ## (``cachingSource``); "" reads the shared clone alone
+    projectRoot: string
+    lazy: bool
+      ## opened from the cache by the pinned root (``cachedNimbleIndexAt``):
+      ## the shared clone is read only for an object the cache lacks
 
   CatalogEvidenceFailure* = object
     ## A catalog that could not be read at a locked record's own revision
@@ -145,6 +152,9 @@ type
       ## ``previous`` (diagnostics only).
     declaration*: LocatedCatalogDeclaration
       ## The declaration the answer was read for (diagnostics only).
+    notes*: seq[string]
+      ## What re-selection reports beside the pins: a rewind that
+      ## ``--allow-rewind`` accepted (NPC-AREQ15).
 
   LocatedCatalogDeclaration* = object
     ## The declaration and where each table starts, for diagnostics.
@@ -587,6 +597,19 @@ proc lockPinOf*(d: DiscoveredNimbleIndex): LockedCatalogImport =
 proc isLowerHex64(value: string): bool =
   value.len == 64 and value.allIt(it in {'0'..'9', 'a'..'f'})
 
+proc parseIndexObjectId(hex: string): IndexObjectId =
+  ## A 64-hex index object id (``isLowerHex64``) as its bytes.
+  for i in 0 ..< 32:
+    result[i] = byte(parseHexInt(hex[2 * i .. 2 * i + 1]))
+
+proc nimbleIndexObjectCache*(): string =
+  ## Where Nimble index objects are cached by id: beside the Nimble source
+  ## store, under the user cache directory (objects under ``objects/<id>``).
+  ## Shared by every project of the user: an object is named by its hash,
+  ## so whatever wrote it, it is the same object, and every reader checks
+  ## the hash again.
+  getCacheDir("reprobuild") / "store" / "nimble-index"
+
 proc discoverNimbleIndexAt*(repo, remote, gitRef, revision,
                             projectRoot: string): DiscoveredNimbleIndex =
   ## Read the Nimble index ``remote`` publishes at exactly ``revision``:
@@ -689,11 +712,17 @@ proc discoverNimbleIndexAt*(repo, remote, gitRef, revision,
   if refusals.len > 0:
     discoveryError(where & " publishes an incomplete Nimble index:\n    " &
       refusals.sorted(cmp).join("\n    ") & "\n    fix" & republish[1 .. ^1])
+  # The verified root goes into the object cache by its id, so a later
+  # resolution of a lock that pins this root reads it -- and the shards it
+  # caches as they are read -- without the shared clone (spec § 1.1).
+  let cache = nimbleIndexObjectCache()
+  cacheIndexObject(cache, rootId, rootBytes)
   DiscoveredNimbleIndex(repo: repo, remote: remote, gitRef: gitRef,
     revision: revision, indexIdentity: $rootId, rootId: rootId, root: root,
-    rootTree: rootTree, objectStore: store.gitDir, store: store, blobs: blobs)
+    rootTree: rootTree, objectStore: store.gitDir, store: store, blobs: blobs,
+    objectCache: cache, projectRoot: projectRoot)
 
-proc indexSource*(d: DiscoveredNimbleIndex): IndexObjectSource =
+proc gitIndexSource(d: DiscoveredNimbleIndex): IndexObjectSource =
   ## The index's objects, read from the shared clone at the pinned revision:
   ## each blob by id and re-hashed (git's id), then checked against the
   ## index object id by the index reader.
@@ -726,9 +755,157 @@ proc indexSource*(d: DiscoveredNimbleIndex): IndexObjectSource =
       result = newSeq[byte](text.len)
       for i, c in text: result[i] = byte(ord(c)))
 
+proc materialized*(d: DiscoveredNimbleIndex): DiscoveredNimbleIndex =
+  ## ``d`` with its shared clone read: itself, unless it was opened from the
+  ## cache alone (``cachedNimbleIndexAt``), in which case the pinned
+  ## revision is discovered now -- and must publish the same root.
+  if not d.lazy:
+    return d
+  result = discoverNimbleIndexAt(d.repo, d.remote, d.gitRef, d.revision,
+    d.projectRoot)
+  if result.indexIdentity != d.indexIdentity:
+    discoveryError(catalogName(d.repo, d.remote) & " at " & d.revision &
+      " publishes the Nimble index " & result.indexIdentity & ", not the " &
+      "pinned " & d.indexIdentity)
+
+proc indexSource*(d: DiscoveredNimbleIndex): IndexObjectSource =
+  ## The index's objects: through the local object cache when the index
+  ## has one, the shared clone read only for what it lacks; otherwise from
+  ## the shared clone.
+  if d.objectCache.len == 0:
+    return gitIndexSource(d)
+  let pinned = d
+  cachingSource(d.objectCache, proc (): IndexObjectSource =
+    gitIndexSource(materialized(pinned)))
+
+proc cachedNimbleIndexAt*(pin: LockedCatalogImport;
+                          projectRoot: string): Option[DiscoveredNimbleIndex] =
+  ## The index a lock pins, opened from the local object cache by the
+  ## pinned root id alone -- no git process, no shared clone -- when the
+  ## cache holds that root (spec § 1.1: "it is not read at resolution time
+  ## when the lock already names the root"). Shards are then read from the
+  ## cache, and the shared clone only for a shard it lacks. None when the
+  ## root is not cached, or the pin is not a 64-hex root id.
+  if pin.kind != cikNimbleIndex or not isLowerHex64(pin.interfaceArtifact):
+    return none(DiscoveredNimbleIndex)
+  let cache = nimbleIndexObjectCache()
+  var rootId: IndexObjectId
+  try:
+    rootId = parseIndexObjectId(pin.interfaceArtifact)
+  except CatchableError:
+    return none(DiscoveredNimbleIndex)
+  try:
+    let bytes = readVerified(directorySource(cache), rootId, -1,
+      MaxRootBytes, "root")
+    let root = decodeRoot(bytes)
+    some(DiscoveredNimbleIndex(repo: pin.repo, remote: pin.remote,
+      gitRef: pin.gitRef, revision: pin.revision,
+      indexIdentity: pin.interfaceArtifact, rootId: rootId, root: root,
+      objectCache: cache, projectRoot: projectRoot, lazy: true))
+  except NimbleIndexError:
+    none(DiscoveredNimbleIndex)
+
 proc openNimbleIndex*(d: DiscoveredNimbleIndex): NimbleIndex =
   ## The index for reading: root verified again by its id, shards on demand.
   openIndex(indexSource(d), d.rootId)
+
+proc readPublishedFile*(d: DiscoveredNimbleIndex; name: string;
+                        maxBytes: int): tuple[found: bool; text: string] =
+  ## The file ``name`` at the root of the index repository at the pinned
+  ## revision (``nimble-sources.toml``: the index's own source set, which
+  ## declares its mirrors), read by object id and re-hashed like every
+  ## other object. ``found`` is false when the commit has no such regular
+  ## file; a file larger than ``maxBytes`` is refused unread.
+  let where = catalogName(d.repo, d.remote) & " at " & d.revision
+  let m = materialized(d)
+  for e in verifiedTree(m.store, m.rootTree, where, ""):
+    if e.name == name:
+      if e.mode notin ["100644", "100755"]:
+        discoveryError(where & ": `" & name & "` is not a regular file")
+      try:
+        return (true, m.store.readVerified("blob", e.oid, maxBytes))
+      except ObjectTooLarge as err:
+        discoveryError(where & ": `" & name & "` is refused: " & err.msg)
+  (false, "")
+
+proc descendantDefect(store: GitStore; pinned, candidate: string): string =
+  ## Why ``candidate`` cannot be taken as a refresh of ``pinned``
+  ## (NPC-AREQ15), or "" when it descends from it (or is it). Checked from
+  ## the commit objects of the shared clone: the pinned commit must be
+  ## present and an ancestor of the candidate. An absent pinned commit is a
+  ## refusal, not a pass: without it nothing shows the candidate is newer.
+  if pinned == candidate:
+    return ""
+  let present = store.run(["cat-file", "-e", pinned & "^{commit}"])
+  if present.code != 0:
+    return "the pinned revision " & pinned & " is not in the shared clone " &
+      store.gitDir & ", so whether " & candidate & " descends from it " &
+      "cannot be checked"
+  let r = store.run(["merge-base", "--is-ancestor", pinned, candidate])
+  case r.code
+  of 0: ""
+  of 1: candidate & " does not descend from the pinned revision " & pinned &
+    " (the index's history moved backwards or was rewritten)"
+  else: "whether " & candidate & " descends from " & pinned & " cannot be " &
+    "decided: " & r.errors.strip()
+
+proc rewindCheck(d: CatalogImportDeclaration; revision, projectRoot: string;
+                 incumbent: seq[LockedCatalogImport]; allowRewind: seq[string];
+                 notes: var seq[string]): string =
+  ## NPC-AREQ15 for one ``nimble-index`` import that names a ``ref``: the
+  ## revision the ref names now must descend from the revision the lock
+  ## pins, or ``--allow-rewind`` must name the import. Returns the refusal,
+  ## or "" (adding a note when a rewind was allowed). An import that names
+  ## a ``commit``, or one whose remote changed, is the declaration's own
+  ## explicit choice and is not checked.
+  if d.gitRef.len == 0:
+    return ""
+  for p in incumbent:
+    if p.repo != d.repo or p.remote != d.remote or p.kind != d.kind:
+      continue
+    let store = openCatalogStore(d.repo, d.remote, projectRoot)
+    let defect = descendantDefect(store, p.revision, revision)
+    if defect.len == 0:
+      return ""
+    let who = catalogName(d.repo, d.remote)
+    if d.repo in allowRewind:
+      notes.add(who & ": ref " & d.gitRef.escape() & " now names " &
+        revision & ", which is not a descendant of the pinned " &
+        p.revision & "; accepted because --allow-rewind names \"" & d.repo &
+        "\"")
+      return ""
+    return who & ": refresh refused: ref " & d.gitRef.escape() & " now " &
+      "names " & revision & ", and " & defect & ". A refresh moves a " &
+      "catalog only forward; if this revision is intended, pass " &
+      "--allow-rewind=" & d.repo & " (nothing was written)"
+  ""
+
+proc nimbleIndexHistory*(d: DiscoveredNimbleIndex; fromRevision,
+                         projectRoot: string): seq[DiscoveredNimbleIndex] =
+  ## The index generations published after ``fromRevision`` up to and
+  ## including ``d``'s revision, oldest first: each first-parent commit of
+  ## ``fromRevision..d.revision`` that publishes an index, read like any
+  ## pinned revision. Used to show the origin events since a lock's pin
+  ## (NPC-AREQ19); a commit that cannot be read is skipped, and an
+  ## unrelated ``fromRevision`` yields the target generation alone.
+  if fromRevision == d.revision:
+    return @[]
+  let store = openCatalogStore(d.repo, d.remote, projectRoot)
+  let r = store.run(["rev-list", "--first-parent", "--reverse",
+    fromRevision & ".." & d.revision])
+  if r.code != 0:
+    return @[d]
+  for line in r.output.splitLines():
+    let c = line.strip()
+    if not isLowerHex40(c): continue
+    if c == d.revision:
+      result.add(d)
+      continue
+    try:
+      result.add(discoverNimbleIndexAt(d.repo, d.remote, d.gitRef, c,
+        projectRoot))
+    except CatalogDiscoveryError:
+      discard
 
 # ---------------------------------------------------------------------------
 # The declaration
@@ -1011,12 +1188,18 @@ proc catalogsForBuild*(projectRoot: string; lockPins: seq[LockedCatalogImport];
   answerOf(located, discovered, indexes, claims, projectRoot)
 
 proc catalogsForReselect*(projectRoot: string;
-                          claims: seq[LockedRealization]): CatalogAnswer =
+                          claims: seq[LockedRealization];
+                          incumbent: seq[LockedCatalogImport] = @[];
+                          allowRewind: seq[string] = @[]): CatalogAnswer =
   ## The catalogs explicit re-selection (``repro lock refresh
   ## --provisioning``) selects from: every declared import, at its declared
   ## commit or at the commit its declared ref names NOW. The answer's
-  ## ``pins`` are what the lock is to record.
+  ## ``pins`` are what the lock is to record. A ``nimble-index`` import
+  ## whose ref now names a revision that does not descend from its
+  ## ``incumbent`` pin is refused unless ``allowRewind`` names it
+  ## (NPC-AREQ15; ``rewindCheck``).
   let located = readLocatedCatalogDeclaration(projectRoot)
+  var notes: seq[string] = @[]
   var refusals: seq[string] = @[]
   var discovered: seq[DiscoveredCatalog] = @[]
   var indexes: seq[DiscoveredNimbleIndex] = @[]
@@ -1027,6 +1210,12 @@ proc catalogsForReselect*(projectRoot: string;
         if d.commit.len > 0: d.commit
         else: resolveCatalogRef(d.repo, d.remote, d.gitRef, projectRoot)
       if d.kind == cikNimbleIndex:
+        let rewind = rewindCheck(d, revision, projectRoot, incumbent,
+          allowRewind, notes)
+        if rewind.len > 0:
+          refusals.add(rewind & "\n    (the [[import]] of \"" & d.repo &
+            "\" is at " & at & ")")
+          continue
         let found = discoverNimbleIndexAt(d.repo, d.remote, d.gitRef,
           revision, projectRoot)
         if d.interfaceArtifact.len > 0 and
@@ -1056,7 +1245,93 @@ proc catalogsForReselect*(projectRoot: string;
         "\" is at " & at & ")")
   if refusals.len > 0:
     discoveryError(refusals.sorted(cmp).join("\n  "))
-  answerOf(located, discovered, indexes, claims, projectRoot)
+  result = answerOf(located, discovered, indexes, claims, projectRoot)
+  result.notes = notes
+
+proc nimbleIndexesForSolve*(projectRoot: string;
+                            incumbent: seq[LockedCatalogImport];
+                            reselect: bool; allowRewind: seq[string];
+                            notes: var seq[string]):
+    seq[DiscoveredNimbleIndex] =
+  ## The ``nimble-index`` imports a lock solve resolves `nimble:` names
+  ## through (NPC-AREQ1, NPC-AREQ15). ``reselect`` (``repro lock refresh
+  ## --provisioning``): each at its declared commit, or the commit its ref
+  ## names now, which must descend from the ``incumbent`` pin unless
+  ## ``allowRewind`` names it. Otherwise: each at the revision the lock
+  ## already pins, re-read and checked against the pinned index identity;
+  ## an import the lock does not pin yet, or pins differently from the
+  ## declaration, refuses with the command that pins it. Nothing else is
+  ## read: no provisioning catalog, no shard.
+  let located = readLocatedCatalogDeclaration(projectRoot)
+  let reselectCmd = "repro lock refresh --provisioning " &
+    quoteShell(projectRoot)
+  var refusals: seq[string] = @[]
+  for d in located.declaration.imports:
+    if d.kind != cikNimbleIndex:
+      continue
+    let at = located.path & ":" & $d.line
+    try:
+      if reselect:
+        let revision =
+          if d.commit.len > 0: d.commit
+          else: resolveCatalogRef(d.repo, d.remote, d.gitRef, projectRoot)
+        let rewind = rewindCheck(d, revision, projectRoot, incumbent,
+          allowRewind, notes)
+        if rewind.len > 0:
+          refusals.add(rewind & "\n    (the [[import]] of \"" & d.repo &
+            "\" is at " & at & ")")
+          continue
+        let found = discoverNimbleIndexAt(d.repo, d.remote, d.gitRef,
+          revision, projectRoot)
+        if d.interfaceArtifact.len > 0 and
+            found.indexIdentity != d.interfaceArtifact:
+          refusals.add("catalog \"" & d.repo & "\" (" & d.remote & ") at " &
+            revision & " publishes the Nimble index " & found.indexIdentity &
+            ", but repro-catalogs.toml asserts " & d.interfaceArtifact &
+            " (" & at & ")")
+          continue
+        result.add(found)
+        continue
+      var pin: LockedCatalogImport
+      var pinned = false
+      for p in incumbent:
+        if p.repo == d.repo:
+          pin = p
+          pinned = true
+      if not pinned:
+        refusals.add("the Nimble index \"" & d.repo & "\" (" & d.remote &
+          ", " & at & ") is declared but the committed lock pins no " &
+          "revision of it; pin it with `" & reselectCmd & "`")
+        continue
+      if pin.remote != d.remote or pin.kind != d.kind or
+          (d.commit.len > 0 and pin.revision != d.commit):
+        refusals.add("the committed lock's pin of the Nimble index \"" &
+          d.repo & "\" (" & pin.remote & " at " & pin.revision & ") " &
+          "disagrees with its declaration at " & at & "; re-pin it with `" &
+          reselectCmd & "`")
+        continue
+      # The lock names the root: read it, and the shards, from the local
+      # object cache when it holds them -- no git (spec § 1.1). The cache
+      # is keyed by the pinned root's hash, so it cannot answer for another
+      # index.
+      let cached = cachedNimbleIndexAt(pin, projectRoot)
+      if cached.isSome:
+        result.add(cached.get)
+        continue
+      let found = discoverNimbleIndexAt(pin.repo, pin.remote, pin.gitRef,
+        pin.revision, projectRoot)
+      if found.indexIdentity != pin.interfaceArtifact:
+        refusals.add("catalog \"" & pin.repo & "\" (" & pin.remote &
+          ") at " & pin.revision & " publishes the Nimble index " &
+          found.indexIdentity & ", but the committed lock pins " &
+          pin.interfaceArtifact & "; nothing read at that revision is used")
+        continue
+      result.add(found)
+    except CatalogDiscoveryError as err:
+      refusals.add(err.msg & "\n    (the [[import]] of \"" & d.repo &
+        "\" is at " & at & ")")
+  if refusals.len > 0:
+    discoveryError(refusals.sorted(cmp).join("\n  "))
 
 proc renderCatalogPinChanges*(old, new: seq[LockedCatalogImport]): seq[string] =
   ## One line per catalog import pin that re-selection added, removed or

@@ -2958,11 +2958,21 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       subcmd "solve", help = "Solve the project's lock (written only with " &
           "--write)":
         `lockSolve`
+        flag excludeNewer is string,
+          help = "Exclude catalog versions first seen after this time " &
+            "(Unix seconds, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"
       subcmd "refresh", help = "Solve the project's lock and write it":
         `lockRefresh`
+        flag excludeNewer is string,
+          help = "Exclude catalog versions first seen after this time " &
+            "(Unix seconds, YYYY-MM-DD or YYYY-MM-DDTHH:MM:SSZ)"
         boolFlag provisioning is bool,
           help = "Re-select the lock's provisioning records instead of " &
             "carrying them forward"
+        flag allowRewind is seq[string],
+          help = "With --provisioning: let these catalog imports move to a " &
+            "revision that does not descend from the pinned one " &
+            "(comma-separated)"
         flag allowPinRegression is seq[string],
           help = "Allow these siblings' pins to move backward " &
             "(comma-separated; `$REPRO_ALLOW_PIN_REGRESSION` is read too)"
@@ -2988,7 +2998,8 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
       subcmd "validate", help = "Check the committed lock is loadable, " &
           "consistent and still what a fresh solve gives":
         `lockValidate`
-      subcmd "diff", help = "The provisioning-level difference of two locks":
+      subcmd "diff", help = "The provisioning and catalog-package " &
+          "difference of two locks":
         pos oldLock is string, required = false, help = "The old lock"
         pos newLock is string, required = false, help = "The new lock"
       subcmd "explain", help = "Explain a variant's value from a solver " &

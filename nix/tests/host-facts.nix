@@ -11,7 +11,9 @@
 #     package name; an unclaimed derivation, an unknown cask and a Mac App
 #     Store app are unmapped with reasons), environment, services per
 #     platform, the file targets without the systemd unit files, the
-#     uncategorized dconf keys, and the refusal of an unknown `homebrew` key.
+#     uncategorized dconf keys, the refusal of an unknown `homebrew` key, and
+#     one id reported twice (host-facts-duplicates.nix: agreeing entries are
+#     one fact, entries differing on a compared field are refused).
 #   * BUILD (the derivation, built on this check's system): the document
 #     itself -- its schema fields, every file's id, mode and SHA-256 digest
 #     against digests computed independently (`sha256sum` of the literal
@@ -255,6 +257,12 @@ let
       host = "gm6-host";
       homebrew.taps = [ "gm6/tap" ];
     });
+  }
+  # One id reported twice: agreeing entries are one fact, differing ones are
+  # refused (nix/tests/host-facts-duplicates.nix).
+  // import ./host-facts-duplicates.nix {
+    inherit pkgs;
+    inherit (reprobuildLib) homeManagerFacts;
   };
   failed = lib.attrNames (lib.filterAttrs (_: ok: !ok) results);
 

@@ -2280,9 +2280,12 @@ proc rustCrudeFallback(projectRoot: string;
                        request: ProviderGraphRequest):
                          GraphFragment {.gcsafe.} =
   ## Mode B emitter for Rust projects that can't take the Mode A path
-  ## (the routing in ``rustEmitFragment`` lists the reasons). Delegates to
-  ## ``cargo build --release --locked --offline`` under io-monitor
-  ## monitoring per the M6 spec.
+  ## (§"Recognition" in Rust.md: a ``build.rs``, a non-member dependency,
+  ## a feature, ...). Delegates the default target to
+  ## ``cargo build --release --locked --offline`` and the ``test`` target to
+  ## ``cargo test --release --locked --offline --workspace --no-fail-fast``
+  ## (both through the thin cargo edge, sized by ``-j``), under
+  ## io-monitor monitoring per the M6 spec.
   {.cast(gcsafe).}:
     let cargoExe = cargoExecutable()
     if cargoExe.len == 0:
@@ -2323,6 +2326,29 @@ proc rustCrudeFallback(projectRoot: string;
     let productsFile = projectRoot / ".repro" / "build" / "cargo" /
       (packageName & ".products")
     let argv = edgeCommand(getAppFilename(), productsFile, cargoArgv)
+    # The ``test`` target (Rust.md, "Test commands", Mode B): cargo builds
+    # and runs every test target of every workspace member, as it declares
+    # them (``harness = false`` included), and with ``--no-fail-fast`` runs
+    # every test binary even after one fails, as Mode A runs each test on
+    # its own. It goes through the edge like the build, so it is sized the
+    # same way (``-j`` takes the grant) and the test output passes through.
+    # Without it a workspace that
+    # §"Recognition" sends to Mode B had no ``test`` target at all, so
+    # ``repro build .#test`` ran none of its tests (issue
+    # 2026-11-18-rust-mode-b-emits-no-test-target-so-cargo-test-never-runs).
+    # ``edgeCommand`` always names a products file; the test run has none,
+    # so its argv is spelled out (the same ``-j 0`` the engine fills in).
+    let testArgv = @[getAppFilename(), EdgeHelperFlag, "-j", "0", "--",
+      cargoExe,
+      "test",
+      "--release",
+      "--locked",
+      "--offline",
+      "--workspace",
+      "--no-fail-fast",
+    ]
+    let testStampFile = projectRoot / ".repro" / "build" / "cargo" /
+      (packageName & ".test.stamp")
     result = emitCrudeFragment(
       projectRoot = projectRoot,
       request = request,
@@ -2331,7 +2357,9 @@ proc rustCrudeFallback(projectRoot: string;
       outputDirs = [],
       toolCacheDirs = ["target"],
       outputFiles = [productsFile],
-      widthFlag = "-j")
+      widthFlag = "-j",
+      testArgv = testArgv,
+      testStampPath = testStampFile)
 
 proc rustEmitFragment(projectRoot: string;
                       request: ProviderGraphRequest):

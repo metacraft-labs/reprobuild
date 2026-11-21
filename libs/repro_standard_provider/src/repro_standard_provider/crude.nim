@@ -14,7 +14,8 @@
 ##      Mode A fragment.
 ##
 ## The emitted fragment carries a *single* ``reprobuild.builtin.exec``
-## action whose:
+## build action (plus, when the convention passes a test command, a test
+## run action and its stamp under a separate ``test`` target) whose:
 ##
 ##   * ``argv`` is the native build tool's command line.
 ##   * ``cwd`` is the project root (the native tool relies on running
@@ -228,6 +229,16 @@ proc crudeActionIdFor(packageName: string): string =
     sanitized = "package"
   "crude-build-" & sanitized
 
+proc crudeTestActionIdFor(packageName: string): string =
+  ## Action id of the crude fallback's test run: the build action's id
+  ## with ``crude-test-`` in place of ``crude-build-``.
+  "crude-test-" & crudeActionIdFor(packageName)["crude-build-".len .. ^1]
+
+proc crudeTestStampActionIdFor(packageName: string): string =
+  ## Action id of the stamp after the crude fallback's test run. Its
+  ## prefix differs from the run's, so no package name makes the two equal.
+  "crude-test-stamp-" & crudeActionIdFor(packageName)["crude-build-".len .. ^1]
+
 proc syntheticPackage(projectRoot, packageName: string): PackageDef =
   ## Minimal ``PackageDef`` for ``buildPackageFragment``. Same shape
   ## the Mode A conventions use — the runtime only reads ``packageName``
@@ -251,7 +262,9 @@ proc emitCrudeFragment*(projectRoot: string;
                        inputGlob: openArray[string] = ["**/*"];
                        toolCacheDirs: openArray[string] = [];
                        outputFiles: openArray[string] = [];
-                       widthFlag = ""):
+                       widthFlag = "";
+                       testArgv: openArray[string] = [];
+                       testStampPath = ""):
                          GraphFragment {.gcsafe.} =
   ## ``toolCacheDirs`` are directories the delegated tool owns for its own
   ## reuse (cargo's ``target``): pruned from the inputs like an output
@@ -263,7 +276,18 @@ proc emitCrudeFragment*(projectRoot: string;
   ## range and the engine writes the granted width after that flag, in the
   ## command (``sized_tools``).
   ##
-  ## See module doc. Build the single-action Mode B fragment for
+  ## ``testArgv``, when non-empty, is the delegated tool's test command
+  ## (``cargo test ...``). It becomes a run action that waits for the build
+  ## action, runs with the same cwd, inputs, monitoring and sizing
+  ## (``widthFlag``), and fails the build when the command exits non-zero,
+  ## plus a stamp action writing
+  ## ``testStampPath`` (the declared output the engine tracks), both under a
+  ## non-default ``test`` target, so ``repro build .#test`` runs the tool's
+  ## tests the way a Mode A fragment's ``test`` target does. Without it a
+  ## Mode B fragment has no ``test`` target and its tests never run.
+  ##
+  ## See module doc. Build the Mode B fragment (one build action, plus the
+  ## test run and stamp when ``testArgv`` is given) for
   ## ``packageName``. Idempotent — callers may invoke this repeatedly
   ## across requests; the action id is derived from ``packageName`` so
   ## two different packages don't collide in the engine's action store.
@@ -277,6 +301,10 @@ proc emitCrudeFragment*(projectRoot: string;
         "crude fallback: nativeBuildArgv must be non-empty (caller " &
         "supplied no command to delegate to)")
     let argvSeq = @nativeBuildArgv
+    let testArgvSeq = @testArgv
+    if testArgvSeq.len > 0 and testStampPath.len == 0:
+      raise newException(ValueError,
+        "crude fallback: testArgv needs a testStampPath for its stamp")
     let outputsSeq = @outputDirs
     let inputs = collectCrudeInputs(projectRoot,
       @outputDirs & @toolCacheDirs, inputGlob)
@@ -308,7 +336,29 @@ proc emitCrudeFragment*(projectRoot: string;
       # action. The Mode A conventions get away with both
       # ``target(pkgName, allActions)`` and ``defaultTarget(target("default", allActions))``
       # because each target carries >1 action and thus doesn't trigger
-      # the single-action alias path.
+      # the single-action alias path. The ``test`` target below carries two
+      # actions (run and stamp), neither of which ``default`` names.
       defaultTarget(target("default", action))
+      if testArgvSeq.len > 0:
+        let testAction = buildAction(
+          id = crudeTestActionIdFor(packageName),
+          call = inlineExecCall(testArgvSeq, cwd = projectRoot),
+          deps = @[action.id],
+          inputs = inputs,
+          outputs = @[],
+          pool = "compile",
+          cacheable = true,
+          dependencyPolicy = automaticMonitorPolicy(),
+          commandStatsId = "standard-provider.crude-test",
+          sizedBy = widthFlag)
+        createDir(extendedPath(parentDir(testStampPath)))
+        let stampAction = fs.stamp(
+          output = testStampPath,
+          title = "crude-test:" & packageName,
+          entries = @[packageName],
+          actionId = crudeTestStampActionIdFor(packageName),
+          deps = @[testAction.id],
+          commandStatsId = "standard-provider.crude-test-stamp")
+        discard target("test", @[testAction, stampAction])
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)

@@ -402,11 +402,12 @@ proc collectUnifiedUnsatCore(variants: openArray[VariantDecl];
           seen.incl(c.target)
           result.add(c.target)
   for p in packages:
-    if p.depends.len > 0 or p.variants.len > 0:
+    let deps = allDependencies(p)
+    if deps.len > 0 or p.variants.len > 0:
       if p.name notin seen:
         seen.incl(p.name)
         result.add(p.name)
-    for d in p.depends:
+    for d in deps:
       if d.name notin seen:
         seen.incl(d.name)
         result.add(d.name)
@@ -466,7 +467,17 @@ proc solve*(variants: openArray[VariantDecl];
   var solveResult: ClingoSolveResult = 0
 
   try:
-    if not clingo_control_new(nil, 0, nil, nil, 20, addr control):
+    # NPC-M6: a program that carries the newest-first search heuristic is
+    # solved with clingo's domain heuristic, which reads it; every other
+    # program is solved exactly as before, with an empty argv.
+    var domainArg = "--heuristic=Domain"
+    var domainArgs = [cstring(domainArg)]
+    let created =
+      if PreferNewestHeuristic in program:
+        clingo_control_new(addr domainArgs[0], 1, nil, nil, 20, addr control)
+      else:
+        clingo_control_new(nil, 0, nil, nil, 20, addr control)
+    if not created:
       raise newException(CatchableError,
         "clingo_control_new failed: " & lastError())
     let progC = cstring(program)
