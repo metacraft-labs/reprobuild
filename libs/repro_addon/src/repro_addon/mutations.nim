@@ -1167,6 +1167,8 @@
 ## ``fresh-accepts-user-config``              fresh_binary accepts a helper
 ##                                            built without --skipUserCfg
 ##                                            (decision 142)
+## ``fresh-accepts-nimble-path``              fresh_binary accepts a helper
+##                                            built without --noNimblePath
 ## ``override-sig-write-error-swallowed``     a failed signature write does
 ##                                            not stop the discard (round 6)
 ## ``override-rollback-removes-sig``         an intent record whose write
@@ -2493,6 +2495,7 @@ const
                           "discard-completion-sync-error-swallowed",
                           "fresh-ignores-listings",
                           "fresh-accepts-user-config",
+                          "fresh-accepts-nimble-path",
                           # An agent apply may weaken a unit's confinement
                           # (a new whole-floor waiver, a new exception, a
                           # waived unit moved onto root) unattended: the

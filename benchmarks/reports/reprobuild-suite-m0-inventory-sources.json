@@ -2865,6 +2865,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -2873,6 +2874,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -2881,7 +2883,7 @@
             "t3",
             "tree"
           ],
-          "line": 218,
+          "line": 233,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "gcc"
@@ -2896,6 +2898,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -2904,6 +2907,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -2912,7 +2916,7 @@
             "t3",
             "tree"
           ],
-          "line": 253,
+          "line": 268,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2927,6 +2931,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -2935,6 +2940,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -2943,7 +2949,7 @@
             "t3",
             "tree"
           ],
-          "line": 356,
+          "line": 371,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2958,6 +2964,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -2966,6 +2973,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -2974,7 +2982,7 @@
             "t3",
             "tree"
           ],
-          "line": 438,
+          "line": 453,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -2989,6 +2997,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -2997,6 +3006,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -3005,7 +3015,7 @@
             "t3",
             "tree"
           ],
-          "line": 570,
+          "line": 585,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -3020,6 +3030,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -3028,6 +3039,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -3036,7 +3048,7 @@
             "t3",
             "tree"
           ],
-          "line": 628,
+          "line": 644,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -3051,6 +3063,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -3059,6 +3072,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -3067,7 +3081,7 @@
             "t3",
             "tree"
           ],
-          "line": 698,
+          "line": 714,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -3082,6 +3096,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -3090,6 +3105,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -3098,7 +3114,7 @@
             "t3",
             "tree"
           ],
-          "line": 767,
+          "line": 783,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
@@ -3113,6 +3129,7 @@
             "app",
             "app2",
             "app3",
+            "base",
             "bin2",
             "bin3",
             "binary",
@@ -3121,6 +3138,7 @@
             "hello",
             "helloSrc",
             "outside",
+            "probe",
             "rApp",
             "rBin",
             "rt",
@@ -3129,12 +3147,45 @@
             "t3",
             "tree"
           ],
-          "line": 803,
+          "line": 819,
           "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
           "patterns": [
             "nim-argv"
           ],
           "snippet": "let (o, c) = execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"-r\","
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "app",
+            "app2",
+            "app3",
+            "base",
+            "bin2",
+            "bin3",
+            "binary",
+            "env",
+            "flags",
+            "hello",
+            "helloSrc",
+            "outside",
+            "probe",
+            "rApp",
+            "rBin",
+            "rt",
+            "t",
+            "t2",
+            "t3",
+            "tree"
+          ],
+          "line": 927,
+          "path": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "execCmdEx(quoteShellCommand(@[\"nim\", \"c\", \"-r\", \"--hints:off\","
         }
       ],
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim"
@@ -30402,7 +30453,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_test_support/tests/t_fresh_helper_binary_refuses_a_stale_build.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 36,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -56562,7 +56613,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_leaf_refetches_through_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 26,
+      "staticCaseCount": 27,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
