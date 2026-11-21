@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3081,
+    "nimTestBinaries": 3082,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 819,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3131
+    "testEntries": 3132
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1772,7 +1772,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 26,
-      "integration": 1712,
+      "integration": 1713,
       "platform/destructive": 199,
       "pure unit": 819,
       "unclassified": 375
@@ -1995,9 +1995,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3081,
+    "nimTestBinaryCount": 3082,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3131
+    "testEntryCount": 3132
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -41940,6 +41940,24 @@
       "source": "tests/integration/t_action_index_backpressure_and_tombstones.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_action_index_flatten_never_retires_the_insert_shard",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_local_store"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_action_index_flatten_never_retires_the_insert_shard.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
