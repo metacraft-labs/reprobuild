@@ -1007,8 +1007,8 @@ proc prePushProtocolRemediation*(cause: PrePushProtocolCause;
     "Git could not answer '" & failedObservation & "' for this repository; " &
       "run it to see Git's error, repair the repository, and retry the push"
   of ppcRefsStream, ppcNone:
-    "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "' and retry the push"
+    "reinstall the managed hooks with `repro hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "` and retry the push"
 
 proc prePushProtocolEvidence*(diagnostic: string;
     cause: PrePushProtocolCause; observationEvidence: string): string =
