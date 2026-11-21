@@ -26,6 +26,12 @@ What is not real, and why:
   them from environment variables first, as the dev shell sets them; their
   contents are not under test here (check_release_source_closure.sh covers
   them), and the real ones are not present on every host that runs this suite.
+* The completion case prints its scripts with a stand-in for build/bin/repro:
+  a shell script answering `completion <shell>` with a minimal script of the
+  shape stage_release_completions.sh accepts. That case checks that the
+  POSIX legs' staging ORDER (completions, then sources) keeps the scripts,
+  which does not depend on their content; building a real repro for it would
+  take most of an hour.
 * "Not owned by the current user" is git's own GIT_TEST_ASSUME_DIFFERENT_OWNER
   (https://github.com/git/git/blob/master/setup.c, ensure_valid_ownership), as
   in test_release_git.py.
@@ -270,6 +276,42 @@ class StagedDataFilesTests(unittest.TestCase):
         stage = self._stage(checkout)
         self.assertNotEqual(stage.returncode, 0, stage.stdout)
         self.assertIn("git cannot read the checkout", stage.stderr)
+
+    def test_sources_staged_after_completions_keep_the_completions(self):
+        # The POSIX release legs stage the completion scripts and THEN the
+        # sources (release.yml, "Package release assets (POSIX)"). v0.2.30's
+        # source stager removed all of share/repro first, so its Linux
+        # archive shipped without completions and the native-package build
+        # refused it at the end of the leg.
+        checkout = self._checkout(git=True)
+        stub = self.case / "repro-stub"
+        stub.write_text(
+            "#!/usr/bin/env bash\n"
+            '[ "$1" = completion ] || exit 2\n'
+            'if [ "$2" = zsh ]; then echo "#compdef repro"; fi\n'
+            'echo "# $2 completion: repro __complete"\n'
+        )
+        stub.chmod(0o755)
+        completions = subprocess.run(
+            [BASH, "scripts/release/stage_release_completions.sh", str(self.pkg)],
+            cwd=checkout, capture_output=True, text=True,
+            env=dict(os.environ, REPRO_COMPLETION_BIN=str(stub)),
+        )
+        self.assertEqual(completions.returncode, 0,
+                         completions.stdout + completions.stderr)
+        names = ["repro.bash", "_repro", "repro.fish", "repro.ps1"]
+        staged = {n: (self.pkg / "share/repro/completions" / n).read_bytes()
+                  for n in names}
+
+        stage = self._stage(checkout)
+        self.assertEqual(stage.returncode, 0, stage.stdout + stage.stderr)
+        for name in names:
+            path = self.pkg / "share/repro/completions" / name
+            self.assertTrue(path.is_file(),
+                            f"staging the sources removed {name}")
+            self.assertGreater(path.stat().st_size, 0)
+            self.assertEqual(path.read_bytes(), staged[name])
+        self.assertTrue((self.pkg / PLAYWRIGHT_MANIFEST).is_file())
 
     def test_the_check_fails_the_source_root_v0_2_26_shipped(self):
         # Negative control for the check: this tree's source root filtered to

@@ -4143,6 +4143,7 @@ const BundledStdlibSelectors* = [
   "xvfb-run",
   "xxhash",
   "yarn",
+  "zlib-dev",
   "zsh",
   "zstd",
   "zstd-dev",

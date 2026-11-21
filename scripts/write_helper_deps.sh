@@ -46,6 +46,11 @@
 #   user-config skipped|read
 #                     whether the binary was built with --skipUserCfg;
 #                     fresh_binary refuses "read" (§13 decision 142)
+#   nimble-path skipped|read
+#                     whether the binary was built with --noNimblePath,
+#                     so the host's nimble directories (~/.nimble/pkgs2,
+#                     /opt/nimble/pkgs2) were not on its search path;
+#                     fresh_binary refuses "read", as for user-config
 #
 # Every `searchpath` and listed search directory is absolute: a relative
 # --path is resolved against the directory the compiler ran in (round 12).
@@ -149,13 +154,17 @@ fi
 export WRITE_HELPER_DEPS_MUTATION="${WRITE_HELPER_DEPS_MUTATION:-}"
 # Was the binary built with --skipUserCfg (§13 decision 142)? The flags
 # given here are the ones it was built with.
+# And with --noNimblePath, which keeps the host-global nimble directories
+# the installed nim.cfg names off its search path?
 WRITE_HELPER_DEPS_USER_CONFIG=read
+WRITE_HELPER_DEPS_NIMBLE_PATH=read
 for a in "$@"; do
   case "$a" in
     --skipUserCfg|--skipUserCfg:on|--skipUserCfg:true) WRITE_HELPER_DEPS_USER_CONFIG=skipped ;;
+    --noNimblePath) WRITE_HELPER_DEPS_NIMBLE_PATH=skipped ;;
   esac
 done
-export WRITE_HELPER_DEPS_USER_CONFIG
+export WRITE_HELPER_DEPS_USER_CONFIG WRITE_HELPER_DEPS_NIMBLE_PATH
 if [ "${WRITE_HELPER_DEPS_MUTATION:-}" != "keep-old-list" ]; then
   rm -f "${published}"
 fi
@@ -691,6 +700,10 @@ for d, digest, kind in configs:
 # 142): a guarded helper is built with --skipUserCfg, and fresh_binary
 # refuses a list that says otherwise.
 lines.append("user-config " + os.environ.get("WRITE_HELPER_DEPS_USER_CONFIG", "read"))
+# Whether the host's nimble directories were on the search path: a guarded
+# helper is built with --noNimblePath, and fresh_binary refuses a list that
+# says otherwise.
+lines.append("nimble-path " + os.environ.get("WRITE_HELPER_DEPS_NIMBLE_PATH", "read"))
 part = published + ".part"
 with open(part, "w") as fh:
     fh.write("\n".join(lines) + "\n")

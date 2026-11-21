@@ -63,7 +63,7 @@ import unittest
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release.yml"
+RELEASE_YML = REPO_ROOT / ".github" / "workflows" / "release-pipeline.yml"
 PLATFORMS = REPO_ROOT / ".github" / "release-platforms.json"
 PACKAGER = REPO_ROOT / "scripts" / "release" / "repro-build-packages.sh"
 COMPLETIONS_FIXTURE = REPO_ROOT / "tests" / "fixtures" / "release-completions"

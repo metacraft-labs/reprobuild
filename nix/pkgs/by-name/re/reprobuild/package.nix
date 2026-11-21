@@ -169,8 +169,8 @@
   confutilsSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-confutils";
-    rev = "ffd5d9a6cf8481b2e696be3704f14b315a10aed9";
-    hash = "sha256-+/i93sfFGAfVkrJc/KswSW8wfsIHEPmhWWyAxETnSsE=";
+    rev = "f85c716c50f29344d9d28747632897c1ebc03ada";
+    hash = "sha256-ruZnbDwPit3onO/aJfWMgWwEawcA0mf5dNQ7X+Fcy9s=";
   },
   codetracerSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
@@ -258,7 +258,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.29";
+  version = "0.2.31";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above

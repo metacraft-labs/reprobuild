@@ -27,6 +27,9 @@
 ## Falsifying builds: ``egress-state-survives-reload`` and
 ## ``egress-instance-ignores-boot`` (the reload step);
 ## ``egress-ignores-counter-reset`` (the two counter-reset cases);
+## ``egress-shortfall-while-set-not-full``,
+## ``egress-reset-bound-ignores-set-reset`` and
+## ``egress-unread-instance-compared`` (the set-reset case);
 ## ``egress-observer-not-installed`` -- the observer unit
 ## never loads the table; the unit step goes red.
 ##
@@ -161,11 +164,13 @@ suite "the egress observer's table":
       @[("192.0.2.7", 3'i64), ("192.0.2.8", 1'i64)]
 
   test "a new or grown destination is fresh once":
+    # Within one table instance ("t"). An instance that could not be read
+    # ("-", the default) matches none: see the set-reset case below.
     let st = root / "state"
-    let a = freshSince(@[("192.0.2.7", 1'i64)], st)
+    let a = freshSince(@[("192.0.2.7", 1'i64)], st, "t")
     check a.len == 1
-    check freshSince(@[("192.0.2.7", 1'i64)], st).len == 0
-    check freshSince(@[("192.0.2.7", 3'i64)], st).len == 1
+    check freshSince(@[("192.0.2.7", 1'i64)], st, "t").len == 0
+    check freshSince(@[("192.0.2.7", 3'i64)], st, "t").len == 1
 
   test "after a table reload a refused destination is reported again (F3)":
     let st = root / "state-reload"
@@ -500,6 +505,104 @@ suite "the egress observer's table":
     recordEgressCheck(EgressCheck(present: true, counterReset: reset), site,
                       30_000)
     check toSeq(walkFiles(site.dir / "*.json")).len == 0
+
+  test "a reset of the sets is no shortfall, and an unread instance no match":
+    # Reprobuild-pm issue
+    # 2026-11-21-addon-egress-check-reports-packets-a-set-held-after-a-set-reset-and-compares-two-unread-instances.md.
+    # ``nft reset set`` zeroes the elements' counts (confirmed on nft 1.1.6
+    # in ``unshare -rn``); an element sent more packets since than it held
+    # before shows no fall, so the reset is not seen. Red under
+    # ``egress-shortfall-while-set-not-full`` (cases 1 and 3),
+    # ``egress-reset-bound-ignores-set-reset`` (the full-set variants of
+    # case 1) and ``egress-unread-instance-compared`` (case 2).
+    var un = -1'i64
+    var reset = "?"
+    proc step(st: string; refused: seq[RefusedDestination]; counted: int64;
+              full: bool; table = "t"): seq[RefusedDestination] =
+      freshSince(refused, st, table, counted, addr un, kernelCounted = counted,
+                 counterReset = addr reset, setFull = full)
+    # 1. The counter and the set reset in one interval, then ten packets to
+    # 192.0.2.1, which the set (not full) added: none is unattributed,
+    # though 192.0.2.1 outgrew its old count of five.
+    block:
+      let st = root / "state-set-reset-1"
+      discard step(st, @[("192.0.2.1", 5'i64), ("192.0.2.2", 995'i64)], 1000,
+                   false)
+      check un == 0
+      discard step(st, @[("192.0.2.1", 10'i64), ("192.0.2.2", 0'i64)], 10,
+                   false)
+      check un == 0
+      check reset.startsWith("the counter of refused packets fell from 1000 to 10")
+    # The same with a full set: 192.0.2.2's fall shows the set was reset, so
+    # 192.0.2.1 may have gained all ten since the reset. The least provable
+    # is the counter less what the set holds: none. (Its gain since the last
+    # check, five, read five as unattributed.)
+    block:
+      let st = root / "state-set-reset-1-full"
+      discard step(st, @[("192.0.2.1", 5'i64), ("192.0.2.2", 995'i64)], 1000,
+                   true)
+      discard step(st, @[("192.0.2.1", 10'i64), ("192.0.2.2", 0'i64)], 10,
+                   true)
+      check un == 0
+      # And from there on a packet the full set does not add is counted.
+      discard step(st, @[("192.0.2.1", 10'i64), ("192.0.2.2", 0'i64)], 12,
+                   true)
+      check (un, reset) == (2'i64, "")
+    # A full set whose counter fell by less than it holds: the counter's
+    # twelve, less the twelve the set holds, is none proven; two more past
+    # what the set holds are proven unattributed.
+    block:
+      let st = root / "state-set-reset-1-proven"
+      discard step(st, @[("192.0.2.1", 5'i64), ("192.0.2.2", 995'i64)], 1000,
+                   true)
+      discard step(st, @[("192.0.2.1", 12'i64), ("192.0.2.2", 0'i64)], 14,
+                   true)
+      check un == 2
+    # A destination that left its set took the packets it was sent since
+    # the reset with it: none is proven unattributed. (Its gain since the
+    # last check, none, read ten.)
+    block:
+      let st = root / "state-set-reset-left"
+      discard step(st, @[("192.0.2.1", 5'i64), ("192.0.2.2", 995'i64)], 1000,
+                   true)
+      discard step(st, @[("192.0.2.1", 5'i64)], 10, true)
+      check un == 0
+      check reset.startsWith("the counter of refused packets fell from 1000 to 10")
+    # Only the counter fell, the set kept its counts: the two packets it
+    # did not add are still counted at the check that sees the fall.
+    block:
+      let st = root / "state-counter-reset-only"
+      discard step(st, @[("192.0.2.1", 5'i64)], 8, true)
+      discard step(st, @[("192.0.2.1", 6'i64)], 3, true)
+      check (un, reset) ==
+        (2'i64, "the counter of refused packets fell from 8 to 3")
+    # 3. The set reset and outgrown, the counter not: counter 100 and
+    # 192.0.2.1 100, then 150 packets to it. Nothing fell, and a set that
+    # is not full added all of them. The gap is no shortfall, and is not
+    # reported once the set is full either; three packets the full set
+    # does not add are.
+    block:
+      let st = root / "state-set-reset-3"
+      discard step(st, @[("192.0.2.1", 100'i64)], 100, false)
+      discard step(st, @[("192.0.2.1", 150'i64)], 250, false)
+      check (un, reset) == (0'i64, "")
+      discard step(st, @[("192.0.2.1", 150'i64)], 253, true)
+      check (un, reset) == (3'i64, "")
+    # 2. Two checks that could not read the table's instance, a reload
+    # between them: the second compares nothing with the first. 192.0.2.1
+    # is recorded again, and the new instance's shortfall is reported whole
+    # (the first's eleven hid all but one of its twelve).
+    block:
+      let st = root / "state-unread-twice"
+      check step(st, @[("192.0.2.1", 9'i64)], 20, true, table = "-") ==
+        @[("192.0.2.1", 9'i64)]
+      check un == 11
+      check step(st, @[("192.0.2.1", 3'i64)], 15, true, table = "-") ==
+        @[("192.0.2.1", 3'i64)]
+      check (un, reset) == (12'i64, "")
+      # A readable instance after it compares nothing with it either.
+      check step(st, @[("192.0.2.1", 3'i64)], 15, true, table = "v") ==
+        @[("192.0.2.1", 3'i64)]
 
   test "the control datagram between the check's reads is no egress-set-full":
     # Mock: a stand-in ``nft`` answering from a file. The race is between

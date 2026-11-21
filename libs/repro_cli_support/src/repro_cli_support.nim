@@ -8435,6 +8435,16 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
   ## writes the refreshed evidence back so the next hit is a stat again.
   if not identity.toolIdentityRealizationsUsable():
     return (servable: false, refreshed: false)
+  # An identity resolved while a Nix compiler wrapper's libc was still
+  # followed as a propagated input carries that libc in its link channels.
+  # Re-resolve it rather than hand the libc to every compiler of the action.
+  # Only a Nix realization is checked: a from-source closure merges its
+  # dependencies' store paths, where a libc can be a dependency of its own.
+  for actionIdentity in identity.actionIdentities:
+    if actionIdentity.installMethod == "nix" and
+        nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
+          actionIdentity.selectedStorePath):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 
@@ -9694,6 +9704,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedCompilerLibcDirs: seq[string] = @[]
     var mergedPrefixVars: seq[(string, string)] = @[]
     var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
@@ -9769,6 +9780,13 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       for path in actionIdy.libraryPathList:
         if path.len > 0 and path notin mergedLibDirs:
           mergedLibDirs.add(path)
+      # The libc a Nix compiler wrapper of this realization records. It
+      # travels apart from ``libDirs``: it is for install normalization,
+      # and on the link channel it would reach every compiler the action
+      # runs, not only this wrapper (which passes it to its own linker).
+      for path in nixCompilerWrapperLibcDirs(actionIdy.realizedStorePaths):
+        if path notin mergedCompilerLibcDirs:
+          mergedCompilerLibcDirs.add(path)
       # A LIBRARY realization (it carries include or library dirs) names its
       # prefix to the consuming action as `DEP_<NAME>_PREFIX`
       # (Package-Model.md §"Environment-provided library prefixes"): the
@@ -9827,6 +9845,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         cmakePrefixDirs: mergedCmakePrefixDirs,
         includeDirs: mergedIncludeDirs,
         libDirs: mergedLibDirs,
+        compilerLibcDirs: mergedCompilerLibcDirs,
         nimPathDirs: nimPathDirs,
         prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
@@ -23020,7 +23039,7 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("    printf '%s\\n' \"repro hooks: re-enter this repository's " &
     "dev shell so its hook installer writes " & hookName &
     ".repro-local again, or delete " &
-    "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
+    "$(repro_remedy_word \"$LOCAL_HOOK\") if nothing installs the " & hookName & " stage any more. " &
     "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") health\\` lists every " &
     "such hook.\" >&2\n")
   result.add("  fi\n")
@@ -24986,8 +25005,8 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
             " already holds a different preserved hook. Reconcile them by " &
             "hand: merge the checks you want into " & local &
             " (which the dispatcher runs first), delete " & standard &
-            ", then re-run 'repro hooks ensure --vcs " &
-            remedyPathWord(parentDir(parentDir(hooksDir))) & "'.")
+            ", then re-run `repro hooks ensure --vcs " &
+            remedyPathWord(parentDir(parentDir(hooksDir))) & "`.")
     else:
       moveFileReplacing(standard, local)
       ensureExecutable(local)
@@ -57768,9 +57787,9 @@ proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     return (1, err.msg)
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
-    return (1, hook.diagnostic & "; run '" &
+    return (1, hook.diagnostic & "; run `" &
       remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "'")
+      remedyPathWord(repoRoot) & "`")
   var capability = ""
   if hook.kind == ephReproV2:
     let location = configuredPushLocation(identity, repoRoot, target.remote)
@@ -58253,8 +58272,8 @@ proc publishedLockKeyCollision(identity: GitToolIdentity; repoRoot,
         localBlob.output.strip() & "); published records are immutable and " &
         "this one is not rewritten. Two sources disagree about the " &
         "workspace state at that commit — bring this store up to date " &
-        "('git -C " & remedyPathWord(repoRoot) &
-        " pull --ff-only') and re-read the " &
+        "(`git -C " & remedyPathWord(repoRoot) &
+        " pull --ff-only`) and re-read the " &
         "published record before deciding which answer is right"
   ""
 
@@ -58824,8 +58843,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     result.diagnostic =
       "lock record(s) missing from the manifest working tree (" &
         vanishedRecords.join(", ") &
-        "); lock records are immutable — restore them with 'git -C " &
-        remedyPathWord(manifestRepoRoot) & " checkout -- locks' and re-run"
+        "); lock records are immutable — restore them with `git -C " &
+        remedyPathWord(manifestRepoRoot) & " checkout -- locks` and re-run"
     return
 
   # Collect the staged lock paths and reject empty/zero-byte locks.
@@ -69913,8 +69932,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     if displaced:
       stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running " &
         "as pre-commit.legacy under another hook manager, so this gate " &
-        "cannot refuse. Restore it with 'repro hooks ensure --vcs " &
-        remedyPathWord(repoRoot) & "'")
+        "cannot refuse. Restore it with `repro hooks ensure --vcs " &
+        remedyPathWord(repoRoot) & "`")
       return 0
     stderr.writeLine(prefix & "the commit is REFUSED: the certificate " &
       "policy this commit carries cannot be read. This is early feedback, " &
@@ -70040,8 +70059,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
       "pre-commit.legacy under another hook manager, whose hooks run after " &
       "this gate and may still change the index, so this gate cannot refuse. " &
-      "Restore it with 'repro hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "'")
+      "Restore it with `repro hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "`")
   if refuses:
     stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
       "required). This is early feedback, which `git commit " &
@@ -73756,8 +73775,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
           "from this checkout); this checkout is not one the workspace " &
           "gates or locks"
       else:
-        "run 'repro hooks ensure --vcs " &
-          remedyPathWord(parsed.currentRepo) & "' from a checkout declared by this workspace, or repair the " &
+        "run `repro hooks ensure --vcs " &
+          remedyPathWord(parsed.currentRepo) & "` from a checkout declared by this workspace, or repair the " &
           "workspace membership before retrying the push"
     result.failures.add(CheckFailure(
       repo: "",
@@ -73910,8 +73929,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: parsed.currentRepo,
         property: "membership-push-scope",
         remediation: "make the pushed commits readable in " &
-          remedyProsePath(parsed.currentRepo) & " (run 'git -C " &
-          remedyPathWord(parsed.currentRepo) & " fsck' and fetch the remote), then retry the push — the gate " &
+          remedyProsePath(parsed.currentRepo) & " (run `git -C " &
+          remedyPathWord(parsed.currentRepo) & " fsck` and fetch the remote), then retry the push — the gate " &
           "cannot tell which repos this manifest push re-pins without them",
         evidence: membership.diagnostic))
       result.exitCode = 2
@@ -74341,9 +74360,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
         # Principle 2: name the offender AND a copy-pasteable command.
         remediation: "commit or stash changes in " &
           remedyProsePath(obs.path) &
-          " — run 'git -C " & remedyPathWord(obs.path) &
-          " commit -a' (or 'git -C " & remedyPathWord(obs.path) &
-          " stash') then 'repro push'",
+          " — run `git -C " & remedyPathWord(obs.path) &
+          " commit -a` (or `git -C " & remedyPathWord(obs.path) &
+          " stash`) then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
 
@@ -74593,12 +74612,12 @@ proc executeCheckPrePush(parsed: CheckArgs;
         result.failures.add(CheckFailure(
           repo: repoLabel,
           property: "history-rewrite-unverifiable",
-          remediation: "run 'git -C " & remedyPathWord(parsed.currentRepo) &
+          remediation: "run `git -C " & remedyPathWord(parsed.currentRepo) &
             " fetch " &
             (if outgoing.remoteName.len > 0:
                quoteShellPosix(outgoing.remoteName)
              else: "<remote>") & " " &
-            quoteShellPosix(pushedBranch) & "' so the commits this update " &
+            quoteShellPosix(pushedBranch) & "` so the commits this update " &
             "would replace are present locally, then retry the push — HEAD " &
             outgoing.headOid & " is publishable; this is refused only because " &
             "the gate cannot see what the update would discard",
@@ -76429,8 +76448,8 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       of ephReproIncompatible: hook.diagnostic
       of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
       of ephReproV2: ""
-    return (false, reason & "; run '" & remedyPathWord(publicCliImagePath()) &
-      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "'")
+    return (false, reason & "; run `" & remedyPathWord(publicCliImagePath()) &
+      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "`")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
     return (false, "the hook-resolved repro executable is unavailable; run `" &
@@ -78427,9 +78446,9 @@ proc executePush(args: PushArgs): PushReport =
       options = {poStdErrToStdOut, poUsePath}, env = scrubbedGitChildEnv())
     if probe.exitCode != 0 or probe.output.strip() != "2":
       let remedy = "set REPROBUILD_REPRO=" &
-        remedyPathWord(publicCliImagePath()) & " (or update PATH), run '" &
+        remedyPathWord(publicCliImagePath()) & " (or update PATH), run `" &
         remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
-        remedyPathWord(repoAbs) & "', then retry 'repro push'"
+        remedyPathWord(repoAbs) & "`, then retry 'repro push'"
       result.repos.add(PushRepoResult(name: name, path: byName[name].path,
         branch: preflight[name].branch, headSha: preflight[name].headSha,
         outcome: proFailed,
@@ -99268,22 +99287,11 @@ proc definedProjectNames*(workspaceRoot: string): seq[string] =
   ## set and a project are one namespace here as they are in resolution
   ## (`resolveWorkspaceProjectByName`). An unconverted manifest repo has no
   ## `repo-sets/` directory and the listing is unchanged for it.
-  let manifests = manifestsRoot(workspaceRoot)
-  var seen: seq[string]
-  for sub in ["projects", "variants", "repo-sets"]:
-    let dir = manifests / sub
-    if not dirExists(dir):
-      continue
-    for kind, path in walkDir(dir):
-      if kind notin {pcFile, pcLinkToFile}:
-        continue
-      if path.splitFile.ext != ".toml":
-        continue
-      let name = path.splitFile.name
-      if name notin seen:
-        seen.add(name)
-  sort(seen)
-  seen
+  ##
+  ## The listing itself is `definedSetNamesAt`, shared with
+  ## `sets list --at=REV`, so the working tree and a revision cannot disagree
+  ## about which files are names.
+  definedSetNamesAt(newDirectorySource(manifestsRoot(workspaceRoot)))
 
 proc manifestDefinitionsAreVisible*(workspaceRoot: string): bool =
   ## Whether this workspace can tell a defined project from an undefined one.
@@ -107008,7 +107016,7 @@ type
     names: seq[string]
       ## ``resolve``'s set names.
     at: Option[string]
-      ## ``resolve --at=REV``.
+      ## ``list --at=REV`` and ``resolve --at=REV``.
     name: string
       ## ``add`` / ``remove``'s set name.
     message: string
@@ -107026,12 +107034,14 @@ template setsRequestOfImpl(c: untyped; Cmd: typedesc): WorkspaceSetsRequest =
     req.enabled = c.call.enabled
     req.disabled = c.call.disabled
     req.all = c.call.all
+    req.at = c.call.at
     req.json = c.call.json
   of Cmd.list:
     req.workspaceRoot = c.list.workspaceRoot
     req.enabled = c.list.enabled
     req.disabled = c.list.disabled
     req.all = c.list.all
+    req.at = c.list.at
     req.json = c.list.json
   of Cmd.resolve:
     req.sub = "resolve"
@@ -107089,6 +107099,54 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
     let wantEnabled = req.enabled and not req.all
     let wantDisabled = req.disabled and not req.all
     let asJson = req.json
+    if req.at.isSome:
+      # `--at=REV`: the names the manifest repository defines AT A COMMIT, read
+      # from its objects through the same git-revision source `resolve --at`
+      # reads (reprobuild-pm issue 2026-11-17 "projects list cannot read the
+      # projects of a metadata revision"). Without this a caller holding a
+      # repository and a commit could resolve only a name it already knew.
+      #
+      # Membership is a fact about THIS workspace's state file, which has no
+      # revision: every set a revision defines is reported not enabled, there
+      # is no primary, and a selector that asks about membership is refused
+      # rather than answered with an always-empty or always-full listing.
+      # `--all` overrides a selector here as it does without `--at`.
+      let atRevision = req.at.get
+      if atRevision.len == 0:
+        stderr.writeLine(verb & " list: --at= needs a revision " &
+          "(a commit id, branch or tag of the manifest repository)")
+        return 2
+      if wantEnabled or wantDisabled:
+        stderr.writeLine(verb & " list: --enabled and --disabled select by " &
+          "this workspace's membership, which a revision does not have; " &
+          "--at=REV lists every set the revision defines")
+        return 2
+      var revisionSource: ManifestSource = nil
+      defer: revisionSource.close()
+      var names: seq[string]
+      try:
+        revisionSource = openGitRevisionSource(manifestsRoot(workspaceRoot),
+          atRevision)
+        names = definedSetNamesAt(revisionSource)
+      except CatchableError as exc:
+        stderr.writeLine(verb & " list: " & exc.msg)
+        return 1
+      if asJson:
+        var arr = newJArray()
+        for name in names:
+          arr.add(%*{"name": name, "enabled": false, "defined": true})
+        # The same schema as the working-tree listing; `metadataRevision` is
+        # additive and present exactly when the listing was read at a
+        # revision, as it is for `resolve --at`.
+        echo (%*{"schema": "reprobuild.workspace-sets-list.v1",
+                 "workspaceRoot": workspaceRoot,
+                 "primary": "",
+                 "sets": arr,
+                 "metadataRevision": revisionSource.resolvedCommit}).pretty
+        return 0
+      for name in names:
+        stdout.writeLine(name & "\tdisabled")
+      return 0
     let active = readWorkspaceProjects(workspaceRoot)
     let defined = definedProjectNames(workspaceRoot)
     # Ordering is meaning, not cosmetics: the primary project answers "what am
