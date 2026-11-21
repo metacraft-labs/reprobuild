@@ -284,7 +284,7 @@ libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	15
 libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	18
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
-libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	41
+libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	42
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
 libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim	nim	15
 libs/repro_cas_store/tests/t_cas_ingest_link.nim	nim	25
@@ -1853,7 +1853,7 @@ tests/integration/t_b2_helpers_built_by_engine.nim	nim	2
 tests/integration/t_b3_repro_test_runs_through_engine.nim	nim	3
 tests/integration/t_b3_test_execute_edge_cache_hit.nim	nim	2
 tests/integration/t_b3_test_invalidation_rebuilds_repro.nim	nim	2
-tests/integration/t_b3_test_template_emits_two_edges.nim	nim	2
+tests/integration/t_b3_test_template_emits_two_edges.nim	nim	3
 tests/integration/t_b4_hcr_flags_in_repro_tests.nim	nim	2
 tests/integration/t_b4_python_tests_in_graph.nim	nim	2
 tests/integration/t_b4_repro_test_alias_covers_all.nim	nim	1

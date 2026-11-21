@@ -53,6 +53,7 @@ import std/[json, os, strutils]
 import repro_core/ambient_execution
 import repro_core/git_separated
 import repro_core/paths
+import repro_core/scratch_env
 import repro_core/workspace_root
 import repro_project_dsl
 
@@ -308,32 +309,9 @@ proc resolveNixExe*(explicit = ""): string =
       "install nix, or drop the useFlakeDevShell() call from devEnv:")
   found
 
-const
-  NixShellScratchNames* = ["NIX_BUILD_TOP", "TMP", "TMPDIR", "TEMP", "TEMPDIR",
-    "terminfo"]
-    ## What `nix print-dev-env`'s script sets for the SHELL SESSION rather
-    ## than for the environment: `NIX_BUILD_TOP` and the four temp-directory
-    ## names all point at a `/tmp/nix-shell.XXXXXX` directory the script
-    ## creates with `mktemp -d` on every sourcing, and `terminfo` at the
-    ## builder's terminal database. nix-direnv's `_nix_import_env` restores
-    ## exactly this list to its pre-import values and deletes the directory
-    ## (nix-direnv 3.0.7, `direnvrc`); `direnv exec` therefore leaves `TMPDIR`
-    ## unset in this repository's shell.
-    ##
-    ## Absorbing them had two consequences, both measured on reprobuild's own
-    ## flake shell (2026-09-28):
-    ##
-    ##   * the contribution was different on EVERY activation — five
-    ##     variables naming a fresh random directory — so the dev-env artifact
-    ##     could never be byte-stable, whatever else is fixed around it; the
-    ##     entropy that put a random name into the OUTPUT is what the M6 gate
-    ##     exists to refuse;
-    ##   * the directory was never removed: 3,975 `/tmp/nix-shell.*`
-    ##     directories had accumulated on the host, one per entry.
-    ##
-    ## Every activated program then used a directory that had been created
-    ## for a subshell which no longer exists; with these dropped it uses the
-    ## caller's own `TMPDIR` (or the platform default), as under direnv.
+export NixShellScratchNames
+  # The list lives in `repro_core/scratch_env`, shared with the workspace
+  # bundle's shell capture, which must leave out the same names.
 
 proc withoutNixShellScratch*(ops: openArray[ForeignEnvOp]):
     tuple[kept: seq[ForeignEnvOp], scratchDir: string] =
