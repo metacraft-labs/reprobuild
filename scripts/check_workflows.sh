@@ -267,9 +267,11 @@ echo "ok: all ${found_refs} shared-action reference(s) name @dev or a SHA"
 #   * it is `on: workflow_call` only. A `push` (or any other) trigger would
 #     make the file a workflow in its own right, and every push to `agents`
 #     would be an admitted run;
-#   * every job with no `needs:` carries the guard, which reads the caller's
-#     context: anything in the organisation may call the file at `@agents`,
-#     a fork pull request's own workflow included.
+#   * every job that can start without `plan` -- no `needs:`, or an `if:`
+#     with `always()` -- carries the guard, which reads the caller's context:
+#     anything in the organisation may call the file at `@agents`, a fork
+#     pull request's own workflow included. The rest need `plan` and are
+#     skipped with it.
 # =============================================================================
 echo "== release-lane shape =="
 
@@ -301,12 +303,24 @@ release_lane_defects() {
   if [ "${triggers}" != "workflow_call " ]; then
     echo "${pipeline}: on: must be exactly workflow_call, found: ${triggers:-nothing}"
   fi
-  for job in plan publish-release; do
+  local jobs
+  jobs="$(awk '
+    /^jobs:[[:space:]]*$/ { injobs = 1; next }
+    injobs && /^[^[:space:]#]/ { injobs = 0 }
+    injobs && /^  [A-Za-z0-9_-]+:[[:space:]]*$/ { sub(/^  /, ""); sub(/:.*/, ""); print }
+  ' "${pipeline}")"
+  if [ -z "${jobs}" ]; then
+    echo "${pipeline}: found no jobs"
+  fi
+  for job in ${jobs}; do
     # Captured first: `grep -q` exits at its first match, and under pipefail
     # the writer's SIGPIPE would fail the pipeline and report a guard missing.
     body="$(workflow_job "${pipeline}" "${job}")"
+    if grep -qE '^    needs:' <<<"${body}" && ! grep -qF 'always()' <<<"${body}"; then
+      continue
+    fi
     if ! grep -qF "${lane_guard_line}" <<<"${body}"; then
-      echo "${pipeline}: job ${job} does not carry the release-lane guard"
+      echo "${pipeline}: job ${job} can start without plan and does not carry the release-lane guard"
     fi
   done
 }
@@ -346,7 +360,7 @@ if ! grep -qxF "    uses: metacraft-labs/reprobuild/.github/workflows/release-pi
   echo "      the one ref infra's \`release-lane\` group admits." >&2
   exit 1
 fi
-echo "ok: release-pipeline.yml is workflow_call-only and guards plan and publish-release"
+echo "ok: release-pipeline.yml is workflow_call-only and guards every job that can start without plan"
 
 # =============================================================================
 # flake.lock: every revision-pinned node carries its derived fields
