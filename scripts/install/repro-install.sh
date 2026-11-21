@@ -128,7 +128,13 @@ fi
 # keyring when its name ends in .asc, rpm --import requires armour, and
 # pacman-key --add accepts it. So no gpg is needed on the client to use it.
 KEYRING_FILE="${REPRO_KEYRING_FILE:-metacraft-labs-archive-keyring.asc}"
-KEYRING_DEST="${REPRO_KEYRING_DEST:-/usr/share/keyrings/$KEYRING_FILE}"
+# macOS's /usr is read-only (system integrity protection), so the tarball
+# install there, the only method macOS has, keeps its copy under /usr/local.
+case "$(uname -s)" in
+  Darwin) _keyring_dir='/usr/local/share/keyrings' ;;
+  *)      _keyring_dir='/usr/share/keyrings' ;;
+esac
+KEYRING_DEST="${REPRO_KEYRING_DEST:-$_keyring_dir/$KEYRING_FILE}"
 
 # The expected SHA-256 of the keyring at $REPRO_KEYS_URL/$KEYRING_FILE:
 # the organisation key 22F8 0A4A 65B0 8E36 AEA8  9F57 E127 BF3A C4CE 1719,
@@ -356,6 +362,27 @@ detect_method() {
 
 need_root() {
   [ "$(id -u)" -eq 0 ] || die "this step needs root; re-run under sudo (installing a system repository writes to $KEYRING_DEST)"
+}
+
+# writable_target <path>: succeeds when <path>, or its nearest existing
+# ancestor, is a directory the invoking user can write (so `mkdir -p <path>`
+# would work).
+writable_target() {
+  _w="$1"
+  while [ ! -e "$_w" ]; do _w="$(dirname -- "$_w")"; done
+  [ -d "$_w" ] && [ -w "$_w" ]
+}
+
+# The tarball method writes under a prefix, a state directory and the trust
+# anchor's directory. As root that always works. An unprivileged user can run
+# it too when all three are theirs to write (a prefix under their home, for
+# one); the installed tree is then theirs and completion is registered for
+# that user alone. Anything else needs root, said before anything is fetched.
+need_tarball_access() {
+  [ "$(id -u)" -eq 0 ] && return 0
+  for _d in "$TARBALL_PREFIX" "$(dirname "$TARBALL_MANIFEST")" "$(dirname "$KEYRING_DEST")"; do
+    writable_target "$_d" || die "the tarball method writes to $_d, which this user cannot write; re-run under sudo, or choose a prefix of your own with --prefix (and REPRO_TARBALL_MANIFEST and REPRO_KEYRING_DEST)"
+  done
 }
 
 # ---------------------------------------------------------------------
@@ -748,6 +775,8 @@ directory listing is not a release policy, and guessing is worse.'
     fi
   fi
 
+  [ "$dry_run" -eq 1 ] || need_tarball_access
+
   _asset="reprobuild-$_ver-$_plat-$_arch.tar.gz"
   _vs="$(locate_verifier)"
   _tmp="$(mktemp -d)"
@@ -782,7 +811,6 @@ directory listing is not a release policy, and guessing is worse.'
     || die 'signature verification failed; refusing to install'
   log 'signature verification passed'
 
-  need_root
   mkdir -p "$TARBALL_PREFIX" "$(dirname "$TARBALL_MANIFEST")"
   _stage="$_tmp/unpack"
   mkdir -p "$_stage"
@@ -812,7 +840,9 @@ directory listing is not a release policy, and guessing is worse.'
   # the binary the installer runs as root for a system-wide completion
   # registration, and that every user runs: a local account that happens
   # to have the builder's uid must not be able to replace it.
-  chown -R 0:0 "$_home" || die "could not make $_home owned by root"
+  if [ "$(id -u)" -eq 0 ]; then
+    chown -R 0:0 "$_home" || die "could not make $_home owned by root"
+  fi
   chmod -R go-w "$_home" || die "could not make $_home writable by root only"
   # Recorded as one directory, so --uninstall removes exactly it.
   printf '%s\n' "$_home" >> "$TARBALL_MANIFEST"
@@ -849,7 +879,14 @@ installer, or switch to a repository install, to upgrade.'
 #     executed AS that user, so every file it writes is theirs and lands in
 #     their home, never in /root);
 #   * run by root with no invoking user, it registers for every user of the
-#     machine (`--system`, under /usr/local/share).
+#     machine (`--system`, under /usr/local/share);
+#   * run by an unprivileged user (a prefix of their own, see
+#     need_tarball_access), it registers for that user, with no sudo.
+#
+# On macOS the tarball is the only method: no package manager is detected
+# there, and neither Homebrew nor the .pkg is tried. A user who has repro from
+# either keeps one registration, because `repro hooks ensure --profile` finds
+# the package's system file and writes nothing.
 #
 # --no-completion or REPRO_NO_COMPLETION=1 skips it. What was done is
 # recorded in $TARBALL_COMPLETION_RECORD, and --uninstall undoes exactly
@@ -875,6 +912,12 @@ valid_completion_user() {
 # names no usable account prints `-`: the caller registers nothing rather
 # than fall back to a system-wide registration nobody asked for.
 completion_target_user() {
+  # Not root: there is no other user to act for, and no sudo to reach one
+  # with. The installed tree is this user's own, and so is the registration.
+  if [ "$(id -u)" -ne 0 ]; then
+    id -un
+    return 0
+  fi
   [ -n "${SUDO_USER:-}" ] || return 0
   if valid_completion_user "$SUDO_USER"; then
     printf '%s\n' "$SUDO_USER"
@@ -901,6 +944,10 @@ run_completion_hooks() {
       warn "cannot $_verb shell completion for '$_user': not an existing non-root account"
       return 1
     }
+    if [ "$(id -u)" -ne 0 ] && [ "$(id -un)" = "$_user" ]; then
+      ( cd / && "$_bin" hooks "$_verb" --shell-autocomplete --profile )
+      return
+    fi
     command -v sudo >/dev/null 2>&1 || {
       warn "cannot $_verb shell completion for $_user: sudo is not on PATH"
       return 1
@@ -1140,7 +1187,7 @@ uninstall_all() {
     nixos) print_nixos_instructions; return 0 ;;
     nix)   remove_nix; log 'uninstall complete'; return 0 ;;
   esac
-  need_root
+  if [ "$method" = 'tarball' ]; then need_tarball_access; else need_root; fi
   log "uninstalling via method=$method"
   case "$method" in
     apt)     remove_apt ;;
