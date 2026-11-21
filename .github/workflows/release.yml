@@ -724,6 +724,20 @@ jobs:
             bash scripts/release/stage_release_macos_tools.sh "${pkg_name}"
 
             tar -czf "${pkg_name}.tar.gz" "${pkg_name}"
+
+            # Fail here, minutes after the build, rather than an hour later in
+            # the native-package step: the archive must carry the bash
+            # completion script the packages install. v0.2.30 shipped an
+            # archive without it, because a later stager cleared share/repro.
+            completion="${pkg_name}/share/repro/completions/repro.bash"
+            # Read into a variable, not piped to grep -q: an early grep exit
+            # would kill tar with SIGPIPE, and pipefail would report that.
+            script=$(tar -xzOf "${pkg_name}.tar.gz" "${completion}" 2>/dev/null || true)
+            if [[ "${script}" != *__complete* ]]; then
+              echo "::error::${pkg_name}.tar.gz has no non-empty ${completion}"
+              exit 1
+            fi
+
             echo "ASSET_PATH=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
             echo "ASSET_NAME=${pkg_name}.tar.gz" >> "$GITHUB_ENV"
             echo "PKG_NAME=${pkg_name}" >> "$GITHUB_ENV"

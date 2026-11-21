@@ -42,7 +42,10 @@ tool directories never count: `.nimcache`, `build`, `.git`, `result`,
 directory an import's later path component is looked up in, those names
 count too: a new `pkgx/build/` can shadow `import pkgx/build/util`.) The
 helpers are built with `--skipUserCfg`, so your own Nim configuration
-(`~/.config/nim`) neither changes them nor makes the tests refuse them.
+(`~/.config/nim`) neither changes them nor makes the tests refuse them,
+and with `--noNimblePath`, so a `nimble install` anywhere on the machine
+(into `~/.nimble/pkgs2`) does not either: every module a helper imports
+comes from this tree and its develop set.
 
 `just build` (`scripts/build_apps.sh`) has two modes:
 

@@ -517,6 +517,12 @@ const
         path: "build/bin/repro-tests-fragment",
         actionId: "reprobuild.apps.repro-tests-fragment")]),
     TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m14_shim_answers_tests_entry.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-tests-fragment",
+        actionId: "reprobuild.apps.repro-tests-fragment")]),
+    TestGraphArtifacts(
       source: "libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim",
       artifacts: @[TestGraphArtifact(
         path: "build/test-fixtures/macos-no-bundle/no_bundle_launch",
@@ -3057,8 +3063,10 @@ package reprobuild:
       defines = @["release", "ssl"],
       paths = sourceOnlyNimPaths,
       # A helper tests run from build/bin is built without the user's Nim
-      # configuration (ReproOS Add-On Mode spec §13 decision 142).
+      # configuration (ReproOS Add-On Mode spec §13 decision 142), and
+      # without the host's nimble directories (scripts/build_apps.sh).
       skipUserCfg = true,
+      noNimblePath = true,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       runInSourceDir = true,
@@ -3094,7 +3102,7 @@ package reprobuild:
     when defined(linux):
       var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
         "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
-        "--skipUserCfg", "--define:release", "--define:ssl"]
+        "--skipUserCfg", "--noNimblePath", "--define:release", "--define:ssl"]
       for p in sourceOnlyNimPaths: binaryCacheDepsArgs.add("--path:" & p)
       let binaryCacheDeps = shell(
         command = quoteShellCommand(binaryCacheDepsArgs),
