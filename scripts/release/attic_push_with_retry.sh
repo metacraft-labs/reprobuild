@@ -57,7 +57,7 @@
 #
 # An UNRECOGNISED failure is not retried. Retrying it could only hide a new
 # failure mode behind half an hour of waiting; failing names it. The release
-# does not wait on this push (see release.yml, job `publish-nix-cache`), so a
+# does not wait on this push (see release-pipeline.yml, job `publish-nix-cache`), so a
 # failure here costs a re-run of that job, not the release.
 #
 # Configuration, all optional (the defaults are the release workflow's):

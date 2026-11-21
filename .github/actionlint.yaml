@@ -12,7 +12,7 @@ self-hosted-runner:
     # matrix, so those uses reach actionlint as an expression rather than a
     # literal -- they are listed here anyway so a literal use stays checked.
     - eph-linux-x64
-    # Dedicated release runner class (release.yml `plan`, `publish-release`
+    # Dedicated release runner class (release-pipeline.yml `publish-release`
     # and the Linux leg of release-platforms.json).
     - eph-linux-x64-release
     - eph-linux-arm64
