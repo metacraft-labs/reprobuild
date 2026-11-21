@@ -265,6 +265,16 @@ The first real run must then be inspected against Rekor — a
 `--certificate-oidc-issuer` — because a keyless signature that verifies
 against *any* identity is not a signature, it is a timestamp.
 
+Which identity to expect depends on how the release ran, since the jobs live
+in `release-pipeline.yml` and `release.yml` only calls it. A Fulcio
+certificate names the workflow that DEFINES the job (the token's
+`job_workflow_ref`), so on the reserved release lane (repository variable
+`RELEASE_LANE=admitted`) it is
+`https://github.com/metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@refs/heads/agents`,
+with the tag in the certificate's source-ref extension. On general capacity
+the same file is named at the tag (`@refs/tags/vX.Y.Z`). A verification
+policy has to accept the one the release used, or both.
+
 **This has not been exercised.** It is code that has never had a real
 token put through it.
 
