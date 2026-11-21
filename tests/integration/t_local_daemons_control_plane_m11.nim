@@ -271,8 +271,13 @@ when isNixSupported:
       waitForFileContent(quietFallbackProject / "dist" / "copied.txt",
         "quiet fallback\n", tempRoot)
 
+      # A real project, as in the cases above: `repro build` refuses a path
+      # that names nothing before it looks for a daemon, so without one this
+      # case failed for that reason and never reached the daemon check.
+      let requireProject = tempRoot / "require-project"
+      writeCopyProject(requireProject, "daemonM11Require", "require\n")
       let requireFailureOutput = requireFailure(buildCommand(
-        tempRoot / "require-project", tempRoot, "require-work",
+        requireProject, tempRoot, "require-work",
         ["--daemon=require"], envExtra = [
           ("REPRO_DAEMON_STATE_DIR", blockedState)
         ]), repoRoot())

@@ -460,13 +460,14 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       except CatchableError as exc:
         check not exc.msg.contains("no stdlib provisioning channel")
 
-  test "test_path_mode_keeps_matching_tarball_before_nix_fallback":
-    # Path-mode fallback historically preferred tarball metadata over
-    # other stdlib channels when the host PATH did not supply the tool.
-    # Keep that contract for tarballs that actually match the current
-    # host so direct-download tool pins (node/cargo/etc.) do not silently
-    # switch to Nix.
-    let scratch = createTempDir("repro-path-tarball-before-nix-", "")
+  test "test_path_mode_refuses_a_missing_tool_without_trying_its_arms":
+    # Path mode used to fall back to a host-matching tarball, then Nix, when
+    # PATH did not supply the tool. Since 2026-11-17 it is strictly PATH-only
+    # (reprobuild-pm issue 2026-11-12-per-mode-fallback-semantics-disagree,
+    # option (b)): the tool is refused, the declared arms are named as the
+    # remedy, and neither arm is tried -- the bogus tarball URL and the
+    # incomplete Nix metadata below would each fail if it were.
+    let scratch = createTempDir("repro-path-refuses-missing-", "")
     defer: removeDir(scratch)
     let nix = @[InterfaceNixProvisioning(
       selector: "",
@@ -485,24 +486,29 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
       nix = nix, tarball = tarball)
     let artifact = ProjectInterfaceArtifact(
       projectInterface: ProjectInterface(
-        projectName: "t_path_tarball_before_nix",
+        projectName: "t_path_refuses_missing",
         toolUses: @[useDef]))
     try:
       discard toolBuildIdentity(artifact, tpmPathOnly,
         pathValue = "", storeRoot = scratch / "tool-store")
-      check false  # expected to raise on the bogus tarball URL
+      check false  # expected to refuse the absent tool
     except CatchableError as exc:
-      check exc.msg.contains("file URL does not exist")
+      check exc.msg.contains("was not found in PATH")
+      check exc.msg.contains("--tool-provisioning=tarball")
+      when defined(linux) or defined(macosx):
+        check exc.msg.contains("--tool-provisioning=nix")
+      check exc.msg.contains("per-tool provisioning override")
+      check not exc.msg.contains("file URL does not exist")
       check not exc.msg.contains("incomplete nixPackage metadata")
+    check not dirExists(scratch / "tool-store")
 
-  test "test_path_mode_uses_nix_when_tarball_does_not_match_host":
-    # Cap'n Proto declares an official Windows tools zip, but upstream
-    # does not publish an equivalent Linux/macOS binary tarball. When a
-    # package has Nix metadata and only non-host tarballs, path mode
-    # should fall through to Nix instead of surfacing the misleading
-    # "no tarball provisioning entry matches host" diagnostic.
+  test "test_path_mode_remedy_names_only_the_modes_that_can_realize":
+    # Cap'n Proto shape: Nix metadata plus a Windows-only tarball. Path mode
+    # refuses the absent tool on every host; the remedy names nix mode on a
+    # Nix-capable host and never sends a Linux/macOS operator to tarball
+    # mode, which has no archive for the host.
     when defined(linux) or defined(macosx):
-      let scratch = createTempDir("repro-path-nix-after-mismatched-tarball-", "")
+      let scratch = createTempDir("repro-path-remedy-modes-", "")
       defer: removeDir(scratch)
       let nix = @[InterfaceNixProvisioning(
         selector: "",
@@ -521,15 +527,17 @@ suite "M9.R.9 auto-recurse + stdlib fall-through":
         nix = nix, tarball = tarball)
       let artifact = ProjectInterfaceArtifact(
         projectInterface: ProjectInterface(
-          projectName: "t_path_nix_after_mismatched_tarball",
+          projectName: "t_path_remedy_modes",
           toolUses: @[useDef]))
       try:
         discard toolBuildIdentity(artifact, tpmPathOnly,
           pathValue = "", storeRoot = scratch / "tool-store")
-        check false  # expected to raise on deliberately incomplete Nix metadata
+        check false  # expected to refuse the absent tool
       except CatchableError as exc:
-        check exc.msg.contains("incomplete nixPackage metadata")
-        check not exc.msg.contains("no tarball provisioning entry")
+        check exc.msg.contains("was not found in PATH")
+        check exc.msg.contains("--tool-provisioning=nix")
+        check not exc.msg.contains("--tool-provisioning=tarball")
+        check not exc.msg.contains("incomplete nixPackage metadata")
 
   test "test_m9r9_hard_fail_when_both_recipe_and_stdlib_provisioning_missing":
     # The terminal case: no sibling recipe AND no provisioning channels

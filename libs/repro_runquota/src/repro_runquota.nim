@@ -901,6 +901,29 @@ proc fillWidthPlaceholders*(text: string; slots: int): string =
     result.add $width
     pos = stop + WidthPlaceholderSuffix.len
 
+proc filledWidth*(argv: openArray[string]; slots: int): int =
+  ## The width `fillWidthPlaceholders` gives the width flag in `argv` under a
+  ## grant of `slots`: the value the command line already asked for when it
+  ## is within the grant, the grant otherwise, and the grant when `argv`
+  ## carries no placeholder at all. The width the command actually RUNS at,
+  ## which is what an engine sharing the host's cores without a lease counts
+  ## as held.
+  result = max(1, slots)
+  for arg in argv:
+    let start = arg.find(WidthPlaceholderPrefix)
+    if start < 0:
+      continue
+    let valueStart = start + WidthPlaceholderPrefix.len
+    let stop = arg.find(WidthPlaceholderSuffix, valueStart)
+    if stop < 0:
+      continue
+    let value = arg[valueStart ..< stop]
+    if value.len > 0 and value.len <= 6 and value.allCharsInSet(Digits):
+      let asked = parseInt(value)
+      if asked >= 1 and asked < result:
+        result = asked
+    return
+
 proc withWidthFlag*(argv: openArray[string]; flag: string;
                     slots: int): seq[string] =
   ## `argv` with `flag` carrying `slots` (see `widthPlaceholderArgv` for

@@ -48,6 +48,11 @@ export sources.profileCacheDir
 export sources.cachedRbpiPath
 export sources.cachedNimcacheDir
 export sources.ProfileNimcacheKeyChars
+export sources.WindowsMaxPathChars
+export sources.ProfileNimcacheModuleNameReserveChars
+export sources.windowsPathChars
+export sources.maxProfileStateDirChars
+export sources.profileStateDirBudgetProblem
 export sources.cachedProfileBinaryPath
 export sources.cachedIntentDocumentPath
 export sources.cachedProfileLockPath

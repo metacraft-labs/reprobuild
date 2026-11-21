@@ -35,8 +35,21 @@
 # below records the caller's directory before arx `cd`s away from it, and the
 # startup script hands it to `-w`.
 #
-# `tests/repro-portable-host-root.nix` is the proof, against a host-shaped root
-# with no /nix at all, with the stock nix-user-chroot as its negative control.
+# The bundle is for a host WITHOUT Nix, and it refuses to start on a host that
+# has one. The sandbox's /nix is the bundle's own store, so on a host with a
+# /nix/store the host's store, its `nix` and every `/nix/store/...` path on the
+# caller's PATH would be invisible: repro would report "this host has no Nix",
+# route its recipe compile to the system C compiler, and fail to run the host's
+# `nix` for a `useFlakeDevShell()` project. Mirroring the host's /nix instead is
+# not possible -- one directory cannot be both stores -- so the archive header
+# checks for /nix/store before arx extracts anything and names what to install
+# instead (the Nix package or the release archive). Distribution-And-Packaging
+# §9.3 is the contract.
+#
+# `tests/repro-portable-host-root.nix` is the proof: against a host-shaped root
+# with no /nix at all, with the stock nix-user-chroot as its negative control,
+# and against the same root with a host /nix, with this bundle minus its guard
+# (byte for byte the bundle before the guard existed) as the negative control.
 # Anything that re-enables shipping this bundle (gosti's GOSTI_RUNNER_REPRO,
 # infra's runner image) should require that check to pass on the revision it
 # ships.
@@ -88,6 +101,29 @@ let
   # unconditionally: an inherited value would be a parent's directory, not
   # this invocation's.
   captureLine = "REPRO_PORTABLE_CALLER_CWD=$(pwd) ; export REPRO_PORTABLE_CALLER_CWD";
+
+  # The refusal on a host with Nix (see the header comment). It sits in the
+  # archive header, before arx's extraction, so a refused run writes nothing
+  # under $HOME/.cache. Plain POSIX sh: it runs on the host, under whatever
+  # `/bin/sh` the host has. The check test strips exactly these bytes to
+  # rebuild the unguarded bundle for its negative control, so it reads them
+  # from `passthru.nixHostGuard` rather than restating them.
+  nixHostGuard = ''
+    if [ -d /nix/store ]; then
+      cat >&2 <<'REPRO_PORTABLE_REFUSAL'
+    repro-portable: refusing to start: this host has Nix (/nix/store exists).
+    This bundle runs repro in a sandbox whose /nix is the bundle's own store, so
+    the host's Nix would be invisible to it: repro would report that this host
+    has no Nix and could not run the host's nix. On a host with Nix, install
+    one of these instead:
+      - the Nix package:
+          curl -fsSL https://get.reprobuild.com/sh | sh -s -- --method nix
+      - the release archive reprobuild-<version>-linux-<arch>.tar.gz from
+          https://github.com/metacraft-labs/reprobuild/releases
+    REPRO_PORTABLE_REFUSAL
+      exit 1
+    fi
+  '';
 in
 arx.overrideAttrs (old: {
   buildCommand = old.buildCommand + ''
@@ -99,13 +135,21 @@ arx.overrideAttrs (old: {
     mv "$out" archive
     {
       printf '%s\n' "$shebang" ${lib.escapeShellArg captureLine}
+      printf '%s' ${lib.escapeShellArg nixHostGuard}
       tail -c +$(( ''${#shebang} + 2 )) archive
     } > "$out"
     rm archive
     chmod +x "$out"
   '';
   passthru = (old.passthru or { }) // {
-    inherit reprobuild nixUserChroot upstreamNixUserChroot;
+    inherit
+      reprobuild
+      nixUserChroot
+      upstreamNixUserChroot
+      nixHostGuard
+      ;
+    # The header lines before the guard, for the check that strips it.
+    headerBeforeGuard = "#!/bin/sh\n${captureLine}\n";
   };
   meta = (old.meta or { }) // {
     platforms = lib.platforms.linux;

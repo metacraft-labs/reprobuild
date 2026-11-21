@@ -895,8 +895,16 @@ suite "RA-32 — refuse and report at publish; repair only when asked":
       # layer root is observable as a finding and an unresolved one as none.
       let ws = fx.scratch / "ws"
       createDir(ws)
+      # The reader takes claims only from a record-store CHECKOUT, where the
+      # writer writes (`existingRecordStoreRoot`); a plain directory at the
+      # conventional location contributes nothing. So the layer is a git
+      # checkout at the preferred location, or the resolver would report no
+      # finding whether or not it encoded the component.
+      let recordStore = recordStoreCandidates(ws)[0]
+      createDir(recordStore)
+      requireGit(gitBin, "init -q", recordStore)
       let dbRel = lockFileRepoRelativePath(project, "isonim", triggerSha)
-      let dbAbs = ws / ".repro" / "manifests" / dbRel.replace('/', DirSep)
+      let dbAbs = recordStore / dbRel.replace('/', DirSep)
       createDir(parentDir(dbAbs))
       writeFile(dbAbs, routedBody("isonim", "isonim", triggerSha))
       let report = lockCoherenceFor(identityFor(gitBin), ws, project,

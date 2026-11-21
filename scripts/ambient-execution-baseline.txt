@@ -11,7 +11,7 @@ libs/repro_cargo_edge/src/repro_cargo_edge/edge.nim
 libs/repro_cargo_edge/src/repro_cargo_edge/rustc_wrapper.nim
 libs/repro_cli_support/src/repro_cli_support.nim
 libs/repro_cli_support/src/repro_cli_support/dev_session.nim
-libs/repro_cli_support/src/repro_cli_support/disk.nim
+libs/repro_cli_support/src/repro_cli_support/disko_source.nim
 libs/repro_cli_support/src/repro_cli_support/home.nim
 libs/repro_cli_support/src/repro_cli_support/infra_install_root.nim
 libs/repro_cli_support/src/repro_cli_support/partition.nim

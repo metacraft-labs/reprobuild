@@ -4,21 +4,46 @@
 ##
 ## No mocks. The pure cases run the production procedures on literal
 ## listings. The listing cases run real processes: on POSIX, small shell
-## scripts stand in for a test binary's ``--entrypoint=tests --list``
-## answer, because what is under test is how the producer reads a listing
-## process (both streams, the exit code), not the tests entry itself. A real
+## scripts stand in for a test binary's ``--entrypoint=list`` and
+## ``--entrypoint=tests --list`` answers, because what is under test is how
+## the producer reads a listing process (both streams, the exit code) and
+## what it does with each answer, not the tests entry itself. A real
 ## nim-entrypoints binary is listed and run per test by
-## ``tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim``.
+## ``tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim``, and
+## ``ct_test_unittest_parallel`` binaries (and a plain ``std/unittest`` one)
+## by ``tests/integration/test_cs_m14_shim_answers_tests_entry.nim``.
 
 import std/[json, os, strutils, tempfiles, unittest]
 
 import ct_test_nim_unittest/tests_fragment
+
+const
+  EntrypointsListDocument = """{"schema":"entrypoints/1","program":"suite","default":"main","entries":[{"name":"main","doc":"run the program","select":["compiletime","runtime"]},{"name":"tests","doc":"run the program's tests","select":["compiletime","runtime"],"args":"[--list]","entries":["alpha"]}]}"""
+    ## What nim-entrypoints prints for ``--entrypoint=list`` (one line).
+  ShimListDocument = """{"schema":"entrypoints/1","program":"suite","default":"main","entries":[{"name":"main","doc":"run every test","select":["runtime"]},{"name":"tests","doc":"run the program's tests","select":["runtime"],"entries":["s::a"]}]}"""
+    ## What ``ct_test_unittest_parallel`` prints for it.
+  NoTestsEntryDocument = """{"schema":"entrypoints/1","program":"tool","default":"main","entries":[{"name":"main","doc":"run the program","select":["compiletime","runtime"]}]}"""
+    ## A nim-entrypoints program without the tests entry.
 
 proc request(): PerTestRequest =
   PerTestRequest(binary: "/abs/build/test-bin/suite",
     fragment: "build/tests-per-entry/suite.rbdyn",
     idPrefix: "pkg.tests", collectorId: "pkg.tests",
     statsName: "build/test-bin/suite", cwd: "/abs")
+
+proc compileTemplate(): PerTestCompile =
+  ## A listed binary's compile as the engine lowers a
+  ## ``buildNimUnittest.build`` edge.
+  PerTestCompile(
+    argv: @["/tools/nim", "c", "--threads:on",
+      "--nimcache:build/nimcache/suite", "--out:build/test-bin/suite",
+      "src/suite.nim"],
+    cwd: "/abs", env: @["PATH=/tools"], envPassthrough: @["TMPDIR"],
+    inputs: @["src/suite.nim"], actionCachePolicy: "timestamp")
+
+proc strings(node: JsonNode): seq[string] =
+  for item in node:
+    result.add(item.getStr())
 
 proc records(text: string): seq[JsonNode] =
   for line in text.splitLines():
@@ -85,6 +110,9 @@ suite "a listing becomes one exact run per test":
       check rec["cacheable"].getBool()
       check rec["commandStatsId"].getStr() ==
         "build/test-bin/suite::" & names[i]
+      # One binary for every test: the engine's default checks, no deps.
+      check not rec.hasKey("actionCachePolicy")
+      check not rec.hasKey("deps")
     # The tab is escaped inside the JSON, so each record is one line.
     check text.splitLines().len == 1 + 3 + 3 + 1
     check depLines(text) == @[
@@ -104,6 +132,137 @@ suite "a listing becomes one exact run per test":
     expect TestsFragmentError:
       discard countFragmentRuns(dir / "missing.rbdyn")
 
+suite "a binary without the tests entry":
+
+  test "the entry list says whether the binary answers the tests entry":
+    check entryListHasTests(EntrypointsListDocument & "\n")
+    check entryListHasTests(ShimListDocument)
+    # No entrypoints/1 document: the binary has no entries. A plain
+    # std/unittest binary runs its suites with the selector as a filter.
+    check not entryListHasTests("\n[Suite] s\n")
+    check not entryListHasTests("")
+    check not entryListHasTests("""{"schema":"other/1","entries":[]}""")
+    check not entryListHasTests("[1, 2]")
+    check entryListArgv("/b") == @["/b", "--entrypoint=list"]
+
+  test "an entry list without a run-time tests entry is refused":
+    var message = ""
+    try:
+      discard entryListHasTests(NoTestsEntryDocument, "/b")
+    except TestsFragmentError as err:
+      message = err.msg
+    checkpoint(message)
+    check "/b" in message
+    check "import entrypoints/tests" in message
+    check "ct_test_unittest_parallel" in message
+    expect TestsFragmentError:
+      discard entryListHasTests("""{"schema":"entrypoints/1","entries":[{"name":"tests","select":["compiletime"]}]}""")
+    expect TestsFragmentError:
+      discard entryListHasTests("""{"schema":"entrypoints/1"}""")
+
+  test "its fragment runs the whole binary once, monitored and cacheable":
+    let text = wholeBinaryFragmentText(request())
+    check text.startsWith("repro-dynamic-graph-v1\n")
+    let recs = records(text)
+    check recs.len == 1
+    let rec = recs[0]
+    checkpoint($rec)
+    check rec["id"].getStr() == "pkg.tests.whole-binary"
+    check strings(rec["argv"]) == @["/abs/build/test-bin/suite"]
+    check rec["cwd"].getStr() == "/abs"
+    check rec["inputs"] == %["/abs/build/test-bin/suite"]
+    check rec["dependencyPolicy"] == %*{"kind": "automaticMonitor"}
+    check rec["cacheable"].getBool()
+    check rec["commandStatsId"].getStr() == "build/test-bin/suite"
+    check depLines(text) == @["dep\tpkg.tests\tpkg.tests.whole-binary"]
+
+suite "one binary per test":
+
+  test "each test gets its own compile, and its run uses that binary":
+    var req = request()
+    req.compile = compileTemplate()
+    let names = @["alpha", "a*b"]
+    let text = perTestFragmentText(req, names)
+    let recs = records(text)
+    check recs.len == 4
+    for i, (name, key) in [("alpha", "alpha"), ("a*b", "a_b")]:
+      let compile = recs[2 * i]
+      let run = recs[2 * i + 1]
+      checkpoint($compile & "\n" & $run)
+      let output = "build/test-bin/suite.per-test/" & key & "/suite"
+      check compile["id"].getStr() == "pkg.tests.compile." & key
+      check compile["argv"].strings == @["/tools/nim", "c", "--threads:on",
+        "--nimcache:build/nimcache/suite.per-test/" & key,
+        "-d:entrypointsTest=" & name, "--out:" & output, "src/suite.nim"]
+      check compile["cwd"].getStr() == "/abs"
+      check compile["env"].strings == @["PATH=/tools"]
+      check compile["envPassthrough"].strings == @["TMPDIR"]
+      check compile["inputs"].strings == @["src/suite.nim"]
+      check compile["outputs"].strings == @[output]
+      check compile["dependencyPolicy"] == %*{"kind": "automaticMonitor"}
+      check compile["cacheable"].getBool()
+      check compile["actionCachePolicy"].getStr() == "timestamp"
+      check run["id"].getStr() == "pkg.tests.test." & key
+      check run["argv"].strings == @["/abs/" & output, "--entrypoint=tests",
+        "--run-exact=" & name]
+      check run["inputs"].strings == @["/abs/" & output]
+      check run["deps"].strings == @["pkg.tests.compile." & key]
+      check run["cacheable"].getBool()
+      # The binary is rewritten whenever the source changes; the run is a
+      # hit when its bytes are the recorded ones.
+      check run["actionCachePolicy"].getStr() == "hybrid"
+    # The collector waits for the runs (which wait for their compiles).
+    check depLines(text) == @[
+      "dep\tpkg.tests\tpkg.tests.test.alpha",
+      "dep\tpkg.tests\tpkg.tests.test.a_b"]
+    let dir = createTempDir("tests-fragment-per-test-", "")
+    defer: removeDir(dir)
+    writeFile(dir / "f.rbdyn", text)
+    check countFragmentRuns(dir / "f.rbdyn") == 2
+
+  test "an uncacheable compile gives uncacheable per-test compiles":
+    var req = request()
+    req.compile = compileTemplate()
+    req.compile.uncacheable = true
+    let recs = records(perTestFragmentText(req, ["alpha"]))
+    check not recs[0]["cacheable"].getBool(true)
+    check recs[1]["cacheable"].getBool()
+    # A compile without a stated policy states none.
+    req.compile.actionCachePolicy = ""
+    check not records(perTestFragmentText(req, ["alpha"]))[0].hasKey(
+      "actionCachePolicy")
+
+  test "a listed test that is not a testCase is refused, by name":
+    # Every listed name is a testCase: nothing to refuse.
+    check notBuildableAlone(["alpha", "a*b"], ["alpha", "a*b"]) == ""
+    # A tests: block's test is listed but not among the testCases.
+    let message = notBuildableAlone(["alpha", "block::framework", "s::t"],
+      ["alpha"], "build/test-bin/suite")
+    checkpoint(message)
+    check "build/test-bin/suite" in message
+    check "\"block::framework\"" in message
+    check "\"s::t\"" in message
+    check "\"alpha\"" notin message
+    check "testCase" in message
+    check "perTestBinaries off" in message
+    # The listing that asks for testCases alone keeps --list first, so an
+    # older tests entry only lists.
+    check listTestCasesArgv("/b") ==
+      @["/b", "--entrypoint=tests", "--list", "--list-test-cases"]
+
+  test "a compile it cannot rewrite is refused":
+    let base = compileTemplate().argv
+    for bad in [
+        @["/tools/nim", "c", "--nimcache:n", "src/suite.nim"],
+        @["/tools/nim", "c", "--out:o", "src/suite.nim"],
+        @["/tools/nim", "c", "--nimcache:n", "--out:o", "--out:p", "s.nim"],
+        base & @["-d:entrypointsTest=beta"]]:
+      checkpoint($bad)
+      expect TestsFragmentError:
+        discard perTestCompileArgv(bad, "alpha", "alpha")
+    expect TestsFragmentError:
+      discard perTestCompileArgv(base, "", "alpha")
+
 suite "the producer's command line":
 
   test "the engine's command line parses back to the same request":
@@ -112,6 +271,13 @@ suite "the producer's command line":
     let command = parseProducerArgs(argv[1 .. ^1])
     check command.kind == pckList
     check command.request == request()
+    var perTest = request()
+    perTest.compile = compileTemplate()
+    perTest.compile.uncacheable = true
+    let perTestCommand = parseProducerArgs(
+      producerListArgv("/bin/repro-tests-fragment", perTest)[1 .. ^1])
+    check perTestCommand.kind == pckList
+    check perTestCommand.request == perTest
     let collect = parseProducerArgs(
       producerCheckArgv("/p", "f.rbdyn")[1 .. ^1])
     check collect.kind == pckCheck
@@ -124,6 +290,15 @@ suite "the producer's command line":
       discard parseProducerArgs(["--bogus"])
     expect TestsFragmentError:
       discard parseProducerArgs(["--check=f", "--binary=/b"])
+    let listing = @["--binary=/b", "--out=f", "--id-prefix=p", "--collector=p"]
+    # A compile's details without its command line, and a command line
+    # without the directory it runs in.
+    expect TestsFragmentError:
+      discard parseProducerArgs(listing & @["--compile-cwd=/abs"])
+    expect TestsFragmentError:
+      discard parseProducerArgs(listing & @["--compile-arg=nim"])
+    expect TestsFragmentError:
+      discard parseProducerArgs(["--check=f", "--compile-arg=nim"])
     check runProducer(["--bogus"]) == 64
     check runProducer([]) == 64
     check runProducer(["--help"]) == 0
@@ -134,6 +309,13 @@ when defined(posix):
     writeFile(result, "#!/bin/sh\n" & body)
     setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 
+  proc answersEntryList(document = EntrypointsListDocument): string =
+    ## The start of a script that answers ``--entrypoint=list`` as a binary
+    ## with the tests entry does.
+    # The document goes in single quotes, each of its own quotes as '\''.
+    "if [ \"$1\" = \"--entrypoint=list\" ]; then printf '%s\\n' '" &
+      document.replace("'", "'\\''") & "'; exit 0; fi\n"
+
   suite "listing a binary":
 
     test "the list is read from stdout, and a large stderr does not block it":
@@ -141,7 +323,7 @@ when defined(posix):
       defer: removeDir(dir)
       # 256 KiB on stderr before the list: more than a pipe holds, so a
       # reader that drained stdout first would wait forever.
-      let binary = script(dir, "lister",
+      let binary = script(dir, "lister", answersEntryList() &
         "[ \"$1 $2\" = \"--entrypoint=tests --list\" ] || exit 9\n" &
         "head -c 262144 /dev/zero | tr '\\0' x >&2\n" &
         "printf 'alpha\\nbeta\\ngamma\\n'\n")
@@ -178,7 +360,88 @@ when defined(posix):
     test "a listing that names a test twice writes no fragment":
       let dir = createTempDir("tests-fragment-dup-", "")
       defer: removeDir(dir)
-      let binary = script(dir, "dup", "printf 'alpha\\nalpha\\n'\n")
+      let binary = script(dir, "dup",
+        answersEntryList() & "printf 'alpha\\nalpha\\n'\n")
+      let outPath = dir / "suite.rbdyn"
+      check runProducer(["--binary=" & binary, "--out=" & outPath,
+        "--id-prefix=p", "--collector=p"]) == 1
+      check not fileExists(outPath)
+
+    test "one binary per test: a tests: block's test writes no fragment":
+      let dir = createTempDir("tests-fragment-block-", "")
+      defer: removeDir(dir)
+      # `--list` names a testCase and a tests: block's test;
+      # `--list --list-test-cases` names the testCase alone.
+      let binary = script(dir, "mixed", answersEntryList() &
+        "if [ \"$3\" = \"--list-test-cases\" ]; then printf 'alpha\\n'; " &
+        "else printf 'alpha\\nblock::framework\\n'; fi\n")
+      let outPath = dir / "suite.rbdyn"
+      var req = request()
+      req.binary = binary
+      req.fragment = outPath
+      req.compile = compileTemplate()
+      var message = ""
+      try:
+        discard writePerTestFragment(req)
+      except TestsFragmentError as err:
+        message = err.msg
+      checkpoint(message)
+      check "\"block::framework\"" in message
+      check "perTestBinaries" in message
+      check not fileExists(outPath)
+      # Control: one binary for every test lists and writes both.
+      req.compile = PerTestCompile()
+      check writePerTestFragment(req) == 2
+      check fileExists(outPath)
+
+    test "a binary without the tests entry is run as a whole, not listed":
+      let dir = createTempDir("tests-fragment-whole-", "")
+      defer: removeDir(dir)
+      # Like a plain std/unittest binary of the protocol-carrying fork: it
+      # prints test names for `--entrypoint=tests --list` (taking `--list`
+      # as its own), and for `--entrypoint=list` it runs its suites, with
+      # the selector as a filter that matches nothing, and exits 0.
+      let binary = script(dir, "plain",
+        "if [ \"$1\" = \"--entrypoint=list\" ]; then " &
+        "printf '\\n[Suite] s\\n'; exit 0; fi\n" &
+        "printf 's::a\\ns::b\\n'\n")
+      check listTests(binary) == @["s::a", "s::b"]
+      check not answersTestsEntry(binary)
+      let outPath = dir / "out" / "suite.rbdyn"
+      var req = request()
+      req.binary = binary
+      req.fragment = outPath
+      var wholeBinary = false
+      check writePerTestFragment(req, wholeBinary) == 1
+      check wholeBinary
+      let recs = records(readFile(outPath))
+      check recs.len == 1
+      check recs.len == 1 and strings(recs[0]["argv"]) == @[binary]
+      check recs.len == 1 and recs[0]["id"].getStr() == "pkg.tests.whole-binary"
+      check countFragmentRuns(outPath) == 1
+      # The program reports it, and succeeds.
+      removeFile(outPath)
+      check runProducer(["--binary=" & binary, "--out=" & outPath,
+        "--id-prefix=p", "--collector=p"]) == 0
+      check fileExists(outPath)
+      # One binary per test needs the entry: refused, no fragment.
+      removeFile(outPath)
+      req.compile = compileTemplate()
+      var message = ""
+      try:
+        discard writePerTestFragment(req)
+      except TestsFragmentError as err:
+        message = err.msg
+      checkpoint(message)
+      check "perTestBinaries" in message
+      check "--entrypoint=list" in message
+      check not fileExists(outPath)
+
+    test "an entry list without the tests entry writes no fragment":
+      let dir = createTempDir("tests-fragment-no-tests-entry-", "")
+      defer: removeDir(dir)
+      let binary = script(dir, "tool",
+        answersEntryList(NoTestsEntryDocument) & "printf 'alpha\\n'\n")
       let outPath = dir / "suite.rbdyn"
       check runProducer(["--binary=" & binary, "--out=" & outPath,
         "--id-prefix=p", "--collector=p"]) == 1

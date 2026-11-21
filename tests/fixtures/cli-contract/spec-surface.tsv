@@ -921,12 +921,14 @@ flag	repro workspace disable	--keep-checkouts
 flag	repro workspace disable	--workspace-root
 command	repro workspace sets
 flag	repro workspace sets	--all
+flag	repro workspace sets	--at
 flag	repro workspace sets	--disabled
 flag	repro workspace sets	--enabled
 flag	repro workspace sets	--json
 flag	repro workspace sets	--workspace-root
 command	repro workspace sets list
 flag	repro workspace sets list	--all
+flag	repro workspace sets list	--at
 flag	repro workspace sets list	--disabled
 flag	repro workspace sets list	--enabled
 flag	repro workspace sets list	--json
@@ -946,12 +948,14 @@ flag	repro workspace sets remove	--prune-orphan-repos
 flag	repro workspace sets remove	--workspace-root
 command	repro workspace projects
 flag	repro workspace projects	--all
+flag	repro workspace projects	--at
 flag	repro workspace projects	--disabled
 flag	repro workspace projects	--enabled
 flag	repro workspace projects	--json
 flag	repro workspace projects	--workspace-root
 command	repro workspace projects list
 flag	repro workspace projects list	--all
+flag	repro workspace projects list	--at
 flag	repro workspace projects list	--disabled
 flag	repro workspace projects list	--enabled
 flag	repro workspace projects list	--json

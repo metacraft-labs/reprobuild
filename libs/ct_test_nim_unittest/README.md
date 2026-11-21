@@ -38,6 +38,21 @@ failing test fails only its own action. A binary that lists no tests, or a
 name twice, fails the listing edge. `libs/ct_test_nim_unittest/src/
 ct_test_nim_unittest/tests_fragment.nim` describes the records.
 
+All tests of one binary share its bytes, so an edit of any of them reruns
+every one. `runPerTest(..., perTestBinaries = true)` opts into one binary per
+test instead: the listing still comes from this binary, and the fragment also
+creates a compile per test (`suite.compile.<name>`), the binary's own compile
+with nim-entrypoints' `-d:entrypointsTest=<name>` and its own output
+(`build/test-bin/suite.per-test/<name>/suite`) and nimcache. That define
+compiles the one `testCase` and expands the others to nothing, so the binary
+of a test whose code did not change comes out byte-identical, and its run,
+which re-hashes an input whose metadata moved (the `hybrid` input-check
+policy), is a cache hit: changing one test reruns only that test. It costs
+a compile per test; it covers `testCase` tests only (the listing edge fails,
+naming every test that belongs to a `tests:` block, before any compile is
+created); and a test whose lines an edit moves reruns too, because its line
+numbers are in its binary.
+
 ## Usage from a reprobuild package
 
 ```nim

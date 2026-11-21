@@ -254,8 +254,12 @@ proc needsProviderToolchain(args: openArray[string]): bool =
     return false
   try:
     let conf = ReproCommandLine.load(args)
-    conf.command notin {ReproCommandLineCommand.help,
-      ReproCommandLineCommand.version}
+    # ``--version`` / ``-V`` are not the ``version`` command: the parser
+    # reads them as the root's own flag and reports the root command
+    # (``call``), which the dispatch answers by printing the version, or,
+    # with no flag, by printing usage. Neither compiles a provider.
+    conf.command notin {ReproCommandLineCommand.call,
+      ReproCommandLineCommand.help, ReproCommandLineCommand.version}
   except CliHelpRequest:
     false
   except CatchableError:

@@ -5,8 +5,11 @@
 ## under `repro build --target=<triple>` a consumer's `buildDeps:` /
 ## `runtimeDeps:` resolve to the sibling's TARGET build (its
 ## `.repro/output/install@<triple>` mirror) ahead of PATH, which can only
-## hold a host build, and a `nativeBuildDeps:` entry stays PATH-first and
-## reads the sibling's NATIVE build when PATH has nothing. A sibling with no
+## hold a host build. In path mode a `nativeBuildDeps:` entry comes from PATH
+## only: it no longer reads the sibling's NATIVE build when PATH has nothing
+## (path mode is strictly PATH-only, operator decision of 2026-11-17 on
+## reprobuild-pm issue 2026-11-12-per-mode-fallback-semantics-disagree), and
+## is refused with the path-mode remedy instead. A sibling with no
 ## verified target build is refused rather than answered from PATH, and a
 ## target mirror without its keyed `.realization-info@<triple>` sidecar is
 ## not a build. Without `--target` PATH answers every side.
@@ -123,16 +126,24 @@ suite "path-mode dispatch resolves a sibling for its side of the split":
         check ("/.repro/output/install@" & Triple & "/usr/bin/openssl") in
           resolve(kind, recipes, pathDir))
 
-  test "under --target a nativeBuildDeps tool stays PATH-first, then the native mirror":
+  test "under --target a nativeBuildDeps tool comes from PATH only":
     let tmp = freshTmp()
     defer: removeDir(tmp)
     let (recipes, pathDir) = layOut(tmp, true, true)
     withTarget(Triple, proc() =
       check resolve(DepKindNative, recipes, pathDir) == pathDir / "openssl"
+      # PATH without it: the sibling's native mirror exists, and is not
+      # taken (it was before 2026-11-17); the refusal names the remedy.
       let empty = tmp / "empty-path"
       createDir(empty)
-      check "/.repro/output/install/usr/bin/openssl" in
-        resolve(DepKindNative, recipes, empty))
+      try:
+        let resolved = resolve(DepKindNative, recipes, empty)
+        checkpoint("expected a refusal, got " & resolved)
+        check false
+      except OSError as e:
+        check "was not found in PATH" in e.msg
+        check "per-tool provisioning override" in e.msg
+        check "/.repro/output/install" notin e.msg)
 
   test "a sibling with no target build is refused, not answered from PATH":
     let tmp = freshTmp()

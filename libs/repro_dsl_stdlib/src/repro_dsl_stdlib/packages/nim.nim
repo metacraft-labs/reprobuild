@@ -384,6 +384,10 @@ package nim:
         # The user's configuration ($XDG_CONFIG_HOME/nim) is no source of
         # the tree: an edge that must not depend on it skips it.
         boolFlag skipUserCfg is bool, alias = "--skipUserCfg"
+        # Nim's installed nim.cfg puts the host's nimble directories
+        # (``$home/.nimble/pkgs2``, ``/opt/nimble/pkgs2``) on the search
+        # path: an edge whose imports all come from ``--path`` drops them.
+        boolFlag noNimblePath is bool, alias = "--noNimblePath"
         boolFlag hintsOff is bool, alias = "--hints:off"
         boolFlag warningsOff is bool, alias = "--warnings:off"
         flag disabledHints is seq[string],
@@ -727,6 +731,7 @@ proc c*(pkg: NimPackage; source: string; binary: string;
         nimcache = "";
         appLib = false;
         skipUserCfg = false;
+        noNimblePath = false;
         threadsOn = false;
         parallelBuild = 0;
         actionId = "";
@@ -879,7 +884,8 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
     paths = paths.mapIt(fromRunDir(it)), passC = passC,
     passL = effectivePassL, nimcache = fromRunDir(cacheDir),
-    appLib = appLib, skipUserCfg = skipUserCfg, threadsOn = threadsOn,
+    appLib = appLib, skipUserCfg = skipUserCfg, noNimblePath = noNimblePath,
+    threadsOn = threadsOn,
     parallelBuild = parallelBuild,
     actionId = actionId,
     deps = deps,

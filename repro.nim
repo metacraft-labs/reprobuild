@@ -445,6 +445,22 @@ const
       rows.add TestGraphArtifacts(source: source, artifacts: artifacts)
     rows
 
+  shellHookCountingShimConsumers = block:
+    ## Every test that opens a case through
+    ## `tests/e2e/dev-env/shell_hook_helper.prepareShellHookCase`, which
+    ## requires the graph-built counting shim.
+    var rows: seq[TestGraphArtifacts]
+    for name in ["t_e2e_shell_hook_noop_io_bounded",
+                 "t_e2e_shell_hook_noop_latency",
+                 "t_e2e_shell_hook_realistic_workload",
+                 "t_e2e_shell_hook_cd_activate_deactivate"]:
+      rows.add TestGraphArtifacts(
+        source: "tests/e2e/dev-env/" & name & ".nim",
+        artifacts: @[TestGraphArtifact(
+          path: "build/test-bin/repro_shell_hook_counting_shim",
+          actionId: "reprobuild.test_fixtures.shell_hook_counting_shim")])
+    rows
+
   profileCompileNimSpyConsumers = block:
     var rows: seq[TestGraphArtifacts]
     for name in ["t_e2e_profile_compile_staticread_payload_change",
@@ -513,6 +529,12 @@ const
     TestGraphArtifacts(
       source: "tests/integration/" &
         "test_cs_m14_repro_collects_tests_per_entry.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/bin/repro-tests-fragment",
+        actionId: "reprobuild.apps.repro-tests-fragment")]),
+    TestGraphArtifacts(
+      source: "tests/integration/" &
+        "test_cs_m14_shim_answers_tests_entry.nim",
       artifacts: @[TestGraphArtifact(
         path: "build/bin/repro-tests-fragment",
         actionId: "reprobuild.apps.repro-tests-fragment")]),
@@ -628,7 +650,25 @@ const
           actionId: "reprobuild.test_helpers.repro_trampoline"),
         TestGraphArtifact(path: "build/test-bin/m5_stub_repro_image",
           actionId: "reprobuild.test_helpers.m5_stub_repro_image")]),
-  ] & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
+    # The tests below executed a graph-built helper with no row here, so a
+    # run that had not built the whole `test-helpers` / `test-fixtures`
+    # collections first failed on the missing file, and a rebuilt helper did
+    # not re-run them (reprobuild-pm `issues/2026-11-18-ten-tests-fail-on-
+    # agents-d3cf033b8c-when-each-is-run-alone.md`).
+    TestGraphArtifacts(
+      source: "tests/integration/t_repro_test_runner_catalog_selection.nim",
+      artifacts: @[TestGraphArtifact(path: "build/bin/repro_test_runner",
+        actionId: "reprobuild.test_helpers.repro_test_runner")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_local_daemons_control_plane_m2.nim",
+      artifacts: @[TestGraphArtifact(path: "build/test-bin/live_endpoint_helper",
+        actionId: "reprobuild.test_helpers.live_endpoint_helper")]),
+    TestGraphArtifacts(
+      source: "tests/integration/t_local_daemons_control_plane_m11.nim",
+      artifacts: @[TestGraphArtifact(
+        path: "build/test-bin/fake_protocol_daemon_helper",
+        actionId: "reprobuild.test_helpers.fake_protocol_daemon_helper")]),
+  ] & shellHookCountingShimConsumers & profileCompileNimSpyConsumers & binaryCacheHelperConsumers &
     cvmTestKeysRows & @[
     TestGraphArtifacts(
       source: "tests/e2e/gm4b/t_e2e_home_profile_resolves_like_uses.nim",
@@ -1058,11 +1098,12 @@ package reprobuild:
     # ``just lint`` ends in ``scripts/check_workflows.sh``, which runs
     # actionlint over ``.github/workflows``. The flake shell carries it on
     # Linux and macOS (so path mode finds it there); on Windows there is no
-    # flake shell, and the path-mode resolver realizes it from the release
-    # archives reprobuild-packages' ``packages/interfaces/actionlint``
-    # declares -- as it does ``just`` from the stdlib's. Without it the
-    # repository's local gate, the only gate ``agents`` has, could not pass
-    # in a Windows dev shell.
+    # flake shell. Path mode takes tools from PATH only (2026-11-17), so a
+    # Windows dev shell needs ``actionlint`` and ``just`` on PATH, or tarball
+    # mode / a per-tool override to realize them from the release archives
+    # reprobuild-packages' ``packages/interfaces/actionlint`` and the stdlib
+    # declare. Without it the repository's local gate, the only gate
+    # ``agents`` has, could not pass in a Windows dev shell.
     "actionlint"
     "sh"
     "bash"
@@ -3056,8 +3097,10 @@ package reprobuild:
       defines = @["release", "ssl"],
       paths = sourceOnlyNimPaths,
       # A helper tests run from build/bin is built without the user's Nim
-      # configuration (ReproOS Add-On Mode spec §13 decision 142).
+      # configuration (ReproOS Add-On Mode spec §13 decision 142), and
+      # without the host's nimble directories (scripts/build_apps.sh).
       skipUserCfg = true,
+      noNimblePath = true,
       extraEnv = sourceOnlyEnv,
       nimcache = "build/nimcache/repro-binary-cache",
       runInSourceDir = true,
@@ -3093,7 +3136,7 @@ package reprobuild:
     when defined(linux):
       var binaryCacheDepsArgs = @["bash", "scripts/write_helper_deps.sh",
         "repro-binary-cache", "apps/repro-binary-cache/repro_binary_cache.nim",
-        "--skipUserCfg", "--define:release", "--define:ssl"]
+        "--skipUserCfg", "--noNimblePath", "--define:release", "--define:ssl"]
       for p in sourceOnlyNimPaths: binaryCacheDepsArgs.add("--path:" & p)
       let binaryCacheDeps = shell(
         command = quoteShellCommand(binaryCacheDepsArgs),
@@ -4654,8 +4697,9 @@ package reprobuild:
             # Decision N (amended 2026-11-03): the prefix ships the catalog
             # fork under nim/, so the images must have been compiled by that
             # fork -- refused, naming the compiler, when the `nim` the edges
-            # resolve is not it (path mode falls back to the stock tarball
-            # Nim when the fork is not on PATH).
+            # resolve is not it (a stock Nim on PATH, or, before path mode
+            # became PATH-only on 2026-11-17, the stock tarball Nim it fell
+            # back to when the fork was not on PATH).
             nimForkGuardScript(catalogMirror("nim-fork") / "nim",
               projectRoot / "flake.lock")])
         let prefix = installedPrefix(spec, projectRoot)
