@@ -17,7 +17,9 @@ type ClosureEntry* = object
   path*: string    ## prefix-relative destination directory
   sha256*: string
   url*: string
-  archiveType*: string   ## ``zip``, ``tar.gz`` or ``tar.xz``
+  archiveType*: string
+    ## One of ``ClosureArchiveTypes``. ``file`` is not an archive: the
+    ## verified download itself is placed at ``path``.
   stripComponents*: int
 
 const
@@ -25,10 +27,19 @@ const
   ## a ``package/``-rooted gzip tarball.
   NpmClosureArchiveType* = "tar.gz"
   NpmClosureStripComponents* = 1
-  ## The kinds a five-field line may name. Each is an archive the existing
-  ## extractor unpacks with no provisioned extractor edge; an installer or an
-  ## executable bootstrap is deliberately not one of them.
-  ClosureArchiveTypes* = ["zip", "tar.gz", "tar.xz"]
+  ClosureFileKind* = "file"
+    ## A whole-file entry: the download is verified and COPIED to the
+    ## entry's path, never unpacked. For a payload that its consumer reads
+    ## as the file itself (a ``.gem`` that ``gem install`` takes, say). Its
+    ## strip count must be ``0``: there is nothing to strip.
+  ## The kinds a five-field line may name. ``zip``, ``tar.gz`` and
+  ## ``tar.xz`` are unpacked by the built-in extractor; ``tar.zst`` (the
+  ## format MSYS2 ships its packages in) is unpacked through the provisioned
+  ## zstd extractor, whose dependency edge the provisioning edge adds for it
+  ## exactly as for a primary ``tar.zst`` archive; ``file`` is copied. An
+  ## installer or an executable bootstrap is deliberately not one of them.
+  ClosureArchiveTypes* = ["zip", "tar.gz", "tar.xz", "tar.zst",
+                          ClosureFileKind]
 
 proc closureSha256(value: string): string =
   result = value.strip().toLowerAscii()
@@ -91,15 +102,24 @@ proc parseClosureManifestText*(text, origin: string): seq[ClosureEntry] =
         "<archiveType> <stripComponents>\": " & origin & ": " & line)
     let entryPath = parts[0].replace('\\', '/')
     let destination = normalizedClosureDestination(entryPath)
-    if destination.len == 0:
+    # ``.`` is the prefix root: an archive entry declared there is MERGED
+    # into the root (``isClosureRootOverlay``), which is how several MSYS2
+    # packages form one MSYS root with its ``usr/`` layout. Only on the
+    # five-field form, which names the kind explicitly, and never for a
+    # ``file`` entry, which needs a file name.
+    let rootOverlay = entryPath.strip(chars = {'/'}) == "." and
+      parts.len == 5 and parts[3] in ClosureArchiveTypes and
+      parts[3] != ClosureFileKind
+    if destination.len == 0 and not rootOverlay:
       raise newException(ValueError,
         "tool-resolution failed: closure entry path must be relative and " &
         "inside the prefix: " & entryPath & " (" & origin & ": " & line & ")")
-    if destination in destinations:
+    if not rootOverlay and destination in destinations:
       raise newException(ValueError,
         "tool-resolution failed: two closure entries unpack to " &
         destination & ": " & origin & ": " & line)
-    destinations.add(destination)
+    if not rootOverlay:
+      destinations.add(destination)
     var sha = ""
     try:
       sha = closureSha256(parts[1])
@@ -126,9 +146,31 @@ proc parseClosureManifestText*(text, origin: string): seq[ClosureEntry] =
         raise newException(ValueError,
           "tool-resolution failed: closure entry stripComponents must be " &
           "0 or 1 for a zip archive: " & origin & ": " & line)
+      if parts[3] == ClosureFileKind and strip != 0:
+        raise newException(ValueError,
+          "tool-resolution failed: closure entry stripComponents must be " &
+          "0 for a file entry, which is copied, not unpacked: " & origin &
+          ": " & line)
       entry.archiveType = parts[3]
       entry.stripComponents = strip
     result.add(entry)
+
+const PacmanPackageMetadata* = [".PKGINFO", ".BUILDINFO", ".MTREE",
+                                 ".INSTALL"]
+  ## The top-level members every pacman package (MSYS2's ``.pkg.tar.zst``)
+  ## carries beside its payload. They describe the package, not the tree it
+  ## installs, and every package has them, so a root overlay of a
+  ## ``tar.zst`` entry does not place them.
+
+proc isClosureRootOverlay*(entry: ClosureEntry): bool =
+  ## Whether ``entry`` is unpacked OVER the prefix root rather than into a
+  ## directory of its own. Such an entry merges: a directory it shares with
+  ## the root (``usr/bin``) is merged, and a file the root already has is
+  ## refused, so two packages can never silently replace each other's
+  ## files. The top-level pacman metadata of a ``tar.zst`` entry
+  ## (``PacmanPackageMetadata``) is not placed.
+  entry.archiveType != ClosureFileKind and
+    entry.path.replace('\\', '/').strip(chars = {'/'}) == "."
 
 proc canonicalClosureLine*(entry: ClosureEntry): string =
   ## An entry with the npm defaults is written as the three-field line, so an
