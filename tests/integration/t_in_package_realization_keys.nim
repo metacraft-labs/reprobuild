@@ -94,6 +94,13 @@ proc changed[T](value: T): T =
     not value
   elif T is SourceLocation:
     SourceLocation(file: value.file & "-moved.nim", line: value.line + 7)
+  elif T is seq[ClosureEntry]:
+    # A tarball record's closure entries (the archives its closure manifest
+    # names). One more entry here; the dedicated loop below moves each field
+    # of one entry alone.
+    value & @[ClosureEntry(path: "changed-entry",
+      sha256: repeat('d', 64), url: "https://example.invalid/changed.tgz",
+      archiveType: "tar.gz", stripComponents: 1)]
   elif T is TarballArchiveDetail:
     # ``agents`` GM4b: the archive-realization detail record. Every one of
     # its fields at once here; the dedicated loop below moves each alone.
@@ -337,6 +344,21 @@ suite "in-package realization keys":
           when field == name:
             slot = changed(slot)
         checkFieldBinding("tarball.detail", name, base, artifactFor(pi))
+    block:
+      # Each field of one closure entry of the tarball record, alone.
+      var withClosure = tarballEntry()
+      withClosure.closureEntries = @[ClosureEntry(path: "node_modules/dep",
+        sha256: repeat('e', 64), url: "https://example.invalid/dep.tgz",
+        archiveType: "tar.gz", stripComponents: 1)]
+      let base = consumerWith(@[], @[withClosure], @[])
+      for name, value in withClosure.closureEntries[0].fieldPairs:
+        var pi = base.projectInterface
+        for field, slot in pi.toolUses[0].tarballProvisioning[0].
+            closureEntries[0].fieldPairs:
+          when field == name:
+            slot = changed(slot)
+        checkFieldBinding("tarball.closureEntries[0]", name, base,
+          artifactFor(pi))
     # The fields the v4 key's list missed, named, so a reader of a failure
     # sees them without decoding the loop.
     let tarballBase = consumerWith(@[], @[tarballEntry()], @[])
@@ -443,7 +465,14 @@ suite "in-package realization keys":
       expectEdit("tarball." & name, name in ["sourceFile", "sourceLine"]):
         for field, slot in packages[tool].tarballProvisioning[0].fieldPairs:
           when field == name:
-            slot = changed(slot)
+            when field == "closureEntries":
+              # The DSL record carries its closure entries as closure
+              # manifest LINES, which the projection parses, so the edit has
+              # to be a well-formed line and not `changed`'s free text.
+              slot.add "node_modules/dep " & repeat('e', 64) &
+                " https://example.invalid/dep.tgz"
+            else:
+              slot = changed(slot)
     for name, value in base[tool].scoopProvisioning[0].fieldPairs:
       expectEdit("scoop." & name, name in ["sourceFile", "sourceLine"]):
         for field, slot in packages[tool].scoopProvisioning[0].fieldPairs:
