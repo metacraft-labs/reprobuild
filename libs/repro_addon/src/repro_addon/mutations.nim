@@ -1048,6 +1048,13 @@
 ##                                            flush leaves the table
 ##                                            deleted (reprobuild-pm issue
 ##                                            2026-11-16)
+## ``egress-ignores-counter-reset``           a count of the egress table
+##                                            that went down in place is not
+##                                            noticed, so the check does not
+##                                            start over and unattributed
+##                                            packets after it stay hidden
+##                                            (reprobuild-pm issue
+##                                            2026-11-18)
 ## ``sink-close-in-finally``                  the sink's connection handler
 ##                                            awaits its close in a finally,
 ##                                            as before; red under Nim 2.2.4
@@ -2344,6 +2351,9 @@ const
                           # reprobuild-pm issue 2026-11-16: the observer
                           # is not tied to the host's nftables.service.
                           "egress-unit-ignores-host-ruleset",
+                          # reprobuild-pm issue 2026-11-18: a reset of the
+                          # egress table's counters in place.
+                          "egress-ignores-counter-reset",
                           # The A11 code review, round 3.
                           "sink-close-in-finally", "egress-owed-by-listing",
                           "egress-owed-dropped-at-reload",

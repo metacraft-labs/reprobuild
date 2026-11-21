@@ -20,6 +20,7 @@
 ##
 ## Server subprocess is shared with the existing A2/A3 gates.
 
+from repro_core/process_streams import drainStream
 import std/[net, os, osproc, random, streams, strutils, times, unittest]
 
 import ../src/repro_binary_cache_client
@@ -76,7 +77,7 @@ proc drainServerOutput(p: Process): string =
     let stream = p.outputStream
     if stream.isNil:
       return ""
-    result = stream.readAll()
+    result = drainStream(stream)
   except CatchableError as e:
     result = "failed to read server output: " & e.msg & "\n"
 

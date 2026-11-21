@@ -15,6 +15,7 @@
 when not defined(windows):
   {.fatal: "windows_release_dll_staging_boundary requires native Windows".}
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, unittest]
 from std/sysrand import urandom
 import repro_test_support/process_fixtures
@@ -196,8 +197,7 @@ suite "Windows release DLL staging":
         "-Source", source, "-Utils", utils, "-Fixture", root],
       env = environment, options = {poStdErrToStdOut})
     defer: process.close()
-    var output: string
-    while not process.outputStream.atEnd(): output.add(process.outputStream.readAll())
+    let output = drainStream(process.outputStream)
     let code = process.waitForExit()
     var witnessCount = 0
     for line in output.splitLines():

@@ -21,6 +21,7 @@
 ##
 ## NO MOCKS: the real compiler and the real `config.nims`.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 proc reproRoot(): string =
@@ -55,7 +56,7 @@ proc linkScript(root, prefix: string; crossArgs: seq[string]): string =
     @[root / "probe.nim"]
   let p = startProcess(nim, workingDir = root, args = args, env = env,
     options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   checkpoint(output)

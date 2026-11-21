@@ -22,6 +22,7 @@
 ## would; it then checks the printed key against the library's derivation
 ## for the same edge. Nothing is mocked.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_binary_cache_client
@@ -191,7 +192,7 @@ proc runRepro(args: seq[string]): tuple[exitCode: int; output: string] =
   childEnv["REPROBUILD_REPO_ROOT"] = RepoRoot
   var p = startProcess(reproBinary(), args = args, env = childEnv,
                        options = {poStdErrToStdOut})
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.exitCode = p.waitForExit()
   p.close()
 

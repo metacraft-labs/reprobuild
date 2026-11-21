@@ -35,6 +35,7 @@
 ## No mocks. The compiler is the real compiler, the configuration file is
 ## the repository's own, and the temporary trees are real directories.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, streams, strtabs, strutils,
             tempfiles, unittest]
 
@@ -264,7 +265,7 @@ proc runNimDump(nim, workDir: string;
     args = @["dump", "--dump.format:json", "./__package_path_probe__.nim"],
     env = e,
     options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (code, output)

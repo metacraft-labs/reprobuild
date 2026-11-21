@@ -2,6 +2,7 @@
 ## fail after earlier worktree writes, including file/directory replacements.
 ## The ref-race runner only schedules a real update-ref between real Git
 ## commands; it injects concurrency at the boundary without faking Git output.
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 import git_fast_forward
 
@@ -11,7 +12,7 @@ proc execute(args: seq[string]; query: bool): FastForwardGitResult {.gcsafe.} =
   let child = startProcess("git", args = args, options = {poUsePath, poStdErrToStdOut})
   defer: child.close()
   child.inputStream.close()
-  let output = child.outputStream.readAll()
+  let output = drainStream(child.outputStream)
   (child.waitForExit(), output, output)
 
 proc git(repo: string; args: varargs[string]): string =

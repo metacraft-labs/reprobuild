@@ -19,6 +19,7 @@
 ##
 ## Both scenarios must exit 3 with a stderr diagnostic.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, unittest]
 
 import repro_test_support
@@ -34,8 +35,8 @@ proc runDeactivate(c: M74Case; manifestPath: string;
     workingDir = c.repoRoot,
     env = c.envFor(),
     options = {poUsePath})
-  result.stdout = process.outputStream.readAll()
-  result.stderr = process.errorStream.readAll()
+  result.stdout = drainStream(process.outputStream)
+  result.stderr = drainStream(process.errorStream)
   result.exitCode = process.waitForExit()
   process.close()
 

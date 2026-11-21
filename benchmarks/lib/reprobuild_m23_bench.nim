@@ -1,5 +1,6 @@
 # The RunQuota helper role of the image this test stands in for: its
 # command line read by repro's generated parser.
+from repro_core/process_streams import drainStream
 from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
   selectsRunQuotaHelper
 import std/[json, os, osproc, streams, strutils, tempfiles, times]
@@ -141,7 +142,7 @@ proc runProcess(args: openArray[string]; cwd = getCurrentDir()):
     workingDir = cwd,
     options = {poUsePath, poStdErrToStdOut})
   if process.outputStream != nil:
-    result.output = process.outputStream.readAll()
+    result.output = drainStream(process.outputStream)
   result.code = process.waitForExit()
   result.millis = elapsedMillis(start)
   process.close()

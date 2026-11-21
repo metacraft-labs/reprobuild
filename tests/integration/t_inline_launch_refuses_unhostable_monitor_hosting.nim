@@ -141,6 +141,7 @@ when defined(linux) or defined(macosx):
     discard daemon.waitForExit()
     var output = ""
     try:
+      # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
       output = daemon.outputStream.readAll().strip()
     except CatchableError:
       discard

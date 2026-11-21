@@ -65,6 +65,7 @@
 ## tail without adding any signal the p50/p99/max trio doesn't
 ## already provide.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, monotimes, os, osproc, streams, strtabs,
     strutils, times, unittest]
 
@@ -283,7 +284,7 @@ proc runExportPlain(c: ShellHookCase; env: StringTableRef):
     workingDir = c.repoRoot, env = env,
     options = {poUsePath, poStdErrToStdOut})
   defer: p.close()
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.exitCode = p.waitForExit()
 
 proc copyEnv(src: StringTableRef): StringTableRef =
@@ -438,7 +439,7 @@ suite "e2e_shell_hook_noop_latency":
     var allowProc = startProcess(c.reproBin,
       args = @["allow", c.projectRoot], workingDir = c.repoRoot,
       env = allowEnv, options = {poUsePath, poStdErrToStdOut})
-    let allowOut = allowProc.outputStream.readAll()
+    let allowOut = drainStream(allowProc.outputStream)
     let allowCode = allowProc.waitForExit()
     allowProc.close()
     if allowCode != 0:

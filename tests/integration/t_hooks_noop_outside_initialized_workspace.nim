@@ -91,6 +91,7 @@
 ## Skip rule: ``git`` missing on PATH (same convention as M17 / M18 /
 ## M19).
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, json, os, osproc, streams, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
@@ -1268,8 +1269,8 @@ suite "RA-10 — hooks no-op outside an initialized workspace":
       let treeProcess = startProcess(gitBin, workingDir = store,
         args = @["ls-tree", "-r", "-z", unusualCommit, "--", "locks"], options = {poUsePath})
       let treeCode = treeProcess.waitForExit()
-      let treeBytes = treeProcess.outputStream.readAll()
-      let treeWarning = treeProcess.errorStream.readAll()
+      let treeBytes = drainStream(treeProcess.outputStream)
+      let treeWarning = drainStream(treeProcess.errorStream)
       treeProcess.close()
       require treeCode == 0
       require treeWarning.contains("unable to find all commit-graph files")

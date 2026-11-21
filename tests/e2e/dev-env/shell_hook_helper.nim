@@ -16,6 +16,7 @@
 ## ``__REPRO_PROJECT_ROOT`` equality check short-circuits before
 ## spawning ``repro dev-env export``.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles]
 
 import repro_test_support
@@ -163,8 +164,8 @@ proc renderHookForCase*(c: ShellHookCase; shell: string): string =
     options = {poUsePath})
   let outStream = process.outputStream
   let errStream = process.errorStream
-  let outText = if outStream != nil: outStream.readAll() else: ""
-  let errText = if errStream != nil: errStream.readAll() else: ""
+  let outText = if outStream != nil: drainStream(outStream) else: ""
+  let errText = if errStream != nil: drainStream(errStream) else: ""
   let code = process.waitForExit()
   process.close()
   if code != 0:

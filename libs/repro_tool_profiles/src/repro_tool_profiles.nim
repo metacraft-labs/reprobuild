@@ -17,6 +17,7 @@ import repro_core/host_tar
 import repro_core/powershell_zip as repro_core_powershell_zip
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
+import repro_core/process_env
 import repro_core/nix_evaluation_policy
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
@@ -2933,11 +2934,9 @@ proc systemToolEnv(): StringTableRef =
   ## …/openssl-3.6.1/lib/libssl.so.3)`. A system tool must use its own system
   ## libraries; scrub the overrides so it does. `repro`'s own env is untouched.
   ##
-  ## The list is every variable through which a caller can make the loader
-  ## put something into, or say something about, a child it did not build:
-  ## the search paths (`LD_LIBRARY_PATH`, both `DYLD_*_LIBRARY_PATH`s), the
-  ## injected objects (`LD_PRELOAD`, `LD_AUDIT`, `DYLD_INSERT_LIBRARIES`) and
-  ## the loader's own tracing (`LD_DEBUG`, `LD_DEBUG_OUTPUT`). Tracing is not
+  ## The list is `repro_core/process_env.LoaderControlEnvNames`: every
+  ## variable through which a caller can make the loader put something into,
+  ## or say something about, a child it did not build. Tracing is not
   ## harmless here: `downloadUrlToFile` captures the child's stderr into its
   ## error, so an inherited `LD_DEBUG` would bury the one line that matters
   ## under the loader's trace, and `LD_DEBUG_OUTPUT` would have a host tool
@@ -2946,12 +2945,7 @@ proc systemToolEnv(): StringTableRef =
   result = newStringTable(modeCaseSensitive)
   for k, v in envPairs():
     result[k] = v
-  for override in ["LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT",
-                   "LD_DEBUG", "LD_DEBUG_OUTPUT",
-                   "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
-                   "DYLD_INSERT_LIBRARIES"]:
-    if result.hasKey(override):
-      result.del(override)
+  dropLoaderControls(result)
 
 # ---------------------------------------------------------------------------
 # The tools a tarball provisioning edge may take from the host.

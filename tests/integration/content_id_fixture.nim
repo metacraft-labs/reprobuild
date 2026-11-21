@@ -8,6 +8,7 @@
 ## private ``TMPDIR`` (so a test can assert the library left no temporary
 ## directory behind), fixed identities and dates.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles]
 
 import repro_cli_support/content_id
@@ -32,8 +33,8 @@ proc runGitIn*(dir: string; args: openArray[string]; input = "";
       if input.len > 0:
         process.inputStream.write(input)
       process.inputStream.close()
-      result.stdout = process.outputStream.readAll()
-      result.stderr = process.errorStream.readAll()
+      result.stdout = drainStream(process.outputStream)
+      result.stderr = drainStream(process.errorStream)
       result.code = process.waitForExit()
     finally:
       process.close()

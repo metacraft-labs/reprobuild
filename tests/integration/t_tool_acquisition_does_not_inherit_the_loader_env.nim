@@ -35,6 +35,7 @@
 ## loader); the cases still run end to end there and pin that acquisition
 ## succeeds with the poison in place.
 
+from repro_core/process_streams import drainStream
 import std/[net, os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_interface_artifacts
@@ -176,7 +177,7 @@ proc runInheriting(exe: string; args: openArray[string]):
   ## before the fix.
   let process = startProcess(exe, args = args,
     options = {poStdErrToStdOut})
-  result.output = process.outputStream().readAll()
+  result.output = drainStream(process.outputStream)
   result.exitCode = waitForExit(process)
   close(process)
 

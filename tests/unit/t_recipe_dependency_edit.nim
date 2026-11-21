@@ -358,9 +358,24 @@ suite "names and constraints":
     check parseDependencyRequest("openssl   >=3.3   <4.0").entry ==
       "openssl >=3.3 <4.0"
     check parseDependencyRequest("zlib").entry == "zlib"
-    for bad in ["", "@1", "zlib@", "zlib@latest", "nimble:zlib", "-z",
-                "zl\"ib", "zlib >=x.y"]:
+    # An ecosystem namespace is part of the name, spelled in `uses:` exactly
+    # as given (Package-Model.md § Ecosystem namespaces; NPC-M6). Before it
+    # was defined, `nimble:zlib` was refused here as a name with a colon.
+    let ns = parseDependencyRequest("nimble:chronicles@>=0.10")
+    check ns.ok
+    check ns.selector == "nimble:chronicles"
+    check ns.entry == "nimble:chronicles >=0.10"
+    check parseDependencyRequest("nimble:zlib").entry == "nimble:zlib"
+    for bad in ["", "@1", "zlib@", "zlib@latest", "-z",
+                "zl\"ib", "zlib >=x.y",
+                # namespace defects: unknown, empty, no name, two colons,
+                # and a name the namespace does not make valid
+                "cargo:serde", ":zlib", "nimble:", "nimble:a:b",
+                "nimble:-z"]:
+      checkpoint bad & ": " & parseDependencyRequest(bad).diagnostic
       check not parseDependencyRequest(bad).ok
+    check "no ecosystem defines" in
+      parseDependencyRequest("cargo:serde").diagnostic
 
 suite "sections and packages":
 

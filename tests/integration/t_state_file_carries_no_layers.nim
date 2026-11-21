@@ -51,6 +51,7 @@
 ## No mocks: real files and directories, the real binary. Skip rule: none —
 ## nothing here needs git or the network.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -66,8 +67,8 @@ proc runRepro(args: openArray[string]):
     env[k] = v
   env.del("REPRO_WORKSPACE_CONFIG")
   let p = startProcess(reproBinary(), args = @args, env = env, options = {})
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 

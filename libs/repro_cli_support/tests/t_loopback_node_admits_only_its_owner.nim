@@ -38,6 +38,7 @@
 ## MOCK POLICY — none: real loopback sockets, real BearSSL, real
 ## certificates and file permissions, a real second OS user.
 
+from repro_core/process_streams import drainStream
 import std/[asyncdispatch, options, os, osproc, streams, strutils, times, unittest]
 
 import repro_cas_store
@@ -261,7 +262,7 @@ suite "Distributed-Execution M7: a loopback node admits only its owner (D3)":
       let deadline = epochTime() + 60.0
       while p.running and epochTime() < deadline:
         pumpFor(100)
-      output = p.outputStream.readAll()
+      output = drainStream(p.outputStream)
       let code = p.waitForExit()
       p.close()
       # The probe's own files belong to `nobody`; it removes them itself.

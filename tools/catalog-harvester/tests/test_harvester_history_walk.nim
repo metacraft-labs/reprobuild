@@ -29,6 +29,7 @@
 ## identity), and the pipe-drain fix is a correctness improvement
 ## everywhere.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, tables, unittest]
 
 import ../src/bucket_clone
@@ -38,7 +39,7 @@ import ../src/bucket_clone
 proc runGitOrFail(args: openArray[string]; cwd: string) =
   let p = startProcess("git", workingDir = cwd, args = @args,
     options = {poUsePath, poStdErrToStdOut})
-  let outp = p.outputStream.readAll()
+  let outp = drainStream(p.outputStream)
   let rc = p.waitForExit()
   p.close()
   if rc != 0:

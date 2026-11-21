@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_hash
@@ -146,7 +147,7 @@ suite "integration_action_cache_concurrent_same_edge_converges_atomically":
         if code != 0:
           allOk = false
           checkpoint("worker exited with code " & $code & ": " &
-            p.outputStream.readAll())
+            drainStream(p.outputStream))
         p.close()
       check allOk
       # A reader concurrent with the writers never saw a torn file.

@@ -90,6 +90,7 @@
 ## real: the packaged `repro`, podman, Nix's own store tools, GNU tar, zstd,
 ## git, the engine's monitor and action cache.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, tables, tempfiles,
   unittest]
 
@@ -108,7 +109,7 @@ proc sh(cmd: string; cwd = ""): string =
     $getCurrentProcessId())
   let p = startProcess("/bin/sh", workingDir = cwd,
     args = ["-c", "(" & cmd & ") 2>" & quoteShell(errFile)], options = {})
-  result = p.outputStream.readAll()
+  result = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   let errText = (if fileExists(errFile): readFile(errFile) else: "")

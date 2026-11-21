@@ -28,6 +28,19 @@
 ##            a failure that NAMES lib-b. This proves the scope is the
 ##            closure (which includes lib-b), not just the pushed repo.
 ##
+##   Part 1 also holds the gate's GIT PROCESSES to the same scope. Under
+##            ``GIT_TRACE2_EVENT`` it asserts that out-of-closure lib-c is
+##            identified as a worktree at most ONCE (the lock writer's
+##            HEAD/branch read) and never has ``git status`` run on it. The
+##            gate used to sweep every declared repo three times — twice to
+##            identify the pushed checkout (``resolveRepoWorktreeMatch``
+##            from ``executeCheckPrePush`` and again from ``pickTriggerRepo``)
+##            and once with a discarded ``git status`` in
+##            ``executeWorkspaceLock`` — which is ~1,490 git processes for a
+##            one-repo push in a 162-repo workspace (reprobuild-pm
+##            ``issues/2026-10-10-pre-push-gate-observes-every-declared-repo-
+##            three-times-per-push.md``). Reverting either fix makes this fail.
+##
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no
 ## network. The manifest layer is a plain directory (not a publishable git
 ## repo), so the RA-21 loud-on-failure publish path is a benign skip here
@@ -250,6 +263,49 @@ proc invokeCheckPrePush(fx: Fixture; currentRepo, refsFile: string):
     "--json",
   ]))
 
+type GitInvocation = object
+  cwd: string    ## the ``-C`` directory, or "" when none was given
+  args: seq[string]  ## argv from the subcommand on
+
+proc gitInvocations(tracePath: string): seq[GitInvocation] =
+  ## Every git process recorded by ``GIT_TRACE2_EVENT`` (its ``start``
+  ## events), with the ``-C <dir>`` prefix split off.
+  if not fileExists(tracePath):
+    return
+  for line in lines(tracePath):
+    if line.len == 0:
+      continue
+    let event = try: parseJson(line) except CatchableError: continue
+    if event{"event"}.getStr() != "start":
+      continue
+    var argv: seq[string]
+    for item in event{"argv"}:
+      argv.add(item.getStr())
+    # Global options precede the subcommand: ``-C <dir>``, ``-c <k=v>`` and
+    # flags such as ``--no-optional-locks`` (which the clean probe passes).
+    # Drop them so ``args`` starts at the subcommand.
+    var inv: GitInvocation
+    var i = 1
+    while i < argv.len:
+      if argv[i] in ["-C", "-c"] and i + 1 < argv.len:
+        if argv[i] == "-C":
+          inv.cwd = argv[i + 1]
+        i += 2
+      elif inv.args.len == 0 and argv[i].startsWith("--"):
+        inc i
+      else:
+        inv.args.add(argv[i])
+        inc i
+    result.add(inv)
+
+proc canonicalOrEmpty(path: string): string =
+  ## ``expandFilename`` raises for a path that no longer exists (a traced
+  ## temp directory, say); such a path is simply not the one we look for.
+  if path.len == 0 or not path.isAbsolute:
+    return ""
+  try: expandFilename(path).normalizedPath
+  except OSError: ""
+
 proc readReport(fx: Fixture): JsonNode =
   let reportPath = fx.workspaceRoot / ".repro" / "build" / "reports" /
     "check-report.json"
@@ -286,9 +342,15 @@ suite "RA-21 — pre-push gate scoped to the pushed repo's dependency closure":
       writeFile(fx.workspaceRoot / "lib-c" / "scratch.txt",
         "uncommitted out-of-closure\n")
 
-      let pass = invokeCheckPrePush(fx,
-        currentRepo = fx.workspaceRoot / "lib-a",
-        refsFile = refsFile)
+      let tracePath = fx.scratch / "pre-push-git-trace2.json"
+      putEnv("GIT_TRACE2_EVENT", tracePath)
+      let pass =
+        try:
+          invokeCheckPrePush(fx,
+            currentRepo = fx.workspaceRoot / "lib-a",
+            refsFile = refsFile)
+        finally:
+          delEnv("GIT_TRACE2_EVENT")
       if pass.code != 0:
         checkpoint("Part 1 output: " & pass.output)
       # Falsifiable: the old whole-workspace gate refuses (exit 2) naming
@@ -300,6 +362,41 @@ suite "RA-21 — pre-push gate scoped to the pushed repo's dependency closure":
       # lib-c must NOT appear in any failure — it is out of scope.
       for failure in passReport["failures"]:
         check failure["repo"].getStr() != "lib-c"
+
+      # ---- Part 1b: out-of-closure lib-c is observed once, not three times
+      # The gate wrote a record on this push, so its lock writer ran and read
+      # lib-c's HEAD. That read is the one whole-workspace cost the record
+      # requires. Asserting the write is what keeps this part from passing
+      # vacuously: without a lock write there is neither the writer's sweep
+      # nor its second identification of the pushed checkout to count.
+      checkpoint("lockUpdate: " & $passReport{"lockUpdate"})
+      check passReport{"lockUpdate"}{"kind"}.getStr() in
+        ["created", "updated"]
+      let libC = canonicalOrEmpty(fx.workspaceRoot / "lib-c")
+      check libC.len > 0
+      let invocations = gitInvocations(tracePath)
+      checkpoint("git processes traced: " & $invocations.len)
+      # Not vacuous: git honoured the trace, and lib-c's HEAD was read.
+      check invocations.len > 0
+      var libCHeadReads, libCWorktreeProbes, libCStatusRuns = 0
+      for inv in invocations:
+        if canonicalOrEmpty(inv.cwd) != libC:
+          continue
+        if inv.args == @["rev-parse", "HEAD"]:
+          inc libCHeadReads
+        elif inv.args == @["rev-parse", "--git-common-dir"]:
+          inc libCWorktreeProbes
+        elif inv.args.len > 0 and inv.args[0] == "status":
+          inc libCStatusRuns
+      checkpoint("lib-c: HEAD reads=" & $libCHeadReads &
+        " worktree probes=" & $libCWorktreeProbes &
+        " status runs=" & $libCStatusRuns)
+      check libCHeadReads >= 1
+      # Identifying the pushed checkout (lib-a, matched by its declared path)
+      # needs no Git query against lib-c; the lock writer's one probe does.
+      check libCWorktreeProbes <= 1
+      # lib-c's cleanliness cannot affect the verdict and is not recorded.
+      check libCStatusRuns == 0
 
       # ---- Part 2: in-closure dirty DOES block, naming the dep ----------
       # lib-b IS in lib-a's closure. Make it dirty (and unpublished, to be

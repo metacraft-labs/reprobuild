@@ -1337,6 +1337,7 @@ command	repro lock list
 command	repro lock solve
 flag	repro lock solve	--activity
 flag	repro lock solve	--dry-run
+flag	repro lock solve	--exclude-newer
 flag	repro lock solve	--highest
 flag	repro lock solve	--inputs
 flag	repro lock solve	--json
@@ -1348,7 +1349,9 @@ flag	repro lock solve	--strategy
 flag	repro lock solve	--write
 command	repro lock refresh
 flag	repro lock refresh	--allow-pin-regression
+flag	repro lock refresh	--allow-rewind
 flag	repro lock refresh	--allow-stale-manifest
+flag	repro lock refresh	--exclude-newer
 flag	repro lock refresh	--highest
 flag	repro lock refresh	--inputs
 flag	repro lock refresh	--json

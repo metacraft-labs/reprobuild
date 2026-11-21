@@ -91,6 +91,7 @@
 ## The registration MINTER is injected by `repro up` itself and not by this
 ## test.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, strtabs, streams, strutils, tempfiles,
     times, typedthreads, unittest]
 
@@ -393,7 +394,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
   var process = startProcess(program, args = @args, workingDir = cwd,
     env = env, options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()
@@ -527,7 +528,7 @@ proc drainF5Output(target: ptr F5OutputDrain) {.thread.} =
   # A blocked output pipe must not masquerade as waiting for the owner lock.
   # Drain concurrently while the parent holds the publication rendezvous.
   {.cast(gcsafe).}:
-    target.output = target.stream.readAll()
+    target.output = drainStream(target.stream)
 
 suite "L9 F5 — two sessions read one instance's minted identifier":
   # Every case owns a fresh workspace and daemon, whether run alone or as

@@ -35,6 +35,7 @@
 ##
 ## None. Real CLI, real compile, real planner.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils]
 
 const RepoRoot* = currentSourcePath.parentDir.parentDir.parentDir
@@ -91,7 +92,7 @@ proc runRepro*(cacheRoot: string; args: seq[string]): CliRun =
   childEnv["REPROBUILD_ACTION_CACHE_ROOT"] = cacheRoot / "action-cache"
   var p = startProcess(reproBinary(), args = args, env = childEnv,
                        options = {poStdErrToStdOut})
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.exitCode = p.waitForExit()
   p.close()
 

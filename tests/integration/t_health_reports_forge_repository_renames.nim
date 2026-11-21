@@ -6,6 +6,7 @@
 ## A sleeping executable exercises the actual subprocess timeout/kill boundary.
 ## Text, verbose, JSON, offline, unavailable tooling and report-only remedies
 ## are checked alongside case-only spelling and unsupported/local URL controls.
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 import repro_test_support
 
@@ -106,7 +107,7 @@ mainline = "main"
         args = @["health", "fixture", "--workspace-root=" & ws] & extra.splitWhitespace(),
         env = environment, options = {poStdErrToStdOut})
       defer: process.close()
-      result = process.outputStream.readAll()
+      result = drainStream(process.outputStream)
       discard process.waitForExit()
     proc row(extra = ""; useTools = true; manifestRequired = true): JsonNode =
       let output = invoke("--json " & extra, useTools)

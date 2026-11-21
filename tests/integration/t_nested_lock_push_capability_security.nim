@@ -18,6 +18,7 @@
 ## one-binding mutation make the claims independently falsifiable. No ignored
 ## tests, mocked filesystem boundaries, or network access are used.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
   times, unittest]
 import repro_test_support/reasoned_skip
@@ -509,8 +510,8 @@ suite "nested lock-push capability security":
         let p2 = startProcess(shBin, workingDir = fx.repo,
           args = @["-c", command], env = childEnv,
           options = {poStdErrToStdOut})
-        result.firstOutput = p1.outputStream.readAll()
-        result.secondOutput = p2.outputStream.readAll()
+        result.firstOutput = drainStream(p1.outputStream)
+        result.secondOutput = drainStream(p2.outputStream)
         result.first = p1.waitForExit()
         result.second = p2.waitForExit()
         p1.close()

@@ -1,3 +1,4 @@
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, streams, strutils, tables, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
@@ -352,7 +353,7 @@ int main(int argc, char **argv) {
         args = [childExe, parentInput, childInput, outputDir],
         env = nil,
         options = {poStdErrToStdOut})
-      let processOutput = process.outputStream.readAll()
+      let processOutput = drainStream(process.outputStream)
       let exitCode = waitForExit(process)
       close(process)
       if exitCode != 0:
@@ -432,7 +433,7 @@ int main(int argc, char **argv) {
           args = [targetPath],
           env = nil,
           options = {poStdErrToStdOut})
-        let processOutput = process.outputStream.readAll()
+        let processOutput = drainStream(process.outputStream)
         let exitCode = waitForExit(process)
         close(process)
         if exitCode != 0:

@@ -47,6 +47,7 @@
 ## NO SILENT SKIP on Linux x86_64. Off-platform prints the loud unsupported
 ## diagnostic through the shared helper rather than a bare `skip()`.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
 
 import repro_test_support
@@ -136,7 +137,7 @@ when defined(linux) and defined(amd64):
     let delivery = client.deliverPatchRequest(connection, request)
     connection.close()
 
-    let output = process.outputStream.readAll()
+    let output = drainStream(process.outputStream)
     let exitCode = process.waitForExit()
     process.close()
     if exitCode != 0:

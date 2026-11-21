@@ -168,7 +168,11 @@ for target in "${targets[@]}"; do
   # here too, but less legibly than the diagnostic above.
   if [[ "${target}" == windows ]]; then
     if [[ -z "${REPRO_WINDOWS_CC:-}" || ! -x "${REPRO_WINDOWS_CC}" ]]; then
-      failures+=("--os:windows: REPRO_WINDOWS_CC ('${REPRO_WINDOWS_CC:-}') is not an executable MinGW-w64 gcc, so the generated C was NOT compiled; run inside the dev shell (\`nix develop\`), which provides it")
+      if [[ -n "${REPRO_WINDOWS_CC:-}" && "${REPRO_WINDOWS_CC}" == /nix/store/* && ! -e "${REPRO_WINDOWS_CC}" ]]; then
+        failures+=("--os:windows: REPRO_WINDOWS_CC ('${REPRO_WINDOWS_CC}') names a store path that no longer exists, so the generated C was NOT compiled: the Nix garbage collector removed it after this shell was entered. Enter the shell through a profile (\`nix develop --profile <path>\`, as scripts/pre_commit_lint.sh does) so its closure is rooted")
+      else
+        failures+=("--os:windows: REPRO_WINDOWS_CC ('${REPRO_WINDOWS_CC:-}') is not an executable MinGW-w64 gcc, so the generated C was NOT compiled; run inside the dev shell (\`nix develop\`), which provides it")
+      fi
       continue
     fi
     printf 'check_portable_engine_closure: compiling the --os:windows C with %s\n' \

@@ -165,6 +165,7 @@ proc captureNaive(): tuple[output: string; exitCode: int] =
   let fx = fixtureChild()
   let p = startProcess(fx.exe, args = fx.args, options = {poStdErrToStdOut})
   defer: p.close()
+  # readall-ok: the control; this read shows the short read drainStream avoids
   result.output = p.outputStream.readAll()
   result.exitCode = p.waitForExit()
 

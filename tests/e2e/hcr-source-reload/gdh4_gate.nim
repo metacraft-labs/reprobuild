@@ -29,6 +29,7 @@
 ##     a catchable error with a name, rather than killing this process with a
 ##     signal that no verdict could be attached to.
 
+from repro_core/process_streams import drainStream
 import std/[json, net, os, osproc, posix, streams, strtabs, strutils, times]
 
 import repro_hcr_agent
@@ -312,7 +313,7 @@ proc startHost(workDir, hostBin: string; advertiseReload: bool;
 proc finish(run: var HostRun): tuple[output: string, exitCode: int] =
   run.conn.close()
   run.listener.close()
-  result.output = run.process.outputStream.readAll()
+  result.output = drainStream(run.process.outputStream)
   result.exitCode = run.process.waitForExit()
   run.process.close()
 

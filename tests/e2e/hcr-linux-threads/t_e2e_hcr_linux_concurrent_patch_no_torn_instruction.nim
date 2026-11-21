@@ -52,6 +52,7 @@
 ## `repro_hcr_lx_apply_direct_patch_at` reached through the probe shim that
 ## re-exports it. The patch bodies come out of a real `ET_REL` object.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
 # Agent sockets go in a short directory under /tmp, not under the scratch
 # tree: on a runner whose work directory is long (the persistent benchmark
@@ -319,7 +320,7 @@ when defined(linux) and defined(amd64):
       let delivery = client.deliverPatchRequest(connection, request)
       connection.close()
 
-      let output = process.outputStream.readAll()
+      let output = drainStream(process.outputStream)
       let exitCode = process.waitForExit()
       process.close()
       if exitCode != 0:

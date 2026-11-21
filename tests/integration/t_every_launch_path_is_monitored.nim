@@ -328,6 +328,7 @@
 ## dependency evidence the engine actually produced, not a call
 ## assertion.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, compilesettings, os, osproc, sequtils, sets,
             streams, strutils, tables, tempfiles, unittest]
 
@@ -1502,6 +1503,7 @@ proc startRunQuotaDaemon(repoRoot, endpointRoot: string;
   discard daemon.waitForExit()
   var output = ""
   try:
+    # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
     output = daemon.outputStream.readAll().strip()
   except CatchableError:
     discard
@@ -3522,7 +3524,7 @@ suite "every_launch_path_is_monitored":
         "printf %s \"$REPRO_MONITOR_INTEREST\" > " & quoteShell(seenPath)]
       let cliProcess = startProcess(tools.monitorCliPath, args = cliArgs,
         options = {poStdErrToStdOut})
-      let cliOutput = cliProcess.outputStream.readAll()
+      let cliOutput = drainStream(cliProcess.outputStream)
       let cliCode = cliProcess.waitForExit()
       cliProcess.close()
       if cliCode != 0:

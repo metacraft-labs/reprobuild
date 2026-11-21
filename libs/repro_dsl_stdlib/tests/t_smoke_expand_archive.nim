@@ -31,6 +31,7 @@
 ## test executable so process identity and ambient temporary-directory
 ## differences cross an actual OS process boundary.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, unittest]
 
 import repro_project_dsl
@@ -71,7 +72,7 @@ proc startArgvEmitter(tempRoot: string): Process =
     options = {poStdErrToStdOut})
 
 proc finishArgvEmitter(process: Process): JsonNode =
-  let output = process.outputStream.readAll()
+  let output = drainStream(process.outputStream)
   let exitCode = process.waitForExit()
   process.close()
   if exitCode != 0:

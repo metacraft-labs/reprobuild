@@ -4,6 +4,7 @@
 ## owner-only modes even when the host has a runquota service account/group.
 ## Restore the caller's scope after each case; no host owner/group override or
 ## shared fixture helper is changed. All daemons and connections remain real.
+from repro_core/process_streams import drainStream
 import std/[monotimes, os, osproc, streams, strutils, tempfiles, times, unittest]
 import repro_core/paths
 import repro_test_support
@@ -76,6 +77,7 @@ when defined(posix):
     var diagnostic = ""
     while getMonoTime() < deadline:
       if not process.running:
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         raise newException(OSError, process.outputStream.readAll())
       try:
         # A bound socket inode can exist before the daemon starts listening.
@@ -200,7 +202,7 @@ suite "RunQuota long temp rendezvous":
         let code = daemon.waitForExit(5_000)
         require code != -1
         check code != 0
-        let output = daemon.outputStream.readAll()
+        let output = drainStream(daemon.outputStream)
         checkpoint(output)
         check "refusing" in output
         check "endpoint directory" in output

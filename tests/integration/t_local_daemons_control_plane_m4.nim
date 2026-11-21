@@ -277,6 +277,7 @@ proc ensureRunQuotaDaemon(repoRoot, tempRoot: string): tuple[
 
   proc daemonOutput(): string =
     if daemon.outputStream != nil:
+      # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
       return daemon.outputStream.readAll()
 
   proc ready(): bool =

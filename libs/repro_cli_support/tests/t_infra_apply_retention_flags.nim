@@ -12,6 +12,7 @@
 ## *Mocking.* None: the real dispatcher in a child process, against a
 ## temporary state directory with a real (empty) system profile.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_cli_support/infra
@@ -33,7 +34,7 @@ proc dispatch(args: seq[string]; stateDir = ""): DispatchResult =
       child.terminate()
       discard child.waitForExit()
       raise newException(IOError, "dispatcher did not return")
-    result.output = child.outputStream.readAll()
+    result.output = drainStream(child.outputStream)
   finally:
     child.close()
 

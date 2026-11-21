@@ -25,6 +25,7 @@
 ## cache decision, and the `portable-*` events of the report's trace, which
 ## say per edge why a record was or was not reused.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tables, tempfiles]
 
 import repro_test_support
@@ -188,7 +189,7 @@ proc build*(host: var SharedHost; project: string; portable: bool;
     (if target.len > 0: @[target] else: @[])
   let process = startProcess(reproBinary(), workingDir = project,
     args = args, env = env, options = {poStdErrToStdOut})
-  result.output = process.outputStream.readAll()
+  result.output = drainStream(process.outputStream)
   result.code = process.waitForExit()
   process.close()
   if fileExists(result.reportPath):

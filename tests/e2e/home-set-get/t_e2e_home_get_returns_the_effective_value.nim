@@ -22,6 +22,7 @@
 ## No mocks: the real `build/bin/repro`, a real profile file, an isolated
 ## HOME / profile / state / store. Nothing is applied.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 const ProjectRoot = currentSourcePath().parentDir().parentDir().
@@ -75,8 +76,8 @@ proc runGet(root, key: string):
   env["REPRO_HOST"] = Host
   let p = startProcess(reproBinary(), args = @["home", "get", key],
     env = env, options = {})
-  result.stdout = p.outputStream().readAll()
-  result.stderr = p.errorStream().readAll()
+  result.stdout = drainStream(p.outputStream)
+  result.stderr = drainStream(p.errorStream)
   result.exitCode = p.waitForExit()
   p.close()
 

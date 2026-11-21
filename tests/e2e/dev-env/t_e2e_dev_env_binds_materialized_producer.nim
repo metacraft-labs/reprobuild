@@ -106,6 +106,7 @@
 ## producer build is pointed at a scratch ``--action-cache-root``. Nothing
 ## touches $HOME.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strutils, unittest]
 
 import repro_test_support
@@ -196,9 +197,9 @@ proc runSplit(exe: string; args: openArray[string]; cwd: string):
     options = {poUsePath})
   let code = process.waitForExit()
   let outText =
-    if process.outputStream != nil: process.outputStream.readAll() else: ""
+    if process.outputStream != nil: drainStream(process.outputStream) else: ""
   let errText =
-    if process.errorStream != nil: process.errorStream.readAll() else: ""
+    if process.errorStream != nil: drainStream(process.errorStream) else: ""
   process.close()
   (code: code, outText: outText, errText: errText)
 

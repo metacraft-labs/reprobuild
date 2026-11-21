@@ -29,6 +29,7 @@
 ##     decoy's sled — the widened store — so this gate's byte predicates are
 ##     seen to reject that shape rather than merely accept the real one.
 
+from repro_core/process_streams import drainStream
 import std/[json, options, os, osproc, streams, strtabs, strutils, unittest]
 
 when defined(linux) and defined(amd64):
@@ -140,7 +141,7 @@ when defined(linux) and defined(amd64):
           sourceGenerationMap = [])
         let delivery = client.deliverPatchRequest(connection, request)
         connection.close()
-        result.output = process.outputStream.readAll()
+        result.output = drainStream(process.outputStream)
         result.exitCode = process.waitForExit()
         process.close()
         result.applied = delivery.patchApplied

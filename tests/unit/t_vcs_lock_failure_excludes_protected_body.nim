@@ -2,6 +2,7 @@
 ## holder acknowledges ownership before the contender enters the production
 ## template and retains it until explicitly released. Exercise the default
 ## 120-second deadline without any test override.
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 from repro_test_support/process_fixtures import releaseDirAtProcessExit
 when defined(posix):
@@ -82,7 +83,7 @@ suite "required VCS locks exclude mutations on failure":
       refused = true
     check refused
     check not fileExists(marker)
-    let refreshOutput = refresh.outputStream.readAll()
+    let refreshOutput = drainStream(refresh.outputStream)
     checkpoint(refreshOutput)
     check refresh.waitForExit() == 0
     check not dirExists(sharedBarePath(root / "cache", upstream))

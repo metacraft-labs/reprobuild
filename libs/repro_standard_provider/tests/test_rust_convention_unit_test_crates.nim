@@ -52,6 +52,7 @@
 ## settings are cleared first, as in
 ## ``test_rust_convention_lib_bin_and_path_deps``.
 
+from repro_core/process_streams import drainStream
 import std/[algorithm, os, osproc, sets, streams, strtabs, strutils, tables,
             tempfiles, unittest]
 import repro_test_support/reasoned_skip
@@ -146,7 +147,7 @@ proc runCapture(exe: string; args: openArray[string]; workingDir: string;
     envTab[name] = value
   let p = startProcess(exe, workingDir = workingDir, args = args,
     env = envTab, options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (output, code)

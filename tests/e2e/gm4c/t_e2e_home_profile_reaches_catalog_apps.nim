@@ -60,6 +60,7 @@
 ## Mocks: none. Nothing is downloaded; selection is static metadata. HOME and
 ## the state/store/profile directories are scratch directories.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
   unittest]
 from repro_core/paths import extendedPath
@@ -115,7 +116,7 @@ proc runPlan(root: string; packages: openArray[string]):
     args = @["home", "apply", "--plan", "--allow-drift",
              "--target-platform", "macos", "--target-arch", "arm64"],
     env = env, options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   (exitCode: code, output: output)

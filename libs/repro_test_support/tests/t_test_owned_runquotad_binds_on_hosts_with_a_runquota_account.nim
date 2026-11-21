@@ -63,6 +63,7 @@ suite "test-owned runquotad on a host with a runquota account":
         sleep(25)
       if not appeared and not daemon.running:
         # Say why the daemon left instead of only that no socket appeared.
+        # readall-ok: diagnostic from a daemon that left or was stopped; a descendant may hold the pipe
         checkpoint(daemon.outputStream.readAll())
       check appeared
     )

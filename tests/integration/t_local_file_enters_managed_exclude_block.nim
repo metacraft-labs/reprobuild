@@ -28,6 +28,7 @@
 ## `refreshWorkspaceSiblingIgnores` every workspace verb calls, and the real
 ## `repro` for the health legs. Skip rule: only when `git` is not on PATH.
 
+from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
@@ -47,8 +48,8 @@ proc runRepro(args: openArray[string]):
     env[k] = v
   env.del("REPRO_WORKSPACE_CONFIG")
   let p = startProcess(reproBinary(), args = @args, env = env, options = {})
-  let o = p.outputStream.readAll()
-  let e = p.errorStream.readAll()
+  let o = drainStream(p.outputStream)
+  let e = drainStream(p.errorStream)
   result = (code: p.waitForExit(), stdout: o, stderr: e)
   p.close()
 

@@ -22,6 +22,7 @@
 ## process against an empty project directory; the refusal happens before
 ## anything is built, so no toolchain or RunQuota daemon is needed.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 import repro_test_support/reasoned_skip
 
@@ -47,7 +48,7 @@ when defined(posix):
     if process.running:
       process.kill()
       discard process.waitForExit()
-    (process.outputStream.readAll(), code)
+    (drainStream(process.outputStream), code)
 
 suite "repro watch bounds the HCR agent socket path":
   test "an over-long absolute agent socket is refused naming the limit":

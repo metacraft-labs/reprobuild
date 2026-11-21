@@ -61,6 +61,7 @@
 ## build-action half — the half this seam feeds — takes the in-process
 ## broker fast path and mutates nothing outside its temp cwd.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_deploy_agent
@@ -153,7 +154,7 @@ proc producerPin(work, profileText, mode, activities: string):
     args.add(["--system-mode", mode, "--system-activities", activities])
   var p = startProcess(reproBinary(), args = args, env = env,
     options = {poStdErrToStdOut})
-  let output = p.outputStream.readAll()
+  let output = drainStream(p.outputStream)
   let code = p.waitForExit()
   p.close()
   doAssert code == 0, "compile-profile failed: " & output
@@ -223,7 +224,7 @@ proc runDeployAgent(stateDir, cacheRoot, manifestPath, signersPath: string):
              "--host", "m5-resolver-host"],
     env = childEnv,
     options = {poStdErrToStdOut})
-  result.output = p.outputStream.readAll()
+  result.output = drainStream(p.outputStream)
   result.exitCode = p.waitForExit()
   p.close()
 

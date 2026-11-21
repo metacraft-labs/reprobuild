@@ -1,8 +1,9 @@
 ## The `uses:` constraint grammar: one entry's selector and version text,
 ## classified, and whether it admits a version.
 ##
-## "nim >=2.2 <3", "lib ==1.4.0", "git": the selector is the first
-## whitespace-separated token (the split `usesSelectorOf` makes in the DSL
+## "nim >=2.2 <3", "lib ==1.4.0", "git", "nimble:chronicles >=0.10": the
+## selector is the first whitespace-separated token, optionally prefixed by an
+## ecosystem namespace (`nimble:`; Package-Model.md § Ecosystem namespaces) (the split `usesSelectorOf` makes in the DSL
 ## runtime) and the rest is a range in the grammar
 ## `repro_solver/version_constraints.parseSemverRange` reads (`>=`, `<`, `^`,
 ## `~`, `=`, a bare or `v`-prefixed version, comma- or space-separated).
@@ -17,6 +18,52 @@ import std/strutils
 
 import ./version_constraints
 
+const
+  NamespaceSeparator* = ':'
+    ## Separates an ecosystem namespace from the package name in a selector:
+    ## `nimble:chronicles` (Package-Model.md § Ecosystem namespaces). A plain
+    ## package name never holds a colon, so the split is unambiguous.
+  KnownNamespaces* = ["nimble"]
+    ## The ecosystem namespaces an ecosystem spec defines. `nimble:` is the
+    ## Nimble package catalog's (Nimble-Package-Catalog.md NPC-AREQ3); the
+    ## next ecosystem adds its own here with its spec.
+
+type
+  SelectorNamespace* = object
+    ## A `uses:` selector split at its namespace.
+    namespace*: string ## "" for a plain name
+    name*: string      ## the package name within the namespace
+    defect*: string    ## why the selector is not a valid namespaced name
+
+proc splitNamespace*(selector: string): SelectorNamespace =
+  ## Split ``selector`` into its ecosystem namespace and package name:
+  ## `nimble:zip` is (`nimble`, `zip`), `zip` is (``""``, `zip`). The
+  ## namespace is part of the package's identity: the solver, the lock and
+  ## `repro add` keep the full spelling. ``defect`` is set for a selector
+  ## with an empty namespace or name, a second colon, or a namespace no
+  ## ecosystem defines (``KnownNamespaces``).
+  let at = selector.find(NamespaceSeparator)
+  if at < 0:
+    return SelectorNamespace(name: selector)
+  result.namespace = selector[0 ..< at]
+  result.name = selector[at + 1 .. ^1]
+  if result.namespace.len == 0:
+    result.defect = "'" & selector & "' has an empty namespace before `:`"
+  elif result.name.len == 0:
+    result.defect = "'" & selector & "' names no package after `" &
+      result.namespace & ":`"
+  elif NamespaceSeparator in result.name:
+    result.defect = "'" & selector & "' has more than one `:`; a selector " &
+      "is `<namespace>:<name>` or a plain name"
+  elif result.namespace notin KnownNamespaces:
+    result.defect = "'" & selector & "' names the namespace `" &
+      result.namespace & ":`, which no ecosystem defines (known: " &
+      KnownNamespaces.join(", ") & ")"
+
+proc isNamespaced*(selector: string): bool =
+  ## Does ``selector`` carry an ecosystem namespace (`nimble:zip`)?
+  NamespaceSeparator in selector
+
 type
   UsesConstraintKind* = enum
     uckUnconstrained   ## the entry names a package and no version
@@ -26,7 +73,9 @@ type
 
   ReproUsesConstraint* = object
     ## What one `uses:` entry states about its package's version.
-    selector*: string      ## the package the entry names
+    selector*: string      ## the package the entry names, namespace included
+    namespace*: string     ## its ecosystem namespace (`nimble`), or ""
+    name*: string          ## the name within the namespace (`zip`)
     rangeText*: string     ## the version text after the selector, or ""
     kind*: UsesConstraintKind
     exactVersion*: string  ## the version an exact entry names, or ""
@@ -51,6 +100,13 @@ proc parseReproUsesConstraint*(rawConstraint: string; file = "";
     result.diagnostic = "empty uses: constraint"
     return
   result.selector = parts[0]
+  let ns = splitNamespace(result.selector)
+  result.namespace = ns.namespace
+  result.name = ns.name
+  if ns.defect.len > 0:
+    result.kind = uckUnparseable
+    result.diagnostic = ns.defect
+    return
   if parts.len == 1:
     result.kind = uckUnconstrained
     return

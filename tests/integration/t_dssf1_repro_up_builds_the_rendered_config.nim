@@ -34,6 +34,7 @@
 ## reason `t_l7_repro_up_converges_on_one_shared_instance.nim` records:
 ## without them the daemon's store would be the developer's live state.
 
+from repro_core/process_streams import drainStream
 import std/[os, osproc, strtabs, streams, strutils, tempfiles, times,
     unittest]
 
@@ -136,7 +137,7 @@ proc runProgram(program: string; args: openArray[string]; cwd: string;
   var process = startProcess(program, args = @args, workingDir = cwd,
     env = env, options = {poUsePath, poStdErrToStdOut})
   let output =
-    if process.outputStream != nil: process.outputStream.readAll()
+    if process.outputStream != nil: drainStream(process.outputStream)
     else: ""
   let exitCode = process.waitForExit()
   process.close()
