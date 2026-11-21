@@ -15906,8 +15906,8 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_run_edge_dev_env_merge_and_key.nim",
-      "sourceSuiteCount": 3,
-      "staticCaseCount": 15,
+      "sourceSuiteCount": 4,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

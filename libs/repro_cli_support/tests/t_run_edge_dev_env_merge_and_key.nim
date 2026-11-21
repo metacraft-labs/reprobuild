@@ -9,12 +9,22 @@
 ## own declaration winning over a `setEnv`, a passthrough `PATH`, an unset
 ## that cannot be honoured, and the key's sensitivity to op order.
 ##
+## It also runs the Windows rule for environment names (`Path` and `PATH`
+## are one variable) on every host, by passing ``caseInsensitive = true``:
+## the comparison is `repro_core/process_env`'s, and the module once kept a
+## private copy fixed to the build host, so these cases ran nowhere but on
+## Windows (reprobuild-pm
+## `issues/2026-11-19-dev-env-run-edges-keeps-a-private-copy-of-the-env-name-comparison.md`).
+##
 ## MOCKS: one. ``inheritedValue`` is a table instead of the process
 ## environment, because the rule under test is what the function does with
 ## an inherited value, and reading the real environment would make the
-## expectations depend on the shell the suite runs in.
+## expectations depend on the shell the suite runs in. ``hostIgnoringCase``
+## is the same table answering as ``getEnv`` does on Windows.
 
-import std/[sequtils, sets, strutils, tables, unittest]
+import std/[sequtils, sets, strtabs, strutils, tables, unittest]
+
+import repro_core/process_env
 
 import repro_build_engine
 import repro_hash
@@ -35,6 +45,24 @@ proc op(kind: DevEnvShellOpKind; name: string; value = ""): DevEnvShellOp =
 proc host(values: openArray[(string, string)]): proc (name: string): string =
   let table = values.toTable
   result = proc (name: string): string = table.getOrDefault(name)
+
+proc hostIgnoringCase(values: openArray[(string, string)]):
+    proc (name: string): string =
+  let table = envTableFrom(values, caseInsensitive = true)
+  result = proc (name: string): string = table.getOrDefault(name)
+
+proc namesDeclared(action: BuildAction; name: string): seq[string] =
+  ## Every spelling under which ``action`` declares the variable ``name``,
+  ## by the Windows rule.
+  for entry in action.env:
+    let eq = entry.find('=')
+    if eq > 0 and sameEnvName(entry[0 ..< eq], name, caseInsensitive = true):
+      result.add(entry[0 ..< eq])
+
+proc namesPassedThrough(action: BuildAction; name: string): seq[string] =
+  for item in action.envPassthrough:
+    if sameEnvName(item, name, caseInsensitive = true):
+      result.add(item)
 
 proc envValue(action: BuildAction; name: string): string =
   for entry in action.env:
@@ -120,6 +148,75 @@ suite "applyDevEnvToRunEdge":
     discard applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops), host([]))
     check a.cwd == cwdBefore
     check a.env.len == 0
+
+suite "applyDevEnvToRunEdge under the Windows rule for environment names":
+  test "an op composes onto the edge's own declaration spelled differently":
+    var a = edge(["Path=/tool/bin"])
+    let ops = @[op(deskSetEnv, "PATH", "/replaced"),
+      op(deskPrependPath, "PATH", "/devenv/bin")]
+    discard applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops),
+      hostIgnoringCase({"Path": "/host/bin"}), caseInsensitive = true)
+    # One variable, one entry: the edge's value wins over the set, the
+    # prepend composes onto it, and the host's value is not involved.
+    # It stays under the edge's spelling.
+    check a.namesDeclared("PATH") == @["Path"]
+    check a.envValue("Path") == "/devenv/bin:/tool/bin"
+    check a.namesPassedThrough("PATH").len == 0
+
+  test "an edge declaring one variable twice is read as the launch reads it":
+    # The launch takes the last entry naming a variable, so that entry is
+    # the declaration the ops meet, under either rule.
+    var a = edge(["Path=/first", "KEEP=1", "PATH=/last"])
+    var ops = @[op(deskSetEnv, "path", "/replaced"),
+      op(deskAppendPath, "path", "/devenv/bin")]
+    discard applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops),
+      hostIgnoringCase([]), caseInsensitive = true)
+    check a.env == @["KEEP=1", "PATH=/last:/devenv/bin"]
+
+    var b = edge(["FOO=first", "KEEP=1", "FOO=last"])
+    ops = @[op(deskSetEnv, "FOO", "replaced")]
+    discard applyDevEnvToRunEdge(b, ops, devEnvRunEdgeIdentity(ops),
+      host([]), caseInsensitive = false)
+    check b.env == @["KEEP=1", "FOO=last"]
+
+  test "an unset is reported against the inherited value spelled differently":
+    var a = edge()
+    let ops = @[op(deskUnsetEnv, "PATH")]
+    let unremoved = applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops),
+      hostIgnoringCase({"Path": "/host/bin"}), caseInsensitive = true)
+    check unremoved == @["PATH"]
+    check a.env.len == 0
+
+  test "an op composes onto the inherited value spelled differently":
+    var a = edge(passthrough = ["Path"])
+    let ops = @[op(deskPrependPath, "PATH", "/devenv/bin")]
+    discard applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops),
+      hostIgnoringCase({"Path": "/usr/bin:/bin"}), caseInsensitive = true)
+    check a.namesDeclared("PATH").len == 1
+    check a.envValue(a.namesDeclared("PATH")[0]) == "/devenv/bin:/usr/bin:/bin"
+    # Already passthrough as `Path`; not named a second time as `PATH`.
+    check a.namesPassedThrough("PATH") == @["Path"]
+
+  test "two ops spelling one variable differently decide one value":
+    var a = edge()
+    let ops = @[op(deskPrependPath, "Path", "/devenv/bin"),
+      op(deskSetEnv, "PATH", "/only")]
+    discard applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops),
+      hostIgnoringCase({"Path": "/host/bin"}), caseInsensitive = true)
+    check a.namesDeclared("PATH").len == 1
+    check a.envValue(a.namesDeclared("PATH")[0]) == "/only"
+    # The set replaced what the prepend composed onto the host's value, so
+    # nothing of the host is left in it and it is keyed by value.
+    check a.namesPassedThrough("PATH").len == 0
+
+  test "the POSIX rule keeps differently spelled names apart":
+    var a = edge(["Path=/tool/bin"])
+    let ops = @[op(deskPrependPath, "PATH", "/devenv/bin")]
+    discard applyDevEnvToRunEdge(a, ops, devEnvRunEdgeIdentity(ops),
+      host({"Path": "/host/bin"}), caseInsensitive = false)
+    check a.envValue("Path") == "/tool/bin"
+    check a.envValue("PATH") == "/devenv/bin"
+    check a.envPassthrough.len == 0
 
 suite "the dev environment's identity keys the run-edge":
   test "the identity folds into the weak fingerprint":
