@@ -8297,12 +8297,17 @@ proc requireInterfaceNimcacheRootParent*(root: string) =
   ## the path to the root's parent is walked from `/`, resolving symbolic
   ## links one at a time:
   ##
-  ## * every directory must be this user's or root's, and writable by no
-  ##   other account unless it is sticky, as `/tmp` is (in a sticky directory
+  ## * every directory must be this user's or root's, or -- inside a user
+  ##   namespace -- owned by an account the namespace cannot name, but only
+  ##   where its container is not writable by group or others
+  ##   (`ancestorOwnerIsTrusted`; a sandbox's `/` and the host directories
+  ##   above its work area show as the kernel's overflow uid), and
+  ##   writable by no other account unless it is sticky, as `/tmp` is (in a sticky directory
   ##   only an entry's owner can rename it). Group write is also accepted
   ##   from this user's private group (`isOwnPrivateGroup`), so a `~/.cache`
   ##   made 0775 under a per-user-group umask is not refused;
-  ## * every symbolic link must be this user's or root's. It lives in a
+  ## * every symbolic link must be this user's or root's (or an unmapped
+  ##   owner's under the same container rule as a directory). It lives in a
   ##   directory that passed the rule above, so nobody else can replace it,
   ##   and its target is walked the same way. A link another user left in
   ##   `/tmp` (an `XDG_CACHE_HOME=/tmp/...` they created first) is refused:
@@ -8317,6 +8322,14 @@ proc requireInterfaceNimcacheRootParent*(root: string) =
       pending.add(part)
     var current = "/"
     var hops = 0
+    proc containerMode(path: string): int =
+      ## Mode of the directory holding `path`; -1 for `/`.
+      if path == "/":
+        return -1
+      var cst: Stat
+      if stat(parentDir(path).cstring, cst) != 0:
+        return 0o777  # cannot tell: the strictest answer
+      int(cst.st_mode) and 0o7777
     proc checkDir(path: string) =
       var st: Stat
       if stat(path.cstring, st) != 0:
@@ -8325,7 +8338,7 @@ proc requireInterfaceNimcacheRootParent*(root: string) =
       let mode = int(st.st_mode) and 0o7777
       let owner = int(st.st_uid)
       let sticky = (mode and 0o1000) != 0
-      if owner != me and owner != 0:
+      if not ancestorOwnerIsTrusted(owner, me, containerMode(path)):
         refuseNimcacheAncestor(root, path, "belongs to another account",
           owner, mode)
       if not sticky and ((mode and 0o002) != 0 or
@@ -8351,7 +8364,7 @@ proc requireInterfaceNimcacheRootParent*(root: string) =
           candidate)
       if S_ISLNK(st.st_mode):
         let owner = int(st.st_uid)
-        if owner != me and owner != 0:
+        if not ancestorOwnerIsTrusted(owner, me, containerMode(candidate)):
           refuseNimcacheAncestor(root, candidate,
             "is a symbolic link another account owns", owner,
             int(st.st_mode))
