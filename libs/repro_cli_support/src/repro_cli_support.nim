@@ -23020,7 +23020,7 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("    printf '%s\\n' \"repro hooks: re-enter this repository's " &
     "dev shell so its hook installer writes " & hookName &
     ".repro-local again, or delete " &
-    "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
+    "$(repro_remedy_word \"$LOCAL_HOOK\") if nothing installs the " & hookName & " stage any more. " &
     "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") health\\` lists every " &
     "such hook.\" >&2\n")
   result.add("  fi\n")
@@ -24986,8 +24986,8 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
             " already holds a different preserved hook. Reconcile them by " &
             "hand: merge the checks you want into " & local &
             " (which the dispatcher runs first), delete " & standard &
-            ", then re-run 'repro hooks ensure --vcs " &
-            remedyPathWord(parentDir(parentDir(hooksDir))) & "'.")
+            ", then re-run `repro hooks ensure --vcs " &
+            remedyPathWord(parentDir(parentDir(hooksDir))) & "`.")
     else:
       moveFileReplacing(standard, local)
       ensureExecutable(local)
@@ -57768,9 +57768,9 @@ proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     return (1, err.msg)
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
-    return (1, hook.diagnostic & "; run '" &
+    return (1, hook.diagnostic & "; run `" &
       remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "'")
+      remedyPathWord(repoRoot) & "`")
   var capability = ""
   if hook.kind == ephReproV2:
     let location = configuredPushLocation(identity, repoRoot, target.remote)
@@ -58253,8 +58253,8 @@ proc publishedLockKeyCollision(identity: GitToolIdentity; repoRoot,
         localBlob.output.strip() & "); published records are immutable and " &
         "this one is not rewritten. Two sources disagree about the " &
         "workspace state at that commit — bring this store up to date " &
-        "('git -C " & remedyPathWord(repoRoot) &
-        " pull --ff-only') and re-read the " &
+        "(`git -C " & remedyPathWord(repoRoot) &
+        " pull --ff-only`) and re-read the " &
         "published record before deciding which answer is right"
   ""
 
@@ -58824,8 +58824,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     result.diagnostic =
       "lock record(s) missing from the manifest working tree (" &
         vanishedRecords.join(", ") &
-        "); lock records are immutable — restore them with 'git -C " &
-        remedyPathWord(manifestRepoRoot) & " checkout -- locks' and re-run"
+        "); lock records are immutable — restore them with `git -C " &
+        remedyPathWord(manifestRepoRoot) & " checkout -- locks` and re-run"
     return
 
   # Collect the staged lock paths and reject empty/zero-byte locks.
@@ -69913,8 +69913,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     if displaced:
       stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running " &
         "as pre-commit.legacy under another hook manager, so this gate " &
-        "cannot refuse. Restore it with 'repro hooks ensure --vcs " &
-        remedyPathWord(repoRoot) & "'")
+        "cannot refuse. Restore it with `repro hooks ensure --vcs " &
+        remedyPathWord(repoRoot) & "`")
       return 0
     stderr.writeLine(prefix & "the commit is REFUSED: the certificate " &
       "policy this commit carries cannot be read. This is early feedback, " &
@@ -70040,8 +70040,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
       "pre-commit.legacy under another hook manager, whose hooks run after " &
       "this gate and may still change the index, so this gate cannot refuse. " &
-      "Restore it with 'repro hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "'")
+      "Restore it with `repro hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "`")
   if refuses:
     stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
       "required). This is early feedback, which `git commit " &
@@ -73756,8 +73756,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
           "from this checkout); this checkout is not one the workspace " &
           "gates or locks"
       else:
-        "run 'repro hooks ensure --vcs " &
-          remedyPathWord(parsed.currentRepo) & "' from a checkout declared by this workspace, or repair the " &
+        "run `repro hooks ensure --vcs " &
+          remedyPathWord(parsed.currentRepo) & "` from a checkout declared by this workspace, or repair the " &
           "workspace membership before retrying the push"
     result.failures.add(CheckFailure(
       repo: "",
@@ -73910,8 +73910,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: parsed.currentRepo,
         property: "membership-push-scope",
         remediation: "make the pushed commits readable in " &
-          remedyProsePath(parsed.currentRepo) & " (run 'git -C " &
-          remedyPathWord(parsed.currentRepo) & " fsck' and fetch the remote), then retry the push — the gate " &
+          remedyProsePath(parsed.currentRepo) & " (run `git -C " &
+          remedyPathWord(parsed.currentRepo) & " fsck` and fetch the remote), then retry the push — the gate " &
           "cannot tell which repos this manifest push re-pins without them",
         evidence: membership.diagnostic))
       result.exitCode = 2
@@ -74341,9 +74341,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
         # Principle 2: name the offender AND a copy-pasteable command.
         remediation: "commit or stash changes in " &
           remedyProsePath(obs.path) &
-          " — run 'git -C " & remedyPathWord(obs.path) &
-          " commit -a' (or 'git -C " & remedyPathWord(obs.path) &
-          " stash') then 'repro push'",
+          " — run `git -C " & remedyPathWord(obs.path) &
+          " commit -a` (or `git -C " & remedyPathWord(obs.path) &
+          " stash`) then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
 
@@ -74593,12 +74593,12 @@ proc executeCheckPrePush(parsed: CheckArgs;
         result.failures.add(CheckFailure(
           repo: repoLabel,
           property: "history-rewrite-unverifiable",
-          remediation: "run 'git -C " & remedyPathWord(parsed.currentRepo) &
+          remediation: "run `git -C " & remedyPathWord(parsed.currentRepo) &
             " fetch " &
             (if outgoing.remoteName.len > 0:
                quoteShellPosix(outgoing.remoteName)
              else: "<remote>") & " " &
-            quoteShellPosix(pushedBranch) & "' so the commits this update " &
+            quoteShellPosix(pushedBranch) & "` so the commits this update " &
             "would replace are present locally, then retry the push — HEAD " &
             outgoing.headOid & " is publishable; this is refused only because " &
             "the gate cannot see what the update would discard",
@@ -76429,8 +76429,8 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       of ephReproIncompatible: hook.diagnostic
       of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
       of ephReproV2: ""
-    return (false, reason & "; run '" & remedyPathWord(publicCliImagePath()) &
-      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "'")
+    return (false, reason & "; run `" & remedyPathWord(publicCliImagePath()) &
+      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "`")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
     return (false, "the hook-resolved repro executable is unavailable; run `" &
@@ -78427,9 +78427,9 @@ proc executePush(args: PushArgs): PushReport =
       options = {poStdErrToStdOut, poUsePath}, env = scrubbedGitChildEnv())
     if probe.exitCode != 0 or probe.output.strip() != "2":
       let remedy = "set REPROBUILD_REPRO=" &
-        remedyPathWord(publicCliImagePath()) & " (or update PATH), run '" &
+        remedyPathWord(publicCliImagePath()) & " (or update PATH), run `" &
         remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
-        remedyPathWord(repoAbs) & "', then retry 'repro push'"
+        remedyPathWord(repoAbs) & "`, then retry 'repro push'"
       result.repos.add(PushRepoResult(name: name, path: byName[name].path,
         branch: preflight[name].branch, headSha: preflight[name].headSha,
         outcome: proFailed,

@@ -180,11 +180,11 @@ suite "remedies outside the flake-pin family quote paths for the hook shell":
       # ---- (7) the pre-push protocol refusal's reinstall remedy ----------
       let reinstall = prePushProtocolRemediation(ppcRefsStream, repo, "")
       checkpoint("pre-push protocol remedy: " & reinstall)
-      let quotedStart = reinstall.find("'repro hooks ensure")
+      let quotedStart = reinstall.find("`repro hooks ensure")
       check quotedStart >= 0
       if quotedStart >= 0:
         let tail = reinstall[quotedStart + 1 .. ^1]
-        let command = tail[0 ..< tail.rfind("' and retry")]
+        let command = tail[0 ..< tail.rfind("` and retry")]
         check shellWords(command, elsewhere) ==
           @["repro", "hooks", "ensure", "--vcs", repo]
 
