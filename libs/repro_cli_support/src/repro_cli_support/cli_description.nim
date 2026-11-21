@@ -891,8 +891,9 @@ proc branchFlags(): NimNode {.compileTime.} =
 
 proc hooksActionFlags(): NimNode {.compileTime.} =
   ## `repro hooks ensure|reinstall|uninstall`: which hooks, and where. With
-  ## no selector `--vcs`, `--shell-direnv` and `--shell-autocomplete` are
-  ## implied.
+  ## no selector every type is implied: `--vcs`, `--shell-direnv`,
+  ## `--shell-autocomplete` and the native integration (`--shell`) of each
+  ## shell found.
   let root = workspaceRootFlag()
   let report = workspaceReportFlags()
   quote do:

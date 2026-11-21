@@ -361,6 +361,7 @@ import repro_home_resources/drivers/managed_block
 import repro_cli_support/shell_detect
 import repro_cli_support/shell_rc_files
 import repro_cli_support/completion_hooks
+import repro_cli_support/direnv_stand_down
 # Peer-Cache M2: parse the `--peer-cache=lan://CIDR[:port]` form into a
 # concrete configuration and start the peer-cache services so the
 # partition planner has a multicast-discovered registry to lean on.
@@ -21342,6 +21343,9 @@ type
                              ## system path (tests).
     recordStore: bool      ## Explicit Git-local backend registration.
     nativeShells: seq[NativeShellKind]
+    nativeDetected: bool   ## A bare command: the native shell integration
+                           ## for every shell found on PATH (uninstall: every
+                           ## shell whose rc file holds the block).
     workspaceRoot: string  ## M17: explicit --workspace-root override.
     json: bool             ## M17: emit JSON to stdout in addition to the report file.
     report: ReportSpec     ## Opt-in ``--write-report[=PATH]`` artifact.
@@ -21389,7 +21393,12 @@ proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string
   of nskBash:
     homeDir / ".bashrc"
   of nskZsh:
-    homeDir / ".zshrc"
+    # zsh reads its startup files from $ZDOTDIR when it is set (zsh manual,
+    # "Startup/Shutdown Files",
+    # https://zsh.sourceforge.io/Doc/Release/Files.html), as the completion
+    # block does too.
+    let zdot = getEnv("ZDOTDIR")
+    (if zdot.len > 0: zdot else: homeDir) / ".zshrc"
   of nskFish:
     let xdg = getEnv("XDG_CONFIG_HOME")
     if xdg.len > 0:
@@ -21406,7 +21415,13 @@ proc nativeShellRcPath(shell: NativeShellKind; homeDir = getEnv("HOME")): string
         else: getEnv("USERPROFILE", homeDir) / "Documents"
       documents / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
     else:
-      homeDir / ".config" / "powershell" /
+      # PowerShell takes its profile directory from XDG_CONFIG_HOME outside
+      # Windows when it is set (`Platform.SelectProductNameForDirectory`,
+      # https://github.com/PowerShell/PowerShell/blob/master/src/System.Management.Automation/CoreCLR/CorePsPlatform.cs;
+      # about_Profiles names only the default ~/.config), as the completion
+      # block does too.
+      let xdg = getEnv("XDG_CONFIG_HOME")
+      (if xdg.len > 0: xdg else: homeDir / ".config") / "powershell" /
         "Microsoft.PowerShell_profile.ps1"
 
 proc posixLiteral(value: string): string =
@@ -21774,6 +21789,14 @@ proc nativePosixHookContent(shell: NativeShellKind): string =
   result.add("  if [ -n \"${" & NativeShellActivationGuard & ":-}\" ]; then\n")
   result.add("    return 0\n")
   result.add("  fi\n")
+  # direnv first, when its hook is loaded in this shell: its DIRENV_DIR then
+  # names what it manages for this directory, and the activation helper
+  # stands down there (direnv_stand_down.nim).
+  case shell
+  of nskZsh:
+    result.add("  if (( ${+functions[_direnv_hook]} )); then _direnv_hook; fi\n")
+  else:
+    result.add("  if declare -F _direnv_hook >/dev/null 2>&1; then _direnv_hook; fi\n")
   result.add("  export " & NativeShellActivationGuard & "=1\n")
   result.add("  local __repro_native_repro=\"${REPROBUILD_REPRO:-repro}\"\n")
   result.add("  if ! command -v \"$__repro_native_repro\" >/dev/null 2>&1 && [ ! -x \"$__repro_native_repro\" ]; then\n")
@@ -21814,6 +21837,10 @@ proc nativeFishHookContent(): string =
   result.add("function __repro_native_shell_hook --on-variable PWD\n")
   result.add("  if set -q " & NativeShellActivationGuard & "\n")
   result.add("    return 0\n")
+  result.add("  end\n")
+  # direnv first, when its hook is loaded (see the POSIX template).
+  result.add("  if functions -q __direnv_export_eval\n")
+  result.add("    __direnv_export_eval\n")
   result.add("  end\n")
   result.add("  set -gx " & NativeShellActivationGuard & " 1\n")
   result.add("  set -l __repro_native_repro \"$REPROBUILD_REPRO\"\n")
@@ -25824,11 +25851,13 @@ proc reportSpecOf[T](c: T): ReportSpec =
 
 proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
   ## ``repro hooks ensure|reinstall|uninstall`` from its configuration.
-  ## With no selector flag ``--vcs``, ``--shell-direnv`` and
-  ## ``--shell-autocomplete`` are implied (the native ``--shell``
-  ## integration is not part of the bare set). Raises ``HooksUsageError``
-  ## for contradictory flags: two scopes, or a scope with only the hooks
-  ## that have none.
+  ## With no selector flag every hook type is implied: ``--vcs``,
+  ## ``--shell-direnv``, ``--shell-autocomplete`` and the native shell
+  ## integration for each shell found (which stands down wherever direnv
+  ## manages the directory, so the two never both activate). Raises
+  ## ``HooksUsageError`` for contradictory flags: two scopes, a scope with
+  ## only the hooks that have none, or ``--system`` with an explicit
+  ## ``--shell``.
   result.action = action
   result.shellDirenv = c.shellDirenv
   result.vcs = c.vcs
@@ -25863,6 +25892,7 @@ proc hooksCommandOf[T](c: T; action: HookActionKind): ParsedHooksCommand =
     result.shellDirenv = true
     result.vcs = true
     result.shellAutocomplete = true
+    result.nativeDetected = true
   if result.scope != hsDefault and not result.shellAutocomplete and
       result.nativeShells.len == 0:
     # VCS hooks are per repository and the direnv block per project: a scope
@@ -26358,6 +26388,67 @@ proc emitCompletionReport(parsed: ParsedHooksCommand;
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   report.exitCode
 
+proc nativeShellBlockPresent(shell: NativeShellKind): bool =
+  ## Whether the shell's rc file holds the native shell block.
+  let rcPath = nativeShellRcPath(shell)
+  try:
+    fileExists(rcPath) and
+      ("repro:home:" & nativeShellBlockId(shell) & " ") in readFile(rcPath)
+  except IOError, OSError:
+    false
+
+proc nativeShellTargets(parsed: ParsedHooksCommand): seq[NativeShellKind] =
+  ## The shells whose native integration this invocation acts on: those
+  ## named by ``--shell``, and for a bare command every shell found on PATH
+  ## (the detector completion uses), or, to uninstall, every shell whose rc
+  ## file holds the block, found or not. Each once. Under ``--system`` a
+  ## bare command acts on none (``runNativeShellHooks`` says why).
+  for shell in parsed.nativeShells:
+    if shell notin result:
+      result.add(shell)
+  if not parsed.nativeDetected or parsed.scope == hsSystem:
+    return
+  if parsed.action == hakUninstall:
+    for shell in NativeShellKind:
+      if shell notin result and nativeShellBlockPresent(shell):
+        result.add(shell)
+  else:
+    for found in detectShells(getEnv("PATH")):
+      if found.kind notin result:
+        result.add(found.kind)
+
+proc runNativeShellHooks(parsed: ParsedHooksCommand): int =
+  ## Installs, reinstalls or removes the native shell integration of
+  ## ``nativeShellTargets``. A shell whose rc file cannot be written (a
+  ## Nix-managed symlink, a read-only file) is reported on stderr and the
+  ## others are still visited; the result is then 1.
+  if parsed.nativeDetected and parsed.scope == hsSystem:
+    # A bare command's scope applies to its shell hooks, and the native
+    # integration has no system-wide file: it is skipped, not refused, so
+    # the rest of the bare set still runs. An explicit `--shell --system`
+    # is a usage error instead (hooksCommandOf).
+    stderr.writeLine("repro hooks: NOTE the native shell integration " &
+      "has no system-wide file, so --system skipped it; run `repro hooks " &
+      "ensure --shell <shell>` as each user who wants it")
+  let targets = nativeShellTargets(parsed)
+  if targets.len == 0 and parsed.nativeDetected and
+      parsed.scope != hsSystem and parsed.action != hakUninstall:
+    stderr.writeLine("repro hooks: NOTE no shell found for the native " &
+      "shell integration (looked for bash, zsh, fish and pwsh on PATH); " &
+      "nothing was installed")
+  for shell in targets:
+    try:
+      case parsed.action
+      of hakEnsure: ensureNativeShellHook(shell)
+      of hakReinstall: ensureNativeShellHook(shell, reinstall = true)
+      of hakUninstall: uninstallNativeShellHook(shell)
+    except CatchableError as err:
+      stderr.writeLine("repro hooks: could NOT " &
+        (if parsed.action == hakUninstall: "remove" else: "write") &
+        " the native " & shell.nativeShellName() & " shell block: " &
+        err.msg)
+      result = 1
+
 proc runHooksCommand(c: ReproCommandLineHooks): int =
   ## ``repro hooks <ensure|reinstall|uninstall|protocol|dispatch|cache-push>``
   ## from its configuration.
@@ -26422,8 +26513,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       let vcsCode = runVcsHooksEnsureCommand(parsed, completion, reported)
       if vcsCode != 0:
         return max(vcsCode, code)
-    for shell in parsed.nativeShells:
-      ensureNativeShellHook(shell)
+    code = max(code, runNativeShellHooks(parsed))
   of hakReinstall:
     if parsed.shellDirenv:
       ensureDirenvHook(parsed.targetPath, reinstall = true)
@@ -26431,8 +26521,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       let vcsCode = runVcsHooksCommand(parsed.action, parsed)
       if vcsCode != 0:
         return max(vcsCode, code)
-    for shell in parsed.nativeShells:
-      ensureNativeShellHook(shell, reinstall = true)
+    code = max(code, runNativeShellHooks(parsed))
   of hakUninstall:
     if parsed.shellDirenv:
       uninstallDirenvHook(parsed.targetPath)
@@ -26440,8 +26529,7 @@ proc runHooksCommand(c: ReproCommandLineHooks): int =
       let vcsCode = runVcsHooksCommand(parsed.action, parsed)
       if vcsCode != 0:
         return max(vcsCode, code)
-    for shell in parsed.nativeShells:
-      uninstallNativeShellHook(shell)
+    code = max(code, runNativeShellHooks(parsed))
   if parsed.shellAutocomplete and not reported:
     code = max(code, emitCompletionReport(parsed, completion))
   code
@@ -26459,6 +26547,24 @@ proc nativeShellActivationRequestOf[T](c: T): NativeShellActivationRequest =
 proc runReproNativeShellActivationHelper(
     request: NativeShellActivationRequest; publicCliPath: string): int =
   let format = nativeShellFormat(request.shell)
+  let direnvStatus = proc (cwd: string): tuple[ok: bool; output: string] =
+    # The user's own direnv, the one whose hook set DIRENV_DIR in this
+    # shell: genuinely ambient. stderr is not captured (its log lines are
+    # not part of the status).
+    try:
+      let res = uncontrolledExecArgvEx(["direnv", "status"],
+        options = {poUsePath}, workingDir = cwd)
+      (ok: res.exitCode == 0, output: res.output)
+    except CatchableError:
+      (ok: false, output: "")
+  if nativeShellStandsDown(request.cwd,
+      proc (name: string): string = getEnv(name), direnvStatus):
+    # direnv has loaded the environment of this directory (its DIRENV_DIR
+    # names it or an ancestor): the environment is direnv's to activate, so
+    # the native hook prints nothing at all. It does not unload a previous
+    # native activation either: the hook ran direnv first, so the
+    # REPRO_DEV_ENV_* the shell passed may be the ones direnv just set.
+    return 0
   let projectRoot = findDevEnvProjectRoot(request.cwd)
   if projectRoot.len == 0:
     stdout.write(renderNativeShellTransition(request.previousArtifact,
