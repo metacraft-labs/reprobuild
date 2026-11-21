@@ -45,7 +45,15 @@
 ##       between (In-Process-Monitor-Hosting HM-4). The pre-HM-4 form —
 ##       ``startBypassRunQuotaProcess`` -> ``startDirect`` — is still the
 ##       code path when the monitor is not hosted (Windows, or an action
-##       with no monitor policy), and is still pinned below.
+##       with no monitor policy), and is still pinned below. That proc
+##       spawns from TWO arms since ``5ca890504`` (a sized action keeps a
+##       width with no lease): an action with no width flag is started as
+##       prepared, and a sized one is prepared with width placeholders and
+##       started after ``applyGrantedWidth`` fills them with the width
+##       the scheduler sized with ``bypassWidthMilli`` (passed in as
+##       ``widthMilli`` since ``c867b3f37``). Both arms are this one path — same proc, same
+##       spec builder, same ``startDirect`` — and both are pinned by their
+##       call-site text, so a third ``startDirect`` is not absorbed by them.
 ##       backend label ``runquota-bypass``.
 ##
 ##   L2  RUNQUOTA HELPER PROCESS — monitored
@@ -607,7 +615,12 @@ const SpawnPrimitives: array[47, tuple[name: string; expected: int;
   ("pollMonitor", 1, "HM-4: advances a hosted monitor; SPAWNS on Windows"),
   ("finishMonitor", 1, "HM-4: consumes a hosted monitor; SPAWNS on Windows"),
   ("uncontrolledStartProcess", 0, "the escape hatch; unused by the engine"),
-  ("startDirect", 1, "L1 bypass-runquota"),
+  # TWO calls, ONE launch path: ``startBypassRunQuotaProcess`` starts an
+  # unsized action as prepared and a sized one with the scheduler's
+  # ``widthMilli`` filled into its width placeholders (``5ca890504``,
+  # ``c867b3f37``). The enumeration case
+  # pins both arms inside that proc by their call-site text.
+  ("startDirect", 2, "L1 bypass-runquota: its unsized and its sized arm"),
   ("offerWithRunQuotaBatch", 1, "L3 inline-runquota"),
   ("startGrantedWithRunQuota", 1, "L3b inline-runquota-after-queue"),
   ("startWithRunQuota", 0, "superseded by the batch offer"),
@@ -977,8 +990,11 @@ proc capabilitySurfaces(): seq[CapabilitySurface] =
                # `applyGrant` and `withParentLease` add the lease as the
                # parent of the command's own RunQuota clients: one more
                # environment entry on a command the launch below starts.
+               # `filledWidth` (`c867b3f37`) reads back the width a filled
+               # argv will run at, so the bypass can count it as held: a
+               # scan of the argv strings and an integer out.
                "applyGrantedWidth", "applyGrant", "withParentLease",
-               "fillWidthPlaceholders",
+               "fillWidthPlaceholders", "filledWidth",
                "widthPlaceholderArgv", "withWidthFlag", "grantedSlots",
                "frontierWaitMillis", "initFrontierSizer",
                "noteGrantedAtOnce", "noteOldestWait", "noteQueuedGrant"]),
@@ -2118,13 +2134,15 @@ suite "every_launch_path_is_monitored":
       "monitoredAction(action, config, cacheRoot,") == 1
 
     # SEAM 2 (argv+env contract): one definition, one forward declaration,
-    # and FIVE uses — SEVEN occurrences. Three uses are the non-deferred
-    # launch paths (L3b reuses L3's spec); the fourth is the in-process host,
-    # which takes the same contract with the shell umask wrapper switched
-    # off — see ``preparedRunQuotaCommand``'s doc-comment for why that
-    # wrapper cannot survive into a monitored tree.
+    # and SIX uses — EIGHT occurrences. Four uses are the non-deferred
+    # launch paths: L1 twice (its unsized and its sized arm, below), L2 and
+    # L3 (L3b reuses L3's spec); the fifth is the in-process host, which
+    # takes the same contract with the shell umask wrapper switched off —
+    # see ``preparedRunQuotaCommand``'s doc-comment for why that wrapper
+    # cannot survive into a monitored tree. The sixth is
+    # ``executedToolImagePath``'s, next.
     #
-    # THE FIFTH USE DOES NOT SPAWN, and a bare total of 7 would not say so.
+    # THE SIXTH USE DOES NOT SPAWN, and a bare total would not say so.
     # `947c50fc` (the executed binary is a cache input) added
     # `executedToolImagePath`, which builds a command spec for ONE purpose:
     # to read the `PATH=` entry out of `command.env` so a bare command name
@@ -2135,10 +2153,20 @@ suite "every_launch_path_is_monitored":
     #
     # So the count is DECOMPOSED rather than bumped. The point of this pin is
     # to notice new launch plumbing, and a single number that went 5 -> 7 can
-    # absorb a genuine new spawn site the next time it moves. The three
-    # assertions below cannot: a new spawn site raises the total without
-    # raising either of the two named counts, and reddens here.
-    check countOccurrences(src, "preparedRunQuotaCommand(") == 7
+    # absorb a genuine new spawn site the next time it moves. The assertions
+    # below cannot: every one of the eight occurrences is named by its own
+    # spelling, so a new use either raises the total without raising any
+    # named count, or copies an existing spelling and raises that one.
+    #
+    # L1 USES THE CONTRACT TWICE since `5ca890504` (a sized action keeps a
+    # width when no RunQuota lease is taken) split
+    # ``startBypassRunQuotaProcess`` in two: an action with no width flag is
+    # prepared as-is and started; a sized one is prepared with width
+    # placeholders — the same spelling L2 and L3 use, because it is the same
+    # contract a lease would fill — and started once the width the
+    # scheduler sized (``widthMilli``, ``c867b3f37``) fills them. That commit left this pin at 7; no new launch path was
+    # added, and the per-arm pins below say so instead of a bare 8.
+    check countOccurrences(src, "preparedRunQuotaCommand(") == 8
     # Definition + forward declaration. Both are spelled `proc`; neither is
     # a use.
     check countOccurrences(src, "proc preparedRunQuotaCommand(") == 2
@@ -2146,6 +2174,50 @@ suite "every_launch_path_is_monitored":
     # that only `executedToolImagePath` has — every launch site holds the
     # config by value or by ref, never as `config[]`.
     check countOccurrences(src, "preparedRunQuotaCommand(action, config[],") == 1
+    # The in-process host (seam 3), the only use without the umask wrapper.
+    check countOccurrences(src,
+      "preparedRunQuotaCommand(action, config, shellUmaskWrap = false)") == 1
+    # L1's unsized arm, started directly from the prepared spec.
+    check countOccurrences(src,
+      "startDirect(preparedRunQuotaCommand(action, config))") == 1
+    # The width-placeholder form: L1's sized arm, L2 (``startRunQuotaProcess``)
+    # and L3 (``runQuotaCommand``, which the batch offer and L3b share).
+    check countOccurrences(src,
+      "preparedRunQuotaCommand(action.withWidthPlaceholders(), config)") == 3
+
+    # BOTH L1 ARMS ARE L1. Every ``startDirect`` in the library (the scan in
+    # the next case pins the total at 2) is inside
+    # ``startBypassRunQuotaProcess``, one per arm, each by its own call-site
+    # text. A ``startDirect`` added anywhere else leaves this body's count at
+    # 2 and raises the library total, which reddens there; one added inside
+    # this proc reddens here; one MOVED out of it into a helper keeps the
+    # library total at 2 and drops this body's count, which reddens here.
+    #
+    # THE BODY ENDS AT THE NEXT LINE THAT STARTS IN COLUMN 0, not at the
+    # next ``proc``. A body is its indented block, and the first top-level
+    # line of ANY kind — ``proc``, ``func``, ``template``, ``when`` — closes
+    # it. Ending at the next ``\nproc `` instead let an arm move into a
+    # helper defined inside a top-level ``when`` block right after this proc
+    # (forward-declared above it) with every count here unchanged: that
+    # mutation was measured green. Over ``code`` comments and literals are
+    # already blanks, so a column-0 comment or string line inside the body
+    # cannot end it early.
+    block:
+      let defAt = code.find("proc startBypassRunQuotaProcess(")
+      check defAt >= 0
+      var bodyEnd = code.len
+      var lineAt = code.find('\n', defAt)
+      while lineAt >= 0 and lineAt + 1 < code.len:
+        if code[lineAt + 1] notin {' ', '\n', '\r'}:
+          bodyEnd = lineAt
+          break
+        lineAt = code.find('\n', lineAt + 1)
+      let body = code[defAt ..< bodyEnd]
+      check countOccurrences(body, "startDirect(") == 2
+      check countOccurrences(body,
+        "return startDirect(preparedRunQuotaCommand(action, config))") == 1
+      check countOccurrences(body,
+        "return startDirect(command.applyGrantedWidth(widthMilli))") == 1
 
     # SEAM 3 (HM-4, hosting): the engine becomes io-mon's host in exactly
     # one proc, called from exactly one site, and the three decomposed
