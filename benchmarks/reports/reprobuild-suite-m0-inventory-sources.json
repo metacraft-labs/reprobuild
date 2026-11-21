@@ -15653,8 +15653,8 @@
       "owner": "libs/repro_cli_support",
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim",
-      "sourceSuiteCount": 5,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 6,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

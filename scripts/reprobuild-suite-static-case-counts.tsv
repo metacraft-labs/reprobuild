@@ -351,7 +351,7 @@ libs/repro_cli_support/tests/t_lowered_action_carries_edge_env_passthrough.nim	n
 libs/repro_cli_support/tests/t_lowered_action_key_covers_its_argv.nim	nim	6
 libs/repro_cli_support/tests/t_lowering_marks_build_file_targets_and_monitors_content_checked_compiles.nim	nim	2
 libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
-libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	19
+libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	22
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
 libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	4
 libs/repro_cli_support/tests/t_nimble_index_catalog_import.nim	nim	5
