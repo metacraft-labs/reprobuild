@@ -85,6 +85,10 @@ const
     ## the module comment. A change to any of them is a new version, because
     ## it changes the bytes a realized prefix holds.
   GemClosureStepDataPrefix = "gem\t"
+  GemSubstitutionsConfigKey = ":substitutions"
+    ## The first field of the build-configuration line that lists the
+    ## substitutions. ``:`` cannot start a gem name, so the line can never
+    ## be mistaken for (or share a key with) a gem's build arguments.
   GemFetchDirectory* = ".repro-gems"
     ## Where the verified gem files are placed, under the step's scratch
     ## directory and never inside the prefix.
@@ -169,7 +173,7 @@ proc gemClosureDeclFor*(use: InterfaceToolUse;
     buildConfig: canonicalGemBuildArgs(record.gemBuildArgs),
     dependencies: record.gemBuildUses)
   if record.gemSubstitutions.len > 0:
-    result.buildConfig.add("substitutions\t" &
+    result.buildConfig.add(GemSubstitutionsConfigKey & "\t" &
       record.gemSubstitutions.sorted().join("\t"))
   # The install order, for the runner. The manifest digest keys the sorted
   # entries, as a closure manifest's identity is formed.
@@ -224,6 +228,19 @@ proc expandPrefixReferences(arg: string;
       let replacement = portablePath(tool.prefix)
       result = result[0 ..< at] & replacement & result[after .. ^1]
       at = result.find(token, at + replacement.len)
+
+proc expandBuildArgument(selector, gem, arg: string;
+                         tools: openArray[PostExtractStepTool]): string =
+  ## ``expandPrefixReferences``, refusing a reference that no step tool
+  ## answers. The declaration reader checked the names against the record's
+  ## build tools; this guards the tools the edge actually handed the step,
+  ## so an unexpanded ``$REPRO_PREFIX_...`` never reaches extconf as text.
+  result = expandPrefixReferences(arg, tools)
+  let left = gemPrefixReferences(result)
+  if left.len > 0:
+    fail(selector, "the build argument \"" & arg & "\" of " & gem &
+      " names $REPRO_PREFIX_" & left[0] & ", and no build tool the edge " &
+      "realized answers to it")
 
 proc toolDirectories(tool: PostExtractStepTool): seq[string] =
   ## The directories a build tool contributes to ``PATH``.
@@ -508,7 +525,7 @@ proc runGemClosureStep*(ctx: PostExtractStepContext) {.gcsafe.} =
   var buildArgs: seq[GemBuildArgs]
   for line in ctx.decl.buildConfig:
     let parts = line.split('\t')
-    if parts.len >= 1 and parts[0] != "substitutions":
+    if parts.len >= 1 and parts[0] != GemSubstitutionsConfigKey:
       buildArgs.add(GemBuildArgs(gem: parts[0], args: parts[1 .. ^1]))
   let ruby = rubyExecutable(ctx.stagingPrefix)
   if ruby.len == 0:
@@ -580,7 +597,7 @@ proc runGemClosureStep*(ctx: PostExtractStepContext) {.gcsafe.} =
       if item.gem == entry.name and item.args.len > 0:
         argv.add("--")
         for arg in item.args:
-          argv.add(expandPrefixReferences(arg, ctx.tools))
+          argv.add(expandBuildArgument(selector, entry.name, arg, ctx.tools))
     let installed = runTool(selector, argv, env, ctx.scratchDir)
     if installed.exitCode != 0:
       fail(selector, "installing " & gemFileName(entry) & " exited " &

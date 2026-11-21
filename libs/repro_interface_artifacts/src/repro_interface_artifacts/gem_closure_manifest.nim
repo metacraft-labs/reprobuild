@@ -217,6 +217,15 @@ proc validateGemClosureDeclaration*(entries: openArray[GemClosureEntry];
         " gives build arguments for " & item.gem & " twice")
     argGems.add(item.gem)
     for arg in item.args:
+      # The step's build configuration is one tab-separated line per gem
+      # (``canonicalGemBuildArgs``), which both keys the prefix and is what
+      # the runner splits back into arguments. A tab or a line break inside
+      # an argument would split it into two there, and two different
+      # declarations would share one key.
+      if arg.contains({'\t', '\n', '\r', '\0'}):
+        raise newException(ValueError, "tool-resolution failed: " & origin &
+          ": a build argument of " & item.gem & " contains a tab, a line " &
+          "break or a NUL character: " & arg.escape)
       for name in gemPrefixReferences(arg):
         if name notin known:
           raise newException(ValueError, "tool-resolution failed: " &
@@ -226,10 +235,16 @@ proc validateGemClosureDeclaration*(entries: openArray[GemClosureEntry];
             (if known.len > 0: known.join(", ") else: "none") & ")")
 
 proc canonicalGemBuildArgs*(buildArgs: openArray[GemBuildArgs]): seq[string] =
-  ## One line per gem, sorted by gem name, each argument kept in order and
-  ## separated by NUL-free tabs: the step's build configuration as it enters
-  ## the prefix's identity.
+  ## One line per gem, sorted by gem name: the gem, then each argument in
+  ## order, separated by tabs (``validateGemClosureDeclaration`` refuses an
+  ## argument containing one). The step's build configuration as it enters
+  ## the prefix's identity, and as the runner reads it back. A gem with no
+  ## arguments is the bare name, so that it does not read back as one empty
+  ## argument.
   var items = @buildArgs
   items.sort(proc(a, b: GemBuildArgs): int = cmp(a.gem, b.gem))
   for item in items:
-    result.add(item.gem & "\t" & item.args.join("\t"))
+    var line = item.gem
+    for arg in item.args:
+      line.add("\t" & arg)
+    result.add(line)

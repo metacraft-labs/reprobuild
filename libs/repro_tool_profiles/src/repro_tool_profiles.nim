@@ -4360,11 +4360,13 @@ proc overlayClosureArchive(archive, root: string; entry: ClosureEntry;
   ## shared directory merges, a file ``root`` already has is refused naming
   ## the entry and the file, and a ``tar.zst`` entry's top-level pacman
   ## metadata is not placed.
-  let scratch = storeRoot / "tmp" / ("overlay-" & entry.sha256[0 .. 15] &
-    "-" & $getCurrentProcessId())
-  if dirExists(extendedPath(scratch)):
-    removeDir(extendedPath(scratch))
-  createDir(extendedPath(scratch))
+  # A fresh directory per call: two edges of one process (concurrent
+  # provisioning) may overlay the same pinned entry at once, and a name
+  # derived from the entry and the process alone would let one delete the
+  # other's half-merged scratch.
+  createDir(extendedPath(storeRoot / "tmp"))
+  let scratch = createTempDir("overlay-" & entry.sha256[0 .. 15] & "-", "",
+    storeRoot / "tmp")
   try:
     extractTarballArchive(archive, scratch, entry.archiveType,
       entry.stripComponents, "", tools)

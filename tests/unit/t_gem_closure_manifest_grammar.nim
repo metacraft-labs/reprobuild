@@ -145,6 +145,23 @@ suite "gem closure manifest grammar":
     check gemPrefixReferences("a=$REPRO_PREFIX_X_Y/b:$REPRO_PREFIX_Z") ==
       @["X_Y", "Z"]
 
+  test "the build configuration reads back as declared, one key per meaning":
+    # The configuration is tab-separated, so a tab or line break inside an
+    # argument is refused (it would read back as two arguments and share a
+    # key with that declaration), and a gem with no arguments does not read
+    # back as one empty argument.
+    let entries = parseGemClosureManifestText(good(), "m")
+    for bad in ["--a\t--b", "--a\n--b", "--a\r"]:
+      expect ValueError:
+        validateGemClosureDeclaration(entries, [],
+          @[GemBuildArgs(gem: "nokogiri", args: @[bad])], [], "m")
+    check canonicalGemBuildArgs([GemBuildArgs(gem: "nokogiri", args: @[])]) ==
+      @["nokogiri"]
+    check canonicalGemBuildArgs([GemBuildArgs(gem: "nokogiri", args: @[""])]) ==
+      @["nokogiri\t"]
+    check canonicalGemBuildArgs([GemBuildArgs(gem: "b", args: @["x"]),
+      GemBuildArgs(gem: "a", args: @["y", "z"])]) == @["a\ty\tz", "b\tx"]
+
   test "a refusal comes when the edge is declared, before any fetch":
     let root = createTempDir("repro-gem-grammar-", "")
     defer: removeDir(root)

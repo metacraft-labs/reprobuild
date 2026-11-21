@@ -2911,7 +2911,7 @@ tests/unit/t_from_source_go_recognition.nim	nim	8
 tests/unit/t_from_source_npm_recognition.nim	nim	7
 tests/unit/t_from_source_realization_platform.nim	nim	2
 tests/unit/t_gem_closure_crt_check.nim	nim	4
-tests/unit/t_gem_closure_manifest_grammar.nim	nim	11
+tests/unit/t_gem_closure_manifest_grammar.nim	nim	12
 tests/unit/t_git_separated_drains_both_streams.nim	nim	8
 tests/unit/t_hackage_vendor_manifest.nim	nim	10
 tests/unit/t_hash_policy_frame_bytes.nim	nim	7
