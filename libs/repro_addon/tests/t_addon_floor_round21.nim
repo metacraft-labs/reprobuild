@@ -295,13 +295,15 @@ suite "A9 review round 21: the confinement table (M1, M2, M3, L2, L4)":
   test "ProtectProc=invisible is tried where it can be seen":
     for row in ProbeRows:
       if row.name != "protect-proc": continue
-      for u in ["repro-addon-boot-hold.service", "repro-agent-fetch.service",
-                "repro-addon-evidence.service"]:
+      for u in ["repro-agent-fetch.service", "repro-addon-evidence.service"]:
         checkpoint u
         check rowApplies(row, unit(u), true).ok
-      let (ok, why) = rowApplies(row, unit("repro-agent-apply.service"), true)
-      check not ok
-      check why.startsWith("not observable") and "CAP_SYS_PTRACE" in why
+      # Root is unaffected by it, whatever its bounding set.
+      for u in ["repro-agent-apply.service", "repro-addon-boot-hold.service"]:
+        let (ok, why) = rowApplies(row, unit(u), true)
+        checkpoint u & ": " & why
+        check not ok
+        check why.startsWith("not observable") and "root is unaffected" in why
   test "an unprivileged unit's RestrictSUIDSGID= has a row of its own":
     var found = false
     for row in ProbeRows:

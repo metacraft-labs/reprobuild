@@ -45,9 +45,8 @@ type
                             ## non-root user (the root form is another row)
     denyLinesOnly*: bool ## REMOVED drops only the unit's ``~`` lines of the
                          ## key, keeping its allow lines (``removedLines``)
-    unlessCapability*: string ## a root unit whose bounding set holds this
-                              ## capability passes the check by design:
-                              ## ``NotObservable`` says why
+    notObservableAsRoot*: bool ## the setting has no effect on root
+                               ## (``NotObservable`` says why)
 
 const
   ProbePath* = "/usr/local/lib/a9probe/a9_confinement_probe"
@@ -143,14 +142,13 @@ let ProbeRows*: seq[ProbeRow] = @[
   ProbeRow(name: "system-call-filter-deny-resources", setting: "SystemCallFilter",
     probe: "affinity", removed: @[FilterReset], denyLinesOnly: true,
     expect: exFilter),
-  # ProtectProc=invisible (M3): another user's process -- PID 1, root with
-  # every capability -- is not there at all. Observable where the unit
-  # cannot pass ptrace's access check on PID 1: a dynamic user, or root
-  # with an empty bounding set (the boot-hold unit); a root unit holding
-  # CAP_SYS_PTRACE passes it (``NotObservable``).
+  # ProtectProc=invisible (M3): another user's process -- PID 1, root --
+  # is not there at all. Observable in a unit that runs as another user
+  # than root (the fetch and evidence units, dynamic users); root is
+  # unaffected (``NotObservable``).
   ProbeRow(name: "protect-proc", setting: "ProtectProc", probe: "exists",
     arg: "/proc/1", removed: @["ProtectProc=default"],
-    unlessCapability: "CAP_SYS_PTRACE"),
+    notObservableAsRoot: true),
   # RestrictSUIDSGID= for an unprivileged unit (L4): the owner sets the
   # setuid bit on a file of its own in its state directory. DynamicUser=
   # implies RestrictSUIDSGID= and no drop-in can lift that, so REMOVED runs
@@ -175,13 +173,15 @@ let ProbeRows*: seq[ProbeRow] = @[
     removed: @["RestrictAddressFamilies="], unlessValueHas: "AF_INET")]
 
 const NotObservable* = [
-  ("ProtectProc", "a root unit whose bounding set holds CAP_SYS_PTRACE " &
-    "passes ptrace's access check on every process, which is what " &
-    "hidepid= applies (proc(5) \"hidepid=\", ptrace(2) \"Ptrace access " &
-    "mode checking\"), so =invisible hides nothing from the five " &
-    "privilegedConfinement units; it is observed in the units that cannot " &
-    "pass that check (the protect-proc row: the boot-hold unit, with no " &
-    "capability, and the fetch and evidence units, dynamic users)"),
+  ("ProtectProc", "=invisible hides the processes of other users, and " &
+    "root is unaffected by it (systemd.exec(5), ProtectProc=: \"the root " &
+    "user is unaffected by this option, so to be effective it has to be " &
+    "used together with User= or DynamicUser=yes, and also without the " &
+    "CAP_SYS_PTRACE capability\"); measured: a copy of the boot-hold " &
+    "unit, root with an empty bounding set, sees /proc/1 with it (debian-13, " &
+    "58445fa836). So it has no effect in the add-on's root units -- the " &
+    "five privilegedConfinement units and the boot-hold unit -- and is " &
+    "observed in the fetch and evidence units (the protect-proc row)"),
   ("ReadWritePaths", "not a restriction but the exception to ProtectSystem=strict; " &
     "its extent is what the protect-system row writes outside of")]
 
@@ -277,20 +277,6 @@ proc missingSettings*(unitName, unit: string): seq[string] =
   for k in expectedSettings(unitName):
     if not setsSetting(unit, k): result.add(k)
 
-proc holdsCapability(unit, cap: string): bool =
-  ## Whether a root unit's bounding set holds ``cap``: no
-  ## ``CapabilityBoundingSet=`` line keeps every capability, an empty
-  ## assignment resets the set to none, a ``~`` value keeps every one but
-  ## those it names (systemd.exec(5)).
-  let vs = valuesOf(unit, "CapabilityBoundingSet")
-  if vs.len == 0: return true
-  var held = false
-  for v in vs:
-    if v.len == 0: held = false
-    elif v.startsWith("~"): held = cap notin v[1 .. ^1].splitWhitespace()
-    elif cap in v.splitWhitespace(): held = true
-  held
-
 proc removedLines*(row: ProbeRow; unit: string): seq[string] =
   ## The lines that remove the row's setting from ``unit``: the row's own,
   ## or, for a ``denyLinesOnly`` row, a reset followed by the unit's allow
@@ -315,8 +301,7 @@ proc rowApplies*(row: ProbeRow; unit: string; amd64: bool): tuple[ok: bool; why:
       if v.startsWith("~"): deny = true
     if not deny:
       return (false, "the unit's " & row.setting & "= has no deny (~) line")
-  if row.unlessCapability.len > 0 and runsAsRoot(unit) and
-      holdsCapability(unit, row.unlessCapability):
+  if row.notObservableAsRoot and runsAsRoot(unit):
     var why = ""
     for (k, r) in NotObservable:
       if k == row.setting: why = r

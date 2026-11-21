@@ -8,8 +8,9 @@
 ##   fails, or a hold that cannot be written, fails closed (the script
 ##   waits for TimeoutStartSec=); every hold is written before the one
 ##   slow step, the reload; every exit path says why;
-## - the unit has no outer ``timeout``, and (decision 172 as amended
-##   2026-11-21, ``t_addon_floor_round21``) no ``-`` prefix either;
+## - the unit has no outer ``timeout``, and no ``-`` prefix either (the
+##   boot-hold unit as decision 172 was amended on 2026-11-21;
+##   ``t_addon_floor_round21``);
 ## - the pending marker is never on disk without the record;
 ## - M-1: the ``systemd.systemDropIn`` form counts as the profile's unit
 ##   in both halves of the ordering refusal;
