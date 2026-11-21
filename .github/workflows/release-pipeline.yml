@@ -32,14 +32,16 @@ permissions:
 # the tag's copy (step "Assert this pipeline is the tag's own"), so a release
 # runs the pipeline its tag declares, byte for byte, or does not run.
 #
-# THE GUARD on `plan` and `publish-release` (everything else needs `plan`).
+# THE GUARD on `plan` and `publish-release`, the two jobs that can start
+# without `plan` (`publish-release` runs under `always()`); the rest need
+# `plan` and are skipped with it.
 # Anything in the organisation can CALL a reusable workflow at `@agents`,
 # including a pull request from a fork that adds such a call to its own
 # workflow, and the jobs it reaches are admitted to the lane because they are
 # defined here. The guard reads the caller's context, which a caller cannot
 # forge, and runs the jobs only for metacraft-labs/reprobuild's own release.yml
 # on a `v*` tag push or a `workflow_dispatch` (both need write access). Keep it
-# on every job that has no `needs:`, and keep this file `on: workflow_call`
+# on every job that can start without `plan`, and keep this file `on: workflow_call`
 # only: a push trigger here would make every push to `agents` an admitted run.
 # scripts/check_workflows.sh asserts both.
 on:
