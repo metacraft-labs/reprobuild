@@ -425,6 +425,7 @@ const
         ("libs/repro_deploy_agent/tests/t_repro_deploy_agent_converges_from_signed_manifest.nim", @[Base]),
         ("libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim", @[M6]),
         ("libs/repro_profile_compile/tests/t_infra_apply_substitutes_from_cache.nim", @[Base]),
+        ("tests/integration/t_tool_prefix_cache_round_trip_post_extract.nim", @[Base]),
         ("libs/repro_binary_cache_server/tests/t_repro_binary_cache_https_publish_authz.nim", @[M6]),
         ("libs/repro_binary_cache_client/tests/t_a2_5_p2_manifest_fetch.nim", @[Base]),
         ("libs/repro_binary_cache_client/tests/t_a2_5_p3_streaming_sink.nim", @[Base]),
