@@ -2180,7 +2180,9 @@
           # directory, and emptied PATH. nix/repro-portable/package.nix
           # assembles the same arx + nix-user-chroot pieces with those fixed;
           # `checks.repro-portable-host-root` proves it against a host root
-          # without /nix. It ADDS to — and does not disturb —
+          # without /nix, and proves that it refuses a host that has one (its
+          # sandbox's /nix is its own store, which would hide the host's
+          # Nix). It ADDS to — and does not disturb —
           # `packages.default`/`packages.reprobuild` or `just build`.
           reproPortable = pkgs.callPackage ./nix/repro-portable/package.nix {
             inherit reprobuild;
@@ -2706,8 +2708,11 @@
             # repro must spawn `/bin/sh`, start in the caller's directory, and
             # carry a real `hooks ensure` + `git checkout` round trip. The
             # stock nix-user-chroot is the negative control and must fail all
-            # four. Linux only, like the bundle. It builds the full ~800 MB
-            # archive; run it alone with
+            # four. Then the same root with a host /nix bound in: the bundle
+            # must refuse to start, before extracting anything, naming what
+            # to install instead; the bundle minus that guard is the negative
+            # control and must fail all four. Linux only, like the bundle. It
+            # builds the full ~800 MB archive; run it alone with
             # `nix build .#checks.x86_64-linux.repro-portable-host-root`.
             ${if pkgs.stdenv.hostPlatform.isLinux then "repro-portable-host-root" else null} =
               pkgs.callPackage ./nix/tests/repro-portable-host-root.nix {
