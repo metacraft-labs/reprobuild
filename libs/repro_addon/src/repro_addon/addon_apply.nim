@@ -2187,6 +2187,26 @@ proc clearResolvedRestartEntries*(stateDir: string; p: SystemProfile):
     else: keep.add(e)
   writeTriggerRestartEntries(stateDir, keep)
 
+proc stopTriggersRecorded*(stateDir: string; startHolds, triggers,
+                           toStop: openArray[string];
+                           stop: proc (t: string) {.closure.}) =
+  ## Stop ``toStop`` once the boot-hold record names the start hold of
+  ## every one of ``triggers`` with ``startHolds`` (A9 review round 21, L7).
+  ## The switch calls this again after its marker is on disk (a trigger the
+  ## drivers' writes loaded only then), and a reboot between a stop and the
+  ## caller's next ``writeBootHoldRecord`` would otherwise start, before
+  ## sysinit.target, a trigger whose hold the record does not name. Raises
+  ## ``OSError`` when the record cannot be written, before anything stops.
+  when not mutated("boot-holds-unrecorded") and
+      not mutated("boot-hold-triggers-before-record"):
+    if triggers.len > 0:
+      var recorded = @startHolds
+      for t in triggers:
+        let h = startHoldPath(t)
+        if h notin recorded: recorded.add(h)
+      writeBootHoldRecord(stateDir, recorded)
+  for t in toStop: stop(t)
+
 proc addonLiveHost*(): LiveHost =
   ## systemctl, as the full apply's release reads and drives it.
   LiveHost(
@@ -7811,7 +7831,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
         if t notin toStop: toStop.add(t)
       if remember.len > 0:
         writeHeldTriggers(stateDir, onRecord & remember)
-      for t in toStop: discard host.stop(t)
+      stopTriggersRecorded(stateDir, startHolds, triggers, toStop,
+        proc (t: string) = discard host.stop(t))
       for h in writeHolds(triggers, StartHoldName, StartHoldText):
         if h notin startHolds: startHolds.add(h)
 

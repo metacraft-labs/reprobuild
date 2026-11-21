@@ -2780,13 +2780,14 @@ proc pathModeRemedy*(useDef: InterfaceToolUse): string =
     ", or give `" & useDef.packageSelector & "` a per-tool provisioning " &
     "override where the workspace declares one."
 
-const LinuxHostToolchainPackages* = ["gcc", "make", "binutils", "ar"]
+const LinuxHostToolchainPackages* = ["gcc", "make", "binutils", "ar", "strip"]
   ## The Linux C toolchain packages (Dependency-Provisioning-In-Build-Graph.md
   ## §4.3, "Not the Linux C toolchain"). Tarball mode does not fall through
   ## to their source recipes on a Linux host: those recipes need each other.
-  ## ``gcc`` and ``ar`` have a Linux x86_64 archive (``linux_toolchain_pin``
-  ## in the standard library), so on such a host tarball mode realizes them and
-  ## never reaches the fall-through; ``make`` and ``binutils`` have none.
+  ## ``gcc``, ``ar`` and ``strip`` have a Linux x86_64 archive
+  ## (``linux_toolchain_pin`` in the standard library), so on such a host
+  ## tarball mode realizes them and never reaches the fall-through; ``make``
+  ## and ``binutils`` have none.
 
 proc linuxHostToolchainFallThroughSkipsArchive*(useDef: InterfaceToolUse;
                                                 hostOs = hostOS): bool =
@@ -10098,7 +10099,7 @@ proc tarballModeHostToolchainRefusal*(useDef: InterfaceToolUse;
     return ""
   "tool-resolution failed: --tool-provisioning=tarball does not realize " &
     "the C toolchain on a Linux host: \"" & useDef.packageSelector &
-    "\" has no Linux tarball, and its source recipe is part of the " &
+    "\" has no tarball for this Linux host, and its source recipe is part of the " &
     "gcc/make/binutils bootstrap cycle no tarball breaks " &
     "(Dependency-Provisioning-In-Build-Graph.md §4.3, \"Not the Linux C " &
     "toolchain\"). Take the toolchain from the host: " &

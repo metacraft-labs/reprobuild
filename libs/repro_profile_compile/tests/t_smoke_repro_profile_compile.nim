@@ -63,6 +63,9 @@ from repro_local_store import ffpHybrid
 import repro_profile
 import repro_profile_intent
 import repro_profile_compile
+from repro_profile_compile/edge import profilePlatformProbeBuildAction
+  # The package facade exports the probe's entry point
+  # (`probeProfilePlatforms`), not its action constructor.
 
 # ---------------------------------------------------------------------------
 # Test helpers.
@@ -348,6 +351,32 @@ suite "M83 Phase C: profileCompileBuildAction":
     # helper, and no part of it names the intent-output contract.
     check act.argv[1 .. 2] == @["internal", "compile-profile"]
     check ReproIntentOutFlag notin act.argv
+
+  test "the compile and platform-probe edges check inputs by content when metadata moved":
+    # `ffpHybrid`, stated on both edges rather than left to the `timestamp`
+    # default: a profile source saved again with the same bytes must not
+    # cost a compile or six `nim check`s (reprobuild-pm
+    # `spec/Profile-Compilation-Model.md` §2.2). The behaviour is held by
+    # `t_e2e_profile_resave_without_edit_does_not_recompile`; this is the
+    # declaration it depends on.
+    let compile = profileCompileBuildAction(
+      profileRoot = "/profile/home.nim",
+      binaryPath = "/cache/abc.profile-build",
+      nimcacheDir = "/cache/nimcache/abc",
+      publicCliPath = "/bin/repro",
+      workDir = "/profile",
+      repoRoot = "/repo",
+      weak = weakFingerprintFromText("smoke.policy"))
+    check compile.actionCachePolicy == ffpHybrid
+    let probe = profilePlatformProbeBuildAction(
+      absProfile = "/profile/home.nim",
+      outPath = "/cache/abc.platforms.json",
+      scratch = "/cache/platform-probe/abc",
+      publicCliPath = "/bin/repro",
+      workDir = "/profile",
+      repoRoot = "/repo",
+      weak = weakFingerprintFromText("smoke.policy.probe"))
+    check probe.actionCachePolicy == ffpHybrid
 
   test "weak fingerprint names compiler and output identity, not sources":
     # Reduced to what monitoring cannot supply. Each of the four identities

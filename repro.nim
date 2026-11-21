@@ -463,6 +463,7 @@ const
                  "t_e2e_nix_reads_intent_like_export",
                  "t_e2e_profile_compile_clang_first_run_published",
                  "t_e2e_profile_compile_ignores_ancestor_membership",
+                 "t_e2e_profile_resave_without_edit_does_not_recompile",
                  "t_e2e_home_facts_from_isolated_plan",
                  "t_e2e_activity_scoped_resource_follows_host_selection",
                  "t_e2e_profile_compiles_of_one_profile_are_serialised"]:
