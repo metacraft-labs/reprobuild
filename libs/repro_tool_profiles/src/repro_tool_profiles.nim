@@ -18,6 +18,8 @@ import repro_core/powershell_zip as repro_core_powershell_zip
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
 import repro_core/process_env
+import repro_core/nix_wrapper_libc
+export nix_wrapper_libc
 import repro_core/nix_evaluation_policy
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
@@ -1978,6 +1980,8 @@ proc decodeNixMaterializationProfile(bytes: openArray[byte]):
 
 proc expandNixPropagatedStorePaths*(paths: var seq[string])
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
+proc nixStorePathsCarryWrapperLibc*(storePaths: openArray[string];
+                                    selectedStorePath: string): bool
 
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                   plan: NixAcquisitionPlan;
@@ -1996,6 +2000,12 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
     var profile = decodeNixMaterializationProfile(
       fromByteString(readFile(extendedPath(path))))
     if not profile.nixMaterializationProfileMatches(useDef, plan):
+      return
+    # An entry written while a wrapper's libc was still followed as if it
+    # were propagated would put that libc back on the shared link channels.
+    # Resolve it afresh instead; the next write replaces the entry.
+    if nixStorePathsCarryWrapperLibc(profile.realizedStorePaths,
+        profile.selectedStorePath):
       return
     expandNixProfilePropagatedPaths(profile)
     return (hit: true, profile: profile)
@@ -2095,14 +2105,24 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
   ## Include split-output runtime and development dependencies declared
   ## by Nix outputs. Their lib/include/pkg-config directories must feed
   ## the same action environment as the selected output.
-  ## Compiler wrappers also record their selected runtime in orig-libc.
-  ## It is not a propagated build input, but install normalization needs
-  ## it on LIBRARY_PATH to retain the libc matching the linked PT_INTERP.
+  ##
+  ## A compiler wrapper's ``nix-support/orig-libc`` is deliberately NOT
+  ## followed. It is not a propagated input: it names the libc that this
+  ## wrapper itself passes to its compiler and linker (``-B`` through
+  ## ``libc-crt1-cflags``, ``-L`` through its binutils wrapper's
+  ## ``libc-ldflags``). Every directory of a realized store path reaches
+  ## channels that EVERY compiler of the action reads (``LIBRARY_PATH``,
+  ## ``CPATH``), so following it handed that libc to a different compiler
+  ## on the action's ``PATH`` as well: a host ``gcc`` then linked against
+  ## the Nix glibc while keeping its own dynamic loader, and the result
+  ## failed at run time with ``GLIBC_2.xx not found``. Install
+  ## normalization, the one consumer that needs the wrapper's libc, reads
+  ## it through ``nixCompilerWrapperLibcDirs`` instead.
   var index = 0
   while index < paths.len:
     let supportDir = paths[index] / "nix-support"
     for manifestName in ["propagated-build-inputs",
-                         "propagated-native-build-inputs", "orig-libc"]:
+                         "propagated-native-build-inputs"]:
       let manifest = supportDir / manifestName
       if not fileExists(extendedPath(manifest)):
         continue
@@ -2111,6 +2131,34 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
           continue
         paths.add(candidate)
     inc index
+
+proc nixStorePathsCarryWrapperLibc*(storePaths: openArray[string];
+                                    selectedStorePath: string): bool =
+  ## True when ``storePaths`` holds a libc that only a wrapper's
+  ## ``orig-libc`` can have brought in: a recorded libc that is neither the
+  ## selected output nor reachable through the propagated inputs of the
+  ## other paths. Builds before the libc stopped being followed by
+  ## ``expandNixPropagatedStorePaths`` cached such realizations; a cache
+  ## reader treats one as a miss and resolves afresh, so the libc does not
+  ## return to the shared link channels from a warm cache.
+  let libcs = nixCompilerWrapperLibcs(storePaths)
+  if libcs.len == 0:
+    return false
+  var present: seq[string] = @[]
+  for libc in libcs:
+    if libc in storePaths and libc != selectedStorePath:
+      present.add(libc)
+  if present.len == 0:
+    return false
+  var reachable: seq[string] = @[]
+  for path in storePaths:
+    if path notin present:
+      reachable.add(path)
+  expandNixPropagatedStorePaths(reachable)
+  for libc in present:
+    if libc notin reachable:
+      return true
+  false
 
 const NixDarwinSdkSetupScript* = "darwin-sdk-setup.bash"
   ## The ``nix-support`` script in which a nixpkgs cc-wrapper for Darwin

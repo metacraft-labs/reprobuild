@@ -348,11 +348,15 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("m9r14f_runtime_loader=$m9r14f_resolved_loader; fi;; ")
   script.add("esac; fi; ")
   # LIBRARY_PATH carries declared link inputs, including libc directories that
-  # the engine intentionally excludes from LD_LIBRARY_PATH. If no declared
-  # mirror supplied a loader, retain only the runtime already selected by the
-  # linker. Executables anchor this choice through PT_INTERP; shared-only
-  # outputs use their prelinked CRT directories below.
-  script.add("if [ -z \"$m9r14f_runtime_loader\" ] && [ -n \"${LIBRARY_PATH:-}\" ]; then ")
+  # the engine intentionally excludes from LD_LIBRARY_PATH. A Nix compiler
+  # wrapper's own libc arrives apart, in REPRO_COMPILER_LIBC_DIRS: the wrapper
+  # links against it by itself, and on LIBRARY_PATH it would reach every other
+  # compiler of the action too. If no declared mirror supplied a loader,
+  # retain only the runtime already selected by the linker, searching both
+  # lists, declared inputs first. Executables anchor this choice through
+  # PT_INTERP; shared-only outputs use their prelinked CRT directories below.
+  script.add("if [ -z \"$m9r14f_runtime_loader\" ] && ")
+  script.add("[ -n \"${LIBRARY_PATH:-}${REPRO_COMPILER_LIBC_DIRS:-}\" ]; then ")
   script.add("m9r14f_linked_loaders=$(for d in \"" & escapedDstUsr &
     "/lib\" \"" & escapedDstUsr & "/lib64\" \"" & escapedDstUsr &
     "/bin\" \"" & escapedDstUsr & "/sbin\" \"" & escapedDstUsr & "/libexec\"; do ")
@@ -364,8 +368,9 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("readlink -f \"$m9r14f_interp\" 2>/dev/null || true;; esac; ")
   script.add("done; fi; done | sort -u); ")
   # Shared-only glibc outputs have no PT_INTERP. Keep their prelinked CRT
-  # directories as anchors, but admit them only through declared LIBRARY_PATH
-  # entries below. Other old RPATH entries must not leak into the mirror.
+  # directories as anchors, but admit them only through the LIBRARY_PATH and
+  # REPRO_COMPILER_LIBC_DIRS entries below. Other old RPATH entries must not
+  # leak into the mirror.
   script.add("m9r14f_prelinked_libdirs=; ")
   script.add("if [ -z \"$m9r14f_linked_loaders\" ]; then ")
   script.add("m9r14f_prelinked_libdirs=$(for d in \"" & escapedDstUsr &
@@ -387,7 +392,9 @@ proc m9r14fEmitRpathPatchScript*(escapedDstUsr: string;
   script.add("if [ -f \"$m9r14f_rp/$so\" ]; then ")
   script.add("readlink -f \"$m9r14f_rp\" 2>/dev/null || true; break; fi; ")
   script.add("done; done; done; fi; done | sort -u); fi; ")
-  script.add("m9r14f_linkdirs=${LIBRARY_PATH}; m9r14f_linked_libdir=; ")
+  # Empty and relative entries are skipped by the loop.
+  script.add("m9r14f_linkdirs=${LIBRARY_PATH:-}:${REPRO_COMPILER_LIBC_DIRS:-}; ")
+  script.add("m9r14f_linked_libdir=; ")
   script.add("while [ -n \"$m9r14f_linkdirs\" ]; do ")
   script.add("ldp=${m9r14f_linkdirs%%:*}; ")
   script.add("if [ \"$m9r14f_linkdirs\" = \"$ldp\" ]; then m9r14f_linkdirs=; ")

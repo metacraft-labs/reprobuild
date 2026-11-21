@@ -8435,6 +8435,16 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
   ## writes the refreshed evidence back so the next hit is a stat again.
   if not identity.toolIdentityRealizationsUsable():
     return (servable: false, refreshed: false)
+  # An identity resolved while a Nix compiler wrapper's libc was still
+  # followed as a propagated input carries that libc in its link channels.
+  # Re-resolve it rather than hand the libc to every compiler of the action.
+  # Only a Nix realization is checked: a from-source closure merges its
+  # dependencies' store paths, where a libc can be a dependency of its own.
+  for actionIdentity in identity.actionIdentities:
+    if actionIdentity.installMethod == "nix" and
+        nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
+          actionIdentity.selectedStorePath):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 
@@ -9694,6 +9704,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedCompilerLibcDirs: seq[string] = @[]
     var mergedPrefixVars: seq[(string, string)] = @[]
     var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
@@ -9769,6 +9780,13 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       for path in actionIdy.libraryPathList:
         if path.len > 0 and path notin mergedLibDirs:
           mergedLibDirs.add(path)
+      # The libc a Nix compiler wrapper of this realization records. It
+      # travels apart from ``libDirs``: it is for install normalization,
+      # and on the link channel it would reach every compiler the action
+      # runs, not only this wrapper (which passes it to its own linker).
+      for path in nixCompilerWrapperLibcDirs(actionIdy.realizedStorePaths):
+        if path notin mergedCompilerLibcDirs:
+          mergedCompilerLibcDirs.add(path)
       # A LIBRARY realization (it carries include or library dirs) names its
       # prefix to the consuming action as `DEP_<NAME>_PREFIX`
       # (Package-Model.md §"Environment-provided library prefixes"): the
@@ -9827,6 +9845,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         cmakePrefixDirs: mergedCmakePrefixDirs,
         includeDirs: mergedIncludeDirs,
         libDirs: mergedLibDirs,
+        compilerLibcDirs: mergedCompilerLibcDirs,
         nimPathDirs: nimPathDirs,
         prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
@@ -99268,22 +99287,11 @@ proc definedProjectNames*(workspaceRoot: string): seq[string] =
   ## set and a project are one namespace here as they are in resolution
   ## (`resolveWorkspaceProjectByName`). An unconverted manifest repo has no
   ## `repo-sets/` directory and the listing is unchanged for it.
-  let manifests = manifestsRoot(workspaceRoot)
-  var seen: seq[string]
-  for sub in ["projects", "variants", "repo-sets"]:
-    let dir = manifests / sub
-    if not dirExists(dir):
-      continue
-    for kind, path in walkDir(dir):
-      if kind notin {pcFile, pcLinkToFile}:
-        continue
-      if path.splitFile.ext != ".toml":
-        continue
-      let name = path.splitFile.name
-      if name notin seen:
-        seen.add(name)
-  sort(seen)
-  seen
+  ##
+  ## The listing itself is `definedSetNamesAt`, shared with
+  ## `sets list --at=REV`, so the working tree and a revision cannot disagree
+  ## about which files are names.
+  definedSetNamesAt(newDirectorySource(manifestsRoot(workspaceRoot)))
 
 proc manifestDefinitionsAreVisible*(workspaceRoot: string): bool =
   ## Whether this workspace can tell a defined project from an undefined one.
@@ -107008,7 +107016,7 @@ type
     names: seq[string]
       ## ``resolve``'s set names.
     at: Option[string]
-      ## ``resolve --at=REV``.
+      ## ``list --at=REV`` and ``resolve --at=REV``.
     name: string
       ## ``add`` / ``remove``'s set name.
     message: string
@@ -107026,12 +107034,14 @@ template setsRequestOfImpl(c: untyped; Cmd: typedesc): WorkspaceSetsRequest =
     req.enabled = c.call.enabled
     req.disabled = c.call.disabled
     req.all = c.call.all
+    req.at = c.call.at
     req.json = c.call.json
   of Cmd.list:
     req.workspaceRoot = c.list.workspaceRoot
     req.enabled = c.list.enabled
     req.disabled = c.list.disabled
     req.all = c.list.all
+    req.at = c.list.at
     req.json = c.list.json
   of Cmd.resolve:
     req.sub = "resolve"
@@ -107089,6 +107099,54 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
     let wantEnabled = req.enabled and not req.all
     let wantDisabled = req.disabled and not req.all
     let asJson = req.json
+    if req.at.isSome:
+      # `--at=REV`: the names the manifest repository defines AT A COMMIT, read
+      # from its objects through the same git-revision source `resolve --at`
+      # reads (reprobuild-pm issue 2026-11-17 "projects list cannot read the
+      # projects of a metadata revision"). Without this a caller holding a
+      # repository and a commit could resolve only a name it already knew.
+      #
+      # Membership is a fact about THIS workspace's state file, which has no
+      # revision: every set a revision defines is reported not enabled, there
+      # is no primary, and a selector that asks about membership is refused
+      # rather than answered with an always-empty or always-full listing.
+      # `--all` overrides a selector here as it does without `--at`.
+      let atRevision = req.at.get
+      if atRevision.len == 0:
+        stderr.writeLine(verb & " list: --at= needs a revision " &
+          "(a commit id, branch or tag of the manifest repository)")
+        return 2
+      if wantEnabled or wantDisabled:
+        stderr.writeLine(verb & " list: --enabled and --disabled select by " &
+          "this workspace's membership, which a revision does not have; " &
+          "--at=REV lists every set the revision defines")
+        return 2
+      var revisionSource: ManifestSource = nil
+      defer: revisionSource.close()
+      var names: seq[string]
+      try:
+        revisionSource = openGitRevisionSource(manifestsRoot(workspaceRoot),
+          atRevision)
+        names = definedSetNamesAt(revisionSource)
+      except CatchableError as exc:
+        stderr.writeLine(verb & " list: " & exc.msg)
+        return 1
+      if asJson:
+        var arr = newJArray()
+        for name in names:
+          arr.add(%*{"name": name, "enabled": false, "defined": true})
+        # The same schema as the working-tree listing; `metadataRevision` is
+        # additive and present exactly when the listing was read at a
+        # revision, as it is for `resolve --at`.
+        echo (%*{"schema": "reprobuild.workspace-sets-list.v1",
+                 "workspaceRoot": workspaceRoot,
+                 "primary": "",
+                 "sets": arr,
+                 "metadataRevision": revisionSource.resolvedCommit}).pretty
+        return 0
+      for name in names:
+        stdout.writeLine(name & "\tdisabled")
+      return 0
     let active = readWorkspaceProjects(workspaceRoot)
     let defined = definedProjectNames(workspaceRoot)
     # Ordering is meaning, not cosmetics: the primary project answers "what am

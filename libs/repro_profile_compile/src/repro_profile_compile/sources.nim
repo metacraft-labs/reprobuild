@@ -16,6 +16,7 @@
 ## key, a depfile or an output name: see Compiles-Are-Normal-Edges.
 
 import std/[algorithm, os, strutils]
+from std/unicode import runes
 when not defined(windows):
   from std/posix import getuid
 from repro_core/paths import extendedPath
@@ -250,6 +251,84 @@ proc cachedNimcacheDir*(stateDir, profileKey: string): string =
     else:
       profileKey
   profileCacheDir(stateDir) / "nimcache" / short
+
+const
+  WindowsMaxPathChars* = 259
+    ## The longest path Win32 file calls accept without the extended-length
+    ## `\\?\` form: `MAX_PATH` (260) less the terminating NUL
+    ## (https://learn.microsoft.com/windows/win32/fileio/maximum-file-path-limitation).
+    ## Nim and MinGW's `cc1` open every file of the profile's nimcache
+    ## through such calls, and `cc1` cannot take the `\\?\` form at all
+    ## (see `cachedNimcacheDir`).
+  ProfileNimcacheModuleNameReserveChars* = 70
+    ## The room the nimcache layout keeps, past `<nimcache>\`, for the file
+    ## names Nim generates there: `@p<module path, '/' spelled '@s'>.nim.c.o`
+    ## for a module on the search path. The longest of reprobuild's own
+    ## `libs/*/src` modules is 70 characters
+    ## (`@prepro_dsl_stdlib@spackages@spiper_voice_lessac_medium_config.nim.c.o`).
+    ## `t_smoke_repro_profile_compile` measures the tree and fails when a
+    ## module outgrows this, so the reserve cannot silently go stale.
+
+proc windowsPathChars*(path: string): int =
+  ## The length of `path` as Win32 measures it: UTF-16 code units, not the
+  ## UTF-8 bytes Nim strings hold. A character outside the Basic
+  ## Multilingual Plane takes two units; every other character one, so a
+  ## state directory under a non-ASCII user name is not refused for bytes
+  ## Windows never counts.
+  for r in path.runes:
+    result += (if int(r) > 0xFFFF: 2 else: 1)
+
+proc maxProfileStateDirChars*(): int =
+  ## The longest state directory (in `windowsPathChars`) whose profile
+  ## nimcache leaves `ProfileNimcacheModuleNameReserveChars` for a generated
+  ## file under `WindowsMaxPathChars`. Derived from `cachedNimcacheDir`
+  ## itself, so a change to the layout moves the budget with it.
+  const probeKey = repeat('0', ProfileNimcacheKeyChars)
+  let suffix = cachedNimcacheDir("", probeKey).len  # `\profile-cache\...`
+  WindowsMaxPathChars - ProfileNimcacheModuleNameReserveChars - 1 -
+    (suffix + 1)  # `+ 1`: `"" / x` drops the separator a real dir carries
+
+proc profileStateDirBudgetProblem*(stateDir: string): string =
+  ## Empty when a profile compile under the ABSOLUTE `stateDir` fits the
+  ## Windows path budget (`maxProfileStateDirChars`); otherwise the
+  ## diagnostic that refuses it, naming the directory's length, the limit
+  ## and how to shorten it. Pure arithmetic, so every host can test it;
+  ## `edge.compileProfileToRbpi` applies it only on Windows, where the limit
+  ## is real (reprobuild-pm `spec/Profile-Compilation-Model.md` step 2).
+  ## The nimcache is the tightest of the profile-cache paths: the lock
+  ## (`cachedProfileLockPath`, 90 characters past the state directory) and
+  ## the binary (`cachedProfileBinaryPath`, 101) keep the full key and
+  ## still fit any state directory this budget admits. The platform probe's
+  ## per-platform working directory (`edge.cachedPlatformProbeScratch` /
+  ## `<system>`, 110 characters past the state directory, where `nim check`
+  ## writes nothing) reaches exactly the 258 characters `CreateProcessW`
+  ## accepts for a working directory at the budget, and
+  ## `edge.probeProfilePlatforms` applies the same refusal.
+  ##
+  ## WHY A REFUSAL AND NOT A SHORTER ROOT. Past the budget the compile used
+  ## to fail inside `nim` or `cc1` with "cannot create directory" or "cannot
+  ## open", naming neither length nor remedy. The nimcache cannot move to a
+  ## short root outside the state directory: the state directory is what
+  ## keeps two of them apart (the profile lock is per state directory) and
+  ## what removing it cleans up, and the observed over-long state
+  ## directories sat under a long temporary directory, so no root derived
+  ## from `TEMP` would be shorter.
+  let have = windowsPathChars(stateDir)
+  let limit = maxProfileStateDirChars()
+  if have <= limit:
+    return ""
+  "repro profile compile: the state directory " & stateDir & " is " &
+    $have & " characters long; on Windows a profile compile fits a state " &
+    "directory of at most " & $limit & " characters. Nim and the C " &
+    "compiler open every file of the profile's nimcache (" &
+    cachedNimcacheDir(stateDir, repeat('x', ProfileNimcacheKeyChars)) &
+    "\\<module>.nim.c) through Win32 calls limited to " &
+    $WindowsMaxPathChars & " characters (MAX_PATH), and generated file " &
+    "names reach " & $ProfileNimcacheModuleNameReserveChars &
+    " characters. Use a shorter state directory: set " &
+    "REPRO_HOME_STATE_DIR (or pass --state-dir) to one of at most " &
+    $limit & " characters, or, when the state directory was made under " &
+    "the temporary directory, point TEMP and TMP at a shorter one."
 
 proc cachedProfileLockPath*(stateDir, profileKey: string): string =
   ## The lock file that serialises every compile and platform probe of the

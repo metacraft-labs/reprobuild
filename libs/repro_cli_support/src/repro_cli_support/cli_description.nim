@@ -939,6 +939,9 @@ proc membershipSetFlags(): NimNode {.compileTime.} =
       boolFlag enabled is bool, help = "Only the sets enabled here"
       boolFlag disabled is bool, help = "Only the sets not enabled here"
       boolFlag all is bool, help = "Every defined set (the default)"
+      flag at is Option[string], format = equals,
+        help = "List the sets this commit of the manifest repository " &
+          "defines instead of its working tree's"
       boolFlag json is bool, help = "Print the list as JSON"
   let callList = listFlags()
   let list = listFlags()
@@ -3567,6 +3570,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "true; `--nixos=false` states it is not); without --target the " &
             "machine's os-release says. A profile with a `nixos` guard is " &
             "refused (exit 3) for a --target without it"
+        flag homeDir is Option[string],
+          help = "The host's home directory, as Home Manager's " &
+            "`home.homeDirectory` (default: $HOME): a PATH entry spelled " &
+            "as it by its absolute path is named `~/...`, as the Nix side " &
+            "names it. Used for naming only; nothing under it is read"
         flag output is Option[string],
           help = "Write the document here instead of to standard output"
       subcmd "compare", help = "Compare a Nix-side and a Reprobuild-side " &

@@ -1121,6 +1121,7 @@ proc pruneBorrowers*(pool: string): seq[string] {.gcsafe.}
 proc registerBorrower*(pool, leaf: string): bool {.gcsafe.}
 proc borrowersPath*(pool: string): string {.gcsafe.}
 proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string {.gcsafe.}
+proc leafRepositoryRefusal*(gitBin, leaf: string): string {.gcsafe.}
 
 const SharedBareSafetyConfig* = [
   ("gc.auto", "0"),
@@ -1733,6 +1734,12 @@ proc wireAlternates*(repoPath, sharedBarePath: string;
     if not dirExists(sharedObjects):
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
         diagnostic: "shared bare has no objects dir: " & sharedObjects)
+    # A path git resolves to an enclosing repository is not a checkout to
+    # wire: its config is someone else's (``leafRepositoryRefusal``).
+    let refusal = leafRepositoryRefusal(gitBin, repoPath)
+    if refusal.len > 0:
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: refusal)
     if not registerBorrower(sharedBarePath, repoPath):
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
         diagnostic: "could not register " & repoPath & " as a borrower in " &
@@ -3383,9 +3390,63 @@ proc objectStoreIsPartial*(gitBin, objectDir: string): bool =
   objectDir.lastPathPart == "objects" and fileExists(owner / "HEAD") and
     hasPromisorRemoteConfig(gitBin, owner)
 
+proc leafRepositoryRefusal*(gitBin, leaf: string): string =
+  ## "" when ``leaf`` is a repository of its own: the top level of a working
+  ## tree, or a bare repository's git dir. Otherwise the diagnostic that
+  ## refuses it.
+  ##
+  ## Every ``--local`` key the refetch chain reads or writes is reached as
+  ## ``git -C <leaf> config --local``, and git answers that for whatever
+  ## repository it DISCOVERS from ``<leaf>``. A nested checkout whose ``.git``
+  ## git does not accept (a stub holding ``HEAD``, ``config`` and
+  ## ``objects/info/alternates`` but no ``refs/``, as an interrupted clone
+  ## leaves it) is discovered as the ENCLOSING repository. The stub's own
+  ## alternates still name its pool, so without this check the enclosing
+  ## leaf's ``remote.repro-pool.url`` was rewritten to the nested pool, the
+  ## leaf could no longer fetch a missing blob, and a ``git switch`` there
+  ## half-applied (reprobuild-pm
+  ## issues/2026-11-21-refetch-chain-repair-writes-a-nested-stub-leaf-pool-into-the-enclosing-repo.md).
+  ##
+  ## One ``rev-parse`` answers both shapes. In a working tree ``--show-cdup``
+  ## is empty only at its top level. Outside a working tree git prints no
+  ## ``--show-cdup`` line at all, which must not read as "at the top level":
+  ## a path inside a non-bare repository's ``.git`` is discovered as that
+  ## repository too, so ``--is-inside-work-tree`` must also say so. In a
+  ## bare repository the git dir itself must be ``leaf``. Identity is
+  ## compared with ``sameFile`` (device and inode), because git prints the
+  ## resolved path and ``leaf`` may be spelled through a symlink.
+  let res = runGit(gitBin, ["-C", leaf, "rev-parse", "--is-bare-repository",
+    "--is-inside-work-tree", "--absolute-git-dir", "--show-cdup"])
+  if res.code != 0:
+    return "not a git checkout: " & leaf & " (" & res.output.strip() & ")"
+  let lines = res.output.splitLines()
+  if lines.len < 3:
+    return "not a git checkout: " & leaf & " (unexpected rev-parse output)"
+  let bare = lines[0].strip() == "true"
+  let inWorkTree = lines[1].strip() == "true"
+  let gitDir = lines[2].strip()
+  let cdup = if lines.len > 3: lines[3].strip() else: ""
+  var own = false
+  if bare:
+    try:
+      own = sameFile(gitDir, leaf)
+    except OSError:
+      own = false
+  else:
+    own = inWorkTree and cdup.len == 0
+  if own:
+    return ""
+  "refusing to configure " & leaf & ": it is not a repository of its own; " &
+    "git resolves it to the enclosing repository whose git dir is " & gitDir &
+    ". Its .git is broken (an interrupted clone leaves a stub without " &
+    "refs/); move " & (leaf / ".git") & " aside and clone it again"
+
 proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   ## Ref-tip presence cannot detect missing blobs below present commits.
   ## Inspect the actual chain before on-touch configuration repairs it.
+  ##
+  ## Precondition: ``leafRepositoryRefusal(gitBin, leaf)`` is "". Otherwise
+  ## the ``--local`` reads below answer for an enclosing repository.
   if not repoIsPartialClone(gitBin, pool): return false
   # The uploadpack row names the launcher; without it the chain cannot run.
   if not fileExists(poolUploadPackLauncherPath(pool)): return true
@@ -3396,9 +3457,20 @@ proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
     "remote." & LeafPoolRemoteName & ".fetch"]).code == 0
 
+proc ensureCheckedLeafPoolConfig(gitBin, leaf, pool: string): string {.gcsafe.}
+
 proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   ## Install §3.4 and §3.5 into ``leaf``'s config. Returns "" on success,
-  ## otherwise the diagnostic. Idempotent.
+  ## otherwise the diagnostic. Idempotent. Refuses, writing nothing, when
+  ## ``leaf`` is not a repository of its own (``leafRepositoryRefusal``).
+  let refusal = leafRepositoryRefusal(gitBin, leaf)
+  if refusal.len > 0:
+    return refusal
+  ensureCheckedLeafPoolConfig(gitBin, leaf, pool)
+
+proc ensureCheckedLeafPoolConfig(gitBin, leaf, pool: string): string =
+  ## ``ensureLeafPoolConfig`` for a ``leaf`` already known to be a repository
+  ## of its own, so ``checkLeaf`` asks git that once rather than twice.
   ##
   ## DEVIATION FROM §3.4, measured 2026-10-02: the leaf does NOT get
   ## ``extensions.partialClone`` or ``core.repositoryFormatVersion=1``. Nix's
@@ -3877,13 +3949,19 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
     if gitDir.len == 0:
       result.diagnostic = "not a git checkout: " & leaf
       return
+    # A nested broken checkout is discovered as its enclosing repository:
+    # every probe and write below would land there. Refuse it before any.
+    let refusal = leafRepositoryRefusal(gitBin, leaf)
+    if refusal.len > 0:
+      result.diagnostic = refusal
+      return
 
     let missingChain = needsLeafRefetchChain(gitBin, leaf, thePool)
     # §4.3 self-registration precedes presence probes even when every ref
     # tip exists: missing blobs are healed on subsequent reads, not by an
     # expensive eager walk of every tree.
     result.registered = registerBorrower(thePool, leaf)
-    let configured = ensureLeafPoolConfig(gitBin, leaf, thePool)
+    let configured = ensureCheckedLeafPoolConfig(gitBin, leaf, thePool)
     result.configured = configured.len == 0
     if configured.len > 0:
       result.diagnostic = configured
@@ -4031,6 +4109,11 @@ proc registerLeafWithPool*(gitBin, leaf, pool: string): string =
   ## and configure it. Returns "" on success, otherwise the diagnostic. Used by
   ## ``wireAlternates`` and by the ``git clone --reference`` path.
   withCheckoutVcsLock(leaf, (block: return "could not lock checkout: " & leaf)):
+    # A stub nested in another leaf is no borrower; registering it would
+    # keep pool objects alive for a repository that does not exist.
+    let refusal = leafRepositoryRefusal(gitBin, leaf)
+    if refusal.len > 0:
+      return refusal
     if not registerBorrower(pool, leaf):
       return "could not register " & leaf & " in " & borrowersPath(pool)
     return ensureLeafPoolConfig(gitBin, leaf, pool)

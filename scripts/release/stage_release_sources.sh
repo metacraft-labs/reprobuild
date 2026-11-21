@@ -46,7 +46,12 @@ pkg=$1
 
 source_root="$pkg/share/repro/source"
 src_root="$pkg/share/repro/src"
-rm -rf "$pkg/share/repro"
+# Clear only the subtrees this script stages (the catalog clears its own).
+# Other stagers write beside them under share/repro -- the shell completion
+# scripts in share/repro/completions are staged BEFORE this script runs on the
+# POSIX legs -- and removing all of share/repro shipped v0.2.30's Linux
+# archive without them.
+rm -rf "$source_root" "$src_root"
 mkdir -p "$source_root" "$src_root"
 
 # Copy the files named on stdin (NUL-separated, relative to <from>) into <to>,
@@ -321,5 +326,5 @@ if (( ${#missing[@]} > 0 )); then
   exit 1
 fi
 
-files=$(find "$pkg/share/repro" -type f | wc -l)
+files=$(find "$source_root" "$src_root" "$pkg/share/repro/reprobuild-packages" -type f | wc -l)
 echo "stage_release_sources: staged $files source files under $pkg/share/repro"

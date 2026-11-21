@@ -108,6 +108,7 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # note in `runBuild`.
 import repro_core/nix_store_roots
 import repro_core/child_reaper
+import repro_core/nix_wrapper_libc
 import repro_core/nix_configuration_env
 # The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
 # the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
@@ -2682,6 +2683,14 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    compilerLibcDirs*: seq[string]
+      ## The library directories of the libc that a Nix compiler wrapper in
+      ## this tool's realization records for itself (``nix-support/orig-libc``).
+      ## Threaded onto ``REPRO_COMPILER_LIBC_DIRS`` and nothing else: install
+      ## normalization reads it to keep the libc that matches a linked
+      ## ``PT_INTERP``. It never joins ``libDirs``: the wrapper passes this
+      ## libc to its own linker, and on ``LIBRARY_PATH`` any OTHER compiler on
+      ## the action's ``PATH`` would link against it too.
     nimPathDirs*: seq[string]
     prefixVars*: seq[(string, string)]
       ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
@@ -2767,6 +2776,10 @@ type
     queuedAtMs: int
       ## When a candidate's offer came back QUEUED (engine monotonic ms);
       ## how long it waited is what sizes the advertised frontier.
+    bypassWidth: int
+      ## The width an ``rpkBypassProcess`` sized action runs at, held out of
+      ## the host's cores until it is reaped (``bypassWidthMilli``); 0 for
+      ## every other action.
     monitorSlot: int
       ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
       ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
@@ -4368,6 +4381,97 @@ proc removalParentOf(spelling: string): string =
       suffix = ancestor.substr(slash) & suffix
       ancestor = ancestor[0 ..< slash]
 
+proc splitLastEntry(path: string): tuple[parent, name: string] =
+  ## `path` (an `outputRemovalLocation` answer, `/`-separated) split at its
+  ## last separator. The parent of `/x` is `/`.
+  let slash = path.rfind('/')
+  if slash < 0:
+    return (parent: "", name: path)
+  (parent: (if slash == 0: "/" else: path[0 ..< slash]),
+   name: path[slash + 1 .. ^1])
+
+proc isSameEntryOnDisk(a, b: string): bool =
+  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers)
+  ## name ONE directory entry on disk, whatever their spellings.
+  ##
+  ## A removal location's parent is resolved through the filesystem, which
+  ## answers in the on-disk spelling, but its last component is kept as the
+  ## output spells it. On a filesystem that folds case (macOS's default APFS,
+  ## Windows, a Linux `casefold` directory) or normalization, `<d>/WORK` and
+  ## `<d>/work` are then one entry with two spellings, and only the
+  ## filesystem can say so. It is asked by identity: the device and file id
+  ## of the entry itself (`lstat`, a final link not followed, because the
+  ## removal takes the link and not its target).
+  ##
+  ## A directory has exactly one entry, so equal identities settle it. A
+  ## non-directory may have several (hard links): two entries of one parent
+  ## that share a file id are the same entry only when the parent does not
+  ## list both names, i.e. one of them is merely another spelling of the
+  ## other. Removing one hard link leaves the other, so it must not count.
+  ## A location that does not exist names nothing to remove: `false`.
+  if a == b:
+    return true
+  var infoA, infoB: FileInfo
+  try:
+    infoA = getFileInfo(a, followSymlink = false)
+    infoB = getFileInfo(b, followSymlink = false)
+  except OSError:
+    return false
+  if infoA.id != infoB.id:
+    return false
+  if infoA.kind == pcDir:
+    return true
+  let (parentA, nameA) = splitLastEntry(a)
+  let (parentB, nameB) = splitLastEntry(b)
+  if parentA.len == 0 or parentB.len == 0 or
+      not isSameEntryOnDisk(parentA, parentB):
+    return false
+  if nameA == nameB:
+    return true
+  var listedA, listedB = false
+  try:
+    for kind, name in walkDir(parentA, relative = true, checkDir = true):
+      when defined(windows):
+        let listed = name.toLowerAscii()
+      else:
+        let listed = name
+      if listed == nameA: listedA = true
+      if listed == nameB: listedB = true
+  except OSError:
+    # The parent cannot be listed: whether these are two hard links or one
+    # entry is unknown, and the safe answer for a removal check is "one".
+    return true
+  not (listedA and listedB)
+
+proc entryAtDepthOf(path, like: string): string =
+  ## The ancestor-or-self of `path` with as many components as `like`, or ""
+  ## when `path` is shallower. Both are `outputRemovalLocation` answers.
+  let want = like.count('/')
+  var seen = 0
+  for i, ch in path:
+    if ch == '/':
+      inc seen
+      if seen > want:
+        return path[0 ..< i]
+  if seen == want: path else: ""
+
+proc removalTakesEntry(removalRoot, targetRoot: string): bool =
+  ## Whether removing the entry at `removalRoot` removes `targetRoot`: it IS
+  ## that location or a directory containing it. Both are
+  ## `outputRemovalLocation` answers. Their spellings are compared first; a
+  ## spelling that differs is still the same entry when the filesystem says
+  ## so (`isSameEntryOnDisk`): another letter case on a case-folding volume
+  ## names the same directory. Only the target's ancestor at the removal's
+  ## depth can be it, since both parents are resolved to their physical,
+  ## on-disk directory and differ at most in the last component's spelling.
+  ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+  if removalRoot.len == 0 or targetRoot.len == 0:
+    return false
+  if removalRoot == targetRoot or targetRoot.startsWith(removalRoot & "/"):
+    return true
+  let entry = entryAtDepthOf(targetRoot, removalRoot)
+  entry.len > 0 and isSameEntryOnDisk(removalRoot, entry)
+
 var
   containmentMemoDepth {.threadvar.}: int
   containmentMemo {.threadvar.}: Table[string, Option[string]]
@@ -4901,7 +5005,7 @@ proc validateGraph(g: BuildGraph) =
         absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
       when defined(windows):
         cwdRoot = cwdRoot.toLowerAscii()
-      if removalRoot == cwdRoot or cwdRoot.startsWith(removalRoot & "/"):
+      if removalTakesEntry(removalRoot, cwdRoot):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
       indexRoot(raw, optional = true)
@@ -4917,7 +5021,7 @@ proc validateGraph(g: BuildGraph) =
           else: action.cwd / raw
         let inputRoot = outputRemovalLocation("", physicalInput)
         let outputRoot = outputRemovalLocation("", physicalOutput)
-        if inputRoot == outputRoot or inputRoot.startsWith(outputRoot & "/"):
+        if removalTakesEntry(outputRoot, inputRoot):
           raiseEngine("optional output contains a declared input: " & raw &
             " contains " & input & " for " & action.id)
     if hasOptionalCandidates:
@@ -4955,12 +5059,12 @@ proc validateGraph(g: BuildGraph) =
       let root = outputRemovalLocation(action.cwd, raw)
       if root notin owned:
         continue
-      if root == cwdRoot or cwdRoot.startsWith(root & "/"):
+      if removalTakesEntry(root, cwdRoot):
         raiseEngine("output removed before run contains the action's cwd: " &
           raw & " for " & action.id)
       for input in action.inputs:
         let inputRoot = outputRemovalLocation(action.cwd, input)
-        if inputRoot == root or inputRoot.startsWith(root & "/"):
+        if removalTakesEntry(root, inputRoot):
           raiseEngine("output removed before run contains a declared input: " &
             raw & " contains " & input & " for " & action.id)
       removalRoots.add((actionId: action.id, raw: raw, root: root))
@@ -11289,7 +11393,39 @@ proc selfWrittenOutputKeys(action: BuildAction): HashSet[string] =
 
 proc isUnderCanonicalPolicyRoot(path: string; roots: openArray[string]): bool
 
-proc isRemovedOutputTreePath(action: BuildAction; path: string): bool =
+proc linkEntryLocation(path: string): string =
+  ## Where a recorded entry that is itself a symbolic link IS: its ancestors
+  ## resolved, its own name kept. Empty when `path` is not such an entry, and
+  ## the caller then places it as before.
+  ##
+  ## `canonicalPolicyPath` is a `realpath` for a path with no parent walk, so
+  ## it follows the last component too and answers where the link LEADS. The
+  ## link is the entry: where it points does not place it inside or outside a
+  ## root (Monitor-Hook-Shim.md §"Metadata, Probe, And Symlink APIs", "Both
+  ## sides in one resolution").
+  ##
+  ## Not on Windows, where `canonicalPolicyPath` is lexical and follows no
+  ## link. Not for a relative path, which it does not resolve at all, nor for
+  ## one with a `..` component, which it resolves only through the last
+  ## parent walk and so never through the last component. A `.` component
+  ## and a trailing `/` are dropped first, as `canonicalPolicyPath` drops
+  ## them before its `realpath`: `<cwd>/./src/link` is the same entry.
+  when defined(windows):
+    discard
+  else:
+    let entry = normalizeWriteRoot(path)
+    if not entry.isAbsolute or "/../" in (entry & "/") or
+        not symlinkExists(entry):
+      return ""
+    let slash = entry.rfind('/')
+    if slash < 0 or slash == entry.high:
+      return ""
+    let parent = canonicalPolicyPath(if slash == 0: "/" else: entry[0 ..< slash])
+    result = (if parent.endsWith("/"): parent else: parent & "/") &
+      entry[slash + 1 .. ^1]
+
+proc isRemovedOutputTreePath(action: BuildAction; path: string;
+                             enumerated = false): bool =
   ## Whether `path` is at or under an output the engine REMOVES before the
   ## action runs: an optional candidate (a conditional byproduct) or a
   ## ``removeBeforeRun`` entry (an opaque output directory, Build-Engine-And-
@@ -11300,6 +11436,39 @@ proc isRemovedOutputTreePath(action: BuildAction; path: string): bool =
   ## find the "input" absent). BuildXL adds an opaque directory to the
   ## untracked scope for the same reason (Opaque-Sealed-Directories.md
   ## §Internals).
+  ##
+  ## A symbolic link OUTSIDE every such tree is never one of these paths,
+  ## wherever it points. The engine did not remove it, it was there when the
+  ## action started, and its own state is a prior input: `src/link ->
+  ## ../gen/a.txt`, with `gen` an optional candidate, used to resolve to a
+  ## path under `gen` and leave the key, so retargeting the link at another
+  ## file of the tree was a false hit (reprobuild-pm issues/2026-11-18-
+  ## output-tree-input-filter-drops-a-symlink-that-points-into-the-tree.md).
+  ## A link INSIDE a tree is decided below exactly as before this test
+  ## existed, by where it leads: one the action made that leads out of the
+  ## tree is the only recorded trace of what was read through it.
+  ##
+  ## `enumerated` is the membership channel, and it asks about the directory
+  ## that was LISTED. Listing follows the link, so a link to a removed tree
+  ## names that tree's entries, which are this run's writes: the listing is
+  ## placed by where it leads, as before. The link itself stays an input
+  ## through the read and probe channels.
+  if not enumerated and
+      (action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0):
+    let linkLocation = path.linkEntryLocation()
+    if linkLocation.len > 0:
+      var insideATree = false
+      for candidate in action.optionalOutputs & action.removeBeforeRun:
+        let root = materialPath(action.cwd, candidate)
+        # The candidate itself, when it is a link: the engine removed it.
+        if path == root.replace('\\', '/'):
+          return true
+        # Both sides resolved the same way: the link's ancestors above, and
+        # the root's here.
+        if recordedPathUnderRoot(linkLocation, canonicalPolicyPath(root)):
+          insideATree = true
+      if not insideATree:
+        return false
   for candidate in action.optionalOutputs & action.removeBeforeRun:
     let root = materialPath(action.cwd, candidate)
     if path == root.replace('\\', '/'):
@@ -13117,7 +13286,8 @@ proc cacheEnumeratedDirectories*(action: BuildAction;
     # A directory inside a tree removed before the action ran: its entries
     # are all this run's writes, and `cacheInputPaths` drops the directory
     # from the key for the same reason (`isRemovedOutputTreePath`).
-    if action.isRemovedOutputTreePath(location.replace('\\', '/')):
+    if action.isRemovedOutputTreePath(location.replace('\\', '/'),
+                                      enumerated = true):
       continue
     result.addUnique(seen, path)
 proc evidenceFromRecord*(action: BuildAction;
@@ -14431,6 +14601,17 @@ type
       ## the action's sub-tools (``BuildAction.subToolIdentityRefs``),
       ## which vouch for what the tool's compiler driver links against,
       ## not for what every process of the action loads at run time.
+    compilerLibcDirs*: seq[string]
+      ## Every ref's and sub-tool's ``ResolvedToolIdentity.compilerLibcDirs``:
+      ## the libcs Nix compiler wrappers record for themselves. Threaded onto
+      ## ``REPRO_COMPILER_LIBC_DIRS`` only, for install normalization; see
+      ## ``refuseForeignCompilerLibc`` for why they stay off ``LIBRARY_PATH``.
+    libDirOwners*: seq[(string, string)]
+      ## (library dir, ref or sub-tool name) for every ``LIBRARY_PATH`` entry
+      ## above, in order, so a refusal can name who contributed a directory.
+    compilerLibcOwners*: seq[(string, string)]
+      ## (libc dir, ref or sub-tool name) for every ``compilerLibcDirs``
+      ## entry: the tool whose compiler wrapper recorded that libc.
     nimPathDirs*: seq[string]
     prefixVars*: seq[(string, string)]
       ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
@@ -14483,7 +14664,14 @@ proc collectResolvedAuxPaths*(action: BuildAction;
   var seenCmakePrefix: HashSet[string] = initHashSet[string]()
   var seenInclude: HashSet[string] = initHashSet[string]()
   var seenLib: HashSet[string] = initHashSet[string]()
+  var seenCompilerLibc: HashSet[string] = initHashSet[string]()
   var seenNimPath: HashSet[string] = initHashSet[string]()
+  template addCompilerLibcDirs(r: ResolvedToolIdentity; owner: string) =
+    for d in r.compilerLibcDirs:
+      if d.len > 0 and d notin seenCompilerLibc:
+        seenCompilerLibc.incl(d)
+        result.compilerLibcDirs.add(d)
+        result.compilerLibcOwners.add((d, owner))
   # Target libraries and headers must precede the native toolchain's
   # transitive sysroot. Otherwise a compiler profile can expose a kernel
   # UAPI header before the matching userspace library header (for example
@@ -14514,6 +14702,8 @@ proc collectResolvedAuxPaths*(action: BuildAction;
         if d.len > 0 and d notin seenLib:
           seenLib.incl(d)
           result.libDirs.add(d)
+          result.libDirOwners.add((d, refName))
+      addCompilerLibcDirs(r, refName)
       # SC-11 (§4.2a.3): accumulate the Nim library source roots in-order,
       # deduped, exactly as the four C/C++ lists above.
       for d in r.nimPathDirs:
@@ -14540,11 +14730,25 @@ proc collectResolvedAuxPaths*(action: BuildAction;
       if d.len > 0 and d notin seenLib:
         seenLib.incl(d)
         result.linkOnlyLibDirs.add(d)
+        result.libDirOwners.add((d, refName))
+    addCompilerLibcDirs(r, refName)
+
+const CompilerLibcDirsEnv* = "REPRO_COMPILER_LIBC_DIRS"
+  ## The action variable that carries ``ResolvedAuxPaths.compilerLibcDirs``.
+  ## The install mirror's ELF normalization reads it (beside ``LIBRARY_PATH``)
+  ## to find the libc that matches a linked ``PT_INTERP``. That script's
+  ## module cannot import the engine, so it spells the name literally.
 
 proc linkLibDirs(paths: ResolvedAuxPaths): seq[string] =
   ## Everything ``LIBRARY_PATH`` carries: the refs' library dirs, then the
   ## sub-tools' link-only ones.
   paths.libDirs & paths.linkOnlyLibDirs
+
+proc holdsLibcRuntime(path: string): bool =
+  ## Whether ``path`` holds a C library runtime, judged by content rather
+  ## than by the owning package's name: compiler bootstrap prefixes and
+  ## federated catalogs can carry one under any package name.
+  fileExists(path / "libc.so.6")
 
 proc isUnsafeRuntimeLibDir(path: string): bool =
   ## Dependency profiles may propagate libc or language-runtime libraries
@@ -14555,7 +14759,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   # Compiler bootstrap prefixes can carry libc startup files even when the
   # owning package is GCC rather than glibc. Detect the runtime by content so
   # federated catalogs and staged compiler package names remain safe.
-  if fileExists(path / "libc.so.6"):
+  if holdsLibcRuntime(path):
     return true
   let normalized = path.replace('\\', '/')
   const sourceMarker = "/packages/source/"
@@ -14785,6 +14989,9 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  # A Nix compiler wrapper's own libc, for install normalization only. No
+  # compiler, linker or loader reads this variable.
+  prependEnvDirs(env, CompilerLibcDirsEnv, paths.compilerLibcDirs)
   for (name, value) in paths.prefixVars:
     env[name] = value
   when defined(macosx):
@@ -14833,6 +15040,8 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  result = prependEnvDirsToArgvEnv(result, CompilerLibcDirsEnv,
+    paths.compilerLibcDirs)
   for (name, value) in paths.prefixVars:
     var replaced = false
     for i in 0 ..< result.len:
@@ -16193,6 +16402,132 @@ proc cargoRustcWrapperEntries(action: BuildAction;
     getEnv(WrapperPathEnv))
   rustcWrapperEntries(env, wrapper)
 
+proc sameDirectory(a, b: string): bool =
+  ## Whether two directory spellings name the same directory: textually after
+  ## dropping trailing separators, or by their resolved physical paths.
+  var left = a
+  var right = b
+  while left.len > 1 and left[^1] in {DirSep, AltSep}: left.setLen(left.len - 1)
+  while right.len > 1 and right[^1] in {DirSep, AltSep}: right.setLen(right.len - 1)
+  if left == right:
+    return true
+  try:
+    result = dirExists(left) and dirExists(right) and
+      expandFilename(left) == expandFilename(right)
+  except OSError:
+    result = false
+
+proc searchPathExecutable(name, searchPath, cwd: string): string =
+  ## The first executable called ``name`` on ``searchPath``, as an absolute
+  ## path, or "" when there is none. The same lookup the launched process's
+  ## ``execvp`` performs, which is what decides which compiler a bare ``cc``
+  ## runs.
+  for dir in searchPath.split(PathSep):
+    if dir.len == 0:
+      continue
+    let candidate = absolutePath(dir / addFileExt(name, ExeExt), cwd)
+    if isExecutableFile(candidate):
+      return candidate
+  ""
+
+proc refuseForeignCompilerLibc*(action: BuildAction; paths: ResolvedAuxPaths;
+                                env: openArray[string]; isolatedEnv: bool) =
+  ## Refuse to launch ``action`` when its ``LIBRARY_PATH`` would carry the
+  ## libc that a Nix compiler wrapper among its tools records for itself
+  ## (``nix-support/orig-libc``) and that libc is not the one the action's
+  ## ``cc`` / ``gcc`` uses.
+  ##
+  ## WHY. ``LIBRARY_PATH`` is read by EVERY compiler the action runs, and a
+  ## compiler searches it ahead of its own system directories for ``-lc`` and
+  ## the C runtime start files. A wrapper's libc there is linked by whichever
+  ## compiler the action's ``PATH`` resolves first. When that is a host
+  ## ``gcc``, the binary keeps the host's dynamic loader but needs the Nix
+  ## libc's symbol versions, and it fails at run time with
+  ## ``version `GLIBC_2.xx' not found``. The tool catalog no longer puts a
+  ## wrapper's libc on the link channels at all (the wrapper passes it to its
+  ## own linker), so this is a backstop: a silent wrong link becomes an error
+  ## naming the directory, who contributed it and whose libc it is.
+  ##
+  ## WHAT IS EXEMPT. A directory whose libc is exactly the libc of every
+  ## compiler the action resolves as ``cc`` and ``gcc``: those compilers would
+  ## link against it anyway. And a libc directory no wrapper of the action
+  ## records -- a libc the edge declares as a dependency, such as a
+  ## source-built glibc or a compiler bootstrap prefix -- is left on the link
+  ## channel as before; only the wrapper's record tells which compiler a libc
+  ## belongs to, and without one there is nothing to compare against.
+  ##
+  ## ``env`` and ``isolatedEnv`` describe the launched environment, so the
+  ## ``cc`` looked up is the one the action's process will find.
+  if paths.compilerLibcOwners.len == 0:
+    return
+  let declaredPath = lookupEnv(env, "PATH")
+  let searchPath =
+    if declaredPath.present: declaredPath.value
+    elif isolatedEnv: ""
+    else: getEnv("PATH")
+  var compilersResolved = false
+  var compilers: seq[tuple[name, path: string; libcDirs: seq[string]]]
+  for (dir, owner) in paths.libDirOwners:
+    # The content test first: one stat per directory, and only a directory
+    # holding a libc is compared (possibly by resolved path) with the records.
+    if not holdsLibcRuntime(dir):
+      continue
+    var recorder = ""
+    for (libcDir, libcOwner) in paths.compilerLibcOwners:
+      if sameDirectory(dir, libcDir):
+        recorder = libcOwner
+        break
+    if recorder.len == 0:
+      continue
+    if not compilersResolved:
+      compilersResolved = true
+      for name in ["cc", "gcc"]:
+        let path = searchPathExecutable(name, searchPath, action.cwd)
+        if path.len > 0:
+          # A nixpkgs wrapper's ``bin/cc`` sits directly in the wrapper's
+          # store path, beside its ``nix-support``. A host compiler has no
+          # such record, and so no libc this directory could match. A PATH
+          # entry can be a profile of symlinks (``~/.nix-profile/bin``), so
+          # the prefix of the resolved file is consulted as well.
+          var prefixes = @[path.parentDir.parentDir]
+          try:
+            let resolvedPrefix = expandFilename(path).parentDir.parentDir
+            if resolvedPrefix notin prefixes:
+              prefixes.add(resolvedPrefix)
+          except OSError:
+            discard
+          compilers.add((name: name, path: path,
+            libcDirs: nixCompilerWrapperLibcDirs(prefixes)))
+    var ownLibc = compilers.len > 0
+    for compiler in compilers:
+      if not compiler.libcDirs.anyIt(sameDirectory(it, dir)):
+        ownLibc = false
+    if ownLibc:
+      continue
+    var resolvedAs: seq[string]
+    for compiler in compilers:
+      if not compiler.libcDirs.anyIt(sameDirectory(it, dir)):
+        resolvedAs.add("`" & compiler.name & "` (" & compiler.path & ")")
+    let compilerText =
+      if resolvedAs.len > 0:
+        "the action's " & resolvedAs.join(" and ") &
+          (if resolvedAs.len > 1: " do not use this libc: a binary they link"
+           else: " does not use this libc: a binary it links") &
+          " would keep its own dynamic loader and fail at run time on that " &
+          "loader's older libc (`GLIBC_x.yy not found`)"
+      else:
+        "neither `cc` nor `gcc` is on the action's PATH, so no compiler " &
+          "of the action is known to use this libc"
+    raiseEngine("refusing to launch " & action.id & ": its LIBRARY_PATH " &
+      "would carry " & dir & ", which holds a C library (libc.so.6). Tool '" &
+      owner & "' contributed the directory, and it is the libc that the Nix " &
+      "compiler wrapper of tool '" & recorder & "' records for its own use " &
+      "(nix-support/" & NixWrapperLibcManifest & "), which that wrapper " &
+      "already passes to its own linker. On LIBRARY_PATH every compiler of " &
+      "the action links against it, and " & compilerText & ". Remove the " &
+      "dependency that brings this libc onto the link path, or provision " &
+      "the tools so that `cc` is that wrapper.")
+
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec =
@@ -16216,6 +16551,7 @@ proc preparedRunQuotaCommand(action: BuildAction;
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
   let threadedEnv = preparedActionEnv(action, config, auxPaths)
   let isolatedEnv = config.hermeticEnv or action.isolateHostEnvironment
+  refuseForeignCompilerLibc(action, auxPaths, threadedEnv, isolatedEnv)
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
     threadedEnv, action.cwd, isolatedEnv)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
@@ -17641,25 +17977,48 @@ proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction
 
-proc bypassWidthMilli*(hostCores, maxParallelism: int): uint32 =
+proc bypassWidthMilli*(hostCores, heldCores, contenders: int): uint32 =
   ## The width a sized action runs at when no RunQuota lease is taken: an
-  ## equal share of the host's cores among the actions the engine runs at
-  ## once, and at least one slot. Left as declared, a Nim compile has no
-  ## ``--parallelBuild`` and starts one C compiler per core, so twelve
-  ## concurrent test-binary compiles on a 32-core host ran ~250 ``cc1``
-  ## (full run 53, 2026-11-15) where the host has 32 cores for everyone.
-  let share = max(1, hostCores) div max(1, maxParallelism)
+  ## equal share of the cores the running sized actions do not already hold
+  ## (``hostCores - heldCores``) among the ``contenders`` that can launch now,
+  ## this one included, and at least one slot.
+  ##
+  ## Left as declared, a Nim compile has no ``--parallelBuild`` and starts one
+  ## C compiler per core, so twelve concurrent test-binary compiles on a
+  ## 32-core host ran ~250 ``cc1`` (full run 53, 2026-11-15) where the host
+  ## has 32 cores for everyone. A STATIC share (``hostCores div
+  ## maxParallelism``) fixed that and starved the tail: in full run 54 the
+  ## build's last action, the main ``reprobuild`` compile, ran alone at
+  ## ``--parallelBuild:2`` for over 80 minutes on 32 cores. Sharing what is
+  ## free among what is ready gives twelve simultaneous launches about
+  ## ``hostCores / 12`` each, as before, and a lone action every free core.
+  ##
+  ## The sum of the widths held stays within ``hostCores`` at every launch,
+  ## EXCEPT for the one-slot floor: an action launched while the running ones
+  ## already hold every core still gets one slot, so the sum can exceed the
+  ## host by at most one slot per such launch. A width is fixed for the
+  ## action's life (a running compiler cannot be widened), so an action that
+  ## launches while others run keeps its smaller share after they finish.
+  let free = max(1, hostCores) - max(0, heldCores)
+  let share = free div max(1, contenders)
   uint32(max(1, share)) * 1000'u32
 
 proc startBypassRunQuotaProcess(action: BuildAction;
-                                config: BuildEngineConfig):
+                                config: BuildEngineConfig;
+                                widthMilli: uint32;
+                                heldWidth: var int):
     ReproDirectRunningProcess =
   ## Use RunQuota's native process backend without acquiring a lease. On
   ## Windows this preserves argument boundaries instead of expanding valid
   ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
   ##
-  ## A sized action still gets its width flag: ``bypassWidthMilli``, filled
-  ## in as a grant of that size would be.
+  ## A sized action still gets its width flag: ``widthMilli``, which the
+  ## scheduler sizes with ``bypassWidthMilli``, filled in as a grant of that
+  ## size would be. ``heldWidth`` receives the width the command actually
+  ## runs at (a smaller value it already asks for is kept), which the
+  ## scheduler counts as held until the action is reaped; 0 for an unsized
+  ## action.
+  heldWidth = 0
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
@@ -17674,16 +18033,15 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     return startDirect(preparedRunQuotaCommand(action, config))
   var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
   command.widthFlag = action.widthFlag
-  let width = bypassWidthMilli(countProcessors(),
-    int(max(1'u32, config.maxParallelism)))
-  return startDirect(command.applyGrantedWidth(width))
+  heldWidth = filledWidth(command.argv, grantedSlots(widthMilli))
+  return startDirect(command.applyGrantedWidth(widthMilli))
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction =
   ## The action with a placeholder where its width flag's value goes, before
   ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
   ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
-  ## launch paths and the bypass use it; the bypass fills it with
-  ## ``bypassWidthMilli``.
+  ## launch paths and the bypass use it; the bypass fills it with the width
+  ## ``bypassWidthMilli`` sizes.
   ##
   ## The flag is placed in the command the action EXECUTES: on the wrapped
   ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
@@ -25220,6 +25578,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var process: Process
         var directProcess: ReproDirectRunningProcess
         var monitorSlot = -1
+        var bypassWidth = 0
         var processKind =
           if plan.hostInProcess: rpkMonitorHost
           elif bypassRunQuota: rpkBypassProcess
@@ -25235,7 +25594,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
               cacheRoot, siteTablePath)
           elif bypassRunQuota:
-            directProcess = startBypassRunQuotaProcess(plan.action, config)
+            # The width is an equal share of the cores the running sized
+            # actions do not hold, among the sized actions that can launch
+            # now: this one, and the sized ones still ahead of it in this
+            # wave's ready queue, as many as there are free parallel slots.
+            # Those ahead may yet turn out to be cache hits; counting them
+            # errs towards narrower widths, never past the host.
+            var widthMilli = 0'u32
+            if plan.action.widthFlag.len > 0:
+              var held = 0
+              for item in running:
+                held += item.bypassWidth
+              let freeSlots = int(maxParallel) -
+                (running.len + stagedInlineLaunches.len)
+              var contenders = 1
+              var k = i
+              while k < ready.len and contenders < freeSlots:
+                if actionsById[ready[k]].widthFlag.len > 0:
+                  inc contenders
+                inc k
+              widthMilli = bypassWidthMilli(countProcessors(), held,
+                contenders)
+            directProcess = startBypassRunQuotaProcess(plan.action, config,
+              widthMilli, bypassWidth)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath,
               runQuotaPoolCaps.getOrDefault(plan.action.pool, 0'u32))
@@ -25276,6 +25657,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           process: process,
           directProcess: directProcess,
           resultPath: resultPath,
+          bypassWidth: bypassWidth,
           monitorSlot: monitorSlot
         )
         when defined(posix):

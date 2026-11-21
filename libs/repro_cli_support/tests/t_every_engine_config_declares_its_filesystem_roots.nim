@@ -86,6 +86,15 @@ proc configSites(source: string): seq[ConfigSite] =
     let name = line["var ".len ..< line.find(" =")]
     result.add(ConfigSite(variableName: name.strip(), line: i + 1))
 
+proc isTopLevelDeclaration(raw: string): bool =
+  ## A routine declared at column 0 ends the routine before it. Every
+  ## construction site is inside a routine, so its wiring cannot be past one.
+  for keyword in ["proc ", "func ", "iterator ", "template ", "macro ",
+                  "method ", "converter "]:
+    if raw.startsWith(keyword):
+      return true
+  false
+
 suite "every engine config declares the workspace root classification":
 
   test "every construction site is wired to the classification":
@@ -103,10 +112,13 @@ suite "every engine config declares the workspace root classification":
     var unwired: seq[string] = @[]
     for site in sites:
       var wired = false
-      # The wiring follows the construction; 90 lines clears the longest
-      # construction-plus-wiring block in this file and stops well short of
-      # the next site.
-      for i in site.line ..< min(site.line + 90, lines.len):
+      # The wiring follows the construction inside the same routine. The
+      # scan is bounded by that routine (the next top-level declaration) and
+      # by the next construction, not by a line count: a fixed window went
+      # red when two construction blocks grew past it while still wired.
+      for i in site.line ..< lines.len:
+        if isTopLevelDeclaration(lines[i]):
+          break
         let line = lines[i].strip()
         if line.startsWith("wireFilesystemRoots(" & site.variableName & ",") or
             line.startsWith("wirePortableCache(" & site.variableName & ","):
