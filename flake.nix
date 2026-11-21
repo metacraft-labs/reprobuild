@@ -428,7 +428,11 @@
       # present but would not map, both bump `growthFailed`, so enumerateEdge
       # no longer honours a completeness claim from a walk that missed
       # elements. Generation-stamped counters saturate instead of wrapping.
-      url = "github:metacraft-labs/nim-shm-gset/34ef30cba47ac93304078a101796a6283230e8cc";
+      # Bumped 34ef30c -> fc0c744 (2026-11-21, `agents`): `markShardDrained` refuses
+      # the shard inserts target, `insertShardIndex` names it, and an insert
+      # into a drained target counts a growth failure and grows past it.
+      # flattenChain bounds its range by `insertShardIndex`.
+      url = "github:metacraft-labs/nim-shm-gset/fc0c74478d945161574a9fc49389c8fd65f09d2e";
       flake = false;
     };
     nim-shm-queue-src = {

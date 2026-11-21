@@ -708,8 +708,8 @@ when actionIndexSupported:
   # --- flattening and retirement (§6.7) ------------------------------------
 
   proc flattenChain*(idx: ActionIndex): bool =
-    ## Copy each still-live element of every older shard into the newest shard,
-    ## then mark the drained shard and unlink it (§6.7).
+    ## Copy each still-live element of every older shard into the shard inserts
+    ## target, then mark the drained shard and unlink it (§6.7).
     ##
     ## This is not a daemon. It is a maintenance pass guarded by a
     ## non-blocking `flock(LOCK_EX|LOCK_NB)` on the anchor, so at most one
@@ -726,9 +726,24 @@ when actionIndexSupported:
     ## tidy: because an element reaches the newer shard before it leaves the
     ## older one, the ascending reader of §6.3 always sees it in one shard or
     ## the other.
+    ##
+    ## THE RANGE STOPS BELOW THE SHARD INSERTS TARGET (§6.7 "Retirement"). The
+    ## copy goes wherever `insert` goes, which is the shard the chain COUNT
+    ## names. The directory can show one shard more than that, because a
+    ## grower links its shard before it bumps the count: a grower stopped
+    ## between the two, or a file left at the next name. Taking the range from
+    ## the directory view (`shardCount`) then reaches the insert target itself,
+    ## "copies" it into itself, and retires it with everything it holds. So the
+    ## bound is `insertShardIndex`, and the library's refusal to drain that
+    ## shard is checked rather than assumed.
+    ##
+    ## NOT EXCLUDED: an insert in another process that chose shard `k` before
+    ## the chain grew and has not yet claimed its slot. The `flock` serialises
+    ## flatteners only.
     if idx == nil or not idx.attached: return false
-    let n = idx.gset.shardCount()
-    if n <= 1: return false
+    # One shard by the COUNT means there is nothing below the insert target,
+    # whatever the directory shows.
+    if idx.gset.insertShardIndex() < 1: return false
     let fd = posix.open(idx.anchor.cstring, O_RDWR or O_CLOEXEC)
     if fd < 0: return false
     defer: discard posix.close(fd)
@@ -737,9 +752,14 @@ when actionIndexSupported:
     # shard0 is never retired — it carries the control block — so there is
     # nothing to gain by copying its elements forward into a shard that will
     # itself be walked after it.
-    for k in 1 ..< n - 1:
+    var k = 0
+    while true:
+      inc k
+      # Re-read each step: the count only rises, so a shard that was the
+      # insert target when the pass began may be an older shard by now.
+      if k >= idx.gset.insertShardIndex(): break
       if idx.gset.shardIsDrained(k): continue
-      # Gather first: the copy targets the NEWEST shard, and inserting while
+      # Gather first: the copy targets the INSERT shard, and inserting while
       # iterating a shard's slots would be reading and writing the same
       # structure through two cursors.
       var records: seq[seq[byte]] = @[]
@@ -772,7 +792,8 @@ when actionIndexSupported:
       for blob in completes:
         if idx.gset.insert(blob) == isSaturated: ok = false
       if not ok: continue
-      idx.gset.markShardDrained(k)
+      # Refused for the insert target: then nothing is unlinked either.
+      if not idx.gset.markShardDrained(k): continue
       idx.gset.retireShard(k)
     # A flatten re-establishes completeness from the elements that survived it,
     # so the escape-hatch counter that voided every claim is cleared with it
