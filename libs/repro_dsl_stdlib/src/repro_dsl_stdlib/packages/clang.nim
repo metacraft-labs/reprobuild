@@ -157,6 +157,35 @@ package clang:
       cpu = "aarch64",
       os = "windows",
       lockIdentity = "tarball:llvm@21.1.7:windows-aarch64:sha256:e0054932e7ca46ad5f06c66a0d7405e3ed0d5c7dd47be0d8d172cfcb99f8a03f"
+    # macOS arm64: the official LLVM release archive. It is one release
+    # ABOVE the Windows arms because LLVM 21.1.7 published no macOS archive;
+    # 21.1.8 is the first that does (checked 2026-11-21 against the release
+    # metadata: `LLVM-21.1.8-macOS-ARM64.tar.xz`, 1,503,047,352 bytes, the
+    # sha256 below is the digest GitHub publishes for the asset). There is no
+    # macOS x64 archive at 21.1.x at all (the last is 19.1.7), so no Intel arm.
+    #
+    # The archive is wrapped in `LLVM-21.1.8-macOS-ARM64/` and carries `bin/`,
+    # `lib/` and `include/` (layout read from the archive's own listing, first
+    # 400 entries). Nothing is pruned: unlike the Windows arms this one is not
+    # size-trimmed, because the drivers, `lld`, `llvm-ar` and the other
+    # `llvm-*` tools a macOS build script reaches for all live in `bin/`.
+    #
+    # NOT claimed: that this compiler needs no Apple SDK. It carries the
+    # compiler's own headers; the libc headers and frameworks come from the
+    # SDK, which is the Xcode foreign execution profile's concern
+    # (reprobuild-pm spec/Xcode-Foreign-Execution-Profile.md). Whether a
+    # nim-libvterm compile succeeds with this arm and an SDK is measured on a
+    # macOS host, not here.
+    tarball url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz",
+      sha256 = "b95bdd32a33a81ee4d40363aaeb26728a26783fcef26a4d80f65457433ea4669",
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/clang",
+      version = "21.1.8",
+      packageId = "llvm@21.1.8",
+      cpu = "aarch64",
+      os = "macos",
+      lockIdentity = "tarball:llvm@21.1.8:macos-aarch64:sha256:b95bdd32a33a81ee4d40363aaeb26728a26783fcef26a4d80f65457433ea4669"
 
   executable clang:
     cli:
