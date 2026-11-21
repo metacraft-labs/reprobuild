@@ -35170,7 +35170,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g03",
+    group: "t_group_tests_unit_g02",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r13c_2_shim_lib_resolution.nim",
@@ -35686,7 +35686,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r22b_4_mount_cli.nim",
@@ -36310,7 +36310,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g05",
+    group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_recipe_lock_consistency_check.nim",
@@ -36663,6 +36663,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_store_path_farm.nim",
     binary: "build/test-bin/t_store_path_farm",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g05",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_strip_edge_selects_the_strip_package.nim",
+    binary: "build/test-bin/t_strip_edge_selects_the_strip_package",
     defines: @[],
     requiresReproBinary: false,
     requiresMonitorShim: false,

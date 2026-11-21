@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3082,
+    "nimTestBinaries": 3083,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 819,
+    "pureUnitTests": 820,
     "staticallyDetectedRuntimeCompilerFlowTests": 156,
-    "testEntries": 3132
+    "testEntries": 3133
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1774,7 +1774,7 @@
       "graph-fixture": 26,
       "integration": 1713,
       "platform/destructive": 199,
-      "pure unit": 819,
+      "pure unit": 820,
       "unclassified": 375
     },
     "graphOwnedTestArtifacts": [
@@ -1995,9 +1995,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3082,
+    "nimTestBinaryCount": 3083,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3132
+    "testEntryCount": 3133
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -64632,6 +64632,27 @@
       "source": "tests/unit/t_store_path_farm.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_strip_edge_selects_the_strip_package",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_strip_edge_selects_the_strip_package.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
