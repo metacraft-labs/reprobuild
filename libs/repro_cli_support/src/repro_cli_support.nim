@@ -66,7 +66,8 @@ import repro_core/nix_configuration_env
 import repro_core/source_root
 import repro_core/variant_assignments
 from ct_test_nim_unittest/tests_fragment import PerTestRequest,
-  TestsFragmentProducerName, producerListArgv, producerCheckArgv
+  PerTestCompile, TestsFragmentProducerName, producerListArgv,
+  producerCheckArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
   SettingsFileName
@@ -4067,6 +4068,12 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
   #                                 --cwd=<cwd>]
   #   subcommand "collectTests" -> [producer, --check=<fragment>]
   #
+  # With ``perTestBinaries = true`` the listing call also carries the
+  # payload of the binary's compile edge (``compileEdge``, hex). It is
+  # lowered here by this same procedure, so each test's own compile is the
+  # command the compile edge itself runs, and handed to the producer as
+  # ``--compile-*`` arguments (``tests_fragment``, "ONE BINARY PER TEST").
+  #
   # The command lines come from ``ct_test_nim_unittest/tests_fragment``, the
   # module the producer parses them with. The producer is run by absolute
   # path, so, as at the HCR site above, the edge makes no ``PATH`` decision.
@@ -4076,12 +4083,14 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
     var fragmentPath = ""
     var collectorId = ""
     var producerPath = ""
+    var compileEdgeHex = ""
     for arg in payload.call.arguments:
       case arg.name
       of "binary": binaryPath = arg.encodedValue
       of "fragment": fragmentPath = arg.encodedValue
       of "collector": collectorId = arg.encodedValue
       of "producer": producerPath = arg.encodedValue
+      of "compileEdge": compileEdgeHex = arg.encodedValue
       else: discard
     if fragmentPath.len == 0:
       raise newException(ValueError,
@@ -4103,13 +4112,77 @@ proc lowerGraphAction(node: GraphNode; profiles: Table[string, PathOnlyToolProfi
           "tool-resolution failed: action " & payload.id & " (" &
             NimUnittestToolId & ".listTests) needs the ``binary`` and " &
             "``collector`` slots")
+      var compile = PerTestCompile()
+      if compileEdgeHex.len > 0:
+        var compilePayload = ""
+        try:
+          compilePayload = parseHexStr(compileEdgeHex)
+        except ValueError:
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests) carries a malformed " &
+              "``compileEdge``")
+        let compiled = lowerGraphAction(GraphNode(kind: gnkAction,
+          payload: compilePayload), profiles, projectRoot)
+        if compiled.kind != bakProcess or compiled.argv.len == 0:
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests): the compile of " &
+              binaryPath & " (" & compiled.id & ") is not a process, so " &
+              "it cannot be run once per test")
+        if compiled.isolateHostEnvironment:
+          # A created action has no field for it, and launching the
+          # per-test compile with the host's environment would not be the
+          # same command.
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests): the compile of " &
+              binaryPath & " (" & compiled.id & ") isolates the host " &
+              "environment, which a per-test compile cannot reproduce")
+        # A created record has no field for any of these either, and each
+        # changes how the engine runs the compile or where its record may
+        # go (a tool-owned cache or a determinism class keeps it on this
+        # host; a relocated or canonical work tree changes where it runs).
+        # Dropping one would give the per-test compile a looser record
+        # than the compile it copies, so the copy is refused instead.
+        var unreproducible: seq[string] = @[]
+        if compiled.contentKeyedToolCaches.len > 0:
+          unreproducible.add("content-keyed tool caches")
+        if compiled.determinism.isSome:
+          unreproducible.add("a declared determinism class")
+        if compiled.nonDeterminism != ndpUnblessed or
+            compiled.entropyBlessedImages.len > 0:
+          unreproducible.add("a non-determinism blessing")
+        if compiled.relocatable or compiled.canonicalWorkKey.len > 0:
+          unreproducible.add("a relocated or canonical work tree")
+        if compiled.requiresElevation:
+          unreproducible.add("elevation")
+        if compiled.optionalOutputs.len > 0:
+          unreproducible.add("optional outputs")
+        if unreproducible.len > 0:
+          raise newException(ValueError,
+            "tool-resolution failed: action " & payload.id & " (" &
+              NimUnittestToolId & ".listTests): the compile of " &
+              binaryPath & " (" & compiled.id & ") declares " &
+              unreproducible.join(", ") & ", which a per-test compile " &
+              "(a created action) cannot carry; build one binary for " &
+              "every test instead (perTestBinaries = false)")
+        compile = PerTestCompile(argv: compiled.argv, cwd: compiled.cwd,
+          env: compiled.env, envPassthrough: compiled.envPassthrough,
+          inputs: compiled.inputs, uncacheable: not compiled.cacheable,
+          actionCachePolicy:
+            case compiled.actionCachePolicy
+            of ffpTimestamp: CreatedActionTimestampCheck
+            of ffpHybrid: CreatedActionHybridCheck
+            of ffpChecksum: CreatedActionChecksumCheck)
       argv = producerListArgv(producer, PerTestRequest(
         binary: materialProjectPath(projectRoot, binaryPath),
         fragment: fragmentPath,
         idPrefix: collectorId,
         collectorId: collectorId,
         statsName: binaryPath,
-        cwd: cwd))
+        cwd: cwd,
+        compile: compile))
     else:
       argv = producerCheckArgv(producer, fragmentPath)
     var translatedInputs: seq[string] = @[]

@@ -26,11 +26,34 @@
 ## procedure the positive cases use, rejects it: one action, not three, and
 ## its argv selects no single test.
 ##
-## Still to come (round 4): "changing one test reruns only that test", with
-## one binary per test. `projectWith` already writes a variant of the test
-## source; that round adds the edit of `beta`'s body and the reruns it
-## expects. With one binary for all three tests, as here, any edit of the
-## source changes the binary every run is keyed on, so all three rerun.
+## Changing one test reruns only that test, with one binary per test
+## (`runPerTest(perTestBinaries = true)`, which builds each test with
+## nim-entrypoints' `-d:entrypointsTest=<name>`):
+##
+##   3. the fragment also creates a compile per test, and each run launches
+##      its own test's binary; after an edit of `beta`'s body that keeps its
+##      line count, the reruns read from the report (status, cache decision,
+##      launched) are `beta`'s alone: `alpha`'s and `gamma`'s compiles run
+##      again (the source changed) and produce byte-identical binaries, so
+##      their runs are cache hits; `beta`'s binary differs and its run is
+##      launched;
+##   4. negative control: the same edit with one binary for every test (the
+##      default) reruns all three, so the check can see a rerun;
+##   5. a binary with a `tests:` block test as well: one binary per test
+##      fails the listing edge, naming that test and saying to use
+##      `testCase` or turn `perTestBinaries` off, before any compile is
+##      created. Control: one binary for every test lists and runs it.
+##
+## Measured and recorded, not asserted: an edit that moves `alpha`'s lines
+## (a line inserted above it). Case 3 prints, for each test, whether its
+## binary changed and whether its run reran. A test's line numbers are in
+## its binary, so the expectation is that every test below the inserted
+## line reruns.
+##
+## nim-entrypoints is found as this repository's `config.nims` finds it (the
+## `../nim-entrypoints` checkout, else `$ENTRYPOINTS_SRC`;
+## `REPRO_SIBLING_POLICY=pin` takes `$ENTRYPOINTS_SRC` even when the checkout
+## exists), and must be one that has `-d:entrypointsTest`.
 ##
 ## MOCKS: none in the positive cases. The real `repro` of this build compiles
 ## the fixture's recipe, compiles the test binary with the real Nim, runs the
@@ -54,32 +77,70 @@ const
   BinaryTail = "build/test-bin/per_entry_suite"
   Marker = "CSM14MARKER "
   BetaBody = "echo \"CSM14MARKER beta\" # beta's body"
+  BetaEdited = "stdout.writeLine \"CSM14MARKER beta\" # beta's body"
+    ## The same output from other code, on the same line.
+  AlphaLine = "testCase \"alpha\":"
+  MainLine = "\nmain:\n"
+  FrameworkBlock = "\ntemplate suite(name: string; body: untyped) = body\n" &
+    "template test(name: string; body: untyped) = body\n\ntests:\n" &
+    "  suite \"block\":\n    test \"framework\":\n" &
+    "      echo \"CSM14MARKER framework\"\n"
+    ## A `tests:` block of one test, listed as `block::framework`. Its
+    ## framework is the two templates above, not `std/unittest`: the Nim this
+    ## repository's dev shell provides is a fork whose `std/unittest` points
+    ## descriptor 1 at standard error at start-up whenever the arguments hold
+    ## `--list`, so a binary importing it answers `--entrypoint=tests --list`
+    ## on standard error and the listing edge reads no tests. nim-entrypoints
+    ## finds a block's tests by their `suite`/`test` syntax, so any framework
+    ## of that shape is listed and guarded the same way.
   ReuseStatuses = ["asUpToDate", "asCacheHit"]
   ReuseDecisions = ["cdHit", "cdHybridCutoff"]
 
 proc entrypointsSrc(): string =
   ## nim-entrypoints' `src/`, as this repository's `config.nims` finds it:
-  ## the `../nim-entrypoints` checkout, else `$ENTRYPOINTS_SRC`.
+  ## the `../nim-entrypoints` checkout, else `$ENTRYPOINTS_SRC`, and
+  ## `$ENTRYPOINTS_SRC` first under `REPRO_SIBLING_POLICY=pin`.
+  let pinned = getEnv("ENTRYPOINTS_SRC")
+  if getEnv("REPRO_SIBLING_POLICY") == "pin" and pinned.len > 0:
+    return pinned
   let sibling = ReprobuildRepoRoot.parentDir / "nim-entrypoints" / "src"
   if fileExists(sibling / "entrypoints.nim"):
     return sibling
-  getEnv("ENTRYPOINTS_SRC")
+  pinned
 
 type Project = object
   scratch: string
   root: string
   reportDir: string
 
-proc projectWith(producer = ""; betaBody = BetaBody): Project =
+proc writeSource(p: Project; betaBody = BetaBody; aboveAlpha = "";
+                 aboveMain = "") =
+  ## The fixture's test source with `beta`'s line replaced by `betaBody`,
+  ## and `aboveAlpha` and `aboveMain` (whole lines) inserted above `alpha`
+  ## and above `main:`.
+  let source = readFile(FixtureDir / "src" / "per_entry_suite.nim")
+  doAssert BetaBody in source and AlphaLine in source and
+    MainLine in source
+  writeFile(p.root / "src" / "per_entry_suite.nim", source
+    .replace(BetaBody, betaBody)
+    .replace(AlphaLine, aboveAlpha & AlphaLine)
+    .replace(MainLine, aboveMain & MainLine))
+
+proc projectWith(producer = ""; betaBody = BetaBody;
+                 perTestBinaries = false; aboveMain = ""): Project =
   ## A scratch copy of the fixture with its placeholders filled in;
   ## `producer` is the listing edge's producer ("" for the engine's own),
-  ## `betaBody` the line `beta` runs.
+  ## `betaBody` the line `beta` runs, `perTestBinaries` whether each test
+  ## gets a binary of its own.
   let entrypoints = entrypointsSrc()
   doAssert fileExists(entrypoints / "entrypoints" / "tests.nim"),
     "nim-entrypoints not found: no ../nim-entrypoints beside this checkout " &
     "and no $ENTRYPOINTS_SRC"
-  doAssert "--run-exact" in readFile(entrypoints / "entrypoints" /
-    "tests.nim"), entrypoints & " predates --run-exact"
+  let testsModule = readFile(entrypoints / "entrypoints" / "tests.nim")
+  doAssert "--run-exact" in testsModule, entrypoints &
+    " predates --run-exact"
+  doAssert "entrypointsTest" in testsModule, entrypoints &
+    " predates -d:entrypointsTest (one binary per test)"
   result.scratch = expandFilename(createTempDir("cs-m14-per-entry-", ""))
   releaseDirAtProcessExit(result.scratch)
   result.root = result.scratch / "project"
@@ -90,15 +151,14 @@ proc projectWith(producer = ""; betaBody = BetaBody): Project =
   writeFile(result.root / "repro.nim", readFile(FixtureDir / "repro.nim")
     .replace("__ENTRYPOINTS_SRC__", entrypoints)
     .replace("__NATIVE_BACKEND__", backend)
-    .replace("__TESTS_FRAGMENT_PRODUCER__", producer))
-  let source = readFile(FixtureDir / "src" / "per_entry_suite.nim")
-  doAssert BetaBody in source
-  writeFile(result.root / "src" / "per_entry_suite.nim",
-    source.replace(BetaBody, betaBody))
+    .replace("__TESTS_FRAGMENT_PRODUCER__", producer)
+    .replace("__PER_TEST_BINARIES__", $perTestBinaries))
+  result.writeSource(betaBody, aboveMain = aboveMain)
 
-proc reproTest(p: Project; label: string): tuple[code: int; report: JsonNode] =
-  ## `repro test` in the project, with this checkout's `repro` and DSL, and
-  ## the report it writes.
+proc reproTest(p: Project; label: string):
+    tuple[code: int; report: JsonNode; output: string] =
+  ## `repro test` in the project, with this checkout's `repro` and DSL, the
+  ## report it writes, and what it printed.
   let repoRoot = ReprobuildRepoRoot
   let reproBin = requireBinary(reproBinaryPath(repoRoot),
     "reprobuild.apps.repro")
@@ -125,6 +185,7 @@ proc reproTest(p: Project; label: string): tuple[code: int; report: JsonNode] =
   if run.code != 0:
     checkpoint(run.stdout & run.stderr)
   result.code = run.code
+  result.output = run.stdout & run.stderr
   result.report =
     if fileExists(reportPath): parseFile(reportPath) else: newJNull()
 
@@ -143,15 +204,19 @@ type PerTestRun = object
   decision: string
   stdout: string
 
-proc perTestRuns(report: JsonNode; collector: string): seq[PerTestRun] =
-  ## The actions the collector's fragment created, with the argv the engine
-  ## recorded for each and its outcome, in creation order.
+proc createdActions(report: JsonNode; collector, kind: string):
+    seq[PerTestRun] =
+  ## The actions the collector's fragment created whose id is
+  ## `<collector>.<kind>.<...>` (`test` for the runs, `compile` for the
+  ## per-test compiles), with the argv the engine recorded for each and its
+  ## outcome, in creation order.
   if report.kind != JObject:
     return
   var ids: seq[string] = @[]
   for event in report{"trace"}:
     if event{"event"}.getStr() == "action-create" and
-        event{"detail"}.getStr() == "producer=" & collector:
+        event{"detail"}.getStr() == "producer=" & collector and
+        event{"actionId"}.getStr().startsWith(collector & "." & kind & "."):
       ids.add(event{"actionId"}.getStr())
   for id in ids:
     var run = PerTestRun(id: id)
@@ -168,6 +233,21 @@ proc perTestRuns(report: JsonNode; collector: string): seq[PerTestRun] =
       run.stdout = entry{"stdout"}.getStr()
     result.add(run)
 
+proc perTestRuns(report: JsonNode; collector: string): seq[PerTestRun] =
+  report.createdActions(collector, "test")
+
+proc perTestCompiles(report: JsonNode; collector: string): seq[PerTestRun] =
+  report.createdActions(collector, "compile")
+
+proc perTestBinary(name: string): string =
+  ## Where test `name`'s own binary is, under the project root.
+  addFileExt((BinaryTail & ".per-test") / name / BinaryTail.extractFilename,
+    ExeExt)
+
+proc reran(run: PerTestRun): bool =
+  ## Whether the run was executed rather than served from the cache.
+  run.launched and run.decision notin ReuseDecisions
+
 proc runFor(runs: seq[PerTestRun]; name: string): PerTestRun =
   ## The run whose argv selects exactly the test `name`.
   for run in runs:
@@ -176,16 +256,19 @@ proc runFor(runs: seq[PerTestRun]; name: string): PerTestRun =
       return run
   PerTestRun()
 
-proc isPerTestCollection(runs: seq[PerTestRun];
-                         names: openArray[string]): bool =
-  ## One run per test, each running the test binary's tests entry with
-  ## exactly that test selected, and nothing else.
+proc isPerTestCollection(runs: seq[PerTestRun]; names: openArray[string];
+                         perTestBinaries = false): bool =
+  ## One run per test, each running the tests entry of the test binary (or,
+  ## with `perTestBinaries`, of that test's own binary) with exactly that
+  ## test selected, and nothing else.
   if runs.len != names.len:
     return false
   for name in names:
     let run = runs.runFor(name)
-    if run.id.len == 0 or
-        not run.argv[0].endsWith(addFileExt(BinaryTail, ExeExt)):
+    let binary =
+      if perTestBinaries: perTestBinary(name)
+      else: addFileExt(BinaryTail, ExeExt)
+    if run.id.len == 0 or not run.argv[0].endsWith(binary):
       return false
   true
 
@@ -300,3 +383,146 @@ printf 'repro-dynamic-graph-v1\ncreate-action\t{"id":"%s.test.whole","argv":["%s
       check runs[0].stdout.markers == @["alpha", "beta", "gamma"]
     # The check the positive cases rely on rejects it.
     check not runs.isPerTestCollection(TestNames)
+
+  test "with one binary per test, an edit of beta's body reruns only beta":
+    let p = projectWith(perTestBinaries = true)
+    let first = p.reproTest("first")
+    check first.code == 0
+    let compiles = first.report.perTestCompiles(CollectorId)
+    let runs = first.report.perTestRuns(CollectorId)
+    checkpoint("first:\n" & compiles.describe & runs.describe)
+    check runs.isPerTestCollection(TestNames, perTestBinaries = true)
+    check compiles.len == TestNames.len
+    for name in TestNames:
+      var compile = PerTestRun()
+      for c in compiles:
+        if c.id == CollectorId & ".compile." & name:
+          compile = c
+      check compile.status == "asSucceeded"
+      check ("-d:entrypointsTest=" & name) in compile.argv
+      var outputs: seq[string] = @[]
+      for arg in compile.argv:
+        if arg.startsWith("--out:"):
+          outputs.add(arg)
+      check outputs.len == 1 and outputs[0].endsWith(perTestBinary(name))
+      let run = runs.runFor(name)
+      check run.id == CollectorId & ".test." & name
+      check run.status == "asSucceeded"
+      check run.launched
+      check run.stdout.markers == @[name]
+    var before: seq[string] = @[]
+    for name in TestNames:
+      before.add(readFile(p.root / perTestBinary(name)))
+
+    # beta's body: other code, the same output, the same line count.
+    p.writeSource(betaBody = BetaEdited)
+    let second = p.reproTest("beta-edited")
+    check second.code == 0
+    # The listed binary changed, so its compile and the listing ran again.
+    check second.report.action(CompileId){"launched"}.getBool()
+    check second.report.action(ListingId){"launched"}.getBool()
+    let recompiles = second.report.perTestCompiles(CollectorId)
+    let reruns = second.report.perTestRuns(CollectorId)
+    checkpoint("beta edited:\n" & recompiles.describe & reruns.describe)
+    # Printed on success too: the reruns are the round's evidence.
+    for run in recompiles & reruns:
+      echo "beta edited: ", run.id, " status=", run.status, " decision=",
+        run.decision, " launched=", run.launched
+    check reruns.isPerTestCollection(TestNames, perTestBinaries = true)
+    # Every test's compile read the edited source, so each ran again ...
+    check recompiles.len == TestNames.len
+    for c in recompiles:
+      check c.status == "asSucceeded"
+      check c.reran
+    # ... and only beta's binary changed (compared as booleans, so a
+    # failure does not print the binaries).
+    var same: seq[bool] = @[]
+    for i, name in TestNames:
+      same.add(readFile(p.root / perTestBinary(name)) == before[i])
+    check same == @[true, false, true]
+    # The reruns, from the engine's report: beta's run alone.
+    for name in TestNames:
+      let run = reruns.runFor(name)
+      if name == "beta":
+        check run.status == "asSucceeded"
+        check run.launched
+        check run.decision notin ReuseDecisions
+        check run.stdout.markers == @["beta"]
+      else:
+        check run.status in ReuseStatuses
+        check run.decision in ReuseDecisions
+        check not run.launched
+    var rerun: seq[string] = @[]
+    for run in reruns:
+      if run.reran:
+        rerun.add(run.id)
+    check rerun == @[CollectorId & ".test.beta"]
+
+    # Measured, not asserted: a line inserted above alpha moves the line
+    # numbers of every test, which are in each test's binary.
+    var afterBeta: seq[string] = @[]
+    for name in TestNames:
+      afterBeta.add(readFile(p.root / perTestBinary(name)))
+    p.writeSource(betaBody = BetaEdited,
+      aboveAlpha = "# a line that moves alpha down\n")
+    let third = p.reproTest("alpha-moved")
+    check third.code == 0
+    let moved = third.report.perTestRuns(CollectorId)
+    var record = "measured, alpha's lines moved by one:"
+    for i, name in TestNames:
+      let run = moved.runFor(name)
+      let changed = readFile(p.root / perTestBinary(name)) != afterBeta[i]
+      record.add(" " & name & ": binary " &
+        (if changed: "changed" else: "unchanged") & ", run " &
+        (if run.reran: "reran" else: "cached") & " (" & run.status & "/" &
+        run.decision & ");")
+    checkpoint(record)
+    echo record
+
+  test "negative control: with one binary, the same edit reruns all three":
+    let p = projectWith()
+    let first = p.reproTest("first")
+    check first.code == 0
+    check first.report.perTestRuns(CollectorId).isPerTestCollection(TestNames)
+    p.writeSource(betaBody = BetaEdited)
+    let second = p.reproTest("beta-edited")
+    check second.code == 0
+    let reruns = second.report.perTestRuns(CollectorId)
+    checkpoint("beta edited, one binary:\n" & reruns.describe)
+    check reruns.isPerTestCollection(TestNames)
+    # No per-test compiles in this mode.
+    check second.report.perTestCompiles(CollectorId).len == 0
+    var rerun: seq[string] = @[]
+    for run in reruns:
+      check run.status == "asSucceeded"
+      if run.reran:
+        rerun.add(run.id)
+    check rerun == @[CollectorId & ".test.alpha", CollectorId & ".test.beta",
+      CollectorId & ".test.gamma"]
+
+  test "with one binary per test, a tests: block's test is refused by name":
+    let p = projectWith(perTestBinaries = true, aboveMain = FrameworkBlock)
+    let refused = p.reproTest("framework-block")
+    check refused.code != 0
+    let listing = refused.report.action(ListingId)
+    checkpoint("listing: " & $listing & "\n" & refused.output)
+    check listing{"status"}.getStr() == "asFailed"
+    # The refusal names the test and the two ways out, in the listing
+    # edge's output or the command's.
+    let said = $listing & refused.output
+    check "block::framework" in said
+    check "testCase" in said
+    check "perTestBinaries off" in said
+    # Refused before any compile was created.
+    check refused.report.perTestCompiles(CollectorId).len == 0
+    check refused.report.perTestRuns(CollectorId).len == 0
+
+    # Control: with one binary for every test, the same source lists the
+    # block's test too and runs it as its own action.
+    let whole = projectWith(aboveMain = FrameworkBlock)
+    let all = whole.reproTest("framework-block-one-binary")
+    check all.code == 0
+    let runs = all.report.perTestRuns(CollectorId)
+    checkpoint("one binary:\n" & runs.describe)
+    check runs.isPerTestCollection(@TestNames & @["block::framework"])
+    check runs.runFor("block::framework").stdout.markers == @["framework"]

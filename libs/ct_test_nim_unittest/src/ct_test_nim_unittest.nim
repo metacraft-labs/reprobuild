@@ -48,7 +48,7 @@
 ## handles RUN/LIST/ENUMERATE at engine execution time.
 
 import std/os
-from std/strutils import endsWith
+from std/strutils import endsWith, toHex
 
 import ct_test_interface
 export ct_test_interface
@@ -551,10 +551,33 @@ proc perTestIdPart(value: string): string =
     result.add(if ch in {'a' .. 'z', 'A' .. 'Z', '0' .. '9', '-', '_', '.'}: ch
       else: '_')
 
+proc perTestCompileEdge(binary: string): BuildActionDef =
+  ## The recorded action that compiles ``binary``, for
+  ## ``runPerTest(perTestBinaries = true)``: a ``nim c`` that declares it
+  ## as an output (``buildNimUnittest.build``). Raises ``ValueError`` when
+  ## there is none, or more than one.
+  var found = 0
+  for action in registeredBuildActions():
+    if binary in action.outputs:
+      inc found
+      result = action
+  if found != 1:
+    raise newException(ValueError, "runPerTest(perTestBinaries = true): " &
+      (if found == 0: "no recorded action" else: $found & " actions") &
+      " declare " & binary & " as an output. Each test's binary is " &
+      "compiled like the listed one, so record its compile " &
+      "(buildNimUnittest.build) once, before runPerTest")
+  if result.call.executableName != "nim" or result.call.subcommand != "c":
+    raise newException(ValueError, "runPerTest(perTestBinaries = true): " &
+      binary & " is produced by " & result.id & ", which is not a nim " &
+      "compile (nim c); one binary per test needs nim-entrypoints' " &
+      "-d:entrypointsTest=<name>")
+
 proc runPerTest*(self: NimUnittestBinary;
                  actionId = "";
                  fragment = "";
                  producer = "";
+                 perTestBinaries = false;
                  deps: openArray[string] = [];
                  after: openArray[BuildActionDef] = []): BuildActionDef
     {.discardable.} =
@@ -599,6 +622,25 @@ proc runPerTest*(self: NimUnittestBinary;
   ## ``tests`` entry, lists no tests, or lists a name twice (two tests with
   ## one name cannot be run one at a time).
   ##
+  ## ONE BINARY PER TEST (``perTestBinaries = true``, an opt-in). The
+  ## listing still comes from this binary, but every test is then compiled
+  ## into a binary of its own and run from it: the fragment also creates a
+  ## compile per test, ``<actionId>.compile.<name>``, which is this
+  ## binary's compile (the recorded ``buildNimUnittest.build`` edge that
+  ## declares it, as the engine lowers it) with nim-entrypoints'
+  ## ``-d:entrypointsTest=<name>``, its own output
+  ## (``<dir>/<stem>.per-test/<name>/<file>``) and its own nimcache. That
+  ## define compiles the one ``testCase`` and expands every other to
+  ## nothing, so the binary of a test whose code did not change comes out
+  ## byte-identical, and its run, which checks its inputs by content when
+  ## their metadata moved (the ``hybrid`` input-check policy), is a cache
+  ## hit: changing one test reruns only that test. It costs a compile per
+  ## test, and it covers ``testCase`` tests only: the listing edge fails,
+  ## naming every listed test of a ``tests:`` block, before any compile is
+  ## created.
+  ## A test still reruns when an edit moves its lines, since its line
+  ## numbers are in its binary. Record the compile before calling this.
+  ##
   ## ``actionId`` defaults to ``tests-per-entry.<binary>`` (the binary's
   ## path with ``/`` and other punctuation spelled ``_``); ``fragment`` to
   ## ``build/tests-per-entry/<actionId>.rbdyn``. ``producer`` names the
@@ -620,6 +662,13 @@ proc runPerTest*(self: NimUnittestBinary;
   listArgs.add(cliArg("collector", collectorId))
   if producer.len > 0:
     listArgs.add(inputArg("producer", producer))
+  if perTestBinaries:
+    # The compile edge rides along as its payload (hex, so the call's
+    # string slot carries any byte), and the engine lowers it exactly as it
+    # lowers the edge itself; the listing edge is keyed on it too, so a
+    # change to the compile's flags rekeys the listing.
+    listArgs.add(cliArg("compileEdge",
+      toHex(actionPayload(perTestCompileEdge(binary)))))
   let listCall = publicCliCall(NimUnittestToolId, NimUnittestToolId,
     "listTests", NimUnittestToolId & ".listTests", listArgs)
   let listing = recordToolInvocation(listingId, listCall,
