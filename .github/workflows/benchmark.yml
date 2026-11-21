@@ -26,8 +26,14 @@ jobs:
         include:
           # EXEMPTION (CIP-5): persistent benchmark runner — real perf hardware
           # is required for meaningful numbers; not migrated to ephemeral eph-linux-x64.
+          #
+          # NO `self-hosted`. The benchmark runner is being moved to dedicated labels
+          # only (registered without GitHub's default `self-hosted`/OS/arch labels) so
+          # that general `[self-hosted, linux, x64]` jobs can no longer take its single
+          # CPU-isolated slot. `[linux, x64, benchmark]` matches it both before and after
+          # that change, and never matches the macOS benchmark runner.
           - platform: linux
-            runner: '["self-hosted", "Linux", "X64", "benchmark"]'
+            runner: '["linux", "x64", "benchmark"]'
           - platform: macos
             runner: '["self-hosted", "macos", "arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
     runs-on: ${{ fromJSON(matrix.runner) }}

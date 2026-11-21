@@ -373,7 +373,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertIn("branches: [dev, stable]", workflow)
         self.assertIn("workflow_dispatch:", workflow)
         self.assertIn(
-            'runner: \'["self-hosted", "Linux", "X64", "benchmark"]\'', workflow
+            'runner: \'["linux", "x64", "benchmark"]\'', workflow
         )
         # Capability-label arrays, not the retired single-name `eph-*` classes:
         # metacraft-dev-guidelines `policies/ci-workflow-standards.md`
