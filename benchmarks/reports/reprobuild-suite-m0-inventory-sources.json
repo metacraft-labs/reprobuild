@@ -43045,12 +43045,14 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_core"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_b3_test_template_emits_two_edges.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
