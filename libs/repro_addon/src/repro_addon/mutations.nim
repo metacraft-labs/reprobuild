@@ -1055,6 +1055,23 @@
 ##                                            packets after it stay hidden
 ##                                            (reprobuild-pm issue
 ##                                            2026-11-18)
+## ``egress-shortfall-while-set-not-full``  the egress check reports a
+##                                            shortfall as unattributed
+##                                            packets while no set is
+##                                            full (reprobuild-pm issue
+##                                            2026-11-21)
+## ``egress-reset-bound-ignores-set-reset``   the check that sees the
+##                                            egress counter fall takes
+##                                            each element's gain since
+##                                            the last check, though an
+##                                            element's count fell with
+##                                            it (reprobuild-pm issue
+##                                            2026-11-21)
+## ``egress-unread-instance-compared``        two egress checks that could
+##                                            not read the table's
+##                                            instance compare their
+##                                            counts (reprobuild-pm issue
+##                                            2026-11-21)
 ## ``sink-close-in-finally``                  the sink's connection handler
 ##                                            awaits its close in a finally,
 ##                                            as before; red under Nim 2.2.4
@@ -2371,6 +2388,11 @@ const
                           # reprobuild-pm issue 2026-11-18: a reset of the
                           # egress table's counters in place.
                           "egress-ignores-counter-reset",
+                          # reprobuild-pm issue 2026-11-21: a set reset,
+                          # and two unread instances compared.
+                          "egress-shortfall-while-set-not-full",
+                          "egress-reset-bound-ignores-set-reset",
+                          "egress-unread-instance-compared",
                           # The A11 code review, round 3.
                           "sink-close-in-finally", "egress-owed-by-listing",
                           "egress-owed-dropped-at-reload",

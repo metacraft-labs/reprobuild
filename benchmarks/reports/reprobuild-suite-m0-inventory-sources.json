@@ -9988,7 +9988,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_egress_observer.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
