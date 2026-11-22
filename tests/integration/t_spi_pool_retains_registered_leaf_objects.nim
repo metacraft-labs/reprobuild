@@ -56,6 +56,17 @@
 ##     reads the index by path under the leaf's configuration, as the hook
 ##     did before, and git expands it: the tree is not printed, and the
 ##     pool's copy is refreshed as a side effect.
+##   - ``cache_tree_subtree_under_a_kept_root_survives_gc`` and
+##     ``cache_tree_subtree_under_an_invalidated_root_survives_gc`` — a
+##     cache-tree node only A holds, over a subtree only expired pool history
+##     reaches: git reuses the topmost valid node without looking below it,
+##     so the hook prints every valid node and the subtree survives;
+##     ``mutation_hook_without_cache_tree_commits_a_missing_subtree`` shows
+##     A's next commit exiting 0 over the pruned subtree, and
+##     ``corrupt_cache_tree_extension_aborts_pruning`` that an index whose
+##     extensions cannot be read makes the hook refuse;
+##     ``cache_tree_nodes_are_read_from_every_index_layout`` reads the same
+##     nodes from index versions 3 and 4, with EOIE, and from a split index.
 ##   - ``failing_hook_aborts_pruning`` — a hook that exits non-zero makes git
 ##     skip pruning: nothing is deleted, not even B's objects (SPI-GOAL-5).
 ##   - ``unreadable_registered_leaf_aborts_pruning`` — a registered leaf that
@@ -375,6 +386,50 @@ proc sparseWorktreeOverExpiredTree(f: Fixture; wt: string): string =
     "core.sparseCheckout") == "false"
   doAssert not fileExists(f.a / ".git" / "objects" / result[0 .. 1] /
     result[2 .. ^1])
+  doAssert must(f.pool, "config", "gc.pruneExpire") != "never"
+  ageObjects(f.pool)
+
+proc cacheTreeOverExpiredSubtree(f: Fixture; invalidateRoot: bool):
+    tuple[root, outer, deep: string] =
+  ## In A, a cache-tree whose root and ``outer/`` are trees only A holds,
+  ## written by ``git write-tree`` and named by nothing else, over
+  ## ``outer/deep/``, a tree only expired pool history reaches. With
+  ## ``invalidateRoot`` a later ``git add`` of a top-level file invalidates
+  ## the root and leaves ``outer/`` valid. Git checks only that the topmost
+  ## valid node exists before it reuses it, so A's next commit records
+  ## whatever is below that node (issue 2026-11-20-a-cache-tree-root-the-pool-
+  ## keeps-can-name-a-subtree-it-pruned).
+  # Upstream adds ``outer/deep/`` on a branch and drops it again; the pool's
+  # refreshes fetch it and then prune the ref, keeping the objects.
+  let url = "file://" & f.up
+  discard must(f.up, "checkout", "-q", "-b", "deep", "main")
+  createDir(f.up / "outer" / "deep")
+  commitFile(f.up, "outer" / "deep" / "inner.txt", "inner\n")
+  let deep = must(f.up, "rev-parse", "HEAD")
+  discard must(f.up, "checkout", "-q", "main")
+  var refreshed = refreshSharedBare(f.gitBin, f.cache, url)
+  doAssert refreshed.ok, refreshed.diagnostic
+  result.deep = must(f.pool, "rev-parse", deep & ":outer/deep")
+  discard must(f.up, "branch", "-q", "-D", "deep")
+  refreshed = refreshSharedBare(f.gitBin, f.cache, url)
+  doAssert refreshed.ok, refreshed.diagnostic
+  doAssert has(f.pool, deep)
+  # Staging by path writes no object; A's own file makes ``outer/`` a tree
+  # the pool does not have.
+  discard must(f.a, "checkout", deep, "--", "outer")
+  writeFile(f.a / "outer" / "own.txt", "own\n")
+  discard must(f.a, "add", "outer/own.txt")
+  result.root = must(f.a, "write-tree")
+  result.outer = must(f.a, "rev-parse", result.root & ":outer")
+  doAssert must(f.a, "rev-parse", result.outer & ":deep") == result.deep
+  for id in [result.root, result.outer]:
+    doAssert not has(f.pool, id)
+    doAssert fileExists(f.a / ".git" / "objects" / id[0 .. 1] / id[2 .. ^1])
+  doAssert not fileExists(f.a / ".git" / "objects" / result.deep[0 .. 1] /
+    result.deep[2 .. ^1])
+  if invalidateRoot:
+    writeFile(f.a / "extra.txt", "extra\n")
+    discard must(f.a, "add", "extra.txt")
   doAssert must(f.pool, "config", "gc.pruneExpire") != "never"
   ageObjects(f.pool)
 
@@ -1169,12 +1224,182 @@ suite "SPI-1: the pool retains what registered leaves name":
       # The read as it was: the index by path, under the leaf's configuration.
       let anchor = "git -C \"$work/empty\" --git-dir=\"$gitdir\" --work-tree=\"$work/empty\""
       doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      # The worktree's cache-tree names the same tree; drop it too, so what
+      # this case observes is the ``ls-files`` read alone.
+      let trees = "    cat \"$work/trees\" >> \"$work/names\"\n"
+      doAssert script.count(trees) == 1, "mutation anchor not found in the hook"
       writeFile(retentionHookPath(f.pool), script.replace(anchor,
-        "GIT_INDEX_FILE=\"$gitdir/index\" git -C \"$leaf\""))
+        "GIT_INDEX_FILE=\"$gitdir/index\" git -C \"$leaf\"").replace(trees, ""))
       let aged = getLastModificationTime(looseObjectPath(f.pool, tree))
       let hook = runRetentionHook(f)
       check tree notin hook.ids
       check getLastModificationTime(looseObjectPath(f.pool, tree)) != aged
+
+  test "cache_tree_subtree_under_a_kept_root_survives_gc":
+    # A's cache-tree root lives only in A and names a subtree only expired
+    # pool history reaches. Git reuses a cache-tree root it finds without
+    # looking below it, so after a gc that pruned the subtree, A's next
+    # commit exited 0 and recorded a tree with a missing subtree. The hook
+    # prints every valid cache-tree node (§3.3), and walks the history
+    # behind the ones the pool lacks, so the subtree is kept.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-cache-tree-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let ct = cacheTreeOverExpiredSubtree(f, invalidateRoot = false)
+      let hook = runRetentionHook(f)
+      checkpoint("hook: " & $hook.code & " " & hook.stderr)
+      check hook.code == 0
+      check ct.root in hook.ids and ct.outer in hook.ids
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code == 0
+      check not has(f.pool, f.bFeat)      # expiry really ran
+      check has(f.pool, ct.deep)
+      let commit = gitIn(f.a, "commit", "-q", "-m", "over the cache-tree")
+      checkpoint("commit: " & commit.output)
+      check commit.code == 0
+      check must(f.a, "rev-parse", "HEAD^{tree}") == ct.root
+      let fsck = gitIn(f.a, "fsck", "--connectivity-only")
+      checkpoint("A fsck: " & fsck.output)
+      check fsck.code == 0
+
+  test "cache_tree_subtree_under_an_invalidated_root_survives_gc":
+    # The same, with the root invalidated by a later ``git add``: git
+    # rebuilds the root but reuses the valid ``outer/`` it finds, again
+    # without looking below it. Printing only the root would print nothing.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-cache-tree-inv-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let ct = cacheTreeOverExpiredSubtree(f, invalidateRoot = true)
+      let hook = runRetentionHook(f)
+      checkpoint("hook: " & $hook.code & " " & hook.stderr)
+      check hook.code == 0
+      check ct.root notin hook.ids        # invalid: no id to print
+      check ct.outer in hook.ids
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code == 0
+      check not has(f.pool, f.bFeat)
+      check has(f.pool, ct.deep)
+      let commit = gitIn(f.a, "commit", "-q", "-m", "over the cache-tree")
+      checkpoint("commit: " & commit.output)
+      check commit.code == 0
+      check must(f.a, "rev-parse", "HEAD:outer") == ct.outer
+      let fsck = gitIn(f.a, "fsck", "--connectivity-only")
+      checkpoint("A fsck: " & fsck.output)
+      check fsck.code == 0
+
+  test "mutation_hook_without_cache_tree_commits_a_missing_subtree":
+    # The hook without the cache-tree trees: gc prunes ``outer/deep/``, and
+    # A's next commit exits 0 over a tree that is gone. Only fsck notices.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-cache-tree-mut-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let ct = cacheTreeOverExpiredSubtree(f, invalidateRoot = false)
+      let hook = retentionHookPath(f.pool)
+      let script = readFile(hook)
+      let anchor = "    cat \"$work/trees\" >> \"$work/names\"\n"
+      doAssert script.count(anchor) == 1, "mutation anchor not found in the hook"
+      writeFile(hook, script.replace(anchor, ""))
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code == 0
+      check not has(f.pool, ct.deep)
+      check gitIn(f.a, "commit", "-q", "-m", "over the cache-tree").code == 0
+      let fsck = gitIn(f.a, "fsck", "--connectivity-only")
+      checkpoint("A fsck: " & fsck.output)
+      check fsck.code != 0
+      check ct.deep in fsck.output
+
+  test "cache_tree_nodes_are_read_from_every_index_layout":
+    # The hook walks the index file itself, so each layout git writes is a
+    # different byte stream: version 3 with extended flags, version 4 with
+    # prefix-compressed names, a split index (the cache-tree is in the front
+    # file, behind a ``link`` extension), and the end-of-index-entries
+    # extension (EOIE), which follows the cache-tree. Each must yield the same
+    # valid nodes, and none may make the hook refuse.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-cache-tree-layouts-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      let ct = cacheTreeOverExpiredSubtree(f, invalidateRoot = false)
+      # Extended flags: skip-worktree on a file outside ``outer/``.
+      let other = must(f.a, "ls-files").splitLines()[0]
+      doAssert not other.startsWith("outer/")
+      discard must(f.a, "update-index", "--skip-worktree", other)
+      for layout in [@["update-index", "--index-version", "3"],
+                     @["update-index", "--index-version", "4"],
+                     @["-c", "index.recordEndOfIndexEntries=true",
+                       "-c", "index.recordOffsetTable=true",
+                       "-c", "index.threads=2",
+                       "update-index", "--force-write-index"],
+                     @["update-index", "--split-index"]]:
+        # Refresh the cache-tree first: a later write-tree may rewrite the
+        # index without the layout's ``-c`` settings.
+        doAssert must(f.a, "write-tree") == ct.root
+        discard must(f.a, layout)
+        checkpoint("layout: " & layout.join(" "))
+        if "--index-version" in layout:
+          doAssert ord(readFile(f.a / ".git" / "index")[7]) == parseInt(layout[^1])
+        if "index.recordEndOfIndexEntries=true" in layout:
+          doAssert "EOIE" in readFile(f.a / ".git" / "index")
+        let hook = runRetentionHook(f)
+        checkpoint("hook: " & $hook.code & " " & hook.stderr)
+        check hook.code == 0
+        check ct.root in hook.ids and ct.outer in hook.ids
+      check fileExists(f.a / ".git" / "index")
+      var shared = false
+      for kind, path in walkDir(f.a / ".git"):
+        if path.extractFilename.startsWith("sharedindex."): shared = true
+      check shared                        # the split really happened
+
+  test "corrupt_cache_tree_extension_aborts_pruning":
+    # An index whose extensions do not end where its checksum begins may
+    # name anything: the hook refuses rather than print part of it. Git
+    # skips the checksum of an index written with ``index.skipHash``, so
+    # ``ls-files`` still reads this one.
+    if findExe("git").len == 0 or not gitAtLeast(2, 42):
+      skip("needs git on PATH, version 2.42 or newer (gc.recentObjectsHook)")
+    else:
+      let root = createTempDir("repro-spi1-cache-tree-corrupt-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      discard must(f.a, "-c", "index.skipHash=true", "update-index",
+        "--force-write-index")
+      discard must(f.a, "-c", "index.skipHash=true", "write-tree")
+      let index = f.a / ".git" / "index"
+      var bytes = readFile(index)
+      let at = bytes.find("TREE")
+      doAssert at > 0, "the index must carry a cache-tree"
+      # Grow the TREE extension's size by one byte past the checksum.
+      bytes[at + 7] = char(ord(bytes[at + 7]) + 1)
+      writeFile(index, bytes)
+      doAssert gitIn(f.a, "ls-files", "--stage").code == 0
+      let gc = gitIn(f.pool, "gc", "--quiet")
+      checkpoint("gc: " & $gc.code & " " & gc.output)
+      check gc.code != 0
+      check has(f.pool, f.bFeat)          # refused: nothing pruned
 
   test "reftable_leaf_refuses_expiry_and_gc":
     # A leaf on the reftable ref backend keeps HEAD and its reflogs in
