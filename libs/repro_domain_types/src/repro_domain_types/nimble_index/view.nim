@@ -75,6 +75,8 @@ proc renderRecord(lines: var seq[string]; r: VersionRecord; indent: string) =
     lines.add i2 & "probe_platform: " & r.probePlatform
   lines.add i2 & "nimble_file: " &
     (if r.nimbleFile.isSome: "blake3:" & $r.nimbleFile.get else: "-")
+  for m in r.submodules:
+    lines.add i2 & "submodule " & q(m.path) & " " & m.url & " " & m.commit
   for e in r.nim:
     lines.add i2 & "nim " & renderRequirement(e)
   for e in r.requires:
@@ -114,7 +116,7 @@ proc renderRecord(lines: var seq[string]; r: VersionRecord; indent: string) =
       (if d.condition.len > 0: " when " & renderCondition(d.condition) else: "")
 
 proc renderShard*(s: NimbleShard): string =
-  var lines = @["nimble-index shard schema=" & $NimbleIndexSchemaVersion &
+  var lines = @["nimble-index shard schema=" & $shardSchemaOf(s) &
     " bits=" & $s.shardBits & " bucket=" & $s.bucket &
     " packages=" & $s.packages.len & " aliases=" & $s.aliases.len &
     (if s.observations.len > 0: " observations=" & $s.observations.len
