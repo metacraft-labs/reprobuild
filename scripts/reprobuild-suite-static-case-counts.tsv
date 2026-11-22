@@ -2595,6 +2595,7 @@ tests/integration/t_runquota_close_refusal_names_the_leaked_lease.nim	nim	1
 tests/integration/t_runquota_daemon_from_another_build_makes_way.nim	nim	5
 tests/integration/t_runquota_long_temp_rendezvous.nim	nim	4
 tests/integration/t_runquota_test_threads_follow_grant.nim	nim	3
+tests/integration/t_rust_mode_a_depfile_is_read_not_cached.nim	nim	1
 tests/integration/t_s7_repro_build_restores_a_deleted_output.nim	nim	1
 tests/integration/t_same_library_two_feature_sets_two_artifacts.nim	nim	1
 tests/integration/t_sc_capstone_reprobuild_runquota_and_library_edge_both_modes.nim	nim	1
