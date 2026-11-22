@@ -214,16 +214,39 @@ proc requireShellValue(output, prefix, expected: string) =
   raise newException(OSError,
     "missing shell marker " & prefix & " in output:\n" & output)
 
-proc requireNativeStats(statsPath: string) =
+proc holds(verdict: var bool; condition: bool; what: string) =
+  ## Records a failed condition of a helper that returns its verdict to the
+  ## test body: a checkpoint naming it, and `verdict` false. A `check` in a
+  ## proc called from a test would fail only the program's exit status (its
+  ## `fail` sees no test status to set), not the case it ran in, so the
+  ## helpers return a verdict and the test body checks it.
+  if not condition:
+    checkpoint("FAILED: " & what)
+    verdict = false
+
+proc requireNativeStats(statsPath: string): bool =
+  ## The native hook's statistics of a warm activation: no provider
+  ## introspection and no shell rendering launched, both served from the
+  ## cache, the artifact not rewritten. True when all of that held.
+  result = true
   let stats = parseJson(readFile(statsPath))
-  check stats["command"].getStr() == "hooks shell-native"
-  check fileExists(stats["artifactPath"].getStr())
-  check stats["stats"].kind == JObject
-  check not stats["stats"]["providerIntrospectionLaunched"].getBool()
-  check stats["stats"]["providerIntrospectionCacheHit"].getBool()
-  check stats["stats"]["artifactWriteSkipped"].getBool()
-  check not stats["stats"]["shellRenderingLaunched"].getBool()
-  check stats["stats"]["shellRenderingCacheHit"].getBool()
+  result.holds(stats["command"].getStr() == "hooks shell-native",
+    statsPath & ": command is " & stats["command"].getStr())
+  result.holds(fileExists(stats["artifactPath"].getStr()),
+    statsPath & ": no artifact at " & stats["artifactPath"].getStr())
+  result.holds(stats["stats"].kind == JObject, statsPath & ": no stats object")
+  if stats["stats"].kind == JObject:
+    let s = stats["stats"]
+    result.holds(not s["providerIntrospectionLaunched"].getBool(),
+      statsPath & ": provider introspection was launched")
+    result.holds(s["providerIntrospectionCacheHit"].getBool(),
+      statsPath & ": provider introspection missed the cache")
+    result.holds(s["artifactWriteSkipped"].getBool(),
+      statsPath & ": the artifact was rewritten")
+    result.holds(not s["shellRenderingLaunched"].getBool(),
+      statsPath & ": shell rendering was launched")
+    result.holds(s["shellRenderingCacheHit"].getBool(),
+      statsPath & ": shell rendering missed the cache")
 
 proc reproPathWithSpaces(c: M6Case): string =
   ## A relocated ``repro`` install whose directory contains spaces, so the
@@ -249,20 +272,21 @@ proc reproPathWithSpaces(c: M6Case): string =
       setFilePermissions(dst, {fpUserRead, fpUserWrite, fpUserExec,
         fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
-proc installNativeHooks(c: M6Case) =
+proc installNativeHooks(c: M6Case): bool =
+  ## Installs the native block for bash, zsh and fish. True when each rc file
+  ## holds its marked block and the activation call.
+  result = true
   discard requireRepro(c, @["hooks", "ensure", "--shell", "bash"])
   discard requireRepro(c, @["hooks", "ensure", "--shell", "zsh"])
   discard requireRepro(c, @["hooks", "ensure", "--shell", "fish"])
-  check readFile(c.homeDir / ".bashrc").contains(
-    "repro:home:repro-dev-env-native-bash")
-  check readFile(c.homeDir / ".zshrc").contains(
-    "repro:home:repro-dev-env-native-zsh")
-  check readFile(c.xdgConfig / "fish" / "config.fish").contains(
-    "repro:home:repro-dev-env-native-fish")
-  check "__repro-native-shell-activate" in readFile(c.homeDir / ".bashrc")
-  check "__repro-native-shell-activate" in readFile(c.homeDir / ".zshrc")
-  check "__repro-native-shell-activate" in
-    readFile(c.xdgConfig / "fish" / "config.fish")
+  for (shell, rc) in [("bash", c.homeDir / ".bashrc"),
+                      ("zsh", c.homeDir / ".zshrc"),
+                      ("fish", c.xdgConfig / "fish" / "config.fish")]:
+    let text = readFile(rc)
+    result.holds(text.contains("repro:home:repro-dev-env-native-" & shell),
+      rc & " holds no native " & shell & " block")
+    result.holds("__repro-native-shell-activate" in text,
+      rc & " does not call __repro-native-shell-activate")
 
 proc posixProbeScript(projectA, projectB: string): string =
   # PATHRESTORED: leaving every project must give back the PATH the shell
@@ -296,7 +320,10 @@ proc fishProbeScript(projectA, projectB: string): string =
     "cd " & q(projectA) & "\n" &
     "printf 'A2:%s|%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$REPRO_DEV_ENV_PROJECT_ROOT\" (fixture-tool)\n"
 
-proc requireBashHook(c: M6Case) =
+proc requireBashHook(c: M6Case): bool =
+  ## The bash probe: enter A, enter B, leave, re-enter A. True when the exit
+  ## code and the warm statistics held (a wrong marker raises).
+  result = true
   let env = c.envFor()
   let statsPath = c.tempRoot / "bash-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
@@ -306,7 +333,8 @@ proc requireBashHook(c: M6Case) =
     "source " & q(c.homeDir / ".bashrc") & "\n" &
       posixProbeScript(c.projectA, c.projectB)
   ], c.tempRoot, env)
-  check res.exitCode == 0
+  result.holds(res.exitCode == 0, "probe exit code " & $res.exitCode &
+    ":\n" & res.output)
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireShellValue(res.output, "B:",
@@ -315,9 +343,11 @@ proc requireBashHook(c: M6Case) =
   requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
-  requireNativeStats(statsPath)
+  result.holds(requireNativeStats(statsPath), "warm statistics " & statsPath)
 
-proc requireZshHook(c: M6Case) =
+proc requireZshHook(c: M6Case): bool =
+  ## The zsh probe, as `requireBashHook`.
+  result = true
   let zsh = findExe("zsh")
   if zsh.len == 0:
     raise newException(OSError,
@@ -329,7 +359,8 @@ proc requireZshHook(c: M6Case) =
   let res = runProgram(zsh, @["-f", "-c",
     "source " & q(c.homeDir / ".zshrc") & "\n" &
       posixProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
-  check res.exitCode == 0
+  result.holds(res.exitCode == 0, "probe exit code " & $res.exitCode &
+    ":\n" & res.output)
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireShellValue(res.output, "B:",
@@ -338,16 +369,19 @@ proc requireZshHook(c: M6Case) =
   requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
-  requireNativeStats(statsPath)
+  result.holds(requireNativeStats(statsPath), "warm statistics " & statsPath)
 
-proc requireFishHook(c: M6Case; fish: string) =
+proc requireFishHook(c: M6Case; fish: string): bool =
+  ## The fish probe, as `requireBashHook`.
+  result = true
   let env = c.envFor()
   let statsPath = c.tempRoot / "fish-native-stats.json"
   env["REPRO_NATIVE_SHELL_STATS"] = statsPath
   let res = runProgram(fish, @["--no-config", "-c",
     "source " & q(c.xdgConfig / "fish" / "config.fish") & "\n" &
       fishProbeScript(c.projectA, c.projectB)], c.tempRoot, env)
-  check res.exitCode == 0
+  result.holds(res.exitCode == 0, "probe exit code " & $res.exitCode &
+    ":\n" & res.output)
   requireShellValue(res.output, "A:",
     "A:alpha|one|" & c.projectA & "|tool:alpha:one")
   requireShellValue(res.output, "B:",
@@ -356,7 +390,7 @@ proc requireFishHook(c: M6Case; fish: string) =
   requireShellValue(res.output, "PATHRESTORED:", "PATHRESTORED:yes")
   requireShellValue(res.output, "A2:",
     "A2:alpha|one|" & c.projectA & "|tool:alpha:one")
-  requireNativeStats(statsPath)
+  result.holds(requireNativeStats(statsPath), "warm statistics " & statsPath)
 
 
 # ---------------------------------------------------------------------------
@@ -375,13 +409,16 @@ proc direnvEnv(c: M6Case): StringTableRef =
   result = c.envFor()
   result["DIRENV_LOG_FORMAT"] = ""
 
-proc prepareDirenvProjects(c: M6Case; direnv: string) =
+proc prepareDirenvProjects(c: M6Case; direnv: string): bool =
   ## project-a: the generated `.envrc`, allowed, so direnv manages it.
   ## project-b: the same `.envrc`, NOT allowed, so direnv loads nothing there
-  ## and the native hook must activate.
+  ## and the native hook must activate. True when both `.envrc` files hold
+  ## the activation call (a failed `direnv allow` raises).
+  result = true
   for project in [c.projectA, c.projectB]:
     discard requireRepro(c, @["hooks", "ensure", "--shell-direnv", project])
-    check "__repro-direnv-activate" in readFile(project / ".envrc")
+    result.holds("__repro-direnv-activate" in readFile(project / ".envrc"),
+      project / ".envrc" & " does not call __repro-direnv-activate")
   let res = runProgram(direnv, @["allow", "."], c.projectA, c.direnvEnv())
   if res.exitCode != 0:
     raise newException(OSError, "direnv allow failed: " & res.output)
@@ -416,16 +453,6 @@ proc fishStandDownProbe(c: M6Case; direnv: string): string =
     "cd " & q(parentDir(c.projectA)) & "\n" &
     "printf 'OUT:%s|%s|%s\\n' \"$AUX_VALUE\" \"$FIXTURE_MODE\" \"$DIRENV_DIR\"\n" &
     "if test (string join : $PATH) = \"$__repro_probe_path0\"; echo PATHRESTORED:yes; else; printf 'PATHRESTORED:no:%s\\n' \"$PATH\"; end\n"
-
-proc holds(verdict: var bool; condition: bool; what: string) =
-  ## Records a failed condition of a helper that returns its verdict to the
-  ## test body: a checkpoint naming it, and `verdict` false. A `check` in a
-  ## proc called from a test would fail only the program's exit status (its
-  ## `fail` sees no test status to set), not the case it ran in, so the
-  ## helpers return a verdict and the test body checks it.
-  if not condition:
-    checkpoint("FAILED: " & what)
-    verdict = false
 
 proc requireStandDown(c: M6Case; shell, program: string;
                       args: seq[string]; unset: string): bool =
@@ -753,10 +780,10 @@ when isNixSupported or defined(windows):
         defer: removeDir(c.tempRoot)
         let fish = requireFish()
 
-        installNativeHooks(c)
-        requireBashHook(c)
-        requireZshHook(c)
-        requireFishHook(c, fish)
+        check installNativeHooks(c)
+        check requireBashHook(c)
+        check requireZshHook(c)
+        check requireFishHook(c, fish)
 
         let bashWithUserBytes = "export USER_OWNED=1\n" & readFile(c.homeDir / ".bashrc")
         writeFile(c.homeDir / ".bashrc", bashWithUserBytes)
@@ -772,8 +799,8 @@ when isNixSupported or defined(windows):
         defer: removeDir(c.tempRoot)
         let fish = requireFish()
         let direnv = requireDirenv()
-        installNativeHooks(c)
-        prepareDirenvProjects(c, direnv)
+        check installNativeHooks(c)
+        check prepareDirenvProjects(c, direnv)
         let loaded = c.direnvLoadedVars(direnv, c.projectA)
         check requireHelperStandsDown(c, "bash", loaded,
           c.pathWithout("direnv", c.envFor()["PATH"]))
@@ -805,8 +832,8 @@ when isNixSupported or defined(windows):
         if zsh.len == 0:
           raise newException(OSError,
             "the direnv start-up gate requires a real zsh binary on PATH")
-        installNativeHooks(c)
-        prepareDirenvProjects(c, direnv)
+        check installNativeHooks(c)
+        check prepareDirenvProjects(c, direnv)
         for (shell, program) in [("bash", findExe("bash")), ("zsh", zsh),
                                  ("fish", fish)]:
           for nativeFirst in [true, false]:
@@ -881,7 +908,7 @@ when isNixSupported or defined(windows):
           requireShellValue(res.output, "OUT:", "OUT:||")
           requireShellValue(res.output, "A2:",
             "A2:alpha|one|" & c.projectA)
-          requireNativeStats(statsPath)
+          check requireNativeStats(statsPath)
           # DIRENV_DIR alone (no RC that direnv reports loaded and allowed)
           # does not stand the hook down: it activates as before.
           let aloneStats = c.tempRoot / "powershell-direnv-dir-alone-stats.json"

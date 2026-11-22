@@ -35,6 +35,25 @@
   Stating that asymmetry is deliberate. Claiming the Scoop path carries
   an OpenPGP guarantee it does not would be worse than the gap itself.
 
+  ## Shell completion
+
+  -Method scoop adds nothing here: the Scoop manifest registers repro's
+  PowerShell completion for the user itself (its post_install), and a
+  second registration from this script would load the same script twice.
+  -Method tarball has no package to do it, so after the archive is in
+  place the installer asks the repro.exe it just installed to register
+  completion for the current user: `repro hooks ensure --shell-autocomplete
+  --profile`, which writes the user's completion script and a managed block
+  in each detected PowerShell's CurrentUserAllHosts profile (Windows
+  PowerShell 5.1 and PowerShell 7 have one each), and leaves an up-to-date
+  registration alone, so a re-run registers nothing twice. What was done is
+  recorded beside the install (.reprobuild\completion) and -Uninstall undoes
+  exactly that, with the same binary, before the binary is removed. A
+  refusal is reported with the command to re-run and does not fail the
+  install. -NoCompletion, or REPRO_NO_COMPLETION=1 in the environment,
+  skips it (and a re-run with it removes an earlier registration); with
+  -Method scoop it is passed on to the manifest's post_install.
+
   ## Idempotence
 
   Every write is a fixed location and a replacement: one bucket named
@@ -60,6 +79,10 @@ param(
   [string]$Domain = $(if ($env:REPRO_REPO_DOMAIN) { $env:REPRO_REPO_DOMAIN } else { 'metacraft-labs.com' }),
   [string]$BucketUrl = $env:REPRO_BUCKET_URL,
   [string]$Prefix = '',
+  # Do not set up shell completion (the same as REPRO_NO_COMPLETION=1):
+  # the archive method skips it, and -Method scoop passes it on to the
+  # manifest's post_install.
+  [switch]$NoCompletion,
   [switch]$DryRun,
   # Accepted and ignored: this installer never prompts (a prompt in an
   # `irm | iex` pipeline has no console to read from).
@@ -100,6 +123,8 @@ if ($BaseUrl) {
   $DownloadsUrl = 'https://github.com/metacraft-labs/reprobuild/releases/download'
   $KeysUrl = "https://deb.$Domain/keys"
 }
+
+$SkipCompletion = $NoCompletion -or ($env:REPRO_NO_COMPLETION -eq '1')
 
 $KeyringFile = if ($env:REPRO_KEYRING_FILE) { $env:REPRO_KEYRING_FILE } else { 'metacraft-labs-archive-keyring.asc' }
 
@@ -236,11 +261,21 @@ or re-run this installer with -Method tarball.
 function Install-WithScoop {
   $target = if ($Version) { "$BucketName/$AppName@$Version" } else { "$BucketName/$AppName" }
   Write-Log "installing $target with scoop"
-  Invoke-Step "scoop install $target" {
-    # Scoop's own action, Scoop's own hash verification, Scoop's own exit
-    # code. Nothing here re-checks what Scoop already refuses.
-    & scoop install $target
-    if ($LASTEXITCODE -ne 0) { Die "scoop install $target failed (exit $LASTEXITCODE)" }
+  # The manifest's post_install registers shell completion and reads the
+  # opt-out from the environment, which `scoop install` inherits. Set for
+  # that call only: under `irm | iex` this process is the user's own
+  # session, which must not keep the variable afterwards.
+  $savedOptOut = $env:REPRO_NO_COMPLETION
+  if ($SkipCompletion) { $env:REPRO_NO_COMPLETION = '1' }
+  try {
+    Invoke-Step "scoop install $target" {
+      # Scoop's own action, Scoop's own hash verification, Scoop's own exit
+      # code. Nothing here re-checks what Scoop already refuses.
+      & scoop install $target
+      if ($LASTEXITCODE -ne 0) { Die "scoop install $target failed (exit $LASTEXITCODE)" }
+    }
+  } finally {
+    $env:REPRO_NO_COMPLETION = $savedOptOut
   }
 }
 
@@ -270,6 +305,92 @@ function Uninstall-WithScoop {
 # ---------------------------------------------------------------------
 # the repo-less fallback: signed archive, verified BEFORE extraction
 # ---------------------------------------------------------------------
+function Get-ArchivePrefix {
+  if ($Prefix) { return $Prefix }
+  if ($env:REPRO_INSTALL_PREFIX) { return $env:REPRO_INSTALL_PREFIX }
+  return (Join-Path $env:LOCALAPPDATA 'Programs\Reprobuild')
+}
+
+# ---------------------------------------------------------------------
+# shell completion for an archive install (see "Shell completion" above)
+# ---------------------------------------------------------------------
+function Get-CompletionRecordPath {
+  param([string]$Dest)
+  return (Join-Path (Join-Path $Dest '.reprobuild') 'completion')
+}
+
+# One `name=value` field of the completion record, or ''.
+function Get-CompletionRecordField {
+  param([string]$Dest, [string]$Name)
+  $record = Get-CompletionRecordPath $Dest
+  if (-not (Test-Path -LiteralPath $record)) { return '' }
+  foreach ($line in @(Get-Content -LiteralPath $record)) {
+    if ($line.StartsWith("$Name=")) { return $line.Substring($Name.Length + 1) }
+  }
+  return ''
+}
+
+# Runs `repro hooks <ensure|uninstall> --shell-autocomplete --profile` with
+# the given binary, from the root of its drive, so the command neither
+# depends on nor looks for a workspace in the directory the installer was
+# started from. Returns whether it exited 0.
+function Invoke-ReproCompletionHooks {
+  param([string]$Verb, [string]$Repro)
+  Push-Location -LiteralPath ([System.IO.Path]::GetPathRoot($Repro))
+  try {
+    & $Repro hooks $Verb --shell-autocomplete --profile | Out-Host
+    return ($LASTEXITCODE -eq 0)
+  } finally {
+    Pop-Location
+  }
+}
+
+# Undo the registration the record describes, if any, and drop the record.
+function Undo-ArchiveCompletion {
+  param([string]$Dest)
+  $record = Get-CompletionRecordPath $Dest
+  if (-not (Test-Path -LiteralPath $record)) { return }
+  $repro = Get-CompletionRecordField -Dest $Dest -Name 'repro'
+  if ($repro -and (Test-Path -LiteralPath $repro)) {
+    if (Invoke-ReproCompletionHooks -Verb 'uninstall' -Repro $repro) {
+      Write-Log 'removed the shell completion this install registered (profile)'
+    } else {
+      Write-Warn 'could not remove all of the shell completion this install registered; see the lines above'
+    }
+  } else {
+    Write-Warn "the completion record $record names no usable binary; left the shells' completion as it is"
+  }
+  Remove-Item -LiteralPath $record -Force -ErrorAction SilentlyContinue
+}
+
+function Set-ArchiveCompletion {
+  param([string]$Dest)
+  if ($SkipCompletion) {
+    # A re-run with the opt-out removes what an earlier run registered, so
+    # the opt-out always leaves none.
+    Undo-ArchiveCompletion -Dest $Dest
+    Write-Log 'shell completion: not set up (-NoCompletion)'
+    return
+  }
+  $repro = Join-Path (Join-Path $Dest 'bin') 'repro.exe'
+  if (-not (Test-Path -LiteralPath $repro)) {
+    Write-Warn "shell completion: $repro does not exist; not set up"
+    return
+  }
+  Write-Log 'setting up shell completion for repro (this user, profile)'
+  # Recorded before it runs: a registration that half-succeeded is still
+  # one that -Uninstall must undo.
+  Set-Content -LiteralPath (Get-CompletionRecordPath $Dest) -Value "scope=profile`nrepro=$repro" -NoNewline
+  if (-not (Invoke-ReproCompletionHooks -Verb 'ensure' -Repro $repro)) {
+    # Completion is a convenience on top of a working install, so a refusal
+    # (for example another tool's file at one of the paths) is reported, not
+    # turned into a failed install.
+    Write-Warn @"
+shell completion was not fully set up; see the lines above. Re-run it with:
+  repro hooks ensure --shell-autocomplete --profile
+"@
+  }
+}
 function Find-Verifier {
   if ($env:REPRO_VERIFY_SCRIPT) {
     if (-not (Test-Path -LiteralPath $env:REPRO_VERIFY_SCRIPT)) {
@@ -334,9 +455,7 @@ unverified archive.
     if ($LASTEXITCODE -ne 0) { Die 'signature verification failed; refusing to install' }
     Write-Log 'signature verification passed'
 
-    $dest = if ($Prefix) { $Prefix } elseif ($env:REPRO_INSTALL_PREFIX) { $env:REPRO_INSTALL_PREFIX } else {
-      Join-Path $env:LOCALAPPDATA 'Programs\Reprobuild'
-    }
+    $dest = Get-ArchivePrefix
     $stage = Join-Path $work 'unpack'
     New-Item -ItemType Directory -Path $stage -Force | Out-Null
     # .NET's zip reader directly, not Expand-Archive: Windows PowerShell 5.1's
@@ -355,6 +474,7 @@ unverified archive.
     $manifestDir = Join-Path $dest '.reprobuild'
     New-Item -ItemType Directory -Path $manifestDir -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $manifestDir 'version') -Value $ver -NoNewline
+    Set-ArchiveCompletion -Dest $dest
     Write-Log "archive install complete under $dest"
     Write-Warn 'an archive install does NOT receive native updates; re-run the installer or use -Method scoop.'
   } finally {
@@ -363,10 +483,16 @@ unverified archive.
 }
 
 function Uninstall-Archive {
-  $dest = if ($Prefix) { $Prefix } elseif ($env:REPRO_INSTALL_PREFIX) { $env:REPRO_INSTALL_PREFIX } else {
-    Join-Path $env:LOCALAPPDATA 'Programs\Reprobuild'
-  }
+  $dest = Get-ArchivePrefix
   if (Test-Path -LiteralPath (Join-Path $dest '.reprobuild')) {
+    # Before the binary goes: it is what removes its own registration.
+    if ($DryRun) {
+      if (Test-Path -LiteralPath (Get-CompletionRecordPath $dest)) {
+        Write-Log "DRY-RUN would remove the shell completion recorded in $(Get-CompletionRecordPath $dest)"
+      }
+    } else {
+      Undo-ArchiveCompletion -Dest $dest
+    }
     Write-Log "removing the archive install at $dest"
     if (-not $DryRun) { Remove-Item -LiteralPath $dest -Recurse -Force -ErrorAction SilentlyContinue }
   } else {

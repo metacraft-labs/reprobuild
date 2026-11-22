@@ -587,6 +587,25 @@ package server:
         flag format is string
 ```
 
+### Shell completion files
+
+When a package builds an executable that has a `cli:` block with a Nim
+compile (`nim c`, `cpp` or `objc`, whichever constructor records it), the
+build also writes the program's Bash, Zsh, Fish and PowerShell completion
+scripts to `build/completions/<binary>/`: `<program>.bash`, `_<program>`,
+`<program>.fish` and `<program>.ps1`. The package declares nothing for it.
+
+The scripts are generated from the description and from the entry list the
+compile writes (`build/entrypoints/<binary>.entrypoints.json`, through
+nim-entrypoints' `-d:entrypointsManifest`); the program is never run, so a
+binary built for another machine gets its scripts too. A program that
+registers nim-entrypoints' `describeProgram` is asked for candidates through
+`--entrypoint=complete`, and any other program through clispec's
+`__complete`. The compile is the one whose `--out:` file is named after the
+executable's binary; two such compiles in one package are refused. An
+executable no Nim compile builds gets no scripts. The paths do not depend on
+`--target`, so a cross build writes the same files as a native one.
+
 ## Profiles
 
 ```text

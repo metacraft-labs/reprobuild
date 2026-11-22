@@ -132,6 +132,31 @@ suite "M1 partition plan — JSON round-trip":
     check rtPlan.unknownTestCount == plan.unknownTestCount
     check sameMeta(rtMeta, meta)
 
+  test "round-trips node ids with the high bit set":
+    ## A node id derived from a hash (the workspace-driven shard's
+    ## ``stableNodeIdFromString``) is above ``int64.high`` about half the
+    ## time. ``std/json`` writes such a ``uint64`` as an unquoted number and
+    ## parses it back as a ``JString``; a reader that took only ``JInt``
+    ## refused the plan ("node id must be an integer"), so
+    ## ``--emit-partition-plan`` / ``--plan-from`` never worked there.
+    resetTmp()
+    let path = TmpDir / "high-bit.json"
+    let high = nodeId(0xF000_0000_0000_0001'u64)
+    let top = nodeId(high(uint64))
+    let meta = ShardPlanRequest(
+      shardCount: 1, policy: sipIndependent, refinementPasses: 0,
+      buildActions: @[ShardBuildAction(id: high, deps: @[top]),
+                      ShardBuildAction(id: top, deps: @[])],
+      testEdges: @[ShardTestEdge(id: top, selector: "t", historyKey: "t",
+                                 buildDeps: @[high])])
+    let plan = ShardPlan(partition: PartitionPlan(shardCount: 1,
+      assignments: @[PartitionAssignment(root: top, shardIndex: 1)],
+      perShardCost: @[initDuration(nanoseconds = 0)]))
+    writePartitionPlanJson(plan, path, meta)
+    let (rtPlan, rtMeta) = readPartitionPlanJson(path)
+    check samePlan(rtPlan.partition, plan.partition)
+    check sameMeta(rtMeta, meta)
+
   test "round-trips a degraded cold-cache plan":
     resetTmp()
     let path = TmpDir / "degraded.json"
