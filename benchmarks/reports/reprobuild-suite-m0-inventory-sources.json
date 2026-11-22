@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3100,
+    "nimTestBinaries": 3101,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 823,
+    "pureUnitTests": 824,
     "staticallyDetectedRuntimeCompilerFlowTests": 159,
-    "testEntries": 3150
+    "testEntries": 3151
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1776,7 +1776,7 @@
       "graph-fixture": 27,
       "integration": 1727,
       "platform/destructive": 200,
-      "pure unit": 823,
+      "pure unit": 824,
       "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
@@ -1997,9 +1997,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3100,
+    "nimTestBinaryCount": 3101,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3150
+    "testEntryCount": 3151
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30587,6 +30587,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_real_file_guard_removes_its_journal_base",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_real_file_guard_removes_its_journal_base.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_scoped_env_restores_in_any_order",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -36748,7 +36765,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_native_shell_hooks.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -56782,7 +56799,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_pool_retains_registered_leaf_objects.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 41,
+      "staticCaseCount": 46,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

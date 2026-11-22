@@ -13693,6 +13693,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_test_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_test_support/tests/t_real_file_guard_removes_its_journal_base.nim",
+    binary: "build/test-bin/t_real_file_guard_removes_its_journal_base",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_test_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_test_support/tests/t_scoped_env_restores_in_any_order.nim",
     binary: "build/test-bin/t_scoped_env_restores_in_any_order",
     defines: @[],
