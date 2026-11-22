@@ -13,15 +13,18 @@
 ##
 ## When enabled, the test asserts:
 ##
-##   1. The build phase completes (no ``M2 requires --fixture-from`` /
-##      missing-fixture diagnostic; ``runner_invoked`` true).
-##   2. At least one test binary was built (we check
-##      ``build/test-bin/`` against a representative file).
-##   3. The per-shard report at ``test-logs/shard-1-of-3.json`` has
-##      ``partition_file``, non-empty ``assigned_selectors`` and
-##      ``assigned_binaries``, per-test results carried through from the
-##      runner's summary JSON, and a ``degraded_plan`` flag that
+##   1. The run is the workspace path (no ``M2 requires --fixture-from`` /
+##      missing-fixture diagnostic).
+##   2. The per-shard report at ``test-logs/shard-1-of-3.json`` has
+##      ``partition_file``, a non-empty ``assigned_selectors``, one
+##      ``tests`` entry per assigned test command with the engine's
+##      outcome, a ``certificates`` array, and a ``degraded_plan`` flag that
 ##      reflects the cost-data state (true on a cold workspace).
+##
+## Since TC-8e (Test-Certificates) the shard materializes exactly its
+## assigned test commands through the build engine; it no longer hands test
+## binaries to a separate runner process (CI-Sharding.md §"Relationship To
+## ``ct-test-runner``", amended 2026-11-12).
 ##
 ## The 5-minute soft budget is enforced as an informational checkpoint
 ## — a real regression would surface as a build/runner failure first.
@@ -32,8 +35,6 @@ import repro_test_support/reasoned_skip
 import sharding_test_support
 
 const LongTestEnv = "REPRO_M1_LONG_TEST"
-const ExpectedTestBinarySample =
-  "build/test-bin/t_engine_action_create_dyndep"
 
 # W15: this file used to carry a PRIVATE ``reprobuildRoot()`` that walked up
 # from ``getCurrentDir()`` keyed on an extension-less ``build/bin/repro``,
@@ -100,38 +101,28 @@ proc runWorkspaceShard() =
   check report.hasKey("partition_file")
   let partitionFile = report["partition_file"].getStr()
   check partitionFile.len > 0
-  check fileExists(repoRoot / partitionFile)
+  # Written beside the report, which this run names by an absolute path.
+  check fileExists(if partitionFile.isAbsolute: partitionFile
+                   else: repoRoot / partitionFile)
 
   check report.hasKey("assigned_selectors")
   check report["assigned_selectors"].kind == JArray
   check report["assigned_selectors"].len > 0
 
-  check report.hasKey("assigned_binaries")
-  check report["assigned_binaries"].kind == JArray
-  check report["assigned_binaries"].len > 0
-
   # degraded_plan must be present and a bool — its value reflects the
-  # cost-data state.  On a cold workspace (no RunQuota learned-estimate
-  # rows and no test-durations.json) we expect degraded_plan to be
-  # true; on a warm workspace it would be false.  Either case must
-  # round-trip without crashing.
+  # cost-data state. The workspace path consults no cost store (every shard
+  # must compute the same plan), so it is the planner's cold-cache slice.
   check report.hasKey("degraded_plan")
   check report["degraded_plan"].kind == JBool
 
-  # The build phase must have produced at least one test binary.
-  check fileExists(repoRoot / ExpectedTestBinarySample)
-
-  # Per-test results must be carried from the runner's summary into
-  # the report's ``tests`` array.  When ``runner_invoked`` is true and
-  # the runner did not fail catastrophically, the array carries one
-  # entry per assigned binary.
-  check report.hasKey("runner_invoked")
-  if report["runner_invoked"].getBool():
-    check report["tests"].kind == JArray
-    # Either the runner ran tests (array non-empty) or every assigned
-    # binary failed to produce a result file — both are valid but
-    # the count must be non-negative.
-    check report["tests"].len >= 0
+  # One entry per assigned test command, carrying the engine's outcome.
+  check report["tests"].kind == JArray
+  check report["tests"].len == report["assigned_selectors"].len
+  for entry in report["tests"].elems:
+    check entry.hasKey("id")
+    check entry.hasKey("status")
+    check entry.hasKey("passed")
+  check report["certificates"].kind == JArray
 
 suite "CI-Sharding M2 follow-up — workspace integration":
 

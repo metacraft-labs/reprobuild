@@ -2231,7 +2231,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "its binary is named by tests/e2e/sharding/t_e2e_repro_test_shard_workspace_integration.nim"),
+    singleReason: "its binary is named by tests/integration/t_b3_test_template_emits_two_edges.nim"),
   TestSpec(
     source: "libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim",
     binary: "build/test-bin/t_engine_implicit_target_name_basename_rule",
@@ -30327,6 +30327,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_test_selects_the_collection_beside_a_test_directory.nim",
     binary: "build/test-bin/t_repro_test_selects_the_collection_beside_a_test_directory",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g13",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_repro_test_shard_certifies_only_nodes_it_ran_whole.nim",
+    binary: "build/test-bin/t_repro_test_shard_certifies_only_nodes_it_ran_whole",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,

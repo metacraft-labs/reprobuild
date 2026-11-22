@@ -447,8 +447,9 @@ proc metaToJson(meta: ShardPlanRequest): JsonNode =
   for e in meta.testEdges:
     result["testEdges"].add(edgeToJson(e))
 
-proc shardPlanJson(plan: ShardPlan; meta: ShardPlanRequest): JsonNode =
-  %*{
+proc shardPlanJson(plan: ShardPlan; meta: ShardPlanRequest;
+                   certificates: JsonNode): JsonNode =
+  result = %*{
     "schemaId": PartitionPlanSchemaId,
     "meta": metaToJson(meta),
     "plan": planToJson(plan.partition),
@@ -456,16 +457,22 @@ proc shardPlanJson(plan: ShardPlan; meta: ShardPlanRequest): JsonNode =
     "unknownBuildCount": plan.unknownBuildCount,
     "unknownTestCount": plan.unknownTestCount
   }
+  if not certificates.isNil:
+    result["certificates"] = certificates
 
 proc writePartitionPlanJson*(plan: ShardPlan; path: string;
-                             meta: ShardPlanRequest) =
+                             meta: ShardPlanRequest;
+                             certificates: JsonNode = nil) =
   ## Writes the plan (with the originating meta) as JSON.  The schema id
   ## is captured at the top of the document for the M2 ``--plan-from``
-  ## consumer's compatibility check.
+  ## consumer's compatibility check. ``certificates``, when given, records
+  ## which shard certifies each certificate-producing node of the selection
+  ## (Test-Certificates TC-8e); it is informational, and
+  ## ``readPartitionPlanJson`` does not read it back.
   let parent = parentDir(path)
   if parent.len > 0 and not dirExists(parent):
     createDir(parent)
-  writeFile(path, shardPlanJson(plan, meta).pretty() & "\n")
+  writeFile(path, shardPlanJson(plan, meta, certificates).pretty() & "\n")
 
 proc readNodeId(node: JsonNode): NodeId =
   ## A node id as ``%uint64`` wrote it. ``std/json`` writes a ``uint64`` above
