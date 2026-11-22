@@ -330,6 +330,73 @@ proc listStoreContentDir*(root, relativeDir: string): StoreListing =
       result.problems.add("'" & entry.path & "' could not be read: " & err.msg)
 
 # ---------------------------------------------------------------------------
+# Listing the content directories of one algorithm (§2.2)
+# ---------------------------------------------------------------------------
+
+type
+  StoreContentDirEntry* = object
+    digest*: string
+      ## The directory's name: a content id's digest in that algorithm.
+    modified*: Time
+      ## When the directory last changed: when a record was last written
+      ## into it (a writer renames its record into place there).
+
+  StoreAlgorithmListing* = object
+    status*: StoreListingStatus
+    entries*: seq[StoreContentDirEntry]
+      ## Newest first; equal times by name.
+    problems*: seq[string]
+
+proc listStoreAlgorithmDir*(root, algorithmName: string):
+    StoreAlgorithmListing =
+  ## The content directories of ``<root>/v1/<algorithmName>/``, without
+  ## reading any record: one directory listing and one ``stat`` per entry.
+  ## Dot-names (a prune's rename aside, a writer's temporary) are not content
+  ## directories and are skipped. A missing root or algorithm directory is
+  ## ``slsAbsent``; one that exists and cannot be listed is ``slsUnreadable``,
+  ## never an empty listing (the §2.4 rule ``listStoreContentDir`` follows).
+  ##
+  ## For a reader that does not know the content id it wants: the gates'
+  ## search for certified content differing from the judged content only in
+  ## managed lock files (Test-Certificates.md §"Gate integration — push
+  ## requirement"). The reference library has no such query — its ``find``
+  ## looks a known id up — and reading stays reprobuild's own here, as for
+  ## ``listStoreContentDir``.
+  if root.len == 0 or algorithmName.len == 0 or '/' in algorithmName or
+      DirSep in algorithmName or algorithmName.startsWith("."):
+    result.status = slsAbsent
+    return
+  let dir = root / LocalStoreLayout / algorithmName
+  if not dirExists(dir):
+    result.status = slsAbsent
+    return
+  var found: seq[StoreContentDirEntry]
+  try:
+    for kind, path in walkDir(dir, checkDir = true):
+      if kind notin {pcDir, pcLinkToDir}:
+        continue
+      let name = path.extractFilename
+      if name.len == 0 or name.startsWith("."):
+        continue
+      var modified: Time
+      try:
+        modified = getLastModificationTime(path)
+      except OSError as err:
+        result.problems.add("'" & path & "' could not be examined: " &
+          err.msg)
+        continue
+      found.add(StoreContentDirEntry(digest: name, modified: modified))
+  except OSError as err:
+    result.status = slsUnreadable
+    result.problems.add("'" & dir & "' could not be listed: " & err.msg)
+    return
+  result.status = slsListed
+  found.sort(proc(a, b: StoreContentDirEntry): int =
+    result = cmp(b.modified, a.modified)
+    if result == 0: result = cmp(a.digest, b.digest))
+  result.entries = found
+
+# ---------------------------------------------------------------------------
 # Writing (§2.3)
 # ---------------------------------------------------------------------------
 

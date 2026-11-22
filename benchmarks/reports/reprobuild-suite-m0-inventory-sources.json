@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3146,
+    "nimTestBinaries": 3150,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 835,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3198
+    "testEntries": 3202
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1834,7 +1834,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1758,
+      "integration": 1762,
       "platform/destructive": 200,
       "pure unit": 835,
       "unclassified": 376
@@ -2057,9 +2057,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3146,
+    "nimTestBinaryCount": 3150,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3198
+    "testEntryCount": 3202
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -54722,6 +54722,40 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_push_of_a_flake_lock_only_change_names_the_certified_content",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_push_of_a_flake_lock_only_change_names_the_certified_content.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_push_of_a_lock_only_change_names_the_certified_content",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_push_of_a_lock_only_change_names_the_certified_content.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_push_refuses_when_the_lock_disagrees_with_the_siblings",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -54733,6 +54767,23 @@
       "source": "tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_push_with_a_non_lock_change_makes_no_lock_only_claim",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_push_with_a_non_lock_change_makes_no_lock_only_claim.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -59304,6 +59355,24 @@
       "source": "tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim",
       "sourceSuiteCount": 2,
       "staticCaseCount": 15,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_tree_comparison_never_fetches_in_a_partial_clone",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_tree_comparison_never_fetches_in_a_partial_clone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

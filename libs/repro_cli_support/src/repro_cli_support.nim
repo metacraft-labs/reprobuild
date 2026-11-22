@@ -69690,6 +69690,203 @@ proc unmetRemedies*(v: ReprobuildCoverageVerdict): seq[string] =
     if line notin result: result.add(line)
 
 # ============================================================================
+# HL-10 (push half) — certified content that differs only in managed locks.
+#
+# A content-bound certificate stops covering content the moment a lock is
+# rewritten after the tests ran: a sibling moved and the commit-time refresh
+# re-pinned, or someone ran `repro lock refresh` / `repro lock update` after
+# testing. The verdict is right — that content was never tested — but "no
+# certificate found" alone sends the developer looking for a test failure.
+# When the store holds certified content that differs from the judged content
+# ONLY in the files the commit-time lock writers manage
+# (``CommitTimeManagedLockFiles``), the gates name it, with the lock files
+# that differ, so the cause is visible (Test-Certificates.md §"Gate
+# integration — push requirement", Unified-Locking-And-Hooks.md §13.7.3
+# item 4).
+#
+# The tested lock is recorded nowhere a push can read, so the search goes by
+# tree entries: the store's content directories in the judged content's
+# algorithm ARE tree ids, and a tree the repository has can be compared with
+# the judged tree by ``git diff-tree`` without a checkout. A certifying run
+# leaves its tree in the object database (the content id is computed by
+# ``git write-tree`` over a temporary index), which is what makes the
+# certified-but-never-committed tree comparable at all.
+# ============================================================================
+
+const
+  LockOnlyNeighbourScanLimit* = 64
+    ## How many of the store's content directories (both roots together,
+    ## newest first) the search considers. The store is pruned to its newest
+    ## ``DefaultStoreRetention`` (20) by default, so the bound rarely bites;
+    ## it keeps a never-pruned store from making the gate slow.
+  LockOnlyNeighboursNamed* = 3
+    ## How many neighbours a diagnostic names, newest first.
+
+type
+  LockOnlyNeighbour* = object
+    ## Certified content that differs from the judged content only in managed
+    ## lock files.
+    contentId*: string
+    differing*: seq[string]
+      ## The managed lock files that differ, repository-relative.
+    bases*: seq[string]
+      ## The ``base`` commits its signed reprobuild certificates record: the
+      ## commit checked out when the tests ran (informational, Standard
+      ## §3.2.3).
+    coversAll*: bool
+      ## Its trusted certificates cover the whole requirement, so the judged
+      ## content would have been covered but for the lock difference.
+
+  LockOnlyNeighbourSearch* = object
+    neighbours*: seq[LockOnlyNeighbour]
+      ## Newest first, at most ``LockOnlyNeighboursNamed``.
+    considered*: int
+      ## Content directories examined (after the bound).
+    truncated*: bool
+      ## More directories existed than ``LockOnlyNeighbourScanLimit``.
+    problems*: seq[string]
+      ## Why the search could not look everywhere. Never a claim: a search
+      ## with problems simply names fewer neighbours.
+
+proc isManagedLockOnlyDifference*(differing: openArray[string]): bool =
+  ## ``differing`` is non-empty and every path in it is a commit-time managed
+  ## lock file (``CommitTimeManagedLockFiles``).
+  differing.len > 0 and
+    differing.allIt(it in CommitTimeManagedLockFiles)
+
+proc searchLockOnlyCertifiedNeighbours(state: CertificateState;
+    requires: seq[PolicyRequirement]; keys: RegisteredKeyStoreLoad;
+    lockSource: ReprobuildLockSource; roots: CertificateStoreRoots;
+    limit: int): LockOnlyNeighbourSearch =
+  ## ``findLockOnlyCertifiedNeighbours`` without its exception guard.
+  if state == nil or state.repository.len == 0:
+    return
+  # A content id that cannot be computed was already reported by the gate's
+  # own lookup of the same state: nothing to compare with, nothing to add.
+  let (ids, _, _) = localStoreContentIds(state)
+  if ids.len == 0:
+    return
+  let judged = parseContentId(ids[0])
+  if judged.form != cifWellFormed or
+      not judged.algorithmName.startsWith("git-tree-"):
+    # Only a `git-tree-*` digest names a tree that git can compare.
+    return
+  var byDigest = initTable[string, Time]()
+  for (label, root) in [("user", roots.user), ("system", roots.system)]:
+    if root.len == 0:
+      continue
+    let listing = listStoreAlgorithmDir(root, judged.algorithmName)
+    for p in listing.problems:
+      result.problems.add("the " & label & " root: " & p)
+    for entry in listing.entries:
+      if entry.digest == judged.digest:
+        continue
+      if entry.digest notin byDigest or byDigest[entry.digest] < entry.modified:
+        byDigest[entry.digest] = entry.modified
+  var newest: seq[tuple[digest: string; modified: Time]]
+  for digest, modified in byDigest:
+    newest.add((digest, modified))
+  newest.sort(proc(a, b: tuple[digest: string; modified: Time]): int =
+    result = cmp(b.modified, a.modified)
+    if result == 0: result = cmp(a.digest, b.digest))
+  if newest.len > limit:
+    result.truncated = true
+    newest.setLen(limit)
+  result.considered = newest.len
+  if newest.len == 0:
+    return
+  var digests: seq[string]
+  for n in newest: digests.add(n.digest)
+  let compared = compareTreesByEntries(state.repository, judged.digest,
+    digests, state.git)
+  if not compared.ok:
+    result.problems.add("certified content could not be compared with " &
+      describeState(state) & ": " & compared.failure)
+    return
+  let neighbourLock =
+    if lockSource.kind == rlsCommittedLock: committedLockSource()
+    else: pendingLockRecordSource()
+  var required: seq[string]
+  for r in requires:
+    if r.certificate notin required: required.add(r.certificate)
+  for c in compared.compared:
+    if result.neighbours.len >= LockOnlyNeighboursNamed:
+      break
+    if not c.present or not isManagedLockOnlyDifference(c.differing):
+      continue
+    let neighbourState = commitUnderEvaluation(state.repository, c.tree,
+      state.repo)
+    let lookup = findCertificatesInLocalStore(neighbourState, roots)
+    if lookup.found.len == 0:
+      continue
+    let verdict = evaluateRequirementCoverage(lookup.found, neighbourState,
+      requires, keys, neighbourLock)
+    var trusted = false
+    for covered in verdict.coveredByPlatform:
+      if covered.targets.anyIt(it in required):
+        trusted = true
+    if not trusted:
+      continue
+    var neighbour = LockOnlyNeighbour(
+      contentId: judged.algorithmName & ":" & c.tree,
+      differing: c.differing, coversAll: verdict.outcome == voCovered)
+    for f in lookup.found:
+      if f.read.status == crsOk and f.read.cert.isSigned and
+          f.read.cert.framework == reprobuildFrameworkId and
+          f.read.cert.vcs.base.len > 0 and
+          f.read.cert.vcs.base notin neighbour.bases:
+        neighbour.bases.add(f.read.cert.vcs.base)
+    result.neighbours.add(neighbour)
+
+proc findLockOnlyCertifiedNeighbours*(state: CertificateState;
+    requires: seq[PolicyRequirement]; keys: RegisteredKeyStoreLoad;
+    lockSource: ReprobuildLockSource;
+    roots = nativeCertificateStoreRoots();
+    limit = LockOnlyNeighbourScanLimit): LockOnlyNeighbourSearch =
+  ## The certified content in the local store (both roots) whose tree differs
+  ## from ``state``'s only in commit-time managed lock files, and whose
+  ## trusted certificates cover at least one name of ``requires``.
+  ##
+  ## Bounded: one listing per root of ``v1/<algorithm>/``, the ``limit``
+  ## newest directories, two git processes for all of them
+  ## (``compareTreesByEntries``), and the store lookup plus the gate's own
+  ## verifier only for a tree whose difference is lock-only. Each neighbour
+  ## is judged against ITS content with the same evaluator the gate uses; the
+  ## lock step reads the neighbour's own ``repro.lock`` for a committed-lock
+  ## project, and is not applied for a record-store project, whose record is
+  ## keyed by a commit the neighbour's tree may never have had (its lock is
+  ## not content, D8). Never raises, and never changes a verdict.
+  ##
+  ## The comparison makes no network operation, in a partial clone either
+  ## (``compareTreesByEntries`` disables lazy fetches), so it has no time
+  ## budget to respect: the pre-push hook's ``TEST_CERTIFICATES_HOOK_TIMEOUT``
+  ## bounds certificate PROPAGATION's network operations (Tooling §4.3), not
+  ## this local search.
+  try:
+    result = searchLockOnlyCertifiedNeighbours(state, requires, keys,
+      lockSource, roots, limit)
+  except CatchableError as err:
+    # A diagnostic must not turn a refusal into a crash: report and name
+    # nothing.
+    result = LockOnlyNeighbourSearch(problems: @["the search for certified " &
+      "content differing only in managed lock files failed: " & err.msg])
+
+proc describeLockOnlyNeighbour*(n: LockOnlyNeighbour;
+                                judged: string): string =
+  ## One line naming a neighbour for a diagnostic about ``judged`` ("the
+  ## pushed tree", "the content being committed").
+  var bases: seq[string]
+  for b in n.bases: bases.add(b[0 ..< min(12, b.len)])
+  "certified content " & n.contentId &
+    (if bases.len > 0: " (tested on top of commit " & bases.join(", ") & ")"
+     else: "") &
+    " differs from " & judged & " only in " & n.differing.join(", ") &
+    (if n.coversAll: "" else: " (its certificates cover part of the " &
+      "requirement)") &
+    ": the lock changed after the tests ran (a re-pin or refresh made " &
+    "after testing)"
+
+# ============================================================================
 # TC-2: certificate TRANSPORT — git notes, the push-time carrier.
 # TC-8c: keyed by the TREE the certificate's content id names, on the shared
 # notes ref.
@@ -70253,8 +70450,24 @@ proc certificateGate(report: var CheckReport;
       # In required mode a clean pass adds no failure — the gate keeps
       # whatever exit code stage 5 set (0 on success).
     of voNotCovered:
-      let detail = describeCoverageVerdict(verdict) & searched
-      let remedies = unmetRemedies(verdict)
+      # HL-10: name certified content that differs from the pushed tree
+      # only in managed lock files — the lock changed after the tests ran.
+      # A cause, never a verdict: the push is judged exactly as before.
+      let neighbours = findLockOnlyCertifiedNeighbours(evaluated,
+        requirement.requires, keys, lockSource)
+      for problem in neighbours.problems:
+        report.notices.add("certificate store: " & problem)
+      var causes: seq[string]
+      for n in neighbours.neighbours:
+        causes.add(describeLockOnlyNeighbour(n, "the pushed tree"))
+      let cause =
+        if causes.len > 0: "; cause: " & causes.join("; ") else: ""
+      let detail = describeCoverageVerdict(verdict) & searched & cause
+      var remedies = unmetRemedies(verdict)
+      if causes.len > 0:
+        remedies.insert("test the content you push, refreshed lock " &
+          "included: run 'repro certify' (or 'repro test') on it, then " &
+          "commit and push again", 0)
       if requirement.mode == cgmAdvisory:
         report.notices.add("certificate advisory: coverage INCOMPLETE — " &
           detail & " (" & applied & "; " & remedies.join("; ") &
@@ -70523,6 +70736,7 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
   var lookup: LocalStoreLookup
   var verdict: ReprobuildCoverageVerdict
   var repinned: seq[string]
+  var neighbours: LockOnlyNeighbourSearch
   try:
     lookup = findCertificatesInLocalStore(state)
     # D8: a project whose lock lives in an out-of-tree record store has no
@@ -70548,6 +70762,12 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
         if staged.status == cfsPresent and
             content_id.sha256Hex(staged.bytes) == note.digest:
           repinned.add(note.path)
+    if verdict.outcome == voNotCovered:
+      # HL-10: the same search the push gate runs. It names the certified
+      # content whatever rewrote the lock after testing — this commit's
+      # refresh (also named by the re-pin note above) or anything earlier.
+      neighbours = findLockOnlyCertifiedNeighbours(state,
+        requirement.requires, keys, lockSource)
   finally:
     if hadIndexEnv: putEnv("GIT_INDEX_FILE", savedIndexEnv)
     else: delEnv("GIT_INDEX_FILE")
@@ -70595,6 +70815,11 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
       stderr.writeLine(prefix & "cause: this commit's lock refresh re-pinned " &
         "and staged " & repinned.join(", ") & ", so the content being " &
         "committed is not the content the tests ran on")
+    for problem in neighbours.problems:
+      stderr.writeLine(prefix & "certificate store: " & problem)
+    for n in neighbours.neighbours:
+      stderr.writeLine(prefix & "cause: " &
+        describeLockOnlyNeighbour(n, "the content being committed"))
     for remedy in unmetRemedies(verdict):
       stderr.writeLine(prefix & "unmet: " & remedy)
     stderr.writeLine(prefix & "remedy: run 'repro certify' on exactly what " &

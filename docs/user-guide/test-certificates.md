@@ -233,6 +233,16 @@ repro pre-commit: certificate gate: remedy: run 'repro certify' on exactly what 
 If the commit's own lock refresh re-pinned something, the report names that as the
 cause, because the content being committed is then not the content that was tested.
 
+The commit gate and the push gate both look one step further. When your local
+certificate store holds certified content that differs from the content being judged
+only in `repro.lock` or `flake.lock`, the report names that content, the commit it
+was tested on top of, and the lock file that differs. That happens whatever changed
+the lock after the tests ran: the commit's own refresh, `repro lock refresh`,
+`repro lock update`, or an edit. The search looks at the 64 most recently written
+entries of the store, and only at trees the repository still has. It fetches
+nothing, in a partial clone either, so it needs no network and the certificate hook's
+time budget does not apply to it. It never changes the verdict.
+
 This is early feedback, not enforcement. `git commit --no-verify` skips it, and the
 push gates judge the pushed content again. It stands down during a rebase,
 cherry-pick or `git am`, which re-create commits that already exist. When another
@@ -494,6 +504,11 @@ everything you tested, or run `repro certify` again on what you mean to commit.
 **The refusal blames a re-pin.** A sibling moved after your run, so the commit's lock
 refresh changed `repro.lock`. Run `repro certify` again with the refreshed lock
 staged.
+
+**The push is refused, and the refusal names certified content that differs only in
+a lock.** The lock changed after you tested, so the commit you pushed was never
+tested as it stands. Run `repro certify` (or `repro test`) on the commit you are
+pushing, then push again.
 
 **`no certificate … has no content id`.** The message names the paths. For example,
 `git update-index --no-assume-unchanged -- <path>` clears the flag it reports.
