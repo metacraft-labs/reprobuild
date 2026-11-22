@@ -659,7 +659,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-ship-confinement-\" & $getC..."),
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim",
     binary: "build/test-bin/t_addon_evidence_ships_off_host",
@@ -1392,6 +1392,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let root = getTempDir() / (\"repro-addon-uninstall-kept-\" & $..."),
+  TestSpec(
+    source: "libs/repro_addon/tests/t_addon_uninstall_rerun_removes_ship_state.nim",
+    binary: "build/test-bin/t_addon_uninstall_rerun_removes_ship_state",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let root = getTempDir() / (\"addon-uninstall-ship-\" & $getCur..."),
   TestSpec(
     source: "libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim",
     binary: "build/test-bin/t_addon_units_meet_confinement_floor",
