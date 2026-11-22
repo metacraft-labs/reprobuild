@@ -750,18 +750,28 @@ proc confirmProblem*(s: LogindSession; writtenMonoUs: int64;
 proc confirmRecordPath*(stateDir: string): string =
   stateDir / "addon" / "guard-confirm"
 
-proc writeConfirm*(stateDir, attempt, session: string) =
-  writeFileNoFollow(confirmRecordPath(stateDir), attempt & "\t" & session &
-    "\n", 0o600)
+proc writeConfirm*(stateDir, attempt: string; s: LogindSession) =
+  ## Record a confirmation of ``attempt`` with what was verified of its
+  ## session when ``confirm`` ran (id, service, remote host, creation
+  ## time): the watch re-checks these, so a confirmation made with
+  ## ``ssh host repro system addon confirm <gen>`` counts after that
+  ## session has closed. Root-only (0600) under the root-only state
+  ## directory, bound to the attempt.
+  writeFileNoFollow(confirmRecordPath(stateDir), attempt & "\t" & s.id &
+    "\t" & s.service & "\t" & s.remoteHost & "\t" & $s.createdMonoUs & "\n",
+    0o600)
 
 proc confirmedBy*(stateDir, attempt: string; writtenMonoUs: int64;
                   ownAddresses: openArray[string]): string =
-  ## The session that confirmed ``attempt``, re-checked now ("" when none
-  ## did or it no longer qualifies).
+  ## The session that confirmed ``attempt``, its recorded facts re-checked
+  ## now against the end of the network writes and the host's addresses
+  ## ("" when none did or it does not qualify).
   try:
     let f = readFile(confirmRecordPath(stateDir)).strip().split('\t')
-    if f.len != 2 or f[0] != attempt: return ""
-    let s = readLogindSession(f[1])
+    if f.len != 5 or f[0] != attempt: return ""
+    let s = LogindSession(id: f[1], service: f[2], remote: true,
+                          remoteHost: f[3],
+                          createdMonoUs: parseBiggestInt(f[4]))
     if confirmProblem(s, writtenMonoUs, ownAddresses).len == 0:
       return "repro system addon confirm from SSH session " & s.id &
         " (" & s.remoteHost & ")"

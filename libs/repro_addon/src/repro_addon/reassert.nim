@@ -976,7 +976,7 @@ proc runConfirm*(stateDir, generation: string): int =
     stderr.writeLine("confirm: refused: " & why & "; the switch is not " &
       "confirmed (spec §4.5 step 3)")
     return 1
-  writeConfirm(stateDir, m.guardAttempt, s.id)
+  writeConfirm(stateDir, m.guardAttempt, s)
   stdout.writeLine("confirm: generation " & generation & " confirmed from " &
     "SSH session " & s.id & " (" & s.remoteHost & "); the apply disarms " &
     "the guard once every invariant holds")

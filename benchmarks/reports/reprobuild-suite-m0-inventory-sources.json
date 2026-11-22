@@ -9528,7 +9528,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_network_class.nim",
       "sourceSuiteCount": 7,
-      "staticCaseCount": 40,
+      "staticCaseCount": 41,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

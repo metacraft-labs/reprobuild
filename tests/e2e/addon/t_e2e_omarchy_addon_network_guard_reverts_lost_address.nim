@@ -1030,11 +1030,17 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
            b.mux("pgrep -f '^/bin/sh " & Stubborn & " q1$'").stdout.strip() == pidBefore and
            b.mux("pgrep -f '^/bin/sh " & Stubborn & " q2$'").exitCode != 0, log)
       b.reverted("q", "EAddOnExclusiveOverlap", proc() =
-        # The harness's own fixture, put back as it was: the old instance
-        # let go, the unit started again.
-        discard b.mux("rm -f " & Flag & "; systemctl stop " & QUnit &
-          "; systemctl reset-failed " & QUnit & " 2>/dev/null; systemctl start " &
-          QUnit, 120))
+        # The harness's own fixture, put back as it was. After the stop
+        # that timed out the unit is `failed` with the old instance still
+        # in its control group, which `systemctl stop` does not signal: it
+        # is killed outright, the group waited empty, and the unit started
+        # again.
+        discard b.mux("rm -f " & Flag & "; systemctl kill --signal=SIGKILL " &
+          QUnit & " 2>/dev/null; for i in $(seq 1 30); do pgrep -f '^/bin/sh " &
+          Stubborn & " ' >/dev/null || break; sleep 1; done; systemctl " &
+          "reset-failed " & QUnit & " 2>/dev/null; systemctl start " & QUnit &
+          "; for i in $(seq 1 30); do systemctl is-active --quiet " & QUnit &
+          " && exit 0; sleep 1; done; exit 1", 120))
       let a1 = g.applyProfile(repro, "q-back", b.profileG)
       discard b.mux("rm -f " & Stubborn)
       step("(q) the fixture goes with the previous generation", a1.exitCode == 0,
@@ -1070,15 +1076,18 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
         "e".repeat(32) & "-loop --on-active=1s --on-unit-active=10s " &
         "-- /var/lib/repro/bin/repro system addon revert-network " & genA &
         " --attempt " & "e".repeat(32) & " --state-dir " & StateDir)
-      discard b.mux("sleep 15", 30)
+      discard b.mux("sleep 25", 60)
       let firing = b.guardJournal("e".repeat(32))
+      step("(s) the stale timer fires and arms a successor between passes",
+           "armed the successor" in firing, firing & "\n" & b.mux(
+             "ls -l /var/lib/repro/bin/repro; systemctl status --no-pager " &
+             "'repro-addon-guard-*' 2>&1 | head -40").stdout)
       for nn in numbersOf(g.addonRows()):
         discard b.mux("chattr +i /.snapshots/" & $nn)
       let un = b.mux(repro & " system addon uninstall").stdout
       step("(s) uninstall with a snapshot undeletable ends incomplete with " &
            "EAddOnSnapshotLeft; its loop stopped every guard unit and the lock " &
            "is gone", "EAddOnSnapshotLeft" in un and "network guard units: pass" in un and
-           "armed the successor" in firing and
            b.nb.guardUnits().len == 0 and
            b.mux("test -e /run/repro-addon-guard.lock").exitCode != 0, un)
       for nn in numbersOf(g.addonRows()):

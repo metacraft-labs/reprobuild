@@ -492,6 +492,22 @@ suite "the guard record and the marker's guard (§4.5 step 4)":
     check not recordNetworkWritesDone(stateDir, repeat('f', 32), 1, 2)
     clearPendingMarker(stateDir)
 
+  test "a recorded confirmation counts after its session has closed":
+    # `ssh host repro system addon confirm <gen>` closes its session at
+    # once: the watch re-checks what confirm verified, not logind now.
+    let a = repeat('9', 32)
+    let s = LogindSession(id: "51", service: "sshd", remote: true,
+                          remoteHost: "10.0.2.2", createdMonoUs: 5000)
+    writeConfirm(stateDir, a, s)
+    let own = @["10.0.2.15"]
+    check "confirm from SSH session 51 (10.0.2.2)" in
+      confirmedBy(stateDir, a, 4000, own)
+    check confirmedBy(stateDir, repeat('8', 32), 4000, own) == ""
+    check confirmedBy(stateDir, a, 6000, own) == ""        # before the writes
+    check confirmedBy(stateDir, a, 4000, @["10.0.2.2"]) == ""  # own address
+    clearConfirm(stateDir)
+    check confirmedBy(stateDir, a, 4000, own) == ""
+
   test "the guard lock is 0600 and is not followed through a link (T62)":
     var l = acquireGuardLock()
     l.release()
