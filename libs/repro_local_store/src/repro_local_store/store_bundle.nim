@@ -38,6 +38,7 @@ import blake3
 import repro_hash
 from repro_core import ReprobuildVersion, ReprobuildSourceRevision
 import repro_core/ambient_execution
+from repro_core/paths import joinUnderCwd
 import ../repro_local_store
 import ./store
 import ./prefix_paths
@@ -1966,7 +1967,7 @@ proc importBundle*(opts: ImportOptions; local: BundleRoots;
       for output in record.outputs:
         let path =
           if output.path.isAbsolute: normalizedPath(output.path)
-          elif outputRoot.len > 0: normalizedPath(outputRoot / output.path)
+          elif outputRoot.len > 0: joinUnderCwd(outputRoot, output.path)
           else: ""
         # The record's own claim that an output is missing is not trusted: it
         # is skipped only when nothing exists at the path, which is what
