@@ -28861,6 +28861,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_pool_gc_leaves_no_abandoned_pack_temporaries.nim",
+    binary: "build/test-bin/t_pool_gc_leaves_no_abandoned_pack_temporaries",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/integration/t_post_commit_cache_push_does_not_hold_callers_pipe.nim",
     binary: "build/test-bin/t_post_commit_cache_push_does_not_hold_callers_pipe",
     defines: @[],
@@ -31763,7 +31775,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     targetOs: soAny,
     selfInterposes: false,
     group: "",
-    singleReason: "module-level statement runs at every start-up: let originalReproOverride = getEnv(\"REPROBUILD_REPRO\")"),
+    singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
     source: "tests/integration/t_spi_leaf_fetches_thin_pack_over_partial_pool.nim",
     binary: "build/test-bin/t_spi_leaf_fetches_thin_pack_over_partial_pool",

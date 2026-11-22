@@ -79,11 +79,15 @@
 ## missing on PATH. Every case needs the built ``repro``, and a missing one is
 ## reported, not skipped.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
+import std/[json, os, osproc, strutils, tempfiles, times, unittest]
 import repro_test_support/reasoned_skip
 
 import repro_test_support
 import shared_clones
+
+# A child that exits at once; its pid then names no process.
+if paramCount() == 1 and paramStr(1) == "exit-at-once":
+  quit(0)
 
 proc q(value: string): string = quoteShell(value)
 
@@ -761,3 +765,84 @@ suite "SPI-3: the detector behind repro health, workspace status and sync":
         if line.startsWith("shared-clone-leaves") and " ok " in line:
           okLine = true
       check okLine
+
+  test "cli_health_reports_and_fixes_abandoned_pack_temporaries":
+    # Shared-Clone-Pool-Integrity §3.4 and CLI/health.md: the git pack
+    # temporaries a dead git left in a pool's ``objects/pack/`` are a warn
+    # row whose ``--fix`` removes them; a live writer's are not counted.
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let reproBin = builtRepro()
+      let root = createTempDir("repro-spi3-pack-temporaries-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      useGlobalConfig(root)
+      let origin = root / "origin.git"
+      let work = root / "seed"
+      discard must(root, "init", "-q", "--bare", origin)
+      createDir(work)
+      discard must(work, "init", "-q")
+      commitFile(work, "a", "a\n")
+      discard must(work, "remote", "add", "origin", origin)
+      discard must(work, "push", "-q", "origin", "main")
+      let ws = root / "ws"
+      createDir(ws / "projects")
+      createDir(ws / "repos")
+      writeFile(ws / "projects" / "spiproj.toml",
+        projectToml(fileUrl(origin)))
+      writeFile(ws / "repos" / "lib.toml", libFragmentToml)
+      let env = @[("REPRO_WORKSPACE_CLONES", root / "cache")]
+      let init = runShell(shellCommand(@[reproBin, "workspace", "init",
+        "spiproj", "--workspace-root=" & ws], env))
+      checkpoint("init: " & init.output)
+      check init.code == 0
+      var pools: seq[string]
+      for p in walkDirRec(root / "cache", yieldFilter = {pcDir}):
+        if p.endsWith(".git") and dirExists(p / "objects"): pools.add(p)
+      check pools.len == 1
+      let packDir = pools[0] / "objects" / "pack"
+      proc row(output: string): string =
+        for line in output.splitLines():
+          if line.startsWith("shared-clone-pack-temporaries "):
+            return line
+      let clean = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health clean: " & clean.output)
+      check " ok " in row(clean.output)
+
+      var child = startProcess(getAppFilename(), args = @["exit-at-once"])
+      let dead = child.processID
+      discard child.waitForExit()
+      child.close()
+      let hash = "8043f2e57aebc5ec763b65a0123456789abcdef0"
+      let deadPack = packDir / (".tmp-" & $dead & "-pack-" & hash & ".pack")
+      let staleIdx = packDir / "tmp_idx_YGlArC"
+      let livePack = packDir / (".tmp-" & $getCurrentProcessId() & "-pack-" &
+        hash & ".pack")
+      writeFile(deadPack, "x".repeat(4096))
+      writeFile(staleIdx, "x".repeat(1024))
+      writeFile(livePack, "x".repeat(2048))
+      setLastModificationTime(staleIdx, getTime() - initDuration(hours = 2))
+
+      let health = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health: " & health.output)
+      let warned = row(health.output)
+      check " warn " in warned
+      check "2 abandoned git pack temporaries (5KiB)" in warned
+      check "health --fix" in health.output
+      check fileExists(deadPack) and fileExists(staleIdx)
+
+      let fixed = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws, "--fix"], env))
+      checkpoint("health --fix: " & fixed.output)
+      check "fix: removed 2 file(s), 5KiB, in " & pools[0] in fixed.output
+      check not fileExists(deadPack)
+      check not fileExists(staleIdx)
+      check fileExists(livePack)
+      let after = runShell(shellCommand(@[reproBin, "health", "spiproj",
+        "--workspace-root=" & ws], env))
+      checkpoint("health after: " & after.output)
+      check " ok " in row(after.output)
