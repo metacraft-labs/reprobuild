@@ -87,18 +87,21 @@ proc writeWitness(dir, name, nim: string): string =
     "esac\nexec " & quoteShell(nim) & " \"$@\"\n")
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec})
 
-proc build(reproBin, path, home, cacheHome, witness, projectRoot,
+proc build(reproBin, path, home, witness, projectRoot,
            actionCacheRoot, storeRoot, tmp: string):
     tuple[output: string; exitCode: int] =
   let res = execCmdEx(quoteShellCommand([
     "env",
     "TMPDIR=" & tmp,
     # The shared interface nimcache (and the witness logs inside it) is under
-    # the user cache directory.
+    # the user cache directory, which is the fixture's own and the same for
+    # every variant. It is set ONCE: `env` lets a later assignment of the
+    # same variable win, and a second one naming the caller's cache directory
+    # put the witness logs outside this fixture, where `extractionCount`
+    # never looked (every count read 0) and where other runs' logs pile up.
     "XDG_CACHE_HOME=" & tmp / "cache",
     "PATH=" & path,
     "HOME=" & home,
-    "XDG_CACHE_HOME=" & cacheHome,
     "REPRO_NIM_COMPILER=" & witness,
     "REPROBUILD_STORE_ROOT=" & storeRoot,
     "REPRO_STORE_ROOT=" & storeRoot,
@@ -134,13 +137,11 @@ suite "interface extraction variants keep their own outputs":
         let pathC = parentDir(witnessC) & ":" & hostPath
         # A and B differ in HOME alone; both homes are private and empty, so
         # nothing else about the build differs between them. The cache base
-        # is pinned to the caller's, so the provider nimcache stays warm and
-        # is the same for both.
+        # is the fixture's private one (`build`), the same for both.
         let homeA = tempRoot / "home-a"
         let homeB = tempRoot / "home-b"
         createDir(homeA)
         createDir(homeB)
-        let cacheHome = getCacheDir()
         let actionCacheRoot = tempRoot / "action-cache"
         let storeRoot = tempRoot / "store"
         # A private temporary directory, and a cache directory inside it
@@ -156,7 +157,7 @@ suite "interface extraction variants keep their own outputs":
         proc step(label, path, home, witness: string): int =
           ## Build under one variant; the extraction count after it. A failed
           ## build or a wrong product is collected and asserted below.
-          let res = build(reproBin, path, home, cacheHome, witness, project,
+          let res = build(reproBin, path, home, witness, project,
             actionCacheRoot, storeRoot, tempRoot / "tmp")
           if res.exitCode != 0:
             failures.add(label & " exited " & $res.exitCode & ":\n" &

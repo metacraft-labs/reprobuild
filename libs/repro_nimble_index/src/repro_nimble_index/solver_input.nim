@@ -24,10 +24,13 @@ import std/[algorithm, options, sequtils, sets, strutils, tables, times]
 import repro_domain_types/nimble_index
 import repro_nimble_reader/conditions
 import repro_solver/version_constraints
-from repro_solver/version_encoder import DependencyDecl, newDependency
+from repro_solver/version_encoder import DependencyDecl, newDependency,
+  rangeAdmits
 
 import ./reader
 import ./from_reader
+
+export Truth, NimVersionValue, parseNimVersionValue, nimVersionText
 
 type
   NimblePlatform* = object
@@ -66,6 +69,9 @@ type
     exDuplicateTag = "duplicate-tag"
       ## another tag of the package reads as the same solver version at the
       ## SAME commit: the same source, offered once, under the first tag
+    exNimVersionUnknown = "nim-version-unknown"
+      ## an active requirement holds under a Nim-version condition, and the
+      ## solve declares no `nim` toolchain package to decide it (NPC-AREQ7)
 
   Exclusion* = object
     kind*: ExclusionKind
@@ -76,6 +82,10 @@ type
     package*: string ## the target as written; "" for a URL target
     range*: string   ## solver range text; "" for any version
     features*: seq[string]
+    nimGated*: bool
+      ## the condition holds on the platform for some Nim versions and not
+      ## others (NPC-AREQ7): the requirement binds only when the Nim the
+      ## solve chooses makes it true (``nimGateIdentity``)
 
   NimbleCandidate* = object
     package*: string  ## canonical name
@@ -92,6 +102,9 @@ type
     devRequires*: seq[SolverRequirement]
       ## root-only (`dev`) features: for the package being developed only
     nim*: seq[string] ## the active `nim` ranges (a toolchain constraint)
+    nimGatedNim*: seq[SolverRequirement]
+      ## `nim` ranges whose condition depends on the Nim version: each
+      ## applies at a Nim version that makes its condition true
     exclusions*: seq[Exclusion]
 
   NimbleSolverPackage* = object
@@ -102,6 +115,11 @@ type
     features*: seq[string] ## features some requirer in the closure named
 
   NimbleSolveOptions* = object
+    nimDeclared*: bool
+      ## the solve declares the project's `nim` toolchain package, so a
+      ## Nim-version condition is decided by the Nim it chooses; without
+      ## one, a candidate with an active requirement under such a condition
+      ## is excluded (`nim-version-unknown`, NPC-AREQ7)
     excludeNewer*: int64
       ## Unix seconds: a record first seen later is excluded (`newer`);
       ## negative for no bound
@@ -154,7 +172,25 @@ proc featureIdentity*(identity, feature: string): string =
   identity & "[" & feature & "]"
 
 proc isFeatureIdentity*(name: string): bool =
+  ## A solver device of a Nimble package -- a feature's package or a Nim
+  ## gate (``nimGateIdentity``) -- never a package of the lock.
   name.endsWith("]") and '[' in name
+
+const NimGateMarker = "[nim "
+
+proc nimGateIdentity*(owner, version: string): string =
+  ## The solver package that decides the Nim-version conditions of
+  ## ``owner``'s candidate ``version`` (``owner`` a `nimble:` identity or a
+  ## feature's, NPC-AREQ7): `nimble:lib[nim 1.2.0]`. It is active exactly
+  ## when that version is chosen, and its versions mirror the `nim`
+  ## toolchain package's: version `<n>` requires `nim` at exactly `<n>` and
+  ## the requirements whose conditions hold at Nim `<n>`. So the chosen Nim
+  ## picks the gate's version, and with it which of those requirements
+  ## bind. A space cannot occur in a feature name, so it names no feature.
+  owner & NimGateMarker & version & "]"
+
+proc isNimGateIdentity*(name: string): bool =
+  name.endsWith("]") and NimGateMarker in name
 
 proc solverVersion*(v: RecordVersion; text: var string): bool =
   ## The solver's three-component version text for a tag version: missing
@@ -205,10 +241,26 @@ proc requirementTargetName*(e: RequirementEntry): string =
 proc isPseudoRequirement*(e: RequirementEntry): bool =
   e.versionKind in {rvHead, rvRef, rvCommit}
 
-proc activeOn*(nodes: seq[ConditionNode]; p: NimblePlatform): bool =
-  ## Whether a record condition holds on platform ``p`` (as Nim's
-  ## `isDefined` answers for the target, see ``conditions.evaluate``).
-  evaluate(conditionOf(nodes), p.targetOs, p.targetCpu, p.hostOs, p.hostCpu)
+proc decideOn*(nodes: seq[ConditionNode]; p: NimblePlatform;
+               nim = none(NimVersionValue)): Truth =
+  ## A record condition on platform ``p`` (as Nim's `isDefined` answers for
+  ## the target) and, when given, at Nim ``nim`` (see ``conditions.decide``).
+  ## ``tUnknown`` when it depends on a Nim version and none is given.
+  decide(conditionOf(nodes), p.targetOs, p.targetCpu, p.hostOs, p.hostCpu,
+    nim)
+
+proc activeOn*(nodes: seq[ConditionNode]; p: NimblePlatform;
+               nim = none(NimVersionValue)): bool =
+  ## Whether a record condition holds on platform ``p`` (at Nim ``nim``):
+  ## ``decideOn`` is ``tTrue``. A caller that may meet a Nim-version
+  ## condition without a Nim version asks ``decideOn``.
+  decideOn(nodes, p, nim) == tTrue
+
+proc nimVersionValueOf*(text: string): Option[NimVersionValue] =
+  ## A Nim toolchain version as the compiler's three fields; none when it
+  ## does not read as `<major>.<minor>.<patch>`.
+  var v: NimVersionValue
+  if parseNimVersionValue(text, v): some(v) else: none(NimVersionValue)
 
 proc solverRequirement(e: RequirementEntry;
                        exclusions: var seq[Exclusion]): SolverRequirement =
@@ -229,9 +281,36 @@ proc solverRequirement(e: RequirementEntry;
 
 proc activeRequirements(es: seq[RequirementEntry]; p: NimblePlatform;
                         exclusions: var seq[Exclusion]): seq[SolverRequirement] =
+  ## The requirements active on ``p``: those whose condition holds there,
+  ## and, marked ``nimGated``, those whose condition holds there for some
+  ## Nim versions only.
   for e in es:
-    if activeOn(e.condition, p):
-      result.add solverRequirement(e, exclusions)
+    case decideOn(e.condition, p)
+    of tTrue: result.add solverRequirement(e, exclusions)
+    of tUnknown:
+      var s = solverRequirement(e, exclusions)
+      s.nimGated = true
+      result.add s
+    of tFalse: discard
+
+proc nimUnknownExclusion(owner: string; reqs: seq[SolverRequirement]):
+    Exclusion =
+  ## `nim-version-unknown`: naming each requirement and its condition, and
+  ## the remedy.
+  var parts: seq[string]
+  for r in reqs:
+    parts.add "`" & r.entry.source & "` when `" &
+      renderCondition(r.entry.condition) & "`"
+  Exclusion(kind: exNimVersionUnknown,
+    detail: owner & parts.join(", ") & " depend" &
+      (if reqs.len == 1: "s" else: "") & " on the Nim version, and this " &
+      "solve declares no `nim` to decide it: declare `uses: nim` (the " &
+      "project's Nim toolchain) so the solve chooses a Nim and evaluates " &
+      "the condition against it")
+
+proc gated(rs: seq[SolverRequirement]): seq[SolverRequirement] =
+  for r in rs:
+    if r.nimGated: result.add r
 
 proc formatTime(t: int64): string =
   ## A Unix time as UTC ISO 8601, for diagnostics.
@@ -289,12 +368,21 @@ proc candidate*(pkg: PackageEnvelope; r: VersionRecord;
     if f.rootOnly: result.devRequires.add reqs
     else: result.features.add (f.name, reqs)
   for e in r.nim:
-    if activeOn(e.condition, p):
+    let t = decideOn(e.condition, p)
+    if t != tFalse:
       var ignored: seq[Exclusion]
-      let s = solverRequirement(e, ignored)
+      var s = solverRequirement(e, ignored)
       if ignored.len > 0:
         result.exclusions.add ignored
-      result.nim.add s.range
+      if t == tTrue:
+        result.nim.add s.range
+      else:
+        s.nimGated = true
+        result.nimGatedNim.add s
+  let needsNim = gated(result.requires) & result.nimGatedNim
+  if needsNim.len > 0 and not options.nimDeclared:
+    result.exclusions.add nimUnknownExclusion(versionText(r.version) &
+      " of " & pkg.name & ": ", needsNim)
 
 proc equalVersionExclusions*(cs: var seq[NimbleCandidate]) =
   ## NPC-M6 item d. ``solverVersion`` reads `v1.0`, `1.0.0` and `1.0.0.0`
@@ -569,6 +657,17 @@ proc solverInput*(idx: var NimbleIndex; roots: openArray[string];
         for (fname, freqs) in c.features:
           if fname in newFeatures: reqs.add freqs
       enqueue(c, reqs)
+  # A requested feature whose requirements depend on the Nim version cannot
+  # be decided without a declared `nim` (NPC-AREQ7): the candidate is
+  # excluded with the others.
+  if not options.nimDeclared:
+    for _, pkg in byKey.mpairs:
+      for c in pkg.candidates.mitems:
+        for (fname, freqs) in c.features:
+          let g = gated(freqs)
+          if fname in pkg.features and g.len > 0:
+            c.exclusions.add nimUnknownExclusion("feature " & fname & " of " &
+              versionText(c.record.version) & " of " & pkg.name & ": ", g)
   for _, pkg in byKey: result.packages.add pkg
   result.packages.sort(proc (a, b: NimbleSolverPackage): int =
     cmp(a.name, b.name))
@@ -627,7 +726,7 @@ proc dependencyOf*(input: NimbleSolverInput; r: SolverRequirement):
       rangeText = if m.found: rng else: UnresolvedRangePrefix & r.entry.source
   some(newDependency(identityOf(canon), rangeText))
 
-proc lowered(input: NimbleSolverInput; reqs: seq[SolverRequirement]):
+proc lowered*(input: NimbleSolverInput; reqs: seq[SolverRequirement]):
     seq[DependencyDecl] =
   ## ``reqs`` as solver dependencies (``dependencyOf``), each requirement
   ## that names features (`lib[extra]`) followed by a dependency on each
@@ -656,10 +755,15 @@ proc perVersionDependencies*(input: NimbleSolverInput;
   ## as written: the solver then finds no candidate for it and the version
   ## cannot be chosen, where dropping it would let the version be chosen
   ## with a requirement nothing satisfies.
+  ## A ``nimGated`` requirement is not here either: it is the candidate's
+  ## Nim gate's (``nimGateVersionDependencies``).
   for c in pkg.candidates:
     if not c.offered:
       continue
-    result.add (c.version, lowered(input, c.requires))
+    var plain: seq[SolverRequirement]
+    for r in c.requires:
+      if not r.nimGated: plain.add r
+    result.add (c.version, lowered(input, plain))
 
 proc exactRange*(version: string): string =
   ## The range that admits exactly the candidate ``version``.
@@ -679,5 +783,56 @@ proc featureVersionDependencies*(input: NimbleSolverInput;
     var deps = @[newDependency(pkg.identity, exactRange(c.version))]
     for (fname, freqs) in c.features:
       if fname == feature:
-        deps.add lowered(input, freqs)
+        var plain: seq[SolverRequirement]
+        for r in freqs:
+          if not r.nimGated: plain.add r
+        deps.add lowered(input, plain)
     result.add (c.version, deps)
+
+proc candidateNimGated*(c: NimbleCandidate): bool =
+  ## Whether the candidate has a requirement or a `nim` range under a
+  ## Nim-version condition, so that its own dependencies need a Nim gate.
+  gated(c.requires).len > 0 or c.nimGatedNim.len > 0
+
+proc featureNimGated*(c: NimbleCandidate; feature: string):
+    seq[SolverRequirement] =
+  ## The requirements of ``feature`` at candidate ``c`` under a Nim-version
+  ## condition.
+  for (fname, freqs) in c.features:
+    if fname == feature: result.add gated(freqs)
+
+proc nimGateVersionDependencies*(input: NimbleSolverInput;
+                                 reqs, nimRanges: seq[SolverRequirement];
+                                 toolchainNim: string;
+                                 nimVersions: seq[string]):
+    seq[(string, seq[DependencyDecl])] =
+  ## The versions of one Nim gate (``nimGateIdentity``) and the dependencies
+  ## of each: for every candidate version ``n`` of the `nim` toolchain
+  ## package, `nim` at exactly ``n``, then every requirement of ``reqs``
+  ## whose condition holds at Nim ``n`` (evaluated as Nim evaluates it,
+  ## ``conditions.evaluateNim``). A version at which a ``nimRanges`` range
+  ## whose condition holds does not admit ``n`` is left out: the candidate
+  ## cannot be chosen with that Nim. So is a `nim` version that does not
+  ## read as `<major>.<minor>.<patch>`, whose conditions cannot be
+  ## evaluated.
+  for n in nimVersions:
+    let v = nimVersionValueOf(n)
+    if v.isNone:
+      continue
+    var admitted = true
+    for r in nimRanges:
+      if evaluate(conditionOf(r.entry.condition), input.platform.targetOs,
+          input.platform.targetCpu, input.platform.hostOs,
+          input.platform.hostCpu, v.get) and r.range.len > 0 and
+          not rangeAdmits(r.range, n):
+        admitted = false
+    if not admitted:
+      continue
+    var active: seq[SolverRequirement]
+    for r in reqs:
+      if evaluate(conditionOf(r.entry.condition), input.platform.targetOs,
+          input.platform.targetCpu, input.platform.hostOs,
+          input.platform.hostCpu, v.get):
+        active.add r
+    result.add (n, @[newDependency(toolchainNim, "=" & n)] &
+      lowered(input, active))

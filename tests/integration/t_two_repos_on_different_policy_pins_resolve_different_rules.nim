@@ -70,9 +70,9 @@ suite "TC-9b — two pins, two rules":
       check pinA != pinB
       # The two revisions really disagree about `agents`.
       check "gateMode advisory" in a.git(a.policyPkg, "show",
-        pinA & ":policy/team_policy.nim")
+        pinA & ":src/team_policy.nim")
       check "gateMode required" in b.git(b.policyPkg, "show",
-        pinB & ":policy/team_policy.nim")
+        pinB & ":src/team_policy.nim")
 
       for (ws, pin, mode, other) in [(a, pinA, "advisory", pinB),
                                      (b, pinB, "required", pinA)]:

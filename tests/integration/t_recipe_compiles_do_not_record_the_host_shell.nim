@@ -46,7 +46,14 @@
 ## path the toolchain's own closure holds: a file the compiler or the C
 ## toolchain needs for itself is the toolchain's input, whatever else uses
 ## it. The toolchain is the closure (`nix-store -qR`) of every store path the
-## provider compile's command names and of the Nim compiler it runs.
+## provider compile's command names and of the Nim compiler it runs. Also
+## less the objects the host's environment preloads into every process
+## (`LD_PRELOAD`, `/etc/ld.so.preload`): the loader maps them into `/bin/sh`
+## and into the compiler alike, so their presence in a record says nothing
+## about whether the compile started the shell. An agent harness's command
+## tracer is one, and it re-adds itself to every process it starts even
+## after `reproRun` removes the variable, so on such a host every record
+## names it.
 ##
 ## THE COMPILER. The recipe compiles run the Nim compiler named by
 ## `REPRO_NIM_COMPILER`. The installed package sets it to the Nim it ships
@@ -193,12 +200,26 @@ proc recipeCompileRecords(actionCacheRoot: string):
             result.mgetOrPut(k, @[]).add(record)
             break
 
+proc environmentPreloads(): HashSet[string] =
+  ## The objects this host's environment preloads into every process: the
+  ## `LD_PRELOAD` this test was started with and `/etc/ld.so.preload`, each
+  ## with symlinks resolved. Both lists are separated by spaces or colons
+  ## (ld.so(8), "LD_PRELOAD" and "/etc/ld.so.preload").
+  var listed = getEnv("LD_PRELOAD")
+  if fileExists("/etc/ld.so.preload"):
+    listed.add(" " & readFile("/etc/ld.so.preload"))
+  for entry in listed.split({' ', ':', '\t', '\n'}):
+    if entry.startsWith("/") and fileExists(entry):
+      result.incl(expandFilename(entry))
+
 proc hostShellOnly(): HashSet[string] =
-  ## The host shell's closure, less the toolchain's (see the header).
+  ## The host shell's closure, less the toolchain's and less what the
+  ## environment preloads into every process (see the header).
   let toolchain = nixClosure(toolchainPaths())
+  let preloads = environmentPreloads()
   for f in loaderClosure("/bin/sh"):
     let sp = storePathOf(f)
-    if sp.len == 0 or sp notin toolchain:
+    if (sp.len == 0 or sp notin toolchain) and f notin preloads:
       result.incl(f)
 
 proc useShippedCompiler() =

@@ -54,11 +54,20 @@ suite "npc-m2 unrecognised condition is unreadable":
     check f.undecided[1].condition == "else of defined(release)"
 
   test "conditions outside the set are named by kind":
-    for (cond, why) in [("NimMajor >= 2", ukToolchain),
-                        ("(NimMajor, NimMinor) >= (1, 6)", ukToolchain),
+    # NPC-AREQ7 as amended by A3 admits literal comparisons of the Nim
+    # version and `defined(posix|unix|bsd)`; the toolchain and OS-family
+    # cases below are the uses of those names that stay outside the set.
+    for (cond, why) in [("NimMajor + 1 >= 2", ukToolchain),
+                        ("NimMajor >= someConst", ukToolchain),
+                        ("NimMajor >= 0x2", ukToolchain),
+                        ("NimMajor >= \"2\"", ukToolchain),
+                        ("NimVersion >= 1", ukToolchain),
+                        ("(NimMinor, NimPatch) >= (1, 6)", ukToolchain),
+                        ("(NimMajor, NimMinor) >= (1, 6, 0)", ukToolchain),
                         ("declared(foo)", ukToolchain),
+                        ("compiles(foo())", ukToolchain),
                         ("defined(nimHasSomething)", ukToolchain),
-                        ("defined(posix)", ukOsFamily),
+                        ("defined(osx)", ukOsFamily),
                         ("defined(lockfreeChronos)", ukOtherDefine),
                         ("getEnv(\"X\") == \"1\"", ukEnvironment),
                         ("hostOS == \"osx\"", ukUnknownName),
@@ -80,7 +89,7 @@ suite "npc-m2 unrecognised condition is unreadable":
       "when defined(nimdistros):\n" &
       "  import distros\n" &
       "  foreignDep \"libcurl\"\n" &
-      "when NimMajor >= 2:\n" &
+      "when declared(foo):\n" &
       "  taskRequires \"test\", \"unittest2\"\n", "foreign.nimble")
     check f.readerClass == rcPlain
     check f.requires.len == 1
