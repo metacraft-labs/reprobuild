@@ -13526,7 +13526,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_output_removal_check_folds_case.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13871,7 +13871,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_scratch_dirs.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 10,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
