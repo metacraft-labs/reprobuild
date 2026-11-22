@@ -32,6 +32,7 @@
 ## work starts is now simply asserted.
 
 import std/[os, osproc, strtabs, strutils, unittest]
+import repro_core/process_env
 
 import repro_test_support
 
@@ -59,11 +60,8 @@ proc findRepoRoot(): string =
 proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     exitCode: int] =
   let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  var env = inheritedEnvTable()
+  env.prependPathEntry(runquotaBin)
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
 suite "Bootstrap-And-Self-Build B2: test-helpers built by engine":

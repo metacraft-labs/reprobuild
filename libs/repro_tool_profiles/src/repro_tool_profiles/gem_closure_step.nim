@@ -74,6 +74,7 @@ import std/[algorithm, os, osproc, sequtils, strtabs, strutils]
 
 from repro_core/process_exec import execArgvExCloseOnce
 import nimcrypto/[hash, sha2]
+import repro_core/process_env
 import repro_interface_artifacts
 import repro_tool_profiles/post_extract_step
 
@@ -415,10 +416,10 @@ proc checkCompiledExtensions*(selector: string; files: openArray[string];
   ## ``crtImportRefusal`` rejects, naming the file and the import. The
   ## C-runtime check of the step, separate so that it can be exercised on
   ## real PE files without a Windows host.
-  let runEnv = if env.isNil: newStringTable(modeCaseSensitive) else: env
-  if env.isNil:
-    for key, value in envPairs():
-      runEnv[key] = value
+  # A nil ``env`` means this process's environment, copied with the host's
+  # name semantics (``repro_core/process_env``): on Windows the inherited
+  # search path is spelled ``Path`` and names compare case-insensitively.
+  let runEnv = if env.isNil: inheritedEnvTable() else: env
   let cwd = if workingDir.len > 0: workingDir else: getCurrentDir()
   for file in files:
     let listed = runTool(selector, @[objdump, "-p", file], runEnv, cwd)

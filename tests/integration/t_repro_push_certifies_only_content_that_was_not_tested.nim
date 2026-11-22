@@ -40,6 +40,7 @@
 ## with hooks on. ``advisory`` is the other way to arrive at them, and has a case
 ## of its own.
 
+import repro_core/process_env
 from repro_core/process_streams import drainStream
 import std/[os, posix, sequtils, streams, strtabs, tempfiles, unittest]
 
@@ -1358,9 +1359,7 @@ suite "repro push publishes a certified dependency cycle through every member's 
       let before = (a: checkoutState(fx.app), b: checkoutState(libB.path))
       let bBefore = gitOut(libB.bare, "rev-parse", "refs/heads/main")
       let scratchBefore = isolatedScratchDirs()
-      var env = newStringTable(modeCaseSensitive)
-      for name, value in envPairs():
-        env[name] = value
+      let env = inheritedEnvTable()
       for (name, value) in daemonKeyEnv(fx.sf.daemonKey, storeKeyId) &
           @[(name: "PATH", value: fx.binDir & $PathSep & pathWithoutTool()),
             (name: "REPROBUILD_REPRO", value: fx.sf.reproBin)]:

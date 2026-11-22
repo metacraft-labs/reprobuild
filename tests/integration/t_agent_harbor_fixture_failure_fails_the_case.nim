@@ -61,6 +61,7 @@
 ## elsewhere they register no case, and this test skips with that reason.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 
 import repro_test_support
 import repro_test_support/reasoned_skip
@@ -131,9 +132,7 @@ template probeAndRunFirstCase(source: string) =
     createDir(dir)
   writeFile(injected / "cc", FailingCc)
   setFilePermissions(injected / "cc", {fpUserRead, fpUserWrite, fpUserExec})
-  let env = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    env[k] = v
+  let env = inheritedEnvTable()
   for k in ["TMPDIR", "TMP", "TEMP"]:
     env[k] = tmpRoot
   env["HOME"] = homeRoot
