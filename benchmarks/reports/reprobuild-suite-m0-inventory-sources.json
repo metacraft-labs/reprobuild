@@ -6148,7 +6148,7 @@
             "f",
             "workRoot"
           ],
-          "line": 209,
+          "line": 261,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6164,7 +6164,7 @@
             "f",
             "workRoot"
           ],
-          "line": 210,
+          "line": 262,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6180,7 +6180,7 @@
             "f",
             "workRoot"
           ],
-          "line": 270,
+          "line": 324,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
@@ -6196,12 +6196,28 @@
             "f",
             "workRoot"
           ],
-          "line": 271,
+          "line": 325,
           "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
           "patterns": [
             "cc"
           ],
           "snippet": "let res = execProcess(cc, args = ["
+        },
+        {
+          "assignedCommandVariable": "spawnerRes",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cc",
+            "f",
+            "workRoot"
+          ],
+          "line": 330,
+          "path": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let spawnerRes = execProcess(cc, args = ["
         }
       ],
       "source": "tests/integration/t_executed_binary_is_a_recorded_input.nim"
@@ -47809,7 +47825,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_executed_binary_is_a_recorded_input.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 16,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
