@@ -879,6 +879,121 @@ class GraphOwnedFixtureRebuildOnce(unittest.TestCase):
                 )
 
 
+# The binary-cache helpers a test can start by path. Each is produced by one
+# ``reprobuild.test_helpers.*`` edge, and each spelling below is one a test
+# source in this tree uses to name it.
+BINARY_CACHE_HELPERS = ("repro_binary_cache", "repro_binary_cache_m6",
+                        "repro_binary_cache_client_cli")
+_BINARY_CACHE_HELPER_REFERENCE = re.compile(
+    r'addFileExt\(\s*"(' + "|".join(BINARY_CACHE_HELPERS) + r')"'
+    r'|"test-bin"\s*/\s*"(' + "|".join(BINARY_CACHE_HELPERS) + r')"'
+)
+
+
+def binary_cache_helper_rows(repro_nim_text: str) -> dict[str, set[str]]:
+    """``binaryCacheHelperConsumers`` as ``{test source: {artifact path}}``.
+
+    The block builds its rows in a loop over ``(source, @[Alias, ...])``
+    tuples, so ``fixture_table_rows`` (which reads literal
+    ``TestGraphArtifacts(...)`` entries) does not see them. Parsed from the
+    text so a test can feed it a mutated copy of ``repro.nim``.
+    """
+    start = repro_nim_text.find("binaryCacheHelperConsumers = block:")
+    if start < 0:
+        return {}
+    end = repro_nim_text.find("\n    rows\n", start)
+    block = repro_nim_text[start : end if end > 0 else len(repro_nim_text)]
+    aliases = dict(
+        re.findall(r'(\w+)\s*=\s*TestGraphArtifact\(\s*path:\s*"([^"]+)"',
+                   block)
+    )
+    rows: dict[str, set[str]] = {}
+    for source, names in re.findall(r'\(\s*"([^"]+)",\s*@\[([^\]]*)\]\)', block):
+        rows.setdefault(source, set()).update(
+            aliases.get(name, "\0" + name) for name in re.findall(r"\w+", names)
+        )
+    return rows
+
+
+def binary_cache_helper_users(root: Path) -> dict[str, set[str]]:
+    """Every declared test source that names a binary-cache helper by path."""
+    nim_specs, _ = inventory.parse_repro_tests(root)
+    users: dict[str, set[str]] = {}
+    for spec in nim_specs:
+        text = inventory.read_text(root / spec.source)
+        for match in _BINARY_CACHE_HELPER_REFERENCE.finditer(text):
+            name = match.group(1) or match.group(2)
+            users.setdefault(spec.source, set()).add("build/test-bin/" + name)
+    return users
+
+
+class BinaryCacheHelperConsumersAreDeclared(unittest.TestCase):
+    """A test that starts a binary-cache helper declares it as a graph input.
+
+    The helpers (``build/test-bin/repro_binary_cache`` and its ``_m6`` and
+    ``_client_cli`` siblings) are built by ``reprobuild.test_helpers.*``
+    edges. A test gets them only through its row in
+    ``binaryCacheHelperConsumers``: the row orders the helper edge before the
+    test's execute edge, so a focused ``repro build '.#test#<name>'`` builds
+    the helper first. Without a row a focused run finds no helper unless an
+    earlier whole-graph build left one behind, and the case fails with a bare
+    ``OSError`` from ``startProcess`` that reads like a regression in the code
+    under test (reprobuild-pm issue 2026-11-19, ``test_publish_in_process``).
+    """
+
+    def setUp(self):
+        self.repro_nim = (REPO_ROOT / "repro.nim").read_text()
+        self.users = binary_cache_helper_users(REPO_ROOT)
+
+    def undeclared(self, repro_nim: str) -> list[str]:
+        rows = binary_cache_helper_rows(repro_nim)
+        return sorted(
+            f"{source} -> {path}"
+            for source, paths in self.users.items()
+            for path in sorted(paths - rows.get(source, set()))
+        )
+
+    def test_every_binary_cache_helper_user_has_a_row(self):
+        self.assertGreater(
+            len(self.users), 10, "no binary-cache helper users found; the "
+            "reference pattern no longer matches how tests name the helpers",
+        )
+        self.assertIn(
+            "libs/repro_binary_cache_client/tests/test_publish_in_process.nim",
+            self.users,
+        )
+        self.assertEqual(
+            self.undeclared(self.repro_nim),
+            [],
+            "tests start a binary-cache helper that their execute edge does "
+            "not declare; add them to binaryCacheHelperConsumers in repro.nim",
+        )
+
+    def test_every_row_names_a_declared_helper(self):
+        rows = binary_cache_helper_rows(self.repro_nim)
+        self.assertTrue(rows, "binaryCacheHelperConsumers did not parse")
+        for source, paths in sorted(rows.items()):
+            for path in sorted(paths):
+                self.assertNotIn("\0", path, f"{source}: unresolved {path!r}")
+                self.assertIn(Path(path).name, BINARY_CACHE_HELPERS)
+
+    def test_the_check_fails_when_a_row_is_removed(self):
+        """MUTATION: drop one consumer's row and watch the check report it."""
+        stripped, removed = re.subn(
+            r'\n\s*\("libs/repro_binary_cache_client/tests/'
+            r'test_publish_in_process\.nim",\s*@\[[^\]]*\]\),?',
+            "",
+            self.repro_nim,
+            count=1,
+        )
+        self.assertEqual(removed, 1, "mutation did not apply")
+        self.assertEqual(
+            self.undeclared(stripped),
+            ["libs/repro_binary_cache_client/tests/test_publish_in_process.nim"
+             " -> build/test-bin/repro_binary_cache"],
+        )
+
+
 class ReproInvocationIntegrationPath(unittest.TestCase):
     """M3 verification: test_repro_invocation_integration_path.
 

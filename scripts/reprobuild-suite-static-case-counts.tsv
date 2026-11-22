@@ -3146,7 +3146,7 @@ tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	15
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_flake_lock_derived_fields.py	python	11
 tests/unit/test_generated_artifact_merge_policy.py	python	19
-tests/unit/test_graph_owned_test_artifacts.py	python	27
+tests/unit/test_graph_owned_test_artifacts.py	python	30
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5
