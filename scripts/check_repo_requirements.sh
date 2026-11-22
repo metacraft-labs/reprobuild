@@ -248,11 +248,12 @@ require_contains .github/workflows/ci.yml "run: dev-exec nix build --no-update-l
 require_contains .github/workflows/ci.yml "if: always()"
 require_contains .github/workflows/ci.yml "actions/upload-artifact@v4"
 require_contains .github/workflows/benchmark.yml 'runner: '\''["linux", "x64", "benchmark"]'\'''
-# Both measurement legs require dedicated benchmark runners.
-require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macOS", "ARM64", "benchmark"]'\'''
+# Both measurement legs require dedicated benchmark runners: CIP-5 lowercase
+# capability labels plus `benchmark`, which only the dedicated runners carry.
+require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64", "benchmark"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
-require_contains .github/workflows/benchmark.yml "ref: reprobuild"
+require_contains .github/workflows/benchmark.yml "ref: 1a59932635c3f083892e70b2cc8a3111047eef70"
 require_contains .github/workflows/benchmark.yml "cmake --build build --target cmake"
 require_contains .github/workflows/benchmark.yml "run: nix develop --command just bench --quick"
 require_contains .github/workflows/benchmark.yml "actions/upload-artifact@v4"

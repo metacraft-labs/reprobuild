@@ -376,8 +376,10 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
             'runner: \'["linux", "x64", "benchmark"]\'', workflow
         )
         # Check the active measurement job, not a label array in a comment
-        # or another job. Continuous benchmarking policy requires m3's
-        # dedicated capability labels instead of the general macOS pool.
+        # or another job. Continuous benchmarking policy requires the
+        # dedicated m3 benchmark runner: CIP-5 lowercase capability labels
+        # plus `benchmark`, which only the dedicated runner carries, instead
+        # of the general or ephemeral macOS pool.
         benchmark_job = re.search(
             r"^  benchmark:\n(.*?)(?=^  \S|\Z)", workflow, re.M | re.S
         )
@@ -397,7 +399,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertEqual(len(macos_runners), 1)
         self.assertEqual(
             json.loads(macos_runners[0]),
-            ["self-hosted", "macOS", "ARM64", "benchmark"],
+            ["self-hosted", "macos", "arm64", "benchmark"],
         )
         self.assertRegex(
             benchmark_job.group(1),
@@ -406,7 +408,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertNotIn('"eph-macos-arm64"]', workflow)
         self.assertIn("metacraft-labs/runquota", workflow)
         self.assertIn("metacraft-labs/reprobuild-cmake", workflow)
-        self.assertIn("ref: reprobuild", workflow)
+        self.assertIn("ref: 1a59932635c3f083892e70b2cc8a3111047eef70", workflow)
         self.assertIn("run: nix develop --command just bench --quick", workflow)
         self.assertIn("benchmark-action/github-action-benchmark@v1", workflow)
         self.assertIn("tool: customSmallerIsBetter", workflow)
