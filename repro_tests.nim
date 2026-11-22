@@ -28897,6 +28897,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_post_commit_cache_push_covers_every_active_project.nim",
+    binary: "build/test-bin/t_post_commit_cache_push_covers_every_active_project",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g10",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_post_commit_cache_push_runs_opportunistic_gc.nim",
     binary: "build/test-bin/t_post_commit_cache_push_runs_opportunistic_gc",
     defines: @[],
