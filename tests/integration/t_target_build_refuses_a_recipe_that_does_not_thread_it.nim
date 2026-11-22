@@ -63,6 +63,7 @@
 
 import std/[algorithm, monotimes, net, os, osproc, strtabs, strutils,
   tempfiles, unittest]
+import repro_core/process_env
 when defined(posix):
   import std/posix
 import repro_peer_cache/auth
@@ -178,8 +179,7 @@ proc runRepro(root: string; args: seq[string];
                extraEnv: openArray[(string, string)]):
     tuple[code: int, output: string] =
   ## `build/bin/repro <args>` with the test's roots and ``extraEnv``.
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): env[key] = value
+  var env = inheritedEnvTable()
   env["REPRO_LOCAL_STORE"] = root / "store"
   env.del("REPRO_VARIANTS")
   for (k, v) in extraEnv: env[k] = v
@@ -233,8 +233,7 @@ proc isHostElf(path: string): bool =
 proc runBuild(root, project: string; args: seq[string];
               extraEnv: openArray[(string, string)] = []):
     tuple[code: int, output: string] =
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): env[key] = value
+  var env = inheritedEnvTable()
   env["REPROBUILD_WORK_ROOT"] = root / "work"
   env["REPROBUILD_ACTION_CACHE_ROOT"] = root / "action-cache"
   env["REPRO_LOCAL_STORE"] = root / "store"

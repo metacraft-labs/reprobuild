@@ -4,6 +4,7 @@
 ## never test-body helper compilation.
 ## This went red on f1f83dc4: no hcr-agent-lib target or producing edge existed.
 import std/[algorithm, os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 import repro_core/ambient_execution
 import repro_project_dsl
 import ../../repro as producer
@@ -91,8 +92,7 @@ when defined(linux) or defined(macosx):
       let realCompiler = uncontrolledFindExe(compiler)
       require realCompiler.len > 0
       createSymlink(realCompiler, scratch / "cc")
-      var env = newStringTable(modeCaseSensitive)
-      for key, value in envPairs(): env[key] = value
+      var env = inheritedEnvTable()
       env["PATH"] = scratch
       let refused = uncontrolledExecCmdEx(command(action(LibraryId)),
         workingDir = Root, env = env)

@@ -84,6 +84,7 @@
 ## repository's real graph, and reads a real file off disk.
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
+import repro_core/process_env
 
 import repro_test_support
 
@@ -116,11 +117,9 @@ proc runBuild(repoRoot, reproBin, selector: string;
               layerRequested = false): tuple[output: string; exitCode: int] =
   ## Drive the real CLI. ``layerRequested`` exports the opt-in variable in
   ## the CALLER's environment, which is the channel arm 3 exists to close.
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
+  var env = inheritedEnvTable()
   let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
-  env["PATH"] = runquotaBin & $PathSep & env.getOrDefault("PATH")
+  env.prependPathEntry(runquotaBin)
   if layerRequested: env[LayerEnv] = "1"
   elif env.hasKey(LayerEnv): env.del(LayerEnv)
   var args = @[reproBin.quoteShell, "build", selector,
@@ -147,11 +146,9 @@ proc runGraph(repoRoot, reproBin, selector: string): JsonNode =
   ## Ask the engine for the ACTIONS it would schedule for ``selector``. This
   ## is the lowered graph, not the recipe's source, so a comment asserting an
   ## exclusion cannot answer it.
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
+  var env = inheritedEnvTable()
   let runquotaBin = requireRunQuotaDaemonBin(repoRoot).parentDir
-  env["PATH"] = runquotaBin & $PathSep & env.getOrDefault("PATH")
+  env.prependPathEntry(runquotaBin)
   if env.hasKey(LayerEnv): env.del(LayerEnv)
   let args = @[reproBin.quoteShell, "graph", selector,
     "--view=actions", "--format=json", "--tool-provisioning=path"]

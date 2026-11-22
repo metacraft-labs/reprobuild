@@ -19,6 +19,7 @@
 ## it; what is under test is resolution, identity and the cache key.
 
 import std/[monotimes, os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 
 import repro_test_support/reasoned_skip
 
@@ -70,8 +71,7 @@ proc createProject(root: string): string =
 proc runBuild(root, project: string; args: seq[string];
               extraEnv: openArray[(string, string)] = []):
     tuple[code: int, output: string] =
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): env[key] = value
+  var env = inheritedEnvTable()
   env["REPROBUILD_WORK_ROOT"] = root / "work"
   env["REPROBUILD_ACTION_CACHE_ROOT"] = root / "action-cache"
   env["REPRO_LOCAL_STORE"] = root / "store"

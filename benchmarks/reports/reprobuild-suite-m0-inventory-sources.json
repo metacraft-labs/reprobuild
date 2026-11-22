@@ -6231,7 +6231,7 @@
             "d",
             "tools"
           ],
-          "line": 839,
+          "line": 838,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6248,7 +6248,7 @@
             "d",
             "tools"
           ],
-          "line": 858,
+          "line": 857,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6265,7 +6265,7 @@
             "d",
             "tools"
           ],
-          "line": 921,
+          "line": 920,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6282,7 +6282,7 @@
             "d",
             "tools"
           ],
-          "line": 931,
+          "line": 930,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6299,7 +6299,7 @@
             "d",
             "tools"
           ],
-          "line": 1156,
+          "line": 1155,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -6316,7 +6316,7 @@
             "d",
             "tools"
           ],
-          "line": 1166,
+          "line": 1165,
           "path": "tests/integration/t_execution_lease_confinement.nim",
           "patterns": [
             "cc"
@@ -7440,7 +7440,7 @@
             "cmd",
             "composed"
           ],
-          "line": 220,
+          "line": 219,
           "path": "tests/integration/t_macro_time_shell_out_needs_no_shell_on_the_path.nim",
           "patterns": [
             "nim-compile-verb"
@@ -9265,7 +9265,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 168,
+          "line": 169,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -9284,7 +9284,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 169,
+          "line": 170,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -9303,7 +9303,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 376,
+          "line": 377,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "cc"
@@ -9322,7 +9322,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 377,
+          "line": 378,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "gcc"
@@ -9341,7 +9341,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 394,
+          "line": 395,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -9360,7 +9360,7 @@
             "patchelfPath",
             "scratch"
           ],
-          "line": 399,
+          "line": 400,
           "path": "tests/unit/t_m9r14f_2_rpath_patching.nim",
           "patterns": [
             "dynamic-c-compiler"
@@ -19619,6 +19619,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_test_support"
       ],
@@ -37512,6 +37513,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/e2e",
@@ -43058,6 +43060,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43322,6 +43325,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_project_dsl",
         "repro_test_support"
       ],
@@ -43552,6 +43556,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43586,6 +43591,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43603,6 +43609,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43620,6 +43627,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43637,6 +43645,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43654,6 +43663,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -43671,6 +43681,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -45751,6 +45762,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -45768,6 +45780,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -45835,6 +45848,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -47389,6 +47403,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_project_dsl",
         "repro_test_support"
       ],
@@ -47563,6 +47578,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -51592,6 +51608,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_project_dsl"
       ],
       "owner": "tests/integration",
@@ -52241,6 +52258,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_test_support"
       ],
@@ -52521,7 +52539,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_core"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_nix_daemon_ipc.nim",
@@ -52709,6 +52729,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support"
       ],
       "owner": "tests/integration",
@@ -55163,6 +55184,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_project_dsl"
       ],
@@ -57414,7 +57436,9 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_core"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_ssl_edges_carry_openssl_link_path.nim",
@@ -58198,6 +58222,7 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_cli_support",
+        "repro_core",
         "repro_dsl_stdlib",
         "repro_peer_cache",
         "repro_profile",
@@ -58800,6 +58825,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_core",
         "repro_test_support",
         "repro_tool_profiles"
       ],

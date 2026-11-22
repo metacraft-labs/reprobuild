@@ -1,13 +1,14 @@
 from repro_core/process_streams import drainStream
 import std/[dynlib, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 import repro_project_dsl/install_mirror_runtime
 import repro_project_dsl/install_mirror_relocation
 import repro_test_support
 
 when defined(linux):
   proc cleanEnv(): StringTableRef =
-    result = newStringTable(modeCaseSensitive)
-    for key, value in envPairs():
+    result = newEnvTable()
+    for key, value in inheritedEnvTable():
       if key notin ["LD_LIBRARY_PATH", "LIBRARY_PATH", "LD_PRELOAD"]:
         result[key] = value
     result["REPRO_M9R30_NEEDED_CHECK"] = "0"

@@ -56,6 +56,7 @@
 ## the real profile compile, interface extraction and planner.
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 from repro_core/paths import extendedPath
 from repro_core/process_streams import drainStream
 
@@ -131,8 +132,8 @@ else:
       doAssert fileExists(result / rel), "staged layout lacks " & rel
 
   proc scrubbedEnv(root: string): StringTableRef =
-    result = newStringTable(modeCaseSensitive)
-    for k, v in envPairs():
+    result = newEnvTable()
+    for k, v in inheritedEnvTable():
       let name = k.toUpperAscii()
       if name.startsWith("REPROBUILD_") or name.endsWith("_SRC"):
         continue
