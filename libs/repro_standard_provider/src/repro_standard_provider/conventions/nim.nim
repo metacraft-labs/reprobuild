@@ -750,6 +750,10 @@ proc nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource: string;
     "c",
     "--skipParentCfg",
     "--skipUserCfg",
+    # Nimble-Package-Catalog NPC-AREQ22 (threat model G17): the system
+    # `nim.cfg` names Nimble's directories, which `--skipUserCfg` does not
+    # drop; a package reaches the compile only as a `--path:`.
+    "--noNimblePath",
     "--compileOnly",
     "--noLinking",
     "--nimcache:" & nimcacheDir,
@@ -1902,6 +1906,7 @@ proc emitTestAction(projectRoot, nimExe, testFile: string;
     "-r",
     "--skipParentCfg",
     "--skipUserCfg",
+    "--noNimblePath",
     "--hints:off",
     "--warnings:off",
     "--path:" & (projectRoot / "src"),

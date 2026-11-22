@@ -30,7 +30,7 @@
 ## so the host inventory is not consulted at all; the PATH case drops a stub
 ## executable into the fixture. No mocks.
 
-import std/[os, strutils, unittest]
+import std/[os, sets, strutils, unittest]
 from repro_core/paths import extendedPath
 import repro_test_support
 
@@ -310,11 +310,40 @@ suite "M0/GM4b — previewPackageResolutions resolves like the apply":
       adapter: "scoop",
       receiptDigest: pid,
       createdAtUnix: 1000))
-    store.registerRoot("gen-1", rkProfile)
-    store.attachPrefixToRoot("gen-1", pid)
-    check scoopAppHolders(store, "ripgrep").len == 0
+    # The caller's own `profile` root is not a holder; another state
+    # directory's is.
+    let own = OwnProfileRoots(keyPrefix: "home/own-key/",
+      bareIds: toHashSet(["gen-legacy"]))
+    store.registerRoot("home/own-key/gen-1", rkProfile)
+    store.attachPrefixToRoot("home/own-key/gen-1", pid)
+    store.registerRoot("gen-legacy", rkProfile)
+    store.attachPrefixToRoot("gen-legacy", pid)
+    check scoopAppHolders(store, "ripgrep", own).len == 0
+    store.registerRoot("home/other-key/gen-1", rkProfile)
+    store.attachPrefixToRoot("home/other-key/gen-1", pid)
     store.registerRoot("dev-shell-1", rkSession)
     store.attachPrefixToRoot("dev-shell-1", pid)
-    let holders = scoopAppHolders(store, "ripgrep")
-    check holders.len == 1
-    check holders[0] == "dev-shell-1 (session)"
+    let holders = scoopAppHolders(store, "ripgrep", own)
+    check holders == @["dev-shell-1 (session)",
+      "home/other-key/gen-1 (profile)"]
+
+    # `ownProfileRootsOf` reads the state directory without creating
+    # anything. One with no `store-root-key` and no `generations/` owns no
+    # root, so every `profile` root holds: the guard retains.
+    let bareStateDir = FixtureRoot / "own-roots-none"
+    resetDir(bareStateDir)
+    let none = ownProfileRootsOf(bareStateDir)
+    check none.keyPrefix.len == 0
+    check none.bareIds.len == 0
+    check not fileExists(extendedPath(storeRootKeyPath(bareStateDir)))
+    check scoopAppHolders(store, "ripgrep", none).len == 4
+    # With a key and a generation directory, both name its own roots; a
+    # stray file under `generations/` is not a generation.
+    let keyedStateDir = FixtureRoot / "own-roots-keyed"
+    resetDir(keyedStateDir)
+    let key = stateDirRootKey(keyedStateDir)
+    createDir(extendedPath(generationDir(keyedStateDir, "gen-legacy")))
+    writeFile(extendedPath(generationsRoot(keyedStateDir) / "stray"), "")
+    let keyed = ownProfileRootsOf(keyedStateDir)
+    check keyed.keyPrefix == profileRootIdForKey(key, "")
+    check keyed.bareIds == toHashSet(["gen-legacy"])

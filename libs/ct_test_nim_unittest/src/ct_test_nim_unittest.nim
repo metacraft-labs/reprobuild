@@ -198,6 +198,11 @@ proc build*(tool: BuildNimUnittest;
   if warningsOff:
     cliArgs.add(cliArg(name = "warningsOff", value = true,
       alias = "--warnings:off"))
+  # Every Nim edge drops the installation's `nimblepath` entries (Nimble's
+  # `$home/.nimble` and `/opt/nimble`): a package reaches the compile only
+  # as a `--path:` (Nimble-Package-Catalog NPC-AREQ22).
+  cliArgs.add(cliArg(name = "noNimblePath", value = true,
+    alias = "--noNimblePath"))
 
   # ``defines`` / ``paths`` / ``imports`` are repeated concat-form flags
   # matching the ``nim.c`` typed-tool surface (``-d:foo``, ``--path:dir``,
@@ -338,9 +343,11 @@ proc build*(tool: BuildNimUnittest;
   # ``typedTestBinary = false`` leaves the TYPED OUTPUT off the graph (the
   # handle is still returned). Test-Binary-Grouping M2 registers every
   # grouped source's own compile as a FALLBACK edge, built only when its
-  # group fails to compile; consumers that enumerate the graph's test
-  # binaries by this type (``repro test --shard``) must not see those as a
-  # second copy of the group's cases.
+  # group fails to compile; a consumer that enumerates the graph's test
+  # binaries by this type must not see those as a second copy of the group's
+  # cases. (``repro test --shard`` was such a consumer; it now partitions the
+  # selection's test commands instead, so nothing in this repository reads
+  # the type today.)
   #
   # The handle carries the DECLARED OUTPUT (`<binary>.exe` on Windows), not
   # the spelling the caller passed: `run` / `runTest` / `list` turn

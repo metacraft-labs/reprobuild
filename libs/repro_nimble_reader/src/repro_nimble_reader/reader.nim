@@ -168,6 +168,10 @@ type
     foreignDeps*: seq[ForeignDep]
     undecided*: seq[Undecided]
     flags*: set[Flag]
+    hooks*: seq[string]
+      ## the install hooks the file declares, as `before install` /
+      ## `after install`, in file order and each once; their presence is
+      ## `has_hooks`. The bodies are never read.
 
   ReaderOptions* = object
     admitIniFormat*: bool
@@ -667,6 +671,9 @@ proc handleExpr(w: var Walker; s: Stmt; ctx: Ctx) =
       if args.len >= 1 and args[0].kind == ekIdent and
           nimIdentEq(args[0].text, "install"):
         w.file.flags.incl flHasHooks
+        let hook = (if nimIdentEq(name, "before"): "before" else: "after") &
+          " install"
+        if hook notin w.file.hooks: w.file.hooks.add hook
       else:
         w.file.flags.incl flHasTasks
       return
@@ -791,7 +798,11 @@ proc readIni(w: var Walker; src: string) =
               w.file.flags.incl flHasTasks
           of "beforehooks", "afterhooks":
             for t in splitList(ev.value):
-              if normalize(t) == "install": w.file.flags.incl flHasHooks
+              if normalize(t) == "install":
+                w.file.flags.incl flHasHooks
+                let hook = (if normalize(ev.key) == "beforehooks": "before"
+                            else: "after") & " install"
+                if hook notin w.file.hooks: w.file.hooks.add hook
               else: w.file.flags.incl flHasTasks
           of "entrypoints", "testentrypoint":
             discard

@@ -10,6 +10,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/rust_toolchain_pins
+import repro_dsl_stdlib/rust_linux_relocation
 export packages_schema
 
 # ---------------------------------------------------------------------------
@@ -131,6 +132,13 @@ package cargo:
       executablePath = "bin/cargo",
       packageId = "rust@1.94.0",
       cpu = "x86_64",
+      elfRuntimePackage = RustLinuxRuntimePackage,
+      elfInterpreter = RustLinuxLoader,
+      elfRunpath = RustLinuxRunpath[0],
+      elfRunpath = RustLinuxRunpath[1],
+      elfPatchDir = RustLinuxPatchDirs[0],
+      elfPatchDir = RustLinuxPatchDirs[1],
+      elfPatchDir = RustLinuxPatchDirs[2],
       os = "linux",
       lockIdentity = "tarball:rust@1.94.0:linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
       version = "1.94.0"
@@ -197,6 +205,13 @@ package cargo:
       executablePath = "bin/cargo",
       packageId = "rust@1.97.1",
       cpu = "x86_64",
+      elfRuntimePackage = RustLinuxRuntimePackage,
+      elfInterpreter = RustLinuxLoader,
+      elfRunpath = RustLinuxRunpath[0],
+      elfRunpath = RustLinuxRunpath[1],
+      elfPatchDir = RustLinuxPatchDirs[0],
+      elfPatchDir = RustLinuxPatchDirs[1],
+      elfPatchDir = RustLinuxPatchDirs[2],
       os = "linux",
       lockIdentity = "tarball:rust@1.97.1:linux:sha256:88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f",
       version = "1.97.1"
