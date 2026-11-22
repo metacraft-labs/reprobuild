@@ -28,6 +28,7 @@ import std/[atomics, exitprocs, nativesockets, net, options, os, osproc, random,
 import repro_core/process_env
 
 import repro_nimble_generator
+import repro_nimble_generator/origin_git
 import repro_nimble_index
 import repro_domain_types/nimble_index
 
@@ -173,8 +174,15 @@ proc cgi(cfg: ServerConfig; req: auto): string =
     env["HTTP_CONTENT_ENCODING"] = req.headers["content-encoding"]
   if req.headers.hasKey("git-protocol"):
     env["GIT_PROTOCOL"] = req.headers["git-protocol"]
-  let p = startProcess(cfg.gitBin, args = ["http-backend"], env = env,
-    options = {})
+  # The server thread starts children while the generator's fetch edges
+  # may start theirs on other threads: under the same lock, with this
+  # side's pipe ends close-on-exec, so neither holds the other's open.
+  var p: Process
+  withSpawnLock:
+    p = startProcess(cfg.gitBin, args = ["http-backend"], env = env,
+      options = {})
+    markCloseOnExec([cint(p.outputHandle), cint(p.errorHandle),
+      cint(p.inputHandle)])
   p.inputStream.write(req.body)
   p.inputStream.close()
   let output = drainStream(p.outputStream)
@@ -253,9 +261,13 @@ proc serve(cfg: ServerConfig) {.thread.} =
               let commit = parts[3][0 ..< parts[3].len - ".tar.gz".len]
               let repo = cfg.root / parts[0] / parts[1] & ".git"
               if dirExists(repo):
-                let p = startProcess(cfg.gitBin, args = ["--git-dir=" & repo,
-                  "archive", "--format=tar.gz", "--prefix=" & parts[1] & "-" &
-                  commit & "/", commit], options = {})
+                var p: Process
+                withSpawnLock:
+                  p = startProcess(cfg.gitBin, args = ["--git-dir=" & repo,
+                    "archive", "--format=tar.gz", "--prefix=" & parts[1] &
+                    "-" & commit & "/", commit], options = {})
+                  markCloseOnExec([cint(p.outputHandle),
+                    cint(p.errorHandle), cint(p.inputHandle)])
                 let body = drainStream(p.outputStream)
                 let code = p.waitForExit()
                 p.close()

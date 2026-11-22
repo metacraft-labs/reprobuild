@@ -17,6 +17,12 @@
 ##   origin supplies. Under `cooldown_days` a version is held -- recorded in
 ##   the observation with its first sighting, not in the index -- until it
 ##   has been observable that long (threat model G8).
+## * **Snapshots** (NPC-AREQ31 item 5). A package whose origin lists no tag
+##   that reads as a version, and that has no `tag` record, is sighted at the
+##   commit its `HEAD` names, as a `snapshot` dated by its first sighting.
+##   It is held and admitted like any version. A later `HEAD` is another
+##   sighting and so another record; the earlier ones stay, like every
+##   record, and the solver input decides which one is offered.
 ## * **Events** compare the previous observation with this one: the origin
 ##   the registry names (`repointed`), whether it answers (`gone`), the
 ##   commit each recorded tag names (`tag-moved`, `tag-removed`) and, when
@@ -131,6 +137,18 @@ proc hexToId(hex: string; id: var array[32, byte]): bool =
 
 proc versionLabel(r: VersionRecord): string =
   if r.version.tag.len > 0: r.version.tag else: r.commit
+
+proc hasTagRecord*(records: openArray[VersionRecord]): bool =
+  ## Whether a package has a `tag` record: then it gets no new snapshot
+  ## (NPC-AREQ31 item 5).
+  for r in records:
+    if r.version.kind == rvkTag: return true
+  false
+
+proc datedAt(v: RecordVersion; firstSeen: uint64): RecordVersion =
+  ## A sighted version as it is held or recorded: a snapshot takes the UTC
+  ## date of its first sighting; any other kind is unchanged.
+  if v.kind == rvkSnapshot: snapshotVersion(firstSeen) else: v
 
 # ---------------------------------------------------------------------------
 # Records
@@ -394,11 +412,18 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
     if prevObs.isSome: obs.held = prevObs.get.held
   else:
     var seenNow = initHashSet[string]()
-    for s in input.sightings:
-      let key = sightingKey(s.version, s.commit)
+    let tagged = hasTagRecord(prevRecords)
+    for sighted in input.sightings:
+      if sighted.version.kind == rvkSnapshot and tagged:
+        # The upstream adopted versioning: its snapshots are retired, and
+        # no new one is taken.
+        continue
+      let key = sightingKey(sighted.version, sighted.commit)
       if key in have or key in seenNow: continue
       seenNow.incl key
       let firstSeen = heldBefore.getOrDefault(key, now)
+      let s = Sighting(version: datedAt(sighted.version, firstSeen),
+        commit: sighted.commit)
       let admitted = firstSeen + params.cooldownSeconds <= now
       let label = input.name & "@" & (if s.version.tag.len > 0: s.version.tag
                                       else: s.commit)
@@ -451,19 +476,29 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
 
 proc sightingsOf*(name: string; refs: RefsAnswer; trackHead: bool;
                   pinnedCommit: string;
-                  requestedCommits: seq[string]): seq[Sighting] =
+                  requestedCommits: seq[string];
+                  hasTagRecord = false): seq[Sighting] =
   ## What a package offers now. A package an override pins to one commit
-  ## offers that commit only.
+  ## offers that commit only. A package whose origin lists no tag that
+  ## reads as a version, and that has no `tag` record (``hasTagRecord``),
+  ## offers a snapshot of the commit its `HEAD` names (NPC-AREQ31 item 5);
+  ## its date is set when it is first sighted.
   if pinnedCommit.len > 0:
     return @[Sighting(version: RecordVersion(kind: rvkCommit),
       commit: pinnedCommit)]
   if refs.state != anOk:
     return
   var commits = initHashSet[string]()
+  var versionTag = false
   for (t, c) in refs.tags:
     if validTagName(t):
-      result.add Sighting(version: versionOfTag(t), commit: c)
+      let v = versionOfTag(t)
+      if v.kind == rvkTag: versionTag = true
+      result.add Sighting(version: v, commit: c)
       commits.incl c
+  if not versionTag and not hasTagRecord and refs.head.len > 0:
+    result.add Sighting(version: RecordVersion(kind: rvkSnapshot),
+      commit: refs.head)
   if trackHead and refs.head.len > 0:
     result.add Sighting(version: RecordVersion(kind: rvkHead,
       tag: (if validTagName(refs.headRef): refs.headRef else: "HEAD")),
