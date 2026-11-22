@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3152,
+    "nimTestBinaries": 3153,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 836,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3204
+    "testEntries": 3205
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1835,7 +1835,7 @@
     "classificationCounts": {
       "graph-fixture": 29,
       "integration": 1763,
-      "platform/destructive": 200,
+      "platform/destructive": 201,
       "pure unit": 836,
       "unclassified": 376
     },
@@ -2057,9 +2057,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3152,
+    "nimTestBinaryCount": 3153,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3204
+    "testEntryCount": 3205
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -10053,8 +10053,8 @@
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -10390,13 +10390,15 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_addon"
+        "repro_addon",
+        "repro_core",
+        "repro_test_support"
       ],
       "owner": "libs/repro_addon",
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim",
       "sourceSuiteCount": 3,
-      "staticCaseCount": 12,
+      "staticCaseCount": 16,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -11527,6 +11529,23 @@
       "source": "libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim",
       "sourceSuiteCount": 16,
       "staticCaseCount": 73,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_uninstall_rerun_removes_ship_state",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_addon"
+      ],
+      "owner": "libs/repro_addon",
+      "requiresReproBinary": false,
+      "source": "libs/repro_addon/tests/t_addon_uninstall_rerun_removes_ship_state.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

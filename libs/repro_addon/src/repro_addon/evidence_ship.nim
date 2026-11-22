@@ -34,7 +34,7 @@
 ## and exits 0; the sink side sees the heartbeat stop. A configuration that
 ## cannot be read exits 2.
 
-import std/[asyncdispatch, json, os, posix, strutils, times]
+import std/[asyncdispatch, json, os, posix, strutils, sysrand, times]
 
 import repro_core/file_lock
 import repro_peer_cache/evidence as sinkEvidence
@@ -462,13 +462,34 @@ proc shipRunWait*(site: ShipSite; heartbeatSec: int): int =
 # ---------------------------------------------------------------------------
 
 const SystemdRunCandidates* = ["/usr/bin/systemd-run", "/bin/systemd-run"]
-const ConfinedExeCopy* = "/var/lib/repro-addon-evidence-run/repro"
-  ## The copy of a binary outside the store that a confined run executes,
-  ## root's, 0755, made just before the run and removed just after it.
-  ## Not in /run (mounted ``noexec``) and not in the dynamic user's state
-  ## directory (systemd refuses to execute from it: measured on debian-13,
-  ## "Permission denied" at EXEC); in practice only an uninstall re-run
-  ## whose store is already gone needs it.
+const ConfinedExeCopyDir* = "/var/lib/repro-addon-evidence-run"
+  ## Where a confined run's copy of a binary outside the store lives:
+  ## root's, 0755, each run in a directory of its own
+  ## (``<dir>/run-<pid>-<random>/repro``), made just before the run and
+  ## removed just after it, so two runs at once never share or remove each
+  ## other's copy. Not in /run (mounted ``noexec``) and not in the dynamic
+  ## user's state directory (systemd refuses to execute from it: measured
+  ## on debian-13, "Permission denied" at EXEC). In practice only an
+  ## uninstall re-run whose store is already gone needs it. Uninstall
+  ## removes the directory with the shipping unit's state.
+
+proc escapeControl*(s: string): string =
+  ## ``s`` with every byte that is not printable ASCII, a newline or a tab
+  ## written as ``\xNN`` (and ``\`` as ``\\``): text a confined run
+  ## printed after decoding the sink's bytes, before root prints it, so a
+  ## hostile sink cannot reach the operator's terminal with escape
+  ## sequences.
+  const hexd = "0123456789abcdef"
+  when mutated("confined-output-unescaped"):
+    return s
+  for c in s:
+    let b = ord(c)
+    if c == '\\': result.add("\\\\")
+    elif c in {'\n', '\t'} or (b >= 0x20 and b < 0x7f): result.add(c)
+    else:
+      result.add("\\x")
+      result.add(hexd[b shr 4])
+      result.add(hexd[b and 15])
 
 proc sinkAddressOf*(endpoint: string): string =
   ## The address part of ``address:port`` (IPv6 without its brackets).
@@ -500,7 +521,8 @@ proc confinedReproExe*(unitFile = unitPath(EvidenceShipUnit);
   self
 
 proc confinedRunArgv*(conf: EvidenceConf; command: openArray[string];
-                      reproExe = confinedReproExe(); systemdRun = ""): seq[string] =
+                      reproExe = confinedReproExe(); systemdRun = "";
+                      exeCopy = ConfinedExeCopyDir / "run" / "repro"): seq[string] =
   ## ``systemd-run`` for one confined run of ``repro system addon
   ## <command>``: waits for it, passes its output through, and gives it
   ## every line of the shipping unit's confinement.
@@ -519,13 +541,13 @@ proc confinedRunArgv*(conf: EvidenceConf; command: openArray[string];
     result.add("-p")
     result.add(line)
   # A binary outside the store may sit where the sandbox hides it (an
-  # operator's /root, the test bed's /root/addon): the run executes a copy
-  # of that one file in the dynamic user's state directory (``runConfined``
-  # makes it; systemd-run looks the command up on the host, so it must
-  # exist there too).
+  # operator's /root, the test bed's /root/addon): the run executes root's
+  # copy of that one file, ``exeCopy``, under ``ConfinedExeCopyDir``
+  # (``runConfined`` makes it; systemd-run looks the command up on the
+  # host, so it must exist there too).
   result.add("--")
   result.add(if reproExe.startsWith(StoreRoot & "/"): reproExe
-             else: ConfinedExeCopy)
+             else: exeCopy)
   result.add("system")
   result.add("addon")
   for c in command: result.add(c)
@@ -535,25 +557,50 @@ var confinedRunner*: proc (argv: seq[string]): HostToolResult {.nimcall.} = nil
   ## ``systemd-run`` argv instead of the host (a unit test has no PID 1 to
   ## start a transient unit).
 
+proc confinedCopyPath*(pid = getCurrentProcessId(); nonce = ""): string =
+  ## This run's own copy (``ConfinedExeCopyDir``): a directory per run.
+  var n = nonce
+  if n.len == 0:
+    for b in urandom(6): n.add(toHex(int(b), 2).toLowerAscii())
+  when mutated("confined-copy-shared"):
+    # FALSIFYING BUILD: every run shares one copy, and the first to finish
+    # removes it from under the others.
+    discard n
+    return ConfinedExeCopyDir / "repro"
+  ConfinedExeCopyDir / ("run-" & $pid & "-" & n) / "repro"
+
 proc runConfined*(conf: EvidenceConf; command: openArray[string]):
     HostToolResult =
-  ## One confined run (``confinedRunArgv``), its output captured.
+  ## One confined run (``confinedRunArgv``), its output captured with every
+  ## control byte escaped (``escapeControl``): it was printed by the
+  ## process that decoded the sink's bytes.
   if confinedRunner != nil:
-    return confinedRunner(confinedRunArgv(conf, command,
-                                          systemdRun = "/usr/bin/systemd-run"))
+    result = confinedRunner(confinedRunArgv(conf, command,
+                                            systemdRun = "/usr/bin/systemd-run"))
+    result.output = escapeControl(result.output)
+    return
   let exe = confinedReproExe()
   let copied = not exe.startsWith(StoreRoot & "/")
+  let copy = confinedCopyPath()
   if copied:
-    createDir(parentDir(ConfinedExeCopy))
-    discard posix.chmod(parentDir(ConfinedExeCopy).cstring, Mode(0o755))
-    writeFileAtomic(ConfinedExeCopy, readFile(exe), 0o755)
+    createDir(ConfinedExeCopyDir)
+    discard posix.chmod(ConfinedExeCopyDir.cstring, Mode(0o755))
+    createDir(parentDir(copy))
+    discard posix.chmod(parentDir(copy).cstring, Mode(0o755))
+    writeFileAtomic(copy, readFile(exe), 0o755)
   try:
-    result = runHostTool(confinedRunArgv(conf, command, reproExe = exe),
+    result = runHostTool(confinedRunArgv(conf, command, reproExe = exe,
+                                         exeCopy = copy),
                          timeoutSec = EvidenceShipTimeoutStartSec + 60)
+    result.output = escapeControl(result.output)
   finally:
     if copied:
-      try: removeDir(parentDir(ConfinedExeCopy))
+      # Only this run's own directory; the shared parent goes only when no
+      # other run has one in it (an rmdir of a non-empty one fails).
+      try: removeDir(parentDir(copy))
       except OSError: discard
+      when not mutated("confined-copy-shared"):
+        discard posix.rmdir(ConfinedExeCopyDir.cstring)
 
 proc shipFor*(site: ShipSite; conf: EvidenceConf; host: string;
               forceHeartbeat = false): ShipResult =
