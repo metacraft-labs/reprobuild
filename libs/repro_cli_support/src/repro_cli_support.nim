@@ -8678,6 +8678,13 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
         nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
           actionIdentity.selectedStorePath):
       return (servable: false, refreshed: false)
+  # A path-mode identity resolved before path mode followed a Nix Darwin
+  # cc-wrapper's SDK host libraries lacks their header and library
+  # directories, and serving it would fail every `-liconv` link again.
+  # Re-resolve it; profiles without such a wrapper never match.
+  for profile in identity.profiles:
+    if pathProfileLacksNixDarwinSdkChannels(profile):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 

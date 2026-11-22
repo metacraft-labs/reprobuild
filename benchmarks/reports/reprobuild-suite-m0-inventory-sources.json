@@ -2,7 +2,7 @@
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
     "nimTestBinaries": 3135,
-    "pureUnitConsolidationGroups": 91,
+    "pureUnitConsolidationGroups": 92,
     "pureUnitTests": 830,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
     "testEntries": 3187
@@ -1684,6 +1684,20 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_m9r15p_1_6_share_only_lib_cmake.nim",
+        "tests/unit/t_nix_propagated_store_paths.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 8,
       "defines": [],
       "dependencyShape": [
@@ -1703,14 +1717,13 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 2,
       "defines": [],
       "dependencyShape": [
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "sources": [
-        "tests/unit/t_nix_propagated_store_paths.nim",
         "tests/unit/t_nonredistributable_publish_gate.nim",
         "tests/unit/t_store_path_farm.nim"
       ],
@@ -65052,13 +65065,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_nix_propagated_store_paths.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

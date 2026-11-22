@@ -1222,6 +1222,10 @@ proc enforcePathToolVersionRange(profile: PathOnlyToolProfile;
                                  useDef: InterfaceToolUse)
   ## Defined beside `enforceUsesVersionRange`.
 
+proc addPathToolNixDarwinSdkLibraryChannels*(
+    profile: var PathOnlyToolProfile)
+  ## Defined beside `addNixDarwinSdkLibraryChannels`.
+
 proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
                          lookup: SidecarPathLookup;
                          holdToDeclaredRange = true): PathOnlyToolProfile =
@@ -1260,6 +1264,7 @@ proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
         useDef.packageSelector, useDef.executableName)
       if holdToDeclaredRange:
         enforcePathToolVersionRange(result, useDef)
+      addPathToolNixDarwinSdkLibraryChannels(result)
       refreshProfileIdentity(result)
       return
 
@@ -1286,6 +1291,7 @@ proc resolvePathOnlyTool(useDef: InterfaceToolUse; pathValue: string;
     useDef.packageSelector, useDef.executableName)
   if holdToDeclaredRange:
     enforcePathToolVersionRange(result, useDef)
+  addPathToolNixDarwinSdkLibraryChannels(result)
 
   refreshProfileIdentity(result)
 
@@ -2247,15 +2253,85 @@ proc nixDarwinWrapperSdkLibraries*(paths: openArray[string]): seq[string] =
     inc index
   result = queue[sdkCount .. ^1]
 
-proc addNixDarwinSdkLibraryChannels*(profile: var PathOnlyToolProfile) =
-  ## Hand the Darwin SDK's host libraries (``nixDarwinWrapperSdkLibraries``)
-  ## to the compiler's consumers on the header and library search paths: the
-  ## two channels through which Apple's own SDK provides them. No-op for every
-  ## profile without a Darwin cc-wrapper among its realized store paths, and so
-  ## for every Linux profile.
-  for library in nixDarwinWrapperSdkLibraries(profile.realizedStorePaths):
+proc addNixDarwinSdkLibraryChannels*(profile: var PathOnlyToolProfile;
+                                     wrappers: openArray[string]) =
+  ## Hand the host libraries of the Apple SDK of each Darwin cc-wrapper in
+  ## ``wrappers`` (``nixDarwinWrapperSdkLibraries``) to the compiler's
+  ## consumers on the header and library search paths: the two channels
+  ## through which Apple's own SDK provides them. Nothing else of the profile
+  ## changes: no store path, prefix or ``bin/`` directory is added. No-op when
+  ## none of ``wrappers`` is a Darwin cc-wrapper, and so on every Linux host.
+  for library in nixDarwinWrapperSdkLibraries(wrappers):
     addUniquePath(profile.cpathList, library / "include")
     addUniquePath(profile.libraryPathList, library / "lib")
+
+proc addNixDarwinSdkLibraryChannels*(profile: var PathOnlyToolProfile) =
+  ## The Nix-realized form: the wrappers are the profile's realized store
+  ## paths.
+  let wrappers = profile.realizedStorePaths
+  addNixDarwinSdkLibraryChannels(profile, wrappers)
+
+proc pathToolInstallationPrefixes*(resolvedExecutablePath: string):
+    seq[string] =
+  ## The installation prefixes a ``$PATH``-resolved executable belongs to,
+  ## where a compiler wrapper keeps its ``nix-support`` metadata: the parent
+  ## of the ``bin/`` directory that holds it, first as found on ``$PATH`` and
+  ## then with symbolic links resolved. A Nix dev shell puts the wrapper's own
+  ## ``<store path>/bin`` on ``$PATH``; a profile or ``buildEnv`` puts a
+  ## directory of links into it there instead. Empty for an executable that
+  ## is not directly inside a ``bin/`` directory.
+  proc prefixOf(path: string): string =
+    let binDir = parentDir(path)
+    if binDir.len == 0 or extractFilename(binDir) != "bin":
+      return ""
+    parentDir(binDir)
+  if resolvedExecutablePath.len == 0:
+    return
+  let found = prefixOf(resolvedExecutablePath)
+  if found.len > 0:
+    result.add(found)
+  when defined(posix):
+    let real =
+      try: expandFilename(resolvedExecutablePath)
+      except OSError: ""
+    if real.len > 0:
+      let resolved = prefixOf(real)
+      if resolved.len > 0 and resolved notin result:
+        result.add(resolved)
+
+proc addPathToolNixDarwinSdkLibraryChannels*(
+    profile: var PathOnlyToolProfile) =
+  ## Path mode's counterpart of the Nix rule in
+  ## ``addNixDarwinSdkLibraryChannels``: when the executable path mode found
+  ## on ``$PATH`` is a nixpkgs Darwin cc-wrapper (a Nix dev shell's compiler),
+  ## its SDK's host libraries reach the header and library search paths, as
+  ## they do for the same wrapper realized by Nix.
+  ##
+  ## The tool itself still comes from ``$PATH`` and from nothing else. What
+  ## this follows is metadata of the executable already resolved, read for
+  ## the same reason as in Nix mode: the wrapper's own setup hooks would add
+  ## these libraries in a Nix shell, and an action runs no setup hooks. A dev
+  ## shell's environment does not reach the action either, so without this a
+  ## Rust build script, which links ``-liconv`` on every Apple target, fails
+  ## with ``ld: library 'iconv' not found``. The directories enter the
+  ## profile fingerprint like every other channel (``profileFingerprintFor``).
+  ## An Xcode ``/usr/bin/cc``, a host compiler and every Linux compiler carry
+  ## no ``darwin-sdk-setup.bash``, so their profiles are unchanged.
+  let prefixes = pathToolInstallationPrefixes(profile.resolvedExecutablePath)
+  addNixDarwinSdkLibraryChannels(profile, prefixes)
+
+proc pathProfileLacksNixDarwinSdkChannels*(
+    profile: PathOnlyToolProfile): bool =
+  ## Whether a path-mode profile, typically read back from a tool-identity
+  ## cache written before path mode followed the rule, is missing a header or
+  ## library directory ``addPathToolNixDarwinSdkLibraryChannels`` would add
+  ## now. Such a profile is resolved afresh rather than served.
+  if profile.installMethod != "path":
+    return false
+  var expected = profile
+  addPathToolNixDarwinSdkLibraryChannels(expected)
+  expected.cpathList != profile.cpathList or
+    expected.libraryPathList != profile.libraryPathList
 
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile) =
   ## Repair cached Nix profiles as well as fresh resolutions. Split
