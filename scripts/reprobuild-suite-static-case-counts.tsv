@@ -2920,7 +2920,7 @@ tests/unit/t_ct_test_nim_unittest_path_mm_pool.nim	nim	6
 tests/unit/t_custom_role_fallback_cycle_is_rejected.nim	nim	1
 tests/unit/t_da1i_evidence_help_names_the_hazard.nim	nim	9
 tests/unit/t_daemon_request_working_directory.nim	nim	4
-tests/unit/t_declared_package_deps_from_recipe.nim	nim	9
+tests/unit/t_declared_package_deps_from_recipe.nim	nim	10
 tests/unit/t_default_daemon_endpoints_fit_the_socket_address_limit.nim	nim	6
 tests/unit/t_dev_env_cache_key_frame.nim	nim	4
 tests/unit/t_dev_env_cache_key_store_root.nim	nim	4

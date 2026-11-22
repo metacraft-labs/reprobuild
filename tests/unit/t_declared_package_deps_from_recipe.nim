@@ -37,12 +37,21 @@
 ##    compile of the recipe; and a recipe-relative compile names the
 ##    packages' directories relative to the recipe, so the workspace stays
 ##    relocatable.
+## 7. **A declared package is found by the workspace-sibling rule**
+##    (`repro_core/workspace_siblings`), the one the workspace-producer import
+##    and the command line's `<pkg>:<target>` selector use: the direct
+##    sibling, else the same name beside a farther ancestor, the nearest
+##    directory winning even without a project file. It used to probe only
+##    the direct sibling, so a recipe deep in its repository had its producer
+##    of a name imported from the workspace root while the package
+##    declaration of the same name put nothing on its compile path.
 ##
 ## NO MOCKS: a real recipe file written to a real temp workspace, with real
 ## sibling directories created and omitted on disk.
 
 import std/[os, unittest, strutils]
 import repro_interface_artifacts
+import repro_core/workspace_siblings
 
 proc writeRecipe(dir, body: string; name = "repro.nim"): string =
   ## Writes the recipe and returns its path -- the reader's input is the
@@ -269,4 +278,47 @@ package consumer:
     check recipeRelativeCompileArgs(command, recipe) == @["nim", "c",
       "--path:/nix/store/x-lib", "--path:.", "--path:../sharedpkg",
       "--path:../sharedpkg/src", "repro.nim"]
+    removeDir(root)
+
+  test "a declared package deep below the workspace root resolves by the sibling rule":
+    let root = getTempDir() / "repro-declared-deps-sibling-rule"
+    removeDir(root)
+    let ws = root / "ws"
+    # The recipe sits three directories below its repository's root, which
+    # sits in the workspace beside the package: `../SharedPkg` from the
+    # recipe does not exist, the workspace-root sibling does.
+    let recipeDir = ws / "repo" / "tools" / "deep"
+    let recipe = writeRecipe(recipeDir, """
+package deep:
+  uses:
+    uses: "SharedPkg"
+    uses: "../escape"
+    uses: "a/b"
+""", name = "deep_recipe.nim")
+    createDir(ws / "SharedPkg" / "src")
+    createDir(root / "escape")
+    let shared = os.normalizedPath(ws / "SharedPkg")
+    check declaredPackageRoots(recipe) == @[shared]
+    check declaredPackagePathDirs(recipe) == @[shared, shared / "src"]
+    # The engine-side resolver and the shared rule give one answer, the one
+    # the workspace-producer import (macro expansion) takes from the same
+    # routine, together with the ancestor it was found under.
+    check resolvePackageRoot(recipeDir, "SharedPkg") == shared
+    let found = nearestWorkspaceSibling(recipeDir, "SharedPkg")
+    check os.normalizedPath(found.dir) == shared
+    check os.normalizedPath(found.workspaceRoot) == os.normalizedPath(ws)
+    # A name that is not one path component never reaches the file system:
+    # `..`-climbing and nested names resolve to nothing.
+    check resolvePackageRoot(recipeDir, "../escape") == ""
+    check resolvePackageRoot(recipeDir, "a/b") == ""
+    check resolvePackageRoot(recipeDir, "..") == ""
+    check nearestWorkspaceSibling(recipeDir, "").dir == ""
+    # The NEAREST directory of the name wins, project file or not: a
+    # `SharedPkg` beside `tools` shadows the workspace-root one for this
+    # recipe, so one name names one checkout for every caller.
+    createDir(ws / "repo" / "SharedPkg")
+    let nearer = os.normalizedPath(ws / "repo" / "SharedPkg")
+    check resolvePackageRoot(recipeDir, "SharedPkg") == nearer
+    check declaredPackageRoots(recipe) == @[nearer]
+    check declaredPackagePathDirs(recipe) == @[nearer]
     removeDir(root)

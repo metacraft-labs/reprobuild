@@ -157,8 +157,10 @@ const teamPolicy* = certificatePolicy "team":
 ```
 
 When the policy lives in `src/team_policy.nim` of a package checked out beside
-the repository, the repository imports the module by name and declares the
-package with the nested `uses: "<package>"` form. The declaration puts the
+the repository (or beside one of its parent directories, such as the
+workspace root: the nearest directory of that name is the package), the
+repository imports the module by name and declares the package with the
+nested `uses: "<package>"` form. The declaration puts the
 package's root and its `src/` on every compile of the recipe and pins the
 package's revision in `repro.lock`. Editing the module rebuilds the recipe.
 

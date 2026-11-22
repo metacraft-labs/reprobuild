@@ -54,6 +54,7 @@ import repro_core/link_target
 import repro_core/path_identity
 import repro_core/process_env
 import repro_core/relocation
+import repro_core/workspace_siblings
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
 # did NOT produce (that is the entire measurement: seventeen store paths on one
 # host, answering differently per shell). The `uncontrolled*` wrappers are the
@@ -1024,10 +1025,15 @@ proc findSiblingProjectFile*(packageName: string;
   ## **Deferred Item D2** cross-project sibling discovery.
   ##
   ## Given a bare package name (the LHS of a ``<pkg>:<target>`` qualified
-  ## selector), check whether a sibling checkout exists alongside the
-  ## current project (one level up: ``../<pkg>/repro.nim`` or
-  ## ``../<pkg>/reprobuild.nim``). Returns the resolved project-file path
-  ## when found, otherwise the empty string.
+  ## selector), the project file of the workspace sibling of that name: the
+  ## directory ``nearestWorkspaceSibling`` finds from ``currentDir`` (the
+  ## direct sibling ``../<pkg>``, else the same name beside a farther
+  ## ancestor), and in it ``repro.nim`` or ``reprobuild.nim``. Returns the
+  ## resolved project-file path when found, otherwise the empty string. The
+  ## search rule is the one a recipe's package declarations and the
+  ## workspace-producer import use, so a name resolves to one checkout for
+  ## all three; a directory of that name with no project file is not walked
+  ## past.
   ##
   ## This is the minimum-viable cross-project discovery for D2 — the
   ## broader workspace-manifest-backed develop-mode mechanism
@@ -1036,46 +1042,27 @@ proc findSiblingProjectFile*(packageName: string;
   ## ``repro build runquota:runquotad`` route through the engine's
   ## existing path-with-fragment codepath (which already supports
   ## arbitrary out-of-tree project files; see the B0 outcome).
-  if packageName.len == 0:
+  # A dot is refused on top of the sibling-name rule: in a qualified selector
+  # it is not part of a bare package name, and the upstream qualified-
+  # selector validator reports it.
+  if '.' in packageName:
     return ""
-  # Filter out obviously-unsafe spellings — a package name with a path
-  # separator is not a bare package name; let the upstream qualified-
-  # selector validator reject it instead.
-  for ch in packageName:
-    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
-      return ""
   let anchor =
     if currentDir.len > 0: currentDir
     else: getCurrentDir()
-  # Walk UP from the anchor, probing ``<ancestor>/<packageName>`` at each level.
-  # Level one (``anchor.parentDir / packageName``) is the direct-sibling
-  # convention; the walk-up extends it to the WORKSPACE-ROOT sibling convention
-  # so a DEEP out-of-tree consumer (several dirs below the workspace root) can
-  # still discover a top-level workspace sibling (the RP5c2 shape). Purely
-  # additive — a direct sibling is still found at level one, and the nearest
-  # ancestor owning ``<packageName>`` wins (a closer same-named sibling shadows a
-  # farther one). Mirrors ``workspaceProducerModule``'s compile-time walk so the
-  # runtime and macro-time discoveries stay in lock-step.
-  var dir = anchor
-  for _ in 0 ..< 16:
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    let siblingDir = parent / packageName
-    if dirExists(extendedPath(siblingDir)):
-      let match =
-        try:
-          resolveProjectFile(siblingDir)
-        except ProjectFileAmbiguousError:
-          # Both repro.nim AND reprobuild.nim — let the regular project-
-          # loading codepath surface the diagnostic if the user proceeds.
-          return ""
-        except CatchableError:
-          ProjectFileMatch()
-      if match.path.len > 0:
-        return match.path
-    dir = parent
-  ""
+  let sibling = nearestWorkspaceSibling(anchor, packageName)
+  if sibling.dir.len == 0:
+    return ""
+  let match =
+    try:
+      resolveProjectFile(sibling.dir)
+    except ProjectFileAmbiguousError:
+      # Both repro.nim AND reprobuild.nim — let the regular project-
+      # loading codepath surface the diagnostic if the user proceeds.
+      return ""
+    except CatchableError:
+      ProjectFileMatch()
+  match.path
 
 proc bareNameAnchor(name, currentDir: string): string =
   ## The anchor a request of names only hands the build for its first name.

@@ -84,6 +84,7 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+import repro_core/workspace_siblings
 import repro_core/variant_assignments
 when defined(posix):
   import repro_core/owned_directory
@@ -5849,27 +5850,32 @@ proc declaredPackageDeps*(recipePath: string): seq[string] =
       result.add(name)
 
 proc resolvePackageRoot*(consumerDir, name: string): string =
-  ## Resolve ONE declared package name to a checkout next to the consumer.
+  ## Resolve ONE declared package name, for the recipe in ``consumerDir``, to
+  ## its checkout: the workspace sibling ``nearestWorkspaceSibling`` finds
+  ## (``../<name>``, else the same name beside a farther ancestor -- the
+  ## workspace root for a recipe deep in its repository). Normalized, or ""
+  ## when nothing resolves.
   ##
-  ## PURE: a directory-existence check and nothing else. No daemon, no lock,
+  ## PURE: directory-existence checks and nothing else. No daemon, no lock,
   ## no sub-build. That matters because this is reachable from a recipe's
   ## own macro expansion via ``staticExec`` DURING a build -- anything that
   ## took a build lock here could deadlock against the build that spawned
   ## it, and anything slow would be paid by every recipe compile.
   ##
-  ## The single source of truth for the resolution: ``declaredPackageRoots``
-  ## and the ``internal resolve-package`` subcommand both route through it,
-  ## so the path a macro imports and the path the engine puts on ``--path:``
-  ## cannot drift apart.
-  if consumerDir.len == 0 or name.len == 0:
-    return ""
-  let candidate = consumerDir.parentDir / name
-  if dirExists(extendedPath(candidate)):
-    return os.normalizedPath(candidate).replace('\\', '/')
+  ## ``declaredPackageRoots`` and the ``internal resolve-package`` subcommand
+  ## both route through it, so the path a macro imports and the path the
+  ## engine puts on ``--path:`` cannot drift apart; and the search rule is
+  ## the one the workspace-producer import and the command line's
+  ## ``<pkg>:<target>`` selector use, so one name names one checkout for all
+  ## of them.
+  let found = nearestWorkspaceSibling(consumerDir, name)
+  if found.dir.len > 0:
+    return os.normalizedPath(found.dir).replace('\\', '/')
 
 proc declaredPackageRoots*(recipePath: string): seq[string] =
-  ## Resolve ``declaredPackageDeps(recipePath)`` to sibling checkouts next to
-  ## the directory that holds the recipe (absolute, normalized). A declared
+  ## Resolve ``declaredPackageDeps(recipePath)`` to their checkouts from the
+  ## directory that holds the recipe (``resolvePackageRoot``; absolute,
+  ## normalized). A declared
   ## dependency that is not checked out is SKIPPED rather than failing here:
   ## the recipe compile that follows reports the unresolved import with a
   ## real file and line, which is a far better diagnostic than a
