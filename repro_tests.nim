@@ -30529,6 +30529,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_repro_test_shard_report_names_the_anchored_projects_tests_and_lock.nim",
+    binary: "build/test-bin/t_repro_test_shard_report_names_the_anchored_projects_tests_and_lock",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g13",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_repro_test_workspace_mode_issues_a_content_bound_certificate.nim",
     binary: "build/test-bin/t_repro_test_workspace_mode_issues_a_content_bound_certificate",
     defines: @[],
@@ -31222,7 +31234,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_selection_bundle_contains_only_the_selection.nim",
@@ -32134,7 +32146,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tampered_uki_detected.nim",
@@ -32938,7 +32950,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_untracked_inputs_flag_read_set_and_strict.nim",

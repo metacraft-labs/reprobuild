@@ -92600,19 +92600,26 @@ proc stableNodeIdFromString(value: string): NodeId =
   ## per CI-Sharding.md §"CI Sharding").
   nodeId(cast[uint64](hashes.hash(value)))
 
-proc shardLockProvenance(opts: ReproTestShardOpts):
+proc shardLockProvenance(opts: ReproTestShardOpts; projDir: string):
     tuple[lockPath, inputsDigest: string; packageCount: int; found: bool] =
   ## Workspace-Manifest-Optional MO-13 (correcting MO-1) — resolve the
   ## committed solved-graph lock the sharded run should honor, using the
   ## SAME loader (``resolveSolvedGraphForBuild``) the real ``repro build``
   ## uses. ``opts.lockFlag`` carries ``--lock=<file>``; absent, the canonical
-  ## ``<cwd>/repro.lock`` is used. The provenance (resolved path + the lock's
-  ## ``inputs_digest`` + pinned package count) is recorded in the shard report
-  ## so the sharded/fixture run is demonstrably tied to the LOCKED graph, not
-  ## a fresh re-solve. A no-op (``found = false``) when no lock is present, so
-  ## every pre-existing shard run (no ``repro.lock``) is byte-unchanged.
+  ## ``<projDir>/repro.lock`` is used. ``projDir`` is the project whose lock
+  ## the shard's build pins: for the workspace shard, the project its
+  ## selectors anchor on (``buildLockProjectDir``, the rule the build's
+  ## ``lockConsumption`` block applies), so ``repro test --shard 1/2 ./sub``
+  ## records ``sub/repro.lock``, not the current directory's lock
+  ## (CI-Sharding.md §"CLI Surface"). The fixture shard runs its commands in
+  ## the current directory and passes it.
+  ## The provenance (resolved path + the lock's ``inputs_digest`` + pinned
+  ## package count) is recorded in the shard report so the sharded/fixture
+  ## run is demonstrably tied to the LOCKED graph, not a fresh re-solve. A
+  ## no-op (``found = false``) when no lock is present, so every pre-existing
+  ## shard run (no ``repro.lock``) is byte-unchanged.
   let lockOverride = opts.lockPath
-  let resolved = resolveSolvedGraphForBuild(getCurrentDir(), lockOverride, "")
+  let resolved = resolveSolvedGraphForBuild(projDir, lockOverride, "")
   result.found = resolved.found and resolved.source == "lock"
   if result.found:
     result.lockPath = resolved.lockPath
@@ -92623,9 +92630,11 @@ proc shardLockProvenance(opts: ReproTestShardOpts):
     except CatchableError:
       result.inputsDigest = ""
 
-proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts) =
-  ## Stamp the resolved lock provenance onto a shard report (MO-13).
-  let prov = shardLockProvenance(opts)
+proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts;
+                            projDir: string) =
+  ## Stamp the resolved lock provenance of ``projDir`` (the project the
+  ## shard's build pins) onto a shard report (MO-13).
+  let prov = shardLockProvenance(opts, projDir)
   report["lock_flag"] = %opts.lockFlag
   report["lock_file"] = %(if prov.found: prov.lockPath else: "")
   report["locked_inputs_digest"] = %prov.inputsDigest
@@ -92747,7 +92756,7 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
   report["strategy"] = %opts.strategy
   report["peer_cache"] = %peerCacheMode
   report["fixture_path"] = %opts.fixturePath
-  addShardLockProvenance(report, opts)
+  addShardLockProvenance(report, opts, getCurrentDir())
   var assignedNames = newJArray()
   for e in assignedEdges:
     assignedNames.add(%e.selector)
@@ -94349,7 +94358,11 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   report["peer_cache"] = %modeName(peer.kind)
   report["fixture_path"] = %""
   report["mode"] = %"workspace"
-  addShardLockProvenance(report, opts)
+  # The lock of the project the selectors anchor on: the one each assigned
+  # command's build (``<anchor>#<action id>``) pins. The anchor resolved when
+  # the plan was read, so it names an existing project.
+  addShardLockProvenance(report, opts,
+    buildLockProjectDir(plan.anchorSelector))
   report["assigned_selectors"] = %assigned
   report["predicted_shard_cost_ns"] = %predictedNs
   report["predicted_build_time_ns"] = %0
