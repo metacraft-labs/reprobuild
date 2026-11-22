@@ -24,9 +24,8 @@
 ##   * running that cargo command produces ``target/release/extra``, and
 ##     ``rootpkg``'s binary too.
 ##
-## Written as the adversarial confirmation of reprobuild-pm issue
-## ``issues/2026-11-19-rust-mode-b-runs-cargo-build-without-workspace.md``:
-## before the fix the argv was ``cargo build --release --locked --offline``,
+## Written as the adversarial confirmation of the defect that Mode B ran
+## ``cargo build`` without ``--workspace``: before the fix the argv was ``cargo build --release --locked --offline``,
 ## and running it left ``extra`` unbuilt.
 ##
 ## No mocks: ``cargo metadata`` and the production emitter

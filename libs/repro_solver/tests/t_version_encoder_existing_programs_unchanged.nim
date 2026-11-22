@@ -98,9 +98,8 @@ const Recorded = {
   "instances/none": "65df692a61c482fd1624766c58fccbacc75cf42dabdf49240c3f7defa55f3a25",
   "instances/assumptions": "9a26cecc4ec670ad57f8954d61de261d5947701e44552f3cefd0b73983943dee",
   # The strategies (`lowest`, `highest`, `lowest-direct`): NLF-STAT-4 does
-  # not freeze them, and the fix for reprobuild-pm issue
-  # 2026-11-20-highest-strategy-solve-time-grows-exponentially-with-the-closure
-  # changed their objective on purpose (one priority level per package,
+  # not freeze them, and the fix for a strategy solve time that grew
+  # exponentially with the closure changed their objective on purpose (one priority level per package,
   # Named-Lock-Files §5.5). Re-recorded with -d:printProgramHashes with that
   # change, so they still catch any OTHER drift in a strategy program.
   "chain/lowest": "1655c240d05a394e00cd15ee3384dd39cd5bdd58b282ee468ab81ffb6c1508eb",

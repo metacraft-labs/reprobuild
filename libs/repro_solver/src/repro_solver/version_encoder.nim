@@ -922,8 +922,7 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
   ## The objective used to be one level summing every package's rank. Proving
   ## that sum optimal is a search over the product of the closure: a chain of
   ## 12 packages with 6 versions each took 42 s and one of 16 did not finish
-  ## in 20 minutes (reprobuild-pm issue
-  ## 2026-11-20-highest-strategy-solve-time-grows-exponentially-with-the-closure).
+  ## in 20 minutes: the solve time grew exponentially with the closure.
   ## Level by level, each level is one package with a handful of candidates,
   ## so proving it costs a few satisfiability checks, and with the core-guided
   ## optimisation `solve` selects for these programs a closure of 120 such
