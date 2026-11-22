@@ -75,6 +75,9 @@ import repro_project_dsl/sized_tools
 import repro_project_dsl/selector_names
 import repro_project_dsl/reprobuild_packages_catalog
 export reprobuild_packages_catalog
+# Refusing a producer recipe newer than this DSL before it is included
+# (`usesImportCode`, Cross-Repo-Source-Consumption.md §9.2a).
+import repro_project_dsl/engine_recipe_skew
 # How a macro shells out at compile time. A `std`-only leaf, deliberately
 # separate from this module so a gate can compile against the RULE without
 # paying for the whole DSL — see the module's own header for why the rule is

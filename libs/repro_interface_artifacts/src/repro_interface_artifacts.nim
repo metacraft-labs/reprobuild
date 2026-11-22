@@ -5617,6 +5617,111 @@ proc resolveRunquotaRoot(anchorRoot, consumerParent: string): string =
       return candidate
   ""
 
+type BootstrapPackage = tuple
+  envName: string
+  candidates: seq[string]  ## relative to a reprobuild root, as in config.nims
+  marker: string           ## the module whose presence identifies the package
+
+const BootstrapPackages: seq[BootstrapPackage] = @[
+  ## The source-only sibling packages ``reprobuild/config.nims`` registers via
+  ## ``addPackagePath``, in its order: each with its candidate roots and the
+  ## marker module a candidate must carry. ``bootstrapSiblingPackagePathFlags``
+  ## resolves them; ``keepOneRootPerPackage`` identifies a package on a
+  ## compile's search path by the same marker.
+  ("REPRO_TEST_ADAPTERS_SRC", @[
+    ".." / "reprobuild-test-adapters" / "src",
+  ], "repro_test_adapters" / "test_runner.nim"),
+  ("FASTSTREAMS_SRC", @[
+    "libs" / "nim-faststreams" / "src",
+    ".." / "codetracer" / "libs" / "nim-faststreams",
+    ".." / "nim-faststreams",
+  ], "faststreams" / "inputs.nim"),
+  ("NIM_STEW_SRC", @[
+    "libs" / "nim-stew" / "src",
+    ".." / "codetracer" / "libs" / "nim-stew",
+    ".." / "nim-stew",
+  ], "stew" / "objects.nim"),
+  ("NIM_SERIALIZATION_SRC", @[
+    "libs" / "nim-serialization" / "src",
+    ".." / "codetracer" / "libs" / "nim-serialization",
+    ".." / "nim-serialization",
+  ], "serialization" / "case_objects.nim"),
+  ("NIM_JSON_SERIALIZATION_SRC", @[
+    "libs" / "nim-json-serialization" / "src",
+    ".." / "codetracer" / "libs" / "nim-json-serialization",
+    ".." / "nim-json-serialization",
+  ], "json_serialization.nim"),
+  ("NIM_TOML_SERIALIZATION_SRC", @[
+    "libs" / "nim-toml-serialization" / "src",
+    ".." / "codetracer" / "libs" / "nim-toml-serialization",
+    ".." / "nim-toml-serialization",
+  ], "toml_serialization.nim"),
+  ("SSZ_SERIALIZATION_SRC", @[
+    "libs" / "nim-ssz-serialization" / "src",
+    ".." / "nim-ssz-serialization",
+  ], "ssz_serialization.nim"),
+  ("NIMCRYPTO_SRC", @[
+    # Vendored source-only slice under reprobuild's own libs/, listed
+    # first so the recipe-compile is self-contained and does not depend
+    # on a consumer's sibling nimcrypto checkout. Mirrors config.nims.
+    # Marker is nimcrypto/hash.nim.
+    "libs" / "nimcrypto",
+    ".." / "codetracer" / "libs" / "nimcrypto",
+    ".." / "nimcrypto",
+  ], "nimcrypto" / "hash.nim"),
+  ("IO_MON_SRC", @[
+    ".." / "io-mon" / "src",
+  ], "io_mon.nim"),
+  ("BEARSSL_SRC", @[
+    ".." / "nim-bearssl",
+    "libs" / "nim-bearssl",
+  ], "bearssl.nim"),
+  ("RESULTS_SRC", @[
+    "libs" / "results" / "src",
+  ], "results.nim"),
+  ("STINT_SRC", @[
+    "libs" / "stint" / "src",
+  ], "stint.nim"),
+  # Incremental-Test-Runner M7: the monitor shim moved to the io-mon
+  # sibling; ``nim-stackable-hooks`` is resolved only from the sibling
+  # checkout now (the deleted ``repro_monitor_shim/vendor`` fallback is gone).
+  ("STACKABLE_HOOKS_SRC", @[
+    ".." / "nim-stackable-hooks" / "src",
+  ], "stackable_hooks.nim"),
+  ("GOSTI_SRC", @[
+    ".." / "gosti" / "src",
+  ], "gosti.nim"),
+  # SHM-QUEUE-MIGRATE: ``shm_queue`` — the extracted single MPSC ring —
+  # reaches this closure through io-mon. ``config.nims`` registers it via
+  # ``addPackagePath("SHM_QUEUE_SRC", …, useDevShellFallback = true)``, so it
+  # is on the NORMAL build ``--path`` but was absent here, and any producer
+  # whose ``repro.nim`` transitively pulled it failed to interface-extract
+  # with ``cannot open file: shm_queue/segment``. Mirror config.nims so the
+  # extractor's path set matches the build's: prefer ``$SHM_QUEUE_SRC``, then
+  # the sibling checkout.
+  ("SHM_QUEUE_SRC", @[
+    ".." / "nim-shm-queue" / "src",
+  ], "shm_queue.nim"),
+  # io-mon's writer now imports ``shm_gset/transport`` from the
+  # ``nim-shm-gset`` sibling (the grow-only shared-memory set, io-mon's Linux
+  # dependency-capture channel). Any producer whose ``repro.nim`` transitively
+  # pulls ``io_mon`` fails to interface-extract with ``cannot open file:
+  # shm_gset/transport`` unless nim-shm-gset is on the extractor's ``--path``.
+  # Mirror config.nims (SHM_GSET_SRC), exactly as SHM_QUEUE_SRC above.
+  ("SHM_GSET_SRC", @[
+    ".." / "nim-shm-gset" / "src",
+  ], "shm_gset.nim"),
+  # ``repro_project_dsl`` builds every ``cli:`` block on the clispec library
+  # (nim-cli-spec), so every producer's ``repro.nim`` imports it. Mirror
+  # config.nims (CLI_SPEC_SRC), exactly as SHM_QUEUE_SRC above.
+  ("CLI_SPEC_SRC", @[
+    ".." / "nim-cli-spec" / "src",
+  ], "clispec.nim"),
+  ("REPRO_TEST_ADAPTERS_SRC", @[
+    ".." / "reprobuild-test-adapters" / "src",
+  ], "repro_test_adapters" / "test_runner.nim"),
+]
+
 proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
                                        consumerParent = ""): seq[string] =
   ## MR14 — produce the ``--path:`` flags for the source-only sibling
@@ -5677,106 +5782,9 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
       else:
         result.add(reprobuildRoot / c)
 
-  type SiblingSpec = tuple
-    envName: string
-    candidates: seq[string]
-    marker: string
-  let specs: seq[SiblingSpec] = @[
-    ("REPRO_TEST_ADAPTERS_SRC", anchored([
-      ".." / "reprobuild-test-adapters" / "src",
-    ]), "repro_test_adapters" / "test_runner.nim"),
-    ("FASTSTREAMS_SRC", anchored([
-      "libs" / "nim-faststreams" / "src",
-      ".." / "codetracer" / "libs" / "nim-faststreams",
-      ".." / "nim-faststreams",
-    ]), "faststreams" / "inputs.nim"),
-    ("NIM_STEW_SRC", anchored([
-      "libs" / "nim-stew" / "src",
-      ".." / "codetracer" / "libs" / "nim-stew",
-      ".." / "nim-stew",
-    ]), "stew" / "objects.nim"),
-    ("NIM_SERIALIZATION_SRC", anchored([
-      "libs" / "nim-serialization" / "src",
-      ".." / "codetracer" / "libs" / "nim-serialization",
-      ".." / "nim-serialization",
-    ]), "serialization" / "case_objects.nim"),
-    ("NIM_JSON_SERIALIZATION_SRC", anchored([
-      "libs" / "nim-json-serialization" / "src",
-      ".." / "codetracer" / "libs" / "nim-json-serialization",
-      ".." / "nim-json-serialization",
-    ]), "json_serialization.nim"),
-    ("NIM_TOML_SERIALIZATION_SRC", anchored([
-      "libs" / "nim-toml-serialization" / "src",
-      ".." / "codetracer" / "libs" / "nim-toml-serialization",
-      ".." / "nim-toml-serialization",
-    ]), "toml_serialization.nim"),
-    ("SSZ_SERIALIZATION_SRC", anchored([
-      "libs" / "nim-ssz-serialization" / "src",
-      ".." / "nim-ssz-serialization",
-    ]), "ssz_serialization.nim"),
-    ("NIMCRYPTO_SRC", anchored([
-      # Vendored source-only slice under reprobuild's own libs/, listed
-      # first so the recipe-compile is self-contained and does not depend
-      # on a consumer's sibling nimcrypto checkout. Mirrors config.nims.
-      # Marker is nimcrypto/hash.nim.
-      "libs" / "nimcrypto",
-      ".." / "codetracer" / "libs" / "nimcrypto",
-      ".." / "nimcrypto",
-    ]), "nimcrypto" / "hash.nim"),
-    ("IO_MON_SRC", anchored([
-      ".." / "io-mon" / "src",
-    ]), "io_mon.nim"),
-    ("BEARSSL_SRC", anchored([
-      ".." / "nim-bearssl",
-      "libs" / "nim-bearssl",
-    ]), "bearssl.nim"),
-    ("RESULTS_SRC", anchored([
-      "libs" / "results" / "src",
-    ]), "results.nim"),
-    ("STINT_SRC", anchored([
-      "libs" / "stint" / "src",
-    ]), "stint.nim"),
-    # Incremental-Test-Runner M7: the monitor shim moved to the io-mon
-    # sibling; ``nim-stackable-hooks`` is resolved only from the sibling
-    # checkout now (the deleted ``repro_monitor_shim/vendor`` fallback is gone).
-    ("STACKABLE_HOOKS_SRC", anchored([
-      ".." / "nim-stackable-hooks" / "src",
-    ]), "stackable_hooks.nim"),
-    ("GOSTI_SRC", anchored([
-      ".." / "gosti" / "src",
-    ]), "gosti.nim"),
-    # SHM-QUEUE-MIGRATE: ``shm_queue`` — the extracted single MPSC ring —
-    # reaches this closure through io-mon. ``config.nims`` registers it via
-    # ``addPackagePath("SHM_QUEUE_SRC", …, useDevShellFallback = true)``, so it
-    # is on the NORMAL build ``--path`` but was absent here, and any producer
-    # whose ``repro.nim`` transitively pulled it failed to interface-extract
-    # with ``cannot open file: shm_queue/segment``. Mirror config.nims so the
-    # extractor's path set matches the build's: prefer ``$SHM_QUEUE_SRC``, then
-    # the sibling checkout.
-    ("SHM_QUEUE_SRC", anchored([
-      ".." / "nim-shm-queue" / "src",
-    ]), "shm_queue.nim"),
-    # io-mon's writer now imports ``shm_gset/transport`` from the
-    # ``nim-shm-gset`` sibling (the grow-only shared-memory set, io-mon's Linux
-    # dependency-capture channel). Any producer whose ``repro.nim`` transitively
-    # pulls ``io_mon`` fails to interface-extract with ``cannot open file:
-    # shm_gset/transport`` unless nim-shm-gset is on the extractor's ``--path``.
-    # Mirror config.nims (SHM_GSET_SRC), exactly as SHM_QUEUE_SRC above.
-    ("SHM_GSET_SRC", anchored([
-      ".." / "nim-shm-gset" / "src",
-    ]), "shm_gset.nim"),
-    # ``repro_project_dsl`` builds every ``cli:`` block on the clispec library
-    # (nim-cli-spec), so every producer's ``repro.nim`` imports it. Mirror
-    # config.nims (CLI_SPEC_SRC), exactly as SHM_QUEUE_SRC above.
-    ("CLI_SPEC_SRC", anchored([
-      ".." / "nim-cli-spec" / "src",
-    ]), "clispec.nim"),
-    ("REPRO_TEST_ADAPTERS_SRC", anchored([
-      ".." / "reprobuild-test-adapters" / "src",
-    ]), "repro_test_adapters" / "test_runner.nim"),
-  ]
-  for spec in specs:
-    let resolved = resolveBootstrapPackagePath(spec.envName, spec.candidates,
+  for spec in BootstrapPackages:
+    let resolved = resolveBootstrapPackagePath(spec.envName,
+                                               anchored(spec.candidates),
                                                spec.marker,
                                                builtSourcePackageRoot(spec.envName))
     if resolved.len > 0:
@@ -7172,6 +7180,17 @@ proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
   if built.len > 0 and fileExists(extendedPath(built / marker)):
     flags.add("--path:" & built)
 
+proc engineIdentityDefines*(): seq[string] =
+  ## The engine's identity, handed to every recipe compile it runs so that a
+  ## diagnostic the DSL raises at macro-expansion time can name the build
+  ## that ran it: the image path (`publicCliImagePath`, the path that
+  ## re-enters this engine) and its source revision. The DSL reads them as
+  ## `reproEngineImage` / `reproEngineRevision` and uses them only in the
+  ## skew refusal (Cross-Repo-Source-Consumption.md §9.2a). They are argv,
+  ## so they key the compile like any other define.
+  @["--define:reproEngineImage=" & publicCliImagePath(),
+    "--define:reproEngineRevision=" & ReprobuildSourceRevision]
+
 proc reproPackagePathFlags(workDir: string): seq[string] =
   ## Replay the third-party / sibling-repo package ``--path`` switches that
   ## reprobuild's ``config.nims`` adds via ``addPackagePath``. Kept byte-for-byte
@@ -7625,6 +7644,91 @@ proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string
   let moduleAt = remaining.find(moduleArg)
   doAssert moduleAt >= 0
   remaining.insert(priority, moduleAt)
+  command = remaining
+
+proc keepOneRootPerPackage*(command: var seq[string]; workDir,
+                            moduleArg: string) =
+  ## Cross-Repo-Source-Consumption.md §9.2b: one recipe compile sees ONE copy
+  ## of each bootstrap package. Two layers of the command can each resolve a
+  ## package on their own -- `reproPackagePathFlags`' in-tree list takes a
+  ## variable the engine seeded with its own staged copy, while
+  ## `bootstrapSiblingPackagePathFlags` ranks the workspace's sibling checkout
+  ## above that seed -- and both roots then sat on `--path`. Nim resolves each
+  ## `import` against the roots separately, so one compile took
+  ## `clispec/config_check` from one copy and `clispec` from the other, and
+  ## failed with `cannot open file` or a type mismatch between the two.
+  ##
+  ## A package is identified by the marker module its resolver probes
+  ## (`BootstrapPackages`). When two or more `--path:` roots ahead of
+  ## `moduleArg` carry one marker, the root `bootstrapSiblingPackagePathFlags`
+  ## resolves is kept -- an explicit override, then the workspace sibling, and
+  ## the engine's staged copy only when no sibling has it, the order
+  ## `config.nims` and develop mode use -- or, when it resolved none of them,
+  ## the root Nim prefers today (the last). Every other such root loses both
+  ## its `--path:` and its `--excludePath:`.
+  ##
+  ## Not touched:
+  ##
+  ## * a package the SDK vendors in its own `libs/` (the serialization family,
+  ##   nimcrypto, ...). `protectSdkCompilePaths` already reasserts the SDK's
+  ##   copy ahead of any other, and keeps the others behind it by decision
+  ##   (see that proc: a vendored library family must come from the one tree
+  ##   the SDK was written against);
+  ## * a root that provides a top-level module the kept root does not (a
+  ##   repository's whole `src` holding a second package): removing it would
+  ##   remove that package too.
+  let sdkLibs =
+    if workDirIsReprobuildTree(workDir): workDir / "libs"
+    else: reprobuildExternalLibsRoot(workDir)
+  var preferred: seq[string]
+  if sdkLibs.len > 0:
+    for flag in bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
+        workDir.parentDir):
+      if flag.startsWith("--path:"): preferred.add(flag["--path:".len .. ^1])
+  let moduleAt = command.find(moduleArg)
+  let limit = if moduleAt >= 0: moduleAt else: command.len
+  var roots: seq[string]
+  for i in 0 ..< limit:
+    if command[i].startsWith("--path:"):
+      let root = command[i]["--path:".len .. ^1]
+      if root.len > 0 and root notin roots: roots.add(root)
+  proc insideSdk(root: string): bool =
+    sdkLibs.len > 0 and (root == sdkLibs or
+      os.normalizedPath(root).startsWith(os.normalizedPath(sdkLibs) & DirSep))
+  var dropped: HashSet[string]
+  var markersSeen: seq[string]
+  for spec in BootstrapPackages:
+    if spec.marker in markersSeen: continue
+    markersSeen.add(spec.marker)
+    var providers: seq[string]
+    for root in roots:
+      if root notin dropped and
+          fileExists(extendedPath(root / spec.marker)):
+        providers.add(root)
+    if providers.len < 2: continue
+    var vendoredBySdk = false
+    for root in providers:
+      if insideSdk(root): vendoredBySdk = true
+    if vendoredBySdk: continue
+    var kept = ""
+    for root in providers:
+      if root in preferred:
+        kept = root
+        break
+    if kept.len == 0: kept = providers[^1]
+    let keptModules = topLevelModuleNames(kept)
+    for root in providers:
+      if root != kept and topLevelModuleNames(root) <= keptModules:
+        dropped.incl(root)
+  if dropped.len == 0:
+    return
+  var remaining: seq[string]
+  for i, arg in command:
+    if i < limit and (arg.startsWith("--path:") or
+        arg.startsWith("--excludePath:")):
+      let root = arg[arg.find(':') + 1 .. ^1]
+      if root in dropped: continue
+    remaining.add(arg)
   command = remaining
 
 proc externalHashFlags(workDir = ""): seq[string] =
@@ -9306,7 +9410,7 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     # the consumer, and every dependency resolved against the wrong
     # workspace.
     consumerRootDefine,
-  ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
+  ] & engineIdentityDefines() & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
   # The `--nimcache:` argument is filled in once the command is complete: its
   # key folds in every compile option (defines, producer paths), so two
@@ -9370,6 +9474,7 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     let runnerAt = command.find(runnerPlaceholder)
     command.insert(recipeConfigFlags, runnerAt)
   protectSdkCompilePaths(command, workDir, runnerPlaceholder, packageFlags)
+  keepOneRootPerPackage(command, workDir, runnerPlaceholder)
   # WHAT IS LAUNCHED. `command` stays the compile's identity: the nimcache
   # key below is computed from it. What runs is `launch.argv`, which leaves
   # the SDK roots' reassertion pairs to a NimScript beside the runner
@@ -10475,6 +10580,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
+  ] & engineIdentityDefines() & @[
     # A recipe-relative compile names the module by its file name and runs
     # in its directory; its search path is then that directory, `.`.
     "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)
@@ -10522,6 +10628,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   for flag in extraFlags:
     result.insert(flag, result.len - 1)
   protectSdkCompilePaths(result, workDir, modulePath, packageFlags)
+  keepOneRootPerPackage(result, workDir, modulePath)
   let nimcache =
     if providerNimcacheMode() == "per-binary":
       nimcacheRoot / providerNimcacheKey(outputBinaryPath)

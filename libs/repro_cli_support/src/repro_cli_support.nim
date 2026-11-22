@@ -68,6 +68,8 @@ import repro_core/variant_assignments
 from ct_test_nim_unittest/tests_fragment import PerTestRequest,
   PerTestCompile, TestsFragmentProducerName, producerListArgv,
   producerCheckArgv
+from repro_project_dsl/engine_recipe_skew import parseEngineRecipeSkew,
+  engineRecipeSkewRemedy
 from repro_project_dsl/completion_files import
   CompletionFilesProducerName, producerArgv
 import repro_core/tool_input_check_policies
@@ -97335,6 +97337,27 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
     return
   if not derived.ok:
     result.unverified = true
+    # Cross-Repo-Source-Consumption.md §9.2a: the recipe compile refused a
+    # sibling reprobuild recipe newer than this engine's DSL. Running
+    # `repro lock refresh` would run this same engine and fail the same way,
+    # so the refusal names the skew and the build to run instead. Told apart
+    # by the record the refusal carries (`parseEngineRecipeSkew`), never by
+    # compiler wording.
+    let skew = parseEngineRecipeSkew(derived.diagnostic)
+    if skew.found:
+      result.evidence = "the dependency set " & root /
+        CanonicalProjectFileName & " derives could not be computed: " &
+        "this repro is older than the sibling recipe the recipe imports — " &
+        "reprobuild " & skew.skew.engineVersion & " (" &
+        (if skew.skew.enginePath.len > 0: skew.skew.enginePath
+         else: "engine path unknown") & ", revision " &
+        (if skew.skew.engineRevision.len > 0: skew.skew.engineRevision
+         else: "unknown") & ") cannot compile " & skew.skew.siblingRoot /
+        "repro.nim" & ", which is reprobuild " & skew.skew.siblingVersion &
+        " (revision " & (if skew.skew.siblingRevision.len > 0:
+          skew.skew.siblingRevision else: "unknown") & ")"
+      result.remediation = engineRecipeSkewRemedy(skew.skew)
+      return
     result.evidence = "the dependency set " & root / CanonicalProjectFileName &
       " derives could not be computed: " & derived.diagnostic
     result.remediation = "make the recipe readable — `repro lock refresh " &
