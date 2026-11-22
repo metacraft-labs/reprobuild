@@ -281,10 +281,11 @@ nim-stackable-hooks
 # keep release archives and CI overrides on the same API as the Nix pin.
 runquota=6ff973131e7f715f0237cb0f08b8dd16cbeba0dc
 nim-shm-queue
-# Moved to fc0c744 (2026-11-21), nim-shm-gset's `agents` tip, with
-# `nim-shm-gset-src` in flake.nix and flake.lock: a flatten never drains
-# the shard inserts target (`insertShardIndex`, which flattenChain calls).
-nim-shm-gset=fc0c74478d945161574a9fc49389c8fd65f09d2e
+# Moved to 803a4fa (2026-11-22), nim-shm-gset's `agents` tip, with
+# `nim-shm-gset-src` in flake.nix and flake.lock: a reader handle stops
+# probing a retired shard on every walk. fc0c744 (a flatten never drains the
+# shard inserts target, `insertShardIndex`) is an ancestor.
+nim-shm-gset=803a4faa23f985ad9697437603436f2f784072be
 # clispec, the `cli:` language and typed CLI model repro_project_dsl builds
 # on. Cloned at repro.lock's revision, like nim-shm-queue.
 nim-cli-spec

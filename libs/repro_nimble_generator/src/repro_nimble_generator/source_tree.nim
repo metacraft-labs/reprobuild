@@ -71,7 +71,7 @@ type
     nimbleCandidates*: seq[string]
 
 proc linkVerdict*(linkPath, target: string;
-                  isLink: proc(p: string): bool): LinkVerdict =
+                  isLink: proc(p: string): bool {.gcsafe.}): LinkVerdict =
   ## Does the link at ``linkPath`` (relative to the package directory) stay
   ## inside it? Lexical, from the link's own directory; a target through
   ## another link counts as outside, so a chain cannot hide an escape.
@@ -232,7 +232,7 @@ proc lowerHex(bytes: openArray[byte]): string =
 
 proc sourceFacts*(tree: FetchedTree): tuple[facts: SourceFacts;
                                             archive: string;
-                                            nimbleBytes: string] =
+                                            nimbleBytes: string] {.gcsafe.} =
   ## Everything the `source` edge outputs about one tree.
   var f = SourceFacts(commitTime: tree.commitTime)
   var links = initTable[string, bool]()

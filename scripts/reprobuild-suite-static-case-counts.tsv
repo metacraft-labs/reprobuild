@@ -42,7 +42,7 @@ libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
 libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	183
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
-libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	5
+libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	7
 libs/repro_addon/tests/t_addon_crash_recovery_records.nim	nim	25
 libs/repro_addon/tests/t_addon_cross_prefix_needs_the_sysroot_glibc.nim	nim	5
 libs/repro_addon/tests/t_addon_detector_controls_run_on_the_host.nim	nim	9
@@ -61,7 +61,7 @@ libs/repro_addon/tests/t_addon_evidence_enrol_never_adopts_keys.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_key_survives_retention.nim	nim	4
 libs/repro_addon/tests/t_addon_evidence_lag_resigned.nim	nim	2
 libs/repro_addon/tests/t_addon_evidence_probe_owns_its_connection.nim	nim	4
-libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim	nim	12
+libs/repro_addon/tests/t_addon_evidence_ship_confinement.nim	nim	16
 libs/repro_addon/tests/t_addon_evidence_ships_off_host.nim	nim	7
 libs/repro_addon/tests/t_addon_evidence_units_and_tick_records.nim	nim	8
 libs/repro_addon/tests/t_addon_fingerprint.nim	nim	16
@@ -123,6 +123,7 @@ libs/repro_addon/tests/t_addon_system_file_with_mode_or_group_is_a_private_copy.
 libs/repro_addon/tests/t_addon_tmpfiles_scope.nim	nim	7
 libs/repro_addon/tests/t_addon_trace_attribution.nim	nim	6
 libs/repro_addon/tests/t_addon_uninstall_keeps_pre_bootstrap_inputs.nim	nim	73
+libs/repro_addon/tests/t_addon_uninstall_rerun_removes_ship_state.nim	nim	5
 libs/repro_addon/tests/t_addon_units_meet_confinement_floor.nim	nim	3
 libs/repro_addon/tests/t_full_host_secrets_materialise_from_the_latest_envelope.nim	nim	9
 libs/repro_addon/tests/t_rdmf_v3_closure_digests_are_enforced.nim	nim	4
@@ -226,7 +227,7 @@ libs/repro_build_engine/tests/t_nix_daemon_search_roots.nim	nim	15
 libs/repro_build_engine/tests/t_nix_gc_roots_cover_working_tree_outputs.nim	nim	3
 libs/repro_build_engine/tests/t_nlf_stat4_baseline_fingerprints.nim	nim	2
 libs/repro_build_engine/tests/t_output_directory_an_action_creates_is_not_an_input.nim	nim	8
-libs/repro_build_engine/tests/t_output_removal_check_folds_case.nim	nim	10
+libs/repro_build_engine/tests/t_output_removal_check_folds_case.nim	nim	19
 libs/repro_build_engine/tests/t_package_identity_is_the_producing_action.nim	nim	7
 libs/repro_build_engine/tests/t_path_mutation_evidence.nim	nim	4
 libs/repro_build_engine/tests/t_pattern_scoped_enumeration_keys_only_matching_entries.nim	nim	9
@@ -243,7 +244,7 @@ libs/repro_build_engine/tests/t_publishers_refuse_zero_evidence_records.nim	nim	
 libs/repro_build_engine/tests/t_relocatable_record_follows_the_working_tree.nim	nim	8
 libs/repro_build_engine/tests/t_remove_before_run.nim	nim	5
 libs/repro_build_engine/tests/t_run_build_returns_its_results_without_copying.nim	nim	1
-libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	8
+libs/repro_build_engine/tests/t_scratch_dirs.nim	nim	10
 libs/repro_build_engine/tests/t_self_written_set_is_derived.nim	nim	8
 libs/repro_build_engine/tests/t_shipped_macos_tools.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
@@ -394,6 +395,8 @@ libs/repro_cli_support/tests/test_m10_home_gc_cli.nim	nim	7
 libs/repro_cli_support/tests/test_m69_home_add_versioned.nim	nim	5
 libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim	nim	35
 libs/repro_cli_support/tests/test_npc_compile_edge_has_no_package_but_locked.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m10_force_pushed_head_snapshot_is_an_event.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m10_retired_snapshot_lock_still_builds.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m14_build_refuses_other_nim_for_condition.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m6_pin_survives_repoint.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m6_refresh_rewind_refused.nim	nim	2
@@ -666,6 +669,7 @@ libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	231
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
 libs/repro_infra/tests/t_system_profile_addon_fields.nim	nim	7
 libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim	nim	5
+libs/repro_interface_artifacts/tests/t_an_envelope_newer_than_the_engine_names_both_versions.nim	nim	4
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_clispec.nim	nim	2
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
@@ -689,6 +693,7 @@ libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_lib
 libs/repro_interface_artifacts/tests/t_provider_source_discovery.nim	nim	3
 libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim	nim	17
 libs/repro_interface_artifacts/tests/t_recipe_compile_openssl_path_follows_the_installed_package.nim	nim	1
+libs/repro_interface_artifacts/tests/t_recipe_compile_sources_follow_the_sibling_policy.nim	nim	6
 libs/repro_interface_artifacts/tests/t_recipe_configuration_above_the_recipe_must_be_trusted.nim	nim	14
 libs/repro_interface_artifacts/tests/t_recipe_configuration_trust_decision.nim	nim	7
 libs/repro_interface_artifacts/tests/t_recipe_relative_artifact_rebases_nix_expression_files.nim	nim	2
@@ -813,6 +818,11 @@ libs/repro_nimble_generator/tests/t_nimble_source_set.nim	nim	6
 libs/repro_nimble_generator/tests/t_origin_git_run_keeps_the_output_of_a_child_that_exits.nim	nim	1
 libs/repro_nimble_generator/tests/t_repro_catalog_generate_and_verify_verbs.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_generator_deterministic_two_hosts.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_concurrent_fetch_edges_bounded.nim	nim	2
+libs/repro_nimble_generator/tests/test_npc_m10_head_move_supersedes_snapshot.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_ini_nimble_read_as_data.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_unspellable_registry_name_refused.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_untagged_package_gets_one_dated_snapshot.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m13_pre_m13_gitlinks_record_stays_excluded.nim	nim	3
 libs/repro_nimble_generator/tests/test_npc_m13_submodule_nesting_bounded.nim	nim	2
 libs/repro_nimble_generator/tests/test_npc_m13_submodule_path_collision_refused.nim	nim	1
@@ -1156,7 +1166,7 @@ libs/repro_standard_provider/tests/test_jsts_convention.nim	nim	19
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_mode1_loader.nim	nim	12
-libs/repro_standard_provider/tests/test_nim_convention.nim	nim	39
+libs/repro_standard_provider/tests/test_nim_convention.nim	nim	45
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_php_composer_convention.nim	nim	10
@@ -1426,7 +1436,7 @@ tests/e2e/addon/t_addon_agent_apply_unit_lacks_cap_net_admin.nim	nim	2
 tests/e2e/addon/t_addon_mode_mismatch_is_refused.nim	nim	0
 tests/e2e/addon/t_addon_plan_only_write_allowlist.nim	nim	4
 tests/e2e/addon/t_addon_registry_mode_round_trip.nim	nim	0
-tests/e2e/addon/t_addon_testbed_guests_boot_without_display_adapter.nim	nim	6
+tests/e2e/addon/t_addon_testbed_guests_boot_without_display_adapter.nim	nim	7
 tests/e2e/addon/t_e2e_addon_adopt_hand_configured_service.nim	nim	3
 tests/e2e/addon/t_e2e_addon_agent_apply_sets_net_sysctl_in_host_namespace.nim	nim	1
 tests/e2e/addon/t_e2e_addon_agent_end_to_end.nim	nim	1
@@ -1599,7 +1609,7 @@ tests/e2e/hcr-linux-rbhcr/t_integration_hcr_linux_threaded_synchronized_reload.n
 tests/e2e/hcr-linux-shared/t_e2e_hcr_linux_shared_library_sled_patch.nim	nim	2
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim	nim	3
 tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_quiescence_handshake_and_release.nim	nim	2
-tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim	nim	18
+tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim	nim	19
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_on_stack_function_reported_skipped.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_quiescence_timeout_aborts_without_writing.nim	nim	2
 tests/e2e/hcr-linux-threads/t_integration_hcr_linux_signal_blocked_thread_refused_by_name.nim	nim	3
@@ -1811,6 +1821,7 @@ tests/integration/t_a_contract_refusal_is_distinguishable_from_a_successful_disp
 tests/integration/t_a_dirty_sibling_leaves_the_lock_alone.nim	nim	1
 tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	nim	1
 tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	nim	5
+tests/integration/t_a_gate_older_than_the_interface_envelope_says_so.nim	nim	1
 tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim	nim	1
 tests/integration/t_a_hand_run_gate_judges_the_repo_the_hook_judges.nim	nim	1
 tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	nim	1
@@ -1830,6 +1841,7 @@ tests/integration/t_a_repin_moves_the_sibling_repos_pin_with_flake_lock.nim	nim	
 tests/integration/t_a_repo_not_in_develop_mode_is_not_substituted.nim	nim	1
 tests/integration/t_a_reused_result_is_attested_only_over_byte_identical_inputs.nim	nim	1
 tests/integration/t_a_root_repo_flake_is_reported_not_refused.nim	nim	1
+tests/integration/t_a_shared_checkout_at_another_repos_pin_is_not_refused.nim	nim	1
 tests/integration/t_a_sibling_override_excludes_gitignored_build_output.nim	nim	1
 tests/integration/t_a_sibling_whose_pin_is_not_fetched_is_not_recorded.nim	nim	1
 tests/integration/t_a_test_that_reads_an_ignored_file_is_not_certified.nim	nim	1
@@ -2106,7 +2118,7 @@ tests/integration/t_every_launch_path_is_monitored.nim	nim	11
 tests/integration/t_every_selector_spelling_plans_the_certificates_its_build_materializes.nim	nim	3
 tests/integration/t_evidence_publish_verb_and_lock_flag_on_test_sharding.nim	nim	1
 tests/integration/t_execute_edge_gives_tests_a_usable_path.nim	nim	3
-tests/integration/t_executed_binary_is_a_recorded_input.nim	nim	16
+tests/integration/t_executed_binary_is_a_recorded_input.nim	nim	18
 tests/integration/t_execution_lease_confinement.nim	nim	10
 tests/integration/t_exit_codes_are_documented_and_stable.nim	nim	6
 tests/integration/t_ext_repro_action_rows.nim	nim	2
@@ -2379,6 +2391,7 @@ tests/integration/t_nested_lock_push_capability_security.nim	nim	15
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
 tests/integration/t_nf4_foreign_env_contract.nim	nim	18
 tests/integration/t_nim_compile_key_ignores_the_shells_temp_dir.nim	nim	2
+tests/integration/t_nim_convention_rekeys_on_observed_phase1_reads.nim	nim	3
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
@@ -2484,6 +2497,7 @@ tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
 tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	6
+tests/integration/t_provider_refresh_rechecks_env_and_scoped_scans.nim	nim	2
 tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9
@@ -3192,7 +3206,7 @@ tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	12
+tests/unit/test_release_native_packages.py	python	13
 tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12

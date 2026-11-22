@@ -280,6 +280,15 @@ proc newWorld(name: string; withGit = false): World =
   for d in [result.home, result.zdot, result.data, result.config,
       result.root, base / "work", base / "cache", base / "state"]:
     createDir(d)
+  when defined(windows):
+    # The scratch home gets the Documents folder every Windows user profile
+    # has. The shell API repro calls (`SHGetFolderPathW`, no
+    # `CSIDL_FLAG_DONT_VERIFY`) and `[Environment]::GetFolderPath('MyDocuments')`
+    # both verify that the folder exists and report nothing when it does
+    # not; with it present, repro and the PowerShell `windowsDocuments` asks
+    # resolve it through the same verified call and therefore agree, which
+    # is what lets a case check the folder repro actually wrote to.
+    createDir(result.home / "Documents")
 
 proc env(w: World): seq[tuple[name, value: string]] =
   @[("HOME", w.home), ("USERPROFILE", w.home), ("ZDOTDIR", w.zdot),
@@ -427,7 +436,9 @@ proc windowsDocuments(env: openArray[tuple[name, value: string]] = []):
       "-Command", "[Environment]::GetFolderPath('MyDocuments')"], env),
       timeoutMs = 60_000)
     # An empty answer would turn every profile path relative and the
-    # comparisons and saves built on it into silent no-ops.
+    # comparisons and saves built on it into silent no-ops. It means the
+    # folder does not exist (the call verifies it): `newWorld` creates the
+    # scratch home's Documents for that reason.
     doAssert res.code == 0 and res.output.strip().len > 0, res.output
     res.output.strip()
   else:
