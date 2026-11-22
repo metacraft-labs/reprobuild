@@ -640,7 +640,7 @@ libs/repro_home_resources/tests/t_smoke_home_resources.nim	nim	175
 libs/repro_home_rollback/tests/t_home_managed_blocks_share_the_one_writer.nim	nim	11
 libs/repro_home_rollback/tests/t_resource_drift.nim	nim	5
 libs/repro_home_rollback/tests/t_rollback_releases_unowned_concerns.nim	nim	3
-libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim	nim	9
+libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim	nim	14
 libs/repro_home_rollback/tests/t_smoke_home_rollback.nim	nim	2
 libs/repro_homebrew_adapter/tests/t_smoke_repro_homebrew_adapter.nim	nim	65
 libs/repro_infra/tests/t_an_apply_reports_reboot_required_from_a_build_action.nim	nim	4

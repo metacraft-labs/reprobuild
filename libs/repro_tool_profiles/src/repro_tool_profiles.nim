@@ -8268,7 +8268,8 @@ proc uninstallScoopApp*(app: string; scoopOverride = "") =
   ## Called only for an `sraUninstallApp` removal plan
   ## (`scoop_removal.planScoopAppRemoval`): the transition was given
   ## `--uninstall-from-scoop`, every installed version is one Reprobuild
-  ## installed, and no non-profile root holds any prefix of the app
+  ## installed, and no root other than the transitioning state directory's
+  ## own `profile` roots holds any prefix of the app
   ## (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed by Store GC Roots).
   if app.len == 0:
     return
