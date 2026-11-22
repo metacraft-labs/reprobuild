@@ -12133,7 +12133,7 @@ proc recipeCompileOutputDirOf(run: BuildRunResult; actionId,
       return item.computationOutputDir
   stagingDir
 
-proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
+proc recipeCompileRelocationAnchors(workDir, helperCliPath, modulePath: string;
                                     compileCommand: openArray[string] = []):
     seq[string] =
   ## The roots a recipe compile reaches by ABSOLUTE path from wherever the
@@ -12166,31 +12166,24 @@ proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
       roots.add(os.normalizedPath(home / dir))
   # Every library directory the compile is TOLD about by absolute path —
   # the reprobuild package path set includes sibling checkouts (io-mon,
-  # runquota, ...) — is reached there from every location.
+  # runquota, ...) — is reached there from every location. Except the
+  # packages the RECIPE declares (`uses "<name>"`): they are found beside the
+  # recipe (`declaredPackagePathDirs`), move with it, and are named relative
+  # to it (`recipeRelativeCompileArgs`), so anchoring them would bind the
+  # compile's identities to one location of the workspace.
+  let declaredDirs =
+    if modulePath.len > 0: declaredPackagePathDirs(absolutePath(modulePath))
+    else: @[]
   for arg in compileCommand:
     if arg.startsWith(NimPathOption) and arg.len > NimPathOption.len:
       let dir = arg[NimPathOption.len .. ^1]
-      if dir.isAbsolute:
+      if dir.isAbsolute and dir notin declaredDirs:
         roots.add(dir)
   for root in roots:
     let normalized = os.normalizedPath(root)
     if normalized notin result:
       result.add(normalized)
   result.sort()
-
-proc recipeRelativeCompileArgs(command: openArray[string];
-                               modulePath: string): seq[string] =
-  ## A provider compile command as the recipe-relative compile spells it:
-  ## the recipe module by its name and the recipe directory as `.`.
-  let absoluteModule = absolutePath(modulePath)
-  let recipeDir = parentDir(absoluteModule)
-  for arg in command:
-    if arg == absoluteModule or arg == modulePath:
-      result.add(extractFilename(modulePath))
-    elif arg == NimPathOption & recipeDir:
-      result.add(NimPathOption & ".")
-    else:
-      result.add(arg)
 
 proc publishIfChanged(path, content: string) =
   ## Write `content` to `path` unless it already holds exactly that, so a
@@ -12246,7 +12239,7 @@ proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
   result.active = true
   result.recipeDir = recipeDir
   result.anchors = effectiveAnchors(recipeDir,
-    recipeCompileRelocationAnchors(workDir, helperCliPath,
+    recipeCompileRelocationAnchors(workDir, helperCliPath, modulePath,
       callerPlan.compilerCommand))
   # Derived from the caller's plan, whose sources and fingerprints are this
   # recipe's. The identities do not depend on the output path (`--out:` is
@@ -12557,7 +12550,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   let anchors =
     if relocatable:
       effectiveAnchors(recipeDir, recipeCompileRelocationAnchors(workDir,
-        helperCliPath, providerCompileCommand(modulePath,
+        helperCliPath, modulePath, providerCompileCommand(modulePath,
           parentDir(artifactPath) / "provider" / "project-provider",
           workDir, scratchDir)))
     else: @[]
@@ -12573,8 +12566,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       else:
         providerCompilerCommand
     elif relocatable:
-      providerCompileCommand(extractFilename(modulePath),
-        ".repro" / "provider" / "project-provider", workDir, "")
+      # Assembled for the recipe at its absolute path, then spelled as the
+      # recipe-relative compile spells it. Assembling it for the bare file
+      # name read that name against THIS process's working directory, which
+      # is not the recipe's: the recipe's declared packages
+      # (`declaredPackagePathDirs`) were looked up beside some other file.
+      recipeRelativeCompileArgs(providerCompileCommand(absolutePath(modulePath),
+        ".repro" / "provider" / "project-provider", workDir, ""), modulePath)
     else:
       providerCompileCommand(modulePath,
         parentDir(artifactPath) / "provider" / "project-provider",

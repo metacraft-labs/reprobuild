@@ -3,9 +3,10 @@
 ## §"Importing and pinning", §"The policy snapshot in `repro.lock`").
 ##
 ## Fixture (``certificate_policy_fixture.nim``): a ``certpolicy`` package
-## whose ``policy/team_policy.nim`` builds the policy, and a ``consumer``
-## repository that names the package in ``uses:`` and enacts the policy. The
-## consumer has no copy of the policy source.
+## whose ``src/team_policy.nim`` builds the policy, and a ``consumer``
+## repository that declares the package with a nested ``uses: "certpolicy"``,
+## imports the policy module by name (``import team_policy``) and enacts the
+## policy. The consumer has no copy of the policy source.
 ##
 ## Asserted, against the built ``repro``:
 ##   1. ``repro lock refresh`` writes ``[certificate_policy]`` exactly as the

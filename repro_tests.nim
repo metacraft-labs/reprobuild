@@ -29785,6 +29785,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_recipe_imports_a_module_of_a_declared_package_by_name.nim",
+    binary: "build/test-bin/t_recipe_imports_a_module_of_a_declared_package_by_name",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_recipe_lock_consistency_refuses.nim",
     binary: "build/test-bin/t_recipe_lock_consistency_refuses",
     defines: @[],
@@ -30382,7 +30394,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_catalog_selection.nim",
@@ -31222,7 +31234,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_scanner_era_cache_entries_are_never_served.nim",
@@ -32146,7 +32158,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_system_plan_apply_symmetry_and_universal_json.nim",
@@ -32938,7 +32950,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g15",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_unsatisfiable_floor_does_not_fall_through_to_path.nim",
@@ -33718,7 +33730,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_metadata_branch_survives_init_and_status.nim",
