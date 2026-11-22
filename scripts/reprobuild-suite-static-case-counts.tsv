@@ -395,6 +395,8 @@ libs/repro_cli_support/tests/test_m10_home_gc_cli.nim	nim	7
 libs/repro_cli_support/tests/test_m69_home_add_versioned.nim	nim	5
 libs/repro_cli_support/tests/test_m70_migrate_from_env_scripts.nim	nim	35
 libs/repro_cli_support/tests/test_npc_compile_edge_has_no_package_but_locked.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m10_force_pushed_head_snapshot_is_an_event.nim	nim	1
+libs/repro_cli_support/tests/test_npc_m10_retired_snapshot_lock_still_builds.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m14_build_refuses_other_nim_for_condition.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m6_pin_survives_repoint.nim	nim	1
 libs/repro_cli_support/tests/test_npc_m6_refresh_rewind_refused.nim	nim	2
@@ -816,6 +818,11 @@ libs/repro_nimble_generator/tests/t_nimble_source_set.nim	nim	6
 libs/repro_nimble_generator/tests/t_origin_git_run_keeps_the_output_of_a_child_that_exits.nim	nim	1
 libs/repro_nimble_generator/tests/t_repro_catalog_generate_and_verify_verbs.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_generator_deterministic_two_hosts.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_concurrent_fetch_edges_bounded.nim	nim	2
+libs/repro_nimble_generator/tests/test_npc_m10_head_move_supersedes_snapshot.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_ini_nimble_read_as_data.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_unspellable_registry_name_refused.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m10_untagged_package_gets_one_dated_snapshot.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m13_pre_m13_gitlinks_record_stays_excluded.nim	nim	3
 libs/repro_nimble_generator/tests/test_npc_m13_submodule_nesting_bounded.nim	nim	2
 libs/repro_nimble_generator/tests/test_npc_m13_submodule_path_collision_refused.nim	nim	1
@@ -1159,7 +1166,7 @@ libs/repro_standard_provider/tests/test_jsts_convention.nim	nim	19
 libs/repro_standard_provider/tests/test_jsts_direct_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_kotlin_gradle_convention.nim	nim	11
 libs/repro_standard_provider/tests/test_mode1_loader.nim	nim	12
-libs/repro_standard_provider/tests/test_nim_convention.nim	nim	39
+libs/repro_standard_provider/tests/test_nim_convention.nim	nim	45
 libs/repro_standard_provider/tests/test_ocaml_dune_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_pascal_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_php_composer_convention.nim	nim	10
@@ -2384,6 +2391,7 @@ tests/integration/t_nested_lock_push_capability_security.nim	nim	15
 tests/integration/t_nested_topology_full_pipeline_without_org_root_repo.nim	nim	1
 tests/integration/t_nf4_foreign_env_contract.nim	nim	18
 tests/integration/t_nim_compile_key_ignores_the_shells_temp_dir.nim	nim	2
+tests/integration/t_nim_convention_rekeys_on_observed_phase1_reads.nim	nim	3
 tests/integration/t_nim_package_path_handling.nim	nim	1
 tests/integration/t_nim_unittest_edge_reaches_declared_c_backend.nim	nim	1
 tests/integration/t_nitro_enclave_attestation_surface.nim	nim	27
@@ -2490,6 +2498,7 @@ tests/integration/t_provider_library_c_abi_reconcile.nim	nim	2
 tests/integration/t_provider_library_nimrtl_direct_call_no_marshal.nim	nim	1
 tests/integration/t_provider_link_never_puts_a_host_lib_dir_in_rpath.nim	nim	4
 tests/integration/t_provider_recompile_keeps_every_invocation_key.nim	nim	6
+tests/integration/t_provider_refresh_rechecks_env_and_scoped_scans.nim	nim	2
 tests/integration/t_provider_session_protocol_is_isolated_from_recipe_output.nim	nim	10
 tests/integration/t_provision_binding.nim	nim	19
 tests/integration/t_provision_policy_gate.nim	nim	9

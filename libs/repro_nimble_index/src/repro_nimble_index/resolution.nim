@@ -171,8 +171,9 @@ proc canonicalRequirement*(input: NimbleSolverInput;
       result.name = identityOf(input.canonical[k])
     if dep.range.strip().len == 0:
       # `uses: "nimble:x"` with no range: any version (the solver's empty
-      # range admits none).
-      result.range = AnyVersionRange
+      # range admits none), which for a package without a tag record is its
+      # offered snapshot (NPC-AREQ31 item 5).
+      result.range = anyVersionRange(input, nimbleNameOf(result.name))
 
 type
   ChosenNimble* = object
@@ -305,6 +306,31 @@ proc explainNimbleFailure*(input: NimbleSolverInput;
               else: "the index does not hold " & requirementTargetName(r.entry)
             lines.add "  " & c.identity & " " & versionText(c.record.version) &
               " requires " & r.entry.source & ": " & why
+  # A ranged requirement on a package whose only offered version is a
+  # snapshot (NPC-AREQ31 item 5): no range admits one.
+  for pkg in input.packages:
+    let si = offeredSnapshot(pkg)
+    if si < 0: continue
+    let snap = pkg.candidates[si]
+    let why = ": no range admits a snapshot; " & pkg.identity & " has no " &
+      "version tag and offers only " & snap.version & ", which the bare " &
+      "name (any version) or `#" & snap.record.commit & "` selects"
+    for rr in input.options.roots:
+      if rr.range.strip().len > 0 and
+          input.canonical.getOrDefault(nameKey(rr.name)) == pkg.name:
+        lines.add "  " & rr.requirer & " requires nimble:" & rr.name & " " &
+          rr.range & why
+    for other in input.packages:
+      for c in other.candidates:
+        if not c.offered: continue
+        var reqs = c.requires
+        for (fname, freqs) in c.features:
+          if fname in other.features: reqs.add freqs
+        for r in reqs:
+          if r.entry.versionKind == rvRange and r.entry.targetKind == rtPackage and
+              input.canonical.getOrDefault(nameKey(r.entry.target)) == pkg.name:
+            lines.add "  " & c.identity & " " & versionText(c.record.version) &
+              " requires " & r.entry.source & why
   for pkg in input.packages:
     var excluded: seq[string]
     var offered = 0

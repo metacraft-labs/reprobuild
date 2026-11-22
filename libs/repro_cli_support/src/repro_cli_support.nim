@@ -8770,6 +8770,9 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
       of gevDirectoryEnumeration:
         if directoryMemberNames(input.identity) != input.directoryMembers:
           return false
+      of gevHostFact:
+        if hostFactDigest(input.identity) != input.digest:
+          return false
       of gevProviderSource:
         # Governed by ``providerSnapshotBinaryFresh``, which every caller
         # applies before this and which requires every fragment's record to
@@ -98639,6 +98642,8 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
       if applied.refusals.len > 0:
         raise newException(NimbleLockError, "the solved Nimble closure " &
           "cannot be locked:\n  " & applied.refusals.join("\n  "))
+      for move in applied.moves:
+        stderr.writeLine("repro lock " & verb & ": " & move)
       applied.document
   let writeTo = if writeByDefault or gen.write: lockP else: ""
   var removals = SiblingRemovalReport(droppedPins: newJArray(),

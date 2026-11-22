@@ -132,13 +132,12 @@
 
 import std/[algorithm, json, os, strutils]
 
-import io_mon
 import repro_core
-import repro_core/monitor_spawn_stdio
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
+import repro_standard_provider/conventions/observed_reads
 import repro_standard_provider/conventions/go_embed
 
 const
@@ -206,23 +205,13 @@ type
       ## ignore this field and emit our own compile action with our own
       ## output path.
 
-  GoObservedInputs = object
+  GoObservedInputs = ObservedReads
     ## What the io monitor observed the project's ``go list`` runs read:
-    ## the graph's key (Go.md §"Implicit-dependency capture", item 3).
-    files: seq[string]
-      ## Absolute paths read, opened or probed (a probe of an absent path is
-      ## recorded too: its appearance changes the listing).
-    directories: seq[string]
-      ## Absolute paths of the directories enumerated.
-    envNames: seq[string]
-      ## Environment variables the runs read.
-    incomplete: seq[string]
-      ## Empty when every run was observed completely. Otherwise the
-      ## monitor's diagnosis of each run it graded incomplete — on Linux,
-      ## every run of a statically linked ``go`` (the preload monitor cannot
-      ## enter it; reprobuild-pm issue
-      ## 2026-10-08-frozen-wasm-static-go-monitor-incomplete). The recorded
-      ## sets are then not a key: nothing derived from the listing is reused.
+    ## the graph's key (Go.md §"Implicit-dependency capture", item 3). On
+    ## Linux every run of a statically linked ``go`` is graded incomplete (the
+    ## preload monitor cannot enter it; reprobuild-pm issue
+    ## 2026-10-08-frozen-wasm-static-go-monitor-incomplete), and then nothing
+    ## derived from the listing is reused.
 
   GoListing = object
     ## The project's one ``go list`` (plus, in workspace mode, the
@@ -520,8 +509,7 @@ const
     ## Cached raw ``go list -export -json -deps`` output (go's own JSON,
     ## re-parsed on a hit).
   GoEmitCacheObservedName = "go-list-export.observed"
-    ## What the monitored runs read, one ``<kind> <path-or-name>`` line per
-    ## input (``f`` file, ``d`` directory, ``e`` environment variable): the
+    ## What the monitored runs read, in ``renderObservedReads``'s format: the
     ## inputs the cache key is recomputed over on the next emit.
   DefaultModuleGoVersion = "1.16"
     ## cmd/go's ``gover.DefaultGoModVersion``: the language version of a
@@ -530,69 +518,6 @@ const
 proc goEmitCacheScratchDir(projectRoot: string): string =
   ## Per-project emit-cache scratch — same shape as the Rust convention.
   projectRoot / ScratchDirName / ".emit-cache"
-
-proc keepObservedPath(path: string): bool =
-  ## The kernel's pseudo file systems are not inputs a file digest can key:
-  ## ``/proc`` and ``/sys`` describe the running system, ``/dev`` holds
-  ## devices (Go.md §"Implicit-dependency capture", item 3).
-  if path.len == 0:
-    return false
-  when defined(posix):
-    for prefix in ["/proc", "/sys", "/dev"]:
-      if path == prefix or path.startsWith(prefix & "/"):
-        return false
-  true
-
-proc addUnique(list: var seq[string]; value: string) =
-  if value notin list:
-    list.add(value)
-
-proc foldMonitorEvidence(observed: var GoObservedInputs;
-                         records: openArray[MonitorRecord]; cwd: string;
-                         ownPaths: openArray[string]) =
-  ## Turn one monitored run's records into graph-evaluation inputs: every
-  ## file read, opened, probed or executed, and every directory enumerated,
-  ## that the run did not itself write. ``ownPaths`` are the capture files
-  ## this process opened for the run; the child never opens them, but they
-  ## are excluded explicitly so a backend that reported an inherited
-  ## descriptor's path cannot make the key depend on its own output.
-  proc material(path: string): string =
-    if path.len == 0:
-      return ""
-    let absolute = if path.isAbsolute: path else: cwd / path
-    os.normalizedPath(absolute)
-  var written: seq[string] = @[]
-  for r in records:
-    if r.observationKind in {moFileWrite, moPathMutation}:
-      written.addUnique(material(r.path))
-  for r in records:
-    let path = material(r.path)
-    case r.observationKind
-    of moFileOpen, moFileRead, moPathProbe, moExecute:
-      if keepObservedPath(path) and path notin written and path notin ownPaths:
-        observed.files.addUnique(path)
-    of moDirectoryEnumerate:
-      if keepObservedPath(path) and path notin ownPaths:
-        observed.directories.addUnique(path)
-    of moEnvRead:
-      if r.path.len > 0:
-        observed.envNames.addUnique(r.path)
-    else:
-      discard
-
-proc monitorDiagnosis(capture: MonitorResult): string =
-  ## Why a capture was graded incomplete, in the monitor's own words.
-  var reasons: seq[string] = @[]
-  for r in capture.records:
-    if r.observationKind == moEventLoss:
-      reasons.add(if r.detail.len > 0: r.detail else: r.path)
-  for gap in capture.depFile.capabilityGaps:
-    if gap.required:
-      reasons.add("required capability missing: " & $gap.capability)
-  if reasons.len == 0:
-    reasons.add("the monitor graded the capture incomplete without naming " &
-      "a loss")
-  reasons.join("; ")
 
 type GoRun = object
   stdout: string
@@ -618,60 +543,19 @@ proc runGoMonitored(goExe: string; args: seq[string];
   ## it. On Windows io-mon captures the child's stdout and stderr into one
   ## file; ``splitJsonObjects`` refuses any text in it that is not JSON.
   let commandText = "go " & args.join(" ")
-  createDir(extendedPath(scratchDir))
-  let outPath = scratchDir / (stem & ".stdout")
-  let errPath = scratchDir / (stem & ".stderr")
-  let depPath = scratchDir / (stem & ".iomon")
-  var request = FsSnoopRequest(
-    command: @[goExe] & args,
-    depFilePath: depPath,
-    cwd: projectRoot,
-    streamMode: fsoNone,
-    passthroughChildStdout: true,
-    passthroughChildStderr: true)
-  var monitored: MonitorResult
+  var run: MonitoredRun
   try:
-    when defined(windows):
-      request.captureChildStdio = true
-      request.captureStdioPath = outPath
-      monitored = runMonitored(request)
-    else:
-      var ctx = beginMonitorSpawnContext(outPath, errPath)
-      var handle: MonitorHandle
-      try:
-        handle = startMonitor(request)
-      finally:
-        endMonitorSpawnContext(ctx)
-      monitored = finishMonitor(move handle)
-  except CatchableError as e:
+    run = runMonitoredTool(@[goExe] & args, projectRoot, scratchDir, stem,
+      commandText, observed)
+  except MonitorUnavailableError as e:
     raise newException(ValueError,
-      "go convention: cannot run '" & commandText & "' under the io " &
-        "monitor, and an unobserved listing has no sound key " &
+      "go convention: an unobserved listing has no sound key " &
         "(Go.md §\"Implicit-dependency capture\"): " & e.msg)
-  try:
-    result.stdout = readFile(extendedPath(outPath))
-  except CatchableError:
-    result.stdout = ""
-  try:
-    if fileExists(extendedPath(errPath)):
-      result.stderr = readFile(extendedPath(errPath))
-  except CatchableError:
-    result.stderr = ""
-  for path in [outPath, errPath, depPath]:
-    try:
-      if fileExists(extendedPath(path)):
-        removeFile(extendedPath(path))
-    except CatchableError:
-      discard
-  if monitored.exitCode != 0:
+  result = GoRun(stdout: run.stdout, stderr: run.stderr)
+  if run.exitCode != 0:
     raise newException(ValueError,
-      "go convention: '" & commandText & "' exited " & $monitored.exitCode &
+      "go convention: '" & commandText & "' exited " & $run.exitCode &
         " for " & projectRoot & ":\n" & result.stderr & result.stdout)
-  if monitored.completeness != mcComplete:
-    observed.incomplete.add("'" & commandText & "': " &
-      monitorDiagnosis(monitored))
-  foldMonitorEvidence(observed, monitored.records, projectRoot,
-    [outPath, errPath, depPath])
 
 proc listArgs(patterns: seq[string]): seq[string] =
   @["list", "-export", "-json", "-deps"] & patterns
@@ -699,43 +583,17 @@ proc workspacePatterns(projectRoot, goExe, scratchDir: string;
 proc observedFingerprint(projectRoot, goExe: string;
                          observed: GoObservedInputs): string =
   ## The emit-cache key: the toolchain, the command, and the CURRENT content
-  ## of every recorded input — file digests, directory memberships and the
-  ## values of the environment variables the runs read.
+  ## of every recorded input — file digests, directory memberships and
+  ## digests of the values of the environment variables the runs read
+  ## (``observedReadsInputs``).
   var inputs: seq[EmitCacheInput] = @[
     textInput("go-exe:" & goExe),
     toolVersionInput(goExe, ["version"]),
     textInput("project-root:" & projectRoot),
     textInput("cmd:go list -export -json -deps (module or workspace patterns)"),
   ]
-  var dirs = observed.directories
-  dirs.sort(system.cmp[string])
-  for dir in dirs:
-    inputs.add(textInput("dir:" & dir & "=" &
-      directoryMemberNames(dir).join("\x1f")))
-  var names = observed.envNames
-  names.sort(system.cmp[string])
-  for name in names:
-    inputs.add(textInput("env:" & name & "=" &
-      (if existsEnv(name): "set:" & getEnv(name) else: "unset")))
-  for file in observed.files:
-    inputs.add(fileInput(file))
+  inputs.add(observedReadsInputs(observed))
   computeEmitCacheFingerprint(inputs)
-
-proc renderObserved(observed: GoObservedInputs): string =
-  for f in observed.files: result.add("f " & f & "\n")
-  for d in observed.directories: result.add("d " & d & "\n")
-  for e in observed.envNames: result.add("e " & e & "\n")
-
-proc parseObserved(text: string): GoObservedInputs =
-  for line in text.splitLines():
-    if line.len < 3 or line[1] != ' ':
-      continue
-    let value = line[2 .. ^1]
-    case line[0]
-    of 'f': result.files.add(value)
-    of 'd': result.directories.add(value)
-    of 'e': result.envNames.add(value)
-    else: discard
 
 proc runGoListing(projectRoot, goExe: string): GoListing =
   ## The project's one listing (Go.md §"Recognition" 2): ``go list -export
@@ -750,7 +608,8 @@ proc runGoListing(projectRoot, goExe: string): GoListing =
   ## **Emit cache**: the raw output is kept with the list of what the runs
   ## read. A later emit reuses it only while every recorded file has the
   ## same content, every recorded directory the same members and every
-  ## recorded environment variable the same value (``observedFingerprint``).
+  ## recorded environment variable the same value, compared by digest
+  ## (``observedFingerprint``).
   ## On a hit the same recorded inputs are what the fragment reports. A
   ## listing whose capture was incomplete is never stored, so it is never
   ## reused.
@@ -760,7 +619,7 @@ proc runGoListing(projectRoot, goExe: string): GoListing =
   if fileExists(extendedPath(observedPath)) and
       fileExists(extendedPath(cachedOutputPath)):
     try:
-      let observed = parseObserved(readFile(extendedPath(observedPath)))
+      let observed = parseObservedReads(readFile(extendedPath(observedPath)))
       if observed.files.len > 0 and emitCacheIsUsable(scratchDir,
           GoEmitCacheBaseName, observedFingerprint(projectRoot, goExe,
           observed), [cachedOutputPath, observedPath]):
@@ -788,7 +647,7 @@ proc runGoListing(projectRoot, goExe: string): GoListing =
   # stale one.
   try:
     writeFile(extendedPath(cachedOutputPath), run.stdout)
-    writeFile(extendedPath(observedPath), renderObserved(observed))
+    writeFile(extendedPath(observedPath), renderObservedReads(observed))
     writeEmitCacheFingerprint(scratchDir, GoEmitCacheBaseName,
       observedFingerprint(projectRoot, goExe, observed))
   except CatchableError:
@@ -802,16 +661,7 @@ proc registerObservedInputs(observed: GoObservedInputs; goExe: string) =
   ## resets the registry before calling it. A path that is a directory when
   ## registered is covered by its enumeration if it was enumerated; a file
   ## digest of it would read as ``missing`` either way.
-  for file in observed.files:
-    if not dirExists(extendedPath(file)):
-      providerFileInput(file)
-  for dir in observed.directories:
-    providerDirectoryInput(dir)
-  if observed.incomplete.len > 0:
-    # Unknown-scope loss: the recorded sets above are a lower bound, not a
-    # key. Mark the fragment as derived from unobserved reads, so every
-    # refresh produces it again (and re-runs the listing).
-    providerUnobservedInput(goExe)
+  registerObservedReads(observed, goExe)
 
 proc sanitizeImportPath(importPath: string): string =
   ## Map a Go import path (``example.com/foo/bar``) to a filesystem-safe
