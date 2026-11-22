@@ -408,6 +408,16 @@ proc resolvedResponsePath(path, base: string): string =
   else:
     os.normalizedPath(absolutePath(base) / path)
 
+proc resolvedResponseSite(site, base: string): string =
+  ## A rendered `<file>:<line>` source site (`DevEnvSharedResolution.
+  ## contributionSites`) with its file resolved as `resolvedResponsePath`
+  ## resolves a bare path. The line is everything after the LAST colon, so
+  ## a file name that itself contains a colon keeps it.
+  let colon = site.rfind(':')
+  if colon <= 0:
+    return resolvedResponsePath(site, base)
+  resolvedResponsePath(site[0 ..< colon], base) & site[colon .. ^1]
+
 proc resolveResponseInputs(inputs: var seq[GraphEvaluationInput];
                            base: string): bool =
   for input in inputs.mitems:
@@ -445,6 +455,20 @@ proc resolveRelativeResponsePaths*(response: var ProviderGraphResponse;
     for diagnostic in response.devEnv.diagnostics.mitems:
       diagnostic.sourceFile =
         resolvedResponsePath(diagnostic.sourceFile, workingDir)
+    # A shared-service resolution names the resolver's site, its
+    # contributions' sites and the OWNER's recipe directory, all as the
+    # provider's DSL recorded them: relative to the recipe the provider was
+    # compiled from when they lie outside the anchors (a sibling owner is
+    # `../<owner>`, the provider's own package is `.`). The engine reads
+    # `ownerRecipeDir` to find the owner's interface artifact, so it must
+    # name THIS copy's owner, never the copy that compiled the provider.
+    for resolution in response.devEnv.sharedResolutions.mitems:
+      resolution.ownerRecipeDir =
+        resolvedResponsePath(resolution.ownerRecipeDir, workingDir)
+      resolution.sourceFile =
+        resolvedResponsePath(resolution.sourceFile, workingDir)
+      for site in resolution.contributionSites.mitems:
+        site = resolvedResponseSite(site, workingDir)
   of pskManifest:
     discard
 

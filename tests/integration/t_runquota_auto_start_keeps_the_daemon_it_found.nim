@@ -36,6 +36,7 @@ import std/[os, osproc, tempfiles, unittest]
 
 import repro_cli_support
 import repro_test_support/per_user_runquota
+import repro_test_support/reasoned_skip
 
 proc writeExecutable(path: string) =
   writeFile(path, "#!/bin/sh\nexit 0\n")
@@ -66,8 +67,7 @@ suite "runquota auto-start keeps the daemon it found":
     test "the build's auto-start starts the daemon the dev-env auto-start found":
       let realDaemon = findRunQuotaDaemonBin()
       if realDaemon.len == 0:
-        checkpoint("no runquotad on this host")
-        skip()
+        skip("no runquotad on this host; this case starts the real daemon")
       else:
         resetInvocationRunQuotaDaemonBin()
         let isolated = isolateUserRunQuota()
@@ -113,8 +113,8 @@ suite "runquota auto-start keeps the daemon it found":
         setCurrentDir(emptyDir)
         let searched = findRunQuotaDaemonBin()
         if searched.len > 0:
-          checkpoint("the sibling-checkout fallback answers here: " & searched)
-          skip()
+          skip("the sibling-checkout fallback answers here (" & searched &
+            "), so the search cannot come up empty")
         else:
           # NEGATIVE CONTROL first, so its nil cannot be a daemon the positive
           # case left running.

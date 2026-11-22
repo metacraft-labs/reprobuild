@@ -16,6 +16,7 @@
 ##   primitives the dot macro lowers to.
 
 import std/[macros]
+from repro_core/relocation import recipeSourceName
 
 import ./types
 import ./context
@@ -90,8 +91,14 @@ proc unwrapValue*[T](v: ConfigurableValue): T =
 # ---------------------------------------------------------------------------
 
 template captureSite*(contribKind: ContributionKind): SourceSite =
-  let info {.gensym.} = instantiationInfo(fullPaths = true)
-  newSourceSite(info.filename, info.line, info.column, contribKind)
+  ## The call site of a configurable declaration or contribution, its file
+  ## recorded as every DSL site is (`recipeSourceName`): relative to the
+  ## recipe in a recipe-relative provider compile, so the provider does not
+  ## carry the recipe's absolute path and may be served to another copy of
+  ## it. The sites are read only to render diagnostics.
+  const info {.gensym.} = instantiationInfo(fullPaths = true)
+  const file {.gensym.} = recipeSourceName(info.filename)
+  newSourceSite(file, info.line, info.column, contribKind)
 
 # ---------------------------------------------------------------------------
 # Construction

@@ -128,13 +128,32 @@ proc boolLiteral(node: NimNode; fallback: bool): bool =
   else:
     fallback
 
+proc recordedSourceFile(node: NimNode): string =
+  ## The file of `node`'s source site as the DSL RECORDS it in the compiled
+  ## program. Nim's line information is always absolute; a recipe-relative
+  ## provider compile names the recipe's own files relative to it instead
+  ## (`recipeSourceName`), so the provider binary describes the copy of the
+  ## recipe it runs beside and may be served to another copy
+  ## (Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles"). Every site the DSL serializes goes through this proc or
+  ## `lineFile`; a raw `lineInfoObj().filename` in emitted code would put the
+  ## recipe's absolute path into the binary and make it location-bound.
+  ## Compile-time-only uses (reading the file, resolving a sibling) keep the
+  ## absolute name.
+  recipeSourceName(node.lineInfoObj().filename)
+
+proc recordedSourceDir(node: NimNode): string =
+  ## The directory of `node`'s recorded source file (`recordedSourceFile`):
+  ## absolute under an anchor or outside a recipe-relative compile, relative
+  ## to the recipe otherwise -- `.` for the recipe's own directory, never
+  ## the empty string, which a reader takes for "not recorded".
+  let dir = parentDir(recordedSourceFile(node))
+  if dir.len == 0: "." else: dir
+
 proc lineFile(node: NimNode): tuple[file: string; line: int] =
-  ## The source site the DSL RECORDS for `node`. Nim's line information is
-  ## always absolute; a recipe-relative provider compile names the recipe's
-  ## own files relative to it instead (`recipeSourceName`), so the provider
-  ## binary describes the copy of the recipe it runs beside.
-  let info = node.lineInfoObj()
-  (recipeSourceName(info.filename), info.line)
+  ## The source site the DSL RECORDS for `node`: `recordedSourceFile` and
+  ## the line.
+  (recordedSourceFile(node), node.lineInfoObj().line)
 
 proc calleeName(node: NimNode): string =
   if node.kind in {nnkCall, nnkCommand} and node.len > 0:

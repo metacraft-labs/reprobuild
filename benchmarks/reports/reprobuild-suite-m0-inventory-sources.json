@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3100,
-    "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 823,
+    "nimTestBinaries": 3101,
+    "pureUnitConsolidationGroups": 92,
+    "pureUnitTests": 824,
     "staticallyDetectedRuntimeCompilerFlowTests": 159,
-    "testEntries": 3150
+    "testEntries": 3151
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1716,6 +1716,19 @@
       "count": 2,
       "defines": [],
       "dependencyShape": [
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_provider_response_resolves_shared_resolution_paths.nim",
+        "tests/unit/t_provider_snapshot_binary_binding.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
         "recipes/packages/source",
         "repro_dsl_stdlib"
       ],
@@ -1776,7 +1789,7 @@
       "graph-fixture": 27,
       "integration": 1727,
       "platform/destructive": 200,
-      "pure unit": 823,
+      "pure unit": 824,
       "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
@@ -1997,9 +2010,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3100,
+    "nimTestBinaryCount": 3101,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3150
+    "testEntryCount": 3151
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -53565,13 +53578,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_dsl_stdlib",
         "repro_project_dsl"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_provider_compile_follows_the_recipe.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64464,6 +64478,23 @@
       "source": "tests/unit/t_provider_graph_snapshot_version_skew.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 11,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_response_resolves_shared_resolution_paths",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_provider_runtime"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_provider_response_resolves_shared_resolution_paths.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
