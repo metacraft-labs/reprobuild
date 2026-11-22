@@ -37,7 +37,7 @@
 ## the environment or the host into an output. `repro catalog verify`
 ## repeats a generation from the same inputs and compares the roots.
 
-import std/[algorithm, options, os, sets, strutils, tables]
+import std/[algorithm, net, options, os, sets, strutils, tables, times]
 
 import blake3
 
@@ -53,6 +53,7 @@ import repro_nimble_fetch/mirror
 import ./assemble
 import ./edge_objects
 import ./egress
+import ./fetch_work
 import ./origin_git
 import ./registry
 import ./source_set
@@ -63,17 +64,26 @@ const
   GeneratorIdentity* = "reprobuild-nimble-generator/1"
     ## The root's `generator`: the generator's own version, never the host's
     ## tools, so two operators with different git builds agree.
-  ReaderIdentity = "repro_nimble_reader/2"
-    ## in the `read` edge's key: the reader's version. Version 2 reads the
-    ## Nim-version comparisons and `defined(posix|unix|bsd)` into the
-    ## closed condition set (NPC-AREQ7, A3), so a version-1 reading of a
-    ## file that uses them (needs-override) is read again
+  ReaderIdentity = "repro_nimble_reader/3"
+    ## in the `read` edge's key: the reader's version and its options.
+    ## Version 2 reads the Nim-version comparisons and
+    ## `defined(posix|unix|bsd)` into the closed condition set (NPC-AREQ7,
+    ## A3), so a version-1 reading of a file that uses them (needs-override)
+    ## is read again. Version 3 reads a `.nimble` in the old INI format as
+    ## data (`admitIniFormat`), as Nimble reads it with `parsecfg` before
+    ## trying NimScript, so a version-2 reading of one (needs-probe) is read
+    ## again
+  GeneratorReaderOptions* = ReaderOptions(admitIniFormat: true)
+    ## The static reader's options for the `read` edge (NPC-AREQ8 step 1)
   SourceEdgeVersion = "source/2"
     ## in the `source` edge's key: version 2 also outputs a gitlinked tree's
     ## entries and blobs, which a version-1 output on this host lacks
   SubmoduleEdgeVersion = "submodule/1"
   ComposerIdentity = "source-compose/1"
   MaxGenerationIterations = 64
+  DefaultFetchParallelism* = 16
+    ## fetch edges a generation runs at once when its configuration does not
+    ## say: each is one git process mostly waiting on the network
 
 type
   EdgeFamily* = enum
@@ -114,6 +124,12 @@ type
     mirrorAccess*: Option[EgressPolicy]
       ## how HTTPS mirrors are reached (resolver, trust anchors, limits);
       ## none: the host's defaults
+    fetchParallelism*: int
+      ## the most fetch edges (`refs`, `refs history`, `source`,
+      ## `submodule`) run at once, each on a worker thread of the engine's
+      ## concurrent dispatch; 1 runs them one at a time, 0 is
+      ## ``DefaultFetchParallelism``. Not part of any output: the edges'
+      ## outputs and their order of capture are the same at any value
 
   Execution* = object
     family*: EdgeFamily
@@ -124,8 +140,25 @@ type
     family*: EdgeFamily
     refusal*: EgressRefusal
 
+  WaveTiming* = object
+    ## How long one wave of the generation took (wall time), for the
+    ## operator; never part of an output.
+    family*: EdgeFamily
+    edges*: int     ## the wave's edges, cache hits included
+    seconds*: float
+
+  SkippedEntry* = object
+    ## A registry entry the generation did not index, and why (NPC-AREQ3:
+    ## a name `nimble:<name>` cannot spell, a style-insensitive collision,
+    ## an entry without a URL, ...).
+    registry*: string ## the registry's remote
+    entry*: string    ## the entry's name, or its index when it has none
+    reason*: string
+
   GenerationResult* = object
     built*: BuiltIndex
+    skipped*: seq[SkippedEntry]
+      ## the registry entries not indexed, in registry order
     executed*: seq[Execution]
       ## every edge whose executor ran this generation (a cache hit is not in
       ## it), in execution order
@@ -133,6 +166,7 @@ type
     diagnostics*: seq[string]
     events*: seq[OriginEvent]
     actions*: seq[BuildAction] ## every edge of the generation
+    waves*: seq[WaveTiming]    ## every wave, in order
 
   GeneratorError* = object of CatchableError
 
@@ -196,6 +230,12 @@ type
       ## worker output file -> the hash the publisher's cache key names; the
       ## publisher reads a worker's output only through ``readObject``
     previousRoot: Option[IndexObjectId]
+    prepareFailures: Table[string, string]
+      ## action id -> why its fetch edge could not be planned
+    preparedRefusals: Table[string, CapturedRefusal]
+      ## output path -> the refusal a fetch edge met while it was prepared
+      ## for a worker, captured when the edge is settled
+    waves: seq[WaveTiming]
 
 proc hex(s: string): string = toHexLower(blake3.digest(s))
 
@@ -255,118 +295,79 @@ proc execRegistry(run: Run; job: Job; outPath: string) =
     fail("registry " & job.url & " has no packages.json at " & job.commit)
   writeFile(outPath, r.stdoutText)
 
-proc execRefs(run: Run; job: Job; outPath: string) =
-  var answer: RefsAnswer
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
-  try:
-    let v = run.vet(job)
-    let (ok, ls, failure) = lsRemote(run.git, v, scratch, run.cfg.policy.limits)
-    if ok:
-      answer = RefsAnswer(state: anOk, headRef: ls.headRef, head: ls.head,
-        tags: ls.tags)
-    else:
-      answer = RefsAnswer(state: anFailed, detail: failure)
-  except EgressError as e:
-    run.capture(job, e)
-    answer = RefsAnswer(state: anRefused, refusal: $e.refusal.kind,
-      detail: e.refusal.detail)
-  writeFile(outPath, encodeRefs(answer))
+proc fetchKindOf(family: EdgeFamily): FetchKind =
+  case family
+  of efRefs: fkRefs
+  of efHistory: fkHistory
+  of efSource: fkSource
+  of efSubmodule: fkSubmodule
+  else: raise newException(GeneratorError, $family & " is not a fetch edge")
 
-proc execHistory(run: Run; job: Job; outPath: string) =
-  var answer: HistoryAnswer
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
-  try:
-    let v = run.vet(job)
-    let h = fetchHistory(run.git, v, scratch, run.cfg.policy.limits)
-    if h.ok:
-      answer = HistoryAnswer(state: anOk, branchCommits: h.branchCommits,
-        allCommits: h.allCommits)
-    else:
-      answer = HistoryAnswer(state: anFailed, detail: h.failure)
-  except EgressError as e:
-    run.capture(job, e)
-    answer = HistoryAnswer(state: anRefused, refusal: $e.refusal.kind,
-      detail: e.refusal.detail)
-  writeFile(outPath, encodeHistory(answer))
+const ConcurrentFamilies = {efRefs, efHistory, efSource, efSubmodule}
+  ## the fetch edges the engine may run on worker threads: each vets one
+  ## origin and runs one git operation against it (``fetch_work``)
 
-proc execSource(run: Run; job: Job; outPath: string) =
-  var answer = SourceAnswer(commit: job.commit)
-  var nimbleBytes = ""
-  var archive = ""
-  var blobs = ""
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
+proc planFetch(run: Run; job: Job; outPath: string; concurrent: bool;
+               observe = true): Option[FetchPlan] =
+  ## The scheduler's half of a fetch edge. Inline (``concurrent`` false) the
+  ## egress policy vets the origin here. For a worker, the policy's resolver
+  ## and dialer -- closures, which stay on this thread -- answer for the
+  ## origin's own host, and the worker vets the origin from those answers
+  ## (``fetch_work``). A refusal met here has its answer written, and there
+  ## is nothing left to run. Inline it is captured at once; for a worker it
+  ## is held until ``finishEdge`` settles the edge, so the captured
+  ## refusals come in the order the edges are settled, which is the order
+  ## an inline run executes them in, whichever thread met each one.
+  let kind = fetchKindOf(job.family)
+  var plan = FetchPlan(kind: kind, url: job.url, subdir: job.subdir,
+    commit: job.commit, git: run.git, limits: run.cfg.policy.limits,
+    scratch: run.cfg.stateDir / "scratch" / hex(job.subject),
+    outPath: outPath)
   try:
-    let v = run.vet(job)
-    let limits = run.cfg.policy.limits
-    let (ok, repo, failure) = fetchCommit(run.git, v, scratch, job.commit,
-      limits)
-    if not ok:
-      answer.state = anFailed
-      answer.detail = failure
-    else:
-      let tree = readTree(run.git, repo, job.commit, job.subdir, limits)
-      let (facts, arch, nb) = sourceFacts(tree)
-      answer.state = anOk
-      answer.facts = facts
-      archive = arch
-      nimbleBytes = nb
-      if tree.hasGitlinks:
-        # The source object is composed from this tree and its submodules'
-        # (`execCompose`), so the tree itself is handed on.
-        answer.entries = tree.entries
-        answer.hasGitmodules = tree.hasGitmodules
-        blobs = encodeBlobs(tree.blobs, tree.gitmodules, tree.hasGitmodules)
+    if not concurrent:
+      plan.vetted = (if observe: run.vet(job)
+                     else: vetOrigin(run.cfg.policy, job.url))
+      plan.prevetted = true
+      return some(plan)
+    if observe and run.cfg.observer != nil:
+      {.cast(gcsafe).}: run.cfg.observer(job.family, job.url)
+    if job.vcs == ovHg:
+      refuse(erScheme, job.url, "Mercurial origins are not fetched by this " &
+        "generator")
+    let u = parseOriginUrl(job.url)
+    let policy = run.cfg.policy
+    plan.systemResolver = policy.resolver == nil
+    plan.identityDialer = policy.dialer == nil
+    var addrs: seq[IpAddress]
+    if isIpAddress(u.host): addrs = @[parseIpAddress(u.host)]
+    elif policy.resolver != nil:
+      addrs = policy.resolver(u.host)
+      plan.hosts.add (u.host, addrs)
+    if policy.dialer != nil:
+      for a in addrs: plan.dials.add (a, policy.dialer(a))
+    some(plan)
   except EgressError as e:
-    run.capture(job, e)
-    answer.state = anRefused
-    answer.refusal = $e.refusal.kind
-    answer.detail = e.refusal.detail
-  except IOError as e:
-    answer.state = anFailed
-    answer.detail = e.msg
-  writeFile(outPath, encodeSource(answer))
-  writeFile(outPath & ".nimble", nimbleBytes)
-  writeFile(outPath & ".tar", archive)
-  writeFile(outPath & ".blobs", blobs)
+    if concurrent:
+      run.preparedRefusals[outPath] = CapturedRefusal(package: job.package,
+        family: job.family, refusal: e.refusal)
+    else:
+      run.capture(job, e)
+    writeRefused(kind, job.url, job.commit, outPath, e.refusal)
+    none(FetchPlan)
 
-proc execSubmodule(run: Run; job: Job; outPath: string) =
-  ## The `submodule <url>@<commit>` edge: exactly that commit, depth 1, into
-  ## private scratch, after the URL passed the egress policy; the whole tree
-  ## read from objects.
-  var answer = SubmoduleAnswer(url: job.url, commit: job.commit)
-  var blobs = ""
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
-  try:
-    let v = run.vet(job)
-    let limits = run.cfg.policy.limits
-    let (ok, repo, failure) = fetchCommit(run.git, v, scratch, job.commit,
-      limits)
-    if not ok:
-      answer.state = anFailed
-      answer.detail = failure
-      answer.failure = $fetchFailureOf(failure)
-    else:
-      let tree = readTree(run.git, repo, job.commit, "", limits)
-      answer.state = anOk
-      answer.entries = tree.entries
-      answer.hasGitmodules = tree.hasGitmodules
-      blobs = encodeBlobs(tree.blobs, tree.gitmodules, tree.hasGitmodules)
-  except EgressError as e:
-    run.capture(job, e)
-    answer.state = anRefused
-    answer.refusal = $e.refusal.kind
-    answer.detail = e.refusal.detail
-    answer.failure = $sfEgress
-  except IOError as e:
-    answer.state = anFailed
-    answer.detail = e.msg
-    answer.failure = $sfNoAnswer
-  writeFile(outPath, encodeSubmodule(answer))
-  writeFile(outPath & ".blobs", blobs)
+proc settleFetch(run: Run; job: Job; r: FetchWorkResult) =
+  ## The scheduler's half after the work: a refusal the transfer met (a
+  ## limit) goes to the capture log.
+  if r.refused:
+    run.refusals.add CapturedRefusal(package: job.package, family: job.family,
+      refusal: r.refusal)
+
+proc execFetch(run: Run; job: Job; outPath: string; observe = true) =
+  ## A fetch edge run inline: the origin vetted here, then the same work as
+  ## on a worker thread.
+  let plan = run.planFetch(job, outPath, concurrent = false, observe)
+  if plan.isSome:
+    run.settleFetch(job, runFetchPlan(plan.get))
 
 # ---------------------------------------------------------------------------
 # The pure executors (publisher)
@@ -378,7 +379,7 @@ proc readRecordBytes*(nimbleBytes, fileName: string): seq[byte] =
   ## The `read` edge: the record the static reader reads from a `.nimble`,
   ## encoded with the index codec as the one record of a placeholder shard
   ## (its version, commit and digests are the publisher's to fill).
-  let f = readNimbleSource(nimbleBytes, fileName)
+  let f = readNimbleSource(nimbleBytes, fileName, GeneratorReaderOptions)
   var facts = VersionFacts(tag: "read", commit: ReadPlaceholderCommit,
     nimbleFile: some(IndexObjectId(blake3.digest(nimbleBytes))))
   let rec = recordFromNimbleFile(f, facts)
@@ -513,6 +514,13 @@ proc sortedEvents*(events: seq[OriginEvent]): seq[OriginEvent] =
   result.sort(proc (a, b: OriginEvent): int =
     cmp(eventSortKey(a), eventSortKey(b)))
 
+proc skippedReport*(r: GenerationResult): seq[string] =
+  ## One line per registry entry the generation did not index, naming it and
+  ## the reason: what `repro catalog generate` prints.
+  for s in r.skipped:
+    result.add "skipped: registry entry " & s.entry.escape() & " of " &
+      s.registry & ": " & s.reason
+
 proc resolveName(run: Run; name: string): string =
   let k = nameKey(name)
   if k in run.targets: run.targets[k].name
@@ -576,10 +584,7 @@ proc execute(run: Run; action: BuildAction): ActionResult =
   try:
     case job.family
     of efRegistry: run.execRegistry(job, outPath)
-    of efRefs: run.execRefs(job, outPath)
-    of efHistory: run.execHistory(job, outPath)
-    of efSource: run.execSource(job, outPath)
-    of efSubmodule: run.execSubmodule(job, outPath)
+    of efRefs, efHistory, efSource, efSubmodule: run.execFetch(job, outPath)
     of efCompose: run.execCompose(job, outPath)
     of efRead:
       writeFile(outPath, toStr(readRecordBytes(readFile(job.inputs[0]),
@@ -625,6 +630,84 @@ proc pureAction(run: Run; job: Job; key: string; inputs: seq[string];
     weakFingerprint = weakFingerprintFromText(fingerprint),
     text = $job.family & " " & job.subject)
 
+proc prepareEdge(run: Run; action: BuildAction): BuiltinWorkItem =
+  ## The scheduler's half of a fetch edge under concurrent dispatch: vet the
+  ## origin and hand the rest to a worker as a ``FetchPlan``'s text. Any
+  ## other edge (the registry) is left whole to ``finishEdge``.
+  if action.id notin run.jobs:
+    return
+  let job = run.jobs[action.id]
+  if job.family notin ConcurrentFamilies:
+    return
+  let outPath = action.outputs[0]
+  try:
+    createDir(parentDir(outPath))
+    run.executed.add Execution(family: job.family, subject: job.subject)
+    let plan = run.planFetch(job, outPath, concurrent = true)
+    if plan.isSome:
+      result = BuiltinWorkItem(work: fetchWork, input: encodePlan(plan.get))
+  except CatchableError as e:
+    run.prepareFailures[action.id] = $job.family & " " & job.subject & ": " &
+      e.msg
+
+proc finishEdge(run: Run; action: BuildAction; dispatched: bool;
+                outcome: BuiltinWorkOutcome): ActionResult =
+  ## The scheduler's half after a worker ran the plan, or the whole edge
+  ## when ``prepareEdge`` left it (``dispatched`` false and no plan).
+  result = ActionResult(id: action.id, status: asSucceeded, exitCode: 0,
+    launched: true)
+  let job = run.jobs.getOrDefault(action.id)
+  if action.id notin run.jobs or job.family notin ConcurrentFamilies:
+    return run.execute(action)
+  if action.id in run.prepareFailures:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = run.prepareFailures[action.id]
+    return
+  if not dispatched:
+    # Refused by the egress policy while it was prepared: answered then,
+    # captured now.
+    var held: CapturedRefusal
+    if run.preparedRefusals.pop(action.outputs[0], held):
+      run.refusals.add held
+    return
+  if not outcome.ok:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = $job.family & " " & job.subject & ": " & outcome.error
+    return
+  try:
+    let r = decodeResult(outcome.output)
+    if r.needsScheduler:
+      # The vetting met a host only the policy's own resolver or dialer can
+      # answer (a redirect under a test policy): it resumes here, on this
+      # thread, from where the worker stopped, and the edge's git work runs
+      # inline. No discovery request is repeated.
+      let outPath = action.outputs[0]
+      var plan = FetchPlan(kind: fetchKindOf(job.family), url: job.url,
+        subdir: job.subdir, commit: job.commit, git: run.git,
+        limits: run.cfg.policy.limits, prevetted: true,
+        scratch: run.cfg.stateDir / "scratch" / hex(job.subject),
+        outPath: outPath)
+      var progress = r.resume
+      try:
+        plan.vetted = vetOriginFrom(run.cfg.policy, job.url, progress)
+      except EgressError as e:
+        run.capture(job, e)
+        writeRefused(plan.kind, job.url, job.commit, outPath, e.refusal)
+        return
+      run.settleFetch(job, runFetchPlan(plan))
+    else:
+      run.settleFetch(job, r)
+  except CatchableError as e:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = $job.family & " " & job.subject & ": " & e.msg
+
+proc fetchParallelism(run: Run): int =
+  if run.cfg.fetchParallelism > 0: run.cfg.fetchParallelism
+  else: DefaultFetchParallelism
+
 proc runWave(run: Run; actions: seq[BuildAction]; all: var seq[BuildAction]) =
   if actions.len == 0: return
   all.add actions
@@ -635,12 +718,22 @@ proc runWave(run: Run; actions: seq[BuildAction]; all: var seq[BuildAction]) =
   registerMetadataFetchExecutor(proc(action: BuildAction): ActionResult
       {.gcsafe.} =
     {.cast(gcsafe).}: run.execute(action))
+  registerConcurrentMetadataFetchExecutor(ConcurrentBuiltinExecutor(
+    prepare: proc(action: BuildAction): BuiltinWorkItem {.gcsafe.} =
+      {.cast(gcsafe).}: run.prepareEdge(action),
+    finish: proc(action: BuildAction; dispatched: bool;
+                 outcome: BuiltinWorkOutcome): ActionResult {.gcsafe.} =
+      {.cast(gcsafe).}: run.finishEdge(action, dispatched, outcome)))
   registerCatalogIndexExecutor(proc(action: BuildAction): ActionResult
       {.gcsafe.} =
     {.cast(gcsafe).}: run.execute(action))
+  let started = epochTime()
   try:
     var cfg = defaultBuildEngineConfig(run.cfg.stateDir / "engine-cache")
-    cfg.maxParallelism = 1
+    # The fetch edges of a wave are independent and wait on the network:
+    # the engine runs up to this many on worker threads. The pure edges
+    # have no concurrent executor and still run one at a time.
+    cfg.maxParallelism = uint32(run.fetchParallelism)
     cfg.bypassRunQuota = true
     cfg.deferLocalOutputBlobs = false
     let outcome = runBuild(g, cfg)
@@ -649,7 +742,12 @@ proc runWave(run: Run; actions: seq[BuildAction]; all: var seq[BuildAction]) =
         fail("generator edge " & res.id & " failed: " & res.stderr)
   finally:
     clearMetadataFetchExecutor()
+    clearConcurrentMetadataFetchExecutor()
     clearCatalogIndexExecutor()
+    var family = efRoot
+    if actions[0].id in run.jobs: family = run.jobs[actions[0].id].family
+    run.waves.add WaveTiming(family: family, edges: actions.len,
+      seconds: epochTime() - started)
 
 proc keyOf(parts: varargs[string]): string =
   var s = ""
@@ -909,10 +1007,11 @@ proc generate*(config: GeneratorConfig): GenerationResult =
 
   var aliases: seq[RegistryAlias]
   var aliasTarget = initTable[string, string]()
-  for f in regFiles:
+  for ri, f in regFiles:
     let reg = parseRegistry(readFile(f))
     for (n, why) in reg.skipped:
-      result.diagnostics.add "registry entry " & n.escape() & " skipped: " & why
+      result.skipped.add SkippedEntry(registry: ss.registries[ri].remote,
+        entry: n, reason: why)
     for p in reg.packages:
       let k = nameKey(p.name)
       if k in run.targets:
@@ -1048,8 +1147,10 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       var requested: seq[string]
       for c in commitRequests.getOrDefault(k): requested.add c
       requested.sort()
+      let tagged = k in run.previousEnvelopes and
+        hasTagRecord(run.previousEnvelopes[k].versions)
       let sightings = sightingsOf(t.name, refs, k in trackKeys,
-        t.pinnedCommit, requested)
+        t.pinnedCommit, requested, tagged)
       run.sightings[k] = sightings
       var recorded = initHashSet[string]()
       if k in run.previousEnvelopes:
@@ -1295,6 +1396,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
   result.executed = run.executed
   result.refusals = run.refusals
   result.actions = all
+  result.waves = run.waves
   result.events = sortedEvents(result.events)
 
 # ---------------------------------------------------------------------------

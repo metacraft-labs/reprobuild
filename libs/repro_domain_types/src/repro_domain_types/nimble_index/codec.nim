@@ -13,7 +13,8 @@
 ## longer than the kind's byte bound, a short or mismatched frame, an
 ## unknown frame version, a type id other than the one asked for, and a
 ## schema other than ``NimbleIndexSchemaVersion`` (for a shard, also
-## ``NimbleShardSubmodulesSchema`` and ``NimbleShardConditionsSchema``).
+## ``NimbleShardSubmodulesSchema``, ``NimbleShardConditionsSchema`` and
+## ``NimbleShardSnapshotsSchema``).
 ##
 ## ## Shard schemas
 ##
@@ -34,6 +35,16 @@
 ## submodule list, and schema 3 for a shard without one is non-canonical. A
 ## reader of schemas 1 and 2 refuses a schema-3 shard (``nrUnknownSchema``),
 ## so it never reads such a condition as a target term or as no condition.
+##
+## A shard in which any version record or held version is a snapshot
+## (NPC-AREQ31 item 5) is schema 4 (``NimbleShardSnapshotsSchema``): schema
+## 3's layout, whose version kind byte may then hold ``rvkSnapshot`` and
+## whose snapshot carries its date as its one component. Schema 4 is chosen
+## by the value before the others: a shard with a snapshot is schema 4
+## whatever else it holds, and schema 4 for a shard without one is
+## non-canonical. A reader of schemas 1 to 3 refuses a schema-4 shard
+## (``nrUnknownSchema``); a snapshot in a shard of a lower schema is refused
+## as an unknown vocabulary.
 ##
 ## ## Canonical form
 ##
@@ -354,6 +365,11 @@ proc validateRecordVersion(v: RecordVersion; field: string) =
     if v.tag.len > 0 or v.components.len > 0:
       refuse(nrInconsistent, field & ": a commit pseudo-version has no tag " &
         "and no components")
+  of rvkSnapshot:
+    if v.tag.len > 0 or v.components.len != 1 or
+        not isCalendarDate(v.components[0]):
+      refuse(nrInconsistent, field & ": a snapshot has no tag and one " &
+        "component, its date as YYYYMMDD")
   if v.components.len > MaxVersionComponents:
     refuse(nrBound, field & ".version has more than " &
       $MaxVersionComponents & " components")
@@ -384,9 +400,19 @@ proc validateSubmodules(r: VersionRecord; field: string) =
     paths.add m.path
   requireStrictlyAscending(paths, field & ".submodules")
 
+proc validateSnapshotDate(v: RecordVersion; firstSeen: uint64; field: string) =
+  ## A snapshot's date is the UTC date of its first sighting, so one
+  ## sighting has one spelling.
+  if v.kind == rvkSnapshot and v.components.len == 1 and
+      v.components[0] != utcDateOf(firstSeen):
+    refuse(nrInconsistent, field & ": the snapshot's date " &
+      $v.components[0] & " is not the UTC date of its first sighting (" &
+      $utcDateOf(firstSeen) & ")")
+
 proc validateRecord*(r: VersionRecord; originCount: int; field: string) =
   ## One version record, against the package it is in.
   validateRecordVersion(r.version, field)
+  validateSnapshotDate(r.version, r.firstSeen, field)
   if r.commit.len notin [40, 64] or not isLowerHex(r.commit):
     refuse(nrInvalidText, field & ".commit is not a full-width lower-case " &
       "object id")
@@ -531,6 +557,7 @@ proc validateObservation*(o: PackageObservation; field: string) =
   for i, h in o.held:
     let f = field & ".held[" & $i & "]"
     validateRecordVersion(h.version, f)
+    validateSnapshotDate(h.version, h.firstSeen, f)
     if h.commit.len notin [40, 64] or not isLowerHex(h.commit):
       refuse(nrInvalidText, f & ".commit is not a full-width lower-case " &
         "object id")
@@ -1070,20 +1097,36 @@ proc hasConditionTerms*(s: NimbleShard): bool =
       if v.hasConditionTerms: return true
   false
 
+proc hasSnapshots*(p: PackageEnvelope): bool =
+  for v in p.versions:
+    if v.version.kind == rvkSnapshot: return true
+  false
+
+proc hasSnapshots*(s: NimbleShard): bool =
+  ## Whether a version record or a held version of ``s`` is a snapshot:
+  ## what makes a shard schema ``NimbleShardSnapshotsSchema``.
+  for p in s.packages:
+    if p.hasSnapshots: return true
+  for o in s.observations:
+    for h in o.held:
+      if h.version.kind == rvkSnapshot: return true
+  false
+
 proc shardSchemaOf*(s: NimbleShard): uint16 =
-  ## The one schema ``s`` is encoded in (see the module docstring): 3 when
-  ## a condition needs it, else 2 when a record has submodules, else 1.
-  if s.hasConditionTerms: NimbleShardConditionsSchema
+  ## The one schema ``s`` is encoded in (see the module docstring): 4 when
+  ## it holds a snapshot, else 3 when a condition needs it, else 2 when a
+  ## record has submodules, else 1.
+  if s.hasSnapshots: NimbleShardSnapshotsSchema
+  elif s.hasConditionTerms: NimbleShardConditionsSchema
   elif s.hasSubmoduleLists: NimbleShardSubmodulesSchema
   else: NimbleIndexSchemaVersion
 
-proc toW2T[S: ShardW2 | ShardW3](s: NimbleShard; _: typedesc[S]): S =
+proc toW2T[S: ShardW2 | ShardW3](s: NimbleShard; _: typedesc[S];
+                                 schema: uint16): S =
   when S is ShardW3:
     type P = PackageW3
-    const schema = NimbleShardConditionsSchema
   else:
     type P = PackageW2
-    const schema = NimbleShardSubmodulesSchema
   var ps: seq[P]
   for i, p in s.packages:
     ps.add toW(p, "shard.packages[" & $i & "]", P)
@@ -1103,11 +1146,11 @@ proc toW2T[S: ShardW2 | ShardW3](s: NimbleShard; _: typedesc[S]): S =
 
 proc toW2*(s: NimbleShard): ShardW2 =
   ## ``s`` as a schema-2 shard; refuses a schema-3 condition.
-  toW2T(s, ShardW2)
+  toW2T(s, ShardW2, NimbleShardSubmodulesSchema)
 
-proc toW3*(s: NimbleShard): ShardW3 =
-  ## ``s`` as a schema-3 shard.
-  toW2T(s, ShardW3)
+proc toW3*(s: NimbleShard; schema = NimbleShardConditionsSchema): ShardW3 =
+  ## ``s`` as a schema-3 shard, or in schema 4's identical layout.
+  toW2T(s, ShardW3, schema)
 
 proc toW*(s: NimbleShard): ShardW =
   ## ``s`` as a schema-1 shard; refuses a record with submodules.
@@ -1271,7 +1314,8 @@ proc acceptsSchema*(kind: NimbleObjectKind; schema: uint16): bool =
   ## The payload schemas a reader of this build decodes for ``kind``.
   schema == NimbleIndexSchemaVersion or
     (kind == nokShard and schema in [NimbleShardSubmodulesSchema,
-                                     NimbleShardConditionsSchema])
+                                     NimbleShardConditionsSchema,
+                                     NimbleShardSnapshotsSchema])
 
 proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind): uint16 =
   ## Everything before the SSZ decode: size bound first, then the header,
@@ -1290,8 +1334,9 @@ proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind): uint16 =
   if not acceptsSchema(kind, schema):
     refuse(nrUnknownSchema, $kind & " schema " & $schema & " (this reader " &
       "accepts " & $NimbleIndexSchemaVersion &
-      (if kind == nokShard: ", " & $NimbleShardSubmodulesSchema & " and " &
-         $NimbleShardConditionsSchema else: "") &
+      (if kind == nokShard: ", " & $NimbleShardSubmodulesSchema & ", " &
+         $NimbleShardConditionsSchema & " and " &
+         $NimbleShardSnapshotsSchema else: "") &
       ")")
   schema
 
@@ -1322,6 +1367,8 @@ proc encodeShard*(s: NimbleShard): seq[byte] =
   ## ``s`` in the one schema its value has (``shardSchemaOf``).
   validateShard(s)
   case shardSchemaOf(s)
+  of NimbleShardSnapshotsSchema:
+    frame(nokShard, SSZ.encode(toW3(s, NimbleShardSnapshotsSchema)))
   of NimbleShardConditionsSchema: frame(nokShard, SSZ.encode(toW3(s)))
   of NimbleShardSubmodulesSchema: frame(nokShard, SSZ.encode(toW2(s)))
   else: frame(nokShard, SSZ.encode(toW(s)))
@@ -1331,7 +1378,7 @@ proc decodeShard*(bytes: openArray[byte]): NimbleShard =
   ## module docstring for the order of the checks.
   let schema = checkFrame(bytes, nokShard)
   vocabularyFailure = ""
-  if schema == NimbleShardConditionsSchema:
+  if schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
     let w = decodeWire(bytes, ShardW3, "shard")
     result = fromW(w)
   elif schema == NimbleShardSubmodulesSchema:
@@ -1340,13 +1387,18 @@ proc decodeShard*(bytes: openArray[byte]): NimbleShard =
   else:
     let w = decodeWire(bytes, ShardW, "shard")
     result = fromW(w)
+  if schema < NimbleShardSnapshotsSchema and result.hasSnapshots:
+    vocabulary("shard", "holds a version of kind snapshot, which only a " &
+      "shard of schema " & $NimbleShardSnapshotsSchema & " carries")
   checkVocabulary()
   validateShard(result)
   if schema != shardSchemaOf(result):
     refuse(nrNonCanonical, "shard of schema " & $schema & " holds " &
-      (if result.hasConditionTerms: "a nim-version or os-family condition"
+      (if result.hasSnapshots: "a snapshot version"
+       elif result.hasConditionTerms: "a nim-version or os-family condition"
        elif result.hasSubmoduleLists: "records with submodule lists"
-       else: "no record with a submodule list or a schema-3 condition") &
+       else: "no snapshot, no record with a submodule list and no " &
+         "schema-3 condition") &
       "; its schema is " & $shardSchemaOf(result))
   if encodeShard(result) != @bytes:
     refuse(nrNonCanonical, "shard does not re-encode to the same bytes")
@@ -1414,18 +1466,22 @@ proc decodePackageSlice*(payload: openArray[byte]; field: string;
   ## Decode ONE package envelope from its SSZ slice inside a shard of
   ## ``schema`` (the navigator's partial access), with the same validation
   ## and canonical-form check a whole-shard decode applies to it.
-  if schema == NimbleShardConditionsSchema:
+  if schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
     result = decodePackageAs(payload, field, PackageW3)
   elif schema == NimbleShardSubmodulesSchema:
     result = decodePackageAs(payload, field, PackageW2)
   else:
     result = decodePackageAs(payload, field, PackageW)
+  if schema < NimbleShardSnapshotsSchema and result.hasSnapshots:
+    refuse(nrUnknownVocabulary, field & " holds a version of kind " &
+      "snapshot, which only a shard of schema " &
+      $NimbleShardSnapshotsSchema & " carries")
   validatePackage(result, field)
   if shardBucket(nameKey(result.name), int(shardBits)) != bucket:
     refuse(nrWrongShard, field & " " & result.name.escape() & " belongs to " &
       "another shard")
   let again =
-    if schema == NimbleShardConditionsSchema:
+    if schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
       SSZ.encode(toW(result, field, PackageW3))
     elif schema == NimbleShardSubmodulesSchema:
       SSZ.encode(toW(result, field, PackageW2))

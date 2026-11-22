@@ -183,6 +183,11 @@ import repro_build_engine/embedded_root_scan
 # allocates is freed in one proc (``dropMonitorFinishNode``).
 import repro_build_engine/worker_pool
 export action_extension
+# Bounded concurrent dispatch of executor-backed built-in edges: worker
+# threads that run a ``BuiltinWork`` (a bare code pointer over plain text)
+# while the scheduler waits. See ``ConcurrentBuiltinExecutor``.
+import repro_build_engine/builtin_dispatch
+export builtin_dispatch
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
 # but is identity-agnostic — the convention populates the identity tuple
@@ -18723,6 +18728,83 @@ type
     ## mirror client, the archive extractor and the stores live above the
     ## engine.
 
+type
+  BuiltinWorkItem* = object
+    ## What a ``ConcurrentBuiltinExecutor``'s ``prepare`` hands the engine:
+    ## the work to run on a worker thread and its input. ``work`` nil means
+    ## there is nothing to run there; ``finish`` is then called with
+    ## ``dispatched`` false when the batch is settled, in its turn.
+    work*: BuiltinWork
+    input*: string
+
+  ConcurrentBuiltinExecutor* = object
+    ## An executor that lets the engine run its edges concurrently, at most
+    ## ``maxParallelism`` at a time, instead of one at a time inline in the
+    ## scheduling loop. It is split in three: ``prepare`` runs on the
+    ## scheduler's thread when the edge is ready (it may use the
+    ## executor's closures and state); the ``BuiltinWork`` it returns runs
+    ## on a worker thread with plain text in and out (``builtin_dispatch``
+    ## says why nothing else may cross); ``finish`` runs on the scheduler's
+    ## thread with the work's outcome and returns the edge's result. The
+    ## scheduler collects the ready edges of one pass, runs their work as
+    ## one bounded batch, then settles each -- with work or without, or
+    ## failed in ``prepare`` -- in the order they were prepared, exactly as
+    ## an inline result is settled.
+    prepare*: proc(action: BuildAction): BuiltinWorkItem {.gcsafe.}
+    finish*: proc(action: BuildAction; dispatched: bool;
+                  outcome: BuiltinWorkOutcome): ActionResult {.gcsafe.}
+
+var concurrentMetadataFetchExecutor {.threadvar.}: ConcurrentBuiltinExecutor
+
+proc registerConcurrentMetadataFetchExecutor*(
+    executor: ConcurrentBuiltinExecutor) =
+  ## Register the per-thread concurrent executor for ``bakMetadataFetch``
+  ## edges. While it is registered and ``maxParallelism`` is above 1, the
+  ## engine dispatches those edges through it (see
+  ## ``ConcurrentBuiltinExecutor``) instead of the inline executor.
+  concurrentMetadataFetchExecutor = executor
+
+proc clearConcurrentMetadataFetchExecutor*() =
+  concurrentMetadataFetchExecutor = ConcurrentBuiltinExecutor()
+
+proc concurrentExecutorFor(kind: BuildActionKind;
+                           executor: var ConcurrentBuiltinExecutor): bool =
+  ## The concurrent executor registered for ``kind``, if any.
+  if kind == bakMetadataFetch and not concurrentMetadataFetchExecutor.prepare.isNil and
+      not concurrentMetadataFetchExecutor.finish.isNil:
+    executor = concurrentMetadataFetchExecutor
+    return true
+  false
+
+proc settledConcurrentResult(action: BuildAction; finished: ActionResult):
+    ActionResult =
+  ## A concurrent executor's result in the shape ``executeBuiltinAction``
+  ## gives an inline one.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "builtin",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  result.status = finished.status
+  result.exitCode = finished.exitCode
+  result.stdout = finished.stdout
+  result.stderr = finished.stderr
+  result.reason = finished.reason
+  result.launched = finished.launched
+  result.runQuotaBackend = if finished.runQuotaBackend.len > 0:
+    finished.runQuotaBackend else: "metadata-fetch"
+
+proc finishConcurrent(executor: ConcurrentBuiltinExecutor; action: BuildAction;
+                      dispatched: bool; outcome: BuiltinWorkOutcome):
+    ActionResult =
+  ## ``executor.finish``, failing the edge when it raises, with the result
+  ## ``executeBuiltinAction`` gives when an inline executor raises.
+  try:
+    settledConcurrentResult(action, executor.finish(action, dispatched,
+      outcome))
+  except CatchableError as e:
+    ActionResult(id: action.id, launched: true, status: asFailed,
+      exitCode: 1, stderr: e.msg, runQuotaBackend: "builtin",
+      dependencyPolicyKind: action.dependencyPolicy.kind)
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
 var sourceFetchExecutor {.threadvar.}: SourceFetchExecutor
@@ -24569,6 +24651,172 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     action: BuildAction
     resultPath: string
 
+  type PendingConcurrentBuiltin = object
+    ## A ready built-in edge prepared for this pass's batch
+    ## (``ConcurrentBuiltinExecutor``): its work, when ``prepare`` returned
+    ## some, waits to run; either way it is settled with the batch, in the
+    ## order the edges were prepared.
+    id: string
+    plan: tuple[action: BuildAction; diagnostic: string; capturePath: string;
+                hostInProcess: bool]
+    executor: ConcurrentBuiltinExecutor
+    item: BuiltinWorkItem
+    prepareError: string ## ``prepare`` raised: the edge fails with this
+
+  template settleBuiltinResult(id, plan, finished, launchedAny: untyped) =
+    ## Settle a built-in edge's result: record it, collect its evidence,
+    ## publish it to the cache, and release or block its dependents. Ends
+    ## with ``continue``: it is the last thing done for the edge, inline
+    ## in the ready scan or in the loop over a concurrent batch.
+    let idx = idToIndex.resultIndex(id)
+    let previousCacheDecision = runResult.results[idx].cacheDecision
+    # M17: the cache-lookup facts were recorded BEFORE the action
+    # ran and would be wiped by this assignment. They are carried
+    # for the same reason the cache decision is -- the settled
+    # result describes the execution, not the lookup that led to
+    # it, and the lookup is the only place either fact exists.
+    let previousMissReason = runResult.results[idx].cacheMissReason
+    let previousStrongFingerprint =
+      runResult.results[idx].strongFingerprintHex
+    let previousPreserved =
+      runResult.results[idx].preservedModifiedOutputs
+    let previousDropped = runResult.results[idx].droppedCorruptPayloads
+    runResult.results[idx] = finished
+    runResult.results[idx].cacheMissReason = previousMissReason
+    runResult.results[idx].preservedModifiedOutputs = previousPreserved
+    runResult.results[idx].droppedCorruptPayloads = previousDropped
+    runResult.results[idx].strongFingerprintHex =
+      previousStrongFingerprint
+    runResult.results[idx].dependencyPolicyKind =
+      plan.action.dependencyPolicy.kind
+    runResult.results[idx].cacheDecision =
+      if actionsById[finished.id].cacheable and
+          previousCacheDecision == cdNotCacheable:
+        cdMiss
+      else:
+        previousCacheDecision
+    statuses[id] = finished.status
+    if finished.status == asSucceeded:
+      invalidateCachedOutputs(plan.action)
+      if plan.action.kind == bakLockUpdate:
+        # HL-10: the node rewrites tracked sources (``repro.lock``,
+        # ``flake.lock``) that no action declares as an output, so
+        # nothing else would drop a stat or digest this run cached for
+        # them before it ran. Its dependents are looked up after this.
+        for written in finished.rewrittenSources:
+          invalidateCachedPath(materialPath(plan.action.cwd, written))
+      if failedForMissingOutputs(finished.id, plan.action):
+        completed = terminalCount()
+        launchedAny = true
+        continue
+      let evidenceStart = statStart()
+      var evidence = collectEvidence(plan.action, strict = true,
+        config = addr config,
+        sourceTreeSpellings = addr sourceTreeSpellings)
+      finishStat("repro evidence collect", evidenceStart)
+      siteTables.learnSiteTableImages(plan.action, evidence.evidence)
+      # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
+      # cannot re-derive: what a foreign provisioner daemon reported
+      # about its own evaluation. `collectEvidence` builds a fresh
+      # `PathSetEvidence` from the action and its reports, so this
+      # assignment used to discard the daemon's report entirely — which
+      # is the only reason that report's former home in `monitorReads`
+      # was inert. Carried forward explicitly, into the channel that
+      # names its source, so the attribution survives instead of
+      # depending on nobody noticing it was dropped.
+      if finished.evidence.provisionerReportedInputs.len > 0:
+        evidence.evidence.provisionerReportedInputs =
+          finished.evidence.provisionerReportedInputs
+        evidence.evidence.evidenceProvenance.incl(
+          evcForeignProvisionerReport)
+      runResult.results[idx].evidence = evidence.evidence
+      traceVolatileRuntimeDrops(finished.id, evidence.evidence)
+      if not evidence.publishable:
+        runResult.results[idx].status = asFailed
+        runResult.results[idx].stderr =
+          evidence.evidence.diagnostics.join("\n")
+        statuses[id] = asFailed
+        runResult.trace(finished.id, "failed", "dependency evidence invalid")
+        blockClosure(finished.id, finished.id)
+        emitProgress(bpkActionCompleted, finished.id)
+        completed = terminalCount()
+        launchedAny = true
+        continue
+      invalidateCachedWrites(plan.action, evidence.evidence)
+      # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
+      # session-disable flag) into the session-scoped accumulator
+      # so downstream cache LOOKUPS can skip narrowly.
+      registerEvidenceInvalidation(evidence)
+      # Cache ineligibility withholds publication, not successful outputs.
+      if plan.action.cacheable and (not evidence.disableCacheHits or
+          determinismProbeAdmits(plan.action, evidence)):
+        try:
+          let recordStart = statStart()
+          # Peer-Cache M1: when a publisher closure is set, force
+          # output-blob retention so the publisher can read the
+          # blob payloads back out of the local CAS. The
+          # publisher-less path (legacy CLI default) keeps the
+          # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+          # M9.L.4-refactor Step A: ALSO force retention when the
+          # binary-cache publisher is configured AND this action
+          # opted into publishing — the publish hook guards on
+          # ``outputPayloadKind == opkCasBlobs`` and would
+          # silently skip otherwise.
+          let storeOutputBlobs =
+            storeOutputBlobsFor(plan.action, evidence.evidence)
+          let keyed = plan.action.cacheInputPaths(evidence.evidence)
+          let record = cache.recordActionResult(cas.inner,
+            plan.action.weakFingerprint,
+            plan.action.actionCachePolicy,
+            plan.action.recordedInputNames(keyed),
+            plan.action.recordedOutputPaths(), plan.action.cwd,
+            storeOutputBlobs = storeOutputBlobs,
+            metadataCache = addr fileMetadataCache,
+            envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+            # Same omission as the elevated site above, reached by
+            # builtin edges and by anything whose plan is not a
+            # `bakProcess`. A builtin cannot be wrapped in the
+            # io-monitor, so its enumeration evidence arrives either
+            # from a converter path set or from a monitor depfile a
+            # direct engine caller prewired — both of which
+            # `collectEvidence` has already folded by this point.
+            enumeratedDirectories = plan.action.recordedInputNames(
+              enumeratedDirectoriesForKey(plan.action, evidence.evidence)),
+            determinism = entryDeterminismFor(config, plan.action),
+            computationStagingDir = plan.action.computationStagingDir)
+          finishStat("repro cache record", recordStart)
+          runResult.results[idx].computationOutputDir =
+            recordComputationDir(record)
+          writeActionResultRecordFile(
+            dependencyEvidencePath(cacheRoot, plan.action.id), record)
+          recordPortableFingerprint(idx, plan.action, evidence.evidence,
+            record, evidenceLevelOf(evidence.monitorStatus), keyed)
+          recordCapturedOutput(idx, record)
+          publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
+            evidenceLevelOf(evidence.monitorStatus), plan.action,
+            evidence.evidence.hostBoundInput)
+          publishBinaryCacheBundle(plan.action, record,
+            hostBoundInput = evidence.evidence.hostBoundInput)
+        except UnreadableInputError as err:
+          runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
+      elif plan.action.cacheable and evidence.disableCacheHits:
+        runResult.traceCacheIneligibility(finished.id, evidence,
+          idToIndex.resultIndex(finished.id),
+          unobservableRootImageNote(plan.action, unsafeAddr config))
+      elif plan.action.fixedOutput:
+        recordFixedOutputPortable(
+          idToIndex.resultIndex(finished.id), plan.action,
+          evidenceLevelOf(evidence.monitorStatus))
+      completeSuccess(finished.id, asSucceeded,
+        runResult.results[idx].cacheDecision, true, "builtin")
+    else:
+      runResult.trace(finished.id, "failed", finished.stderr)
+      blockClosure(finished.id, finished.id)
+      emitProgress(bpkActionCompleted, finished.id)
+    inc completed
+    launchedAny = true
+    continue
+
   # The exception unwinding out of the scheduling loop, if any, recorded by
   # the ``except`` clause at the end of this ``try`` as it passes through.
   #
@@ -24603,6 +24851,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var canonicalWaiting = false
       sweepCanonicalLeases()
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
+      var builtinBatch: seq[PendingConcurrentBuiltin] = @[]
       var i = 0
       while i < ready.len and
           uint32(running.len + stagedInlineLaunches.len) < maxParallel and
@@ -25679,157 +25928,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           continue
 
         if plan.action.kind != bakProcess:
+          var concurrentExec: ConcurrentBuiltinExecutor
+          if maxParallel > 1'u32 and
+              concurrentExecutorFor(plan.action.kind, concurrentExec):
+            # Bounded concurrent dispatch: prepared here, on this thread,
+            # and joins this pass's batch, which runs the work after the
+            # ready scan and settles every edge of it in preparation order --
+            # also one with no work to run or whose ``prepare`` raised, so
+            # that whatever ``finish`` records comes in the order an inline
+            # run would record it.
+            var item = BuiltinWorkItem()
+            var prepareError = ""
+            try:
+              item = concurrentExec.prepare(plan.action)
+            except CatchableError as e:
+              prepareError = e.msg
+            statuses[id] = asRunning
+            builtinBatch.add PendingConcurrentBuiltin(id: id, plan: plan,
+              executor: concurrentExec, item: item,
+              prepareError: prepareError)
+            launchedAny = true
+            continue
           let builtinStart = statStart()
           let finished = executeBuiltinAction(plan.action)
           finishStat("repro builtin execute", builtinStart)
-          let idx = idToIndex.resultIndex(id)
-          let previousCacheDecision = runResult.results[idx].cacheDecision
-          # M17: the cache-lookup facts were recorded BEFORE the action
-          # ran and would be wiped by this assignment. They are carried
-          # for the same reason the cache decision is -- the settled
-          # result describes the execution, not the lookup that led to
-          # it, and the lookup is the only place either fact exists.
-          let previousMissReason = runResult.results[idx].cacheMissReason
-          let previousStrongFingerprint =
-            runResult.results[idx].strongFingerprintHex
-          let previousPreserved =
-            runResult.results[idx].preservedModifiedOutputs
-          let previousDropped = runResult.results[idx].droppedCorruptPayloads
-          runResult.results[idx] = finished
-          runResult.results[idx].cacheMissReason = previousMissReason
-          runResult.results[idx].preservedModifiedOutputs = previousPreserved
-          runResult.results[idx].droppedCorruptPayloads = previousDropped
-          runResult.results[idx].strongFingerprintHex =
-            previousStrongFingerprint
-          runResult.results[idx].dependencyPolicyKind =
-            plan.action.dependencyPolicy.kind
-          runResult.results[idx].cacheDecision =
-            if actionsById[finished.id].cacheable and
-                previousCacheDecision == cdNotCacheable:
-              cdMiss
-            else:
-              previousCacheDecision
-          statuses[id] = finished.status
-          if finished.status == asSucceeded:
-            invalidateCachedOutputs(plan.action)
-            if plan.action.kind == bakLockUpdate:
-              # HL-10: the node rewrites tracked sources (``repro.lock``,
-              # ``flake.lock``) that no action declares as an output, so
-              # nothing else would drop a stat or digest this run cached for
-              # them before it ran. Its dependents are looked up after this.
-              for written in finished.rewrittenSources:
-                invalidateCachedPath(materialPath(plan.action.cwd, written))
-            if failedForMissingOutputs(finished.id, plan.action):
-              completed = terminalCount()
-              launchedAny = true
-              continue
-            let evidenceStart = statStart()
-            var evidence = collectEvidence(plan.action, strict = true,
-              config = addr config,
-              sourceTreeSpellings = addr sourceTreeSpellings)
-            finishStat("repro evidence collect", evidenceStart)
-            siteTables.learnSiteTableImages(plan.action, evidence.evidence)
-            # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
-            # cannot re-derive: what a foreign provisioner daemon reported
-            # about its own evaluation. `collectEvidence` builds a fresh
-            # `PathSetEvidence` from the action and its reports, so this
-            # assignment used to discard the daemon's report entirely — which
-            # is the only reason that report's former home in `monitorReads`
-            # was inert. Carried forward explicitly, into the channel that
-            # names its source, so the attribution survives instead of
-            # depending on nobody noticing it was dropped.
-            if finished.evidence.provisionerReportedInputs.len > 0:
-              evidence.evidence.provisionerReportedInputs =
-                finished.evidence.provisionerReportedInputs
-              evidence.evidence.evidenceProvenance.incl(
-                evcForeignProvisionerReport)
-            runResult.results[idx].evidence = evidence.evidence
-            traceVolatileRuntimeDrops(finished.id, evidence.evidence)
-            if not evidence.publishable:
-              runResult.results[idx].status = asFailed
-              runResult.results[idx].stderr =
-                evidence.evidence.diagnostics.join("\n")
-              statuses[id] = asFailed
-              runResult.trace(finished.id, "failed", "dependency evidence invalid")
-              blockClosure(finished.id, finished.id)
-              emitProgress(bpkActionCompleted, finished.id)
-              completed = terminalCount()
-              launchedAny = true
-              continue
-            invalidateCachedWrites(plan.action, evidence.evidence)
-            # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
-            # session-disable flag) into the session-scoped accumulator
-            # so downstream cache LOOKUPS can skip narrowly.
-            registerEvidenceInvalidation(evidence)
-            # Cache ineligibility withholds publication, not successful outputs.
-            if plan.action.cacheable and (not evidence.disableCacheHits or
-                determinismProbeAdmits(plan.action, evidence)):
-              try:
-                let recordStart = statStart()
-                # Peer-Cache M1: when a publisher closure is set, force
-                # output-blob retention so the publisher can read the
-                # blob payloads back out of the local CAS. The
-                # publisher-less path (legacy CLI default) keeps the
-                # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
-                # M9.L.4-refactor Step A: ALSO force retention when the
-                # binary-cache publisher is configured AND this action
-                # opted into publishing — the publish hook guards on
-                # ``outputPayloadKind == opkCasBlobs`` and would
-                # silently skip otherwise.
-                let storeOutputBlobs =
-                  storeOutputBlobsFor(plan.action, evidence.evidence)
-                let keyed = plan.action.cacheInputPaths(evidence.evidence)
-                let record = cache.recordActionResult(cas.inner,
-                  plan.action.weakFingerprint,
-                  plan.action.actionCachePolicy,
-                  plan.action.recordedInputNames(keyed),
-                  plan.action.recordedOutputPaths(), plan.action.cwd,
-                  storeOutputBlobs = storeOutputBlobs,
-                  metadataCache = addr fileMetadataCache,
-                  envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                  # Same omission as the elevated site above, reached by
-                  # builtin edges and by anything whose plan is not a
-                  # `bakProcess`. A builtin cannot be wrapped in the
-                  # io-monitor, so its enumeration evidence arrives either
-                  # from a converter path set or from a monitor depfile a
-                  # direct engine caller prewired — both of which
-                  # `collectEvidence` has already folded by this point.
-                  enumeratedDirectories = plan.action.recordedInputNames(
-                    enumeratedDirectoriesForKey(plan.action, evidence.evidence)),
-                  determinism = entryDeterminismFor(config, plan.action),
-                  computationStagingDir = plan.action.computationStagingDir)
-                finishStat("repro cache record", recordStart)
-                runResult.results[idx].computationOutputDir =
-                  recordComputationDir(record)
-                writeActionResultRecordFile(
-                  dependencyEvidencePath(cacheRoot, plan.action.id), record)
-                recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                  record, evidenceLevelOf(evidence.monitorStatus), keyed)
-                recordCapturedOutput(idx, record)
-                publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
-                  evidenceLevelOf(evidence.monitorStatus), plan.action,
-                  evidence.evidence.hostBoundInput)
-                publishBinaryCacheBundle(plan.action, record,
-                  hostBoundInput = evidence.evidence.hostBoundInput)
-              except UnreadableInputError as err:
-                runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
-            elif plan.action.cacheable and evidence.disableCacheHits:
-              runResult.traceCacheIneligibility(finished.id, evidence,
-                idToIndex.resultIndex(finished.id),
-                unobservableRootImageNote(plan.action, unsafeAddr config))
-            elif plan.action.fixedOutput:
-              recordFixedOutputPortable(
-                idToIndex.resultIndex(finished.id), plan.action,
-                evidenceLevelOf(evidence.monitorStatus))
-            completeSuccess(finished.id, asSucceeded,
-              runResult.results[idx].cacheDecision, true, "builtin")
-          else:
-            runResult.trace(finished.id, "failed", finished.stderr)
-            blockClosure(finished.id, finished.id)
-            emitProgress(bpkActionCompleted, finished.id)
-          inc completed
-          launchedAny = true
-          continue
+          settleBuiltinResult(id, plan, finished, launchedAny)
 
         # In-Process-Monitor-Hosting P3 — A HOSTED PLAN MAY ONLY REACH A
         # LAUNCH SITE THAT HOSTS. This is the enforcement half of the
@@ -26107,6 +26230,45 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             emitProgress(bpkActionStarted, staged.id)
             launchedAny = true
           frontier.noteGrantedAtOnce(grantedAtOnce)
+
+      if builtinBatch.len > 0:
+        # The ready built-in edges this pass prepared for concurrent
+        # dispatch: their work runs as one batch, at most ``maxParallel``
+        # at a time, and each is then settled as an inline result is, in
+        # the order it was prepared.
+        var work: seq[(BuiltinWork, string)] = @[]
+        var workIndex = newSeq[int](builtinBatch.len)
+        for k, pending in builtinBatch:
+          workIndex[k] = -1
+          if pending.prepareError.len == 0 and not pending.item.work.isNil:
+            workIndex[k] = work.len
+            work.add (pending.item.work, pending.item.input)
+        let batchStart = statStart()
+        let outcomes = runBuiltinWork(work, int(maxParallel))
+        finishStat("repro builtin execute", batchStart)
+        let batch = move(builtinBatch)
+        builtinBatch = @[]
+        for k, pending in batch:
+          let id = pending.id
+          let plan = pending.plan
+          let finished =
+            if pending.prepareError.len > 0:
+              # As ``executeBuiltinAction`` fails an edge whose inline
+              # executor raises.
+              ActionResult(id: plan.action.id, launched: true,
+                status: asFailed, exitCode: 1, stderr: pending.prepareError,
+                runQuotaBackend: "builtin",
+                dependencyPolicyKind: plan.action.dependencyPolicy.kind)
+            elif workIndex[k] < 0:
+              finishConcurrent(pending.executor, plan.action, false,
+                BuiltinWorkOutcome(ok: true))
+            else:
+              finishConcurrent(pending.executor, plan.action, true,
+                outcomes[workIndex[k]])
+          settleBuiltinResult(id, plan, finished, launchedAny)
+        # Settling released their dependents into the ready queue: scan it
+        # again before deciding whether anything is left to wait for.
+        continue
 
       if completed >= buildGraph.actions.len:
         break
