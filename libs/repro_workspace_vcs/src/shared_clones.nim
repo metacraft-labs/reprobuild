@@ -47,6 +47,7 @@ import git_tool
 from repro_core/process_exec import execCmdExCloseOnce
 from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
 import repro_core/process_env
+import repro_core/process_liveness
 import repro_core/remedy_words
 
 const
@@ -1158,7 +1159,8 @@ const SharedBareSafetyConfig* = [
   ("maintenance.auto", "false"),
   ("maintenance.strategy", "none"),
   ("gc.writeCommitGraph", "false"),
-  ("fetch.writeCommitGraph", "false")]
+  ("fetch.writeCommitGraph", "false"),
+  ("repack.writeBitmaps", "false")]
   ## Configuration every shared bare MUST carry because other checkouts
   ## BORROW from it.
   ##
@@ -1187,6 +1189,18 @@ const SharedBareSafetyConfig* = [
   ##      by a borrower. Keep those writers off. ``maintainSharedBare`` first
   ##      converts registered borrowers to independent non-split graphs, then
   ##      rebuilds the pool graph after gc so expired commits leave it too.
+  ##   3. A reachability bitmap cannot be written over a partial pool. A
+  ##      bitmap must cover the full closure of the pack it indexes, and a
+  ##      pool's blobs are promised, not present: git repacks the promisor
+  ##      packs separately, so the pack holding the cache-push objects names
+  ##      trees and blobs it does not contain. ``git gc`` in a bare repository
+  ##      writes bitmaps by default, so every pool gc died with ``Failed to
+  ##      write bitmap index. Packfile doesn't have full closure`` AFTER the
+  ##      new pack was on disk, leaving it there as an abandoned
+  ##      ``.tmp-<pid>-pack-*`` copy of the pool's history, and the failed pass
+  ##      was retried by the next commit. ``repack.writeBitmaps=false`` lets
+  ##      the gc complete; leftovers from earlier failed passes are reclaimed
+  ##      by ``sweepAbandonedPackTemporaries``.
   ##
   ## Persisted in the bare's own config (not only passed per command) so the
   ## property holds for whoever touches the cache: an operator's hand-run
@@ -1275,6 +1289,186 @@ proc sharedBareFetchArgs*(barePath: string): seq[string] =
   result = sharedBareSafetyArgs()
   result.add(["-C", barePath, "fetch", "--all", "--prune", "--quiet"])
 
+# ---- abandoned git pack temporaries (Shared-Clone-Pool-Integrity §3.4) ------
+#
+# Git writes a pack it is receiving or building into the object store's own
+# ``objects/pack/`` under a temporary name, and renames it into place only at
+# the end. A git that dies first leaves the temporary there, where no reader
+# can use it (git resolves objects through ``.idx`` files only, and
+# ``count-objects -v`` lists these under ``garbage``) and nothing else ever
+# removes it. In a pool that is the shared store, so every abandoned repack
+# costs a full copy of the pool's packed history. Measured 2026-11-22: 68.71 GiB
+# of them on one host, 94.5 GiB on another, almost all from pool gc passes
+# that died writing a bitmap (``SharedBareSafetyConfig``).
+#
+# The names are git's own, from git's source:
+#   * ``.tmp-<pid>-pack-<hash>.{pack,idx,rev,bitmap,mtimes,promisor}``:
+#     ``git repack``'s ``packtmp`` prefix (builtin/repack.c,
+#     ``xstrfmt(".tmp-%d-pack", getpid())``), handed to the
+#     ``pack-objects`` it runs. ``<pid>`` is the repack's own pid.
+#     https://github.com/git/git/blob/v2.54.0/builtin/repack.c
+#   * ``tmp_pack_XXXXXX``, ``tmp_idx_XXXXXX``, ``tmp_rev_XXXXXX``,
+#     ``tmp_mtimes_XXXXXX``, ``tmp_bitmap_XXXXXX``: the ``odb_mkstemp``
+#     templates of index-pack, pack-objects and the bitmap writer
+#     (builtin/index-pack.c, pack-write.c, pack-bitmap-write.c). They carry
+#     no owner.
+#
+# Deleting one cannot lose an object: a temporary has no ``.idx`` that git
+# reads, so no lookup has ever resolved through it, and an object a borrower
+# names is in a published pack or a loose file, never only here. That is what
+# distinguishes this sweep from ``git gc --prune=now`` or ``git prune`` in a
+# pool, which are forbidden (§3.1). What it can do to a LIVE writer is make
+# that writer fail, which is why the rules below keep anything whose owner
+# may still be running.
+
+const
+  PackTemporaryGraceSeconds* = 60 * 60
+    ## How long an ownerless ``tmp_*`` temporary is presumed to belong to a
+    ## running git. Git writes these continuously while it receives or
+    ## indexes a pack and renames them within moments of its last write; an
+    ## hour without a write is a git that is no longer running.
+  RepackTemporaryMaxAgeSeconds* = 24 * 60 * 60
+    ## A ``.tmp-<pid>-pack-*`` file older than this is abandoned even when
+    ## ``<pid>`` now names a running process: pids are reused, so a live pid
+    ## alone would keep a 38-day-old temporary for as long as some unrelated
+    ## daemon happened to hold that number.
+  GitPackTemporaryPrefixes = ["tmp_pack_", "tmp_idx_", "tmp_rev_",
+    "tmp_mtimes_", "tmp_bitmap_"]
+
+type
+  PackTemporary* = object
+    ## One abandoned git temporary in a pool's ``objects/pack/``.
+    path*: string
+    bytes*: int64
+    ownerPid*: int
+      ## The repack pid git wrote into a ``.tmp-<pid>-pack-*`` name; 0 for an
+      ## ownerless ``tmp_*`` temporary.
+
+  PackTemporarySweep* = object
+    ## What ``sweepAbandonedPackTemporaries`` removed, and what it could not.
+    removed*: seq[PackTemporary]
+    failures*: seq[string]
+
+proc repackTemporaryOwner*(name: string): int =
+  ## The pid in git repack's ``.tmp-<pid>-pack-*`` name, or 0 when ``name``
+  ## is not one.
+  const prefix = ".tmp-"
+  if not name.startsWith(prefix):
+    return 0
+  let stop = name.find("-pack", prefix.len)
+  if stop <= prefix.len:
+    return 0
+  let digits = name[prefix.len ..< stop]
+  if digits.len > 9 or not digits.allCharsInSet(Digits):
+    return 0
+  parseInt(digits)
+
+proc isGitPackTemporaryName*(name: string): bool =
+  ## Whether ``name`` (a file name in ``objects/pack/``) is one of git's own
+  ## pack temporaries rather than a published pack or anything else.
+  if repackTemporaryOwner(name) > 0:
+    return true
+  for prefix in GitPackTemporaryPrefixes:
+    if name.startsWith(prefix) and name.len > prefix.len:
+      return true
+  false
+
+proc poolPackDir(pool: string): string = pool / "objects" / "pack"
+
+proc packTemporaryNames*(pool: string): HashSet[string] =
+  ## The names of every git pack temporary in ``pool``'s ``objects/pack/``
+  ## now, live or not. A caller holding the pool lock snapshots this before
+  ## running git there, so that whatever appears afterwards can be
+  ## attributed to that git (``adopted`` below).
+  result = initHashSet[string]()
+  let packDir = poolPackDir(pool)
+  if not dirExists(packDir):
+    return
+  for kind, path in walkDir(packDir):
+    if kind == pcFile and isGitPackTemporaryName(path.lastPathPart):
+      result.incl(path.lastPathPart)
+
+proc newPackTemporaries*(pool: string; before: HashSet[string]):
+    HashSet[string] =
+  ## The temporaries in ``pool`` that were not in the ``before`` snapshot.
+  packTemporaryNames(pool) - before
+
+proc abandonedPackTemporaries*(pool: string;
+                               adopted = initHashSet[string]();
+                               now = getTime()): seq[PackTemporary] =
+  ## The git pack temporaries in ``pool``'s ``objects/pack/`` whose writer is
+  ## gone. Read-only: ``repro health`` reports these without a lock.
+  ##
+  ##   * ``.tmp-<pid>-pack-*``: abandoned when ``<pid>`` is not a running
+  ##     process, or when it is older than ``RepackTemporaryMaxAgeSeconds``.
+  ##   * ownerless ``tmp_*``: abandoned when no write has touched it for
+  ##     ``PackTemporaryGraceSeconds``, or when its name is in ``adopted``:
+  ##     the temporaries that appeared while the caller's own git ran under
+  ##     the pool lock, after that git has exited. Reprobuild runs no other
+  ##     git in the store while it holds that lock.
+  ##
+  ## Symlinks and directories are never candidates.
+  let packDir = poolPackDir(pool)
+  if not dirExists(packDir):
+    return
+  for kind, path in walkDir(packDir):
+    if kind != pcFile:
+      continue
+    let name = path.lastPathPart
+    if not isGitPackTemporaryName(name):
+      continue
+    let owner = repackTemporaryOwner(name)
+    var age = -1'i64
+    try:
+      age = (now - getLastModificationTime(path)).inSeconds
+    except OSError:
+      # Vanished, or unreadable metadata: not provably abandoned.
+      continue
+    let abandoned =
+      if owner > 0:
+        not processAlive(owner) or age >= RepackTemporaryMaxAgeSeconds
+      else:
+        name in adopted or age >= PackTemporaryGraceSeconds
+    if not abandoned:
+      continue
+    var bytes = 0'i64
+    try:
+      bytes = getFileSize(path)
+    except OSError:
+      discard
+    result.add(PackTemporary(path: path, bytes: bytes, ownerPid: owner))
+
+proc sweepAbandonedPackTemporaries*(pool: string;
+                                    adopted = initHashSet[string]()):
+    PackTemporarySweep =
+  ## Remove ``abandonedPackTemporaries(pool, adopted)``. The caller holds the
+  ## pool's VCS lock, so no git that reprobuild runs in the store is writing
+  ## there. Never raises: a file that cannot be removed is listed in
+  ## ``failures``, and each caller decides what that blocks.
+  for temporary in abandonedPackTemporaries(pool, adopted):
+    try:
+      removeFile(temporary.path)
+      result.removed.add(temporary)
+    except OSError as error:
+      result.failures.add(temporary.path & ": " & error.msg)
+
+proc failureDiagnostic(sweep: PackTemporarySweep; pool: string): string =
+  if sweep.failures.len == 0: ""
+  else: "could not remove " & $sweep.failures.len &
+    " abandoned git pack temporar" &
+    (if sweep.failures.len == 1: "y" else: "ies") & " in " & pool & ": " &
+    sweep.failures.join("; ")
+
+proc reclaimAbandonedPackTemporaries*(pool: string): PackTemporarySweep =
+  ## ``sweepAbandonedPackTemporaries`` under the pool's VCS lock: the entry
+  ## point for a caller that does not already hold it (``repro health
+  ## --fix``). A lock that cannot be taken is reported as a failure.
+  withCacheEntryVcsLock(pool,
+      (block:
+        result.failures.add("could not lock shared bare: " & pool)
+        return)):
+    result = sweepAbandonedPackTemporaries(pool)
+
 proc onlyPoolBookkeeping(dir: string): bool =
   ## Whether ``dir`` holds nothing but a ``repro`` directory, and so no
   ## object, ref or config of a repository.
@@ -1318,13 +1512,25 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string;
       if prepared.len > 0:
         return SharedCloneResult(ok: false, sharedBarePath: bare,
           diagnostic: prepared)
+      # Under the pool lock, before receiving another pack: what an earlier
+      # git left in the store is reclaimed first (§3.4), and what this fetch
+      # leaves, should it fail, is reclaimed after it.
+      let swept = sweepAbandonedPackTemporaries(bare)
+      if swept.failures.len > 0:
+        return SharedCloneResult(ok: false, sharedBarePath: bare,
+          diagnostic: failureDiagnostic(swept, bare))
+      let before = packTemporaryNames(bare)
       # fetch-if-present: refresh all refs, prune deleted ones.
       announce(sbpFetch)
       let res = runGit(gitBin, sharedBareFetchArgs(bare))
+      let leftover = sweepAbandonedPackTemporaries(bare,
+        newPackTemporaries(bare, before))
       if res.code != 0:
         return SharedCloneResult(ok: false, sharedBarePath: bare,
           diagnostic: "git fetch in shared bare failed (" & $res.code & "): " &
-            res.output.strip())
+            res.output.strip() &
+            (if leftover.failures.len > 0: "; " &
+              failureDiagnostic(leftover, bare) else: ""))
       checkLeaves = true
     else:
       # clone-if-missing. A directory holding nothing but ``repro/`` is the
@@ -2247,6 +2453,12 @@ proc refillPoolObjects(gitBin, pool: string; args: seq[string];
   let originalObjects = absolutePath(gitObjectDir(pool))
   createDir(poolReproDir(pool))
   cleanupAbandonedRefillStages(pool)
+  # The refill writes only into its own stage, but other git in the store
+  # does not, and this lock is held: reclaim what such a git abandoned
+  # before receiving another pack, like the stages above.
+  let swept = sweepAbandonedPackTemporaries(pool)
+  if swept.failures.len > 0:
+    raise newException(IOError, failureDiagnostic(swept, pool))
   let scratch = createTempDir("refill-", "", poolReproDir(pool))
   defer: removeOwnedRefillStage(scratch)
   writeFile(scratch / RefillStageMarkerName, RefillStageMarker)
@@ -4792,6 +5004,9 @@ type
       ## ``gc.pruneExpire=never``: why (an empty registry, borrowers the
       ## discovery pass had not seen, or the path it could not vouch for).
       ## Not an error: such a gc prunes nothing.
+    reclaimedTemporaries*: seq[PackTemporary]
+      ## Abandoned git pack temporaries the pass removed from the pool's
+      ## ``objects/pack/`` (§3.4), whether or not a gc then ran.
 
 const
   DefaultLooseObjectLimit* = 500
@@ -4971,6 +5186,20 @@ proc maintainSharedBare*(gitBin, barePath: string;
     result.ok = true
     result.looseBefore = looseObjectCount(gitBin, barePath)
 
+    # (0) What an earlier git abandoned in the store, reclaimed whether or not
+    # a gc is due (§3.4): a pool that never reaches its budget again must not
+    # keep a dead pass's copy of its history for good. A temporary that
+    # cannot be removed stops the gc, which would write another full pack.
+    let swept = sweepAbandonedPackTemporaries(barePath)
+    result.reclaimedTemporaries = swept.removed
+    if swept.failures.len > 0:
+      result.ok = false
+      result.ran = false
+      result.looseAfter = result.looseBefore
+      result.diagnostic = failureDiagnostic(swept, barePath) &
+        "; gc skipped so it cannot leave another"
+      return
+
     # (1) Dead-workspace ref prune. Only when we were actually given a live
     # set; an empty set means "unknown", and pruning everything would be
     # destructive, so we skip it.
@@ -5036,13 +5265,22 @@ proc maintainSharedBare*(gitBin, barePath: string;
       dirExists(packDir / "multi-pack-index.d")
     var gcArgs = sharedBareSafetyArgs()
     gcArgs.add(["-C", barePath, "gc", "--quiet"])
+    let temporariesBefore = packTemporaryNames(barePath)
     let gc = runGit(gitBin, gcArgs)
+    # A gc that fails part-way has already written its new pack under a
+    # temporary name; it is this pass's own, so it goes now, not at the next
+    # pass (§3.4: temporary objects are removed on success or failure).
+    let leftover = sweepAbandonedPackTemporaries(barePath,
+      newPackTemporaries(barePath, temporariesBefore))
+    result.reclaimedTemporaries.add(leftover.removed)
     if gc.code != 0:
       result.ok = false
       result.ran = false
       result.looseAfter = result.looseBefore
       result.diagnostic = "git gc failed (" & $gc.code & "): " &
-        gc.output.strip()
+        gc.output.strip() &
+        (if leftover.failures.len > 0: "; " &
+          failureDiagnostic(leftover, barePath) else: "")
       return
     # gc deliberately leaves graph writes disabled. Rebuild explicitly, after
     # expiry, so no cached graph can still name a commit gc just removed.
@@ -5068,6 +5306,12 @@ proc maintainSharedBare*(gitBin, barePath: string;
         return
     result.ran = true
     result.looseAfter = looseObjectCount(gitBin, barePath)
+    if leftover.failures.len > 0:
+      # The gc and the index rebuild completed, so the pool is consistent;
+      # the pass still fails, unstamped, so the next one retries the removal.
+      result.ok = false
+      result.diagnostic = failureDiagnostic(leftover, barePath)
+      return
     touchMaintenanceStamp(barePath)
 
 # ---- inspection (the `shared-clones list` surface) -------------------------

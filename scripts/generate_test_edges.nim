@@ -464,11 +464,14 @@ proc needsSslDefine(path: string): bool =
   ##     tests serve their origins over real HTTPS.
   ##   * The Nimble source fetch's tests: mirrors and forge archives are read
   ##     over real HTTPS, by the fetch's own TLS client.
+  ##   * The registry crate fetch's tests: mirrors and the origin are read
+  ##     over real HTTPS through the same client.
   path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
     path.endsWith("/t_repro_https_cache_end_to_end.nim") or
     path.endsWith("/t_cache_reads_are_bounded.nim") or
     path.contains("libs/repro_nimble_generator/tests/") or
-    path.contains("libs/repro_nimble_fetch/tests/")
+    path.contains("libs/repro_nimble_fetch/tests/") or
+    path.contains("libs/repro_cargo_fetch/tests/")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
   ## Five attestation gates are compiled with

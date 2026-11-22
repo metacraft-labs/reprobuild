@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3143,
-    "pureUnitConsolidationGroups": 94,
+    "nimTestBinaries": 3146,
+    "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 835,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3195
+    "testEntries": 3198
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1714,6 +1714,20 @@
       "targetOs": "soAny"
     },
     {
+      "count": 2,
+      "defines": [],
+      "dependencyShape": [
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "sources": [
+        "tests/unit/t_m9r15p_1_6_share_only_lib_cmake.nim",
+        "tests/unit/t_nix_propagated_store_paths.nim"
+      ],
+      "targetOs": "soAny"
+    },
+    {
       "count": 8,
       "defines": [],
       "dependencyShape": [
@@ -1733,14 +1747,13 @@
       "targetOs": "soAny"
     },
     {
-      "count": 3,
+      "count": 2,
       "defines": [],
       "dependencyShape": [
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "sources": [
-        "tests/unit/t_nix_propagated_store_paths.nim",
         "tests/unit/t_nonredistributable_publish_gate.nim",
         "tests/unit/t_store_path_farm.nim"
       ],
@@ -1821,7 +1834,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1755,
+      "integration": 1758,
       "platform/destructive": 200,
       "pure unit": 835,
       "unclassified": 376
@@ -2044,9 +2057,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3143,
+    "nimTestBinaryCount": 3146,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3195
+    "testEntryCount": 3198
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14641,6 +14654,47 @@
       "source": "libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_compile_edges_offline",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_lock",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_crate_fetch_checked",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31494,6 +31548,7 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_dsl_stdlib",
         "repro_interface_artifacts",
         "repro_project_dsl",
         "repro_tool_profiles"
@@ -31501,8 +31556,8 @@
       "owner": "libs/repro_tool_profiles",
       "requiresReproBinary": true,
       "source": "libs/repro_tool_profiles/tests/t_environment_prefix_provisioning.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -53221,6 +53276,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_pool_gc_leaves_no_abandoned_pack_temporaries",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pool_gc_leaves_no_abandoned_pack_temporaries.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_post_commit_cache_push_does_not_hold_callers_pipe",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -57565,7 +57635,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_leaf_detector_messages.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57601,7 +57671,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_leaf_refetches_through_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 27,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -65219,13 +65289,14 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
+        "repro_interface_artifacts",
         "repro_tool_profiles"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": false,
       "source": "tests/unit/t_nix_propagated_store_paths.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

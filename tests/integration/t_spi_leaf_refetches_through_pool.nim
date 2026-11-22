@@ -145,6 +145,9 @@ if paramCount() == 4 and paramStr(1) == "cache-push-owner":
   stdout.write(pushed.diagnostic)
   quit(if pushed.ok: 0 else: 1)
 
+if paramCount() == 1 and paramStr(1) == "exit-at-once":
+  quit(0)
+
 if paramCount() == 2 and paramStr(1) == "refill-orphan-child":
   let stage = paramStr(2)
   createDir(stage / "objects/pack")
@@ -1452,6 +1455,41 @@ exit $status
     check not dirExists(orphan)
     check readFile(unmanaged / "keep") == "user-owned scratch"
     check readFile(unknown / "keep") == "unknown version"
+    check has(f.pool, tip) and has(f.leaf, tip)
+
+  test "refill_reclaims_abandoned_git_pack_temporaries_in_the_store":
+    # §3.4: what a dead git left in the pool's own ``objects/pack/`` (the
+    # repack of an interrupted pool gc, an interrupted index-pack) is
+    # reclaimed under the lock before the refill receives another pack. A
+    # live writer's temporary and the published packs are kept.
+    let root = createTempDir("repro-spi2-pack-temporaries-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    discard must(f.up, "config", "uploadpack.allowFilter", "true")
+    let tip = loseSideFromPool(f)
+    let packDir = f.pool / "objects" / "pack"
+    var child = startProcess(getAppFilename(), args = @["exit-at-once"])
+    let dead = child.processID
+    discard child.waitForExit()
+    child.close()
+    let hash = "79f99208d275c628afb5d40123456789abcdef01"
+    let deadPack = packDir / (".tmp-" & $dead & "-pack-" & hash & ".pack")
+    let staleIdx = packDir / "tmp_idx_eBsYfz"
+    let livePack = packDir / (".tmp-" & $getCurrentProcessId() & "-pack-" &
+      hash & ".pack")
+    let freshIdx = packDir / "tmp_idx_YGlArC"
+    for path in [deadPack, staleIdx, livePack, freshIdx]:
+      writeFile(path, "abandoned bytes")
+    setLastModificationTime(staleIdx, getTime() - initDuration(hours = 2))
+    let read = run(f.leaf, true, "cat-file", "-p", tip)
+    checkpoint(read.output)
+    check read.code == 0
+    check not fileExists(deadPack)
+    check not fileExists(staleIdx)
+    check fileExists(livePack)
+    check fileExists(freshIdx)
     check has(f.pool, tip) and has(f.leaf, tip)
 
   test "chain_survives_removal_of_the_engine_that_wired_it":

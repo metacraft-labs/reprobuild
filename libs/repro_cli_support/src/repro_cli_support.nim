@@ -8665,6 +8665,13 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
         nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
           actionIdentity.selectedStorePath):
       return (servable: false, refreshed: false)
+  # A path-mode identity resolved before path mode followed a Nix Darwin
+  # cc-wrapper's SDK host libraries lacks their header and library
+  # directories, and serving it would fail every `-liconv` link again.
+  # Re-resolve it; profiles without such a wrapper never match.
+  for profile in identity.profiles:
+    if pathProfileLacksNixDarwinSdkChannels(profile):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 
@@ -80637,6 +80644,7 @@ type
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
     hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
+    hfSharedClonePackTemporaries ## Remove git pack temporaries abandoned in shared clone pools.
     hfMigrateStateFile ## Move the old state file / its layers (Workspace-Settings-Files §8 step 2).
 
   HealthCheck* = object
@@ -80689,6 +80697,9 @@ type
       ## ``shared-clone-leaves``: checkouts whose alternates name a shared
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
       ## each with the URL ``--fix`` re-creates its pool from.
+    packTemporaryPools: seq[string]
+      ## ``shared-clone-pack-temporaries``: the pools holding abandoned git
+      ## pack temporaries, which ``--fix`` sweeps under each pool's lock.
 
 proc healthArgsOf(c: ReproCommandLineHealth): HealthArgs =
   ## What `repro health` was given, from its configuration object (repro's
@@ -83273,6 +83284,52 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           else: "follow the per-ref fix in the messages printed below",
         fixKind: if canRepair: hfSharedCloneLeaves else: hfNone))
 
+  # 15. Shared-Clone-Pool-Integrity §3.4 — git pack temporaries abandoned in
+  #     a pool's own ``objects/pack/`` by a git that died (an interrupted
+  #     repack or index-pack). Git can never read them and nothing else
+  #     removes them, so each is dead weight on the host's disk, as large as
+  #     the pack it was becoming. The pools are the host's, not this
+  #     workspace's, so every pool in the cache is examined; examining one is
+  #     a directory listing. Report-only; ``--fix`` sweeps under each pool's
+  #     lock, as the refresh, refill and maintenance paths do themselves.
+  block sharedClonePackTemporariesCheck:
+    let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
+    var pools = 0
+    var files = 0
+    var bytes = 0'i64
+    var findings: seq[string]
+    for pool in findSharedBares(cacheRoot):
+      inc pools
+      let abandoned = abandonedPackTemporaries(pool)
+      if abandoned.len == 0:
+        continue
+      var poolBytes = 0'i64
+      for t in abandoned: poolBytes += t.bytes
+      files += abandoned.len
+      bytes += poolBytes
+      ctx.packTemporaryPools.add(pool)
+      findings.add(pool & " (" & $abandoned.len & " file(s), " &
+        formatSize(poolBytes) & ")")
+    if findings.len == 0:
+      checks.add(HealthCheck(
+        name: "shared-clone-pack-temporaries",
+        status: hsOk,
+        detail: "examined " & $pools & " shared clone pool(s); none holds " &
+          "an abandoned git pack temporary",
+        remedy: "", fixKind: hfNone))
+    else:
+      let prefix = $files & " abandoned git pack temporar" &
+        (if files == 1: "y" else: "ies") & " (" & formatSize(bytes) &
+        ") that git cannot read, in " & $findings.len & " of " & $pools &
+        " shared clone pool(s): "
+      checks.add(HealthCheck(
+        name: "shared-clone-pack-temporaries",
+        status: hsWarn,
+        detail: prefix & formatFindingList(findings, parsed.verbose),
+        fullDetail: prefix & findings.join(", "),
+        remedy: self & " health --fix",
+        fixKind: hfSharedClonePackTemporaries))
+
   # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`. A row only
   # when some participating repository carries a snapshot or names a policy,
   # so a workspace that has adopted none sees no change. A stale snapshot is a
@@ -83449,6 +83506,7 @@ proc healthFixWillAct(c: HealthCheck; ctx: HealthContext): bool =
   of hfStartDaemon: c.status == hsFail
   of hfCloneSiblings: ctx.gitOk and ctx.missingSiblings.len > 0
   of hfSharedCloneLeaves: ctx.gitOk
+  of hfSharedClonePackTemporaries: ctx.packTemporaryPools.len > 0
   of hfEnsureVcsHooks, hfWorkspaceErgonomics: true
 
 proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
@@ -83483,6 +83541,9 @@ proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
     of hfSharedCloneLeaves:
       steps.add(c.name & ": repair refetch chains and stale " &
         "remote-tracking refs in checkouts that borrow from shared clones")
+    of hfSharedClonePackTemporaries:
+      steps.add(c.name & ": remove abandoned git pack temporaries from " &
+        $ctx.packTemporaryPools.len & " shared clone pool(s)")
     of hfWorkspaceErgonomics:
       steps.add(c.name & ": repair the workspace ergonomics files " &
         "(.gitignore, AGENTS.md, workspace-projects.md)")
@@ -83643,6 +83704,16 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+    of hfSharedClonePackTemporaries:
+      for pool in ctx.packTemporaryPools:
+        emit("fix: removing abandoned git pack temporaries in " & pool)
+        let swept = reclaimAbandonedPackTemporaries(pool)
+        var bytes = 0'i64
+        for t in swept.removed: bytes += t.bytes
+        emit("fix: removed " & $swept.removed.len & " file(s), " &
+          formatSize(bytes) & ", in " & pool)
+        for failure in swept.failures:
+          emit("fix: could NOT remove " & failure)
     of hfMigrateStateFile:
       # Done before the diagnosis (``applyStateFileMigrationFix``); a row
       # still failing here is one the migration refused, already reported.
