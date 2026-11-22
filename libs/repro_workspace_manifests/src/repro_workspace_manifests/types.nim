@@ -851,6 +851,17 @@ type
     auto_load_envrc*: Option[bool]
     auto_load_flake*: Option[bool]
 
+  NimbleConfigBody* = object
+    ## Nimble-Package-Catalog.md NPC-AREQ13 -- the `[nimble]` table: the
+    ## mirrors a fetch of `nimble:` sources tries before each catalog's own
+    ## mirrors and before the origin. Each entry is an `https://` base URL or
+    ## an absolute directory. Read from the user's and the system's
+    ## Reprobuild configuration and from the shared `repro-workspace.toml`;
+    ## the personal `repro-workspace.local.toml` does not take it. The
+    ## entries are validated, and the lists concatenated, by the reader of
+    ## the configured mirrors (`repro_cli_support/nimble_mirror_config`).
+    mirrors*: seq[string]
+
   # --- repro-workspace.toml / repro-workspace.local.toml ----------------------
   #
   # Workspace-Settings-Files.md §3–§4. Both files are decoded from the generic
@@ -934,6 +945,8 @@ type
     localToolProvisioningOverrides*: seq[ToolProvisioningConfigEntry]
       ## The local file's `[tool-provisioning.overrides]`: this checkout's
       ## own. It outranks the shared file's.
+    nimble*: NimbleConfigBody
+      ## `[nimble]`: the organization's Nimble source mirrors (NPC-AREQ13).
     extensions*: Extensions
 
   # --- reprobuild.config.v1 (HL-1 layered configuration file) -----------------
@@ -993,6 +1006,10 @@ type
     apply_if*: seq[ApplyIfEntry]
     locking*: BootstrapLockingBody
     foreign_env*: BootstrapForeignEnvBody
+    nimble*: NimbleConfigBody
+      ## `[nimble] mirrors` (NPC-AREQ13). Declared so that the strict decode
+      ## of the user's or the system's file accepts the table; the mirrors
+      ## themselves are read by `repro_cli_support/nimble_mirror_config`.
     extensions*: Extensions
     tool_provisioning* {.serializedFieldName: "tool-provisioning".}:
       ToolProvisioningConfigBody
