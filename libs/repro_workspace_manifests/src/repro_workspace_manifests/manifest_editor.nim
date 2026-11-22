@@ -536,6 +536,9 @@ proc workspaceSettingsText*(cfg: WorkspaceSettings): string =
   f.addOpt("auto_load_envrc", cfg.foreign_env.auto_load_envrc)
   f.addOpt("auto_load_flake", cfg.foreign_env.auto_load_flake)
   if f.len > 0: blocks.add(RenderBlock(header: "[foreign_env]", entries: f))
+  if cfg.nimble.mirrors.len > 0:
+    blocks.add(RenderBlock(header: "[nimble]", entries: @[
+      entry("mirrors", tomlStrings(cfg.nimble.mirrors))]))
   var top: seq[RenderEntry]
   top.addOpt("push_gateway", cfg.push_gateway)
   assemble(schemaWorkspaceSettingsV1, top, blocks,

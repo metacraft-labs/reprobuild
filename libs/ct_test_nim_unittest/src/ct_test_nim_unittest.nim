@@ -198,6 +198,11 @@ proc build*(tool: BuildNimUnittest;
   if warningsOff:
     cliArgs.add(cliArg(name = "warningsOff", value = true,
       alias = "--warnings:off"))
+  # Every Nim edge drops the installation's `nimblepath` entries (Nimble's
+  # `$home/.nimble` and `/opt/nimble`): a package reaches the compile only
+  # as a `--path:` (Nimble-Package-Catalog NPC-AREQ22).
+  cliArgs.add(cliArg(name = "noNimblePath", value = true,
+    alias = "--noNimblePath"))
 
   # ``defines`` / ``paths`` / ``imports`` are repeated concat-form flags
   # matching the ``nim.c`` typed-tool surface (``-d:foo``, ``--path:dir``,
