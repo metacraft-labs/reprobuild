@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3144,
+    "nimTestBinaries": 3145,
     "pureUnitConsolidationGroups": 94,
     "pureUnitTests": 834,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3196
+    "testEntries": 3197
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1821,7 +1821,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1757,
+      "integration": 1758,
       "platform/destructive": 200,
       "pure unit": 834,
       "unclassified": 376
@@ -2044,9 +2044,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3144,
+    "nimTestBinaryCount": 3145,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3196
+    "testEntryCount": 3197
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -53263,6 +53263,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_pool_gc_leaves_no_abandoned_pack_temporaries",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_pool_gc_leaves_no_abandoned_pack_temporaries.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_post_commit_cache_push_does_not_hold_callers_pipe",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -57606,7 +57621,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_leaf_detector_messages.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -57642,7 +57657,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_leaf_refetches_through_pool.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 27,
+      "staticCaseCount": 28,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

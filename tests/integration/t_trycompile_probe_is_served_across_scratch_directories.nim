@@ -112,12 +112,20 @@ proc installTool(prefix: string): string =
   when defined(windows):
     let source = getEnv("SystemRoot", "C:\\Windows") / "System32" / "cmd.exe"
   else:
-    let source = expandSymlink(findExe("sh"))
+    # The file `sh` finally names, so the copy is the program, not a link
+    # to it. `findExe` already follows links, and `expandFilename` (the
+    # `realpath` of it) also accepts the regular file that leaves it with;
+    # `expandSymlink` does not: it fails with EINVAL on a non-link, which is
+    # what `sh` -> `bash` in a Nix store resolves to.
+    let source = expandFilename(findExe("sh"))
   result = prefix / "bin" / extractFilename(source)
   createDir(result.parentDir)
   copyFile(source, result)
   when not defined(windows):
-    setFilePermissions(result, getFilePermissions(source))
+    # Runnable like the source, and writable whatever the source's mode:
+    # the case changes the tool in place (`changeInPlace`), and a Nix store
+    # file is read-only (0555).
+    setFilePermissions(result, getFilePermissions(source) + {fpUserWrite})
 
 proc toolArgv(tool, stagedSource: string): seq[string] =
   when defined(windows):
