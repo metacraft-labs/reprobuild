@@ -2917,6 +2917,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath(\"build/test-tmp/t_tool_cache_reade..."),
   TestSpec(
+    source: "libs/repro_build_engine/tests/t_transient_directory_contents_leave_the_probe_key.nim",
+    binary: "build/test-bin/t_transient_directory_contents_leave_the_probe_key",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let TmpDir = absolutePath("),
+  TestSpec(
     source: "libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim",
     binary: "build/test-bin/t_transient_probed_with_trailing_separator",
     defines: @[],
