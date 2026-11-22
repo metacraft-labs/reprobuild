@@ -467,15 +467,35 @@ proc writePartitionPlanJson*(plan: ShardPlan; path: string;
     createDir(parent)
   writeFile(path, shardPlanJson(plan, meta).pretty() & "\n")
 
+proc readNodeId(node: JsonNode): NodeId =
+  ## A node id as ``%uint64`` wrote it. ``std/json`` writes a ``uint64`` above
+  ## ``int64.high`` as an unquoted number that it parses back as a
+  ## ``JString`` (it has no unsigned integer kind), so both kinds are ids. A
+  ## node id derived from a hash (the workspace-driven shard's) has the high
+  ## bit set about half the time; reading only ``JInt`` refused every such
+  ## plan.
+  case node.kind
+  of JInt:
+    if node.getBiggestInt() < 0:
+      raise newException(PartitionPlanReadError,
+        "node id must not be negative")
+    nodeId(uint64(node.getBiggestInt()))
+  of JString:
+    try:
+      nodeId(uint64(parseBiggestUInt(node.getStr())))
+    except ValueError:
+      raise newException(PartitionPlanReadError,
+        "node id must be an unsigned integer, got " & node.getStr())
+  else:
+    raise newException(PartitionPlanReadError,
+      "node id must be an integer")
+
 proc readSeqU64(node: JsonNode): seq[NodeId] =
   if node.kind != JArray:
     raise newException(PartitionPlanReadError,
       "expected array of node ids, got " & $node.kind)
   for item in node.elems:
-    if item.kind != JInt:
-      raise newException(PartitionPlanReadError,
-        "node id must be an integer")
-    result.add(nodeId(uint64(item.getInt())))
+    result.add(readNodeId(item))
 
 proc readSeqString(node: JsonNode): seq[string] =
   if node.kind != JArray:
@@ -502,14 +522,14 @@ proc readMeta(node: JsonNode): ShardPlanRequest =
   result.refinementPasses = node["refinementPasses"].getInt()
   for actionNode in node["buildActions"].elems:
     var a = ShardBuildAction(
-      id: nodeId(uint64(actionNode["id"].getInt())),
+      id: readNodeId(actionNode["id"]),
       commandStatsId: actionNode["commandStatsId"].getStr(),
       deps: readSeqU64(actionNode["deps"])
     )
     result.buildActions.add(a)
   for edgeNode in node["testEdges"].elems:
     var e = ShardTestEdge(
-      id: nodeId(uint64(edgeNode["id"].getInt())),
+      id: readNodeId(edgeNode["id"]),
       selector: edgeNode["selector"].getStr(),
       historyKey: edgeNode["historyKey"].getStr(),
       buildDeps: readSeqU64(edgeNode["buildDeps"])
@@ -524,7 +544,7 @@ proc readPlan(node: JsonNode): PartitionPlan =
   result.bound = nsToDuration(node["boundNs"].getBiggestInt().int64)
   for a in node["assignments"].elems:
     result.assignments.add(PartitionAssignment(
-      root: nodeId(uint64(a["root"].getInt())),
+      root: readNodeId(a["root"]),
       shardIndex: a["shardIndex"].getInt(),
       explainedCost: nsToDuration(a["explainedCostNs"].getBiggestInt().int64)
     ))
