@@ -406,7 +406,7 @@ class ContinuousBenchmarkingPolicyTests(unittest.TestCase):
         self.assertNotIn('"eph-macos-arm64"]', workflow)
         self.assertIn("metacraft-labs/runquota", workflow)
         self.assertIn("metacraft-labs/reprobuild-cmake", workflow)
-        self.assertIn("ref: reprobuild", workflow)
+        self.assertIn("ref: 5ac5a800ca0b284e76670759a23f5beb72e0fbe6", workflow)
         self.assertIn("run: nix develop --command just bench --quick", workflow)
         self.assertIn("benchmark-action/github-action-benchmark@v1", workflow)
         self.assertIn("tool: customSmallerIsBetter", workflow)
