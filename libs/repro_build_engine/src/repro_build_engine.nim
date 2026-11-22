@@ -163,6 +163,7 @@ import repro_build_engine/monitor_flush
 # because a private field is writable from anywhere in its declaring module, so
 # declared here it would seal nothing. Read its header before adding a refusal.
 import repro_build_engine/cache_refusal
+import repro_build_engine/nim_edge_isolation
 import repro_build_engine/embedded_root_scan
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
@@ -10898,6 +10899,35 @@ proc volatileRootRefusals*(g: BuildGraph;
         " runs in " & cwd & ", which is not a place a project's files can " &
         "be fingerprinted: " & reason)
 
+proc nimCompileArgvBase*(argv: openArray[string]): int =
+  ## The index of the Nim compiler in ``argv`` when it is a Nim compile --
+  ## the command token's basename is ``nim`` and a compile subcommand
+  ## (``c``/``cc``/``compile``/``compileToC``/``c++``/``cpp``/``js``/``e``)
+  ## follows it -- else -1. The canonical monitor-prefix parser finds the
+  ## command, so a ``--`` in the compiled program's runtime arguments is not
+  ## mistaken for the monitor's separator and a monitor-wrapped compile is
+  ## recognised like a bare one.
+  result = -1
+  if argv.len < 2:
+    return
+  let base = executedImageArgvIndex(argv)
+  if base < 0 or base >= argv.len - 1:
+    return
+  let exeBase = extractFilename(argv[base])
+  let stem =
+    when defined(windows):
+      (if exeBase.toLowerAscii.endsWith(".exe"):
+        exeBase[0 ..< exeBase.len - 4] else: exeBase).toLowerAscii
+    else:
+      exeBase
+  if stem != "nim":
+    return
+  const compileSubcommands = ["c", "cc", "compile", "compiletoc",
+    "c++", "cpp", "js", "e"]
+  if argv[base + 1].toLowerAscii notin compileSubcommands:
+    return
+  result = base
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil;
@@ -11331,6 +11361,22 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "§\"Source Rewrites\" — default policy is 'source " &
         "rewrites are errors'.")
     if offenders.len > 0:
+      result.publishable = false
+  # Nimble-Package-Catalog NPC-AREQ22 (threat model G17): the host's Nimble
+  # directory is a DENIED path for a Nim edge (Sandbox-And-Monitoring.md §
+  # Policy Layer). The edge's scratch HOME and `--noNimblePath` keep the
+  # compiler from looking there; a read or probe there that was observed
+  # anyway (a project configuration naming it) fails the edge rather than
+  # becoming an input nothing locked.
+  if nimCompileArgvBase(action.argv) >= 0:
+    var observed: seq[string]
+    for p in result.evidence.monitorReads: observed.add p
+    for p in result.evidence.monitorProbes: observed.add p
+    for p in result.evidence.depfileInputs: observed.add p
+    let violations = deniedNimbleAccess(observed, hostNimbleDeniedRoots())
+    if violations.len > 0:
+      for v in violations:
+        result.evidence.diagnostics.add(v)
       result.publishable = false
   # Everything under a scratch directory is the action's own, so it leaves
   # the evidence here, before the key is graded -- the local key, the
@@ -15759,23 +15805,8 @@ proc applyNimPathArgs*(argv: openArray[string];
   for a in argv: result.add(a)
   if nimPathDirs.len == 0 or argv.len < 2:
     return
-  # Use the canonical monitor-prefix parser: a -- in the compiled program's
-  # runtime arguments must not be mistaken for the monitor's separator.
-  let base = executedImageArgvIndex(argv)
-  if base < 0 or base >= argv.len - 1:
-    return
-  let exeBase = extractFilename(argv[base])
-  let stem =
-    when defined(windows):
-      (if exeBase.toLowerAscii.endsWith(".exe"):
-        exeBase[0 ..< exeBase.len - 4] else: exeBase).toLowerAscii
-    else:
-      exeBase
-  if stem != "nim":
-    return
-  const compileSubcommands = ["c", "cc", "compile", "compiletoc",
-    "c++", "cpp", "js", "e"]
-  if argv[base + 1].toLowerAscii notin compileSubcommands:
+  let base = nimCompileArgvBase(argv)
+  if base < 0:
     return
   validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd,
     isolatedEnv)
@@ -16774,9 +16805,23 @@ proc preparedRunQuotaCommand(action: BuildAction;
         "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH " &
         "[" & nonSipShellSearchReport() & "]")
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
-  let threadedEnv = preparedActionEnv(action, config, auxPaths)
+  var threadedEnv = preparedActionEnv(action, config, auxPaths)
   let isolatedEnv = config.hermeticEnv or action.isolateHostEnvironment
   refuseForeignCompilerLibc(action, auxPaths, threadedEnv, isolatedEnv)
+  # Nimble-Package-Catalog NPC-AREQ22 (threat model G17): a Nim compile runs
+  # on a scratch HOME / NIMBLE_DIR of its own, and an argv naming the
+  # host's Nimble directory is refused before it runs.
+  let nimBase = nimCompileArgvBase(action.argv)
+  if nimBase >= 0:
+    let denied = deniedArgvPath(action.argv, nimBase,
+      hostNimbleDeniedRoots())
+    if denied.arg.len > 0:
+      raiseEngine("Nim edge " & action.id & " names " & denied.arg &
+        ", in the denied " & denied.root & ": Nimble's package directory " &
+        "is never an input of a build; a package reaches a Nim compile " &
+        "only as a locked store path")
+    threadedEnv = isolatedNimEdgeEnv(threadedEnv,
+      nimEdgeHome(config.cacheRoot, action.id))
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
     threadedEnv, action.cwd, isolatedEnv)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
