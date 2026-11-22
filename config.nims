@@ -1,4 +1,8 @@
 import std/[algorithm, os, strutils, compilesettings]
+# The sibling-source decision, shared with the engine's recipe compiles
+# (`repro_interface_artifacts.bootstrapSiblingPackagePathFlags`). Pure, so
+# NimScript can run it; imported by path because no `--path` is set yet.
+import "libs/repro_core/src/repro_core/sibling_source_policy"
 
 # A compile for a Windows TARGET on a non-Windows HOST: generate C for
 # `--os:windows` from Linux, as scripts/check_portable_engine_closure.sh does.
@@ -929,39 +933,18 @@ proc siblingCheckout(sibling: string): string =
 proc pinnedSiblingRevision(sibling: string): string =
   ## The revision this repository pins for `sibling`, keyed by the sibling
   ## directory's name: its `deps` entry in the committed `repro.lock`, else a
-  ## `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos` (which lists
-  ## a sibling repro.lock pins by its bare name only). "" when neither pins it.
-  let name = siblingCheckout(sibling).extractFilename()
+  ## `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos`. The reading
+  ## is `pinnedSiblingRevisionIn`, shared with the engine's recipe compiles so
+  ## the two cannot disagree about the pin. "" when neither pins it.
   let lockPath = repoPath("repro.lock")
-  if fileExists(lockPath):
-    # One inline table per `deps` entry, with no nested braces.
-    # A name also heads its `packages` entry, which has no revision.
-    let lockText = readFile(lockPath)
-    let key = "{ name = \"" & name & "\","
-    let field = "revision = \""
-    var at = lockText.find(key)
-    while at >= 0:
-      let stop = lockText.find('}', at)
-      let revAt = lockText.find(field, at)
-      if stop > at and revAt > at and revAt < stop:
-        let start = revAt + field.len
-        let close = lockText.find('"', start)
-        if close > start: return lockText[start ..< close]
-      at = lockText.find(key, at + key.len)
   let pinsPath = repoPath(".github" / "sibling-repos")
-  if not fileExists(pinsPath): return ""
-  for raw in readFile(pinsPath).splitLines():
-    let line = raw.strip()
-    if line.len == 0 or line[0] == '#': continue
-    for sep in ["!=", "="]:
-      let at = line.find(sep)
-      if at > 0 and line[0 ..< at] == name:
-        return line[at + sep.len .. ^1].strip()
-  return ""
+  pinnedSiblingRevisionIn(
+    if fileExists(lockPath): readFile(lockPath) else: "",
+    if fileExists(pinsPath): readFile(pinsPath) else: "",
+    siblingCheckout(sibling).extractFilename())
 
-const RepositorySelectingGitVariables = ["GIT_DIR", "GIT_WORK_TREE",
-  "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_OBJECT_DIRECTORY",
-  "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_PREFIX"]
+# `RepositorySelectingGitVariables` comes from the shared module: the
+# engine's sibling probe clears the same variables.
 
 proc siblingGit(sibling: string; args: string): tuple[output: string; exitCode: int] =
   ## `gorgeEx` runs relative to the script's directory, not the process's, so
@@ -1010,40 +993,56 @@ proc addSiblingFirstPackagePath(sibling, envName, marker: string) =
   ## intent); sibling behind the pin while an env pin is set -> the env pin,
   ## announced; no pin known or no git -> sibling, as before.
   ## `REPRO_SIBLING_POLICY=sibling|pin` forces either choice.
+  ##
+  ## The DECISION is `chooseSiblingSource`, shared with the engine's recipe
+  ## compiles (the pre-push gate's interface extraction among them), so a
+  ## push is judged against the sources this file selects. This proc only
+  ## observes, with `gorgeEx`, and switches.
   if repoFileExists(sibling / marker):
     let envPath = getEnv(envName)
-    let policy = getEnv("REPRO_SIBLING_POLICY")
-    if policy != "sibling" and envPath.len > 0 and
-        repoFileExists(envPath / marker) and
-        normalizedPath(repoPath(envPath)) !=
-          normalizedPath(repoPath(sibling)):
-      var preferPin = policy == "pin"
-      var why = "REPRO_SIBLING_POLICY=pin"
-      if not preferPin:
-        let pin = pinnedSiblingRevision(sibling)
-        if pin.len > 0:
-          let head = siblingGit(sibling, "rev-parse HEAD")
-          let dirty = siblingGit(sibling, "status --porcelain --untracked-files=no")
-          # `nim check` (and nimsuggest) do not run `gorgeEx`: it answers
-          # ("", 0) there, which this reads as "cannot tell" and keeps the
-          # sibling, as before. Only a real compile can refuse a stale one.
-          let headRev = head.output.strip()
-          if head.exitCode == 0 and dirty.exitCode == 0 and headRev.len >= 12:
-            let atOrAhead = siblingGit(sibling,
-              "merge-base --is-ancestor " & pin & " HEAD").exitCode == 0
-            if not atOrAhead and dirty.output.strip().len == 0:
-              preferPin = true
-              why = "the sibling is at " & headRev[0 ..< 12] &
-                ", which is not at or ahead of the revision " & pin[0 ..< 12] &
-                " this repository pins, and carries no local changes"
-      if preferPin:
-        echo "config.nims: using $" & envName & "=" & envPath &
-          " instead of the sibling " & sibling & " (" & why &
-          "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
-        switch("path", repoPath(envPath))
-        return
-    # Anchored as in `addPackagePath`: the probe above tested this path.
-    switch("path", repoPath(sibling))
+    let envPinPresent = envPath.len > 0 and
+      repoFileExists(envPath / marker) and
+      normalizedPath(repoPath(envPath)) != normalizedPath(repoPath(sibling))
+    let policy = parseSiblingPolicy(getEnv(SiblingPolicyEnvVar))
+    var obs = SiblingObservation(siblingPresent: true,
+      envPinPresent: envPinPresent)
+    # Asked only when the answer can matter: never under `sibling`, and only
+    # when there is a pin to compare with.
+    if policy != spSibling:
+      obs.pin = pinnedSiblingRevision(sibling)
+      if obs.pin.len > 0:
+        let head = siblingGit(sibling, "rev-parse HEAD")
+        let dirty = siblingGit(sibling, "status --porcelain --untracked-files=no")
+        # `nim check` (and nimsuggest) do not run `gorgeEx`: it answers
+        # ("", 0) there, which reads as "cannot tell" and keeps the sibling.
+        if head.exitCode == 0:
+          obs.headRev = head.output.strip()
+        if dirty.exitCode == 0:
+          obs.dirtyKnown = true
+          obs.dirty = dirty.output.strip().len > 0
+        if obs.headRev.len >= 12:
+          obs.atOrAhead = siblingGit(sibling,
+            "merge-base --is-ancestor " & obs.pin & " HEAD").exitCode == 0
+    let choice = chooseSiblingSource(policy, obs)
+    case choice.kind
+    of sskEnvPin:
+      echo "config.nims: using $" & envName & "=" & envPath &
+        " instead of the sibling " & sibling & " (" & choice.why &
+        "); set REPRO_SIBLING_POLICY=sibling to force the sibling"
+      switch("path", repoPath(envPath))
+    of sskStaleSibling:
+      # Compiled against all the same: this file never stops a compile (see
+      # `reportUnresolvedPackagePath`). The engine's recipe compiles refuse in
+      # this state; here it is said, so a compile error that follows has its
+      # explanation above it.
+      echo "config.nims: compiling against the sibling " & sibling & " (" &
+        choice.why & "), because $" & envName & " names no pinned tree; " &
+        "check the sibling out at the pin, or set " & envName &
+        " to a tree of it (the development shell exports it)"
+      switch("path", repoPath(sibling))
+    of sskSibling, sskAbsent:
+      # Anchored as in `addPackagePath`: the probe above tested this path.
+      switch("path", repoPath(sibling))
     return
   addPackagePath(envName, [], marker, useDevShellFallback = true)
 

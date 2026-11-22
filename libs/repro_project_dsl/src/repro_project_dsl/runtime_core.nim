@@ -1754,6 +1754,29 @@ when defined(reproProviderMode):
     ## that appears later — an optional committed lock — also invalidates.
     providerEvaluationInputRegistry.add(fileReadInput(materialProviderPath(path)))
 
+  proc providerRecordedFileInput*(path, digest: string) {.dynOrStatic.} =
+    ## ``providerFileInput`` with the digest the caller took when it decided
+    ## what the graph was derived from (``recordedFileReadInput``), so an
+    ## edit made after that decision is not recorded against the graph.
+    providerEvaluationInputRegistry.add(
+      recordedFileReadInput(materialProviderPath(path), digest))
+
+  proc providerRecordedDirectoryInput*(path: string;
+                                       members: seq[string]) {.dynOrStatic.} =
+    ## ``providerDirectoryInput`` with the members the caller listed when it
+    ## decided what the graph was derived from
+    ## (``recordedDirectoryEnumerationInput``).
+    providerEvaluationInputRegistry.add(
+      recordedDirectoryEnumerationInput(materialProviderPath(path), members))
+
+  proc providerEnvironmentInput*(name: string) {.dynOrStatic.} =
+    ## Report an environment variable whose value shaped the graph this
+    ## evaluation emits: a tool the emitter ran at evaluation time read it.
+    ## Changing or unsetting the variable invalidates the cached provider
+    ## graph (``environmentInput``; Project-Provider-Graph-Protocol.md
+    ## §"Evaluation Inputs", host facts).
+    providerEvaluationInputRegistry.add(environmentInput(name))
+
   proc providerUnobservedInput*(identity: string) {.dynOrStatic.} =
     ## Report that the graph this evaluation emits was derived from reads
     ## that could not be observed completely, so no stored copy of it may be
@@ -1980,6 +2003,18 @@ else:
 
   proc providerFileInput*(path: string) {.dynOrStatic.} =
     discard path
+
+  proc providerRecordedFileInput*(path, digest: string) {.dynOrStatic.} =
+    discard path
+    discard digest
+
+  proc providerRecordedDirectoryInput*(path: string;
+                                       members: seq[string]) {.dynOrStatic.} =
+    discard path
+    discard members
+
+  proc providerEnvironmentInput*(name: string) {.dynOrStatic.} =
+    discard name
 
   proc providerDirectoryInput*(path, memberEntryPointId,
                                memberEntryPointBodyHash: string) {.dynOrStatic.} =

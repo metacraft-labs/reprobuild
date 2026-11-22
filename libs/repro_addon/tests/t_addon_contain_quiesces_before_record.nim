@@ -11,8 +11,12 @@
 ## its record leaves a marker naming none, and running it again finishes
 ## the containment instead of reporting it done.
 ##
-## Falsifying build: ``contain-records-before-quiesce`` (the record is made
-## while the tick still runs, so the heartbeat follows it).
+## Falsifying builds: ``contain-records-before-quiesce`` (the record is made
+## while the tick still runs, so the heartbeat follows it),
+## ``contain-resume-reports-already`` (a marker naming no record reads as a
+## containment made, so the interrupted contain is never finished: the
+## resume case goes red) and ``contain-busy-unknown-is-idle`` (a tick unit
+## whose state systemctl cannot report reads as idle).
 ##
 ## Mocks: ``ContainOps`` stands in for systemctl and for the sink, because a
 ## unit test has no PID 1 whose units it could block, observe or stop, and no
@@ -110,5 +114,26 @@ suite "contain lets a running tick finish before it records":
     let r = runContainWith(ops(b2), "drill", "again", st)
     check r.already
     check b2.log.len == 0
+
+suite "contain's wait counts a unit it cannot read as running":
+  test "an unreadable unit is waited for, an inactive or absent one is not":
+    let states = {"fetch": (true, "inactive"), "apply": (false, ""),
+                  "gone": (true, ""), "tick": (true, "activating")}
+    proc ask(u: string): tuple[ok: bool; state: string] =
+      for (n, v) in states:
+        if n == u: return v
+      (false, "")
+    check busyAgentUnitsWith(["fetch", "apply", "gone", "tick"], ask) ==
+      @["apply", "tick"]
+
+  test "a contain whose systemctl never answers names the units it waited for":
+    let st = newState("unanswered")
+    let b = Bed(tickPolls: 0)
+    var o = ops(b)
+    o.busyUnits = proc(): seq[string] =
+      busyAgentUnitsWith(["repro-agent-fetch.service"],
+        proc(u: string): tuple[ok: bool; state: string] = (false, ""))
+    let r = runContainWith(o, "drill", "reason", st, quiesceMs = 1000)
+    check r.busyAtRecord == @["repro-agent-fetch.service"]
 
 removeDir(root)

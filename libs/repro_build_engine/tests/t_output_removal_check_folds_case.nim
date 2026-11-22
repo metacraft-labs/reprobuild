@@ -4,8 +4,13 @@
 ## On a filesystem that folds case those are refused whatever letter case the
 ## output is spelled in.
 ##
+## A scratch directory, which the engine empties before the action runs, is
+## held to the same rule by `scratchDirProblem`, and may not overlap a
+## declared output either.
+##
 ## Build-Engine-And-Scheduler.md §"A declared output is an obligation"
-## (optional paths) and §"Opaque output directories" (bullet "Exclusive").
+## (optional paths), §"Opaque output directories" (bullet "Exclusive") and
+## §"Scratch directories".
 ##
 ## The defect this pins: validation compared the removal's location with the
 ## cwd and the inputs by spelling (`==`, `startsWith`). The location's parent
@@ -15,7 +20,10 @@
 ## equal to nothing the cwd is spelled as, and was accepted. Removing it
 ## removes the working directory. The same held for an output `SRC` and an
 ## input `src/in.txt`. macOS's default APFS volume folds case, so this was
-## the ordinary configuration there.
+## the ordinary configuration there. `scratchDirProblem` compared its
+## scratch directories with the cwd, inputs and outputs by spelling in the
+## same way, so `../WORK` (and `<D>/WORK`) under that cwd was emptied; the
+## same-case parent walks it also accepted are pinned in `t_scratch_dirs`.
 ##
 ## WHERE THE FOLDING DIRECTORY COMES FROM. Where the temporary directory
 ## already folds case (macOS, Windows) the cases run in it, in this process.
@@ -29,12 +37,15 @@
 ## reports a folding directory is the host's; one after it fails the test.
 ##
 ## NO MOCKS: the real `runBuild` (dry run, which validates the graph and
-## launches nothing), on a real case-folding filesystem.
+## launches nothing) and the real `scratchDirProblem` (asked directly: it is
+## what `resetScratchDirs` consults before removing anything), on a real
+## case-folding filesystem.
 ##
 ## Falsifiability: with the engine comparing spellings only, every
-## `refused` case fails (each is accepted); the two `accepted` cases are the
-## controls that keep the fix from refusing a different directory or a
-## distinct hard link to an input.
+## `refused` case fails (each is accepted); the `accepted` cases are the
+## controls that keep the fix from refusing a different directory, a symlink
+## to the cwd (removing it removes the link) or a distinct hard link to an
+## input.
 
 import std/[os, osproc, sequtils, strutils, tempfiles, unittest]
 
@@ -73,6 +84,7 @@ proc runCases(root: string): seq[CaseResult] =
   ##   <root>/work/kept.txt       an input with a hard link `linked.txt`
   ##   <root>/alias -> work       a symlink to the cwd
   ##   <root>/nest/work           a cwd one level deeper
+  ##   <root>/work/out/app        a declared output
   ##   <root>/other               a directory that is neither
   let dir = expandFilename(root)
   let work = dir / "work"
@@ -82,6 +94,8 @@ proc runCases(root: string): seq[CaseResult] =
   createHardlink(work / "kept.txt", work / "linked.txt")
   createDir(dir / "nest" / "work")
   createDir(dir / "other")
+  createDir(work / "out")
+  writeFile(work / "out" / "app", "output\n")
   createSymlink("work", dir / "alias")
   let cache = dir / "cache"
   var acc: seq[CaseResult] = @[]
@@ -109,6 +123,26 @@ proc runCases(root: string): seq[CaseResult] =
   optional("optional ../alias", work, "../alias")
   removed("removed ../WORK", work, "../WORK")
   removed("removed SRC", work, "SRC", ["src/in.txt"])
+
+  # Scratch directories are emptied before the action runs
+  # (`resetScratchDirs`), so they are held to the same rule
+  # (`scratchDirProblem`), and may not overlap a declared output either.
+  proc scratch(name, cwd, raw: string; inputs: openArray[string] = [];
+               outputs: openArray[string] = []) =
+    var a = base("scratch", cwd, inputs)
+    a.outputs = @outputs
+    a.scratchDirs = @[raw]
+    acc.add((name: name, refusal: scratchDirProblem(a).replace('\n', ' ')))
+  scratch("scratch ../work", work, "../work")
+  scratch("scratch ../WORK", work, "../WORK")
+  scratch("scratch " & dir & "/WORK", work, dir & "/WORK")
+  scratch("scratch ../../NEST", dir / "nest" / "work", "../../NEST")
+  scratch("scratch SRC", work, "SRC", ["src/in.txt"])
+  scratch("scratch SRC/tmp", work, "SRC/tmp", ["src"])
+  scratch("scratch OUT", work, "OUT", outputs = ["out/app"])
+  scratch("scratch ../other", work, "../other")
+  scratch("scratch ../alias", work, "../alias")
+  scratch("scratch Tmp", work, "Tmp")
   acc
 
 proc folds(dir: string): bool =
@@ -262,6 +296,67 @@ suite "an output removal is checked against the cwd and inputs on disk, not by s
     else:
       check "output removed before run contains a declared input" in
         results.refusalFor("removed SRC")
+
+  test "control: a scratch directory naming the cwd in its own case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check "contains the action's cwd" in
+        results.refusalFor("scratch ../work")
+
+  test "a scratch directory naming the cwd in another case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check "contains the action's cwd" in
+        results.refusalFor("scratch ../WORK")
+
+  test "an absolute scratch directory naming the cwd in another case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check results.anyIt(it.name.startsWith("scratch /") and
+        "contains the action's cwd" in it.refusal)
+
+  test "a scratch directory naming an ancestor of the cwd in another case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check "contains the action's cwd" in
+        results.refusalFor("scratch ../../NEST")
+
+  test "a scratch directory containing a declared input in another case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check "declared input" in results.refusalFor("scratch SRC")
+
+  test "a scratch directory inside a declared input directory in another case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check "declared input" in results.refusalFor("scratch SRC/tmp")
+
+  test "a scratch directory containing a declared output in another case is refused":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check "declared output" in results.refusalFor("scratch OUT")
+
+  test "control: a scratch directory that is a different directory is accepted":
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check results.refusalFor("scratch ../other") == ""
+      check results.refusalFor("scratch Tmp") == ""
+
+  test "control: a scratch directory that is a symlink to the cwd is accepted":
+    # Emptying it unlinks the link (`removePathNoFollow`) and leaves the cwd;
+    # `t_scratch_dirs` empties one and checks that the cwd survives.
+    if skipReason.len > 0:
+      skip(skipReason)
+    else:
+      check results.refusalFor("scratch ../alias") == ""
 
   test "control: a different directory is accepted":
     if skipReason.len > 0:

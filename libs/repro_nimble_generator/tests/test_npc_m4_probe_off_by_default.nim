@@ -4,11 +4,14 @@
 ##
 ## A `nimble` that writes a canary when it runs is first on `PATH`. The
 ## origins include versions the static reader cannot read (computed
-## requirements, a hook, the INI format), which are what a probe would be
-## run on. With the default source set the generation reads them as
-## needs-probe or needs-override, records them `unreadable`, and starts no
-## `nimble`. A source set that turns the probe on is refused: this build has
-## no confinement to run it under, and it does not run it without one.
+## requirements, a hook, a condition outside the closed set), which are
+## what a probe would be run on. With the default source set the generation
+## reads them as needs-probe or needs-override, records them `unreadable`,
+## and starts no `nimble`. A `.nimble` in the old INI format is read as
+## data (NPC-AREQ8 step 1, since NPC-M10), so it is no longer a probe's
+## input; it too starts no `nimble`. A source set that turns the probe on is
+## refused: this build has no confinement to run it under, and it does not
+## run it without one.
 
 import std/[os, strutils, tempfiles, unittest]
 
@@ -48,9 +51,13 @@ suite "NPC-M4: the probe is off by default":
       file("src/computed.nim", "discard\n")])
     w.tag("v1.1")
     discard w.commit(@[file("computed.nimble",
-      "[Package]\nname = \"computed\"\nversion = \"1.2\"\n[Deps]\n" &
-      "Requires: \"nim >= 1.0\"\n"), file("src/computed.nim", "discard\n")])
+      "version = \"1.2\"\nwhen declared(foo):\n  requires \"a\"\n"),
+      file("src/computed.nim", "discard\n")])
     w.tag("v1.2")
+    discard w.commit(@[file("computed.nimble",
+      "[Package]\nname = \"computed\"\nversion = \"1.3\"\n[Deps]\n" &
+      "Requires: \"nim >= 1.0\"\n"), file("src/computed.nim", "discard\n")])
+    w.tag("v1.3")
     w.publish()
     let reg = f.newRepo("nim-lang/packages.git")
     let regCommit = reg.commit(@[packagesJson(@[
@@ -64,11 +71,16 @@ suite "NPC-M4: the probe is off by default":
     let g = generate(f.genConfig(ss, 1_790_000_000, work / "state"))
     check not fileExists(canary)
     let e = g.built.envelopeOf("computed")
-    check e.versions.len == 3
+    check e.versions.len == 4
     for v in e.versions:
-      check flUnreadable in v.flags
       check flUsesProbe notin v.flags
-      check v.readerClass in {rrcNeedsProbe, rrcNeedsOverride}
+      if v.version.tag == "v1.3":
+        # The INI file is read as data, by the static reader.
+        check flUnreadable notin v.flags
+        check v.readerClass == rrcPlain
+      else:
+        check flUnreadable in v.flags
+        check v.readerClass in {rrcNeedsProbe, rrcNeedsOverride}
 
     # Turning the probe on is refused before anything runs.
     let probing = parseSourceSet(sourceSetText(regUrl, regCommit,

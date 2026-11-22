@@ -1,6 +1,6 @@
 from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
-            strutils, tables, tempfiles, times]
+            strtabs, strutils, tables, tempfiles, times]
 
 when defined(windows):
   type
@@ -91,6 +91,9 @@ when defined(posix):
   export owned_directory.OwnedDirectoryError
 from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_core/installed_prefix_nim
+import repro_core/sibling_source_policy
+import repro_core/process_env
+import repro_core/git_separated
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
 import repro_interface_artifacts/closure_manifest
@@ -1662,6 +1665,93 @@ proc firstUnknownInterfaceEnvelopeVersion*(): uint16 =
   ## that breaks if those two ever stop coinciding.
   EnvelopeVersion + 1
 
+# ---------------------------------------------------------------------------
+# Engine older than the envelope a recipe's SDK writes (Unified-Locking-And-
+# Hooks.md §13.5, "An engine older than the interface envelope", amended
+# 2026-11-22).
+#
+# A recipe is compiled against a reprobuild SDK (a checkout, for reprobuild's
+# own recipe the repo being pushed) and the program that compile produces
+# writes the interface envelope THAT SDK knows. The engine that then reads it
+# may be older: a pre-push gate is anchored to whichever build installed the
+# hooks (CLI/hooks.md, "Re-anchoring is explicit"). The decode then fails, and
+# it used to say only "unsupported interface envelope version", which the gate
+# reported as an unreadable recipe. The failure is about the ENGINE, and the
+# only remedy is a newer one, so the message carries both numbers and the
+# readers below recognise it by them — the format and its parser live here,
+# together, so they cannot drift apart.
+# ---------------------------------------------------------------------------
+
+const
+  UnsupportedInterfaceEnvelopePhrase* = "unsupported interface envelope version"
+    ## The stable head of the decode refusal, kept from before the versions
+    ## were added so a reader matching it still matches.
+  InterfaceEnvelopeReadsThrough = "this engine reads interface envelope " &
+    "versions 1 through "
+
+proc unsupportedInterfaceEnvelopeMessage*(found: uint16): string =
+  ## The decode refusal for an envelope whose version this build cannot read:
+  ## the version found and the newest this build reads.
+  UnsupportedInterfaceEnvelopePhrase & " " & $found & " (" &
+    InterfaceEnvelopeReadsThrough & $EnvelopeVersion & ")"
+
+proc leadingNumber(text: string; at: int): int =
+  ## The decimal number starting at ``at`` in ``text``, or -1 when none does.
+  var i = at
+  var value = 0
+  while i < text.len and text[i] in {'0' .. '9'} and i - at < 9:
+    value = value * 10 + (ord(text[i]) - ord('0'))
+    inc i
+  if i == at: -1 else: value
+
+type InterfaceEnvelopeSkew* = object
+  ## An envelope NEWER than the engine that read it, as reported by
+  ## ``unsupportedInterfaceEnvelopeMessage``.
+  found*: bool       ## the text carries such a refusal
+  written*: int      ## the envelope version the recipe's SDK wrote
+  readable*: int     ## the newest version the reading engine accepts
+
+proc interfaceEnvelopeSkewIn*(text: string): InterfaceEnvelopeSkew =
+  ## The first envelope-too-new refusal anywhere in ``text`` (a diagnostic may
+  ## wrap the extraction's output several times over). A version of 0, or one
+  ## the reader does accept, is a malformed envelope rather than a newer one,
+  ## and is not reported.
+  var at = text.find(UnsupportedInterfaceEnvelopePhrase & " ")
+  while at >= 0:
+    let numberAt = at + UnsupportedInterfaceEnvelopePhrase.len + 1
+    let written = leadingNumber(text, numberAt)
+    let throughAt = text.find(InterfaceEnvelopeReadsThrough, numberAt)
+    if written > 0 and throughAt >= 0 and throughAt - numberAt < 16:
+      let readable = leadingNumber(text,
+        throughAt + InterfaceEnvelopeReadsThrough.len)
+      if readable > 0 and written > readable:
+        return InterfaceEnvelopeSkew(found: true, written: written,
+          readable: readable)
+    at = text.find(UnsupportedInterfaceEnvelopePhrase & " ", at + 1)
+
+const InterfaceArtifactsSourceInSdk* = "libs" / "repro_interface_artifacts" /
+  "src" / "repro_interface_artifacts.nim"
+  ## This module's place in a reprobuild source tree: where an SDK declares
+  ## the envelope version it writes.
+
+proc sdkWrittenInterfaceEnvelopeVersion*(sdkRoot: string): int =
+  ## The ``EnvelopeVersion`` the reprobuild SDK at ``sdkRoot`` declares — the
+  ## version a recipe compiled against it writes — read from its copy of this
+  ## module's source. 0 when ``sdkRoot`` holds no such source or it declares
+  ## no version (an installed SDK, say): unknown, never a guess.
+  let path = sdkRoot / InterfaceArtifactsSourceInSdk
+  if sdkRoot.len == 0 or not fileExists(extendedPath(path)):
+    return 0
+  try:
+    for line in lines(extendedPath(path)):
+      let stripped = line.strip()
+      if stripped.startsWith("EnvelopeVersion = "):
+        let value = leadingNumber(stripped, "EnvelopeVersion = ".len)
+        if value > 0 and stripped.contains("'u16"):
+          return value
+  except CatchableError:
+    return 0
+
 var cachedNimCompilerPath = ""
 var processWarmInterfaceMetadata =
   initTable[string, WarmInterfaceExtractionCacheRecord]()
@@ -2958,7 +3048,11 @@ proc decodeProjectInterfaceArtifact*(bytes: openArray[
   var pos = 4
   let version = readU16Le(bytes, pos)
   if version < 1'u16 or version > EnvelopeVersion:
-    raiseEnvelopeError(eeUnsupportedVersion, "unsupported interface envelope version")
+    # Both versions in the message: a reader newer than this engine wrote the
+    # envelope, and the caller that has to say so (the pre-push gate, `repro
+    # lock refresh`) only sees this text (`interfaceEnvelopeSkewIn`).
+    raiseEnvelopeError(eeUnsupportedVersion,
+      unsupportedInterfaceEnvelopeMessage(version))
   let typeId = readU16Le(bytes, pos)
   if typeId != uint16(ord(iekProjectInterface) + 101):
     raiseEnvelopeError(eeUnknownType, "not a project interface artifact")
@@ -4777,7 +4871,16 @@ proc commandFailure(command: openArray[string];
     res.output & injectedLibraryNote(res.output))
 
 proc runCommand*(command: openArray[string];
-    cwd = ""; raiseOnFailure = true): ProviderCompileExecutionResult =
+    cwd = ""; raiseOnFailure = true;
+    withoutEnv: openArray[string] = []): ProviderCompileExecutionResult =
+  ## Run ``command`` and capture its merged output.
+  ##
+  ## ``withoutEnv`` names variables the CHILD must not inherit. They are left
+  ## out of the environment handed to the child, never removed from this
+  ## process: compiles run concurrently on several threads, and a variable
+  ## withdrawn from the process for one child would also be missing from
+  ## every other child spawned meanwhile (and `setenv` racing `getenv` is
+  ## undefined behaviour in C).
   if command.len == 0:
     raise newException(OSError, "runCommand requires a non-empty argv")
   when defined(windows):
@@ -4831,8 +4934,28 @@ proc runCommand*(command: openArray[string];
     var cwdW = if cwd.len > 0: newWideCString(cwd) else: newWideCString("")
     let pCmd = addr cmdW[0]
     let pCwd = if cwd.len > 0: addr cwdW[0] else: nil
-    let created = winCreateProcessW(nil, pCmd, nil, nil, 1, 0,
-      nil, pCwd, addr si, addr pi)
+    # The child's environment: inherited, unless names are withdrawn. A
+    # Windows environment block is `NAME=value` strings, each NUL-terminated,
+    # with one more NUL at the end; `newWideCString` converts the embedded
+    # NULs and appends the final one. CREATE_UNICODE_ENVIRONMENT (0x400) says
+    # the block is UTF-16.
+    # https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw
+    var envW = newWideCString("")
+    var pEnv: pointer = nil
+    var creationFlags = 0'u32
+    if withoutEnv.len > 0:
+      var blockText = ""
+      for key, value in envPairs():
+        if key.len == 0 or key in withoutEnv:
+          continue
+        blockText.add(key & "=" & value & '\0')
+      if blockText.len == 0:
+        blockText.add('\0')
+      envW = newWideCString(blockText)
+      pEnv = addr envW[0]
+      creationFlags = 0x00000400'u32
+    let created = winCreateProcessW(nil, pCmd, nil, nil, 1,
+      ProviderLockDword(creationFlags), pEnv, pCwd, addr si, addr pi)
     discard providerLockCloseHandle(sinkHandle)
 
     if created == 0:
@@ -4909,10 +5032,18 @@ proc runCommand*(command: openArray[string];
       # delete afterwards (`probeCCompiler`), so every later spawn then failed
       # with "No such file or directory" from a deleted current directory.
       let savedDir = if cwd.len > 0: getCurrentDir() else: ""
+      # nil inherits this process's environment, as before.
+      var childEnv: StringTableRef = nil
+      if withoutEnv.len > 0:
+        childEnv = newEnvTable()
+        for key, value in envPairs():
+          if key notin withoutEnv:
+            childEnv[key] = value
       try:
         process = startProcess(command[0],
           args = command[1 .. ^1],
           workingDir = cwd,
+          env = childEnv,
           options = {poUsePath, poStdErrToStdOut})
       except OSError:
         if savedDir.len > 0:
@@ -5385,6 +5516,12 @@ proc providerCompileLaunchEnv*(homeDir: string; modulePath = ""): seq[string] =
   # unusable choice: silently falling back can compile a different interface.
   if ReprobuildPackagesRootEnv notin seenRoots:
     seenRoots.add(ReprobuildPackagesRootEnv)
+  # And the sibling-source policy, which decides between a sibling checkout
+  # and a pinned tree for the packages `config.nims` resolves sibling-first
+  # (`resolveSiblingFirstPackagePath`): the compile must take the caller's
+  # choice, exactly as `just lint` does in the caller's shell.
+  if SiblingPolicyEnvVar notin seenRoots:
+    seenRoots.add(SiblingPolicyEnvVar)
   for name in seenRoots:
     if existsEnv(name):
       result.add(name & "=" & getEnv(name))
@@ -5520,6 +5657,18 @@ proc reprobuildExternalLibsRoot(workDir: string): string =
   if result.len == 0:
     result = siblingReprobuildLibsRoot(workDir)
 
+proc recipeSdkRoot*(workDir: string): string =
+  ## The root of the reprobuild source tree a recipe in ``workDir`` compiles
+  ## against: ``workDir`` itself when it IS a reprobuild tree (reprobuild's
+  ## own recipe), else the external SDK ``reprobuildExternalLibsRoot`` picks.
+  ## "" when there is none. A caller that has to name "the checkout the SDK
+  ## came from" (an envelope-skew remedy) asks this, so it names the same
+  ## tree the compile used.
+  if workDirIsReprobuildTree(workDir):
+    return absolutePath(workDir)
+  let libs = reprobuildExternalLibsRoot(workDir)
+  if libs.len > 0: absolutePath(libs).parentDir else: ""
+
 proc explicitSourceEnv(envName: string): string =
   ## ``$<envName>`` when the caller set it, "" when it is unset OR still holds
   ## the value this CLI seeded itself (``seedSourcePackageEnvironment``). A
@@ -5572,6 +5721,187 @@ proc resolveBootstrapPackagePath*(envName: string;
   if seededPath.len > 0:
     return seededPath
   markedPackageRoot(builtCandidate, marker)
+
+# ---------------------------------------------------------------------------
+# Sibling-first packages: the sibling-source policy `config.nims` applies,
+# applied here by the same routine (Unified-Locking-And-Hooks.md §13.5, "The
+# sources a recipe compile reads", amended 2026-11-22).
+#
+# `config.nims` resolves the packages it registers with
+# `addSiblingFirstPackagePath` sibling-first, unless the sibling is stale
+# against the revision the repository pins and a pinned tree is named (or
+# `REPRO_SIBLING_POLICY=pin`). This replay used to resolve them `$<PKG>_SRC`
+# first, then the sibling, then the tree compiled into this engine — so the
+# pre-push gate compiled reprobuild's recipe against other sources than
+# `just lint` did, and against the engine's own snapshot when the pusher was
+# not in the dev shell: an extraction failed on an `undeclared routine` the
+# pinned `nim-shm-gset` defines and the engine's older snapshot lacks. Now both ask
+# `repro_core/sibling_source_policy.chooseSiblingSource`.
+# ---------------------------------------------------------------------------
+
+type SiblingSourceUnavailableError* = object of CatchableError
+  ## A recipe compile against a reprobuild source CHECKOUT found no
+  ## acceptable source for a package that checkout pins: the only sibling is
+  ## stale against the pin, or there is no sibling, no pinned tree is named,
+  ## and the only other candidate is a tree compiled into this engine that
+  ## nothing shows to be the pin. Compiling would read the wrong sources and
+  ## fail (or pass) for reasons that are not the recipe's, so it is refused,
+  ## naming the sibling and the pin.
+
+const SiblingFirstPackageEnvNames* = ["SHM_QUEUE_SRC", "SHM_GSET_SRC",
+  "CLI_SPEC_SRC", "ENTRYPOINTS_SRC", "CONFUTILS_SRC"]
+  ## The packages `config.nims` registers with `addSiblingFirstPackagePath`.
+  ## Keep in step with that file.
+
+proc sdkIsSourceCheckout(sdkRoot: string): bool =
+  ## A git working tree (an ordinary clone's `.git` directory, or a linked
+  ## worktree's `.git` file), as opposed to a store snapshot or an installed
+  ## prefix. Only a checkout's pins can disagree with the tree compiled into
+  ## this engine: a snapshot this engine was built from IS that tree.
+  sdkRoot.len > 0 and (dirExists(extendedPath(sdkRoot / ".git")) or
+    fileExists(extendedPath(sdkRoot / ".git")))
+
+proc sdkPinnedSiblingRevision(sdkRoot, name: string): string =
+  ## The revision the SDK at ``sdkRoot`` pins for the sibling directory
+  ## ``name``, read exactly as `config.nims`'s `pinnedSiblingRevision` reads
+  ## it (`pinnedSiblingRevisionIn`).
+  proc textOf(path: string): string =
+    try:
+      if fileExists(extendedPath(path)): readFile(extendedPath(path)) else: ""
+    except CatchableError: ""
+  if sdkRoot.len == 0: return ""
+  pinnedSiblingRevisionIn(textOf(sdkRoot / "repro.lock"),
+    textOf(sdkRoot / ".github" / "sibling-repos"), name)
+
+proc packageCheckoutOf(packageRoot: string): string =
+  ## The checkout a package root lies in (`../nim-shm-gset/src` is in
+  ## `../nim-shm-gset`), as `config.nims`'s `siblingCheckout` derives it.
+  if packageRoot.extractFilename() == "src": packageRoot.parentDir()
+  else: packageRoot
+
+proc siblingGitQuery(checkout: string; args: openArray[string]):
+    tuple[output: string; code: int] =
+  ## `git -C <checkout> <args>` with the hook's repository-selecting
+  ## variables removed and lazy fetching off: a probe never fetches, and a
+  ## pin the sibling does not have locally is a sibling that is not ahead
+  ## of it. The same terms as `config.nims`'s `siblingGit`.
+  let git = findExe("git")
+  if git.len == 0:
+    return ("", -1)
+  let env = newEnvTable()
+  for key, value in envPairs():
+    if key notin RepositorySelectingGitVariables:
+      env[key] = value
+  env["GIT_NO_LAZY_FETCH"] = "1"
+  var argv = @["-C", checkout]
+  for a in args: argv.add(a)
+  # Standard output only (`gitRunSeparated`): these answers are parsed, and a
+  # git warning on stderr must not become part of a revision. A failure to
+  # run is a non-zero status, which every caller reads as "cannot tell".
+  let run = gitRunSeparated(git, argv, env)
+  (run.output, run.code)
+
+proc observeSiblingCheckout*(checkout, pin: string;
+    siblingPresent, envPinPresent: bool): SiblingObservation =
+  ## The engine's observation of one sibling, by the same three git
+  ## questions `config.nims` asks. Git is asked only when there is a pin
+  ## and a checkout to compare.
+  result = SiblingObservation(siblingPresent: siblingPresent,
+    envPinPresent: envPinPresent, pin: pin)
+  if not siblingPresent or pin.len == 0:
+    return
+  let head = siblingGitQuery(checkout, ["rev-parse", "HEAD"])
+  if head.code != 0:
+    return
+  result.headRev = head.output.strip()
+  let status = siblingGitQuery(checkout,
+    ["status", "--porcelain", "--untracked-files=no"])
+  if status.code == 0:
+    result.dirtyKnown = true
+    result.dirty = status.output.strip().len > 0
+  result.atOrAhead = siblingGitQuery(checkout,
+    ["merge-base", "--is-ancestor", pin, "HEAD"]).code == 0
+
+proc resolveSiblingFirstPackagePath*(sdkRoot, envName: string;
+    candidates: openArray[string]; marker: string;
+    builtCandidate = ""): string =
+  ## One package of `SiblingFirstPackageEnvNames`, resolved to EXACTLY ONE
+  ## root: the sibling checkout (the first of ``candidates`` holding
+  ## ``marker``) or the tree `$<envName>` names, as `chooseSiblingSource`
+  ## decides from the revision ``sdkRoot`` pins for it.
+  ##
+  ## When the SDK is a source checkout and pins the package
+  ## (``sdkIsSourceCheckout``), two states raise
+  ## `SiblingSourceUnavailableError` instead of compiling: the sibling is
+  ## stale and no pinned tree is named; or there is no sibling and no pinned
+  ## tree, so the only candidate left is the tree seeded from, or compiled
+  ## into, this engine (``builtCandidate``), which nothing shows to be the
+  ## revision the checkout pins. Otherwise the remaining order is the one
+  ## ``resolveBootstrapPackagePath`` uses: the caller's `$<envName>`, then
+  ## the seeded value, then ``builtCandidate``.
+  var sibling = ""
+  for candidate in candidates:
+    sibling = markedPackageRoot(candidate, marker)
+    if sibling.len > 0: break
+  let explicitPath = markedPackageRoot(explicitSourceEnv(envName), marker)
+  let checkout =
+    if sibling.len > 0: packageCheckoutOf(sibling)
+    elif candidates.len > 0: packageCheckoutOf(candidates[0])
+    else: ""
+  let siblingName = checkout.extractFilename()
+  let checkoutSdk = sdkIsSourceCheckout(sdkRoot)
+  let pin = sdkPinnedSiblingRevision(sdkRoot, siblingName)
+  let envPinPresent = explicitPath.len > 0 and sibling.len > 0 and
+    cmpPaths(os.normalizedPath(absolutePath(explicitPath)),
+      os.normalizedPath(absolutePath(sibling))) != 0
+  let policy = parseSiblingPolicy(getEnv(SiblingPolicyEnvVar))
+  let obs =
+    if policy == spSibling or sibling.len == 0:
+      SiblingObservation(siblingPresent: sibling.len > 0,
+        envPinPresent: envPinPresent, pin: pin)
+    else:
+      observeSiblingCheckout(checkout, pin, true, envPinPresent)
+  let choice = chooseSiblingSource(policy, obs)
+  let remedy = "Check the sibling out at the pin (`git -C " &
+    quoteShell(checkout) & " checkout " & pin & "`), or set " & envName &
+    " to a tree of that revision (the development shell exports it), or " &
+    "set " & SiblingPolicyEnvVar & "=sibling to compile against the " &
+    "checkout as it is"
+  case choice.kind
+  of sskSibling:
+    return sibling
+  of sskEnvPin:
+    return explicitPath
+  of sskStaleSibling:
+    if checkoutSdk:
+      raise newException(SiblingSourceUnavailableError,
+        "no acceptable source for " & envName & " (" & marker & "): " &
+        sdkRoot & " pins '" & siblingName & "' at " & pin & ", but " &
+        choice.why & ", and $" & envName & " names no tree of the pin; " &
+        "compiling against it would not compile what " & sdkRoot &
+        " builds. " & remedy)
+    return sibling
+  of sskAbsent:
+    if explicitPath.len > 0:
+      return explicitPath
+    let fallback =
+      block:
+        let seeded = markedPackageRoot(getEnv(envName), marker)
+        if seeded.len > 0: seeded else: markedPackageRoot(builtCandidate, marker)
+    if checkoutSdk and pin.len > 0:
+      raise newException(SiblingSourceUnavailableError,
+        "no acceptable source for " & envName & " (" & marker & "): " &
+        sdkRoot & " pins '" & siblingName & "' at " & pin & ", there is " &
+        "no checkout of it at " & checkout & ", and $" & envName &
+        " is not set" &
+        (if fallback.len > 0:
+           "; the tree compiled into this engine (" & fallback &
+             ") is not shown to be that revision, so it is not used"
+         else: "") &
+        ". Check '" & siblingName & "' out at " & checkout & " at the " &
+        "pin, or set " & envName & " to a tree of that revision (the " &
+        "development shell exports it)")
+    return fallback
 
 proc resolveCtTestRunnerAdapterPath(anchorRoot: string): string =
   let envRoot = getEnv("REPRO_CT_TEST_RUNNER_SRC")
@@ -5777,9 +6107,17 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
     ]), "repro_test_adapters" / "test_runner.nim"),
   ]
   for spec in specs:
-    let resolved = resolveBootstrapPackagePath(spec.envName, spec.candidates,
-                                               spec.marker,
-                                               builtSourcePackageRoot(spec.envName))
+    # The packages `config.nims` resolves sibling-first take ITS policy
+    # (`resolveSiblingFirstPackagePath`), judged against the pins of the
+    # reprobuild tree the recipe compiles against; the rest keep the plain
+    # replay of `addPackagePath`.
+    let resolved =
+      if spec.envName in SiblingFirstPackageEnvNames:
+        resolveSiblingFirstPackagePath(reprobuildRoot, spec.envName,
+          spec.candidates, spec.marker, builtSourcePackageRoot(spec.envName))
+      else:
+        resolveBootstrapPackagePath(spec.envName, spec.candidates,
+          spec.marker, builtSourcePackageRoot(spec.envName))
     if resolved.len > 0:
       result.add("--path:" & resolved)
   for adapterPath in [resolveCtTestRunnerAdapterPath(reprobuildRoot),
@@ -7231,148 +7569,46 @@ proc nixLibDirIn*(storeRoot, namePattern: string;
 proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
   nixLibDirIn("/nix/store", namePattern, dylibNames)
 
-proc addExternalPackagePath(flags: var seq[string]; workDir, envName: string;
-                            candidates: openArray[string]; marker: string) =
-  ## Replay one of ``config.nims``'s ``addPackagePath`` resolutions as an
-  ## explicit ``--path`` flag. ``config.nims`` resolves each third-party /
-  ## sibling-repo package by checking ``getEnv(envName)`` first and then a
-  ## list of candidate directories, gating each on a marker file so a stale or
-  ## wrong directory is never added. We mirror that exact logic here.
-  ##
-  ## This is required because the interface-extraction runner and the per-
-  ## project provider binary are compiled from a scratch tree that lives
-  ## OUTSIDE reprobuild (under ``<project>/.repro/...`` for dev-env, under the
-  ## build out-dir otherwise). Nim only evaluates reprobuild's ``config.nims``
-  ## when the compiled main module sits inside reprobuild's directory tree (the
-  ## project-config parent walk); for an arbitrary project it does not, so the
-  ## ``--path`` switches ``config.nims`` would have added (e.g. ``NIMCRYPTO_SRC``
-  ## for ``nimcrypto/sha2``, pulled in transitively by ``repro_project_dsl``)
-  ## are missing and the compile fails with ``cannot open file: nimcrypto/sha2``.
-  ## ``externalHashFlags`` replays ``config.nims``'s C-library flags for the same
-  ## reason; this helper extends that to the Nim package source paths.
-  ##
-  ## Candidate paths are resolved relative to ``workDir`` (the
-  ## ``reprobuildLibraryWorkDir``) so they match ``config.nims``'s
-  ## reprobuild-root-relative candidates regardless of the compile's cwd.
-  let resolve = proc(path: string): string =
-    if path.len == 0 or path.isAbsolute: path else: workDir / path
-  let envPath = getEnv(envName)
-  if envPath.len > 0 and fileExists(extendedPath(envPath / marker)):
-    flags.add("--path:" & envPath)
-    return
-  for candidate in candidates:
-    let resolved = resolve(candidate)
-    if fileExists(extendedPath(resolved / marker)):
-      flags.add("--path:" & resolved)
-      return
-  # Last, the root captured when `repro` was built, as
-  # `resolveBootstrapPackagePath` does: a compile whose environment is
-  # allowlisted, beside no sibling checkout, still finds the pinned source.
-  let built = builtSourcePackageRoot(envName)
-  if built.len > 0 and fileExists(extendedPath(built / marker)):
-    flags.add("--path:" & built)
-
 proc reproPackagePathFlags(workDir: string): seq[string] =
   ## Replay the third-party / sibling-repo package ``--path`` switches that
-  ## reprobuild's ``config.nims`` adds via ``addPackagePath``. Kept byte-for-byte
-  ## in sync with the ``addPackagePath(...)`` block in ``config.nims``; when a
-  ## package is added or its candidate list changes there, update it here too.
-  ## (reprobuild's OWN ``libs/*/src`` tree is replayed separately by
-  ## ``reproLibPathFlags``; this helper covers only the out-of-tree packages.)
+  ## reprobuild's ``config.nims`` adds via ``addPackagePath`` and
+  ## ``addSiblingFirstPackagePath``. (reprobuild's OWN ``libs/*/src`` tree is
+  ## replayed separately by ``reproLibPathFlags``; this helper covers only the
+  ## out-of-tree packages.)
   ##
-  ## The candidate lists below are relative to a REPROBUILD root, as they are
-  ## in ``config.nims``. When ``workDir`` is a consumer that compiles against
-  ## an external reprobuild SDK, they are resolved at that SDK's root instead
-  ## (``bootstrapSiblingPackagePathFlags``, the set ``protectSdkCompilePaths``
-  ## already treats as the SDK's bootstrap closure). Resolving them at the
-  ## consumer read ``libs/<family>/src`` and ``../codetracer/libs/<family>``
-  ## inside the consumer, and each family's marker decided on its own which
-  ## copy it took: codetracer's older ``nim-serialization`` lacks
+  ## ONE resolver for every SDK, ``bootstrapSiblingPackagePathFlags``,
+  ## anchored at the reprobuild tree the recipe compiles against: ``workDir``
+  ## itself when it IS a reprobuild tree, else the external SDK.
+  ##
+  ## Resolving the candidate lists at the CONSUMER's root read
+  ## ``libs/<family>/src`` and ``../codetracer/libs/<family>`` inside the
+  ## consumer, and each family's marker decided on its own which copy it
+  ## took: codetracer's older ``nim-serialization`` lacks
   ## ``serialization/case_objects.nim``, so ``serialization`` came from the
   ## SDK while ``json_serialization``, ``faststreams`` and ``stew`` came from
-  ## codetracer. These flags are reasserted ahead of everything, so the
-  ## recipe compile paired two releases of one library family and failed
-  ## (reprobuild-pm issue 2026-11-18-codetracer-recipe-extraction-mixes-
-  ## reprobuild-serialization-with-codetracer-json-serialization).
+  ## codetracer (reprobuild-pm issue 2026-11-18-codetracer-recipe-extraction-
+  ## mixes-reprobuild-serialization-with-codetracer-json-serialization).
+  ##
+  ## And the in-tree case used to have a resolver of its own, which took
+  ## ``$<PKG>_SRC`` even when it held only the value this engine SEEDED from
+  ## its own build, ahead of the sibling checkout. ``reproLibPathFlags``
+  ## added the sibling for the same package, so a compile carried TWO roots
+  ## of one package, and the stale one — the engine's snapshot, reasserted
+  ## later on the command line — was the one Nim searched first. The gate's
+  ## extract then failed against a ``shm_gset`` older than the pin even with
+  ## the checkout AT the pin. One
+  ## resolver gives each package exactly one root.
   if workDir.len == 0:
     return
-  if not workDirIsReprobuildTree(workDir):
-    let sdkLibs = reprobuildExternalLibsRoot(workDir)
-    if sdkLibs.len > 0:
-      return bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
-        workDir.parentDir)
-  let ctRunnerAdapter = resolveCtTestRunnerAdapterPath(workDir)
-  if ctRunnerAdapter.len > 0:
-    result.add("--path:" & ctRunnerAdapter)
-  result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
-    ".." / "reprobuild-test-adapters" / "src",
-  ], "repro_test_adapters" / "test_runner.nim")
-  result.addExternalPackagePath(workDir, "FASTSTREAMS_SRC", [
-    "libs" / "nim-faststreams" / "src",
-    ".." / "codetracer" / "libs" / "nim-faststreams",
-    ".." / "nim-faststreams",
-  ], "faststreams" / "inputs.nim")
-  result.addExternalPackagePath(workDir, "NIM_STEW_SRC", [
-    "libs" / "nim-stew" / "src",
-    ".." / "codetracer" / "libs" / "nim-stew",
-    ".." / "nim-stew",
-  ], "stew" / "objects.nim")
-  result.addExternalPackagePath(workDir, "NIM_SERIALIZATION_SRC", [
-    "libs" / "nim-serialization" / "src",
-    ".." / "codetracer" / "libs" / "nim-serialization",
-    ".." / "nim-serialization",
-  ], "serialization" / "case_objects.nim")
-  result.addExternalPackagePath(workDir, "NIM_JSON_SERIALIZATION_SRC", [
-    "libs" / "nim-json-serialization" / "src",
-    ".." / "codetracer" / "libs" / "nim-json-serialization",
-    ".." / "nim-json-serialization",
-  ], "json_serialization.nim")
-  result.addExternalPackagePath(workDir, "NIM_TOML_SERIALIZATION_SRC", [
-    "libs" / "nim-toml-serialization" / "src",
-    ".." / "codetracer" / "libs" / "nim-toml-serialization",
-    ".." / "nim-toml-serialization",
-  ], "toml_serialization.nim")
-  result.addExternalPackagePath(workDir, "SSZ_SERIALIZATION_SRC", [
-    "libs" / "nim-ssz-serialization" / "src",
-    ".." / "nim-ssz-serialization",
-  ], "ssz_serialization.nim")
-  result.addExternalPackagePath(workDir, "NIMCRYPTO_SRC", [
-    # Vendored source-only slice under reprobuild's own libs/, listed
-    # first so the recipe-compile is self-contained and does not depend on
-    # a consumer's sibling nimcrypto checkout. Mirrors config.nims. Marker
-    # is nimcrypto/hash.nim.
-    "libs" / "nimcrypto",
-    ".." / "codetracer" / "libs" / "nimcrypto",
-    ".." / "nimcrypto",
-  ], "nimcrypto" / "hash.nim")
-  result.addExternalPackagePath(workDir, "BEARSSL_SRC", [
-    ".." / "nim-bearssl",
-    "libs" / "nim-bearssl",
-  ], "bearssl.nim")
-  result.addExternalPackagePath(workDir, "RESULTS_SRC", [
-    "libs" / "results" / "src",
-  ], "results.nim")
-  result.addExternalPackagePath(workDir, "STINT_SRC", [
-    "libs" / "stint" / "src",
-  ], "stint.nim")
-  # `repro_local_store/action_index` imports `shm_gset` directly, and io-mon
-  # pulls both rings, so every DSL compile needs them. Without these a
-  # foreign project's interface extraction failed with `cannot open file:
-  # shm_gset` whenever the env was scrubbed and no sibling checkout existed.
-  result.addExternalPackagePath(workDir, "SHM_QUEUE_SRC", [
-    ".." / "nim-shm-queue" / "src",
-  ], "shm_queue.nim")
-  result.addExternalPackagePath(workDir, "SHM_GSET_SRC", [
-    ".." / "nim-shm-gset" / "src",
-  ], "shm_gset.nim")
-  # `repro_project_dsl` imports `clispec` (the `cli:` language and its typed
-  # model), so every DSL compile needs it, for the same reason.
-  result.addExternalPackagePath(workDir, "CLI_SPEC_SRC", [
-    ".." / "nim-cli-spec" / "src",
-  ], "clispec.nim")
-  result.addExternalPackagePath(workDir, "REPRO_TEST_ADAPTERS_SRC", [
-    ".." / "reprobuild-test-adapters" / "src",
-  ], "repro_test_adapters" / "test_runner.nim")
+  if workDirIsReprobuildTree(workDir):
+    return bootstrapSiblingPackagePathFlags(workDir, workDir.parentDir)
+  let sdkLibs = reprobuildExternalLibsRoot(workDir)
+  if sdkLibs.len > 0:
+    return bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
+      workDir.parentDir)
+  # No SDK found: the candidate lists resolve at ``workDir``, as they always
+  # did here, so the environment and the built-in roots still apply.
+  bootstrapSiblingPackagePathFlags(workDir, workDir.parentDir)
 
 type RuntimeLinkTarget* = enum
   rltWindows
@@ -8823,12 +9059,24 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## wrote or can replace is refused first
   ## (`requireTrustedRecipeConfiguration`): the refusal propagates, unlike a
   ## failed evaluation.
+  ##
+  ## The evaluation does not see the source roots this engine SEEDED from its
+  ## own build (``seedSourcePackageEnvironment``). To a `config.nims` such a
+  ## value is indistinguishable from a pinned tree the caller named, so
+  ## reprobuild's own one preferred the engine's snapshot of `io-mon` or
+  ## `nim-shm-gset` to the workspace's checkouts whenever the caller was not
+  ## in the dev shell, and the recipe's configuration then disagreed with the
+  ## SDK roots this extraction resolves. Withdrawn for the evaluation only,
+  ## the configuration sees what the caller's own `just lint` sees.
+  ## They are withdrawn from the child's environment only
+  ## (``runCommand``'s ``withoutEnv``), never from this process's.
   requireTrustedRecipeConfiguration(modulePath)
   let execution =
     try:
       runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
         "--hints:off", "--warnings:off", absolutePath(modulePath)],
-        cwd = cwd, raiseOnFailure = false)
+        cwd = cwd, raiseOnFailure = false,
+        withoutEnv = seededSourcePackageEnvironmentNames())
     except CatchableError:
       return @[]
   if execution.exitCode != 0:

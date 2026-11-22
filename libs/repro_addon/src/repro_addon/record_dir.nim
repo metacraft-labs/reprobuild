@@ -600,6 +600,75 @@ proc openOrMakeDirAt(pfd: cint; name, where: string; mode = 0o700): cint =
     discard posix.close(result)
     raise newException(OSError, where & " is not a directory")
 
+proc openDelegatedState(state: string; create: bool): cint =
+  ## The state directory a root writer or reader reaches the delegated
+  ## directories through. Root: by ``O_NOFOLLOW`` from its root-owned
+  ## parent, opened by path (made 0700 when absent and ``create``, as
+  ## /var/lib/private must be). Its own user: as named (no privilege to
+  ## guard; the shipping unit reaches it through the link systemd made).
+  ## -1 when it is absent and not ``create``.
+  if geteuid() == 0:
+    let top = parentDir(state)
+    if not dirExists(top):
+      if not create: return -1
+      createDir(top)
+      discard posix.chmod(top.cstring, Mode(0o700))
+    let tfd = posix.open(top.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if tfd < 0: raiseOSError(osLastError(), "open " & top)
+    try:
+      if not create:
+        result = openatC(tfd, extractFilename(state).cstring,
+                         O_RDONLY or ODirectory or ONoFollow or O_CLOEXEC)
+        if result < 0:
+          if errno == ENOENT: return -1
+          raiseOSError(osLastError(), "open " & state)
+      else:
+        result = openOrMakeDirAt(tfd, extractFilename(state), state)
+    finally:
+      discard posix.close(tfd)
+  else:
+    if not dirExists(state):
+      if not create: return -1
+      createDir(state)
+      discard posix.chmod(state.cstring, Mode(0o700))
+    result = posix.open(state.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if result < 0: raiseOSError(osLastError(), "open " & state)
+
+proc listDelegatedEntries*(dir: string): seq[tuple[name: string; regular: bool]] =
+  ## The entries of a delegated directory (the outbox), listed the way a
+  ## root writer reaches it (``writeDelegatedEntry``): the state directory
+  ## by ``O_NOFOLLOW`` from its root-owned parent, ``dir`` by ``O_NOFOLLOW``
+  ## from that, enumerated on a duplicate of that descriptor, and each
+  ## entry judged without following a link (``fstatat(AT_SYMLINK_NOFOLLOW)``).
+  ## So the directory's owner cannot point a root reader at another
+  ## directory by replacing a name with a link. Empty when ``dir`` or its
+  ## state directory is absent; raises when either is not a directory.
+  let sfd = openDelegatedState(parentDir(dir), create = false)
+  if sfd < 0: return
+  defer: discard posix.close(sfd)
+  let dfd = openatC(sfd, extractFilename(dir).cstring,
+                    O_RDONLY or ODirectory or ONoFollow or O_CLOEXEC)
+  if dfd < 0:
+    if errno == ENOENT: return
+    raiseOSError(osLastError(), "open " & dir)
+  defer: discard posix.close(dfd)
+  let lfd = dup(dfd)
+  if lfd < 0: raiseOSError(osLastError(), "dup " & dir)
+  let d = fdopendirC(lfd)
+  if d == nil:
+    discard posix.close(lfd)
+    raiseOSError(osLastError(), "fdopendir " & dir)
+  defer: discard closedir(d)
+  while true:
+    let ent = readdir(d)
+    if ent == nil: break
+    let name = $cast[cstring](addr ent.d_name)
+    if name == "." or name == "..": continue
+    var st: Stat
+    let regular = fstatatC(dfd, name.cstring, st, AtSymlinkNoFollow) == 0 and
+                  S_ISREG(st.st_mode)
+    result.add((name, regular))
+
 proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
                           mode = 0o600) =
   ## Write ``dir/name`` durably, readable by the owner of ``dir``'s parent
@@ -613,29 +682,9 @@ proc writeDelegatedEntry*(dir, name, bytes: string; staging = "";
   let state = parentDir(dir)
   if staging.len > 0 and parentDir(staging) != state:
     raise newException(ValueError, staging & " is not beside " & dir)
-  var sfd: cint
-  if geteuid() == 0:
-    # Root: the state directory itself by O_NOFOLLOW from its root-owned
-    # parent (made 0700 when absent, as /var/lib/private must be).
-    let top = parentDir(state)
-    if not dirExists(top):
-      createDir(top)
-      discard posix.chmod(top.cstring, Mode(0o700))
-    let tfd = posix.open(top.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
-    if tfd < 0: raiseOSError(osLastError(), "open " & top)
-    try:
-      sfd = openOrMakeDirAt(tfd, extractFilename(state), state)
-    finally:
-      discard posix.close(tfd)
-  else:
-    # The directory's own user (the shipping unit writing its own records,
-    # reaching its state through the link systemd made): no privilege to
-    # guard here, so the state directory is opened as named.
-    if not dirExists(state):
-      createDir(state)
-      discard posix.chmod(state.cstring, Mode(0o700))
-    sfd = posix.open(state.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
-    if sfd < 0: raiseOSError(osLastError(), "open " & state)
+  # Root: the state directory by O_NOFOLLOW from its root-owned parent;
+  # the directory's own user: as named (``openDelegatedState``).
+  let sfd = openDelegatedState(state, create = true)
   defer: discard posix.close(sfd)
   var sst: Stat
   discard fstat(sfd, sst)

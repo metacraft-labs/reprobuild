@@ -22,8 +22,20 @@
 ## Trees are read from git objects (`ls-tree`, `cat-file`), never from a
 ## checkout: nothing is materialized, so a symbolic link in a package can
 ## never be followed (threat model G4).
+##
+## Runs may happen on several threads at once (the engine's concurrent
+## dispatch of fetch edges). A child must not inherit another thread's pipe
+## ends: it would hold them open, and a reader waiting for end of file would
+## wait for that unrelated child. Stock Nim's `osproc` (2.2) creates a
+## child's pipes inheritable, so a child started on one thread while another
+## thread's pipes exist inherits them; the Nim this tree is pinned to
+## creates them close-on-exec atomically (`pipe2`), but this module does not
+## rely on it. Every start happens under ``spawnLock``, and before the lock
+## is released this process's ends are marked close-on-exec: a child started
+## later, under the lock, inherits none of them, on either toolchain.
 
-import std/[algorithm, os, osproc, streams, strtabs, strutils, tables, times]
+import std/[algorithm, locks, os, osproc, streams, strtabs, strutils, tables,
+            times]
 when defined(posix):
   import std/posix
 
@@ -79,6 +91,29 @@ const
     "-c", "core.hooksPath=/dev/null", "-c", "init.defaultBranch=main",
     "-c", "advice.detachedHead=false", "-c", "core.fsmonitor=false"]
 
+var spawnLock: Lock
+initLock(spawnLock)
+
+template withSpawnLock*(body: untyped) =
+  ## Start a child process under the lock every git run of this module
+  ## starts its child under (see the module docstring). A caller that starts
+  ## children on another thread of the same process -- a test's local
+  ## server -- uses it too, and marks its own pipe ends close-on-exec before
+  ## leaving it, so neither inherits the other's pipes.
+  acquire(spawnLock)
+  try:
+    body
+  finally:
+    release(spawnLock)
+
+proc markCloseOnExec*(fds: openArray[cint]) =
+  ## Set close-on-exec on each descriptor (POSIX; nothing elsewhere).
+  when defined(posix):
+    for fd in fds:
+      let flags = fcntl(fd, F_GETFD)
+      if flags >= 0:
+        discard fcntl(fd, F_SETFD, flags or FD_CLOEXEC)
+
 proc gitEnvironment*(g: OriginGit; home: string): StringTableRef =
   ## The child's whole environment. Nothing of this process's is passed.
   result = newStringTable(modeCaseSensitive)
@@ -116,8 +151,13 @@ proc runBounded*(g: OriginGit; args: seq[string]; cwd, home: string;
     createDir(home)
     var full = @BaseConfig
     for a in args: full.add a
-    let p = uncontrolledStartProcess(g.gitBin, workingDir = cwd, args = full,
-      env = gitEnvironment(g, home), options = {})
+    let env = gitEnvironment(g, home)
+    var p: Process
+    withSpawnLock:
+      p = uncontrolledStartProcess(g.gitBin, workingDir = cwd, args = full,
+        env = env, options = {})
+      markCloseOnExec([cint(p.outputHandle), cint(p.errorHandle),
+        cint(p.inputHandle)])
     var killed = false
     var refusal: EgressRefusal
     var refused = false

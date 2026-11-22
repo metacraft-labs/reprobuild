@@ -30,6 +30,14 @@
 ##   argv0    NOTHING AT ALL                      no       cdHit, STALE
 ##   execvp   unresolved name + failed marker     no       cdHit, STALE
 ##
+## A fifth shape was measured later (2026-11-22, reprobuild `198a5330c0`),
+## when a real producer was found starting a tool through Nim's
+## `osproc.execProcess`, which reaches glibc's `posix_spawn`:
+##
+##   shape    helper in the depfile              in key   after the swap
+##   -----    -------------------------------    ------   -----------------
+##   spawn    `mrProcessSpawn` ONLY               no       cdHit, STALE
+##
 ## `bare` was covered ONLY BY ACCIDENT: a shell resolving a bare name `stat`s
 ## every PATH candidate, so the resolved hit lands as an `mrPathProbe`, and
 ## that arm IS folded. Nothing in the engine referenced `mrProcessExec` at all.
@@ -51,6 +59,16 @@
 ##   does not exist, is not what ran, and is a fabricated dependency layered on
 ##   top of the gap. This suite pins that the phantom is NOT manufactured. The
 ##   gap itself is left open, deliberately — see the third test.
+## * `spawn` — the record exists and was discarded, exactly like `abs`, but
+##   it is a DIFFERENT record. glibc's `posix_spawn` performs the child's
+##   `execve` itself, below the interposed symbol, so no `mrProcessExec` is
+##   ever written for the child image; io-mon's `posix_spawn` hook writes one
+##   `mrProcessSpawn` naming the path instead, and the engine read that record
+##   only to attribute the child's pid to an image. Fixed by the
+##   `mrProcessSpawn` arm in `foldOneMonitorRecord`. Rust's
+##   `std::process::Command` and Python's `subprocess` take the same route, so
+##   this is not a Nim-only shape. `posix_spawnp` records the UNRESOLVED name,
+##   the `execvp` limit again, and is pinned the same way (`spawnp`).
 ##
 ## Governing spec text:
 ##
@@ -109,6 +127,7 @@ import repro_core
 import repro_hash
 import repro_local_store
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 const RepoRootMarker = "repro.nim"
 
@@ -186,6 +205,38 @@ int main(int argc, char **argv) {
 }
 """
 
+## Starts the helper through `posix_spawn` (`argv[1] == "spawn"`) or
+## `posix_spawnp` (`"spawnp"`) and waits for it. `argv[2]` is the image as
+## handed to the call — an absolute path for `spawn`, a bare name for
+## `spawnp` — and `argv[3]` the log the helper appends to.
+##
+## A compiled C program rather than a Nim one using `osproc`, so the fixture
+## keeps the one toolchain the rest of this file already depends on; the
+## record io-mon writes is the same, because both arrive at glibc's
+## `posix_spawn` with the path the caller passed.
+const SpawnerSource = """
+#include <spawn.h>
+#include <string.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+extern char **environ;
+int main(int argc, char **argv) {
+  if (argc != 4) return 64;
+  char *a[3];
+  a[0] = argv[2];
+  a[1] = argv[3];
+  a[2] = 0;
+  pid_t pid;
+  int rc = strcmp(argv[1], "spawnp") == 0
+    ? posix_spawnp(&pid, argv[2], 0, 0, a, environ)
+    : posix_spawn(&pid, argv[2], 0, 0, a, environ);
+  if (rc != 0) return 65;
+  int status;
+  if (waitpid(pid, &status, 0) != pid) return 66;
+  return WIFEXITED(status) ? WEXITSTATUS(status) : 67;
+}
+"""
+
 type Fixture = object
   root: string
   workRoot: string
@@ -193,6 +244,7 @@ type Fixture = object
   binDir: string
   helperPath: string
   launcherPath: string
+  spawnerPath: string
   logDir: string
 
 proc logPath(f: Fixture; name: string): string = f.logDir / (name & ".log")
@@ -258,6 +310,7 @@ proc makeFixture(): Fixture =
   createDir(logDir)
   writeFile(workRoot / "helper.c", HelperSource)
   writeFile(workRoot / "launcher.c", LauncherSource)
+  writeFile(workRoot / "spawner.c", SpawnerSource)
   result = Fixture(
     root: root,
     workRoot: workRoot,
@@ -265,6 +318,7 @@ proc makeFixture(): Fixture =
     binDir: binDir,
     helperPath: binDir / "execdep_helper",
     launcherPath: binDir / "execdep_launcher",
+    spawnerPath: binDir / "execdep_spawner",
     logDir: logDir)
   result.compileHelper(1)
   let cc = ccPath()
@@ -273,6 +327,11 @@ proc makeFixture(): Fixture =
   ], options = {poStdErrToStdOut, poUsePath})
   if not fileExists(result.launcherPath):
     raise newException(OSError, "launcher was not produced: " & res)
+  let spawnerRes = execProcess(cc, args = [
+    "-o", result.spawnerPath, workRoot / "spawner.c"
+  ], options = {poStdErrToStdOut, poUsePath})
+  if not fileExists(result.spawnerPath):
+    raise newException(OSError, "spawner was not produced: " & spawnerRes)
 
 proc childPath(f: Fixture): string =
   f.binDir & PathSep & getEnv("PATH")
@@ -330,6 +389,23 @@ proc execvpEdge(f: Fixture): BuildAction =
   ## the helper (bare, recorded UNRESOLVED).
   f.monitoredEdge("execdep/execvp", f.shellArgv("execvp",
     f.launcherPath & " " & f.logPath("execvp")))
+
+proc spawnEdge(f: Fixture): BuildAction =
+  ## `spawn` — the helper started through `posix_spawn` by ABSOLUTE path, from
+  ## a program that is the action's own root image. No shell: the spawner is
+  ## exec'd by the launcher (recorded through `executedToolImagePath`), and the
+  ## helper is reached only through the spawn. glibc execs the child below
+  ## the interposed symbol, so the only record that names the helper is the
+  ## spawner's `mrProcessSpawn`.
+  f.monitoredEdge("execdep/spawn",
+    [f.spawnerPath, "spawn", f.helperPath, f.logPath("spawn")])
+
+proc spawnpEdge(f: Fixture): BuildAction =
+  ## `spawnp` — the same spawner handing `posix_spawnp` a BARE name; glibc
+  ## walks the child's PATH (which leads with `binDir`) internally, after the
+  ## hook has recorded the name as passed.
+  f.monitoredEdge("execdep/spawnp",
+    [f.spawnerPath, "spawnp", "execdep_helper", f.logPath("spawnp")])
 
 proc monitoredConfig(repoRoot, cacheRoot: string): BuildEngineConfig =
   let tools = monitorTools(repoRoot)
@@ -486,6 +562,54 @@ suite "the binary an action executes is a recorded input":
       # The arm works ...
       check launcherRecorded
       # ... and it declines rather than guessing.
+      check not phantomRecorded
+      check not fileExists(phantom)
+
+  test "spawn: a child started through posix_spawn by absolute path is in the cache key":
+    ## The `abs` shape with the shell's `execve` replaced by `posix_spawn`.
+    ## Before the `mrProcessSpawn` arm the helper was in no channel at all, so
+    ## `exerciseShape` fails at its denominator (`helper among them: false`)
+    ## and then at the swap (`cdHit`, the old generation's record served).
+    if ccPath().len == 0:
+      skip("no C compiler (cc/gcc) on PATH to build the spawner and helper")
+    else:
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      f.exerciseShape(repoRoot, f.spawnEdge(), "spawn")
+
+  test "spawnp: an unresolved spawn name is never materialised against cwd":
+    ## THE NEGATIVE GATE for spawns, for the reasons the `execvp` case gives:
+    ## io-mon records the name `posix_spawnp` was handed, before glibc's PATH
+    ## walk, so the record says `path=execdep_helper`. Joining that onto the
+    ## action's cwd would manufacture a dependency on a file that does not
+    ## exist. The spawner itself (the action's root image) IS recorded, so the
+    ## edge has a key and the negative below is not vacuous.
+    if ccPath().len == 0:
+      skip("no C compiler (cc/gcc) on PATH to build the spawner and helper")
+    else:
+      let repoRoot = findRepoRoot()
+      let f = makeFixture()
+      defer: removeDir(f.root)
+      let edge = f.spawnpEdge()
+      let g = graph([edge])
+      let config = monitoredConfig(repoRoot, f.cacheRoot)
+
+      let first = runBuild(g, config)
+      let r0 = first.byId(edge.id)
+      checkpoint("spawnp first: status=" & $r0.status & " stderr=" & r0.stderr)
+      check r0.status == asSucceeded
+      check f.runCount("spawnp") == 1
+
+      let inputs = f.keyInputs(edge, r0)
+      let phantom = f.workRoot / "execdep_helper"
+      let phantomRecorded = inputs.anyIt(it == phantom)
+      let spawnerRecorded = inputs.anyIt(it == f.spawnerPath)
+      checkpoint("spawnp classified inputs: " & $inputs.len &
+        "; spawner recorded: " & $spawnerRecorded &
+        "; phantom '" & phantom & "' recorded: " & $phantomRecorded)
+      check inputs.len > 0
+      check spawnerRecorded
       check not phantomRecorded
       check not fileExists(phantom)
 

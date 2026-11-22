@@ -38,6 +38,7 @@ proc loadSourceSet(path: string): SourceSet =
   parseSourceSet(readFile(path), path)
 
 proc printResult(r: GenerationResult) =
+  for line in skippedReport(r): echo line
   for d in r.diagnostics: stderr.writeLine("  note: " & d)
   for e in r.refusals:
     stderr.writeLine("  refused: " & e.package & " (" & $e.family & "): " &

@@ -74,6 +74,11 @@ from repro_infra/carried_state import nil
 export RecordExistsError
 
 
+
+const ShipStatePaths* = @EvidenceShipStatePaths & @[ConfinedExeCopyDir]
+  ## What ``removeShipState`` removes: the shipping unit's dynamic user's
+  ## state (§13 decision 181) and root's confined-run copies.
+
 type
   UninstallOptions* = object
     stateDir*: string
@@ -202,16 +207,53 @@ proc systemctlOrRecord(args: openArray[string]; r: var UninstallResult) =
   except HostToolMissing as ex:
     r.errors.add(ex.msg)
 
-proc remainingLedger*(l: Ledger; r: UninstallResult): Ledger =
+proc shipStateLeft(paths: openArray[string]): bool =
+  for p in paths:
+    if symlinkExists(p) or dirExists(p): return true
+  false
+
+proc remainingLedger*(l: Ledger; r: UninstallResult;
+                      shipState: openArray[string] = ShipStatePaths): Ledger =
   ## ``l`` without the entries this run undid. Entries are dropped only
   ## for objects this run removed (or found already gone): the package's
   ## copy of a file that a removed diversion put back at the same path is
   ## not the add-on's, so re-observing paths would be wrong here.
+  ##
+  ## The shipping unit's entry stays, though the unit is gone, while its
+  ## dynamic user's state (``shipState``) is still on disk: that entry is
+  ## what tells a re-run the state is the add-on's to remove
+  ## (``removeShipState``). Dropped with the unit, a run that stopped after
+  ## the units went and before the state did would leave the outbox, the
+  ## cursor and the sink's receipt behind for good, owned by a dynamic uid
+  ## systemd may hand to another unit (§13 decision 181).
   result.generation = l.generation
   for e in l.entries:
-    let gone = entryKey(e) in r.undone or
+    var gone = entryKey(e) in r.undone or
                (e.class == lcDir and not dirExists(e.path))
+    when not mutated("uninstall-forgets-ship-state"):
+      if gone and e.class == lcUnit and e.unit == EvidenceShipUnit and
+          shipStateLeft(shipState):
+        gone = false
     if not gone: result.entries.add(e)
+
+proc removeShipState*(r: var UninstallResult; l: Ledger;
+                      paths: openArray[string] = ShipStatePaths) =
+  ## The shipping unit's dynamic user's state (its outbox, its shipping
+  ## cursor, the sink's last receipt) and root's directory of confined-run
+  ## binary copies, when the ledger accounts for the shipping unit -- on a
+  ## first run because the unit is in it, on a re-run because
+  ## ``remainingLedger`` kept the entry while the state was on disk. A
+  ## link is removed, never followed.
+  if not l.entries.anyIt(it.class == lcUnit and it.unit == EvidenceShipUnit):
+    return
+  for leftover in paths:
+    try:
+      if symlinkExists(leftover): removeFile(leftover)
+      elif dirExists(leftover):
+        removeDir(leftover)
+        r.removed.add(leftover & " (the shipping unit's state)")
+    except OSError as ex:
+      r.errors.add(leftover & ": " & ex.msg)
 
 proc priorModeOwner(value: string): tuple[mode: int; uid, gid: int] =
   ## The mode and owner a fingerprint value records (``d 0755 0:0``,
@@ -1272,14 +1314,15 @@ proc removeStore*(r: var UninstallResult; keepStore: bool;
     return true
 
 proc keepStateWhenIncomplete*(r: var UninstallResult; l: Ledger;
-                              stateDir: string): bool =
+                              stateDir: string;
+                              shipState: openArray[string] = ShipStatePaths): bool =
   ## §10.2 step 5: an uninstall that left drift or failed a step keeps the
   ## state directory (ledger copy, attestation key, evidence configuration)
   ## so a second uninstall can finish. Writes the ledger of what the add-on
   ## still owns NOW (objects this run undid are dropped, so the next run
   ## never reports one as drift) and returns true; false when complete.
   if r.drift.len == 0 and r.errors.len == 0: return false
-  writeLedger(ledgerCopyPath(stateDir), remainingLedger(l, r))
+  writeLedger(ledgerCopyPath(stateDir), remainingLedger(l, r, shipState))
   r.errors.add("the add-on's state and ledger at " & stateDir &
     " are kept: the uninstall is incomplete (see the drift and errors " &
     "above); fix or accept them and run uninstall again")
@@ -2190,15 +2233,8 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   # this point and no earlier, as the outbox did when it lived under it:
   # the gate above saw every queued entry shipped, or the operator's signed
   # record authorised their discard.
-  if byClass[lcUnit].anyIt(it.unit == EvidenceShipUnit):
-    for leftover in EvidenceShipStatePaths:
-      try:
-        if symlinkExists(leftover): removeFile(leftover)
-        elif dirExists(leftover):
-          removeDir(leftover)
-          result.removed.add(leftover & " (the shipping unit's state)")
-      except OSError as ex:
-        result.errors.add(leftover & ": " & ex.msg)
+  removeShipState(result, l)
+  keepIfFailed()
   # The state goes last, and within it the ledger copy (§13 decision 150).
   # The pre-bootstrap inputs stay, wherever they are (§13 decisions 165
   # (b) and 166): the token carries every one, so a re-run never rmdirs

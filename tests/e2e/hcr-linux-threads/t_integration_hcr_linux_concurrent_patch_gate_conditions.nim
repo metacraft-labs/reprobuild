@@ -43,6 +43,7 @@ const
   Window = 0x5000'u64
   Calm = 0.5       # load/CPU well inside the calibrated envelope
   Loaded = 5.5     # the issue's host: load 150-215 on 32 CPUs is 4.7-6.7
+  JustOutside = 2.6  # outside the envelope, but only just
 
 proc payload(publications = Publications; aborts = 0; abandoned = 0;
              abortWrites = 0; other = 0; anomalies = 0; adjust = 3;
@@ -282,6 +283,38 @@ suite "HLX-M4 gate verdict: what is never conditional":
       crashedAt(if calm mod 2 == 0: Calm else: Loaded))
     check fed.measured.runs == Runs
     check fed.all.runs == 2 * Runs
+
+  test "the conditions reason attributes the load it saw, lowest as well as highest":
+    ## A reason that reports only the HIGHEST reading cannot tell a host that
+    ## was ambiently outside the envelope from one the gate's own 14 threads
+    ## pushed outside it, and the two call for opposite remedies: a quieter
+    ## host, or a condition that is not inflated by the measurement itself.
+    ## That is not hypothetical. On the dedicated benchmark runner
+    ## (`mcl-bench-001`, reprobuild run 44372733079, 2026-11-20) every arm
+    ## reported `0/24 runs ... (highest 4.56-5.03)` and nothing in the lane's
+    ## output said whether any attempt had started anywhere near 2.0.
+    var readings = 0
+    let spread = collectArm("tier1", Runs, proc (): ArmRun =
+      inc readings
+      crashedAt(if readings mod 2 == 0: JustOutside else: Loaded))
+    check spread.measured.runs == 0
+    check spread.maxLoadPerCpu == Loaded
+    check spread.minLoadPerCpu == JustOutside
+    let v = verdictOf(
+      sample = SampleRun(exitCode: 0, payload: samplePayload(),
+                         loadPerCpu: JustOutside),
+      tier1 = spread)
+    checkpoint("reason: " & v.conditionsReason)
+    check not v.conditionsMet
+    # The whole phrase, not just the numbers: an arm's readings are only
+    # attributable if they are reported with the arm that saw them.
+    check "tier1: 0/" & $Runs & " runs started at load/CPU <= " &
+      $MaxLoadPerCpu & " in " & $(Runs * AttemptsPerRun) &
+      " attempts (lowest 2.60, highest 5.50)" in v.conditionsReason
+    # The sample arm keeps every attempt too, and the attempt the conditional
+    # sample checks judge is the LAST one -- so it reports both.
+    check "sample: no run started at load/CPU <= " & $MaxLoadPerCpu &
+      " in 1 attempts (lowest 2.60, last 2.60)" in v.conditionsReason
 
 when defined(linux) and defined(amd64):
   import m4_fixture
