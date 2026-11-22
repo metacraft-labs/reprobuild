@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3160,
+    "nimTestBinaries": 3162,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 836,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3212
+    "testEntries": 3214
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1834,7 +1834,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1770,
+      "integration": 1772,
       "platform/destructive": 201,
       "pure unit": 836,
       "unclassified": 376
@@ -2057,9 +2057,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3160,
+    "nimTestBinaryCount": 3162,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3212
+    "testEntryCount": 3214
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -49191,6 +49191,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_hook_whose_config_is_gone_is_reported",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_hook_whose_config_is_gone_is_reported.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_hooks_consult_only_the_repos_own_dependencies",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -53587,6 +53604,23 @@
       "source": "tests/integration/t_pool_gc_leaves_no_abandoned_pack_temporaries.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_post_commit_cache_push_covers_every_active_project",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_post_commit_cache_push_covers_every_active_project.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
