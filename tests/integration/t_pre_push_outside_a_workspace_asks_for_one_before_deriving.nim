@@ -6,9 +6,7 @@
 ## absent"; Interactive-UX-And-Progress.md: every refusal names a remedy that
 ## works).
 ##
-## THE DEFECT (reprobuild-pm issue 2026-11-22, "pre-push check in a clone
-## without its sibling checkouts fails inside an interface compile instead of
-## asking for a workspace"). A codetracer clone made outside any workspace ran
+## THE DEFECT. A codetracer clone made outside any workspace ran
 ## the gate on `git push`. Stage 3d compiled the recipe to derive its
 ## dependency set, the compile could not find the siblings the recipe reads,
 ## and the refusal was `committed_lock_dependency_set_unverified` with a Nim
