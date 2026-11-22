@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3117,
+    "nimTestBinaries": 3119,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 827,
+    "pureUnitTests": 828,
     "staticallyDetectedRuntimeCompilerFlowTests": 160,
-    "testEntries": 3167
+    "testEntries": 3170
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -834,7 +834,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 46,
+      "count": 47,
       "defines": [],
       "dependencyShape": [
         "repro_project_dsl"
@@ -872,6 +872,7 @@
         "libs/repro_project_dsl/tests/dsl_port/t_dsl_versions_single.nim",
         "libs/repro_project_dsl/tests/t_canonical_work_key.nim",
         "libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim",
+        "libs/repro_project_dsl/tests/t_completion_files.nim",
         "libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim",
         "libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim",
         "libs/repro_project_dsl/tests/t_dsl_platforms_resolved_form.nim",
@@ -1775,10 +1776,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 28,
-      "integration": 1739,
+      "integration": 1740,
       "platform/destructive": 200,
-      "pure unit": 827,
-      "unclassified": 373
+      "pure unit": 828,
+      "unclassified": 374
     },
     "graphOwnedTestArtifacts": [
       {
@@ -1998,9 +1999,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3117,
-    "pythonTestFileCount": 50,
-    "testEntryCount": 3167
+    "nimTestBinaryCount": 3119,
+    "pythonTestFileCount": 51,
+    "testEntryCount": 3170
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -27592,6 +27593,23 @@
       "source": "libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_completion_files",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_completion_files.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -60982,6 +61000,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_cs_m14_package_build_generates_completion_files",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/test_cs_m14_package_build_generates_completion_files.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_cs_m14_repro_collects_tests_per_entry",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -66032,6 +66067,21 @@
       "localDependencyShape": [],
       "owner": "tests/unit",
       "requiresReproBinary": false,
+      "source": "tests/unit/test_check_private_pm_references.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
       "source": "tests/unit/test_check_superseded_doc_pointers.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
@@ -66244,7 +66294,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_graph_owned_test_artifacts.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 27,
+      "staticCaseCount": 30,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -66514,7 +66564,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
