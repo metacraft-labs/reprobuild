@@ -800,9 +800,9 @@ proc encodeUnificationObjective*(packages: openArray[PackageDecl]): string =
   ##
   ## ## The priority level, and why it is above the version preference
   ##
-  ## `@-1`, with `encodeVersionPreference` moved down to `@-2`/`@-3` whenever
-  ## this fires. clingo optimises higher levels first, so unification
-  ## outranks `--strategy lowest`/`highest`. That ordering is §9.1's
+  ## `@-1`, with `encodeVersionPreference`'s levels starting at `@-2`
+  ## instead whenever this fires. clingo optimises higher levels first, so
+  ## unification outranks `--strategy lowest`/`highest`. That ordering is §9.1's
   ## "divergence is a fallback, not a starting point" made mechanical: a
   ## version preference that outranked unification could split a library the
   ## constraints permitted to unify, purely to reach a lower or higher
@@ -840,39 +840,116 @@ const PreferNewestHeuristic* =
   ## 15 packages with 6 versions each took over 60 s; this encoding solves
   ## 200 in about 0.5 s). `--highest` remains the proven optimum.
 
+proc versionPreferenceOrder*(packages: openArray[PackageDecl];
+                             preference: VersionPreference): seq[string] =
+  ## The order in which a strategy objective settles each package's version:
+  ## element 0 gets the highest priority level, the last element the lowest.
+  ## Named-Lock-Files §5.5 "How a strategy orders the closure".
+  ##
+  ## Only ranked packages appear (a pinned package has no choice to order;
+  ## see `encodeVersionRanks`). The order is the breadth-first distance from
+  ## the request — a root first, then what a root depends on, then what
+  ## those depend on — with the package name breaking ties at one distance,
+  ## and every package no root reaches (a cycle no root enters) after all
+  ## reached ones, by name. Both keys are properties of the declaration set,
+  ## so the order, and with it the answer, never depends on declaration
+  ## order or on a hash.
+  ##
+  ## Distance from the request is the order because it is the order of
+  ## responsibility: a root's own dependency carries a bound the workspace
+  ## wrote, so it is settled before a package whose bounds belong to an
+  ## intermediate author. Every edge counts, including a per-version one and
+  ## a variant-gated arm, for the reason `directDependencyNames` counts them:
+  ## which edges are live is the solve's own output.
+  ##
+  ## Under `vpLowestDirect` the packages `directDependencyNames` names come
+  ## first (in the same order among themselves), then every other package,
+  ## so the two directive groups keep that strategy's "direct minimal, then
+  ## transitive maximal" meaning.
+  var byName = initTable[string, int]()
+  for i, p in packages:
+    if p.name notin byName:
+      byName[p.name] = i
+  var depth = initTable[string, int]()
+  var frontier: seq[string] = @[]
+  for name in rootPackageNames(packages):
+    frontier.add(name)
+  frontier.sort()
+  for name in frontier:
+    depth[name] = 0
+  var d = 0
+  while frontier.len > 0:
+    inc d
+    var next: seq[string] = @[]
+    for name in frontier:
+      for dep in allDependencies(packages[byName[name]]):
+        if dep.name in byName and dep.name notin depth:
+          depth[dep.name] = d
+          next.add(dep.name)
+    next.sort()
+    frontier = next
+  var ranked: seq[string] = @[]
+  var seen = initHashSet[string]()
+  for p in packages:
+    if p.pinned or seen.containsOrIncl(p.name): continue
+    ranked.add(p.name)
+  let directs =
+    if preference == vpLowestDirect: directDependencyNames(packages)
+    else: initHashSet[string]()
+  proc key(name: string): (int, int, string) =
+    # (group, distance, name); group 0 is `lowest-direct`'s direct packages,
+    # and an unreached package's distance sorts after every reached one.
+    let group = if name in directs: 0 else: 1
+    (group, depth.getOrDefault(name, high(int)), name)
+  ranked.sort(proc(a, b: string): int = cmp(key(a), key(b)))
+  ranked
+
 proc encodeVersionPreference*(packages: openArray[PackageDecl];
                               preference: VersionPreference;
                               levelBase = -1): string =
   ## The objective directives for `preference`, or `""` for `vpNone`.
   ##
-  ## ## The priority level, and why it is negative
+  ## ## One priority level per package, not one summed rank
+  ##
+  ## Each ranked package gets its OWN level (`version_level/2`), in the order
+  ## `versionPreferenceOrder` gives, and the directive optimises each
+  ## package's rank at its level. clingo optimises levels lexicographically,
+  ## so `highest` means: the package nearest the request takes the newest
+  ## version any answer allows it, then, among the answers that keep that,
+  ## the next package takes its newest, and so on (`lowest` the same,
+  ## oldest). Named-Lock-Files §5.5 states it.
+  ##
+  ## The objective used to be one level summing every package's rank. Proving
+  ## that sum optimal is a search over the product of the closure: a chain of
+  ## 12 packages with 6 versions each took 42 s and one of 16 did not finish
+  ## in 20 minutes (reprobuild-pm issue
+  ## 2026-11-20-highest-strategy-solve-time-grows-exponentially-with-the-closure).
+  ## Level by level, each level is one package with a handful of candidates,
+  ## so proving it costs a few satisfiability checks, and with the core-guided
+  ## optimisation `solve` selects for these programs a closure of 120 such
+  ## packages solves in well under a second. It also makes the answer unique:
+  ## no two packages' ranks are ever traded against each other, so there are
+  ## no tied optima for clingo's defaults to choose between.
+  ##
+  ## ## The priority levels, and why they are negative
   ##
   ## `variant_encoder`'s priority objective sits at clingo's DEFAULT level
-  ## (`@0`). Version preference is emitted at `@-1` (and `@-2`), which clingo
-  ## optimises AFTER level 0. So a variant priority always outranks a version
-  ## preference, and a `--strategy lowest` invocation cannot silently overturn
-  ## a `prForce` contribution. Sharing level 0 would have summed unrelated
-  ## weights — a variant band (1…4) against a candidate rank (0…N) — and made
-  ## the trade-off between them depend on how many versions a registry
-  ## happened to publish.
+  ## (`@0`). Version preference is emitted at `levelBase` and below, which
+  ## clingo optimises AFTER level 0. So a variant priority always outranks a
+  ## version preference, and a `--strategy lowest` invocation cannot silently
+  ## overturn a `prForce` contribution.
   ##
-  ## ## `vpLowestDirect` is two directives, at two levels
+  ## ## `vpLowestDirect` is two directives
   ##
-  ## Direct packages minimise at `@-1`; everything else maximises at `@-2`. Two
-  ## levels rather than one summed level, because at one level a single direct
-  ## package's rank could be traded against a transitive package's rank and the
-  ## answer would depend on candidate counts. Lexicographic levels make "direct
-  ## minimal, then transitive maximal" mean exactly that.
+  ## Direct packages minimise, everything else maximises, and every direct
+  ## package's level is above every other package's level, so "direct
+  ## minimal, then transitive maximal" means exactly that.
   ##
   ## ## `levelBase`, and why it is a parameter rather than a constant
   ##
   ## NLF-M8 adds a unification objective (§9.1), which must outrank the
   ## version preference — see `encodeUnificationObjective`. It takes `@-1`,
-  ## and this one steps down to `@-2`/`@-3` when it does. The step is a
-  ## PARAMETER so that a program with no unification choice keeps `@-1`/`@-2`
-  ## and stays byte-identical to every pre-NLF-M8 program: NLF-STAT-4 freezes
-  ## the default path, and a renumbering applied unconditionally would move
-  ## the text of every existing `--strategy` invocation for no reason.
+  ## and this one starts at `@-2` when it does.
   if preference == vpNone:
     # NPC-M6 — no strategy, but some packages ask to prefer their newest
     # admissible version (``preferNewest``). Only they are ranked and only
@@ -886,21 +963,25 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
       return ""
     return encodeVersionRanks(packages, onlyPreferNewest = true) & "\n" &
       newest.join("\n") & "\n" & PreferNewestHeuristic
-  let l1 = "@" & $levelBase
-  let l2 = "@" & $(levelBase - 1)
   var sections: seq[string] = @[]
   let ranks = encodeVersionRanks(packages)
   if ranks.len > 0:
     sections.add(ranks)
+  var levels: seq[string] = @[]
+  for i, name in versionPreferenceOrder(packages, preference):
+    levels.add("version_level(\"" & aspQuote(name) & "\", " &
+      $(levelBase - i) & ").")
+  if levels.len > 0:
+    sections.add(levels.join("\n"))
+  const ranked = "package_chosen(P, V), version_rank(P, V, R), " &
+    "version_level(P, L)"
   case preference
   of vpNone:
     discard
   of vpLowest:
-    sections.add("#minimize { R" & l1 & ", P : package_chosen(P, V), " &
-      "version_rank(P, V, R) }.")
+    sections.add("#minimize { R@L, P : " & ranked & " }.")
   of vpHighest:
-    sections.add("#maximize { R" & l1 & ", P : package_chosen(P, V), " &
-      "version_rank(P, V, R) }.")
+    sections.add("#maximize { R@L, P : " & ranked & " }.")
   of vpLowestDirect:
     var directFacts: seq[string] = @[]
     var directs: seq[string] = @[]
@@ -911,10 +992,9 @@ proc encodeVersionPreference*(packages: openArray[PackageDecl];
       directFacts.add("version_direct(\"" & aspQuote(name) & "\").")
     if directFacts.len > 0:
       sections.add(directFacts.join("\n"))
-    sections.add("#minimize { R" & l1 & ", P : package_chosen(P, V), " &
-      "version_rank(P, V, R), version_direct(P) }.")
-    sections.add("#maximize { R" & l2 & ", P : package_chosen(P, V), " &
-      "version_rank(P, V, R), not version_direct(P) }.")
+    sections.add("#minimize { R@L, P : " & ranked & ", version_direct(P) }.")
+    sections.add("#maximize { R@L, P : " & ranked &
+      ", not version_direct(P) }.")
   sections.join("\n")
 
 # ---------------------------------------------------------------------------

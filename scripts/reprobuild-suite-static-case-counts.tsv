@@ -1103,6 +1103,7 @@ libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim	nim	3
 libs/repro_solver/tests/t_version_encoder_existing_programs_unchanged.nim	nim	2
 libs/repro_solver/tests/t_version_encoder_per_version_deps.nim	nim	9
 libs/repro_solver/tests/t_version_encoder_prefer_newest_is_locally_newest.nim	nim	1
+libs/repro_solver/tests/t_version_strategy_solves_package_by_package.nim	nim	5
 libs/repro_standard_provider/tests/test_ada_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	nim	21
 libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	nim	10
