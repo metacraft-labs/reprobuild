@@ -2753,7 +2753,7 @@ proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
     path
   else:
-    root / path
+    joinUnderCwd(root, path)
 
 proc recordedInputLocation*(root, path: string): string =
   ## Where a recorded input lives for the action consulting the record.
