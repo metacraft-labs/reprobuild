@@ -75,6 +75,7 @@ verb	sync
 verb	system
 verb	tasks
 verb	test
+verb	tool
 verb	up
 verb	upgrade
 verb	version
@@ -119,6 +120,7 @@ flag	repro graph	--path
 flag	repro graph	--run
 flag	repro graph	--target
 flag	repro graph	--tool-provisioning
+flag	repro graph	--tool-provisioning-for
 flag	repro graph	--view
 flag	repro graph	--work-root
 env	repro graph	REPROBUILD_ACTION_CACHE_ROOT
@@ -129,6 +131,7 @@ flag	repro why	--action-cache-root
 flag	repro why	--format
 flag	repro why	--json
 flag	repro why	--tool-provisioning
+flag	repro why	--tool-provisioning-for
 flag	repro why	--work-root
 env	repro why	REPROBUILD_ACTION_CACHE_ROOT
 env	repro why	REPROBUILD_WORK_ROOT
@@ -156,6 +159,7 @@ flag	repro stats	--scope
 flag	repro stats	--since
 flag	repro stats	--target
 flag	repro stats	--tool-provisioning
+flag	repro stats	--tool-provisioning-for
 flag	repro stats	--top
 flag	repro stats	--watch-session
 flag	repro stats	--work-root
@@ -308,6 +312,7 @@ flag	repro cache key	--action-cache-root
 flag	repro cache key	--format
 flag	repro cache key	--json
 flag	repro cache key	--tool-provisioning
+flag	repro cache key	--tool-provisioning-for
 flag	repro cache key	--work-root
 env	repro cache key	REPROBUILD_ACTION_CACHE_ROOT
 env	repro cache key	REPROBUILD_WORK_ROOT
@@ -316,6 +321,7 @@ flag	repro cache explain	--action-cache-root
 flag	repro cache explain	--format
 flag	repro cache explain	--json
 flag	repro cache explain	--tool-provisioning
+flag	repro cache explain	--tool-provisioning-for
 flag	repro cache explain	--work-root
 env	repro cache explain	REPROBUILD_ACTION_CACHE_ROOT
 env	repro cache explain	REPROBUILD_WORK_ROOT
@@ -324,6 +330,7 @@ flag	repro cache sharing	--action-cache-root
 flag	repro cache sharing	--format
 flag	repro cache sharing	--json
 flag	repro cache sharing	--tool-provisioning
+flag	repro cache sharing	--tool-provisioning-for
 flag	repro cache sharing	--work-root
 env	repro cache sharing	REPROBUILD_ACTION_CACHE_ROOT
 env	repro cache sharing	REPROBUILD_WORK_ROOT
@@ -517,8 +524,8 @@ flag	repro home export	--nixos
 flag	repro home export	--target
 env	repro home export	REPRO_HOST
 command	repro home facts
-flag	repro home facts	--host
 flag	repro home facts	--home-dir
+flag	repro home facts	--host
 flag	repro home facts	--nixos
 flag	repro home facts	--output
 flag	repro home facts	--target
@@ -1566,6 +1573,7 @@ flag	repro build	--stats-groups
 flag	repro build	--strategy
 flag	repro build	--target
 flag	repro build	--tool-provisioning
+flag	repro build	--tool-provisioning-for
 flag	repro build	--trust-profile
 flag	repro build	--unicode
 flag	repro build	--unsafe-preserve-outputs
@@ -1636,6 +1644,7 @@ flag	repro bench	--stats-groups
 flag	repro bench	--strategy
 flag	repro bench	--target
 flag	repro bench	--tool-provisioning
+flag	repro bench	--tool-provisioning-for
 flag	repro bench	--trust-profile
 flag	repro bench	--unicode
 flag	repro bench	--unsafe-preserve-outputs
@@ -1706,6 +1715,7 @@ flag	repro lint	--stats-groups
 flag	repro lint	--strategy
 flag	repro lint	--target
 flag	repro lint	--tool-provisioning
+flag	repro lint	--tool-provisioning-for
 flag	repro lint	--trust-profile
 flag	repro lint	--unicode
 flag	repro lint	--unsafe-preserve-outputs
@@ -1793,6 +1803,7 @@ flag	repro test	--stats-groups
 flag	repro test	--strategy
 flag	repro test	--target
 flag	repro test	--tool-provisioning
+flag	repro test	--tool-provisioning-for
 flag	repro test	--trust-profile
 flag	repro test	--unicode
 flag	repro test	--unsafe-preserve-outputs
@@ -1880,6 +1891,7 @@ flag	repro certify	--stats-groups
 flag	repro certify	--strategy
 flag	repro certify	--target
 flag	repro certify	--tool-provisioning
+flag	repro certify	--tool-provisioning-for
 flag	repro certify	--trust-profile
 flag	repro certify	--unicode
 flag	repro certify	--unsafe-preserve-outputs
@@ -1966,6 +1978,7 @@ flag	repro watch	--target
 flag	repro watch	--task
 flag	repro watch	--tier
 flag	repro watch	--tool-provisioning
+flag	repro watch	--tool-provisioning-for
 flag	repro watch	--work-root
 flag	repro watch	--write-report
 flag	repro watch	--write-stats
@@ -2508,3 +2521,10 @@ command	repro nimble
 command	repro nimble verify
 flag	repro nimble verify	--lock
 flag	repro nimble verify	--store
+command	repro tool
+command	repro tool realize
+flag	repro tool realize	--json
+flag	repro tool realize	--project
+flag	repro tool realize	--tool-provisioning
+flag	repro tool realize	--tool-provisioning-for
+env	repro tool realize	REPRO_TOOL_PROVISIONING

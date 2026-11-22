@@ -1272,6 +1272,34 @@ proc validateMacosAppRecord(node: NimNode) =
         "installed prefix and lies inside the product bundle: it must " &
         "start with '" & bundleText & "/'; got '" & exeText & "'", node)
 
+proc listLiteralCodes(node: NimNode; field: string): seq[string] =
+  ## The element expressions of a ``@[...]`` (or ``[...]``) literal, each as
+  ## splice-ready source. A list-valued tarball field is written as a list
+  ## literal so the recipe reads as the declaration it is; any other
+  ## expression is refused rather than guessed at.
+  var bracket = node
+  if node.kind == nnkPrefix and node.len == 2 and node[0].eqIdent("@"):
+    bracket = node[1]
+  if bracket.kind != nnkBracket:
+    error("tarball " & field & " must be a list literal, @[...]", node)
+  for element in bracket:
+    result.add(exprCode(element))
+
+proc parseGemBuildArgs(node: NimNode): seq[(string, seq[string])] =
+  ## ``gemBuildArgs = @[("nokogiri", @["--use-system-libraries", ...]), ...]``:
+  ## one ``(gem, @[args])`` pair per gem.
+  var bracket = node
+  if node.kind == nnkPrefix and node.len == 2 and node[0].eqIdent("@"):
+    bracket = node[1]
+  if bracket.kind != nnkBracket:
+    error("tarball gemBuildArgs must be a list literal of (gem, @[args]) " &
+      "pairs", node)
+  for element in bracket:
+    if element.kind notin {nnkPar, nnkTupleConstr} or element.len != 2:
+      error("tarball gemBuildArgs entries are (gem, @[args]) pairs", element)
+    result.add((exprCode(element[0]),
+      listLiteralCodes(element[1], "gemBuildArgs argument list")))
+
 proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   let loc = lineFile(node)
   if calleeName(node).normalize != "tarball":
@@ -1332,6 +1360,24 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let closureManifestValue = namedValue(node[i], "closureManifest")
     if not closureManifestValue.isNil:
       result.closureManifest = exprCode(closureManifestValue)
+    # The gem-closure step: a committed manifest of pinned gems installed
+    # offline into the realized Ruby prefix, the provisioned packages their
+    # native extensions are built with, per-gem build arguments, and the
+    # reviewed list of gems admitted as prebuilt platform gems.
+    let gemClosureValue = namedValue(node[i], "gemClosure")
+    if not gemClosureValue.isNil:
+      result.gemClosure = exprCode(gemClosureValue)
+    let gemBuildUsesValue = namedValue(node[i], "gemBuildUses")
+    if not gemBuildUsesValue.isNil:
+      result.gemBuildUses = listLiteralCodes(gemBuildUsesValue,
+        "gemBuildUses")
+    let gemBuildArgsValue = namedValue(node[i], "gemBuildArgs")
+    if not gemBuildArgsValue.isNil:
+      result.gemBuildArgs = parseGemBuildArgs(gemBuildArgsValue)
+    let gemSubstitutionsValue = namedValue(node[i], "gemSubstitutions")
+    if not gemSubstitutionsValue.isNil:
+      result.gemSubstitutions = listLiteralCodes(gemSubstitutionsValue,
+        "gemSubstitutions")
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -1375,6 +1421,11 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   # diagnostic below.
   if urlNode.isNil:
     error("tarball requires url = \"...\"", node)
+  if result.gemClosure.len == 0 and (result.gemBuildUses.len > 0 or
+      result.gemBuildArgs.len > 0 or result.gemSubstitutions.len > 0):
+    error("tarball gemBuildUses, gemBuildArgs and gemSubstitutions " &
+      "describe a gemClosure step; declare gemClosure = \"<manifest>\"",
+      node)
   # GM4b: an upstream that publishes no SHA-256 (Maven and the .NET SDK
   # publish SHA-512, Free Pascal only SHA-1) is pinned by the digest it does
   # publish. One of the three is still required.
@@ -2631,6 +2682,18 @@ proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
     ", gccLinkSpecs: " & codeOrEmpty(detail.gccLinkSpecs) &
     ", gccSpecDefaults: " & codeListLiteral(detail.gccSpecDefaults) & ")"
 
+proc gemBuildArgsLiteral(items: openArray[(string, seq[string])]): string =
+  ## ``@[(<gem>, @[<arg>, ...]), ...]``, typed so an empty list still
+  ## matches ``TarballProvisioningDef.gemBuildArgs``.
+  if items.len == 0:
+    return "newSeq[(string, seq[string])]()"
+  result = "@["
+  for i, item in items:
+    if i > 0:
+      result.add(", ")
+    result.add("(" & item[0] & ", " & codeListLiteral(item[1]) & ")")
+  result.add("]")
+
 proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
   ## The ``TarballProvisioningDef(...)`` literal for a macro-time record.
   ## ONE emitter for both routes a tarball realization takes — an in-package
@@ -2646,6 +2709,10 @@ proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
     ", nonRedistributable: " & $provisioning.nonRedistributable &
     ", launcher: " & codeOrEmpty(provisioning.launcher) &
     ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
+    ", gemClosure: " & codeOrEmpty(provisioning.gemClosure) &
+    ", gemBuildUses: " & codeListLiteral(provisioning.gemBuildUses) &
+    ", gemBuildArgs: " & gemBuildArgsLiteral(provisioning.gemBuildArgs) &
+    ", gemSubstitutions: " & codeListLiteral(provisioning.gemSubstitutions) &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
     ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
     ", stripComponents: " & $provisioning.stripComponents &
@@ -4262,6 +4329,24 @@ proc explicitlyContractedSelectors*(pkg: PackageDef;
         selector notin split.siblingsBesidePath and selector notin result:
       result.add(selector)
 
+proc gemBuildToolUses(pkg: PackageDef): seq[PackageUseDef] =
+  ## The packages a tarball arm's gem-closure step builds with
+  ## (``gemBuildUses``), as dependency-only uses: their modules must be
+  ## imported so that their provisioning is registered when the interface is
+  ## lifted, which resolves each of them into a tool use. Like a
+  ## ``runtimeDeps:`` entry, only the selector-specific marker is imported:
+  ## a build tool of a step is not a tool of the recipe's own actions.
+  ## Only literal selectors are seen here; the macro-time record holds each
+  ## as expression source.
+  for provisioning in pkg.tarballProvisioning:
+    for code in provisioning.gemBuildUses:
+      let text = code.strip()
+      if text.len >= 2 and text[0] == '"' and text[^1] == '"' and
+          '\\' notin text:
+        let selector = text[1 .. ^2]
+        result.add(PackageUseDef(rawConstraint: selector,
+          packageSelector: selector, executableName: selector))
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
   # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
@@ -4283,7 +4368,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         if useDef notin pkg.toolUses:
           nativeOnlyModules.add(modulePath)
   var dependencyModules: seq[string] = @[]
-  for useDef in pkg.runtimeDeps:
+  let gemBuildUses = gemBuildToolUses(pkg)
+  for useDef in pkg.runtimeDeps & gemBuildUses:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
@@ -4433,7 +4519,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   var dependencyOnlyAliases: seq[string] = @[]
   var nativeOnlyAliases: seq[string] = @[]
   if not hasExplicitImports:
-    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps & gemBuildUses:
       let selector = useDef.packageSelector
       if isBundledStdlibSelector(selector):
         continue

@@ -40,16 +40,24 @@
 ## control shell with nothing installed must not complete.
 ##
 ## On Windows the per-user PowerShell profiles live under the Documents
-## folder the shell API reports, which no environment variable redirects, so
-## the Windows legs (and the bare `ensure` legs, which install the native
-## PowerShell block there) WRITE THE INVOKING USER'S REAL `PowerShell` and
-## `WindowsPowerShell` profiles. They save them to an on-disk journal first
-## and restore them byte for byte after, on every exit path; a journal left
-## by a run that died makes the next run refuse to start
-## (`repro_test_support/real_file_guard`, which says why no redirection is
-## available and how to recover by hand). Each saved and restored file is
-## printed on stderr. Run them directly, not under a home fence
-## (`REPRO_TEST_HOME_FENCE`), which would refuse those writes.
+## folder the shell API reports (`SHGetFolderPathW` in repro,
+## `[Environment]::GetFolderPath('MyDocuments')` in PowerShell). Its registry
+## value is normally `%USERPROFILE%\Documents`, expanded with the calling
+## process's environment, so the case's redirected `USERPROFILE` moves it into
+## the scratch home, for repro and for the PowerShell the case starts alike.
+## The case therefore asks PowerShell for the folder IN THE CASE'S
+## ENVIRONMENT (`windowsDocuments(w)`), and checks that repro wrote where that
+## PowerShell reads. Only a profile that still resolves outside the scratch
+## directory (a Documents folder the registry names absolutely, such as a
+## redirected or synced one) is the invoking user's real file: such files are
+## saved to an on-disk journal first and restored byte for byte after, on
+## every exit path, and a journal left by a run that died makes the next run
+## refuse to start (`repro_test_support/real_file_guard`). Each saved and
+## restored file is printed on stderr; with the default registry value
+## nothing is saved and no journal is written. Either way the real profiles'
+## contents are compared before and after every case (`hostWatched`). Run the
+## Windows legs directly, not under a home fence (`REPRO_TEST_HOME_FENCE`),
+## which would refuse the writes a non-default Documents folder needs.
 ##
 ## `REPRO_E2E_REQUIRE_SHELLS` (comma-separated: bash, zsh, fish, pwsh, and
 ## `bash-completion` for the loader leg) turns a missing shell into a
@@ -91,6 +99,9 @@ template skipLoud(what, why: string) =
 # The machine this runs on must not change.
 # ---------------------------------------------------------------------------
 
+proc windowsDocuments(env: openArray[tuple[name, value: string]] = []):
+    string
+
 proc hostWatched(): seq[string] =
   ## The invoking user's real rc and completion files, and the machine's
   ## system-wide completion files for repro.
@@ -112,11 +123,36 @@ proc hostWatched(): seq[string] =
       "/usr/local/share/repro/completions/repro.ps1"]:
     result.add(p)
 
+proc realWindowsProfiles(): seq[string] =
+  ## The invoking user's real PowerShell profiles, under the Documents folder
+  ## PowerShell reports in this process's (unredirected) environment; none
+  ## off Windows.
+  when defined(windows):
+    let docs = windowsDocuments()
+    @[docs / "PowerShell" / "Profile.ps1",
+      docs / "PowerShell" / "Microsoft.PowerShell_profile.ps1",
+      docs / "WindowsPowerShell" / "Profile.ps1",
+      docs / "WindowsPowerShell" / "Microsoft.PowerShell_profile.ps1"]
+  else:
+    @[]
+
 proc hostState(): seq[string] =
   for p in hostWatched():
     if fileExists(p):
       result.add(p & " " & $getLastModificationTime(p).toUnix & " " &
         $hash(readFile(p)))
+    else:
+      result.add(p & " absent")
+  # The real PowerShell profiles by content only: a leg that has to save and
+  # restore one (a Documents folder outside the scratch) changes its mtime.
+  var profiles {.global.}: seq[string]
+  var profilesDone {.global.} = false
+  if not profilesDone:
+    profiles = realWindowsProfiles()
+    profilesDone = true
+  for p in profiles:
+    if fileExists(p):
+      result.add(p & " " & $hash(readFile(p)))
     else:
       result.add(p & " absent")
 
@@ -326,9 +362,14 @@ proc presentShells(): seq[string] =
 # for every shell found.
 # ---------------------------------------------------------------------------
 
-proc windowsDocuments(): string =
+proc windowsDocuments(env: openArray[tuple[name, value: string]] = []):
+    string =
   ## The Documents folder as Windows reports it, asked of PowerShell itself
-  ## (not computed by the code under test); "" off Windows.
+  ## (not computed by the code under test), in this process's environment
+  ## overridden by `env`; "" off Windows. Pass a case's environment
+  ## (`w.env`): the folder is expanded from `%USERPROFILE%` by default, so
+  ## the case's redirected `USERPROFILE` moves it, as it does for the repro
+  ## and the PowerShell the case starts.
   when defined(windows):
     let ps =
       if "pwsh" in shells(): shells()["pwsh"]
@@ -336,9 +377,11 @@ proc windowsDocuments(): string =
       else: ""
     doAssert ps.len > 0, "no PowerShell to ask for the Documents folder"
     let res = runShell(shellCommand(@[ps, "-NoProfile", "-NonInteractive",
-      "-Command", "[Environment]::GetFolderPath('MyDocuments')"]),
+      "-Command", "[Environment]::GetFolderPath('MyDocuments')"], env),
       timeoutMs = 60_000)
-    doAssert res.code == 0, res.output
+    # An empty answer would turn every profile path relative and the
+    # comparisons and saves built on it into silent no-ops.
+    doAssert res.code == 0 and res.output.strip().len > 0, res.output
     res.output.strip()
   else:
     ""
@@ -352,7 +395,8 @@ proc nativeRcFile(w: World; shell: string): string =
   of "fish": w.config / "fish/config.fish"
   else:
     when defined(windows):
-      windowsDocuments() / "PowerShell" / "Microsoft.PowerShell_profile.ps1"
+      windowsDocuments(w.env) / "PowerShell" /
+        "Microsoft.PowerShell_profile.ps1"
     else:
       w.config / "powershell/Microsoft.PowerShell_profile.ps1"
 
@@ -365,17 +409,21 @@ proc nativeBlockCount(path, shell: string): int =
         line.contains("repro-dev-env-native-" & shell & " "):
       inc result
 
-proc windowsProfiles(): seq[string] =
-  ## The invoking user's real PowerShell profiles, which the Windows legs
-  ## cannot redirect (the Documents folder comes from the shell API, not the
-  ## environment): saved before and restored after each such leg.
+proc windowsProfiles(w: World): seq[string] =
+  ## The PowerShell profiles a Windows leg writes, under the Documents folder
+  ## the case's environment resolves (`windowsDocuments(w.env)`), that lie
+  ## OUTSIDE the case's scratch directory: real files of the invoking user,
+  ## saved before and restored after the leg. With the default registry value
+  ## (`%USERPROFILE%\Documents`) the folder is inside the scratch home and
+  ## this is empty, so nothing real is touched or saved.
   when defined(windows):
-    let docs = windowsDocuments()
-    @[docs / "PowerShell" / "Profile.ps1",
-      docs / "WindowsPowerShell" / "Profile.ps1",
-      docs / "PowerShell" / "Microsoft.PowerShell_profile.ps1"]
+    let docs = windowsDocuments(w.env)
+    result = pathsOutside([docs / "PowerShell" / "Profile.ps1",
+        docs / "WindowsPowerShell" / "Profile.ps1",
+        docs / "PowerShell" / "Microsoft.PowerShell_profile.ps1"], w.dir)
   else:
-    @[]
+    discard w
+    result = @[]
 
 proc saveFiles(paths: seq[string]): RealFilesGuard =
   ## Saves `paths` to an on-disk journal before a leg touches them; refuses
@@ -846,7 +894,7 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
     createDir(repo)
     let present = presentShells()
     check present.len > 0
-    let saved = saveFiles(windowsProfiles())
+    let saved = saveFiles(w.windowsProfiles())
     try:
       if "git" notin shells():
         skipLoud("git", "git is not on PATH")
@@ -895,7 +943,7 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
     createDir(repo)
     let present = presentShells()
     check present.len > 0
-    let saved = saveFiles(windowsProfiles())
+    let saved = saveFiles(w.windowsProfiles())
     try:
       if "git" notin shells():
         skipLoud("git", "git is not on PATH")
@@ -928,9 +976,11 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
   when defined(windows):
     test "Windows: --profile writes the profiles under the reported Documents":
       let w = newWorld("windows-profile")
-      let docs = windowsDocuments()
+      # Documents as PowerShell reports it in the case's environment: where
+      # repro must write, and where the PowerShell started below reads.
+      let docs = windowsDocuments(w.env)
       check docs.len > 0
-      let saved = saveFiles(windowsProfiles())
+      let saved = saveFiles(w.windowsProfiles())
       try:
         let first = w.repro(["hooks", "ensure", "--shell-autocomplete",
           "--profile", "--json"])
@@ -950,9 +1000,12 @@ suite "e2e_cs_m7_hooks_ensure_installs_completion":
           checkpoint(b)
           check got.getOrDefault(b) == "installed"
           check blockCount(b, "powershell") == 1
-        # Nothing under %USERPROFILE%: the Documents folder is the one
-        # Windows reports, never built from it.
-        check filesUnder(w.home).len == 0
+        # Nothing else under %USERPROFILE%: repro writes the profiles where
+        # the reported Documents folder is (inside the scratch home when it
+        # is expanded from %USERPROFILE%), and nothing beside them.
+        for f in filesUnder(w.home):
+          checkpoint(f)
+          check f in blocks
         let second = w.repro(["hooks", "ensure", "--shell-autocomplete",
           "--profile", "--json"])
         checkpoint(second.output)
