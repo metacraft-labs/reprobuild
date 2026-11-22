@@ -8423,6 +8423,264 @@ proc isNimPrefixPath*(path, prefix: string): bool =
   root.len > 0 and path.startsWith(root) and
     (path.len == root.len or path[root.len] in {DirSep, AltSep})
 
+# ---------------------------------------------------------------------
+# Trust in the configuration files above a recipe.
+#
+# A compile whose main module is the recipe -- the provider compile, and the
+# extraction's `nim dump` (`recipeConfigSearchPathFlags`) -- makes Nim read
+# `nim.cfg` and evaluate `config.nims` in every ancestor of the recipe's
+# directory (`loadConfigs` in Nim's `compiler/nimconf.nim`), with this user's
+# privileges. A project under `/tmp` has `/tmp` among those ancestors, and
+# any local account can create `/tmp/config.nims`. Such a file -- and one in
+# the recipe's own directory, where the same applies to a recipe written
+# straight into `/tmp` -- is refused before the compiler starts. It is the
+# rule the extraction's nimcache pool follows
+# (`ensureInterfaceNimcacheStoreDir`), applied to configuration files:
+# nothing another account wrote, or can replace, is used with this user's
+# privileges.
+
+type RecipeConfigurationRefusedError* = object of IOError
+  ## A configuration file Nim would evaluate in a recipe compile may be
+  ## replaced or was written by another account. The message names the file,
+  ## its owner and its mode.
+
+const RecipeConfigFileNames* = ["nim.cfg", "config.nims"]
+  ## The files Nim reads in each ancestor of the main module's directory
+  ## (`DefaultConfig` and `DefaultConfigNims` in `compiler/options.nim`).
+
+proc recipeConfigRealModule(modulePath: string): string =
+  ## The recipe as Nim names its main module: absolute, symbolic links
+  ## resolved (`setFromProjectName` in `compiler/options.nim`).
+  let absoluteModule = absolutePath(modulePath)
+  try: expandFilename(absoluteModule)
+  except OSError: absoluteModule
+
+proc recipeConfigProjectDir(modulePath: string): string =
+  ## Nim's project directory for the main module `modulePath`: the real
+  ## file's directory, itself resolved.
+  let moduleDir = parentDir(recipeConfigRealModule(modulePath))
+  try: expandFilename(moduleDir)
+  except OSError: moduleDir
+
+proc recipeConfigAncestorDirs*(modulePath: string): seq[string] =
+  ## The directories whose `RecipeConfigFileNames` Nim reads for a compile
+  ## whose main module is `modulePath`, from `/` down to the parent of the
+  ## module's directory. Nim resolves the main module, and then its
+  ## directory, with `expandFilename` (`setFromProjectName` in
+  ## `compiler/options.nim`), so a symbolic link to the recipe, or on the way
+  ## to it, is followed here as there: the chain is that of the real file's
+  ## directory. The recipe's own directory is not included here; the files
+  ## Nim reads there are `recipeConfigProjectFiles`.
+  let projectDir = recipeConfigProjectDir(modulePath)
+  for dir in parentDirs(projectDir, fromRoot = true, inclusive = false):
+    result.add(dir)
+
+proc recipeConfigProjectFiles*(modulePath: string): seq[string] =
+  ## The configuration files Nim reads in the recipe's own directory for a
+  ## compile whose main module is `modulePath` (`loadConfigs`): `nim.cfg`
+  ## and `config.nims`, the recipe's `<name>.nimcfg` / `<name>.nim.cfg`, and
+  ## its `<name>.nims`, which `nim c` and `nim dump` both evaluate. Named
+  ## after the real file, as Nim names them (`setFromProjectName`).
+  ##
+  ## They are held to the same rule as the files above the recipe. Most
+  ## recipes sit in a directory only their owner can write, where the rule
+  ## admits their own files; but a recipe written straight into a shared
+  ## sticky directory such as `/tmp` would otherwise have its neighbours'
+  ## `/tmp/config.nims` or `/tmp/repro.nims` evaluated without a check.
+  let projectDir = recipeConfigProjectDir(modulePath)
+  let name = splitFile(recipeConfigRealModule(modulePath)).name
+  for file in RecipeConfigFileNames:
+    result.add(projectDir / file)
+  for ext in [".nimcfg", ".nim.cfg", ".nims"]:
+    result.add(projectDir / (name & ext))
+
+proc recipeConfigEntryRefusal*(fileOwner, fileMode: int;
+                               fileGroupIsOwnPrivate: bool;
+                               dirOwner, dirMode: int;
+                               dirGroupIsOwnPrivate: bool;
+                               me: int): string =
+  ## The reason a configuration file may not be evaluated, or "" when it
+  ## may. A pure decision over `lstat`/`stat` facts, so that the
+  ## other-account cases, which a test cannot create without privilege, are
+  ## tested as directly as the rest.
+  ##
+  ## * The file must be this user's or root's. Anyone else wrote it.
+  ## * It must not be writable by another account: group write is accepted
+  ##   only from this user's private group (login.defs(5) `USERGROUPS_ENAB`).
+  ## * Its directory must be this user's or root's -- a directory's owner can
+  ##   rename any entry in it, sticky or not -- and writable by no other
+  ##   account unless it is sticky (in a sticky directory, such as `/tmp`,
+  ##   only an entry's owner can remove or rename it).
+  proc foreign(owner: int): bool = owner != me and owner != 0
+  proc othersWrite(mode: int; ownPrivateGroup: bool): bool =
+    (mode and 0o002) != 0 or ((mode and 0o020) != 0 and not ownPrivateGroup)
+  if foreign(fileOwner):
+    return "it belongs to another account"
+  if othersWrite(fileMode, fileGroupIsOwnPrivate):
+    return "it is writable by other accounts"
+  if foreign(dirOwner):
+    return "its directory belongs to another account, which can replace it"
+  if (dirMode and 0o1000) == 0 and othersWrite(dirMode, dirGroupIsOwnPrivate):
+    return "its directory is writable by other accounts and not sticky, so " &
+      "another account can replace it"
+  ""
+
+proc recipeConfigInsideStoreObject*(path, storeDir: string): bool =
+  ## Whether the resolved `path` lies inside a Nix store object: below an
+  ## entry of `storeDir`, not directly in it. A store object is immutable
+  ## once registered and written only by the Nix daemon, so its files are
+  ## trusted whatever owner they show -- inside the Nix build sandbox, root
+  ## is not mapped into the user namespace and every store object shows the
+  ## overflow uid (65534) instead. The Nim compiler that would evaluate the
+  ## file is itself a store object, so trusting the store adds no account to
+  ## those the compile already trusts. A file directly in `storeDir` is not
+  ## a store object's content: the build users can create one there, so it
+  ## is held to the rule like any other.
+  let store = storeDir.strip(leading = false, chars = {DirSep, AltSep})
+  if store.len == 0 or not path.startsWith(store & DirSep):
+    return false
+  let rest = path[store.len + 1 .. ^1]
+  let slash = rest.find({DirSep, AltSep})
+  slash > 0 and slash < rest.len - 1
+
+when defined(posix):
+  proc isOwnPrivateGroup(gid: Gid): bool =
+    ## Whether `gid` is this user's private group: the primary group of the
+    ## effective user, named as the user is. That is the per-user group
+    ## convention (`USERGROUPS_ENAB` in login.defs(5)), under which the
+    ## default umask is 002 and a group-writable directory is writable by
+    ## this user alone. A shared group such as `users` is not one.
+    let pw = getpwuid(geteuid())
+    if pw == nil or pw.pw_gid != gid:
+      return false
+    let gr = getgrgid(gid)
+    gr != nil and $gr.gr_name == $pw.pw_name
+
+  proc modeSpelling(mode: int): string = "0" & toOct(mode and 0o7777, 4)
+
+proc requireTrustedRecipeConfiguration*(modulePath: string) =
+  ## Refuse a compile whose main module is `modulePath` when Nim would
+  ## evaluate a configuration file -- above the recipe's directory
+  ## (`recipeConfigAncestorDirs`) or in it (`recipeConfigProjectFiles`) --
+  ## that another account wrote or can replace (`recipeConfigEntryRefusal`).
+  ## Raises `RecipeConfigurationRefusedError` naming the file, its owner and
+  ## its mode, and the directory's when that is the reason. Nothing is repaired
+  ## or removed: the file is someone else's, or someone else may be using it.
+  ##
+  ## A symbolic link in a configuration file's place is followed, as Nim
+  ## follows it: the link must itself be this user's or root's, and the file
+  ## it finally resolves to, and that file's directory, are held to the same
+  ## rule. Further links on the way to that file are not examined: a link
+  ## this user made into a place another account controls is a trust this
+  ## user chose to extend.
+  ##
+  ## A file inside a Nix store object is admitted without examining its
+  ## owner or mode (`recipeConfigInsideStoreObject`).
+  ##
+  ## Called immediately before each such compile starts, not atomically with
+  ## Nim's read. A file another account creates after this check, in a
+  ## directory it can write (a sticky one such as `/tmp`, or one whose
+  ## existing files the rule would refuse), is not seen; and a directory
+  ## that holds no configuration file is not examined at all. The spec
+  ## states that limit.
+  ##
+  ## POSIX only. On Windows ownership is an ACL, and the per-user profile
+  ## and the checkout's own ACLs are what bound who can write there.
+  when defined(posix):
+    let me = int(geteuid())
+    proc refuse(path, why: string; owner, mode: int; extra = "") =
+      raise newException(RecipeConfigurationRefusedError,
+        "refusing to compile the recipe " & absolutePath(modulePath) &
+        ": Nim would evaluate the configuration file " & path &
+        " with this user's privileges, and " & why & " (owned by uid " &
+        $owner & ", mode " & modeSpelling(mode) & ")" & extra &
+        "; remove that file if it is not yours, or move the project out " &
+        "from under its directory, and build again")
+    proc inspect(path: string; st: var Stat; follow: bool): bool =
+      ## false when the entry does not exist (or cannot be reached, in which
+      ## case Nim cannot open it either).
+      let rc = if follow: stat(path.cstring, st) else: lstat(path.cstring, st)
+      if rc == 0:
+        return true
+      let err = errno
+      if err in [ENOENT, ENOTDIR, EACCES, ELOOP]:
+        return false
+      raiseOSError(osLastError(),
+        "cannot inspect the recipe configuration file " & path)
+    proc checkEntry(path, dir: string; st: Stat) =
+      var dirSt: Stat
+      if stat(dir.cstring, dirSt) != 0:
+        raiseOSError(osLastError(),
+          "cannot inspect the directory of the recipe configuration file " &
+          path)
+      let why = recipeConfigEntryRefusal(int(st.st_uid),
+        int(st.st_mode) and 0o7777, isOwnPrivateGroup(st.st_gid),
+        int(dirSt.st_uid), int(dirSt.st_mode) and 0o7777,
+        isOwnPrivateGroup(dirSt.st_gid), me)
+      if why.len > 0:
+        refuse(path, why, int(st.st_uid), int(st.st_mode),
+          if why.startsWith("its directory"):
+            "; the directory " & dir & " is owned by uid " & $dirSt.st_uid &
+              ", mode " & modeSpelling(int(dirSt.st_mode))
+          else: "")
+    let store = nixStoreDir()
+    var candidates: seq[string] = @[]
+    for dir in recipeConfigAncestorDirs(modulePath):
+      for name in RecipeConfigFileNames:
+        candidates.add(dir / name)
+    candidates.add(recipeConfigProjectFiles(modulePath))
+    for path in candidates:
+      let dir = parentDir(path)
+      var st: Stat
+      if not inspect(path, st, follow = false):
+        continue
+      if S_ISLNK(st.st_mode):
+        if recipeConfigInsideStoreObject(path, store):
+          # The link is part of a store object; what it names is not
+          # necessarily, and is examined below.
+          var target: Stat
+          if not inspect(path, target, follow = true) or
+              S_ISDIR(target.st_mode):
+            continue
+          let resolved = expandFilename(path)
+          if not recipeConfigInsideStoreObject(resolved, store):
+            checkEntry(resolved, parentDir(resolved), target)
+          continue
+        let linkOwner = int(st.st_uid)
+        if linkOwner != me and linkOwner != 0:
+          refuse(path, "it is a symbolic link another account owns",
+            linkOwner, int(st.st_mode))
+        # The link sits in `dir`, which must not let another account
+        # replace it either.
+        var dirSt: Stat
+        if stat(dir.cstring, dirSt) != 0:
+          raiseOSError(osLastError(),
+            "cannot inspect the directory of the recipe configuration " &
+            "file " & path)
+        let dirWhy = recipeConfigEntryRefusal(linkOwner, 0, false,
+          int(dirSt.st_uid), int(dirSt.st_mode) and 0o7777,
+          isOwnPrivateGroup(dirSt.st_gid), me)
+        if dirWhy.len > 0:
+          refuse(path, dirWhy, linkOwner, int(st.st_mode),
+            "; the directory " & dir & " is owned by uid " &
+              $dirSt.st_uid & ", mode " & modeSpelling(int(dirSt.st_mode)))
+        var target: Stat
+        if not inspect(path, target, follow = true):
+          continue
+        if S_ISDIR(target.st_mode):
+          continue
+        let resolved = expandFilename(path)
+        if not recipeConfigInsideStoreObject(resolved, store):
+          checkEntry(resolved, parentDir(resolved), target)
+        continue
+      # A directory in a configuration file's place is not read by Nim.
+      if S_ISDIR(st.st_mode):
+        continue
+      if not recipeConfigInsideStoreObject(path, store):
+        checkEntry(path, dir, st)
+  else:
+    discard modulePath
+
 proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## `--path:` flags for the search paths the recipe's OWN configuration
   ## files add: the `config.nims` / `nim.cfg` of the recipe's directory and
@@ -8454,6 +8712,13 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## (Hermetic-Builds-And-Path-Independence.md, "Engine-internal recipe
   ## compiles"). With a main module named, Nim reads its configuration from
   ## that module's directory chain, so the directory changes nothing else.
+  ##
+  ## The evaluation runs that chain's NimScript with this user's privileges,
+  ## so a configuration file above or beside the recipe that another account
+  ## wrote or can replace is refused first
+  ## (`requireTrustedRecipeConfiguration`): the refusal propagates, unlike a
+  ## failed evaluation.
+  requireTrustedRecipeConfiguration(modulePath)
   let execution =
     try:
       runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
@@ -8507,18 +8772,6 @@ when defined(posix):
     elif errno != EEXIST:
       raiseOSError(osLastError(),
         "cannot create the interface-extraction nimcache's parent " & path)
-
-  proc isOwnPrivateGroup(gid: Gid): bool =
-    ## Whether `gid` is this user's private group: the primary group of the
-    ## effective user, named as the user is. That is the per-user group
-    ## convention (`USERGROUPS_ENAB` in login.defs(5)), under which the
-    ## default umask is 002 and a group-writable directory is writable by
-    ## this user alone. A shared group such as `users` is not one.
-    let pw = getpwuid(geteuid())
-    if pw == nil or pw.pw_gid != gid:
-      return false
-    let gr = getgrgid(gid)
-    gr != nil and $gr.gr_name == $pw.pw_name
 
   proc refuseNimcacheAncestor(root, path, why: string; owner, mode: int) =
     raise newException(OwnedDirectoryError,
@@ -10795,6 +11048,11 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
       removeDir(extendedPath(compilerCwd))
     except OSError:
       discard
+  # The compile's main module is the recipe, so Nim evaluates the
+  # configuration files of its directory and of every directory above it
+  # with this user's privileges. One that another account wrote or can
+  # replace is refused before the compiler starts.
+  requireTrustedRecipeConfiguration(modulePath)
   # Keep the immutable library lookup root (`workDir`) out of the write path.
   # Nim emits relative linker response files in CWD even though `--nimcache`
   # and `--out` are absolute.
