@@ -64461,6 +64461,30 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
 
+const
+  CommitTimeFlakeLockFileName* = "flake.lock"
+    ## The `flake.lock` the §13.6 commit-time refresh writes, at the root of
+    ## the repository whose `flake.nix` it is.
+  CommitTimeManagedLockFiles* = [CommittedLockFileName,
+                                 CommitTimeFlakeLockFileName]
+    ## Every file the commit-time lock writers may rewrite, relative to the
+    ## repository root: the §13.3 `repro.lock` re-pin (and the policy
+    ## snapshot it carries) and the §13.6 `flake.lock` refresh. THE one
+    ## definition: the writers derive their paths from it
+    ## (``commitTimeManagedLockPath``), and the certificate gates read it to
+    ## recognise content that differs from certified content only in what
+    ## those writers manage (``findLockOnlyCertifiedNeighbours``). A writer
+    ## added to ``applyCommitTimeLockWriters`` (the Pre-Commit-Check-Sets
+    ## PCS-5 block, once built) adds its file here, or the gates will not
+    ## recognise its rewrite.
+
+proc commitTimeManagedLockPath*(repoRoot, managed: string): string =
+  ## The absolute path of one of ``CommitTimeManagedLockFiles`` in
+  ## ``repoRoot``.
+  doAssert managed in CommitTimeManagedLockFiles, managed &
+    " is not a commit-time managed lock"
+  repoRoot / managed
+
 type
   CommitTimeWriterSite* = enum
     ## Who applies the commit-time lock writers (Unified-Locking-And-Hooks
@@ -64523,10 +64547,11 @@ proc appendCommitTimeWriterLog(site: CommitTimeWriterSite;
       line)
 
 proc commitTimeHasFlakeLock(repoRoot: string): bool =
-  fileExists(repoRoot / "flake.nix") and fileExists(repoRoot / "flake.lock")
+  fileExists(repoRoot / "flake.nix") and fileExists(
+    commitTimeManagedLockPath(repoRoot, CommitTimeFlakeLockFileName))
 
 proc commitTimeHasReproLock(repoRoot: string): bool =
-  fileExists(repoRoot / CommittedLockFileName)
+  fileExists(commitTimeManagedLockPath(repoRoot, CommittedLockFileName))
 
 proc committedLockRepinFailure(plan: CommittedLockRepinPlan): string =
   ## The re-pin could not even be planned: the lock is unreadable or carries
@@ -65422,8 +65447,10 @@ proc stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp: string;
   ## staged. Never raises.
   let label = commitTimeWriterLabel(ctwsLockUpdateNode)
   var locks: seq[string]
-  if hasReproLock: locks.add(committedLockPath(repoRoot))
-  if hasFlake: locks.add(repoRoot / "flake.lock")
+  if hasReproLock:
+    locks.add(commitTimeManagedLockPath(repoRoot, CommittedLockFileName))
+  if hasFlake:
+    locks.add(commitTimeManagedLockPath(repoRoot, CommitTimeFlakeLockFileName))
   var written: seq[string]
   for w in outcome.written:
     written.add(os.normalizedPath(absolutePath(w)))
@@ -104664,7 +104691,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   ## both or neither, so that one repository resolved by both locks is never
   ## moved in one of them only (Unified-Locking-And-Hooks.md §16.3 H3).
   result.tag = "unknown"
-  result.lockPath = flakeRoot / "flake.lock"
+  result.lockPath = flakeRoot / CommitTimeFlakeLockFileName
 
   # (0) Nothing to refresh without BOTH halves. A repo with a flake but no lock
   # pins nothing; a repo with a lock but no flake declares no inputs. Both are
@@ -106336,7 +106363,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## empty result and a failure must not look alike.
   if workspaceRoot.len == 0 or currentRepo.len == 0: return
   let flakeRoot = absolutePath(currentRepo)
-  let lockPath = flakeRoot / "flake.lock"
+  let lockPath = flakeRoot / CommitTimeFlakeLockFileName
   result.lockPath = lockPath
   if not fileExists(flakeRoot / "flake.nix") or not fileExists(lockPath):
     return
