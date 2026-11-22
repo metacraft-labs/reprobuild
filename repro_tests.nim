@@ -36418,7 +36418,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_unit_g04",
+    group: "t_group_tests_unit_g03",
     singleReason: ""),
   TestSpec(
     source: "tests/unit/t_m9r23_1_installer_state_install_sequence.nim",
@@ -36939,6 +36939,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/unit/t_provider_graph_snapshot_version_skew.nim",
     binary: "build/test-bin/t_provider_graph_snapshot_version_skew",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/unit/t_provider_response_resolves_shared_resolution_paths.nim",
+    binary: "build/test-bin/t_provider_response_resolves_shared_resolution_paths",
     defines: @[],
     requiresReproBinary: false,
     requiresMonitorShim: false,

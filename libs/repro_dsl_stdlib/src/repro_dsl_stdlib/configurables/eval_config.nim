@@ -24,6 +24,7 @@
 ## call with the parsed metadata.
 
 import std/[macros, strutils]
+from repro_core/relocation import recipeSourceName
 
 import ./types
 import ./context
@@ -114,13 +115,16 @@ proc emitOneScoped(node: NimNode; doc: string;
     error("doc comment for `" & nameStr & "`: " & err.msg, node)
   except DocDirectiveError as err:
     error(err.msg, node)
+  # The declaring file as every DSL site records it (`recipeSourceName`),
+  # so a recipe-relative provider does not carry the recipe's absolute path.
+  let recordedFile = recipeSourceName(descFile)
   let siteCall = newCall(bindSym"newSourceSite",
-    newLit(descFile), newLit(descLine), newLit(descCol),
+    newLit(recordedFile), newLit(descLine), newLit(descCol),
     bindSym"ckDefault")
   let declCall = newCall(bindSym"declareConfigurable",
     defaultExpr, newLit(scopedName),
     newLit(parsed.description), newLit(parsed.explicitId),
-    newLit(descFile), newLit(descLine), newLit(descCol), siteCall)
+    newLit(recordedFile), newLit(descLine), newLit(descCol), siteCall)
   result = newLetStmt(ident(nameStr), declCall)
 
 proc expandConfigBlock(body: NimNode;

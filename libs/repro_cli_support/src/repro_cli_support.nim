@@ -34451,11 +34451,18 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
 const certificateExportTableStableName* =
   "reprobuild.certificate-export-table.v1"
 
-proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
+proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot;
+                                      projectRoot: string):
     CertificateExportTable =
   ## Union every package fragment's certificate-export table. A fragment
   ## without the node marks nothing. Static metadata: it is read from the
   ## stored graph and never runs the provider.
+  ##
+  ## ``projectRoot`` is the root the provider ran in. A recipe-relative
+  ## provider records each declaration's site relative to it
+  ## (Provider-Runtime-Protocol-v1.md, "Paths in responses"), so every
+  ## entry names its file where it is, exactly as the target-export
+  ## listing does; an absolute site is unchanged.
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
@@ -34463,7 +34470,9 @@ proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
         let perPackage =
           decodeCertificateExportTablePayload(toBytes(node.payload))
         for entry in perPackage.entries:
-          result.entries.add(entry)
+          var located = entry
+          located.sourceFile = rebasedName(entry.sourceFile, projectRoot)
+          result.entries.add(located)
 
 type
   CertificatePlanPart* = object
@@ -34553,7 +34562,8 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
   ## Each non-empty selector's own selection is kept too (``bySelector``),
   ## so a caller can say which selector certifies nothing.
   result.repository = certificateRepositoryRoot(projectRoot)
-  result.certificates = aggregateCertificateExportTable(snapshot)
+  result.certificates = aggregateCertificateExportTable(snapshot,
+    projectRoot)
   let graph = declaredCertificateGraph(snapshot)
   let declared = graph.actions
   result.targets = graph.targets
@@ -34718,7 +34728,7 @@ proc certificateCommandSets*(snapshot: ProviderGraphSnapshot;
   for action in graph.actions:
     byId[action.id] = action
   let part = CertificatePlanPart(
-    certificates: aggregateCertificateExportTable(snapshot),
+    certificates: aggregateCertificateExportTable(snapshot, projectRoot),
     targets: graph.targets)
   var names: seq[string]
   for entry in part.certificates.entries:
@@ -34902,7 +34912,8 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
     if sub == "list":
       let info = prepareBuildGraphInspection(".", mode, publicCliPath,
         selectDefaultAction = false, lowerGraph = false)
-      let table = aggregateCertificateExportTable(info.snapshot)
+      let table = aggregateCertificateExportTable(info.snapshot,
+        info.projectRoot)
       if asJson:
         var arr = newJArray()
         for entry in table.entries:
@@ -93788,7 +93799,8 @@ proc prepareCertifyingPlan(opts: ReproTestShardOpts; mode: ToolProvisioningMode;
         let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
           selectDefaultAction = false, workRoot = workRoot,
           lowerGraph = false, bypassRunQuotaExplicit = bypassRunQuota)
-        for entry in aggregateCertificateExportTable(declared.snapshot).entries:
+        for entry in aggregateCertificateExportTable(declared.snapshot,
+            declared.projectRoot).entries:
           if result.selectors.find(entry.name) < 0:
             result.selectors.add(entry.name)
       if result.selectors.len == 0:
@@ -99080,9 +99092,11 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
   result = predeclaredLockFiles()
   var sidecarPath = ""
   var interfacePath = ""
+  var recipeDir = ""
   try:
     let match = resolveProjectFile(projectDir)
     if match.path.len > 0:
+      recipeDir = parentDir(absolutePath(match.path))
       let artifactDir = lockProviderArtifactDir(absolutePath(match.path),
         reprobuildLibraryWorkDir())
       sidecarPath = artifactDir / LockFileDeclarationsSidecarName
@@ -99113,6 +99127,13 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
     delEnv(LockFilesEmitEnvVar)
     try: removeFile(extendedPath(emitPath))
     except CatchableError: discard
+  # A recipe-relative provider records a declaration's site relative to the
+  # recipe it was compiled from, which is where it runs
+  # (Provider-Runtime-Protocol-v1.md, "Paths in responses"); the listing
+  # names the file where it is. An absolute site is unchanged.
+  if recipeDir.len > 0:
+    for decl in result.mitems:
+      decl.sourceFile = rebasedName(decl.sourceFile, recipeDir)
 
 proc siblingVariantDeclarations(checkout: string):
     seq[DevelopOverrideVariantDecl] =
