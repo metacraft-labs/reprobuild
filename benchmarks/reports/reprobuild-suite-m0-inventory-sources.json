@@ -21364,8 +21364,8 @@
       "owner": "libs/repro_home_rollback",
       "requiresReproBinary": true,
       "source": "libs/repro_home_rollback/tests/t_scoop_cleanup_keeps_installs_others_hold_or_reprobuild_did_not_make.nim",
-      "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
