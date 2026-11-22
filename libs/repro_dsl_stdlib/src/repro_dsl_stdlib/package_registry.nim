@@ -156,12 +156,13 @@ const PartialCatalogCoverage* = {
   "llvm-strip": "Windows llvm-mingw archives only; POSIX hosts use the " &
     "nixPackage.",
   "make": "Windows archive only; POSIX hosts use the nixPackage.",
-  "bash": "Windows archive only; POSIX hosts use the nixPackage.",
+  "bash": "Windows and linux x86_64 archives (the latter a static build); " &
+    "other POSIX hosts use the nixPackage.",
   "clang": "Windows and macOS arm64 archives; Linux and macOS x64 use the " &
     "nixPackage.",
   "capnp": "Windows archive only; POSIX hosts use the nixPackage.",
   "zstd": "Windows archive only; POSIX hosts use the nixPackage.",
-  "zlib-dev": "No archive arm: Nix-capable hosts use the nixPackage; " &
+  "zlib-dev": "linux x86_64 archive; Nix-capable hosts use the nixPackage; " &
     "every other host builds the zlib source recipe, selected on its header.",
   "zstd-dev": "Windows archive only; POSIX hosts use the nixPackage. " &
     "Same upstream release as 'zstd', selected on its header rather than " &
