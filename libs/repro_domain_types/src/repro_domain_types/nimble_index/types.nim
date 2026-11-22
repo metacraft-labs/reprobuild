@@ -15,6 +15,13 @@ const
   NimbleIndexSchemaVersion* = 1'u16
     ## The payload schema every object kind carries as its first field. A
     ## reader refuses any other value before decoding the rest.
+  NimbleShardSubmodulesSchema* = 2'u16
+    ## The shard schema whose version records carry a ``submodules`` list
+    ## (spec § 4.4, the NPC-M13 amendment). A shard is written in this
+    ## schema exactly when one of its records has a non-empty list, and in
+    ## ``NimbleIndexSchemaVersion`` otherwise, so a reader from before
+    ## submodule sources refuses such a shard as an unknown schema instead
+    ## of reading its records without their submodules.
 
   RootTypeId* = 0x1201'u16      ## RBSZ type id of a root object.
   ShardTypeId* = 0x1202'u16     ## RBSZ type id of a shard.
@@ -53,6 +60,11 @@ const
   MaxObservedTags* = 4096
     ## tags one observation records (the bound of a package's versions)
   MaxHeldVersions* = 4096
+  MaxSubmodules* = 256
+    ## submodules one version record lists, at any depth (spec § 6.1,
+    ## "Submodule sources"; threat model G38)
+  MaxSubmoduleDepth* = 8
+    ## nesting levels of submodules a source object may have (G38)
 
   # Text bounds, in bytes.
   MaxNameBytes* = 256
@@ -211,6 +223,9 @@ type
     flPlatformLimited = "platform_limited"
     flUnreadable = "unreadable"
     flGitlinks = "gitlinks"
+      ## the source object includes submodule trees (its ``submodules``
+      ## list names them); with an empty list, a record from before
+      ## submodule sources
     flOverrideApplied = "override_applied"
     flUnlisted = "unlisted"
       ## the source is outside the registry and the source set's own
@@ -244,6 +259,15 @@ type
       ## the source tag (`rvkTag`, `rvkLabel`), the branch (`rvkHead`,
       ## `rvkRef`), or empty (`rvkCommit`)
 
+  RecordSubmodule* = object
+    ## One submodule whose tree is part of a version's source object
+    ## (NPC-AREQ12, "Submodule sources"): where its tree is placed, the URL
+    ## it was fetched from (after relative resolution) and the commit its
+    ## gitlink pins. Provenance: the record's ``tree`` covers the content.
+    path*: string   ## relative to the package directory, `/`-separated
+    url*: string    ## an `https://` URL
+    commit*: string ## lower-case hex, full width
+
   VersionRecord* = object
     ## NPC-AREQ5: one immutable record per version.
     version*: RecordVersion
@@ -268,6 +292,12 @@ type
     nimbleFile*: Option[IndexObjectId]
       ## BLAKE3 of the `.nimble` read; none when the version has no
       ## `.nimble` (then the record is unreadable)
+    submodules*: seq[RecordSubmodule]
+      ## every submodule of the source object at any depth, strictly
+      ## ascending by path; empty for a version without gitlinks. A record
+      ## flagged `gitlinks` with an empty list is from a generator before
+      ## submodule sources: its tree lacks the submodules, and it is never
+      ## offered.
 
   OriginVcs* = enum
     ovGit = "git"

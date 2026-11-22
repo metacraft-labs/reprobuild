@@ -41,6 +41,8 @@ type
     exUnreadable = "unreadable"
     exPlatformLimited = "platform-limited"
     exGitlinks = "gitlinks"
+      ## a `gitlinks` record without a `submodules` list (from a generator
+      ## before submodule sources)
     exVersionShape = "version-shape"
       ## a fourth or later non-zero component: the solver's versions have
       ## three
@@ -254,9 +256,14 @@ proc candidate*(pkg: PackageEnvelope; r: VersionRecord;
     result.exclusions.add Exclusion(kind: exPlatformLimited,
       detail: "read by a probe on " & r.probePlatform & " only; this " &
         "solve is for " & p.id)
-  if flGitlinks in r.flags:
+  if flGitlinks in r.flags and r.submodules.len == 0:
+    # A record from a generator before submodule sources: its tree is the
+    # superproject's alone. One with its `submodules` list is offered: its
+    # tree includes every submodule's (spec § 6.1, "Submodule sources").
     result.exclusions.add Exclusion(kind: exGitlinks,
-      detail: "the tree has submodules, which are not offered")
+      detail: "the record has gitlinks and no submodules list: it is from " &
+        "a generator before submodule sources, and its source lacks the " &
+        "submodule trees")
   case r.version.kind
   of rvkTag:
     var t = ""
