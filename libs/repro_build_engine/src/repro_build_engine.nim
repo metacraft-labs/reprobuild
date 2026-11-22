@@ -8765,6 +8765,39 @@ proc isRemovalMutation*(detail: string): bool =
       return true
   false
 
+func spawnedImagePath(record: MonitorRecord): string =
+  ## The image an `mrProcessSpawn` record says its child started running, or
+  ## "" when the record does not establish one.
+  ##
+  ## THE ONE ANSWER to "which image did this spawn start", read by both of its
+  ## consumers: `observeSpawnImage` (the child pid's image, for entropy
+  ## attribution) and the `mrProcessSpawn` arm of `foldOneMonitorRecord` (the
+  ## image as a content input of the action). Two copies of these guards
+  ## would be two chances to disagree about the same record, and the cost of
+  ## disagreement is asymmetric: a spawn attributed but not keyed is a stale
+  ## hit.
+  ##
+  ## `mrProcessSpawn` is several shapes under one kind, and only one of them
+  ## names an image. Each guard below excludes a shape io-mon really writes:
+  ##
+  ## * `result == 0` — a POSIX `posix_spawn`-family call that SUCCEEDED (it
+  ##   returns 0, and io-mon's Linux shim writes the record only then). A
+  ##   `fork` record carries the child pid in `result` and no path; a Windows
+  ##   `CreateProcessW` record carries the call's BOOL (1 on success) and, as
+  ##   `path`, possibly the whole command line, which is not a path at all.
+  ## * `childOsPid != 0` — there is a child to attribute. A Windows
+  ##   `CreateProcessW` that failed has none.
+  ## * an ABSOLUTE `path` — `posix_spawnp` records the name the caller passed,
+  ##   before glibc's PATH walk (the `execvp` limit; see the `mrProcessExec`
+  ##   content arm), and io-mon's synthetic root spawn carries no path. A
+  ##   relative name names nothing this engine can resolve without guessing
+  ##   the child's search PATH.
+  if record.kind == mrProcessSpawn and record.result == 0 and
+      record.childOsPid != 0 and record.path.isAbsolute:
+    record.path
+  else:
+    ""
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
@@ -8925,6 +8958,10 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     of mrFileRead, mrLibraryLoad, mrProcessExec, mrPathProbe,
        mrDirectoryEnumerate: true
     of mrFileOpen: record.observationKind in {moFileRead, moFileOpen}
+    # Only a spawn that names an image is an input. A `fork` record has no
+    # path, and `materialPath` would turn that into the action's cwd and hand
+    # it to the volatile-runtime verdict below as if it were a read.
+    of mrProcessSpawn: spawnedImagePath(record).len > 0
     else: false
   let isWrite =
     case record.kind
@@ -9138,6 +9175,40 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     #     is for; it must not enter the key as a content read.
     if record.path.isAbsolute and
         not record.detail.contains(FailedExecDetailToken):
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorReads, materialized)
+  of mrProcessSpawn:
+    # A binary the action started through `posix_spawn` (or `pidfd_spawn`, or
+    # the macOS equivalent). The same content dependency as an executed
+    # image, for the same reason, so it goes to `monitorReads` beside the
+    # `mrProcessExec` arm's.
+    #
+    # WHY IT NEEDS ITS OWN ARM, AND WHY THE EXEC ARM DOES NOT COVER IT. glibc's
+    # `posix_spawn` performs the child's `execve` itself, inside libc and
+    # below the interposed symbol, so no `mrProcessExec` is ever written for
+    # the child's image; the child's own shim starts only once that image is
+    # mapped, and the loaded-object enumeration excludes the main executable.
+    # The ONLY record naming the image is the parent's `mrProcessSpawn`
+    # (io-mon `shim/linux_preload.nim` :: `recordPosixSpawn`). Until this arm
+    # existed it was read solely to attribute the child's pid
+    # (`observeSpawnImage`) and otherwise landed in the `else: discard` below,
+    # so a tool started through Nim's `osproc` without a shell, Rust's
+    # `std::process::Command` or Python's `subprocess` was in no cache key: an
+    # ordinary rebuild of that tool in place left the action a stale cache
+    # hit (`t_executed_binary_is_a_recorded_input.nim`, the `spawn` shape).
+    #
+    # THE GUARDS ARE `spawnedImagePath`'s, shared with `observeSpawnImage` so
+    # the attribution and the key cannot disagree about one record. They
+    # mirror the exec arm's: (1) absolute paths only — `posix_spawnp` records
+    # the UNRESOLVED name, and folding it would manufacture `<cwd>/<name>`
+    # exactly as an unresolved `execvp` would (pinned by the `spawnp` case);
+    # (2) no failed spawns — a failed spawn ran nothing, and glibc reports a
+    # child's failed exec as the call's own non-zero result. The other two
+    # conditions exclude the record shapes that are not a POSIX spawn at all:
+    # `fork` (no path) and Windows `CreateProcessW` (a BOOL result and a
+    # command line where the path would be).
+    let image = spawnedImagePath(record)
+    if image.len > 0:
       evidence.monitorReads.observe(evidence.evidenceProvenance,
         evcMonitorCapture, seen.monitorReads, materialized)
   of mrPathProbe:
@@ -9392,12 +9463,12 @@ proc observeSpawnImage(record: MonitorRecord;
   ## read before the child's stream regardless of which PID sorts first.
   ## Conflicting paths for a recycled child PID cannot establish its initial
   ## image: keep an empty binding until an explicit exec supplies one.
-  if record.kind != mrProcessSpawn or record.result != 0 or
-      record.childOsPid == 0 or not record.path.isAbsolute:
+  let image = spawnedImagePath(record)
+  if image.len == 0:
     return
   if not images.hasKey(record.childOsPid):
-    images[record.childOsPid] = record.path
-  elif images[record.childOsPid] != record.path:
+    images[record.childOsPid] = image
+  elif images[record.childOsPid] != image:
     images[record.childOsPid] = ""
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
@@ -10258,7 +10329,8 @@ proc executedToolImagePath(action: BuildAction;
   ## CHILD — it is installed by the preloaded shim's constructor, which runs
   ## only once the new image is already mapped. The launcher's exec of the
   ## action's ROOT image therefore happens strictly BEFORE any hook exists, so
-  ## `mrProcessExec` covers NESTED execs and nothing else. Measured: an action
+  ## `mrProcessExec` covers NESTED execs and nothing else (and `mrProcessSpawn`
+  ## nested spawns, written by the spawning parent). Measured: an action
   ## whose `argv[0]` IS the tool produced a 19-record depfile containing that
   ## binary's six glibc shared objects and NOT the binary itself. No arm in
   ## `foldOneMonitorRecord` can close that, because there is no record.
@@ -13880,7 +13952,7 @@ func interestConsumer*(category: EventCategory): string =
   of ecFileWrites: "monitorWrites (and undeclaredSurvivingWrites)"
   of ecProcessTree:
     "seen.execImageByPid (exec/spawn pid->image attribution) and the mrProcessExec " &
-      "content-dependency arm of the fold"
+      "and mrProcessSpawn content-dependency arms of the fold"
   of ecLibraryLoads: "the mrLibraryLoad arm of the fold (monitorReads)"
   of ecEnvReads: "cacheEnvInputs — the ACTION CACHE KEY"
   of ecEntropy: "applyEntropyBlessingPolicy — the CACHE-PUBLISH GATE"
