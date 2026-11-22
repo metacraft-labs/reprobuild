@@ -3,7 +3,7 @@
 ## package at a time, nearest the request first, and its solve time grows
 ## with the closure rather than with the product of its candidate sets.
 ##
-## The defect: a strategy's solve time grew exponentially with the closure.
+## The defect: ``highest``'s solve time grew exponentially with the closure.
 ## Named-Lock-Files §5.5 "How a strategy orders the closure", which
 ## settles it: one objective level per package, solved with core-guided
 ## optimisation. Before, the objective was one level summing every
