@@ -9,9 +9,9 @@ each case so a caller can compare its own case set against the surface's.
 
 ## What it is not
 
-It is **not** the runner lookup. `scripts/run_tests.sh` and
-`locateCtTestRunner` in `libs/repro_cli_support` resolve an *executor* — a
-program handed a directory of compiled test binaries, via `--bin-dir=<dir>`.
+It is **not** the runner lookup. `scripts/run_tests.sh` resolves an
+*executor* — a program handed a directory of compiled test binaries, via
+`--bin-dir=<dir>`.
 `locateCtTestSurface` here resolves a *catalog* — `<bin> test discover
 --workspace <root> …`, a program handed a source tree.
 
