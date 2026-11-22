@@ -52,6 +52,7 @@ proc canonicalPackage*(p: PackageEnvelope): PackageEnvelope =
   result = p
   for v in result.versions.mitems:
     v.layout.modules.sort()
+    v.submodules.sort(proc (a, b: RecordSubmodule): int = cmp(a.path, b.path))
   result.versions.sort(proc (a, b: VersionRecord): int =
     cmp(versionSortKey(a), versionSortKey(b)))
 

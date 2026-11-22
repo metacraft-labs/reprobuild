@@ -5,9 +5,10 @@
 ## coordinates (the origin, with any `?subdir=`, and the peeled commit) and
 ## the integrity `blake3:<tree>`. Nothing else is needed to fetch and verify
 ## it: no mirror, path or time is in the row. The fetch may additionally be
-## told the canonical archive's `archive_sha256` and size, from the version
-## record of the index the lock pins; they speed a refusal up but decide
-## nothing the tree digest does not.
+## told the canonical archive's `archive_sha256` and size, and whether the
+## record lists submodules, from the version record of the index the lock
+## pins; they speed a refusal up but decide nothing the tree digest does
+## not. The lock records no submodule URL.
 
 import std/[algorithm, strutils]
 
@@ -33,6 +34,11 @@ type
     tree*: string      ## 64 lower-case hex
     archiveSha256*: string ## "" when the index record was not consulted
     size*: int64           ## -1 when unknown
+    submodules*: bool
+      ## the index record lists submodules: the source object includes
+      ## their trees, which a forge's commit archive leaves out, so that
+      ## transport is not tried. False when the record was not consulted
+      ## (a hand-made row); the git transport composes submodules either way
 
   LockRowError* = object of ValueError
 

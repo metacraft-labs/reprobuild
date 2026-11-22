@@ -402,6 +402,7 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
           matched = true
           pkg.row.archiveSha256 = toHexLower(rec.archiveSha256)
           pkg.row.size = int64(rec.size)
+          pkg.row.submodules = rec.submodules.len > 0
           pkg.record = rec
           pkg.package = found.package
           break
