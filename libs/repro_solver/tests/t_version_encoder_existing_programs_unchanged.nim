@@ -11,9 +11,11 @@
 ## packages and variants, instances of one base, cross-package variant
 ## propagation, and every ``VersionPreference``. For each it hashes the
 ## solving program (``encodeUnified``) and the unsat-core program
-## (``encodeWithAssumptions``) and compares the hashes with those recorded
-## from the encoder BEFORE NPC-M6 (reprobuild ``8c92d3530e``), by running
-## this file there with ``-d:printProgramHashes``.
+## (``encodeWithAssumptions``) and compares the hashes with recorded ones:
+## for the default path and the unsat-core program, those of the encoder
+## BEFORE NPC-M6 (reprobuild ``8c92d3530e``), by running this file there with
+## ``-d:printProgramHashes``. The strategy programs were re-recorded when
+## their objective became one level per package (see ``Recorded``).
 ##
 ## Falsifying mutation: emitting the newest-first heuristic for every package
 ## under no strategy (or a ``package_active`` rule instead of the fact) moves
@@ -82,33 +84,40 @@ proc programs(variants: seq[VariantDecl];
   result.add ("assumptions", encodeWithAssumptions(variants, packages)[0])
 
 const Recorded = {
-  # Recorded with -d:printProgramHashes at reprobuild 8c92d3530e, the
-  # encoder before NPC-M6.
+  # The default path (`none`) and the unsat-core program (`assumptions`):
+  # recorded with -d:printProgramHashes at reprobuild 8c92d3530e, the
+  # encoder before NPC-M6, and frozen (NLF-STAT-4).
   "chain/none": "eccfac8d046133725c4d4252702c3dbadb758f6f1a71cadea9255b22258e40aa",
-  "chain/lowest": "a632a1ce74a9a4f3e1abb3d6f7f82e726dba64226e9a1141406a575941c695eb",
-  "chain/highest": "89c6408e9bc622b0cb962e572854018b5ddf74d0612646228882db536361e837",
-  "chain/lowest-direct": "13e2610f60d6377673601bf155500c74c948d5afb5408833ebfc9873543a9008",
   "chain/assumptions": "b477f6f9ba76a4a91923dc316e466d6ddcb0368c2c73a6d370df719454311ed8",
   "unparseable-and-undeclared/none": "3e3635d798fdc138c48dcb991201351b88f157df37cf83f3e7afa415e5223e6f",
-  "unparseable-and-undeclared/lowest": "22ca24fa2c3f865966b4ec2aa39fc9fd22773b8e117803019f0ad64d78a2a5d4",
-  "unparseable-and-undeclared/highest": "8837b484f28644df7ee3e1a1bdee59c500bee37a4c1426b01312b2ed3d5e148a",
-  "unparseable-and-undeclared/lowest-direct": "44207aad5928f778f31375097df6c08892ec1d82c0d49becbacc77fd5a38c1ff",
   "unparseable-and-undeclared/assumptions": "c8d69981d92ee2ea921a0c1b6566cc1ba05c114278b7d15f9f3c36f1dba8facd",
   "variant-gated/none": "93875d0bc63f2e8bc664a8114d034271e213a544ce4896319c45598564ac84a0",
-  "variant-gated/lowest": "445e5125a56355c2a59aae19a529826a7cf103aab5e3728800ba01761ff4cc3c",
-  "variant-gated/highest": "11e175c1c95e6c4d32562ec4ca096e7649f4a74818b0fbec06a4ca21ed1b5171",
-  "variant-gated/lowest-direct": "1733108a990772bfff61c377b954a9af0e0e16f198ace3552b1c3298bc675d56",
   "variant-gated/assumptions": "a102d25a15e8902d9bc2abf4d7155bce7a4b14e0b6f85feee25216008877dd57",
   "pinned/none": "28dd7dd86fca29be13ec92b6befc1e5ae128c329e9872eb6eb52b12de907b458",
-  "pinned/lowest": "efe8b514eb90dedee2257b7b5792eea0e2f1a4485642b735d4dab9ec039d6c97",
-  "pinned/highest": "0cbb107ec1c8549e64552f147ca13e859d374788eed70196224dd680091f4734",
-  "pinned/lowest-direct": "3395ca065892dd83fa2f2aa57cd65cf8f4052cde7f91c38d3442b4b843c83f7a",
   "pinned/assumptions": "7bafd9f3cda1aad9be79b36c95ddad846f282e6971c1b490f278c6792c4fb6e2",
   "instances/none": "65df692a61c482fd1624766c58fccbacc75cf42dabdf49240c3f7defa55f3a25",
-  "instances/lowest": "ccdb2d892e5cb72a875d78f01a0d538fa013a5bf100d8b85a4f1f50ae4c8aae4",
-  "instances/highest": "cdde4229888244ca00a407eb11611b1cadfd387115c46883d94363c5d71b94d2",
-  "instances/lowest-direct": "2a4735af3b3bf9a1235606c8ab7fce03aff22468a770bfd431ef622ae92a4b21",
-  "instances/assumptions": "9a26cecc4ec670ad57f8954d61de261d5947701e44552f3cefd0b73983943dee"}.toTable
+  "instances/assumptions": "9a26cecc4ec670ad57f8954d61de261d5947701e44552f3cefd0b73983943dee",
+  # The strategies (`lowest`, `highest`, `lowest-direct`): NLF-STAT-4 does
+  # not freeze them, and the fix for reprobuild-pm issue
+  # 2026-11-20-highest-strategy-solve-time-grows-exponentially-with-the-closure
+  # changed their objective on purpose (one priority level per package,
+  # Named-Lock-Files §5.5). Re-recorded with -d:printProgramHashes with that
+  # change, so they still catch any OTHER drift in a strategy program.
+  "chain/lowest": "1655c240d05a394e00cd15ee3384dd39cd5bdd58b282ee468ab81ffb6c1508eb",
+  "chain/highest": "7ed42b4776cccb0e725d71e5cf59581981acd40676443ae114e97eb07f7ba8fd",
+  "chain/lowest-direct": "6fe81b54c035e05a3918c7b6f3e87c53e3bb6a5c1287c753f34f0f37c719a23b",
+  "unparseable-and-undeclared/lowest": "07bf6fb42dbc8c8435e9d123f4c0b40e67f34a2a7302322ab045873cc9df83fd",
+  "unparseable-and-undeclared/highest": "31e5fb11dea7b018fdbd8f41cf7d4c64aff99fa89c657b2fea0c7ee5a037e387",
+  "unparseable-and-undeclared/lowest-direct": "612c75323a7166f19c16127b2fec01f70555bec01234d679e9e1d83a524248c9",
+  "variant-gated/lowest": "092174688ed958780bc0a58c175bd30176b16c88618f74e2fa441f35fa055119",
+  "variant-gated/highest": "123f71c8e600a7a4bf6456d1ce4c85432653c28c7b7c6077b49eba6e21658d92",
+  "variant-gated/lowest-direct": "ae1cd273f1ed4ef3da9b698bbf3929ba49715eb2aefcfa81cb55a9b544024ec2",
+  "pinned/lowest": "d968c15e4f285a1630e851032c7e53a1598d4a6b2356843346713229a1a7e156",
+  "pinned/highest": "5b3bdbcd7c4c6d0d0b6dc3a860ac79b4fbf5483ea33e0d62034c0f27701b98e0",
+  "pinned/lowest-direct": "d0a8860d8ca882cc6894e3d35a8a791211d6904b536cf30e2d9ef1f65cefb2ee",
+  "instances/lowest": "3cab06da6488170db2d420b767ad170ed6aa35fb0793b98e83e43f16372f02b7",
+  "instances/highest": "0f1d2fda0642299ad49259f35e74f0c07486a4122ad0484c9f9bf50ad20939f8",
+  "instances/lowest-direct": "1a47130275ad6109e8be1d29896b75120a626a1c84e7ba9eb6f3725bfa219720"}.toTable
 
 when defined(printProgramHashes):
   for (name, variants, packages) in corpus():
@@ -116,7 +125,7 @@ when defined(printProgramHashes):
       echo "  \"", name, "/", kind, "\": \"", digest(text), "\","
 else:
   suite "version_encoder: existing declaration sets encode as before (NPC-M6)":
-    test "every corpus program hashes as recorded before NPC-M6":
+    test "every corpus program hashes as recorded":
       var compared = 0
       for (name, variants, packages) in corpus():
         for (kind, text) in programs(variants, packages):

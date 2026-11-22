@@ -789,6 +789,11 @@ libs/repro_lock_gen/tests/t_targeted_repin_holds_every_unnamed_pin.nim	nim	7
 libs/repro_lock_gen/tests/t_variant_conditioned_uses_over_approximated.nim	nim	10
 libs/repro_nimble_fetch/tests/t_gzip_member_is_checked_whole.nim	nim	3
 libs/repro_nimble_fetch/tests/test_npc_fetch_parallel_no_history.nim	nim	2
+libs/repro_nimble_fetch/tests/test_npc_m13_changed_submodule_commit_changes_digest.nim	nim	1
+libs/repro_nimble_fetch/tests/test_npc_m13_client_git_fallback_composes_submodules.nim	nim	1
+libs/repro_nimble_fetch/tests/test_npc_m13_closure_index_one_row_per_package.nim	nim	1
+libs/repro_nimble_fetch/tests/test_npc_m13_egress_refused_submodule_url_refused.nim	nim	1
+libs/repro_nimble_fetch/tests/test_npc_m13_submodule_tree_in_source_object.nim	nim	1
 libs/repro_nimble_fetch/tests/test_npc_m5_archive_entries_cannot_escape_staging.nim	nim	2
 libs/repro_nimble_fetch/tests/test_npc_m5_origin_deleted_build_from_mirror.nim	nim	1
 libs/repro_nimble_fetch/tests/test_npc_m5_origin_fallback_egress_policy.nim	nim	2
@@ -803,6 +808,10 @@ libs/repro_nimble_generator/tests/t_nimble_source_set.nim	nim	6
 libs/repro_nimble_generator/tests/t_origin_git_run_keeps_the_output_of_a_child_that_exits.nim	nim	1
 libs/repro_nimble_generator/tests/t_repro_catalog_generate_and_verify_verbs.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_generator_deterministic_two_hosts.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m13_pre_m13_gitlinks_record_stays_excluded.nim	nim	3
+libs/repro_nimble_generator/tests/test_npc_m13_submodule_nesting_bounded.nim	nim	2
+libs/repro_nimble_generator/tests/test_npc_m13_submodule_path_collision_refused.nim	nim	1
+libs/repro_nimble_generator/tests/test_npc_m13_unobtainable_submodule_not_offered.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_ambiguous_commit_abbreviation_refused.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_cooldown_withholds_new_version.nim	nim	1
 libs/repro_nimble_generator/tests/test_npc_m4_gitlink_urls_obey_origin_policy.nim	nim	1
@@ -1103,6 +1112,7 @@ libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim	nim	3
 libs/repro_solver/tests/t_version_encoder_existing_programs_unchanged.nim	nim	2
 libs/repro_solver/tests/t_version_encoder_per_version_deps.nim	nim	9
 libs/repro_solver/tests/t_version_encoder_prefer_newest_is_locally_newest.nim	nim	1
+libs/repro_solver/tests/t_version_strategy_solves_package_by_package.nim	nim	5
 libs/repro_standard_provider/tests/test_ada_direct_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_c_cpp_autotools_convention.nim	nim	21
 libs/repro_standard_provider/tests/test_c_cpp_cmake_convention.nim	nim	10
@@ -1149,6 +1159,7 @@ libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim
 libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim	nim	2
 libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim	nim	12
 libs/repro_standard_provider/tests/test_rust_convention_mode_b_test_target.nim	nim	2
+libs/repro_standard_provider/tests/test_rust_convention_mode_b_workspace_build.nim	nim	1
 libs/repro_standard_provider/tests/test_rust_convention_target_edition.nim	nim	1
 libs/repro_standard_provider/tests/test_rust_convention_unit_test_crates.nim	nim	1
 libs/repro_standard_provider/tests/test_rust_direct_convention.nim	nim	14

@@ -4,8 +4,8 @@
 ##
 ##   1. Setting ``LanguageConvention.crudeFallback`` to a closure that
 ##      delegates to ``emitCrudeFragment`` with the language's native
-##      build-tool argv (``cargo build --release --locked --offline``,
-##      ``go build ./...``, ``nimble build``, ...) and the conventional
+##      build-tool argv (``cargo build --release --locked --offline
+##      --workspace``, ``go build ./...``, ``nimble build``, ...) and the conventional
 ##      output directories (``target``, ``build``, ``dist`` ...).
 ##
 ##   2. Detecting the fine-grained-incompatible shape inside their own

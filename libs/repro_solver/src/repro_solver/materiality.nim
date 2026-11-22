@@ -61,9 +61,10 @@
 ##     above every version level): the assigned value is strictly the
 ##     cheapest feasible one. When the gate is TIED with another value — a
 ##     variant nobody expressed a preference for — the version levels break
-##     the tie, comparing whole configurations by their summed ranks, and a
-##     publication outside every interval can flip it (only `libfoo 1.4`
-##     admissible under `fast`, `libfoo 3.0` published, `fast` dropped). The
+##     the tie, comparing whole configurations package by package (one
+##     level per package, Named-Lock-Files §5.5), and a publication outside
+##     every interval can flip it (only `libfoo 1.4` admissible under `fast`,
+##     `libfoo 3.0` published, `fast` dropped). The
 ##     packages such a variant reaches are recorded raw
 ##     (`tradeableVariants`, `tradedPackages`).
 ##
@@ -319,10 +320,10 @@ proc tradedPackages(packages: openArray[PackageDecl];
   ## tradeable variant: the target of every edge gated on one, closed over
   ## every edge out of such a package (its own selection, and so the
   ## liveness of its edges, can flip with the gate). For these the version
-  ## objective compares whole configurations — the sum of ranks across
-  ## packages — so a publication anywhere in the enumeration, even one that
-  ## merely shifts the ranks between two configurations' choices, can move
-  ## the answer. No interval expresses that; they are recorded raw.
+  ## objective compares whole configurations — the ranks of every package,
+  ## one level per package — so a publication anywhere in the enumeration
+  ## can move the answer (a newer `libfoo`, outside every interval, flips
+  ## `fast`). No interval expresses that; they are recorded raw.
   result = initHashSet[string]()
   for p in packages:
     for d in p.depends:
