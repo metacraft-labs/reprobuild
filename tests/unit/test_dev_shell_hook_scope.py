@@ -67,7 +67,8 @@ class DevShellHookScopeTests(unittest.TestCase):
         hook = flake[flake.index("devShells"):]
         guard = hook.index("${./scripts/is_reprobuild_checkout.sh}; then")
         installer = hook.index("${./scripts/install-git-hooks.sh}")
-        ensure = hook.index("hooks ensure --vcs")
+        # The dispatcher assertion lives in a script the hook runs.
+        ensure = hook.index("${./scripts/assert-managed-hooks.sh}")
         end = hook.index("\n              fi", ensure)
         self.assertLess(guard, installer)
         self.assertLess(installer, ensure)
