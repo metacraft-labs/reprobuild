@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3102,
+    "nimTestBinaries": 3103,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 824,
-    "staticallyDetectedRuntimeCompilerFlowTests": 159,
-    "testEntries": 3152
+    "staticallyDetectedRuntimeCompilerFlowTests": 160,
+    "testEntries": 3153
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1773,7 +1773,7 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 27,
+      "graph-fixture": 28,
       "integration": 1728,
       "platform/destructive": 200,
       "pure unit": 824,
@@ -1997,9 +1997,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3102,
+    "nimTestBinaryCount": 3103,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3152
+    "testEntryCount": 3153
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2567,6 +2567,27 @@
         }
       ],
       "source": "libs/repro_interface_artifacts/tests/t_l3_lifted_symbols_compile_in_a_consumer.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "res",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "binary",
+            "root"
+          ],
+          "line": 74,
+          "path": "libs/repro_interface_artifacts/tests/t_provider_location_verdict_tells_a_path_value_from_line_information.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "let res = execCmdEx(quoteShellCommand([findExe(\"nim\"), \"c\", \"--hints:off\","
+        }
+      ],
+      "source": "libs/repro_interface_artifacts/tests/t_provider_location_verdict_tells_a_path_value_from_line_information.nim"
     },
     {
       "class": "graph-fixture",
@@ -21659,6 +21680,23 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_provider_location_verdict_tells_a_path_value_from_line_information",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_provider_location_verdict_tells_a_path_value_from_line_information.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -53606,7 +53644,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_provider_compile_follows_the_recipe.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -7945,6 +7945,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_provider_location_verdict_tells_a_path_value_from_line_information.nim",
+    binary: "build/test-bin/t_provider_location_verdict_tells_a_path_value_from_line_information",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_interface_artifacts_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_provider_nimcache_key_tracks_external_libs.nim",
     binary: "build/test-bin/t_provider_nimcache_key_tracks_external_libs",
     defines: @[],
