@@ -78,6 +78,7 @@ Commands fall into four side-effect classes:
 | `repro why` | — | Explain why a package or an action is in the active context. |
 | `repro lock` | `list`, `solve`, `refresh`, `update`, `validate`, `diff`, `explain` | Inspect and update the project's lock. |
 | `repro workspace` (`repro ws`) | — | Manage the multi-repository workspace. |
+| `repro tool` | `realize` | Realize one provisioned tool of the project. |
 | `repro remove` | — | Remove a package dependency from the current project's repro.nim. |
 | `repro sync` | — | Fast-forward the workspace's repositories toward a target. |
 | `repro pull` | — | Converge the workspace onto its declared revisions. |
@@ -91,7 +92,7 @@ Commands fall into four side-effect classes:
 | `repro gateway` | `pre-receive`, `post-receive`, `migrate` | Run a push-gateway hook entry point. |
 | `repro bundle` | `create`, `publish`, `restore`, `inspect` | Create, publish and restore workspace bundles (docs/workspace-bundles.md). |
 | `repro catalog` | `generate`, `verify`, `publish` | Publish a catalog's interface artifacts, or generate and verify a Nimble package index. |
-| `repro nimble` | `verify` | Work with the Nimble packages a lock pins. |
+| `repro nimble` | `verify`, `check` | Work with the Nimble packages a lock pins. |
 
 ## Machines & Diagnostics
 
@@ -192,6 +193,7 @@ Commands fall into four side-effect classes:
 | `repro system` | Machines & Diagnostics | Manage the machine's system configuration. |
 | `repro tasks` | Environments & Services | List the current project's tasks. |
 | `repro test` | Build & Test | Run the project's tests. |
+| `repro tool` | Dependencies & Workspaces | Realize one provisioned tool of the project. |
 | `repro up` | Environments & Services | Start the project's services. |
 | `repro version` | Machines & Diagnostics | Show the client version and the protocol versions it speaks. |
 | `repro watch` | Build & Test | Watch for changes and rebuild or rerun continuously. |
