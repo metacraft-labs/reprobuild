@@ -137,6 +137,33 @@
 ## from 2025-02, is still served beside ``1.5.7-2``), so the pinned URL stays
 ## fetchable after a rebuild; ``packages/msys2_libevent.nim`` and
 ## ``packages/libtool.nim`` rely on the same.
+##
+## ## Path mode — the prefix ``ZSTD_DEV_PREFIX`` names
+##
+## Path mode resolves a program from ``$PATH``; a library selection has no
+## program there, and the ``zstd`` executable on ``$PATH`` is the CLI, not
+## this package. Its path-mode realization is the ``environmentPrefix`` arm
+## (the ``provisioning:`` entries in the DSL reference): the consumer's dev
+## shell exports the prefix of an installed zstd, and the engine checks, at
+## every resolution, that ``include/zstd.h`` and ``lib/libzstd`` (``.so``,
+## ``.dylib`` or ``.a``) are both under it, that the library is an object for
+## the build host, and hashes both into the realization's identity. Without
+## the arm, path mode refused every consumer of ``zstd-dev`` by name.
+##
+## The variable is ``ZSTD_DEV_PREFIX``, not ``ZSTD_PREFIX``. One prefix must
+## hold BOTH halves of this package's contract, and in nixpkgs they are in
+## two outputs (``dev`` and ``out``, above), so a Nix dev shell exports a
+## joined prefix, for example
+## ``pkgs.symlinkJoin { name = "zstd-dev-prefix"; paths = [ pkgs.zstd.dev
+## pkgs.zstd.out ]; }``. ``ZSTD_PREFIX`` is already in use for the library
+## output alone (reprobuild's own Nix package sets it to ``zstd.out``, which
+## has no ``include/``), and reusing that name would turn every such
+## environment into a refusal over a missing ``zstd.h``. The consuming action
+## receives the prefix as ``DEP_ZSTD_DEV_PREFIX``, after the selector.
+##
+## Under ``--target`` the arm never applies (the prefix is the build host's),
+## and in nix and tarball modes it is not consulted: the arms below realize
+## the package there.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
@@ -148,6 +175,10 @@ const ZstdDevMsys2Version* = "1.5.7-2"
 
 package `zstd-dev`:
   provisioning:
+    # Path mode: the joined dev+lib prefix the consumer's dev shell exports
+    # (module doc, "Path mode").
+    environmentPrefix "ZSTD_DEV_PREFIX", libraries = @["libzstd"],
+      headers = @["zstd.h"]
     nixPackage "nixpkgs#zstd^*", executablePath = "include/zstd.h",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
