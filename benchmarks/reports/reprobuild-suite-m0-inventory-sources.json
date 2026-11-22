@@ -42664,7 +42664,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_managed_hook_resolves_the_build_that_installed_it.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
