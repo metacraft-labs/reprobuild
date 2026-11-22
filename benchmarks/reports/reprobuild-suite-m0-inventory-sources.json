@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3142,
+    "nimTestBinaries": 3144,
     "pureUnitConsolidationGroups": 93,
     "pureUnitTests": 834,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3194
+    "testEntries": 3196
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1808,7 +1808,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1755,
+      "integration": 1757,
       "platform/destructive": 200,
       "pure unit": 834,
       "unclassified": 376
@@ -2031,9 +2031,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3142,
+    "nimTestBinaryCount": 3144,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3194
+    "testEntryCount": 3196
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14628,6 +14628,47 @@
       "source": "libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 22,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_compile_edges_offline",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_lock",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_crate_fetch_checked",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim",
+      "sourceSuiteCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
