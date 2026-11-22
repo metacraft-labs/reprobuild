@@ -762,6 +762,15 @@ lint:
     # contributor to edit a copy nobody reads; the published page under
     # docs/users/content/ goes stale. Pure grep, no build needed.
     bash ./scripts/check_superseded_doc_pointers.sh 2>&1 | tee -a test-logs/lint.log
+    # The private-reference ratchet, beside the pointer gate above because it
+    # guards the same thing one level out: a comment that sends a public reader
+    # somewhere they cannot go. This repository is public and its
+    # project-management repository is not, so a reference to it explains
+    # nothing. The existing ones are pinned per file in
+    # scripts/private-pm-references-baseline.tsv as debt to burn down; a file's
+    # count may fall (the baseline is rewritten smaller) but never rise. Pure
+    # git grep over tracked files, no build needed.
+    python3 ./scripts/check_private_pm_references.py 2>&1 | tee -a test-logs/lint.log
     # Distributed-Execution M7 (deployment-security-architecture.md CONF-1,
     # CONF-3, CONF-4): the worker unit carries the confinement floor (every
     # omission argued in the unit), its syscall additions are the derived

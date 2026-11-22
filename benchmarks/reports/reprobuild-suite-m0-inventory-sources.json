@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 828,
     "staticallyDetectedRuntimeCompilerFlowTests": 160,
-    "testEntries": 3169
+    "testEntries": 3170
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1779,7 +1779,7 @@
       "integration": 1740,
       "platform/destructive": 200,
       "pure unit": 828,
-      "unclassified": 373
+      "unclassified": 374
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2000,8 +2000,8 @@
       }
     ],
     "nimTestBinaryCount": 3119,
-    "pythonTestFileCount": 50,
-    "testEntryCount": 3169
+    "pythonTestFileCount": 51,
+    "testEntryCount": 3170
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -66055,6 +66055,21 @@
       "source": "tests/unit/test_bump_version.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_check_private_pm_references.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
