@@ -100,13 +100,16 @@ package gcc:
     # ambient PATH. ``gccLinkSpecs`` sets the default dynamic linker and run
     # path of a linked executable to the realized ones; ``gccSpecDefault``
     # keeps the hardening defaults Buildroot's wrapper adds, which declaring
-    # the real driver would otherwise lose.
+    # the real driver would otherwise lose. ``executableExtraAlias`` also
+    # puts the driver on PATH as ``cc``, the linker rustc runs by default
+    # (``LinuxToolchainCcAlias``).
     tarball url = LinuxToolchainX64Url,
       sha256 = LinuxToolchainX64Sha256,
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = LinuxToolchainGccDriver,
       executableAlias = "gcc",
+      executableExtraAlias = LinuxToolchainCcAlias,
       extraExecutable = LinuxToolchainArchiver,
       elfInterpreter = LinuxToolchainLoader,
       elfRunpath = LinuxToolchainRuntimeDir,

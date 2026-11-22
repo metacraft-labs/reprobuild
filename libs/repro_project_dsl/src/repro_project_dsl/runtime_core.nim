@@ -1136,6 +1136,35 @@ proc registeredWorkspaceDeps*(): seq[WorkspaceDepEdge] {.dynOrStatic.} =
   ## Return every ``depends_on`` edge recorded in evaluation order.
   workspaceDepRegistry
 
+type
+  CliProgramRegistration* = object
+    ## One ``executable`` with a ``cli:`` section, as the ``package`` macro
+    ## registers it in provider mode: its package, its name as written and
+    ## the program name its ``<name>CliDescription`` template passes to the
+    ## program's CLI generator (``repro_project_dsl/cli_description``).
+    packageName*: string
+    executable*: string
+    program*: string
+
+var cliProgramRegistry: seq[CliProgramRegistration] = @[]
+
+proc registerCliProgram*(packageName, executable, program: string)
+    {.dynOrStatic.} =
+  ## Records that ``executable`` of ``packageName`` has a ``cli:`` section
+  ## describing the program ``program``. Emitted by the ``package`` macro,
+  ## in provider mode only, for each executable with such a section: the
+  ## parsed ``ExecutableDef`` cannot say so by itself, because a section
+  ## that declares only root-scope parameters yields no command. The
+  ## provider's completion edges read it (``runtime_provider``). Idempotent.
+  let entry = CliProgramRegistration(packageName: packageName,
+    executable: executable, program: program)
+  if entry notin cliProgramRegistry:
+    cliProgramRegistry.add(entry)
+
+proc registeredCliPrograms*(): seq[CliProgramRegistration] {.dynOrStatic.} =
+  ## Every ``registerCliProgram`` record, in registration order.
+  cliProgramRegistry
+
 proc resetBuildActionRegistry*() {.dynOrStatic.} =
   buildActionRegistry.setLen(0)
 
@@ -2872,7 +2901,12 @@ proc registerCertificateDeclaration*(name: string;
                                      sourceLine: int) {.dynOrStatic.} =
   ## Record one ``certificate "<name>", <handle>`` declaration. The
   ## ``certificate`` templates below call this with the call site, so a
-  ## collision diagnostic can name it.
+  ## collision diagnostic can name it. The site's file is recorded as every
+  ## DSL site is (``recipeSourceName``): relative to the recipe in a
+  ## recipe-relative provider compile, which is the provider's working
+  ## directory, so the provider stays shareable between copies of the
+  ## recipe; the engine resolves it against the project root
+  ## (``aggregateCertificateExportTable``).
   certificateDeclarationRegistry.add(CertificateExportEntry(
     name: name,
     nodeKind: nodeKind,
@@ -2887,8 +2921,10 @@ template certificate*(certName: string; handle: BuildActionDef) =
   ## ``repro test <certName>`` and ``repro build <certName>`` select the edge.
   block:
     const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    const reproCertificateFile =
+      recipeSourceName(reproCertificateSite.filename)
     registerCertificateDeclaration(certName, cnkAction, handle.id,
-      reproCertificateSite.filename, reproCertificateSite.line)
+      reproCertificateFile, reproCertificateSite.line)
 
 template certificate*(certName: string; handle: BuildTargetDef) =
   ## Mark a build target — a ``target``, an ``aggregate`` or a ``collect``
@@ -2897,8 +2933,10 @@ template certificate*(certName: string; handle: BuildTargetDef) =
   ## ``certificate "unit-suite", aggregate("unit-suite", @[unit, integration])``.
   block:
     const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    const reproCertificateFile =
+      recipeSourceName(reproCertificateSite.filename)
     registerCertificateDeclaration(certName, cnkTarget, handle.name,
-      reproCertificateSite.filename, reproCertificateSite.line)
+      reproCertificateFile, reproCertificateSite.line)
 
 const implicitCertificateName* = "test"
   ## Operator decision D15 (Test-Certificates TC-9a): whatever a plain

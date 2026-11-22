@@ -250,6 +250,14 @@ suite "generated hook remedies name each path as one shell word":
       check chained.code != 0
       check shellWords(sh, backticked(chained.output, " health"),
         elsewhere) == @[stubPath, "health"]
+      # The chained hook's own path, named in running text ("or delete
+      # <path> if nothing installs ..."), is one word as well.
+      let deleteAt = chained.output.find("or delete ")
+      let ifAt = chained.output.find(" if nothing installs")
+      check deleteAt >= 0 and ifAt > deleteAt
+      if deleteAt >= 0 and ifAt > deleteAt:
+        let deleteWord = chained.output[deleteAt + "or delete ".len ..< ifAt]
+        check shellWords(sh, deleteWord, elsewhere) == @[local]
 
       # ---- (6) the dispatcher, managed body missing -------------------------
       removeFile(managed)

@@ -3,6 +3,7 @@ import std/[os, osproc, sequtils, strtabs, strutils]
 when defined(posix):
   import std/posix
 
+import repro_core/process_env
 import repro_dev_env_artifacts
 import repro_provider_runtime
 import repro_platform
@@ -245,13 +246,9 @@ proc baseEnvironment(): StringTableRef =
   # perfectly — the two surfaces disagreeing about the same activation.
   #
   # POSIX environment names ARE case-sensitive, so the distinction is kept
-  # there rather than normalised away globally.
-  when defined(windows):
-    result = newStringTable(modeCaseInsensitive)
-  else:
-    result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
+  # there rather than normalised away globally. `process_env` holds that
+  # choice for every caller.
+  inheritedEnvTable()
 
 proc samePathEntry(a, b: string): bool =
   ## Element equality for a PATH list.

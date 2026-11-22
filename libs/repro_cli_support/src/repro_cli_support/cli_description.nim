@@ -2606,6 +2606,15 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag store is string,
           help = "The source store (default: the user's, under the user " &
             "cache directory)"
+      subcmd "check",
+          help = "Report the native overrides, unmapped native " &
+            "dependencies and binaries of a lock's nimble: packages, " &
+            "offline":
+        flag lock is string,
+          help = "The lock (default: repro.lock in the current directory)"
+        flag store is string,
+          help = "The source store (default: the user's, under the user " &
+            "cache directory)"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
       subcmd "refresh",
           help = "Scan the workspace and rewrite repro.scanned-deps.nim":
@@ -3570,6 +3579,11 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "true; `--nixos=false` states it is not); without --target the " &
             "machine's os-release says. A profile with a `nixos` guard is " &
             "refused (exit 3) for a --target without it"
+        flag homeDir is Option[string],
+          help = "The host's home directory, as Home Manager's " &
+            "`home.homeDirectory` (default: $HOME): a PATH entry spelled " &
+            "as it by its absolute path is named `~/...`, as the Nix side " &
+            "names it. Used for naming only; nothing under it is read"
         flag output is Option[string],
           help = "Write the document here instead of to standard output"
       subcmd "compare", help = "Compare a Nix-side and a Reprobuild-side " &

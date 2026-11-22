@@ -380,7 +380,7 @@ $data = @{command=$invocation.Command; arguments=@($invocation.Arguments); quote
     def test_failed_bootstrap_refuses_before_later_release_work(self):
         just = shutil.which("just")
         self.assertIsNotNone(just, "the declared Just executable is required")
-        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/release-pipeline.yml").read_text(encoding="utf-8")
         lines = workflow.splitlines()
         starts = [index for index, line in enumerate(lines) if line == "          just bootstrap"]
         self.assertEqual(1, len(starts), "one owning Windows bootstrap invocation is required")
@@ -532,7 +532,7 @@ class ReleaseWindowsMonitorSnapshot(unittest.TestCase):
         self.assertIn("librepro_monitor_shim.dll is missing", ran.stderr)
 
     def test_the_release_build_runs_with_the_snapshot_pinned(self):
-        workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+        workflow = (ROOT / ".github/workflows/release-pipeline.yml").read_text(encoding="utf-8")
         lines = workflow.splitlines()
         pins = [i for i, line in enumerate(lines)
                 if line.strip().startswith("$env:REPRO_MONITOR_SHIM_LIB = & "
@@ -560,7 +560,8 @@ class ReleaseInventoryTests(unittest.TestCase):
     APPS = {
         "repro", "reprobuild", "repro-peer-cache-tier2", "repro-peer-cache-admin",
         "repro-peer-cache-mint-cert", "repro-cmake-dyndep-fragment",
-        "repro-tests-fragment", "repro-cmake-trycompile-provider",
+        "repro-tests-fragment", "repro-completion-files",
+        "repro-cmake-trycompile-provider",
         "repro-standard-provider",
         "repro-install-mirror-publish", "repro-agent-conformance", "repro-binary-cache",
         "repro-binary-cache-crosshost", "repro-harvest-apt", "attestation-agent",

@@ -62,6 +62,7 @@
 
 import std/[macros, strutils]
 
+from repro_core/relocation import recipeSourceName
 import repro_lock_files
 import repro_lock_files/ct_registry
 
@@ -127,14 +128,19 @@ proc emitDeclaration(nameNode: NimNode; path, description: string;
     newLit(ownerPackage)))
   # The run-time half: a `let` binding whose value is the name, and whose
   # side effect is registering the declaration in the process that will
-  # later print `repro lock list` and resolve `--lock`.
+  # later print `repro lock list` and resolve `--lock`. Its site is recorded
+  # as every DSL site is (`recipeSourceName`), so a recipe-relative provider
+  # does not carry the recipe's absolute path and stays shareable between
+  # copies; `repro lock list` resolves it against the recipe's directory.
+  # The compile-time record above keeps the absolute name: it is a
+  # diagnostic of this compile and never reaches the binary.
   let letStmt = newNimNode(nnkLetSection).add(
     newNimNode(nnkIdentDefs).add(
       postfix(ident(name), "*"),
       newEmptyNode(),
       newCall(bindSym"declareLockFile",
         newLit(name), newLit(path), newLit(description),
-        newLit(info.filename), newLit(line), newLit(column),
+        newLit(recipeSourceName(info.filename)), newLit(line), newLit(column),
         newLit(ownerPackage))))
   result.add(letStmt)
 

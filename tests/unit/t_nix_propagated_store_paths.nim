@@ -1,5 +1,6 @@
-import std/[os, sequtils, strutils, tempfiles, unittest]
+import std/[os, strutils, tempfiles, unittest]
 
+import repro_interface_artifacts
 import repro_tool_profiles
 
 suite "Nix propagated store path closure":
@@ -43,7 +44,14 @@ suite "Nix propagated store path closure":
     check profile.realizedStorePaths == @[devOutput, runtimeOutput]
     check absolutePath(runtimeOutput / "lib") in profile.libraryPathList
 
-  test "compiler wrapper contributes its selected libc runtime":
+  # A nixpkgs compiler wrapper records the libc it links against in
+  # ``nix-support/orig-libc``; the wrapper passes it to its own compiler and
+  # linker. It is not a propagated input, and following it as one put the libc
+  # on LIBRARY_PATH, where a different compiler on the action's PATH (a host
+  # gcc) linked against it and produced binaries the host libc cannot run.
+  # Fake store directories stand in for the wrapper and the libc; the code
+  # under test reads exactly these files, and nothing is mocked.
+  test "a compiler wrapper's libc stays out of the realized paths":
     let scratch = createTempDir("repro-nix-wrapper-runtime-", "")
     defer: removeDir(scratch)
 
@@ -52,6 +60,7 @@ suite "Nix propagated store path closure":
     let satellite = scratch / "libc-satellite"
     createDir(wrapper / "nix-support")
     createDir(runtime / "nix-support")
+    createDir(runtime / "lib")
     createDir(satellite)
     writeFile(wrapper / "nix-support" / "orig-libc", runtime & "\n")
     writeFile(runtime / "nix-support" / "propagated-build-inputs",
@@ -59,11 +68,12 @@ suite "Nix propagated store path closure":
 
     var paths = @[wrapper]
     expandNixPropagatedStorePaths(paths)
-    check paths == @[wrapper, runtime, satellite]
-    expandNixPropagatedStorePaths(paths)
-    check paths == @[wrapper, runtime, satellite]
+    check paths == @[wrapper]
+    # The dedicated reader still finds it, for install normalization.
+    check nixCompilerWrapperLibcs(paths) == @[runtime]
+    check nixCompilerWrapperLibcDirs(paths) == @[runtime / "lib"]
 
-  test "cached compiler profiles acquire libc without exposing its tools":
+  test "a compiler profile carries its libc only in the dedicated reader":
     let scratch = createTempDir("repro-nix-cached-wrapper-", "")
     defer: removeDir(scratch)
 
@@ -71,24 +81,56 @@ suite "Nix propagated store path closure":
     let runtime = scratch / "libc-runtime"
     createDir(wrapper / "nix-support")
     createDir(wrapper / "bin")
+    createDir(wrapper / "lib")
     createDir(runtime / "lib")
+    createDir(runtime / "include")
     createDir(runtime / "bin")
+    # Content, not name, is what makes a directory a libc: the guard in the
+    # engine refuses this one if it ever reaches LIBRARY_PATH.
+    writeFile(runtime / "lib" / "libc.so.6", "synthetic libc")
+    writeFile(wrapper / "nix-support" / "orig-libc", runtime & "\n")
     var profile = PathOnlyToolProfile(installMethod: "nix",
       realizedStorePaths: @[wrapper], pathSearchList: @[wrapper / "bin"])
     expandNixProfilePropagatedPaths(profile)
-    let oldFingerprint = profile.profileFingerprint
-    check profile.libraryPathList.len == 0
-    writeFile(wrapper / "nix-support" / "orig-libc", runtime & "\n")
+    check profile.realizedStorePaths == @[wrapper]
+    check profile.libraryPathList == @[wrapper / "lib"]
+    for list in [profile.libraryPathList, profile.cpathList,
+                 profile.pkgConfigSearchList, profile.cmakePrefixList,
+                 profile.pathSearchList]:
+      for entry in list:
+        check not entry.startsWith(runtime)
+    check nixCompilerWrapperLibcDirs(profile.realizedStorePaths) ==
+      @[runtime / "lib"]
+    let fingerprint = profile.profileFingerprint
+    expandNixProfilePropagatedPaths(profile)
+    check profile.realizedStorePaths == @[wrapper]
+    check profile.profileFingerprint == fingerprint
 
-    expandNixProfilePropagatedPaths(profile)
-    check profile.realizedStorePaths == @[wrapper, runtime]
-    check profile.libraryPathList == @[absolutePath(runtime / "lib")]
-    check profile.pathSearchList == @[wrapper / "bin"]
-    check profile.profileFingerprint != oldFingerprint
-    let newFingerprint = profile.profileFingerprint
-    expandNixProfilePropagatedPaths(profile)
-    check profile.libraryPathList.count(absolutePath(runtime / "lib")) == 1
-    check profile.profileFingerprint == newFingerprint
+  test "a cached realization that followed the wrapper's libc is detected":
+    # Builds that still followed ``orig-libc`` cached the libc among the
+    # realized paths; their readers resolve such an entry afresh.
+    let scratch = createTempDir("repro-nix-stale-wrapper-", "")
+    defer: removeDir(scratch)
+
+    let wrapper = scratch / "cc-wrapper"
+    let runtime = scratch / "libc-runtime"
+    let libcDev = scratch / "libc-dev"
+    createDir(wrapper / "nix-support")
+    createDir(runtime / "lib")
+    createDir(libcDev / "nix-support")
+    writeFile(wrapper / "nix-support" / "orig-libc", runtime & "\n")
+    check nixStorePathsCarryWrapperLibc([wrapper, runtime], wrapper)
+    # A fresh realization does not carry it.
+    check not nixStorePathsCarryWrapperLibc([wrapper], wrapper)
+    # The libc reached through a real propagated input is not stale.
+    writeFile(libcDev / "nix-support" / "propagated-build-inputs",
+      runtime & "\n")
+    check not nixStorePathsCarryWrapperLibc([wrapper, libcDev, runtime],
+      wrapper)
+    # Nor is a libc that is the tool's own selected output.
+    check not nixStorePathsCarryWrapperLibc([runtime, wrapper], runtime)
+    # Nor anything without a wrapper.
+    check not nixStorePathsCarryWrapperLibc([runtime], runtime)
 
   test "missing compiler runtime and non-runtime wrapper metadata stay out":
     let scratch = createTempDir("repro-nix-wrapper-metadata-", "")
@@ -104,6 +146,8 @@ suite "Nix propagated store path closure":
     var paths = @[wrapper]
     expandNixPropagatedStorePaths(paths)
     check paths == @[wrapper]
+    check nixCompilerWrapperLibcs(paths).len == 0
+    check nixCompilerWrapperLibcDirs(paths).len == 0
 
 # The Darwin SDK cases below reproduce the layout measured on an
 # aarch64-darwin host at the stdlib's canonical nixpkgs pin (``addf7cf5``).
@@ -238,3 +282,108 @@ suite "Darwin compiler wrapper SDK":
     check profile.realizedStorePaths == @[linuxWrapper]
     check profile.libraryPathList == @[absolutePath(linuxWrapper / "lib")]
     check profile.cpathList.len == 0
+
+# Path mode resolves the compiler from ``$PATH``. In a Nix dev shell that is
+# the same Darwin cc-wrapper as above, whose bin directory the shell puts on
+# ``$PATH``; a CI job that runs ``repro build`` inside the shell failed every
+# Rust build-script link with ``ld: library 'iconv' not found`` because the
+# path-mode profile carried none of the SDK's host libraries. The fixture
+# wrapper gets a real executable ``cc`` that answers the version probe, and
+# the cases go through ``resolvePathOnlyTool``, the resolver path mode uses.
+# Shell-script executables need a POSIX host.
+when defined(posix):
+  proc writeProbeableCc(binDir: string) =
+    createDir(binDir)
+    let cc = binDir / "cc"
+    writeFile(cc, "#!/bin/sh\necho 'clang version 21.1.8'\n")
+    setFilePermissions(cc, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+  proc ccUse(): InterfaceToolUse =
+    InterfaceToolUse(rawConstraint: "cc", packageSelector: "cc",
+      executableName: "cc")
+
+  suite "Darwin compiler wrapper SDK in path mode":
+    test "a Darwin cc-wrapper found on PATH links against its SDK's libiconv":
+      let scratch = createTempDir("repro-path-darwin-sdk-profile-", "")
+      defer: removeDir(scratch)
+      let f = darwinSdkFixture(scratch)
+      writeProbeableCc(f.wrapper / "bin")
+
+      let profile = resolvePathOnlyTool(ccUse(),
+        pathValue = f.wrapper / "bin")
+      check profile.installMethod == "path"
+      check profile.resolvedExecutablePath == f.wrapper / "bin" / "cc"
+      check profile.libraryPathList == @[absolutePath(f.iconv / "lib")]
+      check profile.cpathList == @[absolutePath(f.iconvDev / "include")]
+      # Only the two link channels change. Path mode realizes nothing, so no
+      # store path, prefix or extra PATH entry appears, and the SDK's tools
+      # (xcbuild's `xcrun`) and libiconv's `bin/iconv` stay off PATH.
+      check profile.realizedStorePaths.len == 0
+      check profile.cmakePrefixList.len == 0
+      check profile.pkgConfigSearchList.len == 0
+      check profile.pathSearchList == @[f.wrapper / "bin"]
+      check not pathProfileLacksNixDarwinSdkChannels(profile)
+      # The directories are part of the profile's identity.
+      var withoutSdk = profile
+      withoutSdk.cpathList = @[]
+      withoutSdk.libraryPathList = @[]
+      refreshProfileIdentity(withoutSdk)
+      check withoutSdk.profileFingerprint != profile.profileFingerprint
+
+    test "a wrapper reached through a directory of links is followed":
+      # A Nix profile or `buildEnv` puts links into the wrapper on PATH.
+      let scratch = createTempDir("repro-path-darwin-sdk-link-", "")
+      defer: removeDir(scratch)
+      let f = darwinSdkFixture(scratch)
+      writeProbeableCc(f.wrapper / "bin")
+      let linkBin = scratch / "profile" / "bin"
+      createDir(linkBin)
+      createSymlink(f.wrapper / "bin" / "cc", linkBin / "cc")
+
+      let profile = resolvePathOnlyTool(ccUse(), pathValue = linkBin)
+      check profile.resolvedExecutablePath == linkBin / "cc"
+      check profile.libraryPathList == @[absolutePath(f.iconv / "lib")]
+      check profile.cpathList == @[absolutePath(f.iconvDev / "include")]
+
+    test "a host or Linux compiler on PATH gets no SDK libraries":
+      let scratch = createTempDir("repro-path-darwin-sdk-absent-", "")
+      defer: removeDir(scratch)
+      # Xcode's /usr/bin/cc, or any compiler with no nix-support metadata.
+      let hostBin = scratch / "usr" / "bin"
+      writeProbeableCc(hostBin)
+      # A Linux Nix wrapper: nix-support without a darwin-sdk-setup.bash.
+      let linuxWrapper = scratch / "gcc-wrapper"
+      createDir(linuxWrapper / "nix-support")
+      createDir(linuxWrapper / "lib")
+      writeFile(linuxWrapper / "nix-support" / "orig-libc", "")
+      writeProbeableCc(linuxWrapper / "bin")
+
+      for binDir in [hostBin, linuxWrapper / "bin"]:
+        let profile = resolvePathOnlyTool(ccUse(), pathValue = binDir)
+        check profile.resolvedExecutablePath == binDir / "cc"
+        check profile.cpathList.len == 0
+        check profile.libraryPathList.len == 0
+        check profile.realizedStorePaths.len == 0
+        check not pathProfileLacksNixDarwinSdkChannels(profile)
+
+    test "a cached path profile without the SDK libraries is re-resolved":
+      # A tool-identity cache written before path mode followed the SDK
+      # holds the wrapper's profile without them; serving it would fail the
+      # same link again.
+      let scratch = createTempDir("repro-path-darwin-sdk-stale-", "")
+      defer: removeDir(scratch)
+      let f = darwinSdkFixture(scratch)
+      writeProbeableCc(f.wrapper / "bin")
+
+      let fresh = resolvePathOnlyTool(ccUse(), pathValue = f.wrapper / "bin")
+      var stale = fresh
+      stale.cpathList = @[]
+      stale.libraryPathList = @[]
+      check pathProfileLacksNixDarwinSdkChannels(stale)
+      check not pathProfileLacksNixDarwinSdkChannels(fresh)
+      # A Nix profile is repaired on read instead
+      # (`expandNixProfilePropagatedPaths`), so this check leaves it alone.
+      var nixProfile = stale
+      nixProfile.installMethod = "nix"
+      check not pathProfileLacksNixDarwinSdkChannels(nixProfile)

@@ -32,6 +32,15 @@
 ##   `--system` through it without touching the machine. A `--system` target
 ##   that resolves outside the root (through a symlink inside it) is
 ##   reported `failed` and not touched (`requireUnderRoot`).
+## * **Windows.** `--system` writes PowerShell only (no other shell loads
+##   completion system-wide there): the script under the installation prefix
+##   (`<prefix>\share\repro\completions\repro.ps1`, the prefix being the
+##   directory above the running binary's `bin\`), and a block in the
+##   all-users profile `$PSHOME\Profile.ps1` of each PowerShell found whose
+##   `$PSHOME` is writable. A PowerShell whose `$PSHOME` is not writable (an
+##   MSIX install, or a user who is not an administrator) is reported
+##   `refused-unwritable`, as on the other platforms, and its per-user block
+##   is left as it is.
 ##
 ## The blocks go through the one managed-block writer
 ## (`repro_home_resources/drivers/managed_block`), with ids
@@ -40,6 +49,8 @@
 ## Every write is checked against the test-home fence first.
 
 import std/[json, os, strutils]
+when defined(windows):
+  import std/winlean
 
 import clispec/[completion, completion_install]
 from repro_core/paths import extendedPath
@@ -123,6 +134,10 @@ type
     pathEnv*: string      ## the `PATH` shells are detected on
     user*: string         ## the user name, for `/etc/profiles/per-user`
     windows*: bool
+    installPrefix*: string
+      ## Windows: the installation `--system` puts the script under (the
+      ## directory above the running binary's `bin\`), before `systemRoot`
+      ## re-roots it. Unused elsewhere.
     script*: proc (shell: CliShell): string {.closure.}
       ## The script `<program> completion <shell>` prints.
 
@@ -244,7 +259,14 @@ const localFamily = (when defined(linux): cpfLinuxLocal else: cpfLocal)
 proc localSystemTargets(req: CompletionHookRequest; shell: CliShell;
                         psHome = ""): seq[CliCompletionTarget] =
   ## The `--system` targets of `shell`, every path under the test root: the
-  ## prefix and the configuration directory alike.
+  ## prefix and the configuration directory alike. On Windows these are the
+  ## Windows family's (`cpfWindows`): PowerShell's only, under the
+  ## installation prefix.
+  if req.windows:
+    if req.installPrefix.len == 0:
+      return @[]
+    return cliSystemCompletionTargets(shell, req.program, cpfWindows,
+      rooted(req.systemRoot, req.installPrefix), psHome)
   cliSystemCompletionTargets(shell, req.program, localFamily,
     rooted(req.systemRoot, cliDefaultPrefix(localFamily)), psHome,
     sysconfDir = rooted(req.systemRoot, "/etc"))
@@ -275,12 +297,24 @@ proc bashCompletionInstalled(req: CompletionHookRequest): bool =
       return true
   false
 
-proc powerShellHome(executable: string): string =
+proc powerShellHome(executable: string; edition: CliPowerShellEdition): string =
   ## The `$PSHOME` of the PowerShell at `executable`, found without running
-  ## it: the directory that holds `System.Management.Automation.dll`, which
-  ## is the executable's own (Microsoft's packages; symlinks resolved) or,
-  ## for a wrapper script, `../share/powershell` beside it (nixpkgs). "" when
-  ## neither holds it.
+  ## it.
+  ##
+  ## * PowerShell 7 (`pwsh`): the directory that holds
+  ##   `System.Management.Automation.dll`, which is the executable's own
+  ##   (Microsoft's packages, Windows included; symlinks resolved) or, for a
+  ##   wrapper script, `../share/powershell` beside it (nixpkgs). "" when
+  ##   neither holds it, which is also what an MSIX install's App Execution
+  ##   Alias (`%LOCALAPPDATA%\Microsoft\WindowsApps\pwsh.exe`, nothing
+  ##   beside it) gives: its real `$PSHOME`, under `WindowsApps`, is not
+  ##   writable anyway.
+  ## * Windows PowerShell 5.1 (`powershell`): the directory of
+  ##   `powershell.exe` (`%SystemRoot%\System32\WindowsPowerShell\v1.0`).
+  ##   Its `System.Management.Automation.dll` is in the global assembly
+  ##   cache, not beside it, so the marker cannot be used; `$PSHOME` is the
+  ##   directory it was started from (about_Automatic_Variables,
+  ##   https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_automatic_variables#pshome).
   const marker = "System.Management.Automation.dll"
   var exe = executable
   try:
@@ -288,6 +322,8 @@ proc powerShellHome(executable: string): string =
   except OSError:
     discard
   let dir = parentDir(exe)
+  if edition == cpeWindows:
+    return dir
   if fileExists(dir / marker):
     return dir
   let shared = parentDir(dir) / "share" / "powershell"
@@ -305,7 +341,33 @@ proc writableDir(dir: string): bool =
       break
     d = parent
   when defined(windows):
-    dirExists(d)
+    # Windows has no access(2) that answers for the ACL: create a file
+    # there, which is the question being asked. The probe is created with
+    # CREATE_NEW, so an existing file of the same name is never opened, let
+    # alone truncated (a name collision moves on to the next name), and with
+    # FILE_FLAG_DELETE_ON_CLOSE, so the system removes it when the handle
+    # closes, whatever happens in between
+    # (https://learn.microsoft.com/windows/win32/api/fileapi/nf-fileapi-createfilew).
+    if not dirExists(d):
+      return false
+    const
+      deleteAccess = 0x00010000'i32   # DELETE, which DELETE_ON_CLOSE needs
+      errorFileExists = 80'i32
+      errorAlreadyExists = 183'i32
+    for attempt in 0 ..< 64:
+      let probe = d / (".repro-write-probe-" & $getCurrentProcessId() &
+        "-" & $attempt)
+      let h = createFileW(newWideCString(extendedPath(probe)),
+        GENERIC_WRITE or deleteAccess, 0, nil, CREATE_NEW,
+        FILE_ATTRIBUTE_TEMPORARY or FILE_ATTRIBUTE_HIDDEN or
+        FILE_FLAG_DELETE_ON_CLOSE, 0)
+      if h != INVALID_HANDLE_VALUE:
+        discard closeHandle(h)
+        return true
+      let err = getLastError()
+      if err != errorFileExists and err != errorAlreadyExists:
+        return false
+    false
   else:
     dirExists(d) and access(d.cstring, W_OK) == 0
 
@@ -451,9 +513,28 @@ proc foundShells(req: CompletionHookRequest): seq[ShellFound] =
         if d.command == "powershell": cpeWindows else: cpePwsh)
     result[at].executables.add(d.executable)
 
+proc powerShellHomes(found: ShellFound):
+    seq[tuple[executable, home: string]] =
+  ## Each detected PowerShell with its `$PSHOME` ("" when it cannot be
+  ## told), one entry per distinct `$PSHOME`: Windows has two PowerShells,
+  ## each with its own all-users profile.
+  for i, exe in found.executables:
+    let home = powerShellHome(exe, found.editions[i])
+    var seen = false
+    for r in result:
+      if home.len > 0 and r.home == home:
+        seen = true
+    if not seen:
+      result.add((exe, home))
+
+type CompletionRefusal = tuple[path, detail: string]
+
 proc wantedTargets(req: CompletionHookRequest; found: ShellFound):
-    tuple[targets: seq[CliCompletionTarget]; refusal, refusedAt: string] =
-  ## The targets to write for one detected shell, or why none can be.
+    tuple[targets: seq[CliCompletionTarget]; refusals: seq[CompletionRefusal]] =
+  ## The targets to write for one detected shell, and the PowerShells whose
+  ## all-users profile cannot be written (each reported
+  ## `refused-unwritable`). When no target is left, the script file is not
+  ## written either.
   case req.scope
   of csUser:
     for t in cliUserCompletionTargets(found.shell, req.program, req.env,
@@ -469,26 +550,31 @@ proc wantedTargets(req: CompletionHookRequest; found: ShellFound):
       for t in localSystemTargets(req, found.shell):
         result.targets.add(t)
       return
-    var psHome = ""
-    for exe in found.executables:
-      psHome = powerShellHome(exe)
-      if psHome.len > 0:
-        break
-    if psHome.len == 0:
-      result.refusedAt = found.executables.join(", ")
-      result.refusal = "cannot tell this PowerShell's $PSHOME (no " &
-        "System.Management.Automation.dll beside " &
-        found.executables.join(", ") & ")"
-      return
-    let home = rooted(req.systemRoot, psHome)
-    if not writableDir(home):
-      result.refusedAt = cliPowerShellAllUsersProfile(home)
-      result.refusal = "$PSHOME (" & psHome & ") is not writable, so its " &
-        "all-users profile cannot load the script (an MSIX install, or a " &
-        "read-only store); use --profile for each user instead"
-      return
-    for t in localSystemTargets(req, found.shell, home):
-      result.targets.add(t)
+    # One block per PowerShell whose $PSHOME is writable, after the one
+    # script file they all load.
+    for (exe, psHome) in powerShellHomes(found):
+      if psHome.len == 0:
+        result.refusals.add((exe, "cannot tell this PowerShell's $PSHOME " &
+          "(no System.Management.Automation.dll beside " & exe & ")"))
+        continue
+      let home = rooted(req.systemRoot, psHome)
+      # A home that leads out of the test root is not probed (the probe
+      # writes): its block is reported `failed` by `ensureBlock`.
+      var escapes = false
+      try:
+        requireUnderRoot(req, home)
+      except RootEscapeError:
+        escapes = true
+      if not escapes and not writableDir(home):
+        result.refusals.add((cliPowerShellAllUsersProfile(home, req.windows),
+          "$PSHOME (" & psHome & ") is not writable, so its " &
+          "all-users profile cannot load the script (an MSIX install, or a " &
+          "read-only store); use --profile for each user instead"))
+        continue
+      for t in localSystemTargets(req, found.shell, home):
+        if t.kind == ctkFile and result.targets.len > 0:
+          continue
+        result.targets.add(t)
 
 # ---------------------------------------------------------------------------
 # The commands.
@@ -499,9 +585,6 @@ proc ensureCompletionHooks*(req: CompletionHookRequest):
   ## Install (or, with `reinstall`, rewrite) completion for every detected
   ## shell. Returns one entry per target; `completionExitCode` of them is
   ## the command's status. Every shell is visited even after a refusal.
-  if req.windows and req.scope == csSystem:
-    raise newException(ValueError,
-      "--system shell completion is not specified on Windows; use --profile")
   for found in foundShells(req):
     if req.scope == csUser:
       var registered = ""
@@ -520,11 +603,11 @@ proc ensureCompletionHooks*(req: CompletionHookRequest):
           outcome: coAlreadyRegisteredSystem)
         continue
     let wanted = wantedTargets(req, found)
-    if wanted.refusal.len > 0:
+    for r in wanted.refusals:
       result.add CompletionHookEntry(shell: found.shell, scope: req.scope,
-        target: ctkProfileBlock, path: wanted.refusedAt,
-        outcome: coRefusedUnwritable,
-        detail: wanted.refusal)
+        target: ctkProfileBlock, path: r.path,
+        outcome: coRefusedUnwritable, detail: r.detail)
+    if wanted.targets.len == 0:
       continue
     let script = req.script(found.shell)
     var fileOk = true
@@ -547,9 +630,6 @@ proc uninstallCompletionHooks*(req: CompletionHookRequest):
   ## Remove what `ensureCompletionHooks` writes for this scope, for every
   ## shell (detected or not: a shell uninstalled since keeps its files
   ## otherwise). Foreign files are left in place.
-  if req.windows and req.scope == csSystem:
-    raise newException(ValueError,
-      "--system shell completion is not specified on Windows; use --profile")
   for shell in CliShell:
     var targets: seq[CliCompletionTarget] = @[]
     case req.scope
@@ -557,16 +637,20 @@ proc uninstallCompletionHooks*(req: CompletionHookRequest):
       targets = cliUserCompletionTargets(shell, req.program, req.env,
         req.windows)
     of csSystem:
-      var psHome = ""
-      if shell == cshPowerShell:
+      if shell != cshPowerShell:
+        targets = localSystemTargets(req, shell)
+      else:
+        # The script, and the block in the all-users profile of each
+        # PowerShell found (none found: the script alone).
+        targets = localSystemTargets(req, shell)
         for found in foundShells(req):
           if found.shell == cshPowerShell:
-            for exe in found.executables:
-              psHome = powerShellHome(exe)
+            for (exe, psHome) in powerShellHomes(found):
               if psHome.len > 0:
-                break
-      targets = localSystemTargets(req, shell,
-        (if psHome.len > 0: rooted(req.systemRoot, psHome) else: ""))
+                for t in localSystemTargets(req, shell,
+                    rooted(req.systemRoot, psHome)):
+                  if t.kind == ctkProfileBlock:
+                    targets.add(t)
     for t in targets:
       case t.kind
       of ctkFile: result.add removeFileTarget(req, shell, t.path)

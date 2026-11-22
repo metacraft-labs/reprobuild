@@ -109,6 +109,7 @@ repro health --json
 | `unpublished-heads` | Warns when participating checkouts sit at local commits that exist on no remote. | No |
 | `disjoint-local-branches` | Warns about unpublished local branches that share no merge-base with the repository's mainline. | No |
 | `shared-clone-leaves` | Inspects checkouts borrowing from shared bare clones for missing pools, broken refetch chains or stale remote refs. | Yes (pools, chains, stale remote refs) |
+| `shared-clone-pack-temporaries` | Finds git pack temporaries that an interrupted repack or fetch abandoned in the host's shared clone pools, which git can never read. | Yes (removes them) |
 | `certificate-policy-snapshot` | Warns when a repository's recorded certificate-policy snapshot in `repro.lock` is behind its project file. | No |
 <!-- generated:end -->
 

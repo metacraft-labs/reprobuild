@@ -46,6 +46,13 @@ proc recordVersion*(tag: string): RecordVersion =
   else:
     RecordVersion(kind: rvkLabel, tag: tag)
 
+static:
+  # The record's enumerations are the reader's, shifted by their `none`.
+  doAssert ord(high(NimVersionTerm)) == ord(high(NimVersionField)) + 1
+  doAssert $NimVersionTerm(ord(nfMajorMinorPatch) + 1) == $nfMajorMinorPatch
+  doAssert ord(high(ConditionOp)) == ord(high(CompareOp)) + 1
+  doAssert $ConditionOp(ord(coGe) + 1) == $coGe
+
 proc conditionNodes*(c: Condition): seq[ConditionNode] =
   ## A reader condition flattened in prefix order; nil is unconditional.
   if c.isNil:
@@ -55,6 +62,13 @@ proc conditionNodes*(c: Condition): seq[ConditionNode] =
   of ckDefinedCpu: result.add ConditionNode(kind: cnDefinedCpu, name: c.name)
   of ckHostOsIs: result.add ConditionNode(kind: cnHostOs, name: c.name)
   of ckHostCpuIs: result.add ConditionNode(kind: cnHostCpu, name: c.name)
+  of ckOsFamily: result.add ConditionNode(kind: cnOsFamily, name: c.name)
+  of ckNimVersion:
+    var ints: seq[uint64]
+    for x in c.ints: ints.add uint64(x)
+    result.add ConditionNode(kind: cnNimVersion,
+      term: NimVersionTerm(ord(c.field) + 1), op: ConditionOp(ord(c.op) + 1),
+      ints: ints, text: c.text)
   of ckAnd, ckOr:
     result.add ConditionNode(kind: (if c.kind == ckAnd: cnAnd else: cnOr))
     result.add conditionNodes(c.left)
@@ -78,6 +92,12 @@ proc conditionOf*(nodes: seq[ConditionNode]): Condition =
     of cnDefinedCpu: definedCpu(n.name)
     of cnHostOs: hostOsIs(n.name)
     of cnHostCpu: hostCpuIs(n.name)
+    of cnOsFamily: osFamily(n.name)
+    of cnNimVersion:
+      var ints: seq[int64]
+      for x in n.ints: ints.add int64(x)
+      nimVersionIs(NimVersionField(ord(n.term) - 1),
+        CompareOp(ord(n.op) - 1), ints, n.text)
     of cnAnd:
       let a = walk()
       Condition(kind: ckAnd, left: a, right: walk())

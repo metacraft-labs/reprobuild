@@ -128,13 +128,32 @@ proc boolLiteral(node: NimNode; fallback: bool): bool =
   else:
     fallback
 
+proc recordedSourceFile(node: NimNode): string =
+  ## The file of `node`'s source site as the DSL RECORDS it in the compiled
+  ## program. Nim's line information is always absolute; a recipe-relative
+  ## provider compile names the recipe's own files relative to it instead
+  ## (`recipeSourceName`), so the provider binary describes the copy of the
+  ## recipe it runs beside and may be served to another copy
+  ## (Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
+  ## compiles"). Every site the DSL serializes goes through this proc or
+  ## `lineFile`; a raw `lineInfoObj().filename` in emitted code would put the
+  ## recipe's absolute path into the binary and make it location-bound.
+  ## Compile-time-only uses (reading the file, resolving a sibling) keep the
+  ## absolute name.
+  recipeSourceName(node.lineInfoObj().filename)
+
+proc recordedSourceDir(node: NimNode): string =
+  ## The directory of `node`'s recorded source file (`recordedSourceFile`):
+  ## absolute under an anchor or outside a recipe-relative compile, relative
+  ## to the recipe otherwise -- `.` for the recipe's own directory, never
+  ## the empty string, which a reader takes for "not recorded".
+  let dir = parentDir(recordedSourceFile(node))
+  if dir.len == 0: "." else: dir
+
 proc lineFile(node: NimNode): tuple[file: string; line: int] =
-  ## The source site the DSL RECORDS for `node`. Nim's line information is
-  ## always absolute; a recipe-relative provider compile names the recipe's
-  ## own files relative to it instead (`recipeSourceName`), so the provider
-  ## binary describes the copy of the recipe it runs beside.
-  let info = node.lineInfoObj()
-  (recipeSourceName(info.filename), info.line)
+  ## The source site the DSL RECORDS for `node`: `recordedSourceFile` and
+  ## the line.
+  (recordedSourceFile(node), node.lineInfoObj().line)
 
 proc calleeName(node: NimNode): string =
   if node.kind in {nnkCall, nnkCommand} and node.len > 0:
@@ -1082,6 +1101,21 @@ proc parseTarballArchiveDetail(node: NimNode;
     if text.len > 0 and (':' notin text or text.split(':', 1)[0].strip().len == 0):
       error("tarball gccSpecDefault must be `<spec>:<text>`", node)
     detail.gccSpecDefaults.add(exprCode(value))
+  of "elfruntimepackage":
+    # A package selector, not a path: the package whose realized prefix the
+    # relocation paths are resolved in.
+    let text = litText(value)
+    if text.len > 0 and (text.contains('/') or text.contains('\\') or
+        text.strip() != text):
+      error("tarball elfRuntimePackage must name a package", node)
+    detail.elfRuntimePackage = exprCode(value)
+  of "executableextraalias":
+    # A file name beside the executable, like ``executableAlias``.
+    let text = litText(value)
+    if text.len > 0 and (text.contains('/') or text.contains('\\') or
+        text == "." or text == ".."):
+      error("tarball executableExtraAlias must be a file name", node)
+    detail.executableExtraAliases.add(exprCode(value))
   else:
     return false
   true
@@ -1272,6 +1306,34 @@ proc validateMacosAppRecord(node: NimNode) =
         "installed prefix and lies inside the product bundle: it must " &
         "start with '" & bundleText & "/'; got '" & exeText & "'", node)
 
+proc listLiteralCodes(node: NimNode; field: string): seq[string] =
+  ## The element expressions of a ``@[...]`` (or ``[...]``) literal, each as
+  ## splice-ready source. A list-valued tarball field is written as a list
+  ## literal so the recipe reads as the declaration it is; any other
+  ## expression is refused rather than guessed at.
+  var bracket = node
+  if node.kind == nnkPrefix and node.len == 2 and node[0].eqIdent("@"):
+    bracket = node[1]
+  if bracket.kind != nnkBracket:
+    error("tarball " & field & " must be a list literal, @[...]", node)
+  for element in bracket:
+    result.add(exprCode(element))
+
+proc parseGemBuildArgs(node: NimNode): seq[(string, seq[string])] =
+  ## ``gemBuildArgs = @[("nokogiri", @["--use-system-libraries", ...]), ...]``:
+  ## one ``(gem, @[args])`` pair per gem.
+  var bracket = node
+  if node.kind == nnkPrefix and node.len == 2 and node[0].eqIdent("@"):
+    bracket = node[1]
+  if bracket.kind != nnkBracket:
+    error("tarball gemBuildArgs must be a list literal of (gem, @[args]) " &
+      "pairs", node)
+  for element in bracket:
+    if element.kind notin {nnkPar, nnkTupleConstr} or element.len != 2:
+      error("tarball gemBuildArgs entries are (gem, @[args]) pairs", element)
+    result.add((exprCode(element[0]),
+      listLiteralCodes(element[1], "gemBuildArgs argument list")))
+
 proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   let loc = lineFile(node)
   if calleeName(node).normalize != "tarball":
@@ -1332,6 +1394,24 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
     let closureManifestValue = namedValue(node[i], "closureManifest")
     if not closureManifestValue.isNil:
       result.closureManifest = exprCode(closureManifestValue)
+    # The gem-closure step: a committed manifest of pinned gems installed
+    # offline into the realized Ruby prefix, the provisioned packages their
+    # native extensions are built with, per-gem build arguments, and the
+    # reviewed list of gems admitted as prebuilt platform gems.
+    let gemClosureValue = namedValue(node[i], "gemClosure")
+    if not gemClosureValue.isNil:
+      result.gemClosure = exprCode(gemClosureValue)
+    let gemBuildUsesValue = namedValue(node[i], "gemBuildUses")
+    if not gemBuildUsesValue.isNil:
+      result.gemBuildUses = listLiteralCodes(gemBuildUsesValue,
+        "gemBuildUses")
+    let gemBuildArgsValue = namedValue(node[i], "gemBuildArgs")
+    if not gemBuildArgsValue.isNil:
+      result.gemBuildArgs = parseGemBuildArgs(gemBuildArgsValue)
+    let gemSubstitutionsValue = namedValue(node[i], "gemSubstitutions")
+    if not gemSubstitutionsValue.isNil:
+      result.gemSubstitutions = listLiteralCodes(gemSubstitutionsValue,
+        "gemSubstitutions")
     let sha256Value = namedValue(node[i], "sha256")
     if not sha256Value.isNil:
       sha256Node = sha256Value
@@ -1375,6 +1455,11 @@ proc parseTarballProvisioning(node: NimNode): TarballProvisioningDef =
   # diagnostic below.
   if urlNode.isNil:
     error("tarball requires url = \"...\"", node)
+  if result.gemClosure.len == 0 and (result.gemBuildUses.len > 0 or
+      result.gemBuildArgs.len > 0 or result.gemSubstitutions.len > 0):
+    error("tarball gemBuildUses, gemBuildArgs and gemSubstitutions " &
+      "describe a gemClosure step; declare gemClosure = \"<manifest>\"",
+      node)
   # GM4b: an upstream that publishes no SHA-256 (Maven and the .NET SDK
   # publish SHA-512, Free Pascal only SHA-1) is pinned by the digest it does
   # publish. One of the three is still required.
@@ -2629,7 +2714,22 @@ proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
     ", elfRunpath: " & codeListLiteral(detail.elfRunpath) &
     ", elfPatchDirs: " & codeListLiteral(detail.elfPatchDirs) &
     ", gccLinkSpecs: " & codeOrEmpty(detail.gccLinkSpecs) &
-    ", gccSpecDefaults: " & codeListLiteral(detail.gccSpecDefaults) & ")"
+    ", gccSpecDefaults: " & codeListLiteral(detail.gccSpecDefaults) &
+    ", elfRuntimePackage: " & codeOrEmpty(detail.elfRuntimePackage) &
+    ", executableExtraAliases: " &
+      codeListLiteral(detail.executableExtraAliases) & ")"
+
+proc gemBuildArgsLiteral(items: openArray[(string, seq[string])]): string =
+  ## ``@[(<gem>, @[<arg>, ...]), ...]``, typed so an empty list still
+  ## matches ``TarballProvisioningDef.gemBuildArgs``.
+  if items.len == 0:
+    return "newSeq[(string, seq[string])]()"
+  result = "@["
+  for i, item in items:
+    if i > 0:
+      result.add(", ")
+    result.add("(" & item[0] & ", " & codeListLiteral(item[1]) & ")")
+  result.add("]")
 
 proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
   ## The ``TarballProvisioningDef(...)`` literal for a macro-time record.
@@ -2646,6 +2746,10 @@ proc tarballProvisioningLiteral(provisioning: TarballProvisioningDef): string =
     ", nonRedistributable: " & $provisioning.nonRedistributable &
     ", launcher: " & codeOrEmpty(provisioning.launcher) &
     ", closureManifest: " & codeOrEmpty(provisioning.closureManifest) &
+    ", gemClosure: " & codeOrEmpty(provisioning.gemClosure) &
+    ", gemBuildUses: " & codeListLiteral(provisioning.gemBuildUses) &
+    ", gemBuildArgs: " & gemBuildArgsLiteral(provisioning.gemBuildArgs) &
+    ", gemSubstitutions: " & codeListLiteral(provisioning.gemSubstitutions) &
     ", archiveType: " & codeOrEmpty(provisioning.archiveType) &
     ", executablePath: " & codeOrEmpty(provisioning.executablePath) &
     ", stripComponents: " & $provisioning.stripComponents &
@@ -3471,9 +3575,9 @@ proc workspaceProducerLocation(selector, consumerSourceFile: string):
   ## producer's exported ``executable … cli:`` schema module and the consumer
   ## can name it as a typed ``producer.tool(args)`` call (§9.2, §9.3).
   ##
-  ## Mirrors the runtime ``findSiblingProjectFile``
-  ## (``repro_cli_support.nim:612-650``) — one level up from the CONSUMER's
-  ## ``repro.nim`` source directory: ``../<selector>/repro.nim`` (or
+  ## Resolves the selector as the workspace sibling ``nearestWorkspaceSibling``
+  ## finds from the CONSUMER's source directory (the rule the runtime
+  ## ``findSiblingProjectFile`` uses too) and takes its ``repro.nim`` (or
   ## ``reprobuild.nim``). Anchoring on ``consumerSourceFile`` (the consumer's
   ## own source path, available at macro expansion via ``lineInfoObj``) makes
   ## the discovery hermetic and MODE-AGNOSTIC: it runs at consumer macro
@@ -3497,41 +3601,32 @@ proc workspaceProducerLocation(selector, consumerSourceFile: string):
   ## a consumer whose ``uses:`` lives in a submodule.
   if selector.len == 0 or consumerSourceFile.len == 0:
     return
-  for ch in selector:
-    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
-      return
-  let anchorDir = consumerSourceFile.parentDir
-  if anchorDir.len == 0:
+  # A dot is refused on top of the sibling-name rule: in a ``uses:`` selector
+  # it is not part of a bare workspace project name.
+  if '.' in selector:
     return
-  # Walk UP the directory chain from the consumer, probing ``<ancestor>/<selector>``
-  # at each level. The first level (``anchorDir.parentDir / selector``) is the
-  # direct-sibling convention the SC-9/RP5a/TI2 reference tests rely on
-  # (``../<selector>`` next to the consumer); the walk-up EXTENDS that to the
-  # WORKSPACE-ROOT sibling convention so a DEEP out-of-tree consumer (e.g. an
-  # ``infra/tests/rp5c2/recipe.nim`` several dirs below the workspace root) can
-  # still bind a producer checked out as a top-level workspace sibling
-  # (``<workspace>/gosti``) — the RP5c2 shape. It is purely additive: a
-  # direct sibling is still found at the first level, so no existing discovery
-  # changes; only the previously-unresolvable deeper case now resolves. The
-  # nearest ancestor that owns a ``<selector>`` project wins, so a same-named
-  # closer sibling always shadows a farther workspace-root one.
-  var dir = anchorDir
-  for _ in 0 ..< 16:
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    let siblingDir = parent / selector
-    if dirExists(siblingDir):
-      for base in ["repro.nim", "reprobuild.nim"]:
-        let candidate = siblingDir / base
-        if fileExists(candidate):
-          # Return the extension-stripped path so the emitted
-          # ``import "<path>" as <alias>`` resolves the module by file path.
-          result.modulePath =
-            candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
-          result.workspaceRoot = parent
-          return
-    dir = parent
+  # The search is ``nearestWorkspaceSibling`` (``repro_core/
+  # workspace_siblings``), the one rule a recipe's package declarations
+  # (``uses: "<name>"``, whose root and ``src`` go on the compile path) and
+  # the command line's ``<pkg>:<target>`` selector also use: the direct
+  # sibling ``../<selector>`` -- the convention the SC-9/RP5a/TI2 reference
+  # tests rely on -- else the same name beside a farther ancestor, so a DEEP
+  # consumer (an ``infra/tests/rp5c2/recipe.nim`` several directories below
+  # the workspace root, the RP5c2 shape) binds a producer checked out at the
+  # workspace root. The nearest directory of that name is the producer; one
+  # without a project file is not walked past to a farther checkout.
+  let sibling = nearestWorkspaceSibling(consumerSourceFile.parentDir, selector)
+  if sibling.dir.len == 0:
+    return
+  for base in ["repro.nim", "reprobuild.nim"]:
+    let candidate = sibling.dir / base
+    if fileExists(candidate):
+      # Return the extension-stripped path so the emitted
+      # ``import "<path>" as <alias>`` resolves the module by file path.
+      result.modulePath =
+        candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
+      result.workspaceRoot = sibling.workspaceRoot
+      return
 
 proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   ## The producer module path alone. See `workspaceProducerLocation`.
@@ -4143,6 +4238,7 @@ const BundledStdlibSelectors* = [
   "xvfb-run",
   "xxhash",
   "yarn",
+  "zlib-dev",
   "zsh",
   "zstd",
   "zstd-dev",
@@ -4261,6 +4357,24 @@ proc explicitlyContractedSelectors*(pkg: PackageDef;
         selector notin split.siblingsBesidePath and selector notin result:
       result.add(selector)
 
+proc gemBuildToolUses(pkg: PackageDef): seq[PackageUseDef] =
+  ## The packages a tarball arm's gem-closure step builds with
+  ## (``gemBuildUses``), as dependency-only uses: their modules must be
+  ## imported so that their provisioning is registered when the interface is
+  ## lifted, which resolves each of them into a tool use. Like a
+  ## ``runtimeDeps:`` entry, only the selector-specific marker is imported:
+  ## a build tool of a step is not a tool of the recipe's own actions.
+  ## Only literal selectors are seen here; the macro-time record holds each
+  ## as expression source.
+  for provisioning in pkg.tarballProvisioning:
+    for code in provisioning.gemBuildUses:
+      let text = code.strip()
+      if text.len >= 2 and text[0] == '"' and text[^1] == '"' and
+          '\\' notin text:
+        let selector = text[1 .. ^2]
+        result.add(PackageUseDef(rawConstraint: selector,
+          packageSelector: selector, executableName: selector))
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
   # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
@@ -4282,7 +4396,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         if useDef notin pkg.toolUses:
           nativeOnlyModules.add(modulePath)
   var dependencyModules: seq[string] = @[]
-  for useDef in pkg.runtimeDeps:
+  let gemBuildUses = gemBuildToolUses(pkg)
+  for useDef in pkg.runtimeDeps & gemBuildUses:
     if isBundledStdlibSelector(useDef.packageSelector):
       let modulePath = "repro_dsl_stdlib/packages/" &
         selectorModuleName(useDef.packageSelector)
@@ -4432,7 +4547,7 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   var dependencyOnlyAliases: seq[string] = @[]
   var nativeOnlyAliases: seq[string] = @[]
   if not hasExplicitImports:
-    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps:
+    for useDef in pkg.nativeBuildDeps & pkg.runtimeDeps & gemBuildUses:
       let selector = useDef.packageSelector
       if isBundledStdlibSelector(selector):
         continue

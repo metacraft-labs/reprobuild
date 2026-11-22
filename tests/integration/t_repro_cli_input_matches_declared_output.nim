@@ -29,6 +29,7 @@
 ## engine actually lowers.
 
 import std/[json, os, osproc, strtabs, strutils, unittest]
+import repro_core/process_env
 
 import repro_project_dsl
 # Imported under an alias on purpose: the `package nim:` block inside that
@@ -110,11 +111,8 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
   ## notice on every invocation — and merging them into stdout puts non-JSON
   ## text in front of the document ``--format=json`` produced.
   let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  var env = inheritedEnvTable()
+  env.prependPathEntry(runquotaBin)
   execCmdEx(cmd, options = {poEvalCommand, poUsePath}, env = env,
     workingDir = repoRoot)
 

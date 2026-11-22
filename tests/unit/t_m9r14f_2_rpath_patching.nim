@@ -40,6 +40,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 import repro_test_support/reasoned_skip
 
 import repro_project_dsl
@@ -173,9 +174,10 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
       else:
         let scratch = createTempDir("repro-linked-libc-", "")
         defer: removeDir(scratch)
-        let fixtureEnv = newStringTable(modeCaseSensitive)
-        for key, value in envPairs():
-          if key notin ["LIBRARY_PATH", "LD_LIBRARY_PATH"]:
+        let fixtureEnv = newEnvTable()
+        for key, value in inheritedEnvTable():
+          if key notin ["LIBRARY_PATH", "LD_LIBRARY_PATH",
+                        "REPRO_COMPILER_LIBC_DIRS"]:
             fixtureEnv[key] = value
         # The unmatched-loader phase deliberately has no complete closure.
         fixtureEnv["REPRO_M9R30_NEEDED_CHECK"] = "0"
@@ -299,6 +301,24 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
         check readFile(manifest) == firstManifest
         check runTool(patchelfPath,
           @["--print-interpreter", mirrorMain]).output.strip() == firstInterpreter
+
+        # A Nix compiler wrapper's own libc is not on LIBRARY_PATH (every
+        # compiler of the action would link against it there); the engine
+        # hands it over in REPRO_COMPILER_LIBC_DIRS. Normalization finds the
+        # same linked runtime through it.
+        checkpoint "the wrapper's libc is found through its own variable"
+        fixtureEnv["LIBRARY_PATH"] = decoyLib
+        fixtureEnv["REPRO_COMPILER_LIBC_DIRS"] = declaredRuntime
+        let viaCompilerLibc = runTool("/bin/sh", @[installScript])
+        checkpoint viaCompilerLibc.output
+        check viaCompilerLibc.exitCode == 0
+        check runTool(patchelfPath,
+          @["--print-rpath", mirrorMain]).output.strip() == firstRpath
+        check readFile(manifest) == firstManifest
+        check runTool(patchelfPath,
+          @["--print-interpreter", mirrorMain]).output.strip() == firstInterpreter
+        fixtureEnv.del("REPRO_COMPILER_LIBC_DIRS")
+        fixtureEnv["LIBRARY_PATH"] = decoyLib & ":" & declaredRuntime
 
         removeFile(runtimeLib / "libc.so.6")
         check runTool("/bin/sh", @[installScript]).exitCode == 75

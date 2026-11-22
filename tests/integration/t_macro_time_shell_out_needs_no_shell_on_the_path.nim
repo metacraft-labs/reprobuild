@@ -72,6 +72,7 @@
 ## case 3 runs it from inside a real `nim c` under a real restricted `PATH`.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 
 import repro_project_dsl/compile_time_shell
 
@@ -119,9 +120,7 @@ proc shellOnPathDirs(dirs: openArray[string]): string =
   ""
 
 proc withPath(pathValue: string): StringTableRef =
-  result = newStringTable()
-  for k, v in envPairs():
-    result[k] = v
+  result = inheritedEnvTable()
   result["PATH"] = pathValue
 
 proc framed(output: string): string =

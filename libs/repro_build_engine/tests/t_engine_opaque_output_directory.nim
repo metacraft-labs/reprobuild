@@ -277,9 +277,11 @@ suite "opaque output directories":
       # Controls, in the physical spelling: the filter has not gone blind.
       # What is inside a tree is still dropped, and so is a path that reaches
       # the tree THROUGH a link (its ancestors are resolved; only a last
-      # component is the entry). A link INSIDE a tree that leads out of it
-      # is kept, as it was before: the action made it, but it is the only
-      # recorded trace of the source file read through it.
+      # component is the entry). The link that path was resolved through is
+      # added beside it, as a probe, after the observed channels: it decided
+      # which file of the tree was read (the next case). A link INSIDE a tree
+      # that leads out of it is kept, as it was before: the action made it,
+      # but it is the only recorded trace of the source file read through it.
       block:
         var act = action("build", ["unused"], cwd = tempRoot, outputs = ["out"],
           cacheable = true, monitorDepfile = tempRoot / "build.rdep",
@@ -293,7 +295,8 @@ suite "opaque output directories":
                               tempRoot / "src/dirlink/made.txt",
                               tempRoot / "src/plain", tempRoot / "out/inner"])
         check act.cacheInputPaths(evidence) ==
-          @[tempRoot / "src/plain", tempRoot / "out/inner"]
+          @[tempRoot / "src/plain", tempRoot / "out/inner",
+            tempRoot / "src/dirlink"]
         # The membership channel asks about the directory that was LISTED,
         # and listing follows a link: through `src/dirlink` it is the tree's
         # own entries, this run's writes. The listing is dropped; the link
@@ -340,6 +343,126 @@ suite "opaque output directories":
       checkpoint retargeted.results[0].stderr
       check retargeted.results[0].status == asSucceeded
       check readFile(tempRoot / "product.txt") == "B\n"
+
+  test "a link a path into a removed tree was resolved through stays an input":
+    # `src/dirlink/f.txt`, with `src/dirlink -> ../gen/v1` and `gen` an
+    # optional output, resolves to `gen/v1/f.txt`: this run's write, rightly
+    # dropped. The link is a source entry outside the tree, and which file of
+    # the tree was read depends on it, but the path names it only as an
+    # ancestor. It is kept as an input, a probe whose target text is its
+    # fingerprint (Monitor-Hook-Shim.md §"Metadata, Probe, And Symlink
+    # APIs", "Links a dropped path was resolved through"; Incremental-
+    # Invalidation.md §"Symlink inputs"). Before, nothing recorded it and
+    # retargeting it at `../gen/v2` was a cache hit with the old product
+    # (reprobuild-pm issues/2026-11-20-a-source-link-traversed-into-a-
+    # removed-output-tree-is-not-keyed.md).
+    when defined(windows):
+      # The filter resolves no link spelling on Windows (reprobuild-pm
+      # issues/2026-10-27-restore-gate-symlink-spellings-are-not-resolved-on-
+      # windows.md), so no path is placed through a link there and the rule
+      # has nothing to keep.
+      skip("Windows resolves no link spelling in this filter, so no path " &
+        "is placed through a link there")
+    else:
+      let sh = findExe("sh")
+      require sh.len > 0
+      let tempRoot = expandFilename(createTempDir("repro-opaque-through", ""))
+      let alias = tempRoot & "-alias"
+      defer:
+        if symlinkExists(alias):
+          removeFile(alias)
+        removeDir(tempRoot)
+      createSymlink(tempRoot, alias)
+      fixtureWrite(tempRoot / "src" / "plain", "plain\n")
+      createSymlink("../gen/v1", tempRoot / "src" / "dirlink")
+
+      # The filter, on the monitor's read and probe channels and for a
+      # directory enumeration, in the physical cwd and in an alias of it.
+      fixtureWrite(tempRoot / "gen" / "v1" / "f.txt", "one\n")
+      # A link INSIDE the tree: a path through it is this run's doing.
+      createSymlink("v1", tempRoot / "gen" / "inner")
+      let link = tempRoot / "src/dirlink"
+      for work in [tempRoot, alias]:
+        var act = action("build", ["unused"], cwd = work,
+          outputs = ["product.txt"], cacheable = true,
+          monitorDepfile = work / "build.rdep",
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        act.optionalOutputs = @["gen"]
+        for channel in ["read", "probe", "enumeration"]:
+          var evidence: PathSetEvidence
+          evidence.declaredOutputs = act.outputs
+          let observed =
+            if channel == "enumeration": @[work / "src/dirlink"]
+            else: @[work / "src/dirlink/f.txt", work / "gen/inner/f.txt"]
+          case channel
+          of "read":
+            evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+              evcMonitorCapture, observed)
+          of "probe":
+            evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+              evcMonitorCapture, observed)
+          else:
+            evidence.monitorDirectoryEnumerations.observeAll(
+              evidence.evidenceProvenance, evcMonitorCapture, observed)
+          let inputs = act.cacheInputPaths(evidence)
+          checkpoint work & " " & channel & ": " & $inputs
+          # Neither the link inside the tree nor the cwd alias is added: the
+          # tree root is reached through the alias as well, so it does not
+          # decide which file of the tree was read.
+          check alias notin inputs
+          check tempRoot / "gen/inner" notin inputs
+          check work / "gen/inner" notin inputs
+          if work == tempRoot:
+            # The link, at its entry location: its ancestors resolved, its
+            # own name kept. Nothing else: the paths into the tree are
+            # dropped.
+            check inputs == @[link]
+          else:
+            # In the aliased cwd the filter compares a resolved path with the
+            # tree root as spelled, so it drops nothing here yet (reprobuild-
+            # pm issues/2026-11-15-macos-conditional-directory-snapshot-case-
+            # fails-under-a-symlinked-tmpdir.md; its patch resolves the root
+            # too). What must hold either way: a path through the link that
+            # is dropped leaves the link in the key.
+            if channel != "enumeration" and
+                work / "src/dirlink/f.txt" notin inputs:
+              check link in inputs
+          # The listing itself is still dropped: through the link it is the
+          # tree's own entries.
+          check act.cacheEnumeratedDirectories(evidence, [tempRoot]).len == 0
+      removeDir(tempRoot / "gen")
+
+      # End to end, through the depfile channel: the action reads through
+      # the link, and retargeting the link must run it again.
+      var config = defaultBuildEngineConfig(tempRoot / "cache")
+      config.bypassRunQuota = true
+      config.enableCachedOutputRestore()
+      config.maxParallelism = 1
+      var build = action("build", [sh, "-c",
+        "mkdir -p gen/v1 gen/v2; echo one > gen/v1/f.txt; " &
+        "echo two > gen/v2/f.txt; cat src/dirlink/f.txt > product.txt; " &
+        "printf 'product.txt: src/dirlink/f.txt src/plain\\n' > build.d"],
+        cwd = tempRoot, inputs = ["src/plain"], outputs = ["product.txt"],
+        depfile = "build.d", cacheable = true,
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      build.optionalOutputs = @["gen"]
+      let first = runBuild(graph([build]), config)
+      checkpoint first.results[0].stderr
+      require first.results[0].status == asSucceeded
+      check readFile(tempRoot / "product.txt") == "one\n"
+      # Unchanged: the link is keyed and still answers.
+      let unchanged = runBuild(graph([build]), config)
+      check unchanged.results[0].status == asCacheHit
+      # Retargeted at the tree's other directory. The target text has the
+      # same length, so this also holds where only the digest of the target
+      # text tells the two apart (Incremental-Invalidation.md §"Symlink
+      # inputs").
+      removeFile(tempRoot / "src" / "dirlink")
+      createSymlink("../gen/v2", tempRoot / "src" / "dirlink")
+      let retargeted = runBuild(graph([build]), config)
+      checkpoint retargeted.results[0].stderr
+      check retargeted.results[0].status == asSucceeded
+      check readFile(tempRoot / "product.txt") == "two\n"
 
   test "a tree may not contain its action's cwd or declared inputs":
     let tempRoot = createTempDir("repro-opaque-containment", "")

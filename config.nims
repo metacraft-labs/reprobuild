@@ -571,6 +571,11 @@ for libName in [
   # lockfile-keyed closure index, the `nimble.fetch` (`netFetch`) edges, the
   # confined archive extractor and the local source store.
   "repro_nimble_fetch",
+  # Registry crates in the store root: the `cargo.fetch` (`netFetch`) edges
+  # derived from `Cargo.lock`, each verifying the `.crate` against the lock's
+  # SHA-256 before extracting it into a read-only store prefix. Reuses the
+  # Nimble source fetch's confined extractor, mirror client and egress policy.
+  "repro_cargo_fetch",
   # Workspace-Manifest-Optional MO-1: the committed solved-graph lock
   # writer/reader (``SolvedGraphLock`` round-trip + the solution<->lock
   # conversions). ``repro_cli_support`` imports it via ``import

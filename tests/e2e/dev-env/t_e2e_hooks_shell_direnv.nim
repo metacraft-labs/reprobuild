@@ -1,6 +1,7 @@
 from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
+import repro_core/process_env
 
 import repro_test_support
 
@@ -79,9 +80,7 @@ proc prepareCase(prefix: string): M5Case =
     result.shim = monitor.shim
 
 proc envFor(c: M5Case): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
+  result = inheritedEnvTable()
   for key in ["DIRENV_DIR", "DIRENV_FILE", "DIRENV_DIFF", "DIRENV_WATCHES",
       "DIRENV_LAYOUT", "REPRO_DIRENV_ACTIVATING"]:
     result.del(key)

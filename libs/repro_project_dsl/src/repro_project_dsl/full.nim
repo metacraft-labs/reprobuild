@@ -60,6 +60,7 @@ import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
 from repro_core/link_target import readSymlinkTarget
 from repro_core/relocation import recipeSourceName
+from repro_core/workspace_siblings import nearestWorkspaceSibling
 # The managed-file writer's sentinel format (`fs.managedBlock`'s sentinels are
 # rendered by the one implementation; Core-Invariants.md §"One Implementation
 # Per Concern").
@@ -161,6 +162,13 @@ export model, config_check
 # (the thin mode emits the same ones). Compile-time machinery: not
 # re-exported.
 import repro_project_dsl/cli_description
+
+# The completion files of an executable with a ``cli:`` section: the names,
+# paths and entry word the provider's completion edge uses
+# (``runtime_provider``). Standard library and clispec only; not re-exported.
+# Only the provider adds those edges, so no other mode compiles it.
+when defined(reproProviderMode):
+  import repro_project_dsl/completion_files
 
 include "repro_project_dsl/types"
 

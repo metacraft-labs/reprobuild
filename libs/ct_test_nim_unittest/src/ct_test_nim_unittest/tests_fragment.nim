@@ -3,12 +3,16 @@
 ##
 ## A test binary built with ``nim-entrypoints`` answers its ``tests`` entry:
 ##
+## * ``<binary> --entrypoint=list`` prints the binary's entries as one JSON
+##   document (schema ``entrypoints/1``), ``tests`` among them;
 ## * ``<binary> --entrypoint=tests --list`` prints the name of every test,
 ##   one per line, and runs nothing (in a build that carries ``main``);
 ## * ``<binary> --entrypoint=tests --run-exact=<name>`` runs exactly the test
 ##   ``--list`` printed as ``<name>``, never reading it as a pattern.
 ##
-## (https://github.com/metacraft-labs/nim-entrypoints, README §"Tests".)
+## (https://github.com/metacraft-labs/nim-entrypoints, README §"Tests".) A
+## binary that links ``ct_test_unittest_parallel`` answers the same entry
+## without nim-entrypoints.
 ##
 ## This module turns the first answer into a ``repro-dynamic-graph-v1``
 ## fragment whose ``create-action`` records each run the second, so the build
@@ -71,13 +75,30 @@
 ## that it does not print, before any compile is created
 ## (``notBuildableAlone``).
 ##
+## A BINARY WITHOUT THE ENTRY IS RUN AS A WHOLE. The producer first asks
+## ``<binary> --entrypoint=list`` whether the binary has a ``tests`` entry,
+## and reads its list only when it does. A binary that answers
+## ``--entrypoint=tests --list`` without having the entry cannot be trusted
+## to run one test under ``--run-exact=<name>``: a ``std/unittest`` binary of
+## the protocol-carrying codetracer Nim fork reads that ``--list`` as its own
+## and prints its tests' names, and then reads ``--entrypoint=tests`` and
+## ``--run-exact=<name>`` as test filters that match nothing, so every
+## per-test run would skip every test and pass. So when ``--entrypoint=list``
+## exits 0 without an ``entrypoints/1`` document, the fragment creates one
+## run of the whole binary instead (``<prefix>.whole-binary``, argv
+## ``[<binary>]``, otherwise as a test's run): sound, but not per test. One
+## binary per test needs the entry, so that mode refuses such a binary.
+##
 ## WHAT IS REFUSED, AND WHY. The listing is the only thing that says what
 ## the binary's tests are, so a listing this module cannot turn into one
 ## exact run per test fails the listing edge instead of producing a graph
 ## that silently runs less than it should:
 ##
-## * a listing command that exits non-zero (the binary has no ``tests``
-##   entry, or a test name cannot be written on one line: exit 70);
+## * a listing command, or ``--entrypoint=list``, that exits non-zero (an
+##   unknown entry exits 64; a test name that cannot be written on one line,
+##   70);
+## * an ``entrypoints/1`` document without a ``tests`` entry that can be
+##   selected at run time;
 ## * an empty listing: a collection that runs no test is not a passing run;
 ## * an empty name, which ``--run-exact=`` cannot select;
 ## * a name listed twice. Two tests with one name both run under
@@ -105,6 +126,13 @@ const
     ## Lists only the ``testCase`` names, the tests a
     ## ``-d:entrypointsTest=<name>`` build can be made for.
   TestsEntryRunExactPrefix* = "--run-exact="
+  EntryListArg* = "--entrypoint=list"
+    ## Prints a binary's entries (schema ``EntryListSchema``).
+  EntryListSchema* = "entrypoints/1"
+  TestsEntryName = "tests"
+  WholeBinaryIdPart* = "whole-binary"
+    ## The id part of the one run of a binary without the tests entry:
+    ## ``<prefix>.whole-binary``.
   DynamicGraphHeader = "repro-dynamic-graph-v1"
   CreatedRunPolicyKind = "automaticMonitor"
     ## ``dependencyPolicy.kind`` of every created run: the engine's
@@ -180,6 +208,50 @@ proc listTestCasesArgv*(binary: string): seq[string] =
   ## ``--list-test-cases`` still only lists (it prints every name) and runs
   ## nothing.
   @[binary, TestsEntryArg, TestsEntryListArg, TestsEntryListTestCasesArg]
+
+proc entryListArgv*(binary: string): seq[string] =
+  ## The command line that asks ``binary`` which entries it has.
+  @[binary, EntryListArg]
+
+proc entryListHasTests*(output: string; binary = ""): bool =
+  ## Whether ``output``, the standard output of ``<binary>
+  ## --entrypoint=list``, says the binary answers the tests entry: an
+  ## ``entrypoints/1`` document whose entries include ``tests``, selectable
+  ## at run time. False when ``output`` is not such a document (the binary
+  ## has no entries; see "A BINARY WITHOUT THE ENTRY" in the module header).
+  ## Raises ``TestsFragmentError`` for an ``entrypoints/1`` document without
+  ## that entry: the binary has entries, and ``--entrypoint=tests`` would
+  ## be refused as an unknown one. ``binary`` only names the binary in the
+  ## message.
+  let who = if binary.len > 0: binary else: "the test binary"
+  var document: JsonNode
+  try:
+    document = parseJson(output.strip())
+  except CatchableError:
+    return false
+  if document.kind != JObject or
+      document{"schema"}.getStr() != EntryListSchema:
+    return false
+  let entries = document{"entries"}
+  if entries.isNil or entries.kind != JArray:
+    raise newException(TestsFragmentError, who & ": " & EntryListArg &
+      " prints an " & EntryListSchema & " document without an \"entries\" " &
+      "list")
+  for entry in entries:
+    if entry.kind != JObject or entry{"name"}.getStr() != TestsEntryName:
+      continue
+    let select = entry{"select"}
+    if not select.isNil and select.kind == JArray:
+      for kind in select:
+        if kind.getStr() == "runtime":
+          return true
+    raise newException(TestsFragmentError, who & ": its tests entry cannot " &
+      "be selected at run time (" & EntryListArg & " lists it without " &
+      "\"runtime\"), so --entrypoint=tests cannot list or run its tests")
+  raise newException(TestsFragmentError, who & " has entries (" &
+    EntryListArg & " prints an " & EntryListSchema & " document) but no " &
+    "tests entry: a binary run per test must register it " &
+    "(`import entrypoints/tests`), or link ct_test_unittest_parallel")
 
 proc parseTestListing*(output: string; binary = ""): seq[string] =
   ## The test names in ``output``, the standard output of
@@ -390,6 +462,27 @@ proc perTestFragmentText*(request: PerTestRequest;
   for id in ids:
     result.add("dep\t" & request.collectorId & "\t" & id & "\n")
 
+proc wholeBinaryFragmentText*(request: PerTestRequest): string =
+  ## The fragment of a binary without the tests entry: one run of the whole
+  ## binary, ``<prefix>.whole-binary`` (see "A BINARY WITHOUT THE ENTRY" in
+  ## the module header), keyed and monitored as a test's run is, and the
+  ## collector's ``dep`` on it.
+  if request.collectorId.len == 0:
+    raise newException(TestsFragmentError,
+      "a per-test fragment needs the collector's action id")
+  let id = request.idPrefix & "." & WholeBinaryIdPart
+  let record = %*{
+    "id": id,
+    "argv": [request.binary],
+    "cwd": request.cwd,
+    "inputs": [request.binary],
+    "dependencyPolicy": {"kind": CreatedRunPolicyKind},
+    "cacheable": true,
+    "commandStatsId": request.statsName
+  }
+  DynamicGraphHeader & "\n" & "create-action\t" & $record & "\n" &
+    "dep\t" & request.collectorId & "\t" & id & "\n"
+
 proc appendBytes(sink: var string; buffer: openArray[char]; n: int) =
   let start = sink.len
   sink.setLen(start + n)
@@ -462,7 +555,8 @@ proc runListing(argv: openArray[string]): string =
       message.add(":\n" & detail)
     if outcome.code == 64:
       message.add("\n(64 is the selector's usage error: a binary run per " &
-        "test must register the tests entry, `import entrypoints/tests`)")
+        "test must register the tests entry, `import entrypoints/tests`, " &
+        "or link ct_test_unittest_parallel)")
     raise newException(TestsFragmentError, message)
   outcome.stdout
 
@@ -480,9 +574,35 @@ proc listTestCases*(binary: string): seq[string] =
     if name.len > 0:
       result.add(name)
 
-proc writePerTestFragment*(request: PerTestRequest): int =
+proc answersTestsEntry*(binary: string): bool =
+  ## Whether ``binary`` has a tests entry, as ``<binary> --entrypoint=list``
+  ## says (``entryListHasTests``). Raises ``TestsFragmentError`` when that
+  ## command exits non-zero or names entries without a usable ``tests``.
+  entryListHasTests(runListing(entryListArgv(binary)), binary)
+
+proc writeFragmentFile(path, text: string) =
+  let dir = path.parentDir
+  if dir.len > 0:
+    createDir(dir)
+  writeFile(path, text)
+
+proc writePerTestFragment*(request: PerTestRequest;
+                           wholeBinary: var bool): int =
   ## List ``request.binary``'s tests and write their fragment to
-  ## ``request.fragment``. Returns the number of tests.
+  ## ``request.fragment``. Returns the number of runs the fragment creates:
+  ## one per test, or one for the whole binary when it has no tests entry,
+  ## which sets ``wholeBinary``.
+  wholeBinary = false
+  if not answersTestsEntry(request.binary):
+    if request.compile.argv.len > 0:
+      raise newException(TestsFragmentError, request.binary & ": one " &
+        "binary per test (perTestBinaries = true) needs the binary's tests " &
+        "entry, and " & EntryListArg & " prints no " & EntryListSchema &
+        " document. Build it with nim-entrypoints (`import " &
+        "entrypoints/tests`), or turn perTestBinaries off")
+    wholeBinary = true
+    writeFragmentFile(request.fragment, wholeBinaryFragmentText(request))
+    return 1
   let names = listTests(request.binary)
   if request.compile.argv.len > 0:
     # One binary per test: refuse a test that cannot be compiled alone here,
@@ -491,12 +611,14 @@ proc writePerTestFragment*(request: PerTestRequest): int =
       request.binary)
     if refusal.len > 0:
       raise newException(TestsFragmentError, refusal)
-  let text = perTestFragmentText(request, names)
-  let dir = request.fragment.parentDir
-  if dir.len > 0:
-    createDir(dir)
-  writeFile(request.fragment, text)
+  writeFragmentFile(request.fragment, perTestFragmentText(request, names))
   names.len
+
+proc writePerTestFragment*(request: PerTestRequest): int =
+  ## ``writePerTestFragment`` without asking whether the binary was run as a
+  ## whole.
+  var wholeBinary = false
+  writePerTestFragment(request, wholeBinary)
 
 proc countFragmentRuns*(path: string): int =
   ## The number of runs the fragment at ``path`` makes the collector wait
@@ -659,10 +781,17 @@ proc runProducer*(args: openArray[string]): int =
   try:
     case command.kind
     of pckList:
-      let count = writePerTestFragment(command.request)
-      stdout.writeLine(TestsFragmentProducerName & ": " & $count &
-        " tests of " & command.request.binary & " -> " &
-        command.request.fragment)
+      var wholeBinary = false
+      let count = writePerTestFragment(command.request, wholeBinary)
+      if wholeBinary:
+        stdout.writeLine(TestsFragmentProducerName & ": " &
+          command.request.binary & " has no tests entry (" & EntryListArg &
+          " prints no " & EntryListSchema & " document); it runs as a " &
+          "whole -> " & command.request.fragment)
+      else:
+        stdout.writeLine(TestsFragmentProducerName & ": " & $count &
+          " tests of " & command.request.binary & " -> " &
+          command.request.fragment)
     of pckCheck:
       let count = countFragmentRuns(command.fragment)
       stdout.writeLine(TestsFragmentProducerName & ": " & $count &

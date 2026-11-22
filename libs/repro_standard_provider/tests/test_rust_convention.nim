@@ -652,8 +652,8 @@ suite "rust convention M4":
     # M23 Part B (scoped-down): when a project pulls in a crates.io
     # registry dep, the convention currently routes the WHOLE project
     # through the Mode B crude fallback. The crude path emits exactly
-    # one ``cargo build --release --locked --offline`` action under a
-    # ``project:crude-rust_binary_with_crates_io`` (or similar) id. We
+    # one ``cargo build --release --locked --offline --workspace`` action
+    # under a ``project:crude-rust_binary_with_crates_io`` (or similar) id. We
     # don't assert the exact id (crude action ids encode the package
     # name, which varies per fixture); we just check that NO
     # ``rustc-metadata-*`` / ``rustc-link-*`` actions are emitted

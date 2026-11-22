@@ -27,6 +27,15 @@
 ##   * a module in the recipe's OWN project directory, imported by the
 ##     project file. A fix that folded only the library digest into that key
 ##     passes the first case and fails this one.
+##   * a module in the ``src/`` of a package the recipe DECLARES with the
+##     nested ``uses: "<package>"`` form, checked out beside the project and
+##     imported by name. The activation extracts the interface in process
+##     and answers its warm check from the recipe's source closure, with no
+##     monitored run to record what the compile read, so the closure is the
+##     only thing that can see this module (``recipeSourceClosure``: the
+##     declared packages' sources are part of every recipe identity). With
+##     the declared packages left out of the closure this case fails: the
+##     second activation serves the interface of the old module.
 ##
 ## In both, the imported module declares a package with a ``tarball`` arm, the
 ## recipe ``uses:`` it, and the edit changes the arm. The assertion is on the
@@ -55,6 +64,8 @@ type PackageModuleHome = enum
   pmhLibrary      ## ``<workDir>/libs/<lib>/src/``, a library the recipe
                   ## compiles against, like the stdlib's ``packages/gh.nim``
   pmhProjectDir   ## beside the project file, imported by it
+  pmhDeclaredPackage ## ``<package>/src/``, a package checked out beside the
+                     ## project that the recipe declares (``uses: "<package>"``)
 
 proc packageModuleText(version: string): string =
   ## A stdlib-shaped package module: one ``package`` with one ``tarball``
@@ -77,13 +88,23 @@ proc packageModuleText(version: string): string =
       ":sha256:" & sha & "\",\n" &
     "      version = \"" & version & "\"\n"
 
-proc recipeText(): string =
+const FixtureDeclaredPackage = "fixture-shared-pkgs"
+  ## The package ``pmhDeclaredPackage`` declares, checked out beside the
+  ## project.
+
+proc recipeText(home: PackageModuleHome): string =
+  ## The project file. ``pmhDeclaredPackage`` also declares the package that
+  ## holds the module; the import is by module name in every case.
+  let declaration =
+    if home == pmhDeclaredPackage:
+      "    uses: \"" & FixtureDeclaredPackage & "\"\n"
+    else: ""
   "import repro_project_dsl\n" &
     "import " & FixturePkgModule & "\n\n" &
     "package fixture:\n" &
     "  defaultToolProvisioning \"path\"\n" &
     "  uses:\n" &
-    "    \"" & FixtureToolName & "\"\n" &
+    "    \"" & FixtureToolName & "\"\n" & declaration &
     "  devEnv:\n" &
     "    activity \"default\"\n" &
     "    setEnv \"FIXTURE_MODE\", \"dev\"\n"
@@ -123,12 +144,14 @@ proc observeEditReachingInterface(home: PackageModuleHome): EditObservation =
       libsTree / "libs" / FixturePkgModule / "src" / (FixturePkgModule & ".nim")
     of pmhProjectDir:
       projectRoot / (FixturePkgModule & ".nim")
+    of pmhDeclaredPackage:
+      tempRoot / FixtureDeclaredPackage / "src" / (FixturePkgModule & ".nim")
   createDir(projectRoot)
   createDir(libsTree / "libs")
   createDir(parentDir(modulePath))
   createDir(outDir)
   writeFile(modulePath, packageModuleText("1.0.0"))
-  writeFile(projectRoot / "repro.nim", recipeText())
+  writeFile(projectRoot / "repro.nim", recipeText(home))
 
   let savedLibsDir = getEnv("REPROBUILD_LIBS_DIR")
   defer:
@@ -182,6 +205,14 @@ suite "e2e_dev_env_reextracts_interface_after_lib_source_change":
   when isIoMonitorSupported:
     test "a changed library package is not served from the cached interface":
       let seen = observeEditReachingInterface(pmhLibrary)
+      check seen.firstUrls == @[urlFor("1.0.0")]
+      check seen.secondUrls == @[urlFor("2.0.0-changed")]
+      check not seen.secondUrls.anyIt(it == urlFor("1.0.0"))
+      check not seen.thirdRewroteInterface
+      check not seen.thirdLaunchedProvider
+
+    test "a changed module of a declared package is not served from the cached interface":
+      let seen = observeEditReachingInterface(pmhDeclaredPackage)
       check seen.firstUrls == @[urlFor("1.0.0")]
       check seen.secondUrls == @[urlFor("2.0.0-changed")]
       check not seen.secondUrls.anyIt(it == urlFor("1.0.0"))

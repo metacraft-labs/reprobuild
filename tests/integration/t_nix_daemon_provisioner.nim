@@ -22,6 +22,7 @@
 
 import std/[unittest, os, osproc, streams, strutils, strtabs, tables, json,
   tempfiles, times]
+import repro_core/process_env
 import repro_core
 import repro_core/dependency_gathering
 import repro_build_engine
@@ -710,9 +711,7 @@ suite "Nix Evaluation Daemon and Foreign Provisioner Integration Tests":
       defer: f.close()
       var children: seq[Process] = @[]
       for i in 0 ..< 4:
-        var env = newStringTable(modeCaseSensitive)
-        for key, value in envPairs():
-          env[key] = value
+        var env = inheritedEnvTable()
         env[StressChildEnv] = f.root
         children.add(startProcess(getAppFilename(), env = env,
           options = {poParentStreams}))

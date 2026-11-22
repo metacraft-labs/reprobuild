@@ -780,10 +780,18 @@ while read -r name path extra_flags; do
   # ($XDG_CONFIG_HOME/nim), which is no source of the tree and which its
   # dependency list cannot describe (ReproOS Add-On Mode spec §13 decision
   # 142); the same flag goes to scripts/write_helper_deps.sh below, which
-  # records it.
+  # records it. For the same reason it is built without Nim's default
+  # nimble paths (--noNimblePath): the installed nim.cfg puts
+  # ``$home/.nimble/pkgs2`` and ``/opt/nimble/pkgs2`` on the search path,
+  # host-global directories that any ``nimble install`` on the machine
+  # changes. Every module a helper imports comes from this tree or its
+  # develop set (``--path``); with the nimble directories on the path, an
+  # unrelated install there refused every helper as built from a changed
+  # listing (run 53, 2026-11-16), and a package there could have supplied
+  # an import the tree does not.
   helper_flags=()
   case " ${HELPER_DEPS_APPS} " in
-    *" ${name} "*) helper_flags=(--skipUserCfg) ;;
+    *" ${name} "*) helper_flags=(--skipUserCfg --noNimblePath) ;;
   esac
   entrypoint_status=0
   (

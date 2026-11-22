@@ -96,16 +96,17 @@ export PATH="$nimdir:$PATH"
 
 # The sink the evidence suites spawn, built by the same Nim, with its
 # dependency list, where repro_test_support/fresh_binary looks for them
-# (REPRO_TEST_BUILD_DIR).
+# (REPRO_TEST_BUILD_DIR). With the flags scripts/build_apps.sh gives a
+# guarded helper, which fresh_binary requires the list to record.
 lane=build/nim224
 mkdir -p "$lane/bin" "$lane/nimcache" "$lane/test-bin"
 export REPRO_TEST_BUILD_DIR="$PWD/$lane"
-nim c --hints:off --warnings:off \
+nim c --hints:off --warnings:off --skipUserCfg --noNimblePath \
   --nimcache:"$lane/nimcache/repro-evidence-sink" \
   --out:"$lane/bin/repro-evidence-sink" \
   apps/repro-evidence-sink/repro_evidence_sink.nim
 bash scripts/write_helper_deps.sh repro-evidence-sink \
-  apps/repro-evidence-sink/repro_evidence_sink.nim
+  apps/repro-evidence-sink/repro_evidence_sink.nim --skipUserCfg --noNimblePath
 
 # The engine, for the suites that spawn it (m7_test_pki.engineBin), with
 # the flags apps/entrypoints.txt gives it. Only when one is selected: it is

@@ -117,6 +117,7 @@ build:
 | `repro certify` | The names the policy rule for this branch requires, or every declared name when no rule applies |
 | `repro certify <name>…` | The names given |
 | `repro certify --check-set` | The repository's check set, under the name `pre-commit` |
+| `repro test --shard K/N`, `repro certify --shard K/N` | Each marked node whose test commands this part ran all of. A node split across parts is certified by none of them; certify it with `repro certify <name>` after the parts |
 
 `repro certificates list` prints what the project declares.
 
@@ -128,6 +129,7 @@ reason and the remedy:
 | Reason | Remedy |
 | ------ | ------ |
 | A test failed | Fix it and run again |
+| This part of a sharded run ran only some of the node's test commands | Run `repro certify <name>` without `--shard`. It runs again any of the node's tests whose earlier result it cannot attest |
 | Tracked files changed while the tests ran | Leave them alone during the run, then run again |
 | A sibling repository changed while the tests ran | The same, for the sibling |
 | The state has no content id: an unmerged entry, an `assume-unchanged` flag, a present `skip-worktree` entry, or a submodule with modified content | Resolve the conflict, clear the flag, or commit inside the submodule. The message names the paths |
@@ -153,6 +155,27 @@ const teamPolicy* = certificatePolicy "team":
     commitGate advisory
     requires "t-unit", platforms = ["linux/amd64"]
 ```
+
+When the policy lives in `src/team_policy.nim` of a package checked out beside
+the repository (or beside one of its parent directories, such as the
+workspace root: the nearest directory of that name is the package), the
+repository imports the module by name and declares the package with the
+nested `uses: "<package>"` form. The declaration puts the
+package's root and its `src/` on every compile of the recipe and pins the
+package's revision in `repro.lock`. Editing the module rebuilds the recipe.
+
+```nim
+import repro_project_dsl
+import team_policy
+
+package app:
+  uses:
+    uses: "team-policy"
+  enactCertificatePolicy teamPolicy
+```
+
+A bare string in `uses:` (`"team-policy"`) is a tool requirement, not a package
+declaration, and the import then fails.
 
 The repository's `repro.nim` enacts it with `enactCertificatePolicy teamPolicy`,
 and `repro lock refresh` records it in the `[certificate_policy]` section of

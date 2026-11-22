@@ -34,7 +34,9 @@
 ## ``fresh-skips-static-reads`` (that kind of entry is not checked),
 ## ``fresh-ignores-list-binary`` (a list from another build is accepted),
 ## ``fresh-accepts-user-config`` (a list whose binary was built reading the
-## user's Nim configuration is accepted; §13 decision 142).
+## user's Nim configuration is accepted; §13 decision 142),
+## ``fresh-accepts-nimble-path`` (a list whose binary was built with the
+## host's nimble directories on its search path is accepted).
 ##
 ## Mocks: none -- this is test support; it reads the real build outputs.
 
@@ -141,7 +143,7 @@ proc decodeListPath(list, encoded, name: string): string =
 proc readHelperList(repoRoot, name: string):
     tuple[binarySha: string; deps: seq[tuple[kind, path: string]];
           searchPath: seq[string]; listingFilter: string;
-          userConfig: string] =
+          userConfig, nimblePath: string] =
   ## The list ``scripts/write_helper_deps.sh`` wrote for ``name``: the
   ## sha256 of the binary it describes, and every source with its kind
   ## (``module``, ``csource``, ``header``, ``read``). Raises
@@ -170,6 +172,8 @@ proc readHelperList(repoRoot, name: string):
       result.listingFilter = value
     elif kind == "user-config" and value in ["skipped", "read"]:
       result.userConfig = value
+    elif kind == "nimble-path" and value in ["skipped", "read"]:
+      result.nimblePath = value
     elif kind in ["listing", "listing-full", "configs", "configs-probed"] and
         value.len > 65 and value[64] == ' ':
       result.deps.add((kind, value[0 ..< 65] &
@@ -337,6 +341,19 @@ proc freshRepoBinary*(repoRoot, name: string): string =
       raise newException(StaleHelperBinary, result & " was built without " &
         "--skipUserCfg, so the user's Nim configuration " &
         "($XDG_CONFIG_HOME/nim) could have changed it; " &
+        helperRebuildHint(name))
+  # Likewise the nimble directories the installed nim.cfg puts on the
+  # search path ($home/.nimble/pkgs2, /opt/nimble/pkgs2): host-global, no
+  # source of the tree, and changed by any `nimble install` on the machine.
+  # A guarded helper is built with --noNimblePath, so an install there
+  # neither changes it nor refuses it; a list that does not say so is
+  # refused, since its listing of those directories would refuse it on the
+  # next unrelated install.
+  when FreshMutation != "fresh-accepts-nimble-path":
+    if readHelperList(repoRoot, name).nimblePath != "skipped":
+      raise newException(StaleHelperBinary, result & " was built without " &
+        "--noNimblePath, so the host's nimble directories " &
+        "(~/.nimble/pkgs2, /opt/nimble/pkgs2) were on its search path; " &
         helperRebuildHint(name))
   let built = getLastModificationTime(result)
   # A directory the compiler listed (a staticExec `ls`, a walkDir in a

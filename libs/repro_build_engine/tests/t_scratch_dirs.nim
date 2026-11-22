@@ -171,7 +171,8 @@ proc directoryLink(target, link: string) =
   else:
     createSymlink(target, link)
 
-proc assertExcluded(a: BuildAction; path: string; excluded: bool) =
+proc assertExcluded(a: BuildAction; path: string; excluded: bool;
+                    keptLinks: openArray[string] = []) =
   var evidence = PathSetEvidence()
   evidence.monitorReads.observeAll(evidence.evidenceProvenance,
     evcMonitorCapture, [path])
@@ -180,7 +181,23 @@ proc assertExcluded(a: BuildAction; path: string; excluded: bool) =
   evidence.monitorDirectoryEnumerations.observeAll(evidence.evidenceProvenance,
     evcMonitorCapture, [path])
   check a.isOwnOutput(path) == excluded
-  check (a.cacheInputPaths(evidence).len == 0) == excluded
+  # An excluded path leaves the key, but a symbolic link outside the root
+  # that its resolution passed through stays, as a probe: `outside/link` is
+  # what puts `outside/link/../missing` inside `inside` (Monitor-Hook-
+  # Shim.md §"Metadata, Probe, And Symlink APIs", "Links a dropped path was
+  # resolved through"). Nothing else may remain: the key is exactly the
+  # `keptLinks` the caller names, so neither the path itself nor a link on
+  # the root's own resolution may come back. On Windows no link spelling is
+  # resolved by these filters, so nothing is kept there.
+  let inputs = a.cacheInputPaths(evidence)
+  if excluded:
+    when defined(windows):
+      check inputs.len == 0
+    else:
+      checkpoint path & ": " & $inputs
+      check inputs == @keptLinks
+  else:
+    check inputs.len > 0
   check (a.cacheEnumeratedDirectories(evidence).len == 0) == excluded
   dropScratchEvidence(a, evidence)
   check (evidence.monitorReads.len == 0) == excluded
@@ -209,7 +226,14 @@ suite "monitor containment follows parent walks through links":
     let inWalk = root / "outside" / "link" & "/../missing/deep"
     let a = parentWalkAction(root, root / "inside")
     assertExcluded(a, outWalk, false)
-    assertExcluded(a, inWalk, true)
+    let throughOutside = expandFilename(root / "outside") / "link"
+    assertExcluded(a, inWalk, true, [throughOutside])
+    when not defined(windows):
+      # Exactly the link the walk went through, at its entry location.
+      var throughLink = PathSetEvidence()
+      throughLink.monitorReads.observeAll(throughLink.evidenceProvenance,
+        evcMonitorCapture, [inWalk])
+      check a.cacheInputPaths(throughLink) == @[throughOutside]
     check detectSourceWrites([root / "inside"], [outWalk]).len == 0
     check detectSourceWrites([root / "inside"], [inWalk]).len == 1
     let rootWalk = root / "inside" / "link" & "/.././missing//"
@@ -223,7 +247,7 @@ suite "monitor containment follows parent walks through links":
     # Relative observed paths must reach the same decision as absolute ones;
     # joinPath must not fold the link/.. before the predicate sees it.
     assertExcluded(a, "inside/link/../missing/deep", false)
-    assertExcluded(a, "outside/link/../missing/deep", true)
+    assertExcluded(a, "outside/link/../missing/deep", true, [throughOutside])
     let relativeRoot = parentWalkAction(root, "inside/link/../missing")
     check relativeRoot.isOwnOutput(root / "outside" / "missing" / "deep")
     check not relativeRoot.isOwnOutput(root / "inside" / "missing" / "deep")

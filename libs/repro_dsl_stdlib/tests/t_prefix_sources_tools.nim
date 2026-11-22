@@ -28,6 +28,7 @@
 ## and fails in a gate run: the farm run would prove nothing then.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 
 import repro_test_support/reasoned_skip
 import repro_dsl_stdlib/packaging/reprobuild_dist
@@ -47,9 +48,7 @@ proc run(script, dest: string; path = ""): tuple[output: string, code: int] =
   ## Run `bash <script> <dest>` from the repository root, with the ambient
   ## environment and, when `path` is given, PATH replaced by it.
   createDir(dest)
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    env[key] = value
+  var env = inheritedEnvTable()
   var bash = findExe("bash")
   if path.len > 0:
     env["PATH"] = path

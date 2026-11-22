@@ -15,6 +15,22 @@ const
   NimbleIndexSchemaVersion* = 1'u16
     ## The payload schema every object kind carries as its first field. A
     ## reader refuses any other value before decoding the rest.
+  NimbleShardSubmodulesSchema* = 2'u16
+    ## The shard schema whose version records carry a ``submodules`` list
+    ## (spec § 4.4, the NPC-M13 amendment). A shard is written in this
+    ## schema exactly when one of its records has a non-empty list, and in
+    ## ``NimbleIndexSchemaVersion`` otherwise, so a reader from before
+    ## submodule sources refuses such a shard as an unknown schema instead
+    ## of reading its records without their submodules.
+  NimbleShardConditionsSchema* = 3'u16
+    ## The shard schema whose condition nodes may be the NPC-AREQ7 terms the
+    ## operator's A3 ruling added -- a Nim-version comparison and an
+    ## OS-family symbol (spec § 4.4, the NPC-M14 amendment). Its records
+    ## carry the ``submodules`` list as schema 2's do, and its condition
+    ## nodes carry the comparison's field, operator and literal. A shard is
+    ## written in this schema exactly when one of its condition nodes is of
+    ## such a kind, so a reader from before NPC-M14 refuses it as an unknown
+    ## schema instead of misreading the condition.
 
   RootTypeId* = 0x1201'u16      ## RBSZ type id of a root object.
   ShardTypeId* = 0x1202'u16     ## RBSZ type id of a shard.
@@ -53,6 +69,11 @@ const
   MaxObservedTags* = 4096
     ## tags one observation records (the bound of a package's versions)
   MaxHeldVersions* = 4096
+  MaxSubmodules* = 256
+    ## submodules one version record lists, at any depth (spec § 6.1,
+    ## "Submodule sources"; threat model G38)
+  MaxSubmoduleDepth* = 8
+    ## nesting levels of submodules a source object may have (G38)
 
   # Text bounds, in bytes.
   MaxNameBytes* = 256
@@ -60,6 +81,10 @@ const
   MaxPathBytes* = 1024
   MaxConstraintBytes* = 256
   MaxConditionNameBytes* = 32
+  MaxNimVersionTextBytes* = 64
+    ## the string literal a `NimVersion` comparison holds
+  MaxNimVersionInts* = 3
+    ## the integer literals of a Nim-version comparison (a tuple of three)
   MaxCommitBytes* = 32
 
   ShardKeyDomain* = "reprobuild.nimble-index.shard-key.v1"
@@ -116,13 +141,45 @@ type
     cnAnd = "and"
     cnOr = "or"
     cnNot = "not"
+    cnOsFamily = "os-family"
+      ## `defined(posix)`, `defined(unix)`, `defined(bsd)`: shard schema 3
+    cnNimVersion = "nim-version"
+      ## a comparison of the Nim version with a literal: shard schema 3
+
+  NimVersionTerm* = enum
+    ## The left-hand side of a Nim-version comparison (field on the left).
+    ## ``nvNone`` on every node that is not a ``cnNimVersion``.
+    nvNone = "none"
+    nvMajor = "NimMajor"
+    nvMinor = "NimMinor"
+    nvPatch = "NimPatch"
+    nvVersion = "NimVersion"
+    nvMajorMinor = "(NimMajor, NimMinor)"
+    nvMajorMinorPatch = "(NimMajor, NimMinor, NimPatch)"
+
+  ConditionOp* = enum
+    ## The comparison of a ``cnNimVersion`` node; ``opNone`` on every other.
+    opNone = "none"
+    opEq = "=="
+    opNe = "!="
+    opLt = "<"
+    opLe = "<="
+    opGt = ">"
+    opGe = ">="
 
   ConditionNode* = object
     ## One node of a condition in prefix (Polish) order: `and a b` is
-    ## `[and, a, b]`. A term carries the lower-case Nim target name; an
-    ## operator carries none. An empty node list is "unconditional".
+    ## `[and, a, b]`. A target term carries the lower-case Nim target name,
+    ## an OS-family term its symbol; an operator carries none. A
+    ## ``cnNimVersion`` node carries ``term``, ``op`` and the literal
+    ## (``ints``, or ``text`` for `NimVersion`) and no name. An empty node
+    ## list is "unconditional".
     kind*: ConditionNodeKind
     name*: string
+    term*: NimVersionTerm
+    op*: ConditionOp
+    ints*: seq[uint64]
+    text*: string
 
   # -------------------------------------------------------------------------
   # Requirement entries (NPC-AREQ5 / NPC-AREQ6)
@@ -211,6 +268,9 @@ type
     flPlatformLimited = "platform_limited"
     flUnreadable = "unreadable"
     flGitlinks = "gitlinks"
+      ## the source object includes submodule trees (its ``submodules``
+      ## list names them); with an empty list, a record from before
+      ## submodule sources
     flOverrideApplied = "override_applied"
     flUnlisted = "unlisted"
       ## the source is outside the registry and the source set's own
@@ -244,6 +304,15 @@ type
       ## the source tag (`rvkTag`, `rvkLabel`), the branch (`rvkHead`,
       ## `rvkRef`), or empty (`rvkCommit`)
 
+  RecordSubmodule* = object
+    ## One submodule whose tree is part of a version's source object
+    ## (NPC-AREQ12, "Submodule sources"): where its tree is placed, the URL
+    ## it was fetched from (after relative resolution) and the commit its
+    ## gitlink pins. Provenance: the record's ``tree`` covers the content.
+    path*: string   ## relative to the package directory, `/`-separated
+    url*: string    ## an `https://` URL
+    commit*: string ## lower-case hex, full width
+
   VersionRecord* = object
     ## NPC-AREQ5: one immutable record per version.
     version*: RecordVersion
@@ -268,6 +337,12 @@ type
     nimbleFile*: Option[IndexObjectId]
       ## BLAKE3 of the `.nimble` read; none when the version has no
       ## `.nimble` (then the record is unreadable)
+    submodules*: seq[RecordSubmodule]
+      ## every submodule of the source object at any depth, strictly
+      ## ascending by path; empty for a version without gitlinks. A record
+      ## flagged `gitlinks` with an empty list is from a generator before
+      ## submodule sources: its tree lacks the submodules, and it is never
+      ## offered.
 
   OriginVcs* = enum
     ovGit = "git"

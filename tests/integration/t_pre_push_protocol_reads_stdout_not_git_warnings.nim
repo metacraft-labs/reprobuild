@@ -40,6 +40,7 @@ from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support/push_hook_protocol
+import repro_core/remedy_words
 import repro_test_support/reasoned_skip
 
 proc gitBin(): string = findExe("git")
@@ -256,7 +257,12 @@ suite "pre-push protocol reads stdout, not git's warnings":
       check decision.observationEvidence == ""
       check prePushProtocolRemediation(decision.cause, f.repo,
         decision.failedObservation) ==
-        "reinstall the managed hooks with 'repro hooks ensure --vcs " &
-          f.repo & "' and retry the push"
+        "reinstall the managed hooks with `repro hooks ensure --vcs " &
+          remedyPathWord(f.repo) & "` and retry the push"
       check prePushProtocolEvidence(decision.diagnostic, decision.cause,
         decision.observationEvidence) == decision.diagnostic
+      # A path with a space or a quote is one word, and the remedy is not
+      # wrapped in single quotes that the word's own quotes would unbalance.
+      check prePushProtocolRemediation(ppcRefsStream, "/tmp/it's a repo",
+        "") == "reinstall the managed hooks with `repro hooks ensure --vcs " &
+          remedyPathWord("/tmp/it's a repo") & "` and retry the push"

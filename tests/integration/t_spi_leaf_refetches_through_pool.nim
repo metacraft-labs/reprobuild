@@ -45,6 +45,17 @@
 ##     subsequent read heals both leaf and pool. Wrong chain keys must also
 ##     be diagnosed, independently of object presence.
 ##
+##   - ``nested_stub_checkout_never_configures_the_enclosing_leaf`` —
+##     issues/2026-11-21-refetch-chain-repair-writes-a-nested-stub-leaf-pool-
+##     into-the-enclosing-repo.md. A ``.git`` stub with no ``refs/`` nested in
+##     the leaf (as an interrupted clone of a nested repo leaves it) borrows
+##     from a second pool. git does not accept the stub, so ``git -C <stub>``
+##     answers for the enclosing leaf. Checking or wiring the stub must
+##     refuse it as a broken checkout and leave the leaf's ``repro-pool``
+##     naming its own pool: otherwise the leaf can no longer fetch a missing
+##     blob. A leaf already left with its ``repro-pool`` URL naming the
+##     other pool is reported and repaired.
+##
 ##   - ``bounded_lock_is_not_retained_by_an_executed_child`` — a VCS lock
 ##     taken with the ordinary deadline (the cache push's) is close-on-exec
 ##     too: a child its owner started does not keep it once the owner exits.
@@ -133,6 +144,9 @@ if paramCount() == 4 and paramStr(1) == "cache-push-owner":
     paramStr(4), "main")
   stdout.write(pushed.diagnostic)
   quit(if pushed.ok: 0 else: 1)
+
+if paramCount() == 1 and paramStr(1) == "exit-at-once":
+  quit(0)
 
 if paramCount() == 2 and paramStr(1) == "refill-orphan-child":
   let stage = paramStr(2)
@@ -1014,6 +1028,110 @@ exit $status
       check must(f.leaf, "config", "--get-all", name) == expected
       check not checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache").hasMessages
 
+  test "nested_stub_checkout_never_configures_the_enclosing_leaf":
+    let root = createTempDir("repro-spi2-nested-stub-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    makePoolBlobless(f)
+    # A second upstream and its pool: the nested repository's.
+    let up2 = root / "up2"
+    createDir(up2)
+    discard must(up2, "init", "-q")
+    commitFile(up2, "n1", "nested\n")
+    let created = refreshSharedBare(f.gitBin, root / "cache", "file://" & up2)
+    doAssert created.ok, created.diagnostic
+    let pool2 = created.sharedBarePath
+    doAssert pool2 != f.pool
+    # Partial, so the detector treats the stub as a leaf needing a chain.
+    writeFile(pool2 / "objects" / "pack" / "marker.promisor", "")
+    # The stub: what the incident's ``references/mold/.git`` held.
+    let stub = f.leaf / "references" / "nested"
+    let stubGit = stub / ".git"
+    createDir(stubGit / "objects" / "info")
+    writeFile(stubGit / "HEAD", "ref: refs/heads/main\n")
+    writeFile(stubGit / "config", "[core]\n\trepositoryformatversion = 0\n")
+    writeFile(stubGit / "description", "")
+    writeFile(stubGit / "objects" / "info" / "alternates",
+      pool2 / "objects" & "\n")
+    writeFile(stubGit / "repro-vcs-lock", "")
+    # Premise: git resolves the stub to the enclosing leaf.
+    check samePathOnDisk(must(stub, "rev-parse", "--show-toplevel"), f.leaf)
+    let ownUrl = poolFileUrl(f.pool)
+    proc leafUrl(): string =
+      gitIn(f.leaf, "config", "--local", "--get-all",
+        "remote." & LeafPoolRemoteName & ".url").output
+    check leafUrl() == ownUrl
+    let blob = must(f.up, "rev-parse", "main:m2")
+    doAssert not has(f.leaf, blob) and not has(f.pool, blob)
+
+    # On-touch repair of the stub, as `repro health` runs it.
+    let stubReport = checkLeaf(f.gitBin, stub, lcmRepair, root / "cache")
+    check leafUrl() == ownUrl
+    check not stubReport.configured
+    check "not a repository of its own" in stubReport.diagnostic
+    check not stubReport.hasMessages
+    # Every other route that wires a leaf refuses it too.
+    check "not a repository of its own" in ensureLeafPoolConfig(f.gitBin,
+      stub, pool2)
+    check "not a repository of its own" in registerLeafWithPool(f.gitBin,
+      stub, pool2)
+    let wired = wireAlternates(stub, pool2, f.gitBin)
+    check "not a repository of its own" in wired.diagnostic
+    check leafUrl() == ownUrl
+    # Refused before any write: the stub is no borrower of either pool, and
+    # its alternates still name only the pool it held.
+    for p in [f.pool, pool2]:
+      for borrower in readBorrowers(p):
+        check not samePathOnDisk(borrower, stub)
+    check readFile(stubGit / "objects" / "info" / "alternates") ==
+      pool2 / "objects" & "\n"
+    # The leaf still lazily fetches its own missing blob.
+    let read = run(f.leaf, true, "show", "HEAD:m2")
+    check read.code == 0
+    check has(f.leaf, blob)
+
+    # A leaf already left naming the other pool is reported and repaired.
+    discard must(f.leaf, "config", "remote." & LeafPoolRemoteName & ".url",
+      poolFileUrl(pool2))
+    let leafReport = checkLeaf(f.gitBin, f.leaf, lcmReport, root / "cache")
+    check leafReport.configured
+    check "refetch chain" in messages([leafReport]).join("\n")
+    check leafUrl() == ownUrl
+    check not checkLeaf(f.gitBin, f.leaf, lcmReport,
+      root / "cache").hasMessages
+
+    # Controls, last because a worktree checkout reads blobs: the refusal is
+    # not a blanket. A bare repository (the push gateway's shape), a linked
+    # worktree, symlinks to either and a valid nested clone are each a
+    # repository of their own; a plain subdirectory of either is not.
+    check leafRepositoryRefusal(f.gitBin, f.leaf) == ""
+    check leafRepositoryRefusal(f.gitBin, f.pool) == ""
+    let linked = root / "linked"
+    check run(f.leaf, true, "worktree", "add", "-q", "--detach",
+      linked).code == 0
+    check leafRepositoryRefusal(f.gitBin, linked) == ""
+    let aliased = root / "aliased"
+    createSymlink(f.leaf, aliased)
+    check leafRepositoryRefusal(f.gitBin, aliased) == ""
+    let poolAlias = root / "pool-alias"
+    createSymlink(f.pool, poolAlias)
+    check leafRepositoryRefusal(f.gitBin, poolAlias) == ""
+    let validNested = f.leaf / "references" / "valid"
+    discard must(f.leaf, "clone", "-q", up2, validNested)
+    check leafRepositoryRefusal(f.gitBin, validNested) == ""
+    check "not a repository of its own" in
+      leafRepositoryRefusal(f.gitBin, f.leaf / "references")
+    check "not a repository of its own" in
+      leafRepositoryRefusal(f.gitBin, f.pool / "objects")
+    # Inside a working tree's git dir git prints no ``--show-cdup`` line;
+    # that is not its top level either.
+    check "not a repository of its own" in
+      leafRepositoryRefusal(f.gitBin, f.leaf / ".git")
+    check "not a repository of its own" in
+      leafRepositoryRefusal(f.gitBin, f.leaf / ".git" / "objects")
+
   test "cache_push_does_not_refetch_a_missing_similar_blob_under_its_lock":
     let root = createTempDir("repro-spi2-cache-push-", "")
     defer:
@@ -1337,6 +1455,41 @@ exit $status
     check not dirExists(orphan)
     check readFile(unmanaged / "keep") == "user-owned scratch"
     check readFile(unknown / "keep") == "unknown version"
+    check has(f.pool, tip) and has(f.leaf, tip)
+
+  test "refill_reclaims_abandoned_git_pack_temporaries_in_the_store":
+    # §3.4: what a dead git left in the pool's own ``objects/pack/`` (the
+    # repack of an interrupted pool gc, an interrupted index-pack) is
+    # reclaimed under the lock before the refill receives another pack. A
+    # live writer's temporary and the published packs are kept.
+    let root = createTempDir("repro-spi2-pack-temporaries-", "")
+    defer:
+      tearDown()
+      removeDir(root)
+    let f = setUp(root)
+    discard must(f.up, "config", "uploadpack.allowFilter", "true")
+    let tip = loseSideFromPool(f)
+    let packDir = f.pool / "objects" / "pack"
+    var child = startProcess(getAppFilename(), args = @["exit-at-once"])
+    let dead = child.processID
+    discard child.waitForExit()
+    child.close()
+    let hash = "79f99208d275c628afb5d40123456789abcdef01"
+    let deadPack = packDir / (".tmp-" & $dead & "-pack-" & hash & ".pack")
+    let staleIdx = packDir / "tmp_idx_eBsYfz"
+    let livePack = packDir / (".tmp-" & $getCurrentProcessId() & "-pack-" &
+      hash & ".pack")
+    let freshIdx = packDir / "tmp_idx_YGlArC"
+    for path in [deadPack, staleIdx, livePack, freshIdx]:
+      writeFile(path, "abandoned bytes")
+    setLastModificationTime(staleIdx, getTime() - initDuration(hours = 2))
+    let read = run(f.leaf, true, "cat-file", "-p", tip)
+    checkpoint(read.output)
+    check read.code == 0
+    check not fileExists(deadPack)
+    check not fileExists(staleIdx)
+    check fileExists(livePack)
+    check fileExists(freshIdx)
     check has(f.pool, tip) and has(f.leaf, tip)
 
   test "chain_survives_removal_of_the_engine_that_wired_it":

@@ -1,6 +1,7 @@
 from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
+import repro_core/process_env
 
 import repro_test_support
 
@@ -66,9 +67,7 @@ proc prepareCase(prefix: string): M9Case =
     result.shim = monitor.shim
 
 proc envFor(c: M9Case): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
+  result = inheritedEnvTable()
   result["REPROBUILD_SOURCE_ROOT"] = c.repoRoot
   result["REPRO_MONITOR_SHIM_LIB"] = c.shim
   result["PATH"] = parentDir(c.reproBin) & $PathSep & getEnv("PATH")

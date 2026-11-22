@@ -144,6 +144,17 @@ facts for a host:
 repro home facts --profile-dir . --host laptop > reprobuild.json
 ```
 
+Run it as the user whose home it describes, or say where that home is. A
+`PATH` entry that spells the home by its absolute path, such as
+`/home/alice/.local/bin`, is named `~/.local/bin` on both sides only when
+both know the same home directory. Home Manager knows it as
+`home.homeDirectory`; `repro home facts` takes it from `--home-dir`, or from
+`$HOME` when the flag is absent:
+
+```bash
+repro home facts --profile-dir . --host laptop --home-dir /home/alice > reprobuild.json
+```
+
 The check's output directory holds the Home Manager side as `nix.json`.
 `repro home compare` takes one document of each side, in either order:
 

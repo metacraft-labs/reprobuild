@@ -47,6 +47,7 @@ import git_tool
 from repro_core/process_exec import execCmdExCloseOnce
 from repro_core/ambient_execution import uncontrolledFindExe, uncontrolledStartProcess
 import repro_core/process_env
+import repro_core/process_liveness
 import repro_core/remedy_words
 
 const
@@ -125,6 +126,35 @@ type
       ## Set by ``refreshSharedBare``: the detector's report for every leaf
       ## registered with the refreshed pool (Shared-Clone-Pool-Integrity
       ## §4.2). The caller prints their messages.
+
+  SharedBareProgressKind* = enum
+    ## The potentially slow step ``refreshSharedBare`` is about to start.
+    sbpFetch      ## fetching into the existing shared bare
+    sbpClone      ## creating the shared bare (``git clone --bare``)
+    sbpLeafCheck  ## running the leaf detector in one registered borrower
+
+  SharedBareProgress* = object
+    ## One event for a ``SharedBareProgressHook``.
+    kind*: SharedBareProgressKind
+    bare*: string
+      ## The shared bare being refreshed.
+    leaf*: string
+      ## ``sbpLeafCheck`` only: the borrower about to be checked.
+    index*: int
+      ## ``sbpLeafCheck`` only: its 1-based position among ``total``.
+    total*: int
+      ## ``sbpLeafCheck`` only: how many borrowers this pass checks.
+
+  SharedBareProgressHook* = proc (event: SharedBareProgress) {.closure, gcsafe.}
+    ## Called BEFORE each step a refresh may spend a long time in, so a
+    ## command can announce it rather than present as a silent hang
+    ## (Interactive-UX-And-Progress.md Principle 1; CLI/sync.md "Progress and
+    ## phase ordering (RA-27)"). The steps are the network fetch or clone and,
+    ## after a fetch, the §4.2 leaf detector, which runs in every checkout on
+    ## the host that borrows from the bare: with a few dozen sibling
+    ## workspaces that pass alone takes minutes. ``nil`` reports nothing; the
+    ## library itself never writes progress, because only the command knows
+    ## its progress mode and whether its stderr is a terminal.
 
 # ---- cache-root resolution -------------------------------------------------
 
@@ -1114,20 +1144,23 @@ proc ensureSharedBareRefspec*(gitBin, barePath: string): bool =
 
 proc poolIntegrityConfig*(gitBin, pool: string; readinessPass: bool;
                           notReadyReason: var string): seq[(string, string)] {.gcsafe.}
-proc checkRegisteredLeaves*(gitBin, pool: string;
-                            mode = lcmRepair): seq[LeafCheckReport] {.gcsafe.}
+proc checkRegisteredLeaves*(gitBin, pool: string; mode = lcmRepair;
+                            progress: SharedBareProgressHook = nil):
+    seq[LeafCheckReport] {.gcsafe.}
 proc registerLeafWithPool*(gitBin, leaf, pool: string): string {.gcsafe.}
 proc pruneBorrowers*(pool: string): seq[string] {.gcsafe.}
 proc registerBorrower*(pool, leaf: string): bool {.gcsafe.}
 proc borrowersPath*(pool: string): string {.gcsafe.}
 proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string {.gcsafe.}
+proc leafRepositoryRefusal*(gitBin, leaf: string): string {.gcsafe.}
 
 const SharedBareSafetyConfig* = [
   ("gc.auto", "0"),
   ("maintenance.auto", "false"),
   ("maintenance.strategy", "none"),
   ("gc.writeCommitGraph", "false"),
-  ("fetch.writeCommitGraph", "false")]
+  ("fetch.writeCommitGraph", "false"),
+  ("repack.writeBitmaps", "false")]
   ## Configuration every shared bare MUST carry because other checkouts
   ## BORROW from it.
   ##
@@ -1156,6 +1189,18 @@ const SharedBareSafetyConfig* = [
   ##      by a borrower. Keep those writers off. ``maintainSharedBare`` first
   ##      converts registered borrowers to independent non-split graphs, then
   ##      rebuilds the pool graph after gc so expired commits leave it too.
+  ##   3. A reachability bitmap cannot be written over a partial pool. A
+  ##      bitmap must cover the full closure of the pack it indexes, and a
+  ##      pool's blobs are promised, not present: git repacks the promisor
+  ##      packs separately, so the pack holding the cache-push objects names
+  ##      trees and blobs it does not contain. ``git gc`` in a bare repository
+  ##      writes bitmaps by default, so every pool gc died with ``Failed to
+  ##      write bitmap index. Packfile doesn't have full closure`` AFTER the
+  ##      new pack was on disk, leaving it there as an abandoned
+  ##      ``.tmp-<pid>-pack-*`` copy of the pool's history, and the failed pass
+  ##      was retried by the next commit. ``repack.writeBitmaps=false`` lets
+  ##      the gc complete; leftovers from earlier failed passes are reclaimed
+  ##      by ``sweepAbandonedPackTemporaries``.
   ##
   ## Persisted in the bare's own config (not only passed per command) so the
   ## property holds for whoever touches the cache: an operator's hand-run
@@ -1244,6 +1289,186 @@ proc sharedBareFetchArgs*(barePath: string): seq[string] =
   result = sharedBareSafetyArgs()
   result.add(["-C", barePath, "fetch", "--all", "--prune", "--quiet"])
 
+# ---- abandoned git pack temporaries (Shared-Clone-Pool-Integrity §3.4) ------
+#
+# Git writes a pack it is receiving or building into the object store's own
+# ``objects/pack/`` under a temporary name, and renames it into place only at
+# the end. A git that dies first leaves the temporary there, where no reader
+# can use it (git resolves objects through ``.idx`` files only, and
+# ``count-objects -v`` lists these under ``garbage``) and nothing else ever
+# removes it. In a pool that is the shared store, so every abandoned repack
+# costs a full copy of the pool's packed history. Measured 2026-11-22: 68.71 GiB
+# of them on one host, 94.5 GiB on another, almost all from pool gc passes
+# that died writing a bitmap (``SharedBareSafetyConfig``).
+#
+# The names are git's own, from git's source:
+#   * ``.tmp-<pid>-pack-<hash>.{pack,idx,rev,bitmap,mtimes,promisor}``:
+#     ``git repack``'s ``packtmp`` prefix (builtin/repack.c,
+#     ``xstrfmt(".tmp-%d-pack", getpid())``), handed to the
+#     ``pack-objects`` it runs. ``<pid>`` is the repack's own pid.
+#     https://github.com/git/git/blob/v2.54.0/builtin/repack.c
+#   * ``tmp_pack_XXXXXX``, ``tmp_idx_XXXXXX``, ``tmp_rev_XXXXXX``,
+#     ``tmp_mtimes_XXXXXX``, ``tmp_bitmap_XXXXXX``: the ``odb_mkstemp``
+#     templates of index-pack, pack-objects and the bitmap writer
+#     (builtin/index-pack.c, pack-write.c, pack-bitmap-write.c). They carry
+#     no owner.
+#
+# Deleting one cannot lose an object: a temporary has no ``.idx`` that git
+# reads, so no lookup has ever resolved through it, and an object a borrower
+# names is in a published pack or a loose file, never only here. That is what
+# distinguishes this sweep from ``git gc --prune=now`` or ``git prune`` in a
+# pool, which are forbidden (§3.1). What it can do to a LIVE writer is make
+# that writer fail, which is why the rules below keep anything whose owner
+# may still be running.
+
+const
+  PackTemporaryGraceSeconds* = 60 * 60
+    ## How long an ownerless ``tmp_*`` temporary is presumed to belong to a
+    ## running git. Git writes these continuously while it receives or
+    ## indexes a pack and renames them within moments of its last write; an
+    ## hour without a write is a git that is no longer running.
+  RepackTemporaryMaxAgeSeconds* = 24 * 60 * 60
+    ## A ``.tmp-<pid>-pack-*`` file older than this is abandoned even when
+    ## ``<pid>`` now names a running process: pids are reused, so a live pid
+    ## alone would keep a 38-day-old temporary for as long as some unrelated
+    ## daemon happened to hold that number.
+  GitPackTemporaryPrefixes = ["tmp_pack_", "tmp_idx_", "tmp_rev_",
+    "tmp_mtimes_", "tmp_bitmap_"]
+
+type
+  PackTemporary* = object
+    ## One abandoned git temporary in a pool's ``objects/pack/``.
+    path*: string
+    bytes*: int64
+    ownerPid*: int
+      ## The repack pid git wrote into a ``.tmp-<pid>-pack-*`` name; 0 for an
+      ## ownerless ``tmp_*`` temporary.
+
+  PackTemporarySweep* = object
+    ## What ``sweepAbandonedPackTemporaries`` removed, and what it could not.
+    removed*: seq[PackTemporary]
+    failures*: seq[string]
+
+proc repackTemporaryOwner*(name: string): int =
+  ## The pid in git repack's ``.tmp-<pid>-pack-*`` name, or 0 when ``name``
+  ## is not one.
+  const prefix = ".tmp-"
+  if not name.startsWith(prefix):
+    return 0
+  let stop = name.find("-pack", prefix.len)
+  if stop <= prefix.len:
+    return 0
+  let digits = name[prefix.len ..< stop]
+  if digits.len > 9 or not digits.allCharsInSet(Digits):
+    return 0
+  parseInt(digits)
+
+proc isGitPackTemporaryName*(name: string): bool =
+  ## Whether ``name`` (a file name in ``objects/pack/``) is one of git's own
+  ## pack temporaries rather than a published pack or anything else.
+  if repackTemporaryOwner(name) > 0:
+    return true
+  for prefix in GitPackTemporaryPrefixes:
+    if name.startsWith(prefix) and name.len > prefix.len:
+      return true
+  false
+
+proc poolPackDir(pool: string): string = pool / "objects" / "pack"
+
+proc packTemporaryNames*(pool: string): HashSet[string] =
+  ## The names of every git pack temporary in ``pool``'s ``objects/pack/``
+  ## now, live or not. A caller holding the pool lock snapshots this before
+  ## running git there, so that whatever appears afterwards can be
+  ## attributed to that git (``adopted`` below).
+  result = initHashSet[string]()
+  let packDir = poolPackDir(pool)
+  if not dirExists(packDir):
+    return
+  for kind, path in walkDir(packDir):
+    if kind == pcFile and isGitPackTemporaryName(path.lastPathPart):
+      result.incl(path.lastPathPart)
+
+proc newPackTemporaries*(pool: string; before: HashSet[string]):
+    HashSet[string] =
+  ## The temporaries in ``pool`` that were not in the ``before`` snapshot.
+  packTemporaryNames(pool) - before
+
+proc abandonedPackTemporaries*(pool: string;
+                               adopted = initHashSet[string]();
+                               now = getTime()): seq[PackTemporary] =
+  ## The git pack temporaries in ``pool``'s ``objects/pack/`` whose writer is
+  ## gone. Read-only: ``repro health`` reports these without a lock.
+  ##
+  ##   * ``.tmp-<pid>-pack-*``: abandoned when ``<pid>`` is not a running
+  ##     process, or when it is older than ``RepackTemporaryMaxAgeSeconds``.
+  ##   * ownerless ``tmp_*``: abandoned when no write has touched it for
+  ##     ``PackTemporaryGraceSeconds``, or when its name is in ``adopted``:
+  ##     the temporaries that appeared while the caller's own git ran under
+  ##     the pool lock, after that git has exited. Reprobuild runs no other
+  ##     git in the store while it holds that lock.
+  ##
+  ## Symlinks and directories are never candidates.
+  let packDir = poolPackDir(pool)
+  if not dirExists(packDir):
+    return
+  for kind, path in walkDir(packDir):
+    if kind != pcFile:
+      continue
+    let name = path.lastPathPart
+    if not isGitPackTemporaryName(name):
+      continue
+    let owner = repackTemporaryOwner(name)
+    var age = -1'i64
+    try:
+      age = (now - getLastModificationTime(path)).inSeconds
+    except OSError:
+      # Vanished, or unreadable metadata: not provably abandoned.
+      continue
+    let abandoned =
+      if owner > 0:
+        not processAlive(owner) or age >= RepackTemporaryMaxAgeSeconds
+      else:
+        name in adopted or age >= PackTemporaryGraceSeconds
+    if not abandoned:
+      continue
+    var bytes = 0'i64
+    try:
+      bytes = getFileSize(path)
+    except OSError:
+      discard
+    result.add(PackTemporary(path: path, bytes: bytes, ownerPid: owner))
+
+proc sweepAbandonedPackTemporaries*(pool: string;
+                                    adopted = initHashSet[string]()):
+    PackTemporarySweep =
+  ## Remove ``abandonedPackTemporaries(pool, adopted)``. The caller holds the
+  ## pool's VCS lock, so no git that reprobuild runs in the store is writing
+  ## there. Never raises: a file that cannot be removed is listed in
+  ## ``failures``, and each caller decides what that blocks.
+  for temporary in abandonedPackTemporaries(pool, adopted):
+    try:
+      removeFile(temporary.path)
+      result.removed.add(temporary)
+    except OSError as error:
+      result.failures.add(temporary.path & ": " & error.msg)
+
+proc failureDiagnostic(sweep: PackTemporarySweep; pool: string): string =
+  if sweep.failures.len == 0: ""
+  else: "could not remove " & $sweep.failures.len &
+    " abandoned git pack temporar" &
+    (if sweep.failures.len == 1: "y" else: "ies") & " in " & pool & ": " &
+    sweep.failures.join("; ")
+
+proc reclaimAbandonedPackTemporaries*(pool: string): PackTemporarySweep =
+  ## ``sweepAbandonedPackTemporaries`` under the pool's VCS lock: the entry
+  ## point for a caller that does not already hold it (``repro health
+  ## --fix``). A lock that cannot be taken is reported as a failure.
+  withCacheEntryVcsLock(pool,
+      (block:
+        result.failures.add("could not lock shared bare: " & pool)
+        return)):
+    result = sweepAbandonedPackTemporaries(pool)
+
 proc onlyPoolBookkeeping(dir: string): bool =
   ## Whether ``dir`` holds nothing but a ``repro`` directory, and so no
   ## object, ref or config of a repository.
@@ -1254,7 +1479,9 @@ proc onlyPoolBookkeeping(dir: string): bool =
     sawAny = true
   sawAny
 
-proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult =
+proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string;
+                        progress: SharedBareProgressHook = nil):
+    SharedCloneResult =
   ## Clone-if-missing / fetch-if-present the shared bare for ``fetchUrl``.
   ## Returns ``ok = true`` with the bare path populated, or ``ok = false``
   ## with a diagnostic on any failure (the caller then falls back to a
@@ -1263,8 +1490,14 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
   ## out, and is serialized across concurrent processes via
   ## ``withCacheEntryVcsLock(bare)`` so concurrent workspace initializations
   ## or forks never race on the same shared bare entry.
+  ##
+  ## ``progress``, when set, is told before the fetch or clone starts and
+  ## before each borrower's leaf check (``SharedBareProgressHook``).
   let bare = sharedBarePath(cacheRoot, fetchUrl)
   var checkLeaves = false
+  template announce(step: SharedBareProgressKind) =
+    if progress != nil:
+      progress(SharedBareProgress(kind: step, bare: bare))
   withCacheEntryVcsLock(bare,
       (block: return SharedCloneResult(ok: false, sharedBarePath: bare,
         diagnostic: "could not lock shared bare: " & bare))):
@@ -1279,12 +1512,25 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
       if prepared.len > 0:
         return SharedCloneResult(ok: false, sharedBarePath: bare,
           diagnostic: prepared)
+      # Under the pool lock, before receiving another pack: what an earlier
+      # git left in the store is reclaimed first (§3.4), and what this fetch
+      # leaves, should it fail, is reclaimed after it.
+      let swept = sweepAbandonedPackTemporaries(bare)
+      if swept.failures.len > 0:
+        return SharedCloneResult(ok: false, sharedBarePath: bare,
+          diagnostic: failureDiagnostic(swept, bare))
+      let before = packTemporaryNames(bare)
       # fetch-if-present: refresh all refs, prune deleted ones.
+      announce(sbpFetch)
       let res = runGit(gitBin, sharedBareFetchArgs(bare))
+      let leftover = sweepAbandonedPackTemporaries(bare,
+        newPackTemporaries(bare, before))
       if res.code != 0:
         return SharedCloneResult(ok: false, sharedBarePath: bare,
           diagnostic: "git fetch in shared bare failed (" & $res.code & "): " &
-            res.output.strip())
+            res.output.strip() &
+            (if leftover.failures.len > 0: "; " &
+              failureDiagnostic(leftover, bare) else: ""))
       checkLeaves = true
     else:
       # clone-if-missing. A directory holding nothing but ``repro/`` is the
@@ -1304,6 +1550,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
         except OSError as e:
           return SharedCloneResult(ok: false, sharedBarePath: bare,
             diagnostic: "could not create cache parent " & parent & ": " & e.msg)
+      announce(sbpClone)
       let res = runGit(gitBin,
         ["clone", "--bare", "--no-local", "--quiet", fetchUrl, bare])
       if res.code != 0:
@@ -1312,6 +1559,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
           if prepared.len > 0:
             return SharedCloneResult(ok: false, sharedBarePath: bare,
               diagnostic: prepared)
+          announce(sbpFetch)
           let fetched = runGit(gitBin, sharedBareFetchArgs(bare))
           if fetched.code != 0:
             return SharedCloneResult(ok: false, sharedBarePath: bare,
@@ -1342,7 +1590,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
     # (Shared-Clone-Pool-Integrity §4.2). Run outside the bare lock so lock
     # acquisition stays strictly checkout -> pool.
     return SharedCloneResult(ok: true, sharedBarePath: bare,
-      leafReports: checkRegisteredLeaves(gitBin, bare))
+      leafReports: checkRegisteredLeaves(gitBin, bare, progress = progress))
   SharedCloneResult(ok: true, sharedBarePath: bare)
 
 # ---- bootstrap manifest cache population (RA-11) ---------------------------
@@ -1733,6 +1981,12 @@ proc wireAlternates*(repoPath, sharedBarePath: string;
     if not dirExists(sharedObjects):
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
         diagnostic: "shared bare has no objects dir: " & sharedObjects)
+    # A path git resolves to an enclosing repository is not a checkout to
+    # wire: its config is someone else's (``leafRepositoryRefusal``).
+    let refusal = leafRepositoryRefusal(gitBin, repoPath)
+    if refusal.len > 0:
+      return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
+        diagnostic: refusal)
     if not registerBorrower(sharedBarePath, repoPath):
       return SharedCloneResult(ok: false, sharedBarePath: sharedBarePath,
         diagnostic: "could not register " & repoPath & " as a borrower in " &
@@ -2199,6 +2453,12 @@ proc refillPoolObjects(gitBin, pool: string; args: seq[string];
   let originalObjects = absolutePath(gitObjectDir(pool))
   createDir(poolReproDir(pool))
   cleanupAbandonedRefillStages(pool)
+  # The refill writes only into its own stage, but other git in the store
+  # does not, and this lock is held: reclaim what such a git abandoned
+  # before receiving another pack, like the stages above.
+  let swept = sweepAbandonedPackTemporaries(pool)
+  if swept.failures.len > 0:
+    raise newException(IOError, failureDiagnostic(swept, pool))
   let scratch = createTempDir("refill-", "", poolReproDir(pool))
   defer: removeOwnedRefillStage(scratch)
   writeFile(scratch / RefillStageMarkerName, RefillStageMarker)
@@ -2658,7 +2918,7 @@ const RetentionHookScript* = """#!/bin/sh
 # kept, together with everything it reaches in this pool, as if it were
 # recent. It prints what each checkout listed in repro/borrowers still names
 # -- its refs, its HEADs, its reflog entries, and what its indexes stage or
-# keep to undo a conflict resolution --
+# keep to undo a conflict resolution, and the trees their cache-trees name --
 # and, for any of those this pool does not hold itself (a commit made in the
 # checkout), the history behind it, so the parents of a checkout's own
 # commits are kept too. If this script fails, git skips pruning: a failure
@@ -2787,6 +3047,102 @@ ref_storage_files() {
     *) return 1 ;;
   esac
 }
+# cache_tree_ids INDEX HASH-BYTES prints the id of every valid node of the
+# cache-tree extension (TREE) of the index file INDEX, reading the file and no
+# object. Git checks only that the topmost valid node on each path exists
+# before reusing it, never what is below it: a valid root that survives a gc
+# whose subtree did not is committed as is, and the commit points at a tree
+# that is gone. Printing every valid node keeps everything a kept node reaches
+# when the pool holds it, and the walk behind ids the pool lacks covers a node
+# that lives only in the checkout. Format: gitformat-index(5),
+# https://git-scm.com/docs/gitformat-index -- a 12-byte header (DIRC, version
+# 2-4, entry count), the entries (v2/v3: NUL-padded to a multiple of 8 bytes,
+# a v3 extended entry carries 2 more flag bytes; v4: a varint prefix length
+# and a NUL-terminated name, unpadded), then extensions (4-byte signature,
+# 4-byte size) up to the trailing checksum. A TREE node is a NUL-terminated
+# path, "<entries> <subtrees>\n", and the tree id unless <entries> is -1
+# (invalid). Anything else, or a file that ends anywhere but at an extension
+# boundary before the checksum, is a refusal: the index may name anything.
+cache_tree_ids() {
+  size=$(wc -c < "$1") || return 1
+  od -An -v -tx1 "$1" | awk -v size="$size" -v hl="$2" '
+function fail() { bad = 1; exit 1 }
+function entry() { k = 0; st = "fixed" }
+function next_entry() { if (--count > 0) entry(); else st = "ext" }
+BEGIN {
+  for (i = 0; i < 256; i++) val[sprintf("%02x", i)] = i
+  fixed = 40 + hl + 2; end = size - hl; st = "hdr"; n = 0; pos = 0
+}
+{
+  for (f = 1; f <= NF; f++) {
+    b = $f; v = val[b]; pos++
+    if (st == "hdr") {
+      hdr[n++] = v
+      if (n < 12) continue
+      if (hdr[0] != 68 || hdr[1] != 73 || hdr[2] != 82 || hdr[3] != 67) fail()
+      version = ((hdr[4] * 256 + hdr[5]) * 256 + hdr[6]) * 256 + hdr[7]
+      if (version < 2 || version > 4) fail()
+      count = ((hdr[8] * 256 + hdr[9]) * 256 + hdr[10]) * 256 + hdr[11]
+      if (count > 0) entry(); else st = "ext"
+    } else if (st == "fixed") {
+      if (++k == 40 + hl + 1) extended = version >= 3 && int(v / 64) % 2
+      if (k < fixed) continue
+      if (extended) { st = "xflags"; need = 2 }
+      else if (version == 4) st = "prefix"
+      else { st = "name"; namelen = 0; prefixlen = fixed }
+    } else if (st == "xflags") {
+      ++k
+      if (--need > 0) continue
+      if (version == 4) st = "prefix"
+      else { st = "name"; namelen = 0; prefixlen = fixed + 2 }
+    } else if (st == "prefix") {
+      ++k
+      if (v < 128) st = "name4"
+    } else if (st == "name4") {
+      if (v == 0) next_entry()
+    } else if (st == "name") {
+      ++k
+      if (v != 0) { namelen++; continue }
+      need = int((prefixlen + namelen + 8) / 8) * 8 - k
+      if (need > 0) st = "pad"; else next_entry()
+    } else if (st == "pad") {
+      if (v != 0) fail()
+      if (--need == 0) next_entry()
+    } else if (st == "ext") {
+      if (pos - 1 == end) { done = 1; exit 0 }
+      if (pos - 1 > end) fail()
+      st = "exthdr"; n = 0; ext[n++] = b
+    } else if (st == "exthdr") {
+      ext[n++] = b
+      if (n < 8) continue
+      sig = ext[0] ext[1] ext[2] ext[3]
+      rem = ((val[ext[4]] * 256 + val[ext[5]]) * 256 + val[ext[6]]) * 256 + val[ext[7]]
+      if (pos + rem > end) fail()
+      if (rem == 0) st = "ext"
+      else if (sig == "54524545") { st = "tree"; ts = "path" }
+      else st = "skip"
+    } else if (st == "skip") {
+      if (--rem == 0) st = "ext"
+    } else if (st == "tree") {
+      rem--
+      if (ts == "path") {
+        if (v == 0) { ts = "count"; first = "" }
+      } else if (ts == "count") {
+        if (first == "") first = b
+        if (v == 10) {
+          if (first == "2d") ts = "path"
+          else { ts = "id"; id = ""; need = hl }
+        }
+      } else {
+        id = id b
+        if (--need == 0) { print id; ts = "path" }
+      }
+      if (rem == 0) { if (ts != "path") fail(); st = "ext" }
+    }
+  }
+}
+END { if (bad || !done) exit 1 }'
+}
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
 : > "$work/found"
 while IFS= read -r parent || [ -n "$parent" ]; do
@@ -2834,6 +3190,12 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -e "$leaf/.git" ] || continue
   common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { status=1; continue; }
   ref_storage_files "$common" || { status=1; continue; }
+  # The width of an object id in the index file; reads the config only.
+  case $(git -C "$leaf" rev-parse --show-object-format 2>/dev/null) in
+    sha1) hashbytes=20 ;;
+    sha256) hashbytes=32 ;;
+    *) status=1; continue ;;
+  esac
   : > "$work/names"
   # Refs, read from the ref store: this format never opens the objects.
   git -C "$leaf" for-each-ref --format='%(objectname)' >> "$work/names" || { status=1; continue; }
@@ -2854,8 +3216,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   # with `git checkout <old> -- <path>` may be one only expired history in this
   # pool reaches, and so may the conflicted stages a resolve-undo record keeps
   # after the conflict was resolved and the merge abandoned (`git checkout -m`
-  # reads them back). Cache-tree trees are not printed: git checks that one
-  # exists before reusing it and rebuilds it otherwise.
+  # reads them back), and the trees of the index's cache-tree (above).
   # Each index is read through its own worktree's git directory, so a worktree
   # whose directory is gone is still read, and under that worktree's own
   # configuration. The empty work tree, run from inside it, keeps git from
@@ -2869,8 +3230,10 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   indexes=0
   for gitdir in "$common" "$common"/worktrees/*; do
     [ -e "$gitdir/index" ] || continue
-    git -C "$work/empty" --git-dir="$gitdir" --work-tree="$work/empty" -c core.fsmonitor=false ls-files --stage --resolve-undo --sparse > "$work/staged" || { indexes=1; break; }
+    git -C "$work/empty" --git-dir="$gitdir" --work-tree="$work/empty" -c core.fsmonitor=false ls-files --stage --resolve-undo --sparse > "$work/staged" &&
+      cache_tree_ids "$gitdir/index" "$hashbytes" > "$work/trees" || { indexes=1; break; }
     grep -v '^160000 ' "$work/staged" | cut -d' ' -f2 >> "$work/names"
+    cat "$work/trees" >> "$work/names"
   done
   [ "$indexes" = 0 ] || { status=1; continue; }
   grep -E '^[0-9a-f]{40}([0-9a-f]{24})?$' "$work/names" | grep -v -E '^0+$' | sort -u > "$work/ids"
@@ -3383,9 +3746,63 @@ proc objectStoreIsPartial*(gitBin, objectDir: string): bool =
   objectDir.lastPathPart == "objects" and fileExists(owner / "HEAD") and
     hasPromisorRemoteConfig(gitBin, owner)
 
+proc leafRepositoryRefusal*(gitBin, leaf: string): string =
+  ## "" when ``leaf`` is a repository of its own: the top level of a working
+  ## tree, or a bare repository's git dir. Otherwise the diagnostic that
+  ## refuses it.
+  ##
+  ## Every ``--local`` key the refetch chain reads or writes is reached as
+  ## ``git -C <leaf> config --local``, and git answers that for whatever
+  ## repository it DISCOVERS from ``<leaf>``. A nested checkout whose ``.git``
+  ## git does not accept (a stub holding ``HEAD``, ``config`` and
+  ## ``objects/info/alternates`` but no ``refs/``, as an interrupted clone
+  ## leaves it) is discovered as the ENCLOSING repository. The stub's own
+  ## alternates still name its pool, so without this check the enclosing
+  ## leaf's ``remote.repro-pool.url`` was rewritten to the nested pool, the
+  ## leaf could no longer fetch a missing blob, and a ``git switch`` there
+  ## half-applied (reprobuild-pm
+  ## issues/2026-11-21-refetch-chain-repair-writes-a-nested-stub-leaf-pool-into-the-enclosing-repo.md).
+  ##
+  ## One ``rev-parse`` answers both shapes. In a working tree ``--show-cdup``
+  ## is empty only at its top level. Outside a working tree git prints no
+  ## ``--show-cdup`` line at all, which must not read as "at the top level":
+  ## a path inside a non-bare repository's ``.git`` is discovered as that
+  ## repository too, so ``--is-inside-work-tree`` must also say so. In a
+  ## bare repository the git dir itself must be ``leaf``. Identity is
+  ## compared with ``sameFile`` (device and inode), because git prints the
+  ## resolved path and ``leaf`` may be spelled through a symlink.
+  let res = runGit(gitBin, ["-C", leaf, "rev-parse", "--is-bare-repository",
+    "--is-inside-work-tree", "--absolute-git-dir", "--show-cdup"])
+  if res.code != 0:
+    return "not a git checkout: " & leaf & " (" & res.output.strip() & ")"
+  let lines = res.output.splitLines()
+  if lines.len < 3:
+    return "not a git checkout: " & leaf & " (unexpected rev-parse output)"
+  let bare = lines[0].strip() == "true"
+  let inWorkTree = lines[1].strip() == "true"
+  let gitDir = lines[2].strip()
+  let cdup = if lines.len > 3: lines[3].strip() else: ""
+  var own = false
+  if bare:
+    try:
+      own = sameFile(gitDir, leaf)
+    except OSError:
+      own = false
+  else:
+    own = inWorkTree and cdup.len == 0
+  if own:
+    return ""
+  "refusing to configure " & leaf & ": it is not a repository of its own; " &
+    "git resolves it to the enclosing repository whose git dir is " & gitDir &
+    ". Its .git is broken (an interrupted clone leaves a stub without " &
+    "refs/); move " & (leaf / ".git") & " aside and clone it again"
+
 proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   ## Ref-tip presence cannot detect missing blobs below present commits.
   ## Inspect the actual chain before on-touch configuration repairs it.
+  ##
+  ## Precondition: ``leafRepositoryRefusal(gitBin, leaf)`` is "". Otherwise
+  ## the ``--local`` reads below answer for an enclosing repository.
   if not repoIsPartialClone(gitBin, pool): return false
   # The uploadpack row names the launcher; without it the chain cannot run.
   if not fileExists(poolUploadPackLauncherPath(pool)): return true
@@ -3396,9 +3813,20 @@ proc needsLeafRefetchChain(gitBin, leaf, pool: string): bool =
   runGit(gitBin, ["-C", leaf, "config", "--local", "--get-all",
     "remote." & LeafPoolRemoteName & ".fetch"]).code == 0
 
+proc ensureCheckedLeafPoolConfig(gitBin, leaf, pool: string): string {.gcsafe.}
+
 proc ensureLeafPoolConfig*(gitBin, leaf, pool: string): string =
   ## Install §3.4 and §3.5 into ``leaf``'s config. Returns "" on success,
-  ## otherwise the diagnostic. Idempotent.
+  ## otherwise the diagnostic. Idempotent. Refuses, writing nothing, when
+  ## ``leaf`` is not a repository of its own (``leafRepositoryRefusal``).
+  let refusal = leafRepositoryRefusal(gitBin, leaf)
+  if refusal.len > 0:
+    return refusal
+  ensureCheckedLeafPoolConfig(gitBin, leaf, pool)
+
+proc ensureCheckedLeafPoolConfig(gitBin, leaf, pool: string): string =
+  ## ``ensureLeafPoolConfig`` for a ``leaf`` already known to be a repository
+  ## of its own, so ``checkLeaf`` asks git that once rather than twice.
   ##
   ## DEVIATION FROM §3.4, measured 2026-10-02: the leaf does NOT get
   ## ``extensions.partialClone`` or ``core.repositoryFormatVersion=1``. Nix's
@@ -3877,13 +4305,19 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
     if gitDir.len == 0:
       result.diagnostic = "not a git checkout: " & leaf
       return
+    # A nested broken checkout is discovered as its enclosing repository:
+    # every probe and write below would land there. Refuse it before any.
+    let refusal = leafRepositoryRefusal(gitBin, leaf)
+    if refusal.len > 0:
+      result.diagnostic = refusal
+      return
 
     let missingChain = needsLeafRefetchChain(gitBin, leaf, thePool)
     # §4.3 self-registration precedes presence probes even when every ref
     # tip exists: missing blobs are healed on subsequent reads, not by an
     # expensive eager walk of every tree.
     result.registered = registerBorrower(thePool, leaf)
-    let configured = ensureLeafPoolConfig(gitBin, leaf, thePool)
+    let configured = ensureCheckedLeafPoolConfig(gitBin, leaf, thePool)
     result.configured = configured.len == 0
     if configured.len > 0:
       result.diagnostic = configured
@@ -4017,13 +4451,24 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
         message: messageStaleRemoteRef(leaf, thePool, t.refName, t.id,
           logPath, removed)))
 
-proc checkRegisteredLeaves*(gitBin, pool: string;
-                            mode = lcmRepair): seq[LeafCheckReport] {.gcsafe.} =
+proc checkRegisteredLeaves*(gitBin, pool: string; mode = lcmRepair;
+                            progress: SharedBareProgressHook = nil):
+    seq[LeafCheckReport] {.gcsafe.} =
   ## §4.2: after a refresh of ``pool``, run the detector in every leaf
   ## registered with it that still borrows from it.
+  ##
+  ## The leaves are selected before any is checked so ``progress`` can
+  ## number them ``[i/N]``: this pass visits a checkout in every workspace on
+  ## the host that borrows the pool, and a caller reporting it as a count is
+  ## what tells a user the command is moving.
+  var leaves: seq[string]
   for leaf in readBorrowers(pool):
-    if not dirExists(leaf) or not isWiredTo(leaf, pool):
-      continue
+    if dirExists(leaf) and isWiredTo(leaf, pool):
+      leaves.add(leaf)
+  for i, leaf in leaves:
+    if progress != nil:
+      progress(SharedBareProgress(kind: sbpLeafCheck, bare: pool, leaf: leaf,
+        index: i + 1, total: leaves.len))
     result.add(checkLeaf(gitBin, leaf, mode, pool = pool))
 
 proc registerLeafWithPool*(gitBin, leaf, pool: string): string =
@@ -4031,6 +4476,11 @@ proc registerLeafWithPool*(gitBin, leaf, pool: string): string =
   ## and configure it. Returns "" on success, otherwise the diagnostic. Used by
   ## ``wireAlternates`` and by the ``git clone --reference`` path.
   withCheckoutVcsLock(leaf, (block: return "could not lock checkout: " & leaf)):
+    # A stub nested in another leaf is no borrower; registering it would
+    # keep pool objects alive for a repository that does not exist.
+    let refusal = leafRepositoryRefusal(gitBin, leaf)
+    if refusal.len > 0:
+      return refusal
     if not registerBorrower(pool, leaf):
       return "could not register " & leaf & " in " & borrowersPath(pool)
     return ensureLeafPoolConfig(gitBin, leaf, pool)
@@ -4554,6 +5004,9 @@ type
       ## ``gc.pruneExpire=never``: why (an empty registry, borrowers the
       ## discovery pass had not seen, or the path it could not vouch for).
       ## Not an error: such a gc prunes nothing.
+    reclaimedTemporaries*: seq[PackTemporary]
+      ## Abandoned git pack temporaries the pass removed from the pool's
+      ## ``objects/pack/`` (§3.4), whether or not a gc then ran.
 
 const
   DefaultLooseObjectLimit* = 500
@@ -4733,6 +5186,20 @@ proc maintainSharedBare*(gitBin, barePath: string;
     result.ok = true
     result.looseBefore = looseObjectCount(gitBin, barePath)
 
+    # (0) What an earlier git abandoned in the store, reclaimed whether or not
+    # a gc is due (§3.4): a pool that never reaches its budget again must not
+    # keep a dead pass's copy of its history for good. A temporary that
+    # cannot be removed stops the gc, which would write another full pack.
+    let swept = sweepAbandonedPackTemporaries(barePath)
+    result.reclaimedTemporaries = swept.removed
+    if swept.failures.len > 0:
+      result.ok = false
+      result.ran = false
+      result.looseAfter = result.looseBefore
+      result.diagnostic = failureDiagnostic(swept, barePath) &
+        "; gc skipped so it cannot leave another"
+      return
+
     # (1) Dead-workspace ref prune. Only when we were actually given a live
     # set; an empty set means "unknown", and pruning everything would be
     # destructive, so we skip it.
@@ -4798,13 +5265,22 @@ proc maintainSharedBare*(gitBin, barePath: string;
       dirExists(packDir / "multi-pack-index.d")
     var gcArgs = sharedBareSafetyArgs()
     gcArgs.add(["-C", barePath, "gc", "--quiet"])
+    let temporariesBefore = packTemporaryNames(barePath)
     let gc = runGit(gitBin, gcArgs)
+    # A gc that fails part-way has already written its new pack under a
+    # temporary name; it is this pass's own, so it goes now, not at the next
+    # pass (§3.4: temporary objects are removed on success or failure).
+    let leftover = sweepAbandonedPackTemporaries(barePath,
+      newPackTemporaries(barePath, temporariesBefore))
+    result.reclaimedTemporaries.add(leftover.removed)
     if gc.code != 0:
       result.ok = false
       result.ran = false
       result.looseAfter = result.looseBefore
       result.diagnostic = "git gc failed (" & $gc.code & "): " &
-        gc.output.strip()
+        gc.output.strip() &
+        (if leftover.failures.len > 0: "; " &
+          failureDiagnostic(leftover, barePath) else: "")
       return
     # gc deliberately leaves graph writes disabled. Rebuild explicitly, after
     # expiry, so no cached graph can still name a commit gc just removed.
@@ -4830,6 +5306,12 @@ proc maintainSharedBare*(gitBin, barePath: string;
         return
     result.ran = true
     result.looseAfter = looseObjectCount(gitBin, barePath)
+    if leftover.failures.len > 0:
+      # The gc and the index rebuild completed, so the pool is consistent;
+      # the pass still fails, unstamped, so the next one retries the removal.
+      result.ok = false
+      result.diagnostic = failureDiagnostic(leftover, barePath)
+      return
     touchMaintenanceStamp(barePath)
 
 # ---- inspection (the `shared-clones list` surface) -------------------------

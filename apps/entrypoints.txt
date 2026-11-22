@@ -60,6 +60,12 @@ repro-cmake-dyndep-fragment apps/repro-cmake-dyndep-fragment/repro_cmake_dyndep_
 # dynamic graph fragment that runs each as an action of its own. The engine
 # runs it from beside its own image, like the CMake helpers above.
 repro-tests-fragment apps/repro-tests-fragment/repro_tests_fragment.nim
+# The producer of the completion edge an executable with a `cli:` section
+# gets (libs/repro_project_dsl, `completion_files`): writes the program's
+# Bash, Zsh, Fish and PowerShell completion scripts from its name and its
+# compile's entry list, without running it. Run from beside the engine's
+# image, like the producer above.
+repro-completion-files apps/repro-completion-files/repro_completion_files.nim
 repro-cmake-trycompile-provider apps/repro-cmake-trycompile-provider/repro_cmake_trycompile_provider.nim --define:reproProviderMode
 repro-standard-provider apps/repro-standard-provider/repro_standard_provider.nim --define:reproProviderMode
 # ReproOS-Generations-And-Foreign-Packages C2: apt foreign-package

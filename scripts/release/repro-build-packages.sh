@@ -1,11 +1,18 @@
 #!/bin/sh
-# Turn a release tarball into NATIVE packages: .deb, .rpm, .pkg.tar.zst.
+# Turn a release archive into NATIVE packages: .deb, .rpm, .pkg.tar.zst,
+# (on macOS, with pkgbuild) a component .pkg, and a Windows Installer .msi.
 #
 #   repro-build-packages.sh --version 0.1.3 --tarball <path> \
-#       --out <dir> [--ecosystem deb|rpm|arch|all] [--arch amd64]
+#       --out <dir> [--ecosystem deb|rpm|arch|pkg|msi|all] [--arch amd64]
+#
+# `all` is deb, rpm and arch. The macOS `.pkg` is built only when asked for
+# (`--ecosystem pkg --platform darwin`), because it needs pkgbuild, which
+# exists on macOS only, and so is the `.msi` (`--ecosystem msi --platform
+# windows`, from the Windows .zip; see build_msi). No release asset is
+# declared for either (.github/release-platforms.json).
 #
 # The tarball is the release asset release.yml already produces:
-#   reprobuild-<version>-<platform>-<arch>.tar.gz
+#   reprobuild-<version>-<platform>-<arch>.tar.gz (.zip for Windows)
 # containing reprobuild-<version>-<platform>-<arch>/{bin,lib,share}/, where
 # share/repro/completions/ holds repro's shell completion scripts.
 #
@@ -54,7 +61,7 @@ while [ $# -gt 0 ]; do
     --platform)  platform="$2"; shift 2 ;;
     --asset-arch) asset_arch="$2"; shift 2 ;;
     --release)   release_num="$2"; shift 2 ;;
-    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,37p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -81,8 +88,28 @@ topdir="reprobuild-$version-$platform-$asset_arch"
 stage="$(mktemp -d)"
 trap 'rm -rf "$stage"' EXIT INT TERM
 
+# unpack_zip <zip> <dir>: the Windows release asset is a .zip. Whichever
+# reader the host has: unzip, bsdtar (libarchive, also Windows' own
+# System32\tar.exe), or Python's zipfile.
+unpack_zip() {
+  if command -v unzip >/dev/null 2>&1; then
+    unzip -q "$1" -d "$2"
+  elif command -v bsdtar >/dev/null 2>&1; then
+    bsdtar -xf "$1" -C "$2"
+  elif [ -n "${SYSTEMROOT:-}" ] && [ -x "${SYSTEMROOT}/System32/tar.exe" ]; then
+    "${SYSTEMROOT}/System32/tar.exe" -xf "$1" -C "$2"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 -m zipfile -e "$1" "$2"
+  else
+    die "no zip reader (unzip, bsdtar or python3) to unpack $1"
+  fi
+}
+
 log "unpacking $tarball"
-tar -xzf "$tarball" -C "$stage" || die "could not unpack $tarball"
+case "$tarball" in
+  *.zip) unpack_zip "$tarball" "$stage" || die "could not unpack $tarball" ;;
+  *)     tar -xzf "$tarball" -C "$stage" || die "could not unpack $tarball" ;;
+esac
 payload="$stage/$topdir"
 [ -d "$payload" ] || die "tarball did not contain $topdir/ (found: $(ls "$stage"))"
 [ -d "$payload/bin" ] || die "$topdir/bin is missing; refusing to package a release with no binaries"
@@ -110,17 +137,25 @@ log "payload: $nbin file(s) in bin/"
 # /usr/bin gets one two-line wrapper per public command. A symlink would
 # not do: the launcher resolves its OWN directory from $0, which through
 # a symlink is /usr/bin.
+#
+# The prefix is /usr for the Linux packages and /usr/local for the macOS .pkg:
+# macOS's /usr is read-only (system integrity protection), and /usr/local is
+# the location installers there write to.
 stage_tree() {
   _t="$1"
   _fmt="$2"
-  mkdir -p "$_t/usr/bin" "$_t/usr/lib/reprobuild"
+  case "$_fmt" in
+    pkg) _pfx='usr/local' ;;
+    *)   _pfx='usr' ;;
+  esac
+  mkdir -p "$_t/$_pfx/bin" "$_t/$_pfx/lib/reprobuild"
   # The WHOLE archive tree, not a list of known subdirectories. v0.2.3's
   # archive gained share/repro/{source,src} (the Nim sources an installed
   # repro compiles recipes against, found at <prefix>/share/repro/source
   # from the binary's own location), and a copy of only bin/ and lib/
   # shipped .deb/.rpm packages whose repro failed its first compile. What
   # the archive carries, the package carries.
-  cp -a "$payload/." "$_t/usr/lib/reprobuild/"
+  cp -a "$payload/." "$_t/$_pfx/lib/reprobuild/"
   # The archive's bin/ carries runquotad, which the engine starts when no
   # RunQuota daemon answers; under --tool-provisioning=tarball and nix a build
   # cannot run without one. It is NOT given a /usr/bin wrapper: runquota's own
@@ -130,7 +165,7 @@ stage_tree() {
   # already chose one.
   _runquotad_line=''
   if [ -x "$payload/bin/runquotad" ]; then
-    _runquotad_line=': "${RUNQUOTAD_BIN:=/usr/lib/reprobuild/bin/runquotad}"; export RUNQUOTAD_BIN\n'
+    _runquotad_line=": \"\${RUNQUOTAD_BIN:=/$_pfx/lib/reprobuild/bin/runquotad}\"; export RUNQUOTAD_BIN\\n"
   fi
   _ncmd=0
   for _c in "$payload/bin"/*; do
@@ -141,12 +176,12 @@ stage_tree() {
     case "$_n" in .*|*.json|runquotad|runquota) continue ;; esac
     [ -f "$_c" ] && [ -x "$_c" ] || continue
     # shellcheck disable=SC2059 # the format is assembled from fixed text
-    printf "#!/bin/sh\n${_runquotad_line}exec /usr/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/usr/bin/$_n"
-    chmod 0755 "$_t/usr/bin/$_n"
+    printf "#!/bin/sh\n${_runquotad_line}exec /$_pfx/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/$_pfx/bin/$_n"
+    chmod 0755 "$_t/$_pfx/bin/$_n"
     _ncmd=$((_ncmd + 1))
   done
   [ "$_ncmd" -gt 0 ] || die "no public commands in $topdir/bin; refusing to build a package that puts nothing on PATH"
-  [ -x "$_t/usr/bin/repro" ] || die "$topdir/bin has no 'repro' command"
+  [ -x "$_t/$_pfx/bin/repro" ] || die "$topdir/bin has no 'repro' command"
   stage_completions "$_t" "$_fmt"
 }
 
@@ -174,6 +209,13 @@ stage_tree() {
 #         names for packages (`pkg-config --variable completionsdir fish`;
 #         https://fishshell.com/docs/current/completions.html#where-to-put-completions).
 #
+# The macOS .pkg installs under /usr/local instead (macOS's /usr is read-only):
+# the same three files at /usr/local/share/bash-completion/completions/repro,
+# /usr/local/share/zsh/site-functions/_repro and
+# /usr/local/share/fish/vendor_completions.d/repro.fish. The first two
+# directories are on the default search path of bash-completion and of macOS's
+# own zsh; see the comment at build_pkg for what was measured.
+#
 # A missing source file is a hard failure, not a package without that shell:
 # a package that installs but leaves one shell without completion passes every
 # install check and fails only the user.
@@ -182,14 +224,15 @@ stage_completions() {
   _fmt="$2"
   _src="$payload/share/repro/completions"
   case "$_fmt" in
-    deb)     _zsh_dir='usr/share/zsh/vendor-completions' ;;
-    rpm|arch) _zsh_dir='usr/share/zsh/site-functions' ;;
+    deb)     _share='usr/share'; _zsh_dir='usr/share/zsh/vendor-completions' ;;
+    rpm|arch) _share='usr/share'; _zsh_dir='usr/share/zsh/site-functions' ;;
+    pkg)     _share='usr/local/share'; _zsh_dir='usr/local/share/zsh/site-functions' ;;
     *) die "stage_tree: unknown package format '$_fmt'" ;;
   esac
   for _pair in \
-    "repro.bash:usr/share/bash-completion/completions/repro" \
+    "repro.bash:$_share/bash-completion/completions/repro" \
     "_repro:$_zsh_dir/_repro" \
-    "repro.fish:usr/share/fish/vendor_completions.d/repro.fish" ; do
+    "repro.fish:$_share/fish/vendor_completions.d/repro.fish" ; do
     _from="$_src/${_pair%%:*}"
     _to="$_t/${_pair#*:}"
     [ -s "$_from" ] || die "$topdir/share/repro/completions/${_pair%%:*} is missing or empty; the release leg stages it with scripts/release/stage_release_completions.sh"
@@ -408,10 +451,314 @@ PKGINFO
   log "built $_pkg"
 }
 
+# ---------------------------------------------------------------------
+# .pkg (macOS component package)
+# ---------------------------------------------------------------------
+# A flat component package whose payload is rooted at /, holding the archive
+# tree under /usr/local/lib/reprobuild, a wrapper per public command in
+# /usr/local/bin, and the completion files (stage_tree, format `pkg`). It is
+# built with pkgbuild, which exists on macOS only, so this ecosystem is never
+# part of `all`. The package is unsigned and not notarized.
+#
+# Why /usr/local: macOS's /usr is read-only, and /usr/local is where its
+# installers put third-party programs and what its shells already look at:
+# measured on macOS 26 (Apple silicon), /bin/zsh's default fpath starts with
+# /usr/local/share/zsh/site-functions. bash-completion searches
+# /usr/local/share/bash-completion/completions by default (XDG_DATA_DIRS
+# unset), but macOS's own bash is 3.2 and ships none. Fish searches
+# /usr/local/share/fish/vendor_completions.d only when its own prefix is
+# /usr/local (Homebrew on Intel) or XDG_DATA_DIRS names /usr/local/share.
+build_pkg() {
+  command -v pkgbuild >/dev/null 2>&1 || die 'pkgbuild not found (the macOS .pkg can be built on macOS only)'
+  _root="$stage/pkgroot"
+  rm -rf "$_root"
+  mkdir -p "$_root"
+  stage_tree "$_root" pkg
+  # Extended attributes on the staged files (quarantine marks from wherever
+  # the archive was unpacked) would travel in the payload as `._name`
+  # AppleDouble records. Clear what can be cleared; macOS refuses to clear its
+  # own provenance mark, and the installer applies the rest as attributes.
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$_root" 2>/dev/null || true
+  fi
+  _pkg="$out/reprobuild-${version}-${platform}-${asset_arch}.pkg"
+  rm -f "$_pkg"
+  # --ownership recommended: root:wheel on install, whoever built the tree.
+  pkgbuild --root "$_root" --identifier "${REPRO_PKG_IDENTIFIER:-com.metacraft-labs.reprobuild}" \
+    --version "$version" --install-location / --ownership recommended \
+    "$_pkg" >"$stage/pkgbuild.log" 2>&1 || {
+    log 'pkgbuild failed; last 40 lines:'
+    tail -n 40 "$stage/pkgbuild.log" >&2
+    die 'pkgbuild failed'
+  }
+  [ -s "$_pkg" ] || die "built an empty $_pkg"
+  # READ IT BACK, as the pacman package is: the payload must hold the command
+  # and the completion files, or the installer would run and provide nothing.
+  command -v pkgutil >/dev/null 2>&1 || die 'pkgutil not found; cannot read the package back'
+  pkgutil --payload-files "$_pkg" > "$stage/pkg-listing.txt" 2>/dev/null \
+    || die "the package $_pkg cannot be read back (pkgutil --payload-files failed)"
+  for _want in ./usr/local/bin/repro \
+      ./usr/local/share/bash-completion/completions/repro \
+      ./usr/local/share/zsh/site-functions/_repro \
+      ./usr/local/share/fish/vendor_completions.d/repro.fish ; do
+    grep -qx -- "$_want" "$stage/pkg-listing.txt" \
+      || die "the package $_pkg has no $_want in its payload"
+  done
+  log "built $_pkg"
+}
+
+# ---------------------------------------------------------------------
+# .msi (Windows Installer)
+# ---------------------------------------------------------------------
+# A per-machine Windows Installer package built from the Windows release
+# .zip. Like the other formats it carries the archive tree INTACT, here under
+# %ProgramFiles%\Reprobuild (bin\, lib\, share\...), puts bin\ on the machine
+# PATH, and so installs the archive's PowerShell completion script at
+#
+#   %ProgramFiles%\Reprobuild\share\repro\completions\repro.ps1
+#
+# byte-identical to the archive's (generated by the release leg's own
+# repro.exe, scripts/release/stage_release_completions.sh). PowerShell loads
+# no completion file on its own: a block in a profile has to load it
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_profiles).
+# For every user of the machine that is the all-users profile of each
+# PowerShell, $PSHOME\Profile.ps1, which is what
+# `repro hooks ensure --shell-autocomplete --system` writes. The package runs
+# exactly that, with the repro.exe it installed, as a deferred custom action
+# after the files are in place, and runs `repro hooks uninstall
+# --shell-autocomplete --system` before they are removed, so an uninstall
+# leaves no block behind. Both run as LocalSystem (the package is
+# per-machine), and their failure does not fail
+# the installation: completion is a convenience on top of a working install,
+# as with the install scripts. The ensure action writes the block in each
+# PowerShell's profile whose $PSHOME is writable (as LocalSystem, Program
+# Files and Windows PowerShell's directory are); a PowerShell whose $PSHOME
+# is not (an MSIX install) is reported and left to each user's own
+# `repro hooks ensure --shell-autocomplete`. The script the package installed
+# is the one the ensure action would write, so it is left as it is.
+#
+# The authoring (.wxs, WiX v3 schema) is written to <out> beside the package,
+# so it can be read and tested on any host. It is generated from the unpacked
+# tree, one component per file, with WiX deriving each component's GUID from
+# its install path (Guid="*"), which is what keeps upgrades of one product
+# version to the next working. Two files have fixed identifiers, because the
+# custom actions and the read-back name them: bin\repro.exe (fil_repro_exe)
+# and the completion script (fil_completion_ps1). The UpgradeCode is the one
+# the DSL packaging layer's reprobuild distribution carries
+# (libs/repro_dsl_stdlib/src/repro_dsl_stdlib/packaging/reprobuild_dist.nim),
+# so either MSI upgrades the other instead of installing beside it.
+#
+# Toolsets: msitools' wixl (https://wiki.gnome.org/msitools; Linux, macOS),
+# or WiX v3's candle and light on Windows
+# (https://wixtoolset.org/docs/v3/; REPRO_WIX3_BIN names the directory that
+# holds them). REPRO_MSI_TOOLSET=wixl|wix3 chooses one; otherwise wixl when it
+# is on PATH, else WiX v3. REPRO_MSI_SOURCE_ONLY=1 writes the .wxs and stops.
+# The package is read back (msiinfo, or the Windows Installer database API
+# where there is no msiinfo) and refused unless it installs repro.exe, the
+# completion script at its path and both custom actions.
+msi_upgrade_code='{2B7F4E19-8C63-4A05-9D71-5E0C3A8F4B62}'
+[ -z "${REPRO_MSI_UPGRADE_CODE:-}" ] || msi_upgrade_code="$REPRO_MSI_UPGRADE_CODE"
+
+# msi_product_version: Windows Installer's ProductVersion is
+# major.minor.build, each numeric (https://learn.microsoft.com/windows/win32/msi/productversion).
+msi_product_version() {
+  printf '%s\n' "$version" | sed 's/[^0-9.].*$//' \
+    | awk -F. '{ printf "%d.%d.%d\n", $1, $2, $3 }'
+}
+
+# write_msi_wxs <wxs>: the authoring for the unpacked tree under $stage.
+# File sources are "$(var.SourceDir)/<top>/<path>", so the .wxs builds from
+# any directory that holds the unpacked tree (wixl -D / candle -d SourceDir=).
+write_msi_wxs() {
+  ( cd "$stage" && find "$topdir" -type f ) | LC_ALL=C sort | awk \
+    -v top="$topdir" -v ver="$(msi_product_version)" \
+    -v upgrade="$msi_upgrade_code" -v maker="Metacraft Labs" '
+    function esc(s) {
+      gsub(/&/, "\\&amp;", s); gsub(/</, "\\&lt;", s); gsub(/>/, "\\&gt;", s)
+      gsub(/"/, "\\&quot;", s); gsub(/\047/, "\\&apos;", s)
+      return s
+    }
+    function pad(n,   s) { s = ""; while (n-- > 0) s = s "  "; return s }
+    BEGIN {
+      print "<?xml version=\"1.0\" encoding=\"utf-8\"?>"
+      print "<!-- Generated by scripts/release/repro-build-packages.sh, ecosystem msi. -->"
+      print "<Wix xmlns=\"http://schemas.microsoft.com/wix/2006/wi\">"
+      print "  <Product Id=\"*\" Name=\"Reprobuild\" Codepage=\"65001\" Language=\"1033\" Version=\"" ver "\" Manufacturer=\"" maker "\" UpgradeCode=\"" upgrade "\">"
+      print "    <Package InstallerVersion=\"200\" SummaryCodepage=\"1252\" Compressed=\"yes\" InstallScope=\"perMachine\" Comments=\"Reprobuild, a reproducible build system\" />"
+      print "    <MajorUpgrade DowngradeErrorMessage=\"A newer version of Reprobuild is already installed.\" />"
+      print "    <Media Id=\"1\" Cabinet=\"reprobuild.cab\" EmbedCab=\"yes\" />"
+      print "    <Directory Id=\"TARGETDIR\" Name=\"SourceDir\">"
+      print "      <Directory Id=\"ProgramFiles64Folder\">"
+      print "        <Directory Id=\"INSTALLFOLDER\" Name=\"Reprobuild\">"
+      base = 4; depth = 0; n = 0; nd = 0
+    }
+    {
+      rel = substr($0, length(top) + 2)
+      k = split(rel, parts, "/")
+      c = 0
+      while (c < depth && c < k - 1 && stack[c + 1] == parts[c + 1]) c++
+      while (depth > c) { print pad(base + depth) "</Directory>"; depth-- }
+      while (depth < k - 1) {
+        depth++
+        stack[depth] = parts[depth]
+        dpath = parts[1]
+        for (i = 2; i <= depth; i++) dpath = dpath "/" parts[i]
+        if (dpath == "bin") did = "BINDIR"
+        else if (dpath == "share/repro/completions") did = "COMPLETIONSDIR"
+        else { nd++; did = "d" nd }
+        print pad(base + depth) "<Directory Id=\"" did "\" Name=\"" esc(parts[depth]) "\">"
+      }
+      n++
+      cid = "c" n; fid = "f" n
+      if (rel == "bin/repro.exe") { cid = "cmp_repro_exe"; fid = "fil_repro_exe" }
+      if (rel == "share/repro/completions/repro.ps1") { cid = "cmp_completion_ps1"; fid = "fil_completion_ps1" }
+      refs[n] = cid
+      print pad(base + depth + 1) "<Component Id=\"" cid "\" Guid=\"*\" Win64=\"yes\">"
+      print pad(base + depth + 2) "<File Id=\"" fid "\" Name=\"" esc(parts[k]) "\" KeyPath=\"yes\" Source=\"$(var.SourceDir)/" esc($0) "\" />"
+      print pad(base + depth + 1) "</Component>"
+    }
+    END {
+      while (depth > 0) { print pad(base + depth) "</Directory>"; depth-- }
+      # bin\ on the machine PATH: the completion script calls `repro`.
+      print "          <Component Id=\"cmp_path_entry\" Guid=\"{0C1E9A57-6B3D-4F28-8E41-2A7D5C9B3E60}\" Win64=\"yes\">"
+      print "            <RegistryValue Root=\"HKLM\" Key=\"SOFTWARE\\" maker "\\Reprobuild\" Name=\"InstallPath\" Type=\"string\" Value=\"[INSTALLFOLDER]\" KeyPath=\"yes\" />"
+      print "            <Environment Id=\"PathEntry\" Name=\"PATH\" Value=\"[BINDIR]\" Permanent=\"no\" Part=\"last\" Action=\"set\" System=\"yes\" />"
+      print "          </Component>"
+      print "        </Directory>"
+      print "      </Directory>"
+      print "    </Directory>"
+      print "    <Feature Id=\"Complete\" Title=\"Reprobuild\" Level=\"1\">"
+      for (i = 1; i <= n; i++) print "      <ComponentRef Id=\"" refs[i] "\" />"
+      print "      <ComponentRef Id=\"cmp_path_entry\" />"
+      print "    </Feature>"
+      # PowerShell completion for every user: the all-users profile block,
+      # written and removed by the installed repro (see build_msi).
+      print "    <CustomAction Id=\"ReproCompletionEnsure\" FileKey=\"fil_repro_exe\" ExeCommand=\"hooks ensure --shell-autocomplete --system\" Execute=\"deferred\" Impersonate=\"no\" Return=\"ignore\" />"
+      print "    <CustomAction Id=\"ReproCompletionRemove\" FileKey=\"fil_repro_exe\" ExeCommand=\"hooks uninstall --shell-autocomplete --system\" Execute=\"deferred\" Impersonate=\"no\" Return=\"ignore\" />"
+      print "    <InstallExecuteSequence>"
+      print "      <Custom Action=\"ReproCompletionRemove\" Before=\"RemoveFiles\">REMOVE~=\"ALL\"</Custom>"
+      print "      <Custom Action=\"ReproCompletionEnsure\" Before=\"InstallFinalize\">NOT (REMOVE~=\"ALL\")</Custom>"
+      print "    </InstallExecuteSequence>"
+      print "  </Product>"
+      print "</Wix>"
+    }'
+}
+
+# msi_table <msi> <table>: the table's rows, tab-separated, no header.
+msi_table() {
+  if command -v msiinfo >/dev/null 2>&1; then
+    msiinfo export "$1" "$2" | tr -d '\r' | tail -n +4
+  elif command -v powershell.exe >/dev/null 2>&1; then
+    _m="$1"
+    command -v cygpath >/dev/null 2>&1 && _m="$(cygpath -w "$1")"
+    # The Windows Installer database API (WindowsInstaller.Installer):
+    # https://learn.microsoft.com/windows/win32/msi/installer-opendatabase
+    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive -Command '
+      $i = New-Object -ComObject WindowsInstaller.Installer
+      $db = $i.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $i, @($env:REPRO_MSI_DB, 0))
+      $v = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"))
+      $v.GetType().InvokeMember("Execute", "InvokeMethod", $null, $v, $null) | Out-Null
+      $cols = $v.GetType().InvokeMember("ColumnInfo", "GetProperty", $null, $v, @(0))
+      $n = $cols.GetType().InvokeMember("FieldCount", "GetProperty", $null, $cols, $null)
+      while ($r = $v.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $v, $null)) {
+        $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember("StringData", "GetProperty", $null, $r, @($k)) }
+        [Console]::Out.WriteLine(($f -join "`t"))
+      }' | tr -d '\r'
+  else
+    die 'cannot read the MSI back: neither msiinfo (msitools) nor the Windows Installer API (powershell.exe) is available'
+  fi
+}
+
+# msi_file_paths <msi>: every installed file as <Directory id path>/<name>,
+# e.g. ProgramFiles64Folder/Reprobuild/bin/repro.exe, resolved from the
+# Directory, Component and File tables.
+msi_file_paths() {
+  msi_table "$1" Directory > "$stage/msi-directory.tsv"
+  msi_table "$1" Component > "$stage/msi-component.tsv"
+  msi_table "$1" File > "$stage/msi-file.tsv"
+  awk -F '\t' '
+    function longname(s) { sub(/:.*/, "", s); if (index(s, "|")) s = substr(s, index(s, "|") + 1); return s }
+    function dpath(d) {
+      if (d == "TARGETDIR" || d == "ProgramFiles64Folder" || !(d in parent)) return d
+      return dpath(parent[d]) "/" longname(name[d])
+    }
+    FILENAME ~ /directory/ { parent[$1] = $2; name[$1] = $3; next }
+    FILENAME ~ /component/ { cdir[$1] = $3; next }
+    { print dpath(cdir[$2]) "/" longname($3) }
+  ' "$stage/msi-directory.tsv" "$stage/msi-component.tsv" "$stage/msi-file.tsv"
+}
+
+build_msi() {
+  _ps1="$payload/share/repro/completions/repro.ps1"
+  [ -s "$_ps1" ] || die "$topdir/share/repro/completions/repro.ps1 is missing or empty; the release leg stages it with scripts/release/stage_release_completions.sh"
+  grep -q -- '__complete' "$_ps1" \
+    || die "$topdir/share/repro/completions/repro.ps1 does not call 'repro __complete'; refusing to package it"
+  [ -f "$payload/bin/repro.exe" ] || die "$topdir/bin has no repro.exe; refusing to build an MSI without the command"
+  _base="$out/reprobuild-${version}-${platform}-${asset_arch}"
+  _wxs="$_base.wxs"
+  _msi="$_base.msi"
+  rm -f "$_wxs" "$_msi"
+  write_msi_wxs > "$_wxs" || die "could not write $_wxs"
+  log "wrote $_wxs"
+  if [ "${REPRO_MSI_SOURCE_ONLY:-0}" = 1 ]; then
+    log 'REPRO_MSI_SOURCE_ONLY=1: not building the package'
+    return 0
+  fi
+  _toolset="${REPRO_MSI_TOOLSET:-}"
+  _wix="${REPRO_WIX3_BIN:-}"
+  if [ -z "$_toolset" ]; then
+    if command -v wixl >/dev/null 2>&1; then _toolset=wixl
+    elif [ -n "$_wix" ] || command -v candle.exe >/dev/null 2>&1; then _toolset=wix3
+    else die 'no MSI toolset: put msitools (wixl) on PATH, or name WiX v3 with REPRO_WIX3_BIN'
+    fi
+  fi
+  case "$_toolset" in
+    wixl)
+      command -v wixl >/dev/null 2>&1 || die 'wixl (msitools) is not on PATH'
+      ( cd "$stage" && wixl -a x64 -D "SourceDir=$stage" -o "$_msi" "$_wxs" ) \
+        > "$stage/wixl.log" 2>&1 || { tail -n 40 "$stage/wixl.log" >&2; die 'wixl failed'; }
+      ;;
+    wix3)
+      _candle=candle.exe; _light=light.exe
+      if [ -n "$_wix" ]; then _candle="$_wix/candle.exe"; _light="$_wix/light.exe"; fi
+      # WiX is a Windows program: hand it Windows paths (Git for Windows'
+      # bash has cygpath).
+      _w() { if command -v cygpath >/dev/null 2>&1; then cygpath -w "$1"; else printf '%s\n' "$1"; fi; }
+      "$_candle" -nologo -arch x64 "-dSourceDir=$(_w "$stage")" -out "$(_w "$stage/reprobuild.wixobj")" "$(_w "$_wxs")" \
+        > "$stage/candle.log" 2>&1 || { tail -n 40 "$stage/candle.log" >&2; die 'candle failed'; }
+      # -sval: ICE validation consults the build host's Windows Installer
+      # service; it is a check to run on the package, not part of making it.
+      "$_light" -nologo -sval -out "$(_w "$_msi")" "$(_w "$stage/reprobuild.wixobj")" \
+        > "$stage/light.log" 2>&1 || { tail -n 40 "$stage/light.log" >&2; die 'light failed'; }
+      ;;
+    *) die "unknown REPRO_MSI_TOOLSET '$_toolset' (wixl or wix3)" ;;
+  esac
+  [ -s "$_msi" ] || die "built an empty $_msi"
+  # READ IT BACK: the package must install the command, the completion
+  # script at its documented path, and the two custom actions.
+  msi_file_paths "$_msi" > "$stage/msi-files.txt" \
+    || die "the package $_msi cannot be read back"
+  for _want in ProgramFiles64Folder/Reprobuild/bin/repro.exe \
+      ProgramFiles64Folder/Reprobuild/share/repro/completions/repro.ps1 ; do
+    grep -qx -- "$_want" "$stage/msi-files.txt" \
+      || die "the package $_msi does not install $_want"
+  done
+  msi_table "$_msi" CustomAction > "$stage/msi-ca.tsv"
+  for _want in 'ReproCompletionEnsure.*hooks ensure --shell-autocomplete --system' \
+      'ReproCompletionRemove.*hooks uninstall --shell-autocomplete --system' ; do
+    grep -q -- "$_want" "$stage/msi-ca.tsv" \
+      || die "the package $_msi has no custom action matching '$_want'"
+  done
+  log "built $_msi"
+}
+
 built=0
 if want deb;  then build_deb;  built=$((built + 1)); fi
 if want rpm;  then build_rpm;  built=$((built + 1)); fi
 if want arch; then build_arch; built=$((built + 1)); fi
+# Only on request: see build_pkg and build_msi.
+if [ "$ecosystem" = pkg ]; then build_pkg; built=$((built + 1)); fi
+if [ "$ecosystem" = msi ]; then build_msi; built=$((built + 1)); fi
 
 [ "$built" -gt 0 ] || die "--ecosystem $ecosystem selected nothing to build"
 log "done: $built ecosystem(s) into $out"

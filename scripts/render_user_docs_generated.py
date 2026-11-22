@@ -154,6 +154,7 @@ HEALTH_CHECK_SPECS: list[tuple[str, str, str]] = [
     ("unpublished-heads", "Warns when participating checkouts sit at local commits that exist on no remote.", "No"),
     ("disjoint-local-branches", "Warns about unpublished local branches that share no merge-base with the repository's mainline.", "No"),
     ("shared-clone-leaves", "Inspects checkouts borrowing from shared bare clones for missing pools, broken refetch chains or stale remote refs.", "Yes (pools, chains, stale remote refs)"),
+    ("shared-clone-pack-temporaries", "Finds git pack temporaries that an interrupted repack or fetch abandoned in the host's shared clone pools, which git can never read.", "Yes (removes them)"),
     ("certificate-policy-snapshot", "Warns when a repository's recorded certificate-policy snapshot in `repro.lock` is behind its project file.", "No"),
 ]
 
@@ -504,6 +505,7 @@ def extract_installer_ps1_help() -> str:
         "  -Domain <DOMAIN>               Repository domain when -BaseUrl is unset (default: metacraft-labs.com).",
         "  -BucketUrl <URL>               Override the Scoop bucket Git URL (default: $env:REPRO_BUCKET_URL).",
         "  -Prefix <PATH>                 Destination directory for -Method tarball.",
+        "  -NoCompletion                  Do not set up shell completion (also REPRO_NO_COMPLETION=1).",
         "  -DryRun                        Print the actions that would run; change nothing.",
         "  -Yes                           Accepted for scripting compatibility (the installer never prompts).",
         "```",

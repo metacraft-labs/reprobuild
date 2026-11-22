@@ -24,7 +24,8 @@
 ## directory `<repo>-<commit>/`).
 
 from repro_core/process_streams import drainStream
-import std/[exitprocs, nativesockets, net, options, os, osproc, random, streams, strtabs, strutils, tables, tempfiles, times]
+import std/[atomics, exitprocs, nativesockets, net, options, os, osproc, random, streams, strtabs, strutils, tables, tempfiles, times]
+import repro_core/process_env
 
 import repro_nimble_generator
 import repro_nimble_index
@@ -56,6 +57,8 @@ type
     routes: seq[Route]
     listenFd: int
     logPath: string
+    ready: ptr Atomic[bool]
+      ## set once the TLS context and the listener exist
 
   Fixture* = object
     dir*: string        ## everything the fixture writes
@@ -64,7 +67,11 @@ type
     port*: int
     gitBin*: string
     logPath*: string
-    thread: Thread[ServerConfig]
+    thread: ptr Thread[ServerConfig]
+      ## shared memory, never moved, never joined: the server thread reads
+      ## its argument from here when it is first scheduled, which can be
+      ## after a test that never contacts the forge has destroyed its
+      ## ``Fixture``
     listener: Socket
 
 proc run*(args: openArray[string]; cwd = ""; env: StringTableRef = nil;
@@ -82,8 +89,8 @@ proc run*(args: openArray[string]; cwd = ""; env: StringTableRef = nil;
       result)
 
 proc gitEnv*(date = 1_700_000_000'i64): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
+  result = newEnvTable()
+  for k, v in inheritedEnvTable():
     if not k.startsWith("GIT_"): result[k] = v
   result["GIT_CONFIG_NOSYSTEM"] = "1"
   result["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -150,7 +157,7 @@ proc readRequest(s: Socket): tuple[ok: bool; meth, path, query: string;
   result.ok = true
 
 proc cgi(cfg: ServerConfig; req: auto): string =
-  let env = newStringTable(modeCaseSensitive)
+  let env = newEnvTable()
   env["PATH"] = parentDir(cfg.gitBin)
   env["GIT_PROJECT_ROOT"] = cfg.root
   env["GIT_HTTP_EXPORT_ALL"] = "1"
@@ -200,6 +207,7 @@ proc serve(cfg: ServerConfig) {.thread.} =
     let ctx = newContext(verifyMode = CVerifyNone, certFile = cfg.cert,
       keyFile = cfg.key)
     let listener = newSocket(fd = SocketHandle(cfg.listenFd))
+    cfg.ready[].store(true)
     var stalled: seq[Socket]
     while true:
       var client: Socket
@@ -314,9 +322,18 @@ proc newFixture*(prefix: string; routes: seq[Route] = @[]): Fixture =
   var rs = routes
   for r in rs.mitems:
     r.redirectTo = r.redirectTo.replace("{port}", $result.port)
-  createThread(result.thread, serve, ServerConfig(root: result.root,
+  result.thread = cast[ptr Thread[ServerConfig]](
+    allocShared0(sizeof(Thread[ServerConfig])))
+  let ready = cast[ptr Atomic[bool]](allocShared0(sizeof(Atomic[bool])))
+  createThread(result.thread[], serve, ServerConfig(root: result.root,
     cert: result.cert, key: result.key, gitBin: result.gitBin, routes: rs,
-    listenFd: int(result.listener.getFd()), logPath: result.logPath))
+    listenFd: int(result.listener.getFd()), logPath: result.logPath,
+    ready: ready))
+  # Wait until the server is past its TLS setup: a test that never contacts
+  # the forge can otherwise end the process while the thread is still inside
+  # OpenSSL, which crashes at exit.
+  while not ready[].load():
+    sleep(1)
 
 proc requests*(f: Fixture): seq[string] =
   for l in readFile(f.logPath).splitLines():

@@ -84,6 +84,7 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+import repro_core/workspace_siblings
 import repro_core/variant_assignments
 when defined(posix):
   import repro_core/owned_directory
@@ -94,6 +95,8 @@ export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
 import repro_interface_artifacts/closure_manifest
 export closure_manifest
+import repro_interface_artifacts/gem_closure_manifest
+export gem_closure_manifest
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -642,6 +645,28 @@ type
       ## artifact has no way to resolve. Empty for a record whose closure
       ## has not been inlined (a recipe read in place) and for a record
       ## with no closure.
+    gemClosure*: string
+      ## v36: recipe-relative path to the committed gem-closure manifest
+      ## (``gem_closure_manifest``) whose gems a post-extraction step
+      ## installs, offline, into the realized Ruby prefix. Resolved like
+      ## ``closureManifest``. "" when the record declares no gem step.
+    gemEntries*: seq[GemClosureEntry]
+      ## v36: the gem manifest's parsed content, inlined at the lift as
+      ## ``closureEntries`` is, so that a consumer of a published artifact,
+      ## which has no manifest file, installs the same gems. Realization
+      ## installs THESE when present and never opens ``gemClosure``.
+    gemBuildUses*: seq[InterfaceToolUse]
+      ## v36: the provisioned packages the gem step builds native
+      ## extensions with (the C toolchain, the MSYS root, pkg-config, the C
+      ## libraries), each resolved at the lift into a tool use carrying its
+      ## own realizations. Each is realized by its own provisioning edge
+      ## before the step runs; never a tool found on PATH.
+    gemBuildArgs*: seq[GemBuildArgs]
+      ## v36: per-gem extconf arguments, in declaration order.
+    gemSubstitutions*: seq[string]
+      ## v36: the gems whose prebuilt platform gem the manifest may name
+      ## instead of the source gem. Reviewed in the recipe; nokogiri may
+      ## never appear here.
     detail*: TarballArchiveDetail
       ## GM4b (v21): the archive-realization metadata — version, alternative
       ## digests, install method, installer/pacman/bootstrap arguments, env
@@ -1251,10 +1276,53 @@ static:
     "ord(stamp.kind) -- confirm the new value was APPENDED, then update " &
     "this assertion"
 
+# ``InterfaceTarballProvisioning.gemBuildUses`` makes ``InterfaceToolUse`` and
+# ``InterfaceTarballProvisioning`` mutually recursive. The compiler cannot
+# prove the generic, structural ``==`` side-effect free over a recursive type,
+# so ``func`` callers (``provisioning_pins.sameEntries``) would stop
+# compiling. These are that same field-by-field comparison, declared
+# side-effect free, which it is.
+proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.}
+
+proc `==`*(a, b: InterfaceTarballProvisioning): bool {.noSideEffect.} =
+  {.cast(noSideEffect).}:
+    for left, right in fields(a, b):
+      if left != right:
+        return false
+  true
+
+proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
+  {.cast(noSideEffect).}:
+    for left, right in fields(a, b):
+      if left != right:
+        return false
+  true
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 35'u16
-    ## v35 (current): ``InterfaceToolUse`` retains the used package's
+  EnvelopeVersion = 37'u16
+    ## v37 (current): ``TarballArchiveDetail`` retains
+    ##                ``elfRuntimePackage`` (the package whose realized
+    ##                prefix carries the loader and C library an archive
+    ##                with none of its own is relocated onto) and
+    ##                ``executableExtraAliases`` (further names the realized
+    ##                executable is copied under), after
+    ##                ``gccSpecDefaults``. v36 and older payloads decode them
+    ##                empty: relocation within the archive's own prefix and
+    ##                one alias at most, which is what every record was
+    ##                before. The fingerprint projection writes the block
+    ##                only when a field is non-empty, so no fingerprint
+    ##                hashed from a record that declares neither moves.
+    ## v36: ``InterfaceTarballProvisioning`` retains its gem-closure
+    ##                step (``gemClosure``, the inlined ``gemEntries``, the
+    ##                ``gemBuildUses`` tool uses resolved at the lift,
+    ##                ``gemBuildArgs`` and ``gemSubstitutions``), after
+    ##                ``closureEntries``. v35 and older payloads decode a
+    ##                record with no gem step, which is what every record
+    ##                was. The fingerprint projection writes the block only
+    ##                for a record that declares a gem step, so no
+    ##                fingerprint or key hashed from any other record moves.
+    ## v35: ``InterfaceToolUse`` retains the used package's
     ##                declared ``platforms:`` (``platformsDeclared``,
     ##                ``declaredPlatforms``, ``platformsMessage``), after
     ##                the environment-prefix block, so a recipe's ``uses:``
@@ -2133,6 +2201,13 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
       outp.writeStringSeq(detail.elfPatchDirs)
       outp.writeString(detail.gccLinkSpecs)
       outp.writeStringSeq(detail.gccSpecDefaults)
+  if version >= 37'u16:
+    # Omitted from the fingerprint projection when empty, as the v33 block
+    # is (see the v37 note on ``EnvelopeVersion``).
+    if not forFingerprint or detail.elfRuntimePackage.len > 0 or
+        detail.executableExtraAliases.len > 0:
+      outp.writeString(detail.elfRuntimePackage)
+      outp.writeStringSeq(detail.executableExtraAliases)
 
 proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
                               version: uint16): TarballArchiveDetail =
@@ -2165,6 +2240,9 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
     result.elfPatchDirs = readStringSeq(bytes, pos)
     result.gccLinkSpecs = readString(bytes, pos)
     result.gccSpecDefaults = readStringSeq(bytes, pos)
+  if version >= 37'u16:
+    result.elfRuntimePackage = readString(bytes, pos)
+    result.executableExtraAliases = readStringSeq(bytes, pos)
 
 const FirstEnvelopeVersionWithTarballDetail = 21'u16
   ## The envelope version that introduced ``TarballArchiveDetail`` (GM4b).
@@ -2196,6 +2274,16 @@ proc readTaggedTarballArchiveDetail*(bytes: openArray[byte];
       " (this build reads " & $FirstEnvelopeVersionWithTarballDetail &
       " through " & $EnvelopeVersion & ")")
   readTarballArchiveDetail(bytes, pos, version)
+
+proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
+                  version = EnvelopeVersion;
+                  forFingerprint = false)
+proc readToolUse(bytes: openArray[byte]; pos: var int;
+                 version: uint16): InterfaceToolUse
+
+proc hasGemClosureStep*(provisioning: InterfaceTarballProvisioning): bool =
+  ## Whether the record declares a gem-closure post-extraction step.
+  provisioning.gemClosure.len > 0 or provisioning.gemEntries.len > 0
 
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
@@ -2239,6 +2327,29 @@ proc writeTarballProvisioning(outp: var seq[byte];
         outp.writeString(entry.url)
         outp.writeString(entry.archiveType)
         outp.writeU32Le(uint32(max(entry.stripComponents, 0)))
+  if version >= 36'u16 and (not forFingerprint or
+      hasGemClosureStep(provisioning)):
+    # The gem step (v36). Projected for a fingerprint only when the record
+    # declares one, so every other record projects exactly as at v35. The
+    # manifest PATH is a local detail and is left out of the projection;
+    # the inlined entries are what the record realizes.
+    if not forFingerprint:
+      outp.writeString(provisioning.gemClosure)
+    outp.writeU32Le(uint32(provisioning.gemEntries.len))
+    for entry in provisioning.gemEntries:
+      outp.writeString(entry.name)
+      outp.writeString(entry.version)
+      outp.writeString(entry.platform)
+      outp.writeString(entry.sha256)
+      outp.writeString(entry.url)
+    outp.writeU32Le(uint32(provisioning.gemBuildUses.len))
+    for use in provisioning.gemBuildUses:
+      outp.writeToolUse(use, version, forFingerprint)
+    outp.writeU32Le(uint32(provisioning.gemBuildArgs.len))
+    for item in provisioning.gemBuildArgs:
+      outp.writeString(item.gem)
+      outp.writeStringSeq(item.args)
+    outp.writeStringSeq(provisioning.gemSubstitutions)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -2285,6 +2396,30 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
       entry.archiveType = readString(bytes, pos)
       entry.stripComponents = int(readU32Le(bytes, pos))
       result.closureEntries.add(entry)
+  if version >= 36'u16:
+    result.gemClosure = readString(bytes, pos)
+    # Each count is bounded before its loop, as the closure block's is: a
+    # gem line is at least five string length prefixes, a tool use and a
+    # build-argument item at least a few.
+    let gemCount = readElementCount(bytes, pos, 20)
+    for _ in 0 ..< gemCount:
+      var entry: GemClosureEntry
+      entry.name = readString(bytes, pos)
+      entry.version = readString(bytes, pos)
+      entry.platform = readString(bytes, pos)
+      entry.sha256 = readString(bytes, pos)
+      entry.url = readString(bytes, pos)
+      result.gemEntries.add(entry)
+    let useCount = readElementCount(bytes, pos, 16)
+    for _ in 0 ..< useCount:
+      result.gemBuildUses.add(readToolUse(bytes, pos, version))
+    let argCount = readElementCount(bytes, pos, 8)
+    for _ in 0 ..< argCount:
+      var item: GemBuildArgs
+      item.gem = readString(bytes, pos)
+      item.args = readStringSeq(bytes, pos)
+      result.gemBuildArgs.add(item)
+    result.gemSubstitutions = readStringSeq(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -3156,11 +3291,59 @@ proc inlinedClosureEntries(provisioning: TarballProvisioningDef):
     return @[]
   parseClosureManifestText(readFile(extendedPath(path)), path)
 
+proc declaredManifestPath(provisioning: TarballProvisioningDef;
+                          declared: string): string =
+  ## A manifest a record names, resolved the way realization resolves it:
+  ## absolute as written, else beside the declaring file, else as written.
+  if declared.isAbsolute: declared
+  elif provisioning.sourceFile.len > 0:
+    parentDir(provisioning.sourceFile) / declared
+  else: declared
+
+proc inlinedGemEntries(provisioning: TarballProvisioningDef):
+    seq[GemClosureEntry] =
+  ## The parsed content of ``provisioning``'s gem manifest, inlined into the
+  ## record as ``inlinedClosureEntries`` inlines a closure: a consumer of the
+  ## artifact cannot open the file. A malformed manifest is refused here,
+  ## naming the file and line, so a recipe that would fail to realize fails
+  ## to compile instead. A missing file yields no entries; realization then
+  ## reports it.
+  if provisioning.gemClosure.len == 0:
+    return @[]
+  let path = declaredManifestPath(provisioning, provisioning.gemClosure)
+  if not fileExists(extendedPath(path)):
+    return @[]
+  parseGemClosureManifestText(readFile(extendedPath(path)), path)
+
+proc toInterfaceToolUse(useDef: PackageUseDef;
+                        packages: openArray[PackageDef];
+                        depth: int): InterfaceToolUse
+
+proc gemBuildToolUses(provisioning: TarballProvisioningDef;
+                      packages: openArray[PackageDef];
+                      depth: int): seq[InterfaceToolUse] =
+  ## The gem step's build tools, each resolved into a tool use carrying its
+  ## package's own realizations, as a ``uses:`` entry is. A build tool whose
+  ## own record declares another gem step is refused: a step's tools are
+  ## provisioned packages, not further SDKs built by steps.
+  for selector in provisioning.gemBuildUses:
+    if depth > 0:
+      raise newException(ValueError, "tool-resolution failed: the gem " &
+        "build tool " & selector & " itself declares a gem-closure step " &
+        "(" & provisioning.sourceFile & ":" & $provisioning.sourceLine &
+        "); a gem step's build tools are plain provisioned packages")
+    result.add(toInterfaceToolUse(PackageUseDef(rawConstraint: selector,
+      packageSelector: selector, executableName: selector,
+      sourceFile: provisioning.sourceFile,
+      sourceLine: provisioning.sourceLine), packages, depth + 1))
+
 proc toInterfaceTarballProvisioning(packageName: string;
                                     provisioning: TarballProvisioningDef;
-                                    contributor = ""):
+                                    contributor = "";
+                                    packages: openArray[PackageDef] = [];
+                                    depth = 0):
     InterfaceTarballProvisioning =
-  InterfaceTarballProvisioning(
+  result = InterfaceTarballProvisioning(
     packageName: packageName,
     contributor: contributor,
     url: provisioning.url,
@@ -3174,6 +3357,9 @@ proc toInterfaceTarballProvisioning(packageName: string;
     launcher: provisioning.launcher,
     closureManifest: provisioning.closureManifest,
     closureEntries: inlinedClosureEntries(provisioning),
+    gemClosure: provisioning.gemClosure,
+    gemEntries: inlinedGemEntries(provisioning),
+    gemSubstitutions: provisioning.gemSubstitutions,
     detail: provisioning.detail,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
@@ -3182,6 +3368,10 @@ proc toInterfaceTarballProvisioning(packageName: string;
     os: provisioning.os,
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
+  for item in provisioning.gemBuildArgs:
+    result.gemBuildArgs.add(GemBuildArgs(gem: item[0], args: item[1]))
+  if provisioning.gemBuildUses.len > 0:
+    result.gemBuildUses = gemBuildToolUses(provisioning, packages, depth)
 
 proc toInterfaceScoopProvisioning(packageName: string;
                                   provisioning: ScoopProvisioningDef;
@@ -3217,7 +3407,8 @@ proc toInterfaceHomebrewProvisioning(packageName: string;
       line: provisioning.sourceLine))
 
 proc toInterfaceToolUse(useDef: PackageUseDef;
-                        packages: openArray[PackageDef]): InterfaceToolUse =
+                        packages: openArray[PackageDef];
+                        depth: int): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: useDef.rawConstraint,
     packageSelector: useDef.packageSelector,
@@ -3238,7 +3429,8 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
           provisioning))
       for provisioning in pkg.tarballProvisioning:
         result.tarballProvisioning.add(toInterfaceTarballProvisioning(
-          pkg.packageName, provisioning))
+          pkg.packageName, provisioning, packages = packages,
+          depth = depth))
       for provisioning in pkg.scoopProvisioning:
         result.scoopProvisioning.add(toInterfaceScoopProvisioning(
           pkg.packageName, provisioning))
@@ -3267,6 +3459,10 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
           result.executableName = exe.binaryName
           break
 
+proc toInterfaceToolUse(useDef: PackageUseDef;
+                        packages: openArray[PackageDef]): InterfaceToolUse =
+  toInterfaceToolUse(useDef, packages, 0)
+
 proc normalizedInterfaceFingerprint(value: string): string =
   result = value.strip().toLowerAscii()
   for prefix in ["blake3-256:", "blake3:", "b3:"]:
@@ -3287,6 +3483,17 @@ proc toInterfaceProvisioningContribution(contribution:
     result.nixProvisioning.add(toInterfaceNixProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.tarballProvisioning:
+    # A gem-closure step is declared on a package's own tarball record. A
+    # contribution reaches a consumer through a stub that reconstructs the
+    # record field by field (``emitLiftedExtensionTypes``), and its build tools
+    # would have to be resolved against the consumer's packages; neither is
+    # done, so the declaration is refused rather than carried half-way.
+    if provisioning.gemClosure.len > 0 or provisioning.gemBuildUses.len > 0:
+      raise newException(ValueError, "tool-resolution failed: the " &
+        "provisioning contribution of " & contribution.targetPackage &
+        " by " & contribution.contributor & " (" & provisioning.sourceFile &
+        ":" & $provisioning.sourceLine & ") declares a gem-closure step; " &
+        "declare it on the package's own tarball record instead")
     result.tarballProvisioning.add(toInterfaceTarballProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.scoopProvisioning:
@@ -4068,7 +4275,10 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", elfRunpath: " & listLit(detail.elfRunpath) &
     ", elfPatchDirs: " & listLit(detail.elfPatchDirs) &
     ", gccLinkSpecs: " & escForCode(detail.gccLinkSpecs) &
-    ", gccSpecDefaults: " & listLit(detail.gccSpecDefaults) & ")"
+    ", gccSpecDefaults: " & listLit(detail.gccSpecDefaults) &
+    ", elfRuntimePackage: " & escForCode(detail.elfRuntimePackage) &
+    ", executableExtraAliases: " & listLit(detail.executableExtraAliases) &
+    ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
@@ -5585,9 +5795,18 @@ proc bootstrapSiblingPackagePathFlags*(reprobuildRoot: string;
     for path in runquotaPaths:
       result.add("--path:" & path)
 
-proc declaredPackageDeps*(workDir: string): seq[string] =
-  ## The package dependencies a project's ``repro.nim`` declares with a
-  ## nested ``uses "<name>"`` entry, in declaration order, deduplicated.
+proc declaredPackageDeps*(recipePath: string): seq[string] =
+  ## The package dependencies the recipe module ``recipePath`` declares with
+  ## a nested ``uses "<name>"`` entry, in declaration order, deduplicated.
+  ##
+  ## ``recipePath`` is the module being COMPILED -- a consumer's
+  ## ``repro.nim``, a catalog recipe, any recipe module -- and never the
+  ## engine's work directory. The engine compiles a consumer's recipe with
+  ## its work directory at the reprobuild checkout
+  ## (``reprobuildLibraryWorkDir()``), so a scan of ``<workDir>/repro.nim``
+  ## read reprobuild's own recipe and the consumer's declarations never put
+  ## a path on the compile: a consumer's ``import <module>`` of a declared
+  ## package's ``src`` failed with ``cannot open file``.
   ##
   ## Read TEXTUALLY, on purpose. The declarations live INSIDE the recipe,
   ## but the ``--path:`` flags they imply are needed to COMPILE that recipe
@@ -5599,14 +5818,13 @@ proc declaredPackageDeps*(workDir: string): seq[string] =
   ## strings inside a ``uses:`` block (``"nim >=2.0"``, ``"ffmpeg >=7.0"``)
   ## are tool/version requirements and name no Nim package; treating them
   ## as one would try to put ``ffmpeg`` on the Nim path.
-  let recipe = workDir / "repro.nim"
-  if not fileExists(extendedPath(recipe)):
+  if recipePath.len == 0 or not fileExists(extendedPath(recipePath)):
     return
   var seen = initHashSet[string]()
-  for rawLine in lines(extendedPath(recipe)):
+  for rawLine in lines(extendedPath(recipePath)):
     # Comment-strip inline rather than via ``stripNimLineComment``: that
-    # helper is defined further down this module, and these two procs must
-    # sit above ``reproLibPathFlags``, which calls them.
+    # helper is defined further down this module, and these procs must
+    # sit above ``recipeLibPathFlags``, which calls them.
     let hashPos = rawLine.find('#')
     let uncommented = if hashPos >= 0: rawLine[0 ..< hashPos] else: rawLine
     let line = uncommented.strip()
@@ -5632,34 +5850,70 @@ proc declaredPackageDeps*(workDir: string): seq[string] =
       result.add(name)
 
 proc resolvePackageRoot*(consumerDir, name: string): string =
-  ## Resolve ONE declared package name to a checkout next to the consumer.
+  ## Resolve ONE declared package name, for the recipe in ``consumerDir``, to
+  ## its checkout: the workspace sibling ``nearestWorkspaceSibling`` finds
+  ## (``../<name>``, else the same name beside a farther ancestor -- the
+  ## workspace root for a recipe deep in its repository). Normalized, or ""
+  ## when nothing resolves.
   ##
-  ## PURE: a directory-existence check and nothing else. No daemon, no lock,
+  ## PURE: directory-existence checks and nothing else. No daemon, no lock,
   ## no sub-build. That matters because this is reachable from a recipe's
   ## own macro expansion via ``staticExec`` DURING a build -- anything that
   ## took a build lock here could deadlock against the build that spawned
   ## it, and anything slow would be paid by every recipe compile.
   ##
-  ## The single source of truth for the resolution: ``declaredPackageRoots``
-  ## and the ``internal resolve-package`` subcommand both route through it,
-  ## so the path a macro imports and the path the engine puts on ``--path:``
-  ## cannot drift apart.
-  if consumerDir.len == 0 or name.len == 0:
-    return ""
-  let candidate = consumerDir.parentDir / name
-  if dirExists(extendedPath(candidate)):
-    return os.normalizedPath(candidate).replace('\\', '/')
+  ## ``declaredPackageRoots`` and the ``internal resolve-package`` subcommand
+  ## both route through it, so the path a macro imports and the path the
+  ## engine puts on ``--path:`` cannot drift apart; and the search rule is
+  ## the one the workspace-producer import and the command line's
+  ## ``<pkg>:<target>`` selector use, so one name names one checkout for all
+  ## of them.
+  let found = nearestWorkspaceSibling(consumerDir, name)
+  if found.dir.len > 0:
+    return os.normalizedPath(found.dir).replace('\\', '/')
 
-proc declaredPackageRoots*(workDir: string): seq[string] =
-  ## Resolve ``declaredPackageDeps`` to sibling checkouts next to the
-  ## consumer. A declared dependency that is not checked out is SKIPPED
-  ## rather than failing here: the recipe compile that follows reports the
-  ## unresolved import with a real file and line, which is a far better
-  ## diagnostic than a path-assembly error naming a directory.
-  for name in declaredPackageDeps(workDir):
-    let resolved = resolvePackageRoot(workDir, name)
-    if resolved.len > 0:
+proc declaredPackageRoots*(recipePath: string): seq[string] =
+  ## Resolve ``declaredPackageDeps(recipePath)`` to their checkouts from the
+  ## directory that holds the recipe (``resolvePackageRoot``; absolute,
+  ## normalized). A declared
+  ## dependency that is not checked out is SKIPPED rather than failing here:
+  ## the recipe compile that follows reports the unresolved import with a
+  ## real file and line, which is a far better diagnostic than a
+  ## path-assembly error naming a directory.
+  if recipePath.len == 0:
+    return
+  let recipeDir = parentDir(absolutePath(recipePath))
+  for name in declaredPackageDeps(recipePath):
+    let resolved = resolvePackageRoot(recipeDir, name)
+    if resolved.len > 0 and resolved notin result:
       result.add(resolved)
+
+proc declaredPackagePathDirs*(recipePath: string): seq[string] =
+  ## The search directories the recipe's declared packages contribute to
+  ## every compile of that recipe, in declaration order: each package root
+  ## and, when it has one, its ``src``.
+  ##
+  ## The root goes on the path so the dependency's own ``repro.nim`` -- its
+  ## DSL export surface, the standard Nim way -- can be imported, and
+  ## ``src`` so a recipe can ``import <module>`` a module of the package
+  ## directly (Test-Certificates.md §"The policy declaration": a shared
+  ## branch policy is imported this way).
+  ##
+  ## This is what makes a DSL package usable WITHOUT being vendored into
+  ## reprobuild's ``libs/``. Before it, the only ways in were to be copied
+  ## into reprobuild's tree or symlinked there, which privileges the stdlib
+  ## over third-party packages.
+  ##
+  ## The one routine every recipe compile takes these from: the compile
+  ## flags (``recipeLibPathFlags``), the source closure that keys and
+  ## stamps those compiles (``recipeSourceClosure``) and the relocation of
+  ## recipe-relative compiles (which names these directories relative to
+  ## the recipe rather than anchoring them).
+  for depRoot in declaredPackageRoots(recipePath):
+    result.add(depRoot)
+    let depSrc = depRoot / "src"
+    if dirExists(extendedPath(depSrc)):
+      result.add(os.normalizedPath(depSrc).replace('\\', '/'))
 
 proc reproLibPathFlags(workDir: string): seq[string] =
   ## Build the ``--path:`` flags the engine passes to ``nim c`` when
@@ -5685,6 +5939,11 @@ proc reproLibPathFlags(workDir: string): seq[string] =
   ## having to embed the reprobuild repo path. It is also what makes
   ## a one-shot ``repro build`` work in a recorder repo on Windows
   ## without an env.ps1 pre-setup of NIM ``--path``.
+  ##
+  ## The packages a recipe declares (``uses "<name>"``) are NOT here: they
+  ## belong to the recipe being compiled, not to ``workDir``, and
+  ## ``recipeLibPathFlags`` appends them. A recipe compile takes its flags
+  ## from that routine, never from this one alone.
   var paths: seq[string] = @[]
   walkLibSrcPathsInto(workDir / "libs", paths)
 
@@ -5734,25 +5993,27 @@ proc reproLibPathFlags(workDir: string): seq[string] =
     for flag in siblingFlags:
       result.add(flag)
 
-  # Declared package dependencies (``uses "<name>"``). Appended LAST so the
-  # reprobuild stdlib still wins on ambiguity -- a third-party package must
-  # not be able to shadow ``repro_project_dsl`` by shipping a module of the
-  # same name.
-  #
-  # Both the package root and its ``src`` go on the path: the root so the
-  # dependency's own ``repro.nim`` -- which is its DSL export surface, the
-  # standard Nim way -- can be imported, and ``src`` so the modules that
-  # recipe imports resolve too.
-  #
-  # This is what makes a DSL package usable WITHOUT being vendored into
-  # reprobuild's ``libs/``. Before it, the only ways in were to be copied
-  # into reprobuild's tree or symlinked there, which privileges the stdlib
-  # over third-party packages.
-  for depRoot in declaredPackageRoots(workDir):
-    result.add("--path:" & depRoot)
-    let depSrc = depRoot / "src"
-    if dirExists(extendedPath(depSrc)):
-      result.add("--path:" & depSrc)
+proc recipeLibPathFlags(workDir, recipePath: string): seq[string] =
+  ## The library ``--path:`` flags of a compile OF ``recipePath``: the
+  ## work directory's library set (``reproLibPathFlags``) followed by the
+  ## search directories of the packages that recipe declares
+  ## (``declaredPackagePathDirs``).
+  ##
+  ## Every engine compile of a recipe -- interface extraction, the provider
+  ## compile, the lock refresh's probes and a lock-pinned catalog recipe,
+  ## all of which reach ``interfaceExtractionCommand`` /
+  ## ``providerCompileCommand`` -- takes its flags from here, and the cache
+  ## identities of those compiles take theirs from here too, so the flags a
+  ## compile runs with and the flags its key names cannot drift apart.
+  ##
+  ## The declared packages are appended LAST so the reprobuild stdlib still
+  ## wins on ambiguity -- a third-party package must not be able to shadow
+  ## ``repro_project_dsl`` by shipping a module of the same name.
+  result = reproLibPathFlags(workDir)
+  for dir in declaredPackagePathDirs(recipePath):
+    let flag = "--path:" & dir
+    if flag notin result:
+      result.add(flag)
 
 proc normalizedStampPath(path: string): string =
   os.normalizedPath(path).replace('\\', '/')
@@ -5958,6 +6219,55 @@ proc walkLibSourcesInto(libsRoot: string; sink: var seq[string];
       if not seen.containsOrIncl(normalized):
         sink.add(normalized)
 
+proc declaredPackageSources*(recipePath: string): seq[string] =
+  ## The sources of the packages ``recipePath`` declares that a compile of
+  ## it can read: each package's ``repro.nim`` with its local import closure
+  ## (the workspace-producer import brings it into the recipe), and every
+  ## ``.nim`` / ``.nims`` under the package's ``src`` (on the path through
+  ## ``declaredPackagePathDirs``, so any of them can be imported by name).
+  ## Not the package's tests or build outputs, which cannot change what the
+  ## recipe compiles to. Sorted and deduplicated.
+  var seen = initHashSet[string]()
+  for depRoot in declaredPackageRoots(recipePath):
+    let depRecipe = depRoot / "repro.nim"
+    if fileExists(extendedPath(depRecipe)):
+      for src in discoverNimSources(depRecipe, declaredPackagePathDirs(
+          depRecipe)):
+        let normalized = normalizedStampPath(src)
+        if not seen.containsOrIncl(normalized):
+          result.add(normalized)
+    walkLibSourcesInto(depRoot / "src", result, seen)
+  result.sort(system.cmp[string])
+
+proc recipeSourceClosure*(modulePath: string;
+                          extraPaths: openArray[string] = [];
+                          includeSiblingSources = false): seq[string] =
+  ## The source set a compile of the recipe ``modulePath`` reads, as every
+  ## recipe compile keys, stamps and declares it: the recipe's own import
+  ## closure (``discoverNimSources``, following bare imports into
+  ## ``extraPaths`` and into the declared packages' search directories) plus
+  ## the declared packages' sources (``declaredPackageSources``).
+  ##
+  ## This is why an edit to a module a recipe imports from a declared
+  ## package re-keys the interface extraction and the provider compile of
+  ## that recipe: the module is in this closure, and the closure's CONTENT
+  ## feeds ``interfaceExtractionFingerprint``, ``providerFingerprintFor``,
+  ## ``ProviderArtifactId`` and both freshness records. Sorted and
+  ## deduplicated, normalized.
+  var roots = @extraPaths
+  for dir in declaredPackagePathDirs(modulePath):
+    if dir notin roots:
+      roots.add(dir)
+  var seen = initHashSet[string]()
+  for src in discoverNimSources(modulePath, roots, includeSiblingSources):
+    let normalized = normalizedStampPath(src)
+    if not seen.containsOrIncl(normalized):
+      result.add(normalized)
+  for src in declaredPackageSources(modulePath):
+    if not seen.containsOrIncl(src):
+      result.add(src)
+  result.sort(system.cmp[string])
+
 proc reproLibSourcesUncached(workDir: string): seq[string] =
   var seen = initHashSet[string]()
   walkLibSourcesInto(workDir / "libs", result, seen)
@@ -5975,27 +6285,11 @@ proc reproLibSourcesUncached(workDir: string): seq[string] =
   if externalRoot.len > 0:
     walkLibSourcesInto(externalRoot, result, seen)
 
-  # Declared package dependencies contribute ``--path:`` entries (see
-  # ``reproLibPathFlags``), so their sources MUST fold into this key too.
-  # The two are required to stay in lockstep: if a dependency's DSL exports
-  # can be imported but editing them does not re-key the provider nimcache,
-  # the harness serves a stale compiled recipe -- and that surfaces as the
-  # harness<->binary fingerprint skew described above rather than as
-  # "my constructor change had no effect".
-  #
-  # Only the dependency's own ``repro.nim`` and its ``src`` tree are
-  # folded in -- not its tests or build outputs, which cannot change what
-  # the recipe compiles to.
-  for depRoot in declaredPackageRoots(workDir):
-    let depRecipe = depRoot / "repro.nim"
-    if fileExists(extendedPath(depRecipe)):
-      let normalized = normalizedStampPath(depRecipe)
-      if not seen.containsOrIncl(normalized):
-        result.add(normalized)
-    let depSrc = depRoot / "src"
-    if dirExists(extendedPath(depSrc)):
-      walkLibSourcesInto(depSrc, result, seen)
-
+  # The packages a recipe declares are NOT folded in here. They belong to
+  # the recipe being compiled, not to ``workDir`` (which is reprobuild's own
+  # checkout on the cross-repo path), so they enter that recipe's source
+  # closure instead (``recipeSourceClosure``), which keys and stamps every
+  # compile of it.
   result.sort(system.cmp[string])
 
 proc fileStamps(paths: openArray[string]): seq[FileStamp]
@@ -6220,10 +6514,19 @@ proc interfaceLiftSources(modulePath, resourceModule: string;
   ## walk so a resource module's cross-directory dependency reachable ONLY via
   ## an extra ``--path`` is discovered (with its CONTENT), not just named by
   ## basename. A change to such a file re-keys the lift.
-  result = discoverNimSources(modulePath, extraPaths, includeSiblingSources).mapIt(
-    normalizedStampPath(it))
+  ##
+  ## The recipe's closure is ``recipeSourceClosure``, so the packages the
+  ## recipe declares are part of it. A resource module is compiled into the
+  ## same lift, with the same declared-package directories on its path, so
+  ## its bare imports are followed into them too.
+  result = recipeSourceClosure(modulePath, extraPaths, includeSiblingSources)
   if resourceModule.len > 0:
-    for src in discoverNimSources(resourceModule, extraPaths, includeSiblingSources):
+    var resourceRoots = @extraPaths
+    for dir in declaredPackagePathDirs(modulePath):
+      if dir notin resourceRoots:
+        resourceRoots.add(dir)
+    for src in discoverNimSources(resourceModule, resourceRoots,
+                                  includeSiblingSources):
       let normalized = normalizedStampPath(src)
       if normalized notin result:
         result.add(normalized)
@@ -6237,7 +6540,7 @@ proc interfaceExtractionContext(modulePath: string;
     InterfaceExtractionContext =
   let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths,
     includeSiblingSources)
-  var libPathFlags = reproLibPathFlags(workDir)
+  var libPathFlags = recipeLibPathFlags(workDir, modulePath)
   # TI1: the producer's declared resource module + extra ``--path``s are part
   # of the lift's input identity — a change to the extra path set re-keys the
   # extraction (a different resource module resolves a different closure).
@@ -6266,9 +6569,15 @@ proc interfaceExtractionCacheContext(modulePath: string;
                                      resourceModule = "";
                                      extraPaths: openArray[string] = []):
     InterfaceExtractionContext =
+  # An immutable-store work directory's library set cannot change, so it is
+  # left out; the recipe's declared packages are the recipe's own and stay.
   var libPathFlags =
     if immutableStorePath(workDir): @[]
     else: reproLibPathFlags(workDir)
+  for dir in declaredPackagePathDirs(modulePath):
+    let flag = "--path:" & dir
+    if flag notin libPathFlags:
+      libPathFlags.add(flag)
   if resourceModule.len > 0:
     libPathFlags.add("--resource-module:" & normalizedStampPath(resourceModule))
   for extra in extraPaths:
@@ -7328,25 +7637,73 @@ proc resolveSqliteLibDir*(explicitLibDir, explicitPrefix, builtPrefix,
       return stored
   firstExistingLibDir(hostDirs, SqliteLibraryNames)
 
+proc topLevelModuleNames(root: string): HashSet[string] =
+  ## The names a `--path:` root contributes to Nim's module namespace: each
+  ## `<name>.nim` directly under it, and each directory directly under it (a
+  ## package's modules, `import name/module`). Nim resolves `import x` and
+  ## `import x/y` by searching each root for `x.nim` or `x/` in turn
+  ## (https://nim-lang.org/docs/manual.html#modules-module-names-in-imports).
+  result = initHashSet[string]()
+  if root.len == 0 or not dirExists(extendedPath(root)):
+    return
+  for kind, path in walkDir(extendedPath(root)):
+    let name = path.extractFilename
+    if name.len == 0 or name.startsWith("."):
+      continue
+    case kind
+    of pcFile, pcLinkToFile:
+      if name.endsWith(".nim"):
+        result.incl(name[0 ..< name.len - ".nim".len])
+    of pcDir, pcLinkToDir:
+      result.incl(name)
+
 proc protectSdkCompilePaths(command: var seq[string]; workDir, moduleArg: string;
                             packageFlags: openArray[string]) =
   ## Recipe/configuration paths remain usable, but may not replace the SDK's
   ## selected libraries or their bootstrap dependencies. Do not promote a
   ## consumer's other auto-discovered/declared package roots with the SDK.
+  ##
+  ## A package the SDK vendors under its own `libs/` always resolves to the
+  ## SDK's copy in an SDK-internal compile. A root outside the SDK's own
+  ## library roots that provides a module name one of them also provides (an
+  ## explicit `*_SRC` override, a sibling checkout's copy, a declared or
+  ## producer package root such as codetracer's `libs/nim-json-serialization`)
+  ## is therefore never reasserted: it stays on the search path where the
+  ## command put it, behind the SDK's reasserted roots, so the SDK's copy wins
+  ## whenever both are present, and every member of a vendored library family
+  ## (faststreams, stew, the serialization family) comes from the one tree the
+  ## SDK was written against. Reasserting such a root put it AHEAD of the SDK's
+  ## copy and paired two releases of one family in a single compile
+  ## (reprobuild-pm issue 2026-11-18-codetracer-recipe-extraction-mixes-
+  ## reprobuild-serialization-with-codetracer-json-serialization, option 2).
+  ## A root providing no SDK-vendored name is reasserted as before.
   let sdkLibs =
     if workDirIsReprobuildTree(workDir): workDir / "libs"
     else: reprobuildExternalLibsRoot(workDir)
   var protectedFlags = initHashSet[string]()
+  var sdkRootFlags = initHashSet[string]()
+  var sdkModules = initHashSet[string]()
   if sdkLibs.len > 0:
     var roots: seq[string]
     walkLibSrcPathsInto(sdkLibs, roots)
     for root in roots:
       protectedFlags.incl("--path:" & root)
+      sdkRootFlags.incl("--path:" & root)
+      for name in topLevelModuleNames(root):
+        sdkModules.incl(name)
     for flag in bootstrapSiblingPackagePathFlags(sdkLibs.parentDir,
         workDir.parentDir):
       if flag.startsWith("--path:"): protectedFlags.incl(flag)
   for flag in packageFlags:
     if flag.startsWith("--path:"): protectedFlags.incl(flag)
+  # Option 2: an override of an SDK-vendored package is not promoted.
+  var overrides: seq[string]
+  for flag in protectedFlags:
+    if flag notin sdkRootFlags and
+        (topLevelModuleNames(flag["--path:".len .. ^1]) * sdkModules).len > 0:
+      overrides.add(flag)
+  for flag in overrides:
+    protectedFlags.excl(flag)
   var selected: seq[string]
   var remaining: seq[string]
   var beforeModule = true
@@ -7573,7 +7930,8 @@ proc externalHashFlags(workDir = ""): seq[string] =
       if not isHostSystemLibDir(sqliteLibDir):
         result.add("--passL:-Wl,-rpath," & sqliteLibDir)
 
-proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
+proc consumerCompilePathFlags*(workDir = getCurrentDir();
+                               recipePath = ""): seq[string] =
   ## ``--path:`` / ``--passC:`` / ``--passL:`` flags a downstream module
   ## must be compiled with when it ``import``s ``repro_project_dsl`` (or a
   ## generated interface stub, which itself ``import``s the DSL umbrella)
@@ -7591,7 +7949,11 @@ proc consumerCompilePathFlags*(workDir = getCurrentDir()): seq[string] =
   ## consumer compile and the integration tests share one authoritative
   ## source of truth instead of hand-maintaining a parallel ``--path``
   ## list.
-  result.add(reproLibPathFlags(workDir))
+  ##
+  ## ``recipePath``: the recipe module being compiled, when there is one.
+  ## Its declared packages (``uses "<name>"``) then join the path exactly as
+  ## they do for the engine's own compiles of it (``recipeLibPathFlags``).
+  result.add(recipeLibPathFlags(workDir, recipePath))
   result.add(reproPackagePathFlags(workDir))
   result.add(externalHashFlags(workDir))
 
@@ -8166,6 +8528,264 @@ proc isNimPrefixPath*(path, prefix: string): bool =
   root.len > 0 and path.startsWith(root) and
     (path.len == root.len or path[root.len] in {DirSep, AltSep})
 
+# ---------------------------------------------------------------------
+# Trust in the configuration files above a recipe.
+#
+# A compile whose main module is the recipe -- the provider compile, and the
+# extraction's `nim dump` (`recipeConfigSearchPathFlags`) -- makes Nim read
+# `nim.cfg` and evaluate `config.nims` in every ancestor of the recipe's
+# directory (`loadConfigs` in Nim's `compiler/nimconf.nim`), with this user's
+# privileges. A project under `/tmp` has `/tmp` among those ancestors, and
+# any local account can create `/tmp/config.nims`. Such a file -- and one in
+# the recipe's own directory, where the same applies to a recipe written
+# straight into `/tmp` -- is refused before the compiler starts. It is the
+# rule the extraction's nimcache pool follows
+# (`ensureInterfaceNimcacheStoreDir`), applied to configuration files:
+# nothing another account wrote, or can replace, is used with this user's
+# privileges.
+
+type RecipeConfigurationRefusedError* = object of IOError
+  ## A configuration file Nim would evaluate in a recipe compile may be
+  ## replaced or was written by another account. The message names the file,
+  ## its owner and its mode.
+
+const RecipeConfigFileNames* = ["nim.cfg", "config.nims"]
+  ## The files Nim reads in each ancestor of the main module's directory
+  ## (`DefaultConfig` and `DefaultConfigNims` in `compiler/options.nim`).
+
+proc recipeConfigRealModule(modulePath: string): string =
+  ## The recipe as Nim names its main module: absolute, symbolic links
+  ## resolved (`setFromProjectName` in `compiler/options.nim`).
+  let absoluteModule = absolutePath(modulePath)
+  try: expandFilename(absoluteModule)
+  except OSError: absoluteModule
+
+proc recipeConfigProjectDir(modulePath: string): string =
+  ## Nim's project directory for the main module `modulePath`: the real
+  ## file's directory, itself resolved.
+  let moduleDir = parentDir(recipeConfigRealModule(modulePath))
+  try: expandFilename(moduleDir)
+  except OSError: moduleDir
+
+proc recipeConfigAncestorDirs*(modulePath: string): seq[string] =
+  ## The directories whose `RecipeConfigFileNames` Nim reads for a compile
+  ## whose main module is `modulePath`, from `/` down to the parent of the
+  ## module's directory. Nim resolves the main module, and then its
+  ## directory, with `expandFilename` (`setFromProjectName` in
+  ## `compiler/options.nim`), so a symbolic link to the recipe, or on the way
+  ## to it, is followed here as there: the chain is that of the real file's
+  ## directory. The recipe's own directory is not included here; the files
+  ## Nim reads there are `recipeConfigProjectFiles`.
+  let projectDir = recipeConfigProjectDir(modulePath)
+  for dir in parentDirs(projectDir, fromRoot = true, inclusive = false):
+    result.add(dir)
+
+proc recipeConfigProjectFiles*(modulePath: string): seq[string] =
+  ## The configuration files Nim reads in the recipe's own directory for a
+  ## compile whose main module is `modulePath` (`loadConfigs`): `nim.cfg`
+  ## and `config.nims`, the recipe's `<name>.nimcfg` / `<name>.nim.cfg`, and
+  ## its `<name>.nims`, which `nim c` and `nim dump` both evaluate. Named
+  ## after the real file, as Nim names them (`setFromProjectName`).
+  ##
+  ## They are held to the same rule as the files above the recipe. Most
+  ## recipes sit in a directory only their owner can write, where the rule
+  ## admits their own files; but a recipe written straight into a shared
+  ## sticky directory such as `/tmp` would otherwise have its neighbours'
+  ## `/tmp/config.nims` or `/tmp/repro.nims` evaluated without a check.
+  let projectDir = recipeConfigProjectDir(modulePath)
+  let name = splitFile(recipeConfigRealModule(modulePath)).name
+  for file in RecipeConfigFileNames:
+    result.add(projectDir / file)
+  for ext in [".nimcfg", ".nim.cfg", ".nims"]:
+    result.add(projectDir / (name & ext))
+
+proc recipeConfigEntryRefusal*(fileOwner, fileMode: int;
+                               fileGroupIsOwnPrivate: bool;
+                               dirOwner, dirMode: int;
+                               dirGroupIsOwnPrivate: bool;
+                               me: int): string =
+  ## The reason a configuration file may not be evaluated, or "" when it
+  ## may. A pure decision over `lstat`/`stat` facts, so that the
+  ## other-account cases, which a test cannot create without privilege, are
+  ## tested as directly as the rest.
+  ##
+  ## * The file must be this user's or root's. Anyone else wrote it.
+  ## * It must not be writable by another account: group write is accepted
+  ##   only from this user's private group (login.defs(5) `USERGROUPS_ENAB`).
+  ## * Its directory must be this user's or root's -- a directory's owner can
+  ##   rename any entry in it, sticky or not -- and writable by no other
+  ##   account unless it is sticky (in a sticky directory, such as `/tmp`,
+  ##   only an entry's owner can remove or rename it).
+  proc foreign(owner: int): bool = owner != me and owner != 0
+  proc othersWrite(mode: int; ownPrivateGroup: bool): bool =
+    (mode and 0o002) != 0 or ((mode and 0o020) != 0 and not ownPrivateGroup)
+  if foreign(fileOwner):
+    return "it belongs to another account"
+  if othersWrite(fileMode, fileGroupIsOwnPrivate):
+    return "it is writable by other accounts"
+  if foreign(dirOwner):
+    return "its directory belongs to another account, which can replace it"
+  if (dirMode and 0o1000) == 0 and othersWrite(dirMode, dirGroupIsOwnPrivate):
+    return "its directory is writable by other accounts and not sticky, so " &
+      "another account can replace it"
+  ""
+
+proc recipeConfigInsideStoreObject*(path, storeDir: string): bool =
+  ## Whether the resolved `path` lies inside a Nix store object: below an
+  ## entry of `storeDir`, not directly in it. A store object is immutable
+  ## once registered and written only by the Nix daemon, so its files are
+  ## trusted whatever owner they show -- inside the Nix build sandbox, root
+  ## is not mapped into the user namespace and every store object shows the
+  ## overflow uid (65534) instead. The Nim compiler that would evaluate the
+  ## file is itself a store object, so trusting the store adds no account to
+  ## those the compile already trusts. A file directly in `storeDir` is not
+  ## a store object's content: the build users can create one there, so it
+  ## is held to the rule like any other.
+  let store = storeDir.strip(leading = false, chars = {DirSep, AltSep})
+  if store.len == 0 or not path.startsWith(store & DirSep):
+    return false
+  let rest = path[store.len + 1 .. ^1]
+  let slash = rest.find({DirSep, AltSep})
+  slash > 0 and slash < rest.len - 1
+
+when defined(posix):
+  proc isOwnPrivateGroup(gid: Gid): bool =
+    ## Whether `gid` is this user's private group: the primary group of the
+    ## effective user, named as the user is. That is the per-user group
+    ## convention (`USERGROUPS_ENAB` in login.defs(5)), under which the
+    ## default umask is 002 and a group-writable directory is writable by
+    ## this user alone. A shared group such as `users` is not one.
+    let pw = getpwuid(geteuid())
+    if pw == nil or pw.pw_gid != gid:
+      return false
+    let gr = getgrgid(gid)
+    gr != nil and $gr.gr_name == $pw.pw_name
+
+  proc modeSpelling(mode: int): string = "0" & toOct(mode and 0o7777, 4)
+
+proc requireTrustedRecipeConfiguration*(modulePath: string) =
+  ## Refuse a compile whose main module is `modulePath` when Nim would
+  ## evaluate a configuration file -- above the recipe's directory
+  ## (`recipeConfigAncestorDirs`) or in it (`recipeConfigProjectFiles`) --
+  ## that another account wrote or can replace (`recipeConfigEntryRefusal`).
+  ## Raises `RecipeConfigurationRefusedError` naming the file, its owner and
+  ## its mode, and the directory's when that is the reason. Nothing is repaired
+  ## or removed: the file is someone else's, or someone else may be using it.
+  ##
+  ## A symbolic link in a configuration file's place is followed, as Nim
+  ## follows it: the link must itself be this user's or root's, and the file
+  ## it finally resolves to, and that file's directory, are held to the same
+  ## rule. Further links on the way to that file are not examined: a link
+  ## this user made into a place another account controls is a trust this
+  ## user chose to extend.
+  ##
+  ## A file inside a Nix store object is admitted without examining its
+  ## owner or mode (`recipeConfigInsideStoreObject`).
+  ##
+  ## Called immediately before each such compile starts, not atomically with
+  ## Nim's read. A file another account creates after this check, in a
+  ## directory it can write (a sticky one such as `/tmp`, or one whose
+  ## existing files the rule would refuse), is not seen; and a directory
+  ## that holds no configuration file is not examined at all. The spec
+  ## states that limit.
+  ##
+  ## POSIX only. On Windows ownership is an ACL, and the per-user profile
+  ## and the checkout's own ACLs are what bound who can write there.
+  when defined(posix):
+    let me = int(geteuid())
+    proc refuse(path, why: string; owner, mode: int; extra = "") =
+      raise newException(RecipeConfigurationRefusedError,
+        "refusing to compile the recipe " & absolutePath(modulePath) &
+        ": Nim would evaluate the configuration file " & path &
+        " with this user's privileges, and " & why & " (owned by uid " &
+        $owner & ", mode " & modeSpelling(mode) & ")" & extra &
+        "; remove that file if it is not yours, or move the project out " &
+        "from under its directory, and build again")
+    proc inspect(path: string; st: var Stat; follow: bool): bool =
+      ## false when the entry does not exist (or cannot be reached, in which
+      ## case Nim cannot open it either).
+      let rc = if follow: stat(path.cstring, st) else: lstat(path.cstring, st)
+      if rc == 0:
+        return true
+      let err = errno
+      if err in [ENOENT, ENOTDIR, EACCES, ELOOP]:
+        return false
+      raiseOSError(osLastError(),
+        "cannot inspect the recipe configuration file " & path)
+    proc checkEntry(path, dir: string; st: Stat) =
+      var dirSt: Stat
+      if stat(dir.cstring, dirSt) != 0:
+        raiseOSError(osLastError(),
+          "cannot inspect the directory of the recipe configuration file " &
+          path)
+      let why = recipeConfigEntryRefusal(int(st.st_uid),
+        int(st.st_mode) and 0o7777, isOwnPrivateGroup(st.st_gid),
+        int(dirSt.st_uid), int(dirSt.st_mode) and 0o7777,
+        isOwnPrivateGroup(dirSt.st_gid), me)
+      if why.len > 0:
+        refuse(path, why, int(st.st_uid), int(st.st_mode),
+          if why.startsWith("its directory"):
+            "; the directory " & dir & " is owned by uid " & $dirSt.st_uid &
+              ", mode " & modeSpelling(int(dirSt.st_mode))
+          else: "")
+    let store = nixStoreDir()
+    var candidates: seq[string] = @[]
+    for dir in recipeConfigAncestorDirs(modulePath):
+      for name in RecipeConfigFileNames:
+        candidates.add(dir / name)
+    candidates.add(recipeConfigProjectFiles(modulePath))
+    for path in candidates:
+      let dir = parentDir(path)
+      var st: Stat
+      if not inspect(path, st, follow = false):
+        continue
+      if S_ISLNK(st.st_mode):
+        if recipeConfigInsideStoreObject(path, store):
+          # The link is part of a store object; what it names is not
+          # necessarily, and is examined below.
+          var target: Stat
+          if not inspect(path, target, follow = true) or
+              S_ISDIR(target.st_mode):
+            continue
+          let resolved = expandFilename(path)
+          if not recipeConfigInsideStoreObject(resolved, store):
+            checkEntry(resolved, parentDir(resolved), target)
+          continue
+        let linkOwner = int(st.st_uid)
+        if linkOwner != me and linkOwner != 0:
+          refuse(path, "it is a symbolic link another account owns",
+            linkOwner, int(st.st_mode))
+        # The link sits in `dir`, which must not let another account
+        # replace it either.
+        var dirSt: Stat
+        if stat(dir.cstring, dirSt) != 0:
+          raiseOSError(osLastError(),
+            "cannot inspect the directory of the recipe configuration " &
+            "file " & path)
+        let dirWhy = recipeConfigEntryRefusal(linkOwner, 0, false,
+          int(dirSt.st_uid), int(dirSt.st_mode) and 0o7777,
+          isOwnPrivateGroup(dirSt.st_gid), me)
+        if dirWhy.len > 0:
+          refuse(path, dirWhy, linkOwner, int(st.st_mode),
+            "; the directory " & dir & " is owned by uid " &
+              $dirSt.st_uid & ", mode " & modeSpelling(int(dirSt.st_mode)))
+        var target: Stat
+        if not inspect(path, target, follow = true):
+          continue
+        if S_ISDIR(target.st_mode):
+          continue
+        let resolved = expandFilename(path)
+        if not recipeConfigInsideStoreObject(resolved, store):
+          checkEntry(resolved, parentDir(resolved), target)
+        continue
+      # A directory in a configuration file's place is not read by Nim.
+      if S_ISDIR(st.st_mode):
+        continue
+      if not recipeConfigInsideStoreObject(path, store):
+        checkEntry(path, dir, st)
+  else:
+    discard modulePath
+
 proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## `--path:` flags for the search paths the recipe's OWN configuration
   ## files add: the `config.nims` / `nim.cfg` of the recipe's directory and
@@ -8197,6 +8817,13 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## (Hermetic-Builds-And-Path-Independence.md, "Engine-internal recipe
   ## compiles"). With a main module named, Nim reads its configuration from
   ## that module's directory chain, so the directory changes nothing else.
+  ##
+  ## The evaluation runs that chain's NimScript with this user's privileges,
+  ## so a configuration file above or beside the recipe that another account
+  ## wrote or can replace is refused first
+  ## (`requireTrustedRecipeConfiguration`): the refusal propagates, unlike a
+  ## failed evaluation.
+  requireTrustedRecipeConfiguration(modulePath)
   let execution =
     try:
       runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
@@ -8250,18 +8877,6 @@ when defined(posix):
     elif errno != EEXIST:
       raiseOSError(osLastError(),
         "cannot create the interface-extraction nimcache's parent " & path)
-
-  proc isOwnPrivateGroup(gid: Gid): bool =
-    ## Whether `gid` is this user's private group: the primary group of the
-    ## effective user, named as the user is. That is the per-user group
-    ## convention (`USERGROUPS_ENAB` in login.defs(5)), under which the
-    ## default umask is 002 and a group-writable directory is writable by
-    ## this user alone. A shared group such as `users` is not one.
-    let pw = getpwuid(geteuid())
-    if pw == nil or pw.pw_gid != gid:
-      return false
-    let gr = getgrgid(gid)
-    gr != nil and $gr.gr_name == $pw.pw_name
 
   proc refuseNimcacheAncestor(root, path, why: string; owner, mode: int) =
     raise newException(OwnedDirectoryError,
@@ -8762,7 +9377,7 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
   const runnerPlaceholder = "\x00extract-runner\x00"
   let runnerBin = tempRoot / "extract_runner"
   let hostFlags = hostCCompilerFlags()
-  let libFlags = reproLibPathFlags(workDir)
+  let libFlags = recipeLibPathFlags(workDir, absoluteModulePath)
   let packageFlags = reproPackagePathFlags(workDir)
   # The engine's own binary and the consumer's root are handed to the recipe's
   # macro expansion. A macro that needs to resolve a declared dependency calls
@@ -9403,17 +10018,11 @@ proc recipeClosureSourceDigests*(modulePath: string;
   ## re-hashed only the files the record names could not see a definition
   ## grow. The recorded list is compared against this one for NAMING, not
   ## for membership.
-  var sources: seq[string] = @[]
-  for src in discoverNimSources(modulePath, extraPaths, includeSiblingSources):
-    let normalized = normalizedStampPath(src)
-    if normalized notin sources:
-      sources.add(normalized)
-  if resourceModule.len > 0:
-    for src in discoverNimSources(resourceModule, extraPaths,
-                                  includeSiblingSources):
-      let normalized = normalizedStampPath(src)
-      if normalized notin sources:
-        sources.add(normalized)
+  # The same closure the lift keys (``interfaceLiftSources``), declared
+  # packages included, so the provenance and the lift cannot disagree on
+  # what the definition is.
+  let sources = interfaceLiftSources(modulePath, resourceModule, extraPaths,
+    includeSiblingSources)
   result.identity =
     toHex(projectSourceSemanticIdentity(sources).bytes).toLowerAscii()
   let root = commonSourceRoot(sources)
@@ -9936,7 +10545,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
   # `REPRO_PROVIDER_NIMCACHE_MODE=per-binary` narrows the key further, to the
   # output binary path.
   let hostFlags = hostCCompilerFlags()
-  let libFlags = reproLibPathFlags(workDir)
+  let libFlags = recipeLibPathFlags(workDir, modulePath)
   let packageFlags = reproPackagePathFlags(workDir)
   # The nimcache root stays independent of the per-recipe scratch/out tree
   # to bound intermediate storage (auto-recurse has one scratchDir per recipe)
@@ -10072,7 +10681,7 @@ proc providerLibraryCompileActionKey*(modulePath, outputBinaryPath: string;
   let absoluteModulePath = absolutePath(modulePath)
   let normalizedOutputPath = absolutePath(
     normalizedProviderOutputPath(outputBinaryPath))
-  let sources = discoverNimSources(absoluteModulePath)
+  let sources = recipeSourceClosure(absoluteModulePath)
   let command = providerLibraryCompileCommand(absoluteModulePath,
     normalizedOutputPath, mode, workDir, scratchDir)
   var compileOptions: seq[string] = @[]
@@ -10097,10 +10706,36 @@ proc recipeRelativeProviderDefines*(anchors: openArray[string]):
   @["--define:reproRecipeRelative",
     "--define:reproRecipeAnchors=" & anchors.join(":")]
 
-proc recipeRelativeCompileOption*(arg, recipeDir: string): string =
-  ## A provider compile option as the recipe-relative compile keys it: the
-  ## recipe's own directory is `.` (the edge runs there).
-  if arg == "--path:" & recipeDir: "--path:." else: arg
+proc recipeRelativeCompileArgs*(command: openArray[string];
+                                modulePath: string): seq[string] =
+  ## A recipe compile command as the recipe-relative compile keys and
+  ## records it: the recipe module by its file name, the recipe's own
+  ## directory as `.` (the edge runs there), and the search directories of
+  ## the packages the recipe declares (``declaredPackagePathDirs``) relative
+  ## to the recipe. Those packages are siblings of the recipe in its
+  ## workspace and move with it, so naming them absolutely would bind every
+  ## identity of the compile to one location of the workspace; they are
+  ## likewise never relocation anchors (``declaredPackagePathDirs`` is the
+  ## list the engine leaves out of them).
+  ##
+  ## The one mapping for every place that spells a command this way: the
+  ## recipe-relative provider-compile plan, the artifact it records, and the
+  ## compile-configuration identity an interface extraction is keyed on,
+  ## which a lock refresh reconstructs from that recorded artifact.
+  let absoluteModule = absolutePath(modulePath)
+  let recipeDir = parentDir(absoluteModule)
+  var relocated = initTable[string, string]()
+  relocated["--path:" & recipeDir] = "--path:."
+  for dir in declaredPackagePathDirs(absoluteModule):
+    let flag = "--path:" & dir
+    if flag notin relocated:
+      relocated[flag] = "--path:" &
+        relativePath(dir, recipeDir).replace('\\', '/')
+  for arg in command:
+    if arg == absoluteModule or arg == modulePath:
+      result.add(extractFilename(modulePath))
+    else:
+      result.add(relocated.getOrDefault(arg, arg))
 
 proc recipeRelativeProviderCompilePlan*(plan: ProviderCompilePlan;
     modulePath, outputBinaryPath: string;
@@ -10128,13 +10763,14 @@ proc recipeRelativeProviderCompilePlan*(plan: ProviderCompilePlan;
   # Before the trailing module argument: flags after it are run args.
   for flag in recipeRelativeProviderDefines(relocationAnchors):
     command.insert(flag, command.len - 1)
+  let relocatedCommand = recipeRelativeCompileArgs(command, absoluteModulePath)
   var compileOptions: seq[string] = @[]
   for i in 1 ..< command.len:
     let arg = command[i]
     if arg.startsWith("--out:") or arg.startsWith("--nimcache:") or
         arg == normalizedOutputPath or arg == absoluteModulePath:
       continue
-    compileOptions.add(recipeRelativeCompileOption(arg, recipeDir))
+    compileOptions.add(relocatedCommand[i])
   var sourceNames: seq[string] = @[]
   for source in plan.inputSources:
     sourceNames.add(relocatableName(source, recipeDir, relocationAnchors))
@@ -10172,7 +10808,7 @@ proc providerCompilePlan*(modulePath, outputBinaryPath: string;
   let absoluteModulePath = absolutePath(modulePath)
   let normalizedOutputPath = absolutePath(
     normalizedProviderOutputPath(outputBinaryPath))
-  let sources = discoverNimSources(absoluteModulePath,
+  let sources = recipeSourceClosure(absoluteModulePath,
     includeSiblingSources = includeSiblingSources)
   # Hashed once: it feeds both the provider fingerprint and the artifact id.
   let frontend = frontendRuntimeIdentity(workDir)
@@ -10435,7 +11071,7 @@ proc readFreshProviderCompileArtifact*(artifactPath, modulePath,
       return none(ProviderCompileArtifact)
     if cached.outputBinaryPath != normalizedOutputPath:
       return none(ProviderCompileArtifact)
-    let sources = discoverNimSources(modulePath, includeSiblingSources = true)
+    let sources = recipeSourceClosure(modulePath, includeSiblingSources = true)
     if cachedProviderFreshnessByMetadata(artifactPath, modulePath,
         normalizedOutputPath, workDir, sources, cached):
       return some(cached)
@@ -10538,6 +11174,11 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
       removeDir(extendedPath(compilerCwd))
     except OSError:
       discard
+  # The compile's main module is the recipe, so Nim evaluates the
+  # configuration files of its directory and of every directory above it
+  # with this user's privileges. One that another account wrote or can
+  # replace is refused before the compiler starts.
+  requireTrustedRecipeConfiguration(modulePath)
   # Keep the immutable library lookup root (`workDir`) out of the write path.
   # Nim emits relative linker response files in CWD even though `--nimcache`
   # and `--out` are absolute.
@@ -10573,9 +11214,8 @@ proc compileProviderBinary*(modulePath, outputBinaryPath: string;
       source = relocatableName(source, recipeDir, anchors)
     for input in result.compileEdge.declaredInputs.mitems:
       input = relocatableName(input, recipeDir, anchors)
-    result.compilerCommand = result.compilerCommand.mapIt(
-      if it == absoluteModulePath: extractFilename(it)
-      else: recipeRelativeCompileOption(it, recipeDir))
+    result.compilerCommand = recipeRelativeCompileArgs(
+      result.compilerCommand, absoluteModulePath)
     if artifactPath.len > 0:
       writeProviderCompileArtifact(artifactPath, result)
     return
@@ -10622,6 +11262,59 @@ proc isComponentByte(c: char): bool =
 proc isEmbeddedPathByte(c: char): bool =
   c == '/' or isComponentByte(c)
 
+proc precededByNimStringHeader(binaryBytes: string; at, len: int): bool =
+  ## Whether the `len` bytes at `at` are the payload of a Nim string
+  ## literal: the machine word before them is the literal's capacity, its
+  ## length with the string-literal flag set (`NIM_STRLIT_FLAG`, the second
+  ## highest bit). Checked for 8 and 4 byte words in either byte order, so
+  ## the answer does not depend on which target the binary was built for.
+  for width in [8, 4]:
+    if at < width:
+      continue
+    let expected = uint64(len) or (1'u64 shl (width * 8 - 2))
+    var little, big = 0'u64
+    for i in 0 ..< width:
+      little = little or (uint64(ord(binaryBytes[at - width + i])) shl (8 * i))
+      big = (big shl 8) or uint64(ord(binaryBytes[at - width + i]))
+    if little == expected or big == expected:
+      return true
+  false
+
+proc embeddedSourceIsLineInformation(binaryBytes: string;
+                                     at, stop: int): bool =
+  ## Whether the source file path at `at ..< stop` is compiler line
+  ## information rather than a value the program can act on
+  ## (`providerLocationEmbedding`, "WHAT IS EXEMPT").
+  ##
+  ## Nim renders a position as `<file>(<line>, <column>)`; that text is a
+  ## diagnostic wherever it stands.
+  var i = stop
+  if i < binaryBytes.len and binaryBytes[i] == '(':
+    inc i
+    let lineStart = i
+    while i < binaryBytes.len and binaryBytes[i] in {'0'..'9'}:
+      inc i
+    if i > lineStart and i + 1 < binaryBytes.len and
+        binaryBytes[i] == ',' and binaryBytes[i + 1] == ' ':
+      i += 2
+      let columnStart = i
+      while i < binaryBytes.len and binaryBytes[i] in {'0'..'9'}:
+        inc i
+      if i > columnStart and i < binaryBytes.len and binaryBytes[i] == ')':
+        return true
+  # Otherwise only a bare file name the compiler emitted as a C string
+  # literal (a stack-trace frame): the path is the whole string, between
+  # two terminators, and it is not the payload of a Nim string literal. On
+  # a little-endian target the literal's capacity word ends in `@`, so the
+  # terminator test already rejects it; the header test is what rejects it
+  # where the word ends in a zero byte (big-endian, a length that is a
+  # multiple of 256).
+  if stop < binaryBytes.len and binaryBytes[stop] != '\0':
+    return false
+  if at > 0 and binaryBytes[at - 1] != '\0':
+    return false
+  not precededByNimStringHeader(binaryBytes, at, stop - at)
+
 proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
   ## The first string in a compiled provider that names the directory it was
   ## compiled in, or "" when it names none.
@@ -10640,11 +11333,32 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
   ## changed under it whenever another copy recompiled it — an action key
   ## that moved between two builds of an unchanged tree.
   ##
-  ## WHAT IS EXEMPT. A string `<recipeDir>/<file>.nim` (or `.nims`) naming a
-  ## source file that exists in the recipe directory: every provider carries
-  ## its main module's absolute path as compiler line information. Any other
-  ## spelling — the directory itself, a path under it that is not a source
-  ## file — is a location the provider can act on, and binds it.
+  ## WHAT IS EXEMPT. Compiler line information, and nothing else. Every
+  ## provider carries the absolute path of each source file beside the
+  ## recipe that way; a recipe that asks for its location does not get it
+  ## from there. Line
+  ## information has two shapes (`embeddedSourceIsLineInformation`): the
+  ## whole of a C string literal `<recipeDir>/<file>.nim` (or `.nims`) naming
+  ## a source file that exists there, and that name followed by Nim's
+  ## rendered position, `(<line>, <column>)`, as an assertion message
+  ## carries it.
+  ##
+  ## WHAT BINDS. Any other spelling: the directory itself, a path under it
+  ## that is not a source file, and the SAME source file path held as a Nim
+  ## string value. `currentSourcePath()` in the recipe evaluates to exactly
+  ## the path the line information spells, so the path alone cannot tell
+  ## them apart; how it is stored does. A Nim string literal is preceded by
+  ## its capacity word, and a path folded into a longer constant is preceded
+  ## or followed by the rest of it. isonim-tui's recipe derived an output
+  ## directory from `currentSourcePath().parentDir().lastPathPart` at run
+  ## time; while a source file path was exempt wherever it appeared, that
+  ## provider was served to a second worktree and wrote into the first.
+  ##
+  ## WHAT IT CANNOT SEE. A `cstring` constant holding the source path
+  ## (`const src: cstring = currentSourcePath()`) is emitted as a bare C
+  ## string literal, byte for byte the shape of a stack-trace frame, and a
+  ## C compiler that pools literals may store the two as one. It stays
+  ## exempt. So does a value that happens to end in `(<line>, <column>)`.
   if recipeDir.len == 0:
     return ""
   let dir = recipeDir.strip(leading = false, chars = {'/'})
@@ -10658,8 +11372,18 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
     start = at + 1
     # Only a whole path component: `/a/proj` must not match `/a/projX`, nor
     # `/x/a/proj` (a longer path that merely ends in the same components).
+    # What runs into the match from the left is another path only if it
+    # holds a `/`; `-I/a/proj` is this directory behind a flag, and binds.
     if at > 0 and isComponentByte(binaryBytes[at - 1]):
-      continue
+      var left = at - 1
+      var longerPath = false
+      while left >= 0 and isEmbeddedPathByte(binaryBytes[left]):
+        if binaryBytes[left] == '/':
+          longerPath = true
+          break
+        dec left
+      if longerPath:
+        continue
     var stop = at + dir.len
     if stop < binaryBytes.len and binaryBytes[stop] != '/' and
         isEmbeddedPathByte(binaryBytes[stop]):
@@ -10670,6 +11394,7 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
     if embedded.len > dir.len + 1:
       let rel = embedded[dir.len + 1 .. ^1]
       if (rel.endsWith(".nim") or rel.endsWith(".nims")) and
+          embeddedSourceIsLineInformation(binaryBytes, at, stop) and
           fileExists(extendedPath(dir / rel)):
         continue
     return embedded

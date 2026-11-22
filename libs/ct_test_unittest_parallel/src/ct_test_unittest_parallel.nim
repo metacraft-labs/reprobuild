@@ -74,12 +74,69 @@
 ## ``--run`` needs no such care: it is the shim's hook that writes
 ## ``$NIMTEST_RESULT_FILE`` and picks the 0/1/2 exit code, and quitting
 ## first only makes that more certain.
+##
+## The tests entry
+## ---------------
+##
+## A build tool lists and runs a binary's tests through nim-entrypoints'
+## ``tests`` entry (https://github.com/metacraft-labs/nim-entrypoints, README
+## "Tests"): the run-time selector ``--entrypoint=tests`` as the FIRST
+## argument, then
+##
+## * ``--list``: every test's name on standard output, one per line, nothing
+##   run. A name is ``<suite>::<test>``, or ``<test>`` for a test outside a
+##   suite (nim-entrypoints' spelling; the ``--list`` protocol above writes
+##   ``::<test>`` there). A name with a line break cannot be listed: it is
+##   named on stderr and the exit code is 70, before any name is printed.
+## * ``--list-test-cases``: the names a ``-d:entrypointsTest=<name>`` build
+##   can be made for. No test of this shim is one (a framework's tests are
+##   not ``testCase`` s), so it prints nothing.
+## * ``--run-exact=<name>`` (repeatable): run exactly the tests listed as
+##   those names, never reading a name as a pattern. A name ``--list`` does
+##   not print exits with 64, as does ``--run-exact`` together with
+##   ``--run``.
+## * ``--run=<name>`` / ``--run <name>``: refused with 64, nothing run.
+##   The protocol-carrying ``std/unittest`` reads that ``--run`` as its own
+##   and then runs only the test whose full name is exactly ``<name>``, so
+##   the shim's ``--run`` matching above (``<suite>::``, a bare test name)
+##   would select tests the fork then skips. ``--run-exact=<name>`` selects
+##   one test; the ``--run`` protocol above does too, without the selector.
+## * nothing else: run every test.
+##
+## Under the entry the exit code is ``std/unittest``'s: 1 when a test that
+## ran failed, else 0 (a skipped test does not fail the run). Its other
+## arguments are not test filters: ``std/unittest`` does not see the
+## selector as a filter that matches nothing.
+##
+## ``--entrypoint=list`` prints nim-entrypoints' entry list
+## (``{"schema":"entrypoints/1", ...}``) naming ``main`` (run every test, the
+## binary's default) and ``tests``, whose ``entries`` are the test names.
+## A tool reads it to tell a binary that answers the tests entry from one
+## that does not. Any other entry name exits with 64.
+##
+## A program built with nim-entrypoints (``import entrypoints``) already has
+## the entry, its list and its dispatcher, and they answer instead: put the
+## shim's ``suite`` / ``test`` in a ``tests:`` block, where nim-entrypoints
+## lists them and guards each for ``--run-exact``. The shim then only runs
+## the tests it is asked to, with ``std/unittest``'s filtering off, and
+## installs no exit hook under the entry, so nim-entrypoints' exit code
+## stands. Which case applies is decided where a ``test`` expands: when
+## nim-entrypoints' ``entryArgs`` and ``parseSelector`` are visible there,
+## nim-entrypoints owns the entry.
+##
+## For such a program the shim also undoes the fork's redirection under
+## ``--entrypoint=tests --list``: the fork reads that ``--list`` as its own
+## and points descriptor 1 at stderr, and nim-entrypoints prints the list on
+## descriptor 1 (see ``protocol_output``). Import this module before anything
+## that imports ``std/unittest``, so the original descriptor 1 is still there
+## to keep; the shim re-exports ``std/unittest``.
 
 # Import this leaf before ``std/unittest``: its module initialiser preserves the
 # real stdout before the protocol-carrying fork redirects descriptor 1.
-from ct_test_unittest_parallel/protocol_output import writeShimProtocolLine
+from ct_test_unittest_parallel/protocol_output import writeShimProtocolLine,
+  entrySelectorName, restoreEntryStdout, divertStdoutToStderr
 
-import std/[exitprocs, json, os, strutils, times]
+import std/[compilesettings, exitprocs, json, os, strutils, times]
 import std/unittest as stdUnittest
 # ``skip`` joins ``suite``/``test`` as an override rather than a
 # re-export: the shim writes ``$NIMTEST_RESULT_FILE`` from its own
@@ -103,6 +160,17 @@ type
     pmListPlain     ## --list — print one ``suite::test`` per line.
     pmListJson      ## --list-json — print the JSON catalog.
     pmRunOne        ## --run "<name>" — run a single named test.
+    pmEntryList     ## --entrypoint=tests --list — the tests entry's list.
+    pmEntryListTestCases
+      ## --entrypoint=tests --list-test-cases — lists nothing: no test of
+      ## the shim can be built alone.
+    pmEntryRun
+      ## --entrypoint=tests, alone or with --run-exact= (or --run=, which
+      ## the shim refuses and nim-entrypoints answers); also
+      ## --entrypoint=main (every test).
+    pmEntryDescribe ## --entrypoint=list — the entrypoints/1 entry list.
+    pmEntryUnknown  ## --entrypoint=<an entry this binary does not have>.
+    pmEntryUsage    ## --entrypoint=tests with --run-exact= and --run=.
 
   CapturedResult = object
     suite: string
@@ -146,6 +214,14 @@ var
   gRunFormatter {.threadvar.}: ProtocolFormatter
     ## The formatter installed for ``--run``, kept so the exit hook can
     ## read a case that started and never reached ``testEnded``.
+  gExactNames {.threadvar.}: seq[string]
+    ## The ``--run-exact=<name>`` names under the tests entry.
+  gEntryName {.threadvar.}: string
+    ## The entry ``--entrypoint=`` named, for ``pmEntryUnknown``'s message.
+  gEntryRunGiven {.threadvar.}: bool
+    ## ``--run`` was given under the tests entry. The shim refuses it (see
+    ## "The tests entry" in the module header); in a program built with
+    ## nim-entrypoints, nim-entrypoints matches it and guards the tests.
   gSkipReason* {.threadvar.}: string
     ## Reason recorded by the ``skip`` override below and read back by
     ## ``testEnded``. It is a module global rather than a formatter
@@ -230,9 +306,73 @@ method testEnded*(formatter: ProtocolFormatter,
 method suiteEnded*(formatter: ProtocolFormatter) =
   formatter.currentSuite = ""
 
+const
+  EntryModes* = {pmEntryList, pmEntryListTestCases, pmEntryRun,
+    pmEntryDescribe, pmEntryUnknown, pmEntryUsage}
+    ## The modes the run-time selector (``--entrypoint=<name>``) chose.
+  EntryUsageExitCode* = 64
+    ## nim-entrypoints' ``usageExitCode`` (EX_USAGE): an unknown entry, an
+    ## unknown ``--run-exact`` name, ``--run-exact`` with ``--run``.
+  EntryUnlistableExitCode* = 70
+    ## nim-entrypoints' ``unlistableNameExitCode`` (EX_SOFTWARE): a test
+    ## name that ``--list`` cannot print on one line.
+  EntryProgramName = querySetting(SingleValueSetting.projectName)
+    ## The ``program`` of the entry list, as nim-entrypoints spells it.
+
+proc entryTestName*(suite, name: string): string =
+  ## A test's name under the tests entry: ``<suite>::<test>``, or the bare
+  ## test name outside a suite, as nim-entrypoints lists a ``tests:``
+  ## block's tests.
+  if suite.len > 0: suite & "::" & name else: name
+
+proc detectEntryMode(selector: tuple[name: string; taken: int]):
+    ProtocolMode =
+  ## The mode the run-time selector chose; see "The tests entry" in the
+  ## module header. Stores the ``--run-exact`` names and whether ``--run``
+  ## was given (``gEntryRunGiven``).
+  case selector.name
+  of "list":
+    return pmEntryDescribe
+  of "main":
+    return pmEntryRun
+  of "tests":
+    var list = false
+    var testCasesOnly = false
+    var runGiven = false
+    var i = selector.taken + 1
+    while i <= paramCount():
+      let p = paramStr(i)
+      if p == "--list":
+        list = true
+      elif p == "--list-test-cases":
+        list = true
+        testCasesOnly = true
+      elif p.startsWith("--run-exact="):
+        gExactNames.add(p["--run-exact=".len .. ^1])
+      elif p == "--run":
+        runGiven = true
+        if i + 1 <= paramCount():
+          inc i
+      elif p.startsWith("--run="):
+        runGiven = true
+      inc i
+    gEntryRunGiven = runGiven
+    # The listing wins over a run, as in nim-entrypoints.
+    if list:
+      return (if testCasesOnly: pmEntryListTestCases else: pmEntryList)
+    if runGiven and gExactNames.len > 0:
+      return pmEntryUsage
+    return pmEntryRun
+  else:
+    gEntryName = selector.name
+    return pmEntryUnknown
+
 proc detectProtocolMode(): ProtocolMode =
   ## Parse argv and decide the protocol mode. Stores the ``--run``
   ## filter in ``gRunFilter`` when applicable.
+  let selector = entrySelectorName()
+  if selector.taken > 0:
+    return detectEntryMode(selector)
   result = pmDefault
   var i = 1
   while i <= paramCount():
@@ -271,6 +411,76 @@ proc emitListJson() =
   summary["total"] = %gRegistry.len
   doc["summary"] = summary
   writeShimProtocolLine(doc.pretty())
+
+proc registeredEntryNames(): seq[string] =
+  for entry in gRegistry:
+    result.add(entryTestName(entry.suite, entry.name))
+
+proc emitEntryList() =
+  ## The tests entry's ``--list``. Every name is checked before any is
+  ## printed, so a tool never reads a partial list as the whole.
+  let names = registeredEntryNames()
+  for name in names:
+    if '\n' in name or '\r' in name:
+      stderr.writeLine("ct_test_unittest_parallel: the test name " &
+        name.escape & " cannot be listed: it holds a line break, and " &
+        "--entrypoint=tests --list prints one name per line; rename the test")
+      quit(EntryUnlistableExitCode)
+  for name in names:
+    writeShimProtocolLine(name)
+
+proc emitEntryDescribe() =
+  ## nim-entrypoints' entry list (schema ``entrypoints/1``) for a binary that
+  ## has the shim's entries only. Both are chosen at run time; neither has a
+  ## ``-d:entrypoint=<name>`` build.
+  let doc = %*{
+    "schema": "entrypoints/1",
+    "program": EntryProgramName,
+    "default": "main",
+    "entries": [
+      {"name": "main", "doc": "run every test", "select": ["runtime"]},
+      {"name": "tests", "doc": "run the program's tests",
+       "select": ["runtime"],
+       "args": "[--list] [--list-test-cases] [--run-exact=<name>]...",
+       "entries": registeredEntryNames()}]}
+  writeShimProtocolLine($doc)
+
+proc finishEntryRun() =
+  ## The end of a run under the tests entry, in a binary whose entry the shim
+  ## answers. A ``--run-exact`` name no test has, or ``--run`` (which the shim
+  ## refuses; no test ran), is a usage error; otherwise the exit code is the
+  ## one ``std/unittest`` set (1 when a test that ran failed).
+  if gExactNames.len > 0:
+    let known = registeredEntryNames()
+    for name in gExactNames:
+      if name notin known:
+        stderr.writeLine("ct_test_unittest_parallel: --run-exact: no test " &
+          "is named exactly " & name.escape & " (the name is compared as " &
+          "written, not as a pattern, and must be one that " &
+          "--entrypoint=tests --list prints); the tests are: " &
+          known.join(", "))
+        quit(EntryUsageExitCode)
+  elif gEntryRunGiven:
+    stderr.writeLine("ct_test_unittest_parallel: --entrypoint=tests does " &
+      "not take --run here (the protocol-carrying std/unittest would read " &
+      "it as its own exact --run); select a test with --run-exact=<name>, " &
+      "one of: " & registeredEntryNames().join(", "))
+    quit(EntryUsageExitCode)
+
+proc entryRunWanted*(suite, name: string;
+                     entrypointsLinked = false): bool =
+  ## Whether the test ``name`` of ``suite`` runs under the tests entry
+  ## (``pmEntryRun``): with ``--run-exact``, exactly the tests listed as one
+  ## of its names; with ``--run``, none when the shim answers the entry (it
+  ## refuses ``--run``) and, in a program built with nim-entrypoints
+  ## (``entrypointsLinked``), every test nim-entrypoints' guard lets through
+  ## (it matches ``--run`` as it documents); else every test.
+  if gExactNames.len > 0:
+    entryTestName(suite, name) in gExactNames
+  elif gEntryRunGiven:
+    entrypointsLinked
+  else:
+    true
 
 proc writeResultFile(path: string; status: string;
                      durationMs: int; checkpoints: seq[string];
@@ -384,8 +594,33 @@ proc handleProtocolExit() {.noconv.} =
                       captured.durationMs, captured.checkpoints,
                       captured.exception, captured.skipReason)
     quit(statusToExitCode(captured.status))
+  of pmEntryList:
+    emitEntryList()
+    quit(0)
+  of pmEntryListTestCases:
+    quit(0)
+  of pmEntryDescribe:
+    emitEntryDescribe()
+    quit(0)
+  of pmEntryUnknown:
+    stderr.writeLine("ct_test_unittest_parallel: " &
+      (if gEntryName.len == 0: "--entrypoint needs an entry name"
+       else: "unknown entry '" & gEntryName & "'") &
+      "; the entries are: main, tests")
+    quit(EntryUsageExitCode)
+  of pmEntryUsage:
+    stderr.writeLine("ct_test_unittest_parallel: --run-exact cannot be " &
+      "combined with --run: --run-exact selects listed names exactly, " &
+      "--run matches them")
+    quit(EntryUsageExitCode)
+  of pmEntryRun:
+    # Returns unless the run is a usage error: the exit code of a run is
+    # std/unittest's, and no other hook is queued behind this one (the
+    # protocol-carrying std/unittest queues one only for its own --list,
+    # --list-json, --run and --catalog, which the selector's mode is not).
+    finishEntryRun()
 
-proc queueProtocolExitHook*() =
+proc queueProtocolExitHook*(entrypointsLinked = false) =
   ## Install ``handleProtocolExit`` — but deliberately LATE, on the
   ## first ``test`` expansion rather than at module init.
   ##
@@ -400,7 +635,15 @@ proc queueProtocolExitHook*() =
   ## Registering at module-init time instead would invert the order and
   ## reintroduce the double emission. Idempotent; a no-op outside a
   ## protocol mode.
+  ##
+  ## ``entrypointsLinked`` says nim-entrypoints is visible where the
+  ## ``test`` expanded (see "The tests entry" in the module header). Then
+  ## nim-entrypoints answers the selector's entries, ends the process itself
+  ## when it lists, and sets the exit code of a run, so no hook is queued
+  ## for a selector's mode: a hook that quit would replace that exit code.
   if gProtocolMode == pmDefault or gProtocolExitHookQueued:
+    return
+  if entrypointsLinked and gProtocolMode in EntryModes:
     return
   gProtocolExitHookQueued = true
   addExitProc(handleProtocolExit)
@@ -432,6 +675,25 @@ proc initProtocol*() =
     stdUnittest.resetOutputFormatters()
     gRunFormatter = ProtocolFormatter()
     stdUnittest.addOutputFormatter(gRunFormatter)
+  of pmEntryRun:
+    # The selector and the entry's own arguments are not test filters: a
+    # filter that matches nothing would skip every test and pass. The shim
+    # selects the tests itself (``entryRunWanted``), and the console
+    # formatter reports them as in an ordinary run.
+    stdUnittest.disableParamFiltering()
+  of pmEntryList, pmEntryListTestCases, pmEntryDescribe:
+    stdUnittest.disableParamFiltering()
+    stdUnittest.resetOutputFormatters()
+    stdUnittest.addOutputFormatter(SilentFormatter())
+    # Whoever prints the document (nim-entrypoints, in a program built with
+    # it) writes on descriptor 1, which the protocol-carrying std/unittest
+    # pointed at stderr when it saw ``--list``. When the shim prints it
+    # instead, ``suite`` diverts descriptor 1 again (``divertStdoutToStderr``).
+    restoreEntryStdout()
+  of pmEntryUnknown, pmEntryUsage:
+    stdUnittest.disableParamFiltering()
+    stdUnittest.resetOutputFormatters()
+    stdUnittest.addOutputFormatter(SilentFormatter())
 
 # Initialize protocol mode as soon as the module is loaded. Module
 # init runs before any ``suite``/``test`` top-level blocks in importing
@@ -448,7 +710,18 @@ template suite*(suiteName, body: untyped) =
   ## inject our own copy at the OUTER block scope so the registry
   ## records the suite even in list mode (where the inner
   ## ``std/unittest.suite`` body never runs).
+  ##
+  ## While the shim prints a document for the tests entry, the suite's
+  ## output goes to stderr (``divertStdoutToStderr``), as the
+  ## protocol-carrying ``std/unittest`` does for its own ``--list``. Not in
+  ## a program built with nim-entrypoints, which prints that document on
+  ## descriptor 1 itself.
+  bind gProtocolMode, divertStdoutToStderr
   block:
+    when not (declared(entryArgs) and declared(parseSelector)):
+      if gProtocolMode in {pmEntryList, pmEntryListTestCases,
+          pmEntryDescribe}:
+        divertStdoutToStderr()
     let testSuiteName {.inject, used.} = suiteName
     stdUnittest.suite(suiteName):
       body
@@ -458,12 +731,16 @@ template test*(testName, body: untyped) =
   ## then delegates to ``std/unittest.test`` in the modes where the
   ## body should actually run.
   bind gRegistry, gProtocolMode, gRunFilter,
-       gCapturedResult, TestEntry, ProtocolMode, queueProtocolExitHook
+       gCapturedResult, TestEntry, ProtocolMode, queueProtocolExitHook,
+       entryRunWanted
   block:
     # Must run before anything else in the expansion: it is the
     # relative registration order against std/unittest's own exit hook
-    # that decides which implementation gets to emit.
-    queueProtocolExitHook()
+    # that decides which implementation gets to emit. Whether
+    # nim-entrypoints owns the selector's entries is decided here, where
+    # the test's own module is in scope (see the module header).
+    queueProtocolExitHook(
+      entrypointsLinked = declared(entryArgs) and declared(parseSelector))
     let ctpInfo = instantiationInfo()
     let ctpSuite = when declared(testSuiteName): testSuiteName else: ""
     gRegistry.add(TestEntry(
@@ -472,7 +749,8 @@ template test*(testName, body: untyped) =
       file: ctpInfo.filename,
       line: ctpInfo.line))
     case gProtocolMode
-    of pmListPlain, pmListJson:
+    of pmListPlain, pmListJson, pmEntryList, pmEntryListTestCases,
+        pmEntryDescribe, pmEntryUnknown, pmEntryUsage:
       discard  # registration only — do not execute the body.
     of pmRunOne:
       let want = gRunFilter
@@ -480,6 +758,10 @@ template test*(testName, body: untyped) =
       if want == fq or want == testName or
           want == ctpSuite & "::" or
           (want == "" and testName != ""):
+        stdUnittest.test(testName, body)
+    of pmEntryRun:
+      if entryRunWanted(ctpSuite, testName, entrypointsLinked =
+          declared(entryArgs) and declared(parseSelector)):
         stdUnittest.test(testName, body)
     of pmDefault:
       stdUnittest.test(testName, body)

@@ -108,6 +108,7 @@ from repro_core/path_identity import resolveExistingTraversal, prsResolved
 # note in `runBuild`.
 import repro_core/nix_store_roots
 import repro_core/child_reaper
+import repro_core/nix_wrapper_libc
 import repro_core/nix_configuration_env
 # The ONE managed-file writer behind ``ensureLine`` / ``ensureSnippet`` (and
 # the home-profile ``fs.managedBlock``): sentinel format, locator, splice and
@@ -162,6 +163,7 @@ import repro_build_engine/monitor_flush
 # because a private field is writable from anywhere in its declaring module, so
 # declared here it would seal nothing. Read its header before adding a refusal.
 import repro_build_engine/cache_refusal
+import repro_build_engine/nim_edge_isolation
 import repro_build_engine/embedded_root_scan
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
@@ -316,7 +318,10 @@ type
     # ``netFetch`` (its destinations are the mirrors and the origin) and runs
     # in process, dispatched through the executor registered by
     # ``repro_nimble_fetch``. Nothing downstream reaches the network: a
-    # compile edge receives only the store path.
+    # compile edge receives only the store path. The registry crate fetch
+    # (``cargo.fetch``, ``repro_cargo_fetch``) is the same kind of edge: it
+    # verifies a ``.crate`` against its ``Cargo.lock`` checksum and publishes
+    # it as a store prefix.
     bakSourceFetch
 
   NetworkMode* = enum
@@ -2682,6 +2687,14 @@ type
     cmakePrefixDirs*: seq[string]
     includeDirs*: seq[string]
     libDirs*: seq[string]
+    compilerLibcDirs*: seq[string]
+      ## The library directories of the libc that a Nix compiler wrapper in
+      ## this tool's realization records for itself (``nix-support/orig-libc``).
+      ## Threaded onto ``REPRO_COMPILER_LIBC_DIRS`` and nothing else: install
+      ## normalization reads it to keep the libc that matches a linked
+      ## ``PT_INTERP``. It never joins ``libDirs``: the wrapper passes this
+      ## libc to its own linker, and on ``LIBRARY_PATH`` any OTHER compiler on
+      ## the action's ``PATH`` would link against it too.
     nimPathDirs*: seq[string]
     prefixVars*: seq[(string, string)]
       ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
@@ -2767,6 +2780,10 @@ type
     queuedAtMs: int
       ## When a candidate's offer came back QUEUED (engine monotonic ms);
       ## how long it waited is what sizes the advertised frontier.
+    bypassWidth: int
+      ## The width an ``rpkBypassProcess`` sized action runs at, held out of
+      ## the host's cores until it is reaped (``bypassWidthMilli``); 0 for
+      ## every other action.
     monitorSlot: int
       ## HM-4. Index into the scheduler's ``MonitorHostPool`` for an
       ## ``rpkMonitorHost`` entry; ``-1`` for every other kind. An INDEX and
@@ -2892,7 +2909,7 @@ proc actionOutputPath(outputRoot, path: string): string =
   if path.isAbsolute or outputRoot.len == 0:
     path
   else:
-    outputRoot / path
+    joinUnderCwd(outputRoot, path)
 
 proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
   if blob.digest.algorithm != haBlake3_256:
@@ -4277,7 +4294,7 @@ proc outputRemovalLocation(root, path: string): string =
     return ""
   var physical =
     if path.isAbsolute or root.len == 0: path
-    else: root / path
+    else: joinUnderCwd(root, path)
   if not physical.isAbsolute:
     physical = getCurrentDir() & "/" & physical
   # Split the last component off WITHOUT `parentDir`: the stdlib collapses a
@@ -4367,6 +4384,97 @@ proc removalParentOf(spelling: string): string =
         return normalizeWriteRoot(os.normalizedPath(spelling))
       suffix = ancestor.substr(slash) & suffix
       ancestor = ancestor[0 ..< slash]
+
+proc splitLastEntry(path: string): tuple[parent, name: string] =
+  ## `path` (an `outputRemovalLocation` answer, `/`-separated) split at its
+  ## last separator. The parent of `/x` is `/`.
+  let slash = path.rfind('/')
+  if slash < 0:
+    return (parent: "", name: path)
+  (parent: (if slash == 0: "/" else: path[0 ..< slash]),
+   name: path[slash + 1 .. ^1])
+
+proc isSameEntryOnDisk(a, b: string): bool =
+  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers)
+  ## name ONE directory entry on disk, whatever their spellings.
+  ##
+  ## A removal location's parent is resolved through the filesystem, which
+  ## answers in the on-disk spelling, but its last component is kept as the
+  ## output spells it. On a filesystem that folds case (macOS's default APFS,
+  ## Windows, a Linux `casefold` directory) or normalization, `<d>/WORK` and
+  ## `<d>/work` are then one entry with two spellings, and only the
+  ## filesystem can say so. It is asked by identity: the device and file id
+  ## of the entry itself (`lstat`, a final link not followed, because the
+  ## removal takes the link and not its target).
+  ##
+  ## A directory has exactly one entry, so equal identities settle it. A
+  ## non-directory may have several (hard links): two entries of one parent
+  ## that share a file id are the same entry only when the parent does not
+  ## list both names, i.e. one of them is merely another spelling of the
+  ## other. Removing one hard link leaves the other, so it must not count.
+  ## A location that does not exist names nothing to remove: `false`.
+  if a == b:
+    return true
+  var infoA, infoB: FileInfo
+  try:
+    infoA = getFileInfo(a, followSymlink = false)
+    infoB = getFileInfo(b, followSymlink = false)
+  except OSError:
+    return false
+  if infoA.id != infoB.id:
+    return false
+  if infoA.kind == pcDir:
+    return true
+  let (parentA, nameA) = splitLastEntry(a)
+  let (parentB, nameB) = splitLastEntry(b)
+  if parentA.len == 0 or parentB.len == 0 or
+      not isSameEntryOnDisk(parentA, parentB):
+    return false
+  if nameA == nameB:
+    return true
+  var listedA, listedB = false
+  try:
+    for kind, name in walkDir(parentA, relative = true, checkDir = true):
+      when defined(windows):
+        let listed = name.toLowerAscii()
+      else:
+        let listed = name
+      if listed == nameA: listedA = true
+      if listed == nameB: listedB = true
+  except OSError:
+    # The parent cannot be listed: whether these are two hard links or one
+    # entry is unknown, and the safe answer for a removal check is "one".
+    return true
+  not (listedA and listedB)
+
+proc entryAtDepthOf(path, like: string): string =
+  ## The ancestor-or-self of `path` with as many components as `like`, or ""
+  ## when `path` is shallower. Both are `outputRemovalLocation` answers.
+  let want = like.count('/')
+  var seen = 0
+  for i, ch in path:
+    if ch == '/':
+      inc seen
+      if seen > want:
+        return path[0 ..< i]
+  if seen == want: path else: ""
+
+proc removalTakesEntry(removalRoot, targetRoot: string): bool =
+  ## Whether removing the entry at `removalRoot` removes `targetRoot`: it IS
+  ## that location or a directory containing it. Both are
+  ## `outputRemovalLocation` answers. Their spellings are compared first; a
+  ## spelling that differs is still the same entry when the filesystem says
+  ## so (`isSameEntryOnDisk`): another letter case on a case-folding volume
+  ## names the same directory. Only the target's ancestor at the removal's
+  ## depth can be it, since both parents are resolved to their physical,
+  ## on-disk directory and differ at most in the last component's spelling.
+  ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+  if removalRoot.len == 0 or targetRoot.len == 0:
+    return false
+  if removalRoot == targetRoot or targetRoot.startsWith(removalRoot & "/"):
+    return true
+  let entry = entryAtDepthOf(targetRoot, removalRoot)
+  entry.len > 0 and isSameEntryOnDisk(removalRoot, entry)
 
 var
   containmentMemoDepth {.threadvar.}: int
@@ -4886,7 +4994,7 @@ proc validateGraph(g: BuildGraph) =
     let actionId = action.id
     proc indexRoot(raw: string; optional = false; ordinary = false) =
       let physical = if raw.isAbsolute or actionCwd.len == 0: raw
-        else: actionCwd / raw
+        else: joinUnderCwd(actionCwd, raw)
       let root = outputRemovalLocation("", physical)
       if root.len > 0:
         declaredIndex.add((actionId: actionId, root: root,
@@ -4901,7 +5009,7 @@ proc validateGraph(g: BuildGraph) =
         absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
       when defined(windows):
         cwdRoot = cwdRoot.toLowerAscii()
-      if removalRoot == cwdRoot or cwdRoot.startsWith(removalRoot & "/"):
+      if removalTakesEntry(removalRoot, cwdRoot):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
       indexRoot(raw, optional = true)
@@ -4912,12 +5020,12 @@ proc validateGraph(g: BuildGraph) =
             " for " & action.id)
       for input in action.inputs:
         let physicalInput = if input.isAbsolute or action.cwd.len == 0: input
-          else: action.cwd / input
+          else: joinUnderCwd(action.cwd, input)
         let physicalOutput = if raw.isAbsolute or action.cwd.len == 0: raw
-          else: action.cwd / raw
+          else: joinUnderCwd(action.cwd, raw)
         let inputRoot = outputRemovalLocation("", physicalInput)
         let outputRoot = outputRemovalLocation("", physicalOutput)
-        if inputRoot == outputRoot or inputRoot.startsWith(outputRoot & "/"):
+        if removalTakesEntry(outputRoot, inputRoot):
           raiseEngine("optional output contains a declared input: " & raw &
             " contains " & input & " for " & action.id)
     if hasOptionalCandidates:
@@ -4955,12 +5063,12 @@ proc validateGraph(g: BuildGraph) =
       let root = outputRemovalLocation(action.cwd, raw)
       if root notin owned:
         continue
-      if root == cwdRoot or cwdRoot.startsWith(root & "/"):
+      if removalTakesEntry(root, cwdRoot):
         raiseEngine("output removed before run contains the action's cwd: " &
           raw & " for " & action.id)
       for input in action.inputs:
         let inputRoot = outputRemovalLocation(action.cwd, input)
-        if inputRoot == root or inputRoot.startsWith(root & "/"):
+        if removalTakesEntry(root, inputRoot):
           raiseEngine("output removed before run contains a declared input: " &
             raw & " contains " & input & " for " & action.id)
       removalRoots.add((actionId: action.id, raw: raw, root: root))
@@ -5074,7 +5182,7 @@ proc allOutputsExist(action: BuildAction): bool =
   if action.outputs.len == 0:
     return false
   for output in action.outputs:
-    let path = if output.isAbsolute or action.cwd.len == 0: output else: action.cwd / output
+    let path = if output.isAbsolute or action.cwd.len == 0: output else: joinUnderCwd(action.cwd, output)
     if not action.outputPathReady(path):
       return false
   true
@@ -5734,7 +5842,7 @@ proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
     path
   else:
-    root / path
+    joinUnderCwd(root, path)
 
 proc materialContainmentPath(root, path: string): string =
   ## `joinPath` folds relative parent walks before the filesystem sees them.
@@ -10794,6 +10902,35 @@ proc volatileRootRefusals*(g: BuildGraph;
         " runs in " & cwd & ", which is not a place a project's files can " &
         "be fingerprinted: " & reason)
 
+proc nimCompileArgvBase*(argv: openArray[string]): int =
+  ## The index of the Nim compiler in ``argv`` when it is a Nim compile --
+  ## the command token's basename is ``nim`` and a compile subcommand
+  ## (``c``/``cc``/``compile``/``compileToC``/``c++``/``cpp``/``js``/``e``)
+  ## follows it -- else -1. The canonical monitor-prefix parser finds the
+  ## command, so a ``--`` in the compiled program's runtime arguments is not
+  ## mistaken for the monitor's separator and a monitor-wrapped compile is
+  ## recognised like a bare one.
+  result = -1
+  if argv.len < 2:
+    return
+  let base = executedImageArgvIndex(argv)
+  if base < 0 or base >= argv.len - 1:
+    return
+  let exeBase = extractFilename(argv[base])
+  let stem =
+    when defined(windows):
+      (if exeBase.toLowerAscii.endsWith(".exe"):
+        exeBase[0 ..< exeBase.len - 4] else: exeBase).toLowerAscii
+    else:
+      exeBase
+  if stem != "nim":
+    return
+  const compileSubcommands = ["c", "cc", "compile", "compiletoc",
+    "c++", "cpp", "js", "e"]
+  if argv[base + 1].toLowerAscii notin compileSubcommands:
+    return
+  result = base
+
 proc collectEvidence(action: BuildAction; strict: bool;
                      hostedRecords: ptr seq[MonitorRecord] = nil;
                      config: ptr BuildEngineConfig = nil;
@@ -11228,6 +11365,22 @@ proc collectEvidence(action: BuildAction; strict: bool;
         "rewrites are errors'.")
     if offenders.len > 0:
       result.publishable = false
+  # Nimble-Package-Catalog NPC-AREQ22 (threat model G17): the host's Nimble
+  # directory is a DENIED path for a Nim edge (Sandbox-And-Monitoring.md §
+  # Policy Layer). The edge's scratch HOME and `--noNimblePath` keep the
+  # compiler from looking there; a read or probe there that was observed
+  # anyway (a project configuration naming it) fails the edge rather than
+  # becoming an input nothing locked.
+  if nimCompileArgvBase(action.argv) >= 0:
+    var observed: seq[string]
+    for p in result.evidence.monitorReads: observed.add p
+    for p in result.evidence.monitorProbes: observed.add p
+    for p in result.evidence.depfileInputs: observed.add p
+    let violations = deniedNimbleAccess(observed, hostNimbleDeniedRoots())
+    if violations.len > 0:
+      for v in violations:
+        result.evidence.diagnostics.add(v)
+      result.publishable = false
   # Everything under a scratch directory is the action's own, so it leaves
   # the evidence here, before the key is graded -- the local key, the
   # portable record and the determinism probe all read what remains.
@@ -11349,6 +11502,12 @@ proc isRemovedOutputTreePath(action: BuildAction; path: string;
   ## names that tree's entries, which are this run's writes: the listing is
   ## placed by where it leads, as before. The link itself stays an input
   ## through the read and probe channels.
+  ##
+  ## A path that only passes THROUGH a link into a tree (`src/dirlink/f.txt`
+  ## with `src/dirlink -> ../gen/v1`) is placed by its resolved ancestors and
+  ## is one of these paths; so is a listing through such a link. The callers
+  ## then keep the link it was resolved through as an input
+  ## (`TraversedLinkCollector`), since it decided which file was read.
   if not enumerated and
       (action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0):
     let linkLocation = path.linkEntryLocation()
@@ -11373,6 +11532,193 @@ proc isRemovedOutputTreePath(action: BuildAction; path: string;
         path.isUnderCanonicalPolicyRoot(@[root]):
       return true
 
+# Links a dropped path was resolved through.
+#
+# Three input exclusions place an observed path by RESOLVING it: the removed
+# output tree filter above (`isRemovedOutputTreePath`), the ignored-prefix
+# filter (`isUnderCanonicalPolicyRoot`, a `realpath` of the whole path), and
+# the content-addressed tool-root filter for a path with a `..` component
+# (`recordedPathUnderRoot` resolves only that spelling). A path the tool
+# opened names each link on its way only as an ancestor, and the monitor's
+# resolution evidence covers `realpath` and `readlink`, not an `open` through
+# a link, so once such a path is dropped nothing records the links that
+# decided which file was read: `src/dirlink/f.txt`, with `src/dirlink ->
+# ../gen/v1` and `gen` an optional output, is this run's write and rightly
+# dropped, and retargeting `src/dirlink` at `../gen/v2` was a cache hit with
+# the old product (reprobuild-pm issues/2026-11-20-a-source-link-traversed-
+# into-a-removed-output-tree-is-not-keyed.md).
+#
+# So every symbolic link such a resolution passed through is kept as an
+# input, a probe whose fingerprint carries the link's target text
+# (Incremental-Invalidation.md §"Symlink inputs"), except a link located at
+# or under an excluded root (the action's own write, ignored with its root,
+# or part of a content-addressed identity) and a link that resolving the
+# roots' own spellings passes through (a cwd alias, macOS's `/tmp`, a tree
+# candidate that is itself a link): those reach the root and the path alike
+# and do not decide which file inside the root was read. Monitor-Hook-
+# Shim.md §"Metadata, Probe, And Symlink APIs", "Links a dropped path was
+# resolved through"; Build-Engine-And-Scheduler.md §"Opaque output
+# directories".
+#
+# POSIX only. On Windows `canonicalPolicyPath` is lexical, so none of these
+# filters places a path through a link and there is nothing to keep.
+
+type
+  LinkComponent = object
+    ## One `lstat` (and, for a link, one `readlink`) of a path component.
+    present: bool
+    isLink: bool
+    target: string
+
+  TraversedLinkCollector = object
+    ## The links the dropped paths of one keyed-input computation were
+    ## resolved through, in first-seen order. Built per fold, so the
+    ## filesystem answers never outlive the run whose paths they describe;
+    ## nothing is resolved until the first dropped path arrives, so an action
+    ## that drops nothing this way pays nothing.
+    prepared: bool
+    rootSpellings: seq[string]
+      ## The excluded roots as the action spells them (materialized tree
+      ## roots, the ignored prefixes, the tool roots).
+    excludedRoots: seq[string]
+      ## The same roots, as spelled and resolved, for the "inside a root"
+      ## test of a link's entry location.
+    canonicalExcluded: seq[string]
+      ## Already-resolved roots the caller hands over (the canonical ignored
+      ## roots `cacheInputPaths` compares with).
+    rootLinks: HashSet[string]
+    memo: Table[string, LinkComponent]
+    seen: HashSet[string]
+    links: seq[string]
+
+const MaxTraversedLinkExpansions = 40
+  ## The kernel's bound on symbolic links followed in one resolution (Linux
+  ## `MAXSYMLINKS`, path_resolution(7)); past it the `open` fails with
+  ## `ELOOP`, so a longer chain read nothing.
+
+proc traversedLinks(path: string;
+                    memo: var Table[string, LinkComponent]): seq[string] =
+  ## Every symbolic link resolving the absolute `path` passes through, each
+  ## at its ENTRY location (its physical parent and its own name), in the
+  ## order the resolution meets them. Replays path_resolution(7)
+  ## (https://man7.org/linux/man-pages/man7/path_resolution.7.html): a
+  ## component that is a link has its target spliced in front of the
+  ## remaining components, an absolute target restarting at `/`; `..` steps
+  ## to the parent of the PHYSICAL prefix resolved so far, which is what the
+  ## kernel does; the last component is followed too, as `realpath` and an
+  ## `open` without `O_NOFOLLOW` do, so a link read directly
+  ## (`src/link -> ../ign/a.txt`) is one of its own links. The walk stops at
+  ## the first absent component (nothing past it was resolved) and after
+  ## `MaxTraversedLinkExpansions` links, returning what it gathered.
+  ## A relative path resolves against nothing here and yields nothing.
+  when defined(windows):
+    discard
+  else:
+    let spelling = path.replace('\\', '/')
+    if not spelling.startsWith("/"):
+      return
+    # The components still to resolve, the next one LAST.
+    var pending: seq[string] = @[]
+    let components = spelling.split('/')
+    for i in countdown(components.high, 0):
+      pending.add(components[i])
+    # The physical prefix resolved so far; "" is `/`.
+    var current = ""
+    var expansions = 0
+    while pending.len > 0:
+      let name = pending.pop()
+      if name.len == 0 or name == ".":
+        continue
+      if name == "..":
+        let slash = current.rfind('/')
+        current = if slash <= 0: "" else: current[0 ..< slash]
+        continue
+      let candidate = current & "/" & name
+      var component: LinkComponent
+      if candidate in memo:
+        component = memo[candidate]
+      else:
+        var st: Stat
+        if lstat(candidate.cstring, st) == 0:
+          component.present = true
+          if S_ISLNK(st.st_mode):
+            try:
+              component.target = expandSymlink(candidate)
+              component.isLink = component.target.len > 0
+            except OSError:
+              # Unreadable: the resolution cannot be followed past it.
+              component.present = false
+        memo[candidate] = component
+      if not component.present:
+        return
+      if not component.isLink:
+        current = candidate
+        continue
+      result.add(candidate)
+      inc expansions
+      if expansions > MaxTraversedLinkExpansions:
+        return
+      if component.target.startsWith("/"):
+        current = ""
+      let parts = component.target.split('/')
+      for i in countdown(parts.high, 0):
+        pending.add(parts[i])
+
+proc initTraversedLinkCollector(action: BuildAction;
+                                ignoredRoots, canonicalIgnoredRoots,
+                                toolRoots: openArray[string]):
+                                TraversedLinkCollector =
+  ## `ignoredRoots` as the action spells them (`ignoredInputRoots`),
+  ## `canonicalIgnoredRoots` resolved (`canonicalPolicyRoots` of them), and
+  ## the tool roots `cacheInputPaths` subtracts. Cheap: no filesystem access
+  ## until `collectLinks` is first called.
+  for candidate in action.optionalOutputs & action.removeBeforeRun:
+    result.rootSpellings.add(materialPath(action.cwd, candidate))
+  for root in ignoredRoots:
+    result.rootSpellings.add(root)
+  for root in toolRoots:
+    result.rootSpellings.add(root)
+  for root in canonicalIgnoredRoots:
+    result.canonicalExcluded.add(root)
+
+proc prepareRoots(collector: var TraversedLinkCollector) =
+  if collector.prepared:
+    return
+  collector.prepared = true
+  for root in collector.rootSpellings:
+    let spelling = root.replace('\\', '/')
+    collector.excludedRoots.add(spelling)
+    # Both sides in one resolution: a link's entry location has its
+    # ancestors resolved, so the root it is compared with is resolved too.
+    collector.excludedRoots.add(canonicalPolicyPath(spelling))
+    for link in traversedLinks(spelling, collector.memo):
+      collector.rootLinks.incl(link)
+  for root in collector.canonicalExcluded:
+    collector.excludedRoots.add(root)
+
+proc collectLinks(collector: var TraversedLinkCollector; path: string) =
+  ## Record the links `path`, just dropped by a filter that placed it by
+  ## resolution, was resolved through.
+  when defined(windows):
+    discard
+  else:
+    collector.prepareRoots()
+    for link in traversedLinks(path, collector.memo):
+      if link in collector.rootLinks or link in collector.seen:
+        continue
+      # Compared as an entry, with `recordedPathUnderRoot` directly: through
+      # `canonicalPolicyPath` its last component would be followed, and the
+      # link would land back inside the root it leads to.
+      var insideARoot = false
+      for root in collector.excludedRoots:
+        if recordedPathUnderRoot(link, root):
+          insideARoot = true
+          break
+      if insideARoot:
+        continue
+      collector.seen.incl(link)
+      collector.links.add(link)
+
 proc outputAncestorDirectoryKeys(action: BuildAction;
                                  evidence: PathSetEvidence): HashSet[string]
 proc isOutputAncestorObservation(ancestors: HashSet[string];
@@ -11391,29 +11737,42 @@ proc evidenceInputPaths(action: BuildAction;
   # same way (``outputAncestorDirectoryKeys``), so this denominator and the
   # keyed set ``gradeKeyedInputSet`` compares it with subtract the same
   # self-written paths.
+  #
+  # A path dropped as inside a removed output tree leaves the links its
+  # resolution passed through, which `cacheInputPaths` keys as probes
+  # (`TraversedLinkCollector`); they are appended here too, so the keyed set
+  # stays a subset of this denominator.
   let selfWritten = action.selfWrittenOutputKeys()
   let ancestors = action.outputAncestorDirectoryKeys(evidence)
+  var links = action.initTraversedLinkCollector([], [], [])
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
-  for input in evidence.depfileInputs:
-    let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
+  template foldObserved(source: untyped) =
+    for observed in source:
+      let key = materialPath(action.cwd, observed).replace('\\', '/')
+      if selfWritten.contains(key):
+        continue
+      if action.isRemovedOutputTreePath(key):
+        links.collectLinks(key)
+        continue
+      if ancestors.isOutputAncestorObservation(key):
+        continue
+      result.addUnique(seen, observed)
+  foldObserved(evidence.depfileInputs)
+  foldObserved(evidence.monitorReads)
+  foldObserved(evidence.monitorProbes)
+  if action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0:
+    for dir in evidence.monitorDirectoryEnumerations:
+      let location = materialContainmentPath(action.cwd, dir)
+        .patternScopedBase().replace('\\', '/')
+      if action.isRemovedOutputTreePath(location, enumerated = true):
+        links.collectLinks(location)
+  for link in links.links:
+    if selfWritten.contains(link) or
+        ancestors.isOutputAncestorObservation(link):
       continue
-    result.addUnique(seen, input)
-  for input in evidence.monitorReads:
-    let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    result.addUnique(seen, input)
-  for probe in evidence.monitorProbes:
-    let key = materialPath(action.cwd, probe).replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    result.addUnique(seen, probe)
+    result.addUnique(seen, link)
 
 proc addContentAddressedRoot(roots: var seq[string]; path: string) =
   ## AN EMPTY ROOT MUST NEVER ENTER THIS SEQUENCE, and `addUnique` is what
@@ -12623,6 +12982,12 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
   ##   already applied it to the observed channels with the same scope; here
   ##   it reaches the declared and tool-reported ones, which the cache record
   ##   used to drop on its own, by prefix.
+  ## * a path dropped by a filter that places it by RESOLUTION (a removed
+  ##   output tree, an ignored prefix, a tool root reached through `..`, and
+  ##   a directory listed into a removed tree or an ignored root) leaves
+  ##   behind the symbolic links that resolution passed through: they are
+  ##   appended after the observed channels as probes, unless they sit inside
+  ##   an excluded root or on the way to one (`TraversedLinkCollector`).
   # Every containment question this computation asks about one `..`-spelled
   # path resolves the same prefix through the filesystem (once per tool
   # root, ignored root and output); within one computation it is asked once.
@@ -12636,7 +13001,8 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
   # self-written set applies to the ENUMERATION channel only — see
   # `enumerationIgnoredRoots` for the whole argument, and for the shipped
   # recipe that makes the difference load-bearing.
-  let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
+  let ignoredSpellings = action.ignoredInputRoots()
+  let ignoredRoots = canonicalPolicyRoots(ignoredSpellings)
   let selfWritten = action.selfWrittenOutputKeys()
   let ancestors = action.outputAncestorDirectoryKeys(evidence)
   # One memo for the whole fold: every object an action looks up lives in one
@@ -12656,56 +13022,68 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
     if firstOnly: return
-  for input in evidence.depfileInputs:
-    let path = materialContainmentPath(action.cwd, input)
-    let key = path.replace('\\', '/')
-    if path.isVolatileMonitorPath(volatile):
+  # The links a path dropped by a filter that places it by RESOLUTION was
+  # resolved through (`TraversedLinkCollector`): the removed-tree filter,
+  # the ignored-prefix filter, and the tool-root filter for a `..` spelling,
+  # the only one `recordedPathUnderRoot` resolves. Appended after the
+  # observed channels, through the filters that do not place a path by
+  # resolution.
+  var links = action.initTraversedLinkCollector(ignoredSpellings,
+    ignoredRoots, toolRoots)
+  template foldObserved(source: untyped) =
+    for observed in source:
+      let path = materialContainmentPath(action.cwd, observed)
+      let key = path.replace('\\', '/')
+      if path.isVolatileMonitorPath(volatile):
+        continue
+      if selfWritten.contains(key):
+        continue
+      if action.isRemovedOutputTreePath(key):
+        links.collectLinks(key)
+        continue
+      if ancestors.isOutputAncestorObservation(key):
+        continue
+      if not declaredMaterialized.contains(key):
+        if path.isUnderAnyRoot(toolRoots):
+          if lastParentComponent(key) >= 0:
+            links.collectLinks(key)
+          continue
+        if path.isUnderCanonicalPolicyRoot(ignoredRoots):
+          links.collectLinks(key)
+          continue
+        if path.isMonitorSandboxToolsPath() or
+            path.isCompilerWrapperScratchPath() or
+            path.isGitObjectStorePath(gitDirMemo):
+          continue
+      result.addUnique(seen, path)
+      if firstOnly: return
+  foldObserved(evidence.depfileInputs)
+  foldObserved(evidence.monitorReads)
+  foldObserved(evidence.monitorProbes)
+  # A directory LISTED through a link is placed by where it leads, and
+  # dropped when that is a removed tree or an ignored root
+  # (`cacheEnumeratedDirectories`). The link decided which directory was
+  # listed, so it is kept as a probe like the links of a read. Nothing else
+  # about the enumeration channel changes here.
+  if action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0 or
+      ignoredRoots.len > 0:
+    for dir in evidence.monitorDirectoryEnumerations:
+      let location = materialContainmentPath(action.cwd, dir)
+        .patternScopedBase().replace('\\', '/')
+      if action.isRemovedOutputTreePath(location, enumerated = true) or
+          location.isUnderCanonicalPolicyRoot(ignoredRoots):
+        links.collectLinks(location)
+  for link in links.links:
+    if link.isVolatileMonitorPath(volatile):
       continue
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(link) or
+        ancestors.isOutputAncestorObservation(link):
       continue
-    if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or
-         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath() or
-         path.isGitObjectStorePath(gitDirMemo)):
+    if link.isMonitorSandboxToolsPath() or
+        link.isCompilerWrapperScratchPath() or
+        link.isGitObjectStorePath(gitDirMemo):
       continue
-    result.addUnique(seen, path)
-    if firstOnly: return
-  for input in evidence.monitorReads:
-    let path = materialContainmentPath(action.cwd, input)
-    let key = path.replace('\\', '/')
-    if path.isVolatileMonitorPath(volatile):
-      continue
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or
-         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath() or
-         path.isGitObjectStorePath(gitDirMemo)):
-      continue
-    result.addUnique(seen, path)
-    if firstOnly: return
-  for probe in evidence.monitorProbes:
-    let path = materialContainmentPath(action.cwd, probe)
-    if path.isVolatileMonitorPath(volatile):
-      continue
-    let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or
-         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath() or
-         path.isGitObjectStorePath(gitDirMemo)):
-      continue
-    result.addUnique(seen, path)
+    result.addUnique(seen, link)
     if firstOnly: return
 
 proc lookupEnv(env: openArray[string]; name: string):
@@ -14497,6 +14875,17 @@ type
       ## the action's sub-tools (``BuildAction.subToolIdentityRefs``),
       ## which vouch for what the tool's compiler driver links against,
       ## not for what every process of the action loads at run time.
+    compilerLibcDirs*: seq[string]
+      ## Every ref's and sub-tool's ``ResolvedToolIdentity.compilerLibcDirs``:
+      ## the libcs Nix compiler wrappers record for themselves. Threaded onto
+      ## ``REPRO_COMPILER_LIBC_DIRS`` only, for install normalization; see
+      ## ``refuseForeignCompilerLibc`` for why they stay off ``LIBRARY_PATH``.
+    libDirOwners*: seq[(string, string)]
+      ## (library dir, ref or sub-tool name) for every ``LIBRARY_PATH`` entry
+      ## above, in order, so a refusal can name who contributed a directory.
+    compilerLibcOwners*: seq[(string, string)]
+      ## (libc dir, ref or sub-tool name) for every ``compilerLibcDirs``
+      ## entry: the tool whose compiler wrapper recorded that libc.
     nimPathDirs*: seq[string]
     prefixVars*: seq[(string, string)]
       ## `DEP_<NAME>_PREFIX` = the realized prefix of a library ref
@@ -14549,7 +14938,14 @@ proc collectResolvedAuxPaths*(action: BuildAction;
   var seenCmakePrefix: HashSet[string] = initHashSet[string]()
   var seenInclude: HashSet[string] = initHashSet[string]()
   var seenLib: HashSet[string] = initHashSet[string]()
+  var seenCompilerLibc: HashSet[string] = initHashSet[string]()
   var seenNimPath: HashSet[string] = initHashSet[string]()
+  template addCompilerLibcDirs(r: ResolvedToolIdentity; owner: string) =
+    for d in r.compilerLibcDirs:
+      if d.len > 0 and d notin seenCompilerLibc:
+        seenCompilerLibc.incl(d)
+        result.compilerLibcDirs.add(d)
+        result.compilerLibcOwners.add((d, owner))
   # Target libraries and headers must precede the native toolchain's
   # transitive sysroot. Otherwise a compiler profile can expose a kernel
   # UAPI header before the matching userspace library header (for example
@@ -14580,6 +14976,8 @@ proc collectResolvedAuxPaths*(action: BuildAction;
         if d.len > 0 and d notin seenLib:
           seenLib.incl(d)
           result.libDirs.add(d)
+          result.libDirOwners.add((d, refName))
+      addCompilerLibcDirs(r, refName)
       # SC-11 (§4.2a.3): accumulate the Nim library source roots in-order,
       # deduped, exactly as the four C/C++ lists above.
       for d in r.nimPathDirs:
@@ -14606,11 +15004,25 @@ proc collectResolvedAuxPaths*(action: BuildAction;
       if d.len > 0 and d notin seenLib:
         seenLib.incl(d)
         result.linkOnlyLibDirs.add(d)
+        result.libDirOwners.add((d, refName))
+    addCompilerLibcDirs(r, refName)
+
+const CompilerLibcDirsEnv* = "REPRO_COMPILER_LIBC_DIRS"
+  ## The action variable that carries ``ResolvedAuxPaths.compilerLibcDirs``.
+  ## The install mirror's ELF normalization reads it (beside ``LIBRARY_PATH``)
+  ## to find the libc that matches a linked ``PT_INTERP``. That script's
+  ## module cannot import the engine, so it spells the name literally.
 
 proc linkLibDirs(paths: ResolvedAuxPaths): seq[string] =
   ## Everything ``LIBRARY_PATH`` carries: the refs' library dirs, then the
   ## sub-tools' link-only ones.
   paths.libDirs & paths.linkOnlyLibDirs
+
+proc holdsLibcRuntime(path: string): bool =
+  ## Whether ``path`` holds a C library runtime, judged by content rather
+  ## than by the owning package's name: compiler bootstrap prefixes and
+  ## federated catalogs can carry one under any package name.
+  fileExists(path / "libc.so.6")
 
 proc isUnsafeRuntimeLibDir(path: string): bool =
   ## Dependency profiles may propagate libc or language-runtime libraries
@@ -14621,7 +15033,7 @@ proc isUnsafeRuntimeLibDir(path: string): bool =
   # Compiler bootstrap prefixes can carry libc startup files even when the
   # owning package is GCC rather than glibc. Detect the runtime by content so
   # federated catalogs and staged compiler package names remain safe.
-  if fileExists(path / "libc.so.6"):
+  if holdsLibcRuntime(path):
     return true
   let normalized = path.replace('\\', '/')
   const sourceMarker = "/packages/source/"
@@ -14851,6 +15263,9 @@ proc applyResolvedAuxPathsTable*(env: StringTableRef;
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   prependEnvDirs(env, "LD_LIBRARY_PATH", runtimeLibDirs)
   prependEnvDirs(env, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  # A Nix compiler wrapper's own libc, for install normalization only. No
+  # compiler, linker or loader reads this variable.
+  prependEnvDirs(env, CompilerLibcDirsEnv, paths.compilerLibcDirs)
   for (name, value) in paths.prefixVars:
     env[name] = value
   when defined(macosx):
@@ -14899,6 +15314,8 @@ proc applyResolvedAuxPathsArgv*(env: seq[string];
   let runtimeLibDirs = runtimeSafeLibDirs(paths)
   result = prependEnvDirsToArgvEnv(result, "LD_LIBRARY_PATH", runtimeLibDirs)
   result = prependEnvDirsToArgvEnv(result, "REPRO_NIM_PATH_DIRS", paths.nimPathDirs)
+  result = prependEnvDirsToArgvEnv(result, CompilerLibcDirsEnv,
+    paths.compilerLibcDirs)
   for (name, value) in paths.prefixVars:
     var replaced = false
     for i in 0 ..< result.len:
@@ -15391,23 +15808,8 @@ proc applyNimPathArgs*(argv: openArray[string];
   for a in argv: result.add(a)
   if nimPathDirs.len == 0 or argv.len < 2:
     return
-  # Use the canonical monitor-prefix parser: a -- in the compiled program's
-  # runtime arguments must not be mistaken for the monitor's separator.
-  let base = executedImageArgvIndex(argv)
-  if base < 0 or base >= argv.len - 1:
-    return
-  let exeBase = extractFilename(argv[base])
-  let stem =
-    when defined(windows):
-      (if exeBase.toLowerAscii.endsWith(".exe"):
-        exeBase[0 ..< exeBase.len - 4] else: exeBase).toLowerAscii
-    else:
-      exeBase
-  if stem != "nim":
-    return
-  const compileSubcommands = ["c", "cc", "compile", "compiletoc",
-    "c++", "cpp", "js", "e"]
-  if argv[base + 1].toLowerAscii notin compileSubcommands:
+  let base = nimCompileArgvBase(argv)
+  if base < 0:
     return
   validateNimProducerRoots(argv, base, nimPathDirs, compilerEnv, cwd,
     isolatedEnv)
@@ -16259,6 +16661,132 @@ proc cargoRustcWrapperEntries(action: BuildAction;
     getEnv(WrapperPathEnv))
   rustcWrapperEntries(env, wrapper)
 
+proc sameDirectory(a, b: string): bool =
+  ## Whether two directory spellings name the same directory: textually after
+  ## dropping trailing separators, or by their resolved physical paths.
+  var left = a
+  var right = b
+  while left.len > 1 and left[^1] in {DirSep, AltSep}: left.setLen(left.len - 1)
+  while right.len > 1 and right[^1] in {DirSep, AltSep}: right.setLen(right.len - 1)
+  if left == right:
+    return true
+  try:
+    result = dirExists(left) and dirExists(right) and
+      expandFilename(left) == expandFilename(right)
+  except OSError:
+    result = false
+
+proc searchPathExecutable(name, searchPath, cwd: string): string =
+  ## The first executable called ``name`` on ``searchPath``, as an absolute
+  ## path, or "" when there is none. The same lookup the launched process's
+  ## ``execvp`` performs, which is what decides which compiler a bare ``cc``
+  ## runs.
+  for dir in searchPath.split(PathSep):
+    if dir.len == 0:
+      continue
+    let candidate = absolutePath(dir / addFileExt(name, ExeExt), cwd)
+    if isExecutableFile(candidate):
+      return candidate
+  ""
+
+proc refuseForeignCompilerLibc*(action: BuildAction; paths: ResolvedAuxPaths;
+                                env: openArray[string]; isolatedEnv: bool) =
+  ## Refuse to launch ``action`` when its ``LIBRARY_PATH`` would carry the
+  ## libc that a Nix compiler wrapper among its tools records for itself
+  ## (``nix-support/orig-libc``) and that libc is not the one the action's
+  ## ``cc`` / ``gcc`` uses.
+  ##
+  ## WHY. ``LIBRARY_PATH`` is read by EVERY compiler the action runs, and a
+  ## compiler searches it ahead of its own system directories for ``-lc`` and
+  ## the C runtime start files. A wrapper's libc there is linked by whichever
+  ## compiler the action's ``PATH`` resolves first. When that is a host
+  ## ``gcc``, the binary keeps the host's dynamic loader but needs the Nix
+  ## libc's symbol versions, and it fails at run time with
+  ## ``version `GLIBC_2.xx' not found``. The tool catalog no longer puts a
+  ## wrapper's libc on the link channels at all (the wrapper passes it to its
+  ## own linker), so this is a backstop: a silent wrong link becomes an error
+  ## naming the directory, who contributed it and whose libc it is.
+  ##
+  ## WHAT IS EXEMPT. A directory whose libc is exactly the libc of every
+  ## compiler the action resolves as ``cc`` and ``gcc``: those compilers would
+  ## link against it anyway. And a libc directory no wrapper of the action
+  ## records -- a libc the edge declares as a dependency, such as a
+  ## source-built glibc or a compiler bootstrap prefix -- is left on the link
+  ## channel as before; only the wrapper's record tells which compiler a libc
+  ## belongs to, and without one there is nothing to compare against.
+  ##
+  ## ``env`` and ``isolatedEnv`` describe the launched environment, so the
+  ## ``cc`` looked up is the one the action's process will find.
+  if paths.compilerLibcOwners.len == 0:
+    return
+  let declaredPath = lookupEnv(env, "PATH")
+  let searchPath =
+    if declaredPath.present: declaredPath.value
+    elif isolatedEnv: ""
+    else: getEnv("PATH")
+  var compilersResolved = false
+  var compilers: seq[tuple[name, path: string; libcDirs: seq[string]]]
+  for (dir, owner) in paths.libDirOwners:
+    # The content test first: one stat per directory, and only a directory
+    # holding a libc is compared (possibly by resolved path) with the records.
+    if not holdsLibcRuntime(dir):
+      continue
+    var recorder = ""
+    for (libcDir, libcOwner) in paths.compilerLibcOwners:
+      if sameDirectory(dir, libcDir):
+        recorder = libcOwner
+        break
+    if recorder.len == 0:
+      continue
+    if not compilersResolved:
+      compilersResolved = true
+      for name in ["cc", "gcc"]:
+        let path = searchPathExecutable(name, searchPath, action.cwd)
+        if path.len > 0:
+          # A nixpkgs wrapper's ``bin/cc`` sits directly in the wrapper's
+          # store path, beside its ``nix-support``. A host compiler has no
+          # such record, and so no libc this directory could match. A PATH
+          # entry can be a profile of symlinks (``~/.nix-profile/bin``), so
+          # the prefix of the resolved file is consulted as well.
+          var prefixes = @[path.parentDir.parentDir]
+          try:
+            let resolvedPrefix = expandFilename(path).parentDir.parentDir
+            if resolvedPrefix notin prefixes:
+              prefixes.add(resolvedPrefix)
+          except OSError:
+            discard
+          compilers.add((name: name, path: path,
+            libcDirs: nixCompilerWrapperLibcDirs(prefixes)))
+    var ownLibc = compilers.len > 0
+    for compiler in compilers:
+      if not compiler.libcDirs.anyIt(sameDirectory(it, dir)):
+        ownLibc = false
+    if ownLibc:
+      continue
+    var resolvedAs: seq[string]
+    for compiler in compilers:
+      if not compiler.libcDirs.anyIt(sameDirectory(it, dir)):
+        resolvedAs.add("`" & compiler.name & "` (" & compiler.path & ")")
+    let compilerText =
+      if resolvedAs.len > 0:
+        "the action's " & resolvedAs.join(" and ") &
+          (if resolvedAs.len > 1: " do not use this libc: a binary they link"
+           else: " does not use this libc: a binary it links") &
+          " would keep its own dynamic loader and fail at run time on that " &
+          "loader's older libc (`GLIBC_x.yy not found`)"
+      else:
+        "neither `cc` nor `gcc` is on the action's PATH, so no compiler " &
+          "of the action is known to use this libc"
+    raiseEngine("refusing to launch " & action.id & ": its LIBRARY_PATH " &
+      "would carry " & dir & ", which holds a C library (libc.so.6). Tool '" &
+      owner & "' contributed the directory, and it is the libc that the Nix " &
+      "compiler wrapper of tool '" & recorder & "' records for its own use " &
+      "(nix-support/" & NixWrapperLibcManifest & "), which that wrapper " &
+      "already passes to its own linker. On LIBRARY_PATH every compiler of " &
+      "the action links against it, and " & compilerText & ". Remove the " &
+      "dependency that brings this libc onto the link path, or provision " &
+      "the tools so that `cc` is that wrapper.")
+
 proc preparedRunQuotaCommand(action: BuildAction;
                              config: BuildEngineConfig;
                              shellUmaskWrap = true): ReproCommandSpec =
@@ -16280,8 +16808,23 @@ proc preparedRunQuotaCommand(action: BuildAction;
         "configure CT_SANDBOX_TOOLS_DIR or put a Nix/Homebrew sh on PATH " &
         "[" & nonSipShellSearchReport() & "]")
   let auxPaths = collectResolvedAuxPaths(action, config.toolIdentityResolver)
-  let threadedEnv = preparedActionEnv(action, config, auxPaths)
+  var threadedEnv = preparedActionEnv(action, config, auxPaths)
   let isolatedEnv = config.hermeticEnv or action.isolateHostEnvironment
+  refuseForeignCompilerLibc(action, auxPaths, threadedEnv, isolatedEnv)
+  # Nimble-Package-Catalog NPC-AREQ22 (threat model G17): a Nim compile runs
+  # on a scratch HOME / NIMBLE_DIR of its own, and an argv naming the
+  # host's Nimble directory is refused before it runs.
+  let nimBase = nimCompileArgvBase(action.argv)
+  if nimBase >= 0:
+    let denied = deniedArgvPath(action.argv, nimBase,
+      hostNimbleDeniedRoots())
+    if denied.arg.len > 0:
+      raiseEngine("Nim edge " & action.id & " names " & denied.arg &
+        ", in the denied " & denied.root & ": Nimble's package directory " &
+        "is never an input of a build; a package reaches a Nim compile " &
+        "only as a locked store path")
+    threadedEnv = isolatedNimEdgeEnv(threadedEnv,
+      nimEdgeHome(config.cacheRoot, action.id))
   let nimAdjustedArgv = applyNimPathArgs(action.argv, auxPaths.nimPathDirs,
     threadedEnv, action.cwd, isolatedEnv)
   let includePaths = partitionCompilerIncludePaths(auxPaths)
@@ -17707,25 +18250,48 @@ proc teardownIdentities(item: RunningAction; pool: MonitorHostPool): string =
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction
 
-proc bypassWidthMilli*(hostCores, maxParallelism: int): uint32 =
+proc bypassWidthMilli*(hostCores, heldCores, contenders: int): uint32 =
   ## The width a sized action runs at when no RunQuota lease is taken: an
-  ## equal share of the host's cores among the actions the engine runs at
-  ## once, and at least one slot. Left as declared, a Nim compile has no
-  ## ``--parallelBuild`` and starts one C compiler per core, so twelve
-  ## concurrent test-binary compiles on a 32-core host ran ~250 ``cc1``
-  ## (full run 53, 2026-11-15) where the host has 32 cores for everyone.
-  let share = max(1, hostCores) div max(1, maxParallelism)
+  ## equal share of the cores the running sized actions do not already hold
+  ## (``hostCores - heldCores``) among the ``contenders`` that can launch now,
+  ## this one included, and at least one slot.
+  ##
+  ## Left as declared, a Nim compile has no ``--parallelBuild`` and starts one
+  ## C compiler per core, so twelve concurrent test-binary compiles on a
+  ## 32-core host ran ~250 ``cc1`` (full run 53, 2026-11-15) where the host
+  ## has 32 cores for everyone. A STATIC share (``hostCores div
+  ## maxParallelism``) fixed that and starved the tail: in full run 54 the
+  ## build's last action, the main ``reprobuild`` compile, ran alone at
+  ## ``--parallelBuild:2`` for over 80 minutes on 32 cores. Sharing what is
+  ## free among what is ready gives twelve simultaneous launches about
+  ## ``hostCores / 12`` each, as before, and a lone action every free core.
+  ##
+  ## The sum of the widths held stays within ``hostCores`` at every launch,
+  ## EXCEPT for the one-slot floor: an action launched while the running ones
+  ## already hold every core still gets one slot, so the sum can exceed the
+  ## host by at most one slot per such launch. A width is fixed for the
+  ## action's life (a running compiler cannot be widened), so an action that
+  ## launches while others run keeps its smaller share after they finish.
+  let free = max(1, hostCores) - max(0, heldCores)
+  let share = free div max(1, contenders)
   uint32(max(1, share)) * 1000'u32
 
 proc startBypassRunQuotaProcess(action: BuildAction;
-                                config: BuildEngineConfig):
+                                config: BuildEngineConfig;
+                                widthMilli: uint32;
+                                heldWidth: var int):
     ReproDirectRunningProcess =
   ## Use RunQuota's native process backend without acquiring a lease. On
   ## Windows this preserves argument boundaries instead of expanding valid
   ## percent signs, carets, quotes, and backslashes through ``cmd.exe``.
   ##
-  ## A sized action still gets its width flag: ``bypassWidthMilli``, filled
-  ## in as a grant of that size would be.
+  ## A sized action still gets its width flag: ``widthMilli``, which the
+  ## scheduler sizes with ``bypassWidthMilli``, filled in as a grant of that
+  ## size would be. ``heldWidth`` receives the width the command actually
+  ## runs at (a smaller value it already asks for is kept), which the
+  ## scheduler counts as held until the action is reaped; 0 for an unsized
+  ## action.
+  heldWidth = 0
   if action.argv.len == 0:
     raiseEngine("bypassRunQuota: action has empty argv: " & action.id)
   createDir(extendedPath(bypassActionLogDir(config.cacheRoot)))
@@ -17740,16 +18306,15 @@ proc startBypassRunQuotaProcess(action: BuildAction;
     return startDirect(preparedRunQuotaCommand(action, config))
   var command = preparedRunQuotaCommand(action.withWidthPlaceholders(), config)
   command.widthFlag = action.widthFlag
-  let width = bypassWidthMilli(countProcessors(),
-    int(max(1'u32, config.maxParallelism)))
-  return startDirect(command.applyGrantedWidth(width))
+  heldWidth = filledWidth(command.argv, grantedSlots(widthMilli))
+  return startDirect(command.applyGrantedWidth(widthMilli))
 
 proc withWidthPlaceholders(action: BuildAction): BuildAction =
   ## The action with a placeholder where its width flag's value goes, before
   ## the launch wrappers re-quote its argv; RunQuota's launch fills it with
   ## the grant (``repro_runquota.applyGrantedWidth``). Only the RunQuota
-  ## launch paths and the bypass use it; the bypass fills it with
-  ## ``bypassWidthMilli``.
+  ## launch paths and the bypass use it; the bypass fills it with the width
+  ## ``bypassWidthMilli`` sizes.
   ##
   ## The flag is placed in the command the action EXECUTES: on the wrapped
   ## monitor path its argv is ``<repro> internal io monitor … -- <argv>``,
@@ -18080,9 +18645,11 @@ type
 
   SourceFetchExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Nimble-Package-Catalog NPC-AREQ20: hook installed by
-    ## ``repro_nimble_fetch`` for its ``bakSourceFetch`` edges. Indirect for
-    ## the usual layering reason: the mirror client, the archive extractor
-    ## and the source store live above the engine.
+    ## ``repro_nimble_fetch`` for its ``bakSourceFetch`` edges, and by
+    ## ``repro_cargo_fetch`` for its ``cargo.fetch`` edges, each for the
+    ## duration of its own wave. Indirect for the usual layering reason: the
+    ## mirror client, the archive extractor and the stores live above the
+    ## engine.
 
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
@@ -19707,7 +20274,7 @@ proc measuredOutputBytes(action: BuildAction): int64 =
   for output in action.outputs:
     let path =
       if output.isAbsolute or action.cwd.len == 0: output
-      else: action.cwd / output
+      else: joinUnderCwd(action.cwd, output)
     try:
       if fileExists(extendedPath(path)):
         result += int64(getFileSize(extendedPath(path)))
@@ -20419,7 +20986,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for output in action.outputs:
       let path =
         if output.isAbsolute or action.cwd.len == 0: output
-        else: action.cwd / output
+        else: joinUnderCwd(action.cwd, output)
       result.add(absolutePath(path))
 
   proc nixRecordOutputs(action: BuildAction; absentIsLost: bool) =
@@ -25286,6 +25853,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
         var process: Process
         var directProcess: ReproDirectRunningProcess
         var monitorSlot = -1
+        var bypassWidth = 0
         var processKind =
           if plan.hostInProcess: rpkMonitorHost
           elif bypassRunQuota: rpkBypassProcess
@@ -25301,7 +25869,29 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             monitorSlot = startMonitorHost(monitorHosts, plan.action, config,
               cacheRoot, siteTablePath)
           elif bypassRunQuota:
-            directProcess = startBypassRunQuotaProcess(plan.action, config)
+            # The width is an equal share of the cores the running sized
+            # actions do not hold, among the sized actions that can launch
+            # now: this one, and the sized ones still ahead of it in this
+            # wave's ready queue, as many as there are free parallel slots.
+            # Those ahead may yet turn out to be cache hits; counting them
+            # errs towards narrower widths, never past the host.
+            var widthMilli = 0'u32
+            if plan.action.widthFlag.len > 0:
+              var held = 0
+              for item in running:
+                held += item.bypassWidth
+              let freeSlots = int(maxParallel) -
+                (running.len + stagedInlineLaunches.len)
+              var contenders = 1
+              var k = i
+              while k < ready.len and contenders < freeSlots:
+                if actionsById[ready[k]].widthFlag.len > 0:
+                  inc contenders
+                inc k
+              widthMilli = bypassWidthMilli(countProcessors(), held,
+                contenders)
+            directProcess = startBypassRunQuotaProcess(plan.action, config,
+              widthMilli, bypassWidth)
           else:
             process = startRunQuotaProcess(plan.action, config, resultPath,
               runQuotaPoolCaps.getOrDefault(plan.action.pool, 0'u32))
@@ -25342,6 +25932,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           process: process,
           directProcess: directProcess,
           resultPath: resultPath,
+          bypassWidth: bypassWidth,
           monitorSlot: monitorSlot
         )
         when defined(posix):
