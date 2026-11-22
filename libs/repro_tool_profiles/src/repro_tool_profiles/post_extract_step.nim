@@ -84,6 +84,12 @@ type
       ## declaring module.
     buildConfig*: seq[string]
       ## Canonical per-package build configuration lines.
+    stepData*: seq[string]
+      ## The step's own declaration content in the form its runner reads (a
+      ## gem closure's lines in install order, say). Carried with the plan,
+      ## and deliberately NOT a separate identity option: everything in it
+      ## must already be keyed by ``manifestDigest`` and ``buildConfig``,
+      ## which the declaring module derives from the same content.
     normalisationContract*: string
       ## Defaults to ``DefaultNormalisationContract``.
     prunePaths*: seq[string]
@@ -92,6 +98,12 @@ type
       ## Prefix-relative files the step rewrites to remove host-specific
       ## content (an absolute interpreter path in a script, say).
     inputFiles*: seq[PostExtractStepInputFile]
+    declarationFiles*: seq[string]
+      ## Files the declaration itself was read from on the declaring host
+      ## (a manifest whose parsed content is ``manifestDigest``). They are
+      ## not keyed by path or bytes -- their content already is the
+      ## manifest digest -- but one that lies under an output of the build
+      ## graph is refused like an input file (``validatePostExtractStepDecl``).
     dependencies*: seq[InterfaceToolUse]
       ## Provisioned packages the step runs with, each realized by its own
       ## provisioning edge before this one.
@@ -120,6 +132,13 @@ type
     tools*: seq[PostExtractStepTool]
     inputFiles*: seq[string]
       ## The verified ``decl.inputFiles``, resolved, in declaration order.
+    placeFile*: proc(entry: ClosureEntry; destination: string) {.gcsafe,
+                                                                 closure.}
+      ## Fetch a whole-file closure entry (``ClosureFileKind``) through the
+      ## edge's verified, cached download and copy it to
+      ## ``destination / entry.path``. A digest mismatch raises; nothing
+      ## else on the host can satisfy the fetch. For a step whose payloads
+      ## are pinned files named by its own manifest (a gem closure).
 
   PostExtractStepRunner* = proc(ctx: PostExtractStepContext) {.gcsafe, closure.}
     ## Runs the step. Raises to fail the edge; the staging prefix is then
@@ -247,6 +266,18 @@ proc validatePostExtractStepDecl*(decl: PostExtractStepDecl;
       raise newException(ToolPrefixDeclarationError,
         "tool-resolution failed: " & label & " names \"" & path &
         "\", which is not a relative path inside the prefix")
+  for file in decl.declarationFiles:
+    let resolved = resolvedInputFilePath(PostExtractStepInputFile(path: file),
+      declarationRoot)
+    for output in graphOutputs:
+      if output.len > 0 and (isUnder(resolved, output) or
+          isUnder(output, resolved)):
+        raise newException(ToolPrefixDeclarationError,
+          "tool-resolution failed: " & label & " is declared by " &
+          resolved & ", which is an output of the build graph (" & output &
+          "). A step's declaration is a committed file, never a graph " &
+          "output: a graph output is cached by the action cache under its " &
+          "own action identity, not inside a tool prefix.")
   for input in decl.inputFiles:
     let resolved = resolvedInputFilePath(input, declarationRoot)
     for output in graphOutputs:

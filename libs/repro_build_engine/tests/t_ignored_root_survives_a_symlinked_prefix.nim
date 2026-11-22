@@ -28,6 +28,7 @@ import std/[os, strutils, unittest]
 
 import repro_build_engine
 import repro_core/dependency_gathering
+import repro_test_support/reasoned_skip
 
 proc norm(path: string): string =
   path.replace('\\', '/')
@@ -124,3 +125,75 @@ suite "an ignored root fires through a symlinked spelling":
     let enumerations = act.cacheEnumeratedDirectories(evidence)
     check not enumerations.hasPath(logical / "cache")
     check enumerations.hasPath(logical / "cache-sibling")
+
+  test "a link a path into an ignored root was resolved through stays an input":
+    # The ignored-prefix filter places a path by resolving all of it, its
+    # last component included. A source link outside the root that a dropped
+    # path was resolved through decided which file under the root was read,
+    # and the path names it only as an ancestor (or, read directly, as its
+    # own last component). It is kept as an input, a probe whose target text
+    # is its fingerprint: Monitor-Hook-Shim.md §"Metadata, Probe, And
+    # Symlink APIs", "Links a dropped path was resolved through"; reprobuild-
+    # pm issues/2026-11-20-a-source-link-traversed-into-a-removed-output-
+    # tree-is-not-keyed.md.
+    when defined(windows):
+      # `canonicalPolicyPath` is lexical on Windows, so the filter places no
+      # path through a link there and the rule has nothing to keep.
+      skip("Windows resolves no link spelling in this filter, so no path " &
+        "is placed through a link there")
+    else:
+      let physical = expandFilename(getTempDir()) / "repro-ignored-through-" &
+        $getCurrentProcessId()
+      let alias = physical & "-alias"
+      removeDir(physical)
+      createDir(physical / "ign" / "x")
+      createDir(physical / "src")
+      defer:
+        if symlinkExists(alias):
+          removeFile(alias)
+        removeDir(physical)
+      createSymlink(physical, alias)
+      writeFile(physical / "ign" / "x" / "f.txt", "f")
+      writeFile(physical / "ign" / "a.txt", "a")
+      createSymlink("../ign/x", physical / "src" / "l")
+      createSymlink("../ign/a.txt", physical / "src" / "link")
+      # A link INSIDE the ignored root: what is reached through it is under
+      # the root either way, and its own state is ignored with the root.
+      createSymlink("x", physical / "ign" / "inner")
+      # The cwd, the root and the observations spelled physically, and all
+      # three through an alias. The alias is not kept: the root is reached
+      # through it as well, so it does not decide which file under the root
+      # was read. The links are kept at their entry locations, their
+      # ancestors resolved.
+      for work in [physical, alias]:
+        let act = action("compile", ["nim", "c"], cwd = work,
+          outputs = @["out/provider"], cacheable = true,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+          dependencyPolicy = automaticMonitorGatheringPolicy(@[work / "ign"]))
+        for channel in ["read", "probe", "enumeration"]:
+          var evidence: PathSetEvidence
+          evidence.declaredOutputs = act.outputs
+          let observed =
+            if channel == "enumeration": @[work / "src/l"]
+            else: @[work / "src/l/f.txt", work / "src/link",
+                    work / "ign/inner/f.txt"]
+          case channel
+          of "read":
+            evidence.monitorReads.observeAll(evidence.evidenceProvenance,
+              evcMonitorCapture, observed)
+          of "probe":
+            evidence.monitorProbes.observeAll(evidence.evidenceProvenance,
+              evcMonitorCapture, observed)
+          else:
+            evidence.monitorDirectoryEnumerations.observeAll(
+              evidence.evidenceProvenance, evcMonitorCapture, observed)
+          let inputs = act.cacheInputPaths(evidence)
+          checkpoint work & " " & channel & ": " & $inputs
+          check not inputs.hasPath(work / "src/l/f.txt")
+          check not inputs.hasPath(work / "ign/inner/f.txt")
+          check not inputs.hasPath(physical / "ign/inner")
+          check not inputs.hasPath(alias)
+          if channel == "enumeration":
+            check inputs == @[physical / "src/l"]
+          else:
+            check inputs == @[physical / "src/l", physical / "src/link"]

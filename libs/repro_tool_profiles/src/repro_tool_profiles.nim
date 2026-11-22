@@ -87,6 +87,10 @@ import repro_tool_profiles/elf_relocation
 # the tools a build step ran with.
 import repro_tool_profiles/[post_extract_step, prefix_portability]
 export post_extract_step, prefix_portability
+# The gem-closure post-extraction step; importing it registers the step
+# implementation and its declaration reader.
+import repro_tool_profiles/gem_closure_step
+export gem_closure_step
 import repro_dsl_stdlib/packages_schema
 # The realization helpers ``installationToolRoles`` names; importing them
 # registers their package definitions, which ``extractorToolUses`` resolves
@@ -4345,6 +4349,62 @@ proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   canonical.sort()
   $blake3.digest(canonical.join("\n"))
 
+proc placeClosureEntry(plan: TarballAcquisitionPlan; entry: ClosureEntry;
+                       destination, storeRoot: string;
+                       tools: ExtractorTools)
+
+proc overlayClosureArchive(archive, root: string; entry: ClosureEntry;
+                           storeRoot: string; tools: ExtractorTools) =
+  ## Unpack ``archive`` into a scratch directory beside the store's
+  ## temporaries, then merge it into ``root`` (``isClosureRootOverlay``): a
+  ## shared directory merges, a file ``root`` already has is refused naming
+  ## the entry and the file, and a ``tar.zst`` entry's top-level pacman
+  ## metadata is not placed.
+  # A fresh directory per call: two edges of one process (concurrent
+  # provisioning) may overlay the same pinned entry at once, and a name
+  # derived from the entry and the process alone would let one delete the
+  # other's half-merged scratch.
+  createDir(extendedPath(storeRoot / "tmp"))
+  let scratch = createTempDir("overlay-" & entry.sha256[0 .. 15] & "-", "",
+    storeRoot / "tmp")
+  try:
+    extractTarballArchive(archive, scratch, entry.archiveType,
+      entry.stripComponents, "", tools)
+    if entry.archiveType == "tar.zst":
+      for name in PacmanPackageMetadata:
+        if fileExists(extendedPath(scratch / name)):
+          removeFile(extendedPath(scratch / name))
+    var pending = @[""]
+    while pending.len > 0:
+      let relative = pending.pop()
+      let source = if relative.len == 0: scratch else: scratch / relative
+      for kind, path in walkDir(extendedPath(source)):
+        let name = lastPathPart(path)
+        let rel = if relative.len == 0: name else: relative / name
+        let target = root / rel
+        if kind == pcDir:
+          if fileExists(extendedPath(target)) or
+              symlinkExists(extendedPath(target)):
+            raise newException(OSError, "tool-resolution failed: the " &
+              "closure entry " & entry.url & " has a directory " & rel &
+              " where the prefix already has a file")
+          createDir(extendedPath(target))
+          pending.add(rel)
+        else:
+          if fileExists(extendedPath(target)) or
+              dirExists(extendedPath(target)) or
+              symlinkExists(extendedPath(target)):
+            raise newException(OSError, "tool-resolution failed: the " &
+              "closure entry " & entry.url & " would replace " & rel &
+              ", which the prefix already has; root-overlay entries never " &
+              "replace each other's files")
+          createDir(extendedPath(parentDir(target)))
+          moveFile(extendedPath(path), extendedPath(target))
+  finally:
+    if dirExists(extendedPath(scratch)):
+      try: removeDir(extendedPath(scratch))
+      except CatchableError: discard
+
 proc unpackClosure(plan: TarballAcquisitionPlan;
                    destination, storeRoot: string;
                    tools: ExtractorTools) =
@@ -4363,6 +4423,16 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
   if not hasClosure(plan):
     return
   for entry in closureEntries(plan):
+    placeClosureEntry(plan, entry, destination, storeRoot, tools)
+
+proc placeClosureEntry(plan: TarballAcquisitionPlan; entry: ClosureEntry;
+                       destination, storeRoot: string;
+                       tools: ExtractorTools) =
+  ## Fetch one closure entry through ``verifiedDownload`` (checksum-verified,
+  ## sharing the store's download cache) and lay it down under
+  ## ``destination``: unpacked into the entry's directory, or, for a
+  ## ``file`` entry, copied to the entry's path as the file itself.
+  block:
     var entryPlan = plan
     entryPlan.url = entry.url
     entryPlan.mirrors = @[]
@@ -4374,12 +4444,20 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.declaredClosureManifest = ""
     entryPlan.record.closureEntries = @[]
     let downloaded = verifiedDownload(entryPlan, storeRoot)
+    if isClosureRootOverlay(entry):
+      overlayClosureArchive(downloaded.path, destination, entry,
+        storeRoot, tools)
+      return
     let target = destination / entry.path
     createDir(extendedPath(parentDir(target)))
     if dirExists(extendedPath(target)):
       removeDir(extendedPath(target))
-    extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
-      entryPlan.stripComponents, "", tools)
+    if entry.archiveType == ClosureFileKind:
+      # The verified bytes themselves, under the entry's own name.
+      copyFile(extendedPath(downloaded.path), extendedPath(target))
+    else:
+      extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
+        entryPlan.stripComponents, "", tools)
 
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string;
@@ -4905,7 +4983,16 @@ proc runPostExtractStep(plan: TarballAcquisitionPlan;
       storeRoot: storeRoot,
       decl: decl,
       tools: plan.stepTools,
-      inputFiles: inputs))
+      inputFiles: inputs,
+      placeFile: proc(entry: ClosureEntry; destination: string) {.gcsafe.} =
+        if entry.archiveType != ClosureFileKind:
+          raise newException(ValueError, "tool-resolution failed: the " &
+            "post-extraction step of " & plan.packageSelector & " asked " &
+            "for " & entry.url & " as a file, but it is a " &
+            entry.archiveType & " entry")
+        {.cast(gcsafe).}:
+          placeClosureEntry(plan, entry, destination, storeRoot,
+            ExtractorTools())))
   finally:
     if dirExists(extendedPath(scratch)):
       try: removeDir(extendedPath(scratch))
@@ -5693,8 +5780,15 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
 
   var roles: seq[string]
   for plan in plans:
+    var closureRoles: seq[string]
+    if hasClosure(plan):
+      # A closure entry of a kind the built-in extractor cannot unpack
+      # (``tar.zst``) needs its extractor edge exactly as a primary archive
+      # of that kind does.
+      for entry in closureEntries(plan):
+        closureRoles.add(extractorRolesFor(entry.archiveType))
     for role in extractorRolesFor(plan.archiveType) &
-        installationToolRoles(plan.record):
+        installationToolRoles(plan.record) & closureRoles:
       if role notin roles:
         roles.add(role)
   visiting.add(id)
@@ -5766,6 +5860,50 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
     netDestinations = destinations)
   action.argv = @[TarballProvisionerName, first.packageSelector]
   edges.actions.add(action)
+
+proc graphOutputPaths*(actions: openArray[BuildAction]): seq[string] =
+  ## The absolute paths a build graph's actions declare as outputs, for
+  ## ``refuseStepDeclarationsUnderGraphOutputs``. A relative output is
+  ## resolved against its action's working directory, as the engine
+  ## resolves it.
+  for action in actions:
+    for output in action.outputs:
+      if output.len == 0:
+        continue
+      let path =
+        if output.isAbsolute: output
+        elif action.cwd.len > 0: absolutePath(action.cwd) / output
+        else: absolutePath(output)
+      result.add(os.normalizedPath(path))
+
+proc refuseStepDeclarationsUnderGraphOutputs*(
+    uses: openArray[InterfaceToolUse]; graphOutputs: openArray[string]) =
+  ## Refuse a post-extraction step, declared by the host tarball record of
+  ## one of ``uses``, whose input files or declaring files lie under one of
+  ## the build graph's outputs: a graph output is cached by the action
+  ## cache under its own action identity, never inside a tool prefix.
+  ##
+  ## For ``repro build``, which resolves its tools BEFORE the provider emits
+  ## the graph: the graph's outputs are first known here, after lowering
+  ## and before any graph action runs. The same check runs earlier, when a
+  ## caller that already knows them passes them to
+  ## ``tarballProvisioningEdges`` / ``resolveTarballTool``.
+  if graphOutputs.len == 0:
+    return
+  for use in uses:
+    if not hasHostTarballProvisioning(use):
+      continue
+    var plan: TarballAcquisitionPlan
+    try:
+      plan = tarballAcquisitionPlan(use)
+    except ToolPrefixDeclarationError:
+      raise
+    except CatchableError:
+      # No selectable record for this host: the use was realized some other
+      # way (or its resolution already failed), so it declares no step here.
+      continue
+    validatePostExtractStepDecl(plan.postExtract, plan.packageSelector,
+      plan.closureManifestRoot, graphOutputs)
 
 proc tarballProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
                                writerMode = "direct";
