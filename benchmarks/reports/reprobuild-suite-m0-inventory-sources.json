@@ -12835,7 +12835,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_engine_opaque_output_directory.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 7,
+      "staticCaseCount": 8,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13019,13 +13019,14 @@
       "language": "nim",
       "localDependencyShape": [
         "repro_build_engine",
-        "repro_core"
+        "repro_core",
+        "repro_test_support"
       ],
       "owner": "libs/repro_build_engine",
       "requiresReproBinary": false,
       "source": "libs/repro_build_engine/tests/t_ignored_root_survives_a_symlinked_prefix.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -14516,7 +14517,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
       "sourceSuiteCount": 19,
-      "staticCaseCount": 41,
+      "staticCaseCount": 42,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -43100,12 +43101,14 @@
       "classificationReason": "e2e/integration path or requires the repro binary",
       "defines": [],
       "language": "nim",
-      "localDependencyShape": [],
+      "localDependencyShape": [
+        "repro_core"
+      ],
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_b3_test_template_emits_two_edges.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -64638,7 +64641,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_repo_fragment_role_keys.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -66166,7 +66169,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 9,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

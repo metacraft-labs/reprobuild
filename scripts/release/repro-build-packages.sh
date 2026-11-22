@@ -1,8 +1,14 @@
 #!/bin/sh
-# Turn a release tarball into NATIVE packages: .deb, .rpm, .pkg.tar.zst.
+# Turn a release tarball into NATIVE packages: .deb, .rpm, .pkg.tar.zst, and
+# (on macOS, with pkgbuild) a component .pkg.
 #
 #   repro-build-packages.sh --version 0.1.3 --tarball <path> \
-#       --out <dir> [--ecosystem deb|rpm|arch|all] [--arch amd64]
+#       --out <dir> [--ecosystem deb|rpm|arch|pkg|all] [--arch amd64]
+#
+# `all` is deb, rpm and arch. The macOS `.pkg` is built only when asked for
+# (`--ecosystem pkg --platform darwin`), because it needs pkgbuild, which
+# exists on macOS only; no release asset is declared for it
+# (.github/release-platforms.json).
 #
 # The tarball is the release asset release.yml already produces:
 #   reprobuild-<version>-<platform>-<arch>.tar.gz
@@ -54,7 +60,7 @@ while [ $# -gt 0 ]; do
     --platform)  platform="$2"; shift 2 ;;
     --asset-arch) asset_arch="$2"; shift 2 ;;
     --release)   release_num="$2"; shift 2 ;;
-    -h|--help)   sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help)   sed -n '2,36p' "$0"; exit 0 ;;
     *) die "unknown argument: $1" ;;
   esac
 done
@@ -110,17 +116,25 @@ log "payload: $nbin file(s) in bin/"
 # /usr/bin gets one two-line wrapper per public command. A symlink would
 # not do: the launcher resolves its OWN directory from $0, which through
 # a symlink is /usr/bin.
+#
+# The prefix is /usr for the Linux packages and /usr/local for the macOS .pkg:
+# macOS's /usr is read-only (system integrity protection), and /usr/local is
+# the location installers there write to.
 stage_tree() {
   _t="$1"
   _fmt="$2"
-  mkdir -p "$_t/usr/bin" "$_t/usr/lib/reprobuild"
+  case "$_fmt" in
+    pkg) _pfx='usr/local' ;;
+    *)   _pfx='usr' ;;
+  esac
+  mkdir -p "$_t/$_pfx/bin" "$_t/$_pfx/lib/reprobuild"
   # The WHOLE archive tree, not a list of known subdirectories. v0.2.3's
   # archive gained share/repro/{source,src} (the Nim sources an installed
   # repro compiles recipes against, found at <prefix>/share/repro/source
   # from the binary's own location), and a copy of only bin/ and lib/
   # shipped .deb/.rpm packages whose repro failed its first compile. What
   # the archive carries, the package carries.
-  cp -a "$payload/." "$_t/usr/lib/reprobuild/"
+  cp -a "$payload/." "$_t/$_pfx/lib/reprobuild/"
   # The archive's bin/ carries runquotad, which the engine starts when no
   # RunQuota daemon answers; under --tool-provisioning=tarball and nix a build
   # cannot run without one. It is NOT given a /usr/bin wrapper: runquota's own
@@ -130,7 +144,7 @@ stage_tree() {
   # already chose one.
   _runquotad_line=''
   if [ -x "$payload/bin/runquotad" ]; then
-    _runquotad_line=': "${RUNQUOTAD_BIN:=/usr/lib/reprobuild/bin/runquotad}"; export RUNQUOTAD_BIN\n'
+    _runquotad_line=": \"\${RUNQUOTAD_BIN:=/$_pfx/lib/reprobuild/bin/runquotad}\"; export RUNQUOTAD_BIN\\n"
   fi
   _ncmd=0
   for _c in "$payload/bin"/*; do
@@ -141,12 +155,12 @@ stage_tree() {
     case "$_n" in .*|*.json|runquotad|runquota) continue ;; esac
     [ -f "$_c" ] && [ -x "$_c" ] || continue
     # shellcheck disable=SC2059 # the format is assembled from fixed text
-    printf "#!/bin/sh\n${_runquotad_line}exec /usr/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/usr/bin/$_n"
-    chmod 0755 "$_t/usr/bin/$_n"
+    printf "#!/bin/sh\n${_runquotad_line}exec /$_pfx/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/$_pfx/bin/$_n"
+    chmod 0755 "$_t/$_pfx/bin/$_n"
     _ncmd=$((_ncmd + 1))
   done
   [ "$_ncmd" -gt 0 ] || die "no public commands in $topdir/bin; refusing to build a package that puts nothing on PATH"
-  [ -x "$_t/usr/bin/repro" ] || die "$topdir/bin has no 'repro' command"
+  [ -x "$_t/$_pfx/bin/repro" ] || die "$topdir/bin has no 'repro' command"
   stage_completions "$_t" "$_fmt"
 }
 
@@ -174,6 +188,13 @@ stage_tree() {
 #         names for packages (`pkg-config --variable completionsdir fish`;
 #         https://fishshell.com/docs/current/completions.html#where-to-put-completions).
 #
+# The macOS .pkg installs under /usr/local instead (macOS's /usr is read-only):
+# the same three files at /usr/local/share/bash-completion/completions/repro,
+# /usr/local/share/zsh/site-functions/_repro and
+# /usr/local/share/fish/vendor_completions.d/repro.fish. The first two
+# directories are on the default search path of bash-completion and of macOS's
+# own zsh; see the comment at build_pkg for what was measured.
+#
 # A missing source file is a hard failure, not a package without that shell:
 # a package that installs but leaves one shell without completion passes every
 # install check and fails only the user.
@@ -182,14 +203,15 @@ stage_completions() {
   _fmt="$2"
   _src="$payload/share/repro/completions"
   case "$_fmt" in
-    deb)     _zsh_dir='usr/share/zsh/vendor-completions' ;;
-    rpm|arch) _zsh_dir='usr/share/zsh/site-functions' ;;
+    deb)     _share='usr/share'; _zsh_dir='usr/share/zsh/vendor-completions' ;;
+    rpm|arch) _share='usr/share'; _zsh_dir='usr/share/zsh/site-functions' ;;
+    pkg)     _share='usr/local/share'; _zsh_dir='usr/local/share/zsh/site-functions' ;;
     *) die "stage_tree: unknown package format '$_fmt'" ;;
   esac
   for _pair in \
-    "repro.bash:usr/share/bash-completion/completions/repro" \
+    "repro.bash:$_share/bash-completion/completions/repro" \
     "_repro:$_zsh_dir/_repro" \
-    "repro.fish:usr/share/fish/vendor_completions.d/repro.fish" ; do
+    "repro.fish:$_share/fish/vendor_completions.d/repro.fish" ; do
     _from="$_src/${_pair%%:*}"
     _to="$_t/${_pair#*:}"
     [ -s "$_from" ] || die "$topdir/share/repro/completions/${_pair%%:*} is missing or empty; the release leg stages it with scripts/release/stage_release_completions.sh"
@@ -408,10 +430,68 @@ PKGINFO
   log "built $_pkg"
 }
 
+# ---------------------------------------------------------------------
+# .pkg (macOS component package)
+# ---------------------------------------------------------------------
+# A flat component package whose payload is rooted at /, holding the archive
+# tree under /usr/local/lib/reprobuild, a wrapper per public command in
+# /usr/local/bin, and the completion files (stage_tree, format `pkg`). It is
+# built with pkgbuild, which exists on macOS only, so this ecosystem is never
+# part of `all`. The package is unsigned and not notarized.
+#
+# Why /usr/local: macOS's /usr is read-only, and /usr/local is where its
+# installers put third-party programs and what its shells already look at:
+# measured on macOS 26 (Apple silicon), /bin/zsh's default fpath starts with
+# /usr/local/share/zsh/site-functions. bash-completion searches
+# /usr/local/share/bash-completion/completions by default (XDG_DATA_DIRS
+# unset), but macOS's own bash is 3.2 and ships none. Fish searches
+# /usr/local/share/fish/vendor_completions.d only when its own prefix is
+# /usr/local (Homebrew on Intel) or XDG_DATA_DIRS names /usr/local/share.
+build_pkg() {
+  command -v pkgbuild >/dev/null 2>&1 || die 'pkgbuild not found (the macOS .pkg can be built on macOS only)'
+  _root="$stage/pkgroot"
+  rm -rf "$_root"
+  mkdir -p "$_root"
+  stage_tree "$_root" pkg
+  # Extended attributes on the staged files (quarantine marks from wherever
+  # the archive was unpacked) would travel in the payload as `._name`
+  # AppleDouble records. Clear what can be cleared; macOS refuses to clear its
+  # own provenance mark, and the installer applies the rest as attributes.
+  if command -v xattr >/dev/null 2>&1; then
+    xattr -cr "$_root" 2>/dev/null || true
+  fi
+  _pkg="$out/reprobuild-${version}-${platform}-${asset_arch}.pkg"
+  rm -f "$_pkg"
+  # --ownership recommended: root:wheel on install, whoever built the tree.
+  pkgbuild --root "$_root" --identifier "${REPRO_PKG_IDENTIFIER:-com.metacraft-labs.reprobuild}" \
+    --version "$version" --install-location / --ownership recommended \
+    "$_pkg" >"$stage/pkgbuild.log" 2>&1 || {
+    log 'pkgbuild failed; last 40 lines:'
+    tail -n 40 "$stage/pkgbuild.log" >&2
+    die 'pkgbuild failed'
+  }
+  [ -s "$_pkg" ] || die "built an empty $_pkg"
+  # READ IT BACK, as the pacman package is: the payload must hold the command
+  # and the completion files, or the installer would run and provide nothing.
+  command -v pkgutil >/dev/null 2>&1 || die 'pkgutil not found; cannot read the package back'
+  pkgutil --payload-files "$_pkg" > "$stage/pkg-listing.txt" 2>/dev/null \
+    || die "the package $_pkg cannot be read back (pkgutil --payload-files failed)"
+  for _want in ./usr/local/bin/repro \
+      ./usr/local/share/bash-completion/completions/repro \
+      ./usr/local/share/zsh/site-functions/_repro \
+      ./usr/local/share/fish/vendor_completions.d/repro.fish ; do
+    grep -qx -- "$_want" "$stage/pkg-listing.txt" \
+      || die "the package $_pkg has no $_want in its payload"
+  done
+  log "built $_pkg"
+}
+
 built=0
 if want deb;  then build_deb;  built=$((built + 1)); fi
 if want rpm;  then build_rpm;  built=$((built + 1)); fi
 if want arch; then build_arch; built=$((built + 1)); fi
+# Only on request: see build_pkg.
+if [ "$ecosystem" = pkg ]; then build_pkg; built=$((built + 1)); fi
 
 [ "$built" -gt 0 ] || die "--ecosystem $ecosystem selected nothing to build"
 log "done: $built ecosystem(s) into $out"
