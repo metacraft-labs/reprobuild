@@ -74768,8 +74768,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # (`cannot open file: …`) or it derives a smaller set and calls a real pin
   # one "no repro.nim declares". Either way the refusal it produced named
   # `repro lock refresh`, which fails the same way. Asked here, from the
-  # lock alone and before anything is
-  # compiled, so the refusal says what is actually missing: a workspace.
+  # lock alone and before anything is compiled, so the refusal says what is
+  # actually missing: a workspace.
   #
   # "Not part of a workspace" is the gate's committed-lock-only form (no
   # manifest membership resolved, MO-2) AND no enclosing workspace declaring

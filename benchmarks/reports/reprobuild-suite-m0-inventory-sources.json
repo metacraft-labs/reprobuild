@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3131,
+    "nimTestBinaries": 3133,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 829,
-    "staticallyDetectedRuntimeCompilerFlowTests": 160,
-    "testEntries": 3182
+    "pureUnitTests": 830,
+    "staticallyDetectedRuntimeCompilerFlowTests": 161,
+    "testEntries": 3184
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -474,7 +474,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_interface_artifacts"
@@ -484,6 +484,7 @@
         "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
         "libs/repro_interface_artifacts/tests/t_contribution_records.nim",
         "libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim",
+        "libs/repro_interface_artifacts/tests/t_recipe_configuration_trust_decision.nim",
         "libs/repro_interface_artifacts/tests/t_recipe_relative_artifact_rebases_nix_expression_files.nim",
         "libs/repro_interface_artifacts/tests/t_release_clingo_rpath_darwin.nim"
       ],
@@ -1776,10 +1777,10 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 28,
+      "graph-fixture": 29,
       "integration": 1751,
       "platform/destructive": 200,
-      "pure unit": 829,
+      "pure unit": 830,
       "unclassified": 374
     },
     "graphOwnedTestArtifacts": [
@@ -2000,9 +2001,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3131,
+    "nimTestBinaryCount": 3133,
     "pythonTestFileCount": 51,
-    "testEntryCount": 3182
+    "testEntryCount": 3184
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2647,6 +2648,28 @@
         }
       ],
       "source": "libs/repro_interface_artifacts/tests/t_recipe_c_compiler_selection_is_loud.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "callableReachable": true,
+          "commandVariableExecuted": false,
+          "directExecutionLine": false,
+          "enclosingCallable": "compileProvider",
+          "executedVariables": [],
+          "line": 60,
+          "path": "libs/repro_interface_artifacts/tests/t_recipe_configuration_above_the_recipe_must_be_trusted.nim",
+          "patterns": [
+            "repro-compile-provider-binary"
+          ],
+          "runtimeCompilerApi": "compileProviderBinary",
+          "runtimeCompilerApiModule": "repro_interface_artifacts",
+          "snippet": "discard compileProviderBinary(recipe, scratch / \"out\" / \"project-provider\","
+        }
+      ],
+      "source": "libs/repro_interface_artifacts/tests/t_recipe_configuration_above_the_recipe_must_be_trusted.nim"
     },
     {
       "class": "integration",
@@ -21983,6 +22006,41 @@
       "source": "libs/repro_interface_artifacts/tests/t_recipe_compile_openssl_path_follows_the_installed_package.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_configuration_above_the_recipe_must_be_trusted",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_recipe_configuration_above_the_recipe_must_be_trusted.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_configuration_trust_decision",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_recipe_configuration_trust_decision.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

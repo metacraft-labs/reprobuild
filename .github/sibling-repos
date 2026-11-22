@@ -259,7 +259,11 @@ reprobuild-packages
 # Moved to 8b8faa81 (2026-11-19), io-mon's `agents` tip, with `io-mon-src` in
 # flake.nix and flake.lock: its description uses nim-cli-spec's `cliUnbound`
 # (nim-cli-spec fcd5b30 or later). efe6dc5b is an ancestor.
-io-mon=8b8faa81bb0cad5d2d91fae80ceaaa7092782ec2
+# Moved to b1c32599 (2026-11-22), io-mon's `agents` tip, with `io-mon-src` in
+# flake.nix and flake.lock: the Linux preload shim compiles for AArch64 again
+# (the site-table global is x86-64-only, like its type). 8b8faa81 is an
+# ancestor.
+io-mon=b1c32599f9cd671b150f68de2b21bdc9ae0c42be
 # `release-pipeline.yml` overrides `nim-stackable-hooks-src` to THIS clone, so the
 # clone must be the revision the flake pins, or the release compiles the
 # monitor shim from different sources than every other build. Cloned at

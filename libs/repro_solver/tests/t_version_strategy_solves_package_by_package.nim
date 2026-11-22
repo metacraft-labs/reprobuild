@@ -3,9 +3,8 @@
 ## package at a time, nearest the request first, and its solve time grows
 ## with the closure rather than with the product of its candidate sets.
 ##
-## reprobuild-pm issue
-## 2026-11-20-highest-strategy-solve-time-grows-exponentially-with-the-closure,
-## and Named-Lock-Files §5.5 "How a strategy orders the closure", which
+## The defect: ``highest``'s solve time grew exponentially with the closure.
+## Named-Lock-Files §5.5 "How a strategy orders the closure", which
 ## settles it: one objective level per package, solved with core-guided
 ## optimisation. Before, the objective was one level summing every
 ## package's rank under clingo's default branch-and-bound, and on the
