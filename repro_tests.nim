@@ -30226,7 +30226,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_repro_test_runner_consumes_result_document.nim",
@@ -31054,7 +31054,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_selectors_narrow_the_override_state_report.nim",
@@ -31680,6 +31680,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "self-spawn marker isMainModule"),
+  TestSpec(
+    source: "tests/integration/t_store_root_rustc_links_through_the_store_root_c_driver.nim",
+    binary: "build/test-bin/t_store_root_rustc_links_through_the_store_root_c_driver",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g14",
+    singleReason: ""),
   TestSpec(
     source: "tests/integration/t_store_roots_resolve_or_report_unresolved.nim",
     binary: "build/test-bin/t_store_roots_resolve_or_report_unresolved",

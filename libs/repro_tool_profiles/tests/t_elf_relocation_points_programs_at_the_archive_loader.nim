@@ -18,6 +18,10 @@
 ##     (the step is idempotent, so realizing twice gives the same bytes);
 ##   * a declared loader missing from the tree, or no `patchelf`, fails the
 ##     realization instead of sealing an unrelocated tree;
+##   * an archive that carries no C library (`elfRuntimePackage`) is pointed
+##     at the loader and library directory of another prefix (the runtime
+##     package's), and runs; without that prefix, with a loader missing
+##     from it, or combined with `gccLinkSpecs`, the step refuses;
 ##   * the GCC specs edit extends the `*link:` spec and nothing else;
 ##   * declared spec defaults (`gccSpecDefault`) are appended to the specs
 ##     they name, an empty spec included, and a spec the dump lacks or an
@@ -139,6 +143,51 @@ suite "ELF relocation of a tarball realization":
       # Nothing was rewritten by the refused runs.
       check readElfRuntimeFacts(tree.program).interpreter !=
         tree.root / "sysroot" / "lib" / "ld-linux-x86-64.so.2"
+
+  test "an archive with no C library is relocated onto a runtime package's":
+    when not defined(linux):
+      skip("the ELF relocation applies to Linux archives only")
+    else:
+      let patchelf = findExe("patchelf")
+      require patchelf.len > 0
+      # `tree` stands for the runtime package's realized prefix (it carries
+      # the loader and libc); `archive` is a second staging tree holding
+      # only a program, as rust-lang's release does.
+      let tree = stagedTree()
+      defer: removeDir(tree.root)
+      let archive = createTempDir("repro-elf-runtime-", "")
+      defer: removeDir(archive)
+      createDir(archive / "bin")
+      let program = archive / "bin" / "hello"
+      copyFile(tree.program, program)
+      setFilePermissions(program, {fpUserRead, fpUserWrite, fpUserExec})
+      var detail = detailFor()
+      detail.elfRuntimePackage = "runtime"
+      # Without the runtime package's prefix the step refuses, and so it
+      # does when the declared loader is not in that prefix.
+      expect ElfRelocationError:
+        discard relocateElfTree(detail, archive, archive, patchelf, runTool)
+      expect ElfRelocationError:
+        discard relocateElfTree(detail, archive, archive, patchelf, runTool,
+          runtimePrefix = archive)
+      check readElfRuntimeFacts(program).interpreter !=
+        tree.root / "sysroot" / "lib" / "ld-linux-x86-64.so.2"
+      # The specs file belongs to the toolchain that carries the loader.
+      var withSpecs = detail
+      withSpecs.gccLinkSpecs = "lib/gcc/specs"
+      expect ElfRelocationError:
+        discard relocateElfTree(withSpecs, archive, archive, patchelf,
+          runTool, runtimePrefix = tree.root)
+      check relocateElfTree(detail, archive, archive, patchelf, runTool,
+        runtimePrefix = tree.root) == 1
+      let facts = readElfRuntimeFacts(program)
+      check facts.interpreter ==
+        tree.root / "sysroot" / "lib" / "ld-linux-x86-64.so.2"
+      check facts.runPaths[^1] == tree.root / "sysroot" / "lib"
+      let ran = run(quoteShell(program))
+      checkpoint ran.output
+      check ran.exitCode == 0
+      check ran.output.strip() == "relocated"
 
   test "the specs edit extends the link spec and nothing else":
     let dumped = "*asm:\n--64\n\n*link:\n%{shared:-shared} -m elf_x86_64\n\n" &
