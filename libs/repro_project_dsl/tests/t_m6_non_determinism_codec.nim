@@ -105,10 +105,11 @@ suite "M6 the entropy blessing round-trips through the action payload":
     # empty `removeBeforeRun` list, plus v32's empty `optionalOutputs` list
     # (a u32 count of zero each), v33's width fields (two u32 and an empty
     # string: the action's range and width flag, 12 bytes), v35's empty
-    # `contentKeyedToolCaches` list, v36's empty `envPassthrough` list and
-    # v37's empty `canonicalWorkKey` string.
+    # `contentKeyedToolCaches` list, v36's empty `envPassthrough` list,
+    # v37's empty `canonicalWorkKey` string and v38's `relocatable` sentinel
+    # byte.
     check encodeBuildActionPayload(action).len - v23.len ==
-      (1 + 4 + 1) + 1 + 1 + 1 + 4 + 4 + 4 + 4 + (4 + 4 + 4) + 4 + 4 + 4
+      (1 + 4 + 1) + 1 + 1 + 1 + 4 + 4 + 4 + 4 + (4 + 4 + 4) + 4 + 4 + 4 + 1
 
     let decoded = decodeBuildActionPayload(v23)
     # The surrounding fields must still decode, or this would be testing a
