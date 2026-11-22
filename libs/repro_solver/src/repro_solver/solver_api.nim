@@ -477,9 +477,7 @@ proc solve*(variants: openArray[VariantDecl];
     # level by refuting every better assignment of the whole closure: on a
     # 120-package chain it had not finished after 20 s, where
     # unsatisfiable-core search proves each level from the few candidates
-    # that block it and answered in 0.2 s (reprobuild-pm issue
-    # 2026-11-20-highest-strategy-solve-time-grows-exponentially-with-the-closure,
-    # Named-Lock-Files §5.5). Both prove the same optimum; only the time
+    # that block it and answered in 0.2 s (Named-Lock-Files §5.5). Both prove the same optimum; only the time
     # differs. The two cases never coincide: ``preferNewest`` is encoded
     # only under ``vpNone``.
     #
