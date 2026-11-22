@@ -44,6 +44,8 @@ import repro_project_dsl/source_cache_identity
 import repro_dsl_stdlib/active_context
 import repro_dsl_stdlib/operations/zig_c
 from repro_core/scratch_env import ScratchLocationEnvNames
+from repro_core/nimble_path_env import NimblePathDirsEnvVar,
+  decodeNimblePathDirs
 
 var reproNimPathsEnabled {.threadvar.}: bool
 var reproConfigNimsFile {.threadvar.}: string
@@ -386,7 +388,9 @@ package nim:
         boolFlag skipUserCfg is bool, alias = "--skipUserCfg"
         # Nim's installed nim.cfg puts the host's nimble directories
         # (``$home/.nimble/pkgs2``, ``/opt/nimble/pkgs2``) on the search
-        # path: an edge whose imports all come from ``--path`` drops them.
+        # path, and ``--skipUserCfg`` does not drop them. Every edge of this
+        # tool passes it (Nimble-Package-Catalog NPC-AREQ22): a package
+        # reaches a compile only as a ``--path:``.
         boolFlag noNimblePath is bool, alias = "--noNimblePath"
         boolFlag hintsOff is bool, alias = "--hints:off"
         boolFlag warningsOff is bool, alias = "--warnings:off"
@@ -884,7 +888,10 @@ proc c*(pkg: NimPackage; source: string; binary: string;
     gccExe = gccExe, gccLinkerExe = gccLinkerExe, mm = mm,
     paths = paths.mapIt(fromRunDir(it)), passC = passC,
     passL = effectivePassL, nimcache = fromRunDir(cacheDir),
-    appLib = appLib, skipUserCfg = skipUserCfg, noNimblePath = noNimblePath,
+    appLib = appLib, skipUserCfg = skipUserCfg,
+    # Every Nim edge, whatever ``noNimblePath`` says (NPC-AREQ22, threat
+    # model G17): the parameter stays for the callers that already pass it.
+    noNimblePath = true,
     threadsOn = threadsOn,
     parallelBuild = parallelBuild,
     actionId = actionId,
@@ -1049,6 +1056,16 @@ proc nimRepropathsConfig*(pkg: NimPackage;
   var lines: seq[string] = @[]
   for p in paths:
     lines.add("switch(\"path\", \"" & p & "\")")
+  # Nim-Package-Path-Handling.md § 5: then one line per Nimble catalog
+  # package of the lock -- its verified store tree joined with its record's
+  # `srcDir` -- in the lock's topological order, then name, as the build
+  # resolved them. The lines differ between two hosts only in the store's
+  # prefix. A path under `$HOME/.nimble` never appears: only store trees
+  # do.
+  for p in decodeNimblePathDirs(getEnv(NimblePathDirsEnvVar)):
+    let spelled = p.replace('\\', '/')
+    if spelled notin paths:
+      lines.add("switch(\"path\", \"" & spelled & "\")")
   let pathsContent = lines.join("\n") & "\n"
   
   let writePathsAction = fs.writeText(reproPathsFile, pathsContent,

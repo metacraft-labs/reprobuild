@@ -10854,6 +10854,59 @@ proc isComponentByte(c: char): bool =
 proc isEmbeddedPathByte(c: char): bool =
   c == '/' or isComponentByte(c)
 
+proc precededByNimStringHeader(binaryBytes: string; at, len: int): bool =
+  ## Whether the `len` bytes at `at` are the payload of a Nim string
+  ## literal: the machine word before them is the literal's capacity, its
+  ## length with the string-literal flag set (`NIM_STRLIT_FLAG`, the second
+  ## highest bit). Checked for 8 and 4 byte words in either byte order, so
+  ## the answer does not depend on which target the binary was built for.
+  for width in [8, 4]:
+    if at < width:
+      continue
+    let expected = uint64(len) or (1'u64 shl (width * 8 - 2))
+    var little, big = 0'u64
+    for i in 0 ..< width:
+      little = little or (uint64(ord(binaryBytes[at - width + i])) shl (8 * i))
+      big = (big shl 8) or uint64(ord(binaryBytes[at - width + i]))
+    if little == expected or big == expected:
+      return true
+  false
+
+proc embeddedSourceIsLineInformation(binaryBytes: string;
+                                     at, stop: int): bool =
+  ## Whether the source file path at `at ..< stop` is compiler line
+  ## information rather than a value the program can act on
+  ## (`providerLocationEmbedding`, "WHAT IS EXEMPT").
+  ##
+  ## Nim renders a position as `<file>(<line>, <column>)`; that text is a
+  ## diagnostic wherever it stands.
+  var i = stop
+  if i < binaryBytes.len and binaryBytes[i] == '(':
+    inc i
+    let lineStart = i
+    while i < binaryBytes.len and binaryBytes[i] in {'0'..'9'}:
+      inc i
+    if i > lineStart and i + 1 < binaryBytes.len and
+        binaryBytes[i] == ',' and binaryBytes[i + 1] == ' ':
+      i += 2
+      let columnStart = i
+      while i < binaryBytes.len and binaryBytes[i] in {'0'..'9'}:
+        inc i
+      if i > columnStart and i < binaryBytes.len and binaryBytes[i] == ')':
+        return true
+  # Otherwise only a bare file name the compiler emitted as a C string
+  # literal (a stack-trace frame): the path is the whole string, between
+  # two terminators, and it is not the payload of a Nim string literal. On
+  # a little-endian target the literal's capacity word ends in `@`, so the
+  # terminator test already rejects it; the header test is what rejects it
+  # where the word ends in a zero byte (big-endian, a length that is a
+  # multiple of 256).
+  if stop < binaryBytes.len and binaryBytes[stop] != '\0':
+    return false
+  if at > 0 and binaryBytes[at - 1] != '\0':
+    return false
+  not precededByNimStringHeader(binaryBytes, at, stop - at)
+
 proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
   ## The first string in a compiled provider that names the directory it was
   ## compiled in, or "" when it names none.
@@ -10872,11 +10925,32 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
   ## changed under it whenever another copy recompiled it — an action key
   ## that moved between two builds of an unchanged tree.
   ##
-  ## WHAT IS EXEMPT. A string `<recipeDir>/<file>.nim` (or `.nims`) naming a
-  ## source file that exists in the recipe directory: every provider carries
-  ## its main module's absolute path as compiler line information. Any other
-  ## spelling — the directory itself, a path under it that is not a source
-  ## file — is a location the provider can act on, and binds it.
+  ## WHAT IS EXEMPT. Compiler line information, and nothing else. Every
+  ## provider carries the absolute path of each source file beside the
+  ## recipe that way; a recipe that asks for its location does not get it
+  ## from there. Line
+  ## information has two shapes (`embeddedSourceIsLineInformation`): the
+  ## whole of a C string literal `<recipeDir>/<file>.nim` (or `.nims`) naming
+  ## a source file that exists there, and that name followed by Nim's
+  ## rendered position, `(<line>, <column>)`, as an assertion message
+  ## carries it.
+  ##
+  ## WHAT BINDS. Any other spelling: the directory itself, a path under it
+  ## that is not a source file, and the SAME source file path held as a Nim
+  ## string value. `currentSourcePath()` in the recipe evaluates to exactly
+  ## the path the line information spells, so the path alone cannot tell
+  ## them apart; how it is stored does. A Nim string literal is preceded by
+  ## its capacity word, and a path folded into a longer constant is preceded
+  ## or followed by the rest of it. isonim-tui's recipe derived an output
+  ## directory from `currentSourcePath().parentDir().lastPathPart` at run
+  ## time; while a source file path was exempt wherever it appeared, that
+  ## provider was served to a second worktree and wrote into the first.
+  ##
+  ## WHAT IT CANNOT SEE. A `cstring` constant holding the source path
+  ## (`const src: cstring = currentSourcePath()`) is emitted as a bare C
+  ## string literal, byte for byte the shape of a stack-trace frame, and a
+  ## C compiler that pools literals may store the two as one. It stays
+  ## exempt. So does a value that happens to end in `(<line>, <column>)`.
   if recipeDir.len == 0:
     return ""
   let dir = recipeDir.strip(leading = false, chars = {'/'})
@@ -10890,8 +10964,18 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
     start = at + 1
     # Only a whole path component: `/a/proj` must not match `/a/projX`, nor
     # `/x/a/proj` (a longer path that merely ends in the same components).
+    # What runs into the match from the left is another path only if it
+    # holds a `/`; `-I/a/proj` is this directory behind a flag, and binds.
     if at > 0 and isComponentByte(binaryBytes[at - 1]):
-      continue
+      var left = at - 1
+      var longerPath = false
+      while left >= 0 and isEmbeddedPathByte(binaryBytes[left]):
+        if binaryBytes[left] == '/':
+          longerPath = true
+          break
+        dec left
+      if longerPath:
+        continue
     var stop = at + dir.len
     if stop < binaryBytes.len and binaryBytes[stop] != '/' and
         isEmbeddedPathByte(binaryBytes[stop]):
@@ -10902,6 +10986,7 @@ proc providerLocationEmbedding*(binaryBytes, recipeDir: string): string =
     if embedded.len > dir.len + 1:
       let rel = embedded[dir.len + 1 .. ^1]
       if (rel.endsWith(".nim") or rel.endsWith(".nims")) and
+          embeddedSourceIsLineInformation(binaryBytes, at, stop) and
           fileExists(extendedPath(dir / rel)):
         continue
     return embedded
