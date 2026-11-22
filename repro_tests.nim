@@ -13081,6 +13081,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_selfhost_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_solver/tests/t_explainer_unsat_core_names_violated_edge.nim",
+    binary: "build/test-bin/t_explainer_unsat_core_names_violated_edge",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_solver_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim",
     binary: "build/test-bin/t_unselected_package_is_recorded_as_unselected",
     defines: @[],

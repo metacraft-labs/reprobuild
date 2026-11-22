@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3114,
+    "nimTestBinaries": 3115,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 826,
+    "pureUnitTests": 827,
     "staticallyDetectedRuntimeCompilerFlowTests": 160,
-    "testEntries": 3164
+    "testEntries": 3165
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1055,13 +1055,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_solver"
       ],
       "owner": "libs/repro_solver",
       "sources": [
+        "libs/repro_solver/tests/t_explainer_unsat_core_names_violated_edge.nim",
         "libs/repro_solver/tests/t_unselected_package_is_recorded_as_unselected.nim",
         "libs/repro_solver/tests/t_version_encoder_existing_programs_unchanged.nim",
         "libs/repro_solver/tests/t_version_encoder_per_version_deps.nim",
@@ -1776,7 +1777,7 @@
       "graph-fixture": 28,
       "integration": 1737,
       "platform/destructive": 200,
-      "pure unit": 826,
+      "pure unit": 827,
       "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
@@ -1997,9 +1998,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3114,
+    "nimTestBinaryCount": 3115,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3164
+    "testEntryCount": 3165
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -29443,6 +29444,23 @@
       "source": "libs/repro_selfhost/tests/t_the_provider_compiler_pin_lives_in_the_lock.nim",
       "sourceSuiteCount": 3,
       "staticCaseCount": 10,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_explainer_unsat_core_names_violated_edge",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_solver"
+      ],
+      "owner": "libs/repro_solver",
+      "requiresReproBinary": false,
+      "source": "libs/repro_solver/tests/t_explainer_unsat_core_names_violated_edge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
