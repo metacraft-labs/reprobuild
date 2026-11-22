@@ -1648,7 +1648,15 @@ proc emitForTarget(projectRoot, rustcExe: string;
       call = inlineExecCall(metadataArgv, projectRoot),
       deps = externDepIds,
       inputs = metadataInputs,
-      outputs = @[rmetaOutput, metadataDepfile],
+      # The dep-info file is the edge's DEPFILE, not one of its products:
+      # the engine reads it after the run for the implicit inputs (``mod``
+      # files, ``include_str!`` targets) and never caches it. It names the
+      # crate's sources and this checkout's ``--out-dir`` by absolute path,
+      # and ``--remap-path-prefix`` does not rewrite it, so as a cached
+      # output it would carry checkout paths into the record and fail the
+      # cache's embedded-path scan of the outputs. Nothing downstream
+      # consumes it; a cache hit restores only the rmeta.
+      outputs = @[rmetaOutput],
       pool = "compile",
       depfile = metadataDepfile,
       dependencyPolicy = makeDepfilePolicy(metadataDepfile),
@@ -1713,7 +1721,8 @@ proc emitForTarget(projectRoot, rustcExe: string;
     call = inlineExecCall(linkArgv, projectRoot),
     deps = linkDeps,
     inputs = linkInputs,
-    outputs = @[linkOutput, linkDepfile],
+    # The dep-info file is read, not cached: see the metadata pass above.
+    outputs = @[linkOutput],
     pool = "compile",
     depfile = linkDepfile,
     dependencyPolicy = makeDepfilePolicy(linkDepfile),
