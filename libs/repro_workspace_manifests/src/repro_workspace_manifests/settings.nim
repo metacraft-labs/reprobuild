@@ -296,7 +296,7 @@ proc lockingFromTree(c: TreeCtx; n: TomlValueRef): BootstrapLockingBody =
 const settingsTopLevelKeys = ["schema", "push_gateway", "workspace",
   "projects", "records",
   "manifest", "profiles", "branch-roles", "verify", "develop", "locking",
-  "foreign_env", "extensions", ToolProvisioningTableKey]
+  "foreign_env", "nimble", "extensions", ToolProvisioningTableKey]
 
 proc decodeSettingsTree(path, content: string): WorkspaceSettings =
   ## A `settings.v1` file, decoded and checked on its own. Cross-file rules
@@ -422,6 +422,17 @@ proc decodeSettingsTree(path, content: string): WorkspaceSettings =
     result.foreign_env.auto_load_flake =
       c.optBool("foreign_env", foreign, "auto_load_flake")
 
+  # Nimble-Package-Catalog.md NPC-AREQ13: the organization's Nimble source
+  # mirrors. Only the shape is checked here (an array of strings); each
+  # entry's form is checked, naming this file and the entry, by the reader
+  # of the configured mirrors, which also reads the user's and the system's
+  # files.
+  let nimble = child(tree, "nimble")
+  if not nimble.isNil:
+    c.requireTable("nimble", nimble)
+    c.checkKeys("nimble", nimble, ["mirrors"])
+    result.nimble.mirrors = c.stringArray("nimble", nimble, "mirrors")
+
   let ext = child(tree, "extensions")
   if not ext.isNil:
     c.requireTable("extensions", ext)
@@ -461,6 +472,17 @@ proc readLocalSettingsLayers*(localPath, sharedPath: string;
     raiseManifestError(localPath, "schema", schemaWorkspaceSettingsLocalV1,
       observed, "schema version mismatch")
   for k in sortedKeys(tree):
+    if k == "nimble":
+      # Nimble-Package-Catalog.md NPC-AREQ13: the personal file carries
+      # manifest layers only. A mirror list that differed per checkout would
+      # make one lock fetch from different places on two machines without
+      # anything shared saying so.
+      c.fail(k, "`[nimble]` cannot be declared in " & localSettingsFileName &
+        ": the local file may carry `[[manifest]]` layers only. Declare the " &
+        "organization's Nimble mirrors in " & settingsFileName & ", or this " &
+        "host's in the user's Reprobuild configuration " &
+        "($XDG_CONFIG_HOME/reprobuild/config.toml) or the system's " &
+        "(/etc/repro/config.toml)")
     # `[tool-provisioning.overrides]` is the one table besides the layers a
     # checkout may set for itself: the workspace-local layer of the per-tool
     # provisioning overrides. It is read by
