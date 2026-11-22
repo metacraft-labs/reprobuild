@@ -189,8 +189,8 @@ suite "repro sync --progress modes":
 # repository is preceded by a refresh of that URL's shared bare, and the
 # refresh runs the leaf detector in every checkout on the host that borrows
 # from it (Shared-Clone-Pool-Integrity.md §4.2). The fixture reproduces the
-# shape of the reported hang (reprobuild-pm issue 2026-11-22, `repro sync
-# --only reprobuild` silent for minutes after `checking 1 repositories...`):
+# shape of a hang reported on 2026-11-22 (`repro sync --only reprobuild`
+# silent for minutes after `checking 1 repositories...`):
 # a declared repo with no checkout, whose shared bare already exists and has
 # two borrowers registered from "other workspaces". Before the fix the
 # refresh, both leaf checks and the clone ran with nothing on stderr between
