@@ -89949,11 +89949,19 @@ type
       ## for the build the verb-alias and
       ## certifying paths run. Selectors and the words after ``--`` are not
       ## in it.
-    lockFlag: string               # MO-1 ``--lock=<file>`` carry-through:
-                                   # the alternate committed solved-graph
-                                   # lock, forwarded to ``runBuildCommand``
-                                   # on the verb-alias path.
-    lockPath: string               # The ``<file>`` of ``lockFlag``.
+    lockFlag: string
+      ## The ``--lock=<value>`` word that bound ``default``, as given (the
+      ## bare ``PATH`` form or ``default=PATH``); empty when no ``--lock``
+      ## bound it. Recorded in the shard report as ``lock_flag``.
+    lockPath: string
+      ## The file bound to ``default`` (the lock the build pins); empty means
+      ## the project's ``repro.lock``. The shard report's lock provenance is
+      ## read from it.
+    lockBindings: LockBindings
+      ## Every ``--lock`` binding the command line gave, read as
+      ## ``repro build`` reads it (``applyLockFlag``, Named-Lock-Files §5.2).
+      ## The builds the run starts get the words themselves through
+      ## ``buildFlags``; this is what the shard report lists.
     toolProvisioning: ToolProvisioningMode
       ## Workspace-mode discovery needs typed tool provisioning when the
       ## project's interface declares ``uses:`` blocks (the default for any
@@ -92418,10 +92426,25 @@ proc testOptionsOf[C, O](c: C; origin: O): ReproTestShardOpts =
     else:
       tpmUnspecified
   if origin.lock.winner.kind == cokCli and c.lock.len > 0:
-    # MO-1 carry-through for the sharded path: the alternate committed
-    # solved-graph lock (the last `--lock`).
-    result.lockFlag = "--lock=" & c.lock[^1]
-    result.lockPath = c.lock[^1]
+    # MO-1 carry-through for the sharded path, generalised by
+    # Named-Lock-Files §5.1: every `--lock` is read as `repro build` reads it
+    # (`applyLockFlag`: `PATH` and `default=PATH` bind `default`, `NAME=PATH`
+    # binds `NAME`), so the report names the lock the shard's build pins and
+    # a command line the build would refuse (`default` bound twice, an
+    # undeclared name) is refused here as well, also on the fixture path,
+    # which runs no build to refuse it.
+    result.lockBindings = initLockBindings()
+    for value in c.lock:
+      let boundBefore =
+        result.lockBindings.byName.hasKey(DefaultLockFileName)
+      try:
+        result.lockBindings.applyLockFlag(value)
+      except LockFileError as err:
+        raise newException(ValueError, err.msg)
+      if not boundBefore and
+          result.lockBindings.byName.hasKey(DefaultLockFileName):
+        result.lockFlag = "--lock=" & value
+        result.lockPath = result.lockBindings.byName[DefaultLockFileName]
   result.certificateOut = c.certificateOut
   result.certWorkspaceRoot = c.workspaceRoot
   result.certCurrentRepo = c.currentRepo
@@ -92697,8 +92720,10 @@ proc shardLockProvenance(opts: ReproTestShardOpts):
   ## Workspace-Manifest-Optional MO-13 (correcting MO-1) — resolve the
   ## committed solved-graph lock the sharded run should honor, using the
   ## SAME loader (``resolveSolvedGraphForBuild``) the real ``repro build``
-  ## uses. ``opts.lockFlag`` carries ``--lock=<file>``; absent, the canonical
-  ## ``<cwd>/repro.lock`` is used. The provenance (resolved path + the lock's
+  ## uses. ``opts.lockPath`` is the file ``--lock`` bound to ``default``
+  ## (``--lock <file>`` or ``--lock default=<file>``), which is the lock the
+  ## build pins; absent, the canonical ``<cwd>/repro.lock`` is used. A named
+  ## binding (``--lock <name>=<file>``) does not change it. The provenance (resolved path + the lock's
   ## ``inputs_digest`` + pinned package count) is recorded in the shard report
   ## so the sharded/fixture run is demonstrably tied to the LOCKED graph, not
   ## a fresh re-solve. A no-op (``found = false``) when no lock is present, so
@@ -92720,6 +92745,12 @@ proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts) =
   let prov = shardLockProvenance(opts)
   report["lock_flag"] = %opts.lockFlag
   report["lock_file"] = %(if prov.found: prov.lockPath else: "")
+  # Every binding the command line gave, name to path as given, in the order
+  # bound: the report names what the build was handed, not only `default`.
+  var bindings = newJObject()
+  for name in opts.lockBindings.order:
+    bindings[name] = %opts.lockBindings.byName[name]
+  report["lock_bindings"] = bindings
   report["locked_inputs_digest"] = %prov.inputsDigest
   report["locked_package_count"] = %prov.packageCount
 

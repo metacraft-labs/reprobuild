@@ -18,6 +18,22 @@
 ##       graph. Falsifiable: revert the threading → the report omits the lock
 ##       fields.
 ##
+##   (b') the named form and a repeated ``--lock`` on the same path
+##       (issue 2026-11-19-a-sharded-repro-test-reads-a-named-lock-binding-
+##       as-a-path). ``--lock`` is one flag with two forms (Named-Lock-Files
+##       §5.2): ``PATH`` and ``default=PATH`` bind ``default``, ``NAME=PATH``
+##       binds ``NAME``. The report used to read the LAST ``--lock`` value
+##       as a file path, so ``--lock default=<file>`` recorded no lock and
+##       ``--lock <file> --lock hostTools=<other>`` recorded none either. We
+##       assert that ``lock_file`` names the lock the shard's build pins for
+##       ``default`` in each form, that ``lock_bindings`` lists every binding,
+##       that the shard's build is handed every ``--lock`` the command line
+##       gave (``reproTestBuildWords``, the words ``testBuildArgs`` starts
+##       from), and that two bindings of ``default`` are refused (exit 2) as
+##       ``repro build`` refuses them. Falsifiable: restore the
+##       last-value-as-path reading → ``lock_file`` is empty for the first
+##       two cases and the build pins nothing the report names.
+##
 ##   (d) [corrects MO-9] the gate's git-native integrity check, non-conservative
 ##       where SAFE. MO-9 SKIPPED a lock refreshed before a repo's first commit
 ##       (a ``blake3:`` pre-commit tree hash) on a git checkout. MO-13 verifies
@@ -191,6 +207,81 @@ suite "MO-13: evidence-publish verb + --lock on test sharding + gate integrity":
         check report{"locked_inputs_digest"}.getStr().len > 0
         # Sanity: the recorded digest is the lock's OWN inputs_digest.
         check report{"locked_inputs_digest"}.getStr() in lockDigest
+        check report{"lock_bindings"} == %*{"default": lockPath}
+
+      # ===== item (b'): named and repeated --lock on repro test sharding =====
+      block namedLockOnSharding:
+        let proj = createTempDir("repro-mo13-named-", "")
+        defer: removeDir(proj)
+        writeFile(proj / "repro.solver", solverInputs)
+        check run(reproBinary & " lock refresh " & q(proj)).code == 0
+        let cwdLock = proj / "repro.lock"
+        check fileExists(cwdLock)
+        # A second lock file elsewhere, so the report can only name it by
+        # reading the binding, never by falling back to ``./repro.lock``.
+        createDir(proj / "alt")
+        let altLock = proj / "alt" / "alt.lock"
+        copyFile(cwdLock, altLock)
+        let hostLock = proj / "alt" / "host.lock"
+        copyFile(cwdLock, hostLock)
+        let fixturePath = proj / "fixture.json"
+        writeFixture(fixturePath, makeFixture(proj))
+
+        proc shard(name: string; locks: seq[string]):
+            tuple[code: int; output: string; report: JsonNode] =
+          let reportPath = proj / ("report-" & name & ".json")
+          var args = @["test", "--shard", "1/1",
+            "--fixture-from=" & fixturePath]
+          for value in locks:
+            args.add("--lock=" & value)
+          args.add("--write-report=" & reportPath)
+          let res = runRepro(args, proj)
+          checkpoint(name & ": " & res.output)
+          result.code = res.code
+          result.output = res.output
+          if res.code == 0:
+            result.report = readShardReport(reportPath)
+
+        # `--lock default=<file>` is `--lock <file>` (Named-Lock-Files §5.2).
+        block defaultNamed:
+          let r = shard("default-named", @["default=" & altLock])
+          check r.code == 0
+          if r.code == 0:
+            check r.report{"lock_file"}.getStr() == altLock
+            check r.report{"lock_flag"}.getStr() == "--lock=default=" & altLock
+            check r.report{"locked_inputs_digest"}.getStr().len > 0
+            check r.report{"lock_bindings"} == %*{"default": altLock}
+
+        # A named binding alone leaves `default` on `./repro.lock`.
+        block namedOnly:
+          let r = shard("named-only", @["hostTools=" & hostLock])
+          check r.code == 0
+          if r.code == 0:
+            let recorded = r.report{"lock_file"}.getStr()
+            check recorded.len > 0 and sameFile(recorded, cwdLock)
+            check r.report{"lock_flag"}.getStr() == ""
+            check r.report{"lock_bindings"} == %*{"hostTools": hostLock}
+
+        # A repeated `--lock`: every binding counts, not only the last.
+        block repeated:
+          let r = shard("repeated", @[altLock, "hostTools=" & hostLock])
+          check r.code == 0
+          if r.code == 0:
+            check r.report{"lock_file"}.getStr() == altLock
+            check r.report{"lock_flag"}.getStr() == "--lock=" & altLock
+            check r.report{"lock_bindings"} ==
+              %*{"default": altLock, "hostTools": hostLock}
+          # The shard's build receives both, as an unsharded run's does.
+          let words = reproTestBuildWords(@["--shard=1/1",
+            "--lock=" & altLock, "--lock=hostTools=" & hostLock])
+          let (built, _) = loadBuildCommandLine(words.buildFlags)
+          check built.lock == @[altLock, "hostTools=" & hostLock]
+
+        # Two bindings of `default` are a usage error, as for `repro build`.
+        block duplicateDefault:
+          let r = shard("duplicate", @[altLock, "default=" & hostLock])
+          check r.code == 2
+          check "bound twice" in r.output
 
       # ====== item (d): gate verifies a pre-commit blake3 integrity ======
       # MO-9 conservatively SKIPPED a lock whose integrity is a ``blake3:``
