@@ -504,6 +504,7 @@ def extract_installer_ps1_help() -> str:
         "  -Domain <DOMAIN>               Repository domain when -BaseUrl is unset (default: metacraft-labs.com).",
         "  -BucketUrl <URL>               Override the Scoop bucket Git URL (default: $env:REPRO_BUCKET_URL).",
         "  -Prefix <PATH>                 Destination directory for -Method tarball.",
+        "  -NoCompletion                  Do not set up shell completion (also REPRO_NO_COMPLETION=1).",
         "  -DryRun                        Print the actions that would run; change nothing.",
         "  -Yes                           Accepted for scripting compatibility (the installer never prompts).",
         "```",

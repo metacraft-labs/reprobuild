@@ -50,16 +50,32 @@ puts files where Homebrew's own helpers do. It needs macOS's pkgbuild and
 pkgutil, ruby (macOS ships one), sha256sum and a shell; it is skipped, which
 counts as not passed, anywhere else. brew itself is not used: running a real
 `brew install` writes to the machine's Homebrew prefix.
+
+test_cs_m8c_windows_packages_carry_completion is the Windows counterpart. From
+a fixture .zip of the Windows archive's shape it generates the MSI authoring
+(.wxs) with repro-build-packages.sh --ecosystem msi, builds the MSI with
+msitools' wixl and reads it back with msiinfo and msiextract, and generates the
+Scoop manifest with repro-publish-repos.sh. It needs wixl, msiinfo and
+msiextract and is skipped, which counts as not passed, without them:
+  nix shell nixpkgs#msitools nixpkgs#python3 -c \
+    python3 -m unittest tests.unit.test_release_native_packages
+Neither package is installed: installing an MSI changes the machine (Program
+Files, the machine PATH, the all-users PowerShell profiles), and Scoop's
+hooks write the user's profiles. Running them, and building the MSI with WiX v3
+on Windows, is tools/multi-distro-harness/tests/m8c_windows_packages_carry_completion.ps1.
 """
 
 import json
 import os
+import re
 import stat
 import shutil
 import subprocess
 import tarfile
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
+import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -652,6 +668,248 @@ class MacosCompletionFilesTests(PackagerFixture):
         broken_run, _ = self.run_formula_install(formula, "no-archive-zsh")
         self.assertNotEqual(0, broken_run.returncode)
         self.assertIn("_repro", broken_run.stderr)
+
+
+# Where the MSI installs the PowerShell completion script (the archive tree
+# intact under %ProgramFiles%\Reprobuild), and the commands its custom actions
+# and the Scoop manifest's hooks run to register it: all users through the
+# all-users profile for the per-machine MSI, the installing user for Scoop,
+# which installs per user.
+MSI_COMPLETION_PATH = "ProgramFiles64Folder/Reprobuild/share/repro/completions/repro.ps1"
+MSI_REPRO_PATH = "ProgramFiles64Folder/Reprobuild/bin/repro.exe"
+MSI_CUSTOM_ACTIONS = {
+    "ReproCompletionEnsure": "hooks ensure --shell-autocomplete --system",
+    "ReproCompletionRemove": "hooks uninstall --shell-autocomplete --system",
+}
+# msidbCustomActionTypeExe + SourceFile (18), ContinueOnError (64),
+# InScript (1024), NoImpersonate (2048):
+# https://learn.microsoft.com/windows/win32/msi/custom-action-types
+MSI_CUSTOM_ACTION_TYPE = 18 + 64 + 1024 + 2048
+SCOOP_ENSURE = '& "$dir\\bin\\repro.exe" hooks ensure --shell-autocomplete --profile'
+SCOOP_UNINSTALL = '& "$dir\\bin\\repro.exe" hooks uninstall --shell-autocomplete --profile'
+
+_MSI_TOOLS = ("wixl", "msiinfo", "msiextract")
+
+
+@unittest.skipUnless(all(shutil.which(t) for t in _MSI_TOOLS),
+                     "needs " + ", ".join(_MSI_TOOLS) + " (nixpkgs#msitools)")
+class WindowsCompletionTests(PackagerFixture):
+    """The MSI and the Scoop manifest install repro's PowerShell completion
+    where the Windows rows of the platform matrix put it."""
+
+    PLATFORM = "windows"
+    ASSET_ARCH = "x86_64"
+
+    def setUp(self):
+        super().setUp()
+        # The Windows archive's command and engine are .exe images.
+        for name in ("repro.exe", "reprobuild.exe"):
+            (self.archive_root / "bin" / name).write_bytes(b"MZ stand-in\n")
+        self.pack()
+
+    def pack(self):
+        """(Re)write the fixture .zip, the Windows release asset's shape."""
+        self.tarball = self.work / f"{self.archive_top}.zip"
+        with zipfile.ZipFile(self.tarball, "w", zipfile.ZIP_DEFLATED) as zf:
+            for path in sorted(self.archive_root.rglob("*")):
+                if path.is_file():
+                    zf.write(path, f"{self.archive_top}/{path.relative_to(self.archive_root).as_posix()}")
+
+    def archive_ps1(self):
+        return (self.archive_root / "share" / "repro" / "completions" / "repro.ps1").read_bytes()
+
+    def build_msi(self, packager=None, source_only=False):
+        env = dict(os.environ)
+        env.pop("REPRO_MSI_TOOLSET", None)
+        if source_only:
+            env["REPRO_MSI_SOURCE_ONLY"] = "1"
+        return subprocess.run(
+            ["sh", str(packager or PACKAGER), "--version", VERSION,
+             "--tarball", str(self.tarball), "--out", str(self.out),
+             "--ecosystem", "msi", "--platform", self.PLATFORM,
+             "--asset-arch", self.ASSET_ARCH],
+            capture_output=True, text=True, check=False, env=env)
+
+    # ------------------------------------------------------------ the .msi
+    def msi_rows(self, msi, table):
+        text = subprocess.run(["msiinfo", "export", str(msi), table],
+                              capture_output=True, text=True, check=True).stdout
+        return [line.rstrip("\r").split("\t") for line in text.splitlines()[3:] if line.strip()]
+
+    def msi_contents(self, msi, tag):
+        """({install path: bytes}, {custom action: (type, source, target)},
+        {sequenced action: condition}): the package's files resolved through
+        its Directory, Component and File tables, each with the bytes
+        msiextract writes for it, and its custom actions."""
+        parent, name = {}, {}
+        for d, p, default in self.msi_rows(msi, "Directory"):
+            parent[d], name[d] = p, default
+
+        def longname(s):
+            s = s.split(":")[0]
+            return s.split("|")[-1]
+
+        def dpath(d):
+            if d in ("TARGETDIR", "ProgramFiles64Folder") or d not in parent:
+                return d
+            return dpath(parent[d]) + "/" + longname(name[d])
+
+        cdir = {row[0]: row[2] for row in self.msi_rows(msi, "Component")}
+        extracted = self.work / f"msi-x-{tag}"
+        extracted.mkdir()
+        subprocess.run(["msiextract", "-C", str(extracted), str(msi)],
+                       capture_output=True, check=True)
+        files = {}
+        for row in self.msi_rows(msi, "File"):
+            path = dpath(cdir[row[1]]) + "/" + longname(row[2])
+            on_disk = extracted / path.split("/", 1)[1]
+            files[path] = on_disk.read_bytes() if on_disk.is_file() else None
+        actions = {row[0]: (int(row[1]), row[2], row[3])
+                   for row in self.msi_rows(msi, "CustomAction")}
+        sequence = {row[0]: row[1] for row in self.msi_rows(msi, "InstallExecuteSequence")}
+        return files, actions, sequence
+
+    def assert_msi_completion(self, files, actions, sequence):
+        self.assertIn(MSI_COMPLETION_PATH, files, sorted(files))
+        self.assertEqual(self.archive_ps1(), files[MSI_COMPLETION_PATH],
+                         "msi: the completion script differs from the archive's")
+        self.assertIn(b"__complete", files[MSI_COMPLETION_PATH])
+        self.assertIn(MSI_REPRO_PATH, files)
+        for action, command in MSI_CUSTOM_ACTIONS.items():
+            self.assertIn(action, actions)
+            kind, source, target = actions[action]
+            self.assertEqual(MSI_CUSTOM_ACTION_TYPE, kind, action)
+            self.assertEqual("fil_repro_exe", source, action)
+            self.assertEqual(command, target, action)
+            self.assertIn(action, sequence)
+        self.assertEqual('REMOVE~="ALL"', sequence["ReproCompletionRemove"])
+        self.assertEqual('NOT (REMOVE~="ALL")', sequence["ReproCompletionEnsure"])
+
+    # ------------------------------------------------------ the Scoop manifest
+    def generate_scoop_manifest(self):
+        packages = self.work / "release-assets"
+        packages.mkdir(exist_ok=True)
+        shutil.copy(self.tarball, packages / self.tarball.name)
+        repo_root = self.work / "bucket-repo"
+        run = subprocess.run(
+            ["sh", str(PUBLISHER), "--version", VERSION, "--packages", str(packages),
+             "--ecosystem", "scoop", "--repo-root", str(repo_root),
+             "--target", "none", "--scoop-downloads-base", "https://downloads.example"],
+            capture_output=True, text=True, check=False)
+        self.assertEqual(0, run.returncode, run.stderr)
+        return json.loads((repo_root / "scoop" / "bucket" / "reprobuild.json")
+                          .read_text(encoding="utf-8"))
+
+    def assert_scoop_completion(self, manifest):
+        # Scoop extracts the archive's top directory as the app's $dir, so the
+        # script is at $dir\share\repro\completions\repro.ps1 ...
+        self.assertEqual(self.archive_top, manifest["extract_dir"])
+        with zipfile.ZipFile(self.tarball) as zf:
+            self.assertEqual(self.archive_ps1(),
+                             zf.read(f"{self.archive_top}/share/repro/completions/repro.ps1"))
+        self.assertEqual(["bin\\repro.exe"], manifest["bin"])
+        # ... and, Scoop being per user, the hooks register it for the user
+        # (the CurrentUserAllHosts block of `--profile`) and remove it again.
+        post = "\n".join(manifest.get("post_install", []))
+        pre = "\n".join(manifest.get("pre_uninstall", []))
+        self.assertIn(SCOOP_ENSURE, post)
+        self.assertIn("$env:REPRO_NO_COMPLETION -eq '1'", post)
+        self.assertLess(post.index("$env:REPRO_NO_COMPLETION"), post.index(SCOOP_ENSURE))
+        self.assertIn(SCOOP_UNINSTALL, pre)
+        self.assertNotIn("--system", post + pre)
+
+    def test_cs_m8c_windows_packages_carry_completion(self):
+        wxs_text = ""
+        # (1) The MSI source: the completion script is a File of the
+        # completions directory under the install folder, from the archive's
+        # copy; the custom actions run the installed repro.exe.
+        with self.subTest(package="msi source"):
+            run = self.build_msi(source_only=True)
+            self.assertEqual(0, run.returncode, run.stderr)
+            wxs = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.wxs"
+            self.assertFalse(wxs.with_suffix(".msi").exists())
+            ns = {"w": "http://schemas.microsoft.com/wix/2006/wi"}
+            tree = ET.parse(wxs)
+            chain = []
+
+            def find(node, trail):
+                for child in node:
+                    tag = child.tag.split("}")[1]
+                    here = trail + [child.get("Name") or child.get("Id")] if tag == "Directory" else trail
+                    if tag == "File" and child.get("Id") == "fil_completion_ps1":
+                        chain.append((here, child))
+                    find(child, here)
+
+            find(tree.getroot(), [])
+            self.assertEqual(1, len(chain), "the .wxs has no single completion File")
+            dirs, element = chain[0]
+            self.assertEqual(["SourceDir", "ProgramFiles64Folder", "Reprobuild", "share",
+                              "repro", "completions"], dirs)
+            self.assertEqual("repro.ps1", element.get("Name"))
+            self.assertEqual(f"$(var.SourceDir)/{self.archive_top}/share/repro/completions/repro.ps1",
+                             element.get("Source"))
+            commands = {ca.get("Id"): (ca.get("FileKey"), ca.get("ExeCommand"), ca.get("Execute"),
+                                       ca.get("Impersonate"), ca.get("Return"))
+                        for ca in tree.getroot().iterfind(".//w:CustomAction", ns)}
+            for action, command in MSI_CUSTOM_ACTIONS.items():
+                self.assertEqual(("fil_repro_exe", command, "deferred", "no", "ignore"),
+                                 commands.get(action), action)
+            env = tree.getroot().find(".//w:Environment", ns)
+            self.assertEqual(("PATH", "[BINDIR]", "yes"),
+                             (env.get("Name"), env.get("Value"), env.get("System")))
+
+        # (2) The built MSI, read back: the script is installed at
+        # %ProgramFiles%\Reprobuild\share\repro\completions\repro.ps1,
+        # byte-identical to the archive's, and both actions are sequenced.
+        with self.subTest(package="msi"):
+            self.out = self.work / "out-msi"
+            run = self.build_msi()
+            self.assertEqual(0, run.returncode, run.stderr)
+            msi = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.msi"
+            self.assert_msi_completion(*self.msi_contents(msi, "good"))
+            wxs_text = msi.with_suffix(".wxs").read_text(encoding="utf-8")
+
+        # (3) Negative control: the same source without the completion
+        # script's component builds a package the assertion rejects.
+        with self.subTest(package="msi without the completion entry"):
+            self.assertTrue(wxs_text, "no authoring from the MSI build above")
+            component = re.search(r'\s*<Component Id="cmp_completion_ps1".*?</Component>\n',
+                                  wxs_text, re.S)
+            self.assertIsNotNone(component)
+            mutant = (wxs_text.replace(component.group(0), "\n")
+                      .replace('      <ComponentRef Id="cmp_completion_ps1" />\n', ""))
+            self.assertNotIn("fil_completion_ps1", mutant)
+            src = self.work / "msi-src"
+            src.mkdir()
+            with zipfile.ZipFile(self.tarball) as zf:
+                zf.extractall(src)
+            mutant_wxs = self.work / "mutant.wxs"
+            mutant_wxs.write_text(mutant, encoding="utf-8")
+            mutant_msi = self.work / "mutant.msi"
+            subprocess.run(["wixl", "-a", "x64", "-D", f"SourceDir={src}", "-o",
+                            str(mutant_msi), str(mutant_wxs)],
+                           capture_output=True, text=True, check=True, cwd=str(src))
+            with self.assertRaises(AssertionError):
+                self.assert_msi_completion(*self.msi_contents(mutant_msi, "mutant"))
+
+        # (4) The Scoop manifest the publisher generates.
+        with self.subTest(package="scoop"):
+            manifest = self.generate_scoop_manifest()
+            self.assert_scoop_completion(manifest)
+            # Negative control: the manifest without its post_install.
+            mutant = dict(manifest)
+            del mutant["post_install"]
+            with self.assertRaises(AssertionError):
+                self.assert_scoop_completion(mutant)
+
+        # (5) An archive without the script: the packager refuses and names it.
+        with self.subTest(package="msi from an archive without repro.ps1"):
+            (self.archive_root / "share" / "repro" / "completions" / "repro.ps1").unlink()
+            self.pack()
+            self.out = self.work / "out-no-ps1"
+            run = self.build_msi()
+            self.assertNotEqual(0, run.returncode, "an MSI was built without repro.ps1")
+            self.assertIn("share/repro/completions/repro.ps1", run.stderr)
 
 
 if __name__ == "__main__":

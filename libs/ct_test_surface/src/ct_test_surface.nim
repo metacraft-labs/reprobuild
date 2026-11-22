@@ -21,8 +21,7 @@
 ## --------------------------------------
 ## There is already a runner lookup in this repository — ``CT_TEST_RUNNER``,
 ## then ``ct-test-runner`` on ``PATH``, then ``build/bin/repro_test_runner``
-## (``scripts/run_tests.sh`` and ``locateCtTestRunner`` in
-## ``libs/repro_cli_support``). ``locateCtTestSurface`` below is NOT that
+## (``scripts/run_tests.sh``). ``locateCtTestSurface`` below is NOT that
 ## lookup and must not be merged into it, because the two resolve different
 ## contracts:
 ##

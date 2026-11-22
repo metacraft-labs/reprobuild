@@ -29,7 +29,8 @@ proc fileUrl(path: string): string =
   "file:///" & path.replace('\\', '/').strip(leading = true, chars = {'/'})
 
 proc payloadUse(url, sha256, execPath: string; selector: string;
-                alias = ""; launcher = ""): InterfaceToolUse =
+                alias = ""; launcher = "";
+                extraAliases: seq[string] = @[]): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: selector,
     packageSelector: selector,
@@ -49,6 +50,7 @@ proc payloadUse(url, sha256, execPath: string; selector: string;
     # the declaration that they are one realization.
     lockIdentity: "tarball:shared-dist@1:sha256:" & sha256,
     location: SourceLocation(file: "fixture", line: 2))]
+  result.tarballProvisioning[0].detail.executableExtraAliases = extraAliases
 
 suite "one archive realized twice is stored once":
   putEnv("REPRO_CACHE_DISABLE", "1")
@@ -110,6 +112,36 @@ suite "one archive realized twice is stored once":
       discard resolveTarballTool(
         payloadUse(fileUrl(src), digest, "payload.bin", "beta",
           alias = "beta-alias"), store)
+    except CatchableError:
+      failed = true
+    check failed
+
+  test "a sibling realized with installation declarations is NOT cloned":
+    # `alpha` declares an extra alias, an installation declaration that
+    # changes the sealed bytes (as an ELF relocation does: the Linux
+    # `rustc` view of rust-lang's archive is relocated, its `rustfmt` view
+    # is not). `beta` declares none, so a clone would hand it bytes its own
+    # extraction would not produce, under the key of a plain extraction.
+    # With the source removed, refusing to clone means the resolve FAILS.
+    let root = createTempDir("repro-clone-", "")
+    defer:
+      try: removeDir(root) except CatchableError: discard
+    let src = root / "payload.bin"
+    writeFile(src, Payload)
+    let digest = sha256Hex(readFile(src))
+    let store = root / "store"
+
+    let first = resolveTarballTool(
+      payloadUse(fileUrl(src), digest, "payload.bin", "alpha",
+        extraAliases = @["alpha-extra"]), store)
+    check fileExists(first.selectedStorePath / "alpha-extra")
+    removeFile(src)
+    removeDir(store / "downloads")
+
+    var failed = false
+    try:
+      discard resolveTarballTool(
+        payloadUse(fileUrl(src), digest, "payload.bin", "beta"), store)
     except CatchableError:
       failed = true
     check failed

@@ -109,6 +109,10 @@ proc reprobuildComponents(targetOs: TargetOs): seq[DistComponent] =
                  # engine runs it from beside its own image, so a
                  # ``repro test`` of a per-test package needs it here.
                  "repro-tests-fragment",
+                 # The producer of the completion edge of an executable
+                 # with a ``cli:`` section, run from beside the engine
+                 # image like the one above.
+                 "repro-completion-files",
                  "repro-install-mirror-publish"]:
     result.add(component(crHelperExecutable, PrebuiltBin & "/" & helper & sfx))
   # ``reprobuild-nix-daemon`` is the ``tool-provisioning=nix`` bridge and

@@ -560,7 +560,8 @@ class ReleaseInventoryTests(unittest.TestCase):
     APPS = {
         "repro", "reprobuild", "repro-peer-cache-tier2", "repro-peer-cache-admin",
         "repro-peer-cache-mint-cert", "repro-cmake-dyndep-fragment",
-        "repro-tests-fragment", "repro-cmake-trycompile-provider",
+        "repro-tests-fragment", "repro-completion-files",
+        "repro-cmake-trycompile-provider",
         "repro-standard-provider",
         "repro-install-mirror-publish", "repro-agent-conformance", "repro-binary-cache",
         "repro-binary-cache-crosshost", "repro-harvest-apt", "attestation-agent",
