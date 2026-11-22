@@ -7,6 +7,7 @@
 
 import std/[unittest, os, osproc, json, strutils, net, nativesockets, times,
   streams, tempfiles, strtabs]
+import repro_core/process_env
 
 const RepoMarker = "repro.nim"
 const FixtureRelRoot = "tests/fixtures/nix-daemon-local-flake"
@@ -153,10 +154,8 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
       setFilePermissions(fakeNix, {fpUserRead, fpUserWrite, fpUserExec})
 
       let socketPath = fixtureRoot / "nix-daemon.sock"
-      var childEnv = newStringTable(modeCaseSensitive)
-      for key, value in envPairs():
-        childEnv[key] = value
-      childEnv["PATH"] = fakeBin & PathSep & childEnv.getOrDefault("PATH")
+      var childEnv = inheritedEnvTable()
+      childEnv.prependPathEntry(fakeBin)
       childEnv["LD_LIBRARY_PATH"] = fixtureRoot / "target-libraries"
 
       let daemonProcess = startProcess(daemonPath,
@@ -379,10 +378,8 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
           result = readFile(invocationLog).count("invoked")
 
       let socketPath = fixtureRoot / "nix-daemon.sock"
-      var childEnv = newStringTable(modeCaseSensitive)
-      for key, value in envPairs():
-        childEnv[key] = value
-      childEnv["PATH"] = fakeBin & PathSep & childEnv.getOrDefault("PATH")
+      var childEnv = inheritedEnvTable()
+      childEnv.prependPathEntry(fakeBin)
       let daemonProcess = startProcess(daemonPath,
         args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
         env = childEnv, options = {})
@@ -503,10 +500,8 @@ printf '%s\n' /tmp/reprobuild-nix-daemon-fake-store
             if line.len > 0: inc result
 
       let socketPath = fixtureRoot / "nix-daemon.sock"
-      var childEnv = newStringTable(modeCaseSensitive)
-      for key, value in envPairs():
-        childEnv[key] = value
-      childEnv["PATH"] = fakeBin & PathSep & childEnv.getOrDefault("PATH")
+      var childEnv = inheritedEnvTable()
+      childEnv.prependPathEntry(fakeBin)
       let daemonProcess = startProcess(daemonPath,
         args = ["--idle-exit-ms=30000", "--socket-path=" & socketPath],
         env = childEnv, options = {})

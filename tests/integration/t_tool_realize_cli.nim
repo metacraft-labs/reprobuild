@@ -23,6 +23,7 @@
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 
+import repro_core/process_env
 import repro_test_support
 import repro_test_support/process_fixtures
 import repro_test_support/reasoned_skip
@@ -82,8 +83,7 @@ type CliRun = object
 
 proc runRepro(root: string; args: seq[string];
               extraEnv: openArray[(string, string)] = []): CliRun =
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): env[key] = value
+  let env = inheritedEnvTable()
   for pair in [
       ("REPROBUILD_WORK_ROOT", root / "work"),
       ("REPROBUILD_ACTION_CACHE_ROOT", root / "action-cache"),

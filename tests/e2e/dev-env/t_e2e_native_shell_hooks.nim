@@ -1,6 +1,7 @@
 from repro_core/process_streams import drainStream
 import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
     unittest]
+import repro_core/process_env
 
 import repro_core/cli_images
 import repro_test_support
@@ -112,8 +113,8 @@ proc prepareCase(prefix: string): M6Case =
     result.shim = monitor.shim
 
 proc envFor(c: M6Case): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
+  result = newEnvTable()
+  for key, value in inheritedEnvTable():
     if key.startsWith("__REPRO_"):
       continue
     # The invoking shell's own direnv state must not leak in: the native

@@ -43,6 +43,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, times, unittest]
+import repro_core/process_env
 
 import repro_hash
 import repro_interface_artifacts
@@ -71,9 +72,7 @@ proc baseEnv(): StringTableRef =
   ## The cold run's environment: this process's own, with the variables the
   ## variations change pinned to known values so every variation is a real
   ## change whatever shell started the test.
-  result = newStringTable(modeCaseSensitive)
-  for name, value in envPairs():
-    result[name] = value
+  result = inheritedEnvTable()
   result["TERM"] = "xterm-256color"
   result["LANG"] = "C.UTF-8"
   result["TZ"] = "UTC"

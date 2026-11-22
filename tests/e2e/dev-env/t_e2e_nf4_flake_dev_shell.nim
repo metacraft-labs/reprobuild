@@ -30,6 +30,7 @@
 from repro_core/process_streams import drainStream
 import std/[os, osproc, sequtils, streams, strtabs, strutils, tempfiles,
   unittest]
+import repro_core/process_env
 
 import repro_build_engine
 import repro_dsl_stdlib/foreign_env
@@ -130,9 +131,7 @@ proc resolveLocalNixpkgs(): string =
 proc gitEnv(): StringTableRef =
   ## A deterministic committer so the fixture repo's tree revision does not
   ## depend on the host's git identity being configured at all.
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
+  result = inheritedEnvTable()
   result["GIT_AUTHOR_NAME"] = "repro-nf4"
   result["GIT_AUTHOR_EMAIL"] = "repro-nf4@example.invalid"
   result["GIT_COMMITTER_NAME"] = "repro-nf4"
@@ -264,9 +263,7 @@ proc runRepro(f: Fixture; args: openArray[string]; userConfig: string):
   ## `/etc/reprobuild/config.toml` would pass the "off" case for the wrong
   ## reason, and one without it would still be measuring a file this test does
   ## not control.
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    env[key] = value
+  var env = inheritedEnvTable()
   env["REPROBUILD_USER_CONFIG"] = userConfig
   env["REPROBUILD_SYSTEM_CONFIG"] = f.root / "no-such-system-config.toml"
   env["REPROBUILD_VCS_PRIVATE_CONFIG"] = f.root / "no-such-private-config.toml"
@@ -353,7 +350,7 @@ proc nixDevelopEnv(f: Fixture; projectRoot: string):
   ## The reference shell: `nix develop` on the same flake with the same
   ## override, run with `PATH` set to nothing but a sentinel so the resulting
   ## `PATH` is exactly what the dev shell contributed plus that sentinel.
-  var env = newStringTable(modeCaseSensitive)
+  var env = newEnvTable()
   env["HOME"] = getEnv("HOME")
   env["PATH"] = PathSentinel
   for name in ["NIX_SSL_CERT_FILE", "SSL_CERT_FILE", "XDG_RUNTIME_DIR",

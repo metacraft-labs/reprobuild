@@ -837,6 +837,14 @@ lint:
     # `drainStream`. Self-test first. Source scan, no compiler.
     python3 ./scripts/check_process_stream_readall.py --self-test 2>&1 | tee -a test-logs/lint.log
     python3 ./scripts/check_process_stream_readall.py 2>&1 | tee -a test-logs/lint.log
+    # Refuse a case-sensitive copy of the inherited environment in a file
+    # that names `PATH`: Windows names are case-insensitive and the inherited
+    # one is spelled `Path`, so the child gets both and the `PATH` the caller
+    # set can be the one it ignores (a `PATH` spy never ran and its spawn
+    # counts read 0). Build the table with `repro_core/process_env`.
+    # Self-test first. Source scan, no compiler.
+    python3 ./scripts/check_env_table_copies.py --self-test 2>&1 | tee -a test-logs/lint.log
+    python3 ./scripts/check_env_table_copies.py 2>&1 | tee -a test-logs/lint.log
     # Graph-Owned-Test-Artifacts M3: refuse a NEW test that compiles a helper
     # program in its own body instead of declaring a `repro.nim` build edge.
     # Source scan, no compiler, same class as the two gates above. It does NOT

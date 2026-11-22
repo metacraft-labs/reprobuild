@@ -53,6 +53,7 @@
 ## wrapped package, the real build engine, a real `nim c` and the real planner.
 
 import std/[json, os, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 from repro_core/paths import extendedPath
 
 import repro_dsl_stdlib/packaging/runtime_contract
@@ -80,8 +81,8 @@ proc pathWithoutNim(): string =
 
 proc scrubbedEnv(homeDir, spacedBase, profileDir, storeRoot: string;
                  dropNim: bool): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
+  result = newEnvTable()
+  for k, v in inheritedEnvTable():
     if k.startsWith("REPROBUILD_") or k in ReprobuildWrapperVariables:
       continue
     if k in ["REPRO_HOME_STATE_DIR", "REPRO_HOME_GENERATION_DIR"]:
