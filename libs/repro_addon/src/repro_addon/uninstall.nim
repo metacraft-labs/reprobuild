@@ -1091,9 +1091,19 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
   #    deleted, its absence tolerated. This runs whether or not the
   #    uninstall ends complete. The out-of-store guard binary
   #    (`/var/lib/repro/bin/repro`) goes with the state below, after it.
+  #    Units still loaded after the last pass keep the uninstall
+  #    incomplete, and the lock stays with them: a unit that can still fire
+  #    must find its lock, never one recreated by whichever actor runs next.
+  var guardUnitsLeft = false
   for line in stopEveryGuardUnit():
     result.guardUnitPasses.add(line)
-  if removeGuardLock():
+    if line.startsWith(GuardUnitsLeftPrefix): guardUnitsLeft = true
+  if guardUnitsLeft:
+    result.errors.add(diagnosticMessage(adGuardTimer, "network guard units " &
+      "are still loaded after uninstall's last pass (" &
+      result.guardUnitPasses[^1] & "); the guard lock " & guardLockPath &
+      " is kept"))
+  elif removeGuardLock():
     result.removed.add(guardLockPath)
   block:
     let snaps = deleteEveryAddonSnapshot(stateDir, hostSnapshotSite())

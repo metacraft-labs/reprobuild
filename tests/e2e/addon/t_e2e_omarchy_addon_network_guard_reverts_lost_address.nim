@@ -22,7 +22,9 @@
 ## the gate asserts that, plugs the cable back, and only then compares.
 ##
 ## **The guard's states**: negative controls (a)-(cc) of the milestone,
-## each named by its letter in the record. After every control that ends
+## each named by its letter in the record, and (dd): an SSH session while
+## the switch is paused before its network writes is not evidence, and the
+## timer reverts (spec §4.5 step 3, amended 2026-11-22). After every control that ends
 ## in a revert, the attempt's root snapshot is gone and the fingerprint and
 ## the host's links, addresses and routes equal the previous generation's
 ## (§13 decision 105). The record states the successor's re-arm interval as
@@ -328,12 +330,33 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
       step("(b) the timer fires while the apply watches; the apply completes " &
            "the revert", "rolled back" in b.nb.applyLog(unit), b.nb.applyLog(unit))
       b.reverted("b", GuardTimerReason)
+    # ---- (dd): a session before the network writes is no evidence.
+    block:
+      b.pause("step-3")
+      let unit = b.start(b.link)
+      discard b.waitArmed()
+      let paused = b.waitPaused("step-3")
+      let early = nb.freshSsh("true", afterWrites = false)
+      let noWrites = b.mux("grep -c '^guard-written-mono' " & MarkerPath &
+                           "; ls /etc/NetworkManager/system-connections/repro-" &
+                           LinkName & ".nmconnection 2>&1").stdout
+      step("(dd) a new SSH session while the switch is paused before its " &
+           "network writes", paused and early.exitCode == 0 and
+           noWrites.startsWith("0") and "No such file" in noWrites, noWrites)
+      b.resume("step-3")
+      discard b.nb.waitApplyDone(unit, Timeout + 600)
+      let log = b.nb.applyLog(unit)
+      step("(dd) it does not disarm: the timer reverts", "disarmed by" notin log and
+           "rolled back" in log, log)
+      b.reverted("dd", GuardTimerReason)
     # ---- (d): killed after disarmed, before the timer is stopped.
+    var committedAttempt = ""
     block:
       b.pause("guard-after-disarm")
       let unit = b.start(b.link)
       discard b.waitArmed()
       let att = b.attempt()
+      committedAttempt = att
       discard nb.freshSsh("true")
       step("(d) the owner disarms", b.waitPaused("guard-after-disarm"), "")
       b.killedOwner(unit)
@@ -453,22 +476,26 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
       step("(h) after a reboot the re-assert unit's recovery sweeps the orphan",
            numbersOf(g.addonRows()) == b.snapsA, b.reassertReport())
       b.snapshotA()
-    # ---- (h') a stale timer still loaded after its attempt committed.
+    # ---- (h') a stale timer still loaded after its attempt committed:
+    # the attempt (d) committed, armed again as the guard arms its own
+    # (network_guard.armGuardTimer).
     block:
-      let fake = "f".repeat(32)
-      # Armed as the guard arms its own (network_guard.armGuardTimer).
+      let att = committedAttempt
       discard b.mux("systemd-run --quiet --collect --unit=repro-addon-guard-" &
-        fake & "-stale --on-active=3s --timer-property=AccuracySec=1s " &
+        att & "-stale --on-active=3s --timer-property=AccuracySec=1s " &
         "--timer-property=RemainAfterElapse=no --property=Type=oneshot " &
         "-- /var/lib/repro/bin/repro system addon revert-network " & genA &
-        " --attempt " & fake & " --state-dir " & StateDir)
+        " --attempt " & att & " --state-dir " & StateDir)
       discard b.mux("sleep 25", 60)
       let n = b.nb.netState()
-      let j = b.mux("journalctl --no-pager -o short-unix --since '-1min' | " &
-                    "grep -a " & fake).stdout
-      step("(h) a stale timer of a committed attempt changes nothing",
+      # Its own journal only: (d)'s timers of the same attempt logged too.
+      let j = b.mux("journalctl --no-pager -o short-unix -u " &
+        "repro-addon-guard-" & att & "-stale.service").stdout
+      step("(h) a stale timer of a committed attempt arms and stops a " &
+           "successor and changes nothing", att.len == 32 and
            b.nb.guardUnits().len == 0 and n == b.nA and
-           "no pending marker names attempt " & fake in j,
+           "armed the successor" in j and
+           ("no pending marker names attempt " & att) in j,
            j & "\nunits: " & b.nb.guardUnits())
     # ---- (i): revert-network killed mid-revert; the reverting apply killed.
     block:
@@ -864,21 +891,35 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
         discard nb.freshSsh("true")
         discard b.nb.waitApplyDone(u2, Timeout + 600)
       b.snapshotA()
-      # A recovery's revert repairs a stale copy (compared with the store's
-      # binary, not with the digest a ledger recorded).
+      # After a refresh of the add-on binary, a recovery compares the copy
+      # with the store's CURRENT binary, never with the older ledger's
+      # digest (§13 decision 128). The refresh is stood for by its effect:
+      # the copy holds other bytes and the current ledger's `guardBinary`
+      # digest is THEIRS (what an older add-on binary recorded), so only a
+      # comparison with the store's binary finds the copy stale.
       b.pause("step-8")
       let unit = b.start(b.link)
       discard b.waitArmed()
       discard b.waitPaused("step-8")
       let att = b.attempt()
       b.killedOwner(unit)
-      discard b.mux("systemctl stop 'repro-addon-guard-" & att & "-*'; " &
-                    "printf stale > /var/lib/repro/bin/repro")
+      let ledgerFile = StateDir & "/addon-ledger"
+      let stale = b.mux("systemctl stop 'repro-addon-guard-" & att & "-*'; " &
+        "old=$(sha256sum " & gen0ReproExe(g) & " | cut -d' ' -f1); " &
+        "new=$(sha256sum /usr/bin/true | cut -d' ' -f1); " &
+        "sed -i \"/^guardBinary\t/s/$old/$new/\" " & ledgerFile & "; " &
+        "cp /usr/bin/true /var/lib/repro/bin/repro; " &
+        "grep '^guardBinary' " & ledgerFile & " | grep -c \"$new\"").stdout.strip()
       let rec = b.mux(repro & " system addon recover").stdout
-      step("(bb) a recovery's revert repairs the copy and completes",
+      step("(bb) after a refresh a recovery compares the copy with the new " &
+           "binary, not the ledger's older digest, repairs it and completes",
+           stale == "1" and "differed from the store's add-on binary" in rec and
+           # Repaired BEFORE the fresh timer that runs it is armed.
+           rec.find("differed from the store's add-on binary") <
+             rec.find("armed a fresh guard timer") and
            "reverted the network switch" in rec and
            b.mux("cmp -s /var/lib/repro/bin/repro " & gen0ReproExe(g)).exitCode == 0,
-           rec)
+           "ledger digest replaced: " & stale & "\n" & rec)
       b.reverted("bb", TimerGoneReason)
       # The store unreadable for the guard: its add-on binary's prefix
       # hidden (an object the arm needs, spec §13 decision 127), the
@@ -892,6 +933,30 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
       step("(bb) with the store unmounted too: EAddOnGuardTimer, nothing left",
            r.exitCode != 0 and "EAddOnGuardTimer" in r.stdout & r.stderr and
            b.mux("test -e " & MarkerPath).exitCode != 0, r.stdout & r.stderr)
+      # ... and a revert in that state reports EAddOnGuardTimer and goes
+      # on: no good copy can be made, so no fresh timer is armed, and the
+      # revert is never refused for it (§13 decisions 125, 126, 128).
+      block:
+        b.pause("step-8")
+        let u2 = b.start(b.link)
+        discard b.waitArmed()
+        discard b.waitPaused("step-8")
+        let att2 = b.attempt()
+        b.killedOwner(u2)
+        discard b.mux("systemctl stop 'repro-addon-guard-" & att2 & "-*'; " &
+                      "rm -f /var/lib/repro/bin/repro; mount -t tmpfs -o " &
+                      "size=1m,mode=0700 repro-gate-hide " & binPrefix)
+        let rec2 = b.mux(repro & " system addon recover 2>&1").stdout
+        let linkGone = b.mux("ip link show " & LinkName).exitCode != 0
+        discard b.mux("umount " & binPrefix)
+        step("(bb) with the store unmounted and the copy missing, a revert " &
+             "reports EAddOnGuardTimer and goes on", "EAddOnGuardTimer" in rec2 and
+             "the revert goes on" in rec2 and linkGone, rec2)
+        # Whatever waited for the store completes once it is back.
+        let rec3 = b.mux(repro & " system addon recover 2>&1").stdout
+        discard b.waitNoMarker(120)
+        b.reverted("bb store", TimerGoneReason)
+        discard rec3
     # ---- (cc): a generation 0 that predates the copy.
     block:
       discard b.mux("rm -f /var/lib/repro/bin/repro; sed -i '/^guardBinary\t/d' " &
@@ -905,6 +970,76 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
            "and records the addition", r.exitCode == 0 and
            "\nguardBinary\t/var/lib/repro/bin/repro" in l and "added" in logs,
            logs & l)
+    # ---- (q): a network switch refused at step 1, and at step 2.
+    block:
+      b.snapshotA()
+      # Step 1 (the seam build's stand-in for a record that became
+      # unreadable after the plan): before the snapshot and the arm.
+      discard b.mux("touch " & Ctl & "/test-step-1-refuses")
+      let r1 = g.applyProfile(repro, "q-step-1", b.link)
+      discard b.mux("rm -f " & Ctl & "/test-step-1-refuses")
+      step("(q) a network switch refused at step 1 takes no snapshot, arms " &
+           "no timer and leaves no marker", r1.exitCode != 0 and
+           "refusing the switch: step 1" in r1.stdout & r1.stderr and
+           numbersOf(g.addonRows()) == b.snapsA and b.nb.guardUnits().len == 0 and
+           b.mux("test -e " & MarkerPath).exitCode != 0, r1.stdout & r1.stderr)
+      # Step 2: an exclusive unit whose instance ignores SIGTERM while a
+      # flag file exists and may not be killed, changed by a network
+      # switch: its stop is never confirmed and the switch is refused
+      # with EAddOnExclusiveOverlap after its marker and timer were written.
+      const Stubborn = "/usr/local/bin/repro-gate-stubborn"
+      const Flag = "/run/repro-gate-stubborn"
+      const QUnit = "repro-gate-stubborn.service"
+      discard b.mux("printf '%s\\n' '#!/bin/sh' \"trap 'if [ -e " & Flag &
+        " ]; then :; else exit 0; fi' TERM\" 'while :; do sleep 0.2; done' > " &
+        Stubborn & " && chmod 0755 " & Stubborn)
+      proc stubbornUnit(id: string): string =
+        "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" & QUnit &
+          "\"\n  content = \"[Unit]\nDescription=AR5 gate exclusive fixture " &
+          id & "\nX-Repro-Exclusive=true\n\n[Service]\nExecStart=" & Stubborn &
+          " " & id & "\nTimeoutStopSec=3\nSendSIGKILL=no\n\n[Install]\n" &
+          "WantedBy=multi-user.target\n\"\n  enabled = true\n}\n"
+      let q0 = b.profileG & stubbornUnit("q1")
+      let a0 = g.applyProfile(repro, "q0", q0)
+      step("(q) the previous generation with the exclusive fixture applies",
+           a0.exitCode == 0 and g.exec("systemctl is-active --quiet " & QUnit).exitCode == 0,
+           a0.stdout & a0.stderr)
+      b.snapshotA()
+      let pidBefore = b.mux("systemctl show -p MainPID --value " & QUnit).stdout.strip()
+      discard b.mux("touch " & Flag)
+      b.pause("guard-refused-step-2")
+      let unit = b.start(b.profileG & stubbornUnit("q2") & linkStanza(nb.parentMac))
+      # Armed only until step 2 refuses, a few seconds: the pause after the
+      # refused switch wrote `reverting` is what the gate waits for.
+      let p = b.waitPaused("guard-refused-step-2")
+      let att = b.attempt()
+      let m = b.mux("cat " & MarkerPath).stdout
+      let loaded = b.mux("systemctl list-units --plain --no-legend " &
+        "'repro-addon-guard-" & att & "-*.timer' | grep -c ' active '").stdout.strip()
+      step("(q) refused at step 2: the marker shows reverting with the " &
+           "refusal, and the timer is still loaded", p and
+           "guard\treverting" in m and "EAddOnExclusiveOverlap" in m and
+           loaded != "0", m & "\n" & loaded)
+      b.resume("guard-refused-step-2")
+      discard b.nb.waitApplyDone(unit, 600)
+      let log = b.nb.applyLog(unit)
+      step("(q) the refusal is EAddOnExclusiveOverlap, recorded rolled-back " &
+           "with EAddOnNetworkGuard; the old instance is the only one",
+           "EAddOnExclusiveOverlap" in log and "recorded rolled-back with " &
+           "EAddOnNetworkGuard" in log and
+           b.mux("pgrep -f '^/bin/sh " & Stubborn & " q1$'").stdout.strip() == pidBefore and
+           b.mux("pgrep -f '^/bin/sh " & Stubborn & " q2$'").exitCode != 0, log)
+      b.reverted("q", "EAddOnExclusiveOverlap", proc() =
+        # The harness's own fixture, put back as it was: the old instance
+        # let go, the unit started again.
+        discard b.mux("rm -f " & Flag & "; systemctl stop " & QUnit &
+          "; systemctl reset-failed " & QUnit & " 2>/dev/null; systemctl start " &
+          QUnit, 120))
+      let a1 = g.applyProfile(repro, "q-back", b.profileG)
+      discard b.mux("rm -f " & Stubborn)
+      step("(q) the fixture goes with the previous generation", a1.exitCode == 0,
+           a1.stdout & a1.stderr)
+      b.snapshotA()
     # ---- (s): uninstall over a pending marker, the unit loop, the lock.
     block:
       for state in ["armed", "disarmed"]:
@@ -928,14 +1063,22 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
         discard b.mux(repro & " system addon recover")
         discard b.waitNoMarker(Timeout + 120)
         discard b.mux("systemctl stop 'repro-addon-guard-*'; true")
+      # A stale guard timer firing every 10 s: the real revert-network of
+      # an attempt no marker names, so each firing arms a successor (and
+      # stops it) between uninstall's passes.
       discard b.mux("systemd-run --quiet --collect --unit=repro-addon-guard-" &
-        "e".repeat(32) & "-loop --on-active=1s --on-unit-active=10s /bin/true")
+        "e".repeat(32) & "-loop --on-active=1s --on-unit-active=10s " &
+        "-- /var/lib/repro/bin/repro system addon revert-network " & genA &
+        " --attempt " & "e".repeat(32) & " --state-dir " & StateDir)
+      discard b.mux("sleep 15", 30)
+      let firing = b.guardJournal("e".repeat(32))
       for nn in numbersOf(g.addonRows()):
         discard b.mux("chattr +i /.snapshots/" & $nn)
       let un = b.mux(repro & " system addon uninstall").stdout
       step("(s) uninstall with a snapshot undeletable ends incomplete with " &
            "EAddOnSnapshotLeft; its loop stopped every guard unit and the lock " &
            "is gone", "EAddOnSnapshotLeft" in un and "network guard units: pass" in un and
+           "armed the successor" in firing and
            b.nb.guardUnits().len == 0 and
            b.mux("test -e /run/repro-addon-guard.lock").exitCode != 0, un)
       for nn in numbersOf(g.addonRows()):

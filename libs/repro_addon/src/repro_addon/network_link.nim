@@ -347,6 +347,10 @@ proc linkWithMac*(h: HostNetwork; mac: string): seq[HostLink] =
   for l in h.links:
     if l.mac == mac and l.parent.len == 0: result.add(l)
 
+proc hostAddressTexts*(h: HostNetwork): seq[string] =
+  ## Every address any interface of the host holds, loopback included.
+  for a in h.addresses: result.add(a.ip)
+
 proc addressesOf*(h: HostNetwork; iface: string): seq[HostAddress] =
   for a in h.addresses:
     if a.iface == iface: result.add(a)
@@ -484,7 +488,10 @@ proc planNetwork*(inp: NetworkPlanInputs): NetworkPlan =
           "dependency on a connection the add-on does not own)")
   if inp.links.len == 0 and not inp.change.any:
     return
-  if inp.agentApply:
+  # Only a generation whose connections differ from the previous ledger's
+  # is a network generation (G47): a deploy-agent apply that leaves the
+  # host's links as they are applies like any other.
+  if inp.agentApply and inp.change.any:
     raise newAddOnOutOfScope("linux.networkLink", "", "network",
       "a generation that adds, changes or removes a `network` object is " &
       "applied only by an operator, under the network guard (spec §4.5); " &
@@ -706,13 +713,18 @@ proc applyNetworkObject*(o: NetworkObject): string =
     return "cannot write " & o.path & ": " & e.msg
   activateKeyfile(o.path, o.uuid)
 
-proc removeOwnLink(name: string): string =
+proc removeOwnLink(name, connectionId: string): string =
   ## The class's own link ``name``, when one is still there after its
   ## connection went: NetworkManager deletes the software device of a
   ## connection it deactivates, but not one that is ``unavailable`` --
   ## measured with the parent's carrier lost when the guard reverted (AR5,
-  ## 2026-11-20), where ``rhome@enp0s3`` stayed with no connection. Only a
-  ## link of the class's kinds is removed. "" on success.
+  ## 2026-11-20), where ``rhome@enp0s3`` stayed with no connection. The
+  ## caller removes it only once it has shown the connection was the
+  ## add-on's (its keyfile was on the host, or NetworkManager deleted it).
+  ## Here only a link of the class's kinds that no other connection holds
+  ## is removed: one NetworkManager reports active under a connection
+  ## other than ``connectionId`` is someone else's, and is left. "" on
+  ## success.
   if name.len == 0: return ""
   let ip = resolveHostTool(IpCandidates)
   if ip.len == 0: return ""
@@ -722,6 +734,10 @@ proc removeOwnLink(name: string): string =
     if r.exitCode != 0: return ""          # no such link: nothing left
     let links = parseIpLinks(r.output)
     if links.len != 1 or links[0].kind notin NetworkLinkKinds: return ""
+    let held = nmcli(["-g", "GENERAL.CONNECTION", "device", "show", name])
+    if held.exitCode == 0:
+      let c = held.output.strip()
+      if c.len > 0 and c != connectionId: return ""
     let d = nmcli(["device", "delete", name])
     if d.exitCode == 0: return ""
     let k = runHostTool([ip, "link", "delete", "dev", name], timeoutSec = 30)
@@ -745,8 +761,14 @@ proc removeNetworkObject*(path, uuid: string; linkName = ""): string =
   if not isAddOnKeyfile(path):
     return "not a keyfile of the network class: " & path
   var problems: seq[string]
+  # What shows the link is the add-on's: its keyfile on the host, or a
+  # connection of its UUID that NetworkManager deleted. A revert of an
+  # attempt that never wrote its connection proves neither, and leaves a
+  # link of that name alone.
+  var owned = fileExists(path) and not symlinkExists(path)
   if uuid.len > 0:
     let d = nmcli(["connection", "delete", "uuid", uuid])
+    if d.exitCode == 0: owned = true
     if d.exitCode != 0 and not nmNotRunning(d) and
         "not found" notin d.output.toLowerAscii() and
         "unknown connection" notin d.output.toLowerAscii() and
@@ -760,6 +782,7 @@ proc removeNetworkObject*(path, uuid: string; linkName = ""): string =
       discard nmcli(["connection", "load", path])
   except CatchableError as e:
     problems.add("cannot remove " & path & ": " & e.msg)
-  let l = removeOwnLink(linkName)
-  if l.len > 0: problems.add(l)
+  if owned:
+    let l = removeOwnLink(linkName, "repro-" & linkName)
+    if l.len > 0: problems.add(l)
   problems.join("; ")

@@ -10,8 +10,9 @@
 ## is DISARMED: every invariant holds after the switch (each ``keep``
 ## address, the default routes observed before it, each out-of-band link)
 ## and a new key-authenticated SSH session has arrived from a non-loopback
-## address (or ``repro system addon confirm`` ran from a session created
-## after the switch began).
+## address that is not one of the host's own (or ``repro system addon
+## confirm`` ran from such a session), created after the switch wrote its
+## last network object.
 ##
 ## This module holds the guard's mechanisms; the switch (``addon_apply``),
 ## recovery (``reassert``) and the ``revert-network`` verb (``cli``) decide
@@ -41,7 +42,8 @@
 ##   through its trusted fields (``_SYSTEMD_UNIT`` the host's ssh unit,
 ##   ``_EXE`` its sshd or OpenSSH's per-session ``sshd-session``), never
 ##   ``SYSLOG_IDENTIFIER`` (threat model T55); a confirm counts only from
-##   a logind session created after the switch began.
+##   a logind session created after the switch wrote its last network
+##   object; a session from an address the host holds itself never counts.
 
 import std/[algorithm, json, monotimes, net, os, posix, sets, strutils, tables,
             times]
@@ -73,6 +75,8 @@ const
   TimerGoneReason* = "armed, its timer gone"
   ArmedAcrossRebootReason* = "armed across a reboot"
   InterruptedByRebootSuffix* = "; revert interrupted by a reboot"
+  GuardUnitsLeftPrefix* = "guard units still loaded"
+    ## ``stopEveryGuardUnit``'s last line when units survived every pass.
 
 var guardBinaryPath* = GuardBinaryPath
   ## The copy's path; only a unit test points it elsewhere.
@@ -221,10 +225,9 @@ proc storeBinaryVerified(storeExe: string): tuple[ok: bool; digest, why: string]
   except CatchableError as e:
     return (false, "", storeExe & " cannot be read: " & e.msg)
   let prefix = parentDir(parentDir(storeExe))
-  when not mutated("guard-binary-unverified"):
-    if binaryPrefixPath(digest, prefixVersionOf(prefix)) != prefix:
-      return (false, digest, storeExe & " does not hold the bytes its " &
-        "prefix names (sha256 " & digest & ")")
+  if binaryPrefixPath(digest, prefixVersionOf(prefix)) != prefix:
+    return (false, digest, storeExe & " does not hold the bytes its " &
+      "prefix names (sha256 " & digest & ")")
   (true, digest, "")
 
 proc ensureGuardBinary*(storeExe, ledgerDigest: string;
@@ -322,6 +325,37 @@ proc armGuardTimer*(stateDir, attempt, previous, reason: string;
       "systemd-run could not run: " & e.msg))
   ArmResult(unit: unit)
 
+proc verifyGuardBinaryOf*(stateDir: string): GuardBinaryCheck =
+  ## Decision 128 for an arm made outside the switch's own check before
+  ## step 1 (a recovery's or a failure path's fresh timer, a successor):
+  ## the copy is verified against the store's add-on binary that the
+  ## host's own profile names, and repaired; with the store unreadable,
+  ## against the current ledger's ``guardBinary`` digest.
+  var own = ""
+  try: own = readFile(stateDir / "addon" / "own.profile")
+  except CatchableError: discard
+  var digest = ""
+  try:
+    for e in readLedger(stateDir / "addon-ledger").entries:
+      if e.class == lcGuardBinary: digest = e.sha256
+  except CatchableError:
+    discard
+  ensureGuardBinary(storeAddonBinaryOf(own), digest)
+
+proc armVerifiedGuardTimer*(stateDir, attempt, previous, reason: string;
+                            delaySec: int): tuple[arm: ArmResult;
+                                                  note: string] =
+  ## Every arm but the switch's own (which verified the copy before step
+  ## 1): verify and repair the copy first (``verifyGuardBinaryOf``), so a
+  ## timer never runs bytes that cannot revert; a copy that cannot be made
+  ## good is a failed arm (``EAddOnGuardTimer``), which the caller reports
+  ## and goes on from (decisions 125, 126, 128). ``note`` says what the
+  ## verification did (a repair), "" when nothing.
+  let chk = verifyGuardBinaryOf(stateDir)
+  if not chk.ok:
+    return (ArmResult(problem: diagnosticMessage(adGuardTimer, chk.why)), "")
+  (armGuardTimer(stateDir, attempt, previous, reason, delaySec), chk.note)
+
 proc listGuardUnits*(pattern: string): seq[tuple[unit, load, active: string]] =
   ## ``systemctl list-units --all`` of the units matching ``pattern``.
   try:
@@ -403,7 +437,7 @@ proc stopEveryGuardUnit*(maxPasses = 30): seq[string] =
     var names: seq[string]
     for u in units: names.add(u.unit)
     result.add("pass " & $pass & ": stopped " & names.join(" "))
-  result.add("guard units still loaded after " & $maxPasses & " passes")
+  result.add(GuardUnitsLeftPrefix & " after " & $maxPasses & " passes")
 
 # ---------------------------------------------------------------------------
 # Restoring the network objects without the store (revert-network step 3).
@@ -534,16 +568,44 @@ proc hostSshIdentity*(): SshIdentity =
     if lstat(c.cstring, st) == 0 and S_ISREG(st.st_mode) and st.st_uid == 0:
       result.exes.add(c)
 
-proc isLoopback*(ip: string): bool =
+proc normalisedIp(ip: string): string =
+  ## The canonical text of ``ip`` with any ``%scope`` dropped and an
+  ## IPv4-mapped IPv6 address written as its IPv4 address, so that one
+  ## address compares equal however sshd, logind or ``ip`` wrote it. ""
+  ## when it is not an address.
+  var t = ip.strip()
+  let pct = t.find('%')
+  if pct >= 0: t = t[0 ..< pct]
   try:
-    let a = parseIpAddress(ip)
-    if a.family == IpAddressFamily.IPv4: return a.address_v4[0] == 127
-    if $a == "::1": return true
-    let s = $a
-    if s.startsWith("::ffff:127."): return true
-    false
+    let a = parseIpAddress(t)
+    if a.family == IpAddressFamily.IPv6:
+      # ::ffff:a.b.c.d (RFC 4291 §2.5.5.2), read from its bytes: Nim
+      # renders it in hex (``::ffff:a00:20f``).
+      var mapped = a.address_v6[10] == 0xff and a.address_v6[11] == 0xff
+      for i in 0 .. 9:
+        if a.address_v6[i] != 0: mapped = false
+      if mapped:
+        return $a.address_v6[12] & "." & $a.address_v6[13] & "." &
+               $a.address_v6[14] & "." & $a.address_v6[15]
+    $a
   except CatchableError:
-    false
+    ""
+
+proc isOwnAddress*(ip: string; own: openArray[string]): bool =
+  ## Is ``ip`` one of ``own`` -- the addresses the host's own interfaces
+  ## hold? A session from one of them is the host logging in to itself,
+  ## which proves nothing about the network (spec §4.5 step 3, amended
+  ## 2026-11-22; threat model T55).
+  let n = normalisedIp(ip)
+  if n.len == 0: return false
+  for o in own:
+    if normalisedIp(o) == n: return true
+  false
+
+proc isLoopback*(ip: string): bool =
+  ## 127.0.0.0/8, ``::1``, or an IPv4-mapped loopback address.
+  let n = normalisedIp(ip)
+  n == "::1" or (n.startsWith("127.") and '.' in n)
 
 proc acceptedFrom*(message: string): tuple[keyAuth: bool; ip: string] =
   ## ``Accepted publickey for <user> from <ip> port <n> ...`` -> (true, ip).
@@ -557,12 +619,15 @@ proc acceptedFrom*(message: string): tuple[keyAuth: bool; ip: string] =
   (true, rest[0])
 
 proc sshEvidenceIn*(journalJson: string; id: SshIdentity;
-                    sinceUs: int64): string =
+                    sinceUs: int64; ownAddresses: openArray[string]): string =
   ## The first journal entry (``journalctl -o json``, one object per line)
-  ## that is a key-authenticated SSH login from a non-loopback address,
-  ## after ``sinceUs`` (CLOCK_REALTIME µs), written by the host's ssh unit
-  ## and one of its binaries -- judged by the journal's trusted fields
-  ## only. "" when there is none.
+  ## that is a key-authenticated SSH login from a non-loopback address the
+  ## host does not hold itself (``ownAddresses``), after ``sinceUs``
+  ## (CLOCK_REALTIME µs), written by the host's ssh unit and one of its
+  ## binaries -- judged by the journal's trusted fields only. "" when there
+  ## is none. ``sinceUs`` 0 means the switch has not finished its network
+  ## writes, and nothing counts yet.
+  if sinceUs <= 0: return ""
   for line in journalJson.splitLines():
     if line.strip().len == 0: continue
     var j: JsonNode
@@ -586,12 +651,17 @@ proc sshEvidenceIn*(journalJson: string; id: SshIdentity;
     let msg = j{"MESSAGE"}.getStr()
     let a = acceptedFrom(msg)
     if not a.keyAuth or isLoopback(a.ip): continue
+    when not mutated("guard-accepts-own-address"):
+      if isOwnAddress(a.ip, ownAddresses): continue
     return msg & " (" & unit & ", " & exe & ")"
   ""
 
-proc newSshSessionSince*(sinceUs: int64): string =
-  ## A key-authenticated SSH login from a non-loopback address after
-  ## ``sinceUs``, from the host's journal ("" when none).
+proc newSshSessionSince*(sinceUs: int64;
+                         ownAddresses: openArray[string]): string =
+  ## A key-authenticated SSH login from a non-loopback address the host
+  ## does not hold, after ``sinceUs``, from the host's journal ("" when
+  ## none, or when ``sinceUs`` is 0).
+  if sinceUs <= 0: return ""
   let id = hostSshIdentity()
   if id.unit.len == 0 or id.exes.len == 0: return ""
   let jc = resolveHostTool(["/usr/bin/journalctl", "/bin/journalctl"])
@@ -601,7 +671,7 @@ proc newSshSessionSince*(sinceUs: int64): string =
     let r = runHostTool([jc, "-o", "json", "--no-pager", "--since", since,
                          "_SYSTEMD_UNIT=" & id.unit], mergeStderr = false,
                         timeoutSec = 30)
-    sshEvidenceIn(r.output, id, sinceUs)
+    sshEvidenceIn(r.output, id, sinceUs, ownAddresses)
   except CatchableError:
     ""
 
@@ -650,11 +720,16 @@ proc readLogindSession*(id: string): LogindSession =
   except CatchableError:
     discard
 
-proc confirmProblem*(s: LogindSession; switchStartMonoUs: int64): string =
-  ## Why ``s`` cannot confirm the switch that began at
-  ## ``switchStartMonoUs``, or "": it must be an SSH session from a
-  ## non-loopback address, created after the switch began (spec §4.5,
-  ## threat model T55).
+proc confirmProblem*(s: LogindSession; writtenMonoUs: int64;
+                     ownAddresses: openArray[string]): string =
+  ## Why ``s`` cannot confirm the switch whose last network write was done
+  ## at ``writtenMonoUs`` (CLOCK_MONOTONIC µs; 0 while the switch is still
+  ## writing), or "": it must be an SSH session from a non-loopback
+  ## address the host does not hold itself, created after that write
+  ## (spec §4.5 step 3, amended 2026-11-22; threat model T55).
+  if writtenMonoUs <= 0:
+    return "the switch has not yet written its network objects; a " &
+      "confirmation counts only from a session created after it has"
   if s.id.len == 0: return "not run from a logind session"
   if s.service notin ["sshd", "ssh"]:
     return "session " & s.id & " is not an SSH session (service " &
@@ -662,9 +737,14 @@ proc confirmProblem*(s: LogindSession; switchStartMonoUs: int64): string =
   if not s.remote or s.remoteHost.len == 0 or isLoopback(s.remoteHost):
     return "session " & s.id & " is not from a non-loopback address (" &
       s.remoteHost & ")"
+  when not mutated("guard-accepts-own-address"):
+    if isOwnAddress(s.remoteHost, ownAddresses):
+      return "session " & s.id & " is from " & s.remoteHost & ", an " &
+        "address of this host: it proves nothing about the network"
   when not mutated("guard-confirm-any-session"):
-    if s.createdMonoUs <= switchStartMonoUs:
-      return "session " & s.id & " was created before the switch began"
+    if s.createdMonoUs <= writtenMonoUs:
+      return "session " & s.id & " was created before the switch wrote " &
+        "its network objects"
   ""
 
 proc confirmRecordPath*(stateDir: string): string =
@@ -674,14 +754,15 @@ proc writeConfirm*(stateDir, attempt, session: string) =
   writeFileNoFollow(confirmRecordPath(stateDir), attempt & "\t" & session &
     "\n", 0o600)
 
-proc confirmedBy*(stateDir, attempt: string; switchStartMonoUs: int64): string =
+proc confirmedBy*(stateDir, attempt: string; writtenMonoUs: int64;
+                  ownAddresses: openArray[string]): string =
   ## The session that confirmed ``attempt``, re-checked now ("" when none
   ## did or it no longer qualifies).
   try:
     let f = readFile(confirmRecordPath(stateDir)).strip().split('\t')
     if f.len != 2 or f[0] != attempt: return ""
     let s = readLogindSession(f[1])
-    if confirmProblem(s, switchStartMonoUs).len == 0:
+    if confirmProblem(s, writtenMonoUs, ownAddresses).len == 0:
       return "repro system addon confirm from SSH session " & s.id &
         " (" & s.remoteHost & ")"
   except CatchableError:

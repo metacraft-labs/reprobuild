@@ -114,8 +114,14 @@ type
     guardBoot*: string        ## the kernel boot id when the guard was armed
     guardTimeout*: int        ## networkGuard.timeout, seconds
     guardStartRealtime*: int64 ## CLOCK_REALTIME µs when the switch began:
-                              ## an SSH session counts only from here
-    guardStartMono*: int64    ## CLOCK_MONOTONIC µs, likewise (logind's
+                              ## the guard's timeout runs from here
+    guardStartMono*: int64    ## CLOCK_MONOTONIC µs, likewise
+    guardWrittenRealtime*: int64 ## CLOCK_REALTIME µs once the switch has
+                              ## written its last network object (and read
+                              ## the guard after it): an SSH session counts
+                              ## only from here; 0 until then (spec §4.5
+                              ## step 3, amended 2026-11-22)
+    guardWrittenMono*: int64  ## CLOCK_MONOTONIC µs, likewise (logind's
                               ## session creation time is compared with it)
 
 const
@@ -623,6 +629,9 @@ proc render*(m: PendingMarker): string =
     result.add("guard-timeout\t" & $m.guardTimeout & "\n")
     result.add("guard-start-realtime\t" & $m.guardStartRealtime & "\n")
     result.add("guard-start-mono\t" & $m.guardStartMono & "\n")
+    if m.guardWrittenMono != 0 or m.guardWrittenRealtime != 0:
+      result.add("guard-written-realtime\t" & $m.guardWrittenRealtime & "\n")
+      result.add("guard-written-mono\t" & $m.guardWrittenMono & "\n")
 
 proc parsePendingMarker*(text: string): PendingMarker =
   let lines = text.splitLines()
@@ -674,7 +683,8 @@ proc parsePendingMarker*(text: string): PendingMarker =
     of "guard-reason": result.guardReason = v
     of "guard-previous": result.guardPrevious = v
     of "guard-boot": result.guardBoot = v
-    of "guard-timeout", "guard-start-realtime", "guard-start-mono":
+    of "guard-timeout", "guard-start-realtime", "guard-start-mono",
+       "guard-written-realtime", "guard-written-mono":
       var n: BiggestInt
       try: n = parseBiggestInt(v)
       except ValueError:
@@ -682,7 +692,9 @@ proc parsePendingMarker*(text: string): PendingMarker =
       case f[0]
       of "guard-timeout": result.guardTimeout = int(n)
       of "guard-start-realtime": result.guardStartRealtime = int64(n)
-      else: result.guardStartMono = int64(n)
+      of "guard-start-mono": result.guardStartMono = int64(n)
+      of "guard-written-realtime": result.guardWrittenRealtime = int64(n)
+      else: result.guardWrittenMono = int64(n)
     else:
       raise newException(StaticTreeError, "unknown pending marker field " & f[0])
 
@@ -719,6 +731,11 @@ proc writePendingMarker*(stateDir: string; m: PendingMarker) =
         stamped.guard = disk.guard
         stamped.guardTimer = disk.guardTimer
         stamped.guardReason = disk.guardReason
+        # The end of the network writes is recorded once, under the lock
+        # (``recordNetworkWritesDone``); a later step boundary keeps it.
+        if disk.guardWrittenMono != 0:
+          stamped.guardWrittenRealtime = disk.guardWrittenRealtime
+          stamped.guardWrittenMono = disk.guardWrittenMono
     writeMarkerBytes(stateDir, stamped)
 
 proc guardRank(state: string): int =
@@ -790,6 +807,26 @@ proc recordGuardTimer*(stateDir, attempt, timer: string): bool =
     if m.guardAttempt != attempt or attempt.len == 0: return false
     m.guardTimer = timer
     writeMarkerBytes(stateDir, m)
+    result = true
+
+proc recordNetworkWritesDone*(stateDir, attempt: string;
+                              realtimeUs, monoUs: int64): bool =
+  ## Under the guard lock, record on the ``armed`` marker of ``attempt``
+  ## that the switch has written its last network object: the moment from
+  ## which an SSH session or a confirm counts (spec §4.5 step 3). Recorded
+  ## once; false when no armed marker of the attempt is there (a ``fired``
+  ## guard needs no evidence any more).
+  withGuardLock:
+    if not fileExists(pendingMarkerPath(stateDir)): return false
+    var m: PendingMarker
+    try: m = parsePendingMarker(readFile(pendingMarkerPath(stateDir)))
+    except CatchableError: return false
+    if m.guardAttempt != attempt or attempt.len == 0 or m.guard != "armed":
+      return false
+    if m.guardWrittenMono == 0:
+      m.guardWrittenRealtime = realtimeUs
+      m.guardWrittenMono = monoUs
+      writeMarkerBytes(stateDir, m)
     result = true
 
 proc readGuardedMarker*(stateDir: string): tuple[present: bool;

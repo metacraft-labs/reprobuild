@@ -14,10 +14,25 @@
 ##
 ## (a) no new SSH session before the timer; (b) a new SSH session from
 ## loopback only; (c) ``confirm`` from an SSH session opened before the
-## switch; (d) the out-of-band link brought down during the window; (e)
-## the default route replaced during the window; (f) the ``keep`` address
-## removed during the window; (g) an "Accepted publickey" line written to
-## the journal by an unprivileged ``logger -t sshd``, with no real session.
+## switch, refused with its own diagnostic; (d) the out-of-band link
+## brought down during the window; (e) the default route replaced during
+## the window; (f) the ``keep`` address removed during the window; (g) an
+## "Accepted publickey" line written to the journal by an unprivileged
+## ``logger -t sshd``, with no real session; (h) a new key-authenticated
+## SSH session from the host's own LAN address (the host logging in to
+## itself, spec §4.5 step 3 as amended 2026-11-22; threat model T55).
+##
+## Every window opens once the switch has written its last network object
+## (the marker's ``guard-written-mono``): a session before that is not
+## evidence (spec §4.5 step 3, amended 2026-11-22).
+##
+## The two ways to disarm are measured apart. Adding the link disarms on
+## the journal's evidence (a new key-authenticated session); removing it
+## disarms on ``repro system addon confirm`` alone, run in a session
+## authenticated by PASSWORD -- a remote sshd session in logind that writes
+## no "Accepted publickey" line, so nothing but the confirm can disarm it.
+## Password logins for root are enabled for that one step (an sshd
+## drop-in, ``/etc/shadow`` restored byte for byte after).
 ##
 ## In (d), (e) and (f) the harness's own change is not restored by the
 ## add-on (§13 decision 86): the gate asserts it is still in place after
@@ -42,7 +57,7 @@
 ##
 ## *Mocking.* None.
 
-import std/[json, os, strutils, unittest]
+import std/[json, os, strutils, times, unittest]
 
 import repro_test_support/reasoned_skip
 
@@ -105,9 +120,13 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       let before = nb.guardRollbacks().len
       let unit = nb.startApply(repro, "c" & $n, profile)
       let armed = nb.waitArmedOrDone(unit, 600)
-      # The switch has begun; wait for the watch (the link is up).
-      discard nb.muxExec("for i in $(seq 1 120); do ip link show " & LinkName &
-                         " >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1", 200)
+      # The window opens once the switch has written its last network
+      # object; under the falsifying mutation the guard disarms at once and
+      # there is no window to wait for.
+      if armed and mut.len == 0:
+        step("control (" & c & "): the switch records the end of its " &
+             "network writes", nb.waitNetworkWritten(),
+             nb.muxExec("cat " & MarkerPath).stdout)
       during()
       let done = nb.waitApplyDone(unit, Timeout + 600)
       let log = nb.applyLog(unit)
@@ -138,13 +157,20 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
         "UserKnownHostsFile=/dev/null -i /root/.ssh/gate_lo root@127.0.0.1 true"),
       nil, nil)
     var confirmOut = ""
+    var confirmExit = 0
     control("c", proc() =
-      let gen = nb.markerField("attempt")
-      confirmOut = nb.muxExec(repro & " system addon confirm " & gen).stdout,
+      # The generation id the switch allocates after its network writes.
+      let gen = nb.muxExec("for i in $(seq 1 120); do g=$(sed -n " &
+        "'s/^attempt\t//p' " & MarkerPath & "); [ -n \"$g\" ] && " &
+        "{ echo \"$g\"; exit 0; }; sleep 1; done; exit 1", 150).stdout.strip()
+      let r = nb.muxExec(repro & " system addon confirm " & gen)
+      confirmOut = "generation " & gen & ": " & r.stdout
+      confirmExit = r.exitCode,
       nil, nil)
     step("control (c): confirm from a session opened before the switch is refused",
-         "created before the switch began" in confirmOut or
-         "refused" in confirmOut, confirmOut)
+         confirmExit == 1 and "confirm: refused: session" in confirmOut and
+         "was created before the switch wrote its network objects" in confirmOut,
+         "exit " & $confirmExit & "\n" & confirmOut)
     if mut.len > 0: return fails
     control("d", proc() = discard nb.muxExec("ip link set wt0 down"),
       proc(): bool = "state DOWN" in nb.muxExec("ip link show wt0").stdout,
@@ -166,6 +192,21 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
       discard nb.muxExec("runuser -u " & account & " -- logger -t sshd " &
         "'Accepted publickey for root from 10.9.9.9 port 4242 ssh2: ED25519 " &
         "SHA256:forged'"), nil, nil)
+    var ownLogin = ""
+    control("h", proc() =
+      # A real key-authenticated session, from the parent's own address to
+      # itself: sshd logs it from a non-loopback address the host holds.
+      let r = nb.muxExec("ssh -o StrictHostKeyChecking=no -o " &
+        "UserKnownHostsFile=/dev/null -o BatchMode=yes -b " &
+        lease.split('/')[0] & " -i /root/.ssh/gate_lo root@" &
+        lease.split('/')[0] & " true; journalctl --no-pager -o cat " &
+        "--since '-1min' _SYSTEMD_UNIT=sshd.service | grep 'Accepted " &
+        "publickey' | tail -1")
+      ownLogin = r.stdout, nil, nil)
+    step("control (h): the session from the host's own address was a real " &
+         "key-authenticated login from that address",
+         ("Accepted publickey for root from " & lease.split('/')[0]) in ownLogin,
+         ownLogin)
     # The positive run: a new SSH session after the switch.
     let unit = nb.startApply(repro, "ok", profile)
     let armed = nb.waitMarkerGuard(["armed"], 600)
@@ -176,11 +217,37 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          "committed", armed == "armed" and done and "disarmed by" in log and
          nb.muxExec("test -e " & MarkerPath).exitCode != 0 and
          nb.muxExec("ip link show " & LinkName).exitCode == 0, log)
-    # Clean up: the link out, then the add-on, then the harness's own.
+    # The link out, disarmed by `confirm` alone: a session authenticated
+    # by password, which writes no "Accepted publickey" line.
+    let pw = "repro-gate-" & $getCurrentProcessId() & "-" & $epochTime().int
+    let on = nb.passwordLogins(pw, true)
+    step("password logins for root are enabled for the confirm run",
+         on.exitCode == 0, on.stdout)
     let unit2 = nb.startApply(repro, "out", previous)
-    discard nb.waitMarkerGuard(["armed"], 600)
-    discard nb.freshSsh("true")
-    discard nb.waitApplyDone(unit2, Timeout + 600)
+    let armed2 = nb.waitArmedOrDone(unit2, 600)
+    let written2 = nb.waitNetworkWritten()
+    let gen2 = nb.muxExec("for i in $(seq 1 120); do g=$(sed -n " &
+      "'s/^attempt\t//p' " & MarkerPath & "); [ -n \"$g\" ] && " &
+      "{ echo \"$g\"; exit 0; }; sleep 1; done; exit 1", 150).stdout.strip()
+    let conf = nb.passwordSsh(pw, repro & " system addon confirm " & gen2)
+    let done2 = nb.waitApplyDone(unit2, Timeout + 600)
+    let log2 = nb.applyLog(unit2)
+    let accepted = nb.muxExec("journalctl --no-pager -o cat --since '-5min' " &
+      "_SYSTEMD_UNIT=sshd.service | grep -E '^Accepted (password|publickey)' " &
+      "| tail -3").stdout
+    let off = nb.passwordLogins(pw, false)
+    step("confirm from a new password-authenticated SSH session disarms and " &
+         "commits, with no key-authenticated session",
+         armed2 and written2 and conf.exitCode == 0 and
+         ("confirm: generation " & gen2 & " confirmed from SSH session") in
+           conf.stdout and done2 and
+         "network guard: disarmed by repro system addon confirm from SSH session" in log2 and
+         "Accepted password for root" in accepted and
+         nb.muxExec("test -e " & MarkerPath).exitCode != 0 and
+         nb.muxExec("ip link show " & LinkName).exitCode != 0,
+         conf.stdout & "\n" & accepted & "\n" & log2)
+    step("password logins are disabled and /etc/shadow restored",
+         off.exitCode == 0, off.stdout)
     nb.stopMux()
     discard g.run("mv /root/.ssh/authorized_keys.gate /root/.ssh/authorized_keys" &
                   " && rm -f /root/.ssh/gate_lo /root/.ssh/gate_lo.pub")

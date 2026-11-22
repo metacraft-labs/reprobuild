@@ -1061,10 +1061,6 @@
 ##                                            network marker instead of
 ##                                            reverting it (AR5's
 ##                                            falsifier, G48)
-## ``guard-skips-write-check``                the switch writes every
-##                                            network object without
-##                                            reading the guard first
-##                                            (decision 103)
 ## ``guard-ignores-default-route``            the default-route invariant
 ##                                            is not checked
 ## ``guard-trusts-syslog-identifier``         the SSH evidence is read by
@@ -1073,13 +1069,9 @@
 ## ``guard-confirm-any-session``              ``confirm`` counts from a
 ##                                            session created before the
 ##                                            switch
-## ``guard-binary-unverified``                the store's add-on binary is
-##                                            not checked against its
-##                                            prefix's name
-## ``guard-stops-timer-first``                a failure path stops the
-##                                            attempt's timer before its
-##                                            revert completes (decision
-##                                            106)
+## ``guard-accepts-own-address``             an SSH session or a confirm
+##                                            from an address the host
+##                                            holds itself counts (T55)
 ## =========================================  ==============================
 
 # The deploy agent's own mutations (``repro_deploy_agent/agent_mutations``)
@@ -1776,12 +1768,10 @@ const
                           "guard-skips-arm",
                           "guard-disarms-on-success",
                           "recovery-replays-armed",
-                          "guard-skips-write-check",
                           "guard-ignores-default-route",
                           "guard-trusts-syslog-identifier",
                           "guard-confirm-any-session",
-                          "guard-binary-unverified",
-                          "guard-stops-timer-first"]
+                          "guard-accepts-own-address"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

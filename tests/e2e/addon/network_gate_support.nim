@@ -21,7 +21,10 @@
 ## window the harness talks to the Omarchy VM only through a connection it
 ## opened BEFORE the switch (an OpenSSH ``ControlMaster``: one connection,
 ## one logind session, one "Accepted publickey" journal line), and opens a
-## fresh one only where a gate means to disarm (``freshSsh``). The apply
+## fresh one only where a gate means to disarm (``freshSsh``) -- and only
+## once the switch has written its last network object, since a session
+## before that is not evidence (spec §4.5 step 3, amended 2026-11-22). The
+## apply
 ## itself runs detached in a transient unit (``startApply``), so the
 ## harness can watch it, kill it (``systemctl kill``) or let the timer act.
 ##
@@ -168,11 +171,73 @@ proc muxRun*(nb: NetBed; script: string; timeoutSec = 600): string =
       $r.exitCode & ": " & r.stdout)
   r.stdout
 
-proc freshSsh*(nb: NetBed; script: string; timeoutSec = 120): ExecOut =
+proc waitNetworkWritten*(nb: NetBed; timeoutSec = 600): bool =
+  ## Wait until the pending marker records that the switch has written its
+  ## last network object (``guard-written-mono``) -- the moment from which
+  ## a new SSH session counts -- or until no armed guard is pending any
+  ## more (the apply ended, or the guard left ``armed``). True when the
+  ## writes are recorded.
+  nb.muxExec("for i in $(seq 1 " & $timeoutSec & "); do " &
+    "grep -q '^guard-written-mono\t' " & MarkerPath & " 2>/dev/null && exit 0; " &
+    "grep -q '^guard\tarmed' " & MarkerPath & " 2>/dev/null || exit 1; " &
+    "sleep 1; done; exit 1", timeoutSec + 30).exitCode == 0
+
+proc freshSsh*(nb: NetBed; script: string; timeoutSec = 120;
+               afterWrites = true): ExecOut =
   ## A brand-new key-authenticated SSH connection from the harness (a new
-  ## session from 10.0.2.2, not loopback): what disarms the guard.
+  ## session from 10.0.2.2, not loopback): what disarms the guard. By
+  ## default it waits first for the switch's last network write
+  ## (``waitNetworkWritten``), so it is evidence when it arrives.
+  if afterWrites and nb.muxUp: discard nb.waitNetworkWritten()
   runSsh(sshBase(nb.om) & @["-o", "ControlPath=none", "root@127.0.0.1",
     "sh", "-c", quoteShell(script)], timeoutSec)
+
+proc passwordSsh*(nb: NetBed; password, script: string;
+                  timeoutSec = 120): ExecOut =
+  ## A brand-new SSH session from the harness authenticated by PASSWORD
+  ## (``passwordLogins`` enables it on the guest): a remote sshd session
+  ## in logind that writes no "Accepted publickey" line, so a ``confirm``
+  ## run in it is the only evidence it can give (spec §4.5 step 3).
+  when defined(gostiAvailable):
+    let askpass = getTempDir() / ("repro-gate-askpass-" & $getCurrentProcessId())
+    writeFile(askpass, "#!/bin/sh\nprintf '%s\\n' " & quoteShell(password) & "\n")
+    setFilePermissions(askpass, {fpUserRead, fpUserWrite, fpUserExec})
+    defer: removeFile(askpass)
+    let argv = @["ssh", "-q", "-o", "StrictHostKeyChecking=no", "-o",
+      "UserKnownHostsFile=/dev/null", "-o", "ConnectTimeout=20", "-o",
+      "PreferredAuthentications=password", "-o", "PubkeyAuthentication=no",
+      "-o", "ControlPath=none", "-p", $nb.om.vm.sshPort, "root@127.0.0.1",
+      "sh", "-c", quoteShell(script)]
+    let cmd = "env SSH_ASKPASS=" & quoteShell(askpass) &
+      " SSH_ASKPASS_REQUIRE=force DISPLAY=repro-gate timeout " & $timeoutSec &
+      " " & quoteShellCommand(argv) & " </dev/null"
+    let (o, c) = execCmdEx(cmd)
+    ExecOut(exitCode: c, stdout: o)
+  else:
+    ExecOut(exitCode: 1, stdout: "no gosti")
+
+const
+  GatePasswordDropIn = "/etc/ssh/sshd_config.d/00-repro-gate-password.conf"
+  GateShadowCopy = "/root/repro-gate-shadow"
+
+proc passwordLogins*(nb: NetBed; password: string; on: bool): ExecOut =
+  ## Enable (``on``) or disable password logins for root on the Omarchy
+  ## VM for one gate step: a drop-in sorting before every other (sshd takes
+  ## an option's first value) and a password, with ``/etc/shadow`` and its
+  ## backup ``/etc/shadow-`` (which ``chpasswd`` rewrites) copied first and
+  ## put back byte for byte, owner and mode, after.
+  if on:
+    nb.muxExec("set -e; cp -a /etc/shadow " & GateShadowCopy & "; " &
+      "if [ -e /etc/shadow- ]; then cp -a /etc/shadow- " & GateShadowCopy &
+      "-; fi; printf 'root:%s\\n' " & quoteShell(password) & " | chpasswd; " &
+      "printf 'PasswordAuthentication yes\\nPermitRootLogin yes\\n' > " &
+      GatePasswordDropIn & "; systemctl reload sshd.service")
+  else:
+    nb.muxExec("set -e; rm -f " & GatePasswordDropIn & "; cp -a " &
+      GateShadowCopy & " /etc/shadow; if [ -e " & GateShadowCopy & "- ]; " &
+      "then cp -a " & GateShadowCopy & "- /etc/shadow-; else rm -f " &
+      "/etc/shadow-; fi; rm -f " & GateShadowCopy & " " & GateShadowCopy &
+      "-; systemctl reload sshd.service")
 
 # ---------------------------------------------------------------------------
 # Profiles.

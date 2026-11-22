@@ -65,6 +65,7 @@ import ./secrets_ops
 import ./switch
 import ./transitions
 import ./network_guard
+import ./network_link
 import ./network_switch
 
 type
@@ -891,8 +892,12 @@ proc runRevertNetwork*(stateDir, previous, attempt, reason: string): int =
   let tag = if own.len > 0: own else: "revert-network"
   proc say(s: string) = stdout.writeLine(tag & ": " & s)
   # 1.
-  let succ = armGuardTimer(stateDir, attempt, previous, reason,
-                           SuccessorIntervalSec)
+  # Verified and repaired first, as before every arm (decision 128): the
+  # successor runs the copy this process runs from, and a stale or
+  # damaged copy is rewritten (atomically) from the store's add-on binary.
+  let (succ, verified) = armVerifiedGuardTimer(stateDir, attempt, previous,
+                                               reason, SuccessorIntervalSec)
+  if verified.len > 0: say(verified)
   if succ.problem.len > 0:
     say(succ.problem & "; going on with no successor (§13 decisions 125, 126)")
   else:
@@ -944,9 +949,10 @@ proc runRevertNetwork*(stateDir, previous, attempt, reason: string): int =
 
 proc runConfirm*(stateDir, generation: string): int =
   ## ``repro system addon confirm <gen>`` (spec §4.5 step 3): from an SSH
-  ## session created after the switch began (logind's creation time,
-  ## threat model T55), confirm the pending network generation; the
-  ## watching apply disarms on it once every invariant holds.
+  ## session created after the switch wrote its last network object
+  ## (logind's creation time, threat model T55) and from an address the
+  ## host does not hold itself, confirm the pending network generation;
+  ## the watching apply disarms on it once every invariant holds.
   if not hasPendingMarker(stateDir):
     stderr.writeLine("confirm: no switch is pending")
     return 2
@@ -961,7 +967,11 @@ proc runConfirm*(stateDir, generation: string): int =
       ", not " & generation)
     return 2
   let s = readLogindSession(sessionOfPid(getCurrentProcessId()))
-  let why = confirmProblem(s, m.guardStartMono)
+  let host = observeHostNetwork()
+  let why = if host.ok:
+              confirmProblem(s, m.guardWrittenMono, hostAddressTexts(host))
+            else:
+              "the host's addresses cannot be read (" & host.why & ")"
   if why.len > 0:
     stderr.writeLine("confirm: refused: " & why & "; the switch is not " &
       "confirmed (spec §4.5 step 3)")

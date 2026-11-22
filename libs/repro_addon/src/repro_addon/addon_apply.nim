@@ -335,6 +335,9 @@ type
     guardNotes*: seq[string]
       ## What the network guard did: the guard binary's verification or
       ## repair, the arm, the disarm or the revert, every timer stopped.
+    snapshotLeft*: seq[string]
+      ## A guarded revert: ``EAddOnSnapshotLeft`` for the reverted
+      ## attempt's root snapshot when its step 9 could not delete it
     rootSnapshot*: string
       ## The snapshot this switch took (``<config>#<number>
       ## (repro-addon=<key>)``); "" when none.
@@ -3098,9 +3101,12 @@ proc hasRolledBackRecord*(stateDir, attempt: string): bool =
   ## goes; a recovery that finishes that step 9 must not write it twice.)
   if attempt.len == 0: return false
   try:
-    "rolled-back" in readFile(applyLogPath(stateDir, attempt))
+    for r in readAuditLog(applyLogPath(stateDir, attempt)).records:
+      if r.operationKind == "addon.switch" and r.outcome == "rolled-back":
+        return true
   except CatchableError:
-    false
+    discard
+  false
 
 proc decideInstall(driver: CollisionDriver; r: SystemResource;
                    ownedLinks: HashSet[string];
@@ -5685,7 +5691,13 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # write-ahead plan, the pending marker), so the switch refuses with
   # nothing written rather than failing in step 1.
   block:
-    let why = liveReferenceRefusal(@[preservedDir(stateDir)])
+    # (The seam build's ``step-1-refuses`` stands for a record that became
+    # unreadable between the plan and here, which a gate cannot time.)
+    let why =
+      if seamFlag(stateDir, "step-1-refuses"):
+        "a hand-back record cannot be read (test seam step-1-refuses)"
+      else:
+        liveReferenceRefusal(@[preservedDir(stateDir)])
     if why.len > 0:
       raise newException(AddonCollisionError, "refusing the switch: step 1 " &
         "recomputes the store's hold, and " & why & "; nothing was written")
@@ -6966,6 +6978,7 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       # network writes come after the flip).
       let b = beginGuardRevert(stateDir, marker, e.msg)
       result.guardNotes.add(b.notes)
+      seamPause(stateDir, "guard-refused-step-2")
       let undoProblems = undoPreStop(marker)
       recordRolledBack(stateDir, hookGeneration, committedPrevious,
         committedPrevious, guardDiagnostic(b.reason), false)
@@ -7180,10 +7193,10 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     # This process completed the revert: it deletes the attempt's root
     # snapshot (spec §7.2, §13 decisions 105, 119). One it cannot delete
     # is reported with `EAddOnSnapshotLeft`; the orphan sweep retries it.
-    var left: seq[string]
+    var left = reverted.snapshotLeft
     if marker.rootSnapshot.len > 0:
-      left = deleteSnapshotByKey(stateDir, marker.rootSnapshot,
-        "the revert", snapshotSite).left
+      left.add(deleteSnapshotByKey(stateDir, marker.rootSnapshot,
+        "the revert", snapshotSite).left)
     # The guard's timers go last, once the revert is complete (decision 106).
     if guarded and marker.guardAttempt.len > 0:
       for n in finishGuardRevert(stateDir, marker.guardAttempt):
@@ -7268,15 +7281,19 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       resourceAddress: "generation:" & result.generationId,
       outcome: "secrets-failed", diagnostic: secretsFailure,
       recordClass: AuditClassLiveState))
-  if marker.purpose == "revert" and marker.guardAttempt.len > 0 and
-      not hasRolledBackRecord(stateDir, marker.revertOf):
-    # The revert of a network switch completes here: `rolled-back` is
-    # appended BEFORE the marker goes (spec §4.5 step 4, "What revert
-    # means": the actor that completes a revert records it, then deletes
-    # the snapshot and removes the marker), so no crash between the two
-    # loses the record. Its callers do not record it again.
-    recordRolledBack(stateDir, marker.revertOf, committedPrevious,
-                     result.generationId, marker.revertReason, false)
+  if marker.purpose == "revert" and marker.guardAttempt.len > 0:
+    # The revert of a network switch completes here, in the order spec
+    # §4.5 step 4 ("What revert means") gives: `rolled-back` is appended,
+    # then the reverted attempt's root snapshot is deleted, then the marker
+    # goes -- so no crash between them loses the record, and the snapshot
+    # is never left owned by nothing but the orphan sweep. Its callers do
+    # neither again (a deletion of a snapshot already gone does nothing).
+    if not hasRolledBackRecord(stateDir, marker.revertOf):
+      recordRolledBack(stateDir, marker.revertOf, committedPrevious,
+                       result.generationId, marker.revertReason, false)
+    if marker.revertSnapshot.len > 0:
+      result.snapshotLeft = deleteSnapshotByKey(stateDir,
+        marker.revertSnapshot, "the revert", hostSnapshotSite()).left
   clearPendingMarker(stateDir)
   clearPendingPlan(stateDir)
   if marker.guardAttempt.len > 0:
@@ -7454,10 +7471,10 @@ proc revertAfterFailedReplay*(stateDir: string; prior: PendingMarker;
                    false)
   # The recovery completed the revert: it deletes the attempt's root
   # snapshot (spec §13 decisions 105, 119).
-  var left: seq[string]
+  var left = r.snapshotLeft
   if prior.rootSnapshot.len > 0:
-    left = deleteSnapshotByKey(stateDir, prior.rootSnapshot,
-      "the recovery's revert", hostSnapshotSite()).left
+    left.add(deleteSnapshotByKey(stateDir, prior.rootSnapshot,
+      "the recovery's revert", hostSnapshotSite()).left)
   FailedReplayRevert(reverted: true, generationId: r.generationId,
                      source: backFrom, snapshotLeft: left)
 

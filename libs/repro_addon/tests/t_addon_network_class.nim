@@ -38,7 +38,7 @@ import repro_profile
 import repro_profile/types as profileTypes
 import repro_profile/emit as profileEmit
 import repro_profile_intent/codec
-import repro_addon/[addon_apply, guard_lock, ledger, network_guard,
+import repro_addon/[addon_apply, fingerprint, guard_lock, ledger, network_guard,
                     network_link, static_tree]
 
 let root = getTempDir() / ("repro-addon-network-" & $getCurrentProcessId())
@@ -280,6 +280,17 @@ suite "what the host has":
   test "an agent apply of a network generation is refused":
     check "only by an operator" in plan(p.resources, agent = true)
 
+  test "an agent apply that leaves the connections as they are is not (G47)":
+    # The add-on's own link, its keyfile in the previous ledger byte for
+    # byte: the generation changes no connection.
+    let mine = parseSystemProfile(Guard & Link.replace("home0", "rhome").replace(
+      "192.168.77.20", "192.168.77.21")).resources
+    let o = networkObjectOf(mine[0])
+    var prev = Ledger()
+    prev.entries.add(LedgerEntry(class: lcNetwork, unit: "rhome", path: o.path,
+      sha256: sha256Hex(o.content)))
+    check plan(mine, previous = prev, agent = true) == ""
+
   test "an address on the host and a link name in use are refused":
     let taken = parseSystemProfile(Guard & Link.replace("192.168.77.20",
       "192.168.77.129")).resources
@@ -356,26 +367,52 @@ suite "the SSH evidence (§4.5 step 3, threat model T55)":
                        exes: @["/usr/bin/sshd", "/usr/lib/ssh/sshd-session"])
   const Real = """{"_SYSTEMD_UNIT":"sshd.service","_EXE":"/usr/lib/ssh/sshd-session","SYSLOG_IDENTIFIER":"sshd-session","MESSAGE":"Accepted publickey for root from 10.0.2.2 port 52186 ssh2: ED25519 SHA256:x","__REALTIME_TIMESTAMP":"1795128481514818"}"""
   const Forged = """{"_SYSTEMD_UNIT":"session-12.scope","_COMM":"logger","SYSLOG_IDENTIFIER":"sshd","MESSAGE":"Accepted publickey for root from 10.9.9.9 port 1 ssh2: FORGED","__REALTIME_TIMESTAMP":"1795128481628494"}"""
+  # The moment the switch finished its network writes: every case below
+  # but the "not yet written" one reads the journal from here.
+  const Written = 1795128481000000'i64
+  let own = @["127.0.0.1", "10.0.2.15", "192.168.77.129",
+              "fe80::8961:4b2d:abb5:7f27"]
   test "a real login after the switch counts":
-    check sshEvidenceIn(Real, id, 1795128481000000).len > 0
-  test "before the switch it does not":
-    check sshEvidenceIn(Real, id, 1795128481514818) == ""
+    check sshEvidenceIn(Real, id, Written, own).len > 0
+  test "before the network writes are done it does not":
+    check sshEvidenceIn(Real, id, 1795128481514818, own) == ""
+    # Not yet recorded (0): nothing counts, however late the login.
+    check sshEvidenceIn(Real, id, 0, own) == ""
   test "logger -t sshd does not, whatever it says (control (g))":
-    check sshEvidenceIn(Forged, id, 0) == ""
+    check sshEvidenceIn(Forged,
+                        id, Written, own) == ""
   test "loopback and password logins do not":
-    check sshEvidenceIn(Real.replace("10.0.2.2", "127.0.0.1"), id, 0) == ""
-    check sshEvidenceIn(Real.replace("publickey", "password"), id, 0) == ""
+    check sshEvidenceIn(Real.replace("10.0.2.2", "127.0.0.1"), id, Written,
+                        own) == ""
+    check sshEvidenceIn(Real.replace("publickey", "password"), id, Written,
+                        own) == ""
+  test "a login from an address the host holds itself does not (T55)":
+    check sshEvidenceIn(Real.replace("10.0.2.2", "192.168.77.129"), id,
+                        Written, own) == ""
+    check sshEvidenceIn(Real.replace("10.0.2.2", "::ffff:10.0.2.15"), id,
+                        Written, own) == ""
+    check sshEvidenceIn(Real.replace("10.0.2.2", "fe80::8961:4b2d:abb5:7f27%enp0s3"),
+                        id, Written, own) == ""
+    check isOwnAddress("::ffff:192.168.77.129", own)
+    check not isOwnAddress("192.168.77.130", own)
+    check isLoopback("::ffff:127.0.0.1") and isLoopback("127.1.2.3") and
+          isLoopback("::1") and not isLoopback("10.0.2.2")
   test "a confirm counts only from a remote SSH session created after the switch":
     let s = LogindSession(id: "12", service: "sshd", remote: true,
                           remoteHost: "10.0.2.2", createdMonoUs: 2000)
-    check confirmProblem(s, 1000) == ""
-    check "before the switch" in confirmProblem(s, 3000)
+    check confirmProblem(s, 1000, own) == ""
+    check "before the switch wrote" in confirmProblem(s, 3000, own)
+    check "not yet written" in confirmProblem(s, 0, own)
     var l = s
     l.remoteHost = "127.0.0.1"
-    check "loopback" in confirmProblem(l, 1000)
+    check "loopback" in confirmProblem(l, 1000, own)
     var t = s
     t.service = "login"
-    check "not an SSH session" in confirmProblem(t, 1000)
+    check "not an SSH session" in confirmProblem(t, 1000, own)
+  test "a confirm from an address the host holds itself does not count (T55)":
+    let s = LogindSession(id: "13", service: "sshd", remote: true,
+                          remoteHost: "192.168.77.129", createdMonoUs: 2000)
+    check "an address of this host" in confirmProblem(s, 1000, own)
 
 suite "the guard record and the marker's guard (§4.5 step 4)":
   let stateDir = root / "state"
@@ -396,6 +433,11 @@ suite "the guard record and the marker's guard (§4.5 step 4)":
       guardTimeout: 300, guardStartRealtime: 12, guardStartMono: 34)
     check parsePendingMarker(m.render()).guardStartMono == 34
     check parsePendingMarker(m.render()).guard == "armed"
+    check "guard-written" notin m.render()
+    m.guardWrittenRealtime = 56
+    m.guardWrittenMono = 78
+    check parsePendingMarker(m.render()).guardWrittenMono == 78
+    check parsePendingMarker(m.render()).guardWrittenRealtime == 56
     check "guard" notin PendingMarker(step: ssRealise).render()
 
   test "the guard moves only forward, and a step write keeps it":
@@ -425,6 +467,29 @@ suite "the guard record and the marker's guard (§4.5 step 4)":
     check now.ownerPid == pid
     # Another attempt's actor finds nothing of its own.
     check not transitionGuard(stateDir, repeat('d', 32), "fired", "x").found
+    # A fired guard records no end of the network writes: no evidence is
+    # needed any more.
+    check not recordNetworkWritesDone(stateDir, a, 1, 2)
+    clearPendingMarker(stateDir)
+
+  test "the end of the network writes is recorded once and a step write keeps it":
+    let a = repeat('e', 32)
+    writePendingMarker(stateDir, PendingMarker(fromGeneration: "g1",
+      step: ssRealise, status: "in-progress", guard: "armed",
+      guardAttempt: a, guardTimer: "t0"))
+    check recordNetworkWritesDone(stateDir, a, 100, 200)
+    check recordNetworkWritesDone(stateDir, a, 300, 400)   # kept: once
+    check readPendingMarker(stateDir).guardWrittenMono == 200
+    # The owner's next step boundary, from its in-memory marker that never
+    # saw the record, keeps it.
+    var stale = readPendingMarker(stateDir)
+    stale.guardWrittenMono = 0
+    stale.guardWrittenRealtime = 0
+    stale.step = ssCopies
+    writePendingMarker(stateDir, stale)
+    check readPendingMarker(stateDir).guardWrittenMono == 200
+    check readPendingMarker(stateDir).guardWrittenRealtime == 100
+    check not recordNetworkWritesDone(stateDir, repeat('f', 32), 1, 2)
     clearPendingMarker(stateDir)
 
   test "the guard lock is 0600 and is not followed through a link (T62)":

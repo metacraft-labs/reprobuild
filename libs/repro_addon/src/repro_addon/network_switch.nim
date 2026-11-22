@@ -6,7 +6,9 @@
 ##
 ## - ``writeNetworkObjects``: steps 4-5's network writes, each preceded by
 ##   a read of the guard under the guard lock, held across the write
-##   (decision 103); a ``fired`` guard stops them;
+##   (decision 103); a ``fired`` guard stops them. Once the last is written
+##   and the guard read after it, the marker records the moment: the SSH
+##   evidence and a confirm count only from there (spec §4.5 step 3);
 ## - ``watchGuard``: after step 8 the owner watches the invariants until
 ##   it disarms (only the owner writes ``disarmed``) or the timer fires;
 ##   at the deadline the timer is the only actor, unless none of the
@@ -14,8 +16,9 @@
 ## - ``beginGuardRevert``: every failure path before disarm writes
 ##   ``reverting`` with its reason, having first armed a fresh guard timer
 ##   when none of the attempt's is loaded (decisions 104, 121, 123, 125,
-##   126). A failed arm is reported (``EAddOnGuardTimer``) and the revert
-##   goes on;
+##   126) -- after verifying and repairing the out-of-store copy that timer
+##   runs (decision 128). A failed arm is reported (``EAddOnGuardTimer``)
+##   and the revert goes on;
 ## - ``finishGuardRevert``: once the revert has completed, the marker gone
 ##   and the snapshot deleted, the attempt's timers are stopped LAST
 ##   (decision 106), and the guard's records go.
@@ -59,8 +62,10 @@ proc beginGuardRevert*(stateDir: string; m: PendingMarker;
   if m.guardAttempt.len == 0: return (reason, @[])
   var fresh = ""
   if loadedGuardTimers(m.guardAttempt).len == 0:
-    let a = armGuardTimer(stateDir, m.guardAttempt, m.guardPrevious, reason,
-                          SuccessorIntervalSec)
+    let (a, note) = armVerifiedGuardTimer(stateDir, m.guardAttempt,
+                                          m.guardPrevious, reason,
+                                          SuccessorIntervalSec)
+    if note.len > 0: result.notes.add(note)
     if a.problem.len > 0:
       result.notes.add(a.problem & "; the revert goes on (§13 decisions " &
         "125, 126)")
@@ -82,10 +87,9 @@ proc finishGuardRevert*(stateDir, attempt: string): seq[string] =
   ## attempt and its service, the actor's own excepted, and drop the
   ## guard's records (decision 106).
   if attempt.len == 0: return
-  when not mutated("guard-stops-timer-first"):
-    let stopped = stopAttemptTimers(attempt)
-    if stopped.len > 0:
-      result.add("stopped the guard units " & stopped.join(" "))
+  let stopped = stopAttemptTimers(attempt)
+  if stopped.len > 0:
+    result.add("stopped the guard units " & stopped.join(" "))
   clearGuardRecord(stateDir)
   clearConfirm(stateDir)
 
@@ -124,8 +128,7 @@ proc writeNetworkObjects*(stateDir: string; m: PendingMarker;
   ## ``fired`` guard stops the writes and the switch goes to the revert
   ## (decision 103). The read is repeated after the last write.
   let guarded = m.guardAttempt.len > 0 and m.guard == "armed" and
-                m.purpose notin ["revert", "replay"] and
-                not mutated("guard-skips-write-check")
+                m.purpose notin ["revert", "replay"]
   let change = networkChanges(previous, desired)
   var prevByPath = initTable[string, LedgerEntry]()
   for e in networkEntries(previous): prevByPath[e.path] = e
@@ -171,6 +174,13 @@ proc writeNetworkObjects*(stateDir: string; m: PendingMarker;
     var held = acquireGuardLock()
     result.firedReason = firedReasonOnDisk(stateDir, m.guardAttempt)
     held.release()
+  # The switch has written its last network object: from now on a new SSH
+  # session or a confirm is evidence that the host is reachable on the
+  # network as it now is (spec §4.5 step 3, amended 2026-11-22). Recorded
+  # under the guard lock, only on a guard still `armed`.
+  if result.firedReason.len == 0 and guarded:
+    discard recordNetworkWritesDone(stateDir, m.guardAttempt, nowRealtimeUs(),
+                                    nowMonoUs())
 
 proc networkLedgerEntries*(written: seq[NetworkObject];
                            preserve: proc (content: string): string):
@@ -203,11 +213,17 @@ proc watchGuard*(stateDir: string; m: PendingMarker;
   var failedReads = 0
   while true:
     let g = readGuardedMarker(stateDir)
+    # When the switch finished its network writes (``writeNetworkObjects``
+    # recorded it on the marker): the evidence counts only from there. 0
+    # -- never recorded -- and nothing counts.
+    var writtenRealtime, writtenMono: int64
     if g.present and g.marker.guardAttempt == attempt:
       if g.marker.guard in ["fired", "reverting"]:
         return GuardOutcome(reason: g.marker.guardReason)
       if g.marker.guard == "disarmed":
         return GuardOutcome(disarmed: true, reason: "already disarmed")
+      writtenRealtime = g.marker.guardWrittenRealtime
+      writtenMono = g.marker.guardWrittenMono
     when mutated("guard-disarms-on-success"):
       # FALSIFYING MUTATION (e2e_omarchy_addon_network_guard_disarm_conditions):
       # the switch reported success, so the guard disarms at once.
@@ -223,9 +239,12 @@ proc watchGuard*(stateDir: string; m: PendingMarker;
         return GuardOutcome(reason: "invariant failed: " & now.join("; "))
     else:
       failedReads = 0
-      var evidence = newSshSessionSince(m.guardStartRealtime)
+      # A session from an address the host holds itself is the host
+      # logging in to itself: no evidence (spec §4.5 step 3; T55).
+      let own = hostAddressTexts(host)
+      var evidence = newSshSessionSince(writtenRealtime, own)
       if evidence.len == 0:
-        evidence = confirmedBy(stateDir, attempt, m.guardStartMono)
+        evidence = confirmedBy(stateDir, attempt, writtenMono, own)
       if evidence.len > 0:
         seamPause(stateDir, "guard-before-disarm")
         let t = transitionGuard(stateDir, attempt, "disarmed", "")
