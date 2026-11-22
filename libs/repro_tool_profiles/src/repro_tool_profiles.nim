@@ -18,6 +18,8 @@ import repro_core/powershell_zip as repro_core_powershell_zip
 # GC roots for the store paths a Nix tool realization is recorded under.
 import repro_core/nix_store_roots
 import repro_core/process_env
+import repro_core/nix_wrapper_libc
+export nix_wrapper_libc
 import repro_core/nix_evaluation_policy
 # The tarball provisioner runs as a built-in executor on the build engine's
 # scheduler thread, possibly while the engine's worker pool is live, so its
@@ -80,6 +82,15 @@ import repro_tool_profiles/executable_evidence
 export executable_evidence
 import repro_tool_profiles/[archive_inputs, archive_steps, archive_digest]
 import repro_tool_profiles/elf_relocation
+# Binary-cache coverage of provisioned prefixes: the post-extraction step
+# hook of the tarball edge, the staging-path leak scan, and the identity of
+# the tools a build step ran with.
+import repro_tool_profiles/[post_extract_step, prefix_portability]
+export post_extract_step, prefix_portability
+# The gem-closure post-extraction step; importing it registers the step
+# implementation and its declaration reader.
+import repro_tool_profiles/gem_closure_step
+export gem_closure_step
 import repro_dsl_stdlib/packages_schema
 # The realization helpers ``installationToolRoles`` names; importing them
 # registers their package definitions, which ``extractorToolUses`` resolves
@@ -423,6 +434,17 @@ type
       ## resolver knows where the declaration came from.
     stripComponents*: int
     lockIdentity*: string
+    postExtract*: PostExtractStepDecl
+      ## The arm's post-extraction step; the zero value when it has none.
+      ## Serialized with the plan, so the edge executor runs the step the
+      ## declaration named.
+    stepInputs*: seq[RealizedInputIdentity]
+      ## The identities of the provisioned tools ``postExtract`` runs with,
+      ## resolved by the edge executor from its dependency edges' receipts
+      ## (and the declaration's external inputs). Not serialized: it is a
+      ## fact about this host's realized dependencies, read at execution.
+    stepTools*: seq[PostExtractStepTool]
+      ## Where those tools are realized on this host. Not serialized.
 
   ScoopAcquisitionPlan* = object
     packageSelector*: string
@@ -1962,6 +1984,8 @@ proc decodeNixMaterializationProfile(bytes: openArray[byte]):
 
 proc expandNixPropagatedStorePaths*(paths: var seq[string])
 proc expandNixProfilePropagatedPaths*(profile: var PathOnlyToolProfile)
+proc nixStorePathsCarryWrapperLibc*(storePaths: openArray[string];
+                                    selectedStorePath: string): bool
 
 proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
                                   plan: NixAcquisitionPlan;
@@ -1980,6 +2004,12 @@ proc readCachedNixMaterialization(storeRoot: string; useDef: InterfaceToolUse;
     var profile = decodeNixMaterializationProfile(
       fromByteString(readFile(extendedPath(path))))
     if not profile.nixMaterializationProfileMatches(useDef, plan):
+      return
+    # An entry written while a wrapper's libc was still followed as if it
+    # were propagated would put that libc back on the shared link channels.
+    # Resolve it afresh instead; the next write replaces the entry.
+    if nixStorePathsCarryWrapperLibc(profile.realizedStorePaths,
+        profile.selectedStorePath):
       return
     expandNixProfilePropagatedPaths(profile)
     return (hit: true, profile: profile)
@@ -2079,14 +2109,24 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
   ## Include split-output runtime and development dependencies declared
   ## by Nix outputs. Their lib/include/pkg-config directories must feed
   ## the same action environment as the selected output.
-  ## Compiler wrappers also record their selected runtime in orig-libc.
-  ## It is not a propagated build input, but install normalization needs
-  ## it on LIBRARY_PATH to retain the libc matching the linked PT_INTERP.
+  ##
+  ## A compiler wrapper's ``nix-support/orig-libc`` is deliberately NOT
+  ## followed. It is not a propagated input: it names the libc that this
+  ## wrapper itself passes to its compiler and linker (``-B`` through
+  ## ``libc-crt1-cflags``, ``-L`` through its binutils wrapper's
+  ## ``libc-ldflags``). Every directory of a realized store path reaches
+  ## channels that EVERY compiler of the action reads (``LIBRARY_PATH``,
+  ## ``CPATH``), so following it handed that libc to a different compiler
+  ## on the action's ``PATH`` as well: a host ``gcc`` then linked against
+  ## the Nix glibc while keeping its own dynamic loader, and the result
+  ## failed at run time with ``GLIBC_2.xx not found``. Install
+  ## normalization, the one consumer that needs the wrapper's libc, reads
+  ## it through ``nixCompilerWrapperLibcDirs`` instead.
   var index = 0
   while index < paths.len:
     let supportDir = paths[index] / "nix-support"
     for manifestName in ["propagated-build-inputs",
-                         "propagated-native-build-inputs", "orig-libc"]:
+                         "propagated-native-build-inputs"]:
       let manifest = supportDir / manifestName
       if not fileExists(extendedPath(manifest)):
         continue
@@ -2095,6 +2135,34 @@ proc expandNixPropagatedStorePaths*(paths: var seq[string]) =
           continue
         paths.add(candidate)
     inc index
+
+proc nixStorePathsCarryWrapperLibc*(storePaths: openArray[string];
+                                    selectedStorePath: string): bool =
+  ## True when ``storePaths`` holds a libc that only a wrapper's
+  ## ``orig-libc`` can have brought in: a recorded libc that is neither the
+  ## selected output nor reachable through the propagated inputs of the
+  ## other paths. Builds before the libc stopped being followed by
+  ## ``expandNixPropagatedStorePaths`` cached such realizations; a cache
+  ## reader treats one as a miss and resolves afresh, so the libc does not
+  ## return to the shared link channels from a warm cache.
+  let libcs = nixCompilerWrapperLibcs(storePaths)
+  if libcs.len == 0:
+    return false
+  var present: seq[string] = @[]
+  for libc in libcs:
+    if libc in storePaths and libc != selectedStorePath:
+      present.add(libc)
+  if present.len == 0:
+    return false
+  var reachable: seq[string] = @[]
+  for path in storePaths:
+    if path notin present:
+      reachable.add(path)
+  expandNixPropagatedStorePaths(reachable)
+  for libc in present:
+    if libc notin reachable:
+      return true
+  false
 
 const NixDarwinSdkSetupScript* = "darwin-sdk-setup.bash"
   ## The ``nix-support`` script in which a nixpkgs cc-wrapper for Darwin
@@ -2960,7 +3028,8 @@ proc tarballAcquisitionPlan*(useDef: InterfaceToolUse;
       else: "",
     stripComponents: selected.stripComponents,
     lockIdentity: contributorLockIdentity(selected.contributor,
-      useDef.provisioningPin, tarballRealizationLockIdentity(selected)))
+      useDef.provisioningPin, tarballRealizationLockIdentity(selected)),
+    postExtract: postExtractStepDeclFor(useDef, selected))
 
 proc systemToolEnv(): StringTableRef =
   ## A copy of the current environment with the dynamic-linker override
@@ -4150,7 +4219,11 @@ proc writeTarballReceipt(prefix: string; plan: TarballAcquisitionPlan;
     "executableAlias": plan.declaredExecutableAlias,
     "declaredExecutablePath": plan.declaredExecutablePath,
     "lockIdentity": plan.lockIdentity,
-    "realizationBoundary": prefix
+    # The prefix itself. This receipt is sealed into the prefix and published
+    # with it, so it must not record the absolute path it was written at:
+    # that is the staging directory, which exists only on the realizing host
+    # and only until the prefix is moved into place.
+    "realizationBoundary": "."
   }
   writeFile(extendedPath(tarballReceiptPath(prefix)), receipt.pretty())
 
@@ -4276,6 +4349,62 @@ proc closureManifestDigest(plan: TarballAcquisitionPlan): string =
   canonical.sort()
   $blake3.digest(canonical.join("\n"))
 
+proc placeClosureEntry(plan: TarballAcquisitionPlan; entry: ClosureEntry;
+                       destination, storeRoot: string;
+                       tools: ExtractorTools)
+
+proc overlayClosureArchive(archive, root: string; entry: ClosureEntry;
+                           storeRoot: string; tools: ExtractorTools) =
+  ## Unpack ``archive`` into a scratch directory beside the store's
+  ## temporaries, then merge it into ``root`` (``isClosureRootOverlay``): a
+  ## shared directory merges, a file ``root`` already has is refused naming
+  ## the entry and the file, and a ``tar.zst`` entry's top-level pacman
+  ## metadata is not placed.
+  # A fresh directory per call: two edges of one process (concurrent
+  # provisioning) may overlay the same pinned entry at once, and a name
+  # derived from the entry and the process alone would let one delete the
+  # other's half-merged scratch.
+  createDir(extendedPath(storeRoot / "tmp"))
+  let scratch = createTempDir("overlay-" & entry.sha256[0 .. 15] & "-", "",
+    storeRoot / "tmp")
+  try:
+    extractTarballArchive(archive, scratch, entry.archiveType,
+      entry.stripComponents, "", tools)
+    if entry.archiveType == "tar.zst":
+      for name in PacmanPackageMetadata:
+        if fileExists(extendedPath(scratch / name)):
+          removeFile(extendedPath(scratch / name))
+    var pending = @[""]
+    while pending.len > 0:
+      let relative = pending.pop()
+      let source = if relative.len == 0: scratch else: scratch / relative
+      for kind, path in walkDir(extendedPath(source)):
+        let name = lastPathPart(path)
+        let rel = if relative.len == 0: name else: relative / name
+        let target = root / rel
+        if kind == pcDir:
+          if fileExists(extendedPath(target)) or
+              symlinkExists(extendedPath(target)):
+            raise newException(OSError, "tool-resolution failed: the " &
+              "closure entry " & entry.url & " has a directory " & rel &
+              " where the prefix already has a file")
+          createDir(extendedPath(target))
+          pending.add(rel)
+        else:
+          if fileExists(extendedPath(target)) or
+              dirExists(extendedPath(target)) or
+              symlinkExists(extendedPath(target)):
+            raise newException(OSError, "tool-resolution failed: the " &
+              "closure entry " & entry.url & " would replace " & rel &
+              ", which the prefix already has; root-overlay entries never " &
+              "replace each other's files")
+          createDir(extendedPath(parentDir(target)))
+          moveFile(extendedPath(path), extendedPath(target))
+  finally:
+    if dirExists(extendedPath(scratch)):
+      try: removeDir(extendedPath(scratch))
+      except CatchableError: discard
+
 proc unpackClosure(plan: TarballAcquisitionPlan;
                    destination, storeRoot: string;
                    tools: ExtractorTools) =
@@ -4294,6 +4423,16 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
   if not hasClosure(plan):
     return
   for entry in closureEntries(plan):
+    placeClosureEntry(plan, entry, destination, storeRoot, tools)
+
+proc placeClosureEntry(plan: TarballAcquisitionPlan; entry: ClosureEntry;
+                       destination, storeRoot: string;
+                       tools: ExtractorTools) =
+  ## Fetch one closure entry through ``verifiedDownload`` (checksum-verified,
+  ## sharing the store's download cache) and lay it down under
+  ## ``destination``: unpacked into the entry's directory, or, for a
+  ## ``file`` entry, copied to the entry's path as the file itself.
+  block:
     var entryPlan = plan
     entryPlan.url = entry.url
     entryPlan.mirrors = @[]
@@ -4305,12 +4444,20 @@ proc unpackClosure(plan: TarballAcquisitionPlan;
     entryPlan.declaredClosureManifest = ""
     entryPlan.record.closureEntries = @[]
     let downloaded = verifiedDownload(entryPlan, storeRoot)
+    if isClosureRootOverlay(entry):
+      overlayClosureArchive(downloaded.path, destination, entry,
+        storeRoot, tools)
+      return
     let target = destination / entry.path
     createDir(extendedPath(parentDir(target)))
     if dirExists(extendedPath(target)):
       removeDir(extendedPath(target))
-    extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
-      entryPlan.stripComponents, "", tools)
+    if entry.archiveType == ClosureFileKind:
+      # The verified bytes themselves, under the entry's own name.
+      copyFile(extendedPath(downloaded.path), extendedPath(target))
+    else:
+      extractTarballArchive(downloaded.path, target, entryPlan.archiveType,
+        entryPlan.stripComponents, "", tools)
 
 proc toolCacheIdentity(plan: TarballAcquisitionPlan;
                        packageName, version: string;
@@ -4369,6 +4516,47 @@ proc toolCacheIdentity(plan: TarballAcquisitionPlan;
   # the key it already had.
   if hasClosure(plan):
     result.addOption("closure", closureManifestDigest(plan))
+  # A post-extraction step is one more declared change to the bytes: its
+  # kind and contract, its manifest, configuration, pinned input files,
+  # prunes and rewrites, and the normalisation contract all key the entry,
+  # and so does every tool it ran with, by that tool's own complete key.
+  # Conditional, so a package with no step keeps the key it already had.
+  #
+  # The tools' keys are an OPTION, not the entry's ``depClosure``: the cache
+  # protocol treats ``depClosure`` as the entries a consumer must substitute
+  # together with this one (its runtime references), and a prefix does not
+  # need the compiler that built it at run time. Listing the compiler there
+  # would make every consumer fetch it, and would make an entry built with a
+  # compiler from the Nix store unsubstitutable, since no cache entry exists
+  # under that key.
+  #
+  # A step that ran with a tool whose identity is incomplete produces a
+  # prefix whose identity is incomplete too: the reserved pending option
+  # makes every substitute and every publish refuse it, while the prefix is
+  # still realized and used on this host.
+  if hasPostExtractStep(plan.postExtract):
+    for option in postExtractStepIdentityOptions(plan.postExtract):
+      result.addOption(option.name, option.value)
+    result.addOption("buildInputs", buildInputKeys(plan.stepInputs))
+    var incomplete = incompleteReasons(plan.stepInputs)
+    # Every tool the step declares must have been resolved to an identity
+    # by the edge executor. One that was not would simply be absent from
+    # ``buildInputs``, and the key would then claim a complete identity for
+    # bytes built with a tool it does not name; so a missing one makes the
+    # identity incomplete rather than silently smaller.
+    for dependency in plan.postExtract.dependencies:
+      var resolved = false
+      for input in plan.stepInputs:
+        if input.role == dependency.packageSelector:
+          resolved = true
+          break
+      if not resolved:
+        incomplete.add(dependency.packageSelector &
+          " has no resolved identity")
+    if incomplete.len > 0:
+      result.addOption(PendingCacheIdentityOptionKey,
+        "the post-extraction step ran with inputs whose identity is " &
+        "incomplete: " & incomplete.join("; "))
   result.addOption("stripComponents", $plan.stripComponents)
   # An ELF relocation writes the realized prefix's ABSOLUTE path into every
   # rewritten program (its ``PT_INTERP``) and shared object (its
@@ -4413,6 +4601,10 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
   ## failure mode of this optimisation is that it does nothing.
   if installationIdentity(plan).len > 0:
     return false
+  if hasPostExtractStep(plan.postExtract):
+    # A step's output depends on the tools it ran with, which no receipt
+    # field compares; a clone could carry a sibling's differently built tree.
+    return false
   if plan.lockIdentity.len == 0:
     # No declaration to key on. Matching on the checksum alone would clone
     # between packages whose authors never said they were the same thing.
@@ -4456,7 +4648,8 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
       # The clone carries the sibling's receipt. Drop it: the caller seals
       # this package's own, and a prefix holding somebody else's provenance
       # is worse than one holding none.
-      for receiptName in [".repro-receipt", ".reprobuild-tarball-receipt.json"]:
+      for receiptName in [".repro-receipt", ".reprobuild-tarball-receipt.json",
+                          PrefixIdentityFileName]:
         let clonedReceipt = tempPrefix / receiptName
         if fileExists(extendedPath(clonedReceipt)):
           try:
@@ -4476,31 +4669,49 @@ proc cloneSiblingRealization(plan: TarballAcquisitionPlan;
 
 proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: string)
 
-proc substituteToolPrefix(plan: TarballAcquisitionPlan;
-                          packageName, version, prefix, storeRoot: string):
+proc reportIncompleteIdentity(label, verb, reason: string) =
+  ## One line naming a prefix whose identity is incomplete and what that
+  ## prevented. ``binary-cache-identity-incomplete`` is the same reason name
+  ## the build engine traces for an action whose identity is incomplete, so
+  ## one search finds both.
+  stderr.writeLine("repro cache: binary-cache-identity-incomplete: " &
+    label & " is not " & verb & ": " & reason)
+  flushStoreDiagnostics()
+
+proc substitutePrefixFromCache*(identity: CacheEntryIdentity;
+                                label, prefix, storeRoot: string;
+                                verify: proc(staging: string): bool):
     bool =
-  ## Try the shared binary cache before downloading from upstream.
+  ## Lay down ``prefix`` from the shared binary cache entry ``identity``
+  ## names, when a trusted cache holds it; true on a hit.
   ##
-  ## Before this existed, a direct-download package was ALWAYS fetched from
-  ## its upstream URL: the realize path had no CAS lookup and no substitution
-  ## step, so a prefix was never read from — nor written to — the shared
-  ## cache. Publishing a toolchain so other machines install it quickly had
-  ## no mechanism behind it, because the cache only ever held build-ACTION
-  ## outputs, a different population entirely.
+  ## The shared step of every tool-prefix provisioning edge (a plain or
+  ## closure tarball, one with a post-extraction step, a source build): it
+  ## runs before the edge downloads anything, and the edge realizes the
+  ## prefix itself only on a miss.
   ##
-  ## Soft-fail on every path. A cache that is unreachable, unconfigured, or
-  ## simply does not have this entry must cost nothing but the lookup — the
-  ## upstream download still follows.
-  # The shared resolver (``caches_config.resolveTrustedCacheConfig``): the
-  # same trust the provider-compile cache and the apply-time build-action
-  # substitute act on. Three private copies of "which caches, with which
-  # keys" is three places for a trust decision to drift.
+  ## An identity that is incomplete (it carries the reserved pending option)
+  ## never substitutes: an entry under it could hold bytes built from inputs
+  ## the key does not name. The refusal is logged by name when a cache is
+  ## configured, so "why did this host rebuild" has an answer.
+  ##
+  ## ``verify`` checks the unpacked staging tree before it is moved into
+  ## place (the declared executable is present, say); false rejects the hit.
+  ## Soft-fail on every other path: an unreachable, unconfigured or missing
+  ## entry costs only the lookup.
   let cacheCfg = resolveTrustedCacheConfig()
   if not cacheCfg.configured:
     return false
+  let identityError = cacheEntryIdentityError(identity)
+  if identityError.len > 0:
+    reportIncompleteIdentity(label, "substituted", identityError)
+    return false
   let endpoints = cacheCfg.endpoints
-  let keyHex = deriveCacheEntryKeyHex(toolCacheIdentity(plan, packageName,
-    version, prefix))
+  var keyHex = ""
+  try:
+    keyHex = deriveCacheEntryKeyHex(identity)
+  except CatchableError:
+    return false
   try:
     let outcome = bcInProcess.substituteInProcess(keyHex, storeRoot, endpoints)
     if not outcome.ok or outcome.outcomes.len == 0:
@@ -4527,14 +4738,16 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
     createDir(extendedPath(staging))
     try:
       bcInProcess.extractPrefix(archiveBytes, staging)
-      if executableInStorePath(staging, plan.declaredExecutablePath,
-          rejectSymlinks = true).len == 0:
+      # A prefix sealed with an identity record must have been published
+      # under the key it is being served for. A mismatch is a mis-filed or
+      # tampered entry, and it is refused rather than trusted.
+      let recorded = readPrefixIdentityFile(staging)
+      if recorded.found and recorded.keyHex != keyHex:
         removeDir(extendedPath(staging))
         return false
-      validateExtraTarballExecutables(plan, staging)
-      if archiveInstallerFeatures(plan.record).len > 0:
-        verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
-          plan.record), staging, tarballAppTrust)
+      if not verify(staging):
+        removeDir(extendedPath(staging))
+        return false
       createDir(extendedPath(prefix.parentDir))
       moveDir(extendedPath(staging), extendedPath(prefix))
     except CatchableError:
@@ -4542,16 +4755,116 @@ proc substituteToolPrefix(plan: TarballAcquisitionPlan;
       return false
   except CatchableError:
     return false
+  result = dirExists(extendedPath(prefix))
+  if result:
+    stderr.writeLine("repro cache: substituted " & label &
+      " from the shared cache (no download)")
+    flushStoreDiagnostics()
+
+proc publishPrefixToCache*(identity: CacheEntryIdentity;
+                           label, prefix: string) =
+  ## Publish the sealed ``prefix`` under ``identity`` so the next host
+  ## substitutes it.
+  ##
+  ## Who publishes is decided by configuration, not by this code: only a
+  ## host given an operator-supplied keypair (``REPRO_BINARY_CACHE_KEY_PATH``
+  ## and ``REPRO_BINARY_CACHE_CERT_PATH`` naming existing files) publishes,
+  ## and a key is never generated here. The organisation delivers that key
+  ## only to CI legs that run on a push to a protected branch; pull-request
+  ## runs and developer machines hold none and so only read.
+  ##
+  ## An incomplete identity is never published (see
+  ## ``substitutePrefixFromCache``); on a publishing host the refusal is
+  ## logged by name. Soft-fail otherwise: a publish that does not happen
+  ## costs the next host a realization, never this one its toolchain.
+  ##
+  ## Calls ``publishInProcess`` directly rather than going through the
+  ## engine's ``mkBinaryCachePublisher`` closure: that type lives in
+  ## ``repro_build_engine``, which sits ABOVE this module, and importing it
+  ## here would invert the layering for the sake of one call.
+  # (``REPRO_CACHE_DISABLE`` is honoured by the shared resolver below.)
+  let cacheCfg = resolveTrustedCacheConfig()
+  if not (cacheCfg.configured and cacheCfg.keypairOk):
+    return
+  let identityError = cacheEntryIdentityError(identity)
+  if identityError.len > 0:
+    reportIncompleteIdentity(label, "published", identityError)
+    return
+  try:
+    let keypair = peerAuth.loadOrGenerateKeypair(cacheCfg.certPath,
+      cacheCfg.keyPath)
+    let request = bcInProcess.PublishInProcessRequest(
+      entryKeyHex: deriveCacheEntryKeyHex(identity),
+      prefixDir: prefix,
+      identity: identity,
+      endpoint: cacheCfg.publishEndpoint,
+      keypair: keypair)
+    if request.endpoint.len == 0:
+      return
+    let outcome = bcInProcess.publishInProcess(request)
+    if outcome.ok:
+      # Said out loud. A publish is the step that makes this prefix cheap for
+      # everyone else, and an operator asking "did my toolchain reach the
+      # shared cache" should not have to infer the answer from silence.
+      stderr.writeLine("repro cache: published " & label & " (" &
+        request.entryKeyHex & ")")
+      flushStoreDiagnostics()
+    if not outcome.ok and outcome.error.len > 0:
+      # Reported, not raised. Knowing a publish did not happen is useful;
+      # failing the realization over it would be absurd.
+      stderr.writeLine("repro cache: warning: publishing " & label &
+        " to " & request.endpoint & " failed: " & outcome.error)
+      flushStoreDiagnostics()
+  except CatchableError as err:
+    stderr.writeLine("repro cache: warning: publishing " & label &
+      " skipped: " & err.msg)
+    flushStoreDiagnostics()
+
+proc sealPrefixIdentity(identity: CacheEntryIdentity; stagingPrefix: string) =
+  ## Record the key ``stagingPrefix`` is about to be sealed under (or why it
+  ## has none) inside it, so a step that later runs a tool from this prefix
+  ## can name the tool's identity (``realizedInputIdentity``).
+  let identityError = cacheEntryIdentityError(identity)
+  if identityError.len > 0:
+    writePrefixIdentityFile(stagingPrefix, "", identityError)
+  else:
+    writePrefixIdentityFile(stagingPrefix, deriveCacheEntryKeyHex(identity),
+      "")
+
+proc substituteToolPrefix(plan: TarballAcquisitionPlan;
+                          packageName, version, prefix, storeRoot: string):
+    bool =
+  ## Try the shared binary cache before downloading from upstream.
+  ##
+  ## Before this existed, a direct-download package was ALWAYS fetched from
+  ## its upstream URL: the realize path had no CAS lookup and no substitution
+  ## step, so a prefix was never read from — nor written to — the shared
+  ## cache. Publishing a toolchain so other machines install it quickly had
+  ## no mechanism behind it, because the cache only ever held build-ACTION
+  ## outputs, a different population entirely.
+  # The shared resolver (``caches_config.resolveTrustedCacheConfig``): the
+  # same trust the provider-compile cache and the apply-time build-action
+  # substitute act on. Three private copies of "which caches, with which
+  # keys" is three places for a trust decision to drift.
+  let verify = proc(staging: string): bool =
+    if executableInStorePath(staging, plan.declaredExecutablePath,
+        rejectSymlinks = true).len == 0:
+      return false
+    validateExtraTarballExecutables(plan, staging)
+    if archiveInstallerFeatures(plan.record).len > 0:
+      verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
+        plan.record), staging, tarballAppTrust)
+    true
+  if not substitutePrefixFromCache(toolCacheIdentity(plan, packageName,
+      version, prefix), packageName & "@" & version, prefix, storeRoot,
+      verify):
+    return false
   # A hit is only a hit if the declared executable is actually there.
   # Verifying the member this package promises is what stops a partial or
   # mismatched entry from being accepted as a realization.
-  result = dirExists(extendedPath(prefix)) and
+  dirExists(extendedPath(prefix)) and
     executableInStorePath(prefix, plan.declaredExecutablePath,
       rejectSymlinks = true).len > 0
-  if result:
-    stderr.writeLine("repro cache: substituted " & packageName & "@" &
-      version & " from the shared cache (no download)")
-    flushStoreDiagnostics()
 
 proc barredFromCachePublication*(plan: TarballAcquisitionPlan): bool =
   ## Whether a realized prefix must NOT be uploaded to a shared binary cache,
@@ -4569,20 +4882,9 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
                        packageName, version, prefix: string) =
   ## Publish a freshly realized prefix so the next machine substitutes it.
   ##
-  ## Calls ``publishInProcess`` directly rather than going through the
-  ## engine's ``mkBinaryCachePublisher`` closure: that type lives in
-  ## ``repro_build_engine``, which sits ABOVE this module, and importing it
-  ## here would invert the layering for the sake of one call.
-  ##
-  ## Soft-fail on every path, matching the engine hook's own policy. A
-  ## developer without publish credentials must still get a working
-  ## toolchain — an unpublished prefix costs the next person a download; a
-  ## realize that failed because a cache was unreachable costs them the day.
-  ##
   ## Publishing requires credentials to be configured. Their absence is the
   ## ordinary case for most developers and is silent by design; it is not an
   ## error and must not read like one.
-  # (``REPRO_CACHE_DISABLE`` is honoured by the shared resolver below.)
   # A caller may relax application trust checks for local fixtures. Such a
   # prefix has not met the normal publication contract, so it must never be
   # advertised under the same cache identity as a strictly verified product.
@@ -4598,43 +4900,8 @@ proc publishToolPrefix(plan: TarballAcquisitionPlan;
   # a property of the package rather than an accident of who is running.
   if barredFromCachePublication(plan):
     return
-  # Publish credentials come from the shared resolver too: an operator-
-  # supplied keypair, never a generated one, and the publish endpoint it
-  # resolved. No key means this host does not publish toolchains either.
-  let cacheCfg = resolveTrustedCacheConfig()
-  if not (cacheCfg.configured and cacheCfg.keypairOk):
-    return
-  let keyPath = cacheCfg.keyPath
-  let certPath = cacheCfg.certPath
-  try:
-    let keypair = peerAuth.loadOrGenerateKeypair(certPath, keyPath)
-    let identity = toolCacheIdentity(plan, packageName, version, prefix)
-    let request = bcInProcess.PublishInProcessRequest(
-      entryKeyHex: deriveCacheEntryKeyHex(identity),
-      prefixDir: prefix,
-      identity: identity,
-      endpoint: cacheCfg.publishEndpoint,
-      keypair: keypair)
-    if request.endpoint.len == 0:
-      return
-    let outcome = bcInProcess.publishInProcess(request)
-    if outcome.ok:
-      # Said out loud. A publish is the step that makes this prefix cheap for
-      # everyone else, and an operator asking "did my toolchain reach the
-      # shared cache" should not have to infer the answer from silence.
-      stderr.writeLine("repro cache: published " & packageName & "@" &
-        version & " (" & request.entryKeyHex & ")")
-      flushStoreDiagnostics()
-    if not outcome.ok and outcome.error.len > 0:
-      # Reported, not raised. Knowing a publish did not happen is useful;
-      # failing the realization over it would be absurd.
-      stderr.writeLine("repro cache: warning: publishing " & packageName &
-        " to " & request.endpoint & " failed: " & outcome.error)
-      flushStoreDiagnostics()
-  except CatchableError as err:
-    stderr.writeLine("repro cache: warning: publishing " & packageName &
-      " skipped: " & err.msg)
-    flushStoreDiagnostics()
+  publishPrefixToCache(toolCacheIdentity(plan, packageName, version, prefix),
+    packageName & "@" & version, prefix)
 
 proc tarballPrefixLayoutParts(plan: TarballAcquisitionPlan): seq[string] =
   ## The declared LAYOUT a realized prefix is keyed on, beyond the executable
@@ -4657,6 +4924,17 @@ proc tarballPrefixLayoutParts(plan: TarballAcquisitionPlan): seq[string] =
     result.add("launcher=" & plan.declaredLauncher)
   if plan.declaredPrunePaths.len > 0:
     result.add("prune=" & plan.declaredPrunePaths.join(","))
+  # The step and the tools it ran with change the bytes, so they key the
+  # local directory as they key the cache entry. A tool with no complete
+  # identity contributes its local location, so rebuilding or moving it
+  # realizes the prefix again instead of reusing one built against the old
+  # tool.
+  if hasPostExtractStep(plan.postExtract):
+    var stepText = ""
+    for option in postExtractStepIdentityOptions(plan.postExtract):
+      stepText.add(option.name & "=" & option.value & "\0")
+    result.add("step=" & blake3.toHex(blake3.digest(stepText &
+      "\0inputs=" & localInputsDigest(plan.stepInputs)))[0 .. 31])
 
 proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: string) =
   for extra in plan.record.detail.extraExecutables:
@@ -4669,6 +4947,57 @@ proc validateExtraTarballExecutables(plan: TarballAcquisitionPlan; prefix: strin
       raise newException(OSError, "tool-resolution failed: extraExecutable " &
         extra & " resolves outside the realized prefix: " & realExtra)
 
+proc runPostExtractStep(plan: TarballAcquisitionPlan;
+                        stagingPrefix, finalPrefix, storeRoot: string) =
+  ## Run the arm's post-extraction step over the staging prefix. Every
+  ## pinned input file is verified against its SHA-256 first, so the step
+  ## reads exactly the bytes the prefix's identity names. The step gets an
+  ## empty scratch directory outside the prefix, removed afterwards whether
+  ## or not it succeeded.
+  let decl = plan.postExtract
+  let runner = postExtractStepRunner(decl.kind)
+  var inputs: seq[string]
+  for input in decl.inputFiles:
+    let path = resolvedInputFilePath(input, plan.closureManifestRoot)
+    if not fileExists(extendedPath(path)):
+      raise newException(OSError, "tool-resolution failed: the " &
+        "post-extraction step of " & plan.packageSelector & " reads " &
+        path & ", which does not exist")
+    let observed = fileShaHex(path, "sha256")
+    if observed != input.sha256.toLowerAscii:
+      raise newException(OSError, "tool-resolution failed: the " &
+        "post-extraction step of " & plan.packageSelector & " reads " &
+        path & ", whose SHA-256 is " & observed & ", not the declared " &
+        input.sha256)
+    inputs.add(path)
+  let scratch = stagingPrefix & ".step-scratch"
+  if dirExists(extendedPath(scratch)):
+    removeDir(extendedPath(scratch))
+  createDir(extendedPath(scratch))
+  try:
+    runner(PostExtractStepContext(
+      packageSelector: plan.packageSelector,
+      stagingPrefix: stagingPrefix,
+      finalPrefix: finalPrefix,
+      scratchDir: scratch,
+      storeRoot: storeRoot,
+      decl: decl,
+      tools: plan.stepTools,
+      inputFiles: inputs,
+      placeFile: proc(entry: ClosureEntry; destination: string) {.gcsafe.} =
+        if entry.archiveType != ClosureFileKind:
+          raise newException(ValueError, "tool-resolution failed: the " &
+            "post-extraction step of " & plan.packageSelector & " asked " &
+            "for " & entry.url & " as a file, but it is a " &
+            entry.archiveType & " entry")
+        {.cast(gcsafe).}:
+          placeClosureEntry(plan, entry, destination, storeRoot,
+            ExtractorTools())))
+  finally:
+    if dirExists(extendedPath(scratch)):
+      try: removeDir(extendedPath(scratch))
+      except CatchableError: discard
+
 proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
                               writerMode = "direct";
                               tools = ExtractorTools()):
@@ -4680,6 +5009,8 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
   # download nor any entry's, and must not be served an existing prefix.
   if hasClosure(plan):
     discard closureEntries(plan)
+  validatePostExtractStepDecl(plan.postExtract, plan.packageSelector,
+    plan.closureManifestRoot)
   let tmpRoot = storeRoot / "tmp"
   createDir(extendedPath(tmpRoot))
   let packageName = safeStoreSegment(plan.packageSelector, "package")
@@ -4782,6 +5113,10 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       # already carries the result, and the clone only matches a sibling
       # whose closure keyed the same cache entry.
       unpackClosure(plan, tempPrefix, storeRoot, tools)
+      # The post-extraction step, over the finished unpacked tree and before
+      # the prunes, which also cover what the step declares it leaves behind.
+      if hasPostExtractStep(plan.postExtract):
+        runPostExtractStep(plan, tempPrefix, prefix, storeRoot)
     # Declared prunes, applied to the temporary prefix before anything is
     # sealed — so the dropped bytes never appear under the store path, never
     # reach the receipt, and never reach the archive the publish step packs.
@@ -4790,7 +5125,7 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
     # and a stale entry should cost a version bump, not a broken realize. A
     # prune that removes the declared executable IS an error, and the check
     # immediately below is what reports it.
-    for prunePath in plan.declaredPrunePaths:
+    for prunePath in plan.declaredPrunePaths & plan.postExtract.prunePaths:
       if prunePath.len == 0 or prunePath.isAbsolute or
           prunePath.contains(".."):
         raise newException(OSError,
@@ -4892,6 +5227,13 @@ proc materializeTarballPrefix(plan: TarballAcquisitionPlan; storeRoot: string;
       verifyArchiveApplication(archiveRealizationOf(plan.packageSelector,
         plan.record), tempPrefix, tarballAppTrust)
     writeTarballReceipt(tempPrefix, plan, downloaded.selectedUrl)
+    sealPrefixIdentity(toolCacheIdentity(plan, packageName, resolvedVersion,
+      prefix), tempPrefix)
+    # Last check before sealing: the staging tree must not name itself. A
+    # prefix that does works only at the path it was built at, so it is
+    # neither moved into place nor published under its portable identity;
+    # the edge fails naming the file.
+    refuseStagingPathLeaks(tempPrefix, plan.packageSelector)
     createDir(extendedPath(prefix.parentDir))
     try:
       moveDir(extendedPath(tempPrefix), extendedPath(prefix))
@@ -5207,6 +5549,9 @@ proc tarballProfileFor(useDef: InterfaceToolUse; plan: TarballAcquisitionPlan;
 
 const
   TarballProvisionerName* = "tarball"
+  PostExtractDependencyRolePrefix = "step-dependency:"
+    ## The role of a dependency edge that provisions a tool a
+    ## post-extraction step runs with; the package selector follows.
   NixProvisionerName = "nix"
   TarballProvisionEdgeSchema = "reprobuild.tarball-provision.v2"
 
@@ -5217,6 +5562,11 @@ type
     actions*: seq[BuildAction]
     rootId*: string
     rootReceipt*: string
+    graphOutputs*: seq[string]
+      ## The outputs the consuming build graph declares, when the caller
+      ## knows them. A post-extraction step that would read one into a tool
+      ## prefix is refused when its edge is declared (see
+      ## ``validatePostExtractStepDecl``).
 
   TarballProvisionReceipt* = object
     ## What a tarball provisioning edge wrote as its output.
@@ -5252,7 +5602,8 @@ proc planJson(plan: TarballAcquisitionPlan): JsonNode =
     "declaredClosureManifest": plan.declaredClosureManifest,
     "closureManifestRoot": plan.closureManifestRoot,
     "stripComponents": plan.stripComponents,
-    "lockIdentity": plan.lockIdentity}
+    "lockIdentity": plan.lockIdentity,
+    "postExtract": jsonutils.toJson(plan.postExtract)}
 
 proc jsonStrings(node: JsonNode): seq[string] =
   if node != nil and node.kind == JArray:
@@ -5279,7 +5630,11 @@ proc planFromJson(node: JsonNode): TarballAcquisitionPlan =
     declaredClosureManifest: node{"declaredClosureManifest"}.getStr(),
     closureManifestRoot: node{"closureManifestRoot"}.getStr(),
     stripComponents: node{"stripComponents"}.getInt(),
-    lockIdentity: node{"lockIdentity"}.getStr())
+    lockIdentity: node{"lockIdentity"}.getStr(),
+    postExtract:
+      if node.hasKey("postExtract"):
+        jsonutils.jsonTo(node["postExtract"], PostExtractStepDecl)
+      else: PostExtractStepDecl())
 
 proc provisionEdgeIdentity(provisioner, packageSelector,
                            executablePath: string): string =
@@ -5413,11 +5768,27 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
       if plan.record.closureEntries.len == 0:
         inputs.add(closureManifestPath(plan))
       fingerprintText.add("\0closure:" & closureManifestDigest(plan))
+    # A post-extraction step is checked here, when the edge is declared and
+    # before anything runs: a graph output it would read into the prefix,
+    # an unpinned input or a path outside the prefix is a declaration error.
+    # Its pinned input files are inputs of the edge, by content.
+    validatePostExtractStepDecl(plan.postExtract, plan.packageSelector,
+      plan.closureManifestRoot, edges.graphOutputs)
+    for input in plan.postExtract.inputFiles:
+      inputs.add(resolvedInputFilePath(input, plan.closureManifestRoot))
+      fingerprintText.add("\0step-input:" & input.sha256.toLowerAscii)
 
   var roles: seq[string]
   for plan in plans:
+    var closureRoles: seq[string]
+    if hasClosure(plan):
+      # A closure entry of a kind the built-in extractor cannot unpack
+      # (``tar.zst``) needs its extractor edge exactly as a primary archive
+      # of that kind does.
+      for entry in closureEntries(plan):
+        closureRoles.add(extractorRolesFor(entry.archiveType))
     for role in extractorRolesFor(plan.archiveType) &
-        installationToolRoles(plan.record):
+        installationToolRoles(plan.record) & closureRoles:
       if role notin roles:
         roles.add(role)
   visiting.add(id)
@@ -5431,6 +5802,37 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
     fingerprintText.add("\0extractor:" & role & ":" & extractor.id)
     extractorNodes.add(%*{"role": role, "receipt": extractor.receipt,
       "kind": extractor.kind, "executablePath": extractor.executablePath})
+  # The tools a post-extraction step runs with are provisioned packages,
+  # each realized by its own edge before this one, exactly as an extractor
+  # is: never a tool found on the host. Their receipts are inputs of this
+  # edge, and the executor reads each tool's identity from the prefix the
+  # receipt names.
+  var stepDependencies: seq[string]
+  for plan in plans:
+    for dependency in plan.postExtract.dependencies:
+      let role = PostExtractDependencyRolePrefix & dependency.packageSelector
+      if role in stepDependencies:
+        continue
+      stepDependencies.add(role)
+      var edge: ProvisionEdgeRef
+      if hasHostTarballProvisioning(dependency):
+        edge = addTarballProvisionEdge(edges, [dependency], storeRoot,
+          writerMode, visiting)
+      elif dependency.nixProvisioning.len > 0:
+        edge = addNixProvisionEdge(edges, dependency, storeRoot)
+      else:
+        raise newException(ToolPrefixDeclarationError,
+          "tool-resolution failed: the post-extraction step of " &
+          plan.packageSelector & " runs with " & dependency.packageSelector &
+          ", which has no tarball or nix provisioning for host cpu=" &
+          hostCpuToken() & " os=" & hostOsToken() & "; a step's tools are " &
+          "provisioned packages")
+      deps.add(edge.id)
+      inputs.add(edge.receipt)
+      fingerprintText.add("\0step-dependency:" & dependency.packageSelector &
+        ":" & edge.id)
+      extractorNodes.add(%*{"role": role, "receipt": edge.receipt,
+        "kind": edge.kind, "executablePath": edge.executablePath})
   discard visiting.pop()
 
   var destinations: seq[string]
@@ -5459,10 +5861,59 @@ proc addTarballProvisionEdge(edges: var ProvisioningEdges;
   action.argv = @[TarballProvisionerName, first.packageSelector]
   edges.actions.add(action)
 
+proc graphOutputPaths*(actions: openArray[BuildAction]): seq[string] =
+  ## The absolute paths a build graph's actions declare as outputs, for
+  ## ``refuseStepDeclarationsUnderGraphOutputs``. A relative output is
+  ## resolved against its action's working directory, as the engine
+  ## resolves it.
+  for action in actions:
+    for output in action.outputs:
+      if output.len == 0:
+        continue
+      let path =
+        if output.isAbsolute: output
+        elif action.cwd.len > 0: absolutePath(action.cwd) / output
+        else: absolutePath(output)
+      result.add(os.normalizedPath(path))
+
+proc refuseStepDeclarationsUnderGraphOutputs*(
+    uses: openArray[InterfaceToolUse]; graphOutputs: openArray[string]) =
+  ## Refuse a post-extraction step, declared by the host tarball record of
+  ## one of ``uses``, whose input files or declaring files lie under one of
+  ## the build graph's outputs: a graph output is cached by the action
+  ## cache under its own action identity, never inside a tool prefix.
+  ##
+  ## For ``repro build``, which resolves its tools BEFORE the provider emits
+  ## the graph: the graph's outputs are first known here, after lowering
+  ## and before any graph action runs. The same check runs earlier, when a
+  ## caller that already knows them passes them to
+  ## ``tarballProvisioningEdges`` / ``resolveTarballTool``.
+  if graphOutputs.len == 0:
+    return
+  for use in uses:
+    if not hasHostTarballProvisioning(use):
+      continue
+    var plan: TarballAcquisitionPlan
+    try:
+      plan = tarballAcquisitionPlan(use)
+    except ToolPrefixDeclarationError:
+      raise
+    except CatchableError:
+      # No selectable record for this host: the use was realized some other
+      # way (or its resolution already failed), so it declares no step here.
+      continue
+    validatePostExtractStepDecl(plan.postExtract, plan.packageSelector,
+      plan.closureManifestRoot, graphOutputs)
+
 proc tarballProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
-                               writerMode = "direct"): ProvisioningEdges =
+                               writerMode = "direct";
+                               graphOutputs: openArray[string] = []):
+    ProvisioningEdges =
   ## The provisioning subgraph that realizes `useDef` from its tarball pin:
   ## the extractor edges its archive needs, then its own edge.
+  ## ``graphOutputs`` are the consuming build graph's declared outputs, when
+  ## the caller has them; a post-extraction step reading one is refused.
+  result.graphOutputs = @graphOutputs
   var visiting: seq[string]
   let root = addTarballProvisionEdge(result, [useDef], storeRoot, writerMode,
     visiting)
@@ -5551,8 +6002,27 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
       let writerMode = spec{"writerMode"}.getStr("direct")
       var tools = ExtractorTools()
       var toolIdentities = ""
+      var stepTools: seq[PostExtractStepTool]
+      var stepInputs: seq[RealizedInputIdentity]
       for node in spec{"extractors"}:
         let exe = extractorExecutable(node)
+        let nodeRole = node{"role"}.getStr()
+        if nodeRole.startsWith(PostExtractDependencyRolePrefix):
+          # A tool the post-extraction step runs with. Its identity is read
+          # from the prefix its edge realized (the key that prefix was
+          # sealed under), never from its path, so the step's prefix is keyed
+          # the same on every host.
+          let selector = nodeRole[PostExtractDependencyRolePrefix.len .. ^1]
+          let receiptPath = node{"receipt"}.getStr()
+          let prefix =
+            if node{"kind"}.getStr() == NixProvisionerName:
+              (let paths = readNixReceiptPaths(receiptPath);
+               if paths.len > 0: paths[0] else: "")
+            else: readTarballProvisionReceipt(receiptPath).prefix
+          stepTools.add(PostExtractStepTool(role: selector, prefix: prefix,
+            executable: exe))
+          stepInputs.add(realizedInputIdentity(selector, prefix))
+          continue
         toolIdentities.add(node{"role"}.getStr() & ":" &
           storeRelativePath(exe, storeRoot) & "\n")
         case node{"role"}.getStr()
@@ -5571,6 +6041,21 @@ proc executeTarballProvisionEdge*(action: BuildAction): ActionResult {.gcsafe.} 
       for planNode in spec{"plans"}:
         var plan = planFromJson(planNode)
         plan.installationToolsIdentity = toolIdentities
+        if hasPostExtractStep(plan.postExtract):
+          plan.stepTools = stepTools
+          plan.stepInputs = stepInputs
+          # Tools realized outside this subgraph carry the identity their
+          # caller stated; a step tool is handed to the step either way.
+          for external in plan.postExtract.externalInputs:
+            plan.stepTools.add(PostExtractStepTool(role: external.role,
+              prefix: external.prefix))
+            plan.stepInputs.add(RealizedInputIdentity(role: external.role,
+              keyHex: (if external.incomplete.len == 0:
+                         external.cacheKey.toLowerAscii else: ""),
+              incomplete: (if external.incomplete.len > 0:
+                             external.role & ": " & external.incomplete
+                           else: ""),
+              localIdentity: external.prefix))
         tools.installation.interpreters = @[]
         for encoded in plan.record.detail.launcherEmit:
           let launcher = decodeLauncherEmitSpec(encoded)
@@ -5677,7 +6162,8 @@ proc raiseProvisioningFailure(run: BuildRunResult) =
         " was blocked by " & item.blockedBy)
 
 proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
-                         writerMode = "direct"):
+                         writerMode = "direct";
+                         graphOutputs: openArray[string] = []):
     PathOnlyToolProfile =
   ## Realize a tarball-provisioned package THROUGH ITS PROVISIONING EDGE and
   ## return its profile. See the section comment above for the edge's shape.
@@ -5687,7 +6173,8 @@ proc resolveTarballTool*(useDef: InterfaceToolUse; storeRoot: string;
       absolutePath(storeRoot)
     else:
       getCurrentDir() / ".repro" / "tool-store"
-  let edges = tarballProvisioningEdges(useDef, root, writerMode)
+  let edges = tarballProvisioningEdges(useDef, root, writerMode,
+    graphOutputs)
   var receipt: TarballProvisionReceipt
   var actionCacheHit = false
   for attempt in 0 .. 1:
@@ -6645,6 +7132,51 @@ proc provisionBootstrapCCompiler*(storeRoot: string;
     bootstrapCRemedy(route, systemCandidates))
   BootstrapCCompiler(path: cc, sdkRoot: sdk)
 
+const
+  NimSourceBuildContract = "nim-source-build-v1"
+    ## What the source build does: run the archive's own ``build.sh`` with
+    ## ``CC`` (and ``SDKROOT``) set, keep ``bin/``, ``lib/`` and ``config/``,
+    ## drop ``c_code/``. A change to that is a new version, because it
+    ## changes the bytes a built tree holds.
+
+proc nimSourceBuildDest(storeRoot, version, sha256: string): string =
+  storeRoot / "bootstrap-nim" /
+    ("nim-" & version & "-" & sha256[0 .. 15] & "-" & hostCpuToken())
+
+proc nimSourceBuildCacheIdentity*(version, sha256, cc,
+                                  sdkRoot: string): CacheEntryIdentity =
+  ## The shared-cache identity of a Nim tree built from its source archive:
+  ## the version, the archive's digest, the build contract, and the complete
+  ## identity of the C compiler it was built with. A compiler found on the
+  ## host (rather than realized into a content-keyed prefix or the Nix
+  ## store) has no complete identity, and neither has a macOS SDK named by
+  ## path, so such a build's identity is incomplete: it is used on this host
+  ## but neither substituted nor published.
+  let localPlatform = detectLocalPlatform("")
+  let platform = bcTypes.PlatformTriple(cpu: localPlatform.cpu,
+    os: localPlatform.os, abi: "", libcVariant: "", microarch: "")
+  result = newCacheEntryIdentity("nim", version, platform,
+    bcTypes.ToolchainIdentity(name: "nim-source-build"),
+    "repro-tool-profiles-v1")
+  result.addOption("sourceSha256", sha256.toLowerAscii)
+  result.addOption("sourceBuild", NimSourceBuildContract)
+  result.addOption("normalisation", DefaultNormalisationContract)
+  var incomplete: seq[string]
+  # The compiler's key is an option, not a ``depClosure`` reference: the
+  # built tree does not need the compiler at run time (see
+  # ``toolCacheIdentity``).
+  let compiler = realizedInputIdentity("the C compiler", cc)
+  result.addOption("buildInputs", buildInputKeys([compiler]))
+  if compiler.keyHex.len == 0:
+    incomplete.add(compiler.incomplete)
+  if sdkRoot.len > 0:
+    incomplete.add("the SDK at " & sdkRoot & " is named by path, not by " &
+      "content")
+  if incomplete.len > 0:
+    result.addOption(PendingCacheIdentityOptionKey,
+      "the source build ran with inputs whose identity is incomplete: " &
+      incomplete.join("; "))
+
 proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
                         url, sha256: string): string =
   ## Build ``bin/nim`` from the extracted source archive of Nim ``version``
@@ -6659,12 +7191,13 @@ proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
   ## The result is a Nim distribution tree: ``bin/nim``, ``lib/``,
   ## ``config/``. Used by the bootstrap's own source route and by a pinned
   ## Nim whose lock entry names a source archive.
-  let id = "nim-" & version & "-" & sha256[0 .. 15] & "-" & hostCpuToken()
-  let dest = storeRoot / "bootstrap-nim" / id
+  let dest = nimSourceBuildDest(storeRoot, version, sha256)
   let nimExe = dest / "bin" / "nim"
   let marker = dest / ".repro-built"
   if fileExists(extendedPath(marker)) and fileExists(extendedPath(nimExe)):
     return nimExe
+  # Derived only when a build is due, so a warm call pays nothing for it.
+  let identity = nimSourceBuildCacheIdentity(version, sha256, cc, sdkRoot)
   createDir(extendedPath(dest.parentDir))
   let work = dest & ".build-" & $getCurrentProcessId()
   if dirExists(extendedPath(work)):
@@ -6711,15 +7244,28 @@ proc buildNimFromSource(sourcePrefix, storeRoot, cc, sdkRoot, version,
         " source archive exited " & $res.exitCode & " (full log: " &
         logPath & "):\n" & tail.join("\n"))
     removeDir(extendedPath(work / "c_code"))
+    # The marker records the compiler by its identity, not its path: the
+    # tree may be published, and a path names only this host's layout.
+    let compiler = realizedInputIdentity("the C compiler", cc)
     writeFile(extendedPath(work / ".repro-built"),
-      "source " & url & "\nsha256 " & sha256 & "\ncc " & cc & "\n")
+      "source " & url & "\nsha256 " & sha256 & "\ncc " &
+      (if compiler.keyHex.len > 0: "key:" & compiler.keyHex
+       else: "unidentified") & "\n")
+    sealPrefixIdentity(identity, work)
+    # The build ran in ``work``; a tree that names it works only there.
+    refuseStagingPathLeaks(work, "nim@" & version & " (source build)")
     if dirExists(extendedPath(dest)) and not fileExists(extendedPath(marker)):
       removeDir(extendedPath(dest))
+    var moved = false
     try:
       moveDir(extendedPath(work), extendedPath(dest))
+      moved = true
     except OSError:
       if not fileExists(extendedPath(marker)):
         raise
+    if moved:
+      publishPrefixToCache(identity, "nim@" & version & " (source build)",
+        dest)
   finally:
     if dirExists(extendedPath(work)):
       try: removeDir(extendedPath(work))
@@ -6867,6 +7413,22 @@ proc buildNimFromSourceThroughEdges*(version, url, sha256, storeRoot, cc,
   ## the action cache kept after the built tree was removed is re-executed,
   ## as ``resolveTarballTool`` does for a tarball prefix.
   let root = absolutePath(storeRoot)
+  # Substitute before anything is downloaded: a trusted cache entry for this
+  # exact build (source digest, contract, compiler identity) replaces both
+  # the source archive's download and the compile.
+  let dest = nimSourceBuildDest(root, version, sha256)
+  let builtNim = dest / "bin" / "nim"
+  if not (fileExists(extendedPath(dest / ".repro-built")) and
+      fileExists(extendedPath(builtNim))):
+    if dirExists(extendedPath(dest)):
+      removeDir(extendedPath(dest))
+    let verify = proc(staging: string): bool =
+      fileExists(extendedPath(staging / "bin" / "nim")) and
+        fileExists(extendedPath(staging / ".repro-built"))
+    if substitutePrefixFromCache(nimSourceBuildCacheIdentity(version, sha256,
+        cc, sdkRoot), "nim@" & version & " (source build)", dest, root,
+        verify):
+      return builtNim
   let edges = nimSourceBuildEdges(version, url, sha256, root, cc, sdkRoot)
   for attempt in 0 .. 1:
     registerNimSourceBuildProvisioner()
@@ -9389,6 +9951,7 @@ const FromSourceRecipeAliases* = [
   (dependency: "libudev", recipe: "systemd"),
   (dependency: "libsystemd", recipe: "systemd"),
   (dependency: "libcrypt", recipe: "libxcrypt"),
+  (dependency: "zlib-dev", recipe: "zlib"),
 ]
   ## Source packages can publish independently consumed libraries whose
   ## ABI name differs from the upstream source-package name. Keep these

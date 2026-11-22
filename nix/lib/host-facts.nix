@@ -433,7 +433,9 @@ let
       # A PATH entry under the home directory is named `~/...` however it
       # spells the home (`$HOME`, `${HOME}`, `~`, the absolute directory),
       # as the Reprobuild producer names it (host_facts.nim,
-      # homeRelativePathEntry); other entries are named as written.
+      # homeRelativePathEntry, given the same directory as `repro home
+      # facts --home-dir`; `reprobuildFacts` passes it); other entries are
+      # named as written.
       pathEntryId =
         p:
         let
@@ -546,6 +548,11 @@ let
       # that imports catalogs (`repro-catalogs.toml`) reads them in the sandbox
       # (`$REPRO_WORKSPACE_CLONES`). Null: the profile imports none.
       catalogClones ? null,
+      # The host's home directory (`home.homeDirectory` on the Nix side):
+      # `repro home facts --home-dir`, which names a PATH entry spelled as it
+      # by its absolute path `~/...`, as `homeManagerFacts` does. Null: the
+      # sandbox's `$HOME`, a directory no profile names.
+      homeDirectory ? null,
     }:
     pkgs.runCommand "host-facts-reprobuild-${host}.json"
       (
@@ -554,6 +561,7 @@ let
           inherit host system;
           nativeBuildInputs = [ repro ];
           nixosFlag = if nixos == null then "" else if nixos then "--nixos" else "--nixos=false";
+          homeDirectory = if homeDirectory == null then "" else homeDirectory;
         }
         // (if catalogClones == null then { } else { REPRO_WORKSPACE_CLONES = catalogClones; })
       )
@@ -564,7 +572,8 @@ let
         cp -R "$profile" "$TMPDIR/profile"
         chmod -R u+w "$TMPDIR/profile"
         repro home facts --profile-dir "$TMPDIR/profile" --host "$host" \
-          --target "$system" $nixosFlag --output "$out"
+          --target "$system" $nixosFlag ''${homeDirectory:+--home-dir="$homeDirectory"} \
+          --output "$out"
       '';
 
   # reprobuild.lib.homeEquivalenceCheck {
@@ -621,6 +630,9 @@ let
           catalogClones
           ;
         repro = reproPkg;
+        # One home directory on both sides, so a PATH entry that spells it
+        # absolutely has one id.
+        homeDirectory = configuration.config.home.homeDirectory;
       };
       allowArgs = if allowlist == null then "" else "--allow ${allowlist}";
     in

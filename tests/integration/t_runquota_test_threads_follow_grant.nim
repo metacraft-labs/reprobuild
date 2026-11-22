@@ -19,12 +19,20 @@
 ##   grant, is kept as written.
 ##
 ## * bypass_shares_the_host: with no lease (``bypassRunQuota``), a sized
-##   action still gets a width, the host's cores shared among the actions
-##   the engine runs at once (``bypassWidthMilli``). Mutation: launch the
-##   declared argv under the bypass, as before 2026-11-15, and the binary
-##   receives no ``--test-threads`` and no ``RUNQUOTA_RUN_WIDTH`` -- for a
-##   Nim compile, no ``--parallelBuild``, so one C compiler per core per
-##   concurrent action (~250 ``cc1`` on a 32-core host in full run 53).
+##   action still gets a width, an equal share of the cores the running sized
+##   actions do not hold among the sized actions that launch together
+##   (``bypassWidthMilli``), so two that launch together hold no more than
+##   the host's cores between them. Mutation: launch the declared argv under
+##   the bypass, as before 2026-11-15, and the binary receives no
+##   ``--test-threads`` and no ``RUNQUOTA_RUN_WIDTH`` -- for a Nim compile,
+##   no ``--parallelBuild``, so one C compiler per core per concurrent action
+##   (~250 ``cc1`` on a 32-core host in full run 53).
+## * bypass_lone_action_takes_the_free_cores: a sized action that launches
+##   alone under the bypass runs at every core of the host. Mutation: the
+##   static share ``hostCores div maxParallelism`` of 2026-11-15, and it runs
+##   at half of them here -- in full run 54 the build's last action, the main
+##   ``reprobuild`` compile, ran alone at ``--parallelBuild:2`` on 32 cores
+##   for over 80 minutes.
 ##
 ## NO MOCKS, ONE FIXTURE: the "test binary" is this file's own executable in
 ## ``fixture-action`` mode. It records the argv and ``RUNQUOTA_RUN_WIDTH``
@@ -38,7 +46,7 @@
 # command line read by repro's generated parser.
 from repro_cli_support/runquota_helper_cli import runRunQuotaHelperArgs,
   selectsRunQuotaHelper
-import std/[os, osproc, streams, strutils, tempfiles, unittest]
+import std/[os, osproc, streams, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_runquota
@@ -167,43 +175,94 @@ suite "negotiated widths reach the test binary":
       check recorded("asked-less") == @["width=3", "--test-threads", "2",
         "--", "filter"]
 
-  test "bypass_shares_the_host: without a lease a sized action runs at " &
-      "its share of the host's cores":
-    check bypassWidthMilli(32, 12) == 2000'u32
-    check bypassWidthMilli(32, 8) == 4000'u32
-    check bypassWidthMilli(4, 12) == 1000'u32
-    check bypassWidthMilli(0, 0) == 1000'u32
-
-    let tempRoot = createTempDir("repro-widths-bypass", "")
+  proc bypassRecords(name: string; parallelism: int;
+                     actions: openArray[tuple[id: string; extra: seq[string];
+                                              deps: seq[string]]]):
+      Table[string, seq[string]] =
+    ## Runs ``actions`` under the bypass at ``parallelism`` and returns what
+    ## each recorded: ``width=<RUNQUOTA_RUN_WIDTH>`` and its argv.
+    let tempRoot = createTempDir(name, "")
     defer: removeDir(tempRoot)
     let workRoot = tempRoot / "work"
     createDir(workRoot)
     let app = getAppFilename()
-    proc testAction(id: string; extra: openArray[string]): BuildAction =
-      var argv = @[app, "fixture-action", "record", workRoot / (id & ".txt")]
-      argv.add extra
-      action(id, argv, cwd = workRoot, outputs = [id & ".txt"],
+    var graphActions: seq[BuildAction]
+    for spec in actions:
+      var argv = @[app, "fixture-action", "record",
+        workRoot / (spec.id & ".txt")]
+      argv.add spec.extra
+      var a = action(spec.id, argv, cwd = workRoot,
+        outputs = [spec.id & ".txt"],
         cpuMinMilli = 1000'u32, cpuPreferredMilli = 64000'u32,
-        widthFlag = "--test-threads", commandStatsId = id,
+        widthFlag = "--test-threads", commandStatsId = spec.id,
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
-    let parallelism = 2
-    let buildResult = runBuild(graph(@[
-        testAction("bypass-plain", ["--nocapture"]),
-        testAction("bypass-asked-less", ["--test-threads", "1"])], []),
-      BuildEngineConfig(
-        cacheRoot: tempRoot / ".repro-cache",
-        maxParallelism: uint32(parallelism),
-        stdoutLimit: 256 * 1024,
-        stderrLimit: 256 * 1024,
-        bypassRunQuota: true))
+      a.deps = spec.deps
+      graphActions.add a
+    let buildResult = runBuild(graph(graphActions, []), BuildEngineConfig(
+      cacheRoot: tempRoot / ".repro-cache",
+      maxParallelism: uint32(parallelism),
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      bypassRunQuota: true))
     for item in buildResult.results:
       checkpoint item.id & ": " & $item.status & " " & item.stderr
       check item.status == asSucceeded
-    let share = $(bypassWidthMilli(countProcessors(), parallelism) div 1000)
-    proc recorded(id: string): seq[string] =
-      readFile(workRoot / (id & ".txt")).strip().splitLines()
-    check recorded("bypass-plain") == @["width=" & share, "--nocapture",
-      "--test-threads", share]
+    for spec in actions:
+      result[spec.id] =
+        readFile(workRoot / (spec.id & ".txt")).strip().splitLines()
+
+  proc threadsOf(record: seq[string]): int =
+    let at = record.find("--test-threads")
+    if at < 0 or at + 1 >= record.len: return 0
+    parseInt(record[at + 1])
+
+  test "bypass_shares_the_host: without a lease a sized action runs at " &
+      "its share of the host's cores":
+    # The cores the running sized actions do not hold, shared among those
+    # that launch together; at least one slot.
+    check bypassWidthMilli(32, 0, 12) == 2000'u32
+    check bypassWidthMilli(32, 0, 8) == 4000'u32
+    check bypassWidthMilli(4, 0, 12) == 1000'u32
+    check bypassWidthMilli(0, 0, 0) == 1000'u32
+    # A lone action takes every free core.
+    check bypassWidthMilli(32, 0, 1) == 32000'u32
+    check bypassWidthMilli(32, 22, 1) == 10000'u32
+    check bypassWidthMilli(32, 2, 11) == 2000'u32
+    # The floor: a launch onto a host whose cores are all held still runs.
+    check bypassWidthMilli(32, 32, 1) == 1000'u32
+    check bypassWidthMilli(32, 40, 3) == 1000'u32
+
+    let cores = countProcessors()
+    let records = bypassRecords("repro-widths-bypass", 2, [
+      (id: "bypass-plain", extra: @["--nocapture"], deps: newSeq[string]()),
+      (id: "bypass-asked-less", extra: @["--test-threads", "1"],
+       deps: newSeq[string]())])
+    let plain = records["bypass-plain"]
+    let less = records["bypass-asked-less"]
+    checkpoint "cores=" & $cores & " plain=" & $plain & " less=" & $less
+    check plain.len == 4
+    check plain[0 .. 1] == @["width=" & plain[3], "--nocapture"]
+    check plain[2] == "--test-threads"
     # A width the command already asks for, within the share, is kept.
-    check recorded("bypass-asked-less") == @["width=" & share,
-      "--test-threads", "1"]
+    check less[1 .. 2] == @["--test-threads", "1"]
+    check less[0].startsWith("width=")
+    # Launched together, the two hold no more than the host's cores (when it
+    # has two to share); one launches first and holds at most half of them.
+    let plainThreads = threadsOf(plain)
+    check plainThreads >= 1
+    if cores >= 2:
+      check plainThreads + threadsOf(less) <= cores
+      check plainThreads >= cores div 2
+
+  test "bypass_lone_action_takes_the_free_cores: a sized action that " &
+      "launches alone under the bypass runs at every core":
+    let cores = countProcessors()
+    # Two in a chain at parallelism 4: each launches alone, the second after
+    # the first has been reaped and released its width.
+    let records = bypassRecords("repro-widths-lone", 4, [
+      (id: "lone-first", extra: @["--nocapture"], deps: newSeq[string]()),
+      (id: "lone-tail", extra: @["--nocapture"], deps: @["lone-first"])])
+    for id in ["lone-first", "lone-tail"]:
+      checkpoint id & ": " & $records[id]
+      check records[id] == @["width=" & $cores, "--nocapture",
+        "--test-threads", $cores]

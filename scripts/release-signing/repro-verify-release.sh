@@ -20,7 +20,7 @@
 #     || fail "signature verification failed; refusing to install"
 #
 # BEFORE it unpacks or executes anything it downloaded. This script
-# depends on nothing but a POSIX shell, `sha256sum` and `gpgv` (or
+# depends on nothing but a POSIX shell, `sha256sum` (or macOS's `shasum`) and `gpgv` (or
 # `gpg`) — deliberately, because a verifier that needs the payload it is
 # verifying has verified nothing.
 #
@@ -78,8 +78,15 @@ elif command -v gpg2 >/dev/null 2>&1; then
 else
   rv_fail 'no gpg/gpg2 on PATH and $REPRO_GPG_BIN unset. Refusing to install unverified bytes.'
 fi
-command -v sha256sum >/dev/null 2>&1 \
-  || rv_fail 'no sha256sum on PATH. Refusing to install unverified bytes.'
+# `sha256sum` where there is one; macOS ships `shasum` instead, which prints
+# the same "digest  name" line.
+if command -v sha256sum >/dev/null 2>&1; then
+  rv_sha256() { sha256sum "$1"; }
+elif command -v shasum >/dev/null 2>&1; then
+  rv_sha256() { shasum -a 256 "$1"; }
+else
+  rv_fail 'no sha256sum or shasum on PATH. Refusing to install unverified bytes.'
+fi
 
 # ── 1. Ephemeral keyring. ────────────────────────────────────────────
 #
@@ -193,7 +200,7 @@ for a in $artifacts; do
 
   # 4b. the bytes must be present and hash to it.
   [ -f "$dir/$a" ] || rv_fail "$a is listed in $RV_SUMS but not present in $dir"
-  actual="$(sha256sum "$dir/$a" | awk '{print $1}')"
+  actual="$(rv_sha256 "$dir/$a" | awk '{print $1}')"
   if [ "$actual" != "$line" ]; then
     rv_fail "$a digest mismatch: signed manifest says $line, downloaded bytes are $actual"
   fi

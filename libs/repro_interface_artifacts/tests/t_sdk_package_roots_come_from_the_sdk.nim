@@ -20,6 +20,14 @@
 ## `reproPackagePathFlags` and `protectSdkCompilePaths` with the interface
 ## extraction). The process environment is mutated, so this binary runs on
 ## its own.
+##
+## Option 2 of that issue: a root outside the SDK's own library roots that
+## provides a module the SDK vendors (an explicit `*_SRC` override, a sibling
+## or producer copy) is never reasserted, so the SDK's copy wins whenever both
+## are present. The last two tests pin it with the case the pre-push gate hit
+## (codetracer's flat copies of faststreams, stew and json-serialization
+## chosen as overrides), and with a control: an override of a package the SDK
+## does not vendor is still reasserted.
 
 import std/[os, strutils, tempfiles, unittest]
 
@@ -27,7 +35,7 @@ import repro_interface_artifacts
 
 const FamilyEnvVars = ["FASTSTREAMS_SRC", "NIM_STEW_SRC",
   "NIM_SERIALIZATION_SRC", "NIM_JSON_SERIALIZATION_SRC",
-  "NIM_TOML_SERIALIZATION_SRC"]
+  "NIM_TOML_SERIALIZATION_SRC", "REPRO_TEST_ADAPTERS_SRC"]
   ## The families' explicit overrides. An explicit value outranks every
   ## candidate by design, so the test clears them.
 
@@ -133,3 +141,33 @@ suite "the SDK's bootstrap packages are reasserted from the SDK":
     let command = providerCommand(workspace, consumer)
     check ("--path:" & consumer / "libs" / "nim-json-serialization" / "src") in
       command
+
+  test "an override of a package the SDK vendors is not reasserted":
+    # The pre-push gate's case: explicit overrides name codetracer's flat copies
+    # of three members of the serialization family. Reasserted, they went AHEAD
+    # of the SDK's copies, and `json_serialization` (codetracer's) was compiled
+    # against `serialization` (the SDK's): "Defect can raise an unlisted
+    # exception: Defect". Not reasserted, every member comes from the SDK.
+    let consumer = workspace / "codetracer"
+    makeFlatConsumerLibs(consumer)
+    putEnv("FASTSTREAMS_SRC", consumer / "libs" / "nim-faststreams")
+    putEnv("NIM_STEW_SRC", consumer / "libs" / "nim-stew")
+    putEnv("NIM_JSON_SERIALIZATION_SRC",
+      consumer / "libs" / "nim-json-serialization")
+    checkSdkOnly(workspace, consumer)
+    # The overrides are not dropped: they stay on the search path, behind the
+    # SDK's reasserted roots, for any module the SDK does not provide.
+    let command = providerCommand(workspace, consumer)
+    check ("--path:" & consumer / "libs" / "nim-json-serialization") in command
+
+  test "an override of a package the SDK does not vendor is still reasserted":
+    # The control: the rule removes only roots that shadow an SDK-vendored
+    # module name, so a bootstrap package the SDK does not carry (the test
+    # adapters, from a sibling checkout) is reasserted as before.
+    let consumer = workspace / "consumer"
+    let adapters = workspace / "reprobuild-test-adapters" / "src"
+    touch(adapters / "repro_test_adapters" / "test_runner.nim")
+    putEnv("REPRO_TEST_ADAPTERS_SRC", adapters)
+    let roots = reassertedRoots(providerCommand(workspace, consumer))
+    checkpoint("reasserted: " & roots.join(", "))
+    check adapters in roots

@@ -3485,6 +3485,20 @@ proc runHomeFacts(c: ReproCommandLineHomeFacts): int =
   if c.output.isSome and output.len == 0:
     stderr.writeLine("repro home facts: --output needs a file")
     return 2
+  # The host's real home, used only to name the PATH entries that spell it
+  # by its absolute path (`homeRelativePathEntry`): the Nix side names them
+  # against `home.homeDirectory`, so without it one directory would have two
+  # ids. Never read or written -- the plan runs against the private home
+  # below.
+  var hostHomeDir = ""
+  if c.homeDir.isSome:
+    hostHomeDir = c.homeDir.get
+    if hostHomeDir.len == 0 or not isAbsolute(hostHomeDir):
+      stderr.writeLine("repro home facts: --home-dir needs an absolute " &
+        "directory; got '" & hostHomeDir & "'")
+      return 2
+  else:
+    hostHomeDir = getHomeDir()
   # Without --target the facts are this machine's, so os-release says
   # whether it is NixOS (unless the flag does); for another target the flag
   # is the only source.
@@ -3573,7 +3587,7 @@ proc runHomeFacts(c: ReproCommandLineHomeFacts): int =
       storeRoot: storeRoot,
       homeDir: homeDir,
       preLoadedProfile: profile)
-    doc = collectHostFacts(opts, target)
+    doc = collectHostFacts(opts, target, hostHomeDir)
   except ENoProfile as e:
     printNoProfile(e); return 1
   except EFactNotStated as e:

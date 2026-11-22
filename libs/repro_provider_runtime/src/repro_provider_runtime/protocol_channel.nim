@@ -286,9 +286,20 @@ __attribute__((constructor)) static void repro_channel_constructor(void) {
     ## process was not started in serve mode, -1 on failure. Idempotent. The
     ## C constructor normally did the work already; this is the fallback for
     ## a C runtime that runs no constructors.
+    ##
+    ## A POSIX shared library (``--app:lib``, the provider-library form of
+    ## Typed-Extension-Interfaces) cannot read the command line from Nim:
+    ## ``std/cmdline``'s ``paramCount`` raises ``OSError`` there, by design
+    ## (https://nim-lang.org/docs/cmdline.html, "On Posix, there is no
+    ## portable way to get the command line from a DLL"). Calling it from
+    ## this module's initializer made every such library fail to load. The
+    ## library is never the process the engine starts with the serve flag;
+    ## it can only adopt a channel the executable already set up, which
+    ## the program name alone is enough for.
     var args = @[getAppFilename()]
-    for i in 1 .. paramCount():
-      args.add(paramStr(i))
+    when not (defined(posix) and appType == "lib"):
+      for i in 1 .. paramCount():
+        args.add(paramStr(i))
     let argv = allocCStringArray(args)
     defer: deallocCStringArray(argv)
     int(cEstablish(cint(args.len), argv))

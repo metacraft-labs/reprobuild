@@ -8435,6 +8435,16 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
   ## writes the refreshed evidence back so the next hit is a stat again.
   if not identity.toolIdentityRealizationsUsable():
     return (servable: false, refreshed: false)
+  # An identity resolved while a Nix compiler wrapper's libc was still
+  # followed as a propagated input carries that libc in its link channels.
+  # Re-resolve it rather than hand the libc to every compiler of the action.
+  # Only a Nix realization is checked: a from-source closure merges its
+  # dependencies' store paths, where a libc can be a dependency of its own.
+  for actionIdentity in identity.actionIdentities:
+    if actionIdentity.installMethod == "nix" and
+        nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
+          actionIdentity.selectedStorePath):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 
@@ -9694,6 +9704,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
     var mergedCmakePrefixDirs: seq[string] = @[]
     var mergedIncludeDirs: seq[string] = @[]
     var mergedLibDirs: seq[string] = @[]
+    var mergedCompilerLibcDirs: seq[string] = @[]
     var mergedPrefixVars: seq[(string, string)] = @[]
     var mergedReceipts: seq[string] = @[]
     for actionIdy in snapshot.actionIdentities:
@@ -9769,6 +9780,13 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
       for path in actionIdy.libraryPathList:
         if path.len > 0 and path notin mergedLibDirs:
           mergedLibDirs.add(path)
+      # The libc a Nix compiler wrapper of this realization records. It
+      # travels apart from ``libDirs``: it is for install normalization,
+      # and on the link channel it would reach every compiler the action
+      # runs, not only this wrapper (which passes it to its own linker).
+      for path in nixCompilerWrapperLibcDirs(actionIdy.realizedStorePaths):
+        if path notin mergedCompilerLibcDirs:
+          mergedCompilerLibcDirs.add(path)
       # A LIBRARY realization (it carries include or library dirs) names its
       # prefix to the consuming action as `DEP_<NAME>_PREFIX`
       # (Package-Model.md §"Environment-provided library prefixes"): the
@@ -9827,6 +9845,7 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         cmakePrefixDirs: mergedCmakePrefixDirs,
         includeDirs: mergedIncludeDirs,
         libDirs: mergedLibDirs,
+        compilerLibcDirs: mergedCompilerLibcDirs,
         nimPathDirs: nimPathDirs,
         prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
@@ -13197,6 +13216,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # catalog bin dirs to PATH, and bare-name argv entries fall through
   # to the host's existing PATH (the legacy pre-Batch-B behaviour).
   var pendingToolIdentityResolver: ToolIdentityResolver = nil
+  # The tool uses whose tarball records may declare a post-extraction step,
+  # set once tool identities are resolved (below). Before the graph runs,
+  # each such step is checked against the graph's outputs
+  # (``refuseStepDeclarationsUnderGraphOutputs``); on the early cache-warm
+  # fast path it is still empty and nothing is checked there.
+  var pendingStepToolUses: seq[InterfaceToolUse]
   var effectiveSelectDefaultAction = selectDefaultAction
   let ownsFromSourceDryRunPlan =
     dryRun and mode == tpmFromSource and fromSourceBuildStack.len == 0
@@ -13486,6 +13511,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
+      # A tool prefix built by a step must not have read a graph output;
+      # the outputs are first known here, before any graph action runs.
+      refuseStepDeclarationsUnderGraphOutputs(pendingStepToolUses,
+        graphOutputPaths(scheduledActions))
       if substituteMaterialized:
         buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
       elif publishMaterialized:
@@ -14728,6 +14757,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     pendingToolIdentityResolver =
       if materializedOnly: nil
       else: mkToolIdentityResolver(identity, result.projectRoot)
+    if not materializedOnly:
+      pendingStepToolUses = buildArtifact.projectInterface.toolUses &
+        buildArtifact.projectInterface.runtimeToolUses
     if materializedOnly:
       logSummary("repro build: materialized " &
         (if substituteMaterialized: "substitution" else: "publication") &
@@ -15306,6 +15338,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
+      # A tool prefix built by a step must not have read a graph output;
+      # the outputs are first known here, before any graph action runs.
+      refuseStepDeclarationsUnderGraphOutputs(pendingStepToolUses,
+        graphOutputPaths(scheduledActions))
       if substituteMaterialized:
         buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
       elif publishMaterialized:
@@ -21903,7 +21939,70 @@ proc nativePosixHookContent(shell: NativeShellKind): string =
     result.add("add-zsh-hook chpwd __repro_native_shell_hook\n")
   else:
     discard
-  result.add("__repro_native_shell_hook\n")
+  # The shell's start-up activation. Where direnv is installed but its hook
+  # is not loaded yet (the rc file loads it after this block), activating
+  # now would run before direnv could export DIRENV_DIR, and direnv would
+  # then load the same directory on top at the first prompt: two
+  # activations. So the start-up run waits for the first prompt, the point
+  # where direnv itself acts (the code `direnv hook bash|zsh` prints puts
+  # `_direnv_hook` in bash's PROMPT_COMMAND and zsh's precmd_functions; the
+  # rc lines that load it: https://direnv.net/docs/hook.html), and where
+  # the hook calls direnv first. Where direnv is not installed, or
+  # its hook is already loaded, the block activates at once, as before.
+  # "Already loaded" is the test the hook itself uses before calling direnv:
+  # the function direnv's hook code defines in the same `eval` that
+  # registers it (`_direnv_hook` for bash and zsh, `__direnv_export_eval`,
+  # itself the `fish_prompt` handler, for fish), per direnv's hook sources
+  # https://github.com/direnv/direnv/blob/v2.37.1/internal/cmd/shell_bash.go,
+  # https://github.com/direnv/direnv/blob/v2.37.1/internal/cmd/shell_zsh.go and
+  # https://github.com/direnv/direnv/blob/v2.37.1/internal/cmd/shell_fish.go.
+  case shell
+  of nskZsh:
+    result.add("__repro_native_shell_start() {\n")
+    result.add("  add-zsh-hook -d precmd __repro_native_shell_start\n")
+    result.add("  __repro_native_shell_hook\n")
+    result.add("}\n")
+    result.add("if (( ${+functions[_direnv_hook]} )) || ! command -v direnv >/dev/null 2>&1; then\n")
+    result.add("  __repro_native_shell_hook\n")
+    result.add("else\n")
+    result.add("  add-zsh-hook precmd __repro_native_shell_start\n")
+    result.add("fi\n")
+  else:
+    # bash has no hook registry. The start function is added to
+    # PROMPT_COMMAND the way direnv adds `_direnv_hook`, for a scalar or an
+    # array PROMPT_COMMAND (bash 5.1 and later accept both), and on its
+    # first run it takes its own entry out again, leaving every other entry
+    # as it was. bash runs a copy of PROMPT_COMMAND (`execute_prompt_command`
+    # in bash's eval.c), so editing it from inside is safe. Where another
+    # tool has rewritten PROMPT_COMMAND so that the entry no longer stands
+    # on its own (bash-preexec joins entries with newlines), the entry is
+    # left there, and the guard variable makes every later run a no-op.
+    result.add("__repro_native_shell_start() {\n")
+    result.add("  if [ -n \"${__repro_native_shell_started:-}\" ]; then return 0; fi\n")
+    result.add("  __repro_native_shell_started=1\n")
+    result.add("  if [[ \"$(declare -p PROMPT_COMMAND 2>&1)\" == \"declare -a\"* ]]; then\n")
+    result.add("    local __repro_native_pc=() __repro_native_cmd\n")
+    result.add("    for __repro_native_cmd in \"${PROMPT_COMMAND[@]}\"; do\n")
+    result.add("      if [ \"$__repro_native_cmd\" != __repro_native_shell_start ]; then __repro_native_pc+=(\"$__repro_native_cmd\"); fi\n")
+    result.add("    done\n")
+    result.add("    PROMPT_COMMAND=(\"${__repro_native_pc[@]}\")\n")
+    result.add("  else\n")
+    result.add("    local __repro_native_pc=\";${PROMPT_COMMAND:-};\"\n")
+    result.add("    __repro_native_pc=\"${__repro_native_pc//;__repro_native_shell_start;/;}\"\n")
+    result.add("    __repro_native_pc=\"${__repro_native_pc#;}\"\n")
+    result.add("    PROMPT_COMMAND=\"${__repro_native_pc%;}\"\n")
+    result.add("  fi\n")
+    result.add("  __repro_native_shell_hook\n")
+    result.add("}\n")
+    result.add("if declare -F _direnv_hook >/dev/null 2>&1 || ! command -v direnv >/dev/null 2>&1; then\n")
+    result.add("  __repro_native_shell_hook\n")
+    result.add("elif [[ \";${PROMPT_COMMAND[*]:-};\" != *\";__repro_native_shell_start;\"* ]]; then\n")
+    result.add("  if [[ \"$(declare -p PROMPT_COMMAND 2>&1)\" == \"declare -a\"* ]]; then\n")
+    result.add("    PROMPT_COMMAND=(\"${PROMPT_COMMAND[@]}\" __repro_native_shell_start)\n")
+    result.add("  else\n")
+    result.add("    PROMPT_COMMAND=\"${PROMPT_COMMAND:+$PROMPT_COMMAND;}__repro_native_shell_start\"\n")
+    result.add("  fi\n")
+    result.add("fi\n")
 
 proc nativeFishHookContent(): string =
   result = "# Generated by repro hooks ensure --shell fish. Do not edit this block.\n"
@@ -21941,7 +22040,17 @@ proc nativeFishHookContent(): string =
   result.add("  set -e " & NativeShellActivationGuard & "\n")
   result.add("  return $__repro_native_status\n")
   result.add("end\n")
-  result.add("__repro_native_shell_hook\n")
+  # The start-up activation waits for the first prompt where direnv is
+  # installed but its hook is not loaded yet (see the POSIX template):
+  # `direnv hook fish` defines `__direnv_export_eval --on-event fish_prompt`.
+  result.add("if functions -q __direnv_export_eval; or not command -q direnv\n")
+  result.add("  __repro_native_shell_hook\n")
+  result.add("else\n")
+  result.add("  function __repro_native_shell_start --on-event fish_prompt\n")
+  result.add("    functions -e __repro_native_shell_start\n")
+  result.add("    __repro_native_shell_hook\n")
+  result.add("  end\n")
+  result.add("end\n")
 
 proc nativePowerShellHookContent(): string =
   result = "# Generated by repro hooks ensure --shell powershell. Do not edit this block.\n"
@@ -23020,7 +23129,7 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   result.add("    printf '%s\\n' \"repro hooks: re-enter this repository's " &
     "dev shell so its hook installer writes " & hookName &
     ".repro-local again, or delete " &
-    "$LOCAL_HOOK if nothing installs the " & hookName & " stage any more. " &
+    "$(repro_remedy_word \"$LOCAL_HOOK\") if nothing installs the " & hookName & " stage any more. " &
     "\\`$(repro_remedy_word \"$REPRO_REMEDY_CMD\") health\\` lists every " &
     "such hook.\" >&2\n")
   result.add("  fi\n")
@@ -24986,8 +25095,8 @@ proc ensureVcsHookDetailed(hooksDir, hookName: string;
             " already holds a different preserved hook. Reconcile them by " &
             "hand: merge the checks you want into " & local &
             " (which the dispatcher runs first), delete " & standard &
-            ", then re-run 'repro hooks ensure --vcs " &
-            remedyPathWord(parentDir(parentDir(hooksDir))) & "'.")
+            ", then re-run `repro hooks ensure --vcs " &
+            remedyPathWord(parentDir(parentDir(hooksDir))) & "`.")
     else:
       moveFileReplacing(standard, local)
       ensureExecutable(local)
@@ -27136,6 +27245,44 @@ proc findRunQuotaDaemonBin*(): string =
     return cwdSibling
   result = ""
 
+var invocationRunQuotaDaemonBin {.threadvar.}: string
+  ## The last `runquotad` this process's auto-start found (see
+  ## `invocationRunQuotaDaemonBinFor`).
+
+proc invocationRunQuotaDaemonBinFor*(found: string): string =
+  ## The daemon this invocation's auto-start uses, given `found`, what
+  ## `findRunQuotaDaemonBin` answered just now.
+  ##
+  ## One invocation runs the auto-start more than once: `repro test` and
+  ## `repro build` prepare the dev env (one adopt-or-start, released when the
+  ## preparation ends) and then open the build's own session (another). The
+  ## first runs under the caller's `PATH`; the second can run after the
+  ## preparation has changed this process's environment, and the search then
+  ## missed the install's `runquotad` the first search had found and the
+  ## handover had digested. A daemon from another build, adopted by the
+  ## first and retiring once this invocation let go of it, was then gone
+  ## with nothing to start in its place: "runquota daemon unreachable and
+  ## bypass is disabled" (reprobuild-pm issue 2026-11-21,
+  ## `repro-test-on-a-long-lived-runner-adopts-a-retiring-runquotad-...`).
+  ##
+  ## So a fresh answer always wins and is remembered, and an empty one falls
+  ## back to the remembered daemon while it is still an executable file. A
+  ## search that finds nothing therefore never forgets a daemon this
+  ## invocation already named, and one that finds something (an operator's
+  ## `RUNQUOTAD_BIN`, a changed `PATH`) is never overridden by it.
+  if found.len > 0:
+    invocationRunQuotaDaemonBin = found
+    return found
+  if invocationRunQuotaDaemonBin.len > 0 and
+      executableFile(invocationRunQuotaDaemonBin):
+    return invocationRunQuotaDaemonBin
+  ""
+
+proc resetInvocationRunQuotaDaemonBin*() =
+  ## Forget the remembered daemon. For tests that drive several auto-starts
+  ## in one process under different discovery environments.
+  invocationRunQuotaDaemonBin = ""
+
 const
   ## Compatibility inventory of operational variables historically forwarded
   ## from the user-facing CLI into the daemon-hosted build executor. Request
@@ -27964,9 +28111,9 @@ when defined(windows):
       # before, and is told why. See `decideRunQuotaHandover` and
       # reprobuild-specs/RunQuota-Host-Configuration.md, "A daemon from
       # another build makes way".
-      let candidate =
+      let candidate = invocationRunQuotaDaemonBinFor(
         try: findRunQuotaDaemonBin()
-        except OSError: ""
+        except OSError: "")
       let report = decideRunQuotaHandover(candidate)
       if report.note.len > 0:
         stderr.writeLine("repro: note: " & report.note)
@@ -28054,7 +28201,7 @@ when defined(windows):
         # (``isRunQuotaDaemonReachable`` already returned false to get
         # us here); unchanged from before this fix.
         discard
-    let runquotad = findRunQuotaDaemonBin()
+    let runquotad = invocationRunQuotaDaemonBinFor(findRunQuotaDaemonBin())
     if runquotad.len == 0:
       # No daemon binary discovered. Return nil silently — downstream
       # ``tryEnsureInlineRunQuotaSession`` will probe ``connectDefault``,
@@ -28228,10 +28375,11 @@ proc startAutoRunQuotaIfNeeded*(bypassRunQuota: bool): owned(Process) =
     # filesystem and the effective uid; a malformed
     # `RUNQUOTA_USER_ENDPOINT_DIR` raises here.
     let userSocket = userEndpoint().path
-    # Found once, used as the handover's candidate and as what is started.
-    let runquotad =
+    # Found once, used as the handover's candidate and as what is started,
+    # and remembered for this invocation's later auto-starts.
+    let runquotad = invocationRunQuotaDaemonBinFor(
       try: findRunQuotaDaemonBin()
-      except OSError: ""
+      except OSError: "")
     if inheritedSocket.len > 0 and inheritedSocket == userSocket:
       return adoptOrStartUserRunQuota(runquotad)
     if getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private":
@@ -57768,9 +57916,9 @@ proc pushLockRef(identity: GitToolIdentity; repoRoot: string;
     return (1, err.msg)
   let hook = effectivePrePushHook(identity, repoRoot)
   if hook.kind == ephReproIncompatible:
-    return (1, hook.diagnostic & "; run '" &
+    return (1, hook.diagnostic & "; run `" &
       remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "'")
+      remedyPathWord(repoRoot) & "`")
   var capability = ""
   if hook.kind == ephReproV2:
     let location = configuredPushLocation(identity, repoRoot, target.remote)
@@ -58253,8 +58401,8 @@ proc publishedLockKeyCollision(identity: GitToolIdentity; repoRoot,
         localBlob.output.strip() & "); published records are immutable and " &
         "this one is not rewritten. Two sources disagree about the " &
         "workspace state at that commit — bring this store up to date " &
-        "('git -C " & remedyPathWord(repoRoot) &
-        " pull --ff-only') and re-read the " &
+        "(`git -C " & remedyPathWord(repoRoot) &
+        " pull --ff-only`) and re-read the " &
         "published record before deciding which answer is right"
   ""
 
@@ -58824,8 +58972,8 @@ proc publishWorkspaceLock*(identity: GitToolIdentity;
     result.diagnostic =
       "lock record(s) missing from the manifest working tree (" &
         vanishedRecords.join(", ") &
-        "); lock records are immutable — restore them with 'git -C " &
-        remedyPathWord(manifestRepoRoot) & " checkout -- locks' and re-run"
+        "); lock records are immutable — restore them with `git -C " &
+        remedyPathWord(manifestRepoRoot) & " checkout -- locks` and re-run"
     return
 
   # Collect the staged lock paths and reject empty/zero-byte locks.
@@ -69913,8 +70061,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     if displaced:
       stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running " &
         "as pre-commit.legacy under another hook manager, so this gate " &
-        "cannot refuse. Restore it with 'repro hooks ensure --vcs " &
-        remedyPathWord(repoRoot) & "'")
+        "cannot refuse. Restore it with `repro hooks ensure --vcs " &
+        remedyPathWord(repoRoot) & "`")
       return 0
     stderr.writeLine(prefix & "the commit is REFUSED: the certificate " &
       "policy this commit carries cannot be read. This is early feedback, " &
@@ -70040,8 +70188,8 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
     stderr.writeLine(prefix & "ADVISORY: the hook dispatcher is running as " &
       "pre-commit.legacy under another hook manager, whose hooks run after " &
       "this gate and may still change the index, so this gate cannot refuse. " &
-      "Restore it with 'repro hooks ensure --vcs " &
-      remedyPathWord(repoRoot) & "'")
+      "Restore it with `repro hooks ensure --vcs " &
+      remedyPathWord(repoRoot) & "`")
   if refuses:
     stderr.writeLine(prefix & "the commit is REFUSED (commit_gate = " &
       "required). This is early feedback, which `git commit " &
@@ -73756,8 +73904,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
           "from this checkout); this checkout is not one the workspace " &
           "gates or locks"
       else:
-        "run 'repro hooks ensure --vcs " &
-          remedyPathWord(parsed.currentRepo) & "' from a checkout declared by this workspace, or repair the " &
+        "run `repro hooks ensure --vcs " &
+          remedyPathWord(parsed.currentRepo) & "` from a checkout declared by this workspace, or repair the " &
           "workspace membership before retrying the push"
     result.failures.add(CheckFailure(
       repo: "",
@@ -73910,8 +74058,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: parsed.currentRepo,
         property: "membership-push-scope",
         remediation: "make the pushed commits readable in " &
-          remedyProsePath(parsed.currentRepo) & " (run 'git -C " &
-          remedyPathWord(parsed.currentRepo) & " fsck' and fetch the remote), then retry the push — the gate " &
+          remedyProsePath(parsed.currentRepo) & " (run `git -C " &
+          remedyPathWord(parsed.currentRepo) & " fsck` and fetch the remote), then retry the push — the gate " &
           "cannot tell which repos this manifest push re-pins without them",
         evidence: membership.diagnostic))
       result.exitCode = 2
@@ -74341,9 +74489,9 @@ proc executeCheckPrePush(parsed: CheckArgs;
         # Principle 2: name the offender AND a copy-pasteable command.
         remediation: "commit or stash changes in " &
           remedyProsePath(obs.path) &
-          " — run 'git -C " & remedyPathWord(obs.path) &
-          " commit -a' (or 'git -C " & remedyPathWord(obs.path) &
-          " stash') then 'repro push'",
+          " — run `git -C " & remedyPathWord(obs.path) &
+          " commit -a` (or `git -C " & remedyPathWord(obs.path) &
+          " stash`) then 'repro push'",
         evidence: evidence))
       result.exitCode = 2
 
@@ -74593,12 +74741,12 @@ proc executeCheckPrePush(parsed: CheckArgs;
         result.failures.add(CheckFailure(
           repo: repoLabel,
           property: "history-rewrite-unverifiable",
-          remediation: "run 'git -C " & remedyPathWord(parsed.currentRepo) &
+          remediation: "run `git -C " & remedyPathWord(parsed.currentRepo) &
             " fetch " &
             (if outgoing.remoteName.len > 0:
                quoteShellPosix(outgoing.remoteName)
              else: "<remote>") & " " &
-            quoteShellPosix(pushedBranch) & "' so the commits this update " &
+            quoteShellPosix(pushedBranch) & "` so the commits this update " &
             "would replace are present locally, then retry the push — HEAD " &
             outgoing.headOid & " is publishable; this is refused only because " &
             "the gate cannot see what the update would discard",
@@ -76429,8 +76577,8 @@ proc protocolV2HookReady(identity: GitToolIdentity; repoRoot: string):
       of ephReproIncompatible: hook.diagnostic
       of ephThirdParty: "effective pre-push hook is not Reprobuild protocol v2"
       of ephReproV2: ""
-    return (false, reason & "; run '" & remedyPathWord(publicCliImagePath()) &
-      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "'")
+    return (false, reason & "; run `" & remedyPathWord(publicCliImagePath()) &
+      " hooks ensure --vcs " & remedyPathWord(repoRoot) & "`")
   let hookCli = resolveHookReproCli(repoRoot)
   if hookCli.len == 0:
     return (false, "the hook-resolved repro executable is unavailable; run `" &
@@ -78427,9 +78575,9 @@ proc executePush(args: PushArgs): PushReport =
       options = {poStdErrToStdOut, poUsePath}, env = scrubbedGitChildEnv())
     if probe.exitCode != 0 or probe.output.strip() != "2":
       let remedy = "set REPROBUILD_REPRO=" &
-        remedyPathWord(publicCliImagePath()) & " (or update PATH), run '" &
+        remedyPathWord(publicCliImagePath()) & " (or update PATH), run `" &
         remedyPathWord(publicCliImagePath()) & " hooks ensure --vcs " &
-        remedyPathWord(repoAbs) & "', then retry 'repro push'"
+        remedyPathWord(repoAbs) & "`, then retry 'repro push'"
       result.repos.add(PushRepoResult(name: name, path: byName[name].path,
         branch: preflight[name].branch, headSha: preflight[name].headSha,
         outcome: proFailed,

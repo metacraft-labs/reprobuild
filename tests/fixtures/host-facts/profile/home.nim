@@ -18,3 +18,10 @@ profile "gm6Equivalence":
   resources:
     fsUserFile(hostFile = "~/.config/gm6/app.conf", content = "answer = 42\n")
     envUserVariable(name = "GM6_EDITOR", value = "nvim")
+    # The host's home spelled by its absolute path: `repro home facts
+    # --home-dir` (the configuration's `home.homeDirectory`) names it
+    # `~/.local/bin`, as Home Manager names its `$HOME/.local/bin`.
+    when linux():
+      envUserPath(entries = "/home/gm6/.local/bin")
+    when macos():
+      envUserPath(entries = "/Users/gm6/.local/bin")

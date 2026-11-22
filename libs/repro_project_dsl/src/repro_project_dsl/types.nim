@@ -1159,6 +1159,31 @@ type
       ## set when the def is rebuilt from a published artifact, whose
       ## consumer has no such file (envelope v34). Realization prefers these
       ## to the file.
+    gemClosure*: string
+      ## Recipe-relative path to a committed, GENERATED gem-closure manifest
+      ## (one ``<name> <version> <platform> <sha256> <url>`` line per gem, in
+      ## install order). A post-extraction step installs exactly those gems,
+      ## each verified against its SHA-256, offline, with the realized
+      ## prefix's own Ruby, into the prefix's default gem directory; native
+      ## extensions are compiled with ``gemBuildUses``. Resolved like
+      ## ``closureManifest``. The step's identity (the manifest's content,
+      ## the build arguments, the step contract and the build tools' own
+      ## identities) keys the realized prefix, so the prefix is shared
+      ## through the binary cache like any other.
+    gemBuildUses*: seq[string]
+      ## Package selectors the gem step compiles native extensions with: the
+      ## C toolchain, the MSYS root, pkg-config and the C libraries. Each is
+      ## provisioned by its own edge before the step runs, never found on
+      ## PATH. Written as a list literal, ``gemBuildUses = @["gcc", ...]``.
+    gemBuildArgs*: seq[(string, seq[string])]
+      ## Per-gem extconf arguments, ``gem install ... -- <args>``. An argument
+      ## may name the realized prefix of a ``gemBuildUses`` package as
+      ## ``$REPRO_PREFIX_<NAME>`` (``libxml2-dev`` -> ``LIBXML2_DEV``) and
+      ## nothing else. Written as ``gemBuildArgs = @[("nokogiri", @[...])]``.
+    gemSubstitutions*: seq[string]
+      ## Gems whose prebuilt platform gem the manifest may name instead of
+      ## the source gem: an explicit, reviewed list. nokogiri may never
+      ## appear on it.
     stripComponents*: int
     packageId*: string
     lockIdentity*: string
