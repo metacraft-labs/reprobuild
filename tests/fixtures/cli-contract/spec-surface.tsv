@@ -2528,3 +2528,6 @@ flag	repro tool realize	--project
 flag	repro tool realize	--tool-provisioning
 flag	repro tool realize	--tool-provisioning-for
 env	repro tool realize	REPRO_TOOL_PROVISIONING
+command	repro nimble check
+flag	repro nimble check	--lock
+flag	repro nimble check	--store
