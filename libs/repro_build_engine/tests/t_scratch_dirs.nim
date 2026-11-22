@@ -84,6 +84,41 @@ suite "scratch directories":
     check left == 0
     check readFile(outside / "keep.txt") == "not scratch"
 
+  test "one that is itself a link to the cwd is unlinked, not emptied through":
+    # `scratchDirProblem` judges the ENTRY a scratch directory names, and a
+    # link to the cwd is a different entry from the cwd, so it is accepted.
+    # That is safe only if emptying it removes the link. Emptying it through
+    # the link (listing what the link resolves to) emptied the working
+    # directory: the files below were gone and the reset then failed.
+    let root = createTempDir("repro-scratch-self-link-", "")
+    defer: removeDir(root)
+    let work = root / "work"
+    createDir(work / "src")
+    writeFile(work / "src" / "in.txt", "input\n")
+    writeFile(work / "kept.txt", "kept\n")
+    let link = root / "alias"
+    when defined(windows):
+      require execShellCmd("cmd /c mklink /J \"" & link & "\" \"" &
+        work & "\" > NUL") == 0
+    else:
+      createSymlink(work, link)
+    var a = action("scratch/self-link", ["tool"], cwd = work,
+      inputs = ["src/in.txt"],
+      weakFingerprint = weakFingerprintFromText("scratch.self-link"),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    a.scratchDirs = @["../alias"]
+    check scratchDirProblem(a) == ""
+    check resetScratchDirs(a) == ""
+    check readFile(work / "kept.txt") == "kept\n"
+    check readFile(work / "src" / "in.txt") == "input\n"
+    # The link is replaced by an empty directory of its own.
+    check not symlinkExists(link)
+    check dirExists(link)
+    var left = 0
+    for _ in walkDir(link):
+      inc left
+    check left == 0
+
   test "nothing observed under one is evidence":
     var a = action("scratch/evidence", ["tool"], cwd = "/proj",
       weakFingerprint = weakFingerprintFromText("scratch.evidence"),
@@ -130,6 +165,40 @@ suite "scratch directories":
     check "cwd" in scratchDirProblem(a)
     a.scratchDirs = @["/home"]
     check scratchDirProblem(a).len > 0
+
+  test "one named through a parent walk is judged by the directory it empties":
+    # `resetScratchDirs` empties the directory the spelling REACHES, so
+    # `../work` under a cwd `<T>/work` empties the cwd and a walk far enough
+    # up empties `/`. Neither spelling starts with the cwd's or is short, so
+    # a check that compares spellings accepted both. Only the refusal is
+    # asked for here: nothing is emptied.
+    let root = createTempDir("repro-scratch-walk-", "")
+    defer: removeDir(root)
+    let work = root / "work"
+    createDir(work / "src")
+    writeFile(work / "src" / "in.txt", "input\n")
+    createDir(root / "other")
+    var a = action("scratch/walk", ["tool"], cwd = work,
+      inputs = ["src/in.txt"],
+      weakFingerprint = weakFingerprintFromText("scratch.walk"),
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    a.scratchDirs = @["../work"]
+    check "contains the action's cwd" in scratchDirProblem(a)
+    a.scratchDirs = @["../work/src"]
+    check "declared input" in scratchDirProblem(a)
+    a.scratchDirs = @["src/../src"]
+    check "declared input" in scratchDirProblem(a)
+    var up = ""
+    for _ in 0 .. work.count('/'):
+      up.add("../")
+    a.scratchDirs = @[up & ".."]
+    check "too close to a filesystem root" in scratchDirProblem(a)
+    # Controls: a sibling of the cwd, and a directory inside it, reached
+    # through a walk.
+    a.scratchDirs = @["../other"]
+    check scratchDirProblem(a) == ""
+    a.scratchDirs = @["../work/tmp"]
+    check scratchDirProblem(a) == ""
 
   test "a parent walk through a scratch symlink keeps external evidence":
     let root = createTempDir("repro-scratch-parent-", "")

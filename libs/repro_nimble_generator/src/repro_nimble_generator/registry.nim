@@ -35,6 +35,17 @@ proc printable(s: string): bool =
     if ord(c) < 0x21 or ord(c) > 0x7e: return false
   true
 
+const UnspellableNameChars* = {'.', '/', ':'}
+  ## What a package name after `nimble:` cannot hold (NPC-AREQ3): `.` and
+  ## `/` are the grammar's own separators, and `:` the namespace's.
+
+proc unspellableNameChar*(name: string): char =
+  ## The first character of ``name`` that `nimble:<name>` cannot spell, or
+  ## `\0` when there is none.
+  for c in name:
+    if c in UnspellableNameChars: return c
+  '\0'
+
 proc parseRegistry*(bytes: string): Registry =
   ## Read `packages.json`. Raises `ValueError` when it is not a JSON array.
   if bytes.len > MaxRegistryBytes:
@@ -52,6 +63,14 @@ proc parseRegistry*(bytes: string): Registry =
     if not printable(name) or name.len > MaxNameBytes:
       result.skipped.add ((if name.len > 0: name else: $i),
         "the name is empty, too long, or not printable ASCII")
+      continue
+    let unspellable = unspellableNameChar(name)
+    if unspellable != '\0':
+      # NPC-AREQ3: `uses:` spells a catalog package `nimble:<name>`, and the
+      # package-name grammar after the namespace cannot hold these.
+      result.skipped.add (name, "the name holds " & ($unspellable).escape() &
+        ", which `nimble:<name>` cannot spell (a package name holds no " &
+        "`.`, `/` or `:`)")
       continue
     let k = nameKey(name)
     if k in byKey:

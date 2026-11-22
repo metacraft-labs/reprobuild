@@ -58,6 +58,9 @@ type
     input*: NimbleSolverInput
     notes*: seq[string] ## a rewind ``--allow-rewind`` accepted
     shardsRead*: int ## shards the closure read (NPC-AREQ29 claim 1)
+    incumbentVersions*: Table[string, string]
+      ## `nimble:<name>` -> the version the existing lock row records, for
+      ## the moves a refresh reports (``applyNimbleRows``)
 
 proc nimbleError(msg: string) {.noreturn.} =
   raise newException(NimbleLockError, msg)
@@ -155,6 +158,8 @@ proc prepareNimbleSolve*(projectRoot: string; packages: var seq[PackageDecl];
   for d in incumbentRows:
     if d.isNimbleDep and d.catalog == result.index.repo:
       accepted[nameKey(nimbleNameOf(d.name))] = d.coordinates.url
+    if d.isNimbleDep:
+      result.incumbentVersions[d.name] = d.version
   # The project's `nim` toolchain package, when the solve declares one: its
   # candidates decide the records' Nim-version conditions (NPC-AREQ7).
   var hasNim = false
@@ -188,11 +193,29 @@ proc nimbleFailureText*(setup: NimbleSolveSetup): string =
   if not setup.active: ""
   else: explainNimbleFailure(setup.input, indexLabel(setup.index))
 
+proc snapshotMove*(oldVersion, newVersion: string): string =
+  ## What a lock row's move from a snapshot is (NPC-AREQ31 item 5):
+  ## `snapshot superseded` for a newer snapshot (by date, then commit),
+  ## `snapshot retired` for a tag version, which every snapshot sorts
+  ## below; "" for any other move.
+  var od, nd: uint64
+  var oc, nc: string
+  if not parseSnapshotVersionText(oldVersion, od, oc):
+    return ""
+  if parseSnapshotVersionText(newVersion, nd, nc):
+    if nd > od or (nd == od and nc > oc): "snapshot superseded"
+    else: ""
+  elif newVersion.len > 0 and not newVersion.startsWith("#"):
+    "snapshot retired"
+  else: ""
+
 proc applyNimbleRows*(setup: NimbleSolveSetup; document: string):
-    tuple[document: string; refusals: seq[string]] =
+    tuple[document: string; refusals: seq[string]; moves: seq[string]] =
   ## The solved lock ``document`` with one `LockedDep` per chosen Nimble
   ## package (see the module header), or the refusals -- a top-level module
-  ## two chosen packages export -- with ``document`` unchanged.
+  ## two chosen packages export -- with ``document`` unchanged. ``moves``
+  ## names each row that moves from a snapshot (NPC-AREQ31 item 5), as
+  ## `nimble:<name> <old> -> <new> (snapshot superseded|retired)`.
   result.document = document
   if not setup.active:
     return
@@ -216,6 +239,12 @@ proc applyNimbleRows*(setup: NimbleSolveSetup; document: string):
       subdir: c.origin.subdir, commit: c.record.commit, tree: $c.record.tree)
     var dep = lockedDepOf(row)
     dep.version = c.version
+    let before = setup.incumbentVersions.getOrDefault(c.identity)
+    if before.len > 0 and before != c.version:
+      let move = snapshotMove(before, c.version)
+      if move.len > 0:
+        result.moves.add c.identity & " " & before & " -> " & c.version &
+          " (" & move & ")"
     dep.depends = c.depends
     dep.catalog = setup.index.repo
     dep.visibility = "public"
@@ -668,7 +697,9 @@ proc nimbleLockDiff*(oldText, newText, anchor: string; now: int64):
       let x = newRows[n]
       var parts: seq[string]
       if o.version != x.version:
-        parts.add "version " & o.version & " -> " & x.version
+        let move = snapshotMove(o.version, x.version)
+        parts.add "version " & o.version & " -> " & x.version &
+          (if move.len > 0: " (" & move & ")" else: "")
       if o.coordinates.revision != x.coordinates.revision:
         parts.add "commit " & o.coordinates.revision & " -> " &
           x.coordinates.revision

@@ -36,17 +36,21 @@
 ## deferred to a follow-on milestone.
 ##
 ## M18 lands the headline perf goal (the eager subprocess no longer fires
-## on every ``repro build``) via a pragmatic fingerprint sidecar in
-## ``conventions/emit_cache.nim``: ``runNimCompileOnly`` hashes the
-## ``.nim`` source set + the entry source + the ``--app:lib`` toggle +
-## the nim driver path + the project config files and ``.nimble``
-## (``nimPhase1KeyFiles``), compares against
-## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint``, and skips
+## on every ``repro build``) via a fingerprint sidecar in
+## ``conventions/emit_cache.nim``. The eager run is monitored, and
+## ``runNimCompileOnly`` keys it on the ``.nim`` source set, the entry
+## source, the ``--app:lib`` toggle, the nim driver, the project config
+## files and ``.nimble`` (``nimPhase1KeyFiles``), and on what the previous
+## run was observed to read (files, absent paths it looked for, directory
+## scans, environment variables; ``conventions/observed_reads.nim``). It
+## compares the key against
+## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint`` and skips
 ## the subprocess on a match (the previous run's manifest is reused),
 ## provided every file that manifest's ``depfiles`` array lists still has
-## the hash Nim recorded for it (``nimManifestDepfilesAreCurrent``).
-## This keeps a static-graph emit shape while making cold-snapshot
-## re-emits cheap when the source set is unchanged.
+## the hash Nim recorded for it (``nimManifestDepfilesAreCurrent``). The
+## same reads are the fragment's evaluation inputs. This keeps a
+## static-graph emit shape while making cold-snapshot re-emits cheap when
+## nothing Phase 1 read has changed.
 ##
 ## The eager ``nim c`` run also doubles as the Phase 1 action: we encode
 ## the *same* command line into the inline-exec call so the engine's
@@ -74,13 +78,14 @@
 ##     compiler's default on Linux/MinGW. M3+ should consult ``uses:``
 ##     for ``msvc``/``clang`` pins and pick the matching compiler driver.
 
-import std/[algorithm, json, options, os, osproc, sha1, strutils, tables]
+import std/[algorithm, json, options, os, osproc, sha1, strutils, tables, times]
 
 import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
+import repro_standard_provider/conventions/observed_reads
 # Binary-cache publish identity. ``computeCacheEntryIdentity`` is the
 # shared helper the from-source conventions use to compose the
 # ``CacheEntryIdentity`` tuple the engine's binary-cache publisher hook
@@ -781,6 +786,11 @@ const
   NimEmitCacheBaseName = "nim-c-compileonly"
     ## Sidecar file basename for the M18 emit-time fingerprint cache.
     ## See ``emit_cache.nim`` for the contract.
+  NimEmitCacheObservedName = "nim-c-compileonly.observed"
+    ## What the monitored eager Phase 1 run read, in
+    ## ``renderObservedReads``'s format, kept in the nimcache beside the
+    ## fingerprint sidecar: the reads the key is recomputed over on the next
+    ## emit, and the paths stamped just before the next run.
 
 proc nimProjectConfigCandidates(entrySource: string): seq[string] =
   ## The project config files Nim reads for ``entrySource`` when Phase 1
@@ -829,15 +839,18 @@ proc existingFiles(paths: openArray[string]): seq[string] =
     if fileExists(extendedPath(path)):
       result.add(path)
 
-proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
-                             nimSources: openArray[string];
-                             appLib: bool;
-                             cIncludeDirs: openArray[string] = [];
-                             noMain = false;
-                             keyFiles: openArray[string] = []): string =
-  ## Fingerprint key for the nim-c-compileonly cache.
+proc nimEmitCacheBaseInputs(nimExe, entrySource, manifestPath: string;
+                            nimSources: openArray[string];
+                            appLib: bool;
+                            cIncludeDirs: openArray[string] = [];
+                            noMain = false;
+                            keyFiles: openArray[string] = []):
+                              seq[EmitCacheInput] =
+  ## The part of the nim-c-compileonly emit-cache key the provider can name
+  ## before Nim runs. The rest of the key is what the monitored Phase 1 run
+  ## was observed to read (``runNimCompileOnly``).
   ##
-  ## Inputs that participate in the key:
+  ## Inputs:
   ##   * the Nim driver path (``findExe("nim")`` resolved on this run);
   ##   * the entry source path (which entry we're compiling);
   ##   * the ``appLib`` toggle (controls whether ``--app:lib`` is emitted,
@@ -855,38 +868,13 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
   ##     (reprobuild-pm issues/2026-11-16-nim-emit-cache-ignores-project-
   ##     nim-config-files.md).
   ##
-  ## **M29 Part A**: the Nim driver's reported version is now folded in
-  ## via ``toolVersionInput`` (running ``nim --version`` once per emit
-  ## process, with the result cached). The same-path-different-binary
-  ## case (e.g. ``choosenim`` swapping the resolved binary, or a system
-  ## ``nim`` upgraded in place) is therefore handled directly: the
-  ## reported version string changes and the cache misses naturally.
-  ##
-  ## Not in the key today:
-  ##   * the ``nim`` binary's raw bytes (hash). Version output is the
-  ##     pragmatic stand-in — it changes whenever Nim's behaviour
-  ##     materially changes and is cheap to compute. A future M can
-  ##     fold in the full binary hash if a same-version-different-bytes
-  ##     case crops up.
-  ##   * environment variables. Nim itself doesn't read ``NIMCACHE_DIR``
-  ##     etc. when ``--nimcache:`` is set on the command line, but a
-  ##     project ``config.nims`` can call ``getEnv``, and ``HOME`` /
-  ##     ``NIMBLE_DIR`` steer the default ``nimblePath``.
-  ##   * anything Nim reads at compile time without recording it, in
-  ##     ``config.nims`` or in a module: ``getEnv``, ``readFile``,
-  ##     ``staticExec`` / ``gorge``, ``fileExists``. And a file that does
-  ##     not exist yet but that Nim would choose in a module lookup once
-  ##     it is created outside the keyed ``src/`` trees (reprobuild-pm
-  ##     issues/2026-11-19-nim-emit-cache-cannot-see-environment-reads-or-
-  ##     files-that-do-not-exist-yet.md).
-  ##
-  ## The key is not the whole test. Files Nim reads that the provider
-  ## cannot name beforehand (a file ``config.nims`` includes, a module
-  ## outside ``src/``, a ``--path`` or ``nimblePath`` package, the
-  ## standard library) are checked after the key matches, against the
-  ## hashes Nim recorded in the cached manifest: see
-  ## ``nimManifestDepfilesAreCurrent``.
-  var inputs: seq[EmitCacheInput] = @[
+  ## **M29 Part A**: the Nim driver's reported version is folded in via
+  ## ``toolVersionInput`` (running ``nim --version`` once per emit process,
+  ## with the result cached), so a same-path-different-binary swap
+  ## (``choosenim``, an in-place upgrade) misses. The ``nim`` binary's own
+  ## bytes are covered too once a run has been observed: the monitor
+  ## records it as executed.
+  result = @[
     textInput("nim-exe:" & nimExe),
     toolVersionInput(nimExe),
     textInput("entry-source:" & entrySource),
@@ -895,16 +883,15 @@ proc nimEmitCacheFingerprint(nimExe, entrySource, manifestPath: string;
     textInput("no-main:" & (if noMain: "true" else: "false")),
     # Bumped when the reuse test changes shape, so that a sidecar written
     # under the older test cannot make a manifest reusable.
-    textInput("reuse-test:depfiles-v1"),
+    textInput("reuse-test:observed-reads-v1"),
     fileInput(entrySource),
   ]
   for source in nimSources:
-    inputs.add(fileInput(source))
+    result.add(fileInput(source))
   for incDir in cIncludeDirs:
-    inputs.add(textInput("c-inc-dir:" & incDir))
+    result.add(textInput("c-inc-dir:" & incDir))
   for keyFile in keyFiles:
-    inputs.add(fileInput(keyFile))
-  computeEmitCacheFingerprint(inputs)
+    result.add(fileInput(keyFile))
 
 proc parseNimcacheManifest(manifestPath: string): NimcacheManifest
 
@@ -922,10 +909,12 @@ proc nimManifestDepfilesAreCurrent(manifestPath: string): bool =
   ## it, and hashes config files, included ``.nims`` files and
   ## ``staticRead`` payloads only when it writes the manifest. An edit
   ## that lands between Nim's read and its hash is therefore recorded with
-  ## its new hash and is not seen here. False when the manifest cannot be read or
-  ## parsed, when it lists no files (a manifest written before Phase 1
-  ## defined ``nimBetterRun`` proves nothing), when a row is malformed,
-  ## and when a listed file is missing, unreadable or changed.
+  ## its new hash and is not seen here; ``runNimCompileOnly`` does not
+  ## store a run during which an input changed (``unstableObservedReads``).
+  ## False when the manifest cannot be read or parsed, when it lists no
+  ## files (a manifest written before Phase 1 defined ``nimBetterRun``
+  ## proves nothing), when a row is malformed, and when a listed file is
+  ## missing, unreadable or changed.
   var manifest: NimcacheManifest
   try:
     manifest = parseNimcacheManifest(manifestPath)
@@ -944,6 +933,20 @@ proc nimManifestDepfilesAreCurrent(manifestPath: string): bool =
       return false
   true
 
+proc isUnderNimcache(path, nimcacheDir: string): bool
+
+proc dropNimcacheReads(observed: var ObservedReads; nimcacheDir: string) =
+  ## Remove from ``observed`` what Phase 1 read or rewrote inside its own
+  ## nimcache: the manifest, the ``.c`` files and the sidecars there are its
+  ## outputs (Nim.md §"Phase 1 — Nim → C transpile"), not inputs.
+  proc keep(paths: seq[string]): seq[string] =
+    for path in paths:
+      if not isUnderNimcache(path, nimcacheDir):
+        result.add(path)
+  observed.files = keep(observed.files)
+  observed.directories = keep(observed.directories)
+  observed.rewritten = keep(observed.rewritten)
+
 proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
                        nimSources: openArray[string];
                        manifestPath: string;
@@ -951,61 +954,138 @@ proc runNimCompileOnly(nimExe, nimcacheDir, entrySource: string;
                        cIncludeDirs: openArray[string] = [];
                        noMain = false;
                        keyFiles: openArray[string] = []) =
-  ## Execute the eager Phase 1 run and surface any failure as a
-  ## ``ValueError`` carrying the captured stderr. The standard provider
-  ## binary's outer ``try/except`` (in ``apps/repro-standard-provider``)
-  ## converts these into the protocol-level error response.
+  ## Execute the eager Phase 1 run, or reuse the manifest of the previous
+  ## one, and report what it read as the fragment's evaluation inputs.
+  ## A failure surfaces as a ``ValueError`` carrying Nim's output; the
+  ## standard provider binary's outer ``try/except`` (in
+  ## ``apps/repro-standard-provider``) converts it into the protocol-level
+  ## error response. Must run inside ``buildPackageFragment``'s build proc
+  ## (``registerObservedReads``).
   ##
-  ## **M6.5 pipe-buffer audit**: previously used
-  ## ``osproc.startProcess(..., options = {poStdErrToStdOut}) +
-  ## outputStream.readAll() + waitForExit()`` which deadlocks on Windows
-  ## when ``nim c`` output exceeds the ~64 KB OS pipe buffer (a real
-  ## project with thousands of modules emits enough log chatter to hit
-  ## this). Switched to ``execCmdEx`` which drains the pipe continuously
-  ## via background reader, matching the Go convention's
-  ## ``runGoListExport`` pattern.
+  ## **The run is monitored** (Nim.md §"Cross-module ordering"). The io
+  ## monitor records every file Nim opens, reads, probes (a lookup that
+  ## found nothing included) or executes, every directory it lists and every
+  ## environment variable it reads, in ``config.nims`` and in the VM as much
+  ## as in the compiler itself. That covers what neither the provider nor
+  ## Nim's ``depfiles`` can name: ``getEnv``, ``readFile``, ``staticExec``
+  ## and ``gorge``, ``fileExists``, and the module a search path would
+  ## supply once it is created (reprobuild-pm issues/2026-11-19-nim-emit-
+  ## cache-cannot-see-environment-reads-or-files-that-do-not-exist-yet.md).
+  ## It does not cover a variable a process reads by walking ``environ``
+  ## rather than through a call: a shell that ``staticExec`` runs expands
+  ## ``$NAME`` that way, so such a read is not keyed (Nim.md
+  ## §"Cross-module ordering", "What the monitor does not see").
   ##
-  ## The captured output is used **only** for the non-zero-exit
-  ## diagnostic; the actual graph data is parsed from the on-disk
-  ## ``nimcache.json`` manifest after the process exits, so any progress
-  ## chatter in the merged stdout/stderr is harmless here.
+  ## **Reuse.** The previous run's manifest is reused when all of these
+  ## hold:
+  ##   * the key matches the sidecar at
+  ##     ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint``. The key
+  ##     is ``nimEmitCacheBaseInputs`` plus, for each read the previous run
+  ##     was observed to make, what it would read now: a file's content
+  ##     (``missing`` for an absent one), a directory's members, a variable's
+  ##     value;
+  ##   * the manifest is on disk and every file its ``depfiles`` lists still
+  ##     has the hash Nim recorded (``nimManifestDepfilesAreCurrent``).
+  ## The sidecar is written only after a run whose capture was complete and
+  ## whose inputs held still while it ran (``unstableObservedReads``): an
+  ## input that changed during the run may have been read before the
+  ## change, so the content on disk afterwards does not stand for it. The
+  ## paths the previous run read are stamped just before the next run, so
+  ## an edit made shortly before a build does not count against it.
   ##
-  ## **M18 emit-cache fast path**: when a sidecar fingerprint at
-  ## ``<nimcacheDir>/nim-c-compileonly.repro-emit-fingerprint`` matches
-  ## the current source-set fingerprint AND the nimcache manifest is on
-  ## disk AND every file that manifest's ``depfiles`` lists still has the
-  ## hash Nim recorded (``nimManifestDepfilesAreCurrent``), we skip the
-  ## subprocess entirely: the previous run's manifest is still valid.
-  ## The convention's caller re-parses the manifest
-  ## unconditionally; that work is cheap (~10 KB JSON) compared to the
-  ## ~1-2 s ``nim c`` invocation. The sidecar is refreshed on every
-  ## subprocess success so a partial run never poisons the cache.
+  ## **No monitor.** When the monitor cannot be started (no shim beside the
+  ## binaries, an unsupported host), Phase 1 runs unmonitored. Its manifest
+  ## is used for this evaluation, never stored for reuse, and the fragment
+  ## is marked as derived from unobserved reads, so every refresh runs it
+  ## again. The same holds for a capture the monitor grades incomplete.
+  ##
+  ## **M6.5 pipe-buffer audit**: the unmonitored fallback uses
+  ## ``execCmdEx``, which drains the pipe continuously and so cannot
+  ## deadlock on a Windows pipe buffer; the monitored run captures the
+  ## output to files. The output is used **only** for the non-zero-exit
+  ## diagnostic; the graph is read from the on-disk manifest.
   createDir(extendedPath(nimcacheDir))
-  let fingerprint = nimEmitCacheFingerprint(nimExe, entrySource,
-    manifestPath, nimSources, appLib, cIncludeDirs, noMain, keyFiles)
-  if emitCacheIsUsable(nimcacheDir, NimEmitCacheBaseName, fingerprint,
-      [manifestPath]) and nimManifestDepfilesAreCurrent(manifestPath):
-    return
-  # With ``nimBetterRun`` defined, Nim skips the compile when it judges the
-  # manifest on disk current and finds its own output file unchanged (a
-  # binary that a manual ``nim c`` wrote next to the entry source). The
-  # provider has just decided not to trust the manifest, so remove it:
-  # Nim then always runs in full and rewrites it. The recorded Phase 1
-  # action gets the same guarantee from ``removeBeforeRun``.
+  let baseInputs = nimEmitCacheBaseInputs(nimExe, entrySource, manifestPath,
+    nimSources, appLib, cIncludeDirs, noMain, keyFiles)
+  # The emit key's own files are evaluation inputs too, so whatever would
+  # change the key also re-invokes the convention.
+  for path in nimSources:
+    providerFileInput(path)
+  providerFileInput(entrySource)
+  for path in keyFiles:
+    providerFileInput(path)
+  let observedPath = nimcacheDir / NimEmitCacheObservedName
+  var previous = ObservedReads()
   try:
-    removeFile(extendedPath(manifestPath))
-  except OSError:
-    discard
+    if fileExists(extendedPath(observedPath)):
+      previous = parseObservedReads(readFile(extendedPath(observedPath)))
+  except CatchableError:
+    previous = ObservedReads()
+  # Stamped before the run: both the key of the reuse test and, on a miss,
+  # the state the run is about to read.
+  let before = observedStamps(previous)
+  if previous.files.len > 0 and previous.rewritten.len == 0:
+    let fingerprint = computeEmitCacheFingerprint(
+      baseInputs & observedStampInputs(previous, before))
+    if emitCacheIsUsable(nimcacheDir, NimEmitCacheBaseName, fingerprint,
+        [manifestPath, observedPath]) and
+        nimManifestDepfilesAreCurrent(manifestPath):
+      registerObservedReads(previous, nimExe, stamps = before)
+      return
+  # The provider has decided not to trust the manifest. Remove the sidecar
+  # first, so that a run whose result is not stored cannot leave an older
+  # key in place that a later emit might match. Then remove the manifest:
+  # with ``nimBetterRun`` defined, Nim skips the compile when it judges the
+  # manifest on disk current and finds its own output file unchanged (a
+  # binary that a manual ``nim c`` wrote next to the entry source). Without
+  # it Nim always runs in full and rewrites it. The recorded Phase 1 action
+  # gets the same guarantee from ``removeBeforeRun``.
+  for path in [emitCacheFingerprintPath(nimcacheDir, NimEmitCacheBaseName),
+      manifestPath]:
+    try:
+      removeFile(extendedPath(path))
+    except OSError:
+      discard
   let argv = nimCompileOnlyArgv(nimExe, nimcacheDir, entrySource, appLib,
     cIncludeDirs, noMain)
   let cmd = quoteShellCommand(argv)
-  let (output, exitCode) = execCmdEx(cmd,
-    options = {poStdErrToStdOut, poUsePath})
+  var observed = ObservedReads()
+  var monitored = true
+  var output = ""
+  var exitCode = 0
+  let runStart = getTime()
+  try:
+    let run = runMonitoredTool(argv, getCurrentDir(), parentDir(nimcacheDir),
+      NimEmitCacheBaseName, cmd, observed)
+    output = run.stderr & run.stdout
+    exitCode = run.exitCode
+  except MonitorUnavailableError:
+    monitored = false
+    (output, exitCode) = execCmdEx(cmd,
+      options = {poStdErrToStdOut, poUsePath})
   if exitCode != 0:
     raise newException(ValueError,
       "nim convention: 'nim c --compileOnly' exited " & $exitCode &
         " for " & entrySource & ":\n" & output)
-  writeEmitCacheFingerprint(nimcacheDir, NimEmitCacheBaseName, fingerprint)
+  if not monitored:
+    registerObservedReads(observed, nimExe, reusable = false)
+    return
+  dropNimcacheReads(observed, nimcacheDir)
+  let after = observedStamps(observed)
+  let unstable = unstableObservedReads(observed, before, after, runStart)
+  let reusable = observed.incomplete.len == 0 and unstable.len == 0
+  # The list is kept even when the result is not reusable: it names the
+  # paths to stamp before the next run. Written before the sidecar, so a
+  # crash in between leaves a miss, never a stale match.
+  try:
+    writeFile(extendedPath(observedPath), renderObservedReads(observed))
+    if reusable:
+      writeEmitCacheFingerprint(nimcacheDir, NimEmitCacheBaseName,
+        computeEmitCacheFingerprint(
+          baseInputs & observedStampInputs(observed, after)))
+  except CatchableError:
+    discard
+  registerObservedReads(observed, nimExe, reusable, stamps = after)
 
 proc isUnderNimcache(path, nimcacheDir: string): bool =
   ## Whether ``path`` is ``nimcacheDir`` or lies beneath it. Compared

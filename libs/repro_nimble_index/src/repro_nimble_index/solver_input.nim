@@ -72,6 +72,13 @@ type
     exNimVersionUnknown = "nim-version-unknown"
       ## an active requirement holds under a Nim-version condition, and the
       ## solve declares no `nim` toolchain package to decide it (NPC-AREQ7)
+    exSnapshotRetired = "snapshot-retired"
+      ## a snapshot of a package that has a `tag` record: the upstream has
+      ## adopted versioning, and no resolution offers its snapshots
+      ## (NPC-AREQ31 item 5)
+    exSnapshotSuperseded = "snapshot-superseded"
+      ## a snapshot of a package that has a newer one: only the newest
+      ## snapshot is offered (NPC-AREQ31 item 5)
 
   Exclusion* = object
     kind*: ExclusionKind
@@ -93,7 +100,9 @@ type
     version*: string
       ## solver version text: `1.2.0` for a tag version, `#head`,
       ## `#ref/<branch>` or `#commit/<id>` for a pseudo-version (offered only
-      ## to a requirement naming it); "" for a label
+      ## to a requirement naming it), `#snapshot/<YYYYMMDD>/<commit>` for a
+      ## snapshot (admitted by "any version" and by its commit, never by a
+      ## range); "" for a label
     record*: VersionRecord
     requires*: seq[SolverRequirement]
       ## the record's own requirements active on the platform
@@ -355,6 +364,11 @@ proc candidate*(pkg: PackageEnvelope; r: VersionRecord;
   of rvkLabel:
     result.exclusions.add Exclusion(kind: exLabel,
       detail: "tag " & r.version.tag & " is not a version")
+  of rvkSnapshot:
+    # Offered under an exact `#` version no range admits (NPC-AREQ31 item
+    # 5); retirement and supersession depend on the package's other
+    # records and are decided in ``snapshotExclusions``.
+    result.version = snapshotVersionText(r.version, r.commit)
   of rvkHead, rvkRef, rvkCommit:
     # Offered only to a requirement that names it: ``solverInput`` lifts
     # this exclusion for exactly that record (``admitPseudo``).
@@ -425,6 +439,61 @@ proc equalVersionExclusions*(cs: var seq[NimbleCandidate]) =
             " at different commits; a range cannot choose between them. " &
             "Name the one meant by `#<commit>`")
 
+proc newerSnapshot*(a, b: VersionRecord): bool =
+  ## Whether snapshot ``a`` is newer than snapshot ``b``: first seen later,
+  ## then (for one generation's two sightings, which cannot happen for one
+  ## origin) the greater commit. A snapshot's date is the UTC date of its
+  ## first sighting, so this orders by date first, as the spec's "by date
+  ## and then by commit" does, and within a day by the sighting itself.
+  if a.firstSeen != b.firstSeen: a.firstSeen > b.firstSeen
+  else: a.commit > b.commit
+
+proc snapshotExclusions*(cs: var seq[NimbleCandidate]; accepted: int;
+                         originCount: int) =
+  ## NPC-AREQ31 item 5, computed from the records alone. Once the package
+  ## has any `tag` record -- even one that is itself excluded -- every
+  ## snapshot is `snapshot-retired`, naming the first tag record. Otherwise
+  ## every snapshot but the newest of the accepted origin is
+  ## `snapshot-superseded`, naming the newest. Records are never dropped,
+  ## so a lock that pins an excluded snapshot still finds its record.
+  var firstTag = -1
+  for i, c in cs:
+    if c.record.version.kind == rvkTag:
+      firstTag = i
+      break
+  if firstTag >= 0:
+    let t = cs[firstTag].record
+    for c in cs.mitems:
+      if c.record.version.kind == rvkSnapshot:
+        c.exclusions.add Exclusion(kind: exSnapshotRetired,
+          detail: c.version & " is retired: the package has the tag record " &
+            t.version.tag & " (" & t.commit & "), so no resolution offers " &
+            "its snapshots")
+    return
+  var newest = -1
+  for i, c in cs:
+    if c.record.version.kind != rvkSnapshot: continue
+    if originCount > 1 and int(c.record.origin) != accepted: continue
+    if newest < 0 or newerSnapshot(c.record, cs[newest].record):
+      newest = i
+  if newest < 0: return
+  for i, c in cs.mpairs:
+    if c.record.version.kind == rvkSnapshot and i != newest and
+        (originCount <= 1 or int(c.record.origin) == accepted):
+      c.exclusions.add Exclusion(kind: exSnapshotSuperseded,
+        detail: c.version & " is superseded by the newer snapshot " &
+          cs[newest].version)
+
+proc offeredSnapshot*(pkg: NimbleSolverPackage): int =
+  ## The candidate a requirement of "any version" admits when the package
+  ## has no `tag` record (NPC-AREQ31 item 5): its offered snapshot. -1 when
+  ## the package has a tag record or offers no snapshot.
+  for c in pkg.candidates:
+    if c.record.version.kind == rvkTag: return -1
+  for i, c in pkg.candidates:
+    if c.record.version.kind == rvkSnapshot and c.offered: return i
+  -1
+
 proc originUrl(o: PackageOrigin): string =
   o.url & (if o.subdir.len > 0: "?subdir=" & o.subdir else: "")
 
@@ -458,6 +527,7 @@ proc candidatesOf*(pkg: PackageEnvelope; p: NimblePlatform;
           "origin is not implemented yet")
     result.add c
   equalVersionExclusions(result)
+  snapshotExclusions(result, accepted, pkg.origins.len)
 
 type PseudoMatch* = object
   ## What a `#head`, `#<branch>` or `#<commit>` requirement names in a
@@ -518,6 +588,9 @@ proc matchPseudo*(pkg: NimbleSolverPackage; e: RequirementEntry): PseudoMatch =
       if c.record.commit == commits[0] and c.record.version.kind == rvkTag and
           c.version.len > 0:
         return tagRange(i)
+    for i, c in pkg.candidates:
+      if c.record.commit == commits[0] and c.record.version.kind == rvkSnapshot:
+        return PseudoMatch(found: true, index: i, range: c.version)
     for i, c in pkg.candidates:
       if c.record.commit == commits[0] and c.record.version.kind in
           {rvkHead, rvkRef}:
@@ -691,6 +764,21 @@ const AnyVersionRange* = ">=0.0.0"
   ## and every tag version is at least 0.0.0. A pseudo-version (``#...``)
   ## is not admitted by it, which is the point.
 
+proc anyVersionRange*(input: NimbleSolverInput; name: string): string =
+  ## What "any version" of ``name`` lowers to: the exact range of the
+  ## package's offered snapshot when it has no `tag` record (NPC-AREQ31
+  ## item 5), else ``AnyVersionRange``, which admits every tag version and
+  ## no `#` version.
+  let k = nameKey(name)
+  if k in input.canonical:
+    let canon = input.canonical[k]
+    for p in input.packages:
+      if p.name == canon:
+        let i = offeredSnapshot(p)
+        if i >= 0: return p.candidates[i].version
+        break
+  AnyVersionRange
+
 const UnresolvedRangePrefix* = "#unresolved:"
   ## The range a pseudo-version requirement lowers to when the index holds
   ## nothing it names: it admits no candidate, so the requiring version
@@ -713,6 +801,9 @@ proc dependencyOf*(input: NimbleSolverInput; r: SolverRequirement):
     return none(DependencyDecl)
   let canon = if tk in input.canonical: input.canonical[tk] else: target
   var rangeText = r.range
+  if r.entry.versionKind == rvAny:
+    let any = anyVersionRange(input, canon)
+    if any != AnyVersionRange: rangeText = any
   if isPseudoRequirement(r.entry):
     let pi = input.packageOf(canon)
     if pi < 0:

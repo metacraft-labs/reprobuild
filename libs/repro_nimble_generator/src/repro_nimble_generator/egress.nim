@@ -402,15 +402,28 @@ when defined(ssl):
     except CatchableError as e:
       return (-1, e.msg)
 
-proc vetOrigin*(policy: EgressPolicy; url: string): VettedOrigin =
-  ## Rules 1-3: the URL, its addresses, and every redirect its discovery
-  ## answers with. Raises `EgressError` for a refusal. A discovery that
-  ## fails otherwise (connection refused, 404, TLS) is not a refusal: the
-  ## final URL is returned and git's own run reports the failure.
-  result.requested = url
-  var current = parseOriginUrl(url)
-  var hops = 0
+type
+  VetProgress* = object
+    ## How far ``vetOriginFrom`` got: the URL it is vetting and the
+    ## redirects it followed to reach it. Vetting resumes from it, so a
+    ## caller that had to stop (a host only another thread's resolver can
+    ## answer) continues without repeating a discovery request.
+    current*: string
+    hops*: int
+    redirects*: seq[string]
+
+proc vetOriginFrom*(policy: EgressPolicy; requested: string;
+                    progress: var VetProgress): VettedOrigin =
+  ## ``vetOrigin`` from ``progress`` on, keeping ``progress`` up to date as
+  ## it goes: when it raises, ``progress`` names the URL whose host was
+  ## being vetted.
+  result.requested = requested
+  var current = parseOriginUrl(progress.current)
+  var hops = progress.hops
+  result.redirects = progress.redirects
   while true:
+    progress = VetProgress(current: current.url, hops: hops,
+      redirects: result.redirects)
     let addrs = vetHost(policy, current)
     result.final = current
     result.addresses = addrs
@@ -435,6 +448,14 @@ proc vetOrigin*(policy: EgressPolicy; url: string): VettedOrigin =
     # Without -d:ssl there is no discovery request, so no redirect is
     # followed at all: git runs with redirects off and fails on one.
     return
+
+proc vetOrigin*(policy: EgressPolicy; url: string): VettedOrigin =
+  ## Rules 1-3: the URL, its addresses, and every redirect its discovery
+  ## answers with. Raises `EgressError` for a refusal. A discovery that
+  ## fails otherwise (connection refused, 404, TLS) is not a refusal: the
+  ## final URL is returned and git's own run reports the failure.
+  var progress = VetProgress(current: url)
+  vetOriginFrom(policy, url, progress)
 
 proc curloptResolve*(v: VettedOrigin): string =
   ## Rule 4: git's `http.curloptResolve` value pinning the final host to the

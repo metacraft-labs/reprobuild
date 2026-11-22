@@ -10,7 +10,9 @@
 ## ``2026-11-18-arch-test-bed-guests-emulated-display-raises-kernel-warnings-under-load``:
 ## two arch-ext4 cells of an AR4 measurement turned red that way). The test
 ## bed therefore asks gosti for ``noDisplayDevice`` (QEMU ``-vga none``) on
-## every boot, unless a guest opts back in with ``displayAdapter``.
+## every boot, unless a guest opts back in with ``displayAdapter``, or its
+## base cannot boot without the adapter (``BaseImage.displayAdapter``:
+## debian-13-amd64 resets right after GRUB without one).
 ##
 ## The spec checked is the one the REAL ``boot`` and ``bootNoWait`` hand
 ## ``bootFromMedia`` (``qemuBootSpec``), and the argv is gosti's own
@@ -57,20 +59,30 @@ when Checkable:
 suite "test-bed guests boot without an emulated display adapter":
   when Checkable:
     test "a booted amd64 guest has no display adapter":
-      let spec = guestOf("debian-13-amd64").qemuBootSpec()
+      let spec = guestOf("debian-12-amd64").qemuBootSpec()
       check spec.noDisplayDevice
       check hasNoVga(argvOf(spec))
 
     test "a read-only and a serial-only boot have none either":
-      let g = guestOf("debian-13-amd64")
+      let g = guestOf("ubuntu-24.04-amd64")
       check g.qemuBootSpec(readonly = true).noDisplayDevice
       check g.qemuBootSpec(serialOnly = true).noDisplayDevice
 
     test "an arm64 guest has none":
       check guestOf("debian-13-arm64").qemuBootSpec().noDisplayDevice
 
+    test "a base that cannot boot without the adapter keeps it":
+      # debian-13-amd64 resets right after GRUB with ``-vga none``.
+      let spec = guestOf("debian-13-amd64").qemuBootSpec()
+      check not spec.noDisplayDevice
+      check not hasNoVga(argvOf(spec))
+      var only: seq[string]
+      for b in BaseImages:
+        if b.displayAdapter: only.add(b.name)
+      check only == @["debian-13-amd64"]
+
     test "a guest that asks for the adapter keeps it":
-      let g = guestOf("debian-13-amd64")
+      let g = guestOf("debian-12-amd64")
       g.displayAdapter = true
       let spec = g.qemuBootSpec()
       check not spec.noDisplayDevice
