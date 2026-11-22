@@ -468,3 +468,52 @@ suite "a declared output the action did not produce":
         weakFingerprint = weakFingerprintFromText("missing-output.link"),
         governingLockIdentity = lockIdentityOutsideSolvedGraph())
       check linked.missingDeclaredOutputs().len == 0
+
+  test "a relative output under a cwd with a parent walk after a link is " &
+       "placed where the action runs":
+    # 2026-11-20 issue: with `detour -> far/deep` and cwd `<T>/detour/../work`
+    # the kernel runs the action in `<T>/far/work`, but the engine folded the
+    # cwd lexically to `<T>/work` and looked for, recorded and restored
+    # `stage` there. Real `runBuild`, real `sh`, real symlink; no mocks.
+    when defined(windows):
+      skip("symlink creation needs privileges on Windows")
+    else:
+      let sh = findExe("sh")
+      if sh.len == 0:
+        skip(NoShell)
+      else:
+        let root = createTempDir("repro-cwd-walk-", "")
+        defer: removeDir(root)
+        createDir(root / "far/deep")
+        createDir(root / "far/work")
+        createDir(root / "work")
+        createSymlink("far/deep", root / "detour")
+        # Concatenated: Nim's `/` would fold the walk before the engine saw it.
+        let cwd = root & "/detour/../work"
+        writeFile(root / "far/work/in.txt", "input\n")
+        let script = "printf '%s: in.txt\\n' stamp > walk.d; echo built > stage"
+        let act = action("tool/walk", [sh, "-c", script],
+          cwd = cwd,
+          inputs = ["in.txt"],
+          outputs = ["stage"],
+          depfile = "walk.d",
+          cacheable = true,
+          weakFingerprint = weakFingerprintFromText("cwd-walk.stage"),
+          actionCachePolicy = ffpHybrid,
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        var config = defaultBuildEngineConfig(root / "cache")
+        config.bypassRunQuota = true
+        config.maxParallelism = 1
+        config.enableCachedOutputRestore()
+        let first = runBuild(graph([act]), config).byId(act.id)
+        checkpoint first.stderr
+        check first.status == asSucceeded
+        check readFile(root / "far/work/stage") == "built\n"
+        check not fileExists(root / "work/stage")
+        removeFile(root / "far/work/stage")
+        let restored = runBuild(graph([act]), config).byId(act.id)
+        checkpoint restored.stderr
+        check restored.status == asCacheHit
+        check not restored.launched
+        check readFile(root / "far/work/stage") == "built\n"
+        check not fileExists(root / "work/stage")

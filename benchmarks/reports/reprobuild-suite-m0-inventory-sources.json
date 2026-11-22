@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3096,
+    "nimTestBinaries": 3101,
     "pureUnitConsolidationGroups": 91,
-    "pureUnitTests": 822,
-    "staticallyDetectedRuntimeCompilerFlowTests": 158,
-    "testEntries": 3146
+    "pureUnitTests": 824,
+    "staticallyDetectedRuntimeCompilerFlowTests": 159,
+    "testEntries": 3151
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1540,7 +1540,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 4,
+      "count": 5,
       "defines": [],
       "dependencyShape": [
         "repro_interface_artifacts",
@@ -1550,6 +1550,7 @@
       "owner": "tests/unit",
       "sources": [
         "tests/unit/t_from_source_realization_platform.nim",
+        "tests/unit/t_gem_closure_manifest_grammar.nim",
         "tests/unit/t_m9r14d_1_library_use_kind_resolution.nim",
         "tests/unit/t_m9r14e_1_resolver_pkg_config_paths.nim",
         "tests/unit/t_m9r14f_1_transitive_lib_dirs.nim"
@@ -1772,10 +1773,10 @@
   ],
   "static": {
     "classificationCounts": {
-      "graph-fixture": 26,
-      "integration": 1725,
+      "graph-fixture": 27,
+      "integration": 1727,
       "platform/destructive": 200,
-      "pure unit": 822,
+      "pure unit": 824,
       "unclassified": 373
     },
     "graphOwnedTestArtifacts": [
@@ -1996,9 +1997,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3096,
+    "nimTestBinaryCount": 3101,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3146
+    "testEntryCount": 3151
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9034,6 +9035,60 @@
       "class": "graph-fixture",
       "matches": [
         {
+          "assignedCommandVariable": "argv",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "argv",
+            "objdump",
+            "viaApiSet"
+          ],
+          "line": 25,
+          "path": "tests/unit/t_gem_closure_crt_check.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "var argv = @[cc, \"-shared\", \"-nostdlib\", \"-o\", result, dir / (name & \".c\")]"
+        },
+        {
+          "assignedCommandVariable": "cc",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "argv",
+            "objdump",
+            "viaApiSet"
+          ],
+          "line": 39,
+          "path": "tests/unit/t_gem_closure_crt_check.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let cc = getEnv(\"REPRO_WINDOWS_CC\")"
+        },
+        {
+          "assignedCommandVariable": "viaApiSet",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "argv",
+            "objdump",
+            "viaApiSet"
+          ],
+          "line": 62,
+          "path": "tests/unit/t_gem_closure_crt_check.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "let viaApiSet = compile(cc, dir, \"apiset_ext\", UsesMalloc, [\"-lucrt\"])"
+        }
+      ],
+      "source": "tests/unit/t_gem_closure_crt_check.nim"
+    },
+    {
+      "class": "graph-fixture",
+      "matches": [
+        {
           "assignedCommandVariable": "",
           "commandVariableExecuted": false,
           "directExecutionLine": true,
@@ -12587,7 +12642,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_declared_output_not_produced_fails_the_action.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -21362,8 +21417,8 @@
       "owner": "libs/repro_interface_artifacts",
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
-      "sourceSuiteCount": 10,
-      "staticCaseCount": 22,
+      "sourceSuiteCount": 11,
+      "staticCaseCount": 24,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -30532,6 +30587,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_real_file_guard_removes_its_journal_base",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_test_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_test_support/tests/t_real_file_guard_removes_its_journal_base.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_scoped_env_restores_in_any_order",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -36693,7 +36765,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_native_shell_hooks.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47523,6 +47595,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_gem_closure_offline_install",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_gem_closure_offline_install.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_generated_envrc_block_never_runs_hooks_ensure",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -55658,6 +55748,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_runquota_auto_start_keeps_the_daemon_it_found",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_runquota_auto_start_keeps_the_daemon_it_found.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_runquota_bypass_is_reported_in_build_header_and_report",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -56691,7 +56799,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_spi_pool_retains_registered_leaf_objects.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 41,
+      "staticCaseCount": 46,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -61957,6 +62065,42 @@
       "source": "tests/unit/t_from_source_realization_platform.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_gem_closure_crt_check",
+      "class": "graph-fixture",
+      "classificationReason": "test body compiles or links a helper/fixture artifact",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_gem_closure_crt_check.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_gem_closure_manifest_grammar",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_project_dsl",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_gem_closure_manifest_grammar.nim",
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

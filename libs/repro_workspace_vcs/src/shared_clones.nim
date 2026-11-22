@@ -2706,7 +2706,7 @@ const RetentionHookScript* = """#!/bin/sh
 # kept, together with everything it reaches in this pool, as if it were
 # recent. It prints what each checkout listed in repro/borrowers still names
 # -- its refs, its HEADs, its reflog entries, and what its indexes stage or
-# keep to undo a conflict resolution --
+# keep to undo a conflict resolution, and the trees their cache-trees name --
 # and, for any of those this pool does not hold itself (a commit made in the
 # checkout), the history behind it, so the parents of a checkout's own
 # commits are kept too. If this script fails, git skips pruning: a failure
@@ -2835,6 +2835,102 @@ ref_storage_files() {
     *) return 1 ;;
   esac
 }
+# cache_tree_ids INDEX HASH-BYTES prints the id of every valid node of the
+# cache-tree extension (TREE) of the index file INDEX, reading the file and no
+# object. Git checks only that the topmost valid node on each path exists
+# before reusing it, never what is below it: a valid root that survives a gc
+# whose subtree did not is committed as is, and the commit points at a tree
+# that is gone. Printing every valid node keeps everything a kept node reaches
+# when the pool holds it, and the walk behind ids the pool lacks covers a node
+# that lives only in the checkout. Format: gitformat-index(5),
+# https://git-scm.com/docs/gitformat-index -- a 12-byte header (DIRC, version
+# 2-4, entry count), the entries (v2/v3: NUL-padded to a multiple of 8 bytes,
+# a v3 extended entry carries 2 more flag bytes; v4: a varint prefix length
+# and a NUL-terminated name, unpadded), then extensions (4-byte signature,
+# 4-byte size) up to the trailing checksum. A TREE node is a NUL-terminated
+# path, "<entries> <subtrees>\n", and the tree id unless <entries> is -1
+# (invalid). Anything else, or a file that ends anywhere but at an extension
+# boundary before the checksum, is a refusal: the index may name anything.
+cache_tree_ids() {
+  size=$(wc -c < "$1") || return 1
+  od -An -v -tx1 "$1" | awk -v size="$size" -v hl="$2" '
+function fail() { bad = 1; exit 1 }
+function entry() { k = 0; st = "fixed" }
+function next_entry() { if (--count > 0) entry(); else st = "ext" }
+BEGIN {
+  for (i = 0; i < 256; i++) val[sprintf("%02x", i)] = i
+  fixed = 40 + hl + 2; end = size - hl; st = "hdr"; n = 0; pos = 0
+}
+{
+  for (f = 1; f <= NF; f++) {
+    b = $f; v = val[b]; pos++
+    if (st == "hdr") {
+      hdr[n++] = v
+      if (n < 12) continue
+      if (hdr[0] != 68 || hdr[1] != 73 || hdr[2] != 82 || hdr[3] != 67) fail()
+      version = ((hdr[4] * 256 + hdr[5]) * 256 + hdr[6]) * 256 + hdr[7]
+      if (version < 2 || version > 4) fail()
+      count = ((hdr[8] * 256 + hdr[9]) * 256 + hdr[10]) * 256 + hdr[11]
+      if (count > 0) entry(); else st = "ext"
+    } else if (st == "fixed") {
+      if (++k == 40 + hl + 1) extended = version >= 3 && int(v / 64) % 2
+      if (k < fixed) continue
+      if (extended) { st = "xflags"; need = 2 }
+      else if (version == 4) st = "prefix"
+      else { st = "name"; namelen = 0; prefixlen = fixed }
+    } else if (st == "xflags") {
+      ++k
+      if (--need > 0) continue
+      if (version == 4) st = "prefix"
+      else { st = "name"; namelen = 0; prefixlen = fixed + 2 }
+    } else if (st == "prefix") {
+      ++k
+      if (v < 128) st = "name4"
+    } else if (st == "name4") {
+      if (v == 0) next_entry()
+    } else if (st == "name") {
+      ++k
+      if (v != 0) { namelen++; continue }
+      need = int((prefixlen + namelen + 8) / 8) * 8 - k
+      if (need > 0) st = "pad"; else next_entry()
+    } else if (st == "pad") {
+      if (v != 0) fail()
+      if (--need == 0) next_entry()
+    } else if (st == "ext") {
+      if (pos - 1 == end) { done = 1; exit 0 }
+      if (pos - 1 > end) fail()
+      st = "exthdr"; n = 0; ext[n++] = b
+    } else if (st == "exthdr") {
+      ext[n++] = b
+      if (n < 8) continue
+      sig = ext[0] ext[1] ext[2] ext[3]
+      rem = ((val[ext[4]] * 256 + val[ext[5]]) * 256 + val[ext[6]]) * 256 + val[ext[7]]
+      if (pos + rem > end) fail()
+      if (rem == 0) st = "ext"
+      else if (sig == "54524545") { st = "tree"; ts = "path" }
+      else st = "skip"
+    } else if (st == "skip") {
+      if (--rem == 0) st = "ext"
+    } else if (st == "tree") {
+      rem--
+      if (ts == "path") {
+        if (v == 0) { ts = "count"; first = "" }
+      } else if (ts == "count") {
+        if (first == "") first = b
+        if (v == 10) {
+          if (first == "2d") ts = "path"
+          else { ts = "id"; id = ""; need = hl }
+        }
+      } else {
+        id = id b
+        if (--need == 0) { print id; ts = "path" }
+      }
+      if (rem == 0) { if (ts != "path") fail(); st = "ext" }
+    }
+  }
+}
+END { if (bad || !done) exit 1 }'
+}
 poolobjects=$(cd "$pool/objects" && pwd -P) || exit 1
 : > "$work/found"
 while IFS= read -r parent || [ -n "$parent" ]; do
@@ -2882,6 +2978,12 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   [ -e "$leaf/.git" ] || continue
   common=$(git -C "$leaf" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || { status=1; continue; }
   ref_storage_files "$common" || { status=1; continue; }
+  # The width of an object id in the index file; reads the config only.
+  case $(git -C "$leaf" rev-parse --show-object-format 2>/dev/null) in
+    sha1) hashbytes=20 ;;
+    sha256) hashbytes=32 ;;
+    *) status=1; continue ;;
+  esac
   : > "$work/names"
   # Refs, read from the ref store: this format never opens the objects.
   git -C "$leaf" for-each-ref --format='%(objectname)' >> "$work/names" || { status=1; continue; }
@@ -2902,8 +3004,7 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   # with `git checkout <old> -- <path>` may be one only expired history in this
   # pool reaches, and so may the conflicted stages a resolve-undo record keeps
   # after the conflict was resolved and the merge abandoned (`git checkout -m`
-  # reads them back). Cache-tree trees are not printed: git checks that one
-  # exists before reusing it and rebuilds it otherwise.
+  # reads them back), and the trees of the index's cache-tree (above).
   # Each index is read through its own worktree's git directory, so a worktree
   # whose directory is gone is still read, and under that worktree's own
   # configuration. The empty work tree, run from inside it, keeps git from
@@ -2917,8 +3018,10 @@ while IFS= read -r leaf || [ -n "$leaf" ]; do
   indexes=0
   for gitdir in "$common" "$common"/worktrees/*; do
     [ -e "$gitdir/index" ] || continue
-    git -C "$work/empty" --git-dir="$gitdir" --work-tree="$work/empty" -c core.fsmonitor=false ls-files --stage --resolve-undo --sparse > "$work/staged" || { indexes=1; break; }
+    git -C "$work/empty" --git-dir="$gitdir" --work-tree="$work/empty" -c core.fsmonitor=false ls-files --stage --resolve-undo --sparse > "$work/staged" &&
+      cache_tree_ids "$gitdir/index" "$hashbytes" > "$work/trees" || { indexes=1; break; }
     grep -v '^160000 ' "$work/staged" | cut -d' ' -f2 >> "$work/names"
+    cat "$work/trees" >> "$work/names"
   done
   [ "$indexes" = 0 ] || { status=1; continue; }
   grep -E '^[0-9a-f]{40}([0-9a-f]{24})?$' "$work/names" | grep -v -E '^0+$' | sort -u > "$work/ids"
