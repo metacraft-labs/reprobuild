@@ -21,10 +21,18 @@
 ##    extraction when the caller knows it;
 ## 3. the origin's forge archive, when the origin's host is a known forge
 ##    (`defaultForges`), fetched through the origin egress policy with every
-##    redirect re-vetted (threat model G5);
+##    redirect re-vetted (threat model G5). Not for a row whose record lists
+##    submodules: a forge's archive of a commit leaves submodule directories
+##    empty (spec § 6.1, "Submodule sources");
 ## 4. the origin by git: exactly the locked commit, depth 1, into scratch,
 ##    through the same policy and the generator's confined git
 ##    (`repro_nimble_generator/origin_git`); the tree is read from objects.
+##    A tree with gitlinks is composed as the generator composes it
+##    (`repro_nimble_generator/submodules`): each submodule's `.gitmodules`
+##    URL resolved, refused by the egress policy before any contact when it
+##    is not `https` (and by `vetOrigin` when its addresses are not public),
+##    fetched at its pinned commit into the same scratch, within the same
+##    bounds, and placed as one tree (threat model G37-G39).
 ##
 ## Every transport ends the same way: the bytes are extracted in process
 ## into a fresh staging directory under C6's rules (`archive_extract`, threat
@@ -64,6 +72,7 @@ import repro_nimble_generator/edge_objects
 import repro_nimble_generator/egress
 import repro_nimble_generator/origin_git
 import repro_nimble_generator/source_tree
+import repro_nimble_generator/submodules
 
 import ./archive_extract
 import ./closure_index
@@ -354,8 +363,44 @@ proc tryGit(cfg: FetchConfig; row: NimbleLockRow;
       attempt.outcome = aoFailed
       attempt.detail = failure
       return false
-    let tree = readTree(git, repo, row.commit, row.subdir,
+    var tree = readTree(git, repo, row.commit, row.subdir,
       cfg.originPolicy.limits)
+    if tree.hasGitlinks:
+      var fetched = initTable[string, SubmoduleLookup]()
+      var n = 0
+      let lookup = proc(url, identity, commit: string): SubmoduleLookup =
+        ## One submodule commit, fetched now (cached by URL identity and
+        ## commit for this row), through the policy (G37).
+        let k = identity & "@" & commit
+        if k in fetched: return fetched[k]
+        cfg.observe(tGit, url)
+        inc n
+        try:
+          let sv = vetOrigin(cfg.originPolicy, url)
+          let (sok, srepo, sfailure) = fetchCommit(git, sv,
+            scratch / ("sub-" & $n), commit, cfg.originPolicy.limits)
+          if not sok:
+            result = SubmoduleLookup(state: slFailed,
+              failure: fetchFailureOf(sfailure), detail: sfailure)
+          else:
+            result = SubmoduleLookup(state: slReady, tree: readTree(git,
+              srepo, commit, "", cfg.originPolicy.limits))
+        except EgressError as e:
+          result = SubmoduleLookup(state: slFailed, failure: sfEgress,
+            refusal: $e.refusal.kind, detail: e.refusal.detail)
+        except IOError as e:
+          result = SubmoduleLookup(state: slFailed, failure: sfNoAnswer,
+            detail: e.msg)
+        fetched[k] = result
+      let c = composeSource(tree, row.subdir, row.origin, row.commit, lookup)
+      if c.state != coComposed:
+        attempt.outcome =
+          if c.failure.failure == sfEgress: aoRefused else: aoFailed
+        attempt.rule = c.failure.refusal
+        attempt.detail = eventPhrase(c.failure) &
+          (if c.failure.detail.len > 0: ": " & c.failure.detail else: "")
+        return false
+      tree = c.tree
     # The tree is materialized from its own canonical archive, so a git
     # transport ends in the same extractor and the same digest check.
     let archive = canonicalArchive(tree.entries, tree.blobs)
@@ -410,7 +455,11 @@ proc fetchPackage*(cfg: FetchConfig; row: NimbleLockRow;
       result.state = psFetched
       result.transport = tMirror
       return
-  let archiveUrl = forgeArchiveUrl(cfg.forges, row.origin, row.commit)
+  # A forge's archive of a commit has empty submodule directories, so it is
+  # never the source object of a record that lists submodules.
+  let archiveUrl =
+    if row.submodules: ""
+    else: forgeArchiveUrl(cfg.forges, row.origin, row.commit)
   if archiveUrl.len > 0:
     var a = FetchAttempt(transport: tForgeArchive)
     let ok = cfg.tryForgeArchive(row, archiveUrl, a)

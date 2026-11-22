@@ -74085,6 +74085,54 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
   ## Forward declaration; defined beside ``unreachedDevelopSiblings``, whose
   ## solve-completeness rule it shares with ``repro lock refresh``.
 
+proc absentLockedSiblingsOutsideWorkspace(repoRoot: string):
+    seq[tuple[name, path: string]] =
+  ## Unified-Locking-And-Hooks.md §13.5, "outside a workspace, with siblings
+  ## absent": the non-root VCS entries of the committed ``repro.lock`` at
+  ## ``repoRoot`` that have no checkout at their derived location
+  ## (``committedLockPathBase`` / ``<name>``, §14.2), each with the absolute
+  ## path it was looked for at. The caller asks only when the repo is not
+  ## part of a workspace, where that lock is the only record of where the
+  ## siblings are kept (§14.3), so a name it pins whose checkout is absent
+  ## is a recipe input the set derivation cannot read.
+  ##
+  ## Reads only, and compiles nothing: answering this is what lets the gate
+  ## refuse before the derivation's provider compile fails on the missing
+  ## sources. An unreadable lock answers
+  ## empty; the committed-lock integrity and set stages report it.
+  ##
+  ## The ``reprobuild-packages`` catalog pin is never reported. It is not a
+  ## sibling the derivation needs checked out: when no checkout stands in for
+  ## the pin, the recipe compile materializes the pinned revision under
+  ## ``.repro/cross-repo-producers/`` (Provisioning-Contributions.md
+  ## §"Lookup", ``selectExternalCatalog`` / ``ensureLockPinnedCatalog``), so
+  ## a stand-alone clone whose only absent pin is the catalog derives its set
+  ## truthfully and must not be refused. It is told apart the way the lock
+  ## writer finds the catalog's existing pin: by name, or by the repository
+  ## its URL names.
+  let root = absolutePath(repoRoot)
+  let lockPath = root / CommittedLockFileName
+  if not fileExists(extendedPath(lockPath)): return
+  var ld: LockedDependencies
+  try:
+    ld = parseLockedDepsAt(readFile(extendedPath(lockPath)), root)
+  except CatchableError:
+    return
+  let pathBase = committedLockPathBase(root)
+  var seen: seq[string]
+  for d in ld.deps:
+    if isSelfLockedDep(d) or d.coordinates.kind != ckVcs or d.path.len == 0:
+      continue
+    if d.name == ReprobuildPackagesRepositoryName or
+        repositoryNameFromUrl(d.coordinates.url) ==
+          ReprobuildPackagesRepositoryName:
+      continue
+    if d.name in seen: continue
+    seen.add(d.name)
+    let depAbs = os.normalizedPath(absolutePath(pathBase / d.path))
+    if not isGitCheckoutDir(depAbs):
+      result.add((name: d.name, path: depAbs))
+
 proc executeCheckPrePush(parsed: CheckArgs;
     publicationMembers: seq[HookPublicationMember] = @[];
     publicationWorkspace = ""): CheckReport =
@@ -74709,6 +74757,55 @@ proc executeCheckPrePush(parsed: CheckArgs;
     except CatchableError as err:
       result.notices.add("the exact recipe pins of " & parsed.currentRepo &
         " could not be listed: " & err.msg)
+
+  # ---- 0a. outside a workspace, the siblings the lock pins are present ---
+  #
+  # Unified-Locking-And-Hooks.md §13.5, "outside a workspace, with siblings
+  # absent". A clone that is not part of a workspace has only its committed
+  # lock to say where its siblings are kept (§14.3). When one the lock pins
+  # is not checked out there, stage 3d's derivation cannot run truthfully: the
+  # recipe reads sources that are not there, so its provider compile fails
+  # (`cannot open file: …`) or it derives a smaller set and calls a real pin
+  # one "no repro.nim declares". Either way the refusal it produced named
+  # `repro lock refresh`, which fails the same way. Asked here, from the
+  # lock alone and before anything is compiled, so the refusal says what is
+  # actually missing: a workspace.
+  #
+  # "Not part of a workspace" is the gate's committed-lock-only form (no
+  # manifest membership resolved, MO-2) AND no enclosing workspace declaring
+  # the repo; a workspace with an absent sibling keeps stage 3d's answer,
+  # whose `uses:` finding already names `repro sync` / `repro ws enable`. A
+  # clone whose siblings are all beside it (CI's `clone-siblings`) passes.
+  var needsWorkspace = false
+  if parsed.currentRepo.len > 0 and workspaceLocal.isNone and
+      not hasResolvedManifestCheckout(parsed.workspaceRoot) and
+      not manifestMembershipOf(parsed.currentRepo).resolved:
+    let absent = absentLockedSiblingsOutsideWorkspace(parsed.currentRepo)
+    if absent.len > 0:
+      needsWorkspace = true
+      var rows, names: seq[string]
+      for a in absent:
+        rows.add("'" & a.name & "' (expected at " & a.path & ")")
+        names.add(a.name)
+      result.failures.add(CheckFailure(
+        repo: currentRepoPath,
+        property: "pre_push_needs_workspace",
+        remediation: "push from a workspace checkout of this repository: " &
+          "join one with `repro workspace init <org-or-url>`, run " &
+          "`repro ws enable <project>` for a project that includes it, and " &
+          "bring this commit there by fetching it from " &
+          remedyProsePath(parsed.currentRepo) & "; or check out " &
+          names.join(", ") & " at the path(s) shown, beside this clone, " &
+          "then re-push",
+        evidence: remedyProsePath(parsed.currentRepo) & " is not part of a " &
+          "workspace, so its committed " & CommittedLockFileName & " is " &
+          "the only record of where its siblings are kept, and it pins " &
+          "sibling(s) that are not checked out: " & rows.join(", ") &
+          ". The dependency set its repro.nim derives reads those " &
+          "checkouts, so it cannot be computed here and was not attempted " &
+          "[absent=" & names.join(",") & "]",
+        source: parsed.currentRepo / CommittedLockFileName))
+      result.exitCode = 2
 
   # ---- 0. HL-11 H1 / H2: the pushed recipe and locks are consistent -------
   #
@@ -75419,14 +75516,20 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # the derivation `repro lock refresh` itself uses. Together with stages 1
     # and 2 over the closure those pins span, a passing push publishes a lock
     # that is current and names only committed, published revisions.
+    #
+    # Not asked when stage 0a has already refused for an absent sibling
+    # outside a workspace: the derivation could not run truthfully, and its
+    # compile is exactly what that refusal exists to spare.
     var depSet: tuple[examined, stale, unverified: bool;
                       evidence, remediation: string]
-    try:
-      depSet = verifyCommittedLockDependencySet(parsed.currentRepo)
-    except CatchableError as err:
-      depSet = (examined: true, stale: false, unverified: true,
-        evidence: "the dependency set could not be verified: " & err.msg,
-        remediation: "investigate the failure (" & err.msg & "), then re-push")
+    if not needsWorkspace:
+      try:
+        depSet = verifyCommittedLockDependencySet(parsed.currentRepo)
+      except CatchableError as err:
+        depSet = (examined: true, stale: false, unverified: true,
+          evidence: "the dependency set could not be verified: " & err.msg,
+          remediation: "investigate the failure (" & err.msg &
+            "), then re-push")
     if depSet.stale or depSet.unverified:
       result.failures.add(CheckFailure(
         repo: currentRepoPath,

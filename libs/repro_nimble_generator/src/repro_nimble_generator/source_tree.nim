@@ -11,10 +11,11 @@
 ##   passes through another link, points OUTSIDE the tree. Such a version is
 ##   `unreadable` (spec § 6.1). Every link, in or out, is stored in the
 ##   archive as a link: its target text, never the bytes of what it names.
-## * **Gitlinks.** A gitlink (a submodule entry) sets `gitlinks`. Its
-##   `.gitmodules` URL is never fetched: each is classified by the origin
-##   egress policy and recorded with that verdict (threat model G35); whether
-##   such versions are offered is operator question A4.
+## * **Gitlinks.** A gitlink (a submodule entry) sets `gitlinks`. This
+##   module never fetches one: `submodules.nim` resolves each through the
+##   commit's `.gitmodules`, under the origin egress policy, and composes
+##   the source object of the submodules' trees, which ``sourceFacts`` is
+##   then given as one tree (spec § 6.1, "Submodule sources"; G35, G37).
 ## * **Digest.** The tree digest is the lock's canonical tree hash for
 ##   integrity in its typed form (`repro_multihash.canonicalTreeMultihash`):
 ##   every regular file with its path, content and executable bit, and every
@@ -48,8 +49,8 @@ type
   SubmoduleUrl* = object
     path*, url*: string
     verdict*: string
-      ## `refused:<egress refusal kind>`, or `not-fetched` for a URL the
-      ## policy would allow: no gitlink is fetched in this version
+      ## `refused:<egress refusal kind>`; `fetched`; or `not-fetched` for a
+      ## URL the policy allows whose version failed before fetching it
 
   NimbleFileLookup* = enum
     nlFound = "found"

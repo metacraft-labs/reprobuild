@@ -450,9 +450,9 @@ proc solve*(variants: openArray[VariantDecl];
   ## NLF-M6 — ``preference`` is the version-selection objective (§5.5's
   ## strategy set, as the solver sees it). ``vpNone`` emits no directive, so
   ## the program text and therefore the answer are byte-unchanged from every
-  ## pre-NLF-M6 call. The yield loop below already keeps the LAST model, which
-  ## under clingo's default ``opt`` mode is the optimum, so an objective needs
-  ## no change to the driver.
+  ## pre-NLF-M6 call. The yield loop below keeps the LAST model, which under
+  ## clingo's ``opt`` mode is the optimum whichever optimisation strategy
+  ## found it; a strategy only changes that strategy (see below).
   let program = encodeUnified(variants, packages, preference)
   result = UnifiedSolution(variants: initTable[string, string](),
                            packages: initTable[string, string](),
@@ -468,12 +468,28 @@ proc solve*(variants: openArray[VariantDecl];
 
   try:
     # NPC-M6: a program that carries the newest-first search heuristic is
-    # solved with clingo's domain heuristic, which reads it; every other
-    # program is solved exactly as before, with an empty argv.
+    # solved with clingo's domain heuristic, which reads it.
+    #
+    # A strategy (any preference but ``vpNone``) is solved with core-guided
+    # optimisation (``--opt-strategy=usc``) instead of clingo's default
+    # model-guided branch-and-bound. Its objective has one priority level per
+    # package (``encodeVersionPreference``), and branch-and-bound proves each
+    # level by refuting every better assignment of the whole closure: on a
+    # 120-package chain it had not finished after 20 s, where
+    # unsatisfiable-core search proves each level from the few candidates
+    # that block it and answered in 0.2 s (Named-Lock-Files §5.5). Both prove the same optimum; only the time
+    # differs. The two cases never coincide: ``preferNewest`` is encoded
+    # only under ``vpNone``.
+    #
+    # Every other program is solved exactly as before, with an empty argv.
     var domainArg = "--heuristic=Domain"
     var domainArgs = [cstring(domainArg)]
+    var uscArg = "--opt-strategy=usc"
+    var uscArgs = [cstring(uscArg)]
     let created =
-      if PreferNewestHeuristic in program:
+      if preference != vpNone:
+        clingo_control_new(addr uscArgs[0], 1, nil, nil, 20, addr control)
+      elif PreferNewestHeuristic in program:
         clingo_control_new(addr domainArgs[0], 1, nil, nil, 20, addr control)
       else:
         clingo_control_new(nil, 0, nil, nil, 20, addr control)

@@ -36,6 +36,9 @@ type
     count: int
     shardBits*: uint8
     bucket*: uint32
+    schema*: uint16
+      ## ``NimbleIndexSchemaVersion`` or ``NimbleShardSubmodulesSchema``:
+      ## which wire type the packages are (their fixed parts agree)
 
   RootNavigator* = object
     whole: ByteView
@@ -120,8 +123,10 @@ proc varListItem(list: ByteView; count, i: int; what: string): ByteView =
     refuse(nrMalformed, what & "[" & $i & "] starts inside the offset table")
   sub(list, a, b, what & "[" & $i & "]")
 
-proc checkFrameView(v: ByteView; kind: NimbleObjectKind): ByteView =
-  ## The frame checks of the full decoder, on a view; returns the payload.
+proc checkFrameView(v: ByteView; kind: NimbleObjectKind;
+                    schema: var uint16): ByteView =
+  ## The frame checks of the full decoder, on a view; returns the payload
+  ## and sets ``schema``.
   if v.len > maxBytesOf(kind):
     refuse(nrOversize, $kind & " of " & $v.len & " bytes exceeds " &
       $maxBytesOf(kind))
@@ -132,9 +137,9 @@ proc checkFrameView(v: ByteView; kind: NimbleObjectKind): ByteView =
     refuse(nrLengthMismatch, "the frame length field disagrees with the input")
   if v.len < FrameHeaderLen + 2:
     refuse(nrTruncated, $kind & " payload has no schema")
-  let schema = uint16(v.data[FrameHeaderLen]) or
+  schema = uint16(v.data[FrameHeaderLen]) or
     (uint16(v.data[FrameHeaderLen + 1]) shl 8)
-  if schema != NimbleIndexSchemaVersion:
+  if not acceptsSchema(kind, schema):
     refuse(nrUnknownSchema, $kind & " schema " & $schema)
   sub(v, FrameHeaderLen, v.len, $kind)
 
@@ -145,14 +150,22 @@ proc checkFrameView(v: ByteView; kind: NimbleObjectKind): ByteView =
 proc navigateShard*(v: ByteView): ShardNavigator =
   ## Open a shard for partial access. Reads the frame, the fixed part and
   ## the package list's offset header only.
-  let payload = checkFrameView(v, nokShard)
+  var schema = 0'u16
+  let payload = checkFrameView(v, nokShard, schema)
   result.whole = v
-  result.shardBits = fixedField(payload, ShardW, "shardBits", "shard").data[0]
-  let b = fixedField(payload, ShardW, "bucket", "shard")
-  result.bucket = uint32(u32At(b, 0, "shard.bucket"))
+  result.schema = schema
+  if schema == NimbleShardSubmodulesSchema:
+    result.shardBits = fixedField(payload, ShardW2, "shardBits", "shard").data[0]
+    let b = fixedField(payload, ShardW2, "bucket", "shard")
+    result.bucket = uint32(u32At(b, 0, "shard.bucket"))
+    result.packages = varField(payload, ShardW2, "packages", "shard")
+  else:
+    result.shardBits = fixedField(payload, ShardW, "shardBits", "shard").data[0]
+    let b = fixedField(payload, ShardW, "bucket", "shard")
+    result.bucket = uint32(u32At(b, 0, "shard.bucket"))
+    result.packages = varField(payload, ShardW, "packages", "shard")
   if int(result.shardBits) > MaxShardBits:
     refuse(nrBound, "shard: shardBits " & $result.shardBits)
-  result.packages = varField(payload, ShardW, "packages", "shard")
   result.count = varListCount(result.packages, MaxPackagesPerShard,
     "shard.packages")
 
@@ -165,8 +178,13 @@ proc packageRegion(n: ShardNavigator; i: int): ByteView =
 
 proc packageNameAt*(n: ShardNavigator; i: int): string =
   ## The canonical name of package ``i``, reading only its name field.
-  let name = varField(packageRegion(n, i), PackageW, "name",
-    "shard.packages[" & $i & "]")
+  let name =
+    if n.schema == NimbleShardSubmodulesSchema:
+      varField(packageRegion(n, i), PackageW2, "name",
+        "shard.packages[" & $i & "]")
+    else:
+      varField(packageRegion(n, i), PackageW, "name",
+        "shard.packages[" & $i & "]")
   if name.len > MaxNameBytes:
     refuse(nrBound, "shard.packages[" & $i & "].name is longer than " &
       $MaxNameBytes & " bytes")
@@ -193,14 +211,15 @@ proc decodePackageAt*(n: ShardNavigator; i: int): PackageEnvelope =
   ## Decode package ``i`` alone (bounded, validated, canonical).
   let r = packageRegion(n, i)
   decodePackageSlice(bytesOf(r), "shard.packages[" & $i & "]", n.shardBits,
-    n.bucket)
+    n.bucket, n.schema)
 
 # ---------------------------------------------------------------------------
 # Roots
 # ---------------------------------------------------------------------------
 
 proc navigateRoot*(v: ByteView): RootNavigator =
-  let payload = checkFrameView(v, nokRoot)
+  var schema = 0'u16
+  let payload = checkFrameView(v, nokRoot, schema)
   result.whole = v
   result.shardBits = fixedField(payload, RootW, "shardBits", "root").data[0]
   if int(result.shardBits) > MaxShardBits:
