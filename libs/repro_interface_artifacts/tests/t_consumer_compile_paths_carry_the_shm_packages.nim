@@ -52,9 +52,18 @@ suite "consumer compile paths carry the shm packages":
     let savedQueue = getEnv("SHM_QUEUE_SRC")
     putEnv("SHM_GSET_SRC", gset)
     putEnv("SHM_QUEUE_SRC", queue)
+    # Both packages are sibling-first (Unified-Locking-And-Hooks.md §13.5,
+    # "The sources a recipe compile reads", amended 2026-11-22): a sibling
+    # checkout at or ahead of the SDK's pin outranks the variable, exactly as
+    # in `config.nims`. `REPRO_SIBLING_POLICY=pin` asks for the named tree
+    # whatever siblings the host workspace carries.
+    let savedPolicy = getEnv("REPRO_SIBLING_POLICY")
+    putEnv("REPRO_SIBLING_POLICY", "pin")
     defer:
       putEnv("SHM_GSET_SRC", savedGset)
       putEnv("SHM_QUEUE_SRC", savedQueue)
+      if savedPolicy.len > 0: putEnv("REPRO_SIBLING_POLICY", savedPolicy)
+      else: delEnv("REPRO_SIBLING_POLICY")
     let flags = consumerCompilePathFlags(root / "work")
     check gset in pathsWithMarker(flags, "shm_gset.nim")
     check queue in pathsWithMarker(flags, "shm_queue.nim")
