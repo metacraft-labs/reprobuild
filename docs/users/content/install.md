@@ -161,6 +161,16 @@ irm https://get.reprobuild.com/pwsh
 irm https://get.reprobuild.com/pwsh | iex
 ```
 
+Completion for `repro` in PowerShell is set up for you. Scoop's install
+runs `repro hooks ensure --shell-autocomplete --profile`, which writes the
+completion script and a short block in the `CurrentUserAllHosts` profile of
+each PowerShell it finds (Windows PowerShell 5.1 and PowerShell 7 each have
+one), and `scoop uninstall reprobuild` removes them again. With
+`-Method tarball` the installer runs the same command itself, and
+`-Uninstall` removes it. To skip this, pass `-NoCompletion` or set
+`REPRO_NO_COMPLETION=1`. A profile loads only where the execution policy
+allows scripts (`Get-ExecutionPolicy`; `RemoteSigned` does).
+
 The installer's options:
 
 <!-- generated:begin installer-help pwsh -->
@@ -174,6 +184,7 @@ Usage: .\repro-install.ps1 [PARAMETERS]
   -Domain <DOMAIN>               Repository domain when -BaseUrl is unset (default: metacraft-labs.com).
   -BucketUrl <URL>               Override the Scoop bucket Git URL (default: $env:REPRO_BUCKET_URL).
   -Prefix <PATH>                 Destination directory for -Method tarball.
+  -NoCompletion                  Do not set up shell completion (also REPRO_NO_COMPLETION=1).
   -DryRun                        Print the actions that would run; change nothing.
   -Yes                           Accepted for scripting compatibility (the installer never prompts).
 ```
