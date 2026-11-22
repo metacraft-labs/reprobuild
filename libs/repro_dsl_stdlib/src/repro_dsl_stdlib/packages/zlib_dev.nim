@@ -20,15 +20,16 @@
 ##   * Nix-capable hosts: ``nixpkgs#zlib^*`` (every output), with the HEADER as
 ##     the declared ``executablePath`` so a realization without it is refused
 ##     by name at resolution time -- the ``zstd-dev`` mechanism.
+##   * linux x86_64 tarball: a metacraft-labs release asset in
+##     reprobuild-packages holding the install tree of the ``zlib`` source
+##     recipe (zlib 1.3.1 built with the pinned Bootlin gcc 15.3.0). It is an
+##     archive because a from-source realization is ``local-only`` (not
+##     cache-portable), while an archive arm is substitutable from the shared
+##     binary cache on every host.
 ##   * Every other host and mode: no archive arm. Under tarball provisioning a
 ##     tool with no arm for the platform is realized from its source recipe,
 ##     and ``zlib-dev`` resolves to the ``zlib`` recipe in reprobuild-packages
-##     (``FromSourceRecipeAliases`` in ``repro_tool_profiles``), built from
-##     the upstream release archive and cached in the shared binary cache.
-##
-## No third-party binary is pinned here on purpose: zlib is small and its
-## source recipe already exists, so a prebuilt archive would add a trust
-## surface and a per-platform pin for nothing.
+##     (``FromSourceRecipeAliases`` in ``repro_tool_profiles``).
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
@@ -38,3 +39,12 @@ package `zlib-dev`:
     nixPackage "nixpkgs#zlib^*", executablePath = "include/zlib.h",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    tarball url = "https://github.com/metacraft-labs/reprobuild-packages/releases/download/zlib-dev-1.3.1-linux-x86_64/zlib-dev-1.3.1-linux-x86_64.tar.xz",
+      sha256 = "45994537e6330d5b200505d8f7f36d418313527ec7b8642e1d6b4db03670c9ea",
+      archiveType = "tar.xz",
+      executablePath = "include/zlib.h",
+      version = "1.3.1",
+      packageId = "zlib-dev@1.3.1",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:zlib-dev@1.3.1:linux-x86_64:sha256:45994537e6330d5b200505d8f7f36d418313527ec7b8642e1d6b4db03670c9ea"
