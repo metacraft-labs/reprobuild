@@ -31,6 +31,7 @@ import repro_nimble_reader/requirements except nameKey
 import ./edge_objects
 import ./source_set
 import ./source_tree
+import ./submodules
 
 type
   Sighting* = object
@@ -239,10 +240,17 @@ proc buildRecord*(input: PackageInput; params: GenerationParams;
         " points outside the tree (" & l.target.escape() & "); stored as a " &
         "link, never followed, and the version is unreadable"
   if f.gitlinks.len > 0:
+    # The source object includes the submodule trees (`source-compose`);
+    # the record names them, as provenance (spec § 6.1).
     result.flags.incl flGitlinks
     for sm in f.submodules:
       diagnostics.add label & ": gitlink " & sm.path.escape() & " url " &
         sm.url.escape() & ": " & sm.verdict
+    for p in b.source.pins:
+      result.submodules.add RecordSubmodule(path: p.path, url: p.url,
+        commit: p.commit)
+    result.submodules.sort(proc (a, b: RecordSubmodule): int =
+      cmp(a.path, b.path))
   if input.unlisted:
     result.flags.incl flUnlisted
   # NPC-AREQ8 step 2: an override supplies what the reader could not read.
@@ -415,14 +423,21 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
           prevTags.getOrDefault(s.version.tag) == s.commit
         result.diagnostics.add label & ": the source could not be fetched: " &
           b.source.detail
+        for sm in b.source.facts.submodules:
+          result.diagnostics.add label & ": gitlink " & sm.path.escape() &
+            " url " & sm.url.escape() & ": " & sm.verdict
         if offeredBefore:
           continue
+        # A submodule that cannot be obtained names itself and the reason
+        # (spec § 6.1, "What is not offered").
+        let after =
+          if b.source.unobtainable.len > 0:
+            eventPhrase(b.source.unobtainable[0])
+          elif b.source.state == anRefused: "refused by the egress policy"
+          else: "the source could not be fetched"
         result.events.add OriginEvent(kind: oeGone, package: input.name,
           version: (if s.version.tag.len > 0: s.version.tag else: s.commit),
-          before: s.commit,
-          after: (if b.source.state == anRefused: "refused by the egress policy"
-                  else: "the source could not be fetched"),
-          observedAt: now)
+          before: s.commit, after: after, observedAt: now)
         continue
       records.add buildRecord(input, params, s, b, uint16(originIndex),
         firstSeen, result.diagnostics)

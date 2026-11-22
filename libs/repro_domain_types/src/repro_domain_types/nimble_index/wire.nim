@@ -102,6 +102,35 @@ type
     probePlatform*: WName
     nimbleFile*: List[WDigest, 1]
 
+  SubmoduleW* = object
+    path*: WPath
+    url*: WText
+    commit*: List[byte, MaxCommitBytes]
+
+  VersionRecordW2* = object
+    ## ``VersionRecordW`` with the ``submodules`` list: the record of a
+    ## shard of schema ``NimbleShardSubmodulesSchema``. The fields before
+    ## it are ``VersionRecordW``'s, in the same order.
+    version*: VersionW
+    commit*: List[byte, MaxCommitBytes]
+    tree*: WDigest
+    archiveSha256*: WDigest
+    size*: uint64
+    firstSeen*: uint64
+    origin*: uint16
+    nim*: List[RequirementW, MaxNimEntries]
+    requires*: List[RequirementW, MaxRequirements]
+    features*: List[FeatureW, MaxFeatures]
+    layout*: LayoutW
+    binaries*: BinariesW
+    foreign*: List[ForeignW, MaxForeign]
+    flags*: uint32
+    readerClass*: uint8
+    resolutionClass*: uint8
+    probePlatform*: WName
+    nimbleFile*: List[WDigest, 1]
+    submodules*: List[SubmoduleW, MaxSubmodules]
+
   OriginW* = object
     url*: WText
     subdir*: WPath
@@ -112,6 +141,12 @@ type
     origins*: List[OriginW, MaxOrigins]
     registryOrigin*: uint16
     versions*: List[VersionRecordW, MaxVersionsPerPackage]
+
+  PackageW2* = object
+    name*: WName
+    origins*: List[OriginW, MaxOrigins]
+    registryOrigin*: uint16
+    versions*: List[VersionRecordW2, MaxVersionsPerPackage]
 
   AliasW* = object
     alias*: WName
@@ -140,6 +175,16 @@ type
     shardBits*: uint8
     bucket*: uint32
     packages*: List[PackageW, MaxPackagesPerShard]
+    aliases*: List[AliasW, MaxAliasesPerShard]
+    observations*: List[ObservationW, MaxPackagesPerShard]
+
+  ShardW2* = object
+    ## A shard of schema ``NimbleShardSubmodulesSchema``: ``ShardW`` whose
+    ## records carry their ``submodules`` list.
+    schema*: uint16
+    shardBits*: uint8
+    bucket*: uint32
+    packages*: List[PackageW2, MaxPackagesPerShard]
     aliases*: List[AliasW, MaxAliasesPerShard]
     observations*: List[ObservationW, MaxPackagesPerShard]
 

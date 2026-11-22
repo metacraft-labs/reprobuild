@@ -8,15 +8,21 @@
 ## | `registry <remote>@<commit>` | `bakMetadataFetch` | `netFetch` | remote, commit, git identity | `packages.json` at the commit |
 ## | `refs <package>` | `bakMetadataFetch` | `netFetch` | none: revalidated every generation | the origin's tags (peeled) and `HEAD` |
 ## | `refs <package> history` | `bakMetadataFetch` | `netFetch` | origin, the commits it is asked about, generation | the commits of every branch and tag |
-## | `source <package>@<commit>` | `bakMetadataFetch` | `netFetch` | origin, subdir, commit, git identity, limits | the source facts, the `.nimble`, the canonical archive |
+## | `source <package>@<commit>` | `bakMetadataFetch` | `netFetch` | origin, subdir, commit, git identity, limits | the source facts, the `.nimble`, the canonical archive; for a tree with gitlinks also its entries and blobs |
+## | `submodule <url>@<commit>` | `bakMetadataFetch` | `netFetch` | URL identity, commit, git identity, limits | one submodule commit's whole tree: entries, blobs, its own `.gitmodules` |
+## | `source-compose <package>@<commit>` | `bakCatalogIndex` | `netDenied` | the hashes of the `source` output and of every `submodule` output it uses | the composed source object: facts, `.nimble`, canonical archive, the `submodules` list (or the submodule that could not be obtained) |
 ## | `read <blake3 of .nimble>` | `bakCatalogIndex` | `netDenied` | the `.nimble` bytes' hash, the reader version | the record as the static reader reads it |
 ## | `shard <bucket>` | `bakCatalogIndex` | `netDenied` | the hashes of every input object, the generation parameters | the shard and its events |
 ## | `root` | `bakCatalogIndex` | `netDenied` | the hashes of the shards and events, the generation parameters | the root and name map |
 ##
 ## The fetch edges are the WORKERS of the threat model: they hold no
 ## credential (git runs in an environment built from nothing), fetch only
-## through the origin egress policy (`egress`), never follow a symbolic link
-## or a gitlink, and hand on only content: objects named by what they hold.
+## through the origin egress policy (`egress`), never follow a symbolic link,
+## and hand on only content: objects named by what they hold. A gitlink is
+## followed only as `submodules` says (spec § 6.1, "Submodule sources"):
+## its `.gitmodules` URL, resolved and checked by the policy, at the commit
+## it pins, one `submodule` wave per nesting level, and the version's source
+## object is then composed from those trees by a pure edge.
 ## The pure edges are the PUBLISHER's computation: they read only those
 ## outputs and the previous generation's shards.
 ##
@@ -51,12 +57,18 @@ import ./origin_git
 import ./registry
 import ./source_set
 import ./source_tree
+import ./submodules
 
 const
   GeneratorIdentity* = "reprobuild-nimble-generator/1"
     ## The root's `generator`: the generator's own version, never the host's
     ## tools, so two operators with different git builds agree.
   ReaderIdentity = "repro_nimble_reader/1"
+  SourceEdgeVersion = "source/2"
+    ## in the `source` edge's key: version 2 also outputs a gitlinked tree's
+    ## entries and blobs, which a version-1 output on this host lacks
+  SubmoduleEdgeVersion = "submodule/1"
+  ComposerIdentity = "source-compose/1"
   MaxGenerationIterations = 64
 
 type
@@ -65,6 +77,8 @@ type
     efRefs = "refs"
     efHistory = "refs-history"
     efSource = "source"
+    efSubmodule = "submodule"
+    efCompose = "source-compose"
     efRead = "read"
     efShard = "shard"
     efRoot = "root"
@@ -138,6 +152,10 @@ type
     shardBucket: uint32
     shardNames: seq[string]
     shardAliases: seq[PackageAlias]
+    rawPath: string
+      ## a composition's `source` output
+    subInputs: seq[(string, string)]
+      ## a composition's `submodule` outputs: `<identity>@<commit>` -> path
 
   Run = ref object
     cfg: GeneratorConfig
@@ -153,7 +171,14 @@ type
     previousObservations: Table[string, PackageObservation]
     refsPath: Table[string, string]     ## name key -> refs output
     historyPath: Table[string, string]
-    sourcePath: Table[string, string]   ## origin key & commit -> source output
+    sourcePath: Table[string, string]
+      ## origin key & commit -> the version's source object: the `source`
+      ## output, or for a tree with gitlinks the `source-compose` output
+    rawSourcePath: Table[string, string]
+      ## origin key & commit -> the `source` output a composition read
+    sourceJobs: Table[string, Job]      ## origin key & commit -> its job
+    subPath: Table[string, string]
+      ## `<URL identity>@<commit>` -> the `submodule` output
     readPath: Table[string, string]     ## nimble hash -> read output
     sightings: Table[string, seq[Sighting]]
     expansions: Table[string, Expansion]
@@ -266,6 +291,7 @@ proc execSource(run: Run; job: Job; outPath: string) =
   var answer = SourceAnswer(commit: job.commit)
   var nimbleBytes = ""
   var archive = ""
+  var blobs = ""
   let scratch = run.scratchFor(hex(job.subject))
   defer: removeDir(scratch)
   try:
@@ -283,6 +309,12 @@ proc execSource(run: Run; job: Job; outPath: string) =
       answer.facts = facts
       archive = arch
       nimbleBytes = nb
+      if tree.hasGitlinks:
+        # The source object is composed from this tree and its submodules'
+        # (`execCompose`), so the tree itself is handed on.
+        answer.entries = tree.entries
+        answer.hasGitmodules = tree.hasGitmodules
+        blobs = encodeBlobs(tree.blobs, tree.gitmodules, tree.hasGitmodules)
   except EgressError as e:
     run.capture(job, e)
     answer.state = anRefused
@@ -294,6 +326,43 @@ proc execSource(run: Run; job: Job; outPath: string) =
   writeFile(outPath, encodeSource(answer))
   writeFile(outPath & ".nimble", nimbleBytes)
   writeFile(outPath & ".tar", archive)
+  writeFile(outPath & ".blobs", blobs)
+
+proc execSubmodule(run: Run; job: Job; outPath: string) =
+  ## The `submodule <url>@<commit>` edge: exactly that commit, depth 1, into
+  ## private scratch, after the URL passed the egress policy; the whole tree
+  ## read from objects.
+  var answer = SubmoduleAnswer(url: job.url, commit: job.commit)
+  var blobs = ""
+  let scratch = run.scratchFor(hex(job.subject))
+  defer: removeDir(scratch)
+  try:
+    let v = run.vet(job)
+    let limits = run.cfg.policy.limits
+    let (ok, repo, failure) = fetchCommit(run.git, v, scratch, job.commit,
+      limits)
+    if not ok:
+      answer.state = anFailed
+      answer.detail = failure
+      answer.failure = $fetchFailureOf(failure)
+    else:
+      let tree = readTree(run.git, repo, job.commit, "", limits)
+      answer.state = anOk
+      answer.entries = tree.entries
+      answer.hasGitmodules = tree.hasGitmodules
+      blobs = encodeBlobs(tree.blobs, tree.gitmodules, tree.hasGitmodules)
+  except EgressError as e:
+    run.capture(job, e)
+    answer.state = anRefused
+    answer.refusal = $e.refusal.kind
+    answer.detail = e.refusal.detail
+    answer.failure = $sfEgress
+  except IOError as e:
+    answer.state = anFailed
+    answer.detail = e.msg
+    answer.failure = $sfNoAnswer
+  writeFile(outPath, encodeSubmodule(answer))
+  writeFile(outPath & ".blobs", blobs)
 
 # ---------------------------------------------------------------------------
 # The pure executors (publisher)
@@ -340,6 +409,70 @@ proc readObject(run: Run; path: string): string =
   if path in run.objectHashes and hex(result) != run.objectHashes[path]:
     raise newException(EdgeObjectError, path & " is not the object the " &
       "shard edge was keyed on")
+
+proc submoduleLookupOf(run: Run; paths: Table[string, string]):
+    SubmoduleLookupProc =
+  ## A lookup over `submodule` outputs: ``paths`` maps
+  ## `<identity>@<commit>` to the output; one it lacks, or not yet written,
+  ## is pending.
+  result = proc(url, identity, commit: string): SubmoduleLookup =
+    let k = identity & "@" & commit
+    if k notin paths or not fileExists(paths[k]):
+      return SubmoduleLookup(state: slPending)
+    let a = decodeSubmodule(run.readObject(paths[k]))
+    if a.state != anOk:
+      return SubmoduleLookup(state: slFailed,
+        failure: (if a.failure.len > 0: failureOf(a.failure) else: sfNoAnswer),
+        refusal: a.refusal, detail: a.detail)
+    var t = FetchedTree(entries: a.entries)
+    decodeBlobs(run.readObject(paths[k] & ".blobs"), t)
+    SubmoduleLookup(state: slReady, tree: t)
+
+proc rootTreeOf(run: Run; rawPath: string): tuple[src: SourceAnswer;
+                                                  tree: FetchedTree] =
+  ## A `source` output with gitlinks, as the tree it read.
+  result.src = decodeSource(run.readObject(rawPath))
+  result.tree = FetchedTree(commitTime: result.src.facts.commitTime,
+    entries: result.src.entries)
+  decodeBlobs(run.readObject(rawPath & ".blobs"), result.tree)
+
+proc execCompose(run: Run; job: Job; outPath: string) =
+  ## The `source-compose` edge (pure): the version's source object as ONE
+  ## tree of the superproject's and its submodules' entries (`submodules`),
+  ## its digest, `.nimble` and canonical archive; or the submodule that
+  ## could not be obtained.
+  let (raw, root) = run.rootTreeOf(job.rawPath)
+  var paths = initTable[string, string]()
+  for (k, p) in job.subInputs: paths[k] = p
+  let c = composeSource(root, job.subdir, job.url, job.commit,
+    run.submoduleLookupOf(paths))
+  var answer = SourceAnswer(commit: job.commit)
+  var archive = ""
+  var nimbleBytes = ""
+  case c.state
+  of coComposed:
+    let (facts, arch, nb) = sourceFacts(c.tree)
+    answer.state = anOk
+    answer.facts = facts
+    answer.facts.gitlinks = raw.facts.gitlinks
+    answer.facts.submodules = c.verdicts
+    answer.pins = c.pins
+    archive = arch
+    nimbleBytes = nb
+  of coFailed:
+    answer.state = (if c.failure.failure == sfEgress: anRefused else: anFailed)
+    answer.refusal = c.failure.refusal
+    answer.detail = eventPhrase(c.failure) &
+      (if c.failure.detail.len > 0: ": " & c.failure.detail else: "")
+    answer.unobtainable = @[c.failure]
+    answer.facts.submodules = c.verdicts
+  of coPending:
+    fail("composition of " & job.subject & " needs submodule trees its " &
+      "edge was not given")
+  writeFile(outPath, encodeSource(answer))
+  writeFile(outPath & ".nimble", nimbleBytes)
+  writeFile(outPath & ".tar", archive)
+  writeFile(outPath & ".blobs", "")
 
 proc packageInput(run: Run; t: Target): PackageInput =
   ## A package's publisher input, from the fetch edges' output files only.
@@ -442,6 +575,8 @@ proc execute(run: Run; action: BuildAction): ActionResult =
     of efRefs: run.execRefs(job, outPath)
     of efHistory: run.execHistory(job, outPath)
     of efSource: run.execSource(job, outPath)
+    of efSubmodule: run.execSubmodule(job, outPath)
+    of efCompose: run.execCompose(job, outPath)
     of efRead:
       writeFile(outPath, toStr(readRecordBytes(readFile(job.inputs[0]),
         job.subject)))
@@ -527,6 +662,111 @@ proc answeredBefore(sourceOutput: string): bool =
   except CatchableError:
     false
 
+proc submoduleAnsweredBefore(output: string): bool =
+  ## As ``answeredBefore``, for a `submodule` edge's output.
+  if not fileExists(output): return true
+  try:
+    decodeSubmodule(readFile(output)).state == anOk
+  except CatchableError:
+    false
+
+proc composeSources(run: Run; all: var seq[BuildAction]; limitsKey: string;
+                    generatedAt: uint64) =
+  ## The versions fetched this wave whose trees have gitlinks: their
+  ## submodules, one `submodule` wave per nesting level (each level's URLs
+  ## are known only from the level above), then one `source-compose` edge
+  ## per version, whose output becomes the version's source object.
+  var pending: seq[string]
+  var keys: seq[string]
+  for sk in run.sourcePath.keys: keys.add sk
+  keys.sort()
+  for sk in keys:
+    if sk in run.rawSourcePath: continue
+    let src = decodeSource(readFile(run.sourcePath[sk]))
+    if src.state == anOk and src.facts.gitlinks.len > 0:
+      pending.add sk
+  if pending.len == 0: return
+  var levels = 0
+  while true:
+    inc levels
+    if levels > MaxSubmoduleDepth + 2:
+      fail("the submodule waves did not end within " &
+        $(MaxSubmoduleDepth + 2) & " levels")
+    var needs = initTable[string, SubmoduleNeed]()
+    var needer = initTable[string, string]()
+    for sk in pending:
+      let job = run.sourceJobs[sk]
+      let (_, root) = run.rootTreeOf(run.sourcePath[sk])
+      let c = composeSource(root, job.subdir, job.url, job.commit,
+        run.submoduleLookupOf(run.subPath))
+      if c.state != coPending: continue
+      for n in c.needs:
+        let k = n.identity & "@" & n.commit
+        if k notin needs or n.url < needs[k].url:
+          needs[k] = n
+        if k notin needer: needer[k] = job.package
+    var needKeys: seq[string]
+    for k in needs.keys:
+      if k notin run.subPath: needKeys.add k
+    needKeys.sort()
+    if needKeys.len == 0: break
+    var wave: seq[BuildAction]
+    for k in needKeys:
+      let n = needs[k]
+      var key = keyOf("submodule", n.identity, n.commit, run.gitDigest,
+        limitsKey, SubmoduleEdgeVersion)
+      # As for `source`: only an answer is reused from this host's cache.
+      if not submoduleAnsweredBefore(run.edgePath(efSubmodule, key)):
+        key = keyOf("submodule", n.identity, n.commit, run.gitDigest,
+          limitsKey, SubmoduleEdgeVersion, "retry", $generatedAt)
+      let job = Job(family: efSubmodule, subject: n.url & "@" & n.commit,
+        package: needer[k], url: n.url, commit: n.commit, vcs: ovGit)
+      wave.add run.fetchAction(job, key, cacheable = true,
+        extraOutputs = @[".blobs"])
+      run.subPath[k] = run.edgePath(efSubmodule, key)
+    run.runWave(wave, all)
+  var composeWave: seq[BuildAction]
+  for sk in pending:
+    let job = run.sourceJobs[sk]
+    let raw = run.sourcePath[sk]
+    let (_, root) = run.rootTreeOf(raw)
+    let c = composeSource(root, job.subdir, job.url, job.commit,
+      run.submoduleLookupOf(run.subPath))
+    if c.state == coFailed and c.failure.failure == sfEgress and
+        c.failure.url.len > 0:
+      # A URL rule 1 refused before any edge ran: captured like an edge's.
+      # (A refusal by a `submodule` edge was captured when the edge ran.)
+      var kind = erScheme
+      for k in EgressRefusalKind:
+        if $k == c.failure.refusal: kind = k
+      run.refusals.add CapturedRefusal(package: job.package,
+        family: efSubmodule, refusal: EgressRefusal(kind: kind,
+          url: c.failure.url, detail: c.failure.detail))
+    var inputs = @[raw, raw & ".blobs"]
+    var fp = @["source-compose", ComposerIdentity, job.url, job.subdir,
+      job.commit]
+    var subs: seq[(string, string)]
+    for k in c.looked:
+      if k in run.subPath:
+        let p = run.subPath[k]
+        inputs.add p
+        inputs.add p & ".blobs"
+        subs.add (k, p)
+    for path in inputs:
+      run.objectHashes[path] = hex(readFile(path))
+      fp.add path.extractFilename() & " " & run.objectHashes[path]
+    for (k, _) in subs: fp.add "uses " & k
+    let key = keyOf(fp.join("\n"))
+    var cj = job
+    cj.family = efCompose
+    cj.rawPath = raw
+    cj.subInputs = subs
+    composeWave.add run.pureAction(cj, key, inputs, fp.join("\n"),
+      extraOutputs = @[".nimble", ".tar", ".blobs"])
+    run.rawSourcePath[sk] = raw
+    run.sourcePath[sk] = run.edgePath(efCompose, key)
+  run.runWave(composeWave, all)
+
 # ---------------------------------------------------------------------------
 # The generation
 # ---------------------------------------------------------------------------
@@ -537,11 +777,28 @@ proc loadPrevious(run: Run) =
   let rootId = indexDirRootId(run.cfg.previousIndex)
   var idx = openIndex(src, rootId)
   run.previousRoot = some(rootId)
+  var stale: seq[string]
   for r in idx.root.shards:
     let s = idx.loadShard(r.bucket)
     if s.isNone: continue
-    for p in s.get.packages: run.previousEnvelopes[nameKey(p.name)] = p
+    for p in s.get.packages:
+      run.previousEnvelopes[nameKey(p.name)] = p
+      for v in p.versions:
+        if flGitlinks in v.flags and v.submodules.len == 0:
+          stale.add p.name & " " &
+            (if v.version.tag.len > 0: v.version.tag else: $v.version.kind) &
+            " (" & v.commit & ")"
     for o in s.get.observations: run.previousObservations[nameKey(o.name)] = o
+  if stale.len > 0:
+    # Spec § 6.1, "Submodule sources": such a record's tree lacks its
+    # submodules, records are never edited, so the index is regenerated
+    # rather than carried forward.
+    fail("the previous generation " & run.cfg.previousIndex & " holds " &
+      $stale.len & " `gitlinks` record(s) without a submodules list, " &
+      "written by a generator before submodule sources: " &
+      stale.join(", ") & ". Their trees lack the submodules, and a record " &
+      "is never edited, so this generation cannot extend that index; " &
+      "generate it again without a previous generation")
   if run.cfg.shardBits < 0:
     run.shardBits = int(idx.root.shardBits)
 
@@ -801,20 +1058,24 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         if sk in run.sourcePath: continue
         changed = true
         var key = keyOf("source", t.origin.url, t.origin.subdir, s.commit,
-          run.gitDigest, limitsKey)
+          run.gitDigest, limitsKey, SourceEdgeVersion)
         # A source that failed or was refused is not a fact about the
         # commit, so its answer is not reused from the cache: the edge runs
         # again at this generation, as a host without that cache would.
         if not answeredBefore(run.edgePath(efSource, key)):
           key = keyOf("source", t.origin.url, t.origin.subdir, s.commit,
-            run.gitDigest, limitsKey, "retry", $config.generatedAt)
+            run.gitDigest, limitsKey, SourceEdgeVersion, "retry",
+            $config.generatedAt)
         let job = Job(family: efSource, subject: t.name & "@" & s.commit,
           package: t.name, url: t.origin.url, subdir: t.origin.subdir,
           commit: s.commit, vcs: t.origin.vcs)
         sourceWave.add run.fetchAction(job, key, cacheable = true,
-          extraOutputs = @[".nimble", ".tar"])
+          extraOutputs = @[".nimble", ".tar", ".blobs"])
         run.sourcePath[sk] = run.edgePath(efSource, key)
+        run.sourceJobs[sk] = job
     run.runWave(sourceWave, all)
+    # Versions with gitlinks: their submodules, then their composition.
+    run.composeSources(all, limitsKey, config.generatedAt)
 
     # Reads.
     var readWave: seq[BuildAction]

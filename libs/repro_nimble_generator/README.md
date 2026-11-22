@@ -9,14 +9,20 @@ build engine:
 | `registry` | `bakMetadataFetch` | `netFetch` | `packages.json` at the pinned registry commit |
 | `refs` | `bakMetadataFetch` | `netFetch` | an origin's tags (peeled) and `HEAD`, revalidated every generation |
 | `refs-history` | `bakMetadataFetch` | `netFetch` | an origin's commits, to expand `#<commit>` abbreviations and detect rewritten history |
-| `source` | `bakMetadataFetch` | `netFetch` | one commit's tree facts, `.nimble` and canonical archive |
+| `source` | `bakMetadataFetch` | `netFetch` | one commit's tree facts, `.nimble` and canonical archive (and, for a tree with gitlinks, its entries and blobs) |
+| `submodule` | `bakMetadataFetch` | `netFetch` | one submodule commit's whole tree, one wave per nesting level |
+| `source-compose` | `bakCatalogIndex` | none | a gitlinked version's source object: its tree with each submodule's in place |
 | `read` | `bakCatalogIndex` | none | the version record the static reader reads from a `.nimble` |
 | `shard`, `root` | `bakCatalogIndex` | none | the index objects |
 
 The fetch edges hold no credential, reach origins only through the egress
 policy (`egress.nim`: `https` only, public addresses only, every redirect
 checked, size and stall limits), read trees from git objects so a symbolic
-link is never followed, and never fetch a gitlink. A version's `first_seen`
+link is never followed, and fetch a gitlink only as a submodule source: its
+`.gitmodules` URL, resolved and refused before any contact unless it is
+`https`, vetted like any origin, at the commit it pins, within 8 levels and
+256 submodules per version. A version one of whose submodules cannot be
+obtained gets no record and a `gone` event naming the submodule. A version's `first_seen`
 is the generation's own time; `cooldown_days` holds a version back from its
 first sighting. Origin events (`repointed`, `tag-moved`,
 `history-rewritten`, `gone`, `tag-removed`) are computed against the
@@ -28,6 +34,7 @@ previous generation, whose records are copied, never edited.
 | `egress.nim` | the origin egress policy |
 | `origin_git.nim` | git as the bounded, confined origin transport |
 | `source_tree.nim` | tree digest, canonical archive, links, gitlinks, the `.nimble` |
+| `submodules.nim` | submodule URLs (relative resolution, rule 1 of the policy), nesting and count bounds, the source object composed and checked as one tree |
 | `registry.nim` | `packages.json` |
 | `edge_objects.nim` | the fetch edges' outputs, a closed vocabulary |
 | `assemble.nim` | one package's records, observation and events |

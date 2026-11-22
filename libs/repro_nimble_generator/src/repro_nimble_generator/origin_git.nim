@@ -62,6 +62,12 @@ type
     commitTime*: int64
     entries*: seq[TreeEntry]      ## sorted by path
     blobs*: Table[string, string] ## oid -> bytes, for files and links
+    hasGitmodules*: bool
+      ## the commit has a `.gitmodules` at the top of its repository (read
+      ## only when the tree has a gitlink)
+    gitmodules*: string
+      ## its bytes: what a gitlink's submodule URL is read from, whatever
+      ## the package's `?subdir=` (spec § 6.1, "Submodule sources")
 
 const
   BaseConfig = [
@@ -362,6 +368,21 @@ proc readTree*(g: OriginGit; repo, commit, subdir: string;
     if kind in {teFile, teExecutable, teSymlink}:
       wanted.add meta[2]
   result.entries.sort(proc (a, b: TreeEntry): int = cmp(a.path, b.path))
+  var anyGitlink = false
+  for e in result.entries:
+    if e.kind == teGitlink: anyGitlink = true
+  if anyGitlink:
+    # A regular file only: git itself refuses a `.gitmodules` that is a
+    # symbolic link, so its target text is never read as submodule URLs.
+    let lt = localGit(g, repo, ["ls-tree", "-z", commit, "--", ".gitmodules"],
+      limits)
+    let mode = if lt.code == 0: lt.stdoutText.split(' ')[0] else: ""
+    if mode in ["100644", "100755"]:
+      let gm = localGit(g, repo, ["cat-file", "blob",
+        commit & ":.gitmodules"], limits)
+      if gm.code == 0:
+        result.hasGitmodules = true
+        result.gitmodules = gm.stdoutText
   if wanted.len == 0:
     return
   var input = ""
