@@ -41689,7 +41689,7 @@
       "requiresReproBinary": true,
       "source": "tests/e2e/t_e2e_cs_m7_hooks_ensure_installs_completion.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 10,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -26751,6 +26751,11 @@ proc completionHookRequestOf(parsed: ParsedHooksCommand):
     pathEnv: getEnv("PATH"),
     user: getEnv("USER"),
     windows: defined(windows),
+    # Windows `--system` puts the script under this installation: the
+    # directory above the `bin\` this binary runs from (an MSI's
+    # `%ProgramFiles%\Reprobuild`, whose script the package installed).
+    installPrefix: (when defined(windows): getAppFilename().parentDir.parentDir
+                    else: ""),
     script: proc (shell: CliShell): string =
       ReproCommandLine.completionScript(shell))
 

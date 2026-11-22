@@ -200,7 +200,8 @@ function Assert-DocumentsInScratch {
   return $true
 }
 
-# The invoking user's real profiles and per-user completion script, each as
+# The invoking user's real profiles and per-user completion script (and on
+# Windows the machine's all-users PowerShell profiles), each as
 # "<sha256|absent> <path>", read in THIS process's own environment.
 function Get-RealProfileState {
   $paths = @()
@@ -211,6 +212,12 @@ function Get-RealProfileState {
       $paths += (Join-Path $d $rel)
     }
     $paths += (Join-Path $env:LOCALAPPDATA 'repro\completions\repro.ps1')
+    # The all-users profiles ($PSHOME\Profile.ps1) of Windows PowerShell 5.1
+    # and of the PowerShell 7 on PATH, which `repro hooks ensure
+    # --shell-autocomplete --system` writes and these checks must not.
+    $paths += [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Profile.ps1')
+    $pwsh = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pwsh) { $paths += (Join-Path (Split-Path -Parent $pwsh.Source) 'Profile.ps1') }
   } else {
     # REPRO_M8C_REAL_HOME: the invoking user's home when this script itself
     # runs with a scratch HOME (so that pwsh's own caches stay out of it).
