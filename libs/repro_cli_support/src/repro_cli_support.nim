@@ -91647,15 +91647,35 @@ proc canonicalReadPath(path: string): string =
   except OSError:
     result = os.normalizedPath(absolutePath(path))
 
-proc repositoryRelativePath(root, path: string): string =
-  ## ``path`` relative to ``root`` with ``/`` separators, or "" when it is not
-  ## inside the repository.
+proc placedReadPath(path: string): string =
+  ## Where ``path`` sits: the ancestors of the entry are resolved and the
+  ## entry itself is not. A read of a symbolic link is a read of the link,
+  ## and the content binds (or fails to bind) the link, so where it points
+  ## neither places it inside the repository nor inside an output tree
+  ## (Monitor-Hook-Shim §"Both sides in one resolution"; the engine's own
+  ## ``isRemovedOutputTreePath`` places a link entry the same way).
+  let absolute = os.normalizedPath(absolutePath(path))
+  let (dir, name) = splitPath(absolute)
+  if name.len == 0 or not symlinkExists(absolute):
+    return canonicalReadPath(path)
+  try:
+    result = expandFilename(dir) / name
+  except OSError:
+    result = absolute
+
+proc relativeToRoot(root, full: string): string =
+  ## ``full`` (already placed) relative to ``root`` with ``/`` separators,
+  ## or "" when it is not inside the repository.
   let base = canonicalReadPath(root)
-  let full = canonicalReadPath(path)
   if full.len <= base.len + 1 or not full.startsWith(base) or
       full[base.len] notin {DirSep, AltSep}:
     return ""
   full[base.len + 1 .. ^1].replace(DirSep, '/')
+
+proc repositoryRelativePath(root, path: string): string =
+  ## ``path`` relative to ``root`` with ``/`` separators, or "" when it is not
+  ## inside the repository. A link is placed as the entry (``placedReadPath``).
+  relativeToRoot(root, placedReadPath(path))
 
 proc isTrackedOrInsideTracked(relative: string;
     tracked: HashSet[string]): bool =
@@ -91673,15 +91693,18 @@ proc isTrackedOrInsideTracked(relative: string;
     path = path[0 ..< slash]
   false
 
-proc isExemptOutputRead(path: string; readSet: CapturedReadSet): bool =
+proc isExemptOutputRead(path: string; readSet: CapturedReadSet;
+    asEntry = true): bool =
   ## ``path`` (absolute) is a declared output of an action in the certified
   ## closure, or lies in an output directory the engine empties before one
   ## runs. Exact match for files, as the engine's own self-write filter
   ## (``selfWrittenOutputKeys``) uses: lying NEXT TO an output, or in the
   ## directory outputs go to, does not make a file an output.
-  let full = canonicalReadPath(path)
+  ## ``asEntry`` places a link as the entry; false resolves it to its target.
+  let full = if asEntry: placedReadPath(path) else: canonicalReadPath(path)
   for output in readSet.exemptOutputs:
-    if canonicalReadPath(output) == full:
+    if (if asEntry: placedReadPath(output) else: canonicalReadPath(output)) ==
+        full:
       return true
   for tree in readSet.exemptOutputTrees:
     let root = canonicalReadPath(tree)
@@ -91739,19 +91762,27 @@ proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
   var seen = initHashSet[string]()
   if readSet.captured:
     for path in readSet.paths:
-      let relative = repositoryRelativePath(repositoryRoot, path)
-      if relative.len == 0 or seen.contains(relative):
-        continue
-      if relative == ".git" or relative.startsWith(".git/"):
-        continue
-      if isTrackedOrInsideTracked(relative, trackedPaths):
-        continue
-      if dirExists(canonicalReadPath(path)):
-        continue
-      if isExemptOutputRead(path, readSet):
-        continue
-      seen.incl(relative)
-      result.offending.add(relative)
+      # The entry first: a link is judged as itself, wherever it points.
+      var entries = @[(relative: repositoryRelativePath(repositoryRoot, path),
+        asEntry: true)]
+      # A link's target is read too, and the content binds the link, not
+      # what it leads to, so the target is judged as well.
+      if symlinkExists(absolutePath(path)):
+        entries.add((relative: relativeToRoot(repositoryRoot,
+          canonicalReadPath(path)), asEntry: false))
+      for (relative, asEntry) in entries:
+        if relative.len == 0 or seen.contains(relative):
+          continue
+        if relative == ".git" or relative.startsWith(".git/"):
+          continue
+        if isTrackedOrInsideTracked(relative, trackedPaths):
+          continue
+        if dirExists(canonicalReadPath(path)):
+          continue
+        if isExemptOutputRead(path, readSet, asEntry):
+          continue
+        seen.incl(relative)
+        result.offending.add(relative)
   result.read = result.offending
   result.read.sort(system.cmp[string])
   if mode == cuiStrict:
