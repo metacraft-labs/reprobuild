@@ -7,7 +7,7 @@
 ##
 ## .. code-block:: nim
 ##
-##   # policy/metacraft_certificate_policy.nim, in the shared package
+##   # src/metacraft_certificate_policy.nim, in the shared package
 ##   import repro_certificates
 ##
 ##   const metacraftPolicy* = certificatePolicy "metacraft-default":
@@ -26,34 +26,25 @@
 ##       gateMode advisory
 ##       requires "unit-suite"          # the rule's `platforms`, else any
 ##
-## The shared package's own ``repro.nim`` re-exports that module:
+## Each adopting repository imports the module by name and declares the
+## package, checked out beside it, with the nested ``uses: "<package>"``
+## form. The declaration puts the package's root and its ``src/`` on every
+## compile of the recipe, and pins the package's revision in ``repro.lock``:
 ##
 ## .. code-block:: nim
 ##
 ##   import repro_project_dsl
-##   import ./policy/metacraft_certificate_policy
-##   export metacraft_certificate_policy
-##   package metacraft_policy:           # checked out as ../metacraft_policy
-##     ...
-##
-## and each adopting repository names the package in ``uses:``, which imports
-## the package's ``repro.nim`` (and so the policy) and pins its revision in
-## ``repro.lock``:
-##
-## .. code-block:: nim
-##
-##   import repro_project_dsl
+##   import metacraft_certificate_policy
 ##
 ##   package codetracer:
 ##     uses:
-##       "metacraft_policy"
+##       uses: "metacraft-certificate-policy"
 ##     enactCertificatePolicy metacraftPolicy
 ##     build:
 ##       ...
 ##
-## A bare ``import metacraft_certificate_policy`` of a module in the package's
-## ``src/`` does not compile yet: a nested ``uses: "<pkg>"`` does not put that
-## directory on the recipe compile path.
+## A bare string in ``uses:`` (``"metacraft-certificate-policy"``) is a tool
+## requirement, not a package declaration, and puts nothing on the path.
 ##
 ## The vocabulary, in full. Anything else inside the blocks is a compile
 ## error naming what is accepted:

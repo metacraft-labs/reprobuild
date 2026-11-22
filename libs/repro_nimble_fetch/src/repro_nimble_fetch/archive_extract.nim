@@ -29,6 +29,28 @@
 ##    block, and a pax `size` must equal the header's (the data is located by
 ##    the header's), so no two readers can see different members.
 ##
+## Two options serve archives that do not come from git:
+##
+## * ``topDirectory`` names the one top directory every member must lie
+##   under (with ``stripComponents = 1``). A `.crate` file holds exactly one,
+##   `<name>-<version>/`, and a member outside it is refused under rule 1
+##   (Cargo Book, "Registry Web API", `cargo publish`: "a `.crate` file ...
+##   is a gzipped tar archive ... with a single top-level directory named
+##   `<name>-<version>`",
+##   https://doc.rust-lang.org/cargo/reference/registry-web-api.html).
+## * ``gnuLongNames`` accepts GNU tar's long-name records (type `L`, and `K`
+##   for a long link target). cargo writes its `.crate` archives with GNU
+##   headers through the `tar` crate, which emits an `L` record before any
+##   member whose path does not fit the 100-byte name field
+##   (https://www.gnu.org/software/tar/manual/html_node/Standard.html, "GNU
+##   Extensions"). The record only supplies the next member's name; that name
+##   then passes every rule above exactly as a pax `path` does. Off by
+##   default: a git tree's archive never needs it.
+##
+## The 155-byte `prefix` field is read only from a POSIX ustar header (magic
+## `ustar\0`): a GNU header keeps other fields (access and change times) at
+## those offsets, so reading them as a name would invent a path.
+##
 ## A refusal is an `ExtractRefusal` naming the member and the rule; the
 ## caller discards the whole staging directory (`fetch.nim`). Modes are
 ## normalized: a regular file is written 0644, or 0755 when its archive mode
@@ -67,6 +89,11 @@ type
       ## after stripping, keep only the members under this directory, rooted
       ## there (a package's `?subdir=`); "" keeps everything
     limits*: ExtractLimits
+    topDirectory*: string
+      ## with ``stripComponents = 1``: the name the one top directory must
+      ## have; "" accepts whatever the first member names
+    gnuLongNames*: bool
+      ## accept GNU long-name (`L`) and long-link (`K`) records
 
   ExtractedTree* = object
     files*, links*: int
@@ -189,7 +216,8 @@ proc extractArchive*(archive: string; staging: string;
     let typeflag = header[156]
     var name = cstr(header, 0, 100)
     let magic = header[257 ..< 263]
-    if magic.startsWith("ustar"):
+    if magic == "ustar\0":
+      # POSIX ustar only: a GNU header ("ustar  \0") has no prefix field.
       let prefix = cstr(header, 345, 155)
       if prefix.len > 0: name = prefix & "/" & name
     var linkName = cstr(header, 157, 100)
@@ -198,6 +226,15 @@ proc extractArchive*(archive: string; staging: string;
       refusal(xrMalformed, name, "the member's size runs past the archive")
     let body = archive[pos ..< pos + int(size)]
     pos += int((size + 511) div 512 * 512)
+    if typeflag in {'L', 'K'} and options.gnuLongNames:
+      if size > 64 * 1024:
+        refusal(xrBounds, name, "a GNU long name longer than 64 KiB")
+      var long = body
+      let z = long.find('\0')
+      if z >= 0: long.setLen(z)
+      if typeflag == 'L': pending["path"] = long
+      else: pending["linkpath"] = long
+      continue
     if typeflag in {'x', 'g'}:
       if size > 1024 * 1024:
         refusal(xrBounds, name, "pax header larger than 1 MiB")
@@ -225,7 +262,11 @@ proc extractArchive*(archive: string; staging: string;
     if options.stripComponents > 0:
       if options.stripComponents != 1:
         refusal(xrMalformed, name, "only one component can be stripped")
-      if stripTop.len == 0: stripTop = parts[0]
+      if stripTop.len == 0:
+        if options.topDirectory.len > 0 and parts[0] != options.topDirectory:
+          refusal(xrName, name, "outside the archive's top directory " &
+            options.topDirectory.escape())
+        stripTop = parts[0]
       elif parts[0] != stripTop:
         refusal(xrName, name, "outside the archive's top directory " &
           stripTop.escape())

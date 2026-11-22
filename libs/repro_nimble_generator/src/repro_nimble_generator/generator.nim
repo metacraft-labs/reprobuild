@@ -63,7 +63,11 @@ const
   GeneratorIdentity* = "reprobuild-nimble-generator/1"
     ## The root's `generator`: the generator's own version, never the host's
     ## tools, so two operators with different git builds agree.
-  ReaderIdentity = "repro_nimble_reader/1"
+  ReaderIdentity = "repro_nimble_reader/2"
+    ## in the `read` edge's key: the reader's version. Version 2 reads the
+    ## Nim-version comparisons and `defined(posix|unix|bsd)` into the
+    ## closed condition set (NPC-AREQ7, A3), so a version-1 reading of a
+    ## file that uses them (needs-override) is read again
   SourceEdgeVersion = "source/2"
     ## in the `source` edge's key: version 2 also outputs a gitlinked tree's
     ## entries and blobs, which a version-1 output on this host lacks

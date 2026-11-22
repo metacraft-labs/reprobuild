@@ -54,6 +54,7 @@ import repro_core/link_target
 import repro_core/path_identity
 import repro_core/process_env
 import repro_core/relocation
+import repro_core/workspace_siblings
 # PG-14 — the managed-hook contract handshake has to run a `repro` this build
 # did NOT produce (that is the entire measurement: seventeen store paths on one
 # host, answering differently per shell). The `uncontrolled*` wrappers are the
@@ -1026,10 +1027,15 @@ proc findSiblingProjectFile*(packageName: string;
   ## **Deferred Item D2** cross-project sibling discovery.
   ##
   ## Given a bare package name (the LHS of a ``<pkg>:<target>`` qualified
-  ## selector), check whether a sibling checkout exists alongside the
-  ## current project (one level up: ``../<pkg>/repro.nim`` or
-  ## ``../<pkg>/reprobuild.nim``). Returns the resolved project-file path
-  ## when found, otherwise the empty string.
+  ## selector), the project file of the workspace sibling of that name: the
+  ## directory ``nearestWorkspaceSibling`` finds from ``currentDir`` (the
+  ## direct sibling ``../<pkg>``, else the same name beside a farther
+  ## ancestor), and in it ``repro.nim`` or ``reprobuild.nim``. Returns the
+  ## resolved project-file path when found, otherwise the empty string. The
+  ## search rule is the one a recipe's package declarations and the
+  ## workspace-producer import use, so a name resolves to one checkout for
+  ## all three; a directory of that name with no project file is not walked
+  ## past.
   ##
   ## This is the minimum-viable cross-project discovery for D2 — the
   ## broader workspace-manifest-backed develop-mode mechanism
@@ -1038,46 +1044,27 @@ proc findSiblingProjectFile*(packageName: string;
   ## ``repro build runquota:runquotad`` route through the engine's
   ## existing path-with-fragment codepath (which already supports
   ## arbitrary out-of-tree project files; see the B0 outcome).
-  if packageName.len == 0:
+  # A dot is refused on top of the sibling-name rule: in a qualified selector
+  # it is not part of a bare package name, and the upstream qualified-
+  # selector validator reports it.
+  if '.' in packageName:
     return ""
-  # Filter out obviously-unsafe spellings — a package name with a path
-  # separator is not a bare package name; let the upstream qualified-
-  # selector validator reject it instead.
-  for ch in packageName:
-    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
-      return ""
   let anchor =
     if currentDir.len > 0: currentDir
     else: getCurrentDir()
-  # Walk UP from the anchor, probing ``<ancestor>/<packageName>`` at each level.
-  # Level one (``anchor.parentDir / packageName``) is the direct-sibling
-  # convention; the walk-up extends it to the WORKSPACE-ROOT sibling convention
-  # so a DEEP out-of-tree consumer (several dirs below the workspace root) can
-  # still discover a top-level workspace sibling (the RP5c2 shape). Purely
-  # additive — a direct sibling is still found at level one, and the nearest
-  # ancestor owning ``<packageName>`` wins (a closer same-named sibling shadows a
-  # farther one). Mirrors ``workspaceProducerModule``'s compile-time walk so the
-  # runtime and macro-time discoveries stay in lock-step.
-  var dir = anchor
-  for _ in 0 ..< 16:
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    let siblingDir = parent / packageName
-    if dirExists(extendedPath(siblingDir)):
-      let match =
-        try:
-          resolveProjectFile(siblingDir)
-        except ProjectFileAmbiguousError:
-          # Both repro.nim AND reprobuild.nim — let the regular project-
-          # loading codepath surface the diagnostic if the user proceeds.
-          return ""
-        except CatchableError:
-          ProjectFileMatch()
-      if match.path.len > 0:
-        return match.path
-    dir = parent
-  ""
+  let sibling = nearestWorkspaceSibling(anchor, packageName)
+  if sibling.dir.len == 0:
+    return ""
+  let match =
+    try:
+      resolveProjectFile(sibling.dir)
+    except ProjectFileAmbiguousError:
+      # Both repro.nim AND reprobuild.nim — let the regular project-
+      # loading codepath surface the diagnostic if the user proceeds.
+      return ""
+    except CatchableError:
+      ProjectFileMatch()
+  match.path
 
 proc bareNameAnchor(name, currentDir: string): string =
   ## The anchor a request of names only hands the build for its first name.
@@ -8680,6 +8667,13 @@ proc toolIdentityServable(identity: var PathOnlyBuildIdentity):
         nixStorePathsCarryWrapperLibc(actionIdentity.realizedStorePaths,
           actionIdentity.selectedStorePath):
       return (servable: false, refreshed: false)
+  # A path-mode identity resolved before path mode followed a Nix Darwin
+  # cc-wrapper's SDK host libraries lacks their header and library
+  # directories, and serving it would fail every `-liconv` link again.
+  # Re-resolve it; profiles without such a wrapper never match.
+  for profile in identity.profiles:
+    if pathProfileLacksNixDarwinSdkChannels(profile):
+      return (servable: false, refreshed: false)
   let executables = verifyIdentityExecutables(identity)
   (servable: executables.current, refreshed: executables.refreshed)
 
@@ -12135,7 +12129,7 @@ proc recipeCompileOutputDirOf(run: BuildRunResult; actionId,
       return item.computationOutputDir
   stagingDir
 
-proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
+proc recipeCompileRelocationAnchors(workDir, helperCliPath, modulePath: string;
                                     compileCommand: openArray[string] = []):
     seq[string] =
   ## The roots a recipe compile reaches by ABSOLUTE path from wherever the
@@ -12168,31 +12162,24 @@ proc recipeCompileRelocationAnchors(workDir, helperCliPath: string;
       roots.add(os.normalizedPath(home / dir))
   # Every library directory the compile is TOLD about by absolute path —
   # the reprobuild package path set includes sibling checkouts (io-mon,
-  # runquota, ...) — is reached there from every location.
+  # runquota, ...) — is reached there from every location. Except the
+  # packages the RECIPE declares (`uses "<name>"`): they are found beside the
+  # recipe (`declaredPackagePathDirs`), move with it, and are named relative
+  # to it (`recipeRelativeCompileArgs`), so anchoring them would bind the
+  # compile's identities to one location of the workspace.
+  let declaredDirs =
+    if modulePath.len > 0: declaredPackagePathDirs(absolutePath(modulePath))
+    else: @[]
   for arg in compileCommand:
     if arg.startsWith(NimPathOption) and arg.len > NimPathOption.len:
       let dir = arg[NimPathOption.len .. ^1]
-      if dir.isAbsolute:
+      if dir.isAbsolute and dir notin declaredDirs:
         roots.add(dir)
   for root in roots:
     let normalized = os.normalizedPath(root)
     if normalized notin result:
       result.add(normalized)
   result.sort()
-
-proc recipeRelativeCompileArgs(command: openArray[string];
-                               modulePath: string): seq[string] =
-  ## A provider compile command as the recipe-relative compile spells it:
-  ## the recipe module by its name and the recipe directory as `.`.
-  let absoluteModule = absolutePath(modulePath)
-  let recipeDir = parentDir(absoluteModule)
-  for arg in command:
-    if arg == absoluteModule or arg == modulePath:
-      result.add(extractFilename(modulePath))
-    elif arg == NimPathOption & recipeDir:
-      result.add(NimPathOption & ".")
-    else:
-      result.add(arg)
 
 proc publishIfChanged(path, content: string) =
   ## Write `content` to `path` unless it already holds exactly that, so a
@@ -12248,7 +12235,7 @@ proc planRecipeRelativeProviderCompile(callerPlan: ProviderCompilePlan;
   result.active = true
   result.recipeDir = recipeDir
   result.anchors = effectiveAnchors(recipeDir,
-    recipeCompileRelocationAnchors(workDir, helperCliPath,
+    recipeCompileRelocationAnchors(workDir, helperCliPath, modulePath,
       callerPlan.compilerCommand))
   # Derived from the caller's plan, whose sources and fingerprints are this
   # recipe's. The identities do not depend on the output path (`--out:` is
@@ -12559,7 +12546,7 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   let anchors =
     if relocatable:
       effectiveAnchors(recipeDir, recipeCompileRelocationAnchors(workDir,
-        helperCliPath, providerCompileCommand(modulePath,
+        helperCliPath, modulePath, providerCompileCommand(modulePath,
           parentDir(artifactPath) / "provider" / "project-provider",
           workDir, scratchDir)))
     else: @[]
@@ -12575,8 +12562,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
       else:
         providerCompilerCommand
     elif relocatable:
-      providerCompileCommand(extractFilename(modulePath),
-        ".repro" / "provider" / "project-provider", workDir, "")
+      # Assembled for the recipe at its absolute path, then spelled as the
+      # recipe-relative compile spells it. Assembling it for the bare file
+      # name read that name against THIS process's working directory, which
+      # is not the recipe's: the recipe's declared packages
+      # (`declaredPackagePathDirs`) were looked up beside some other file.
+      recipeRelativeCompileArgs(providerCompileCommand(absolutePath(modulePath),
+        ".repro" / "provider" / "project-provider", workDir, ""), modulePath)
     else:
       providerCompileCommand(modulePath,
         parentDir(artifactPath) / "provider" / "project-provider",
@@ -26484,6 +26476,69 @@ proc emitLeafReports(reports: openArray[LeafCheckReport]) =
   stdout.flushFile()
   for line in reportLines:
     stderr.writeLine(line)
+
+proc emitProgressItem(mode: BuildProgressMode; isTty: bool;
+                      text: string) {.gcsafe.} =
+  ## One per-item progress line (``checking [i/N] <repo>...`` and the like),
+  ## rendered as the sync observation loop renders it: rewritten in place on
+  ## a terminal in the single-line modes, one line per item in the line
+  ## modes, and nothing in the others, whose phase announcement is the whole
+  ## of their progress. The caller has already decided progress is wanted at
+  ## all (not ``--json``, not ``--progress=quiet``). Follow a run of items
+  ## with ``endProgressItems``.
+  if isTty and mode in {bpmLine, bpmBarLine}:
+    stderr.write("\r\27[2K" & text)
+    stderr.flushFile()
+  elif mode in {bpmLines, bpmLinesBar, bpmSimpleLines, bpmLiveLines}:
+    stderr.writeLine(text)
+    stderr.flushFile()
+
+proc endProgressItems(mode: BuildProgressMode; isTty: bool) {.gcsafe.} =
+  ## Clear the line ``emitProgressItem`` rewrote in place, so whatever is
+  ## printed next starts on a clean line.
+  if isTty and mode in {bpmLine, bpmBarLine}:
+    stderr.write("\r\27[2K")
+    stderr.flushFile()
+
+proc refreshSharedBareAnnounced(gitBin, cacheRoot, fetchUrl: string;
+                                label, purpose: string; emitProgress: bool;
+                                mode: BuildProgressMode): SharedCloneResult =
+  ## ``refreshSharedBare`` for a command that reports progress. ``label``
+  ## prefixes every line (``workspace sync``); ``purpose`` says what the
+  ## refresh is for (``to clone <path>``).
+  ##
+  ## Why it exists: a refresh fetches (or clones) into the shared bare and
+  ## then runs the leaf detector in every checkout on the host that borrows
+  ## from it (Shared-Clone-Pool-Integrity.md §4.2). On a host with a few
+  ## dozen sibling workspaces that is minutes of work with nothing on stderr:
+  ## `repro sync --only <repo>` for a repo with no checkout printed
+  ## ``checking 1 repositories...`` and then nothing until the clone was
+  ## done, which a user cannot tell from a hang. CLI/sync.md "Progress and
+  ## phase ordering (RA-27)" requires the refresh to be announced (naming the
+  ## URL and what it is for) and each borrower to be reported as ``[i/N]``;
+  ## Interactive-UX-And-Progress.md Principle 1 is the general rule. The
+  ## announcement is a phase line, printed in every progress mode; the
+  ## borrowers are per-item lines (``emitProgressItem``).
+  if not emitProgress:
+    return refreshSharedBare(gitBin, cacheRoot, fetchUrl)
+  let isTty = isatty(stderr)
+  let hook: SharedBareProgressHook =
+    proc (event: SharedBareProgress) {.closure, gcsafe.} =
+      case event.kind
+      of sbpFetch:
+        stderr.writeLine(label & ": refreshing the shared clone cache for " &
+          fetchUrl & " (" & purpose & ")...")
+        stderr.flushFile()
+      of sbpClone:
+        stderr.writeLine(label & ": creating the shared clone cache for " &
+          fetchUrl & " (" & purpose & ")...")
+        stderr.flushFile()
+      of sbpLeafCheck:
+        emitProgressItem(mode, isTty, label &
+          ": checking borrowing checkout [" & $event.index & "/" &
+          $event.total & "] " & event.leaf & "...")
+  result = refreshSharedBare(gitBin, cacheRoot, fetchUrl, hook)
+  endProgressItems(mode, isTty)
 
 proc runManifestRefreshHookCommand*(hookName, currentRepo: string;
                                     hookArgs: openArray[string]): int
@@ -45816,12 +45871,17 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
   # standalone (no ``--reference``) and the accelerator is a no-op for it.
   let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
   var sharedBareByUrl = initTable[string, string]()
-  proc sharedReferenceFor(fetchUrl: string): string =
+  #
+  # ``init`` has no ``--progress`` flag; it reports like the default
+  # single-line mode (``refreshSharedBareAnnounced``): the refresh is
+  # announced, and on a terminal each borrower check rewrites one line.
+  proc sharedReferenceFor(fetchUrl, path: string): string =
     if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
-    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let refreshed = refreshSharedBareAnnounced(identity.binaryPath, cacheRoot,
+      fetchUrl, "workspace init", "to clone " & path, not args.json, bpmLine)
     emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
@@ -45855,7 +45915,7 @@ proc executeWorkspaceInit(argsIn: WorkspaceInitArgs): WorkspaceInitOutcome =
       repoPath = repo.path,
       receiptPath = receiptRel,
       revision = repo.revision,
-      referencePath = sharedReferenceFor(initCloneUrl),
+      referencePath = sharedReferenceFor(initCloneUrl, repo.path),
       cloneFilter = repo.cloneFilter,
       depth = repo.depth,
       singleBranch = repo.singleBranch)
@@ -52902,7 +52962,8 @@ proc describeDirectoryContents(probe: RelocationGitProbe;
 proc relocateDeclaredRenames(identity: GitToolIdentity;
                              workspaceRoot, cacheRoot: string;
                              repos: seq[ResolvedRepo];
-                             emitProgress: bool):
+                             emitProgress: bool;
+                             progressMode: BuildProgressMode):
     Table[int, RepoRelocationOutcome] =
   ## Decide and perform the relocation for every declared repo that has a
   ## `previously` list. Per-repo atomicity throughout: one repo awaiting a
@@ -53251,8 +53312,12 @@ proc relocateDeclaredRenames(identity: GitToolIdentity;
     var evidenceSource = ""
     if cacheRoot.len > 0 and newCloneUrl.len > 0:
       if newCloneUrl notin bareForUrl:
-        let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot,
-          newCloneUrl)
+        # Announced like the clone-path refresh: it runs the same leaf
+        # detector over every borrower on the host.
+        let refreshed = refreshSharedBareAnnounced(identity.binaryPath,
+          cacheRoot, newCloneUrl, "workspace sync",
+          "to verify the relocation of '" & repo.name & "'", emitProgress,
+          progressMode)
         emitLeafReports(refreshed.leafReports)
         bareForUrl[newCloneUrl] =
           if refreshed.ok: refreshed.sharedBarePath else: ""
@@ -53691,7 +53756,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   # that has nothing to do with it.
   let relocations = relocateDeclaredRenames(identity, args.workspaceRoot,
     cloneObjectsRoot(args.cloneObjects, args.workspaceRoot), resolved.repos,
-    emitProgress = not args.json and args.progressMode != bpmQuiet)
+    emitProgress = not args.json and args.progressMode != bpmQuiet,
+    progressMode = args.progressMode)
 
   alignWorkspaceRemotes(args.workspaceRoot, resolved.repos, identity)
 
@@ -54033,14 +54099,9 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     stderr.flushFile()
   var observations: seq[RepoSyncObservation]
   for idx, repo in resolved.repos:
-    if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
-      stderr.write("\r\27[2Kworkspace sync: checking [" & $(idx + 1) & "/" &
-        $resolved.repos.len & "] " & repo.path & "...")
-      stderr.flushFile()
-    elif emitProgress and args.progressMode in {bpmLines, bpmLinesBar, bpmSimpleLines, bpmLiveLines}:
-      stderr.writeLine("workspace sync: checking [" & $(idx + 1) & "/" &
-        $resolved.repos.len & "] " & repo.path & "...")
-      stderr.flushFile()
+    if emitProgress:
+      emitProgressItem(args.progressMode, isTty, "workspace sync: checking [" &
+        $(idx + 1) & "/" & $resolved.repos.len & "] " & repo.path & "...")
     let repoPath = args.workspaceRoot / repo.path
     let repoForcePushed =
       forcePushedShasFor(forcePushes, repo.path, repo.name)
@@ -54065,9 +54126,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         observation.relocationFailure = outcome.tag & ": " & outcome.message
       else: discard
     observations.add(observation)
-  if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
-    stderr.write("\r\27[2K")
-    stderr.flushFile()
+  if emitProgress:
+    endProgressItems(args.progressMode, isTty)
 
   # Step 4: planner.
   #
@@ -54103,13 +54163,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   # private repo a teammate added) is reported + SKIPPED rather than aborting
   # the whole sync (RA-23 deliverable 2; consistent with RA-11's no-rollback
   # partial-advance — the readable repos still converge).
+  #
+  # The refresh is announced (``refreshSharedBareAnnounced``): it runs before
+  # ``updating N repo(s)`` is printed and can take minutes.
   var sharedBareForClone = initTable[string, string]()
-  proc cloneReferenceFor(fetchUrl: string): string =
+  proc cloneReferenceFor(fetchUrl, path: string): string =
     if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
-    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let refreshed = refreshSharedBareAnnounced(identity.binaryPath, cacheRoot,
+      fetchUrl, "workspace sync", "to clone " & path, emitProgress,
+      args.progressMode)
     emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
@@ -54264,7 +54329,8 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
     # acceleration, and remember it as a clone so a failure is skip-not-fatal.
     var cloneRef = ""
     if decision.action == saClone:
-      cloneRef = cloneReferenceFor(cloneUrlFor(resolvedRepo))
+      cloneRef = cloneReferenceFor(cloneUrlFor(resolvedRepo),
+        resolvedRepo.path)
       cloneRepoIdx.incl(repoIdx)
     let built = syncCheckoutActionFor(
       identity, args.workspaceRoot, resolvedRepo, decision, repoIdx, cloneRef)
@@ -54284,6 +54350,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
       stderr.writeLine("workspace sync: updating " & $checkoutActions.len &
         " repo(s) (clone/fast-forward/attach, jobs-checkout=" &
         $jobsCheckout & ") ...")
+      # Name each clone before the graph runs (CLI/sync.md RA-27 phase 3):
+      # a clone is the slow item of this graph, and its ``[cloned]`` line
+      # only appears once it is done. One full line per clone, in every
+      # mode: the graph runs them concurrently, so a line rewritten in place
+      # would show only the last one while all of them are in flight.
+      for a in checkoutActions:
+        let repoIdx = actionRepoIdx[a.id]
+        if repoIdx in cloneRepoIdx:
+          let repo = resolved.repos[repoIdx]
+          stderr.writeLine("workspace sync: cloning " & repo.path & " <- " &
+            cloneUrlFor(repo) & "...")
+      stderr.flushFile()
     var config = defaultBuildEngineConfig(engineCacheRoot)
     config.suppressTrace = true
     config.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
@@ -54877,14 +54955,9 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     stderr.flushFile()
   var observations: seq[MainlineSyncObservation]
   for idx, repo in resolved.repos:
-    if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
-      stderr.write("\r\27[2Kworkspace sync: checking [" & $(idx + 1) & "/" &
-        $resolved.repos.len & "] " & repo.path & "...")
-      stderr.flushFile()
-    elif emitProgress and args.progressMode in {bpmLines, bpmLinesBar, bpmSimpleLines, bpmLiveLines}:
-      stderr.writeLine("workspace sync: checking [" & $(idx + 1) & "/" &
-        $resolved.repos.len & "] " & repo.path & "...")
-      stderr.flushFile()
+    if emitProgress:
+      emitProgressItem(args.progressMode, isTty, "workspace sync: checking [" &
+        $(idx + 1) & "/" & $resolved.repos.len & "] " & repo.path & "...")
     let repoAbs = args.workspaceRoot / repo.path
     var obs: MainlineSyncObservation
     # The role was resolved when the manifest loaded, from declarations only
@@ -54943,9 +55016,8 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
           ["-C", repoAbs, "merge-tree", "--write-tree",
            obs.headSha, obs.roleTip]).code != 0
     observations.add(obs)
-  if emitProgress and isTty and args.progressMode in {bpmLine, bpmBarLine}:
-    stderr.write("\r\27[2K")
-    stderr.flushFile()
+  if emitProgress:
+    endProgressItems(args.progressMode, isTty)
 
   let decisions = planMainlineSync(resolved.repos, observations,
     args.mainlineFlavor)
@@ -54954,12 +55026,15 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
 
   # Clone phase for missing repositories:
   var sharedBareForClone = initTable[string, string]()
-  proc cloneReferenceFor(fetchUrl: string): string =
+  proc cloneReferenceFor(fetchUrl, path: string): string =
     if clonePoolRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareForClone.hasKey(fetchUrl):
       return sharedBareForClone[fetchUrl]
-    let refreshed = refreshSharedBare(identity.binaryPath, clonePoolRoot, fetchUrl)
+    # Announced for the same reason as in ``executeWorkspaceSync``.
+    let refreshed = refreshSharedBareAnnounced(identity.binaryPath,
+      clonePoolRoot, fetchUrl, "workspace sync", "to clone " & path,
+      emitProgress, args.progressMode)
     emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     if not refreshed.ok and refreshed.diagnostic.len > 0:
@@ -54982,7 +55057,7 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
       let idSeg = safeRepoIdSegment(repo.name) & "-" & $i
       let receiptRel = ".repro" / "workspace" / "receipts" /
         ("mainline-sync-clone-" & idSeg & ".receipt")
-      let cloneRef = cloneReferenceFor(cloneUrlFor(repo))
+      let cloneRef = cloneReferenceFor(cloneUrlFor(repo), repo.path)
       var a = gitCloneAction("workspace-mainline-sync-clone-" & idSeg, identity,
         remoteUrl = cloneUrlFor(repo),
         repoPath = repo.path,
@@ -55004,6 +55079,12 @@ proc executeMainlineSync(args: WorkspaceSyncArgs): MainlineSyncReport =
     if emitProgress:
       stderr.writeLine("workspace sync: cloning " & $cloneActions.len &
         " missing repo(s) (jobs-checkout=" & $jobsCheckout & ") ...")
+      # One full line per clone, as in ``executeWorkspaceSync``.
+      for a in cloneActions:
+        let repo = resolved.repos[cloneActionRepoIdx[a.id]]
+        stderr.writeLine("workspace sync: cloning " & repo.path & " <- " &
+          cloneUrlFor(repo) & "...")
+      stderr.flushFile()
     var cloneConfig = defaultBuildEngineConfig(cacheRoot)
     cloneConfig.suppressTrace = true
     cloneConfig.maxParallelism = uint32(max(jobsNetwork, jobsCheckout))
@@ -56076,12 +56157,15 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
 
   let cacheRoot = cloneObjectsRoot(args.cloneObjects, args.workspaceRoot)
   var sharedBareByUrl = initTable[string, string]()
-  proc sharedReferenceFor(fetchUrl: string): string =
+  # ``pull`` has neither ``--progress`` nor ``--json``; its refresh is
+  # announced as ``init``'s is (``refreshSharedBareAnnounced``).
+  proc sharedReferenceFor(fetchUrl, path: string): string =
     if cacheRoot.len == 0 or fetchUrl.len == 0:
       return ""
     if sharedBareByUrl.hasKey(fetchUrl):
       return sharedBareByUrl[fetchUrl]
-    let refreshed = refreshSharedBare(identity.binaryPath, cacheRoot, fetchUrl)
+    let refreshed = refreshSharedBareAnnounced(identity.binaryPath, cacheRoot,
+      fetchUrl, "workspace pull", "to clone " & path, true, bpmLine)
     emitLeafReports(refreshed.leafReports)
     let reference = if refreshed.ok: refreshed.sharedBarePath else: ""
     sharedBareByUrl[fetchUrl] = reference
@@ -56108,7 +56192,7 @@ proc executeWorkspacePull(args: WorkspacePullArgs): WorkspacePullOutcome =
         repoPath = repo.path,
         receiptPath = receiptRel,
         revision = repo.revision,
-        referencePath = sharedReferenceFor(pullCloneUrl),
+        referencePath = sharedReferenceFor(pullCloneUrl, repo.path),
         cloneFilter = repo.cloneFilter,
         depth = repo.depth,
         singleBranch = repo.singleBranch)
@@ -92625,21 +92709,28 @@ proc stableNodeIdFromString(value: string): NodeId =
   ## per CI-Sharding.md §"CI Sharding").
   nodeId(cast[uint64](hashes.hash(value)))
 
-proc shardLockProvenance(opts: ReproTestShardOpts):
+proc shardLockProvenance(opts: ReproTestShardOpts; projDir: string):
     tuple[lockPath, inputsDigest: string; packageCount: int; found: bool] =
   ## Workspace-Manifest-Optional MO-13 (correcting MO-1) — resolve the
   ## committed solved-graph lock the sharded run should honor, using the
   ## SAME loader (``resolveSolvedGraphForBuild``) the real ``repro build``
   ## uses. ``opts.lockPath`` is the file ``--lock`` bound to ``default``
   ## (``--lock <file>`` or ``--lock default=<file>``), which is the lock the
-  ## build pins; absent, the canonical ``<cwd>/repro.lock`` is used. A named
-  ## binding (``--lock <name>=<file>``) does not change it. The provenance (resolved path + the lock's
-  ## ``inputs_digest`` + pinned package count) is recorded in the shard report
-  ## so the sharded/fixture run is demonstrably tied to the LOCKED graph, not
-  ## a fresh re-solve. A no-op (``found = false``) when no lock is present, so
-  ## every pre-existing shard run (no ``repro.lock``) is byte-unchanged.
+  ## build pins; a named binding (``--lock <name>=<file>``) does not change
+  ## it. Absent, the canonical ``<projDir>/repro.lock`` is used. ``projDir``
+  ## is the project whose lock the shard's build pins: for the workspace
+  ## shard, the project its selectors anchor on (``buildLockProjectDir``,
+  ## the rule the build's ``lockConsumption`` block applies), so
+  ## ``repro test --shard 1/2 ./sub`` records ``sub/repro.lock``, not the
+  ## current directory's lock (CI-Sharding.md §"CLI Surface"). The fixture
+  ## shard runs its commands in the current directory and passes it.
+  ## The provenance (resolved path + the lock's ``inputs_digest`` + pinned
+  ## package count) is recorded in the shard report so the sharded/fixture
+  ## run is demonstrably tied to the LOCKED graph, not a fresh re-solve. A
+  ## no-op (``found = false``) when no lock is present, so every pre-existing
+  ## shard run (no ``repro.lock``) is byte-unchanged.
   let lockOverride = opts.lockPath
-  let resolved = resolveSolvedGraphForBuild(getCurrentDir(), lockOverride, "")
+  let resolved = resolveSolvedGraphForBuild(projDir, lockOverride, "")
   result.found = resolved.found and resolved.source == "lock"
   if result.found:
     result.lockPath = resolved.lockPath
@@ -92650,9 +92741,11 @@ proc shardLockProvenance(opts: ReproTestShardOpts):
     except CatchableError:
       result.inputsDigest = ""
 
-proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts) =
-  ## Stamp the resolved lock provenance onto a shard report (MO-13).
-  let prov = shardLockProvenance(opts)
+proc addShardLockProvenance(report: JsonNode; opts: ReproTestShardOpts;
+                            projDir: string) =
+  ## Stamp the resolved lock provenance of ``projDir`` (the project the
+  ## shard's build pins) onto a shard report (MO-13).
+  let prov = shardLockProvenance(opts, projDir)
   report["lock_flag"] = %opts.lockFlag
   report["lock_file"] = %(if prov.found: prov.lockPath else: "")
   # Every binding the command line gave, name to path as given, in the order
@@ -92780,7 +92873,7 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
   report["strategy"] = %opts.strategy
   report["peer_cache"] = %peerCacheMode
   report["fixture_path"] = %opts.fixturePath
-  addShardLockProvenance(report, opts)
+  addShardLockProvenance(report, opts, getCurrentDir())
   var assignedNames = newJArray()
   for e in assignedEdges:
     assignedNames.add(%e.selector)
@@ -94382,7 +94475,11 @@ proc runWorkspaceModeShard(opts: ReproTestShardOpts;
   report["peer_cache"] = %modeName(peer.kind)
   report["fixture_path"] = %""
   report["mode"] = %"workspace"
-  addShardLockProvenance(report, opts)
+  # The lock of the project the selectors anchor on: the one each assigned
+  # command's build (``<anchor>#<action id>``) pins. The anchor resolved when
+  # the plan was read, so it names an existing project.
+  addShardLockProvenance(report, opts,
+    buildLockProjectDir(plan.anchorSelector))
   report["assigned_selectors"] = %assigned
   report["predicted_shard_cost_ns"] = %predictedNs
   report["predicted_build_time_ns"] = %0

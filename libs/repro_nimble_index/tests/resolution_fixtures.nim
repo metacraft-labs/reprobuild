@@ -28,11 +28,13 @@ proc resolve*(packages: seq[PackageEnvelope];
               preference = vpNone): Resolved =
   ## Resolve ``roots`` (name, range) for a project package `app` against
   ## an index of ``packages``. With ``nimVersions``, the project also
-  ## declares the `nim` toolchain package with those candidates.
+  ## declares the `nim` toolchain package with those candidates (and the
+  ## solve is one that declares `nim`, ``NimbleSolveOptions.nimDeclared``).
   let built = buildIndex(buildInput(packages))
   var idx = openIndex(memorySource(objectTable(built)), built.rootId)
   var names: seq[string]
   var opts = options
+  if nimVersions.len > 0: opts.nimDeclared = true
   for (n, r) in roots:
     names.add n
     opts.roots.add RootRequirement(requirer: "app", name: n, range: r)
@@ -47,7 +49,8 @@ proc resolve*(packages: seq[PackageEnvelope];
     app.depends.add newDependency("nim", ">=0.0.0")
     decls[0] = app
   decls.add lowerToSolver(result.input,
-    toolchainNim = (if nimVersions.len > 0: "nim" else: ""))
+    toolchainNim = (if nimVersions.len > 0: "nim" else: ""),
+    nimVersions = nimVersions)
   try:
     let sol = solve(NoVariants, decls, preference)
     for k, v in sol.packages:

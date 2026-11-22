@@ -60,6 +60,7 @@ import repro_binary_cache_server/types as bcsTypes
 import repro_project_dsl/install_mirror_resolver
 from repro_core/link_target import readSymlinkTarget
 from repro_core/relocation import recipeSourceName
+from repro_core/workspace_siblings import nearestWorkspaceSibling
 # The managed-file writer's sentinel format (`fs.managedBlock`'s sentinels are
 # rendered by the one implementation; Core-Invariants.md §"One Implementation
 # Per Concern").

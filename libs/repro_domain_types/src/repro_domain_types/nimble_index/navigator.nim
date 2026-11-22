@@ -37,8 +37,9 @@ type
     shardBits*: uint8
     bucket*: uint32
     schema*: uint16
-      ## ``NimbleIndexSchemaVersion`` or ``NimbleShardSubmodulesSchema``:
-      ## which wire type the packages are (their fixed parts agree)
+      ## ``NimbleIndexSchemaVersion``, ``NimbleShardSubmodulesSchema`` or
+      ## ``NimbleShardConditionsSchema``: which wire type the packages are
+      ## (their fixed parts agree)
 
   RootNavigator* = object
     whole: ByteView
@@ -154,7 +155,12 @@ proc navigateShard*(v: ByteView): ShardNavigator =
   let payload = checkFrameView(v, nokShard, schema)
   result.whole = v
   result.schema = schema
-  if schema == NimbleShardSubmodulesSchema:
+  if schema == NimbleShardConditionsSchema:
+    result.shardBits = fixedField(payload, ShardW3, "shardBits", "shard").data[0]
+    let b = fixedField(payload, ShardW3, "bucket", "shard")
+    result.bucket = uint32(u32At(b, 0, "shard.bucket"))
+    result.packages = varField(payload, ShardW3, "packages", "shard")
+  elif schema == NimbleShardSubmodulesSchema:
     result.shardBits = fixedField(payload, ShardW2, "shardBits", "shard").data[0]
     let b = fixedField(payload, ShardW2, "bucket", "shard")
     result.bucket = uint32(u32At(b, 0, "shard.bucket"))
@@ -179,7 +185,10 @@ proc packageRegion(n: ShardNavigator; i: int): ByteView =
 proc packageNameAt*(n: ShardNavigator; i: int): string =
   ## The canonical name of package ``i``, reading only its name field.
   let name =
-    if n.schema == NimbleShardSubmodulesSchema:
+    if n.schema == NimbleShardConditionsSchema:
+      varField(packageRegion(n, i), PackageW3, "name",
+        "shard.packages[" & $i & "]")
+    elif n.schema == NimbleShardSubmodulesSchema:
       varField(packageRegion(n, i), PackageW2, "name",
         "shard.packages[" & $i & "]")
     else:

@@ -318,7 +318,10 @@ type
     # ``netFetch`` (its destinations are the mirrors and the origin) and runs
     # in process, dispatched through the executor registered by
     # ``repro_nimble_fetch``. Nothing downstream reaches the network: a
-    # compile edge receives only the store path.
+    # compile edge receives only the store path. The registry crate fetch
+    # (``cargo.fetch``, ``repro_cargo_fetch``) is the same kind of edge: it
+    # verifies a ``.crate`` against its ``Cargo.lock`` checksum and publishes
+    # it as a store prefix.
     bakSourceFetch
 
   NetworkMode* = enum
@@ -18642,9 +18645,11 @@ type
 
   SourceFetchExecutor* = proc(action: BuildAction): ActionResult {.gcsafe.}
     ## Nimble-Package-Catalog NPC-AREQ20: hook installed by
-    ## ``repro_nimble_fetch`` for its ``bakSourceFetch`` edges. Indirect for
-    ## the usual layering reason: the mirror client, the archive extractor
-    ## and the source store live above the engine.
+    ## ``repro_nimble_fetch`` for its ``bakSourceFetch`` edges, and by
+    ## ``repro_cargo_fetch`` for its ``cargo.fetch`` edges, each for the
+    ## duration of its own wave. Indirect for the usual layering reason: the
+    ## mirror client, the archive extractor and the stores live above the
+    ## engine.
 
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor

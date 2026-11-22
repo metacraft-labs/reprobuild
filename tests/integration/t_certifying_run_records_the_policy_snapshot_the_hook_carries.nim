@@ -78,11 +78,15 @@ suite "TC-9b — the node records the snapshot, the hook carries it":
       discard fx.cf.gitIn(libB, "add -A")
       discard fx.cf.gitIn(libB, "commit -q -m policy")
       discard fx.cf.gitIn(libB, "push -q origin main")
-      # app adopts it. lib-b is already a develop-set sibling the lock pins;
-      # this fixture's recipe gets its typed tool through `usesImportPath`,
-      # which takes over `uses:` imports, so the policy module is imported by
-      # its path in the sibling checkout (the `uses:` import itself is what
-      # the other TC-9b tests exercise).
+      # app adopts it. lib-b is a develop-set sibling the lock pins, and this
+      # case is about the node RE-PINNING it when it moves (step 3), so app
+      # keeps the bare `uses:` entry and imports the policy module by its
+      # path in the sibling checkout. Declaring lib-b with the nested
+      # `uses: "lib-b"` form instead (the clean `import team_policy` the other
+      # TC-9b tests use) makes it a lock-pinned source producer: its checkout
+      # must then sit at app's pin, and `repro test` refuses a moved lib-b
+      # before the lock-update node runs, leaving `repro lock update lib-b`
+      # as the way to move it.
       let recipe = readFile(fx.app / "repro.nim")
       writeFile(fx.app / "repro.nim", recipe.replace(
         "import repro_project_dsl\n",

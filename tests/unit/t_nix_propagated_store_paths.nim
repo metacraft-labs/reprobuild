@@ -1,5 +1,6 @@
 import std/[os, strutils, tempfiles, unittest]
 
+import repro_interface_artifacts
 import repro_tool_profiles
 
 suite "Nix propagated store path closure":
@@ -281,3 +282,108 @@ suite "Darwin compiler wrapper SDK":
     check profile.realizedStorePaths == @[linuxWrapper]
     check profile.libraryPathList == @[absolutePath(linuxWrapper / "lib")]
     check profile.cpathList.len == 0
+
+# Path mode resolves the compiler from ``$PATH``. In a Nix dev shell that is
+# the same Darwin cc-wrapper as above, whose bin directory the shell puts on
+# ``$PATH``; a CI job that runs ``repro build`` inside the shell failed every
+# Rust build-script link with ``ld: library 'iconv' not found`` because the
+# path-mode profile carried none of the SDK's host libraries. The fixture
+# wrapper gets a real executable ``cc`` that answers the version probe, and
+# the cases go through ``resolvePathOnlyTool``, the resolver path mode uses.
+# Shell-script executables need a POSIX host.
+when defined(posix):
+  proc writeProbeableCc(binDir: string) =
+    createDir(binDir)
+    let cc = binDir / "cc"
+    writeFile(cc, "#!/bin/sh\necho 'clang version 21.1.8'\n")
+    setFilePermissions(cc, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+
+  proc ccUse(): InterfaceToolUse =
+    InterfaceToolUse(rawConstraint: "cc", packageSelector: "cc",
+      executableName: "cc")
+
+  suite "Darwin compiler wrapper SDK in path mode":
+    test "a Darwin cc-wrapper found on PATH links against its SDK's libiconv":
+      let scratch = createTempDir("repro-path-darwin-sdk-profile-", "")
+      defer: removeDir(scratch)
+      let f = darwinSdkFixture(scratch)
+      writeProbeableCc(f.wrapper / "bin")
+
+      let profile = resolvePathOnlyTool(ccUse(),
+        pathValue = f.wrapper / "bin")
+      check profile.installMethod == "path"
+      check profile.resolvedExecutablePath == f.wrapper / "bin" / "cc"
+      check profile.libraryPathList == @[absolutePath(f.iconv / "lib")]
+      check profile.cpathList == @[absolutePath(f.iconvDev / "include")]
+      # Only the two link channels change. Path mode realizes nothing, so no
+      # store path, prefix or extra PATH entry appears, and the SDK's tools
+      # (xcbuild's `xcrun`) and libiconv's `bin/iconv` stay off PATH.
+      check profile.realizedStorePaths.len == 0
+      check profile.cmakePrefixList.len == 0
+      check profile.pkgConfigSearchList.len == 0
+      check profile.pathSearchList == @[f.wrapper / "bin"]
+      check not pathProfileLacksNixDarwinSdkChannels(profile)
+      # The directories are part of the profile's identity.
+      var withoutSdk = profile
+      withoutSdk.cpathList = @[]
+      withoutSdk.libraryPathList = @[]
+      refreshProfileIdentity(withoutSdk)
+      check withoutSdk.profileFingerprint != profile.profileFingerprint
+
+    test "a wrapper reached through a directory of links is followed":
+      # A Nix profile or `buildEnv` puts links into the wrapper on PATH.
+      let scratch = createTempDir("repro-path-darwin-sdk-link-", "")
+      defer: removeDir(scratch)
+      let f = darwinSdkFixture(scratch)
+      writeProbeableCc(f.wrapper / "bin")
+      let linkBin = scratch / "profile" / "bin"
+      createDir(linkBin)
+      createSymlink(f.wrapper / "bin" / "cc", linkBin / "cc")
+
+      let profile = resolvePathOnlyTool(ccUse(), pathValue = linkBin)
+      check profile.resolvedExecutablePath == linkBin / "cc"
+      check profile.libraryPathList == @[absolutePath(f.iconv / "lib")]
+      check profile.cpathList == @[absolutePath(f.iconvDev / "include")]
+
+    test "a host or Linux compiler on PATH gets no SDK libraries":
+      let scratch = createTempDir("repro-path-darwin-sdk-absent-", "")
+      defer: removeDir(scratch)
+      # Xcode's /usr/bin/cc, or any compiler with no nix-support metadata.
+      let hostBin = scratch / "usr" / "bin"
+      writeProbeableCc(hostBin)
+      # A Linux Nix wrapper: nix-support without a darwin-sdk-setup.bash.
+      let linuxWrapper = scratch / "gcc-wrapper"
+      createDir(linuxWrapper / "nix-support")
+      createDir(linuxWrapper / "lib")
+      writeFile(linuxWrapper / "nix-support" / "orig-libc", "")
+      writeProbeableCc(linuxWrapper / "bin")
+
+      for binDir in [hostBin, linuxWrapper / "bin"]:
+        let profile = resolvePathOnlyTool(ccUse(), pathValue = binDir)
+        check profile.resolvedExecutablePath == binDir / "cc"
+        check profile.cpathList.len == 0
+        check profile.libraryPathList.len == 0
+        check profile.realizedStorePaths.len == 0
+        check not pathProfileLacksNixDarwinSdkChannels(profile)
+
+    test "a cached path profile without the SDK libraries is re-resolved":
+      # A tool-identity cache written before path mode followed the SDK
+      # holds the wrapper's profile without them; serving it would fail the
+      # same link again.
+      let scratch = createTempDir("repro-path-darwin-sdk-stale-", "")
+      defer: removeDir(scratch)
+      let f = darwinSdkFixture(scratch)
+      writeProbeableCc(f.wrapper / "bin")
+
+      let fresh = resolvePathOnlyTool(ccUse(), pathValue = f.wrapper / "bin")
+      var stale = fresh
+      stale.cpathList = @[]
+      stale.libraryPathList = @[]
+      check pathProfileLacksNixDarwinSdkChannels(stale)
+      check not pathProfileLacksNixDarwinSdkChannels(fresh)
+      # A Nix profile is repaired on read instead
+      # (`expandNixProfilePropagatedPaths`), so this check leaves it alone.
+      var nixProfile = stale
+      nixProfile.installMethod = "nix"
+      check not pathProfileLacksNixDarwinSdkChannels(nixProfile)
