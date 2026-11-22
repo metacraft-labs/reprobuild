@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3167,
+    "nimTestBinaries": 3168,
     "pureUnitConsolidationGroups": 95,
-    "pureUnitTests": 836,
+    "pureUnitTests": 837,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3219
+    "testEntries": 3220
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1651,7 +1651,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 12,
+      "count": 13,
       "defines": [],
       "dependencyShape": [
         "repro_workspace_manifests"
@@ -1665,6 +1665,7 @@
         "tests/unit/t_manifest_editor_member_edits_target_the_named_array.nim",
         "tests/unit/t_manifest_editor_places_a_new_scalar_with_the_scalars.nim",
         "tests/unit/t_manifest_editor_preserves_unrelated_text.nim",
+        "tests/unit/t_manifest_string_keys_refuse_non_strings.nim",
         "tests/unit/t_repo_fragment_role_keys.nim",
         "tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim",
         "tests/unit/t_repo_v1_and_v2_resolve_identically.nim",
@@ -1836,7 +1837,7 @@
       "graph-fixture": 29,
       "integration": 1777,
       "platform/destructive": 201,
-      "pure unit": 836,
+      "pure unit": 837,
       "unclassified": 376
     },
     "graphOwnedTestArtifacts": [
@@ -2057,9 +2058,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3167,
+    "nimTestBinaryCount": 3168,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3219
+    "testEntryCount": 3220
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -42859,7 +42860,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_a_managed_hook_resolves_the_build_that_installed_it.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -65626,6 +65627,23 @@
       "source": "tests/unit/t_manifest_editor_preserves_unrelated_text.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_manifest_string_keys_refuse_non_strings",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/t_manifest_string_keys_refuse_non_strings.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -37045,6 +37045,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_unit_g04",
     singleReason: ""),
   TestSpec(
+    source: "tests/unit/t_manifest_string_keys_refuse_non_strings.nim",
+    binary: "build/test-bin/t_manifest_string_keys_refuse_non_strings",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_unit_g04",
+    singleReason: ""),
+  TestSpec(
     source: "tests/unit/t_measurement_axes.nim",
     binary: "build/test-bin/t_measurement_axes",
     defines: @[],
