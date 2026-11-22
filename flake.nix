@@ -3260,19 +3260,7 @@
               # install`) is put back in the same shell entry rather than at
               # the next commit. `repro health` reports the same gap with a
               # remedy.
-              _repro_hook_bin=""
-              if [ -x "$PWD/build/bin/repro" ]; then
-                _repro_hook_bin="$PWD/build/bin/repro"
-              elif command -v repro >/dev/null 2>&1; then
-                _repro_hook_bin="$(command -v repro)"
-              fi
-              if [ -n "$_repro_hook_bin" ]; then
-                "$_repro_hook_bin" hooks ensure --vcs "$PWD" >/dev/null || \
-                  echo "warning: 'repro hooks ensure --vcs $PWD' failed; the pre-push publication gate may be uninstalled. Run it by hand and read its diagnostic." >&2
-              else
-                echo "warning: no 'repro' binary found; the pre-push publication gate cannot be asserted. Build it with 'just build' and re-enter the shell." >&2
-              fi
-              unset _repro_hook_bin
+              ${pkgs.bash}/bin/bash ${./scripts/assert-managed-hooks.sh} "$PWD"
               fi
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''

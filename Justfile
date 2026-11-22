@@ -342,6 +342,7 @@ list-standalone-gates:
 dev-shell-hooks:
     bash ./tests/test_dev_shell_entry_roots_its_closure.sh
     bash ./tests/test_dev_shell_writes_nothing_elsewhere.sh
+    bash ./tests/test_dev_shell_hooks_warning_names_the_command_it_ran.sh
     bash ./tests/test_pre_commit_runs_lint_in_dev_shell.sh
 
 # The test runner uses the host's RunQuota daemon, and keeps a private
