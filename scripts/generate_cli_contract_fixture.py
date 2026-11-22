@@ -396,6 +396,8 @@ COVERED_COMMANDS = [
     "catalog verify",
     "nimble",
     "nimble verify",
+    "tool",
+    "tool realize",
 ]
 
 BUILT_IN_FLAGS = {"--help", "-h"}

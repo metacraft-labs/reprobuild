@@ -168,6 +168,15 @@ proc requestFromTarballUse*(useDef: InterfaceToolUse; storeRoot, holderId,
                             rootId: string):
     StoreDaemonExternalRealizeRequest =
   let plan = tarballAcquisitionPlan(useDef)
+  if hasPostExtractStep(plan.postExtract):
+    # The request carries no step, its build tools or their identities, so
+    # the daemon would realize a different prefix than the declaration
+    # names. Such a package is realized through its provisioning edge
+    # (``resolveTarballTool``).
+    raise newException(StoreDaemonClientError, "tool-resolution failed: " &
+      useDef.packageSelector & " declares a post-extraction step (" &
+      plan.postExtract.kind & "), which the store daemon's external " &
+      "realize does not run; realize it through its provisioning edge")
   StoreDaemonExternalRealizeRequest(
     storeRoot: storeRoot,
     holderId: holderId,

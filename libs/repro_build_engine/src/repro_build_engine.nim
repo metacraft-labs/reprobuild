@@ -2905,7 +2905,7 @@ proc actionOutputPath(outputRoot, path: string): string =
   if path.isAbsolute or outputRoot.len == 0:
     path
   else:
-    outputRoot / path
+    joinUnderCwd(outputRoot, path)
 
 proc contentHashForActionBlob(blob: CasBlobRef): ContentHash =
   if blob.digest.algorithm != haBlake3_256:
@@ -4290,7 +4290,7 @@ proc outputRemovalLocation(root, path: string): string =
     return ""
   var physical =
     if path.isAbsolute or root.len == 0: path
-    else: root / path
+    else: joinUnderCwd(root, path)
   if not physical.isAbsolute:
     physical = getCurrentDir() & "/" & physical
   # Split the last component off WITHOUT `parentDir`: the stdlib collapses a
@@ -4990,7 +4990,7 @@ proc validateGraph(g: BuildGraph) =
     let actionId = action.id
     proc indexRoot(raw: string; optional = false; ordinary = false) =
       let physical = if raw.isAbsolute or actionCwd.len == 0: raw
-        else: actionCwd / raw
+        else: joinUnderCwd(actionCwd, raw)
       let root = outputRemovalLocation("", physical)
       if root.len > 0:
         declaredIndex.add((actionId: actionId, root: root,
@@ -5016,9 +5016,9 @@ proc validateGraph(g: BuildGraph) =
             " for " & action.id)
       for input in action.inputs:
         let physicalInput = if input.isAbsolute or action.cwd.len == 0: input
-          else: action.cwd / input
+          else: joinUnderCwd(action.cwd, input)
         let physicalOutput = if raw.isAbsolute or action.cwd.len == 0: raw
-          else: action.cwd / raw
+          else: joinUnderCwd(action.cwd, raw)
         let inputRoot = outputRemovalLocation("", physicalInput)
         let outputRoot = outputRemovalLocation("", physicalOutput)
         if removalTakesEntry(outputRoot, inputRoot):
@@ -5178,7 +5178,7 @@ proc allOutputsExist(action: BuildAction): bool =
   if action.outputs.len == 0:
     return false
   for output in action.outputs:
-    let path = if output.isAbsolute or action.cwd.len == 0: output else: action.cwd / output
+    let path = if output.isAbsolute or action.cwd.len == 0: output else: joinUnderCwd(action.cwd, output)
     if not action.outputPathReady(path):
       return false
   true
@@ -5838,7 +5838,7 @@ proc materialPath(root, path: string): string =
   if path.isAbsolute or root.len == 0:
     path
   else:
-    root / path
+    joinUnderCwd(root, path)
 
 proc materialContainmentPath(root, path: string): string =
   ## `joinPath` folds relative parent walks before the filesystem sees them.
@@ -11453,6 +11453,12 @@ proc isRemovedOutputTreePath(action: BuildAction; path: string;
   ## names that tree's entries, which are this run's writes: the listing is
   ## placed by where it leads, as before. The link itself stays an input
   ## through the read and probe channels.
+  ##
+  ## A path that only passes THROUGH a link into a tree (`src/dirlink/f.txt`
+  ## with `src/dirlink -> ../gen/v1`) is placed by its resolved ancestors and
+  ## is one of these paths; so is a listing through such a link. The callers
+  ## then keep the link it was resolved through as an input
+  ## (`TraversedLinkCollector`), since it decided which file was read.
   if not enumerated and
       (action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0):
     let linkLocation = path.linkEntryLocation()
@@ -11477,6 +11483,193 @@ proc isRemovedOutputTreePath(action: BuildAction; path: string;
         path.isUnderCanonicalPolicyRoot(@[root]):
       return true
 
+# Links a dropped path was resolved through.
+#
+# Three input exclusions place an observed path by RESOLVING it: the removed
+# output tree filter above (`isRemovedOutputTreePath`), the ignored-prefix
+# filter (`isUnderCanonicalPolicyRoot`, a `realpath` of the whole path), and
+# the content-addressed tool-root filter for a path with a `..` component
+# (`recordedPathUnderRoot` resolves only that spelling). A path the tool
+# opened names each link on its way only as an ancestor, and the monitor's
+# resolution evidence covers `realpath` and `readlink`, not an `open` through
+# a link, so once such a path is dropped nothing records the links that
+# decided which file was read: `src/dirlink/f.txt`, with `src/dirlink ->
+# ../gen/v1` and `gen` an optional output, is this run's write and rightly
+# dropped, and retargeting `src/dirlink` at `../gen/v2` was a cache hit with
+# the old product (reprobuild-pm issues/2026-11-20-a-source-link-traversed-
+# into-a-removed-output-tree-is-not-keyed.md).
+#
+# So every symbolic link such a resolution passed through is kept as an
+# input, a probe whose fingerprint carries the link's target text
+# (Incremental-Invalidation.md §"Symlink inputs"), except a link located at
+# or under an excluded root (the action's own write, ignored with its root,
+# or part of a content-addressed identity) and a link that resolving the
+# roots' own spellings passes through (a cwd alias, macOS's `/tmp`, a tree
+# candidate that is itself a link): those reach the root and the path alike
+# and do not decide which file inside the root was read. Monitor-Hook-
+# Shim.md §"Metadata, Probe, And Symlink APIs", "Links a dropped path was
+# resolved through"; Build-Engine-And-Scheduler.md §"Opaque output
+# directories".
+#
+# POSIX only. On Windows `canonicalPolicyPath` is lexical, so none of these
+# filters places a path through a link and there is nothing to keep.
+
+type
+  LinkComponent = object
+    ## One `lstat` (and, for a link, one `readlink`) of a path component.
+    present: bool
+    isLink: bool
+    target: string
+
+  TraversedLinkCollector = object
+    ## The links the dropped paths of one keyed-input computation were
+    ## resolved through, in first-seen order. Built per fold, so the
+    ## filesystem answers never outlive the run whose paths they describe;
+    ## nothing is resolved until the first dropped path arrives, so an action
+    ## that drops nothing this way pays nothing.
+    prepared: bool
+    rootSpellings: seq[string]
+      ## The excluded roots as the action spells them (materialized tree
+      ## roots, the ignored prefixes, the tool roots).
+    excludedRoots: seq[string]
+      ## The same roots, as spelled and resolved, for the "inside a root"
+      ## test of a link's entry location.
+    canonicalExcluded: seq[string]
+      ## Already-resolved roots the caller hands over (the canonical ignored
+      ## roots `cacheInputPaths` compares with).
+    rootLinks: HashSet[string]
+    memo: Table[string, LinkComponent]
+    seen: HashSet[string]
+    links: seq[string]
+
+const MaxTraversedLinkExpansions = 40
+  ## The kernel's bound on symbolic links followed in one resolution (Linux
+  ## `MAXSYMLINKS`, path_resolution(7)); past it the `open` fails with
+  ## `ELOOP`, so a longer chain read nothing.
+
+proc traversedLinks(path: string;
+                    memo: var Table[string, LinkComponent]): seq[string] =
+  ## Every symbolic link resolving the absolute `path` passes through, each
+  ## at its ENTRY location (its physical parent and its own name), in the
+  ## order the resolution meets them. Replays path_resolution(7)
+  ## (https://man7.org/linux/man-pages/man7/path_resolution.7.html): a
+  ## component that is a link has its target spliced in front of the
+  ## remaining components, an absolute target restarting at `/`; `..` steps
+  ## to the parent of the PHYSICAL prefix resolved so far, which is what the
+  ## kernel does; the last component is followed too, as `realpath` and an
+  ## `open` without `O_NOFOLLOW` do, so a link read directly
+  ## (`src/link -> ../ign/a.txt`) is one of its own links. The walk stops at
+  ## the first absent component (nothing past it was resolved) and after
+  ## `MaxTraversedLinkExpansions` links, returning what it gathered.
+  ## A relative path resolves against nothing here and yields nothing.
+  when defined(windows):
+    discard
+  else:
+    let spelling = path.replace('\\', '/')
+    if not spelling.startsWith("/"):
+      return
+    # The components still to resolve, the next one LAST.
+    var pending: seq[string] = @[]
+    let components = spelling.split('/')
+    for i in countdown(components.high, 0):
+      pending.add(components[i])
+    # The physical prefix resolved so far; "" is `/`.
+    var current = ""
+    var expansions = 0
+    while pending.len > 0:
+      let name = pending.pop()
+      if name.len == 0 or name == ".":
+        continue
+      if name == "..":
+        let slash = current.rfind('/')
+        current = if slash <= 0: "" else: current[0 ..< slash]
+        continue
+      let candidate = current & "/" & name
+      var component: LinkComponent
+      if candidate in memo:
+        component = memo[candidate]
+      else:
+        var st: Stat
+        if lstat(candidate.cstring, st) == 0:
+          component.present = true
+          if S_ISLNK(st.st_mode):
+            try:
+              component.target = expandSymlink(candidate)
+              component.isLink = component.target.len > 0
+            except OSError:
+              # Unreadable: the resolution cannot be followed past it.
+              component.present = false
+        memo[candidate] = component
+      if not component.present:
+        return
+      if not component.isLink:
+        current = candidate
+        continue
+      result.add(candidate)
+      inc expansions
+      if expansions > MaxTraversedLinkExpansions:
+        return
+      if component.target.startsWith("/"):
+        current = ""
+      let parts = component.target.split('/')
+      for i in countdown(parts.high, 0):
+        pending.add(parts[i])
+
+proc initTraversedLinkCollector(action: BuildAction;
+                                ignoredRoots, canonicalIgnoredRoots,
+                                toolRoots: openArray[string]):
+                                TraversedLinkCollector =
+  ## `ignoredRoots` as the action spells them (`ignoredInputRoots`),
+  ## `canonicalIgnoredRoots` resolved (`canonicalPolicyRoots` of them), and
+  ## the tool roots `cacheInputPaths` subtracts. Cheap: no filesystem access
+  ## until `collectLinks` is first called.
+  for candidate in action.optionalOutputs & action.removeBeforeRun:
+    result.rootSpellings.add(materialPath(action.cwd, candidate))
+  for root in ignoredRoots:
+    result.rootSpellings.add(root)
+  for root in toolRoots:
+    result.rootSpellings.add(root)
+  for root in canonicalIgnoredRoots:
+    result.canonicalExcluded.add(root)
+
+proc prepareRoots(collector: var TraversedLinkCollector) =
+  if collector.prepared:
+    return
+  collector.prepared = true
+  for root in collector.rootSpellings:
+    let spelling = root.replace('\\', '/')
+    collector.excludedRoots.add(spelling)
+    # Both sides in one resolution: a link's entry location has its
+    # ancestors resolved, so the root it is compared with is resolved too.
+    collector.excludedRoots.add(canonicalPolicyPath(spelling))
+    for link in traversedLinks(spelling, collector.memo):
+      collector.rootLinks.incl(link)
+  for root in collector.canonicalExcluded:
+    collector.excludedRoots.add(root)
+
+proc collectLinks(collector: var TraversedLinkCollector; path: string) =
+  ## Record the links `path`, just dropped by a filter that placed it by
+  ## resolution, was resolved through.
+  when defined(windows):
+    discard
+  else:
+    collector.prepareRoots()
+    for link in traversedLinks(path, collector.memo):
+      if link in collector.rootLinks or link in collector.seen:
+        continue
+      # Compared as an entry, with `recordedPathUnderRoot` directly: through
+      # `canonicalPolicyPath` its last component would be followed, and the
+      # link would land back inside the root it leads to.
+      var insideARoot = false
+      for root in collector.excludedRoots:
+        if recordedPathUnderRoot(link, root):
+          insideARoot = true
+          break
+      if insideARoot:
+        continue
+      collector.seen.incl(link)
+      collector.links.add(link)
+
 proc outputAncestorDirectoryKeys(action: BuildAction;
                                  evidence: PathSetEvidence): HashSet[string]
 proc isOutputAncestorObservation(ancestors: HashSet[string];
@@ -11495,29 +11688,42 @@ proc evidenceInputPaths(action: BuildAction;
   # same way (``outputAncestorDirectoryKeys``), so this denominator and the
   # keyed set ``gradeKeyedInputSet`` compares it with subtract the same
   # self-written paths.
+  #
+  # A path dropped as inside a removed output tree leaves the links its
+  # resolution passed through, which `cacheInputPaths` keys as probes
+  # (`TraversedLinkCollector`); they are appended here too, so the keyed set
+  # stays a subset of this denominator.
   let selfWritten = action.selfWrittenOutputKeys()
   let ancestors = action.outputAncestorDirectoryKeys(evidence)
+  var links = action.initTraversedLinkCollector([], [], [])
   var seen = initHashSet[string]()
   for input in evidence.declaredInputs:
     result.addUnique(seen, input)
-  for input in evidence.depfileInputs:
-    let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
+  template foldObserved(source: untyped) =
+    for observed in source:
+      let key = materialPath(action.cwd, observed).replace('\\', '/')
+      if selfWritten.contains(key):
+        continue
+      if action.isRemovedOutputTreePath(key):
+        links.collectLinks(key)
+        continue
+      if ancestors.isOutputAncestorObservation(key):
+        continue
+      result.addUnique(seen, observed)
+  foldObserved(evidence.depfileInputs)
+  foldObserved(evidence.monitorReads)
+  foldObserved(evidence.monitorProbes)
+  if action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0:
+    for dir in evidence.monitorDirectoryEnumerations:
+      let location = materialContainmentPath(action.cwd, dir)
+        .patternScopedBase().replace('\\', '/')
+      if action.isRemovedOutputTreePath(location, enumerated = true):
+        links.collectLinks(location)
+  for link in links.links:
+    if selfWritten.contains(link) or
+        ancestors.isOutputAncestorObservation(link):
       continue
-    result.addUnique(seen, input)
-  for input in evidence.monitorReads:
-    let key = materialPath(action.cwd, input).replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    result.addUnique(seen, input)
-  for probe in evidence.monitorProbes:
-    let key = materialPath(action.cwd, probe).replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    result.addUnique(seen, probe)
+    result.addUnique(seen, link)
 
 proc addContentAddressedRoot(roots: var seq[string]; path: string) =
   ## AN EMPTY ROOT MUST NEVER ENTER THIS SEQUENCE, and `addUnique` is what
@@ -12727,6 +12933,12 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
   ##   already applied it to the observed channels with the same scope; here
   ##   it reaches the declared and tool-reported ones, which the cache record
   ##   used to drop on its own, by prefix.
+  ## * a path dropped by a filter that places it by RESOLUTION (a removed
+  ##   output tree, an ignored prefix, a tool root reached through `..`, and
+  ##   a directory listed into a removed tree or an ignored root) leaves
+  ##   behind the symbolic links that resolution passed through: they are
+  ##   appended after the observed channels as probes, unless they sit inside
+  ##   an excluded root or on the way to one (`TraversedLinkCollector`).
   # Every containment question this computation asks about one `..`-spelled
   # path resolves the same prefix through the filesystem (once per tool
   # root, ignored root and output); within one computation it is asked once.
@@ -12740,7 +12952,8 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
   # self-written set applies to the ENUMERATION channel only — see
   # `enumerationIgnoredRoots` for the whole argument, and for the shipped
   # recipe that makes the difference load-bearing.
-  let ignoredRoots = canonicalPolicyRoots(action.ignoredInputRoots())
+  let ignoredSpellings = action.ignoredInputRoots()
+  let ignoredRoots = canonicalPolicyRoots(ignoredSpellings)
   let selfWritten = action.selfWrittenOutputKeys()
   let ancestors = action.outputAncestorDirectoryKeys(evidence)
   # One memo for the whole fold: every object an action looks up lives in one
@@ -12760,56 +12973,68 @@ proc cacheInputPathsImpl(action: BuildAction; evidence: PathSetEvidence;
     declaredMaterialized.incl(path.replace('\\', '/'))
     result.addUnique(seen, path)
     if firstOnly: return
-  for input in evidence.depfileInputs:
-    let path = materialContainmentPath(action.cwd, input)
-    let key = path.replace('\\', '/')
-    if path.isVolatileMonitorPath(volatile):
+  # The links a path dropped by a filter that places it by RESOLUTION was
+  # resolved through (`TraversedLinkCollector`): the removed-tree filter,
+  # the ignored-prefix filter, and the tool-root filter for a `..` spelling,
+  # the only one `recordedPathUnderRoot` resolves. Appended after the
+  # observed channels, through the filters that do not place a path by
+  # resolution.
+  var links = action.initTraversedLinkCollector(ignoredSpellings,
+    ignoredRoots, toolRoots)
+  template foldObserved(source: untyped) =
+    for observed in source:
+      let path = materialContainmentPath(action.cwd, observed)
+      let key = path.replace('\\', '/')
+      if path.isVolatileMonitorPath(volatile):
+        continue
+      if selfWritten.contains(key):
+        continue
+      if action.isRemovedOutputTreePath(key):
+        links.collectLinks(key)
+        continue
+      if ancestors.isOutputAncestorObservation(key):
+        continue
+      if not declaredMaterialized.contains(key):
+        if path.isUnderAnyRoot(toolRoots):
+          if lastParentComponent(key) >= 0:
+            links.collectLinks(key)
+          continue
+        if path.isUnderCanonicalPolicyRoot(ignoredRoots):
+          links.collectLinks(key)
+          continue
+        if path.isMonitorSandboxToolsPath() or
+            path.isCompilerWrapperScratchPath() or
+            path.isGitObjectStorePath(gitDirMemo):
+          continue
+      result.addUnique(seen, path)
+      if firstOnly: return
+  foldObserved(evidence.depfileInputs)
+  foldObserved(evidence.monitorReads)
+  foldObserved(evidence.monitorProbes)
+  # A directory LISTED through a link is placed by where it leads, and
+  # dropped when that is a removed tree or an ignored root
+  # (`cacheEnumeratedDirectories`). The link decided which directory was
+  # listed, so it is kept as a probe like the links of a read. Nothing else
+  # about the enumeration channel changes here.
+  if action.optionalOutputs.len > 0 or action.removeBeforeRun.len > 0 or
+      ignoredRoots.len > 0:
+    for dir in evidence.monitorDirectoryEnumerations:
+      let location = materialContainmentPath(action.cwd, dir)
+        .patternScopedBase().replace('\\', '/')
+      if action.isRemovedOutputTreePath(location, enumerated = true) or
+          location.isUnderCanonicalPolicyRoot(ignoredRoots):
+        links.collectLinks(location)
+  for link in links.links:
+    if link.isVolatileMonitorPath(volatile):
       continue
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
+    if selfWritten.contains(link) or
+        ancestors.isOutputAncestorObservation(link):
       continue
-    if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or
-         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath() or
-         path.isGitObjectStorePath(gitDirMemo)):
+    if link.isMonitorSandboxToolsPath() or
+        link.isCompilerWrapperScratchPath() or
+        link.isGitObjectStorePath(gitDirMemo):
       continue
-    result.addUnique(seen, path)
-    if firstOnly: return
-  for input in evidence.monitorReads:
-    let path = materialContainmentPath(action.cwd, input)
-    let key = path.replace('\\', '/')
-    if path.isVolatileMonitorPath(volatile):
-      continue
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or
-         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath() or
-         path.isGitObjectStorePath(gitDirMemo)):
-      continue
-    result.addUnique(seen, path)
-    if firstOnly: return
-  for probe in evidence.monitorProbes:
-    let path = materialContainmentPath(action.cwd, probe)
-    if path.isVolatileMonitorPath(volatile):
-      continue
-    let key = path.replace('\\', '/')
-    if selfWritten.contains(key) or action.isRemovedOutputTreePath(key) or
-        ancestors.isOutputAncestorObservation(key):
-      continue
-    if not declaredMaterialized.contains(key) and
-        (path.isUnderAnyRoot(toolRoots) or
-         path.isUnderCanonicalPolicyRoot(ignoredRoots) or
-         path.isMonitorSandboxToolsPath() or
-         path.isCompilerWrapperScratchPath() or
-         path.isGitObjectStorePath(gitDirMemo)):
-      continue
-    result.addUnique(seen, path)
+    result.addUnique(seen, link)
     if firstOnly: return
 
 proc lookupEnv(env: openArray[string]; name: string):
@@ -19999,7 +20224,7 @@ proc measuredOutputBytes(action: BuildAction): int64 =
   for output in action.outputs:
     let path =
       if output.isAbsolute or action.cwd.len == 0: output
-      else: action.cwd / output
+      else: joinUnderCwd(action.cwd, output)
     try:
       if fileExists(extendedPath(path)):
         result += int64(getFileSize(extendedPath(path)))
@@ -20711,7 +20936,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     for output in action.outputs:
       let path =
         if output.isAbsolute or action.cwd.len == 0: output
-        else: action.cwd / output
+        else: joinUnderCwd(action.cwd, output)
       result.add(absolutePath(path))
 
   proc nixRecordOutputs(action: BuildAction; absentIsLost: bool) =

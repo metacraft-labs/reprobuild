@@ -94,6 +94,8 @@ export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
 import repro_interface_artifacts/closure_manifest
 export closure_manifest
+import repro_interface_artifacts/gem_closure_manifest
+export gem_closure_manifest
 import repro_core/ambient_execution
 import repro_core/paths as corepaths
 import repro_core/relocation
@@ -642,6 +644,28 @@ type
       ## artifact has no way to resolve. Empty for a record whose closure
       ## has not been inlined (a recipe read in place) and for a record
       ## with no closure.
+    gemClosure*: string
+      ## v36: recipe-relative path to the committed gem-closure manifest
+      ## (``gem_closure_manifest``) whose gems a post-extraction step
+      ## installs, offline, into the realized Ruby prefix. Resolved like
+      ## ``closureManifest``. "" when the record declares no gem step.
+    gemEntries*: seq[GemClosureEntry]
+      ## v36: the gem manifest's parsed content, inlined at the lift as
+      ## ``closureEntries`` is, so that a consumer of a published artifact,
+      ## which has no manifest file, installs the same gems. Realization
+      ## installs THESE when present and never opens ``gemClosure``.
+    gemBuildUses*: seq[InterfaceToolUse]
+      ## v36: the provisioned packages the gem step builds native
+      ## extensions with (the C toolchain, the MSYS root, pkg-config, the C
+      ## libraries), each resolved at the lift into a tool use carrying its
+      ## own realizations. Each is realized by its own provisioning edge
+      ## before the step runs; never a tool found on PATH.
+    gemBuildArgs*: seq[GemBuildArgs]
+      ## v36: per-gem extconf arguments, in declaration order.
+    gemSubstitutions*: seq[string]
+      ## v36: the gems whose prebuilt platform gem the manifest may name
+      ## instead of the source gem. Reviewed in the recipe; nokogiri may
+      ## never appear here.
     detail*: TarballArchiveDetail
       ## GM4b (v21): the archive-realization metadata — version, alternative
       ## digests, install method, installer/pacman/bootstrap arguments, env
@@ -1251,10 +1275,41 @@ static:
     "ord(stamp.kind) -- confirm the new value was APPENDED, then update " &
     "this assertion"
 
+# ``InterfaceTarballProvisioning.gemBuildUses`` makes ``InterfaceToolUse`` and
+# ``InterfaceTarballProvisioning`` mutually recursive. The compiler cannot
+# prove the generic, structural ``==`` side-effect free over a recursive type,
+# so ``func`` callers (``provisioning_pins.sameEntries``) would stop
+# compiling. These are that same field-by-field comparison, declared
+# side-effect free, which it is.
+proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.}
+
+proc `==`*(a, b: InterfaceTarballProvisioning): bool {.noSideEffect.} =
+  {.cast(noSideEffect).}:
+    for left, right in fields(a, b):
+      if left != right:
+        return false
+  true
+
+proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
+  {.cast(noSideEffect).}:
+    for left, right in fields(a, b):
+      if left != right:
+        return false
+  true
+
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 35'u16
-    ## v35 (current): ``InterfaceToolUse`` retains the used package's
+  EnvelopeVersion = 36'u16
+    ## v36 (current): ``InterfaceTarballProvisioning`` retains its gem-closure
+    ##                step (``gemClosure``, the inlined ``gemEntries``, the
+    ##                ``gemBuildUses`` tool uses resolved at the lift,
+    ##                ``gemBuildArgs`` and ``gemSubstitutions``), after
+    ##                ``closureEntries``. v35 and older payloads decode a
+    ##                record with no gem step, which is what every record
+    ##                was. The fingerprint projection writes the block only
+    ##                for a record that declares a gem step, so no
+    ##                fingerprint or key hashed from any other record moves.
+    ## v35: ``InterfaceToolUse`` retains the used package's
     ##                declared ``platforms:`` (``platformsDeclared``,
     ##                ``declaredPlatforms``, ``platformsMessage``), after
     ##                the environment-prefix block, so a recipe's ``uses:``
@@ -2197,6 +2252,16 @@ proc readTaggedTarballArchiveDetail*(bytes: openArray[byte];
       " through " & $EnvelopeVersion & ")")
   readTarballArchiveDetail(bytes, pos, version)
 
+proc writeToolUse(outp: var seq[byte]; useDef: InterfaceToolUse;
+                  version = EnvelopeVersion;
+                  forFingerprint = false)
+proc readToolUse(bytes: openArray[byte]; pos: var int;
+                 version: uint16): InterfaceToolUse
+
+proc hasGemClosureStep*(provisioning: InterfaceTarballProvisioning): bool =
+  ## Whether the record declares a gem-closure post-extraction step.
+  provisioning.gemClosure.len > 0 or provisioning.gemEntries.len > 0
+
 proc writeTarballProvisioning(outp: var seq[byte];
                               provisioning: InterfaceTarballProvisioning;
                               version = EnvelopeVersion;
@@ -2239,6 +2304,29 @@ proc writeTarballProvisioning(outp: var seq[byte];
         outp.writeString(entry.url)
         outp.writeString(entry.archiveType)
         outp.writeU32Le(uint32(max(entry.stripComponents, 0)))
+  if version >= 36'u16 and (not forFingerprint or
+      hasGemClosureStep(provisioning)):
+    # The gem step (v36). Projected for a fingerprint only when the record
+    # declares one, so every other record projects exactly as at v35. The
+    # manifest PATH is a local detail and is left out of the projection;
+    # the inlined entries are what the record realizes.
+    if not forFingerprint:
+      outp.writeString(provisioning.gemClosure)
+    outp.writeU32Le(uint32(provisioning.gemEntries.len))
+    for entry in provisioning.gemEntries:
+      outp.writeString(entry.name)
+      outp.writeString(entry.version)
+      outp.writeString(entry.platform)
+      outp.writeString(entry.sha256)
+      outp.writeString(entry.url)
+    outp.writeU32Le(uint32(provisioning.gemBuildUses.len))
+    for use in provisioning.gemBuildUses:
+      outp.writeToolUse(use, version, forFingerprint)
+    outp.writeU32Le(uint32(provisioning.gemBuildArgs.len))
+    for item in provisioning.gemBuildArgs:
+      outp.writeString(item.gem)
+      outp.writeStringSeq(item.args)
+    outp.writeStringSeq(provisioning.gemSubstitutions)
   outp.writeLocation(provisioning.location, forFingerprint)
 
 proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
@@ -2285,6 +2373,30 @@ proc readTarballProvisioning(bytes: openArray[byte]; pos: var int;
       entry.archiveType = readString(bytes, pos)
       entry.stripComponents = int(readU32Le(bytes, pos))
       result.closureEntries.add(entry)
+  if version >= 36'u16:
+    result.gemClosure = readString(bytes, pos)
+    # Each count is bounded before its loop, as the closure block's is: a
+    # gem line is at least five string length prefixes, a tool use and a
+    # build-argument item at least a few.
+    let gemCount = readElementCount(bytes, pos, 20)
+    for _ in 0 ..< gemCount:
+      var entry: GemClosureEntry
+      entry.name = readString(bytes, pos)
+      entry.version = readString(bytes, pos)
+      entry.platform = readString(bytes, pos)
+      entry.sha256 = readString(bytes, pos)
+      entry.url = readString(bytes, pos)
+      result.gemEntries.add(entry)
+    let useCount = readElementCount(bytes, pos, 16)
+    for _ in 0 ..< useCount:
+      result.gemBuildUses.add(readToolUse(bytes, pos, version))
+    let argCount = readElementCount(bytes, pos, 8)
+    for _ in 0 ..< argCount:
+      var item: GemBuildArgs
+      item.gem = readString(bytes, pos)
+      item.args = readStringSeq(bytes, pos)
+      result.gemBuildArgs.add(item)
+    result.gemSubstitutions = readStringSeq(bytes, pos)
   result.location = readLocation(bytes, pos)
 
 proc writeScoopProvisioning(outp: var seq[byte];
@@ -3156,11 +3268,59 @@ proc inlinedClosureEntries(provisioning: TarballProvisioningDef):
     return @[]
   parseClosureManifestText(readFile(extendedPath(path)), path)
 
+proc declaredManifestPath(provisioning: TarballProvisioningDef;
+                          declared: string): string =
+  ## A manifest a record names, resolved the way realization resolves it:
+  ## absolute as written, else beside the declaring file, else as written.
+  if declared.isAbsolute: declared
+  elif provisioning.sourceFile.len > 0:
+    parentDir(provisioning.sourceFile) / declared
+  else: declared
+
+proc inlinedGemEntries(provisioning: TarballProvisioningDef):
+    seq[GemClosureEntry] =
+  ## The parsed content of ``provisioning``'s gem manifest, inlined into the
+  ## record as ``inlinedClosureEntries`` inlines a closure: a consumer of the
+  ## artifact cannot open the file. A malformed manifest is refused here,
+  ## naming the file and line, so a recipe that would fail to realize fails
+  ## to compile instead. A missing file yields no entries; realization then
+  ## reports it.
+  if provisioning.gemClosure.len == 0:
+    return @[]
+  let path = declaredManifestPath(provisioning, provisioning.gemClosure)
+  if not fileExists(extendedPath(path)):
+    return @[]
+  parseGemClosureManifestText(readFile(extendedPath(path)), path)
+
+proc toInterfaceToolUse(useDef: PackageUseDef;
+                        packages: openArray[PackageDef];
+                        depth: int): InterfaceToolUse
+
+proc gemBuildToolUses(provisioning: TarballProvisioningDef;
+                      packages: openArray[PackageDef];
+                      depth: int): seq[InterfaceToolUse] =
+  ## The gem step's build tools, each resolved into a tool use carrying its
+  ## package's own realizations, as a ``uses:`` entry is. A build tool whose
+  ## own record declares another gem step is refused: a step's tools are
+  ## provisioned packages, not further SDKs built by steps.
+  for selector in provisioning.gemBuildUses:
+    if depth > 0:
+      raise newException(ValueError, "tool-resolution failed: the gem " &
+        "build tool " & selector & " itself declares a gem-closure step " &
+        "(" & provisioning.sourceFile & ":" & $provisioning.sourceLine &
+        "); a gem step's build tools are plain provisioned packages")
+    result.add(toInterfaceToolUse(PackageUseDef(rawConstraint: selector,
+      packageSelector: selector, executableName: selector,
+      sourceFile: provisioning.sourceFile,
+      sourceLine: provisioning.sourceLine), packages, depth + 1))
+
 proc toInterfaceTarballProvisioning(packageName: string;
                                     provisioning: TarballProvisioningDef;
-                                    contributor = ""):
+                                    contributor = "";
+                                    packages: openArray[PackageDef] = [];
+                                    depth = 0):
     InterfaceTarballProvisioning =
-  InterfaceTarballProvisioning(
+  result = InterfaceTarballProvisioning(
     packageName: packageName,
     contributor: contributor,
     url: provisioning.url,
@@ -3174,6 +3334,9 @@ proc toInterfaceTarballProvisioning(packageName: string;
     launcher: provisioning.launcher,
     closureManifest: provisioning.closureManifest,
     closureEntries: inlinedClosureEntries(provisioning),
+    gemClosure: provisioning.gemClosure,
+    gemEntries: inlinedGemEntries(provisioning),
+    gemSubstitutions: provisioning.gemSubstitutions,
     detail: provisioning.detail,
     stripComponents: provisioning.stripComponents,
     packageId: provisioning.packageId,
@@ -3182,6 +3345,10 @@ proc toInterfaceTarballProvisioning(packageName: string;
     os: provisioning.os,
     location: SourceLocation(file: provisioning.sourceFile,
       line: provisioning.sourceLine))
+  for item in provisioning.gemBuildArgs:
+    result.gemBuildArgs.add(GemBuildArgs(gem: item[0], args: item[1]))
+  if provisioning.gemBuildUses.len > 0:
+    result.gemBuildUses = gemBuildToolUses(provisioning, packages, depth)
 
 proc toInterfaceScoopProvisioning(packageName: string;
                                   provisioning: ScoopProvisioningDef;
@@ -3217,7 +3384,8 @@ proc toInterfaceHomebrewProvisioning(packageName: string;
       line: provisioning.sourceLine))
 
 proc toInterfaceToolUse(useDef: PackageUseDef;
-                        packages: openArray[PackageDef]): InterfaceToolUse =
+                        packages: openArray[PackageDef];
+                        depth: int): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: useDef.rawConstraint,
     packageSelector: useDef.packageSelector,
@@ -3238,7 +3406,8 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
           provisioning))
       for provisioning in pkg.tarballProvisioning:
         result.tarballProvisioning.add(toInterfaceTarballProvisioning(
-          pkg.packageName, provisioning))
+          pkg.packageName, provisioning, packages = packages,
+          depth = depth))
       for provisioning in pkg.scoopProvisioning:
         result.scoopProvisioning.add(toInterfaceScoopProvisioning(
           pkg.packageName, provisioning))
@@ -3267,6 +3436,10 @@ proc toInterfaceToolUse(useDef: PackageUseDef;
           result.executableName = exe.binaryName
           break
 
+proc toInterfaceToolUse(useDef: PackageUseDef;
+                        packages: openArray[PackageDef]): InterfaceToolUse =
+  toInterfaceToolUse(useDef, packages, 0)
+
 proc normalizedInterfaceFingerprint(value: string): string =
   result = value.strip().toLowerAscii()
   for prefix in ["blake3-256:", "blake3:", "b3:"]:
@@ -3287,6 +3460,17 @@ proc toInterfaceProvisioningContribution(contribution:
     result.nixProvisioning.add(toInterfaceNixProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.tarballProvisioning:
+    # A gem-closure step is declared on a package's own tarball record. A
+    # contribution reaches a consumer through a stub that reconstructs the
+    # record field by field (``emitLiftedExtensionTypes``), and its build tools
+    # would have to be resolved against the consumer's packages; neither is
+    # done, so the declaration is refused rather than carried half-way.
+    if provisioning.gemClosure.len > 0 or provisioning.gemBuildUses.len > 0:
+      raise newException(ValueError, "tool-resolution failed: the " &
+        "provisioning contribution of " & contribution.targetPackage &
+        " by " & contribution.contributor & " (" & provisioning.sourceFile &
+        ":" & $provisioning.sourceLine & ") declares a gem-closure step; " &
+        "declare it on the package's own tarball record instead")
     result.tarballProvisioning.add(toInterfaceTarballProvisioning(
       contribution.targetPackage, provisioning, contribution.contributor))
   for provisioning in contribution.scoopProvisioning:
