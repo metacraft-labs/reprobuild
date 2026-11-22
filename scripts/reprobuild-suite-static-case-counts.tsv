@@ -655,7 +655,7 @@ libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_clispec.nim	nim	2
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_the_shm_packages.nim	nim	2
 libs/repro_interface_artifacts/tests/t_contribution_records.nim	nim	3
-libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	22
+libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim	nim	24
 libs/repro_interface_artifacts/tests/t_extraction_checks_the_prefix_nim.nim	nim	8
 libs/repro_interface_artifacts/tests/t_installed_layout_source_roots.nim	nim	5
 libs/repro_interface_artifacts/tests/t_interface_artifact_provenance_is_recorded_by_the_lift.nim	nim	3
@@ -2102,6 +2102,7 @@ tests/integration/t_gateway_plain_git_unset_is_a_per_repo_opt_out.nim	nim	1
 tests/integration/t_gateway_push_fails_when_the_upstream_rejects_the_forward.nim	nim	4
 tests/integration/t_gateway_ratchets_the_anchor_requirements.nim	nim	7
 tests/integration/t_gateway_reads_the_policy_from_the_pushed_tree_by_destination_branch.nim	nim	2
+tests/integration/t_gem_closure_offline_install.nim	nim	4
 tests/integration/t_generated_envrc_block_never_runs_hooks_ensure.nim	nim	1
 tests/integration/t_generated_hook_remedies_name_each_path_as_one_shell_word.nim	nim	1
 tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
@@ -2910,6 +2911,8 @@ tests/unit/t_from_source_cargo_recognition.nim	nim	8
 tests/unit/t_from_source_go_recognition.nim	nim	8
 tests/unit/t_from_source_npm_recognition.nim	nim	7
 tests/unit/t_from_source_realization_platform.nim	nim	2
+tests/unit/t_gem_closure_crt_check.nim	nim	4
+tests/unit/t_gem_closure_manifest_grammar.nim	nim	12
 tests/unit/t_git_separated_drains_both_streams.nim	nim	8
 tests/unit/t_hackage_vendor_manifest.nim	nim	10
 tests/unit/t_hash_policy_frame_bytes.nim	nim	7
