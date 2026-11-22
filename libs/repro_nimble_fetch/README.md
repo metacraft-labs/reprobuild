@@ -13,7 +13,7 @@ content-addressed source store that every project of a user shares.
 | `lock_rows` | the `nimble:<name>` rows of a lock (origin, commit, `blake3:<tree>`) and the lock's closure key |
 | `closure_index` | the lockfile-keyed closure index a mirror serves, accepted only when it agrees with the lock row for row |
 | `store` | the source store: one verified tree per digest, installed by an atomic rename |
-| `fetch` | the `nimble.fetch` edges (`bakSourceFetch`, `netFetch`): store, then mirrors, then the origin's forge archive, then the origin by git; every transport ends in the same extractor and the same digest check |
+| `fetch` | the `nimble.fetch` edges (`bakSourceFetch`, `netFetch`): store, then mirrors, then the origin's forge archive (not for a record that lists submodules: a forge archive leaves them empty), then the origin by git, which composes a tree with gitlinks from its submodules as the generator does; every transport ends in the same extractor and the same digest check |
 | `verify` | `repro nimble verify`: re-hash the store entries a lock names, offline |
 
 A fetched tree is accepted exactly when it re-hashes to the digest the lock

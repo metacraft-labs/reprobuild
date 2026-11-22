@@ -12,7 +12,28 @@
 ## refuses, in this order and before decoding anything else: an input
 ## longer than the kind's byte bound, a short or mismatched frame, an
 ## unknown frame version, a type id other than the one asked for, and a
-## schema other than ``NimbleIndexSchemaVersion``.
+## schema other than ``NimbleIndexSchemaVersion`` (for a shard, also
+## ``NimbleShardSubmodulesSchema`` and ``NimbleShardConditionsSchema``).
+##
+## ## Shard schemas
+##
+## A shard whose records carry no ``submodules`` list is schema 1. A shard
+## in which any record carries one is schema 2 (``ShardW2``, whose records
+## add the list after their schema-1 fields). The schema is a function of
+## the value, so it is part of the canonical form: schema 2 for a shard
+## without any list is refused as non-canonical. A reader that knows only
+## schema 1 refuses a schema-2 shard (``nrUnknownSchema``) and so never
+## offers a record without the submodule trees its digest covers.
+##
+## A shard in which any condition node is a Nim-version comparison or an
+## OS-family term (the NPC-AREQ7 terms of the A3 ruling) is schema 3
+## (``ShardW3``): schema 2's layout, with every condition node carrying, after
+## its kind and name, the comparison's term, operator and literal
+## (``ConditionNodeW3``). Schema 3 is chosen by the value too, before
+## schema 2: a shard with such a node is schema 3 whether or not it has a
+## submodule list, and schema 3 for a shard without one is non-canonical. A
+## reader of schemas 1 and 2 refuses a schema-3 shard (``nrUnknownSchema``),
+## so it never reads such a condition as a target term or as no condition.
 ##
 ## ## Canonical form
 ##
@@ -193,8 +214,19 @@ proc requireStrictlyAscending(keys: seq[string]; field: string) =
 # Validation (applied on encode and on decode)
 # ---------------------------------------------------------------------------
 
+const
+  OsFamilyNames = ["posix", "unix", "bsd"]
+  MaxNimVersionLiteral = uint64(high(int64))
+    ## an integer literal of a Nim-version comparison is a Nim `int`
+
+proc isPlainNode(n: ConditionNode): bool =
+  ## A node that carries no Nim-version comparison fields.
+  n.term == nvNone and n.op == opNone and n.ints.len == 0 and n.text.len == 0
+
 proc validateCondition*(nodes: seq[ConditionNode]; field: string) =
   ## A well-formed prefix expression over the closed term set, or empty.
+  ## Every field a node's kind does not use is empty, so one condition has
+  ## one encoding.
   if nodes.len > MaxConditionNodes:
     refuse(nrBound, field & " has more than " & $MaxConditionNodes & " nodes")
   if nodes.len == 0:
@@ -204,16 +236,47 @@ proc validateCondition*(nodes: seq[ConditionNode]; field: string) =
     if needed <= 0:
       refuse(nrMalformed, field & " has nodes after a complete expression")
     dec needed
+    let at = field & " node " & $i
+    if n.kind != cnNimVersion and not n.isPlainNode:
+      refuse(nrNonCanonical, at & ": only a nim-version node has a term, " &
+        "an operator or a literal")
     case n.kind
     of cnDefinedOs, cnDefinedCpu, cnHostOs, cnHostCpu:
-      checkConditionName(n.name, field & " node " & $i)
+      checkConditionName(n.name, at)
+    of cnOsFamily:
+      if n.name notin OsFamilyNames:
+        refuse(nrUnknownVocabulary, at & ": " & n.name.escape() &
+          " is not an OS-family term (posix, unix, bsd)")
+    of cnNimVersion:
+      if n.name.len > 0:
+        refuse(nrNonCanonical, at & ": a nim-version node has no name")
+      if n.term == nvNone or n.op == opNone:
+        refuse(nrMalformed, at & ": a nim-version node names its term " &
+          "and its operator")
+      let wantInts = case n.term
+        of nvMajor, nvMinor, nvPatch: 1
+        of nvMajorMinor: 2
+        of nvMajorMinorPatch: 3
+        else: 0
+      if n.ints.len != wantInts:
+        refuse(nrInconsistent, at & ": " & $n.term & " is compared with " &
+          $wantInts & " integer literal(s), not " & $n.ints.len)
+      for x in n.ints:
+        if x > MaxNimVersionLiteral:
+          refuse(nrBound, at & ": integer literal " & $x & " is not a Nim int")
+      if n.term == nvVersion:
+        checkFreeText(n.text, at & ".text", MaxNimVersionTextBytes,
+          allowEmpty = true)
+      elif n.text.len > 0:
+        refuse(nrInconsistent, at & ": only NimVersion is compared with a " &
+          "string")
     of cnAnd, cnOr:
       if n.name.len > 0:
-        refuse(nrNonCanonical, field & " node " & $i & ": an operator has no name")
+        refuse(nrNonCanonical, at & ": an operator has no name")
       needed += 2
     of cnNot:
       if n.name.len > 0:
-        refuse(nrNonCanonical, field & " node " & $i & ": an operator has no name")
+        refuse(nrNonCanonical, at & ": an operator has no name")
       needed += 1
   if needed != 0:
     refuse(nrMalformed, field & " is an incomplete expression")
@@ -294,6 +357,32 @@ proc validateRecordVersion(v: RecordVersion; field: string) =
   if v.components.len > MaxVersionComponents:
     refuse(nrBound, field & ".version has more than " &
       $MaxVersionComponents & " components")
+
+proc validateSubmodules(r: VersionRecord; field: string) =
+  ## The ``submodules`` list (spec § 4.4, the NPC-M13 amendment): bounded,
+  ## strictly ascending by path, each path relative and `/`-separated, each
+  ## URL an identifier, each commit a full-width object id. A record with a
+  ## list is flagged `gitlinks`.
+  if r.submodules.len > MaxSubmodules:
+    refuse(nrBound, field & ".submodules has " & $r.submodules.len &
+      " entries, bound " & $MaxSubmodules)
+  if r.submodules.len > 0 and flGitlinks notin r.flags:
+    refuse(nrInconsistent, field & ": a record with submodules is flagged " &
+      "gitlinks")
+  var paths: seq[string]
+  for i, m in r.submodules:
+    let f = field & ".submodules[" & $i & "]"
+    checkFreeText(m.path, f & ".path", MaxPathBytes)
+    for part in m.path.split('/'):
+      if part.len == 0 or part == "." or part == "..":
+        refuse(nrInvalidText, f & ".path " & m.path.escape() & " is not a " &
+          "relative path of named components")
+    checkIdent(m.url, f & ".url", maxLen = MaxTextBytes)
+    if m.commit.len notin [40, 64] or not isLowerHex(m.commit):
+      refuse(nrInvalidText, f & ".commit is not a full-width lower-case " &
+        "object id")
+    paths.add m.path
+  requireStrictlyAscending(paths, field & ".submodules")
 
 proc validateRecord*(r: VersionRecord; originCount: int; field: string) =
   ## One version record, against the package it is in.
@@ -382,6 +471,7 @@ proc validateRecord*(r: VersionRecord; originCount: int; field: string) =
       flOverrideApplied notin r.flags:
     refuse(nrInconsistent, field & ": a record read from no `.nimble` is " &
       "unreadable unless an override supplied it")
+  validateSubmodules(r, field)
 
 proc validatePackage*(p: PackageEnvelope; field: string) =
   checkIdent(p.name, field & ".name")
@@ -604,22 +694,52 @@ proc checkVocabulary() =
     vocabularyFailure = ""
     refuse(nrUnknownVocabulary, detail)
 
-proc toW(nodes: seq[ConditionNode]; field: string): WCondition =
-  var ws: seq[ConditionNodeW]
+proc isConditionsSchemaNode(n: ConditionNode): bool =
+  ## A node only shard schema ``NimbleShardConditionsSchema`` can carry.
+  n.kind in {cnOsFamily, cnNimVersion} or not n.isPlainNode
+
+proc toW[C: ConditionNodeW | ConditionNodeW3](nodes: seq[ConditionNode];
+    field: string; _: typedesc[C]): List[C, MaxConditionNodes] =
+  var ws: seq[C]
   for n in nodes:
-    ws.add ConditionNodeW(kind: uint8(ord(n.kind)),
-      name: textL(n.name, WCondName, field))
-  toL(ws, WCondition, field)
+    when C is ConditionNodeW3:
+      ws.add ConditionNodeW3(kind: uint8(ord(n.kind)),
+        name: textL(n.name, WCondName, field),
+        term: uint8(ord(n.term)), op: uint8(ord(n.op)),
+        ints: toL(n.ints, List[uint64, MaxNimVersionInts], field & ".ints"),
+        text: textL(n.text, List[byte, MaxNimVersionTextBytes],
+          field & ".text"))
+    else:
+      if n.isConditionsSchemaNode:
+        refuse(nrInconsistent, field & ": a " & $n.kind & " condition is " &
+          "encoded only in a shard of schema " & $NimbleShardConditionsSchema)
+      ws.add ConditionNodeW(kind: uint8(ord(n.kind)),
+        name: textL(n.name, WCondName, field))
+  toL(ws, List[C, MaxConditionNodes], field)
 
-proc fromW(w: WCondition; field: string): seq[ConditionNode] =
+proc fromW[C: ConditionNodeW | ConditionNodeW3](w: List[C, MaxConditionNodes];
+    field: string): seq[ConditionNode] =
   for n in w:
-    result.add ConditionNode(kind: enumFrom(n.kind, ConditionNodeKind, field),
-      name: wText(n.name))
+    when C is ConditionNodeW3:
+      result.add ConditionNode(kind: enumFrom(n.kind, ConditionNodeKind, field),
+        name: wText(n.name),
+        term: enumFrom(n.term, NimVersionTerm, field & ".term"),
+        op: enumFrom(n.op, ConditionOp, field & ".op"),
+        ints: asSeq(n.ints), text: wText(n.text))
+    else:
+      # Schema 1 and 2 have the seven kinds of NPC-M3 only: the A3 kinds
+      # exist in schema 3 alone.
+      let k = enumFrom(n.kind, ConditionNodeKind, field)
+      if k > cnNot:
+        vocabulary(field, "has kind " & $k & ", which only a shard of " &
+          "schema " & $NimbleShardConditionsSchema & " carries")
+      result.add ConditionNode(kind: k, name: wText(n.name))
 
-proc toW(r: RequirementEntry; field: string): RequirementW =
+proc toW[C: ConditionNodeW | ConditionNodeW3](r: RequirementEntry;
+    field: string; _: typedesc[C]): RequirementWT[C] =
   var fs: seq[WName]
   for f in r.features: fs.add textL(f, WName, field & ".features")
-  RequirementW(condition: toW(r.condition, field & ".condition"),
+  RequirementWT[C](condition: toW(r.condition, field & ".condition", C),
     targetKind: uint8(ord(r.targetKind)),
     target: textL(r.target, WText, field & ".target"),
     subdir: textL(r.subdir, WPath, field & ".subdir"),
@@ -628,7 +748,8 @@ proc toW(r: RequirementEntry; field: string): RequirementW =
     features: toL(fs, List[WName, MaxRequirementFeatures], field & ".features"),
     source: textL(r.source, WText, field & ".source"))
 
-proc fromW(w: RequirementW; field: string): RequirementEntry =
+proc fromW[C: ConditionNodeW | ConditionNodeW3](w: RequirementWT[C];
+    field: string): RequirementEntry =
   result.condition = fromW(w.condition, field & ".condition")
   result.targetKind = enumFrom(w.targetKind, RequirementTargetKind,
     field & ".targetKind")
@@ -640,11 +761,11 @@ proc fromW(w: RequirementW; field: string): RequirementEntry =
   for f in w.features: result.features.add wText(f)
   result.source = wText(w.source)
 
-proc reqsW[N: static int](rs: seq[RequirementEntry]; field: string):
-    List[RequirementW, N] =
-  var ws: seq[RequirementW]
-  for i, r in rs: ws.add toW(r, field & "[" & $i & "]")
-  toL(ws, List[RequirementW, N], field)
+proc reqsW[N: static int; C](rs: seq[RequirementEntry]; field: string;
+                             _: typedesc[C]): List[RequirementWT[C], N] =
+  var ws: seq[RequirementWT[C]]
+  for i, r in rs: ws.add toW(r, field & "[" & $i & "]", C)
+  toL(ws, List[RequirementWT[C], N], field)
 
 proc reqsFromW(w: auto; field: string): seq[RequirementEntry] =
   for i, r in w: result.add fromW(r, field & "[" & $i & "]")
@@ -668,7 +789,18 @@ proc binsW[N: static int](ps: seq[NamedBin]; field: string):
 proc binsFromW(w: auto): seq[NamedBin] =
   for p in w: result.add NamedBin(key: wText(p.key), value: wText(p.value))
 
-proc toW(r: VersionRecord; field: string): VersionRecordW =
+proc commitBytes(hex, field: string): seq[byte] =
+  if hex.len mod 2 != 0 or not isLowerHex(hex):
+    refuse(nrInvalidText, field & " is not lower-case hex")
+  for i in countup(0, hex.len - 2, 2):
+    result.add byte(parseHexInt(hex[i .. i + 1]))
+
+proc toW[T: VersionRecordW | VersionRecordW2 | VersionRecordW3](
+    r: VersionRecord; field: string; _: typedesc[T]): T =
+  when T is VersionRecordW3:
+    type C = ConditionNodeW3
+  else:
+    type C = ConditionNodeW
   var comps = r.version.components
   result.version = VersionW(kind: uint8(ord(r.version.kind)),
     components: toL(comps, List[uint64, MaxVersionComponents],
@@ -685,26 +817,29 @@ proc toW(r: VersionRecord; field: string): VersionRecordW =
   result.size = r.size
   result.firstSeen = r.firstSeen
   result.origin = r.origin
-  result.nim = reqsW[MaxNimEntries](r.nim, field & ".nim")
-  result.requires = reqsW[MaxRequirements](r.requires, field & ".requires")
-  var fs: seq[FeatureW]
+  result.nim = reqsW[MaxNimEntries, C](r.nim, field & ".nim", C)
+  result.requires = reqsW[MaxRequirements, C](r.requires,
+    field & ".requires", C)
+  var fs: seq[FeatureWT[C]]
   for i, f in r.features:
-    fs.add FeatureW(name: textL(f.name, WName, field & ".features"),
+    fs.add FeatureWT[C](name: textL(f.name, WName, field & ".features"),
       rootOnly: f.rootOnly,
-      requires: reqsW[MaxRequirements](f.requires,
-        field & ".features[" & $i & "].requires"))
-  result.features = toL(fs, List[FeatureW, MaxFeatures], field & ".features")
+      requires: reqsW[MaxRequirements, C](f.requires,
+        field & ".features[" & $i & "].requires", C))
+  result.features = toL(fs, List[FeatureWT[C], MaxFeatures],
+    field & ".features")
   let l = r.layout
-  var conds: seq[ConditionalFieldW]
+  var conds: seq[ConditionalFieldWT[C]]
   for i, c in l.conditional:
     let f = field & ".layout.conditional[" & $i & "]"
-    conds.add ConditionalFieldW(field: uint8(ord(c.field)), append: c.append,
+    conds.add ConditionalFieldWT[C](field: uint8(ord(c.field)),
+      append: c.append,
       values: pathsW[MaxLayoutEntries](c.values, f & ".values"),
       pairs: binsW[MaxLayoutEntries](c.pairs, f & ".pairs"),
-      condition: toW(c.condition, f & ".condition"))
+      condition: toW(c.condition, f & ".condition", C))
   var mods: seq[WName]
   for m in l.modules: mods.add textL(m, WName, field & ".layout.modules")
-  result.layout = LayoutW(
+  result.layout = LayoutWT[C](
     srcDir: textL(l.srcDir, WPath, field & ".layout.srcDir"),
     installDirs: pathsW[MaxLayoutEntries](l.installDirs, field & ".layout.installDirs"),
     installFiles: pathsW[MaxLayoutEntries](l.installFiles, field & ".layout.installFiles"),
@@ -714,7 +849,7 @@ proc toW(r: VersionRecord; field: string): VersionRecordW =
     skipExt: pathsW[MaxLayoutEntries](l.skipExt, field & ".layout.skipExt"),
     paths: pathsW[MaxLayoutEntries](l.paths, field & ".layout.paths"),
     modules: toL(mods, List[WName, MaxModules], field & ".layout.modules"),
-    conditional: toL(conds, List[ConditionalFieldW, MaxConditionalFields],
+    conditional: toL(conds, List[ConditionalFieldWT[C], MaxConditionalFields],
       field & ".layout.conditional"))
   let b = r.binaries
   result.binaries = BinariesW(
@@ -722,11 +857,13 @@ proc toW(r: VersionRecord; field: string): VersionRecordW =
     namedBin: binsW[MaxBinaries](b.namedBin, field & ".binaries.namedBin"),
     binDir: textL(b.binDir, WPath, field & ".binaries.binDir"),
     backend: textL(b.backend, WName, field & ".binaries.backend"))
-  var fws: seq[ForeignW]
+  var fws: seq[ForeignWT[C]]
   for i, d in r.foreign:
-    fws.add ForeignW(name: textL(d.name, WText, field & ".foreign"),
-      condition: toW(d.condition, field & ".foreign[" & $i & "].condition"))
-  result.foreign = toL(fws, List[ForeignW, MaxForeign], field & ".foreign")
+    fws.add ForeignWT[C](name: textL(d.name, WText, field & ".foreign"),
+      condition: toW(d.condition, field & ".foreign[" & $i & "].condition",
+        C))
+  result.foreign = toL(fws, List[ForeignWT[C], MaxForeign],
+    field & ".foreign")
   var bits = 0'u32
   for f in r.flags: bits = bits or (1'u32 shl ord(f))
   result.flags = bits
@@ -736,8 +873,23 @@ proc toW(r: VersionRecord; field: string): VersionRecordW =
   var nf: seq[WDigest]
   if r.nimbleFile.isSome: nf.add r.nimbleFile.get
   result.nimbleFile = toL(nf, List[WDigest, 1], field & ".nimbleFile")
+  when T is VersionRecordW2 | VersionRecordW3:
+    var sms: seq[SubmoduleW]
+    for i, m in r.submodules:
+      let f = field & ".submodules[" & $i & "]"
+      sms.add SubmoduleW(path: textL(m.path, WPath, f & ".path"),
+        url: textL(m.url, WText, f & ".url"),
+        commit: toL(commitBytes(m.commit, f & ".commit"),
+          List[byte, MaxCommitBytes], f & ".commit"))
+    result.submodules = toL(sms, List[SubmoduleW, MaxSubmodules],
+      field & ".submodules")
+  else:
+    if r.submodules.len > 0:
+      refuse(nrInconsistent, field & ": a record with submodules is " &
+        "encoded only in a shard of schema " & $NimbleShardSubmodulesSchema)
 
-proc fromW(w: VersionRecordW; field: string): VersionRecord =
+proc fromW[T: VersionRecordW | VersionRecordW2 | VersionRecordW3](w: T;
+    field: string): VersionRecord =
   result.version = RecordVersion(
     kind: enumFrom(w.version.kind, RecordVersionKind, field & ".version.kind"),
     components: asSeq(w.version.components),
@@ -788,23 +940,34 @@ proc fromW(w: VersionRecordW; field: string): VersionRecord =
   result.probePlatform = wText(w.probePlatform)
   if w.nimbleFile.len == 1:
     result.nimbleFile = some(w.nimbleFile[0])
+  when T is VersionRecordW2 | VersionRecordW3:
+    for m in w.submodules:
+      result.submodules.add RecordSubmodule(path: wText(m.path),
+        url: wText(m.url), commit: toHexLower(asSeq(m.commit)))
 
-proc toW(p: PackageEnvelope; field: string): PackageW =
+proc toW[P: PackageW | PackageW2 | PackageW3](p: PackageEnvelope;
+    field: string; _: typedesc[P]): P =
   var os: seq[OriginW]
   for o in p.origins:
     os.add OriginW(url: textL(o.url, WText, field & ".origins"),
       subdir: textL(o.subdir, WPath, field & ".origins"),
       vcs: uint8(ord(o.vcs)))
-  var vs: seq[VersionRecordW]
+  when P is PackageW3:
+    type R = VersionRecordW3
+  elif P is PackageW2:
+    type R = VersionRecordW2
+  else:
+    type R = VersionRecordW
+  var vs: seq[R]
   for i, v in p.versions:
-    vs.add toW(v, field & ".versions[" & $i & "]")
-  PackageW(name: textL(p.name, WName, field & ".name"),
+    vs.add toW(v, field & ".versions[" & $i & "]", R)
+  P(name: textL(p.name, WName, field & ".name"),
     origins: toL(os, List[OriginW, MaxOrigins], field & ".origins"),
     registryOrigin: p.registryOrigin,
-    versions: toL(vs, List[VersionRecordW, MaxVersionsPerPackage],
-      field & ".versions"))
+    versions: toL(vs, List[R, MaxVersionsPerPackage], field & ".versions"))
 
-proc fromW(w: PackageW; field: string): PackageEnvelope =
+proc fromW[P: PackageW | PackageW2 | PackageW3](w: P; field: string):
+    PackageEnvelope =
   result.name = wText(w.name)
   for i, o in w.origins:
     result.origins.add PackageOrigin(url: wText(o.url), subdir: wText(o.subdir),
@@ -869,9 +1032,88 @@ proc fromW(w: ObservationW; field: string): PackageObservation =
         tag: wText(h.version.tag)),
       commit: toHexLower(asSeq(h.commit)), firstSeen: h.firstSeen)
 
+proc hasSubmoduleLists*(s: NimbleShard): bool =
+  ## Whether any record of ``s`` carries a ``submodules`` list: what makes
+  ## a shard schema ``NimbleShardSubmodulesSchema``.
+  for p in s.packages:
+    for v in p.versions:
+      if v.submodules.len > 0: return true
+  false
+
+proc anyConditionsSchemaNode(nodes: seq[ConditionNode]): bool =
+  for n in nodes:
+    if n.isConditionsSchemaNode: return true
+  false
+
+proc anyConditionsSchemaNode(rs: seq[RequirementEntry]): bool =
+  for r in rs:
+    if anyConditionsSchemaNode(r.condition): return true
+  false
+
+proc hasConditionTerms*(r: VersionRecord): bool =
+  ## Whether a condition node of ``r`` is one only shard schema
+  ## ``NimbleShardConditionsSchema`` carries (a Nim-version comparison or an
+  ## OS-family term).
+  if anyConditionsSchemaNode(r.nim) or anyConditionsSchemaNode(r.requires):
+    return true
+  for f in r.features:
+    if anyConditionsSchemaNode(f.requires): return true
+  for c in r.layout.conditional:
+    if anyConditionsSchemaNode(c.condition): return true
+  for d in r.foreign:
+    if anyConditionsSchemaNode(d.condition): return true
+  false
+
+proc hasConditionTerms*(s: NimbleShard): bool =
+  for p in s.packages:
+    for v in p.versions:
+      if v.hasConditionTerms: return true
+  false
+
+proc shardSchemaOf*(s: NimbleShard): uint16 =
+  ## The one schema ``s`` is encoded in (see the module docstring): 3 when
+  ## a condition needs it, else 2 when a record has submodules, else 1.
+  if s.hasConditionTerms: NimbleShardConditionsSchema
+  elif s.hasSubmoduleLists: NimbleShardSubmodulesSchema
+  else: NimbleIndexSchemaVersion
+
+proc toW2T[S: ShardW2 | ShardW3](s: NimbleShard; _: typedesc[S]): S =
+  when S is ShardW3:
+    type P = PackageW3
+    const schema = NimbleShardConditionsSchema
+  else:
+    type P = PackageW2
+    const schema = NimbleShardSubmodulesSchema
+  var ps: seq[P]
+  for i, p in s.packages:
+    ps.add toW(p, "shard.packages[" & $i & "]", P)
+  var al: seq[AliasW]
+  for a in s.aliases:
+    al.add AliasW(alias: textL(a.alias, WName, "shard.aliases"),
+      target: textL(a.target, WName, "shard.aliases"))
+  var os: seq[ObservationW]
+  for i, o in s.observations:
+    os.add toW(o, "shard.observations[" & $i & "]")
+  S(schema: schema, shardBits: s.shardBits,
+    bucket: s.bucket,
+    packages: toL(ps, List[P, MaxPackagesPerShard], "shard.packages"),
+    aliases: toL(al, List[AliasW, MaxAliasesPerShard], "shard.aliases"),
+    observations: toL(os, List[ObservationW, MaxPackagesPerShard],
+      "shard.observations"))
+
+proc toW2*(s: NimbleShard): ShardW2 =
+  ## ``s`` as a schema-2 shard; refuses a schema-3 condition.
+  toW2T(s, ShardW2)
+
+proc toW3*(s: NimbleShard): ShardW3 =
+  ## ``s`` as a schema-3 shard.
+  toW2T(s, ShardW3)
+
 proc toW*(s: NimbleShard): ShardW =
+  ## ``s`` as a schema-1 shard; refuses a record with submodules.
   var ps: seq[PackageW]
-  for i, p in s.packages: ps.add toW(p, "shard.packages[" & $i & "]")
+  for i, p in s.packages:
+    ps.add toW(p, "shard.packages[" & $i & "]", PackageW)
   var al: seq[AliasW]
   for a in s.aliases:
     al.add AliasW(alias: textL(a.alias, WName, "shard.aliases"),
@@ -886,7 +1128,7 @@ proc toW*(s: NimbleShard): ShardW =
     observations: toL(os, List[ObservationW, MaxPackagesPerShard],
       "shard.observations"))
 
-proc fromW(w: ShardW): NimbleShard =
+proc fromW[S: ShardW | ShardW2 | ShardW3](w: S): NimbleShard =
   result.shardBits = w.shardBits
   result.bucket = w.bucket
   for i, p in w.packages:
@@ -1025,9 +1267,15 @@ proc peekObjectKind*(bytes: openArray[byte]): NimbleObjectKind =
     refuse(nrUnknownKind, "type id 0x" & toHex(int(getU16(bytes, 6)), 4) &
       " is not a Nimble index object")
 
-proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind) =
+proc acceptsSchema*(kind: NimbleObjectKind; schema: uint16): bool =
+  ## The payload schemas a reader of this build decodes for ``kind``.
+  schema == NimbleIndexSchemaVersion or
+    (kind == nokShard and schema in [NimbleShardSubmodulesSchema,
+                                     NimbleShardConditionsSchema])
+
+proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind): uint16 =
   ## Everything before the SSZ decode: size bound first, then the header,
-  ## the kind, the length and the schema.
+  ## the kind, the length and the schema, which it returns.
   if bytes.len > maxBytesOf(kind):
     refuse(nrOversize, $kind & " of " & $bytes.len & " bytes exceeds " &
       $maxBytesOf(kind))
@@ -1039,9 +1287,13 @@ proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind) =
   if bytes.len < FrameHeaderLen + 2:
     refuse(nrTruncated, $kind & " payload has no schema")
   let schema = getU16(bytes, FrameHeaderLen)
-  if schema != NimbleIndexSchemaVersion:
+  if not acceptsSchema(kind, schema):
     refuse(nrUnknownSchema, $kind & " schema " & $schema & " (this reader " &
-      "accepts " & $NimbleIndexSchemaVersion & ")")
+      "accepts " & $NimbleIndexSchemaVersion &
+      (if kind == nokShard: ", " & $NimbleShardSubmodulesSchema & " and " &
+         $NimbleShardConditionsSchema else: "") &
+      ")")
+  schema
 
 proc sszFailure(msg: string): NimbleIndexRefusal =
   if "exceeds list limit" in msg: nrBound else: nrMalformed
@@ -1067,19 +1319,36 @@ template decodeWire(bytes: openArray[byte]; T: typedesc; what: string): untyped 
 # ---------------------------------------------------------------------------
 
 proc encodeShard*(s: NimbleShard): seq[byte] =
+  ## ``s`` in the one schema its value has (``shardSchemaOf``).
   validateShard(s)
-  frame(nokShard, SSZ.encode(toW(s)))
+  case shardSchemaOf(s)
+  of NimbleShardConditionsSchema: frame(nokShard, SSZ.encode(toW3(s)))
+  of NimbleShardSubmodulesSchema: frame(nokShard, SSZ.encode(toW2(s)))
+  else: frame(nokShard, SSZ.encode(toW(s)))
 
 proc decodeShard*(bytes: openArray[byte]): NimbleShard =
   ## Bounded, fail-closed decode of a shard (threat model G3): see the
   ## module docstring for the order of the checks.
-  checkFrame(bytes, nokShard)
-  let w = decodeWire(bytes, ShardW, "shard")
+  let schema = checkFrame(bytes, nokShard)
   vocabularyFailure = ""
-  result = fromW(w)
+  if schema == NimbleShardConditionsSchema:
+    let w = decodeWire(bytes, ShardW3, "shard")
+    result = fromW(w)
+  elif schema == NimbleShardSubmodulesSchema:
+    let w = decodeWire(bytes, ShardW2, "shard")
+    result = fromW(w)
+  else:
+    let w = decodeWire(bytes, ShardW, "shard")
+    result = fromW(w)
   checkVocabulary()
   validateShard(result)
-  if frame(nokShard, SSZ.encode(toW(result))) != @bytes:
+  if schema != shardSchemaOf(result):
+    refuse(nrNonCanonical, "shard of schema " & $schema & " holds " &
+      (if result.hasConditionTerms: "a nim-version or os-family condition"
+       elif result.hasSubmoduleLists: "records with submodule lists"
+       else: "no record with a submodule list or a schema-3 condition") &
+      "; its schema is " & $shardSchemaOf(result))
+  if encodeShard(result) != @bytes:
     refuse(nrNonCanonical, "shard does not re-encode to the same bytes")
 
 proc encodeRoot*(r: NimbleIndexRoot): seq[byte] =
@@ -1087,7 +1356,7 @@ proc encodeRoot*(r: NimbleIndexRoot): seq[byte] =
   frame(nokRoot, SSZ.encode(toW(r)))
 
 proc decodeRoot*(bytes: openArray[byte]): NimbleIndexRoot =
-  checkFrame(bytes, nokRoot)
+  discard checkFrame(bytes, nokRoot)
   let w = decodeWire(bytes, RootW, "root")
   vocabularyFailure = ""
   result = fromW(w)
@@ -1101,7 +1370,7 @@ proc encodeNameMap*(m: NimbleNameMap): seq[byte] =
   frame(nokNameMap, SSZ.encode(toW(m)))
 
 proc decodeNameMap*(bytes: openArray[byte]): NimbleNameMap =
-  checkFrame(bytes, nokNameMap)
+  discard checkFrame(bytes, nokNameMap)
   let w = decodeWire(bytes, NameMapW, "name map")
   vocabularyFailure = ""
   result = fromW(w)
@@ -1115,7 +1384,7 @@ proc encodeEvents*(e: NimbleEvents): seq[byte] =
   frame(nokEvents, SSZ.encode(toW(e)))
 
 proc decodeEvents*(bytes: openArray[byte]): NimbleEvents =
-  checkFrame(bytes, nokEvents)
+  discard checkFrame(bytes, nokEvents)
   let w = decodeWire(bytes, EventsW, "events")
   vocabularyFailure = ""
   result = fromW(w)
@@ -1124,15 +1393,13 @@ proc decodeEvents*(bytes: openArray[byte]): NimbleEvents =
   if frame(nokEvents, SSZ.encode(toW(result))) != @bytes:
     refuse(nrNonCanonical, "events do not re-encode to the same bytes")
 
-proc decodePackageSlice*(payload: openArray[byte]; field: string;
-                         shardBits: uint8; bucket: uint32): PackageEnvelope =
-  ## Decode ONE package envelope from its SSZ slice inside a shard (the
-  ## navigator's partial access), with the same validation and
-  ## canonical-form check a whole-shard decode applies to it.
-  var w: PackageW
+proc decodePackageAs[P: PackageW | PackageW2 | PackageW3](payload: openArray[byte];
+                                              field: string;
+                                              _: typedesc[P]): PackageEnvelope =
+  var w: P
   var failure = ""
   try:
-    w = SSZ.decode(payload, PackageW)
+    w = SSZ.decode(payload, P)
   except SerializationError as e:
     failure = e.msg
   if failure.len > 0:
@@ -1140,9 +1407,29 @@ proc decodePackageSlice*(payload: openArray[byte]; field: string;
   vocabularyFailure = ""
   result = fromW(w, field)
   checkVocabulary()
+
+proc decodePackageSlice*(payload: openArray[byte]; field: string;
+                         shardBits: uint8; bucket: uint32;
+                         schema = NimbleIndexSchemaVersion): PackageEnvelope =
+  ## Decode ONE package envelope from its SSZ slice inside a shard of
+  ## ``schema`` (the navigator's partial access), with the same validation
+  ## and canonical-form check a whole-shard decode applies to it.
+  if schema == NimbleShardConditionsSchema:
+    result = decodePackageAs(payload, field, PackageW3)
+  elif schema == NimbleShardSubmodulesSchema:
+    result = decodePackageAs(payload, field, PackageW2)
+  else:
+    result = decodePackageAs(payload, field, PackageW)
   validatePackage(result, field)
   if shardBucket(nameKey(result.name), int(shardBits)) != bucket:
     refuse(nrWrongShard, field & " " & result.name.escape() & " belongs to " &
       "another shard")
-  if SSZ.encode(toW(result, field)) != @payload:
+  let again =
+    if schema == NimbleShardConditionsSchema:
+      SSZ.encode(toW(result, field, PackageW3))
+    elif schema == NimbleShardSubmodulesSchema:
+      SSZ.encode(toW(result, field, PackageW2))
+    else:
+      SSZ.encode(toW(result, field, PackageW))
+  if again != @payload:
     refuse(nrNonCanonical, field & " does not re-encode to the same bytes")

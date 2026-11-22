@@ -110,8 +110,12 @@ suite "NPC-M3: the shard and root decoders are bounded and fail closed":
 
   test "an unknown schema, record kind or frame version is refused before decoding":
     let shard = validShard()
+    # Schema 2 is a shard schema since NPC-M13 (records with a submodules
+    # list) and schema 3 since NPC-M14 (Nim-version and OS-family
+    # conditions); the first schema no reader of this build knows is the
+    # next.
     var s2 = shard
-    s2[12] = 2
+    s2[12] = byte(NimbleShardConditionsSchema + 1)
     check refusal(proc () = discard decodeShard(s2)) == $nrUnknownSchema
     var kind = shard
     kind[6] = 0xff
@@ -291,7 +295,7 @@ suite "NPC-M3: the shard and root decoders are bounded and fail closed":
     check nav.findPackage("RICH") == 1
     check nav.decodePackageAt(1) == decodeShard(shard).packages[1]
     var s2 = shard
-    s2[12] = 2
+    s2[12] = byte(NimbleShardConditionsSchema + 1)
     check refusal(proc () = discard navigateShard(viewOf(s2))) ==
       $nrUnknownSchema
     for n in 0 ..< shard.len:

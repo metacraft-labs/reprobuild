@@ -51,6 +51,7 @@
 ## measured on home-pc (eli-pc runs it with the rest of the suite).
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 when not defined(windows):
   from std/nativesockets import getHostname
 
@@ -129,9 +130,7 @@ proc dispose(f: Fixture) =
 proc baseEnv(f: Fixture): StringTableRef =
   ## The developer's environment minus every host-identity input, so each
   ## case sets exactly the ones it is about.
-  result = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    result[k] = v
+  result = inheritedEnvTable()
   result.del("REPRO_HOST")
   result.del("HOSTNAME")
   result.del("COMPUTERNAME")

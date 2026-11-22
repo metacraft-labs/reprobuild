@@ -14,6 +14,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles]
+import repro_core/process_env
 
 import repro_dev_env_artifacts
 import repro_test_support
@@ -88,8 +89,8 @@ proc prepareCase*(prefix: string): M74Case =
     result.shim = monitor.shim
 
 proc envFor*(c: M74Case): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
+  result = newEnvTable()
+  for key, value in inheritedEnvTable():
     if key.startsWith("__REPRO_"):
       continue
     result[key] = value

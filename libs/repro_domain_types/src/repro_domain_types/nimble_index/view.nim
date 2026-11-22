@@ -10,6 +10,21 @@ import ./codec
 
 proc q(s: string): string = s.escape()
 
+proc nimVersionText*(n: ConditionNode): string =
+  ## A ``cnNimVersion`` node in Nim syntax, the term on the left:
+  ## `NimMajor >= 2`, `(NimMajor, NimMinor) < (1, 6)`,
+  ## `NimVersion >= "1.6.0"`.
+  var lit = ""
+  case n.term
+  of nvVersion: lit = q(n.text)
+  of nvMajorMinor, nvMajorMinorPatch:
+    var parts: seq[string]
+    for x in n.ints: parts.add $x
+    lit = "(" & parts.join(", ") & ")"
+  else:
+    lit = (if n.ints.len > 0: $n.ints[0] else: "?")
+  $n.term & " " & $n.op & " " & lit
+
 proc renderCondition*(nodes: seq[ConditionNode]): string =
   ## A condition in infix form, fully parenthesized below the top level:
   ## `defined(linux) and not (hostCPU == "arm64")`. Empty: "".
@@ -22,7 +37,8 @@ proc renderCondition*(nodes: seq[ConditionNode]): string =
     let n = nodes[i]
     inc i
     case n.kind
-    of cnDefinedOs, cnDefinedCpu: "defined(" & n.name & ")"
+    of cnDefinedOs, cnDefinedCpu, cnOsFamily: "defined(" & n.name & ")"
+    of cnNimVersion: nimVersionText(n)
     of cnHostOs: "hostOS == " & q(n.name)
     of cnHostCpu: "hostCPU == " & q(n.name)
     of cnNot:
@@ -75,6 +91,8 @@ proc renderRecord(lines: var seq[string]; r: VersionRecord; indent: string) =
     lines.add i2 & "probe_platform: " & r.probePlatform
   lines.add i2 & "nimble_file: " &
     (if r.nimbleFile.isSome: "blake3:" & $r.nimbleFile.get else: "-")
+  for m in r.submodules:
+    lines.add i2 & "submodule " & q(m.path) & " " & m.url & " " & m.commit
   for e in r.nim:
     lines.add i2 & "nim " & renderRequirement(e)
   for e in r.requires:
@@ -114,7 +132,7 @@ proc renderRecord(lines: var seq[string]; r: VersionRecord; indent: string) =
       (if d.condition.len > 0: " when " & renderCondition(d.condition) else: "")
 
 proc renderShard*(s: NimbleShard): string =
-  var lines = @["nimble-index shard schema=" & $NimbleIndexSchemaVersion &
+  var lines = @["nimble-index shard schema=" & $shardSchemaOf(s) &
     " bits=" & $s.shardBits & " bucket=" & $s.bucket &
     " packages=" & $s.packages.len & " aliases=" & $s.aliases.len &
     (if s.observations.len > 0: " observations=" & $s.observations.len

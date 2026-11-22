@@ -156,6 +156,27 @@ const teamPolicy* = certificatePolicy "team":
     requires "t-unit", platforms = ["linux/amd64"]
 ```
 
+When the policy lives in `src/team_policy.nim` of a package checked out beside
+the repository (or beside one of its parent directories, such as the
+workspace root: the nearest directory of that name is the package), the
+repository imports the module by name and declares the package with the
+nested `uses: "<package>"` form. The declaration puts the
+package's root and its `src/` on every compile of the recipe and pins the
+package's revision in `repro.lock`. Editing the module rebuilds the recipe.
+
+```nim
+import repro_project_dsl
+import team_policy
+
+package app:
+  uses:
+    uses: "team-policy"
+  enactCertificatePolicy teamPolicy
+```
+
+A bare string in `uses:` (`"team-policy"`) is a tool requirement, not a package
+declaration, and the import then fails.
+
 The repository's `repro.nim` enacts it with `enactCertificatePolicy teamPolicy`,
 and `repro lock refresh` records it in the `[certificate_policy]` section of
 `repro.lock`:

@@ -152,8 +152,8 @@
   cliSpecSrc ? fetchFromGitHub {
     owner = "metacraft-labs";
     repo = "nim-cli-spec";
-    rev = "5380e20c8866e49e000e8070f692f54d303b5658";
-    hash = "sha256-52dtjt5p4FUkBnFfsSb8JoicImn4VTZOgr0ZfZfmKqA=";
+    rev = "17c4f468cdd807f3a00225097a22817ebb075142";
+    hash = "sha256-+gdOffcTtkVptAypMQJu+ahGuSw1WM/9etmCQHofejU=";
   },
   # Added after the `src` commit too: nim-entrypoints, the `entrypoints`
   # package (the declarative description of a program's entry points); the
@@ -258,7 +258,7 @@ stdenv.mkDerivation (finalAttrs: {
   # forbids. reprobuild's flake overrides it with the value it parses from the
   # nimble manifest, and `checks.nixpkgs-package-version-sync` fails the build
   # if this literal and the manifest disagree, so the two cannot drift silently.
-  version = "0.2.32";
+  version = "0.2.33";
 
   # The default source: a published commit whose `reprobuild.nimble` carries
   # `version` above and whose `flake.lock` pins the `*Src` defaults above

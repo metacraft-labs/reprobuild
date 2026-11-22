@@ -397,7 +397,13 @@
       # mountable description uses nim-cli-spec's `cliUnbound` instead of a
       # copy of its own, so it needs nim-cli-spec fcd5b30 (`clispec/splice`),
       # the revision this flake pins.
-      url = "github:metacraft-labs/io-mon/8b8faa81bb0cad5d2d91fae80ceaaa7092782ec2";
+      # Bumped 8b8faa81 -> b1c32599 (2026-11-22, io-mon `agents`): the Linux
+      # preload shim compiles for AArch64 again. 14345cc (inside the previous
+      # pin) declared the x86-64-only site-table global unguarded, so every
+      # linux-arm64 source build stopped at "undeclared identifier:
+      # 'SiteTableView'". The range also keeps a late inline scan on the
+      # startup scan's instruction boundaries (c4ab263).
+      url = "github:metacraft-labs/io-mon/b1c32599f9cd671b150f68de2b21bdc9ae0c42be";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -462,7 +468,7 @@
       # CI jobs have no sibling, so seed it from here — exactly like
       # nim-shm-queue-src. Keep this URL, flake.lock, repro.lock and
       # .github/sibling-repos aligned.
-      url = "github:metacraft-labs/nim-cli-spec/5380e20c8866e49e000e8070f692f54d303b5658";
+      url = "github:metacraft-labs/nim-cli-spec/17c4f468cdd807f3a00225097a22817ebb075142";
       flake = false;
     };
     nim-entrypoints-src = {
@@ -3260,19 +3266,7 @@
               # install`) is put back in the same shell entry rather than at
               # the next commit. `repro health` reports the same gap with a
               # remedy.
-              _repro_hook_bin=""
-              if [ -x "$PWD/build/bin/repro" ]; then
-                _repro_hook_bin="$PWD/build/bin/repro"
-              elif command -v repro >/dev/null 2>&1; then
-                _repro_hook_bin="$(command -v repro)"
-              fi
-              if [ -n "$_repro_hook_bin" ]; then
-                "$_repro_hook_bin" hooks ensure --vcs "$PWD" >/dev/null || \
-                  echo "warning: 'repro hooks ensure --vcs $PWD' failed; the pre-push publication gate may be uninstalled. Run it by hand and read its diagnostic." >&2
-              else
-                echo "warning: no 'repro' binary found; the pre-push publication gate cannot be asserted. Build it with 'just build' and re-enter the shell." >&2
-              fi
-              unset _repro_hook_bin
+              ${pkgs.bash}/bin/bash ${./scripts/assert-managed-hooks.sh} "$PWD"
               fi
             ''
             + pkgs.lib.optionalString pkgs.stdenv.isLinux ''

@@ -46,6 +46,7 @@
 ## finds. The switch reaches nothing that enters an action fingerprint.
 
 import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 
 import repro_core/cli_images
 import repro_test_support
@@ -160,9 +161,7 @@ proc runCaptured(exe: string; args: openArray[string]; cwd: string;
   ## that true, the same trap as reading a build's exit code through a pipe.
   let outPath = cwd / "captured-stdout"
   let errPath = cwd / "captured-stderr"
-  var envTable = newStringTable()
-  for key, value in envPairs():
-    envTable[key] = value
+  var envTable = inheritedEnvTable()
   for entry in env:
     envTable[entry[0]] = entry[1]
   var shArgs = @["-c",

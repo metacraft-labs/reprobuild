@@ -38,12 +38,17 @@
 ##   4. **A live arm abandoned for a better version.** `fast` has no
 ##      contribution, so `true` and `false` tie at the variant level and the
 ##      version objective breaks the tie. `fast=true` caps `libfoo` at `<1.5`;
-##      `fast=false` caps `libbar` at `<1.5`. With only `libfoo 1.4`
-##      published, `highest` takes `fast=true` (`libbar 2.0`). Publishing
+##      `fast=false` caps `libzed` at `<1.5`. With only `libfoo 1.4`
+##      published, `highest` takes `fast=true` (`libzed 2.0`). Publishing
 ##      `libfoo 2.0` and `3.0` — both outside the `[1.4, 1.5)` interval the
-##      live cap folds into — makes `fast=false, libfoo 3.0, libbar 1.0` the
-##      better configuration. No interval can express that, so the packages a
-##      tied variant reaches are recorded raw.
+##      live cap folds into — makes `fast=false, libfoo 3.0, libzed 1.0` the
+##      better configuration. A strategy settles packages one at a time, at
+##      equal distance from the request by name (Named-Lock-Files §5.5), so
+##      the second package is named to come AFTER `libfoo`, as `Z` comes
+##      after `X` in the spec's own example of this case: `libfoo` is settled
+##      first, and its new release is what decides the variant. No interval
+##      can express that, so the packages a tied variant reaches are recorded
+##      raw.
 ##
 ## Each case asserts that the SOLVE RAN (NLF-GEN-3: "Assert on whether the
 ## solve RAN, not only on lock content") and that the regenerated lock agrees
@@ -79,7 +84,7 @@ const
   App = "app"
   LibFoo = "libfoo"
   LibSsl = "libssl"
-  LibBar = "libbar"
+  LibZed = "libzed"
   Tls = "tls"
   Fast = "fast"
 
@@ -231,9 +236,9 @@ proc tiedWorkspace(): seq[PackageDecl] =
     newPackage(App, @["1.0.0"], @[
       newDependency(LibFoo, ">=1.0"),
       newConditionalDependency(LibFoo, ">=1.0 <1.5", Fast, "true"),
-      newConditionalDependency(LibBar, ">=1.0 <1.5", Fast, "false")]),
+      newConditionalDependency(LibZed, ">=1.0 <1.5", Fast, "false")]),
     newPackage(LibFoo, @["1.4.0"]),
-    newPackage(LibBar, @["1.0.0", "2.0.0"])]
+    newPackage(LibZed, @["1.0.0", "2.0.0"])]
 
 proc fastTied(): seq[VariantDecl] =
   ## No contribution: both values carry the same variant-level weight, so the
@@ -247,17 +252,17 @@ suite "NLF-GEN-8 a live arm a tied variant can abandon is material":
     try:
       reg.server.publish(App, ["1.0.0"])
       reg.server.publish(LibFoo, ["1.4.0"])
-      reg.server.publish(LibBar, ["1.0.0", "2.0.0"])
+      reg.server.publish(LibZed, ["1.0.0", "2.0.0"])
 
       let first = runLockSolve(
         reg.request(tiedWorkspace(), lsHighest, fastTied()), "")
       check first.solveExecuted
       check first.variantsOf()[Fast] == "true"
       check first.resolved()[LibFoo] == "1.4.0"
-      check first.resolved()[LibBar] == "2.0.0"
+      check first.resolved()[LibZed] == "2.0.0"
       # Both packages a tied variant reaches are recorded whole.
       check first.intervalOf(LibFoo) == "raw"
-      check first.intervalOf(LibBar) == "raw"
+      check first.intervalOf(LibZed) == "raw"
 
       reg.server.publish(LibFoo, ["1.4.0", "2.0.0", "3.0.0"])
       let after = runLockSolve(
@@ -266,7 +271,7 @@ suite "NLF-GEN-8 a live arm a tied variant can abandon is material":
         proc(r: Registry) =
           r.server.publish(App, ["1.0.0"])
           r.server.publish(LibFoo, ["1.4.0", "2.0.0", "3.0.0"])
-          r.server.publish(LibBar, ["1.0.0", "2.0.0"]))
+          r.server.publish(LibZed, ["1.0.0", "2.0.0"]))
       check truth.variantsOf()[Fast] == "false"
       check truth.resolved()[LibFoo] == "3.0.0"
 

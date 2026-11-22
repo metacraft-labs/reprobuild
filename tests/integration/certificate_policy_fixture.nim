@@ -8,18 +8,21 @@
 ##
 ##   <root>/
 ##     certpolicy/                the SHARED policy package
-##       repro.nim                ``package certpolicy``; imports and
-##                                re-exports ``policy/team_policy``
-##       policy/team_policy.nim   ``import repro_certificates`` and the
+##       repro.nim                ``package certpolicy``
+##       src/team_policy.nim      ``import repro_certificates`` and the
 ##                                ``const`` policies
 ##     consumer/                  a repository that adopts a policy
-##       repro.nim                ``uses: "certpolicy"`` and
+##       repro.nim                ``import team_policy``, the nested
+##                                ``uses: "certpolicy"`` and
 ##                                ``enactCertificatePolicy <policy>``
 ##
-## The consumer carries no copy of the policy: it reaches it through its
-## ``uses:`` entry, which resolves to the sibling package (the ordinary
-## workspace-producer import) and pins the package's revision in the
-## consumer's ``repro.lock`` like any other dependency. Every case drives the
+## The consumer carries no copy of the policy. It imports the policy module
+## by name, the form Test-Certificates.md §"The policy declaration" gives:
+## the nested ``uses: "certpolicy"`` entry declares the sibling package, so
+## every engine compile of the consumer's recipe has the package's ``src``
+## on its path (``declaredPackagePathDirs``), and the same entry pins the
+## package's revision in the consumer's ``repro.lock`` like any other
+## dependency. Every case drives the
 ## built ``./build/bin/repro``: the real provider compile, the real
 ## ``repro lock refresh`` writer and the real ``repro certificates policy``
 ## reader. Nothing is mocked.
@@ -44,9 +47,7 @@ type
     repro*: string
     gitBin*: string
 
-const policyPackageRecipe* = "import repro_project_dsl\n" &
-  "import ./policy/team_policy\n" &
-  "export team_policy\n\n" &
+const policyPackageRecipe* = "import repro_project_dsl\n\n" &
   "package certpolicy:\n" &
   "  build:\n" &
   "    discard aggregate(\"certpolicy-noop\", actions = @[])\n"
@@ -81,24 +82,27 @@ proc commitAll*(ws: PolicyWorkspace; repo, message: string) =
 
 proc writePolicyModule*(ws: PolicyWorkspace; body: string;
                         message = "policy") =
-  ## Replace the shared package's policy module with ``body`` (after its
-  ## ``import repro_certificates``) and commit it.
-  writeFile(ws.policyPkg / "policy" / "team_policy.nim",
+  ## Replace the shared package's policy module, ``src/team_policy.nim``,
+  ## with ``body`` (after its ``import repro_certificates``) and commit it.
+  writeFile(ws.policyPkg / "src" / "team_policy.nim",
     "import repro_certificates\n\n" & body)
   ws.commitAll(ws.policyPkg, message)
 
 proc consumerRecipe*(enact: string; certificates: openArray[string]): string =
-  ## The consumer's ``repro.nim``: ``uses: "certpolicy"``, the enacted
+  ## The consumer's ``repro.nim``: ``import team_policy`` (the policy module,
+  ## by name, from the declared package's ``src``), the nested
+  ## ``uses: "certpolicy"``, the enacted
   ## policy, and one ``certificate`` per name, each over an aggregate of the
   ## same name holding one edge, ``<name>-check`` (it runs ``true``; no edge
   ## runs for a lock refresh). The edge is what the name MEANS: the refresh
   ## records its command set (Test-Certificates.md §"What a required name
   ## means: its command set"), and a name that marks no test command can
   ## never be certified, so its requirement is refused.
-  result = "import repro_project_dsl\n\n" &
+  result = "import repro_project_dsl\n" &
+    "import team_policy\n\n" &
     "package consumer:\n" &
     "  uses:\n" &
-    "    \"certpolicy\"\n"
+    "    uses: \"certpolicy\"\n"
   if enact.len > 0:
     result.add("  enactCertificatePolicy " & enact & "\n")
   result.add("  build:\n")
@@ -129,7 +133,7 @@ proc newPolicyWorkspace*(label, policyModule, consumer: string;
   # Stable coordinates keep copied-workspace tests independent of scratch paths.
   discard result.git(result.policyPkg, "remote", "add", "origin",
     "https://example.invalid/certpolicy.git")
-  createDir(result.policyPkg / "policy")
+  createDir(result.policyPkg / "src")
   writeFile(result.policyPkg / "repro.nim", policyPackageRecipe)
   result.writePolicyModule(policyModule, "seed")
   result.initRepo(result.consumer)

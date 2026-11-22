@@ -54,6 +54,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, unittest]
+import repro_core/process_env
 
 const RepoMarker = "repro.nim"
 
@@ -99,9 +100,7 @@ proc reproBinary(repoRoot: string): string =
 proc scrubbedEnvironment(): StringTableRef =
   ## The inherited environment minus every loader search-path variable —
   ## the shape a non-interactive ``sshd`` session hands to a remote command.
-  result = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
-    result[k] = v
+  result = inheritedEnvTable()
   for name in LoaderSearchPathVars:
     if result.hasKey(name):
       result.del(name)
@@ -121,7 +120,7 @@ proc minimalEnvironment(): StringTableRef =
   ## variables a remote command can count on. Nothing the dev shell exports
   ## survives — in particular no loader search path — so this is the closest
   ## in-process approximation of the far side of an SSH transport.
-  result = newStringTable(modeCaseSensitive)
+  result = newEnvTable()
   for name in RemoteSessionVars:
     let value = getEnv(name)
     if value.len > 0:

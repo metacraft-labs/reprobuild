@@ -3575,9 +3575,9 @@ proc workspaceProducerLocation(selector, consumerSourceFile: string):
   ## producer's exported ``executable … cli:`` schema module and the consumer
   ## can name it as a typed ``producer.tool(args)`` call (§9.2, §9.3).
   ##
-  ## Mirrors the runtime ``findSiblingProjectFile``
-  ## (``repro_cli_support.nim:612-650``) — one level up from the CONSUMER's
-  ## ``repro.nim`` source directory: ``../<selector>/repro.nim`` (or
+  ## Resolves the selector as the workspace sibling ``nearestWorkspaceSibling``
+  ## finds from the CONSUMER's source directory (the rule the runtime
+  ## ``findSiblingProjectFile`` uses too) and takes its ``repro.nim`` (or
   ## ``reprobuild.nim``). Anchoring on ``consumerSourceFile`` (the consumer's
   ## own source path, available at macro expansion via ``lineInfoObj``) makes
   ## the discovery hermetic and MODE-AGNOSTIC: it runs at consumer macro
@@ -3601,41 +3601,32 @@ proc workspaceProducerLocation(selector, consumerSourceFile: string):
   ## a consumer whose ``uses:`` lives in a submodule.
   if selector.len == 0 or consumerSourceFile.len == 0:
     return
-  for ch in selector:
-    if ch == '/' or ch == '\\' or ch == '.' or ch == ':':
-      return
-  let anchorDir = consumerSourceFile.parentDir
-  if anchorDir.len == 0:
+  # A dot is refused on top of the sibling-name rule: in a ``uses:`` selector
+  # it is not part of a bare workspace project name.
+  if '.' in selector:
     return
-  # Walk UP the directory chain from the consumer, probing ``<ancestor>/<selector>``
-  # at each level. The first level (``anchorDir.parentDir / selector``) is the
-  # direct-sibling convention the SC-9/RP5a/TI2 reference tests rely on
-  # (``../<selector>`` next to the consumer); the walk-up EXTENDS that to the
-  # WORKSPACE-ROOT sibling convention so a DEEP out-of-tree consumer (e.g. an
-  # ``infra/tests/rp5c2/recipe.nim`` several dirs below the workspace root) can
-  # still bind a producer checked out as a top-level workspace sibling
-  # (``<workspace>/gosti``) — the RP5c2 shape. It is purely additive: a
-  # direct sibling is still found at the first level, so no existing discovery
-  # changes; only the previously-unresolvable deeper case now resolves. The
-  # nearest ancestor that owns a ``<selector>`` project wins, so a same-named
-  # closer sibling always shadows a farther workspace-root one.
-  var dir = anchorDir
-  for _ in 0 ..< 16:
-    let parent = dir.parentDir
-    if parent.len == 0 or parent == dir:
-      break
-    let siblingDir = parent / selector
-    if dirExists(siblingDir):
-      for base in ["repro.nim", "reprobuild.nim"]:
-        let candidate = siblingDir / base
-        if fileExists(candidate):
-          # Return the extension-stripped path so the emitted
-          # ``import "<path>" as <alias>`` resolves the module by file path.
-          result.modulePath =
-            candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
-          result.workspaceRoot = parent
-          return
-    dir = parent
+  # The search is ``nearestWorkspaceSibling`` (``repro_core/
+  # workspace_siblings``), the one rule a recipe's package declarations
+  # (``uses: "<name>"``, whose root and ``src`` go on the compile path) and
+  # the command line's ``<pkg>:<target>`` selector also use: the direct
+  # sibling ``../<selector>`` -- the convention the SC-9/RP5a/TI2 reference
+  # tests rely on -- else the same name beside a farther ancestor, so a DEEP
+  # consumer (an ``infra/tests/rp5c2/recipe.nim`` several directories below
+  # the workspace root, the RP5c2 shape) binds a producer checked out at the
+  # workspace root. The nearest directory of that name is the producer; one
+  # without a project file is not walked past to a farther checkout.
+  let sibling = nearestWorkspaceSibling(consumerSourceFile.parentDir, selector)
+  if sibling.dir.len == 0:
+    return
+  for base in ["repro.nim", "reprobuild.nim"]:
+    let candidate = sibling.dir / base
+    if fileExists(candidate):
+      # Return the extension-stripped path so the emitted
+      # ``import "<path>" as <alias>`` resolves the module by file path.
+      result.modulePath =
+        candidate[0 ..< candidate.len - ".nim".len].replace('\\', '/')
+      result.workspaceRoot = sibling.workspaceRoot
+      return
 
 proc workspaceProducerModule(selector, consumerSourceFile: string): string =
   ## The producer module path alone. See `workspaceProducerLocation`.

@@ -541,6 +541,9 @@ proc isProviderModePath(path: string): bool =
     # paths absolute; both exist only under this define.
     "tests/integration/" &
       "t_edge_reading_a_shared_tool_cache_is_never_published_cross_host.nim",
+    # Runs the Rust convention's emitter (``rustConvention().emitFragment``),
+    # whose fallback path reaches ``buildPackageFragment``.
+    "tests/integration/t_rust_mode_a_depfile_is_read_not_cached.nim",
     "tests/unit/t_from_source_cabal_recognition.nim",
     "tests/unit/t_from_source_cargo_recognition.nim",
     "tests/unit/t_from_source_go_recognition.nim",
