@@ -29,6 +29,26 @@
 ##   Reprobuild installed and nothing holds IS removed, and its ledger
 ##   records are dropped.
 ##
+## Regression test for reprobuild-pm
+## `issues/2026-11-19-scoop-cleanup-does-not-count-a-generation-of-another-state-directory-as-a-holder.md`.
+## Several state directories can use one store, each holding its
+## generations through `profile` roots of its own
+## (`home/<state-dir-key>/<generation-id>`). Before the fix the cleanup
+## skipped EVERY `profile` root as a holder, so a transition with the flag
+## in one state directory uninstalled an app another state directory's
+## current generation still uses. The cases:
+##
+## * a rollback in state directory A keeps the install B's current
+##   generation holds, both when the two generation ids differ and when
+##   they are equal (generation ids are content-addressed, so the same
+##   profile applied in both collides);
+## * an apply in A: `--plan` previews `skip` naming B's root
+##   (`home/<B-key>/<id> (profile)`), and the apply keeps the install;
+## * a `profile` root an earlier build registered under a bare generation
+##   id that A has no generation for is a holder;
+## * positive control: a bare-id root for a generation A itself holds is
+##   A's own, not a holder, and the app is removed.
+##
 ## Production paths: `runRollback`, `runApplyPlan` and `runApply` run
 ## unmodified against a real store (`index.db`, CAS), a real state directory
 ## and a real sandboxed Scoop root on disk.
@@ -136,10 +156,11 @@ proc registerScoopPrefix(store: var Store; f: Fixture;
     packageName: "scoop.main." & app, version: version, realizedPath: rel,
     adapter: "scoop", receiptDigest: result, createdAtUnix: 1000))
 
-proc writeGen(f: Fixture; store: var Store; tag: string; timestamp: int64;
-              scoopRecords: openArray[(string, string)]): string =
-  ## One generation recording `scoopRecords` (`(app, version)`) as Scoop
-  ## packages. Returns its hex id.
+proc writeGenIn(f: Fixture; stateDir: string; store: var Store; tag: string;
+                timestamp: int64;
+                scoopRecords: openArray[(string, string)]): string =
+  ## One generation of `stateDir` recording `scoopRecords`
+  ## (`(app, version)`) as Scoop packages. Returns its hex id.
   var manifest = ActivationManifest(schemaVersion: 1'u16)
   var envelope = PointerEnvelope(schemaVersion: 1'u16,
     activationTimestamp: timestamp, hostIdentity: "fixture-host")
@@ -157,23 +178,40 @@ proc writeGen(f: Fixture; store: var Store; tag: string; timestamp: int64;
     snapshot.add(byte(ch))
   envelope.generationId = computeGenerationId(
     blake3Digest32(tag), "fixture-host", timestamp)
-  writeGeneration(f.stateDir, envelope, encodeManifest(manifest), snapshot,
+  writeGeneration(stateDir, envelope, encodeManifest(manifest), snapshot,
     snapshot, store)
   generationIdHex(envelope.generationId)
+
+proc writeGen(f: Fixture; store: var Store; tag: string; timestamp: int64;
+              scoopRecords: openArray[(string, string)]): string =
+  ## `writeGenIn` for the fixture's own state directory.
+  writeGenIn(f, f.stateDir, store, tag, timestamp, scoopRecords)
+
+proc otherStateDir(f: Fixture): string =
+  ## A second state directory using the same store (another container,
+  ## another `REPRO_HOME_STATE_DIR`).
+  result = f.root / "state-b"
+  createDir(extendedPath(result))
+
+type StoreSetup = proc (store: var Store; currentId: string)
 
 proc rollbackDroppingRipgrep(f: Fixture; uninstallFromScoop: bool;
                              currentVersion = "14.1";
                              holdByWorkspace = "";
-                             holdAppSpelling = "ripgrep") =
+                             holdAppSpelling = "ripgrep";
+                             extraSetup: StoreSetup = nil) =
   ## Current generation records ripgrep@`currentVersion`; the target (older)
   ## generation records nothing, so the rollback drops ripgrep. When
   ## `holdByWorkspace` names a version, a `workspace` root holds that
   ## version's prefix (a project lock still using it), registered under
-  ## the app name `holdAppSpelling`.
+  ## the app name `holdAppSpelling`. `extraSetup` runs on the open store
+  ## after both generations are written, with the current one's id.
   var store = openStore(f.storeRoot)
   let target = writeGen(f, store, "target", 1000, [])
   let current = writeGen(f, store, "current", 2000,
     [("ripgrep", currentVersion)])
+  if extraSetup != nil:
+    extraSetup(store, current)
   if holdByWorkspace.len > 0:
     let held = registerScoopPrefix(store, f, holdAppSpelling,
       holdByWorkspace)
@@ -364,3 +402,101 @@ suite "dropping a Scoop package keeps the installs others hold or " &
     check "scoop uninstall ripgrep" in doomed.detail
     discard runApply(opts3)
     check not dirExists(extendedPath(f3.appDir("ripgrep")))
+
+suite "dropping a Scoop package keeps the installs another state " &
+      "directory's generations hold":
+
+  proc otherDirHoldsRipgrep(f: Fixture; tag: string; timestamp: int64):
+      tuple[stateDir, generationId: string] =
+    ## State directory B, on the same store, whose current generation
+    ## records ripgrep@14.1.
+    result.stateDir = f.otherStateDir()
+    var store = openStore(f.storeRoot)
+    result.generationId = writeGenIn(f, result.stateDir, store, tag,
+      timestamp, [("ripgrep", "14.1")])
+    store.close()
+    writeCurrentGenerationId(result.stateDir, result.generationId)
+
+  test "rollback in A keeps the app B's current generation holds " &
+       "(different generation ids)":
+    let f = newFixture("other-dir-different-id")
+    f.installVersion("ripgrep", "14.1")
+    f.markInstalledByReprobuild("ripgrep", "14.1")
+    let b = f.otherDirHoldsRipgrep("b-current", 3000)
+    rollbackDroppingRipgrep(f, uninstallFromScoop = true)
+    check readCurrentGenerationId(b.stateDir) == b.generationId
+    check dirExists(extendedPath(f.appDir("ripgrep") / "14.1"))
+    check f.ledgerRecords("ripgrep") == 1
+
+  test "rollback in A keeps the app B's current generation holds " &
+       "(the same generation id in both)":
+    # The same profile, host and timestamp: `computeGenerationId` gives
+    # both state directories one id, and only their keys tell the roots
+    # apart.
+    let f = newFixture("other-dir-same-id")
+    f.installVersion("ripgrep", "14.1")
+    f.markInstalledByReprobuild("ripgrep", "14.1")
+    let b = f.otherDirHoldsRipgrep("current", 2000)
+    rollbackDroppingRipgrep(f, uninstallFromScoop = true)
+    check readCurrentGenerationId(f.stateDir) != b.generationId
+    check profileRootId(b.stateDir, b.generationId) !=
+      profileRootId(f.stateDir, b.generationId)
+    check dirExists(extendedPath(f.appDir("ripgrep") / "14.1"))
+    check f.ledgerRecords("ripgrep") == 1
+
+  test "apply in A: --plan names B's root and the apply keeps the app":
+    let f = newFixture("other-dir-apply")
+    f.installVersion("ripgrep", "14.1")
+    f.markInstalledByReprobuild("ripgrep", "14.1")
+    var store = openStore(f.storeRoot)
+    let current = writeGen(f, store, "current", 2000, [("ripgrep", "14.1")])
+    store.close()
+    writeCurrentGenerationId(f.stateDir, current)
+    let b = f.otherDirHoldsRipgrep("b-current", 3000)
+    let opts = ApplyOptions(profileDir: f.profileDir,
+      profilePath: f.profileDir / "home.nim", host: "fixture-host",
+      stateDir: f.stateDir, storeRoot: f.storeRoot, homeDir: f.homeDir,
+      uninstallFromScoop: true)
+    var item: PlanItem
+    var found = false
+    let preview = runApplyPlan(opts)
+    for it in preview.items:
+      if it.category == "package" and it.name == "ripgrep":
+        item = it
+        found = true
+    checkpoint(renderPlanPreview(preview))
+    check found
+    check item.action == piaSkip
+    check (profileRootId(b.stateDir, b.generationId) & " (profile)") in
+      item.detail
+    discard runApply(opts)
+    check dirExists(extendedPath(f.appDir("ripgrep") / "14.1"))
+
+  test "a bare-id profile root of a generation A does not hold is a holder":
+    # An earlier build registered `profile` roots under the bare generation
+    # id. One whose generation is not A's is another state directory's.
+    let f = newFixture("legacy-bare-foreign")
+    f.installVersion("ripgrep", "14.1")
+    f.markInstalledByReprobuild("ripgrep", "14.1")
+    let foreignId = generationIdHex(computeGenerationId(
+      blake3Digest32("legacy-b"), "fixture-host", 5000))
+    proc legacyHold(store: var Store; currentId: string) =
+      store.registerRoot(foreignId, rkProfile)
+      store.attachPrefixToRoot(foreignId, prefixIdFor("ripgrep", "14.1"))
+    rollbackDroppingRipgrep(f, uninstallFromScoop = true,
+      extraSetup = legacyHold)
+    check not dirExists(extendedPath(generationDir(f.stateDir, foreignId)))
+    check dirExists(extendedPath(f.appDir("ripgrep") / "14.1"))
+
+  test "positive control: a bare-id profile root of A's own generation " &
+       "is not a holder":
+    let f = newFixture("legacy-bare-own")
+    f.installVersion("ripgrep", "14.1")
+    f.markInstalledByReprobuild("ripgrep", "14.1")
+    proc ownLegacyHold(store: var Store; currentId: string) =
+      store.registerRoot(currentId, rkProfile)
+      store.attachPrefixToRoot(currentId, prefixIdFor("ripgrep", "14.1"))
+    rollbackDroppingRipgrep(f, uninstallFromScoop = true,
+      extraSetup = ownLegacyHold)
+    check not dirExists(extendedPath(f.appDir("ripgrep")))
+    check f.ledgerRecords("ripgrep") == 0

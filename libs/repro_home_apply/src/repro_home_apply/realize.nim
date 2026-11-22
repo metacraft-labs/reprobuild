@@ -26,7 +26,7 @@
 ## the actual realization still goes through the real store and the real
 ## realizer, only the binding comes from the environment.
 
-import std/[options, os, strutils, tables]
+import std/[options, os, sets, strutils, tables]
 from repro_core/paths import extendedPath
 
 import blake3
@@ -749,17 +749,49 @@ proc recordedScoopApp*(rp: RealizedPackage): tuple[
     provStr[i] = char(b)
   result = parseScoopProvenance(provStr)
 
-proc planDroppedScoopRecord*(store: Store; rp: RealizedPackage;
+proc ownProfileRootsOf*(stateDir: string): OwnProfileRoots =
+  ## The `profile` roots of `stateDir`, which a Scoop removal does not count
+  ## as holders (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed by
+  ## Store GC Roots): every root under its key
+  ## (`home/<state-dir-key>/…`, `profileRootIdForKey`) and the bare id of
+  ## every generation under its `generations/`, which is how an earlier
+  ## build named the same roots. Any other `profile` root on the store is
+  ## another state directory's (Home-Profile-Generations-And-State.md
+  ## § Store GC Interaction).
+  ##
+  ## Reads only: the key is never created here, so a state directory
+  ## without one owns no keyed root. A key that cannot be read, or a
+  ## `generations/` that cannot be listed, leaves that part empty; the
+  ## caller's own roots then count as holders and the removal retains,
+  ## which is the safe direction for a deletion guard.
+  let key =
+    try: existingStateDirRootKey(stateDir)
+    except CatchableError: ""
+  if key.len > 0:
+    result.keyPrefix = profileRootIdForKey(key, "")
+  let gens = generationsRoot(stateDir)
+  try:
+    if dirExists(extendedPath(gens)):
+      for kind, entry in walkDir(extendedPath(gens), relative = true):
+        # Only a real directory is a generation; a symlink is not one this
+        # state directory holds.
+        if kind == pcDir:
+          result.bareIds.incl(extractFilename(entry))
+  except OSError:
+    discard
+
+proc planDroppedScoopRecord*(store: Store; stateDir: string;
+                             rp: RealizedPackage;
                              uninstallFromScoop: bool): ScoopRemovalPlan =
-  ## The removal plan for a Scoop package a generation transition drops
-  ## (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed by Store GC Roots).
-  ## `rp` must be a Scoop record (`recordedScoopApp(rp).ok`). Shared by the
-  ## apply's `--plan` preview, the apply itself and rollback, so all three
-  ## decide alike.
+  ## The removal plan for a Scoop package a generation transition in
+  ## `stateDir` drops (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed
+  ## by Store GC Roots). `rp` must be a Scoop record
+  ## (`recordedScoopApp(rp).ok`). Shared by the apply's `--plan` preview,
+  ## the apply itself and rollback, so all three decide alike.
   let sc = recordedScoopApp(rp)
   planScoopAppRemoval(store,
     resolveScoopRootFor(getEnv(ScoopOverrideEnvVar)), sc.bucket, sc.app,
-    sc.version, uninstallFromScoop)
+    sc.version, uninstallFromScoop, ownProfileRootsOf(stateDir))
 
 proc executeScoopRemoval*(store: Store; plan: ScoopRemovalPlan) =
   ## Carry out `plan`: a whole-app `scoop uninstall` when every installed
