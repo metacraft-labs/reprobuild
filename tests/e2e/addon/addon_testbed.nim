@@ -70,6 +70,15 @@ type
     osId*: string
     versionId*: string
     note*: string
+    displayAdapter*: bool
+      ## The base does not boot without the QEMU machine's emulated display
+      ## adapter, so every guest of it keeps one (``Guest.displayAdapter``).
+      ## debian-13-amd64: with ``-vga none`` the guest resets right after
+      ## GRUB's "Booting `Debian GNU/Linux'", before the kernel prints a
+      ## line, and QEMU (``-no-reboot``) exits; with the adapter it reaches
+      ## the login prompt (measured 2026-11-22 on nixos-ci-bare-002, QEMU
+      ## 10.2.4, KVM and ``-cpu host`` or ``qemu64``; debian-12-amd64 and
+      ## ubuntu-24.04-amd64 boot either way).
 
   TestBedError* = object of CatchableError
 
@@ -80,7 +89,7 @@ const
       algo: "sha512",
       digest: "3ace18e33bdd036edb49d1f79342bd01d2ab980e35194edb0b410435cd543538d286a0bd13bbb0835f7862306e3d385ce2f6a70d8ecf0bd961111166adbc1b8e",
       file: "debian-13-genericcloud-amd64-20261026-2643.qcow2",
-      osId: "debian", versionId: "13"),
+      osId: "debian", versionId: "13", displayAdapter: true),
     BaseImage(name: "debian-12-amd64", debArch: "amd64",
       url: "https://cloud.debian.org/images/cloud/bookworm/20261026-2643/debian-12-genericcloud-amd64-20261026-2643.qcow2",
       algo: "sha512",
@@ -560,7 +569,7 @@ when defined(gostiAvailable):
       serialLogPath: g.serialLog, guestArch: qemuArch(g.base),
       diskReadonly: readonly, diskInPlace: true)
     when GostiHasNoDisplayDevice:
-      result.noDisplayDevice = not g.displayAdapter
+      result.noDisplayDevice = not (g.displayAdapter or g.base.displayAdapter)
     if not serialOnly:
       result.dataDiskPaths = g.dataDisks
 
