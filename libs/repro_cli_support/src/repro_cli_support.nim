@@ -26866,6 +26866,11 @@ proc completionHookRequestOf(parsed: ParsedHooksCommand):
     pathEnv: getEnv("PATH"),
     user: getEnv("USER"),
     windows: defined(windows),
+    # Windows `--system` puts the script under this installation: the
+    # directory above the `bin\` this binary runs from (an MSI's
+    # `%ProgramFiles%\Reprobuild`, whose script the package installed).
+    installPrefix: (when defined(windows): getAppFilename().parentDir.parentDir
+                    else: ""),
     script: proc (shell: CliShell): string =
       ReproCommandLine.completionScript(shell))
 
@@ -34448,11 +34453,18 @@ proc runListTargetsCommand(target: string; mode: ToolProvisioningMode;
 const certificateExportTableStableName* =
   "reprobuild.certificate-export-table.v1"
 
-proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
+proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot;
+                                      projectRoot: string):
     CertificateExportTable =
   ## Union every package fragment's certificate-export table. A fragment
   ## without the node marks nothing. Static metadata: it is read from the
   ## stored graph and never runs the provider.
+  ##
+  ## ``projectRoot`` is the root the provider ran in. A recipe-relative
+  ## provider records each declaration's site relative to it
+  ## (Provider-Runtime-Protocol-v1.md, "Paths in responses"), so every
+  ## entry names its file where it is, exactly as the target-export
+  ## listing does; an absolute site is unchanged.
   for fragment in snapshot.fragments:
     for node in fragment.nodes:
       if node.kind == gnkMetadata and
@@ -34460,7 +34472,9 @@ proc aggregateCertificateExportTable*(snapshot: ProviderGraphSnapshot):
         let perPackage =
           decodeCertificateExportTablePayload(toBytes(node.payload))
         for entry in perPackage.entries:
-          result.entries.add(entry)
+          var located = entry
+          located.sourceFile = rebasedName(entry.sourceFile, projectRoot)
+          result.entries.add(located)
 
 type
   CertificatePlanPart* = object
@@ -34550,7 +34564,8 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
   ## Each non-empty selector's own selection is kept too (``bySelector``),
   ## so a caller can say which selector certifies nothing.
   result.repository = certificateRepositoryRoot(projectRoot)
-  result.certificates = aggregateCertificateExportTable(snapshot)
+  result.certificates = aggregateCertificateExportTable(snapshot,
+    projectRoot)
   let graph = declaredCertificateGraph(snapshot)
   let declared = graph.actions
   result.targets = graph.targets
@@ -34715,7 +34730,7 @@ proc certificateCommandSets*(snapshot: ProviderGraphSnapshot;
   for action in graph.actions:
     byId[action.id] = action
   let part = CertificatePlanPart(
-    certificates: aggregateCertificateExportTable(snapshot),
+    certificates: aggregateCertificateExportTable(snapshot, projectRoot),
     targets: graph.targets)
   var names: seq[string]
   for entry in part.certificates.entries:
@@ -34899,7 +34914,8 @@ proc runCertificatesCommand*(conf: ReproCommandLineCertificates;
     if sub == "list":
       let info = prepareBuildGraphInspection(".", mode, publicCliPath,
         selectDefaultAction = false, lowerGraph = false)
-      let table = aggregateCertificateExportTable(info.snapshot)
+      let table = aggregateCertificateExportTable(info.snapshot,
+        info.projectRoot)
       if asJson:
         var arr = newJArray()
         for entry in table.entries:
@@ -80635,6 +80651,7 @@ type
     hfWorkspaceErgonomics ## Repair workspace-projects.md, gitignore, and AGENTS.md.
     hfEnsureVcsHooks  ## Reinstall the managed VCS hooks in every participating repo.
     hfSharedCloneLeaves ## Remove stale remote-tracking refs the shared-clone detector found.
+    hfSharedClonePackTemporaries ## Remove git pack temporaries abandoned in shared clone pools.
     hfMigrateStateFile ## Move the old state file / its layers (Workspace-Settings-Files §8 step 2).
 
   HealthCheck* = object
@@ -80687,6 +80704,9 @@ type
       ## ``shared-clone-leaves``: checkouts whose alternates name a shared
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
       ## each with the URL ``--fix`` re-creates its pool from.
+    packTemporaryPools: seq[string]
+      ## ``shared-clone-pack-temporaries``: the pools holding abandoned git
+      ## pack temporaries, which ``--fix`` sweeps under each pool's lock.
 
 proc healthArgsOf(c: ReproCommandLineHealth): HealthArgs =
   ## What `repro health` was given, from its configuration object (repro's
@@ -83271,6 +83291,52 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           else: "follow the per-ref fix in the messages printed below",
         fixKind: if canRepair: hfSharedCloneLeaves else: hfNone))
 
+  # 15. Shared-Clone-Pool-Integrity §3.4 — git pack temporaries abandoned in
+  #     a pool's own ``objects/pack/`` by a git that died (an interrupted
+  #     repack or index-pack). Git can never read them and nothing else
+  #     removes them, so each is dead weight on the host's disk, as large as
+  #     the pack it was becoming. The pools are the host's, not this
+  #     workspace's, so every pool in the cache is examined; examining one is
+  #     a directory listing. Report-only; ``--fix`` sweeps under each pool's
+  #     lock, as the refresh, refill and maintenance paths do themselves.
+  block sharedClonePackTemporariesCheck:
+    let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
+    var pools = 0
+    var files = 0
+    var bytes = 0'i64
+    var findings: seq[string]
+    for pool in findSharedBares(cacheRoot):
+      inc pools
+      let abandoned = abandonedPackTemporaries(pool)
+      if abandoned.len == 0:
+        continue
+      var poolBytes = 0'i64
+      for t in abandoned: poolBytes += t.bytes
+      files += abandoned.len
+      bytes += poolBytes
+      ctx.packTemporaryPools.add(pool)
+      findings.add(pool & " (" & $abandoned.len & " file(s), " &
+        formatSize(poolBytes) & ")")
+    if findings.len == 0:
+      checks.add(HealthCheck(
+        name: "shared-clone-pack-temporaries",
+        status: hsOk,
+        detail: "examined " & $pools & " shared clone pool(s); none holds " &
+          "an abandoned git pack temporary",
+        remedy: "", fixKind: hfNone))
+    else:
+      let prefix = $files & " abandoned git pack temporar" &
+        (if files == 1: "y" else: "ies") & " (" & formatSize(bytes) &
+        ") that git cannot read, in " & $findings.len & " of " & $pools &
+        " shared clone pool(s): "
+      checks.add(HealthCheck(
+        name: "shared-clone-pack-temporaries",
+        status: hsWarn,
+        detail: prefix & formatFindingList(findings, parsed.verbose),
+        fullDetail: prefix & findings.join(", "),
+        remedy: self & " health --fix",
+        fixKind: hfSharedClonePackTemporaries))
+
   # Test-Certificates TC-9b: `certificate_policy_snapshot_stale`. A row only
   # when some participating repository carries a snapshot or names a policy,
   # so a workspace that has adopted none sees no change. A stale snapshot is a
@@ -83447,6 +83513,7 @@ proc healthFixWillAct(c: HealthCheck; ctx: HealthContext): bool =
   of hfStartDaemon: c.status == hsFail
   of hfCloneSiblings: ctx.gitOk and ctx.missingSiblings.len > 0
   of hfSharedCloneLeaves: ctx.gitOk
+  of hfSharedClonePackTemporaries: ctx.packTemporaryPools.len > 0
   of hfEnsureVcsHooks, hfWorkspaceErgonomics: true
 
 proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
@@ -83481,6 +83548,9 @@ proc healthFixPlanLines*(parsed: HealthArgs; checks: seq[HealthCheck];
     of hfSharedCloneLeaves:
       steps.add(c.name & ": repair refetch chains and stale " &
         "remote-tracking refs in checkouts that borrow from shared clones")
+    of hfSharedClonePackTemporaries:
+      steps.add(c.name & ": remove abandoned git pack temporaries from " &
+        $ctx.packTemporaryPools.len & " shared clone pool(s)")
     of hfWorkspaceErgonomics:
       steps.add(c.name & ": repair the workspace ergonomics files " &
         "(.gitignore, AGENTS.md, workspace-projects.md)")
@@ -83641,6 +83711,16 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+    of hfSharedClonePackTemporaries:
+      for pool in ctx.packTemporaryPools:
+        emit("fix: removing abandoned git pack temporaries in " & pool)
+        let swept = reclaimAbandonedPackTemporaries(pool)
+        var bytes = 0'i64
+        for t in swept.removed: bytes += t.bytes
+        emit("fix: removed " & $swept.removed.len & " file(s), " &
+          formatSize(bytes) & ", in " & pool)
+        for failure in swept.failures:
+          emit("fix: could NOT remove " & failure)
     of hfMigrateStateFile:
       # Done before the diagnosis (``applyStateFileMigrationFix``); a row
       # still failing here is one the migration refused, already reported.
@@ -93721,7 +93801,8 @@ proc prepareCertifyingPlan(opts: ReproTestShardOpts; mode: ToolProvisioningMode;
         let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
           selectDefaultAction = false, workRoot = workRoot,
           lowerGraph = false, bypassRunQuotaExplicit = bypassRunQuota)
-        for entry in aggregateCertificateExportTable(declared.snapshot).entries:
+        for entry in aggregateCertificateExportTable(declared.snapshot,
+            declared.projectRoot).entries:
           if result.selectors.find(entry.name) < 0:
             result.selectors.add(entry.name)
       if result.selectors.len == 0:
@@ -99034,9 +99115,11 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
   result = predeclaredLockFiles()
   var sidecarPath = ""
   var interfacePath = ""
+  var recipeDir = ""
   try:
     let match = resolveProjectFile(projectDir)
     if match.path.len > 0:
+      recipeDir = parentDir(absolutePath(match.path))
       let artifactDir = lockProviderArtifactDir(absolutePath(match.path),
         reprobuildLibraryWorkDir())
       sidecarPath = artifactDir / LockFileDeclarationsSidecarName
@@ -99067,6 +99150,13 @@ proc lockFileDeclarationsFromCompiledProvider*(projectDir: string):
     delEnv(LockFilesEmitEnvVar)
     try: removeFile(extendedPath(emitPath))
     except CatchableError: discard
+  # A recipe-relative provider records a declaration's site relative to the
+  # recipe it was compiled from, which is where it runs
+  # (Provider-Runtime-Protocol-v1.md, "Paths in responses"); the listing
+  # names the file where it is. An absolute site is unchanged.
+  if recipeDir.len > 0:
+    for decl in result.mitems:
+      decl.sourceFile = rebasedName(decl.sourceFile, recipeDir)
 
 proc siblingVariantDeclarations(checkout: string):
     seq[DevelopOverrideVariantDecl] =

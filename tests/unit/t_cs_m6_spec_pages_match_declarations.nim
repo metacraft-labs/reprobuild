@@ -230,9 +230,12 @@ const
     # The Nimble index generator's verbs.
     "repro catalog generate", "repro catalog verify",
     # The Nimble package catalog's client verbs.
-    "repro nimble", "repro nimble verify", "repro nimble check",
+    "repro nimble", "repro nimble verify",
     # One provisioned tool of the project, realized on its own.
-    "repro tool", "repro tool realize"]
+    "repro tool", "repro tool realize",
+    # Declared after `repro tool`; in the generator's order, which the
+    # fixture's rows follow (`scripts/generate_cli_contract_fixture.py`).
+    "repro nimble check"]
     ## The commands whose flags and environment variables are compared:
     ## every command repro declares.
   SpecifiedNotImplemented = [

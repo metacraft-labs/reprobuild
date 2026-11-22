@@ -2901,7 +2901,12 @@ proc registerCertificateDeclaration*(name: string;
                                      sourceLine: int) {.dynOrStatic.} =
   ## Record one ``certificate "<name>", <handle>`` declaration. The
   ## ``certificate`` templates below call this with the call site, so a
-  ## collision diagnostic can name it.
+  ## collision diagnostic can name it. The site's file is recorded as every
+  ## DSL site is (``recipeSourceName``): relative to the recipe in a
+  ## recipe-relative provider compile, which is the provider's working
+  ## directory, so the provider stays shareable between copies of the
+  ## recipe; the engine resolves it against the project root
+  ## (``aggregateCertificateExportTable``).
   certificateDeclarationRegistry.add(CertificateExportEntry(
     name: name,
     nodeKind: nodeKind,
@@ -2916,8 +2921,10 @@ template certificate*(certName: string; handle: BuildActionDef) =
   ## ``repro test <certName>`` and ``repro build <certName>`` select the edge.
   block:
     const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    const reproCertificateFile =
+      recipeSourceName(reproCertificateSite.filename)
     registerCertificateDeclaration(certName, cnkAction, handle.id,
-      reproCertificateSite.filename, reproCertificateSite.line)
+      reproCertificateFile, reproCertificateSite.line)
 
 template certificate*(certName: string; handle: BuildTargetDef) =
   ## Mark a build target — a ``target``, an ``aggregate`` or a ``collect``
@@ -2926,8 +2933,10 @@ template certificate*(certName: string; handle: BuildTargetDef) =
   ## ``certificate "unit-suite", aggregate("unit-suite", @[unit, integration])``.
   block:
     const reproCertificateSite = instantiationInfo(-1, fullPaths = true)
+    const reproCertificateFile =
+      recipeSourceName(reproCertificateSite.filename)
     registerCertificateDeclaration(certName, cnkTarget, handle.name,
-      reproCertificateSite.filename, reproCertificateSite.line)
+      reproCertificateFile, reproCertificateSite.line)
 
 const implicitCertificateName* = "test"
   ## Operator decision D15 (Test-Certificates TC-9a): whatever a plain

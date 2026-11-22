@@ -5998,7 +5998,7 @@ proc l5BindingsLiteral(bindings: openArray[L5Binding]): NimNode =
       ", name: " & escForCode(b.name) &
       ", valueRepr: " & escForCode(b.valueNode.repr.strip()) &
       ", precedence: epOverride" &
-      ", sourceFile: " & escForCode(b.anchor.lineInfoObj.filename) &
+      ", sourceFile: " & escForCode(recordedSourceFile(b.anchor)) &
       ", sourceLine: " & $b.anchor.lineInfoObj.line & ")")
   parseExpr("@[" & items.join(", ") & "]")
 
@@ -6033,7 +6033,7 @@ proc l5EnvironmentEmission(packageName: string; stmt: NimNode;
   let nameLit = newLit(envName)
   let defLiteral = parseExpr("DslEnvironmentDef(packageName: " &
     escForCode(packageName) & ", name: " & escForCode(envName) &
-    ", sourceFile: " & escForCode(stmt.lineInfoObj.filename) &
+    ", sourceFile: " & escForCode(recordedSourceFile(stmt)) &
     ", sourceLine: " & $stmt.lineInfoObj.line & ")")
   let bindingsExpr = l5BindingsLiteral(bindings)
   let applierBody = newStmtList()
@@ -6207,7 +6207,7 @@ proc l5OverrideEmission(packageName: string; stmt: NimNode;
     (if parsed.scopeDeclared: "true" else: "false") & ", scope: " &
     scopeExpr.repr & ", leaseKind: " & parsed.leaseKind &
     ", leaseTtlSeconds: " & $parsed.ttl & ", sourceFile: " &
-    escForCode(stmt.lineInfoObj.filename) & ", sourceLine: " &
+    escForCode(recordedSourceFile(stmt)) & ", sourceLine: " &
     $stmt.lineInfoObj.line & "))"
   result = parseStmt(code)
   result.copyLineInfo(stmt)
@@ -6833,8 +6833,9 @@ proc emitL8Contributions(packageName: string;
       let precIdent = ident(c.precedence)
       let opIdent = ident(c.operation)
       let valueNode = c.valueNode.copyNimTree()
-      let fileLit = newLit(c.anchor.lineInfoObj().filename)
-      let lineLit = newLit(c.anchor.lineInfoObj().line)
+      let (siteFile, siteLine) = lineFile(c.anchor)
+      let fileLit = newLit(siteFile)
+      let lineLit = newLit(siteLine)
       result.add(quote do:
         contributeMembers(`keyLit`, `pkgLit`, `precIdent`, `opIdent`,
           l8ContributionMembers(`valueNode`), `fileLit`, `lineLit`))
@@ -7440,14 +7441,14 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
   for act in collected.activities:
     var params: seq[string] = @[]
     for p in act.params:
-      let info = act.anchor.lineInfoObj()
+      let (siteFile, siteLine) = lineFile(act.anchor)
       params.add("ActivityParamInterfaceDef(name: " & escForCode(p.name) &
         ", nimType: " & escForCode(p.typeNode.repr.strip()) &
-        ", sourceFile: " & escForCode(info.filename) &
-        ", sourceLine: " & $info.line & ")")
+        ", sourceFile: " & escForCode(siteFile) &
+        ", sourceLine: " & $siteLine & ")")
     var configs: seq[string] = @[]
     for c in act.config:
-      let info = act.anchor.lineInfoObj()
+      let (siteFile, siteLine) = lineFile(act.anchor)
       configs.add("ActivityConfigInterfaceDef(name: " & escForCode(c.name) &
         ", nimType: " & escForCode(c.typeNode.repr.strip()) &
         ", defaultRepr: " &
@@ -7455,22 +7456,22 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
                    else: c.defaultNode.repr.strip()) &
         ", hasDefault: " & $(c.defaultNode != nil) &
         ", description: " & escForCode(c.description) &
-        ", sourceFile: " & escForCode(info.filename) &
-        ", sourceLine: " & $info.line & ")")
+        ", sourceFile: " & escForCode(siteFile) &
+        ", sourceLine: " & $siteLine & ")")
     var svcNames: seq[string] = @[]
     for svcName in act.services:
       svcNames.add(escForCode(svcName))
-    let info = act.anchor.lineInfoObj()
+    let (actFile, actLine) = lineFile(act.anchor)
     code.add(l3RegisterActivityCallName & "(" & escForCode(pkg.packageName) &
       ", ActivityInterfaceDef(name: " & escForCode(act.name) &
       ", handleType: " & escForCode(act.handleType) &
       ", params: @[" & params.join(", ") & "]" &
       ", config: @[" & configs.join(", ") & "]" &
       ", services: @[" & svcNames.join(", ") & "]" &
-      ", sourceFile: " & escForCode(info.filename) &
-      ", sourceLine: " & $info.line & "))\n")
+      ", sourceFile: " & escForCode(actFile) &
+      ", sourceLine: " & $actLine & "))\n")
   for svc in collected.services:
-    let info = svc.anchor.lineInfoObj()
+    let (svcFile, svcLine) = lineFile(svc.anchor)
     # L4: the declared identity and scope travel with the signature.
     # Written as the enum's own name rather than as an ordinal so the
     # generated code is readable and a reordered enum cannot silently
@@ -7495,8 +7496,8 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       ", contributionPoints: @[" &
       l3ContributionPointLiterals(svc.identityScope.convergePoints) &
       "]" &
-      ", sourceFile: " & escForCode(info.filename) &
-      ", sourceLine: " & $info.line & "))\n")
+      ", sourceFile: " & escForCode(svcFile) &
+      ", sourceLine: " & $svcLine & "))\n")
   # Shared-Development-Services D-SS11 (§4.6): the RESOLVER's two
   # generated consts, one pair per service that declares an `instance:`
   # block.
@@ -7543,7 +7544,15 @@ proc l3LiftedExportSurface(pkg: PackageDef; pkgBody: NimNode): NimNode =
       # imports this emitter does not control, and a stub that needed
       # `std/os` in scope would be a build break in the consumer rather
       # than a diagnostic.
-      escForCode(parentDir(svc.anchor.lineInfoObj().filename)) &
+      #
+      # RECORDED like every other site (`recordedSourceDir`): in a
+      # recipe-relative provider compile it is relative to the recipe
+      # being compiled -- `.` in the owner's own provider, `../<owner>`
+      # in a consumer that includes the owner's recipe -- which is the
+      # provider's working directory, and the engine resolves it there
+      # when the resolution reaches it in a dev-env response
+      # (Provider-Runtime-Protocol-v1.md, "Paths in responses").
+      escForCode(recordedSourceDir(svc.anchor)) &
       ", contributionPoints: @[" & points & "])\n")
   if resolverCode.len > 0:
     code.add(resolverCode)
@@ -8107,8 +8116,9 @@ macro sharedServiceResolve*(points: static seq[string];
     for k in 2 ..< valueNode.len:
       membersExpr = nnkInfix.newTree(ident"&", membersExpr,
         newCall(ident"l8ContributionMembers", valueNode[k]))
-    let siteFile = newLit(nameNode.lineInfoObj().filename)
-    let siteLine = newLit(nameNode.lineInfoObj().line)
+    let (recordedFile, recordedLine) = lineFile(nameNode)
+    let siteFile = newLit(recordedFile)
+    let siteLine = newLit(recordedLine)
     contributionCalls.add(newCall(ident"sharedContribution",
       newLit(point), membersExpr, ident(resolved.prec),
       ident(resolved.op), siteFile, siteLine))
@@ -8181,7 +8191,7 @@ macro shared*(declaration: untyped;
   let anchor = declaration.copyNimTree()
   let checked = newCall(ident"sharedServiceResolve", pointsConst, declConst,
     newLit(reference),
-    newLit(declaration.lineInfoObj().filename),
+    newLit(recordedSourceFile(declaration)),
     newLit(declaration.lineInfoObj().line))
   for p in pairs:
     checked.add(p)

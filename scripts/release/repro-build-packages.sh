@@ -530,9 +530,12 @@ build_pkg() {
 # leaves no block behind. Both run as LocalSystem (the package is
 # per-machine), and their failure does not fail
 # the installation: completion is a convenience on top of a working install,
-# as with the install scripts. A repro whose `--system` does not handle
-# Windows reports that and exits non-zero, and the package then installs the
-# script file and registers nothing.
+# as with the install scripts. The ensure action writes the block in each
+# PowerShell's profile whose $PSHOME is writable (as LocalSystem, Program
+# Files and Windows PowerShell's directory are); a PowerShell whose $PSHOME
+# is not (an MSIX install) is reported and left to each user's own
+# `repro hooks ensure --shell-autocomplete`. The script the package installed
+# is the one the ensure action would write, so it is left as it is.
 #
 # The authoring (.wxs, WiX v3 schema) is written to <out> beside the package,
 # so it can be read and tested on any host. It is generated from the unpacked
