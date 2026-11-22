@@ -57,8 +57,34 @@ proc waitForListener(srvProc: Process; port: int; tries = 2400;
         try: sock.close() except CatchableError: discard
   return false
 
+proc serverBinaryPath(): string =
+  ## The A2 server this file's round-trip cases start, refused by name when
+  ## it is absent.
+  ##
+  ## The binary is not this test's own output: the graph edge
+  ## ``reprobuild.test_helpers.repro_binary_cache`` builds it, and this
+  ## test's row in ``binaryCacheHelperConsumers`` (``repro.nim``) orders
+  ## that edge before the execute edge that runs this test, so a run through
+  ## the graph builds it first. A run that bypasses the graph — the test
+  ## compiled and run by hand — can still lack it. Without this check that
+  ## surfaced as a bare ``OSError: No such file or directory`` from
+  ## ``startProcess``, which a reviewer read as a regression of the
+  ## publish/extract code under test.
+  ##
+  ## The message names the ``test-helpers`` collection rather than a
+  ## ``.#test#<name>`` selector: this source is compiled into a test GROUP
+  ## (``repro_tests.nim``), so no execute target bears its own name, and the
+  ## group's name is generated and changes when the plan does.
+  result = absolutePath(ServerBinary)
+  if not fileExists(result):
+    raise newException(IOError,
+      "missing test helper " & result & ": this case starts the binary-cache " &
+      "server, which the graph edge reprobuild.test_helpers.repro_binary_cache " &
+      "builds. Build it with `repro build '.#test-helpers'`, or run the tests " &
+      "through the graph (`repro build '.#test'`), which builds it first")
+
 proc startServer(serverRoot: string; port: int): Process =
-  startProcess(absolutePath(ServerBinary),
+  startProcess(serverBinaryPath(),
                args = @["--root=" & serverRoot,
                         "--listen=127.0.0.1:" & $port,
                         "--print-pubkey"],

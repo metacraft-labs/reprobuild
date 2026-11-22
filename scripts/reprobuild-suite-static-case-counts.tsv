@@ -995,6 +995,7 @@ libs/repro_project_dsl/tests/dsl_port/t_l9_supervision_surface_refuses_near_miss
 libs/repro_project_dsl/tests/t_activity_params_reach_the_services_they_declare.nim	nim	17
 libs/repro_project_dsl/tests/t_canonical_work_key.nim	nim	5
 libs/repro_project_dsl/tests/t_certificate_export_table_resolution.nim	nim	8
+libs/repro_project_dsl/tests/t_completion_files.nim	nim	6
 libs/repro_project_dsl/tests/t_dependency_lists_are_not_merged_at_serialization.nim	nim	5
 libs/repro_project_dsl/tests/t_dsl_bare_executable_no_body.nim	nim	7
 libs/repro_project_dsl/tests/t_dsl_cross_project_binding_guard.nim	nim	5
@@ -2850,6 +2851,7 @@ tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
+tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_cs_m14_shim_answers_tests_entry.nim	nim	2
 tests/integration/test_dev_env_local_flake_root.py	python	3
@@ -3144,7 +3146,7 @@ tests/unit/test_daemon_worker_confinement_systemd_analyze.py	python	15
 tests/unit/test_dev_shell_hook_scope.py	python	7
 tests/unit/test_flake_lock_derived_fields.py	python	11
 tests/unit/test_generated_artifact_merge_policy.py	python	19
-tests/unit/test_graph_owned_test_artifacts.py	python	27
+tests/unit/test_graph_owned_test_artifacts.py	python	30
 tests/unit/test_install_nix_paths.py	python	14
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5
