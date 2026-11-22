@@ -38,6 +38,7 @@
 
 import std/[monotimes, os, osproc, strtabs, strutils, tempfiles, times,
   unittest]
+import repro_core/process_env
 
 import repro_test_support/reasoned_skip
 
@@ -66,8 +67,7 @@ proc recipeFor(tokenPath: string): string =
   Recipe.replace("TOKEN_PATH", tokenPath)
 
 proc runBuild(root, project: string): tuple[code: int, output: string] =
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): env[key] = value
+  var env = inheritedEnvTable()
   env["REPROBUILD_WORK_ROOT"] = root / "work"
   env["REPROBUILD_ACTION_CACHE_ROOT"] = root / "action-cache"
   env["REPRO_LOCAL_STORE"] = root / "store"

@@ -34,6 +34,7 @@
 ## are forced to execute regardless of what any other case left in that root.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 import repro_test_support
 
 const RepoMarker = "repro.nim"
@@ -58,13 +59,10 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
   let runquota = requireRunQuotaCliBin(repoRoot)
   let runquotad = requireRunQuotaDaemonBin(repoRoot)
   let runquotaBin = runquota.parentDir
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
+  var env = inheritedEnvTable()
   env["RUNQUOTA_BIN"] = runquota
   env["RUNQUOTAD_BIN"] = runquotad
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  env.prependPathEntry(runquotaBin)
   # The graph-built test binary must carry its own Darwin runtime linkage.
   # Do not let the parent shell or the outer test runner hide a missing
   # LC_RPATH on the nested execute edge.
@@ -103,9 +101,7 @@ when defined(macosx):
 
   proc runWithoutDarwinLoaderOverrides(binary, workingDir: string):
       tuple[output: string; exitCode: int] =
-    var env = newStringTable()
-    for key, value in envPairs():
-      env[key] = value
+    var env = inheritedEnvTable()
     env.del("DYLD_LIBRARY_PATH")
     env.del("DYLD_FALLBACK_LIBRARY_PATH")
     execCmdEx(binary.quoteShell, env = env, workingDir = workingDir)
