@@ -74103,7 +74103,7 @@ proc absentLockedSiblingsOutsideWorkspace(repoRoot: string):
   ##
   ## Reads only, and compiles nothing: answering this is what lets the gate
   ## refuse before the derivation's provider compile fails on the missing
-  ## sources (reprobuild-pm issue 2026-11-22). An unreadable lock answers
+  ## sources. An unreadable lock answers
   ## empty; the committed-lock integrity and set stages report it.
   ##
   ## The ``reprobuild-packages`` catalog pin is never reported. It is not a
@@ -74772,8 +74772,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
   # recipe reads sources that are not there, so its provider compile fails
   # (`cannot open file: …`) or it derives a smaller set and calls a real pin
   # one "no repro.nim declares". Either way the refusal it produced named
-  # `repro lock refresh`, which fails the same way (reprobuild-pm issue
-  # 2026-11-22). Asked here, from the lock alone and before anything is
+  # `repro lock refresh`, which fails the same way. Asked here, from the
+  # lock alone and before anything is
   # compiled, so the refusal says what is actually missing: a workspace.
   #
   # "Not part of a workspace" is the gate's committed-lock-only form (no
