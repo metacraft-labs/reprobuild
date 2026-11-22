@@ -1,4 +1,5 @@
 import std/[os, osproc, sequtils, strtabs, strutils, tempfiles, times, unittest, uri]
+import repro_core/process_env
 
 when defined(reproProviderMode):
   import repro_core
@@ -170,9 +171,7 @@ suite "constructor auxiliary tool identities":
           if argument.name == "argv":
             argv = argument.encodedValue.split('\x1f')
         require argv.len == 3
-        let environment = newStringTable(modeCaseSensitive)
-        for name, value in envPairs():
-          environment[name] = value
+        let environment = inheritedEnvTable()
         environment["PATH"] = binDir
         let execution = uncontrolledExecCmdEx(quoteShellCommand(argv),
           env = environment, workingDir = root)

@@ -110,6 +110,7 @@ from repro_core/process_streams import drainStream
 import std/[asyncdispatch, asyncnet, nativesockets, net, os, osproc, posix, streams,
             strtabs, strutils, times,
             unittest]
+import repro_core/process_env
 
 import repro_test_support
 import repro_distributed_worker
@@ -309,8 +310,7 @@ proc socketExists(path: string): bool =
 
 proc startPlainDaemon(d: var WorkerDaemon) =
   try: removeFile(d.endpoint) except OSError: discard
-  var env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs(): env[key] = value
+  var env = inheritedEnvTable()
   for (key, value) in daemonEnv(d): env[key] = value
   d.process = startProcess(publicReproBin(),
     args = @["daemon", "serve", "--foreground", "--endpoint", d.endpoint,
@@ -798,8 +798,7 @@ suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
         writeFile(base / "interposer.c", InterposerSource)
         check execCmdEx(quoteShellCommand([cc, "-shared", "-fPIC", "-o",
           base / "interposer.so", base / "interposer.c", "-ldl"])).exitCode == 0
-        var env = newStringTable(modeCaseSensitive)
-        for k, v in envPairs(): env[k] = v
+        var env = inheritedEnvTable()
         env["LD_PRELOAD"] = base / "interposer.so"
         env[InterposeChildEnv] = base
         let child = startProcess(getAppFilename(), env = env,

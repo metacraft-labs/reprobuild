@@ -61,6 +61,7 @@
 ## positive assertion can survive.
 
 import std/[json, os, osproc, sequtils, strtabs, strutils, unittest]
+import repro_core/process_env
 import repro_test_support/reasoned_skip
 
 import repro_dsl_stdlib/monitor_shim_artifacts
@@ -193,11 +194,8 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
   ## every invocation) and merging them into stdout puts non-JSON text in front
   ## of the document ``--format=json`` produced.
   let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  var env = inheritedEnvTable()
+  env.prependPathEntry(runquotaBin)
   execCmdEx(cmd, options = {poEvalCommand, poUsePath}, env = env,
     workingDir = repoRoot)
 

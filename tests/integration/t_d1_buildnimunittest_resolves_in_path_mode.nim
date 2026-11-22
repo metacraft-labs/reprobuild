@@ -28,6 +28,7 @@
 ## into a direct test-binary invocation and the test exits 0.
 
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 import repro_test_support
 
 const RepoMarker = "repro.nim"
@@ -58,12 +59,9 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
     "runquota" / addFileExt("runquotad", ExeExt),
     "reprobuild.test_fixtures.runquotad")
   let runquotaBin = runquotad.parentDir
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
+  var env = inheritedEnvTable()
   env["RUNQUOTAD_BIN"] = runquotad
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  env.prependPathEntry(runquotaBin)
   execCmdEx(cmd, env = env, workingDir = repoRoot)
 
 proc valueAfter(output, prefix: string): string =
