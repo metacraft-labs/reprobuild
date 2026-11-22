@@ -207,6 +207,9 @@ function Get-RealProfileState {
   $paths = @()
   if ($script:M8cOnWindows) {
     $d = [Environment]::GetFolderPath('MyDocuments')
+    # "" when the folder does not exist: the profile paths would turn
+    # relative and the comparison would cover the wrong files.
+    if (-not $d) { throw 'the invoking user''s Documents folder does not resolve; cannot record the real profiles' }
     foreach ($rel in @('PowerShell\Profile.ps1', 'PowerShell\Microsoft.PowerShell_profile.ps1',
         'WindowsPowerShell\Profile.ps1', 'WindowsPowerShell\Microsoft.PowerShell_profile.ps1')) {
       $paths += (Join-Path $d $rel)
@@ -216,8 +219,11 @@ function Get-RealProfileState {
     # and of the PowerShell 7 on PATH, which `repro hooks ensure
     # --shell-autocomplete --system` writes and these checks must not.
     $paths += [IO.Path]::Combine($env:SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'Profile.ps1')
+    # PowerShell 7's $PSHOME, asked of that PowerShell: the pwsh.exe on PATH
+    # can be a launcher elsewhere (Scoop's shims directory), so the
+    # directory it sits in is not where its all-users profile is.
     $pwsh = Get-Command pwsh.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($pwsh) { $paths += (Join-Path (Split-Path -Parent $pwsh.Source) 'Profile.ps1') }
+    if ($pwsh) { $paths += (Join-Path (Get-PowerShellHome -PowerShell $pwsh.Source) 'Profile.ps1') }
   } else {
     # REPRO_M8C_REAL_HOME: the invoking user's home when this script itself
     # runs with a scratch HOME (so that pwsh's own caches stay out of it).
@@ -359,9 +365,100 @@ function Get-ScriptBash {
   return ''
 }
 
-# A path as the repository's shell scripts take it (forward slashes, which
-# Git for Windows' bash accepts as they are).
-function ConvertTo-ScriptPath { param([string]$Path) return ($Path -replace '\\', '/') }
+# A path as the repository's shell scripts and the MSYS tools they run take
+# it. On Windows those are Git for Windows' MSYS2 programs (bash, sh, gpg),
+# and an absolute Windows path must be given in MSYS form, /<drive>/<rest>:
+# bash itself accepts C:/x, but MSYS gpg treats C:/x as a RELATIVE name
+# (`gpg --homedir C:/x` resolves it under the working directory), so every
+# path is converted the one way all of them read
+# (https://www.msys2.org/docs/filesystem-paths/). A UNC path (\\server\share
+# or \\?\C:\...) and a drive-relative one (C:x) have no form every MSYS tool
+# reads the same way and are refused; the scratch directories are under
+# %TEMP%, a drive path. A relative path only has its separators turned. Off
+# Windows a path is returned as it is. -Windows overrides the host test, so
+# the Windows rules can be checked on any host.
+function ConvertTo-ScriptPath {
+  param([Parameter(Mandatory = $true)][AllowEmptyString()][string]$Path, [Nullable[bool]]$Windows = $null)
+  $onWindows = if ($null -ne $Windows) { [bool]$Windows } else { $script:M8cOnWindows }
+  if (-not $onWindows) { return $Path }
+  if ($Path -match '^[\\/]{2}') {
+    throw "ConvertTo-ScriptPath: '$Path' is a UNC path, which the MSYS tools do not all read; use a path on a drive"
+  }
+  $m = [regex]::Match($Path, '^(?<drive>[A-Za-z]):(?<rest>.*)$')
+  if ($m.Success) {
+    $rest = $m.Groups['rest'].Value -replace '\\', '/'
+    if (-not $rest.StartsWith('/')) {
+      throw "ConvertTo-ScriptPath: '$Path' is relative to the current directory of drive $($m.Groups['drive'].Value):; use an absolute path"
+    }
+    return '/' + $m.Groups['drive'].Value.ToLowerInvariant() + $rest
+  }
+  return ($Path -replace '\\', '/')
+}
+
+# Runs a native program and returns its exit code and its standard output
+# lines; standard error is shown on the host, never raised. Windows
+# PowerShell 5.1 wraps each line a native program writes to a redirected
+# standard error in an ErrorRecord, and with $ErrorActionPreference = 'Stop'
+# (these checks run under it) the first such line is a terminating error,
+# however harmless (a progress log line), so `& bash x.sh 2>&1` dies in the
+# harness instead of reporting the program's exit code
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_redirection;
+# PowerShell 7.2 and later stopped applying the preference to these records,
+# and 7.3's $PSNativeCommandUseErrorActionPreference is about the exit code,
+# but these checks also run under 5.1). The preference is therefore
+# 'Continue' around the call only, restored in `finally`, and the caller
+# judges the exit code. -Quiet keeps standard output off the host (the
+# caller reads it from .Output).
+function Invoke-NativeCommand {
+  param([Parameter(Mandatory = $true)][string]$FilePath, [string[]]$ArgumentList = @(), [switch]$Quiet)
+  # A program that is not there is the caller's error, reported as such
+  # (and $LASTEXITCODE would otherwise be a previous program's).
+  $null = Get-Command -Name $FilePath -CommandType Application -ErrorAction Stop
+  $stdout = New-Object System.Collections.Generic.List[string]
+  $saved = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    & $FilePath @ArgumentList 2>&1 | ForEach-Object {
+      if ($_ -is [System.Management.Automation.ErrorRecord]) {
+        Write-Host $_.ToString()
+      } else {
+        $line = "$_"
+        $stdout.Add($line)
+        if (-not $Quiet) { Write-Host $line }
+      }
+    }
+    $code = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $saved
+  }
+  return [pscustomobject]@{ Code = $code; Output = $stdout.ToArray() }
+}
+
+# The $PSHOME a PowerShell reports for itself (where its all-users profile
+# lives). Throws when it reports none, so that a check comparing the real
+# profiles never silently compares the wrong file.
+function Get-PowerShellHome {
+  param([Parameter(Mandatory = $true)][string]$PowerShell)
+  $r = Invoke-NativeCommand -FilePath $PowerShell -ArgumentList @('-NoProfile', '-NonInteractive', '-Command', '$PSHOME') -Quiet
+  # Not $psHome: PowerShell variable names ignore case, and $PSHOME is a
+  # read-only automatic variable.
+  $reported = (@($r.Output) | Where-Object { $_.Trim() } | Select-Object -Last 1)
+  if ($r.Code -ne 0 -or -not $reported -or -not [IO.Path]::IsPathRooted($reported.Trim())) {
+    throw "$PowerShell did not report its `$PSHOME (exit $($r.Code)): $($r.Output -join ' ')"
+  }
+  return $reported.Trim()
+}
+
+# The version this checkout builds, from reprobuild.nimble, as
+# scripts/release/package_windows_release.ps1 reads it: the archive a check
+# makes from a build tree is named for the version of that build.
+function Get-ReproVersion {
+  param([Parameter(Mandatory = $true)][string]$RepoRoot)
+  $nimble = Join-Path $RepoRoot 'reprobuild.nimble'
+  $m = Select-String -LiteralPath $nimble -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+  if ($null -eq $m) { throw "no version line in $nimble" }
+  return $m.Matches[0].Groups[1].Value
+}
 
 # The release archive of the Windows asset's shape, from a build tree:
 # bin\ (the images and their DLLs), lib\, and share\repro\completions\repro.ps1
@@ -399,8 +496,7 @@ function New-TestArchive {
   $env:REPRO_COMPLETION_BIN = ConvertTo-ScriptPath $reproBin
   Push-Location -LiteralPath $RepoRoot
   try {
-    & $Bash ./scripts/release/stage_release_completions.sh (ConvertTo-ScriptPath $root) powershell | Out-Host
-    $code = $LASTEXITCODE
+    $code = (Invoke-NativeCommand -FilePath $Bash -ArgumentList @('./scripts/release/stage_release_completions.sh', (ConvertTo-ScriptPath $root), 'powershell')).Code
   } finally {
     Pop-Location
     Remove-Item Env:\REPRO_COMPLETION_BIN -ErrorAction SilentlyContinue
