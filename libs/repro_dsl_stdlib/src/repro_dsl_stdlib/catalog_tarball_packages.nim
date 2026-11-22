@@ -55,7 +55,7 @@ const CatalogTarballModules* = [
     "mingw_gcc", "mix", "mktemp", "msys2_libevent", "msys2_ncurses", "neovim",
     "nim", "nimble", "ninja", "node", "npm", "npx", "nsis", "ocaml",
     "openssl", "patchelf", "perl", "php", "piper", "piper_voice_lessac_medium",
-    "piper_voice_lessac_medium_config", "pkg_7zip", "playwright",
+    "piper_voice_lessac_medium_config", "pkg_7zip", "pkgconf", "playwright",
     "postgresql", "python3", "python3_opentelemetry", "python_dev", "ruby",
     "rust_std", "rustc",
     "rustfmt", "rustup",
