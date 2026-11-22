@@ -28777,6 +28777,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let gitBin = findExe(\"git\")"),
   TestSpec(
+    source: "tests/integration/t_pre_push_outside_a_workspace_asks_for_one_before_deriving.nim",
+    binary: "build/test-bin/t_pre_push_outside_a_workspace_asks_for_one_before_deriving",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_pre_push_passes_on_heterogeneous_branches.nim",
     binary: "build/test-bin/t_pre_push_passes_on_heterogeneous_branches",
     defines: @[],
