@@ -18,6 +18,14 @@
 ## realizes and hands to the realizer like an extractor
 ## (https://github.com/NixOS/patchelf).
 ##
+## An archive that carries no C library of its own (rust-lang's toolchain
+## release) names an ``elfRuntimePackage`` instead: its programs are pointed
+## at the loader and library directories of THAT package's realized prefix
+## (the catalog's Linux C toolchain), which a dependency edge of the
+## realization put in the same tool store first. The paths are then a
+## function of that prefix too, whose store-relative identity is in the
+## realization's key.
+##
 ## ``DT_RPATH`` rather than ``DT_RUNPATH`` on purpose: the loader consults a
 ## program's ``DT_RPATH`` for the dependencies of every object it loads,
 ## including an ``LD_PRELOAD``ed monitor shim that carries no search path of
@@ -54,14 +62,32 @@ type
 proc absoluteInPrefix(prefix, relative: string): string =
   os.normalizedPath(prefix / relative)
 
-proc relocationTargets*(detail: TarballArchiveDetail; finalPrefix: string):
+proc runtimeBase(detail: TarballArchiveDetail;
+                 finalPrefix, runtimePrefix: string): string =
+  ## The prefix ``elfInterpreter`` and ``elfRunpath`` are resolved in: the
+  ## archive's own, or, when the archive names an ``elfRuntimePackage``, that
+  ## package's realized prefix (``runtimePrefix``), which a dependency edge
+  ## of the realization put in the same tool store before this step runs.
+  if detail.elfRuntimePackage.len == 0:
+    return finalPrefix
+  if runtimePrefix.len == 0:
+    relocationFail("elfRuntimePackage " & detail.elfRuntimePackage &
+      " was not realized for this realization (its prefix is the " &
+      "dependency edge the relocation needs)")
+  runtimePrefix
+
+proc relocationTargets*(detail: TarballArchiveDetail; finalPrefix: string;
+                        runtimePrefix = ""):
     tuple[interpreter: string; runpath: seq[string]] =
   ## The ``PT_INTERP`` and the ``DT_RPATH`` entries a relocated file is
-  ## given: the declared paths, absolute in the prefix as it will be sealed.
+  ## given: the declared paths, absolute in the prefix as it will be sealed,
+  ## or in ``runtimePrefix`` when the archive relocates onto another
+  ## package's loader and C library (``elfRuntimePackage``).
+  let base = runtimeBase(detail, finalPrefix, runtimePrefix)
   if detail.elfInterpreter.len > 0:
-    result.interpreter = absoluteInPrefix(finalPrefix, detail.elfInterpreter)
+    result.interpreter = absoluteInPrefix(base, detail.elfInterpreter)
   for entry in detail.elfRunpath:
-    let dir = absoluteInPrefix(finalPrefix, entry)
+    let dir = absoluteInPrefix(base, entry)
     if dir notin result.runpath:
       result.runpath.add(dir)
 
@@ -79,7 +105,7 @@ proc relocatedRunpath*(existing, added: openArray[string]): seq[string] =
 
 proc relocateElfTree*(detail: TarballArchiveDetail;
                       stagingPrefix, finalPrefix, patchelf: string;
-                      runTool: ElfToolRunner): int =
+                      runTool: ElfToolRunner; runtimePrefix = ""): int =
   ## Rewrite every dynamically linked ELF file under ``detail.elfPatchDirs``
   ## of ``stagingPrefix``: ``PT_INTERP`` (programs that have one) to the
   ## declared loader, ``DT_RPATH`` to the file's own entries plus the
@@ -101,15 +127,26 @@ proc relocateElfTree*(detail: TarballArchiveDetail;
     relocationFail("no patchelf was provisioned for this realization " &
       "(the archive declares an ELF relocation, which needs the " &
       "patchelf dependency edge)")
-  let targets = relocationTargets(detail, finalPrefix)
+  if detail.elfRuntimePackage.len > 0 and detail.gccLinkSpecs.len > 0:
+    relocationFail("gccLinkSpecs cannot be combined with elfRuntimePackage: " &
+      "the specs file belongs to the toolchain that carries the loader")
+  let targets = relocationTargets(detail, finalPrefix, runtimePrefix)
+  # The declared loader and library directories must exist where they will
+  # be used: in the staging copy of this archive, or in the runtime
+  # package's prefix, which is already sealed in the store.
+  let (lookupBase, where) =
+    if detail.elfRuntimePackage.len > 0:
+      (runtimePrefix, "the realized " & detail.elfRuntimePackage & " prefix")
+    else:
+      (stagingPrefix, "the archive")
   if detail.elfInterpreter.len > 0 and
-      not fileExists(stagingPrefix / detail.elfInterpreter):
+      not fileExists(lookupBase / detail.elfInterpreter):
     relocationFail("elfInterpreter " & detail.elfInterpreter &
-      " is not a file in the archive")
+      " is not a file in " & where)
   for entry in detail.elfRunpath:
-    if not dirExists(stagingPrefix / entry):
-      relocationFail("elfRunpath " & entry &
-        " is not a directory in the archive")
+    if not dirExists(lookupBase / entry):
+      relocationFail("elfRunpath " & entry & " is not a directory in " &
+        where)
   var seen = initHashSet[(uint64, uint64)]()
   for dirEntry in detail.elfPatchDirs:
     let root = stagingPrefix / dirEntry

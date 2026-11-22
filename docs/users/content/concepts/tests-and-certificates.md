@@ -5,12 +5,13 @@ kind: explanation
 persona: build-maintainer
 order: 30
 verifies:
-  commands: [test, test --shard, test --no-certify, build, certify, certify --verify, certificates policy, push, gateway pre-receive, gateway post-receive, gateway migrate]
+  commands: [test, test --shard, test --emit-partition-plan, test --plan-from, test --no-certify, build, certify, certify --verify, certificates policy, push, gateway pre-receive, gateway post-receive, gateway migrate]
   tests:
     - tests/integration/t_b3_repro_test_runs_through_engine.nim
     - tests/integration/t_b4_repro_test_alias_covers_all.nim
     - tests/e2e/sharding/t_e2e_repro_test_shard_partition_total_coverage.nim
     - tests/e2e/sharding/t_e2e_repro_test_shard_balances_wall_time.nim
+    - tests/integration/t_repro_test_shard_certifies_only_nodes_it_ran_whole.nim
     - tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim
     - tests/integration/t_certificate_requires_verified_tree.nim
     - tests/integration/t_certificates_travel_with_pushed_commit.nim
@@ -44,6 +45,17 @@ target as well: `repro build .#test#<name>` runs the same action.
 part on its own machine and every test runs exactly once: none is left out and
 none runs twice. reprobuild sizes the parts by how long each test took before,
 so the parts take similar time rather than holding similar numbers of tests.
+
+Each part runs its tests through the build engine, so it certifies them like
+an ordinary `repro test` does, with one rule: a part issues a certificate for a
+group of tests only when it ran every test in the group. A group whose tests
+landed in several parts gets no certificate from any of them, and each part says
+how many of the group's tests it ran. Run `repro certify` with the group's name
+after the parts to certify it; it runs again any of the group's tests whose
+earlier result it cannot attest. `repro test --shard K/N
+--emit-partition-plan=plan.json` writes the split without running anything,
+records which part certifies each group, and the parts read it back with
+`--plan-from=plan.json`.
 
 ## A certificate records what passed
 

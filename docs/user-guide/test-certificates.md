@@ -117,6 +117,7 @@ build:
 | `repro certify` | The names the policy rule for this branch requires, or every declared name when no rule applies |
 | `repro certify <name>…` | The names given |
 | `repro certify --check-set` | The repository's check set, under the name `pre-commit` |
+| `repro test --shard K/N`, `repro certify --shard K/N` | Each marked node whose test commands this part ran all of. A node split across parts is certified by none of them; certify it with `repro certify <name>` after the parts |
 
 `repro certificates list` prints what the project declares.
 
@@ -128,6 +129,7 @@ reason and the remedy:
 | Reason | Remedy |
 | ------ | ------ |
 | A test failed | Fix it and run again |
+| This part of a sharded run ran only some of the node's test commands | Run `repro certify <name>` without `--shard`. It runs again any of the node's tests whose earlier result it cannot attest |
 | Tracked files changed while the tests ran | Leave them alone during the run, then run again |
 | A sibling repository changed while the tests ran | The same, for the sibling |
 | The state has no content id: an unmerged entry, an `assume-unchanged` flag, a present `skip-worktree` entry, or a submodule with modified content | Resolve the conflict, clear the flag, or commit inside the submodule. The message names the paths |
