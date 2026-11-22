@@ -126,6 +126,35 @@ type
       ## registered with the refreshed pool (Shared-Clone-Pool-Integrity
       ## §4.2). The caller prints their messages.
 
+  SharedBareProgressKind* = enum
+    ## The potentially slow step ``refreshSharedBare`` is about to start.
+    sbpFetch      ## fetching into the existing shared bare
+    sbpClone      ## creating the shared bare (``git clone --bare``)
+    sbpLeafCheck  ## running the leaf detector in one registered borrower
+
+  SharedBareProgress* = object
+    ## One event for a ``SharedBareProgressHook``.
+    kind*: SharedBareProgressKind
+    bare*: string
+      ## The shared bare being refreshed.
+    leaf*: string
+      ## ``sbpLeafCheck`` only: the borrower about to be checked.
+    index*: int
+      ## ``sbpLeafCheck`` only: its 1-based position among ``total``.
+    total*: int
+      ## ``sbpLeafCheck`` only: how many borrowers this pass checks.
+
+  SharedBareProgressHook* = proc (event: SharedBareProgress) {.closure, gcsafe.}
+    ## Called BEFORE each step a refresh may spend a long time in, so a
+    ## command can announce it rather than present as a silent hang
+    ## (Interactive-UX-And-Progress.md Principle 1; CLI/sync.md "Progress and
+    ## phase ordering (RA-27)"). The steps are the network fetch or clone and,
+    ## after a fetch, the §4.2 leaf detector, which runs in every checkout on
+    ## the host that borrows from the bare: with a few dozen sibling
+    ## workspaces that pass alone takes minutes. ``nil`` reports nothing; the
+    ## library itself never writes progress, because only the command knows
+    ## its progress mode and whether its stderr is a terminal.
+
 # ---- cache-root resolution -------------------------------------------------
 
 proc windowsDrive(path: string): string =
@@ -1114,8 +1143,9 @@ proc ensureSharedBareRefspec*(gitBin, barePath: string): bool =
 
 proc poolIntegrityConfig*(gitBin, pool: string; readinessPass: bool;
                           notReadyReason: var string): seq[(string, string)] {.gcsafe.}
-proc checkRegisteredLeaves*(gitBin, pool: string;
-                            mode = lcmRepair): seq[LeafCheckReport] {.gcsafe.}
+proc checkRegisteredLeaves*(gitBin, pool: string; mode = lcmRepair;
+                            progress: SharedBareProgressHook = nil):
+    seq[LeafCheckReport] {.gcsafe.}
 proc registerLeafWithPool*(gitBin, leaf, pool: string): string {.gcsafe.}
 proc pruneBorrowers*(pool: string): seq[string] {.gcsafe.}
 proc registerBorrower*(pool, leaf: string): bool {.gcsafe.}
@@ -1255,7 +1285,9 @@ proc onlyPoolBookkeeping(dir: string): bool =
     sawAny = true
   sawAny
 
-proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult =
+proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string;
+                        progress: SharedBareProgressHook = nil):
+    SharedCloneResult =
   ## Clone-if-missing / fetch-if-present the shared bare for ``fetchUrl``.
   ## Returns ``ok = true`` with the bare path populated, or ``ok = false``
   ## with a diagnostic on any failure (the caller then falls back to a
@@ -1264,8 +1296,14 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
   ## out, and is serialized across concurrent processes via
   ## ``withCacheEntryVcsLock(bare)`` so concurrent workspace initializations
   ## or forks never race on the same shared bare entry.
+  ##
+  ## ``progress``, when set, is told before the fetch or clone starts and
+  ## before each borrower's leaf check (``SharedBareProgressHook``).
   let bare = sharedBarePath(cacheRoot, fetchUrl)
   var checkLeaves = false
+  template announce(step: SharedBareProgressKind) =
+    if progress != nil:
+      progress(SharedBareProgress(kind: step, bare: bare))
   withCacheEntryVcsLock(bare,
       (block: return SharedCloneResult(ok: false, sharedBarePath: bare,
         diagnostic: "could not lock shared bare: " & bare))):
@@ -1281,6 +1319,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
         return SharedCloneResult(ok: false, sharedBarePath: bare,
           diagnostic: prepared)
       # fetch-if-present: refresh all refs, prune deleted ones.
+      announce(sbpFetch)
       let res = runGit(gitBin, sharedBareFetchArgs(bare))
       if res.code != 0:
         return SharedCloneResult(ok: false, sharedBarePath: bare,
@@ -1305,6 +1344,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
         except OSError as e:
           return SharedCloneResult(ok: false, sharedBarePath: bare,
             diagnostic: "could not create cache parent " & parent & ": " & e.msg)
+      announce(sbpClone)
       let res = runGit(gitBin,
         ["clone", "--bare", "--no-local", "--quiet", fetchUrl, bare])
       if res.code != 0:
@@ -1313,6 +1353,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
           if prepared.len > 0:
             return SharedCloneResult(ok: false, sharedBarePath: bare,
               diagnostic: prepared)
+          announce(sbpFetch)
           let fetched = runGit(gitBin, sharedBareFetchArgs(bare))
           if fetched.code != 0:
             return SharedCloneResult(ok: false, sharedBarePath: bare,
@@ -1343,7 +1384,7 @@ proc refreshSharedBare*(gitBin, cacheRoot, fetchUrl: string): SharedCloneResult 
     # (Shared-Clone-Pool-Integrity §4.2). Run outside the bare lock so lock
     # acquisition stays strictly checkout -> pool.
     return SharedCloneResult(ok: true, sharedBarePath: bare,
-      leafReports: checkRegisteredLeaves(gitBin, bare))
+      leafReports: checkRegisteredLeaves(gitBin, bare, progress = progress))
   SharedCloneResult(ok: true, sharedBarePath: bare)
 
 # ---- bootstrap manifest cache population (RA-11) ---------------------------
@@ -4198,13 +4239,24 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
         message: messageStaleRemoteRef(leaf, thePool, t.refName, t.id,
           logPath, removed)))
 
-proc checkRegisteredLeaves*(gitBin, pool: string;
-                            mode = lcmRepair): seq[LeafCheckReport] {.gcsafe.} =
+proc checkRegisteredLeaves*(gitBin, pool: string; mode = lcmRepair;
+                            progress: SharedBareProgressHook = nil):
+    seq[LeafCheckReport] {.gcsafe.} =
   ## §4.2: after a refresh of ``pool``, run the detector in every leaf
   ## registered with it that still borrows from it.
+  ##
+  ## The leaves are selected before any is checked so ``progress`` can
+  ## number them ``[i/N]``: this pass visits a checkout in every workspace on
+  ## the host that borrows the pool, and a caller reporting it as a count is
+  ## what tells a user the command is moving.
+  var leaves: seq[string]
   for leaf in readBorrowers(pool):
-    if not dirExists(leaf) or not isWiredTo(leaf, pool):
-      continue
+    if dirExists(leaf) and isWiredTo(leaf, pool):
+      leaves.add(leaf)
+  for i, leaf in leaves:
+    if progress != nil:
+      progress(SharedBareProgress(kind: sbpLeafCheck, bare: pool, leaf: leaf,
+        index: i + 1, total: leaves.len))
     result.add(checkLeaf(gitBin, leaf, mode, pool = pool))
 
 proc registerLeafWithPool*(gitBin, leaf, pool: string): string =

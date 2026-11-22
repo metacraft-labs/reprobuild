@@ -35,6 +35,7 @@
 ## directory can be held to the stronger claim.
 
 import std/[json, os, osproc, strtabs, strutils, tables, unittest]
+import repro_core/process_env
 
 const RepoMarker = "repro.nim"
 
@@ -129,11 +130,8 @@ proc runWithRunquotaOnPath(cmd, repoRoot: string): tuple[output: string;
   ## notice on every invocation — and merging them into stdout puts non-JSON
   ## text in front of the document ``--format=json`` produced.
   let runquotaBin = repoRoot.parentDir / "runquota" / "build" / "bin"
-  var env = newStringTable()
-  for k, v in envPairs():
-    env[k] = v
-  let oldPath = env.getOrDefault("PATH")
-  env["PATH"] = runquotaBin & $PathSep & oldPath
+  var env = inheritedEnvTable()
+  env.prependPathEntry(runquotaBin)
   execCmdEx(cmd, options = {poEvalCommand, poUsePath}, env = env,
     workingDir = repoRoot)
 

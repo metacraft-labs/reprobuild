@@ -31,6 +31,7 @@
 
 import std/[json, os, strtabs, strutils, tempfiles, times, unittest]
 
+import repro_core/process_env
 import repro_test_support
 import repro_test_support/process_fixtures
 
@@ -104,8 +105,8 @@ proc parentEnv(f: Fixture): StringTableRef =
   ## name the fixture's dev environment contributes removed or reset, and
   ## nothing of `devtools/bin` on `PATH`. `FIXTURE_RUN_EDGE_LIST` is SET, so
   ## the prepend has an inherited value to compose onto.
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
+  result = newEnvTable()
+  for key, value in inheritedEnvTable():
     if key.startsWith("FIXTURE_") or key.startsWith("REPRO_DEV_ENV"):
       continue
     result[key] = value

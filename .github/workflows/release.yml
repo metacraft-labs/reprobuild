@@ -26,6 +26,10 @@ on:
 #               exactly as release.yml ran before the split. Not admitted.
 #
 # The two conditions are complements, so exactly one job runs.
+# release-pipeline.yml's `plan` repeats the `lane` condition to tell which of
+# the two copies its run loaded (both are always in `referenced_workflows`), so
+# change the two together; tests/unit/test_release_pipeline_identity.py fails
+# until they agree.
 #
 # WHY THE VARIABLE. Turning the lane on is two steps outside this repository:
 # infra's governance apply must add the entry above, and the operator confirms

@@ -49,6 +49,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[json, os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 
 import repro_core/cli_images
 import repro_test_support
@@ -109,9 +110,7 @@ proc pathWithoutAnyRepro(): string =
 
 proc ambientEnv(): StringTableRef =
   ## No ``REPROBUILD_REPRO``, no launcher override, only this build on PATH.
-  result = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
+  result = inheritedEnvTable()
   for key in ["REPROBUILD_REPRO", "REPRO_PUBLIC_CLI_PATH", "REPRO_FULL_CLI",
       "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"]:
     result.del(key)

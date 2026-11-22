@@ -40,6 +40,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_core/process_env
 import repro_test_support/reasoned_skip
 
 import repro_project_dsl
@@ -173,8 +174,8 @@ suite "DSL-port M9.R.14f.2 — install-mirror RPATH patching":
       else:
         let scratch = createTempDir("repro-linked-libc-", "")
         defer: removeDir(scratch)
-        let fixtureEnv = newStringTable(modeCaseSensitive)
-        for key, value in envPairs():
+        let fixtureEnv = newEnvTable()
+        for key, value in inheritedEnvTable():
           if key notin ["LIBRARY_PATH", "LD_LIBRARY_PATH",
                         "REPRO_COMPILER_LIBC_DIRS"]:
             fixtureEnv[key] = value

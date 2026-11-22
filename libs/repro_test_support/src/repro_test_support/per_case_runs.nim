@@ -17,6 +17,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[json, os, osproc, strtabs, strutils]
+import repro_core/process_env
 
 type
   CaseProcess* = object
@@ -123,9 +124,11 @@ proc runEveryCaseInItsOwnProcess*(binary: string; env: StringTableRef;
   for i, name in names:
     if i >= maxCases:
       break
-    let caseEnv = newStringTable(modeCaseSensitive)
+    # Host name semantics, so a caller's case-insensitive table (and the
+    # inherited `Path` on Windows) stays one entry per variable.
+    let caseEnv = newEnvTable()
     if env == nil:
-      for k, v in envPairs():
+      for k, v in inheritedEnvTable():
         caseEnv[k] = v
     else:
       for k, v in env.pairs:

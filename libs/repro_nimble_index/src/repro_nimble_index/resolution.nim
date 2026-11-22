@@ -12,7 +12,10 @@
 ##   dependency on the project's `nim` TOOLCHAIN package -- never a
 ##   `nimble:nim` package. A name the index does not hold is declared with no
 ##   candidate, so a version requiring it cannot be chosen and nothing else
-##   is affected.
+##   is affected. A candidate with a requirement under a Nim-version
+##   condition (NPC-AREQ7) depends on its Nim gate (``nimGateIdentity``), an
+##   on-demand package whose versions mirror the `nim` toolchain's, so the
+##   requirement binds exactly when the chosen Nim makes the condition true.
 ## * ``chosenNimblePackages`` -- the records the solution chose.
 ## * ``moduleCollisions`` -- two chosen packages exporting one top-level
 ##   module (threat model G16): Nim would take whichever `--path` comes
@@ -51,14 +54,32 @@ proc nimblePlatformOf*(platformId: string): NimblePlatform =
   NimblePlatform(id: os & "-" & cpu, targetOs: os, targetCpu: cpu,
     hostOs: os, hostCpu: cpu)
 
-proc lowerToSolver*(input: NimbleSolverInput;
-                    toolchainNim = ""): seq[PackageDecl] =
+proc gateDecl(name: string; versions: seq[(string, seq[DependencyDecl])]):
+    PackageDecl =
+  result = PackageDecl(name: name, onDemand: true)
+  for (version, ds) in versions:
+    if version in result.versions:
+      continue
+    result.versions.add version
+    var all: seq[DependencyDecl]
+    for d in ds:
+      all.add newDependency(d.name,
+        if d.range.len > 0: d.range else: AnyVersionRange)
+    result.versionDepends.add newVersionDependencies(version, all)
+
+proc lowerToSolver*(input: NimbleSolverInput; toolchainNim = "";
+                    nimVersions: seq[string] = @[]): seq[PackageDecl] =
   ## The solver declarations of a Nimble closure (see the module header).
   ## ``toolchainNim`` names the project's `nim` toolchain package when the
-  ## solve declares one: each candidate's `nim` ranges become per-version
-  ## dependencies on it, so the chosen Nim satisfies every chosen record.
-  ## Without one the ranges constrain nothing here (the toolchain is not
-  ## solved in this lock).
+  ## solve declares one, and ``nimVersions`` are its candidate versions:
+  ## each candidate's `nim` ranges become per-version dependencies on it,
+  ## so the chosen Nim satisfies every chosen record, and a candidate whose
+  ## requirements or `nim` ranges depend on the Nim version also depends on
+  ## its Nim gate, which mirrors ``nimVersions``. Without one the ranges
+  ## constrain nothing here (the toolchain is not solved in this lock), and
+  ## ``solverInput`` has already excluded every candidate with a Nim-version
+  ## condition (`nim-version-unknown`; ``NimbleSolveOptions.nimDeclared``).
+  var gates: seq[PackageDecl]
   for pkg in input.packages:
     var decl = PackageDecl(name: pkg.identity, onDemand: true,
       preferNewest: true)
@@ -80,6 +101,16 @@ proc lowerToSolver*(input: NimbleSolverInput;
         for r in nimOf.getOrDefault(version):
           if r.len > 0:
             all.add newDependency(toolchainNim, r)
+        for c in pkg.candidates:
+          if c.offered and c.version == version and c.candidateNimGated:
+            let gate = nimGateIdentity(pkg.identity, version)
+            all.add newDependency(gate, AnyVersionRange)
+            var reqs: seq[SolverRequirement]
+            for r in c.requires:
+              if r.nimGated: reqs.add r
+            gates.add gateDecl(gate, nimGateVersionDependencies(input, reqs,
+              c.nimGatedNim, toolchainNim, nimVersions))
+            break
       if all.len > 0:
         decl.versionDepends.add newVersionDependencies(version, all)
     result.add decl
@@ -97,8 +128,19 @@ proc lowerToSolver*(input: NimbleSolverInput;
         for d in ds:
           all.add newDependency(d.name,
             if d.range.len > 0: d.range else: AnyVersionRange)
+        if toolchainNim.len > 0:
+          for c in pkg.candidates:
+            if c.offered and c.version == version:
+              let g = featureNimGated(c, f)
+              if g.len > 0:
+                let gate = nimGateIdentity(decl.name, version)
+                all.add newDependency(gate, AnyVersionRange)
+                gates.add gateDecl(gate, nimGateVersionDependencies(input, g,
+                  @[], toolchainNim, nimVersions))
+              break
         decl.versionDepends.add newVersionDependencies(version, all)
       result.add decl
+  result.add gates
   # Names reached that the index does not hold: declared without a
   # candidate, under the spelling the requirement used (NPC-M6 item e).
   # Every declaration's edges are scanned, a feature package's included: an
@@ -161,6 +203,26 @@ proc chosenNimblePackages*(input: NimbleSolverInput;
           # An active feature's requirements are this version's too.
           if featureIdentity(pkg.identity, f) in chosen:
             edges.add featureVersionDependencies(input, pkg, f)
+        # So are the requirements the chosen Nim made true: the Nim gates'
+        # chosen versions (the gate's version is the chosen Nim).
+        for owner in @[pkg.identity] & pkg.features.mapIt(
+            featureIdentity(pkg.identity, it)):
+          let gate = nimGateIdentity(owner, v)
+          if gate notin chosen: continue
+          var reqs: seq[SolverRequirement]
+          if owner == pkg.identity:
+            for r in c.requires:
+              if r.nimGated: reqs.add r
+          else:
+            reqs = featureNimGated(c, owner[pkg.identity.len + 1 .. ^2])
+          let n = chosen[gate]
+          let nv = nimVersionValueOf(n)
+          if nv.isNone: continue
+          var active: seq[SolverRequirement]
+          for r in reqs:
+            if activeOn(r.entry.condition, input.platform, nv):
+              active.add r
+          edges.add (v, lowered(input, active))
         for (version, ds) in edges:
           if version != v: continue
           for d in ds:

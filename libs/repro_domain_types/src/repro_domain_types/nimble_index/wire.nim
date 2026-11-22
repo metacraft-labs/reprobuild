@@ -29,8 +29,22 @@ type
     kind*: uint8
     name*: WCondName
 
-  RequirementW* = object
-    condition*: WCondition
+  ConditionNodeW3* = object
+    ## A condition node of shard schema ``NimbleShardConditionsSchema``:
+    ## ``ConditionNodeW`` followed by a Nim-version comparison's term,
+    ## operator and literal (zero and empty on every other node).
+    kind*: uint8
+    name*: WCondName
+    term*: uint8
+    op*: uint8
+    ints*: List[uint64, MaxNimVersionInts]
+    text*: List[byte, MaxNimVersionTextBytes]
+
+  WCondition3* = List[ConditionNodeW3, MaxConditionNodes]
+
+  RequirementWT*[C] = object
+    ## A requirement entry whose condition nodes are ``C``.
+    condition*: List[C, MaxConditionNodes]
     targetKind*: uint8
     target*: WText
     subdir*: WPath
@@ -39,23 +53,30 @@ type
     features*: List[WName, MaxRequirementFeatures]
     source*: WText
 
-  FeatureW* = object
+  RequirementW* = RequirementWT[ConditionNodeW]
+  RequirementW3* = RequirementWT[ConditionNodeW3]
+
+  FeatureWT*[C] = object
     name*: WName
     rootOnly*: bool
-    requires*: List[RequirementW, MaxRequirements]
+    requires*: List[RequirementWT[C], MaxRequirements]
+
+  FeatureW* = FeatureWT[ConditionNodeW]
 
   NamedBinW* = object
     key*: WPath
     value*: WPath
 
-  ConditionalFieldW* = object
+  ConditionalFieldWT*[C] = object
     field*: uint8
     append*: bool
     values*: List[WPath, MaxLayoutEntries]
     pairs*: List[NamedBinW, MaxLayoutEntries]
-    condition*: WCondition
+    condition*: List[C, MaxConditionNodes]
 
-  LayoutW* = object
+  ConditionalFieldW* = ConditionalFieldWT[ConditionNodeW]
+
+  LayoutWT*[C] = object
     srcDir*: WPath
     installDirs*: List[WPath, MaxLayoutEntries]
     installFiles*: List[WPath, MaxLayoutEntries]
@@ -65,7 +86,9 @@ type
     skipExt*: List[WPath, MaxLayoutEntries]
     paths*: List[WPath, MaxLayoutEntries]
     modules*: List[WName, MaxModules]
-    conditional*: List[ConditionalFieldW, MaxConditionalFields]
+    conditional*: List[ConditionalFieldWT[C], MaxConditionalFields]
+
+  LayoutW* = LayoutWT[ConditionNodeW]
 
   BinariesW* = object
     bin*: List[WPath, MaxBinaries]
@@ -73,9 +96,11 @@ type
     binDir*: WPath
     backend*: WName
 
-  ForeignW* = object
+  ForeignWT*[C] = object
     name*: WText
-    condition*: WCondition
+    condition*: List[C, MaxConditionNodes]
+
+  ForeignW* = ForeignWT[ConditionNodeW]
 
   VersionW* = object
     kind*: uint8
@@ -107,10 +132,12 @@ type
     url*: WText
     commit*: List[byte, MaxCommitBytes]
 
-  VersionRecordW2* = object
+  VersionRecordW2T*[C] = object
     ## ``VersionRecordW`` with the ``submodules`` list: the record of a
-    ## shard of schema ``NimbleShardSubmodulesSchema``. The fields before
-    ## it are ``VersionRecordW``'s, in the same order.
+    ## shard of schema ``NimbleShardSubmodulesSchema`` (``C`` is
+    ## ``ConditionNodeW``) or ``NimbleShardConditionsSchema`` (``C`` is
+    ## ``ConditionNodeW3``). The fields before it are ``VersionRecordW``'s,
+    ## in the same order.
     version*: VersionW
     commit*: List[byte, MaxCommitBytes]
     tree*: WDigest
@@ -118,18 +145,21 @@ type
     size*: uint64
     firstSeen*: uint64
     origin*: uint16
-    nim*: List[RequirementW, MaxNimEntries]
-    requires*: List[RequirementW, MaxRequirements]
-    features*: List[FeatureW, MaxFeatures]
-    layout*: LayoutW
+    nim*: List[RequirementWT[C], MaxNimEntries]
+    requires*: List[RequirementWT[C], MaxRequirements]
+    features*: List[FeatureWT[C], MaxFeatures]
+    layout*: LayoutWT[C]
     binaries*: BinariesW
-    foreign*: List[ForeignW, MaxForeign]
+    foreign*: List[ForeignWT[C], MaxForeign]
     flags*: uint32
     readerClass*: uint8
     resolutionClass*: uint8
     probePlatform*: WName
     nimbleFile*: List[WDigest, 1]
     submodules*: List[SubmoduleW, MaxSubmodules]
+
+  VersionRecordW2* = VersionRecordW2T[ConditionNodeW]
+  VersionRecordW3* = VersionRecordW2T[ConditionNodeW3]
 
   OriginW* = object
     url*: WText
@@ -142,11 +172,14 @@ type
     registryOrigin*: uint16
     versions*: List[VersionRecordW, MaxVersionsPerPackage]
 
-  PackageW2* = object
+  PackageW2T*[C] = object
     name*: WName
     origins*: List[OriginW, MaxOrigins]
     registryOrigin*: uint16
-    versions*: List[VersionRecordW2, MaxVersionsPerPackage]
+    versions*: List[VersionRecordW2T[C], MaxVersionsPerPackage]
+
+  PackageW2* = PackageW2T[ConditionNodeW]
+  PackageW3* = PackageW2T[ConditionNodeW3]
 
   AliasW* = object
     alias*: WName
@@ -178,15 +211,20 @@ type
     aliases*: List[AliasW, MaxAliasesPerShard]
     observations*: List[ObservationW, MaxPackagesPerShard]
 
-  ShardW2* = object
-    ## A shard of schema ``NimbleShardSubmodulesSchema``: ``ShardW`` whose
-    ## records carry their ``submodules`` list.
+  ShardW2T*[C] = object
+    ## A shard of schema ``NimbleShardSubmodulesSchema`` (``ShardW2``) or
+    ## ``NimbleShardConditionsSchema`` (``ShardW3``): ``ShardW`` whose
+    ## records carry their ``submodules`` list, and for schema 3 whose
+    ## condition nodes carry a Nim-version comparison.
     schema*: uint16
     shardBits*: uint8
     bucket*: uint32
-    packages*: List[PackageW2, MaxPackagesPerShard]
+    packages*: List[PackageW2T[C], MaxPackagesPerShard]
     aliases*: List[AliasW, MaxAliasesPerShard]
     observations*: List[ObservationW, MaxPackagesPerShard]
+
+  ShardW2* = ShardW2T[ConditionNodeW]
+  ShardW3* = ShardW2T[ConditionNodeW3]
 
   ShardRefW* = object
     bucket*: uint32

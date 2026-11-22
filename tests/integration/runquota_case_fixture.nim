@@ -1,5 +1,6 @@
 ## Private source workspace for the cross-project RunQuota integration cases.
 import std/[os, sha1, strtabs]
+import repro_core/process_env
 import repro_test_support
 
 type RunQuotaCaseFixture* = object
@@ -50,9 +51,7 @@ proc prepareRunQuotaCase*(repoRoot: string;
 package consumer:
   version: "0.0.0"
 """)
-  result.env = newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result.env[key] = value
+  result.env = inheritedEnvTable()
   result.env["RUNQUOTA_SRC"] = result.checkout
   result.env["XDG_CACHE_HOME"] = result.root / "cache"
   result.env["REPROBUILD_STORE_ROOT"] = result.root / "store"

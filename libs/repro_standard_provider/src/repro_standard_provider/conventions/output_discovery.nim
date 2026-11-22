@@ -20,6 +20,7 @@
 ## answer, discovery fails and names the tool's own diagnostic.
 from repro_core/process_streams import drainStream
 import std/[algorithm, json, os, osproc, sets, streams, strtabs, strutils]
+import repro_core/process_env
 import blake3
 from repro_core/paths import extendedPath
 from repro_core/ambient_execution import uncontrolledFindExe,
@@ -163,10 +164,7 @@ proc queryEnvironment(overrides: openArray[(string, string)]): StringTableRef =
   ## case-insensitive, so the table is too.
   if overrides.len == 0:
     return nil
-  result = when defined(windows): newStringTable(modeCaseInsensitive)
-           else: newStringTable(modeCaseSensitive)
-  for key, value in envPairs():
-    result[key] = value
+  result = inheritedEnvTable()
   for (key, value) in overrides:
     if value.len == 0:
       result.del(key)

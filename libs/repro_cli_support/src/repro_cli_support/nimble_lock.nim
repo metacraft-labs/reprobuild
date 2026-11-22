@@ -155,15 +155,20 @@ proc prepareNimbleSolve*(projectRoot: string; packages: var seq[PackageDecl];
   for d in incumbentRows:
     if d.isNimbleDep and d.catalog == result.index.repo:
       accepted[nameKey(nimbleNameOf(d.name))] = d.coordinates.url
+  # The project's `nim` toolchain package, when the solve declares one: its
+  # candidates decide the records' Nim-version conditions (NPC-AREQ7).
+  var hasNim = false
+  var nimVersions: seq[string]
+  for p in packages:
+    if p.name == "nim":
+      hasNim = true
+      nimVersions = p.versions
   result.input = solverInput(idx, names, nimblePlatformOf(platform),
     NimbleSolveOptions(excludeNewer: excludeNewer, roots: roots,
-      acceptedOrigins: accepted))
+      acceptedOrigins: accepted, nimDeclared: hasNim))
   result.shardsRead = loadedShardCount(idx)
-  var hasNim = false
-  for p in packages:
-    if p.name == "nim": hasNim = true
   let decls = lowerToSolver(result.input,
-    toolchainNim = (if hasNim: "nim" else: ""))
+    toolchainNim = (if hasNim: "nim" else: ""), nimVersions = nimVersions)
   for p in packages.mitems:
     for d in p.depends.mitems:
       d = canonicalRequirement(result.input, d)
@@ -276,6 +281,10 @@ type
     mirrors*: seq[Mirror]  ## the search order the fetch used
     indexLine*: string     ## the pinned index's generation time and age
     platform*: string      ## the lock's platform the records were read for
+    solvedNim*: string
+      ## the version the lock's solve chose for the project's `nim`
+      ## toolchain package; "" when the solve declared none. The records'
+      ## Nim-version conditions were decided against it (NPC-AREQ7)
 
 proc indexSourceSet*(d: DiscoveredNimbleIndex): Option[SourceSet] =
   ## The index repository's source set at the pinned revision, read by
@@ -293,15 +302,23 @@ proc indexMirrors(ss: Option[SourceSet]): seq[Mirror] =
   for m in ss.get.mirrors:
     result.add parseMirror(m.url, required = m.role == mrRequired)
 
-proc recordSrcDir*(rec: VersionRecord; p: NimblePlatform): string =
-  ## The record's `srcDir` on platform ``p``: the plain assignment, then
-  ## every conditional assignment whose condition holds there, in record
-  ## order (the last one wins, as in the `.nimble` file). "" = the package
-  ## root.
+proc recordSrcDir*(rec: VersionRecord; p: NimblePlatform;
+                   nim = none(NimVersionValue)): string =
+  ## The record's `srcDir` on platform ``p`` (at Nim ``nim``): the plain
+  ## assignment, then every conditional assignment whose condition holds
+  ## there, in record order (the last one wins, as in the `.nimble` file).
+  ## "" = the package root. Raises ``NimbleLockError`` for an assignment
+  ## whose condition depends on the Nim version when ``nim`` is none.
   result = rec.layout.srcDir
   for c in rec.layout.conditional:
-    if c.field == rfSrcDir and c.values.len > 0 and activeOn(c.condition, p):
-      result = c.values[^1]
+    if c.field == rfSrcDir and c.values.len > 0:
+      case decideOn(c.condition, p, nim)
+      of tTrue: result = c.values[^1]
+      of tFalse: discard
+      of tUnknown:
+        raise newException(NimbleLockError, "the record's srcDir depends " &
+          "on the Nim version (`" & renderCondition(c.condition) & "`), " &
+          "and the lock records no Nim: declare `uses: nim` and re-lock")
 
 proc nimbleBuildOrder*(packages: seq[LockedNimblePackage]):
     seq[LockedNimblePackage] =
@@ -364,6 +381,9 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
   result.active = true
   result.platform = if ld.platform.len > 0: ld.platform else: currentPlatformId()
   let platform = nimblePlatformOf(result.platform)
+  for p in ld.packages:
+    if p.name == "nim": result.solvedNim = p.version
+  let solvedNim = nimVersionValueOf(result.solvedNim)
   # The pins, verified against the declaration and re-read at the pinned
   # revision (the index identity must be the pinned one).
   let answer = catalogsForBuild(projectRoot, pins, @[])
@@ -484,7 +504,12 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
   # source directory, in the build order.
   for p in anchored.mitems:
     p.storePath = result.storePaths.getOrDefault(p.row.name)
-    let srcDir = recordSrcDir(p.record, platform).replace('\\', '/')
+    var srcDir = ""
+    try:
+      srcDir = recordSrcDir(p.record, platform, solvedNim).replace('\\', '/')
+    except NimbleLockError as e:
+      refusals.add "nimble:" & p.row.name & " " & p.version & ": " & e.msg
+      continue
     var parts: seq[string]
     for c in srcDir.split('/'):
       if c.len > 0 and c != ".": parts.add c
@@ -507,6 +532,24 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
     nimbleError(refusals.join("\n  "))
   result.packages = anchored
 
+proc nimConditionsOf(rec: VersionRecord):
+    seq[tuple[what: string; nodes: seq[ConditionNode]]] =
+  ## Every condition of a record with its subject, for the build's check of
+  ## the Nim-version conditions (NPC-AREQ7).
+  for r in rec.requires:
+    result.add ("requires " & r.source.escape(), r.condition)
+  for r in rec.nim:
+    result.add ("requires " & r.source.escape(), r.condition)
+  for f in rec.features:
+    if f.rootOnly: continue
+    for r in f.requires:
+      result.add ("feature " & f.name & " requires " & r.source.escape(),
+        r.condition)
+  for c in rec.layout.conditional:
+    result.add ($c.field, c.condition)
+  for d in rec.foreign:
+    result.add ("foreignDep " & d.name.escape(), d.condition)
+
 proc nimVersionRefusals*(report: NimbleSourcesReport; nimVersion: string):
     seq[string] =
   ## M6-P12 (NPC-AREQ7, NPC-AREQ17): the Nim the build compiles with,
@@ -515,13 +558,54 @@ proc nimVersionRefusals*(report: NimbleSourcesReport; nimVersion: string):
   ## ``nimVersion``, naming the package, its version, the range and the Nim
   ## version. A range is evaluated for the lock's platform, as the solve
   ## evaluated it.
+  ##
+  ## NPC-M14 (A3): every condition of a chosen record that depends on the
+  ## Nim version is evaluated at ``nimVersion`` and at the Nim the lock was
+  ## solved for (``report.solvedNim``); where they differ the build is
+  ## refused, naming the package, the condition and both Nim versions. A
+  ## record with such a condition in a lock that records no solved Nim is
+  ## refused too. Every condition of the record is checked, a feature's
+  ## included, as the lock does not record which features were active.
   let platform = nimblePlatformOf(report.platform)
+  let build = nimVersionValueOf(nimVersion)
+  let solved = nimVersionValueOf(report.solvedNim)
   for p in report.packages:
-    let c = candidate(p.package, p.record, platform)
+    var opts = NimbleSolveOptions(excludeNewer: -1, nimDeclared: true)
+    let c = candidate(p.package, p.record, platform, opts)
+    let who = "nimble:" & p.row.name & " " & p.version
     for r in c.nim:
       if not rangeAdmits(r, nimVersion):
-        result.add "nimble:" & p.row.name & " " & p.version &
-          " requires nim " & r & "; the build's Nim is " & nimVersion
+        result.add who & " requires nim " & r & "; the build's Nim is " &
+          nimVersion
+    for r in c.nimGatedNim:
+      if build.isSome and activeOn(r.entry.condition, platform, build) and
+          r.range.len > 0 and not rangeAdmits(r.range, nimVersion):
+        result.add who & " requires nim " & r.range & " when `" &
+          renderCondition(r.entry.condition) & "`; the build's Nim is " &
+          nimVersion
+    for (what, nodes) in nimConditionsOf(p.record):
+      if decideOn(nodes, platform) != tUnknown:
+        continue
+      let cond = "`" & renderCondition(nodes) & "` (" & what & ")"
+      if solved.isNone:
+        result.add who & ": " & cond & " depends on the Nim version, and " &
+          "the lock records no Nim it was solved for: declare `uses: nim` " &
+          "and re-lock"
+        continue
+      if build.isNone:
+        result.add who & ": " & cond & " depends on the Nim version, and " &
+          "the build's Nim version " & nimVersion.escape() & " does not " &
+          "read as <major>.<minor>.<patch>"
+        continue
+      let atSolved = decideOn(nodes, platform, solved)
+      let atBuild = decideOn(nodes, platform, build)
+      if atSolved != atBuild:
+        result.add who & ": " & cond & " is " &
+          (if atSolved == tTrue: "true" else: "false") & " at Nim " &
+          report.solvedNim & ", which the lock was solved for, and " &
+          (if atBuild == tTrue: "true" else: "false") & " at the build's " &
+          "Nim " & nimVersion & "; build with Nim " & report.solvedNim &
+          ", or re-lock with the build's Nim"
 
 # ---------------------------------------------------------------------------
 # `repro lock diff`

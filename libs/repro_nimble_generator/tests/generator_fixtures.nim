@@ -25,6 +25,7 @@
 
 from repro_core/process_streams import drainStream
 import std/[atomics, exitprocs, nativesockets, net, options, os, osproc, random, streams, strtabs, strutils, tables, tempfiles, times]
+import repro_core/process_env
 
 import repro_nimble_generator
 import repro_nimble_index
@@ -88,8 +89,8 @@ proc run*(args: openArray[string]; cwd = ""; env: StringTableRef = nil;
       result)
 
 proc gitEnv*(date = 1_700_000_000'i64): StringTableRef =
-  result = newStringTable(modeCaseSensitive)
-  for k, v in envPairs():
+  result = newEnvTable()
+  for k, v in inheritedEnvTable():
     if not k.startsWith("GIT_"): result[k] = v
   result["GIT_CONFIG_NOSYSTEM"] = "1"
   result["GIT_CONFIG_GLOBAL"] = "/dev/null"
@@ -156,7 +157,7 @@ proc readRequest(s: Socket): tuple[ok: bool; meth, path, query: string;
   result.ok = true
 
 proc cgi(cfg: ServerConfig; req: auto): string =
-  let env = newStringTable(modeCaseSensitive)
+  let env = newEnvTable()
   env["PATH"] = parentDir(cfg.gitBin)
   env["GIT_PROJECT_ROOT"] = cfg.root
   env["GIT_HTTP_EXPORT_ALL"] = "1"

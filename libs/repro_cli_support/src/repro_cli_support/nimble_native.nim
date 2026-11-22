@@ -95,15 +95,22 @@ proc hooksOf(p: LockedNimblePackage): seq[string] =
         discard
       return
 
-proc recordBinaries(rec: VersionRecord; plat: NimblePlatform):
+proc recordBinaries(rec: VersionRecord; plat: NimblePlatform;
+                    nim: Option[NimVersionValue]; undecided: var string):
     tuple[bin: seq[string]; named: seq[NamedBin]] =
-  ## `bin` and `namedBin` on ``plat``: the plain assignments, then the
-  ## conditional ones whose condition holds there (an append extends, an
-  ## assignment replaces), in record order.
+  ## `bin` and `namedBin` on ``plat`` at Nim ``nim``: the plain
+  ## assignments, then the conditional ones whose condition holds there (an
+  ## append extends, an assignment replaces), in record order. An
+  ## assignment whose condition depends on the Nim version when ``nim`` is
+  ## none sets ``undecided`` to that condition.
   result.bin = rec.binaries.bin
   result.named = rec.binaries.namedBin
   for c in rec.layout.conditional:
-    if not activeOn(c.condition, plat): continue
+    if c.field notin {rfBin, rfNamedBin}: continue
+    let t = decideOn(c.condition, plat, nim)
+    if t == tUnknown and undecided.len == 0:
+      undecided = renderCondition(c.condition)
+    if t != tTrue: continue
     case c.field
     of rfBin:
       if c.append: result.bin.add c.values
@@ -142,7 +149,14 @@ proc planNimbleBinaries*(report: NimbleSourcesReport;
     return
   var supplied: seq[string]
   for o in result.overrides: supplied.add o.binaries
-  let (bins, named) = recordBinaries(p.record, plat)
+  var undecided = ""
+  let (bins, named) = recordBinaries(p.record, plat,
+    nimVersionValueOf(report.solvedNim), undecided)
+  if undecided.len > 0:
+    result.refusal = "nimble:" & p.row.name & " " & p.version & ": its " &
+      "binaries depend on the Nim version (`" & undecided & "`), and the " &
+      "lock records no Nim: declare `uses: nim` and re-lock"
+    return
   if bins.len == 0 and named.len == 0 and supplied.len == 0:
     return
   if flHasHooks in p.record.flags and supplied.len == 0:
@@ -284,7 +298,13 @@ proc nimbleCheck*(report: NimbleSourcesReport): tuple[lines: seq[string];
       if o.nativeBuildDeps.len + o.runtimeDeps.len + o.passL.len > 0:
         mapped.incl "*"
     for f in p.record.foreign:
-      if not activeOn(f.condition, plat): continue
+      let t = decideOn(f.condition, plat, nimVersionValueOf(report.solvedNim))
+      if t == tUnknown:
+        result.lines.add "  native dependency " & f.name & " depends on " &
+          "the Nim version (`" & renderCondition(f.condition) & "`), and " &
+          "the lock records no Nim to decide it"
+        continue
+      if t != tTrue: continue
       if "*" notin mapped:
         result.lines.add "  unmapped native dependency: " & f.name &
           " (foreignDep; no native override of this version supplies it)"
