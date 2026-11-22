@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3115,
+    "nimTestBinaries": 3117,
     "pureUnitConsolidationGroups": 91,
     "pureUnitTests": 827,
     "staticallyDetectedRuntimeCompilerFlowTests": 160,
-    "testEntries": 3165
+    "testEntries": 3167
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1775,7 +1775,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 28,
-      "integration": 1737,
+      "integration": 1739,
       "platform/destructive": 200,
       "pure unit": 827,
       "unclassified": 373
@@ -1998,9 +1998,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3115,
+    "nimTestBinaryCount": 3117,
     "pythonTestFileCount": 50,
-    "testEntryCount": 3165
+    "testEntryCount": 3167
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -2244,7 +2244,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 301,
+          "line": 325,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-c"
@@ -2260,7 +2260,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 416,
+          "line": 440,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -2276,7 +2276,7 @@
             "source",
             "tempRoot"
           ],
-          "line": 478,
+          "line": 502,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -2292,7 +2292,23 @@
             "source",
             "tempRoot"
           ],
-          "line": 611,
+          "line": 634,
+          "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
+          "patterns": [
+            "nim-check"
+          ],
+          "snippet": "execCmdEx(\"nim check --hints:off --warnings:off --path:\" &"
+        },
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "probe",
+            "source",
+            "tempRoot"
+          ],
+          "line": 705,
           "path": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
           "patterns": [
             "nim-check"
@@ -15979,7 +15995,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_cli_support/tests/t_partition_plan_json_round_trip.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -19902,8 +19918,8 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_tarball_archive_detail_fields.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 14,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 17,
       "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
@@ -21636,7 +21652,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_interface_artifacts/tests/t_envelope_versions_do_not_collide.nim",
       "sourceSuiteCount": 11,
-      "staticCaseCount": 24,
+      "staticCaseCount": 26,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -31017,7 +31033,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_tool_profiles/tests/t_elf_relocation_points_programs_at_the_archive_loader.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55304,6 +55320,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_repro_test_shard_certifies_only_nodes_it_ran_whole",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_repro_test_shard_certifies_only_nodes_it_ran_whole.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_repro_test_workspace_mode_issues_a_content_bound_certificate",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -57325,6 +57359,30 @@
       "source": "tests/integration/t_store_daemon_m66_dev.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_store_root_rustc_links_through_the_store_root_c_driver",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_interface_artifacts",
+        "repro_local_store",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_store_root_rustc_links_through_the_store_root_c_driver.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -65278,7 +65336,7 @@
       "requiresReproBinary": true,
       "source": "tests/unit/t_sibling_prefix_clone.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

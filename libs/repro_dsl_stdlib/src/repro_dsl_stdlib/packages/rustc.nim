@@ -28,6 +28,7 @@
 import repro_project_dsl
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/rust_toolchain_pins
+import repro_dsl_stdlib/rust_linux_relocation
 export packages_schema
 
 package rustc:
@@ -108,6 +109,12 @@ package rustc:
     # auto-merge flattens rustc / cargo / rust-std into a single prefix
     # so `rustc` lands at `<prefix>/bin/rustc` and libstd at the
     # canonical `<prefix>/lib/rustlib/<triple>/lib/` sysroot location.
+    # The ``elf*`` fields relocate the toolchain onto the loader and C
+    # library of the catalog's Linux C toolchain (the ``gcc`` package's
+    # realized prefix), so it runs on any Linux x86_64 host and reads no C
+    # library outside the store root; see ``rust_linux_relocation``. A
+    # native link runs ``cc``, which the ``gcc`` arm exports: declare
+    # ``gcc`` beside ``rustc``.
     tarball url = "https://static.rust-lang.org/dist/rust-1.94.0-x86_64-unknown-linux-gnu.tar.xz",
       sha256 = "e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
       archiveType = "tar.xz",
@@ -115,6 +122,13 @@ package rustc:
       executablePath = "bin/rustc",
       packageId = "rust@1.94.0",
       cpu = "x86_64",
+      elfRuntimePackage = RustLinuxRuntimePackage,
+      elfInterpreter = RustLinuxLoader,
+      elfRunpath = RustLinuxRunpath[0],
+      elfRunpath = RustLinuxRunpath[1],
+      elfPatchDir = RustLinuxPatchDirs[0],
+      elfPatchDir = RustLinuxPatchDirs[1],
+      elfPatchDir = RustLinuxPatchDirs[2],
       os = "linux",
       lockIdentity = "tarball:rust@1.94.0:linux:sha256:e8fa4185f3ef6ae32725ff638b1ecdbff28f5d651dc0b3111e2539350d03b15a",
       version = "1.94.0"
@@ -181,6 +195,13 @@ package rustc:
       executablePath = "bin/rustc",
       packageId = "rust@1.97.1",
       cpu = "x86_64",
+      elfRuntimePackage = RustLinuxRuntimePackage,
+      elfInterpreter = RustLinuxLoader,
+      elfRunpath = RustLinuxRunpath[0],
+      elfRunpath = RustLinuxRunpath[1],
+      elfPatchDir = RustLinuxPatchDirs[0],
+      elfPatchDir = RustLinuxPatchDirs[1],
+      elfPatchDir = RustLinuxPatchDirs[2],
       os = "linux",
       lockIdentity = "tarball:rust@1.97.1:linux:sha256:88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f",
       version = "1.97.1"

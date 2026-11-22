@@ -1299,8 +1299,20 @@ proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 36'u16
-    ## v36 (current): ``InterfaceTarballProvisioning`` retains its gem-closure
+  EnvelopeVersion = 37'u16
+    ## v37 (current): ``TarballArchiveDetail`` retains
+    ##                ``elfRuntimePackage`` (the package whose realized
+    ##                prefix carries the loader and C library an archive
+    ##                with none of its own is relocated onto) and
+    ##                ``executableExtraAliases`` (further names the realized
+    ##                executable is copied under), after
+    ##                ``gccSpecDefaults``. v36 and older payloads decode them
+    ##                empty: relocation within the archive's own prefix and
+    ##                one alias at most, which is what every record was
+    ##                before. The fingerprint projection writes the block
+    ##                only when a field is non-empty, so no fingerprint
+    ##                hashed from a record that declares neither moves.
+    ## v36: ``InterfaceTarballProvisioning`` retains its gem-closure
     ##                step (``gemClosure``, the inlined ``gemEntries``, the
     ##                ``gemBuildUses`` tool uses resolved at the lift,
     ##                ``gemBuildArgs`` and ``gemSubstitutions``), after
@@ -2188,6 +2200,13 @@ proc writeTarballArchiveDetail(outp: var seq[byte];
       outp.writeStringSeq(detail.elfPatchDirs)
       outp.writeString(detail.gccLinkSpecs)
       outp.writeStringSeq(detail.gccSpecDefaults)
+  if version >= 37'u16:
+    # Omitted from the fingerprint projection when empty, as the v33 block
+    # is (see the v37 note on ``EnvelopeVersion``).
+    if not forFingerprint or detail.elfRuntimePackage.len > 0 or
+        detail.executableExtraAliases.len > 0:
+      outp.writeString(detail.elfRuntimePackage)
+      outp.writeStringSeq(detail.executableExtraAliases)
 
 proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
                               version: uint16): TarballArchiveDetail =
@@ -2220,6 +2239,9 @@ proc readTarballArchiveDetail(bytes: openArray[byte]; pos: var int;
     result.elfPatchDirs = readStringSeq(bytes, pos)
     result.gccLinkSpecs = readString(bytes, pos)
     result.gccSpecDefaults = readStringSeq(bytes, pos)
+  if version >= 37'u16:
+    result.elfRuntimePackage = readString(bytes, pos)
+    result.executableExtraAliases = readStringSeq(bytes, pos)
 
 const FirstEnvelopeVersionWithTarballDetail = 21'u16
   ## The envelope version that introduced ``TarballArchiveDetail`` (GM4b).
@@ -4252,7 +4274,10 @@ proc tarballArchiveDetailValueLiteral(detail: TarballArchiveDetail): string =
     ", elfRunpath: " & listLit(detail.elfRunpath) &
     ", elfPatchDirs: " & listLit(detail.elfPatchDirs) &
     ", gccLinkSpecs: " & escForCode(detail.gccLinkSpecs) &
-    ", gccSpecDefaults: " & listLit(detail.gccSpecDefaults) & ")"
+    ", gccSpecDefaults: " & listLit(detail.gccSpecDefaults) &
+    ", elfRuntimePackage: " & escForCode(detail.elfRuntimePackage) &
+    ", executableExtraAliases: " & listLit(detail.executableExtraAliases) &
+    ")"
 
 proc emitProvisioningContributionRegistrations(code: var string;
     contributions: seq[InterfaceProvisioningContribution]) =
