@@ -27,6 +27,10 @@
 ##      answers, an unbuilt or missing sibling is refused by name, and a set
 ##      variable is said to be unused -- the host prefix is never linked;
 ##   5. nix mode does not consult the arm.
+##
+## The last suite resolves a real catalog package through its arm:
+## `zstd-dev`, whose two halves nixpkgs splits across its `dev` and `out`
+## outputs, so the prefix a dev shell exports joins them.
 
 import std/[os, sequtils, strutils, unittest]
 
@@ -34,6 +38,11 @@ import repro_interface_artifacts
 import repro_project_dsl
 import repro_project_dsl/install_mirror_resolver
 import repro_tool_profiles
+# Imported for its REGISTRATION side effect: the catalog's `zstd-dev` is the
+# real package the "catalog packages" suite resolves.
+{.push warning[UnusedImport]: off.}
+import repro_dsl_stdlib/packages/zstd_dev
+{.pop.}
 
 const
   Triple = "armv7-unknown-linux-gnueabihf"
@@ -339,3 +348,101 @@ suite "the environmentPrefix provisioning arm":
         checkpoint(message)
         check Variable notin message
         check "not this build host" notin message))
+
+proc zstdDevConsumer(): ProjectInterfaceArtifact =
+  ProjectInterfaceArtifact(projectInterface: toProjectInterface(PackageDef(
+    packageName: "zstdDevConsumer",
+    toolUses: @[PackageUseDef(rawConstraint: "zstd-dev",
+      packageSelector: "zstd-dev", executableName: "zstd-dev",
+      depKind: DepKindTarget)]), registeredPackages()))
+
+proc makeNixpkgsZstdOutputs(root: string): tuple[dev, lib, joined: string] =
+  ## nixpkgs' zstd as its outputs lay it out: `zstd.h` and the pkg-config
+  ## file in `dev`, the shared library in `out`, and the joined prefix a dev
+  ## shell builds from both with `symlinkJoin` (directories real, files
+  ## links into the outputs).
+  result = (dev: root / "zstd-1.5.7-dev", lib: root / "zstd-1.5.7",
+    joined: root / "zstd-dev-prefix")
+  createDir(result.dev / "include")
+  createDir(result.dev / "lib" / "pkgconfig")
+  writeFile(result.dev / "include" / "zstd.h", "size_t ZSTD_compress();\n")
+  writeFile(result.dev / "lib" / "pkgconfig" / "libzstd.pc", "Libs: -lzstd\n")
+  createDir(result.lib / "lib")
+  writeFile(result.lib / "lib" / "libzstd.so.1.5.7",
+    elfObject(hostMachine(), "zstd"))
+  createSymlink("libzstd.so.1.5.7", result.lib / "lib" / "libzstd.so.1")
+  createSymlink("libzstd.so.1", result.lib / "lib" / "libzstd.so")
+  createDir(result.joined / "include")
+  createDir(result.joined / "lib" / "pkgconfig")
+  createSymlink(result.dev / "include" / "zstd.h",
+    result.joined / "include" / "zstd.h")
+  createSymlink(result.dev / "lib" / "pkgconfig" / "libzstd.pc",
+    result.joined / "lib" / "pkgconfig" / "libzstd.pc")
+  for name in ["libzstd.so", "libzstd.so.1", "libzstd.so.1.5.7"]:
+    createSymlink(result.lib / "lib" / name, result.joined / "lib" / name)
+
+proc resolveZstdDev(prefix: string; pathDir = ""): PathOnlyToolProfile =
+  var profile: PathOnlyToolProfile
+  withEnv("ZSTD_DEV_PREFIX", prefix, proc() =
+    profile = pathOnlyBuildIdentity(zstdDevConsumer(), pathDir).profiles[0])
+  profile
+
+proc zstdDevRefusal(prefix: string; pathDir = ""): string =
+  var message = ""
+  try:
+    discard resolveZstdDev(prefix, pathDir)
+  except CatchableError as e:
+    message = e.msg
+  message
+
+suite "catalog packages realized through their environmentPrefix arm":
+  test "zstd-dev declares a path-mode arm for its joined prefix":
+    let use = zstdDevConsumer().projectInterface.toolUses[0]
+    check use.environmentPrefixProvisioning.len == 1
+    let arm = use.environmentPrefixProvisioning[0]
+    check arm.variable == "ZSTD_DEV_PREFIX"
+    check arm.libraries == @["libzstd"]
+    check arm.headers == @["zstd.h"]
+    check useDeclaresProvisioningArm(use, tpmPathOnly)
+
+  test "zstd-dev resolves in path mode from a joined dev and lib prefix":
+    # The defect: path mode refused every `uses: "zstd-dev"` because the
+    # package had no realization there, and the `zstd` CLI on PATH is not it.
+    let tmp = freshTmp()
+    defer: removeDir(tmp)
+    let outputs = makeNixpkgsZstdOutputs(tmp)
+    # A `zstd` program on PATH changes nothing: it is the CLI package.
+    let pathDir = tmp / "bin"
+    createDir(pathDir)
+    writeFile(pathDir / "zstd-dev", "#!/bin/sh\n")
+    setFilePermissions(pathDir / "zstd-dev",
+      {fpUserRead, fpUserWrite, fpUserExec})
+    withTarget("", proc() =
+      let profile = resolveZstdDev(outputs.joined, pathDir)
+      check profile.installMethod == "environment-prefix"
+      check profile.cpathList == @[outputs.joined / "include"]
+      check profile.libraryPathList == @[outputs.joined / "lib"]
+      check profile.pkgConfigSearchList ==
+        @[outputs.joined / "lib" / "pkgconfig"]
+      check profile.lockIdentity.startsWith(
+        "environment-prefix:ZSTD_DEV_PREFIX=" & outputs.joined))
+
+  test "zstd-dev refuses a prefix that holds only one of its outputs":
+    let tmp = freshTmp()
+    defer: removeDir(tmp)
+    let outputs = makeNixpkgsZstdOutputs(tmp)
+    withTarget("", proc() =
+      # The library output alone, which is what `ZSTD_PREFIX` names in
+      # reprobuild's own Nix package: no header.
+      let libOnly = zstdDevRefusal(outputs.lib)
+      checkpoint(libOnly)
+      check "ZSTD_DEV_PREFIX=" & outputs.lib in libOnly
+      check "include/zstd.h" in libOnly
+      # The dev output alone: no library.
+      let devOnly = zstdDevRefusal(outputs.dev)
+      checkpoint(devOnly)
+      check "holds no libzstd" in devOnly
+      # Unset: refused naming the variable.
+      let unset = zstdDevRefusal("")
+      checkpoint(unset)
+      check "ZSTD_DEV_PREFIX is not set" in unset)
