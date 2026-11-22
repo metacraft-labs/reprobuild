@@ -2606,6 +2606,15 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
         flag store is string,
           help = "The source store (default: the user's, under the user " &
             "cache directory)"
+      subcmd "check",
+          help = "Report the native overrides, unmapped native " &
+            "dependencies and binaries of a lock's nimble: packages, " &
+            "offline":
+        flag lock is string,
+          help = "The lock (default: repro.lock in the current directory)"
+        flag store is string,
+          help = "The source store (default: the user's, under the user " &
+            "cache directory)"
     subcmd "deps", help = "Refresh and check scanner-inferred dependencies":
       subcmd "refresh",
           help = "Scan the workspace and rewrite repro.scanned-deps.nim":

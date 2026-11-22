@@ -230,7 +230,7 @@ const
     # The Nimble index generator's verbs.
     "repro catalog generate", "repro catalog verify",
     # The Nimble package catalog's client verbs.
-    "repro nimble", "repro nimble verify",
+    "repro nimble", "repro nimble verify", "repro nimble check",
     # One provisioned tool of the project, realized on its own.
     "repro tool", "repro tool realize"]
     ## The commands whose flags and environment variables are compared:
