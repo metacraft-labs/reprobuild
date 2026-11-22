@@ -397,7 +397,13 @@
       # mountable description uses nim-cli-spec's `cliUnbound` instead of a
       # copy of its own, so it needs nim-cli-spec fcd5b30 (`clispec/splice`),
       # the revision this flake pins.
-      url = "github:metacraft-labs/io-mon/8b8faa81bb0cad5d2d91fae80ceaaa7092782ec2";
+      # Bumped 8b8faa81 -> b1c32599 (2026-11-22, io-mon `agents`): the Linux
+      # preload shim compiles for AArch64 again. 14345cc (inside the previous
+      # pin) declared the x86-64-only site-table global unguarded, so every
+      # linux-arm64 source build stopped at "undeclared identifier:
+      # 'SiteTableView'". The range also keeps a late inline scan on the
+      # startup scan's instruction boundaries (c4ab263).
+      url = "github:metacraft-labs/io-mon/b1c32599f9cd671b150f68de2b21bdc9ae0c42be";
       flake = false;
     };
     nim-shm-gset-src = {
