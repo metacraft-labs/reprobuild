@@ -2282,7 +2282,8 @@ proc rustCrudeFallback(projectRoot: string;
   ## Mode B emitter for Rust projects that can't take the Mode A path
   ## (§"Recognition" in Rust.md: a ``build.rs``, a non-member dependency,
   ## a feature, ...). Delegates the default target to
-  ## ``cargo build --release --locked --offline`` and the ``test`` target to
+  ## ``cargo build --release --locked --offline --workspace`` and the
+  ## ``test`` target to
   ## ``cargo test --release --locked --offline --workspace --no-fail-fast``
   ## (both through the thin cargo edge, sized by ``-j``), under
   ## io-monitor monitoring per the M6 spec.
@@ -2307,12 +2308,20 @@ proc rustCrudeFallback(projectRoot: string;
       packageName = projectRoot.extractFilename
     if packageName.len == 0:
       packageName = "rust-crude"
+    # ``--workspace`` (Rust.md, "Mode B", the argv table): without it
+    # ``cargo build`` at a workspace root builds only cargo's default
+    # members, which for a root manifest with a ``[package]`` table is that
+    # package and what it depends on, so a member it does not depend on
+    # would go unbuilt while Mode A builds every member (issue
+    # 2026-11-19-rust-mode-b-runs-cargo-build-without-workspace). For a
+    # single package the flag selects that package, as before.
     let cargoArgv = @[
       cargoExe,
       "build",
       "--release",
       "--locked",
       "--offline",
+      "--workspace",
     ]
     # The thin cargo edge (``libs/repro_cargo_edge``, Build-Engine-And-
     # Scheduler.md "Integration tiers" -> Cargo). cargo stays the build system;
