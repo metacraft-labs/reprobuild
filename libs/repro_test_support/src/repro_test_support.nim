@@ -730,6 +730,30 @@ proc daemonSocketEndpoint*(name: string): string =
   else:
     "/tmp" / (name & ".sock")
 
+proc selectTestOwnedEndpointScope() =
+  ## THE ENDPOINT IS THE TEST'S OWN, SO ITS POLICY IS ``private``. A daemon
+  ## the test starts in a directory the test user owns is, by the spec's
+  ## "Explicit private POSIX rendezvous", a ``RUNQUOTA_ENDPOINT_SCOPE=
+  ## private`` endpoint. Under the host scope that endpoint is judged
+  ## against the ``runquota`` account's uid on a host that has one, and the
+  ## daemon refuses it (``refusing a path owned by uid 1000 ... configured
+  ## daemon owner uid 953``) -- correctly for a host daemon, wrongly for a
+  ## test. The daemon and the ``repro`` children it serves inherit this
+  ## process's environment, so selecting the scope here puts the daemon and
+  ## every client on one policy without each fixture repeating it. A scope
+  ## the test (or a test about the host policy) already chose is left alone.
+  ##
+  ## BOTH WAYS A FIXTURE OBTAINS AN ENDPOINT CALL THIS, and that is the
+  ## reason it is a proc of its own: ``runquotaSocketEndpoint`` (a socket
+  ## name) and ``runquotaRendezvousDir`` (a directory the caller appends its
+  ## socket to). The scope was first selected in the former only, and every
+  ## fixture built on the latter -- ``t_every_launch_path_is_monitored``'s
+  ## L2/L3/L3b among them -- kept the host scope and was refused on a host
+  ## with a ``runquota`` account.
+  when defined(posix):
+    if not existsEnv("RUNQUOTA_ENDPOINT_SCOPE"):
+      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+
 proc runquotaSocketEndpoint*(name: string): string =
   ## Per-test ``runquotad --socket`` argument that always lands on the
   ## right transport: a Unix socket inside a private per-test directory
@@ -742,21 +766,9 @@ proc runquotaSocketEndpoint*(name: string): string =
   ## product's own daemon spawn, because a test that binds somewhere the
   ## shipped code would not is a test of something nobody runs.
   ##
-  ## THE ENDPOINT IS THE TEST'S OWN, SO ITS POLICY IS ``private``. A daemon
-  ## the test starts in a directory the test user owns is, by the spec's
-  ## "Explicit private POSIX rendezvous", a ``RUNQUOTA_ENDPOINT_SCOPE=
-  ## private`` endpoint. Under the host scope that endpoint is judged
-  ## against the ``runquota`` account's uid on a host that has one, and the
-  ## daemon refuses it (``refusing a path owned by uid 1000 ... configured
-  ## daemon owner uid 953``) -- correctly for a host daemon, wrongly for a
-  ## test. Every fixture obtains its endpoint here, and the daemon and the
-  ## ``repro`` children it spawns inherit this process's environment, so
-  ## selecting the scope here puts the daemon and every client on one
-  ## policy without each fixture repeating it. A scope the test (or a test
-  ## about the host policy) already chose is left alone.
-  when defined(posix):
-    if not existsEnv("RUNQUOTA_ENDPOINT_SCOPE"):
-      putEnv("RUNQUOTA_ENDPOINT_SCOPE", "private")
+  ## The endpoint is the test's own, so this selects the ``private`` scope
+  ## (``selectTestOwnedEndpointScope``).
+  selectTestOwnedEndpointScope()
   runquotaEndpointPath(name)
 
 const RunquotaRendezvousSocketNameBudget* = 24
@@ -837,7 +849,15 @@ proc runquotaRendezvousDir*(root: string): string =
   ## ``<root>/ep``. Not before: the name is predictable, and a recursive
   ## removal registered for a path somebody else planted (a symlink, say)
   ## would be pointed by them.
+  ##
+  ## THE SCOPE IS SELECTED BEFORE THE DIRECTORY IS PROVISIONED. The
+  ## rendezvous is the test's own, so its policy is ``private``
+  ## (``selectTestOwnedEndpointScope``), and ``ensureEndpointDir`` creates
+  ## and verifies under whichever policy is in force when it runs: selected
+  ## afterwards, the directory would be made ``0750`` for the host's
+  ## ``runquota`` group and judged against the ``runquota`` account's uid.
   result = root / "ep"
+  selectTestOwnedEndpointScope()
   when defined(posix):
     let relocated = result.len + 1 + RunquotaRendezvousSocketNameBudget >=
       sizeof(Sockaddr_un().sun_path)
