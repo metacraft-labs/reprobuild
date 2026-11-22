@@ -4481,6 +4481,15 @@ proc removalTakesEntry(removalRoot, targetRoot: string): bool =
   let entry = entryAtDepthOf(targetRoot, removalRoot)
   entry.len > 0 and isSameEntryOnDisk(removalRoot, entry)
 
+proc cwdRemovalRoot(action: BuildAction): string =
+  ## The action's working directory as `removalTakesEntry` compares it with
+  ## a removal location: absolute (the process's own cwd when the action
+  ## declares none) and resolved to its physical directory.
+  result = normalizeWriteRoot(canonicalPolicyPath(
+    absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
+  when defined(windows):
+    result = result.toLowerAscii()
+
 var
   containmentMemoDepth {.threadvar.}: int
   containmentMemo {.threadvar.}: Table[string, Option[string]]
@@ -5010,10 +5019,7 @@ proc validateGraph(g: BuildGraph) =
       if raw.len == 0:
         raiseEngine("optional output path is empty for " & action.id)
       let removalRoot = outputRemovalLocation(action.cwd, raw)
-      var cwdRoot = normalizeWriteRoot(canonicalPolicyPath(
-        absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
-      when defined(windows):
-        cwdRoot = cwdRoot.toLowerAscii()
+      let cwdRoot = cwdRemovalRoot(action)
       if removalTakesEntry(removalRoot, cwdRoot):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
@@ -5053,10 +5059,7 @@ proc validateGraph(g: BuildGraph) =
   for action in g.actions:
     if action.removeBeforeRun.len == 0:
       continue
-    var cwdRoot = normalizeWriteRoot(canonicalPolicyPath(
-      absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
-    when defined(windows):
-      cwdRoot = cwdRoot.toLowerAscii()
+    let cwdRoot = cwdRemovalRoot(action)
     var owned = initHashSet[string]()
     for output in action.outputs & action.optionalOutputs &
         action.declaredOutputs:
@@ -10658,6 +10661,23 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
 
 proc scratchDirProblem*(action: BuildAction): string =
   ## Why emptying the action's scratch directories would be unsafe, or "".
+  ##
+  ## A scratch directory is emptied before the action runs
+  ## (`resetScratchDirs`), so it may not be close to a filesystem root,
+  ## contain the action's cwd, or overlap a declared input or output.
+  ## Build-Engine-And-Scheduler.md §"Scratch directories".
+  ##
+  ## Two judgements, and a directory must pass both. The first compares the
+  ## containment keys (`scratchRoots`) by spelling, and also covers the
+  ## canonical work tree. The second judges each declared scratch directory
+  ## by the ENTRY ON DISK that emptying it removes, as the optional-output
+  ## and removed-before-run checks do (`removalTakesEntry`): a spelling says
+  ## nothing about which directory it reaches. `../work` under a cwd
+  ## `<T>/work` is the cwd itself, a walk far enough up is `/`, and on a
+  ## filesystem that folds case (macOS's default APFS, Windows, a Linux
+  ## `casefold` directory) `<T>/WORK` is the same directory as `<T>/work`.
+  ## Each of those passed the first judgement, and the engine then emptied
+  ## the working directory, an input or the filesystem root.
   let roots = action.scratchRoots()
   if roots.len == 0:
     return ""
@@ -10683,6 +10703,38 @@ proc scratchDirProblem*(action: BuildAction): string =
   for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     let why = overlaps(output, "declared output")
     if why.len > 0: return why
+  # On disk. `outputRemovalLocation` names the entry `resetScratchDirs`
+  # removes: the spelling `materialPath` gives, its parent resolved through
+  # the filesystem, its last component not followed (a scratch directory
+  # that is a link is unlinked, not emptied through).
+  if action.scratchDirs.allIt(it.len == 0):
+    return ""
+  let cwdRoot = cwdRemovalRoot(action)
+  # Each declared path resolved once, not once per scratch directory: the
+  # resolution walks the filesystem, and an action may declare many inputs.
+  var declared: seq[tuple[path, what, location: string]] = @[]
+  for input in action.inputs:
+    declared.add((path: input, what: "declared input",
+                  location: outputRemovalLocation(action.cwd, input)))
+  for output in action.outputs & action.optionalOutputs &
+      action.declaredOutputs:
+    declared.add((path: output, what: "declared output",
+                  location: outputRemovalLocation(action.cwd, output)))
+  for dir in action.scratchDirs:
+    if dir.len == 0:
+      continue
+    let location = outputRemovalLocation(action.cwd, dir)
+    if location.count('/') < 2:
+      return "scratch directory '" & dir & "' (" & location & ") is too " &
+        "close to a filesystem root to empty"
+    if removalTakesEntry(location, cwdRoot):
+      return "scratch directory '" & dir & "' (" & location & ") contains " &
+        "the action's cwd"
+    for other in declared:
+      if removalTakesEntry(location, other.location) or
+          removalTakesEntry(other.location, location):
+        return "scratch directory '" & dir & "' (" & location & ") " &
+          "overlaps the action's " & other.what & " '" & other.path & "'"
   ""
 
 # `removeTreeNoFollow` and `removePathNoFollow` live in
@@ -10829,8 +10881,14 @@ proc resetScratchDirs*(action: BuildAction): string =
       continue
     let physical = extendedPath(materialPath(action.cwd, dir))
     try:
-      if dirExists(physical):
-        removeTreeNoFollow(physical)
+      # A scratch directory that is itself a link (a symlink, or a junction
+      # on Windows) is unlinked, never emptied through: `scratchDirProblem`
+      # judges the entry, not the link's target, so a link to the cwd or an
+      # input passes it. `removeTreeNoFollow` lists what its argument
+      # resolves to and would empty the target; `removePathNoFollow`
+      # removes the link itself and leaves the target alone.
+      if dirExists(physical) or symlinkExists(physical):
+        removePathNoFollow(physical)
       createDir(physical)
     except CatchableError as err:
       return "cannot empty scratch directory '" & dir & "': " & err.msg
