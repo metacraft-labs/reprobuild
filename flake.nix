@@ -438,7 +438,11 @@
       # the shard inserts target, `insertShardIndex` names it, and an insert
       # into a drained target counts a growth failure and grows past it.
       # flattenChain bounds its range by `insertShardIndex`.
-      url = "github:metacraft-labs/nim-shm-gset/fc0c74478d945161574a9fc49389c8fd65f09d2e";
+      # Bumped fc0c744 -> 803a4fa (2026-11-22, `agents`): a reader handle
+      # remembers a shard index it found retired and no longer stats it on
+      # every walk, so a lookup by an engine that attached after a flatten
+      # performs no syscall once warm.
+      url = "github:metacraft-labs/nim-shm-gset/803a4faa23f985ad9697437603436f2f784072be";
       flake = false;
     };
     nim-shm-queue-src = {

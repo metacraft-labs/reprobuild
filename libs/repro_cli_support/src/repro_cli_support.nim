@@ -74182,8 +74182,9 @@ proc roleHistoryRewriteFailure(declared: tuple[role, branch: string];
       declaredFor & ", and this update is not a fast-forward: it would make " &
       discarded & " unreachable there, including " & remoteOldOid)
 
-proc verifyCommittedLockDependencySet*(repoRoot: string):
-    tuple[examined, stale, unverified: bool;
+proc verifyCommittedLockDependencySet*(repoRoot: string;
+    workspaceRoot = ""):
+    tuple[examined, stale, unverified, engineOlderThanEnvelope: bool;
           evidence, remediation: string]
   ## Forward declaration; defined beside ``unreachedDevelopSiblings``, whose
   ## solve-completeness rule it shares with ``repro lock refresh``.
@@ -75623,13 +75624,16 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # Not asked when stage 0a has already refused for an absent sibling
     # outside a workspace: the derivation could not run truthfully, and its
     # compile is exactly what that refusal exists to spare.
-    var depSet: tuple[examined, stale, unverified: bool;
+    var depSet: tuple[examined, stale, unverified,
+                      engineOlderThanEnvelope: bool;
                       evidence, remediation: string]
     if not needsWorkspace:
       try:
-        depSet = verifyCommittedLockDependencySet(parsed.currentRepo)
+        depSet = verifyCommittedLockDependencySet(parsed.currentRepo,
+          parsed.workspaceRoot)
       except CatchableError as err:
         depSet = (examined: true, stale: false, unverified: true,
+          engineOlderThanEnvelope: false,
           evidence: "the dependency set could not be verified: " & err.msg,
           remediation: "investigate the failure (" & err.msg &
             "), then re-push")
@@ -75638,6 +75642,10 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: currentRepoPath,
         property:
           if depSet.stale: "committed_lock_dependency_set_stale"
+          # §13.5 (amended 2026-11-22): its own property, so the refusal is
+          # recognisable — the anchor cannot trail an envelope bump unnoticed.
+          elif depSet.engineOlderThanEnvelope:
+            "gate_engine_older_than_interface_envelope"
           else: "committed_lock_dependency_set_unverified",
         remediation: depSet.remediation,
         evidence: depSet.evidence,
@@ -96941,11 +96949,93 @@ proc foldProviderSolverInputs(projectDir: string;
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
 
+type EngineEnvelopeSkew = object
+  ## The engine running a recipe read is OLDER than the interface envelope
+  ## the recipe's SDK writes (Unified-Locking-And-Hooks.md §13.5, "An engine
+  ## older than the interface envelope", amended 2026-11-22).
+  found: bool
+  written: int        ## the version the SDK writes
+  readable: int       ## the newest version this engine reads
+  sdkRoot: string     ## the reprobuild tree the recipe compiled against
+  engine: string      ## this engine, as the hooks would name it
+
+proc engineEnvelopeSkewOf(failure, projectDir: string): EngineEnvelopeSkew =
+  ## Is ``failure`` (a recipe read of ``projectDir`` that did not complete)
+  ## the decode of an envelope newer than this engine? Recognised only from
+  ## the refusal ``unsupportedInterfaceEnvelopeMessage`` writes, and only when
+  ## the SDK the recipe compiled against declares that very version (or
+  ## declares none this reader can see): a garbled envelope that merely
+  ## carries a large number is a malformed artifact, not a newer engine's.
+  let skew = interfaceEnvelopeSkewIn(failure)
+  if not skew.found: return
+  let sdkRoot =
+    try: recipeSdkRoot(absolutePath(projectDir))
+    except CatchableError: ""
+  let declared = sdkWrittenInterfaceEnvelopeVersion(sdkRoot)
+  if declared > 0 and declared != skew.written: return
+  EngineEnvelopeSkew(found: true, written: skew.written,
+    readable: skew.readable, sdkRoot: sdkRoot,
+    engine:
+      try: publicCliImagePath()
+      except CatchableError: getAppFilename())
+
+proc engineBuiltFromSdkCommand(sdkRoot: string): string =
+  ## A shell word that evaluates to a `repro` built from ``sdkRoot``, runnable
+  ## from any directory: the flake's default package when the tree is a
+  ## flake (the route the distribution spec uses before any pin moves). ""
+  ## when there is no flake to build it from.
+  if sdkRoot.len == 0 or not fileExists(extendedPath(sdkRoot / "flake.nix")):
+    return ""
+  "\"$(nix build --no-link --print-out-paths " &
+    quoteShellPosix(sdkRoot & "#default") & ")/bin/repro\""
+
+proc engineEnvelopeSkewSentence(skew: EngineEnvelopeSkew): string =
+  ## What happened, naming both versions, the engine and the SDK.
+  "the engine reading the recipe (" & skew.engine & ") reads interface " &
+    "envelopes up to version " & $skew.readable & ", but the reprobuild " &
+    "tree the recipe compiles against (" &
+    (if skew.sdkRoot.len > 0: skew.sdkRoot else: "unknown") &
+    ") writes version " & $skew.written & ": this engine is OLDER than " &
+    "that tree's interface envelope, so it cannot read a recipe compiled " &
+    "against it. The recipe itself is not at fault"
+
+proc engineEnvelopeSkewRemedy(skew: EngineEnvelopeSkew;
+    verbArgs: string): string =
+  ## The remedy, runnable where printed: run ``verbArgs`` (a `repro` verb and
+  ## its arguments) with an engine built from the SDK tree. Without a flake
+  ## to build from, the tree's own build is named instead.
+  let built = engineBuiltFromSdkCommand(skew.sdkRoot)
+  if built.len > 0:
+    "build an engine from that tree and run it: `" & built & " " & verbArgs &
+      "`"
+  elif skew.sdkRoot.len > 0:
+    "build `repro` from " & remedyProsePath(skew.sdkRoot) & " (its " &
+      "CONTRIBUTING.md: `just build` in its development shell) and run `" &
+      remedyPathWord(skew.sdkRoot / "build" / "bin" / "repro") & " " &
+      verbArgs & "`"
+  else:
+    "run `repro " & verbArgs & "` with a build of reprobuild that reads " &
+      "interface envelope version " & $skew.written
+
 proc unreadableRecipeLockRefusal(recipe, failure: string): string =
   ## Why a refresh refuses to write: the recipe's solve could not be read,
   ## so no lock written now would carry its packages or producer pins.
-  "could not read the solve of " & recipe & ", so a lock written now " &
-    "would record none of its packages or the workspace producers its " &
+  ##
+  ## When the read failed because this engine is older than the envelope
+  ## the recipe's SDK writes, that is said FIRST, with the remedy: no edit
+  ## to the recipe can clear it, and a reader told only "could not read the
+  ## solve" looks at the recipe.
+  let dir =
+    if dirExists(extendedPath(recipe)): recipe else: recipe.parentDir
+  let skew = engineEnvelopeSkewOf(failure, dir)
+  let lead =
+    if skew.found:
+      engineEnvelopeSkewSentence(skew) & "; " &
+        engineEnvelopeSkewRemedy(skew, "lock refresh " &
+          remedyPathWord(absolutePath(dir))) & ". "
+    else: ""
+  lead & "could not read the solve of " & recipe & ", so a lock written " &
+    "now would record none of its packages or the workspace producers its " &
     "uses resolve from; refusing to write one (the committed lock is " &
     "left as it is): " & failure
 
@@ -97485,8 +97575,9 @@ proc recipeDependencySet(projectDir: string): RecipeDependencySet =
   except CatchableError as err:
     result.diagnostic = err.msg
 
-proc verifyCommittedLockDependencySet*(repoRoot: string):
-    tuple[examined, stale, unverified: bool;
+proc verifyCommittedLockDependencySet*(repoRoot: string;
+    workspaceRoot = ""):
+    tuple[examined, stale, unverified, engineOlderThanEnvelope: bool;
           evidence, remediation: string] =
   ## Unified-Locking-And-Hooks.md §13.5 / §14.9 — does the committed
   ## ``repro.lock`` at ``repoRoot`` carry exactly the dependencies its
@@ -97547,6 +97638,30 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
     return
   if not derived.ok:
     result.unverified = true
+    # §13.5 (amended 2026-11-22): an engine older than the envelope the
+    # recipe's SDK writes is not an unreadable recipe. It is told apart —
+    # its own property, both versions, and a remedy that can work — because
+    # "make the recipe readable" sent the operator to a recipe that was
+    # readable, and `repro lock refresh` with the same engine fails the same
+    # way. The gate's engine is the hooks' anchor (CLI/hooks.md,
+    # "Re-anchoring is explicit"), so the remedy moves the anchor.
+    let skew = engineEnvelopeSkewOf(derived.diagnostic, root)
+    if skew.found:
+      result.engineOlderThanEnvelope = true
+      let anchorRoot =
+        if workspaceRoot.len > 0: workspaceRoot
+        else:
+          let enclosing = enclosingWorkspaceRoot(root)
+          if enclosing.len > 0: enclosing else: root
+      result.evidence = engineEnvelopeSkewSentence(skew) &
+        " [envelope-written=" & $skew.written & " envelope-readable=" &
+        $skew.readable & " sdk=" & skew.sdkRoot & "]: " & derived.diagnostic
+      result.remediation = "this gate cannot verify " & root /
+        CanonicalProjectFileName & " until the hooks run an engine that " &
+        "reads envelope " & $skew.written & "; move their anchor: " &
+        engineEnvelopeSkewRemedy(skew, "hooks ensure --vcs --re-anchor " &
+          remedyPathWord(anchorRoot)) & ", then re-push"
+      return
     result.evidence = "the dependency set " & root / CanonicalProjectFileName &
       " derives could not be computed: " & derived.diagnostic
     result.remediation = "make the recipe readable — `repro lock refresh " &
@@ -106676,6 +106791,100 @@ proc flakeDeferredCycleNotice(row: FlakeOverrideStateRow; selfName,
     " sibling=" & row.siblingRev & " relation=ahead ahead=" & $row.aheadBy &
     " unpublished=true deferred=mutual-pin]"
 
+# A shared checkout another participating repo pins (Unified-Locking-And-
+# Hooks.md §13.6, amended 2026-11-22). A workspace has ONE checkout of a
+# sibling, and two repos may pin it at two revisions on purpose (two repos
+# pinning one shared modules repo 9 commits apart). Compared with that
+# one checkout, whichever of the two pushed second was refused, and the only
+# way through was to move the checkout between the pushes — which changes what
+# every other push from the workspace is judged against. So a row whose
+# sibling HEAD is the revision another participating repo's COMMITTED lock
+# records for that same sibling is a notice, not a refusal: the checkout is at
+# an equally valid pin, and the verdict no longer depends on push order.
+
+type FlakeCheckoutHolder = object
+  ## The participating repo whose committed lock pins a sibling at the
+  ## revision its shared checkout is at.
+  repo: string        ## its declared name
+  dir: string         ## its checkout
+  lockFiles: seq[string]
+    ## the committed lock(s) that record the revision (`flake.lock`,
+    ## `repro.lock`), for the notice
+
+proc flakeCheckoutHolder(row: FlakeOverrideStateRow;
+    selfRoot, workspaceRoot: string; repos: seq[ResolvedRepo];
+    identity: GitToolIdentity): FlakeCheckoutHolder =
+  ## The other participating repo whose committed lock pins ``row.repo`` at
+  ## ``row.siblingRev``, or an empty holder when none does.
+  ##
+  ## "Pins" is ``committedLockRevisionsOf``, the one rule for "the tested lock
+  ## pins this peer": its `repro.lock` entry for the sibling, or a
+  ## `flake.lock` root input bound to the sibling's checkout by identity. A
+  ## revision another repo records for a DIFFERENT entry does not count.
+  ##
+  ## Not granted, so the row keeps refusing exactly as before:
+  ##   * a sibling HEAD that is not published: another repo's lock naming it
+  ##     would itself be a lock nobody can reproduce;
+  ##   * a lock (or the `flake.nix` its binding reads) with uncommitted
+  ##     changes: an edit in a working tree is not a pin anybody holds;
+  ##   * the pushed repo itself, and the sibling itself.
+  ## A sibling at a third revision, pinned by nobody, is refused as before.
+  let rev = row.siblingRev.toLowerAscii()
+  if rev.len == 0 or row.path.len == 0 or workspaceRoot.len == 0:
+    return
+  if flakeClassifyPublication(identity, row.path, row.siblingRev).unpublished:
+    return
+  for r in repos:
+    if r.name.len == 0 or r.name == row.repo or r.path.len == 0:
+      continue
+    let dir = os.normalizedPath(absolutePath(workspaceRoot / r.path))
+    if cmpPaths(dir, selfRoot) == 0 or not dirExists(extendedPath(dir)):
+      continue
+    # Cheap first: a lock whose text never mentions the revision cannot pin
+    # it, and this loop visits every participating repo.
+    var mentioning: seq[string]
+    for name in [CommittedLockFileName, "flake.lock"]:
+      let path = dir / name
+      if fileExists(extendedPath(path)):
+        try:
+          if readFile(extendedPath(path)).toLowerAscii().contains(rev):
+            mentioning.add(name)
+        except CatchableError:
+          discard  # unreadable: not shown to pin anything
+    if mentioning.len == 0:
+      continue
+    # Committed: the lock files (and `flake.nix`, which binds the flake's
+    # inputs to checkouts) carry no uncommitted change.
+    let status = gitRunPlainQuery(identity, ["-C", dir, "status",
+      "--porcelain", "--untracked-files=no", "--", CommittedLockFileName,
+      "flake.lock", "flake.nix"])
+    if status.code != 0 or status.output.strip().len > 0:
+      continue
+    let pinned = committedLockRevisionsOf(dir, workspaceRoot, repos, row.repo)
+    # A positive answer only: ``ok = false`` speaks about what may be MISSING
+    # from ``revs``, never about a revision a readable lock did record.
+    if rev in pinned.revs:
+      return FlakeCheckoutHolder(repo: r.name, dir: dir, lockFiles: mentioning)
+
+proc flakeCheckoutHeldNotice(row: FlakeOverrideStateRow;
+    holder: FlakeCheckoutHolder; selfName: string): string =
+  ## The notice for a row a shared checkout's other pin holds. It names both
+  ## pins and the repo that holds the checkout's, so an operator who did NOT
+  ## mean the two repos to differ can see it and act.
+  let self = if selfName.len > 0: "'" & selfName & "'" else: "this repo"
+  "flake.lock pin NOT refused — the shared checkout is at another " &
+    "participating repo's pin: " & flakeRowSentence(row) & ". '" &
+    holder.repo & "' pins '" & row.repo & "' at " & shortRev(row.siblingRev) &
+    " in its committed " & holder.lockFiles.join(" and ") & " (" &
+    holder.dir & "), and " & self & " pins it at " & shortRev(row.pinnedRev) &
+    "; the workspace has one checkout of '" & row.repo & "', so it can sit " &
+    "at only one of the two, and each is a revision a committed lock " &
+    "names. If the two repos are meant to agree, re-pin one " &
+    "of them [input=" & row.input & " repo=" & row.repo & " pinned=" &
+    row.pinnedRev & " sibling=" & row.siblingRev & " relation=" &
+    flakePinRelationTag(row.relation) & " pinnedBy=" & holder.repo &
+    " deferred=shared-checkout]"
+
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     identity: GitToolIdentity;
     toolProvisioning: ToolProvisioningMode): FlakeGateVerdict =
@@ -106872,6 +107081,17 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     if flakeRowIsDeferredCycle(cycle, row, identity):
       result.notices.add(flakeDeferredCycleNotice(row, cycle.selfName,
         declaredRevs.getOrDefault(row.input, ""), flakeRoot, workspaceRoot))
+    else:
+      refused.add(row)
+  offenders = refused
+  # §13.6 (amended 2026-11-22) — and the rows whose shared checkout sits at
+  # another participating repo's committed pin (``flakeCheckoutHolder``).
+  refused = @[]
+  for row in offenders:
+    let holder = flakeCheckoutHolder(row, flakeRoot, wsRoot, memberRepos,
+      identity)
+    if holder.repo.len > 0:
+      result.notices.add(flakeCheckoutHeldNotice(row, holder, cycle.selfName))
     else:
       refused.add(row)
   offenders = refused
