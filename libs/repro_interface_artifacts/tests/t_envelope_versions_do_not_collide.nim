@@ -564,6 +564,48 @@ suite "envelope lanes -- a tarball record's ELF relocation begins at v33":
         archiveType: "tar.gz", stripComponents: 1)]
     check interfaceFingerprint(closed) != interfaceFingerprint(plain)
 
+  test "v37 carries the runtime package and extra aliases; v21..v36 " &
+      "decode them empty with every other detail field intact":
+    var pi = withElfRelocation(bothLanesInterface())
+    var row = addr pi.provisioningContributions[0].tarballProvisioning[0]
+    row.detail.elfRuntimePackage = "gcc"
+    row.detail.executableExtraAliases = @["cc"]
+    for v in 21'u16 .. 36'u16:
+      checkpoint "v" & $v
+      let detail = tarballOf(atVersion(pi, v)).detail
+      check detail.elfRuntimePackage == ""
+      check detail.executableExtraAliases.len == 0
+      check detail.version == DetailVersion
+      if v >= 33'u16:
+        check detail.gccSpecDefaults == @["cc1:-fstack-protector-strong"]
+    for v in [37'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let detail = tarballOf(atVersion(pi, v)).detail
+      check detail.elfRuntimePackage == "gcc"
+      check detail.executableExtraAliases == @["cc"]
+      check detail.elfInterpreter == "sysroot/lib64/ld-linux-x86-64.so.2"
+      check detail.gccSpecDefaults == @["cc1:-fstack-protector-strong"]
+      check detail.version == DetailVersion
+      check tarballOf(atVersion(pi, v)).closureManifest == ClosureManifest
+
+  test "a record that declares neither keeps its v36 fingerprint":
+    let plain = bothLanesInterface()
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 36'u16)
+    let relocated = withElfRelocation(plain)
+    check fingerprintBytes(relocated, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(relocated, 36'u16)
+    # The control: naming a runtime package changes what the relocation
+    # points at, so it moves the fingerprint; so does an extra alias.
+    var onRuntime = relocated
+    onRuntime.provisioningContributions[0].tarballProvisioning[0].detail
+      .elfRuntimePackage = "gcc"
+    check interfaceFingerprint(onRuntime) != interfaceFingerprint(relocated)
+    var aliased = plain
+    aliased.provisioningContributions[0].tarballProvisioning[0].detail
+      .executableExtraAliases = @["cc"]
+    check interfaceFingerprint(aliased) != interfaceFingerprint(plain)
+
 suite "envelope lanes -- a tool use's declared platforms begin at v35":
 
   proc withDeclaredPlatforms(pi: ProjectInterface): ProjectInterface =
@@ -651,9 +693,9 @@ suite "envelope lanes -- a tarball record's gem-closure step begins at v36":
     check toolUseRealizationDigest(stepped.toolUses[0]) !=
       toolUseRealizationDigest(plain.toolUses[0])
 
-  test "v36 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v36, so this matrix is extended
-    check interfaceEnvelopeVersion() == 36'u16
+  test "v37 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v37, so this matrix is extended
+    check interfaceEnvelopeVersion() == 37'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

@@ -260,8 +260,10 @@ type
                                         ## drops may be removed from
                                         ## Scoop (only the versions
                                         ## Reprobuild installed, only
-                                        ## when no non-profile root
-                                        ## holds any prefix of the app).
+                                        ## when no root other than
+                                        ## this state directory's own
+                                        ## `profile` roots holds any
+                                        ## prefix of the app).
                                         ## false (the default) leaves
                                         ## every Scoop install in place
                                         ## (Scoop-Catalog-Adapter.md
@@ -2689,8 +2691,8 @@ proc runApplyPlan*(rawOpts: ApplyOptions): PlanPreview =
           let sc = recordedScoopApp(rp)
           if sc.ok and sc.app notin plannedScoopApps and
               not previewedDropped.containsOrIncl(sc.app):
-            let removal = planDroppedScoopRecord(store, rp,
-              opts.uninstallFromScoop)
+            let removal = planDroppedScoopRecord(store, opts.stateDir,
+              rp, opts.uninstallFromScoop)
             result.items.add(PlanItem(
               category: "package",
               name: rp.packageId,
@@ -3504,9 +3506,10 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
             # adapter (`adapter == "scoop"`) and the new generation no longer
             # realizes via Scoop is removed from Scoop only when the apply
             # was given `--uninstall-from-scoop`, only for the versions
-            # Reprobuild installed, and only when no non-profile root holds
-            # any prefix of the app (Scoop-Catalog-Adapter.md § Opt-In
-            # Cleanup Governed by Store GC Roots).
+            # Reprobuild installed, and only when no root other than this
+            # state directory's own `profile` roots holds any prefix of the
+            # app (Scoop-Catalog-Adapter.md § Opt-In Cleanup Governed by
+            # Store GC Roots).
             if hcPackages in owned and opts.uninstallFromScoop:
               var newScoopApps: HashSet[string]
               for r in realized:
@@ -3519,7 +3522,7 @@ proc runApply*(rawOpts: ApplyOptions): ApplyOutcome =
                 if sc.ok and sc.app notin newScoopApps and
                     not handled.containsOrIncl(sc.app):
                   executeScoopRemoval(store,
-                    planDroppedScoopRecord(store, rp, true))
+                    planDroppedScoopRecord(store, opts.stateDir, rp, true))
             # Same for managed blocks.
             var newBlockKeys: seq[string]
             for mb in appliedManagedBlocks:

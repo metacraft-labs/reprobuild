@@ -47,8 +47,7 @@ const quotedInSource = [
   "REPRO_ALLOW_PIN_REGRESSION",
   "TEST_CERTIFICATES_HOOK",
   "--no-certify",
-  "--check-set",
-  "--current-repo"]
+  "--check-set"]
 
 proc cliSource(): string =
   ## Everything the guide's messages can come from, as one text, with string

@@ -4881,10 +4881,11 @@ const DefaultBuildCollectionName* = "default"
   ## equivalent, while a literal `repro build build` would have read
   ## like an authoring mistake.
 
-proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
-                            declaredActions: openArray[BuildActionDef];
-                            targets: Table[string, BuildTargetDef];
-                            selectors: openArray[string]): HashSet[string] =
+proc selectProviderActionsAndRoots*(snapshot: ProviderGraphSnapshot;
+    declaredActions: openArray[BuildActionDef];
+    targets: Table[string, BuildTargetDef];
+    selectors: openArray[string]):
+    tuple[selected: HashSet[string]; roots: seq[string]] =
   ## The provider action ids a build of ``selectors`` materializes, by the
   ## rules of CLI/build.md §"Target Selection" and Build-Graph-Collections.md.
   ## ``declaredActions`` are the snapshot's declared actions with their dependencies
@@ -4907,6 +4908,11 @@ proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
   ## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md: the
   ## plan kept a resolver of its own that lacked the collection-member form
   ## and treated a fragment-less path as selecting nothing).
+  ##
+  ## ``roots`` is what each non-empty selector resolved to (an action id or
+  ## a build-target name), deduplicated, in selector order; empty when no
+  ## selector was given. A sharded test run partitions the test commands
+  ## these roots name directly.
   # A seq copy: the nested procs below capture it, and an ``openArray``
   # parameter cannot be captured.
   let actions = @declaredActions
@@ -4965,7 +4971,7 @@ proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
     let excludedActionIds = excludedByBuildRules()
     for action in actions:
       if not excludedActionIds.contains(action.id):
-        result.incl(action.id)
+        result.selected.incl(action.id)
     return
 
   var byId = initTable[string, BuildActionDef]()
@@ -5224,7 +5230,16 @@ proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
       skippingExcluded = false
     else:
       includeClosure(root)
-  selected
+  result.selected = selected
+  result.roots = resolvedRoots
+
+proc selectProviderActions*(snapshot: ProviderGraphSnapshot;
+                            declaredActions: openArray[BuildActionDef];
+                            targets: Table[string, BuildTargetDef];
+                            selectors: openArray[string]): HashSet[string] =
+  ## The selection alone (``selectProviderActionsAndRoots``).
+  selectProviderActionsAndRoots(snapshot, declaredActions, targets,
+    selectors).selected
 
 proc lowerProviderSnapshot*(snapshot: ProviderGraphSnapshot;
                             identity: PathOnlyBuildIdentity;
@@ -34348,6 +34363,10 @@ type
       ## Each non-empty selector the part was planned for, with the actions
       ## that selector alone materializes, in selector order. Empty when the
       ## part was planned for no name (a fragment-less path selector).
+    roots*: seq[string]
+      ## What each selector resolved to, in selector order (a provider
+      ## action id or a build-target name): a sharded run partitions the
+      ## test commands they name directly.
 
   CertificatePlan* = object
     ## A plan as the certificate query sees it. ``noCertify`` is
@@ -34421,8 +34440,10 @@ proc certificatePlanPart*(snapshot: ProviderGraphSnapshot;
   let declared = graph.actions
   result.targets = graph.targets
   let inferred = inferDeclaredActionDeps(declared, projectRoot)
-  result.materialized = selectProviderActions(snapshot, inferred,
+  let selection = selectProviderActionsAndRoots(snapshot, inferred,
     result.targets, selectors)
+  result.materialized = selection.selected
+  result.roots = selection.roots
   var nonEmpty: seq[string] = @[]
   for selector in selectors:
     if selector.len > 0 and nonEmpty.find(selector) < 0:
@@ -92406,35 +92427,9 @@ proc writeShardReport(path: string; meta: JsonNode) =
   writeFile(path, meta.pretty() & "\n")
 
 ## ----------------------------------------------------------------------------
-## CI-Sharding M2 deviation fix — workspace-driven discovery, build, and
-## ct-test-runner handoff. Replaces the M2 ``--fixture-from=<JSON>`` deviation
-## with the real reprobuild integration the M3 benchmark milestone depends on.
-##
-## The three helpers below mirror the M2 follow-up bullets in
-## ``CI-Sharding.milestones.org``:
-##
-##   1. ``discoverTestEdgesFromWorkspace`` — walks the engine's normalised
-##      graph artefact (via ``prepareBuildGraphInspection``) and returns one
-##      ``ShardTestEdge`` per declared ``NimUnittestBinary`` action plus the
-##      build-action graph that backs the edges' closures.
-##   2. ``buildClosureForShard`` — delegates to ``runBuildCommand`` (the
-##      Named-Targets M2 resolver) to build the ``:test`` aggregate.  The
-##      simpler whole-aggregate path is acceptable here because the M3
-##      benchmark milestone is the one that optimises build-phase
-##      parallelism.
-##   3. ``invokeCtTestRunner`` — locates the sibling ct-test-runner (mirroring
-##      ``scripts/run_tests.sh``'s cut-over rule from Test-Edges M4) or the
-##      fallback ``tools/test-runner/repro_test_runner`` and invokes it with
-##      the assigned binary paths as positional arguments — that gives
-##      whole-binary sharding without requiring per-test protocol probing.
-
-type
-  WorkspaceTestDiscovery = object
-    actions: seq[ShardBuildAction]
-    edges: seq[ShardTestEdge]
-    edgeBinaryPath: Table[NodeId, string]
-      ## Maps each test-edge root id to the binary stem (``build/test-bin/<stem>``)
-      ## the engine emits for that edge.  Populated from ``typedOutputs.path``.
+## CI-Sharding — the workspace-driven shard (no ``--fixture-from``) is
+## ``runWorkspaceModeShard``, defined after the certifying build it shares
+## with an unsharded ``repro test`` (Test-Certificates TC-8e).
 
 proc stableNodeIdFromString(value: string): NodeId =
   ## Deterministic 64-bit id derived from an action id string.  We use the
@@ -92443,239 +92438,6 @@ proc stableNodeIdFromString(value: string): NodeId =
   ## reproducible across shards (every shard recomputes the plan locally,
   ## per CI-Sharding.md §"CI Sharding").
   nodeId(cast[uint64](hashes.hash(value)))
-
-proc isNimUnittestBinaryEdge(action: BuildAction): bool =
-  for typedOutput in action.typedOutputs:
-    for typeName in typedOutput.types:
-      if typeName == "NimUnittestBinary":
-        return true
-  false
-
-proc nimUnittestBinaryPath(action: BuildAction): string =
-  for typedOutput in action.typedOutputs:
-    for typeName in typedOutput.types:
-      if typeName == "NimUnittestBinary":
-        return typedOutput.path
-  ""
-
-proc discoverTestEdgesFromWorkspace(projectRoot: string;
-                                    publicCliPath: string;
-                                    mode: ToolProvisioningMode = tpmUnspecified):
-    WorkspaceTestDiscovery =
-  ## Walks the engine's normalised graph artefact for ``projectRoot`` and
-  ## returns one ``ShardTestEdge`` per action whose typed-output type is
-  ## ``NimUnittestBinary``.  The whole build-action graph is returned as
-  ## ``actions`` so the planner can walk the dependency closures when
-  ## costing each edge.
-  result.edgeBinaryPath = initTable[NodeId, string]()
-  let info = prepareBuildGraphInspection(projectRoot, mode,
-    publicCliPath, selectDefaultAction = false)
-  # Build a unique-id table so we don't double-add an action that appears
-  # multiple times in ``info.actions`` (the engine returns one entry per
-  # action id but defensive code is cheap).
-  var seenIds = initHashSet[NodeId]()
-  for action in info.actions:
-    let nid = stableNodeIdFromString(action.id)
-    if nid in seenIds:
-      continue
-    seenIds.incl(nid)
-    var deps: seq[NodeId] = @[]
-    for depId in action.deps:
-      deps.add(stableNodeIdFromString(depId))
-    result.actions.add(ShardBuildAction(
-      id: nid,
-      commandStatsId: action.commandStatsId,
-      deps: deps))
-  # Test edges: actions whose typedOutputs declare ``NimUnittestBinary``.
-  # Use a separate id space for the edge root (hash of "test:" + actionId)
-  # so the planner's ``PartitionRoot.id`` and the build-graph node id never
-  # collide on the same NodeId — the bridge node the planner adds for the
-  # root would otherwise overwrite the action's real node.
-  for action in info.actions:
-    if not isNimUnittestBinaryEdge(action):
-      continue
-    let buildActionId = stableNodeIdFromString(action.id)
-    let edgeId = stableNodeIdFromString("test::" & action.id)
-    let binaryPath = nimUnittestBinaryPath(action)
-    result.edges.add(ShardTestEdge(
-      id: edgeId,
-      selector: action.id,
-      # Without the `.exe` the typed output names on Windows, so one test's
-      # history keys the same on every host (`testHistoryKeyForBinary`).
-      historyKey: testHistoryKeyForBinary(binaryPath),
-      buildDeps: @[buildActionId]))
-    result.edgeBinaryPath[edgeId] = binaryPath
-
-proc writeWorkspacePartitionFile(path: string;
-                                 binaryPaths: openArray[string]) =
-  ## Writes the per-shard partition file in the ct-test-runner format:
-  ## one fully-qualified test name per line.  For the workspace path we
-  ## record the binary stem (whole-binary sharding) which the runner
-  ## treats as an opaque-binary entry; this matches the documented format
-  ## while still being trivial to author from the test-edge metadata.
-  var lines: seq[string] = @[]
-  lines.add(
-    "# CI-Sharding M2 workspace partition file " &
-    "— one fully-qualified test per line.")
-  for binPath in binaryPaths:
-    let stem = splitFile(binPath).name
-    if stem.len > 0:
-      lines.add(stem)
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent):
-    createDir(parent)
-  writeFile(path, lines.join("\n") & "\n")
-
-proc buildClosureForShard(assignedSelectors: seq[string];
-                          publicCliPath: string;
-                          mode: ToolProvisioningMode = tpmUnspecified;
-                          lockFlag = ""):
-    tuple[code: int; output: string] =
-  ## Builds the closure of the assigned test edges via ``runBuildCommand``.
-  ## The strategy note in the milestone documents the trade-off: building
-  ## the whole ``:test`` aggregate is simpler than computing the union of
-  ## per-shard closures and lets the engine's existing dedup do its job;
-  ## M3 will optimise this once the benchmark milestone is on the table.
-  ##
-  ## ``lockFlag`` (Workspace-Manifest-Optional MO-13, correcting MO-1) is the
-  ## ``--lock=<file>`` carry-through. When set, the sharded build PINS the
-  ## locked solved graph — the sharded run builds against the LOCKED
-  ## revisions, exactly like the verb-alias path already did — rather than
-  ## re-solving from live inputs.
-  if assignedSelectors.len == 0:
-    return (0, "")
-  let bin =
-    if publicCliPath.len > 0 and fileExists(publicCliPath): publicCliPath
-    else: stablePublicCliPath()
-  doAssert fileExists(bin), "repro binary missing at " & bin
-  var buildArgs = @["build", TestCollectionSelector]
-  if mode != tpmUnspecified:
-    buildArgs.add("--tool-provisioning=" & modeName(mode))
-  if lockFlag.len > 0:
-    buildArgs.add(lockFlag)
-  let p = startProcess(bin,
-    workingDir = getCurrentDir(),
-    args = buildArgs,
-    options = {poUsePath, poStdErrToStdOut})
-  defer: p.close()
-  var buf = ""
-  let outp = p.outputStream
-  var line = newStringOfCap(120)
-  while true:
-    if outp.readLine(line):
-      buf.add(line)
-      buf.add("\n")
-    else:
-      let code = p.peekExitCode()
-      if code != -1:
-        return (code, buf)
-
-proc locateCtTestRunner(): string =
-  ## Prefer an explicitly installed ``ct-test-runner`` binary and otherwise
-  ## fall back to ``tools/test-runner/repro_test_runner`` (the M3 internal
-  ## protocol-level runner). Returns ``""`` when neither is available — the
-  ## caller surfaces a diagnostic.
-  let exeExt = when defined(windows): ".exe" else: ""
-  let fromEnv = getEnv("CT_TEST_RUNNER")
-  if fromEnv.len > 0 and fileExists(fromEnv):
-    return absolutePath(fromEnv)
-  let fromPath = findExe("ct-test-runner" & exeExt)
-  if fromPath.len > 0:
-    return fromPath
-  let fallback = "build" / "bin" / "repro_test_runner" & exeExt
-  if fileExists(fallback):
-    return absolutePath(fallback)
-  let toolsFallback = "tools" / "test-runner" / "repro_test_runner" & exeExt
-  if fileExists(toolsFallback):
-    return absolutePath(toolsFallback)
-  ""
-
-proc invokeCtTestRunner(runnerBin, binDir, partitionFile, summaryJson,
-                        resultsDir: string;
-                        threads: int;
-                        assignedBinaryPaths: seq[string]):
-    tuple[code: int; output: string] =
-  ## Spawns the located runner with the per-shard parameters.  Passes
-  ## assigned binary paths positionally (the runner skips ``--bin-dir``
-  ## scanning when positionals are supplied, per its ``main`` proc).  We
-  ## pass ``--partition`` too so the run is documented end-to-end even
-  ## when positionals would otherwise have selected the same set — that
-  ## keeps the partition file as a load-bearing input rather than a
-  ## post-hoc record.
-  var args: seq[string] = @[]
-  args.add("run")
-  args.add("--bin-dir=" & binDir)
-  args.add("--summary-json=" & summaryJson)
-  args.add("--results-dir=" & resultsDir)
-  if threads > 0:
-    args.add("--threads=" & $threads)
-  args.add("--no-build")  # Build phase already completed via repro build.
-  for binPath in assignedBinaryPaths:
-    args.add(binPath)
-  let p = startProcess(runnerBin,
-    workingDir = getCurrentDir(),
-    args = args,
-    options = {poUsePath, poStdErrToStdOut})
-  defer: p.close()
-  var buf = ""
-  let outp = p.outputStream
-  var line = newStringOfCap(120)
-  while true:
-    if outp.readLine(line):
-      buf.add(line)
-      buf.add("\n")
-    else:
-      let code = p.peekExitCode()
-      if code != -1:
-        return (code, buf)
-
-proc discoveryToShardPlanRequest(disc: WorkspaceTestDiscovery;
-                                 shardCount: int;
-                                 selectors: seq[string]): ShardPlanRequest =
-  result.shardCount = shardCount
-  result.targetSelectors = selectors
-  result.policy = sipIndependent
-  result.fallbackBuildCostNs = 1_000_000_000'i64
-  result.fallbackTestCostNs = 1_000_000_000'i64
-  result.refinementPasses = DefaultRefinementPasses
-  result.buildActions = disc.actions
-  result.testEdges = disc.edges
-
-proc edgesAssignedToShardWorkspace(disc: WorkspaceTestDiscovery;
-                                   plan: ShardPlan;
-                                   shardIndex: int): seq[ShardTestEdge] =
-  var byId = initTable[NodeId, ShardTestEdge]()
-  for e in disc.edges:
-    byId[e.id] = e
-  for a in plan.partition.assignments:
-    if a.shardIndex == shardIndex and byId.hasKey(a.root):
-      result.add(byId[a.root])
-
-proc loadSummaryJsonOrNull(path: string): JsonNode =
-  if path.len == 0 or not fileExists(path):
-    return newJNull()
-  try:
-    return parseJson(readFile(path))
-  except CatchableError:
-    return newJNull()
-
-proc summarizeTestResults(summary: JsonNode): tuple[passed, failed: int] =
-  ## Reads ``summary["summary"]["passed"]`` / ``["failed"]`` (the schema the
-  ## ct-test-runner / repro_test_runner writes).  Returns ``(0, 0)`` on a
-  ## null / malformed document so callers can still write a report.
-  if summary.isNil or summary.kind != JObject:
-    return (0, 0)
-  if not summary.hasKey("summary"):
-    return (0, 0)
-  let s = summary["summary"]
-  if s.kind != JObject:
-    return (0, 0)
-  result.passed =
-    if s.hasKey("passed") and s["passed"].kind == JInt: s["passed"].getInt()
-    else: 0
-  result.failed =
-    if s.hasKey("failed") and s["failed"].kind == JInt: s["failed"].getInt()
-    else: 0
 
 proc shardLockProvenance(opts: ReproTestShardOpts):
     tuple[lockPath, inputsDigest: string; packageCount: int; found: bool] =
@@ -92862,200 +92624,6 @@ proc runFixtureModeShard(opts: ReproTestShardOpts;
   if buildFailed:
     return 1
   if failed > 0:
-    return 1
-  0
-
-proc runWorkspaceModeShard(opts: ReproTestShardOpts;
-                           peer: PeerCacheSpecResult;
-                           publicCliPath: string): int =
-  ## Workspace-driven shard runner.  Discovers real test edges via the
-  ## engine's normalised graph artefact, builds the closure via
-  ## ``repro build test``, and hands off to ct-test-runner with the
-  ## assigned binaries.  Replaces the M2 ``--fixture-from`` deviation
-  ## for the on-the-suite case the M3 benchmark milestone depends on.
-  var disc: WorkspaceTestDiscovery
-  try:
-    disc = discoverTestEdgesFromWorkspace(".", publicCliPath,
-      opts.toolProvisioning)
-  except CatchableError as exc:
-    emitShardDiagnostic(
-      "workspace test-edge discovery failed: " & exc.msg)
-    return 2
-  if disc.edges.len == 0:
-    emitShardDiagnostic(
-      "workspace test-edge discovery returned no NimUnittestBinary " &
-      "edges; nothing to shard.  (Did you mean to pass --fixture-from?)")
-    return 2
-
-  var plan: ShardPlan
-  var planMeta: ShardPlanRequest
-  if opts.planFromPath.len > 0:
-    try:
-      let loaded = readPartitionPlanJson(opts.planFromPath)
-      plan = loaded.plan
-      planMeta = loaded.meta
-    except PartitionPlanReadError as exc:
-      emitShardDiagnostic("failed to read partition plan: " & exc.msg)
-      return 2
-  else:
-    let shardCount =
-      if opts.shardCount > 0: opts.shardCount
-      else: 1
-    let req = discoveryToShardPlanRequest(disc, shardCount, opts.selectors)
-    plan = planTestShards(req)
-    planMeta = req
-
-  if opts.emitPlanPath.len > 0:
-    try:
-      writePartitionPlanJson(plan, opts.emitPlanPath, planMeta)
-    except CatchableError as exc:
-      emitShardDiagnostic("failed to write partition plan: " & exc.msg)
-      return 1
-    return 0
-
-  if opts.shardCount == 0:
-    emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
-    return 2
-
-  let peerCacheMode = modeName(peer.kind)
-  let assignedEdges =
-    edgesAssignedToShardWorkspace(disc, plan, opts.shardIndex)
-  var assignedBinaryPaths: seq[string] = @[]
-  var assignedSelectors: seq[string] = @[]
-  for e in assignedEdges:
-    assignedSelectors.add(e.selector)
-    if disc.edgeBinaryPath.hasKey(e.id):
-      assignedBinaryPaths.add(disc.edgeBinaryPath[e.id])
-
-  # ----- Build phase: build the :test aggregate.  See the milestone
-  # strategy note for why we don't compute per-shard closures here.
-  let buildStart = epochTime()
-  var buildFailed = false
-  let buildRes = buildClosureForShard(assignedSelectors, publicCliPath,
-    opts.toolProvisioning, opts.lockFlag)
-  if buildRes.code != 0:
-    buildFailed = true
-    stderr.writeLine("repro test: workspace build phase failed " &
-      "(exit " & $buildRes.code & ")")
-    stderr.write(buildRes.output)
-  let buildElapsedNs = int64((epochTime() - buildStart) * 1_000_000_000.0)
-
-  # ----- Partition file: written before the test phase so the
-  # per-shard report can reference it even when the runner skips it.
-  let partitionFilePath =
-    "test-logs" / ("partition-" & $opts.shardIndex & "-of-" &
-      $opts.shardCount & ".txt")
-  writeWorkspacePartitionFile(partitionFilePath, assignedBinaryPaths)
-
-  # ----- Test phase: locate ct-test-runner (or the internal fallback),
-  # invoke with the assigned binary set.
-  let summaryJson =
-    "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
-      $opts.shardCount & "-summary.json")
-  let resultsDir =
-    "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
-      $opts.shardCount & "-results")
-  if not dirExists(resultsDir):
-    createDir(resultsDir)
-  let runnerBin = locateCtTestRunner()
-  let testStart = epochTime()
-  var runnerOutput = ""
-  var runnerCode = 0
-  var runnerInvoked = false
-  if buildFailed:
-    discard
-  elif runnerBin.len == 0:
-    stderr.writeLine("repro test: no ct-test-runner located " &
-      "(checked CT_TEST_RUNNER, PATH, build/bin/repro_test_runner, " &
-      "tools/test-runner/repro_test_runner). " &
-      "Build a runner before sharding.")
-    runnerCode = 1
-  elif assignedBinaryPaths.len == 0:
-    # Nothing assigned to this shard — still write a summary record.
-    discard
-  else:
-    runnerInvoked = true
-    let invocation = invokeCtTestRunner(runnerBin,
-      "build/test-bin", partitionFilePath, summaryJson, resultsDir,
-      0, assignedBinaryPaths)
-    runnerCode = invocation.code
-    runnerOutput = invocation.output
-  let testElapsedNs = int64((epochTime() - testStart) * 1_000_000_000.0)
-
-  let runnerSummary = loadSummaryJsonOrNull(summaryJson)
-  let counts = summarizeTestResults(runnerSummary)
-
-  let predictedNs = predictedShardCostNs(plan, opts.shardIndex)
-  let actualNs = buildElapsedNs + testElapsedNs
-  let delta =
-    if predictedNs > 0:
-      (float(actualNs) - float(predictedNs)) / float(predictedNs)
-    else:
-      0.0
-  let driftThreshold = 0.5
-  let drift = abs(delta) > driftThreshold
-
-  # Build the per-test results array from the runner's summary, so the
-  # per-shard report carries per-test outcomes (not just aggregate
-  # counts).
-  var testResults = newJArray()
-  if runnerSummary.kind == JObject and runnerSummary.hasKey("tests") and
-      runnerSummary["tests"].kind == JArray:
-    for entry in runnerSummary["tests"].elems:
-      testResults.add(entry)
-
-  var report = newJObject()
-  report["schemaId"] = %"reprobuild.shard-report.v1"
-  report["shard"] = %opts.shardIndex
-  report["shardCount"] = %opts.shardCount
-  report["strategy"] = %opts.strategy
-  report["peer_cache"] = %peerCacheMode
-  report["fixture_path"] = %""  # workspace mode — no fixture
-  report["mode"] = %"workspace"
-  addShardLockProvenance(report, opts)
-  report["runner_binary"] = %runnerBin
-  report["runner_invoked"] = %runnerInvoked
-  report["runner_exit_code"] = %runnerCode
-  report["summary_json"] = %summaryJson
-  if not runnerSummary.isNil and runnerSummary.kind != JNull:
-    report["runner_summary"] = runnerSummary
-  else:
-    report["runner_summary"] = newJNull()
-  var assignedNames = newJArray()
-  for sel in assignedSelectors:
-    assignedNames.add(%sel)
-  report["assigned_selectors"] = assignedNames
-  var assignedBins = newJArray()
-  for p in assignedBinaryPaths:
-    assignedBins.add(%p)
-  report["assigned_binaries"] = assignedBins
-  report["predicted_shard_cost_ns"] = %predictedNs
-  report["predicted_build_time_ns"] = %0
-  report["predicted_test_time_ns"] = %0
-  report["actual_build_time_ns"] = %buildElapsedNs
-  report["actual_test_time_ns"] = %testElapsedNs
-  report["actual_total_time_ns"] = %actualNs
-  report["cost_model_delta"] = %delta
-  report["cost_model_drift"] = %drift
-  report["build_failed"] = %buildFailed
-  report["tests"] = testResults
-  report["test_pass_count"] = %counts.passed
-  report["test_fail_count"] = %counts.failed
-  report["partition_file"] = %partitionFilePath
-  report["degraded_plan"] = %plan.degraded
-  report["unknown_build_count"] = %plan.unknownBuildCount
-  report["unknown_test_count"] = %plan.unknownTestCount
-
-  let reportPath =
-    if opts.reportPath.len > 0: opts.reportPath
-    else:
-      "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
-        $opts.shardCount & ".json")
-  writeShardReport(reportPath, report)
-
-  if buildFailed:
-    return 1
-  if counts.failed > 0 or runnerCode != 0:
     return 1
   0
 
@@ -93402,15 +92970,15 @@ proc readSetFromMonitorDepFiles(paths: openArray[string];
 
 proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
     commands: seq[seq[string]]; readSet: CapturedReadSet;
-    workspaceRoot, certificateOut: string): bool =
+    workspaceRoot, certificateOut: string): string =
   ## Confirm the tested state for one passing node, then build, sign, deliver
-  ## and note its certificate. Returns true when one was issued; every
-  ## refusal is printed with its remedy.
+  ## and note its certificate. Returns "" when one was issued, else why
+  ## not; every refusal is also printed with its remedy.
   let tested = confirmTestedState(pre, readSet)
   if tested.reason != tswNone:
     stderr.writeLine("repro test: no certificate for '" & name & "' — " &
       $tested.reason & ": " & tested.message & " — " & tested.remedy)
-    return false
+    return $tested.reason & ": " & tested.message
   if tested.note.len > 0:
     stderr.writeLine("repro test: " & tested.note)
   var confirmed = pre
@@ -93424,14 +92992,15 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
     stderr.writeLine("repro test: no certificate for '" & name & "' — the " &
       "daemon could not sign it (" & err.msg & "); the attestation is " &
       "withheld")
-    return false
+    return "the daemon could not sign it (" & err.msg & ")"
   let delivered = publishCertificateToLocalStore(cert, pre.repository,
     signatureMade = true)
   if delivered.error.len > 0:
     stderr.writeLine("repro test: no certificate for '" & name & "' — it " &
       "was issued but could not be written to the local certificate store: " &
       delivered.error)
-    return false
+    return "it could not be written to the local certificate store: " &
+      delivered.error
   if delivered.retentionProblem.len > 0:
     stderr.writeLine("repro test: " & delivered.retentionProblem)
   for problem in delivered.pruned.errors:
@@ -93446,7 +93015,7 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
     (if certificateOut.len > 0: " (copy: " & certificateOut & ")" else: "") &
     " (signed " & certificateSignatureAlgorithm & ", key_id=" & cert.keyId &
     ", " & $cert.commands.len & " command(s))")
-  true
+  ""
 
 proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
@@ -93710,32 +93279,102 @@ proc reportLockUpdateRefusal(state: LockUpdateNodeState; rerun: string) =
     ", so the tested content does not carry the locks a commit of it " &
     "would have to record; the tests ran, and the exit code is theirs")
 
-proc runCertifyingTestBuild(opts: ReproTestShardOpts;
-                            publicCliPath: string): int =
-  ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
-  ## issuance for the certificate-producing nodes the plan materializes (see
-  ## the block comment above). The build is ``opts``'s build command line
-  ## (``testBuildArgs``).
-  let mode =
-    if opts.toolProvisioning == tpmUnspecified: tpmPathOnly
-    else: opts.toolProvisioning
-  let workRoot = opts.workRoot
-  var selectors = opts.selectors
+type
+  CertifyingPlanOutcome = enum
+    cpoReady
+      ## The plan was read; the run can proceed.
+    cpoExit
+      ## Stop with ``exitCode``; the reason was printed.
+    cpoUnknownSelector
+      ## A selector is unknown or ambiguous (``problem``). The build reports
+      ## the same error in its ordinary form.
+    cpoUnreadable
+      ## The plan's certificate-producing nodes could not be read
+      ## (``problem``).
 
-  # 1. The plan: the stored graph, as ``repro certificates plan`` reads it.
-  var info: BuildGraphInspection
-  var part: CertificatePlanPart
-  var names: seq[string]
-  # The selectors the certifying build is given: the resolved anchor
-  # (``./repro.nim#<name>``, ``bareNameAnchor``) and the extra names, exactly as the
-  # resolution above produced them. Not ``names``: a bare anchor name that
-  # also names a directory (``test`` beside a ``test/`` directory) would be
-  # classified as a path again by the build.
-  var buildSelectors: seq[string]
-  # What the user typed, and the resolved anchor, so a selector that
-  # certifies nothing is named in the user's spelling.
-  var spellings: seq[string]
-  var anchorSelector = ""
+  CertifyingPlan = object
+    ## What a ``repro test`` / ``repro certify`` run materializes, read from
+    ## the stored graph before anything runs (TC-8e, step 1). Both the
+    ## unsharded run and every shard of a sharded one start from it.
+    outcome: CertifyingPlanOutcome
+    exitCode: int
+    problem: string
+    selectors: seq[string]
+      ## The selectors the run materializes: the user's, or, for
+      ## ``repro certify`` with none, the names the branch rule requires
+      ## (every declared name when no rule applies).
+    names: seq[string]
+      ## The names those selectors resolve to (the anchor and the extras).
+    buildSelectors: seq[string]
+      ## The selectors an unsharded run hands its build
+      ## (``anchoredBuildSelectors``).
+    spellings: seq[string]
+      ## What the user typed, so a selector that certifies nothing is named
+      ## in the user's spelling.
+    anchorSelector: string
+      ## The resolved anchor.
+    info: BuildGraphInspection
+    part: CertificatePlanPart
+    nodes: seq[CertificatePlanNode]
+      ## The certificate-producing nodes the selection materializes.
+    unselected: seq[string]
+      ## The project's marked nodes the selection does not materialize.
+
+  ShardScope = object
+    ## The share of a sharded run (``--shard k/N``) this process executes.
+    ## Inactive for an unsharded run, which executes its whole selection.
+    active: bool
+    label: string
+      ## ``shard k/N``, for messages.
+    assigned: seq[string]
+      ## The test commands the partition assigned to this shard, as provider
+      ## action ids.
+    buildSelectors: seq[string]
+      ## The selectors that materialize exactly those test commands (and
+      ## the closure that builds what they need).
+
+  NodeCertificateOutcome = object
+    ## What a run did about one certificate-producing node.
+    name: string
+    issued: bool
+    detail: string
+      ## Why no certificate was issued; "" when one was.
+
+  CertifyingRun = object
+    ## The outcome of ``executeCertifyingPlan``.
+    code: int
+      ## The build's exit code: withholding never changes it.
+    delivered: bool
+      ## The build delivered its per-action outcome.
+    records: Table[string, ExecutedActionRecord]
+      ## That outcome, by engine action id.
+    certificates: seq[NodeCertificateOutcome]
+
+proc anchoredBuildSelectors(resolved: ResolvedPositionalSelectors): seq[string] =
+  ## The selectors a build is handed for ``resolved``: the resolved anchor
+  ## (``./repro.nim#<name>``, ``bareNameAnchor``) and the extra names, exactly
+  ## as the resolution produced them. Not the bare names: a bare anchor name
+  ## that also names a directory (``test`` beside a ``test/`` directory)
+  ## would be classified as a path again by the build. An extra name the
+  ## build would classify as a path again (one that carries ``#``, ``.`` or
+  ## ``/``, such as the member shorthand ``test#unit`` taken from a second
+  ## ``.#test#unit`` selector, or a dotted action id) is handed over anchored
+  ## on the same project, so the build selects exactly what the plan
+  ## resolved.
+  let anchorBase = splitTarget(resolved.target).base
+  result = @[resolved.target]
+  for extra in resolved.extraNameSelectors:
+    result.add(
+      if classifyBuildSelector(extra).kind == bskPath:
+        (if anchorBase.len > 0: anchorBase else: ".") & "#" & extra
+      else: extra)
+
+proc prepareCertifyingPlan(opts: ReproTestShardOpts; mode: ToolProvisioningMode;
+                           publicCliPath: string): CertifyingPlan =
+  ## TC-8e, step 1: the plan, from the stored graph, as ``repro certificates
+  ## plan`` reads it. Runs nothing but the provider's graph evaluation.
+  let workRoot = opts.workRoot
+  result.selectors = opts.selectors
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch
@@ -93749,7 +93388,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
     let bypassRunQuota = opts.bypassRunQuota
     var autoRunQuota = startAutoRunQuotaIfNeeded(bypassRunQuota)
     defer: releaseAutoRunQuotaProcess(autoRunQuota)
-    if selectors.len == 0 and opts.certifyExplicit:
+    if result.selectors.len == 0 and opts.certifyExplicit:
       # TC-9c: ``repro certify`` with no names materializes the names the
       # current branch's rule requires, read from the ``[certificate_policy]``
       # snapshot of the working tree being certified, for the branch a commit
@@ -93770,7 +93409,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
           of brkOther: target.name
         if requirement.error.len > 0 and requirement.source == gpsSnapshot:
           stderr.writeLine("repro certify: " & requirement.error)
-          return 2
+          result.outcome = cpoExit
+          result.exitCode = 2
+          return
         if requirement.source == gpsSnapshot:
           for req in requirement.requires:
             if req.certificate notin ruleNames:
@@ -93788,71 +93429,206 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
         stderr.writeLine("repro certify: the branch rule could not be read (" &
           err.msg & "); certifying every declared name")
       for name in ruleNames:
-        selectors.add(name)
-      if selectors.len == 0:
+        result.selectors.add(name)
+      if result.selectors.len == 0:
         let declared = prepareBuildGraphInspection(".", mode, publicCliPath,
           selectDefaultAction = false, workRoot = workRoot,
           lowerGraph = false, bypassRunQuotaExplicit = bypassRunQuota)
         for entry in aggregateCertificateExportTable(declared.snapshot).entries:
-          if selectors.find(entry.name) < 0:
-            selectors.add(entry.name)
-      if selectors.len == 0:
+          if result.selectors.find(entry.name) < 0:
+            result.selectors.add(entry.name)
+      if result.selectors.len == 0:
         stderr.writeLine("repro certify: this project declares no " &
           "certificate-producing node (see 'repro certificates list'); " &
           "nothing to certify")
-        return 2
+        result.outcome = cpoExit
+        result.exitCode = 2
+        return
     let typedSelectors =
-      if selectors.len == 0: @[TestCollectionSelector] else: selectors
+      if result.selectors.len == 0: @[TestCollectionSelector]
+      else: result.selectors
     let resolved = parseAndResolveSelectors(typedSelectors, "repro test")
-    anchorSelector = resolved.target
+    result.anchorSelector = resolved.target
     # The name the build selects through the anchor, exactly as the build
     # derives it (``parseBuildTarget``): a legacy ``<dir>#<module>`` anchor
     # selects a module, not an action, and a fragment-less path selects no
     # name at all, which the plan then reads as the whole default graph.
     let anchorName = parseBuildTarget(resolved.target).selectedActionId
     if anchorName.len > 0:
-      names.add(anchorName)
+      result.names.add(anchorName)
     for typed in typedSelectors:
-      spellings.add(typed)
+      result.spellings.add(typed)
     for name in resolved.extraNameSelectors:
-      if names.find(name) < 0:
-        names.add(name)
-    # An extra name the build would classify as a path again (one that
-    # carries ``#``, ``.`` or ``/``, such as the member shorthand
-    # ``test#unit`` taken from a second ``.#test#unit`` selector) is
-    # handed over anchored on the same project, so the build selects
-    # exactly what the plan resolved.
-    let anchorBase = splitTarget(resolved.target).base
-    buildSelectors = @[resolved.target]
-    for extra in resolved.extraNameSelectors:
-      buildSelectors.add(
-        if classifyBuildSelector(extra).kind == bskPath:
-          (if anchorBase.len > 0: anchorBase else: ".") & "#" & extra
-        else: extra)
-    info = prepareBuildGraphInspection(resolved.target, mode, publicCliPath,
-      selectDefaultAction = false, workRoot = workRoot, lowerGraph = false,
-      bypassRunQuotaExplicit = bypassRunQuota)
-    part = certificatePlanPart(info.snapshot, info.projectRoot, names)
+      if result.names.find(name) < 0:
+        result.names.add(name)
+    result.buildSelectors = anchoredBuildSelectors(resolved)
+    result.info = prepareBuildGraphInspection(resolved.target, mode,
+      publicCliPath, selectDefaultAction = false, workRoot = workRoot,
+      lowerGraph = false, bypassRunQuotaExplicit = bypassRunQuota)
+    result.part = certificatePlanPart(result.info.snapshot,
+      result.info.projectRoot, result.names)
   except BuildTargetUnknownError, BuildTargetAmbiguousError:
-    # The build reports the same selector error in its ordinary form.
-    return plainTestBuild(opts, selectors, publicCliPath)
+    result.outcome = cpoUnknownSelector
+    result.problem = getCurrentExceptionMsg()
+    return
   except CatchableError as err:
-    stderr.writeLine("repro test: no certificate — the plan's " &
-      "certificate-producing nodes could not be read (" & err.msg & ")")
-    return plainTestBuild(opts, selectors, publicCliPath)
-  let nodes = planCertificateNodes(CertificatePlan(parts: @[part]))
-  var unselected: seq[string]
-  for entry in part.certificates.entries:
+    result.outcome = cpoUnreadable
+    result.problem = err.msg
+    return
+  result.nodes = planCertificateNodes(CertificatePlan(parts: @[result.part]))
+  for entry in result.part.certificates.entries:
     var planned = false
-    for node in nodes:
+    for node in result.nodes:
       if node.name == entry.name: planned = true
-    if not planned and unselected.find(entry.name) < 0:
-      unselected.add(entry.name)
-  if nodes.len == 0:
-    let code = plainTestBuild(opts, selectors, publicCliPath)
-    reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
-    reportUnselectedCertificates(unselected)
-    return code
+    if not planned and result.unselected.find(entry.name) < 0:
+      result.unselected.add(entry.name)
+  result.outcome = cpoReady
+
+proc certifyingPlanTestCommands(plan: CertifyingPlan): seq[string] =
+  ## The test commands the selection runs, as provider action ids, in
+  ## selection and declaration order: the edges each selected root names
+  ## directly — every edge a selected target groups, nested targets included,
+  ## or the edge itself for a selected edge. Everything else the selection
+  ## materializes builds what they need. These are the roots a sharded run
+  ## partitions (CI-Sharding.md §"The Joint Partitioning Problem": test edges
+  ## are the roots, their closures the build work), and they are what
+  ## ``certificateNodeMembers`` calls a marked node's test commands, so a
+  ## node is wholly inside one shard exactly when all of its members are.
+  for root in plan.part.roots:
+    let members =
+      if plan.part.targets.hasKey(root):
+        certificateNodeMembers(plan.part, cnkTarget, root)
+      else: @[root]
+    for id in members:
+      if result.find(id) < 0:
+        result.add(id)
+
+proc collectingBuild(opts: ReproTestShardOpts; selectors: seq[string];
+                     publicCliPath: string;
+                     augmenter: BuildGraphAugmenter = nil):
+    tuple[code: int; delivered: bool;
+          records: Table[string, ExecutedActionRecord]] =
+  ## ``repro build`` of ``selectors`` with ``opts``'s build command line
+  ## (``testBuildArgs``), in this process, with its per-action outcome
+  ## collected (a build with an outcome sink never routes to the daemon,
+  ## whose protocol carries no per-action results).
+  let collector = ActionOutcomeCollector()
+  withCallerVariants(opts):
+    result.code = runBuildCommand(testBuildArgs(opts, selectors),
+      publicCliPath, actionOutcomeSink = collectorSink(collector),
+      graphAugmenter = augmenter)
+  result.delivered = collector.delivered
+  result.records = collector.records
+
+proc withholdCertificates(run: var CertifyingRun;
+                          runs: seq[CertificateNodeRun]; why: string) =
+  ## Record that no node of ``runs`` was certified, for ``why``.
+  for r in runs:
+    run.certificates.add(NodeCertificateOutcome(name: r.node.name,
+      detail: why))
+
+proc reportShardNotJudged(run: var CertifyingRun; scope: ShardScope;
+    partial: seq[tuple[name: string; here, total: int]];
+    elsewhere: seq[string]) =
+  ## The closing lines of a shard: the certificate-producing nodes it did not
+  ## judge, and why.
+  ##
+  ## This, ``withholdCertificates`` and ``collectingBuild`` are top-level
+  ## procs rather than nested procs of ``executeCertifyingPlan`` to avoid a
+  ## Nim compiler defect under ``--mm:orc`` and ``--mm:arc`` (seen with Nim
+  ## 2.2.4, 2.2.8 and a 2.3.1-based fork; ``--mm:refc`` is unaffected): when
+  ## a proc calls a nested closure on an early-``return`` path and later
+  ## creates an anonymous closure over a local declared after that
+  ## ``return``, the captured local is read through a nil environment and the
+  ## program dies with SIGSEGV, whether or not the early return is taken.
+  ## The smallest form:
+  ##
+  ## .. code-block:: nim
+  ##   proc f(n: int): int =
+  ##     proc rep(): int = n
+  ##     if n == 0:
+  ##       discard rep()
+  ##       return
+  ##     var taken = false
+  ##     let cb = proc() = taken = true
+  ##     cb()
+  ##     ord(taken)
+  ##
+  ## Here the anonymous closure is the lock-update node's ``afterApply``
+  ## callback, over ``pre`` / ``preTaken``; with ``collectingBuild`` nested,
+  ## every certifying run crashed in ``takePreconditions``. Do not call a
+  ## nested closure on an early-return path of ``executeCertifyingPlan``
+  ## until the compiler is fixed.
+  for p in partial:
+    let detail = scope.label & " ran " & $p.here & " of its " & $p.total &
+      " test commands; a certificate rests on one run of all of them"
+    stderr.writeLine("repro test: no certificate for '" & p.name &
+      "' from this shard — " & detail & " (the other " &
+      $(p.total - p.here) & " are assigned to other shards); run " &
+      "'repro certify " & p.name & "' without --shard to certify it")
+    run.certificates.add(NodeCertificateOutcome(name: p.name,
+      detail: detail))
+  if elsewhere.len > 0:
+    stderr.writeLine("repro test: not certified by " & scope.label & ": " &
+      elsewhere.join(", ") & " (none of their test commands is assigned " &
+      "to this shard)")
+    for name in elsewhere:
+      run.certificates.add(NodeCertificateOutcome(name: name,
+        detail: "none of its test commands is assigned to " & scope.label))
+
+proc executeCertifyingPlan(opts: ReproTestShardOpts; publicCliPath: string;
+                           plan: CertifyingPlan;
+                           scope: ShardScope): CertifyingRun =
+  ## TC-8e, steps 2 to 6: run ``plan`` (or, for a shard, the share of it
+  ## ``scope`` assigns) through the build engine in this process and issue
+  ## for every certificate-producing node it judges. The build is
+  ## ``opts``'s build command line (``testBuildArgs``).
+  ##
+  ## An unsharded run judges every node the plan materializes. A shard
+  ## judges only the nodes whose every test command is assigned to it: a
+  ## certificate attests one observed run of all of a node's test commands
+  ## (Standard §6.2), and a shard that ran only some of them observed no such
+  ## run. Each node it does not judge is named, with how many of its test
+  ## commands this shard ran; the shards' partial results are not combined
+  ## into a certificate (Test-Certificates.md §"Issuance on a sharded run").
+  let part = plan.part
+  let info = plan.info
+
+  # 0. The nodes this run judges.
+  var judged: seq[CertificatePlanNode]
+  var partial: seq[tuple[name: string; here, total: int]]
+  var elsewhere: seq[string]
+  for node in plan.nodes:
+    if not scope.active:
+      judged.add(node)
+      continue
+    let members = certificateNodeMembers(part, node.nodeKind, node.node)
+    var here = 0
+    for id in members:
+      if scope.assigned.find(id) >= 0:
+        inc here
+    if here == members.len:
+      judged.add(node)
+    elif here == 0:
+      elsewhere.add(node.name)
+    else:
+      partial.add((node.name, here, members.len))
+  let selectors =
+    if scope.active: scope.buildSelectors else: plan.buildSelectors
+
+  if judged.len == 0:
+    if scope.active:
+      let built = collectingBuild(opts, selectors, publicCliPath)
+      result.code = built.code
+      result.delivered = built.delivered
+      result.records = built.records
+      reportShardNotJudged(result, scope, partial, elsewhere)
+    else:
+      result.code = plainTestBuild(opts, plan.selectors, publicCliPath)
+      reportSelectorsCertifyingNothing(part, plan.nodes, plan.spellings,
+        plan.anchorSelector)
+    reportUnselectedCertificates(plan.unselected)
+    return
 
   # 2. The issuance preconditions (TC-8d) for the repository the plan builds.
   let currentRepo =
@@ -93918,21 +93694,22 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
 
   # 3. The incremental no-op, per name: a name the local store already
   # certifies for this content on this platform is not issued again. When
-  # every selector is such a name, nothing runs at all. When the lock-update
-  # node is about to rewrite a lock, the content is not yet known, so nothing
-  # is covered.
+  # every selector is such a name, an unsharded run runs nothing at all; a
+  # shard still runs its assignment, which the other shards do not. When the
+  # lock-update node is about to rewrite a lock, the content is not yet
+  # known, so nothing is covered.
   var covered: seq[string]
   if preTaken and pre.kind == ipOk:
     let algorithmName = parseContentId(pre.content).algorithmName
     let existing = findCertificatesInLocalStore(stateWithKnownContent(
       [KnownContentId(algorithm: algorithmName, id: pre.content)]))
-    for node in nodes:
+    for node in judged:
       if certificateNoOpDecision(existing.certificates, pre, @[node.name],
           opts.certTraceDir, info.projectRoot,
           defaultCachePath(info.projectRoot)):
         covered.add(node.name)
-    var allCovered = covered.len > 0
-    for name in names:
+    var allCovered = covered.len > 0 and not scope.active
+    for name in plan.names:
       if covered.find(name) < 0:
         allCovered = false
     if allCovered:
@@ -93940,12 +93717,14 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
         "certificate store (" & existing.searched.join(", ") & ") already " &
         "covers [" & covered.join(", ") & "] for content " & pre.content &
         " on " & pre.platform & " (no relevant change; tests not re-run)")
-      reportUnselectedCertificates(unselected)
-      return 0
+      reportUnselectedCertificates(plan.unselected)
+      return
     for name in covered:
       stderr.writeLine("repro test: '" & name & "' is already certified " &
         "for content " & pre.content & " on " & pre.platform &
         "; not issued again")
+      result.certificates.add(NodeCertificateOutcome(name: name,
+        detail: "already certified for content " & pre.content))
 
   # 4. Each remaining node's test commands and closure, in engine ids, and
   # which of its members each member depends on (for the command order).
@@ -93954,7 +93733,7 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
   for target in part.targets.values:
     considerDirectAlias(aliases, target)
   var runs: seq[CertificateNodeRun]
-  for node in nodes:
+  for node in judged:
     if covered.find(node.name) >= 0:
       continue
     let members = certificateNodeMembers(part, node.nodeKind, node.node)
@@ -93997,18 +93776,11 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
             records: Table[string, ExecutedActionRecord]] =
     var withExtra = opts
     withExtra.buildFlags.add(extra)
-    let args = testBuildArgs(withExtra, buildSelectors)
-    let collector = ActionOutcomeCollector()
     # HL-10: the lock-update node joins the graph, and every test command
     # of every node this run judges depends on it.
     registerLockUpdateExecutor(lockUpdateExecutorFor(lockUpdate))
     defer: clearLockUpdateExecutor()
-    withCallerVariants(opts):
-      result.code = runBuildCommand(args, publicCliPath,
-        actionOutcomeSink = collectorSink(collector),
-        graphAugmenter = lockUpdateAugmenter)
-    result.delivered = collector.delivered
-    result.records = collector.records
+    collectingBuild(withExtra, selectors, publicCliPath, lockUpdateAugmenter)
 
   var outcome = certifyingBuild(@[])
   var verdicts: seq[CertificateNodeVerdict]
@@ -94046,7 +93818,9 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
         if outcome.delivered:
           for run in runs:
             verdicts.add(certificateNodeVerdict(run, outcome.records))
-  let code = outcome.code
+  result.code = outcome.code
+  result.delivered = outcome.delivered
+  result.records = outcome.records
 
   # 6. Issue for each passing node.
   if lockUpdateNodeRefused(lockUpdate):
@@ -94063,18 +93837,23 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
     for sel in opts.selectors:
       rerun.add(" " & quoteShellPosix(sel))
     reportLockUpdateRefusal(lockUpdate, rerun)
+    withholdCertificates(result, runs, "the lock-update node refused or failed")
   elif not preTaken:
     # Deferred to the node, which never ran: the build stopped before it.
     stderr.writeLine("repro test: no certificate — the lock-update node " &
       "did not run" &
-      (if code != 0: " (the build failed before it)" else: "") &
+      (if result.code != 0: " (the build failed before it)" else: "") &
       ", so the state the tests ran against was never taken")
+    withholdCertificates(result, runs, "the lock-update node did not run")
   elif pre.kind != ipOk:
     reportRefusedPreconditions(pre)
+    withholdCertificates(result, runs, issuancePreconditionLabel(pre.kind))
   elif not outcome.delivered:
     stderr.writeLine("repro test: no certificate — the build reported no " &
       "per-action outcome to certify from" &
-      (if code != 0: " (it failed before running its graph)" else: ""))
+      (if result.code != 0: " (it failed before running its graph)" else: ""))
+    withholdCertificates(result, runs,
+      "the build reported no per-action outcome")
   else:
     let copyOut = if runs.len == 1: opts.certificateOut else: ""
     if opts.certificateOut.len > 0 and runs.len != 1:
@@ -94085,14 +93864,355 @@ proc runCertifyingTestBuild(opts: ReproTestShardOpts;
       if not verdict.passed:
         stderr.writeLine("repro test: no certificate for '" & run.node.name &
           "' — " & verdict.problem & " — " & verdict.remedy)
+        result.certificates.add(NodeCertificateOutcome(name: run.node.name,
+          detail: verdict.problem))
         continue
-      discard issueForCertificateNode(pre, run.node.name, verdict.commands,
+      let refusal = issueForCertificateNode(pre, run.node.name,
+        verdict.commands,
         readSetFromMonitorDepFiles(verdict.depfiles, verdict.recordedReads,
           verdict.recordedSources, verdict.uncaptured, verdict.outputs,
           verdict.outputTrees), workspaceRoot, copyOut)
-  reportSelectorsCertifyingNothing(part, nodes, spellings, anchorSelector)
-  reportUnselectedCertificates(unselected)
-  code
+      result.certificates.add(NodeCertificateOutcome(name: run.node.name,
+        issued: refusal.len == 0, detail: refusal))
+  if scope.active:
+    reportShardNotJudged(result, scope, partial, elsewhere)
+  else:
+    reportSelectorsCertifyingNothing(part, plan.nodes, plan.spellings,
+      plan.anchorSelector)
+  reportUnselectedCertificates(plan.unselected)
+
+
+proc runCertifyingTestBuild(opts: ReproTestShardOpts;
+                            publicCliPath: string): int =
+  ## TC-8e: ``repro test`` / ``repro certify`` on the build-engine path, with
+  ## issuance for the certificate-producing nodes the plan materializes (see
+  ## the block comment above). The build is ``opts``'s build command line
+  ## (``testBuildArgs``).
+  let mode =
+    if opts.toolProvisioning == tpmUnspecified: tpmPathOnly
+    else: opts.toolProvisioning
+  let plan = prepareCertifyingPlan(opts, mode, publicCliPath)
+  case plan.outcome
+  of cpoExit:
+    return plan.exitCode
+  of cpoUnknownSelector:
+    # The build reports the same selector error in its ordinary form.
+    return plainTestBuild(opts, plan.selectors, publicCliPath)
+  of cpoUnreadable:
+    stderr.writeLine("repro test: no certificate — the plan's " &
+      "certificate-producing nodes could not be read (" & plan.problem & ")")
+    return plainTestBuild(opts, plan.selectors, publicCliPath)
+  of cpoReady:
+    discard
+  executeCertifyingPlan(opts, publicCliPath, plan, ShardScope()).code
+
+# ---------------------------------------------------------------------------
+# The workspace-driven shard: ``repro test --shard k/N`` (and ``repro certify
+# --shard k/N``) without ``--fixture-from``.
+#
+# The plan is the one an unsharded run reads (``prepareCertifyingPlan``). Its
+# partition roots are the selection's test commands
+# (``certifyingPlanTestCommands``), each with the closure that builds what it
+# needs; ``planTestShards`` assigns every one to exactly one shard. A shard
+# then materializes exactly its assigned test commands through the build
+# engine, in this process, so it knows per action how each settled, the argv
+# it launched and what the monitor saw it read — the same per-action outcome
+# the unsharded run issues from. Issuance is ``executeCertifyingPlan`` with a
+# ``ShardScope``: a certificate-producing node whose every test command is in
+# this shard is judged and issued exactly as an unsharded run would; any other
+# node is named with how much of it this shard ran, and nothing is issued for
+# it. Shards' partial results are never combined into a certificate: each
+# shard attests only what it observed (Standard §6.2). A node split across
+# shards is certified afterwards by ``repro certify <name>``, which reuses a
+# shard's result only where D16 lets it attest one (a key-matched record
+# this host observed, over byte-identical inputs) and re-executes the rest.
+#
+# ``--emit-partition-plan`` records, beside the assignment, which shard
+# certifies each marked node (``certificates`` in the plan document), so a CI
+# planner knows before any shard runs which certificates the shards will
+# produce. ``--plan-from`` must name a plan made for exactly this selection:
+# a test command the plan lacks would run in no shard, and one the selection
+# lacks would be dropped, so either refuses.
+# ---------------------------------------------------------------------------
+
+proc shardPlanRequestFor(plan: CertifyingPlan; testCommands: seq[string];
+                         shardCount: int): ShardPlanRequest =
+  ## The partition request for ``testCommands``: one test edge per command,
+  ## its build closure from the stored graph's dependencies. No cost store
+  ## is consulted (every shard must compute the same plan, and a host's
+  ## learned estimates are its own), so the planner's cold-cache rule makes
+  ## a deterministic slice of the commands in selection order.
+  result.shardCount = shardCount
+  result.policy = sipIndependent
+  result.fallbackBuildCostNs = 1_000_000_000'i64
+  result.fallbackTestCostNs = 1_000_000_000'i64
+  result.refinementPasses = DefaultRefinementPasses
+  for id in certificateNodeClosure(plan.part, testCommands):
+    var deps: seq[NodeId]
+    for dep in plan.part.actionDeps.getOrDefault(id):
+      deps.add(stableNodeIdFromString(dep))
+    result.buildActions.add(ShardBuildAction(
+      id: stableNodeIdFromString(id), deps: deps))
+  for id in testCommands:
+    result.testEdges.add(ShardTestEdge(
+      id: stableNodeIdFromString("test::" & id),
+      selector: id,
+      historyKey: id,
+      buildDeps: @[stableNodeIdFromString(id)]))
+
+proc shardOfEdge(shardPlan: ShardPlan; meta: ShardPlanRequest):
+    Table[string, int] =
+  ## Each planned test command's shard, by provider action id.
+  var byId = initTable[NodeId, string]()
+  for e in meta.testEdges:
+    byId[e.id] = e.selector
+  for a in shardPlan.partition.assignments:
+    if byId.hasKey(a.root):
+      result[byId[a.root]] = a.shardIndex
+
+proc certificateShards(plan: CertifyingPlan;
+                       shardOf: Table[string, int]): JsonNode =
+  ## For each certificate-producing node the selection materializes: its
+  ## test commands, the shards they are assigned to, and the one shard that
+  ## certifies it (``null`` when they are split, so that no shard does).
+  result = newJArray()
+  for node in plan.nodes:
+    let members = certificateNodeMembers(plan.part, node.nodeKind, node.node)
+    var shards: seq[int]
+    for id in members:
+      let k = shardOf.getOrDefault(id, 0)
+      if k > 0 and shards.find(k) < 0:
+        shards.add(k)
+    shards.sort()
+    var entry = %*{"name": node.name, "test_commands": members,
+      "shards": shards}
+    entry["certifying_shard"] =
+      if shards.len == 1: %shards[0] else: newJNull()
+    result.add(entry)
+
+proc runWorkspaceModeShard(opts: ReproTestShardOpts;
+                           peer: PeerCacheSpecResult; issue: bool;
+                           publicCliPath: string): int =
+  ## The workspace-driven shard runner (see the block comment above).
+  ## ``issue`` is false under ``--no-certify`` and for a run that executes
+  ## nothing.
+  let mode =
+    if opts.toolProvisioning == tpmUnspecified: tpmPathOnly
+    else: opts.toolProvisioning
+  let plan = prepareCertifyingPlan(opts, mode, publicCliPath)
+  case plan.outcome
+  of cpoExit:
+    return plan.exitCode
+  of cpoUnknownSelector, cpoUnreadable:
+    emitShardDiagnostic("the selection could not be planned: " &
+      plan.problem)
+    return 2
+  of cpoReady:
+    discard
+  let testCommands = certifyingPlanTestCommands(plan)
+  if testCommands.len == 0:
+    emitShardDiagnostic("the selection names no test command; nothing " &
+      "to shard")
+    return 2
+
+  var shardPlan: ShardPlan
+  var planMeta: ShardPlanRequest
+  if opts.planFromPath.len > 0:
+    try:
+      let loaded = readPartitionPlanJson(opts.planFromPath)
+      shardPlan = loaded.plan
+      planMeta = loaded.meta
+    except PartitionPlanReadError as exc:
+      emitShardDiagnostic("failed to read partition plan: " & exc.msg)
+      return 2
+    if opts.shardCount > 0 and
+        shardPlan.partition.shardCount != opts.shardCount:
+      emitShardDiagnostic("the partition plan " & opts.planFromPath &
+        " splits the suite into " & $shardPlan.partition.shardCount &
+        " shards, not " & $opts.shardCount)
+      return 2
+    var planned: seq[string]
+    for e in planMeta.testEdges:
+      planned.add(e.selector)
+    var extra, missing: seq[string]
+    for id in planned:
+      if testCommands.find(id) < 0: extra.add(id)
+    for id in testCommands:
+      if planned.find(id) < 0: missing.add(id)
+    if extra.len > 0 or missing.len > 0:
+      emitShardDiagnostic("the partition plan " & opts.planFromPath &
+        " was made for a different selection" &
+        (if missing.len > 0: "; it assigns no shard to " & missing.join(", ")
+         else: "") &
+        (if extra.len > 0: "; it names test commands this selection does " &
+           "not have: " & extra.join(", ") else: "") &
+        " — emit it again with --emit-partition-plan")
+      return 2
+  else:
+    let shardCount =
+      if opts.shardCount > 0: opts.shardCount
+      else: 1
+    planMeta = shardPlanRequestFor(plan, testCommands, shardCount)
+    shardPlan = planTestShards(planMeta)
+  let shardOf = shardOfEdge(shardPlan, planMeta)
+  let shardCount = shardPlan.partition.shardCount
+
+  if opts.emitPlanPath.len > 0:
+    let certs = certificateShards(plan, shardOf)
+    try:
+      writePartitionPlanJson(shardPlan, opts.emitPlanPath, planMeta,
+        certificates = certs)
+    except CatchableError as exc:
+      emitShardDiagnostic("failed to write partition plan: " & exc.msg)
+      return 1
+    for entry in certs.elems:
+      let name = entry["name"].getStr()
+      if entry["certifying_shard"].kind == JInt:
+        stderr.writeLine("repro test: partition plan: '" & name &
+          "' is certified by shard " & $entry["certifying_shard"].getInt() &
+          "/" & $shardCount)
+      else:
+        var shards: seq[string]
+        for k in entry["shards"].elems:
+          shards.add($k.getInt())
+        stderr.writeLine("repro test: partition plan: '" & name &
+          "' is split across shards " & shards.join(", ") & " of " &
+          $shardCount & ", so no shard certifies it ('repro certify " &
+          name & "' does, after the shards)")
+    return 0
+
+  if opts.shardCount == 0:
+    emitShardDiagnostic("--shard <k>/<N> is required for an actual run")
+    return 2
+
+  # This shard's test commands, in selection order.
+  var assigned: seq[string]
+  for id in testCommands:
+    if shardOf.getOrDefault(id, 0) == opts.shardIndex:
+      assigned.add(id)
+  let label = "shard " & $opts.shardIndex & "/" & $opts.shardCount
+  let reportPath =
+    if opts.reportPath.len > 0: opts.reportPath
+    else:
+      "test-logs" / ("shard-" & $opts.shardIndex & "-of-" &
+        $opts.shardCount & ".json")
+  let partitionFilePath = reportPath.parentDir /
+    ("partition-" & $opts.shardIndex & "-of-" & $opts.shardCount & ".txt")
+  block:
+    var lines = @["# The test commands assigned to " & label &
+      ", one declared action id (a selector for it) per line."]
+    for id in assigned:
+      lines.add(id)
+    if partitionFilePath.parentDir.len > 0:
+      createDir(partitionFilePath.parentDir)
+    writeFile(partitionFilePath, lines.join("\n") & "\n")
+
+  # The build, scoped to exactly the assigned test commands. The shard's own
+  # report is written below; ``--write-report`` names it, not a build report.
+  var shardOpts = opts
+  shardOpts.buildFlags = @[]
+  for arg in opts.buildFlags:
+    if not arg.startsWith("--write-report"):
+      shardOpts.buildFlags.add(arg)
+  var run: CertifyingRun
+  let start = epochTime()
+  if assigned.len == 0:
+    stderr.writeLine("repro test: " & label & " has no test command " &
+      "assigned; nothing to run")
+  else:
+    let base = splitTarget(plan.buildSelectors[0]).base
+    var fragments: seq[string]
+    for id in assigned:
+      fragments.add((if base.len > 0: base else: ".") & "#" & id)
+    var scope = ShardScope(active: true, label: label, assigned: assigned)
+    try:
+      scope.buildSelectors = anchoredBuildSelectors(
+        parseAndResolveSelectors(fragments, "repro test"))
+    except CatchableError as exc:
+      emitShardDiagnostic("the assigned test commands could not be " &
+        "selected: " & exc.msg)
+      return 2
+    if issue:
+      run = executeCertifyingPlan(shardOpts, publicCliPath, plan, scope)
+    else:
+      let built = collectingBuild(shardOpts, scope.buildSelectors,
+        publicCliPath)
+      run.code = built.code
+      run.delivered = built.delivered
+      run.records = built.records
+  let elapsedNs = int64((epochTime() - start) * 1_000_000_000.0)
+
+  # The per-shard report: the assignment, each assigned test command's
+  # outcome as the engine reported it, and what was certified.
+  var aliases = DirectTargetAliases(byAction: initTable[string, string](),
+    rankByAction: initTable[string, int]())
+  for target in plan.part.targets.values:
+    considerDirectAlias(aliases, target)
+  var tests = newJArray()
+  var passed, failed = 0
+  for id in assigned:
+    let engineId = aliases.byAction.getOrDefault(id, id)
+    var entry = %*{"id": engineId}
+    if run.records.hasKey(engineId):
+      let record = run.records[engineId]
+      let ok = record.status in {asSucceeded, asCacheHit, asUpToDate}
+      if ok:
+        inc passed
+      else:
+        inc failed
+      entry["status"] = %($record.status)
+      entry["passed"] = %ok
+      entry["executed"] = %record.launched
+      entry["exit_code"] = %record.exitCode
+      entry["argv"] = %record.argv
+    else:
+      inc failed
+      entry["status"] = %"no-outcome"
+      entry["passed"] = %false
+    tests.add(entry)
+  var certificates = newJArray()
+  for c in run.certificates:
+    certificates.add(%*{"name": c.name, "issued": c.issued,
+      "detail": c.detail})
+  let predictedNs = predictedShardCostNs(shardPlan, opts.shardIndex)
+  let delta =
+    if predictedNs > 0:
+      (float(elapsedNs) - float(predictedNs)) / float(predictedNs)
+    else:
+      0.0
+  var report = newJObject()
+  report["schemaId"] = %"reprobuild.shard-report.v1"
+  report["shard"] = %opts.shardIndex
+  report["shardCount"] = %opts.shardCount
+  report["strategy"] = %opts.strategy
+  report["peer_cache"] = %modeName(peer.kind)
+  report["fixture_path"] = %""
+  report["mode"] = %"workspace"
+  addShardLockProvenance(report, opts)
+  report["assigned_selectors"] = %assigned
+  report["predicted_shard_cost_ns"] = %predictedNs
+  report["predicted_build_time_ns"] = %0
+  report["predicted_test_time_ns"] = %0
+  # One engine pass builds and runs the assignment, so its time is reported
+  # as build time; the engine does not split it.
+  report["actual_build_time_ns"] = %elapsedNs
+  report["actual_test_time_ns"] = %0
+  report["actual_total_time_ns"] = %elapsedNs
+  report["cost_model_delta"] = %delta
+  report["cost_model_drift"] = %(abs(delta) > 0.5)
+  report["build_failed"] = %(run.code != 0)
+  report["tests"] = tests
+  report["test_pass_count"] = %passed
+  report["test_fail_count"] = %failed
+  report["certificates"] = certificates
+  report["partition_file"] = %partitionFilePath
+  report["degraded_plan"] = %shardPlan.degraded
+  report["unknown_build_count"] = %shardPlan.unknownBuildCount
+  report["unknown_test_count"] = %shardPlan.unknownTestCount
+  writeShardReport(reportPath, report)
+  if run.code != 0 or failed > 0:
+    return 1
+  0
 
 proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
   ## ``repro test`` (and ``repro certify``, which runs it with issuance
@@ -94182,10 +94302,9 @@ proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
   #   (a) ``--fixture-from=<path>`` — the M2 fixture path, kept for
   #       backwards compatibility with the existing M2 e2e tests.  See
   #       ``runFixtureModeShard`` below.
-  #   (b) Workspace mode — discover real test edges via the engine's
-  #       normalised graph artefact, build the closure, and hand off to
-  #       ct-test-runner.  This is the CI-Sharding M2 follow-up that
-  #       this milestone fix delivers.
+  #   (b) Workspace mode — partition the selection's test commands and
+  #       materialize this shard's share through the build engine, issuing
+  #       as an unsharded run does (``runWorkspaceModeShard``).
   if opts.fixturePath.len > 0:
     # ---- TC-1 certificate issuance (fixture path) ----------------------
     # The fixture path runs REAL trivial commands and reports REAL per-target
@@ -94321,15 +94440,11 @@ proc runReproTest(opts: ReproTestShardOpts; publicCliPath: string): int =
         " (signed " & certificateSignatureAlgorithm & ", key_id=" &
         cert.keyId & ")")
     return code
-  # A sharded run hands its test edges to the external test runner, which
-  # does not report a per-node outcome or the commands it executed, so this
-  # path issues nothing. Say so when a certificate was asked for explicitly.
-  let shardCode = runWorkspaceModeShard(opts, peer, publicCliPath)
-  if opts.certifyExplicit:
-    stderr.writeLine("repro test: no certificate — a sharded run (--shard, " &
-      "--emit-partition-plan, --plan-from) does not issue certificates yet; " &
-      "run 'repro certify' without shard flags")
-  return shardCode
+  # A sharded run materializes its share of the selection through the build
+  # engine and issues for every certificate-producing node it ran whole
+  # (``runWorkspaceModeShard``).
+  runWorkspaceModeShard(opts, peer, opts.certify and opts.executesTests,
+    publicCliPath)
 
 proc runReproTestCommand*(args: openArray[string];
                           publicCliPath: string): int =

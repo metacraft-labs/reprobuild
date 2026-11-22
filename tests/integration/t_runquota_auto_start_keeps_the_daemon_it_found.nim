@@ -67,8 +67,8 @@ suite "runquota auto-start keeps the daemon it found":
     test "the build's auto-start starts the daemon the dev-env auto-start found":
       let realDaemon = findRunQuotaDaemonBin()
       if realDaemon.len == 0:
-        skip("no runquotad on this host (neither RUNQUOTAD_BIN, PATH nor " &
-          "a ../runquota sibling names one); this case starts the real daemon")
+        checkpoint("no runquotad on this host")
+        skip("no runquotad on this host")
       else:
         resetInvocationRunQuotaDaemonBin()
         let isolated = isolateUserRunQuota()
@@ -114,9 +114,8 @@ suite "runquota auto-start keeps the daemon it found":
         setCurrentDir(emptyDir)
         let searched = findRunQuotaDaemonBin()
         if searched.len > 0:
-          skip("the sibling-checkout fallback answers from this test " &
-            "binary's location (" & searched & "), so the search cannot be " &
-            "emptied and the remembered binary cannot be told apart")
+          checkpoint("the sibling-checkout fallback answers here: " & searched)
+          skip("the sibling-checkout fallback finds a runquotad, so the empty-PATH case cannot be staged")
         else:
           # NEGATIVE CONTROL first, so its nil cannot be a daemon the positive
           # case left running.

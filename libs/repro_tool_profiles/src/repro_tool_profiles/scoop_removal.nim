@@ -24,7 +24,10 @@
 ##    the app, so the hold check spans every store prefix of the app, not
 ##    only the version the generation recorded: a workspace lock or dev
 ##    shell holding `app@14.0` keeps the whole app when the profile drops
-##    `app@14.1`.
+##    `app@14.1`. A `profile` root counts too, unless it is the calling
+##    state directory's own (`OwnProfileRoots`): several state directories
+##    can use one store, and another one's generation may still use the
+##    app.
 ##
 ## When some versions are Reprobuild's and others are not, only
 ## Reprobuild's versions are removed, one directory at a time, and never the
@@ -56,7 +59,8 @@ type
       ## `--uninstall-from-scoop` was not passed: the Scoop install is
       ## left for its other consumers.
     sraRetainHeld = "retain-held"
-      ## A `workspace`, `session` or `pin` root holds a prefix of the app.
+      ## A `workspace`, `session` or `pin` root, or a `profile` root of
+      ## another state directory, holds a prefix of the app.
     sraRetainAdopted = "retain-adopted"
       ## No installed version of the app is one Reprobuild installed, or
       ## the only ones it installed are the version `current` points at
@@ -67,6 +71,24 @@ type
       ## Every installed version is Reprobuild's: `scoop uninstall <app>`.
     sraRemoveVersions = "remove-versions"
       ## Remove only `removeVersions`; `retainedVersions` stay.
+
+  OwnProfileRoots* = object
+    ## The `profile` roots of the state directory running the transition,
+    ## which the hold check does not count: the generation being left holds
+    ## its own prefix until retention drops it, and the transition is what
+    ## releases that hold. Every other `profile` root on the store belongs
+    ## to another state directory and is a holder. The caller describes its
+    ## roots, because their naming belongs to the home-generation registry
+    ## (reprobuild-pm `spec/Home-Profile-Generations-And-State.md`
+    ## §"Store GC Interaction"). An empty value owns nothing, so every
+    ## `profile` root holds: the safe direction for a deletion guard.
+    keyPrefix*: string
+      ## `home/<state-dir-key>/`: every root under it is the caller's.
+      ## Empty when the state directory has no readable key.
+    bareIds*: HashSet[string]
+      ## The ids of the generations the state directory holds. A root an
+      ## earlier build registered under one of these bare ids is the
+      ## caller's; a bare id it does not hold is another state directory's.
 
   ScoopRemovalPlan* = object
     ## The decision for one Scoop app dropped by a generation transition.
@@ -210,12 +232,18 @@ proc isScoopPrefixOfApp(row: PrefixRow; app: string): bool =
       safeApp.add('_')
   name.endsWith("." & safeApp.toLowerAscii)
 
-proc scoopAppHolders*(store: Store; app: string): seq[string] =
-  ## Every non-`profile` root (`workspace`, `session`, `pin`, …) that holds
-  ## ANY store prefix of `app`, rendered `<root-id> (<kind>)`. Profile
-  ## roots are excluded: the generation being left still holds its own
-  ## prefix until retention drops it, and the transition is exactly what
-  ## releases that hold.
+proc ownsProfileRoot*(own: OwnProfileRoots; rootId: string): bool =
+  ## True when `rootId` names a `profile` root of the caller's state
+  ## directory (`OwnProfileRoots`).
+  (own.keyPrefix.len > 0 and rootId.startsWith(own.keyPrefix)) or
+    rootId in own.bareIds
+
+proc scoopAppHolders*(store: Store; app: string;
+                      own: OwnProfileRoots): seq[string] =
+  ## Every root that holds ANY store prefix of `app`, rendered
+  ## `<root-id> (<kind>)`, except the caller's own `profile` roots
+  ## (`own`). A `profile` root of another state directory that uses the
+  ## same store is a holder like a `workspace`, `session` or `pin` root.
   var rootKind = initTable[string, string]()
   for r in store.listRoots():
     rootKind[r.rootId] = r.kind
@@ -227,7 +255,7 @@ proc scoopAppHolders*(store: Store; app: string): seq[string] =
       # A holder whose root row is missing is counted, not skipped: an
       # index this guard cannot read fully must not license a deletion.
       let kind = rootKind.getOrDefault(holder, $rkUnknown)
-      if kind == $rkProfile:
+      if kind == $rkProfile and own.ownsProfileRoot(holder):
         continue
       let rendered = holder & " (" & kind & ")"
       if rendered notin seen:
@@ -241,10 +269,13 @@ proc scoopAppHolders*(store: Store; app: string): seq[string] =
 
 proc planScoopAppRemoval*(store: Store; scoopRoot, bucket, app,
                           recordedVersion: string;
-                          uninstallFromScoop: bool): ScoopRemovalPlan =
+                          uninstallFromScoop: bool;
+                          own: OwnProfileRoots): ScoopRemovalPlan =
   ## Decide what a transition that drops `app` from the generation may
-  ## delete. Reads only; `executeScoopVersionRemoval` and
-  ## `uninstallScoopApp` carry the decision out.
+  ## delete. `own` names the `profile` roots of the state directory
+  ## running the transition (`scoopAppHolders`). Reads only;
+  ## `executeScoopVersionRemoval` and `uninstallScoopApp` carry the
+  ## decision out.
   result = ScoopRemovalPlan(bucket: bucket, app: app,
     recordedVersion: recordedVersion, scoopRoot: scoopRoot)
   let installed =
@@ -257,7 +288,7 @@ proc planScoopAppRemoval*(store: Store; scoopRoot, bucket, app,
   if installed.len == 0:
     result.action = sraAbsent
     return
-  result.holders = scoopAppHolders(store, app)
+  result.holders = scoopAppHolders(store, app, own)
   if result.holders.len > 0:
     result.action = sraRetainHeld
     result.retainedVersions = installed

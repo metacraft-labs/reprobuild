@@ -106,3 +106,24 @@ const
     ## as GCC spec text for the specs file ``gccLinkSpecs`` writes (see
     ## "THE WRAPPER'S DEFAULTS ARE KEPT" above;
     ## https://gcc.gnu.org/onlinedocs/gcc/Spec-Files.html).
+  LinuxToolchainCcAlias* = "cc"
+    ## The second name the ``gcc`` arm copies the real driver under. ``cc``
+    ## is the C compiler a POSIX system names (and what Bootlin's own
+    ## ``x86_64-buildroot-linux-gnu-cc`` is), and it is the linker rustc runs
+    ## on ``*-linux-gnu`` targets when no ``-C linker`` is given, found on
+    ## ``PATH``. A recipe that links Rust declares ``gcc`` beside ``rustc``
+    ## for that reason; without this name the store-root driver would be on
+    ## the edge's ``PATH`` but never run.
+  LinuxToolchainHostLibDir* = "lib"
+    ## The toolchain's host library directory (``libz``, ``libgmp``, ...),
+    ## which its own programs reach through ``$ORIGIN/../lib``.
+
+  LinuxToolchainRuntimePackage* = "gcc"
+    ## The package whose realized prefix carries the loader and C library
+    ## another Linux x86_64 archive is relocated onto when it ships none of
+    ## its own (``elfRuntimePackage`` of the Rust toolchain's arms).
+  LinuxToolchainRuntimeLibDirs* = [LinuxToolchainRuntimeDir,
+    LinuxToolchainHostLibDir]
+    ## The ``elfRunpath`` such an archive takes in that prefix: the sysroot's
+    ## glibc and ``libgcc_s``, then the host ``libz`` (rust-lang's LLVM and
+    ## ``rust-lld`` need ``libz.so.1``, which the sysroot does not carry).
