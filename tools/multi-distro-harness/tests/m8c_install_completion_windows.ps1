@@ -66,9 +66,10 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../..')).Path
 $InstallPs1 = [IO.Path]::Combine($RepoRoot, 'scripts', 'install', 'repro-install.ps1')
 $SignDir = [IO.Path]::Combine($RepoRoot, 'scripts', 'release-signing')
-$Version = '0.2.29'
+# The version of this checkout's build, the name of the archive made from
+# it; a real release archive names its own version.
+$Version = Get-ReproVersion -RepoRoot $RepoRoot
 $Arch = 'x86_64'
-# A real release archive names its own version.
 if ($Archive) {
   $m = [regex]::Match((Split-Path -Leaf $Archive), '^reprobuild-(.+)-windows-(x86_64|aarch64)\.zip$')
   if (-not $m.Success) { throw "-Archive must be a reprobuild-<version>-windows-<arch>.zip, not $Archive" }
@@ -132,7 +133,8 @@ try {
   $shim = Join-Path $Work 'shim'
   if (-not $script:M8cOnWindows) {
     New-Item -ItemType Directory -Force -Path $shim | Out-Null
-    & ln -sf (Join-Path $Prefix 'bin/repro.exe') (Join-Path $shim 'repro')
+    $r = Invoke-NativeCommand -FilePath 'ln' -ArgumentList @('-sf', (Join-Path $Prefix 'bin/repro.exe'), (Join-Path $shim 'repro'))
+    if ($r.Code -ne 0) { throw "ln -sf failed (exit $($r.Code))" }
   }
   $isoPath = @((Join-Path $Prefix 'bin'), $shim) + $sys + @($shDir)
   $isoEnv = New-IsolatedEnvironment -HomeDir $H -TempDir $Tmp -PathDirs $isoPath
@@ -149,15 +151,16 @@ try {
     Copy-Item -LiteralPath $zip -Destination (Join-Path $dl $Asset)
   }
   $gnupg = Join-Path $Work 'gnupg'
-  $fpr = (& $bash (ConvertTo-ScriptPath (Join-Path $SignDir 'make-test-key.sh')) --home (ConvertTo-ScriptPath $gnupg) | Select-Object -Last 1)
-  if (-not $fpr) { throw 'make-test-key.sh printed no fingerprint' }
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @((ConvertTo-ScriptPath (Join-Path $SignDir 'make-test-key.sh')), '--home', (ConvertTo-ScriptPath $gnupg)) -Quiet
+  $fpr = @($r.Output) | Select-Object -Last 1
+  if ($r.Code -ne 0 -or -not $fpr) { throw "make-test-key.sh printed no fingerprint (exit $($r.Code))" }
   $env:GNUPGHOME = ConvertTo-ScriptPath $gnupg
   $env:REPRO_SIGNING_ALLOW_TEST_KEY = '1'
   try {
-    & $bash (ConvertTo-ScriptPath (Join-Path $SignDir 'repro-sign-release.sh')) --dir (ConvertTo-ScriptPath $dl) --key $fpr | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "repro-sign-release.sh failed (exit $LASTEXITCODE)" }
-    & $bash -c "gpg --homedir '$(ConvertTo-ScriptPath $gnupg)' --armor --export '$fpr' > '$(ConvertTo-ScriptPath (Join-Path (Join-Path $Www 'keys') $KeyringFile))'"
-    if ($LASTEXITCODE -ne 0) { throw 'gpg --export failed' }
+    $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @((ConvertTo-ScriptPath (Join-Path $SignDir 'repro-sign-release.sh')), '--dir', (ConvertTo-ScriptPath $dl), '--key', $fpr)
+    if ($r.Code -ne 0) { throw "repro-sign-release.sh failed (exit $($r.Code))" }
+    $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @('-c', "gpg --homedir '$(ConvertTo-ScriptPath $gnupg)' --armor --export '$fpr' > '$(ConvertTo-ScriptPath (Join-Path (Join-Path $Www 'keys') $KeyringFile))'")
+    if ($r.Code -ne 0) { throw "gpg --export failed (exit $($r.Code))" }
   } finally {
     Remove-Item Env:\GNUPGHOME, Env:\REPRO_SIGNING_ALLOW_TEST_KEY -ErrorAction SilentlyContinue
   }
@@ -274,7 +277,7 @@ try {
   Stop-FileServer $server
   # The gpg-agent the throwaway key's home started, by that home only.
   if ($bash -and (Test-Path -LiteralPath (Join-Path $Work 'gnupg'))) {
-    & $bash -c "gpgconf --homedir '$(ConvertTo-ScriptPath (Join-Path $Work 'gnupg'))' --kill all" 2>$null
+    $null = Invoke-NativeCommand -FilePath $bash -ArgumentList @('-c', "gpgconf --homedir '$(ConvertTo-ScriptPath (Join-Path $Work 'gnupg'))' --kill all") -Quiet
   }
 }
 exit $exit

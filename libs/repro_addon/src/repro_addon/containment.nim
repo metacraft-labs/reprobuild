@@ -172,17 +172,38 @@ const
   BusyStates = ["active", "activating", "deactivating", "reloading",
                 "refreshing"]
 
+proc busyAgentUnitsWith*(units: openArray[string];
+                         ask: proc (u: string): tuple[ok: bool; state: string]):
+    seq[string] =
+  ## The units of ``units`` that are running, as ``ask`` reports their
+  ## ``ActiveState``. A unit whose state cannot be read counts as running:
+  ## ``contain`` then waits for it and, at the end of the wait, names it,
+  ## rather than record over a tick it could not see (A11 round 24).
+  for u in units:
+    let a = ask(u)
+    if not a.ok:
+      when not mutated("contain-busy-unknown-is-idle"):
+        result.add(u)
+    elif a.state in BusyStates:
+      result.add(u)
+
+proc askActiveState(u: string): tuple[ok: bool; state: string] =
+  ## ``(true, "")`` for a unit this host does not have.
+  try:
+    let lr = runSystemctl(["show", "-p", "LoadState", "--value", u])
+    if lr.exitCode != 0: return (false, "")
+    if lr.output.strip() in ["not-found", ""]: return (true, "")
+    let r = runSystemctl(["show", "-p", "ActiveState", "--value", u])
+    if r.exitCode != 0: return (false, "")
+    (true, r.output.strip())
+  except CatchableError:
+    (false, "")
+
 proc busyAgentUnits*(): seq[string] =
   ## The agent's tick units that are running now (a oneshot tick is
-  ## ``activating`` until it exits). The fetch timer only waits, so it is
-  ## not one of them.
-  for u in [AgentFetchUnit, ContainedApplyUnit]:
-    if not unitLoaded(u): continue
-    try:
-      let r = runSystemctl(["show", "-p", "ActiveState", "--value", u])
-      if r.exitCode == 0 and r.output.strip() in BusyStates: result.add(u)
-    except CatchableError:
-      discard
+  ## ``activating`` until it exits), or whose state systemctl could not
+  ## report. The fetch timer only waits, so it is not one of them.
+  busyAgentUnitsWith([AgentFetchUnit, ContainedApplyUnit], askActiveState)
 
 proc nextContainmentSequence*(stateDir: string; nowMs = 0'i64): uint64 =
   ## Strictly increasing per host, kept root-only beside the marker: the
@@ -293,7 +314,13 @@ proc runContainWith*(ops: ContainOps; operator, reason: string;
     raise newException(ContainmentError, "--operator and --reason are required")
   if not fileExists(stateDir / "addon-ledger"):
     raise newException(ContainmentError, "this is not an add-on host")
-  if containmentRecorded(stateDir):
+  let done = when mutated("contain-resume-reports-already"):
+               # FALSIFYING BUILD: a marker naming no record (a contain
+               # stopped before its record) reads as a containment made.
+               isContained(stateDir)
+             else:
+               containmentRecorded(stateDir)
+  if done:
     result.already = true
     return
   let marker = containedMarkerPath(stateDir)

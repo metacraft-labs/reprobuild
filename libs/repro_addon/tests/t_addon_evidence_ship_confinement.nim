@@ -18,20 +18,68 @@
 ## ``evidence-ship-unix-sockets`` (the confinement step goes red),
 ## ``egress-units-unix-sockets`` (the egress step), ``ship-decoded-as-root``
 ## (the root-caller step: the shipping runs in process), and
-## ``outbox-written-by-path`` (the planted-link step).
+## ``outbox-written-by-path`` (the planted-link step: the record writer's
+## staging link would overwrite a file of root's), ``outbox-listed-by-path``
+## (the outbox listed through a link), ``confined-output-unescaped`` (a
+## confined run's control bytes reach root's terminal) and
+## ``confined-copy-shared`` (two runs share one binary copy).
+##
+## The euid-0 branch of the root writer runs as uid 0 in a user namespace
+## (``unshare --map-auto -r``, this binary re-run with ``AsRootEnv``), the
+## state directory handed to a subordinate uid: no host root is needed, and
+## the case skips, saying why, where the host offers no such namespace.
 ##
 ## Mocks: ``confinedRunner`` stands in for ``systemd-run`` in the
 ## root-caller step, because a unit test has no PID 1 to start a transient
 ## unit in; the VM gates (``e2e_addon_evidence_enrol`` and the drill) run the
 ## real one. Everything else is real files and rendered unit text.
 
-import std/[os, posix, sequtils, strutils, unittest]
+import std/[os, osproc, posix, sequtils, streams, strtabs, strutils, unittest]
 
 import repro_addon/evidence as addonEvidence
 import repro_addon/evidence_ship
 import repro_addon/generation0
 import repro_addon/host_exec
 import repro_addon/record_dir
+import repro_test_support/reasoned_skip
+import repro_core/process_streams
+
+const AsRootEnv = "REPRO_ADDON_DELEGATED_AS_ROOT"
+  ## Set to a directory, this binary is the root half of the euid-0 case:
+  ## started by ``unshare --map-auto -r`` (uid 0 in a user namespace, with
+  ## the subordinate uids mapped too), it hands a state directory to uid
+  ## 1000, writes an entry as root, tries a state directory replaced with a
+  ## link, prints what it saw, and gives everything back to uid 0 (the
+  ## invoking user outside) so the suite can remove it.
+if existsEnv(AsRootEnv):
+  let base = getEnv(AsRootEnv)
+  var said = "ASROOT euid=" & $geteuid()
+  let state = base / "top" / "state"
+  createDir(state)
+  discard posix.chown(state.cstring, Uid(1000), Gid(1000))
+  writeDelegatedEntry(state / "outbox", "f.evr", "bytes",
+                      staging = state / ".outbox-staging")
+  var st: Stat
+  discard stat(cstring(state / "outbox"), st)
+  said.add(" outbox=" & toOct(int(st.st_mode) and 0o777, 4))
+  discard stat(cstring(state / "outbox" / "f.evr"), st)
+  said.add(" entry=" & toOct(int(st.st_mode) and 0o777, 4))
+  said.add(" listed=" & $outboxEntries(state / "outbox").len)
+  createDir(base / "elsewhere")
+  createDir(base / "top2")
+  createSymlink(base / "elsewhere", base / "top2" / "state")
+  var refused = false
+  try:
+    writeDelegatedEntry(base / "top2" / "state" / "outbox", "g.evr", "bytes")
+  except OSError:
+    refused = true
+  var inElsewhere = 0
+  for _ in walkDirRec(base / "elsewhere"): inc inElsewhere
+  said.add(" linkRefused=" & $refused & " elsewhere=" & $inElsewhere)
+  for p in walkDirRec(base, yieldFilter = {pcFile, pcDir, pcLinkToFile, pcLinkToDir}):
+    discard posix.lchown(p.cstring, Uid(0), Gid(0))
+  echo said
+  quit(0)
 
 let root = getTempDir() / ("addon-ship-confinement-" & $getCurrentProcessId())
 removeDir(root)
@@ -112,14 +160,33 @@ suite "the shipping unit runs as a dedicated user (§13 decision 181)":
       "/root/addon/repro"
     let conf = EvidenceConf(sinkEndpoint: "10.0.2.100:7443",
                             sinkHost: repeat('a', 64), heartbeatSec: 300)
-    # a binary outside the store runs as root's copy in /run
+    # A binary outside the store runs as root's copy, in a directory of
+    # this run's own under ConfinedExeCopyDir (not /run, which is noexec,
+    # and not the dynamic user's state directory, which systemd refuses to
+    # execute from).
+    let copy = confinedCopyPath(4242, "abc")
     let a = confinedRunArgv(conf, ["evidence-ship"], reproExe = "/root/addon/repro",
-                            systemdRun = "/usr/bin/systemd-run")
-    check a[a.find("--") + 1] == ConfinedExeCopy
+                            systemdRun = "/usr/bin/systemd-run", exeCopy = copy)
+    check a[a.find("--") + 1] == copy
+    check copy.startsWith(ConfinedExeCopyDir & "/")
     let b = confinedRunArgv(conf, ["evidence-ship"], reproExe = Exe,
                             systemdRun = "/usr/bin/systemd-run")
     check not b.anyIt(it.startsWith("BindReadOnlyPaths="))
     check b[b.find("--") + 1] == Exe
+
+  test "two confined runs at once never share a binary copy":
+    let one = confinedCopyPath(4242)
+    let two = confinedCopyPath(4242)
+    checkpoint one & " " & two
+    check one != two
+    check parentDir(one) != ConfinedExeCopyDir
+    check parentDir(parentDir(one)) == ConfinedExeCopyDir
+
+  test "a confined run's output reaches root's terminal escaped":
+    check escapeControl("ok\n") == "ok\n"
+    check escapeControl("\e]0;owned\a\e[2J") == "\\x1b]0;owned\\x07\\x1b[2J"
+    check escapeControl("a\\b") == "a\\\\b"
+    check escapeControl("\xff") == "\\xff"
 
 var calls: seq[seq[string]]
 proc recordingRunner(argv: seq[string]): HostToolResult {.nimcall.} =
@@ -187,12 +254,19 @@ suite "a root writer follows no link into the outbox (§13 decision 181)":
     createDir(st / "outbox")
     createDir(elsewhere)
     createSymlink(elsewhere, st / ".outbox-staging")
+    # The writer unlinks a stale temporary of its own name before it makes
+    # one: through the link, that would delete this file of root's. An
+    # empty ``elsewhere`` afterwards would not tell (a followed temporary
+    # is renamed away).
+    let sentinel = elsewhere / (".b.evr.tmp-" & $getCurrentProcessId())
+    writeFile(sentinel, "ROOT'S FILE")
     writeDelegatedEntry(st / "outbox", "b.evr", "bytes",
                         staging = st / ".outbox-staging")
+    check fileExists(sentinel) and readFile(sentinel) == "ROOT'S FILE"
     var inElsewhere = 0
     for _ in walkDir(elsewhere): inc inElsewhere
     checkpoint $inElsewhere
-    check inElsewhere == 0
+    check inElsewhere == 1
     check readFile(st / "outbox" / "b.evr") == "bytes"
 
   test "an outbox replaced with a link is refused":
@@ -208,6 +282,35 @@ suite "a root writer follows no link into the outbox (§13 decision 181)":
     for _ in walkDir(elsewhere): inc inElsewhere
     check inElsewhere == 0
 
+  test "as root, an entry is handed to the state directory's owner":
+    # The euid-0 branch: the state directory by O_NOFOLLOW from its
+    # parent, an outbox root makes 0711, an entry 0644 on its descriptor,
+    # and a state directory replaced with a link refused.
+    let base = root / "w6"
+    createDir(base / "top")
+    let unshare = findExe("unshare")
+    if unshare.len == 0:
+      skip("no unshare(1) on this host: the euid-0 branch needs a user namespace")
+    else:
+      let p = startProcess(unshare, args = ["--map-auto", "-r", getAppFilename()],
+        env = newStringTable({AsRootEnv: base, "PATH": getEnv("PATH")}),
+        options = {poStdErrToStdOut})
+      let output = drainStream(p.outputStream)
+      let code = p.waitForExit()
+      p.close()
+      checkpoint output
+      if code != 0 and "ASROOT" notin output and
+          ("map" in output or "Operation not permitted" in output or
+           "newuidmap" in output):
+        skip("no user namespace with subordinate uids here: " & output.strip())
+      else:
+        check code == 0
+        check "ASROOT euid=0" in output
+        check " outbox=0711" in output
+        check " entry=0644" in output
+        check " listed=1" in output
+        check " linkRefused=true elsewhere=0" in output
+
   test "an outbox whose state directory does not exist yet is made":
     let st = root / "w5" / "state"
     writeDelegatedEntry(st / "outbox", "e.evr", "bytes",
@@ -220,10 +323,33 @@ suite "a root writer follows no link into the outbox (§13 decision 181)":
     let elsewhere = root / "w4" / "elsewhere"
     createDir(elsewhere)
     createSymlink(elsewhere, outboxStaging(st / "outbox"))
+    # A file the link would have the writer overwrite (and then move away):
+    # it must keep its bytes (red under ``outbox-written-by-path``).
+    writeFile(elsewhere / "d.evr", "ROOT'S FILE")
     writeOutboxEntry(st / "outbox", "d.evr", "bytes")
+    check readFile(elsewhere / "d.evr") == "ROOT'S FILE"
     var inElsewhere = 0
     for _ in walkDir(elsewhere): inc inElsewhere
-    check inElsewhere == 0
-    check fileExists(st / "outbox" / "d.evr")
+    check inElsewhere == 1
+    check readFile(st / "outbox" / "d.evr") == "bytes"
+
+  test "the outbox is listed without following a link":
+    let st = root / "w7" / "state"
+    let elsewhere = root / "w7" / "elsewhere"
+    createDir(st)
+    createDir(elsewhere)
+    writeFile(elsewhere / "x.evr", "not the outbox's")
+    createSymlink(elsewhere, st / "outbox")
+    var listed: seq[string]
+    try: listed = outboxEntries(st / "outbox")
+    except OSError: listed = @[]
+    checkpoint $listed
+    check listed.len == 0
+    # Inside a real outbox, a link named like an entry is not one.
+    let st2 = root / "w8" / "state"
+    createDir(st2 / "outbox")
+    writeFile(st2 / "outbox" / "a.evr", "a")
+    createSymlink(elsewhere / "x.evr", st2 / "outbox" / "b.evr")
+    check outboxEntries(st2 / "outbox") == @[st2 / "outbox" / "a.evr"]
 
 removeDir(root)

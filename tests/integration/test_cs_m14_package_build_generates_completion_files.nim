@@ -35,10 +35,10 @@
 ##      removed from the program, its compile writes a list without
 ##      `complete` and the edge reruns: its files now call `__complete`.
 ##
-## Case 1's evidence check catches the edge READING the binary. It cannot
-## catch the edge RUNNING it: a child started through `posix_spawn` (what
-## Nim's `osproc` uses) reaches the evidence as a spawn record, which names
-## the child for attribution but is not an input of the edge. Case 2 is what
+## Case 1's evidence check catches the edge READING the binary, and RUNNING it
+## by absolute path through `posix_spawn` (what Nim's `osproc` uses): such a
+## child is an input of the edge too. It cannot catch a child started by a
+## bare name (`posix_spawnp`, `execvp`), recorded unresolved. Case 2 is what
 ## catches that: the binary there cannot be run, so an edge that ran it would
 ## fail.
 ##
