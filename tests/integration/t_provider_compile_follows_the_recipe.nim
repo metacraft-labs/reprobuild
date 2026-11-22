@@ -21,7 +21,11 @@
 ##   * NOT OVER-SHARED: an edit to B's recipe compiles again;
 ##   * NOT SHARED WHEN LOCATION-BOUND: a recipe whose provider bakes in its
 ##     own absolute location (`currentSourcePath()`) is compiled at each
-##     copy, so each copy evaluates its own paths and keeps its cache hits;
+##     copy, so each copy evaluates its own paths and keeps its cache hits.
+##     Both shapes: the directory folded into a `const`, and the source
+##     path itself read at run time, which spells exactly what the
+##     compiler's line information spells (reprobuild-pm issue
+##     `2026-11-19-a-cached-provider-compile-is-reused-across-checkouts-so-currentsourcepath-names-another-checkout.md`);
 ##   * SHARED WHEN ONLY THE DSL RECORDS A SITE: a recipe that declares a
 ##     `certificate`, a `contribute:` entry, an `environment`, an
 ##     `instanceOverrides` block, an activity with a parameter and a
@@ -35,7 +39,7 @@
 ## only stand-in is a shell wrapper around the real `nim` that counts
 ## provider compiles before exec'ing it.
 
-import std/[json, os, osproc, strutils, unittest]
+import std/[json, os, osproc, sequtils, strutils, unittest]
 
 const OtherModule = """
 import repro_project_dsl
@@ -140,6 +144,17 @@ package relocconsumer:
       relyingParties = append("resolved")))
 """
 
+const RunTimeSourcePathRecipe = """
+import std/os
+import repro_project_dsl
+import other
+
+package relocprobe:
+  build:
+    fs.writeText(actionId = "write-checkout-name", output = "out/root.txt",
+      text = currentSourcePath().parentDir().parentDir().lastPathPart & "\n")
+"""
+
 const ProviderLinePrefix = "providerCompileAction: __repro_provider_compile"
 
 proc providerLine(output: string): string =
@@ -177,6 +192,14 @@ proc build(reproBin, witness, projectRoot, actionCacheRoot, storeRoot: string):
     projectRoot]))
   (output: res.output, exitCode: res.exitCode)
 
+proc verdictsUnder(root: string): seq[string] =
+  ## Every recipe-relative provider-compile verdict written under `root`
+  ## (`recipeRelativeProviderVerdictPath`), wherever the engine kept the
+  ## edge's outputs: in staging, or in a published computation directory.
+  for path in walkDirRec(root):
+    if extractFilename(path) == "relocation-verdict":
+      result.add(readFile(path).strip())
+
 proc snapshotOf(projectRoot: string): string =
   for path in walkDirRec(projectRoot / ".repro"):
     if extractFilename(path) == "provider-fragments.rbsz":
@@ -212,13 +235,6 @@ proc newRelocFixture(prefix, recipe: string): RelocFixture =
   result.projectB = result.tempRoot / "b" / "project"
   writeProject(result.projectA, recipe)
   writeProject(result.projectB, recipe)
-
-proc verdicts(root: string): seq[string] =
-  ## Every relocation verdict the recipe-relative provider-compile edge
-  ## recorded under `root`.
-  for path in walkDirRec(root):
-    if extractFilename(path) == "relocation-verdict":
-      result.add(readFile(path).strip())
 
 proc reproAt(reproBin: string; fx: RelocFixture; project: string;
              args: openArray[string]): string =
@@ -297,7 +313,7 @@ proc servedAtTheSecondCopy(reproBin: string; fx: RelocFixture) =
   require first.exitCode == 0
   let compiledAtA = compileCount(fx.compileLog)
   checkpoint("A: " & providerLine(first.output))
-  checkpoint("verdicts: " & $verdicts(fx.tempRoot))
+  checkpoint("verdicts: " & $verdictsUnder(fx.tempRoot))
   check compiledAtA >= 1
   check readFile(fx.projectA / "out" / "root.txt").strip() == fx.projectA
 
@@ -460,7 +476,7 @@ suite "the provider compile follows the recipe":
       let fx = newRelocFixture("rb-provcert-", CertifiedRecipe)
       defer: removeDir(fx.tempRoot)
       servedAtTheSecondCopy(reproBin, fx)
-      check verdicts(fx.tempRoot) == @["relocatable"]
+      check verdictsUnder(fx.tempRoot) == @["relocatable"]
       # CORRECT AT B: what B reports names B's recipe, not A's. On a
       # verdict that shares a binary holding absolute DSL sites, B is
       # served A's binary and reports A's file for each of these.
@@ -495,7 +511,7 @@ suite "the provider compile follows the recipe":
       let fx = newRelocFixture("rb-provdevenv-", DevEnvRecipe)
       defer: removeDir(fx.tempRoot)
       servedAtTheSecondCopy(reproBin, fx)
-      check verdicts(fx.tempRoot) == @["relocatable"]
+      check verdictsUnder(fx.tempRoot) == @["relocatable"]
       # CORRECT AT B: every site B reports names B's recipe, not A's --
       # the certificate, the target it exports, the lock file, and the
       # dev-env evaluation's shared resolution (its owner directory and
@@ -515,3 +531,66 @@ suite "the provider compile follows the recipe":
       checkpoint("B files naming A: " & $filesNaming(fx.projectB,
         fx.projectA))
       check filesNaming(fx.projectB, fx.projectA).len == 0
+
+  test "a recipe that reads its source path at run time is compiled at each location":
+    # isonim-tui 915f9fc derived an output directory from
+    # `currentSourcePath().parentDir().lastPathPart`, evaluated when the
+    # provider runs. The binary then holds `<recipe>/repro.nim` as a string
+    # value and nothing else of its location, which is the very spelling
+    # every provider carries as line information. Measured on repro 0.2.23:
+    # two worktrees of one commit got one provider, and the second worktree's
+    # build wrote into the first.
+    let repoRoot = getCurrentDir()
+    let reproBin = repoRoot / "build" / "bin" / addFileExt("repro", ExeExt)
+    let nim = findExe("nim")
+    if not fileExists(reproBin) or nim.len == 0:
+      checkpoint("missing " & reproBin & " or nim; run `just build` first")
+      fail()
+    else:
+      let tempRoot = expandFilename("/tmp") /
+        ("rb-provruntime-" & $getCurrentProcessId())
+      removeDir(tempRoot)
+      createDir(tempRoot)
+      defer: removeDir(tempRoot)
+      let compileLog = tempRoot / "provider-compiles"
+      let witness = tempRoot / "witness-nim"
+      writeFile(witness, "#!/bin/sh\n" &
+        "case \"$*\" in\n" &
+        "  *--define:reproProviderMode*) echo provider >> " &
+          quoteShell(compileLog) & " ;;\n" &
+        "esac\nexec " & quoteShell(nim) & " \"$@\"\n")
+      setFilePermissions(witness, {fpUserRead, fpUserWrite, fpUserExec})
+      let actionCacheRoot = tempRoot / "action-cache"
+      let storeRoot = tempRoot / "store"
+      createDir(actionCacheRoot)
+      # Two checkouts that differ in the name the recipe reads: `a`, `b`.
+      let projectA = tempRoot / "a" / "project"
+      let projectB = tempRoot / "b" / "project"
+      writeProject(projectA, RunTimeSourcePathRecipe)
+      writeProject(projectB, RunTimeSourcePathRecipe)
+
+      var compiledBefore = 0
+      for (label, project, name) in [("A", projectA, "a"),
+                                     ("B", projectB, "b"),
+                                     ("A again", projectA, "a")]:
+        let res = build(reproBin, witness, project, actionCacheRoot,
+          storeRoot)
+        let compiledNow = compileCount(compileLog)
+        if label == "B":
+          # B could not be served A's binary: it compiled its own.
+          check compiledNow > compiledBefore
+        compiledBefore = compiledNow
+        if res.exitCode != 0:
+          checkpoint(res.output)
+        require res.exitCode == 0
+        checkpoint(label & ": " & providerLine(res.output))
+        # CORRECT AT EACH COPY: the name read is this checkout's own.
+        check readFile(project / "out" / "root.txt").strip() == name
+        if label == "A again":
+          check "action: write-checkout-name status=asUpToDate" in res.output
+        if label == "A":
+          # BOUND BY ITS BYTES: the edge's recorded verdict names A's recipe.
+          # This holds whether or not the host publishes the compile record,
+          # so it discriminates even where no copy would ever be served.
+          check verdictsUnder(tempRoot).anyIt(
+            it.startsWith("location-bound") and (projectA / "repro.nim") in it)

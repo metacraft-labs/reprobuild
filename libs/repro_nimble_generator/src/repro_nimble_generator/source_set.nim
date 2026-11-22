@@ -27,6 +27,7 @@ from std/unicode import validateUtf8
 import blake3
 
 import repro_domain_types/nimble_index/types
+from repro_nimble_reader/requirements import readRequirements, vkRange
 
 const
   SourceSetSchemaV1* = "reprobuild.nimble-source-set.v1"
@@ -68,6 +69,28 @@ type
     hasRequires*: bool
     line*: int
 
+  NativeOverride* = object
+    ## `[[native]]` (Nimble-Package-Catalog NPC-AREQ24): what a package's
+    ## versions in a range need that a `.nimble` cannot say -- Reprobuild
+    ## packages for the build (`native_build_deps`) or for run time
+    ## (`runtime_deps`; a `dlopen`ed library is one), `-d:` defines, and
+    ## `passC` / `passL` -- and, for a package with install hooks, how its
+    ## binaries are built without them (`binaries`). Keyed by the package
+    ## AND a version range (`versions`), never by the name alone: the rule
+    ## for `jester >= 0.5` says nothing about `jester` 0.4.
+    package*: string
+    versions*: string          ## a Nimble version range, as written
+    nativeBuildDeps*: seq[string]
+    runtimeDeps*: seq[string]
+    defines*: seq[string]
+    passC*: seq[string]
+    passL*: seq[string]
+    binaries*: seq[string]
+      ## `<name>=<source>`: each executable built, from a Nim source path
+      ## relative to the package's tree; supplying it is how a package whose
+      ## `bin` needs an install hook becomes buildable (NPC-AREQ23)
+    line*: int
+
   MirrorRole* = enum
     mrRequired = "required"
       ## publishing is complete only when every source object is on it
@@ -95,6 +118,7 @@ type
     overrides*: seq[OverrideRecord]  ## sorted by (name key, tag)
     policy*: SourcePolicy
     mirrors*: seq[MirrorDecl]        ## in declaration order: the search order
+    natives*: seq[NativeOverride]    ## sorted by (name key, versions)
 
   SourceSetError* = object of ValueError
     ## The source set cannot be read; the message names every cause.
@@ -143,7 +167,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
     false
 
   type Section = enum sTop, sRegistry, sRoot, sExtra, sOverride, sPolicy,
-    sMirror
+    sMirror, sNative
   var section = sTop
   var tables: seq[(Section, int, seq[(string, Value, int)])]
   var top: seq[(string, Value, int)]
@@ -201,6 +225,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
       of "[[extra]]": section = sExtra
       of "[[override]]": section = sOverride
       of "[[mirror]]": section = sMirror
+      of "[[native]]": section = sNative
       of "[policy]":
         if sawPolicy:
           fail(lineNo, "duplicate table [policy]")
@@ -209,7 +234,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
       else:
         fail(lineNo, "unsupported table header " & header.escape() &
           " (read: [[registry]], [[root]], [[extra]], [[override]], " &
-          "[[mirror]], [policy])")
+          "[[mirror]], [[native]], [policy])")
         section = sTop
         continue
       tables.add((section, lineNo, newSeq[(string, Value, int)]()))
@@ -361,6 +386,7 @@ proc parseSourceSet*(text, path: string): SourceSet =
   var extras: seq[ExtraSource]
   var overrides: seq[OverrideRecord]
   var mirrors: seq[MirrorDecl]
+  var natives: seq[NativeOverride]
   var policy = SourcePolicy(unlisted: upRefuse, probe: ppOff)
 
   for (sec, at, raw) in tables:
@@ -457,6 +483,59 @@ proc parseSourceSet*(text, path: string): SourceSet =
       if hasTag and o.tag.len == 0:
         fail(at, "the `tag` of [[override]] is empty")
       overrides.add o
+    of sNative:
+      const keys = ["package", "versions", "native_build_deps",
+        "runtime_deps", "defines", "pass_c", "pass_l", "binaries"]
+      let e = keysOf(raw, keys, "[[native]]")
+      var has, hasVersions: bool
+      var n = NativeOverride(line: at)
+      n.package = str(e, "package", has, "[[native]]")
+      if not has: fail(at, "[[native]] is missing `package`")
+      elif nameDefect(n.package).len > 0:
+        fail(at, "native package " & n.package.escape() & " " &
+          nameDefect(n.package))
+      n.versions = str(e, "versions", hasVersions, "[[native]]")
+      if not hasVersions or n.versions.strip().len == 0:
+        fail(at, "[[native]] " & n.package.escape() & " is missing " &
+          "`versions`: a native override is keyed by a package AND a " &
+          "version range, never by the name alone")
+      elif has and nameDefect(n.package).len == 0:
+        # The range is read as Nimble reads a requirement's version, and
+        # must BE a range: `any version` would key the override by the
+        # name alone.
+        let reading = readRequirements(n.package & " " & n.versions)
+        if reading.errors.len > 0 or reading.requirements.len != 1 or
+            reading.requirements[0].version.kind != vkRange:
+          fail(at, "versions " & n.versions.escape() & " of [[native]] " &
+            n.package.escape() & " is not a Nimble version range")
+      var supplies = false
+      for (k, v, kat) in e:
+        if k in ["package", "versions"]: continue
+        if v.kind != vkArray:
+          fail(kat, "`" & k & "` in [[native]] must be an array of strings")
+          continue
+        supplies = supplies or v.items.len > 0
+        case k
+        of "native_build_deps": n.nativeBuildDeps = v.items
+        of "runtime_deps": n.runtimeDeps = v.items
+        of "defines": n.defines = v.items
+        of "pass_c": n.passC = v.items
+        of "pass_l": n.passL = v.items
+        of "binaries":
+          for b in v.items:
+            let eq = b.find('=')
+            if eq <= 0 or eq == b.len - 1:
+              fail(kat, "binary " & b.escape() & " of [[native]] is not " &
+                "`<name>=<source>`")
+            elif b[eq + 1 .. ^1].startsWith("/") or
+                ".." in b[eq + 1 .. ^1].split('/'):
+              fail(kat, "binary source " & b[eq + 1 .. ^1].escape() &
+                " of [[native]] leaves the package's tree")
+          n.binaries = v.items
+        else: discard
+      if not supplies:
+        fail(at, "[[native]] " & n.package.escape() & " supplies nothing")
+      natives.add n
     of sPolicy:
       let e = keysOf(raw, ["unlisted", "probe", "cooldown_days", "track_head"],
         "[policy]")
@@ -513,6 +592,13 @@ proc parseSourceSet*(text, path: string): SourceSet =
       fail(o.line, "a second [[override]] of " & o.package.escape() &
         (if o.tag.len > 0: " at tag " & o.tag.escape() else: ""))
     seenOverrides.incl k
+  var seenNatives = initHashSet[string]()
+  for n in natives:
+    let k = nameKey(n.package) & "\0" & n.versions.strip()
+    if k in seenNatives:
+      fail(n.line, "a second [[native]] of " & n.package.escape() &
+        " for versions " & n.versions.escape())
+    seenNatives.incl k
   var seenMirrors = initHashSet[string]()
   for m in mirrors:
     if m.url in seenMirrors:
@@ -544,6 +630,10 @@ proc parseSourceSet*(text, path: string): SourceSet =
   result.overrides = overrides
   result.policy = policy
   result.mirrors = mirrors
+  natives.sort(proc (a, b: NativeOverride): int =
+    result = cmp(nameKey(a.package), nameKey(b.package))
+    if result == 0: result = cmp(a.versions.strip(), b.versions.strip()))
+  result.natives = natives
 
 proc canonicalText*(s: SourceSet): string =
   ## The source set's content in one canonical spelling: what its identity
@@ -565,6 +655,19 @@ proc canonicalText*(s: SourceSet): string =
       o.origin.escape() & " subdir=" & o.subdir.escape() & " commit=" &
       o.commit & " tag=" & o.tag.escape() & " requires=" &
       (if o.hasRequires: "[" & reqs.join(",") & "]" else: "-")
+  # A native override changes what a build of the package needs, so it is
+  # part of what the index says. A source set without one keeps its
+  # identity byte for byte.
+  for n in s.natives:
+    proc list(xs: seq[string]): string =
+      var q: seq[string]
+      for x in xs: q.add x.escape()
+      "[" & q.join(",") & "]"
+    lines.add "native " & n.package.escape() & " versions=" &
+      n.versions.strip().escape() & " native_build_deps=" &
+      list(n.nativeBuildDeps) & " runtime_deps=" & list(n.runtimeDeps) &
+      " defines=" & list(n.defines) & " pass_c=" & list(n.passC) &
+      " pass_l=" & list(n.passL) & " binaries=" & list(n.binaries)
   var heads: seq[string]
   for h in s.policy.trackHead: heads.add h.escape()
   lines.add "policy unlisted=" & $s.policy.unlisted & " probe=" &
