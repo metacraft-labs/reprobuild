@@ -179,6 +179,7 @@ when defined(linux) and defined(amd64):
         %*{"crashes": arm.measured.crashes, "runs": arm.measured.runs,
            "allCrashes": arm.all.crashes, "allRuns": arm.all.runs,
            "maxLoadPerCpu": arm.maxLoadPerCpu,
+           "minLoadPerCpu": arm.minLoadPerCpu,
            "anomalies": arm.all.anomalies,
            "publications": arm.measured.publications,
            "ipAdjustments": arm.all.adjust,
@@ -202,6 +203,7 @@ when defined(linux) and defined(amd64):
           "runsPerArm": Runs,
           "sampleRounds": SampleRounds,
           "maxLoadPerCpu": MaxLoadPerCpu,
+          "hostCpus": hostCpuCount(),
           "conditionsMet": verdict.conditionsMet,
           "conditionsReason": verdict.conditionsReason,
           "sampleLoadPerCpu": sample.loadPerCpu,
@@ -248,7 +250,8 @@ when defined(linux) and defined(amd64):
         # met". The count check above is included in that.
         if not anyFailed and asserted == 6 + GateUnconditionalCheckCount:
           let reason = "conditions not met (HLX-M4 calibrated at load/CPU <= " &
-            $MaxLoadPerCpu & "): " & verdict.conditionsReason
+            $MaxLoadPerCpu & " and measured on " & $hostCpuCount() &
+            " CPUs): " & verdict.conditionsReason
           # The line the HCR lane keys on to report NO VERDICT rather than a
           # refusal (`scripts/lib/hcr_lane_verdict.sh`).
           echo "HCR-CONDITIONS-NOT-MET: " &

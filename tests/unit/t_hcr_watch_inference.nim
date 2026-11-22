@@ -62,7 +62,16 @@ proc bytesOf(text: string): seq[byte] =
 suite "HCR watch inference":
   test "infers patch metadata from ordinary C object rebuild":
     when defined(macosx) and defined(arm64):
-      let tempRoot = createTempDir("repro-hcr-watch-infer", "")
+      # Both the baseline capture and the inference record the paths they
+      # observed CANONICALISED, and under the stock macOS TMPDIR `/tmp` is a
+      # symlink to `/private/tmp` -- so a path derived from `createTempDir`
+      # is not the spelling they report, and all four path checks below
+      # compared `/tmp/...` against `/private/tmp/...` (the macOS lane of
+      # reprobuild run 44864552117, 2026-11-21, on `m3-mcl-bench-001`).
+      # Canonicalise the root once, as `t_e2e_hcr_watch_inference` does.
+      # Nothing here opens a unix socket under it, so the extra 8 bytes
+      # `/private` adds are not a `sun_path` concern.
+      let tempRoot = expandFilename(createTempDir("repro-hcr-watch-infer", ""))
       defer: removeDir(tempRoot)
 
       let projectRoot = tempRoot / "project"
