@@ -605,30 +605,87 @@ proc lookupAssumeLiteral(atomsPtr: ClingoSymbolicAtomsPtr;
     return false
   return true
 
+type AssumingOutcome = enum
+  aoFailed ## a clingo call failed; no verdict
+  aoSat    ## a stable model exists under the assumptions
+  aoUnsat  ## no stable model exists; ``core`` holds clingo's core
+
+proc solveAssuming(control: ClingoControlPtr;
+                   assumptions: seq[ClingoLiteral];
+                   core: var seq[ClingoLiteral]): AssumingOutcome =
+  ## Solve ``control``'s grounded program under ``assumptions`` and, when
+  ## it is unsatisfiable, copy clingo's core out of the solve handle (the
+  ## array is borrowed from the handle and dies with it). Each call opens
+  ## and closes its own handle, so the same control can be solved again
+  ## under a different assumption set.
+  core.setLen(0)
+  var handle: ClingoSolveHandlePtr = nil
+  try:
+    let assumptionPtr =
+      if assumptions.len > 0: cast[pointer](unsafeAddr assumptions[0])
+      else: nil
+    if not clingo_control_solve(control, clingoSolveModeYield,
+                                 assumptionPtr, csize_t(assumptions.len),
+                                 nil, nil, addr handle):
+      return aoFailed
+    var model: ptr ClingoModel = nil
+    if not clingo_solve_handle_model(handle, addr model):
+      return aoFailed
+    if not model.isNil:
+      return aoSat
+    var solveResult: ClingoSolveResult = 0
+    if not clingo_solve_handle_get(handle, addr solveResult):
+      return aoFailed
+    if (solveResult and clingoSolveResultUnsatisfiable) == 0:
+      return aoFailed
+    var corePtr: ptr ClingoLiteral = nil
+    var coreSize: csize_t = 0
+    if not clingo_solve_handle_core(handle, addr corePtr, addr coreSize):
+      return aoFailed
+    for i in 0 ..< int(coreSize):
+      core.add(cast[ptr ClingoLiteral](
+        cast[int](corePtr) + i * sizeof(ClingoLiteral))[])
+    return aoUnsat
+  finally:
+    if not handle.isNil:
+      discard clingo_solve_handle_close(handle)
+
+proc keepGuards(core, assumptions: seq[ClingoLiteral]): seq[ClingoLiteral] =
+  ## The entries of ``assumptions`` that ``core`` contains, in assumption
+  ## (that is, annotation) order and each once. clingo's core is a subset
+  ## of the assumptions passed to the solve, all of them positive guard
+  ## literals; anything else in it names no constraint and is dropped
+  ## rather than mapped by its sign onto a guard it is not.
+  let inCore = core.toHashSet
+  for lit in assumptions:
+    if lit in inCore:
+      result.add(lit)
+
 proc solveForUnsatCore*(variants: openArray[VariantDecl];
                         packages: openArray[PackageDecl]): seq[string] =
   ## Run a parallel solve with the annotated encoding from
   ## ``explainer.encodeWithAssumptions``: each constraint is guarded
-  ## by an ``assume_constraint(N).`` external atom; we assume every
-  ## external true; clingo's ``clingo_solve_handle_core`` returns the
-  ## literals participating in the conflict; the
-  ## ``ConstraintAnnotation`` table maps each literal back to the
-  ## constraint identity via its atom name.
+  ## by an ``assume_constraint(N).`` external atom; we release every
+  ## external to ``free`` and assume it true; clingo's
+  ## ``clingo_solve_handle_core`` returns a core of those assumptions,
+  ## which is then shrunk to a minimal one; the ``ConstraintAnnotation``
+  ## table maps each literal back to the constraint identity via its
+  ## atom name.
   ##
-  ## Returns the list of ``assume_constraint(N)`` atom names that
-  ## participate in the minimal unsat core. Returns the empty seq if
-  ## the annotated program is unexpectedly satisfiable, or if any
-  ## clingo C call fails — in either case the caller's diagnostic
-  ## still has the M2c best-effort core to fall back to.
+  ## Returns the ``assume_constraint(N)`` atom names of a minimal unsat
+  ## core — no constraint in it can be dropped and leave the rest
+  ## unsatisfiable — in annotation order, each once. Returns the empty
+  ## seq if the annotated program is unexpectedly satisfiable, or if a
+  ## clingo C call fails before a core exists — in either case the
+  ## caller's diagnostic still has the M2c best-effort core to fall back
+  ## to.
   let (program, annotations) = encodeWithAssumptions(variants, packages)
   result = @[]
   if annotations.len == 0:
     return @[]
 
   var control: ClingoControlPtr = nil
-  var handle: ClingoSolveHandlePtr = nil
   var atomsPtr: ClingoSymbolicAtomsPtr = nil
-  var solveResult: ClingoSolveResult = 0
 
   try:
     if not clingo_control_new(nil, 0, nil, nil, 20, addr control):
@@ -646,58 +703,77 @@ proc solveForUnsatCore*(variants: openArray[VariantDecl];
     # symbol in the symbolic atoms collection. Annotations whose atoms
     # didn't ground (clingo dropped the external as redundant) are
     # silently skipped — their constraint won't appear in any core.
+    #
+    # Each guard is an ``#external`` atom, and clingo keeps an
+    # unassigned external FALSE by passing the solver its negation as an
+    # assumption of its own. Assuming the guard true on top of that is a
+    # conflict between those two assumptions alone, whatever the program
+    # says: the solve is UNSAT even when every constraint holds, and the
+    # core is the first guard and its own negation (which decoded as
+    # that guard twice). Releasing each guard to ``free`` first leaves
+    # our assumption as the only thing fixing its value.
     var literals: seq[ClingoLiteral] = @[]
     var litToAtomName: Table[ClingoLiteral, string]
     for ann in annotations:
       var lit: ClingoLiteral = 0
       if lookupAssumeLiteral(atomsPtr, ann.id, lit):
+        if not clingo_control_assign_external(control, lit,
+                                              clingoTruthValueFree):
+          return @[]
         literals.add(lit)
         litToAtomName[lit] = ann.atomName
 
     if literals.len == 0:
       return @[]
 
-    let assumptionPtr = cast[pointer](addr literals[0])
-    if not clingo_control_solve(control, clingoSolveModeYield,
-                                 assumptionPtr, csize_t(literals.len),
-                                 nil, nil, addr handle):
+    var core: seq[ClingoLiteral] = @[]
+    if solveAssuming(control, literals, core) != aoUnsat:
+      # Satisfiable under every guard (the structural unsat is outside
+      # the annotated rules), or a clingo call failed.
       return @[]
-    # Drain — under unsat we expect no models. Resume each (none-found)
-    # event until the search exhausts.
+    core = keepGuards(core, literals)
+    if core.len == 0:
+      return @[]
+
+    # clasp's core is a core, not a minimal one: it routinely carries
+    # guards assumed before the conflicting ones although their
+    # constraints hold. Shrink it by deletion — drop one guard, re-solve
+    # under the rest, and keep the drop whenever the solve stays UNSAT —
+    # until every remaining guard is necessary. Necessity survives
+    # shrinking (assuming fewer guards can only make the program easier
+    # to satisfy), so a guard found necessary once is never re-tested.
+    # This runs only on the failure path and costs at most one solve per
+    # guard in clasp's core.
+    var necessary = initHashSet[ClingoLiteral]()
     while true:
-      var model: ptr ClingoModel = nil
-      if not clingo_solve_handle_model(handle, addr model):
-        return @[]
-      if model.isNil:
+      var candidate: ClingoLiteral = 0
+      var found = false
+      for lit in core:
+        if lit notin necessary:
+          candidate = lit
+          found = true
+          break
+      if not found:
         break
-      if not clingo_solve_handle_resume(handle):
-        return @[]
-    if not clingo_solve_handle_get(handle, addr solveResult):
-      return @[]
-    if (solveResult and clingoSolveResultUnsatisfiable) == 0:
-      # Surprisingly satisfiable — the structural unsat is outside the
-      # annotated rules. Return empty so the M2c best-effort core
-      # survives as the caller's diagnostic.
-      return @[]
-    # Extract the core.
-    var corePtr: ptr ClingoLiteral = nil
-    var coreSize: csize_t = 0
-    if not clingo_solve_handle_core(handle, addr corePtr, addr coreSize):
-      return @[]
-    if coreSize == 0:
-      return @[]
-    for i in 0 ..< int(coreSize):
-      let lit = cast[ptr ClingoLiteral](
-        cast[int](corePtr) + i * sizeof(ClingoLiteral))[]
-      # Match on signed literal first (positive assumption); then on
-      # the negated form clingo sometimes returns; then drop unknown
-      # entries silently.
-      if lit in litToAtomName:
-        result.add(litToAtomName[lit])
-      elif (-lit) in litToAtomName:
-        result.add(litToAtomName[-lit])
+      var without: seq[ClingoLiteral] = @[]
+      for lit in core:
+        if lit != candidate:
+          without.add(lit)
+      var subCore: seq[ClingoLiteral] = @[]
+      case solveAssuming(control, without, subCore)
+      of aoUnsat:
+        # clingo's core of the smaller set may be smaller still. Should
+        # it hold no guard at all, no constraint is to blame and the
+        # result is empty, leaving the best-effort participants.
+        core = keepGuards(subCore, without)
+      of aoSat:
+        necessary.incl(candidate)
+      of aoFailed:
+        # A clingo failure mid-shrink leaves ``core`` a valid, if not
+        # minimal, core: report it rather than nothing.
+        break
+    for lit in core:
+      result.add(litToAtomName[lit])
   finally:
-    if not handle.isNil:
-      discard clingo_solve_handle_close(handle)
     if not control.isNil:
       clingo_control_free(control)

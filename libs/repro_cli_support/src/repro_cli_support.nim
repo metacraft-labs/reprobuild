@@ -271,6 +271,8 @@ import repro_cli_support/catalog_publication
 import repro_cli_support/catalog_generate
 import repro_cli_support/nimble_verify
 import repro_cli_support/nimble_lock
+import repro_cli_support/nimble_native
+import repro_core/nimble_path_env
 import repro_cli_support/home_catalog_imports
 import repro_domain_types/nimble_index/view
 # HL-11: the recipe-constraint reader. What a `flake.nix` input URL and a
@@ -450,6 +452,7 @@ const
     ## override-args` writes before each override triple.
 export provisioning_lock_selection
 export nimble_lock
+export nimble_native
 export catalog_publication
 export cli_hardware.runHardwareCommand
 export cli_disk.runDiskCommand,
@@ -5663,6 +5666,14 @@ var producerMaterializedAuxPaths*: Table[string, ProducerAuxPaths] =
   ## non-producer / executable-only build resolves every ref byte-for-byte as
   ## before. Exported for the SC-3 integration test to observe the splice.
 
+const NimbleCatalogSelectorPrefix* = "nimble:"
+  ## A `uses:` selector naming a locked Nimble catalog package.
+
+var nimbleCatalogSelectorOrder*: seq[string] = @[]
+  ## The `nimble:` selectors the build's preparation registered on
+  ## ``producerMaterializedAuxPaths``, in the lock's topological order then
+  ## name (``registerNimbleCatalogProducers``).
+
 var producerMaterializedSourceRoots: Table[string, string] =
   initTable[string, string]()
   ## Provenance of the cached channels. A later consumer must validate the
@@ -5751,11 +5762,21 @@ proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
     return
   var nimSourceSelectors: seq[string] = @[]
   for selector, aux in producerMaterializedAuxPaths.pairs:
-    if selector.len > 0 and aux.nimPathDirs.len > 0:
+    if selector.len > 0 and aux.nimPathDirs.len > 0 and
+        not selector.startsWith(NimbleCatalogSelectorPrefix):
+      nimSourceSelectors.add(selector)
+  nimSourceSelectors.sort()
+  # Locked catalog packages follow the workspace producers, in the lock's
+  # topological order, then name (Nimble-Package-Catalog NPC-AREQ21): the
+  # order their `--path:` roots reach every Nim compile, identical on
+  # every machine with the lock. Nothing is added for a build whose lock
+  # pins no Nimble package.
+  for selector in nimbleCatalogSelectorOrder:
+    if producerMaterializedAuxPaths.hasKey(selector) and
+        producerMaterializedAuxPaths[selector].nimPathDirs.len > 0:
       nimSourceSelectors.add(selector)
   if nimSourceSelectors.len == 0:
     return
-  nimSourceSelectors.sort()
   for action in actions.mitems:
     for selector in nimSourceSelectors:
       if selector in action.toolIdentityRefs:
@@ -5768,6 +5789,145 @@ proc attachProducerAuxRefs*(actions: var seq[BuildAction]) =
       # native build (``repro_build_engine.nim`` ``kindForRef``).
       if action.toolIdentityRefKinds.len > 0:
         action.toolIdentityRefKinds.add(dkBuild)
+
+var nimbleCatalogChannelKeys: Table[string, string] =
+  initTable[string, string]()
+  ## `nimble:` selector -> what its `--path:` root is, independent of where
+  ## the store is: `blake3:<tree>` and the record's source directory.
+
+proc registerNimbleCatalogProducers*(report: NimbleSourcesReport) =
+  ## Nimble-Package-Catalog NPC-AREQ21 (Cross-Repo-Source-Consumption
+  ## §4.2a.2b): each locked catalog package becomes a Nim source producer
+  ## of the build -- ``producerMaterializedAuxPaths["nimble:<name>"]`` holds
+  ## its `<store tree>/<srcDir>`, read from its version record with no
+  ## provider run and no sub-build (SC-12) -- in the lock's topological
+  ## order, then name. ``attachProducerAuxRefs`` puts the roots on every Nim
+  ## compile in that order; the tool-identity resolver returns them.
+  nimbleCatalogSelectorOrder.setLen(0)
+  # The previous build's packages (a daemon serves many builds) are not
+  # this one's: a `nimble:` selector resolves only to a package of the lock
+  # being built.
+  var stale: seq[string]
+  for selector in producerMaterializedAuxPaths.keys:
+    if selector.startsWith(NimbleCatalogSelectorPrefix): stale.add selector
+  for selector in stale:
+    producerMaterializedAuxPaths.del(selector)
+    producerMaterializedSourceRoots.del(selector)
+  nimbleCatalogChannelKeys.clear()
+  for p in report.packages:
+    let selector = NimbleCatalogSelectorPrefix & p.row.name
+    producerMaterializedAuxPaths[selector] =
+      ProducerAuxPaths(nimPathDirs: @[p.srcPath])
+    producerMaterializedSourceRoots[selector] = p.storePath
+    nimbleCatalogChannelKeys[selector] = "blake3:" & p.row.tree & "/" &
+      relativePath(p.srcPath, p.storePath, '/')
+    nimbleCatalogSelectorOrder.add selector
+
+proc foldNimbleCatalogChannels*(actions: var seq[BuildAction]) =
+  ## A Nim compile handed catalog packages' roots keys on WHICH trees they
+  ## are -- the lock's digests and source directories, in the order they
+  ## are passed -- so an unobserved compile cannot reuse a result built
+  ## against another version. The store's location is not in the key: a
+  ## tree's digest names its content on every host. Actions that are not
+  ## Nim compiles, and every action of a build whose lock pins no Nimble
+  ## package, keep their key.
+  if nimbleCatalogSelectorOrder.len == 0:
+    return
+  for action in actions.mitems:
+    if nimCompileArgvBase(action.argv) < 0:
+      continue
+    var payload = "nimble-catalog-channel.v1\x00" &
+      digestHex(action.weakFingerprint) & "\x00"
+    var folded = false
+    for refName in action.toolIdentityRefs:
+      if refName in nimbleCatalogChannelKeys:
+        payload.add(refName & "=" & nimbleCatalogChannelKeys[refName] & "\x00")
+        folded = true
+    if folded:
+      action.weakFingerprint =
+        blake3DomainDigest(payload.bytesOf(), hdActionFingerprint)
+
+var lastNimbleSourcesReport*: NimbleSourcesReport
+  ## What the build's preparation found for the lock (`nimble:` rows, their
+  ## records and store trees); inactive when the lock pins no Nimble package.
+
+proc nimVersionOf*(nimExe: string): string =
+  ## The version `nim --version` reports (`Nim Compiler Version 2.2.4
+  ## [...]`), or "" when it cannot be read. `--version` reads no
+  ## configuration and compiles nothing.
+  let ran = try: uncontrolledExecArgvEx([nimExe, "--version"],
+                   options = {poStdErrToStdOut})
+            except CatchableError: (output: "", exitCode: -1)
+  if ran.exitCode != 0:
+    return ""
+  for line in ran.output.splitLines():
+    let marker = "Version "
+    let at = line.find(marker)
+    if line.contains("Nim Compiler") and at >= 0:
+      let rest = line[at + marker.len .. ^1].strip()
+      let stop = rest.find({' ', '['})
+      return (if stop > 0: rest[0 ..< stop] else: rest)
+  ""
+
+proc buildNimExecutable(action: BuildAction; base: int;
+                        resolver: ToolIdentityResolver): string =
+  ## The compiler a Nim compile action will run: an absolute command as
+  ## written, else the first match in the bin directories its tool refs
+  ## resolve to (the directories the engine puts first on its `PATH`),
+  ## else the engine's own `PATH`.
+  let command = action.argv[base]
+  if command.isAbsolute:
+    return command
+  let file = addFileExt(command, ExeExt)
+  if resolver != nil:
+    for i, refName in action.toolIdentityRefs:
+      let kind = if i < action.toolIdentityRefKinds.len:
+                   action.toolIdentityRefKinds[i] else: dkBuild
+      let r = resolver(refName, kind)
+      if r.isSome:
+        if r.get.resolvedExecutablePath.len > 0 and
+            extractFilename(r.get.resolvedExecutablePath) == file:
+          return r.get.resolvedExecutablePath
+        for dir in r.get.binDirs:
+          if fileExists(dir / file):
+            return dir / file
+  uncontrolledFindExe(command)
+
+proc nimbleCatalogNimRefusal*(actions: seq[BuildAction];
+                              resolver: ToolIdentityResolver): string =
+  ## M6-P12 (Nimble-Package-Catalog NPC-AREQ7, NPC-AREQ17), checked before
+  ## anything compiles: the Nim the build's Nim compiles run, against the
+  ## `nim` range of every chosen record of the lock, whether or not the
+  ## solve declared a `nim` package. "" when the lock pins no Nimble
+  ## package, no action is a Nim compile, or every range admits it; else
+  ## the refusal, naming each package, its version, the range and the Nim
+  ## version. A compiler whose version cannot be read is refused too: the
+  ## records' ranges would otherwise go unchecked.
+  let report = lastNimbleSourcesReport
+  if not report.active or report.packages.len == 0:
+    return ""
+  var checked = initHashSet[string]()
+  var lines: seq[string]
+  for action in actions:
+    let base = nimCompileArgvBase(action.argv)
+    if base < 0:
+      continue
+    let exe = buildNimExecutable(action, base, resolver)
+    if exe.len == 0 or exe in checked:
+      continue
+    checked.incl exe
+    let version = nimVersionOf(exe)
+    if version.len == 0:
+      lines.add "the version of the Nim compiler " & exe & " (action " &
+        action.id & ") cannot be read, so the `nim` ranges of the locked " &
+        "Nimble packages cannot be checked"
+      continue
+    for line in nimVersionRefusals(report, version):
+      if line notin lines: lines.add line
+  if lines.len == 0:
+    return ""
+  "the build's Nim does not satisfy the locked Nimble packages:\n  " &
+    lines.join("\n  ")
 
 proc foldProducerActionHashes*(actions: var seq[BuildAction]) =
   ## SC-2 (§4.2 point 3): after the consumer graph is lowered, fold each
@@ -9849,6 +10009,19 @@ proc mkToolIdentityResolver*(identity: PathOnlyBuildIdentity;
         nimPathDirs: nimPathDirs,
         prefixVars: mergedPrefixVars,
         cachePlatformTag: cacheTag))
+    # Nimble-Package-Catalog NPC-AREQ21 (Cross-Repo-Source-Consumption
+    # §4.2a.2b): a locked catalog package is a Nim source producer whose
+    # interface came from its version record and whose root is a verified
+    # store tree. The build's preparation registered it; it has no provider,
+    # no sub-build and no executable, only its `--path:` root.
+    if name.startsWith(NimbleCatalogSelectorPrefix):
+      {.cast(gcsafe).}:
+        if producerMaterializedAuxPaths.hasKey(name):
+          let aux = producerMaterializedAuxPaths[name]
+          if aux.nimPathDirs.len > 0:
+            return some(ResolvedToolIdentity(nimPathDirs: aux.nimPathDirs,
+              cachePlatformTag: cacheTag))
+      return none(ResolvedToolIdentity)
     # Cross-Repo-Source-Consumption SC-1 (§4.1) — ADDITIVE cross-repo
     # producer branch. A ref that matched NO host / nix / tarball / scoop /
     # corpus-recipe action identity above is a candidate cross-repo producer.
@@ -13487,6 +13660,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var scheduledActions = lowered.actions
     appendForwardedArgs(scheduledActions, selectedActionId)
     attachProducerAuxRefs(scheduledActions)
+    foldNimbleCatalogChannels(scheduledActions)
+    let nimbleNimRefusal = nimbleCatalogNimRefusal(scheduledActions,
+      engineConfig.toolIdentityResolver)
+    if nimbleNimRefusal.len > 0:
+      stderr.writeLine(reproBuildErrorText(nimbleNimRefusal))
+      return 1
     foldProducerActionHashes(scheduledActions)
     # Cross-Repo-Source-Consumption SC-4 (§4.3): a producer SOURCE change
     # rebuilds the consumer actions that READ it. Actions whose reads are
@@ -15309,6 +15488,13 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     var scheduledActions = lowered.actions
     appendForwardedArgs(scheduledActions, forwardedActionId)
     attachProducerAuxRefs(scheduledActions)
+    foldNimbleCatalogChannels(scheduledActions)
+    let nimbleNimRefusal = nimbleCatalogNimRefusal(scheduledActions,
+      engineConfig.toolIdentityResolver)
+    if nimbleNimRefusal.len > 0:
+      stderr.writeLine(reproBuildErrorText(nimbleNimRefusal))
+      result.exitCode = 1
+      return
     foldProducerActionHashes(scheduledActions)
     # A package that declares ``devEnv:`` gets it on its run-edges (the
     # members of its ``test`` / ``bench`` collections), keyed by the
@@ -29685,6 +29871,14 @@ proc resolveProducerBinding*(selector: string;
   ## worker would compute a divergent cache key).
   if selector.len == 0:
     return ProducerBinding(selector: selector, kind: pbkNotProducer)
+  # A `nimble:` selector names a locked Nimble catalog package: its row pins
+  # a verified store tree (`blake3:`), not a repository revision, and the
+  # build's preparation registers it as a Nim source producer
+  # (``registerNimbleCatalogProducers``, Nimble-Package-Catalog NPC-AREQ21).
+  # It is never a cross-repo producer to build, fetch or verify as a
+  # checkout. A develop-mode sibling that replaces one is NPC-M9's.
+  if selector.startsWith(NimbleCatalogSelectorPrefix):
+    return ProducerBinding(selector: selector, kind: pbkNotProducer)
 
   # 1. develop mode — the override map shadows the upstream/lock binding.
   let upstream = UpstreamPackageBinding(packageName: selector)
@@ -32530,6 +32724,12 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
   # reaches the pinning path with no separate wiring.
   # ----------------------------------------------------------------
   block lockConsumption:
+    # A build whose lock pins no Nimble package, or that never reaches the
+    # preparation below, hands its compiles no catalog root: nothing a
+    # previous build in this process (a daemon) registered carries over.
+    lastNimbleSourcesReport = NimbleSourcesReport()
+    registerNimbleCatalogProducers(lastNimbleSourcesReport)
+    delEnv(NimblePathDirsEnvVar)
     let projDir = buildLockProjectDir(target)
     let effectiveLock =
       if lockOverride.len > 0: absolutePath(lockOverride)
@@ -32558,8 +32758,18 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       # (verified in place when it is already there: a warm build evaluates
       # no fetch edge). A lock without Nimble packages does nothing here.
       try:
-        discard prepareLockedNimbleSources(projDir, graph.lockPath,
-          NimbleSourcesOptions())
+        lastNimbleSourcesReport = prepareLockedNimbleSources(projDir,
+          graph.lockPath, NimbleSourcesOptions())
+        # NPC-AREQ21: every locked package becomes a Nim source producer
+        # of this build (its `<store tree>/<srcDir>` on `nim c --path:`).
+        registerNimbleCatalogProducers(lastNimbleSourcesReport)
+        # Nim-Package-Path-Handling.md § 5: the provider's `repro.paths`
+        # edge lists the same roots in the same order.
+        if lastNimbleSourcesReport.nimPathDirs.len > 0:
+          putEnv(NimblePathDirsEnvVar,
+            encodeNimblePathDirs(lastNimbleSourcesReport.nimPathDirs))
+        else:
+          delEnv(NimblePathDirsEnvVar)
       except CatchableError as e:
         stderr.writeLine(reproBuildErrorText(e.msg))
         return 1
@@ -108963,6 +109173,9 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineNimbleCommand.verify:
       let r = conf.nimble.verify
       return runNimbleVerifyCommand(r.lock, r.store)
+    of ReproCommandLineNimbleCommand.check:
+      let r = conf.nimble.check
+      return runNimbleCheckCommand(r.lock, r.store)
   of ReproCommandLineCommand.deps:
     case conf.deps.command
     of ReproCommandLineDepsCommand.refresh:

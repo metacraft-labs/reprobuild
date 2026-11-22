@@ -64,6 +64,10 @@
 ##   without being rendered, which failed this test's coverage guard. Only
 ##   ``nim c`` declares any (``refs=["ScratchLocationEnvNames"]``); no argv
 ##   changed.
+## * ``nim c`` gained the ``noNimblePath`` flag (``--noNimblePath``), which
+##   the typed tool's ``c`` sets on every call: the installation's
+##   ``nim.cfg`` names Nimble's directories, which ``--skipUserCfg`` does not
+##   drop (Nimble package catalog, NPC-M7).
 ## * ``cargo build`` gained the optional ``color`` flag (``--color``, with
 ##   the closed set ``auto|always|never``), and ``offline``, ``targetDir``,
 ##   ``target`` and ``color`` name the configuration-file keys they override

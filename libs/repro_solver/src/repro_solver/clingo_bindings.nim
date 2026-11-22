@@ -140,6 +140,11 @@ type
     ## Bitset of ``clingo_solve_mode_e`` (async=1, yield=2). The smoke
     ## test uses the default mode (0) which blocks on the first model.
 
+  ClingoTruthValue* = cint
+    ## ``clingo_truth_value_t`` (``typedef int``) — the value
+    ## ``clingo_control_assign_external`` gives an external atom
+    ## (free=0, true=1, false=2).
+
   ClingoShowType* = cuint
     ## Bitset of ``clingo_show_type_e`` selecting which symbols to
     ## extract from a model (shown=2, atoms=4, terms=8, theory=16,
@@ -158,6 +163,10 @@ const
   clingoSolveModeDefault*: ClingoSolveMode = 0
   clingoSolveModeAsync*: ClingoSolveMode = 1
   clingoSolveModeYield*: ClingoSolveMode = 2
+
+  clingoTruthValueFree*: ClingoTruthValue = 0
+  clingoTruthValueTrue*: ClingoTruthValue = 1
+  clingoTruthValueFalse*: ClingoTruthValue = 2
 
   clingoShowTypeShown*: ClingoShowType = 2
   clingoShowTypeAtoms*: ClingoShowType = 4
@@ -324,6 +333,18 @@ proc clingo_solve_handle_core*(handle: ClingoSolveHandlePtr;
   ## literals the caller passed to ``clingo_control_solve``; the sign
   ## tells whether the positive or the negative form participates in
   ## the conflict.
+
+proc clingo_control_assign_external*(control: ClingoControlPtr;
+                                     literal: ClingoLiteral;
+                                     value: ClingoTruthValue): bool
+  ## Set the truth value of the external atom whose program literal is
+  ## ``literal``. Upstream doc: Control module, "Grounding and Solving"
+  ## (https://potassco.org/clingo/c-api/current/group__Control.html).
+  ## An external is FALSE until assigned, and clingo enforces that
+  ## value by handing the solver the external's negation as an
+  ## assumption of its own. Assuming the external true on top of that
+  ## is contradictory by itself, so a caller that uses externals as
+  ## assumption guards must first make them ``clingoTruthValueFree``.
 
 proc clingo_control_symbolic_atoms*(control: ClingoControlPtr;
                                     atoms: ptr ClingoSymbolicAtomsPtr): bool

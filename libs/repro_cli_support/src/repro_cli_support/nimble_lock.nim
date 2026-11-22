@@ -36,6 +36,9 @@ import repro_nimble_fetch
 import repro_nimble_generator/source_set
 
 import ./catalog_discovery
+import ./nimble_mirror_config
+
+export nimble_mirror_config
 
 const
   NimbleSourceSetFile* = "nimble-sources.toml"
@@ -227,31 +230,121 @@ type
     storeRoot*: string    ## "" = the user's source store
     offline*: bool
       ## refuse instead of fetching a tree the store lacks
-    extraMirrors*: seq[Mirror]
-      ## organization-local mirrors, searched before the index's own
+    mirrorConfig*: Option[MirrorConfigPaths]
+      ## where the configured mirrors (`[nimble] mirrors`, NPC-AREQ13) are
+      ## read from; none = the host's files for the project
+      ## (``mirrorConfigPathsFor``). Tests point every path into a private
+      ## root.
+    fetchTemplate*: Option[FetchConfig]
+      ## how mirrors and origins are reached (resolver, trust anchors,
+      ## forges, git, limits) when not the host's defaults. Its mirror list
+      ## is replaced by the production order: the configured mirrors, then
+      ## the index's, then the origin (tests pass their resolver here)
     fetchConfig*: Option[FetchConfig]
       ## a complete fetch configuration to use instead (its mirrors are then
       ## exactly these; tests pass their resolver and dialer here)
 
+  LockedNimblePackage* = object
+    ## One `nimble:` row of the lock with the record of the pinned index it
+    ## was anchored to (NPC-AREQ21: the producer's interface comes from the
+    ## record, with no provider run).
+    row*: NimbleLockRow
+    version*: string        ## the solver version the lock chose
+    depends*: seq[string]   ## `nimble:` identities
+    record*: VersionRecord
+    package*: PackageEnvelope ## the record's package (origins, name)
+    storePath*: string      ## the verified store tree ("" until present)
+    srcPath*: string        ## `<storePath>/<srcDir>`, the `--path` entry
+
   NimbleSourcesReport* = object
     active*: bool          ## the lock pins Nimble packages
     rows*: seq[NimbleLockRow]
+    packages*: seq[LockedNimblePackage]
+      ## in the build order (``nimbleBuildOrder``)
     present*: seq[string]  ## verified in the store, nothing fetched
     fetched*: seq[string]
     fetchEdges*: int       ## `nimble.fetch` edges whose executor ran
     storePaths*: Table[string, string] ## name -> verified store tree
+    nimPathDirs*: seq[string]
+      ## `<store tree>/<srcDir>` of every package, in the build order: the
+      ## Nim source roots the compile edges receive (`--path:`) and the
+      ## lines of `repro.paths`
+    configuredMirrors*: seq[ConfiguredMirror]
+    natives*: seq[NativeOverride]
+      ## the native overrides (`[[native]]`, NPC-AREQ24) of the pinned
+      ## indexes' source sets
+    mirrors*: seq[Mirror]  ## the search order the fetch used
     indexLine*: string     ## the pinned index's generation time and age
+    platform*: string      ## the lock's platform the records were read for
 
-proc indexMirrors(d: DiscoveredNimbleIndex): seq[Mirror] =
-  ## The mirrors the index repository declares in its source set at the
-  ## pinned revision, in its search order.
+proc indexSourceSet*(d: DiscoveredNimbleIndex): Option[SourceSet] =
+  ## The index repository's source set at the pinned revision, read by
+  ## object id; none when the revision has none.
   let (found, text) = readPublishedFile(d, NimbleSourceSetFile,
     MaxSourceSetBytes)
-  if not found:
+  if found:
+    result = some(parseSourceSet(text, d.repo & ":" & NimbleSourceSetFile))
+
+proc indexMirrors(ss: Option[SourceSet]): seq[Mirror] =
+  ## The mirrors the index repository declares in its source set at the
+  ## pinned revision, in its search order.
+  if ss.isNone:
     return
-  let ss = parseSourceSet(text, d.repo & ":" & NimbleSourceSetFile)
-  for m in ss.mirrors:
+  for m in ss.get.mirrors:
     result.add parseMirror(m.url, required = m.role == mrRequired)
+
+proc recordSrcDir*(rec: VersionRecord; p: NimblePlatform): string =
+  ## The record's `srcDir` on platform ``p``: the plain assignment, then
+  ## every conditional assignment whose condition holds there, in record
+  ## order (the last one wins, as in the `.nimble` file). "" = the package
+  ## root.
+  result = rec.layout.srcDir
+  for c in rec.layout.conditional:
+    if c.field == rfSrcDir and c.values.len > 0 and activeOn(c.condition, p):
+      result = c.values[^1]
+
+proc nimbleBuildOrder*(packages: seq[LockedNimblePackage]):
+    seq[LockedNimblePackage] =
+  ## The lock's topological order, then name (NPC-AREQ21,
+  ## Nim-Package-Path-Handling.md § 5): a package comes after every package
+  ## it depends on; among the packages whose dependencies are all placed,
+  ## the smallest canonical name comes first. Nothing else -- no store path,
+  ## no host fact -- decides it, so the order is the same on every machine
+  ## that has the lock. A dependency the lock does not hold, or a cycle,
+  ## does not stop the order: what remains is placed by name.
+  var byName = initTable[string, LockedNimblePackage]()
+  for p in packages: byName["nimble:" & p.row.name] = p
+  var placed = initHashSet[string]()
+  var remaining: seq[string]
+  for k in byName.keys: remaining.add k
+  remaining.sort()
+  while remaining.len > 0:
+    var next = -1
+    for i, k in remaining:
+      var ready = true
+      for d in byName[k].depends:
+        if d in byName and d notin placed and d != k:
+          ready = false
+          break
+      if ready:
+        next = i
+        break
+    if next < 0:
+      next = 0 # a cycle: the smallest remaining name breaks it
+    let k = remaining[next]
+    remaining.delete(next)
+    placed.incl k
+    result.add byName[k]
+
+proc configuredMirrorsFor(projectRoot: string; options: NimbleSourcesOptions):
+    seq[ConfiguredMirror] =
+  let paths =
+    if options.mirrorConfig.isSome: options.mirrorConfig.get
+    else: mirrorConfigPathsFor(projectRoot)
+  try:
+    configuredNimbleMirrors(paths)
+  except NimbleMirrorConfigError as e:
+    nimbleError("the configured Nimble mirrors cannot be read: " & e.msg)
 
 proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
                                  options: NimbleSourcesOptions):
@@ -269,13 +362,20 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
   if rows.len == 0 and nimblePins.len == 0:
     return
   result.active = true
+  result.platform = if ld.platform.len > 0: ld.platform else: currentPlatformId()
+  let platform = nimblePlatformOf(result.platform)
   # The pins, verified against the declaration and re-read at the pinned
   # revision (the index identity must be the pinned one).
   let answer = catalogsForBuild(projectRoot, pins, @[])
   var byRepo = initTable[string, DiscoveredNimbleIndex]()
-  for d in answer.nimbleIndexes: byRepo[d.repo] = d
+  var sourceSets = initTable[string, Option[SourceSet]]()
+  for d in answer.nimbleIndexes:
+    byRepo[d.repo] = d
+    sourceSets[d.repo] = indexSourceSet(d)
+    if sourceSets[d.repo].isSome:
+      result.natives.add sourceSets[d.repo].get.natives
   var refusals: seq[string]
-  var anchored: seq[NimbleLockRow]
+  var anchored: seq[LockedNimblePackage]
   var depOf = initTable[string, LockedDep]()
   for d in ld.deps:
     if d.isNimbleDep: depOf[d.name] = d
@@ -290,7 +390,8 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
     var idx = openNimbleIndex(d)
     let found = lookupPackage(idx, row.name)
     var matched = false
-    var r = row
+    var pkg = LockedNimblePackage(row: row, version: dep.version,
+      depends: dep.depends)
     if found.found:
       for rec in found.package.versions:
         let o = if int(rec.origin) < found.package.origins.len:
@@ -299,8 +400,10 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
         if rec.commit == row.commit and $rec.tree == row.tree and
             o.url == row.origin and o.subdir == row.subdir:
           matched = true
-          r.archiveSha256 = toHexLower(rec.archiveSha256)
-          r.size = int64(rec.size)
+          pkg.row.archiveSha256 = toHexLower(rec.archiveSha256)
+          pkg.row.size = int64(rec.size)
+          pkg.record = rec
+          pkg.package = found.package
           break
     if not matched:
       refusals.add "nimble:" & row.name & " (commit " & row.commit &
@@ -308,58 +411,116 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
         "; the lock row was not written by a solve of that index. " &
         "Re-solve it with `repro lock refresh`"
       continue
-    anchored.add r
+    anchored.add pkg
   if refusals.len > 0:
     nimbleError(refusals.join("\n  "))
-  result.rows = anchored
+  anchored = nimbleBuildOrder(anchored)
+  for p in anchored: result.rows.add p.row
   if answer.nimbleIndexes.len > 0:
     result.indexLine = nimbleIndexAgeLine(answer.nimbleIndexes[0],
       getTime().toUnix)
   let store =
     if options.fetchConfig.isSome and options.fetchConfig.get.storeRoot.len > 0:
       options.fetchConfig.get.storeRoot
+    elif options.fetchTemplate.isSome and
+        options.fetchTemplate.get.storeRoot.len > 0:
+      options.fetchTemplate.get.storeRoot
     elif options.storeRoot.len > 0: options.storeRoot
     else: defaultStoreRoot()
   var missing: seq[NimbleLockRow]
-  for r in anchored:
-    if entryVerified(store, r.tree):
-      result.present.add r.name
-      result.storePaths[r.name] = entryPath(store, r.tree)
+  for p in anchored:
+    if entryVerified(store, p.row.tree):
+      result.present.add p.row.name
+      result.storePaths[p.row.name] = entryPath(store, p.row.tree)
     else:
-      missing.add r
-  if missing.len == 0:
-    return
-  if options.offline:
-    var names: seq[string]
-    for r in missing: names.add "nimble:" & r.name & " (blake3:" & r.tree & ")"
-    nimbleError("the build is offline and the source store " & store &
-      " does not hold " & names.join(", ") & "; fetch them with a build " &
-      "that may reach the index's mirrors")
-  var cfg =
-    if options.fetchConfig.isSome: options.fetchConfig.get
+      missing.add p.row
+  if missing.len > 0:
+    if options.offline:
+      var names: seq[string]
+      for r in missing:
+        names.add "nimble:" & r.name & " (blake3:" & r.tree & ")"
+      nimbleError("the build is offline and the source store " & store &
+        " does not hold " & names.join(", ") & "; fetch them with a build " &
+        "that may reach the index's mirrors")
+    var cfg: FetchConfig
+    if options.fetchConfig.isSome:
+      cfg = options.fetchConfig.get
     else:
-      var mirrors = options.extraMirrors
-      for d in answer.nimbleIndexes: mirrors.add indexMirrors(d)
-      defaultFetchConfig(
+      # NPC-AREQ13 / NPC-AREQ20: the configured mirrors, then the index's
+      # own, then (inside the fetch) the origin. The list is part of every
+      # `nimble.fetch` edge's cache key (``fetchLocked``).
+      result.configuredMirrors = configuredMirrorsFor(projectRoot, options)
+      var mirrors = fetchMirrorsOf(result.configuredMirrors)
+      for d in answer.nimbleIndexes: mirrors.add indexMirrors(sourceSets[d.repo])
+      let stateDir =
         if options.stateDir.len > 0: options.stateDir
-        else: projectRoot / ".repro" / "nimble-fetch", mirrors)
-  if cfg.storeRoot.len == 0: cfg.storeRoot = store
-  let fetched = fetchLocked(missing, cfg)
-  result.fetchEdges = fetched.executed.len
-  var failed: seq[string]
-  for p in fetched.packages:
-    if p.state == psFailed:
-      var tried: seq[string]
-      for a in p.attempts:
-        tried.add $a.transport & " " & a.location & ": " & $a.outcome &
-          (if a.detail.len > 0: " (" & a.detail & ")" else: "")
-      failed.add "nimble:" & p.row.name & " (blake3:" & p.row.tree &
-        ") could not be fetched:\n    " & tried.join("\n    ")
-    else:
-      result.fetched.add p.row.name
-      result.storePaths[p.row.name] = p.storePath
-  if failed.len > 0:
-    nimbleError(failed.join("\n  "))
+        else: projectRoot / ".repro" / "nimble-fetch"
+      if options.fetchTemplate.isSome:
+        cfg = options.fetchTemplate.get
+        cfg.mirrors = mirrors
+        if cfg.stateDir.len == 0: cfg.stateDir = stateDir
+      else:
+        cfg = defaultFetchConfig(stateDir, mirrors)
+    if cfg.storeRoot.len == 0: cfg.storeRoot = store
+    result.mirrors = cfg.mirrors
+    let fetched = fetchLocked(missing, cfg)
+    result.fetchEdges = fetched.executed.len
+    var failed: seq[string]
+    for p in fetched.packages:
+      if p.state == psFailed:
+        var tried: seq[string]
+        for a in p.attempts:
+          tried.add $a.transport & " " & a.location & ": " & $a.outcome &
+            (if a.detail.len > 0: " (" & a.detail & ")" else: "")
+        failed.add "nimble:" & p.row.name & " (blake3:" & p.row.tree &
+          ") could not be fetched:\n    " & tried.join("\n    ")
+      else:
+        result.fetched.add p.row.name
+        result.storePaths[p.row.name] = p.storePath
+    if failed.len > 0:
+      nimbleError(failed.join("\n  "))
+  # NPC-AREQ21: each package is its verified tree and a `--path` to its
+  # source directory, in the build order.
+  for p in anchored.mitems:
+    p.storePath = result.storePaths.getOrDefault(p.row.name)
+    let srcDir = recordSrcDir(p.record, platform).replace('\\', '/')
+    var parts: seq[string]
+    for c in srcDir.split('/'):
+      if c.len > 0 and c != ".": parts.add c
+    # The record's `srcDir` is the generator's reading of a hostile
+    # `.nimble`: a path that leaves the tree would hand the compile a
+    # directory no digest covers.
+    if srcDir.isAbsolute or ".." in parts:
+      refusals.add "nimble:" & p.row.name & " " & p.version & ": the " &
+        "record's srcDir " & srcDir.escape() & " leaves the package's tree"
+      continue
+    p.srcPath = if parts.len == 0: p.storePath
+                else: p.storePath / parts.join("/")
+    if not dirExists(p.srcPath):
+      refusals.add "nimble:" & p.row.name & " " & p.version & ": the " &
+        "record's srcDir " & srcDir.escape() & " is not a directory of " &
+        "the verified tree " & p.storePath
+      continue
+    result.nimPathDirs.add p.srcPath
+  if refusals.len > 0:
+    nimbleError(refusals.join("\n  "))
+  result.packages = anchored
+
+proc nimVersionRefusals*(report: NimbleSourcesReport; nimVersion: string):
+    seq[string] =
+  ## M6-P12 (NPC-AREQ7, NPC-AREQ17): the Nim the build compiles with,
+  ## against the `nim` range of every chosen record, whether or not the
+  ## solve declared a `nim` package. One line per range that does not admit
+  ## ``nimVersion``, naming the package, its version, the range and the Nim
+  ## version. A range is evaluated for the lock's platform, as the solve
+  ## evaluated it.
+  let platform = nimblePlatformOf(report.platform)
+  for p in report.packages:
+    let c = candidate(p.package, p.record, platform)
+    for r in c.nim:
+      if not rangeAdmits(r, nimVersion):
+        result.add "nimble:" & p.row.name & " " & p.version &
+          " requires nim " & r & "; the build's Nim is " & nimVersion
 
 # ---------------------------------------------------------------------------
 # `repro lock diff`

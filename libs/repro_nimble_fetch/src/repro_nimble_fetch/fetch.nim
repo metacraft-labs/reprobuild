@@ -567,14 +567,24 @@ proc fetchLocked*(rows: seq[NimbleLockRow]; cfg: FetchConfig): FetchResult =
     jobs[id] = r
     var dests = destinations
     dests.add r.originUrl
+    # The edge's effect is a tree installed in ``storeOf(cfg)``: its key
+    # names that store, so a project whose user cache directory (and so
+    # store) changed does not take a cached receipt for a tree the new
+    # store lacks.
     let outPath = stateDir / "edges" / "fetch" / keyOf(r.name, r.origin,
-      r.subdir, r.commit, r.tree, cfg.mirrorList)
+      r.subdir, r.commit, r.tree, cfg.mirrorList, storeOf(cfg))
+    # A receipt says the tree WAS installed; a store that no longer holds
+    # it (an entry removed by hand or by a cleanup) must not be answered
+    # from that receipt, so the edge runs again.
+    if not hasEntry(storeOf(cfg), r.tree) and fileExists(outPath):
+      removeFile(outPath)
     actions.add builtinAction(bakSourceFetch, id,
       governingLockIdentity = lockIdentityOutsideSolvedGraph(),
       deps = (if closureId.len > 0: @[closureId] else: @[]),
       outputs = [outPath], cacheable = true,
       weakFingerprint = weakFingerprintFromText(id & "\n" & r.tree & "\n" &
-        r.commit & "\n" & r.originUrl & "\n" & cfg.mirrorList),
+        r.commit & "\n" & r.originUrl & "\n" & cfg.mirrorList & "\n" &
+        storeOf(cfg)),
       text = "nimble.fetch " & r.name & " " & r.tree,
       networkMode = netFetch, netDestinations = dests)
   result.actions = actions
