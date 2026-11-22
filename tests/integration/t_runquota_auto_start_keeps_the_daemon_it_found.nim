@@ -68,7 +68,7 @@ suite "runquota auto-start keeps the daemon it found":
       let realDaemon = findRunQuotaDaemonBin()
       if realDaemon.len == 0:
         checkpoint("no runquotad on this host")
-        skip("no runquotad can be found on this host")
+        skip("no runquotad on this host")
       else:
         resetInvocationRunQuotaDaemonBin()
         let isolated = isolateUserRunQuota()
@@ -115,7 +115,7 @@ suite "runquota auto-start keeps the daemon it found":
         let searched = findRunQuotaDaemonBin()
         if searched.len > 0:
           checkpoint("the sibling-checkout fallback answers here: " & searched)
-          skip("the sibling-checkout fallback finds a runquotad from this test binary's location")
+          skip("the sibling-checkout fallback finds a runquotad, so the empty-PATH case cannot be staged")
         else:
           # NEGATIVE CONTROL first, so its nil cannot be a daemon the positive
           # case left running.

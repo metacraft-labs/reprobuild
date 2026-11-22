@@ -27,7 +27,10 @@
 ## `gccLinkSpecs`, `gccSpecDefault`) from the macro, the literal emitters or
 ## the codec, or writing it before v33 (the ELF relocation cases); accepting
 ## an absolute relocation path, or a `gccSpecDefault` that names no spec
-## (its authoring-error case).
+## (its authoring-error case); dropping `elfRuntimePackage` or
+## `executableExtraAlias` from any route, or writing them before v37 (the
+## runtime-package cases); accepting a runtime package or an extra alias
+## that is a path (their authoring-error case).
 ##
 ## No mocks: the macros, the codec and a real `nim c` of the generated stub.
 
@@ -168,12 +171,33 @@ package elfDetailFixture:
       cpu = "x86_64",
       os = "linux"
 
+# An archive relocated onto ANOTHER package's loader and C library, and a
+# driver exported under a second name. Never realized here.
+package elfRuntimeDetailFixture:
+  provisioning:
+    tarball url = "https://example.invalid/compiler.tar.xz",
+      sha256 = repeat('6', 64),
+      archiveType = "tar.xz",
+      stripComponents = 1,
+      executablePath = "bin/compiler",
+      executableAlias = "compiler-alias",
+      executableExtraAlias = "cc",
+      executableExtraAlias = "c99",
+      elfRuntimePackage = "elfDetailFixture",
+      elfInterpreter = "sysroot/lib/ld-linux-x86-64.so.2",
+      elfRunpath = "sysroot/lib",
+      elfRunpath = "lib",
+      elfPatchDir = "bin",
+      cpu = "x86_64",
+      os = "linux"
+
 package detailConsumer:
   uses:
     "detailFixture"
     "appDetailFixture"
     "installerDetailFixture"
     "elfDetailFixture"
+    "elfRuntimeDetailFixture"
 
 proc findPackage(name: string): PackageDef =
   for pkg in registeredPackages():
@@ -594,8 +618,7 @@ suite "ELF relocation detail fields":
     check olderSeen == 1
 
   test "an ELF relocation path outside the prefix is an authoring error":
-    let tempRoot = createTempDir("repro-elf-detail-error", "",
-      getCurrentDir())
+    let tempRoot = inTreeScratchDir("repro-elf-detail-error")
     defer: removeDir(tempRoot)
     proc compileRecord(field, value: string): tuple[output: string;
         exitCode: int] =
@@ -626,3 +649,74 @@ suite "ELF relocation detail fields":
       checkpoint "gccSpecDefault = " & bad & ":\n" & res.output
       check res.exitCode != 0
       check "gccSpecDefault must be `<spec>:<text>`" in res.output
+
+suite "ELF runtime package and extra alias detail fields":
+
+  proc checkRuntimeDetail(detail: TarballArchiveDetail) =
+    check detail.elfRuntimePackage == "elfDetailFixture"
+    check detail.executableExtraAliases == @["cc", "c99"]
+    check detail.elfInterpreter == "sysroot/lib/ld-linux-x86-64.so.2"
+    check detail.elfRunpath == @["sysroot/lib", "lib"]
+    check detail.elfPatchDirs == @["bin"]
+
+  test "the in-package block carries the runtime package and the aliases":
+    let pkg = findPackage("elfRuntimeDetailFixture")
+    check pkg.tarballProvisioning.len == 1
+    checkRuntimeDetail(pkg.tarballProvisioning[0].detail)
+
+  test "the v37 codec keeps them, and a v36 payload decodes without them":
+    let artifact = artifactFromRegisteredDsl(currentSourcePath())
+    let roundTrip = decodeProjectInterfaceArtifact(
+      encodeProjectInterfaceArtifact(artifact))
+    var seen = 0
+    for u in roundTrip.projectInterface.toolUses:
+      if u.packageSelector == "elfRuntimeDetailFixture":
+        checkRuntimeDetail(u.tarballProvisioning[0].detail)
+        inc seen
+    check seen == 1
+    check InterfaceFormatVersion >= 37'u16
+    let older = decodeInterfacePayload(encodeInterfacePayload(
+      artifact.projectInterface, version = 36'u16), version = 36'u16)
+    var olderSeen = 0
+    for u in older.toolUses:
+      if u.packageSelector == "elfRuntimeDetailFixture":
+        let detail = u.tarballProvisioning[0].detail
+        check detail.elfRuntimePackage == ""
+        check detail.executableExtraAliases.len == 0
+        check detail.elfRunpath == @["sysroot/lib", "lib"]
+        inc olderSeen
+    check olderSeen == 1
+
+  test "a runtime package or an extra alias that is a path is an " &
+      "authoring error":
+    let tempRoot = inTreeScratchDir("repro-elf-runtime-error")
+    defer: removeDir(tempRoot)
+    proc compileRecord(field, value: string): tuple[output: string;
+        exitCode: int] =
+      let source = tempRoot / "bad_runtime_record.nim"
+      writeFile(source, "import repro_project_dsl\n" &
+        "package badRuntime:\n  provisioning:\n" &
+        "    tarball url = \"https://example.invalid/t.tar.xz\",\n" &
+        "      sha256 = \"" & repeat('f', 64) & "\",\n" &
+        "      archiveType = \"tar.xz\",\n" &
+        "      executablePath = \"bin/cc\",\n" &
+        "      " & field & " = " & value & ",\n" &
+        "      cpu = \"x86_64\",\n      os = \"linux\"\n")
+      execCmdEx("nim check --hints:off --warnings:off --path:" &
+        quoteShell(getCurrentDir() / "libs" / "repro_project_dsl" / "src") &
+        " " & quoteShell(source))
+    for (field, good) in [("elfRuntimePackage", "\"gcc\""),
+        ("executableExtraAlias", "\"cc\"")]:
+      let ok = compileRecord(field, good)
+      checkpoint field & " = " & good & ":\n" & ok.output
+      check ok.exitCode == 0
+    for bad in ["\"lib/gcc\"", "\" gcc\""]:
+      let res = compileRecord("elfRuntimePackage", bad)
+      checkpoint "elfRuntimePackage = " & bad & ":\n" & res.output
+      check res.exitCode != 0
+      check "elfRuntimePackage must name a package" in res.output
+    for bad in ["\"bin/cc\"", "\"..\""]:
+      let res = compileRecord("executableExtraAlias", bad)
+      checkpoint "executableExtraAlias = " & bad & ":\n" & res.output
+      check res.exitCode != 0
+      check "executableExtraAlias must be a file name" in res.output

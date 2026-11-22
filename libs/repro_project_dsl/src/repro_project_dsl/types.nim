@@ -1023,6 +1023,21 @@ type
       ## ``toolchain-wrapper``), so that declaring the real driver keeps the
       ## options the vendor ships. Requires ``gccLinkSpecs``.
       ## https://gcc.gnu.org/onlinedocs/gcc/Spec-Files.html
+    elfRuntimePackage*: string
+      ## The package whose realized prefix carries the loader and C library
+      ## this archive's programs are relocated onto, for an archive that
+      ## ships none of its own (rust-lang's toolchain release). When set,
+      ## ``elfInterpreter`` and ``elfRunpath`` are paths in THAT package's
+      ## prefix, realized on this host into the same tool store by a
+      ## dependency edge of this realization, not paths in this archive.
+      ## The package must have a ``tarball`` realization for the host.
+      ## Incompatible with ``gccLinkSpecs``.
+    executableExtraAliases*: seq[string]
+      ## Further names the realized executable is copied under, beside
+      ## ``executableAlias``. For a C compiler driver that must also answer
+      ## to ``cc``, the name rustc and build scripts run as their default C
+      ## compiler and linker. A name that already exists beside the
+      ## executable fails the realization rather than being overwritten.
 
   TarballProvisioningDef* = object
     url*: string
