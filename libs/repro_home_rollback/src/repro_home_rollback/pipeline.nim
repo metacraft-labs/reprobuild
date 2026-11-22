@@ -843,7 +843,8 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
       # unless it was given `--uninstall-from-scoop`. With it, a Scoop app
       # the current generation records and the target does not is removed
       # by the same policy the apply uses: only the versions Reprobuild
-      # installed, only when no non-profile root holds any prefix of it.
+      # installed, only when no root other than this state directory's own
+      # `profile` roots holds any prefix of it.
       if opts.uninstallFromScoop and
           hcPackages in ownedConcernsOf(tgt.manifest):
         var targetScoopApps: HashSet[string]
@@ -856,7 +857,8 @@ proc runRollback*(rawOpts: RollbackOptions): RollbackOutcome =
           let sc = recordedScoopApp(rp)
           if sc.ok and sc.app notin targetScoopApps and
               not handled.containsOrIncl(sc.app):
-            executeScoopRemoval(store, planDroppedScoopRecord(store, rp, true))
+            executeScoopRemoval(store,
+              planDroppedScoopRecord(store, opts.stateDir, rp, true))
       # M68 resources.
       for op in plan.resourceOps:
         if removesNothingOwned(op):
