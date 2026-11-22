@@ -162,6 +162,13 @@ export model, config_check
 # re-exported.
 import repro_project_dsl/cli_description
 
+# The completion files of an executable with a ``cli:`` section: the names,
+# paths and entry word the provider's completion edge uses
+# (``runtime_provider``). Standard library and clispec only; not re-exported.
+# Only the provider adds those edges, so no other mode compiles it.
+when defined(reproProviderMode):
+  import repro_project_dsl/completion_files
+
 include "repro_project_dsl/types"
 
 # Project-DSL-Composition M5: per-section typed-object prelude.

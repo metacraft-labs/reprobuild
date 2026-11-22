@@ -1136,6 +1136,35 @@ proc registeredWorkspaceDeps*(): seq[WorkspaceDepEdge] {.dynOrStatic.} =
   ## Return every ``depends_on`` edge recorded in evaluation order.
   workspaceDepRegistry
 
+type
+  CliProgramRegistration* = object
+    ## One ``executable`` with a ``cli:`` section, as the ``package`` macro
+    ## registers it in provider mode: its package, its name as written and
+    ## the program name its ``<name>CliDescription`` template passes to the
+    ## program's CLI generator (``repro_project_dsl/cli_description``).
+    packageName*: string
+    executable*: string
+    program*: string
+
+var cliProgramRegistry: seq[CliProgramRegistration] = @[]
+
+proc registerCliProgram*(packageName, executable, program: string)
+    {.dynOrStatic.} =
+  ## Records that ``executable`` of ``packageName`` has a ``cli:`` section
+  ## describing the program ``program``. Emitted by the ``package`` macro,
+  ## in provider mode only, for each executable with such a section: the
+  ## parsed ``ExecutableDef`` cannot say so by itself, because a section
+  ## that declares only root-scope parameters yields no command. The
+  ## provider's completion edges read it (``runtime_provider``). Idempotent.
+  let entry = CliProgramRegistration(packageName: packageName,
+    executable: executable, program: program)
+  if entry notin cliProgramRegistry:
+    cliProgramRegistry.add(entry)
+
+proc registeredCliPrograms*(): seq[CliProgramRegistration] {.dynOrStatic.} =
+  ## Every ``registerCliProgram`` record, in registration order.
+  cliProgramRegistry
+
 proc resetBuildActionRegistry*() {.dynOrStatic.} =
   buildActionRegistry.setLen(0)
 

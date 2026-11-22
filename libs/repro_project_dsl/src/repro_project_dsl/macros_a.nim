@@ -1101,6 +1101,21 @@ proc parseTarballArchiveDetail(node: NimNode;
     if text.len > 0 and (':' notin text or text.split(':', 1)[0].strip().len == 0):
       error("tarball gccSpecDefault must be `<spec>:<text>`", node)
     detail.gccSpecDefaults.add(exprCode(value))
+  of "elfruntimepackage":
+    # A package selector, not a path: the package whose realized prefix the
+    # relocation paths are resolved in.
+    let text = litText(value)
+    if text.len > 0 and (text.contains('/') or text.contains('\\') or
+        text.strip() != text):
+      error("tarball elfRuntimePackage must name a package", node)
+    detail.elfRuntimePackage = exprCode(value)
+  of "executableextraalias":
+    # A file name beside the executable, like ``executableAlias``.
+    let text = litText(value)
+    if text.len > 0 and (text.contains('/') or text.contains('\\') or
+        text == "." or text == ".."):
+      error("tarball executableExtraAlias must be a file name", node)
+    detail.executableExtraAliases.add(exprCode(value))
   else:
     return false
   true
@@ -2699,7 +2714,10 @@ proc tarballArchiveDetailLiteral*(detail: TarballArchiveDetail): string =
     ", elfRunpath: " & codeListLiteral(detail.elfRunpath) &
     ", elfPatchDirs: " & codeListLiteral(detail.elfPatchDirs) &
     ", gccLinkSpecs: " & codeOrEmpty(detail.gccLinkSpecs) &
-    ", gccSpecDefaults: " & codeListLiteral(detail.gccSpecDefaults) & ")"
+    ", gccSpecDefaults: " & codeListLiteral(detail.gccSpecDefaults) &
+    ", elfRuntimePackage: " & codeOrEmpty(detail.elfRuntimePackage) &
+    ", executableExtraAliases: " &
+      codeListLiteral(detail.executableExtraAliases) & ")"
 
 proc gemBuildArgsLiteral(items: openArray[(string, seq[string])]): string =
   ## ``@[(<gem>, @[<arg>, ...]), ...]``, typed so an empty list still
