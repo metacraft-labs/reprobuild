@@ -237,7 +237,7 @@ require_contains .github/workflows/benchmark.yml 'runner: '\''["linux", "x64", "
 require_contains .github/workflows/benchmark.yml 'runner: '\''["self-hosted", "macos", "arm64"]'\'''
 require_contains .github/workflows/benchmark.yml "metacraft-labs/runquota"
 require_contains .github/workflows/benchmark.yml "metacraft-labs/reprobuild-cmake"
-require_contains .github/workflows/benchmark.yml "ref: reprobuild"
+require_contains .github/workflows/benchmark.yml "ref: 1a59932635c3f083892e70b2cc8a3111047eef70"
 require_contains .github/workflows/benchmark.yml "cmake --build build --target cmake"
 require_contains .github/workflows/benchmark.yml "run: nix develop --command just bench --quick"
 require_contains .github/workflows/benchmark.yml "actions/upload-artifact@v4"
