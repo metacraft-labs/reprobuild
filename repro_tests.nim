@@ -26077,6 +26077,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_hook_whose_config_is_gone_is_reported.nim",
+    binary: "build/test-bin/t_hook_whose_config_is_gone_is_reported",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g07",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_hooks_consult_only_the_repos_own_dependencies.nim",
     binary: "build/test-bin/t_hooks_consult_only_the_repos_own_dependencies",
     defines: @[],
@@ -26830,7 +26842,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
