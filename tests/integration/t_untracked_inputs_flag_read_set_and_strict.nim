@@ -182,6 +182,66 @@ suite "TC-8d — the untracked-inputs flag":
       check not none.withhold
       check "no read set was captured" in none.note
 
+      # ---- 3b. a read through a link is placed by the link ------------------
+      # Test-Certificates §"Issuance preconditions": the link is the entry
+      # read, so an untracked link withholds wherever it points (a verifier
+      # who checks out the content has no such link). Only the ancestors of
+      # the entry are resolved (Monitor-Hook-Shim §"Both sides in one
+      # resolution"). Hand-built read sets: the judgement is the unit.
+      createDir(app / "lib")
+      createDir(app / "src")
+      createDir(app / "gen")
+      writeFile(app / "lib" / "tracked.txt", "tracked\n")
+      writeFile(app / "gen" / "a.txt", "an output\n")
+      writeFile(app / "lib" / "loose.txt", "untracked\n")
+      var linkTracked = tracked
+      linkTracked.incl("lib/tracked.txt")
+      proc readsOf(paths: varargs[string]): CapturedReadSet =
+        CapturedReadSet(captured: true, source: "hand-built",
+          paths: @paths)
+      # An untracked link to a tracked file withholds, naming the link.
+      createSymlink("../lib/tracked.txt", app / "src" / "link")
+      check judgeUntrackedInputs(cuiReadSet, app, @[], linkTracked,
+        readsOf(app / "src" / "link")).offending == @["src/link"]
+      # An untracked link into an exempt output tree is not exempt.
+      createSymlink("../gen/a.txt", app / "src" / "gen-link")
+      var viaTree = readsOf(app / "src" / "gen-link")
+      viaTree.exemptOutputTrees = @[app / "gen"]
+      check judgeUntrackedInputs(cuiReadSet, app, @[], linkTracked,
+        viaTree).offending == @["src/gen-link"]
+      var viaOutput = readsOf(app / "src" / "gen-link")
+      viaOutput.exemptOutputs = @[app / "gen" / "a.txt"]
+      check judgeUntrackedInputs(cuiReadSet, app, @[], linkTracked,
+        viaOutput).offending == @["src/gen-link"]
+      # A tracked link to a tracked file is bound by the content.
+      createSymlink("../lib/tracked.txt", app / "src" / "tlink")
+      var linkBound = linkTracked
+      linkBound.incl("src/tlink")
+      check not judgeUntrackedInputs(cuiReadSet, app, @[], linkBound,
+        readsOf(app / "src" / "tlink")).withhold
+      # A tracked link to an untracked file: the target is read too, and
+      # the content binds only the link, so the target withholds.
+      createSymlink("../lib/loose.txt", app / "src" / "tloose")
+      linkBound.incl("src/tloose")
+      check judgeUntrackedInputs(cuiReadSet, app, @[], linkBound,
+        readsOf(app / "src" / "tloose")).offending == @["lib/loose.txt"]
+      # A tracked link to an exempt output is exempt on both counts.
+      createSymlink("../gen/a.txt", app / "src" / "tgen")
+      linkBound.incl("src/tgen")
+      var tgen = readsOf(app / "src" / "tgen")
+      tgen.exemptOutputs = @[app / "gen" / "a.txt"]
+      check not judgeUntrackedInputs(cuiReadSet, app, @[], linkBound,
+        tgen).withhold
+      # A link among the ANCESTORS is still resolved: it names a directory,
+      # and the file under it is placed by where that directory is.
+      createSymlink("lib", app / "alias")
+      check not judgeUntrackedInputs(cuiReadSet, app, @[], linkTracked,
+        readsOf(app / "alias" / "tracked.txt")).withhold
+      check judgeUntrackedInputs(cuiReadSet, app, @[], linkTracked,
+        readsOf(app / "alias" / "loose.txt")).offending == @["lib/loose.txt"]
+      removeDir(app / "src"); removeDir(app / "lib"); removeDir(app / "gen")
+      removeFile(app / "alias")
+
       # ---- 4. an invalid value is a loud error ------------------------------
       # Not renderable (the renderer only writes valid values), so the
       # valid snapshot is edited by hand, as a hand-edited lock would be.
