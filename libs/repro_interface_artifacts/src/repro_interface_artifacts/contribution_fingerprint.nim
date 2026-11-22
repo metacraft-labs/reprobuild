@@ -616,6 +616,20 @@ proc tarballFieldView*(p: InterfaceTarballProvisioning):
     for entry in p.closureEntries:
       lines.add(canonicalClosureLine(entry))
     result.sets.add(("closureEntries", lines))
+  # A gem step installs gems by URL and digest and builds them with the
+  # named tools and arguments, so each of those moves the fingerprint too.
+  # Named only when the record declares a step.
+  if p.gemEntries.len > 0 or p.gemClosure.len > 0:
+    var gems: seq[string] = @[]
+    for entry in p.gemEntries:
+      gems.add(canonicalGemLine(entry))
+    result.sets.add(("gemEntries", gems))
+    var tools: seq[string] = @[]
+    for use in p.gemBuildUses:
+      tools.add(use.packageSelector)
+    result.sets.add(("gemBuildUses", tools))
+    result.sets.add(("gemBuildArgs", canonicalGemBuildArgs(p.gemBuildArgs)))
+    result.sets.add(("gemSubstitutions", p.gemSubstitutions))
 
 proc scoopFieldView*(p: InterfaceScoopProvisioning): RealizationFieldView =
   RealizationFieldView(family: "scoop", lockIdentity: p.lockIdentity,

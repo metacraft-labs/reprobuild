@@ -13216,6 +13216,12 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
   # catalog bin dirs to PATH, and bare-name argv entries fall through
   # to the host's existing PATH (the legacy pre-Batch-B behaviour).
   var pendingToolIdentityResolver: ToolIdentityResolver = nil
+  # The tool uses whose tarball records may declare a post-extraction step,
+  # set once tool identities are resolved (below). Before the graph runs,
+  # each such step is checked against the graph's outputs
+  # (``refuseStepDeclarationsUnderGraphOutputs``); on the early cache-warm
+  # fast path it is still empty and nothing is checked there.
+  var pendingStepToolUses: seq[InterfaceToolUse]
   var effectiveSelectDefaultAction = selectDefaultAction
   let ownsFromSourceDryRunPlan =
     dryRun and mode == tpmFromSource and fromSourceBuildStack.len == 0
@@ -13505,6 +13511,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
+      # A tool prefix built by a step must not have read a graph output;
+      # the outputs are first known here, before any graph action runs.
+      refuseStepDeclarationsUnderGraphOutputs(pendingStepToolUses,
+        graphOutputPaths(scheduledActions))
       if substituteMaterialized:
         buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
       elif publishMaterialized:
@@ -14747,6 +14757,9 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     pendingToolIdentityResolver =
       if materializedOnly: nil
       else: mkToolIdentityResolver(identity, result.projectRoot)
+    if not materializedOnly:
+      pendingStepToolUses = buildArtifact.projectInterface.toolUses &
+        buildArtifact.projectInterface.runtimeToolUses
     if materializedOnly:
       logSummary("repro build: materialized " &
         (if substituteMaterialized: "substitution" else: "publication") &
@@ -15325,6 +15338,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("checking graph actions=" &
         $scheduledActions.len)
       let scheduledGraph = graph(scheduledActions, lowered.pools)
+      # A tool prefix built by a step must not have read a graph output;
+      # the outputs are first known here, before any graph action runs.
+      refuseStepDeclarationsUnderGraphOutputs(pendingStepToolUses,
+        graphOutputPaths(scheduledActions))
       if substituteMaterialized:
         buildResult = substituteMaterializedBinaryCacheEntries(scheduledGraph)
       elif publishMaterialized:

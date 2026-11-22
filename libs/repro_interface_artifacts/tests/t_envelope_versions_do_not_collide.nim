@@ -603,9 +603,57 @@ suite "envelope lanes -- a tool use's declared platforms begin at v35":
     check interfaceFingerprint(withDeclaredPlatforms(bothLanesInterface())) !=
       interfaceFingerprint(plain)
 
-  test "v35 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v35, so this matrix is extended
-    check interfaceEnvelopeVersion() == 35'u16
+suite "envelope lanes -- a tarball record's gem-closure step begins at v36":
+
+  proc withGemStep(pi: ProjectInterface): ProjectInterface =
+    result = withToolUses(pi, envPrefixArm = true)
+    let builder = result.toolUses[0]
+    for useDef in result.toolUses.mitems:
+      let record = useDef.tarballProvisioning[0]
+      useDef.tarballProvisioning[0].gemClosure = "gems.manifest"
+      useDef.tarballProvisioning[0].gemEntries = @[GemClosureEntry(
+        name: "rack", version: "3.2.4", platform: "ruby",
+        sha256: record.sha256.replace("sha256:", ""),
+        url: "https://rubygems.org/gems/rack-3.2.4.gem")]
+      useDef.tarballProvisioning[0].gemBuildUses = @[builder]
+      useDef.tarballProvisioning[0].gemBuildArgs = @[GemBuildArgs(
+        gem: "rack", args: @["--fixture"])]
+    result.runtimeToolUses = result.toolUses
+
+  test "v36 carries the step; v30..v35 decode it absent with every other " &
+      "field intact":
+    let pi = withGemStep(bothLanesInterface())
+    for v in 30'u16 .. 35'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check not hasGemClosureStep(back.toolUses[0].tarballProvisioning[0])
+      check back.toolUses[0].tarballProvisioning[0].gemBuildUses.len == 0
+      check back.toolUses[0].environmentPrefixProvisioning.len == 1
+      check back.toolUses[0].location.line == 30
+    for v in [36'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      let record = back.toolUses[0].tarballProvisioning[0]
+      check record == pi.toolUses[0].tarballProvisioning[0]
+      check record.gemBuildUses[0].packageSelector == "sqlite"
+      check back.toolUses[0].location.line == 30
+      check back.runtimeToolUses[0].tarballProvisioning[0].gemEntries.len == 1
+
+  test "a record without a step keeps its v35 projection; a step moves " &
+      "its realization digest":
+    let plain = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 35'u16)
+    # A tool use's realizations stay out of the interface fingerprint (a
+    # realization change does not move a consumer's typecheck identity);
+    # the step moves the digest that keys the realization instead.
+    let stepped = withGemStep(bothLanesInterface())
+    check toolUseRealizationDigest(stepped.toolUses[0]) !=
+      toolUseRealizationDigest(plain.toolUses[0])
+
+  test "v36 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v36, so this matrix is extended
+    check interfaceEnvelopeVersion() == 36'u16
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 
