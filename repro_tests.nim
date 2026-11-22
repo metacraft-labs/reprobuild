@@ -3385,6 +3385,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "suite-scope statement runs at every start-up: let cf = newCrateFixture(\"fetch-checked\")"),
   TestSpec(
+    source: "libs/repro_cargo_fetch/tests/test_rqe_cg4a_registry_crate_rustc_edge.nim",
+    binary: "build/test-bin/test_rqe_cg4a_registry_crate_rustc_edge",
+    defines: @["ssl"],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let s = newSetup()"),
+  TestSpec(
     source: "libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim",
     binary: "build/test-bin/t_rqe_cg2_cargo_gc",
     defines: @[],

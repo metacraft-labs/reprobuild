@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3168,
+    "nimTestBinaries": 3169,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 837,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3220
+    "testEntries": 3221
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1835,7 +1835,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1777,
+      "integration": 1778,
       "platform/destructive": 201,
       "pure unit": 837,
       "unclassified": 376
@@ -2058,9 +2058,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3168,
+    "nimTestBinaryCount": 3169,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3220
+    "testEntryCount": 3221
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14731,6 +14731,27 @@
       "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_registry_crate_rustc_edge",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_registry_crate_rustc_edge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
