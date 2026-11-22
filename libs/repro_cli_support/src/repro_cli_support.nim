@@ -61143,12 +61143,32 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## cache-push hook context. Mirrors the manifest-vs-compositional dispatch of
   ## the pre-push gate; returns ``@[]`` on any resolution failure so the caller
   ## (always best-effort) can silently no-op.
+  ##
+  ## The result is the repo set of the WHOLE active project set
+  ## (``[workspace] projects``), not just the primary project: a commit in a
+  ## repo that only a non-primary active project declares must still match, or
+  ## the eager cache push, the evidence refresh and the sibling-ignore block
+  ## silently skip it. Same extension the hook installer
+  ## (``enumerateParticipatingReposStrict``) applies; a single-project
+  ## workspace is returned unchanged.
+  ##
+  ## If the extension itself fails (an active project that no longer resolves,
+  ## an unreadable state file), the PRIMARY project's repos are returned, which
+  ## is exactly what this proc returned before it learned about project sets.
+  ## A hook is best-effort, so one broken member must not blank the repo set
+  ## of every healthy one (that would also empty the sibling-ignore block).
+  proc withActiveSet(primary: ResolvedProject): seq[ResolvedRepo] =
+    try:
+      extendWithActiveProjectSet(workspaceRoot, primary).repos
+    except CatchableError:
+      primary.repos
   try:
     let unrecordedProject =
       if hasWorkspaceStateFile(workspaceRoot): ""
       else: detectWorkspaceProjectName(workspaceRoot)
     if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
-      return composeWorkspaceLayers(workspaceRoot, unrecordedProject).repos
+      return withActiveSet(
+        composeWorkspaceLayers(workspaceRoot, unrecordedProject))
     else:
       let projectName = detectWorkspaceProjectName(workspaceRoot)
       if projectName.len == 0:
@@ -61157,9 +61177,9 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
       let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
       let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
       if fileExists(projectFile):
-        return resolveProject(projectFile).repos
+        return withActiveSet(resolveProject(projectFile))
       elif fileExists(variantFile):
-        return resolveVariant(variantFile).repos
+        return withActiveSet(resolveVariant(variantFile))
       else:
         return @[]
   except CatchableError:
@@ -61233,10 +61253,15 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     let repoAbs = absolutePath(repoRoot)
     let workspaceRoot = resolvePostCommitWorkspaceRoot(repoAbs, "")
     if workspaceRoot.len == 0:
-      return 0
+      return 0 # no workspace to log into
     let repos = resolveWorkspaceReposForHook(workspaceRoot)
     let matched = findRepoByWorkspacePath(workspaceRoot, repos, repoAbs)
     if matched.isNone:
+      # Say so: this return used to be silent, which made a repo outside the
+      # resolved project set indistinguishable from a working push.
+      appendPostCommitLog(workspaceRoot,
+        "repro cache-push: skipped: " & repoAbs & " is not a repo of the " &
+        "workspace's active projects (" & $repos.len & " repos resolved)")
       return 0
     # HL-6 (§7.2): evidence-only / source-secret repos are EXCLUDED from the
     # eager cache push. Propagating the just-committed branch's objects to
@@ -61250,6 +61275,8 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     # the sync/init clone path — NOT the bare remote base (`fetchUrl`).
     let fetchUrl = cloneUrlFor(matched.get())
     if fetchUrl.len == 0:
+      appendPostCommitLog(workspaceRoot,
+        "repro cache-push: skipped: " & repoAbs & " resolves no clone URL")
       return 0
     let cacheRoot = defaultCacheRoot(workspaceRoot)
     # Absolutized here because ``pushCacheRef`` will only push to an absolute
@@ -61264,6 +61291,9 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     # No shared bare on disk → nothing to push into. Common before the
     # first ``init``/``shared-clones rewire`` wires the cache.
     if not dirExists(bare / "objects"):
+      appendPostCommitLog(workspaceRoot,
+        "repro cache-push: skipped: no shared bare at " & bare &
+        " (run `repro workspace shared-clones rewire`)")
       return 0
     let gitBin = findExe("git")
     if gitBin.len == 0:
