@@ -8770,6 +8770,9 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
       of gevDirectoryEnumeration:
         if directoryMemberNames(input.identity) != input.directoryMembers:
           return false
+      of gevHostFact:
+        if hostFactDigest(input.identity) != input.digest:
+          return false
       of gevProviderSource:
         # Governed by ``providerSnapshotBinaryFresh``, which every caller
         # applies before this and which requires every fragment's record to
