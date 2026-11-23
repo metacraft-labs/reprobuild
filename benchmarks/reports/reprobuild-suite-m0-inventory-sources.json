@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3209,
+    "nimTestBinaries": 3212,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 844,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3261
+    "testEntries": 3264
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1841,7 +1841,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1802,
+      "integration": 1805,
       "platform/destructive": 203,
       "pure unit": 844,
       "unclassified": 383
@@ -2064,9 +2064,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3209,
+    "nimTestBinaryCount": 3212,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3261
+    "testEntryCount": 3264
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -22192,6 +22192,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_interface_nimcache_survives_an_interrupted_compile",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_interface_nimcache_survives_an_interrupted_compile.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_l3_lift_carries_service_and_activity_signatures",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -31765,6 +31782,29 @@
       "source": "libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rust_convention_emit_cache_inputs",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_standard_provider",
+      "requiresReproBinary": false,
+      "source": "libs/repro_standard_provider/tests/test_rust_convention_emit_cache_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55621,6 +55661,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_provider_startup_failures_are_summarised_at_the_end",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_provider_startup_failures_are_summarised_at_the_end.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_provision_binding",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -68500,7 +68558,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_reprobuild_suite_inventory.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 110,
+      "staticCaseCount": 115,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1573,8 +1573,7 @@ type
 # the auto-start twice -- once while they prepare the dev env, and again when
 # the build opens its session -- and each step paired it with a release. The
 # first release let go of an adopted, retiring daemon from another build, and
-# it exited before the build's step (the adoption hold on a retiring
-# `runquotad` ended with the dev-env preparation).
+# it exited before the build's step, which then found no daemon.
 # Inside `withInvocationRunQuotaHold` a step's release is deferred to the end
 # of the scope, so the hold covers the whole command.
 # ---------------------------------------------------------------------------

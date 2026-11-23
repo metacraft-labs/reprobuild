@@ -1,8 +1,8 @@
 ## The hold on an adopted, retiring `runquotad` lasts for the whole `repro
 ## test` / `repro build`, not for one of its steps.
 ##
-## THE DEFECT (the adoption hold on a retiring `runquotad` ended with the
-## dev-env preparation). `repro test` runs
+## THE DEFECT. The adoption hold on a retiring `runquotad` ended with the
+## dev-env preparation. `repro test` runs
 ## the RunQuota auto-start twice: while it prepares the dev env, and again when
 ## the build opens its session. Each step released its own hold. On a fresh
 ## one-job runner (nim-termctl run 44842642371, attempt 2) setup's `repro

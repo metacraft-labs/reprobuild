@@ -91,6 +91,32 @@ proc syncDirectoryDurably*(dir: string) =
     discard syncFd(fd)
     discard posix.close(fd)
 
+proc syncExistingFileDurably*(path: string): bool =
+  ## Flush a file that another process wrote to stable storage (`F_FULLFSYNC`
+  ## on macOS, `fsync` elsewhere on POSIX, `FlushFileBuffers` on Windows),
+  ## without changing it. Returns false when the file cannot be opened or
+  ## the flush fails. For a caller that must know a tool's output survives a
+  ## crash before it records that the tool finished (Tool-Owned-Caches.md
+  ## §"Interrupted Use"). The directory entry
+  ## naming the file is made durable separately, by `syncDirectoryDurably`.
+  when defined(windows):
+    # FlushFileBuffers needs a handle with write access
+    # (https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers);
+    # opening an existing file for update neither truncates nor touches it.
+    var f: File
+    if not open(f, extendedPath(path), fmReadWriteExisting):
+      return false
+    try:
+      result = flushFileBuffers(Handle(getOsFileHandle(f))) != 0
+    finally:
+      f.close()
+  else:
+    let fd = posix.open(cstring(extendedPath(path)), posix.O_RDONLY)
+    if fd < 0:
+      return false
+    result = syncFd(fd)
+    discard posix.close(fd)
+
 proc writeSyncedFile(path: string; data: pointer; len: int) =
   ## Create ``path`` (a fresh temporary file), write the ``len`` bytes at
   ## ``data``, flush and sync it. Raises on any failure.
