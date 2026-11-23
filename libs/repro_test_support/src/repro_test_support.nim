@@ -604,6 +604,19 @@ proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
   let msg = e.msg.toLowerAscii()
   msg.contains("directory not empty") or msg.contains("directory is not empty")
 
+const WindowsErrorPathNotFound* = 3'i32
+  ## ERROR_PATH_NOT_FOUND, https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
+
+proc isWindowsPathNotFound*(errorCode: int32; message: string): bool =
+  ## True for the Windows failure that `RemoveDirectory`/`FindFirstFileW` report
+  ## when a path inside the tree is longer than `MAX_PATH` and was not given the
+  ## `\\?\` prefix: "The system cannot find the path specified". It is the
+  ## second face of the long-path problem `removeDirEventually` documents (the
+  ## first is ENOTEMPTY), and no amount of waiting clears it either. The code is
+  ## compared first because the message is localised.
+  errorCode == WindowsErrorPathNotFound or
+    message.toLowerAscii().contains("cannot find the path specified")
+
 proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
   ## Remove a test scratch directory, tolerating only transient ENOTEMPTY.
   ##
@@ -634,11 +647,22 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
       removeDir(path)
       return
     except OSError as e:
-      if not isTransientDirectoryNotEmpty(e):
+      # ERROR_PATH_NOT_FOUND on a tree that still exists is the over-MAX_PATH
+      # symptom: waiting cannot clear it, so go straight to the extended-length
+      # form below instead of re-raising (a Windows runner without
+      # LongPathsEnabled failed t_compiler_args_transport's teardown this way,
+      # on nim 2.2.10's dist/nimble/tests tree, after every assertion passed).
+      let longPathSymptom = when defined(windows):
+          isWindowsPathNotFound(e.errorCode, e.msg) and dirExists(path)
+        else:
+          false
+      if not longPathSymptom and not isTransientDirectoryNotEmpty(e):
         raise
       if not dirExists(path):
         return
       last = e
+      if longPathSymptom:
+        break
       if attempt + 1 < attempts:
         sleep(sleepMs)
   # Waiting did not help: try the long-path form before giving up. Kept as an
