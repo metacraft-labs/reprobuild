@@ -1128,6 +1128,47 @@ proc mode1WorkspaceCandidate(base: string): string =
       return dir
   ""
 
+proc testCollectionOfPath*(selector: string): string =
+  ## The selector ``repro test`` (and ``repro certify``) hands its plan and
+  ## build for ``selector``: a fragment-less path that anchors a project
+  ## selects that project's ``test`` collection (``repro test [args]`` is
+  ## ``repro build test [args]``, so the path says WHICH project's ``test``
+  ## runs). ``repro build ./sub`` selects ``sub``'s graph minus its ``test``
+  ## collection, and handing ``./sub`` through unchanged made an unsharded
+  ## ``repro test ./sub`` run no test and exit 0 -- a CI step that was green
+  ## without testing anything -- while the sharded run refused the same
+  ## selection as naming no test command.
+  ##
+  ## A path anchors a project when it is an existing directory or names a
+  ## project file (``<dir>/repro.nim``, ``<dir>/reprobuild.nim``). A
+  ## directory is anchored on its project FILE, as ``bareNameAnchor``
+  ## anchors a bare name: ``<dir>#test`` is the legacy ``<dir>#<module>``
+  ## form whenever ``<dir>/test.nim`` exists, and would build that module.
+  ## A directory with no project file is anchored on the ``repro.nim`` it
+  ## would hold, so a Mode-1 workspace still resolves through
+  ## ``mode1WorkspaceCandidate`` and anything else reports the missing
+  ## project file. Every other selector is returned unchanged: a name, a
+  ## selector that already carries a ``#<fragment>``, a module file, a
+  ## dotted action id, or a path that does not exist (the build reports it).
+  ## ``ProjectFileAmbiguousError`` propagates, as it does from
+  ## ``parseBuildTarget``.
+  if classifyBuildSelector(selector).kind != bskPath or
+      selector.find('#') >= 0:
+    return selector
+  if dirExists(extendedPath(selector)):
+    let match = resolveProjectFile(selector)
+    let fileName =
+      if match.fileName.len > 0: match.fileName else: CanonicalProjectFileName
+    return (selector / fileName) & "#" & TestCollectionSelector
+  if extractFilename(selector) in ProjectFileNames:
+    return selector & "#" & TestCollectionSelector
+  selector
+
+proc testCollectionSelectors*(selectors: openArray[string]): seq[string] =
+  ## ``testCollectionOfPath`` of each of ``selectors``, in order.
+  for selector in selectors:
+    result.add(testCollectionOfPath(selector))
+
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
                                currentDir = ""): ResolvedPositionalSelectors =
@@ -94226,9 +94267,12 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
   ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  ## A fragment-less project path selects that project's ``test``
+  ## collection (``testCollectionOfPath``).
   withCallerVariants(opts):
     result = runBuildCommand(testBuildArgs(opts,
-      if selectors.len == 0: @[TestCollectionSelector] else: selectors),
+      if selectors.len == 0: @[TestCollectionSelector]
+      else: testCollectionSelectors(selectors)),
       publicCliPath)
 
 proc selectorSpelling(name: string; spellings: openArray[string]): string =
@@ -94580,7 +94624,10 @@ proc prepareCertifyingPlan(opts: ReproTestShardOpts; mode: ToolProvisioningMode;
   ## TC-8e, step 1: the plan, from the stored graph, as ``repro certificates
   ## plan`` reads it. Runs nothing but the provider's graph evaluation.
   let workRoot = opts.workRoot
-  result.selectors = opts.selectors
+  # A fragment-less project path selects that project's ``test`` collection
+  # (``testCollectionOfPath``), for the plan, the sharded partition and the
+  # build alike.
+  result.selectors = testCollectionSelectors(opts.selectors)
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch

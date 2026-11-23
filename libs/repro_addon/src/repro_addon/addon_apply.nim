@@ -1024,9 +1024,9 @@ proc agentApplyRefusal*(r: AddonApplyResult; migration = false): string =
   ## agent wrote and refuses one that differs:
   ## ``agent_switch.migrateLegacyAgentState``), so nothing is weakened: the
   ## weakening half does not apply, as for a pre-floor unit now waived.
-  ## The caller passes it only then: over a stored generation (an
-  ## operator's) the switch can rewrite that generation's units, and is
-  ## judged against it like any agent apply.
+  ## The caller passes it only then (``isLegacyAgentTakeOver``): over a
+  ## stored generation (an operator's) the switch can rewrite that
+  ## generation's units, and is judged against it like any agent apply.
   var parts: seq[string]
   if r.floorIntroduced.len > 0:
     parts.add("the hardening floor (serviceFloor) would change " &
@@ -1044,6 +1044,32 @@ proc agentApplyRefusal*(r: AddonApplyResult; migration = false): string =
   "operator action required: " & parts.join("; and ") & ". Review " &
     "`repro system addon plan` and apply this profile once as an " &
     "operator. Nothing was changed"
+
+proc isLegacyAgentTakeOver*(migratedFrom, storedUserText: string;
+                            stateDir = ""): bool =
+  ## Whether an agent apply is the take-over ``agentApplyRefusal`` exempts
+  ## from the weakening half (its ``migration``, spec §10.1): the switch
+  ## commits what a legacy agent applied (``migratedFrom`` names that
+  ## agent's generation) onto a host with no stored add-on user generation.
+  ## ``storedUserText`` is the stored user profile (``user.profile``; ""
+  ## when there is none).
+  ##
+  ## "No stored generation" is judged by what the stored profile declares,
+  ## not by its bytes. Bootstrap stores generation 0 by applying the empty
+  ## user profile, and the stored form of that (``renderProfileText``) is
+  ## a lone newline, so a byte-length test never exempts a take-over on a
+  ## bootstrapped host -- every host a take-over happens on. A stored
+  ## profile that declares no resource has no unit the switch could
+  ## rewrite, which is the reason the exemption is safe; one that declares
+  ## any (an operator's apply) is judged like every other agent apply.
+  if migratedFrom.len == 0:
+    return false
+  when mutated("agent-take-over-reads-stored-bytes"):
+    # Falsifying build: the stored profile's byte length decides, so the
+    # bootstrapped host's stored empty profile counts as a generation.
+    return storedUserText.len == 0
+  storedUserText.len == 0 or
+    parseStoredUserProfile(storedUserText, stateDir).resources.len == 0
 
 # ---------------------------------------------------------------------------
 # Scope (spec §4.1, §4.4; threat model G8).
@@ -7389,8 +7415,8 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
   # not refused.
   if opts.agentSequence > 0'u64 and purpose == "apply" and not replaying:
     let why = agentApplyRefusal(result,
-      migration = opts.agentRecord.migratedFrom.len > 0 and
-                  previousUserText.len == 0)
+      migration = isLegacyAgentTakeOver(opts.agentRecord.migratedFrom,
+                                        previousUserText, stateDir))
     if why.len > 0:
       raise newException(AddonNeedsOperator, why)
 

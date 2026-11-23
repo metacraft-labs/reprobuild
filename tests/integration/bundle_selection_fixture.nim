@@ -39,6 +39,14 @@ proc markerOf*(repo: string): string =
 
 proc produceEdge*(repo: string): string = repo & "-produce"
 
+proc compileEdge*(repo: string): string =
+  ## With `writeWorkspace(tempReadingProducer = true)`, the C compile the
+  ## produce edge of `TempReadingRepo` depends on.
+  repo & "-compile"
+
+const TempReadingRepo* = "alpha"
+  ## The repository that gets the temp-directory-reading producer.
+
 proc outputRel*(repo: string): string = "out" / ("out-" & markerOf(repo) & ".txt")
 
 proc run(cmd: string; cwd: string) =
@@ -64,14 +72,33 @@ const
     ## `<beta>/../dslexport`).
   DslExportSymbol* = "dslexportGreeting"
 
-proc writeRepo(dir, repo: string; dslDeps = false) =
+proc writeRepo(dir, repo: string; dslDeps = false; compile = false) =
   let marker = markerOf(repo)
   createDir(dir / "src")
   writeFile(dir / "src" / ("in-" & marker & ".txt"), "source " & marker & "\n")
   writeFile(dir / ".gitignore", "out/\n.repro/\n")
+  # With `compile`, a second monitored action the produce edge depends on: a
+  # C compile with the `cc` of the shell the build runs in. GCC reads TMPDIR
+  # (it puts its intermediate assembly there), so the monitor records the
+  # variable among the action's inputs, and the action is a hit only where
+  # the shell gives TMPDIR the same value. The copy below reads none of the
+  # temp-directory variables, so without this edge a shell that gives them
+  # a fresh value per activation goes unnoticed.
+  let compileBlock =
+    if not compile: ""
+    else:
+      writeFile(dir / "src" / ("unit-" & marker & ".c"),
+        "int " & marker & "_answer(void) { return 42; }\n")
+      """    let csrc = root / "src/unit-MARKER.c"
+    let obj = root / "out/unit-MARKER.o"
+    let c = buildAction(id = "CEDGE",
+      call = inlineExecCall(@["cc", "-c", csrc, "-o", obj], root),
+      inputs = @[csrc], outputs = @[obj],
+      dependencyPolicy = automaticMonitorPolicy())
+"""
   # One monitored action: copy the source to the output and append a line,
   # so the output's bytes carry the marker and differ from the source's.
-  writeFile(dir / "repro.nim", """import std/os
+  writeFile(dir / "repro.nim", ("""import std/os
 import repro_project_dsl
 
 package MARKER:
@@ -80,15 +107,17 @@ package MARKER:
     let src = root / "src/in-MARKER.txt"
     let outp = root / "OUTREL"
     createDir(outp.parentDir)
-    let a = buildAction(id = "EDGE",
+""" & compileBlock & """    let a = buildAction(id = "EDGE",
       call = inlineExecCall(@["sh", "-c",
         "cat \"$1\" > \"$2\"; echo produced-MARKER >> \"$2\"", "sh", src, outp],
         root),
-      inputs = @[src], outputs = @[outp],
+      DEPSinputs = @[src], outputs = @[outp],
       dependencyPolicy = automaticMonitorPolicy())
     defaultBuildAction(a)
-""".multiReplace(("MARKER", marker),
-    ("OUTREL", outputRel(repo)), ("EDGE", produceEdge(repo))) &
+""").multiReplace(("MARKER", marker),
+    ("OUTREL", outputRel(repo)), ("CEDGE", compileEdge(repo)),
+    ("EDGE", produceEdge(repo)),
+    ("DEPS", (if compile: "deps = @[c.id], " else: ""))) &
     (if not dslDeps: ""
      else:
        # The use is under `reproInterfaceMode`, the one compile that resolves
@@ -99,12 +128,15 @@ package MARKER:
        "    static: doAssert imported.len > 0\n"))
   gitInit(dir, "https://example.invalid/" & repo)
 
-proc writeWorkspace*(ws: string; dslExport = false) =
+proc writeWorkspace*(ws: string; dslExport = false;
+                     tempReadingProducer = false) =
   ## The workspace root (a Git checkout holding the manifests) with projects
   ## `pair` (alpha, beta) and `all` (alpha, beta, gamma), and the three
   ## repositories checked out beside the manifests. With `dslExport`, the
   ## root also holds `DslExportName`, and beta's recipe imports it with
-  ## `dslDeps:`, a compile-time resolution through the engine.
+  ## `dslDeps:`, a compile-time resolution through the engine. With
+  ## `tempReadingProducer`, `TempReadingRepo`'s produce edge depends on
+  ## `compileEdge`, a C compile with the `cc` on PATH, which reads TMPDIR.
   createDir(ws / "projects")
   createDir(ws / "repos")
   createDir(ws / "url-prefixes")
@@ -137,7 +169,8 @@ proc writeWorkspace*(ws: string; dslExport = false) =
     "schema = \"reprobuild.workspace.state.v1\"\n\n[workspace]\n" &
     "project = \"pair\"\nprojects = [\"pair\"]\n")
   for repo in Repos:
-    writeRepo(ws / repo, repo, dslDeps = dslExport and repo == "beta")
+    writeRepo(ws / repo, repo, dslDeps = dslExport and repo == "beta",
+      compile = tempReadingProducer and repo == TempReadingRepo)
 
 proc reproEnv*(host: SharedHost;
                extra: openArray[(string, string)] = []): StringTableRef =

@@ -137,7 +137,15 @@ namespace VerifiedDownloadTests
     {
         private readonly X509Certificate2 certificate;
         private readonly TcpListener http, https;
-        private readonly Thread httpThread, httpsThread;
+        // The HTTPS origin is dialled as "localhost", which resolves to ::1 as
+        // well as 127.0.0.1 on a dual-stack host, and the .NET Framework client
+        // tries ::1 first. With only an IPv4 listener that connection never
+        // arrives (measured on a Windows runner: 30 of 30 timed transactions
+        // saw no TCP connection, against 0 of 30 once a [::1] listener shared
+        // the port), so the HTTPS origin listens on both loopback families on
+        // one port. Null on a host without IPv6.
+        private readonly TcpListener https6;
+        private readonly Thread httpThread, httpsThread, https6Thread;
         private readonly ManualResetEvent stop = new ManualResetEvent(false);
         private readonly object gate = new object();
         private readonly List<TcpClient> clients = new List<TcpClient>();
@@ -150,12 +158,28 @@ namespace VerifiedDownloadTests
             certificate = cert;
             evidence = new Evidence(Guid.NewGuid().ToString("N"), "normal");
             http = new TcpListener(IPAddress.Loopback, 0);
-            https = new TcpListener(IPAddress.Loopback, 0);
-            http.Start(); https.Start();
+            http.Start();
+            // Pick an IPv4 port whose IPv6 twin is free too; another process
+            // can hold the twin, so try a few ports before giving up on IPv6.
+            for (int attempt = 0; attempt < 20 && https == null; attempt++)
+            {
+                TcpListener candidate = new TcpListener(IPAddress.Loopback, 0);
+                candidate.Start();
+                if (!Socket.OSSupportsIPv6) { https = candidate; break; }
+                TcpListener twin = new TcpListener(IPAddress.IPv6Loopback, ((IPEndPoint)candidate.LocalEndpoint).Port);
+                try { twin.Start(); https = candidate; https6 = twin; }
+                catch (SocketException) { candidate.Stop(); }
+            }
+            if (https == null) throw new Exception("No IPv4 loopback port with a free IPv6 twin.");
             httpThread = new Thread(delegate() { Accept(http, false); });
             httpsThread = new Thread(delegate() { Accept(https, true); });
             httpThread.IsBackground = true; httpsThread.IsBackground = true;
             httpThread.Start(); httpsThread.Start();
+            if (https6 != null)
+            {
+                https6Thread = new Thread(delegate() { Accept(https6, true); });
+                https6Thread.IsBackground = true; https6Thread.Start();
+            }
         }
         public void Reset(string id, string mode)
         {
@@ -166,7 +190,7 @@ namespace VerifiedDownloadTests
             {
                 lock (gate)
                 {
-                    if (clients.Count == 0 && !http.Pending() && !https.Pending())
+                    if (clients.Count == 0 && !http.Pending() && !https.Pending() && (https6 == null || !https6.Pending()))
                     { evidence = new Evidence(id, mode); return; }
                 }
                 if (timer.Elapsed.TotalSeconds > 6) throw new Exception("Fixture did not become idle before reset.");
@@ -274,8 +298,9 @@ namespace VerifiedDownloadTests
         public void Dispose()
         {
             stop.Set(); http.Stop(); https.Stop();
+            if (https6 != null) https6.Stop();
             lock (gate) foreach (TcpClient client in clients) client.Dispose();
-            if (!httpThread.Join(2000) || !httpsThread.Join(2000)) throw new Exception("Fixture listeners did not stop.");
+            if (!httpThread.Join(2000) || !httpsThread.Join(2000) || (https6Thread != null && !https6Thread.Join(2000))) throw new Exception("Fixture listeners did not stop.");
             Stopwatch timer = Stopwatch.StartNew();
             while (true)
             {
