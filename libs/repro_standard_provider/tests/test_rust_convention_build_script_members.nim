@@ -58,6 +58,24 @@
 ## Reported in reprobuild-pm
 ## issues/2026-11-18-rust-mode-a-ignores-a-workspace-members-build-script.md.
 ##
+## A sixth case covers the other kind of member Mode A cannot compile, a
+## procedural macro crate (``[lib] proc-macro = true``). ``cargo
+## metadata`` reports its library as a target of kind ``proc-macro``
+## (Cargo reference, "Cargo Targets", "Configuring a target",
+## ``proc-macro``:
+## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-proc-macro-field),
+## which Mode A neither compiles for the host nor passes to a dependent
+## with ``--extern``. Until it does, Rust.md §"Recognition" item 5 sends
+## a workspace with such a member to Mode B, as a build script does:
+##
+## 6. **A member of a virtual workspace is a proc-macro crate.** ``m``
+##    defines the function-like macro ``answer!()`` against the compiler's
+##    own ``proc_macro`` crate alone (no registry dependency, which would
+##    send the workspace to Mode B for another reason), and ``a``'s binary
+##    prints ``m::answer!()``. The fragment must not hold a ``rustc``
+##    action for ``a`` without ``--extern m``, every ``rustc`` action it
+##    holds must build, and it must delegate to cargo.
+##
 ## No mocks: ``cargo metadata`` and the production emitter
 ## (``rustConvention().emitFragment``) run unmodified, and the cargo and
 ## rustc used are whichever are on ``PATH``. When either is missing the case
@@ -395,6 +413,63 @@ proc writeBuildKeyFixture(root: string) =
     "    println!(\"build says {}\", env!(\"FROM_BUILD\"));\n" &
     "}\n")
 
+proc hasExtern(argv: openArray[string]; crateName: string): bool =
+  ## True when ``argv`` passes ``--extern <crateName>[=<path>]``.
+  for i, arg in argv:
+    let value =
+      if arg == "--extern" and i + 1 < argv.len: argv[i + 1]
+      elif arg.startsWith("--extern="): arg["--extern=".len .. ^1]
+      else: ""
+    if value == crateName or value.startsWith(crateName & "="):
+      return true
+  false
+
+proc writeProcMacroFixture(root: string) =
+  ## A virtual workspace: binary ``a`` depends on the proc-macro crate
+  ## ``m``, whose ``answer!()`` expands to ``4217u32``. ``m`` uses only the
+  ## compiler's ``proc_macro`` crate, so no dependency of the workspace
+  ## is a registry one.
+  createDir(root / "a" / "src")
+  createDir(root / "m" / "src")
+  writeFile(root / "reprobuild.nim",
+    "import repro_project_dsl\n" &
+    "package procMacroMember:\n" &
+    "  uses:\n" &
+    "    \"rust >=1.80\"\n")
+  writeFile(root / "Cargo.toml",
+    "[workspace]\n" &
+    "resolver = \"2\"\n" &
+    "members = [\"a\", \"m\"]\n")
+  writeFile(root / "a" / "Cargo.toml",
+    "[package]\n" &
+    "name = \"a\"\n" &
+    "version = \"0.1.0\"\n" &
+    "edition = \"2021\"\n" &
+    "publish = false\n" &
+    "\n" &
+    "[dependencies]\n" &
+    "m = { path = \"../m\" }\n")
+  writeFile(root / "a" / "src" / "main.rs",
+    "fn main() {\n" &
+    "    println!(\"m says {}\", m::answer!());\n" &
+    "}\n")
+  writeFile(root / "m" / "Cargo.toml",
+    "[package]\n" &
+    "name = \"m\"\n" &
+    "version = \"0.1.0\"\n" &
+    "edition = \"2021\"\n" &
+    "publish = false\n" &
+    "\n" &
+    "[lib]\n" &
+    "proc-macro = true\n")
+  writeFile(root / "m" / "src" / "lib.rs",
+    "use proc_macro::TokenStream;\n" &
+    "\n" &
+    "#[proc_macro]\n" &
+    "pub fn answer(_input: TokenStream) -> TokenStream {\n" &
+    "    \"4217u32\".parse().unwrap()\n" &
+    "}\n")
+
 suite "rust convention: packages with a build script":
   test "a workspace member's build.rs keeps the member out of Mode A":
     if not rustToolchainAvailable():
@@ -488,3 +563,27 @@ suite "rust convention: packages with a build script":
         libWorkspace = "../ws")
       checkScriptAddedAfterModeAEmit(parent, root):
         writeFile(parent / "ext" / "build.rs", BuildScriptSettingCfg)
+
+suite "rust convention: proc-macro members":
+  test "a workspace member that is a proc-macro keeps the workspace out of Mode A":
+    if not rustToolchainAvailable():
+      skip("rustc or cargo not on PATH")
+    else:
+      let root = createTempDir("test_rust_convention_member_proc_macro_", "")
+      defer:
+        removeDir(root)
+      isolateFromAmbientCargo(root)
+      writeProcMacroFixture(root)
+      require cargoBuildAndRun(root, root / "cargo-target", "a") ==
+        "m says 4217\n"
+
+      let emitted = emittedFragment(root)
+      checkpoint "emitted actions: " & $emitted.actionIds
+      # ``a`` cannot expand ``m::answer!()`` unless rustc is handed the
+      # compiled macro library.
+      for id in emitted.rustcActionsOf("a"):
+        let argv = inlineArgvOf(emitted.byId[id])
+        checkpoint id & " argv: " & argv.join(" ")
+        check hasExtern(argv, "m")
+      check emitted.runRustcActions(root).len == 0
+      check emitted.cargoBuildIds.len == 1
