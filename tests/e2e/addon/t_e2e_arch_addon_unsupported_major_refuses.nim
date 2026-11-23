@@ -154,7 +154,7 @@ suite Gate:
     if not gatesEnabled():
       skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just " & Gate & ")")
     else:
-      let m = startSnapshotMirror(MirrorStamp)
+      let m = sharedSnapshotMirror(MirrorStamp)
       m.prewarm(archWindowDates())
       var failures: seq[string]
       try:

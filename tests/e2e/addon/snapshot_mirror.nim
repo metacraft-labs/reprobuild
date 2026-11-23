@@ -379,6 +379,17 @@ proc startSnapshotMirror*(stamp: string; root = ""): SnapshotMirror =
     result.workers.add(t)
   createThread(result.acceptThread, acceptMain, result.shared)
 
+var sharedMirror: SnapshotMirror
+
+proc sharedSnapshotMirror*(stamp = "20261123T000000Z"): SnapshotMirror =
+  ## The process's one mirror (``startSnapshotMirror`` allows one per
+  ## process), started on first use: the Arch gates' guests all fetch the
+  ## Arch Linux Archive through it (``arch_testbed.prepareArchGuest``), and
+  ## the archive route reads its date from the path, not ``stamp``.
+  if sharedMirror == nil:
+    sharedMirror = startSnapshotMirror(stamp)
+  sharedMirror
+
 proc stop*(m: SnapshotMirror) =
   if m == nil or m.shared == nil: return
   withLock m.shared.lock: m.shared.stopping = true

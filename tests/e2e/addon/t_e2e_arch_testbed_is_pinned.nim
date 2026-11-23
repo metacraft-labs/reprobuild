@@ -91,7 +91,7 @@ proc observe(b: BaseImage; image: string; note: var seq[string]): GuestFacts =
   try:
     g = newArchGuestOver(b, image)
     g.boot()
-    g.prepareArchGuest()
+    g.prepareArchGuest(viaMirror = false)
     result.fsType = g.rootFsType()
     result.systemd = g.run("systemctl --version | head -n 1").strip()
     result.packages = g.packageList()
@@ -119,7 +119,7 @@ proc refusedAfter(b: BaseImage; image, workDir, tag, edit: string;
   try:
     g = newArchGuestOver(b, image)
     g.boot()
-    g.prepareArchGuest()         # pinned before the edit
+    g.prepareArchGuest(viaMirror = false)         # pinned before the edit
     discard g.run(edit)
     g.shutdown()
     convertTo(g.diskPath, disk)
@@ -130,7 +130,7 @@ proc refusedAfter(b: BaseImage; image, workDir, tag, edit: string;
     h = newArchGuestOver(b, disk)
     h.boot()
     try:
-      h.prepareArchGuest()
+      h.prepareArchGuest(viaMirror = false)
       result = (false, "the test bed accepted it")
     except TestBedError as e:
       result = (true, e.msg)

@@ -114,6 +114,7 @@ import std/[json, os, osproc, posix, strutils, tables, times]
 import nimcrypto/[hash, sha2]
 
 import ./addon_testbed
+import ./snapshot_mirror
 
 when defined(gostiAvailable):
   import gosti
@@ -1369,10 +1370,34 @@ proc newArchGuestOver*(b: BaseImage; image: string;
   result = newGuest(b, diskGiB = diskGiB, image = image)
   result.noDisplay = true
 
-proc prepareArchGuest*(g: Guest) =
+proc useArchiveMirror*(g: Guest; date: string) =
+  ## Point the guest's pacman at ``date`` of the Arch Linux Archive through
+  ## the test bed's caching mirror (``snapshot_mirror.sharedSnapshotMirror``,
+  ## ``archRoute``) and refuse it unless its effective configuration names
+  ## exactly that. A dated snapshot never changes, so each file is fetched
+  ## from the archive once and every later run is served from the cache; a
+  ## transfer the archive cut short is retried by the mirror and never
+  ## cached. ``DisableDownloadTimeout`` (pacman.conf(5)): the mirror answers
+  ## a file it has not cached yet only once it has the whole of it, which
+  ## can take longer than pacman's 10 s low-speed limit. Measured
+  ## 2026-11-23: the live archive served 4 KiB/s to this host for hours,
+  ## and gates that fetched from it directly failed on ``core.db``, avahi,
+  ## cronie and fakeroot.
+  let m = sharedSnapshotMirror()
+  let root = "http://" & GuestHostAddress & ":" & $m.port & ArchMirrorPrefix
+  discard g.run("printf '%s\\n' " & quoteShell(mirrorlistLine(date, root)) &
+    " > /etc/pacman.d/mirrorlist; grep -q '^DisableDownloadTimeout' " &
+    "/etc/pacman.conf || sed -i '/^\\[options\\]/a DisableDownloadTimeout' " &
+    "/etc/pacman.conf")
+  g.requirePinnedPacman(archiveMirrorRule(root, date))
+
+proc prepareArchGuest*(g: Guest; viaMirror = true) =
   ## First-boot completion, then the pin check: refuses (raises) a guest
   ## whose pacman names anything but its archive date (an Omarchy guest:
-  ## anything but the capture cache, ``prepareOmarchyGuest``).
+  ## anything but the capture cache, ``prepareOmarchyGuest``). Then, unless
+  ## ``viaMirror`` is false (the pinning gate, which measures the image's
+  ## own configuration), the guest fetches that date through the test bed's
+  ## caching mirror (``useArchiveMirror``; AR6).
   if isOmarchyBase(g.base):
     g.prepareOmarchyGuest()
     return
@@ -1381,6 +1406,8 @@ proc prepareArchGuest*(g: Guest) =
   discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",
                  timeoutSec = 600)
   g.requirePinnedPacman(archiveRule(archiveDateOf(g.base)))
+  if viaMirror:
+    g.useArchiveMirror(archiveDateOf(g.base))
 
 # ---------------------------------------------------------------------------
 # What the pinning gate compares.

@@ -818,9 +818,14 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
                     " >/dev/null 2>&1 && exit 0; sleep 1; done")
       discard b.mux("systemctl stop 'repro-addon-guard-" & att & "-*'")
       b.pause("revert:step-4")
-      discard b.mux("ip link set " & nb.oob & " down 2>/dev/null; sleep 4; " &
-                    "ip link set " & nb.oob & " up", 60)
+      # The outage lasts until the owner has seen it and started its
+      # failure-path revert: a flap of a few seconds was sampled or missed
+      # by the owner's watch depending on the host's load, and a missed one
+      # left the owner to revert at its deadline ("armed, its timer gone")
+      # instead (measured twice in the AR6 regression runs, 2026-11-23).
+      discard b.mux("ip link set " & nb.oob & " down", 60)
       discard b.waitPaused("revert:step-4", 120)
+      discard b.mux("ip link set " & nb.oob & " up", 60)
       let loaded = b.mux("systemctl list-units --plain --no-legend " &
         "'repro-addon-guard-" & att & "-*.timer'").stdout.strip()
       b.killedOwner(unit)
