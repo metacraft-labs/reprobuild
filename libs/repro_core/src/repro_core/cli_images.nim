@@ -50,7 +50,7 @@
 ## disk (a sibling probe, a packaging assertion, a bootstrap lookup), never for
 ## deciding what a running image is allowed to do.
 
-import std/os
+import std/[os, strutils]
 
 const
   ReproThinClientName* = "repro"
@@ -81,3 +81,36 @@ proc reproThinClientExeName*(): string =
 
 proc reproLegacyEngineExeName*(): string =
   addFileExt(ReproLegacyEngineName, ExeExt)
+
+const
+  MakeWrapperHiddenPrefix* = "."
+  MakeWrapperHiddenSuffix* = "-wrapped"
+    ## nixpkgs makeWrapper's name for the image a wrapper hides:
+    ## ``wrapProgram <dir>/<name>`` moves the real image to
+    ## ``<dir>/.<name>-wrapped`` and writes a shell script at ``<dir>/<name>``
+    ## that exports the package's ``--set-default`` variables and then
+    ## ``exec``s the hidden image (nixpkgs `setup-hooks/make-wrapper.sh`:
+    ## ``hidden="$(dirname "$prog")/.$(basename "$prog")"-wrapped``).
+    ## `nix/pkgs/by-name/re/reprobuild/package.nix` asserts the convention at
+    ## build time, so a change in nixpkgs fails the package build.
+
+proc makeWrapperPublicPath*(image: string): string =
+  ## The wrapper script that makeWrapper put in front of ``image``:
+  ## ``<dir>/<name>`` for ``<dir>/.<name>-wrapped``, or "" when ``image`` is
+  ## not named as a hidden image. A name mapping only: whether that file
+  ## exists, and whether it really wraps ``image``, is the caller's question.
+  ##
+  ## Use it where a path to this build is HANDED TO SOMETHING THAT WILL RUN IT
+  ## LATER, outside this process's environment (a git hook body). Running the
+  ## hidden image directly skips the wrapper's variables, among them
+  ## ``REPROBUILD_SOURCE_ROOT``, and a recipe compile then has no reprobuild
+  ## source tree of its own. Do NOT use it for a self-spawn: a child inherits
+  ## the variables already, and the daemon digests the hidden image's own path
+  ## (see package.nix, "Dependency-Attribution MAC-1").
+  let name = extractFilename(image)
+  if name.len <= MakeWrapperHiddenPrefix.len + MakeWrapperHiddenSuffix.len or
+      not name.startsWith(MakeWrapperHiddenPrefix) or
+      not name.endsWith(MakeWrapperHiddenSuffix):
+    return ""
+  image.parentDir / name[MakeWrapperHiddenPrefix.len ..
+    ^(MakeWrapperHiddenSuffix.len + 1)]
