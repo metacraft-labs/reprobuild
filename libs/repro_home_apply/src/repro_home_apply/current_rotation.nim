@@ -19,7 +19,7 @@
 ##     generation's id because the mirror copy is committed before
 ##     `current.txt`.
 
-import std/[os]
+import std/[os, strutils]
 from repro_core/paths import extendedPath
 
 import repro_home_generations
@@ -104,6 +104,10 @@ proc mirrorBinDir(srcBinDir, dstBinDir: string) =
   # TODO(win-longpath): walk results escape; needs review
   for kind, entry in walkDir(srcBinDir, relative = false):
     let leaf = extractFilename(entry)
+    if leaf.startsWith(".") and leaf.endsWith(".tmp"):
+      # A launcher write's temporary file (`repro_core/durable_replace`),
+      # left by an apply killed mid-write; never a launcher.
+      continue
     let dst = dstBinDir / leaf
     case kind
     of pcFile, pcLinkToFile:

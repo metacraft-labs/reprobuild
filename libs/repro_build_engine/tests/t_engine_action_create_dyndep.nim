@@ -290,3 +290,93 @@ suite "M25 engine action-create dyndep ingest":
     check valid.results.len == 2
     check valid.results[0].status == asWouldRun
     check valid.results[1].status == asWouldRun
+
+  when not defined(windows):
+    test "an optional output cannot remove a link the working directory is reached through":
+      # An optional output `..` was accepted when the working directory is
+      # reached through a symlinked `TMPDIR`. The engine removes an optional
+      # candidate before the action runs, as the entry its spelling names.
+      # Under a
+      # working directory spelled `<link>/work`, `..` names the link. The
+      # link does not contain the physical working directory, so a check
+      # against the physical directory alone accepted it. The case builds
+      # its own linked prefix, so it does not depend on how `TMPDIR` is
+      # reached (macOS reaches its default one through `/var`).
+      let tempRoot = createTempDir("repro-optional-linked-cwd", "")
+      defer: removeDir(tempRoot)
+      var config = defaultBuildEngineConfig(tempRoot / "cache")
+      config.bypassRunQuota = true
+      config.dryRun = true
+      createDir(tempRoot / "phys" / "work")
+      createDir(tempRoot / "phys" / "sibling")
+      createDir(tempRoot / "far" / "deep")
+      createDir(tempRoot / "far" / "work")
+      createSymlink(tempRoot / "phys", tempRoot / "link")
+      createSymlink("link", tempRoot / "outer")
+      createSymlink("far/../phys/work", tempRoot / "direct")
+      createSymlink(tempRoot / "far" / "deep", tempRoot / "detour")
+      let linkedCwd = tempRoot / "link" / "work"
+      let chainedCwd = tempRoot / "outer" / "work"
+      let directCwd = tempRoot / "direct"
+      # A parent walk after a link: the kernel starts the action in
+      # `far/work`, and a relative output is joined onto the lexical `work`.
+      let detourCwd = tempRoot & "/detour/../work"
+      type Verdict = enum accepted, refusedForCwd, refusedOtherwise
+      proc verdict(cwd, candidate: string): Verdict =
+        let subject = action("install", ["unused"], cwd = cwd,
+          optionalOutputs = [candidate],
+          governingLockIdentity = lockIdentityOutsideSolvedGraph())
+        try:
+          let built = runBuild(graph([subject]), config)
+          doAssert built.results.len == 1
+          accepted
+        except BuildEngineError as err:
+          checkpoint err.msg
+          if "optional output contains the action's cwd" in err.msg:
+            refusedForCwd
+          else:
+            refusedOtherwise
+      for cwd in [linkedCwd, chainedCwd]:
+        for candidate in [".", "..", "../../link", "../../phys", "../work",
+            cwd, tempRoot / "link", tempRoot / "phys",
+            tempRoot / "phys" / "work", tempRoot / "link" / "work" / "..",
+            tempRoot]:
+          checkpoint cwd & " <- " & candidate
+          check verdict(cwd, candidate) == refusedForCwd
+      # The outer link is on the chained spelling only.
+      check verdict(chainedCwd, tempRoot / "outer") == refusedForCwd
+      check verdict(chainedCwd, "../../outer") == refusedForCwd
+      check verdict(linkedCwd, tempRoot / "outer") == accepted
+      # A working directory that is itself a link, whose target walks
+      # through another directory.
+      for candidate in [".", directCwd, "../direct", tempRoot / "far",
+          tempRoot / "phys" / "work", tempRoot / "phys"]:
+        checkpoint directCwd & " <- " & candidate
+        check verdict(directCwd, candidate) == refusedForCwd
+      for candidate in [".", "..", tempRoot / "detour",
+          tempRoot / "far" / "deep", tempRoot / "far" / "work",
+          tempRoot / "far", tempRoot / "work"]:
+        checkpoint detourCwd & " <- " & candidate
+        check verdict(detourCwd, candidate) == refusedForCwd
+      # What the working directory is not reached through stays declarable.
+      for cwd in [linkedCwd, chainedCwd]:
+        for candidate in ["stage", "../sibling", tempRoot / "phys" / "sibling",
+            tempRoot / "link" / "sibling", tempRoot / "detour",
+            tempRoot / "far"]:
+          checkpoint cwd & " <- " & candidate
+          check verdict(cwd, candidate) == accepted
+      check verdict(detourCwd, "stage") == accepted
+      # A relative output is placed where the action runs (`far/work`), not
+      # at the lexical `work`, so `../detour` names `far/detour`: not the link.
+      check verdict(detourCwd, "../detour") == accepted
+      check verdict(detourCwd, tempRoot / "link") == accepted
+      # An opaque output directory is removed before the run the same way.
+      var opaque = action("opaque", ["unused"], cwd = linkedCwd,
+        outputs = [".."],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+      opaque.removeBeforeRun = @[".."]
+      try:
+        discard runBuild(graph([opaque]), config)
+        fail()
+      except BuildEngineError as err:
+        check "output removed before run contains the action's cwd" in err.msg
