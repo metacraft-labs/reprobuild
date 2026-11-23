@@ -80837,7 +80837,38 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result["summary"] = summary
   result["exitCode"] = %report.exitCode
 
-proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
+proc isRoutineStatusEntry*(entry: WorkspaceStatusRepoEntry;
+    activeBranch: string): bool =
+  ## Whether ``entry`` is a *routine clean* repository, the kind the default
+  ## text output of ``repro workspace status`` omits from its per-repo
+  ## listing (spec/CLI/workspace.md §"`repro workspace status`", the
+  ## exceptional information policy). Every condition the page names must
+  ## hold: a clean working tree with no modified or untracked files, at lock
+  ## or no lock recorded, no stashes, no ahead/behind divergence, no unmerged
+  ## branches, and on the active workspace branch.
+  ##
+  ## A repository with a diagnostic is never routine: something about it
+  ## could not be observed, and an omitted line would hide that. When the
+  ## workspace has an active branch, a checkout on another branch or with a
+  ## detached HEAD (empty ``branch``) is off it; when the workspace has none,
+  ## the branch condition cannot be failed.
+  entry.checkoutState == "clean" and
+    entry.lockState in ["at-lock", "no-lock-recorded"] and
+    entry.modifiedCount == 0 and entry.untrackedCount == 0 and
+    entry.stashCount == 0 and
+    entry.aheadCount == 0 and entry.behindCount == 0 and
+    entry.unmergedBranches.len == 0 and
+    entry.diagnostic.len == 0 and
+    (activeBranch.len == 0 or entry.branch == activeBranch)
+
+proc renderStatusTextLines*(report: WorkspaceStatusReport;
+    verbose = false): seq[string] =
+  ## The text form of ``repro workspace status``. By default routine clean
+  ## repositories (``isRoutineStatusEntry``) are left out of the per-repo
+  ## listing and tallied after the summary; when every repository is routine
+  ## the footer says the workspace is all clean. ``verbose`` (``--verbose`` /
+  ## ``-v``) lists every repository. The summary line is the same in both
+  ## modes and always counts every repository.
   result.add("workspace status: project=" & report.project &
     " branch=" & (if report.activeBranch.len > 0:
                     report.activeBranch
@@ -80849,7 +80880,15 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
   for entry in report.manifestLayers:
     result.add("workspace status: manifest-layer " & entry.provenance &
       " status=" & entry.status)
+  var omitted = 0
+  var routine = 0
   for entry in report.repos:
+    let isRoutine = isRoutineStatusEntry(entry, report.activeBranch)
+    if isRoutine:
+      inc routine
+      if not verbose:
+        inc omitted
+        continue
     var line = "workspace status: " & entry.path & " " &
       entry.checkoutState
     if entry.branch.len > 0:
@@ -80878,6 +80917,12 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
     " drifted=" & $report.summary.drifted &
     " atLock=" & $report.summary.atLock &
     " noLockRecorded=" & $report.summary.noLockRecorded)
+  if report.repos.len > 0 and routine == report.repos.len:
+    result.add("workspace status: all clean (" & $report.repos.len &
+      " repo(s))")
+  elif omitted > 0:
+    result.add("workspace status: " & $omitted &
+      " routine clean repo(s) not listed (--verbose lists them)")
 
 type
   WorkspaceStatusArgs = object
@@ -80893,6 +80938,9 @@ type
     fix: bool
       ## Shared-Clone-Pool-Integrity §4.2: remove stale remote-tracking refs
       ## the shared-clone detector finds, instead of only reporting them.
+    verbose: bool
+      ## ``--verbose`` / ``-v``: list routine clean repos in the text output
+      ## too. ``--json`` and the report always carry every repo.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
@@ -80909,6 +80957,7 @@ proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
   result.unmerged = c.unmerged
   result.fileDetails = c.fileDetails
   result.fix = c.fix
+  result.verbose = c.verbose
   result.report = reportSpecOf(c)
   result.projectName = c.project
   if not (result.stashes or result.files or result.aheadBehind or result.unmerged):
@@ -81217,7 +81266,7 @@ proc writeWorkspaceStatusReport(report: WorkspaceStatusReport;
 
 proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   ## ``repro workspace status [<project>] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json] [--verbose|-v]``.
   ##
   ## Exit codes (per M12 design — read-only command):
   ##   - 0 — status gathered (with whatever drift the live workspace
@@ -81232,7 +81281,7 @@ proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
-    for line in renderStatusTextLines(report):
+    for line in renderStatusTextLines(report, parsed.verbose):
       stdout.writeLine(line)
     emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
       report.project, report.repos)

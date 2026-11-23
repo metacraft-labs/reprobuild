@@ -28,6 +28,7 @@
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 # ---- repro binary build ---------------------------------------------------
@@ -780,3 +781,122 @@ suite "M12 — repro workspace status (active branch + drift)":
     check findRepo(undeclared, "lib-a")["unmergedBranches"] ==
       %*["beyond-root"]
     check findRepo(undeclared, "lib-b")["unmergedBranches"].len == 0
+
+  test "test_m12_status_text_omits_routine_repos_unless_verbose":
+    ## spec/CLI/workspace.md §"`repro workspace status`": the default text
+    ## output follows the exceptional information policy. A routine clean
+    ## repository (clean tree, at lock or no lock recorded, no stashes, no
+    ## ahead/behind, no unmerged branches, on the active workspace branch) is
+    ## omitted from the per-repo listing and tallied in the footer; an
+    ## all-clean workspace gets a concise "all clean" report; `--verbose` /
+    ## `-v` list every repository; `--json` and the report are unchanged.
+    ##
+    ## Real git repositories and the real `repro` binary; nothing is mocked.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git not on PATH; this case needs real repositories")
+    else:
+      let fx = setupFixture(gitBin, "exceptional-listing")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      check invokeLock(fx).code == 0
+
+      proc repoLine(output, path: string): string =
+        ## The per-repo line for `path`, or "" when the listing omits it.
+        for line in output.splitLines():
+          if line.startsWith("workspace status: " & path & " "):
+            return line
+        ""
+
+      const
+        summaryPrefix = "workspace status: summary clean="
+        tallyOne = "workspace status: 2 routine clean repo(s) not listed " &
+          "(--verbose lists them)"
+        allClean = "workspace status: all clean (3 repo(s))"
+
+      # ---- all clean: every repo is routine. -----------------------------
+      let quiet = invokeStatus(fx)
+      checkpoint("all-clean default output:\n" & quiet.output)
+      check quiet.code == 0
+      for path in ["lib-a", "lib-b", "lib-c"]:
+        check repoLine(quiet.output, path) == ""
+      check allClean in quiet.output
+      check summaryPrefix & "3 dirty=0 missing=0 drifted=0 atLock=3 " &
+        "noLockRecorded=0" in quiet.output
+      check "routine clean repo(s) not listed" notin quiet.output
+      # The report still carries every repository.
+      check readReport(fx)["repos"].len == 3
+
+      for flag in ["--verbose", "-v"]:
+        let listed = invokeStatus(fx, [flag])
+        checkpoint("all-clean " & flag & " output:\n" & listed.output)
+        check listed.code == 0
+        for path in ["lib-a", "lib-b", "lib-c"]:
+          let line = repoLine(listed.output, path)
+          check line.startsWith("workspace status: " & path &
+            " clean branch=main head=")
+          check line.endsWith(" lock=at-lock")
+        check "routine clean repo(s) not listed" notin listed.output
+        check summaryPrefix in listed.output
+
+      # ---- one dirty repo: it is listed, the routine ones are tallied. ---
+      dirtyTheTree(fx.workspaceRoot / "lib-b")
+      let mixed = invokeStatus(fx)
+      checkpoint("mixed default output:\n" & mixed.output)
+      check mixed.code == 0
+      check repoLine(mixed.output, "lib-b").startsWith(
+        "workspace status: lib-b dirty branch=main")
+      check "untracked=1" in repoLine(mixed.output, "lib-b")
+      check repoLine(mixed.output, "lib-a") == ""
+      check repoLine(mixed.output, "lib-c") == ""
+      check tallyOne in mixed.output
+      check "all clean" notin mixed.output
+      # The summary line is unchanged by the omission: it still counts all.
+      check summaryPrefix & "2 dirty=1 missing=0 drifted=0 atLock=3 " &
+        "noLockRecorded=0" in mixed.output
+      # The footer follows the summary.
+      check mixed.output.find(tallyOne) > mixed.output.find(summaryPrefix)
+      check readReport(fx)["repos"].len == 3
+
+      for flag in ["--verbose", "-v"]:
+        let listed = invokeStatus(fx, [flag])
+        checkpoint("mixed " & flag & " output:\n" & listed.output)
+        check listed.code == 0
+        check repoLine(listed.output, "lib-a").startsWith(
+          "workspace status: lib-a clean branch=main")
+        check repoLine(listed.output, "lib-b").startsWith(
+          "workspace status: lib-b dirty branch=main")
+        check repoLine(listed.output, "lib-c").startsWith(
+          "workspace status: lib-c clean branch=main")
+        check "routine clean repo(s) not listed" notin listed.output
+        check "all clean" notin listed.output
+
+      # ---- `--json` is unchanged: every repository, routine or not. ------
+      let asJson = invokeStatus(fx, ["--json"])
+      check asJson.code == 0
+      var names: seq[string]
+      try:
+        let js = parseJson(asJson.output[asJson.output.find('{') .. ^1])
+        for entry in js["repos"]:
+          names.add(entry["path"].getStr())
+      except CatchableError as e:
+        checkpoint("status --json output: " & asJson.output & "\n" & e.msg)
+      check names == @["lib-a", "lib-b", "lib-c"]
+      check repoLine(asJson.output, "lib-b") == ""
+
+      # ---- off the active branch is not routine. --------------------------
+      # lib-c moves to another branch: its tree is clean, at lock and has no
+      # divergence, but the recorded workspace branch stays `main`, so lib-c
+      # is off the active branch and is listed. lib-b is still dirty, so only
+      # lib-a is routine.
+      writeWorkspaceBranch(fx.workspaceRoot, "lib-a", "main")
+      discard requireGit(q(gitBin) & " -C " &
+        q(fx.workspaceRoot / "lib-c") & " checkout -q -b side")
+      let offBranch = invokeStatus(fx)
+      checkpoint("off-branch default output:\n" & offBranch.output)
+      check offBranch.code == 0
+      check repoLine(offBranch.output, "lib-c").startsWith(
+        "workspace status: lib-c clean branch=side")
+      check repoLine(offBranch.output, "lib-a") == ""
+      check "workspace status: 1 routine clean repo(s) not listed " &
+        "(--verbose lists them)" in offBranch.output
