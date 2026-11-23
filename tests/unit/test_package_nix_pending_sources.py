@@ -163,6 +163,11 @@ class PendingSourceFixtures(unittest.TestCase):
         self.assertEqual(pending, [])
         self.assertEqual(len(errors), 1, errors)
         self.assertIn('d' * 40, errors[0])
+        # The fixture has no `origin`, so the fetch fails; the error names
+        # that failure, not git show's "exists on disk, but not in <rev>",
+        # which reads as a commit without a flake.lock.
+        self.assertIn('fetching it failed', errors[0])
+        self.assertNotIn('exists on disk', errors[0])
 
 
 class SrcCommitFetch(unittest.TestCase):
