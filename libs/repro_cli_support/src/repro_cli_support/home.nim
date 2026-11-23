@@ -2415,13 +2415,13 @@ proc materializeRemoteLaunchers(store: Store; stateDir, generationId: string;
       let scriptPath = binDir / command.commandName
       let scriptBody = generatePosixLauncherScript(plan,
         when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
-      writeFile(extendedPath(scriptPath), scriptBody)
+      # A content-addressed id may name a generation that is already
+      # committed: replace by rename, never write in place.
       try:
-        setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite,
-          fpUserRead, fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
-      except OSError as err:
-        raiseRemoteActivation("could not set launcher permissions for " &
-          scriptPath & ": " & err.msg)
+        replaceLauncherFile(scriptPath, scriptBody, LauncherScriptMode)
+      except CatchableError as err:
+        raiseRemoteActivation("could not write launcher " & scriptPath &
+          ": " & err.msg)
       inc result
 
 proc runHomeRemoteActivate[T](c: T): int =

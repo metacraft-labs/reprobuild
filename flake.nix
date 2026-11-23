@@ -1846,9 +1846,18 @@
                                     # hidden target. Enumerate rather than hard-code the current
                                     # binaries so newly installed helpers (including scripts)
                                     # cannot bypass the packaged defaults.
+                                    #
+                                    # The one exception is the engine's graph helper image,
+                                    # which only the engine runs (as the argv of its own
+                                    # helper actions, where it ran its unwrapped image
+                                    # before) and which package.nix leaves unwrapped on
+                                    # purpose: it must be there, executable, and NOT wrapped.
                                     wrapperCount=0
+                                    test -x ${reprobuild}/bin/reprobuild-helper
+                                    test ! -e ${reprobuild}/bin/.reprobuild-helper-wrapped
                                     for wrapper in ${reprobuild}/bin/*; do
                                       name=$(basename "$wrapper")
+                                      test "$name" = reprobuild-helper && continue
                                       hidden=${reprobuild}/bin/.$name-wrapped
                                       if test ! -x "$wrapper"; then
                                         echo "unexpected non-executable bin artifact: $wrapper" >&2
@@ -2635,7 +2644,12 @@
             # (nix/tests/lib-reference.nix). The build fails listing each
             # difference; `nix eval --raw .#checks.<system>.lib-reference.render`
             # prints the options region to paste. A control run against the
-            # page with one option deleted must fail too.
+            # page with one option deleted must fail too. Each option's
+            # description must also meet the user-page style rules a pattern
+            # can decide (no `--` or `->` in prose, no "Reprobuild"
+            # mid-sentence, no undefined "IFD", identifiers in code spans,
+            # sentences of at most 30 words); a probe per rule must be
+            # rejected and a set of acceptable sentences accepted.
             lib-reference =
               let
                 result = import ./nix/tests/lib-reference.nix {
@@ -2662,7 +2676,8 @@
                   ++ pkgs.lib.optional (result.controlFailures == [ ])
                     "the control (the page without option ${result.controlOption}) passed, so the check proves nothing"
                   ++ pkgs.lib.optional (reprobuildLib ? resolveRealizationSource && result.sourceControlFailures == [ ])
-                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing";
+                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing"
+                  ++ map (p: "the description style check got its probe wrong: ${p}") result.styleControlPasses;
               in
               pkgs.runCommand "reprobuild-lib-reference"
                 {
@@ -2671,7 +2686,7 @@
                 }
                 ''
                   if [ -n "$problems" ]; then
-                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library:" >&2
+                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library, or an option description breaks the user-page style:" >&2
                     printf '%s\n' "$problems" | sed 's/^/  - /' >&2
                     exit 1
                   fi

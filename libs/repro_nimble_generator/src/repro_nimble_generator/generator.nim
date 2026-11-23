@@ -40,6 +40,7 @@
 import std/[algorithm, net, options, os, sets, strutils, tables, times]
 
 import blake3
+import nimcrypto/sha2
 
 import repro_build_engine
 import repro_lock/identity
@@ -101,6 +102,12 @@ type
     ## Called with every URL a fetch edge hands to the transport, before the
     ## egress policy runs on it. Tests use it to show what was attempted.
 
+  WorkerOutputTap* = proc(family: EdgeFamily; subject, outPath: string)
+    {.gcsafe.}
+    ## Called with every fetch edge's output file after its wave, before the
+    ## publisher admits it. Tests use it to hand the publisher what a
+    ## compromised worker would write; a generation never sets it.
+
   GeneratorConfig* = object
     sourceSet*: SourceSet
     generatedAt*: uint64
@@ -130,6 +137,11 @@ type
       ## concurrent dispatch; 1 runs them one at a time, 0 is
       ## ``DefaultFetchParallelism``. Not part of any output: the edges'
       ## outputs and their order of capture are the same at any value
+    workerOutputTap*: WorkerOutputTap
+    publishHold*: string
+      ## a hold file the independent regeneration writes (``regeneration``):
+      ## while it names the root this generation builds on, the generation
+      ## is not published. "" checks none
 
   Execution* = object
     family*: EdgeFamily
@@ -139,6 +151,29 @@ type
     package*: string
     family*: EdgeFamily
     refusal*: EgressRefusal
+
+  WorkerOutputRefusal* = object
+    ## A fetch edge's output the publisher refused (threat model G36,
+    ## FLOW-2): an unknown header or record, a field over its limit or of the
+    ## wrong shape, a truncated object, or bytes that are not what the
+    ## object says. The publisher used none of it: the edge's answer is a
+    ## failure naming the refusal.
+    package*: string
+    family*: EdgeFamily
+    subject*: string
+    output*: string   ## BLAKE3 (hex) of the refused bytes
+    reason*: string
+
+  OutsideLink* = object
+    ## A symbolic link of a fetched tree that points outside it (threat
+    ## model G4): stored as a link, never followed, and the version is
+    ## `unreadable`. Kept for capture.
+    package*: string
+    commit*: string
+    tree*: string    ## the source object's digest
+    origin*: string  ## the URL the bytes came from
+    path*: string
+    target*: string
 
   WaveTiming* = object
     ## How long one wave of the generation took (wall time), for the
@@ -163,6 +198,11 @@ type
       ## every edge whose executor ran this generation (a cache hit is not in
       ## it), in execution order
     refusals*: seq[CapturedRefusal]
+    workerRefusals*: seq[WorkerOutputRefusal]
+      ## the worker outputs the publisher refused, in admission order
+    outsideLinks*: seq[OutsideLink]
+      ## every link out of its tree in the sources this generation read,
+      ## by origin and commit
     diagnostics*: seq[string]
     events*: seq[OriginEvent]
     actions*: seq[BuildAction] ## every edge of the generation
@@ -232,12 +272,29 @@ type
     previousRoot: Option[IndexObjectId]
     prepareFailures: Table[string, string]
       ## action id -> why its fetch edge could not be planned
+    admitted: Table[string, string]
+      ## worker output file -> the failed answer the publisher reads in its
+      ## place, for an output it refused (``admitWorkerOutput``)
+    workerRefusals: seq[WorkerOutputRefusal]
     preparedRefusals: Table[string, CapturedRefusal]
       ## output path -> the refusal a fetch edge met while it was prepared
       ## for a worker, captured when the edge is settled
     waves: seq[WaveTiming]
 
 proc hex(s: string): string = toHexLower(blake3.digest(s))
+
+const PublishHoldHeader* = "reprobuild.nimble-publish-hold.v1"
+
+proc heldRoot*(path: string): string =
+  ## The root a publish-hold file names (`regeneration.holdPublish`), "*"
+  ## for one that cannot be read (it holds every root), or "" when there is
+  ## no hold.
+  if path.len == 0 or not fileExists(path): return ""
+  let lines = readFile(path).splitLines()
+  if lines.len < 2 or lines[0] != PublishHoldHeader or
+      not lines[1].startsWith("root "):
+    return "*"
+  lines[1][5 .. ^1]
 
 proc fail(msg: string) {.noreturn.} =
   raise newException(GeneratorError, msg)
@@ -383,10 +440,20 @@ proc readRecordBytes*(nimbleBytes, fileName: string): seq[byte] =
   var facts = VersionFacts(tag: "read", commit: ReadPlaceholderCommit,
     nimbleFile: some(IndexObjectId(blake3.digest(nimbleBytes))))
   let rec = recordFromNimbleFile(f, facts)
-  let shard = NimbleShard(shardBits: 0, bucket: 0, packages: @[
-    PackageEnvelope(name: "read", origins: @[PackageOrigin(
-      url: "https://read.invalid/", vcs: ovGit)], versions: @[rec])])
-  encodeShard(shard)
+  proc framed(r: VersionRecord): seq[byte] =
+    encodeShard(NimbleShard(shardBits: 0, bucket: 0, packages: @[
+      PackageEnvelope(name: "read", origins: @[PackageOrigin(
+        url: "https://read.invalid/", vcs: ovGit)], versions: @[r])]))
+  try:
+    framed(rec)
+  except NimbleIndexError:
+    # A `.nimble` can say more than a record holds (more requirements,
+    # binaries or foreign dependencies than the format's bounds). Its
+    # version is then unreadable, as for anything else the reader cannot
+    # represent; the edge does not fail, so the generation goes on.
+    framed(VersionRecord(version: rec.version, commit: rec.commit,
+      nimbleFile: rec.nimbleFile, readerClass: rrcUnreadable,
+      resolutionClass: rrcUnreadable, flags: {flUnreadable}))
 
 proc decodeReadRecord*(bytes: openArray[byte]): VersionRecord =
   let s = decodeShard(bytes)
@@ -406,11 +473,16 @@ proc recordableOrigin*(o: PackageOrigin): PackageOrigin =
         result.add c
   PackageOrigin(url: pct(o.url), subdir: pct(o.subdir), vcs: o.vcs)
 
+proc workerText(run: Run; path: string): string =
+  ## A fetch edge's output as the publisher admitted it: the file, or for
+  ## an output it refused the failed answer it reads in its place.
+  if path in run.admitted: run.admitted[path] else: readFile(path)
+
 proc readObject(run: Run; path: string): string =
   ## A worker's output, read by the publisher: refused unless it is the
   ## object the shard's cache key names (threat model § 3.2: the publisher
   ## consumes content-addressed outputs).
-  result = readFile(path)
+  result = run.workerText(path)
   if path in run.objectHashes and hex(result) != run.objectHashes[path]:
     raise newException(EdgeObjectError, path & " is not the object the " &
       "shard edge was keyed on")
@@ -704,6 +776,74 @@ proc finishEdge(run: Run; action: BuildAction; dispatched: bool;
     result.exitCode = 1
     result.stderr = $job.family & " " & job.subject & ": " & e.msg
 
+const MaxRefusalReasonBytes = 1024
+
+proc admitWorkerOutput(run: Run; action: BuildAction) =
+  ## The publisher's admission of one fetch edge's output (threat model
+  ## G36, FLOW-2): the object is decoded against its kind's closed
+  ## vocabulary and field limits (``edge_objects``), a source or submodule
+  ## object must answer for the commit it was asked about, and a `source`
+  ## edge that ran this generation must have written the archive its
+  ## object describes. An output that fails any of it is refused: the
+  ## refusal is kept for capture, and the publisher reads a failed answer
+  ## in its place, so nothing of it reaches a shard.
+  if action.id notin run.jobs: return
+  let job = run.jobs[action.id]
+  if job.family notin ConcurrentFamilies: return
+  let outPath = action.outputs[0]
+  if not fileExists(outPath): return
+  if run.cfg.workerOutputTap != nil:
+    {.cast(gcsafe).}: run.cfg.workerOutputTap(job.family, job.subject, outPath)
+  let text = readFile(outPath)
+  var reason = ""
+  try:
+    case job.family
+    of efRefs: discard decodeRefs(text)
+    of efHistory: discard decodeHistory(text)
+    of efSource:
+      let a = decodeSource(text)
+      if a.commit != job.commit:
+        reason = "the object answers for commit " & a.commit.escape() &
+          ", not " & job.commit
+      var t = FetchedTree()
+      if fileExists(outPath & ".blobs"):
+        decodeBlobs(readFile(outPath & ".blobs"), t)
+      var ran = false
+      for e in run.executed:
+        if e.family == efSource and e.subject == job.subject: ran = true
+      if reason.len == 0 and a.state == anOk and ran:
+        let archive = readFile(outPath & ".tar")
+        if int64(archive.len) != a.facts.archiveSize or
+            toLowerAscii($sha256.digest(archive)) != a.facts.archiveSha256:
+          reason = "the archive is not the one the object describes"
+    of efSubmodule:
+      let a = decodeSubmodule(text)
+      if a.commit != job.commit:
+        reason = "the object answers for commit " & a.commit.escape() &
+          ", not " & job.commit
+      var t = FetchedTree()
+      if fileExists(outPath & ".blobs"):
+        decodeBlobs(readFile(outPath & ".blobs"), t)
+    else: discard
+  except EdgeObjectError, ValueError, IOError:
+    reason = getCurrentExceptionMsg()
+  if reason.len == 0: return
+  if reason.len > MaxRefusalReasonBytes:
+    reason = reason[0 ..< MaxRefusalReasonBytes]
+  run.workerRefusals.add WorkerOutputRefusal(package: job.package,
+    family: job.family, subject: job.subject, output: hex(text),
+    reason: reason)
+  let detail = "the publisher refused the worker's output: " & reason
+  run.admitted[outPath] =
+    case job.family
+    of efRefs: encodeRefs(RefsAnswer(state: anFailed, detail: detail))
+    of efHistory: encodeHistory(HistoryAnswer(state: anFailed,
+      detail: detail))
+    of efSource: encodeSource(SourceAnswer(state: anFailed,
+      commit: job.commit, detail: detail))
+    else: encodeSubmodule(SubmoduleAnswer(state: anFailed, url: job.url,
+      commit: job.commit, failure: $sfNoAnswer, detail: detail))
+
 proc fetchParallelism(run: Run): int =
   if run.cfg.fetchParallelism > 0: run.cfg.fetchParallelism
   else: DefaultFetchParallelism
@@ -740,6 +880,7 @@ proc runWave(run: Run; actions: seq[BuildAction]; all: var seq[BuildAction]) =
     for res in outcome.results:
       if res.status == asFailed:
         fail("generator edge " & res.id & " failed: " & res.stderr)
+    for a in actions: run.admitWorkerOutput(a)
   finally:
     clearMetadataFetchExecutor()
     clearConcurrentMetadataFetchExecutor()
@@ -784,7 +925,7 @@ proc composeSources(run: Run; all: var seq[BuildAction]; limitsKey: string;
   keys.sort()
   for sk in keys:
     if sk in run.rawSourcePath: continue
-    let src = decodeSource(readFile(run.sourcePath[sk]))
+    let src = decodeSource(run.workerText(run.sourcePath[sk]))
     if src.state == anOk and src.facts.gitlinks.len > 0:
       pending.add sk
   if pending.len == 0: return
@@ -855,7 +996,7 @@ proc composeSources(run: Run; all: var seq[BuildAction]; limitsKey: string;
         inputs.add p & ".blobs"
         subs.add (k, p)
     for path in inputs:
-      run.objectHashes[path] = hex(readFile(path))
+      run.objectHashes[path] = hex(run.workerText(path))
       fp.add path.extractFilename() & " " & run.objectHashes[path]
     for (k, _) in subs: fp.add "uses " & k
     let key = keyOf(fp.join("\n"))
@@ -930,9 +1071,20 @@ proc publishSources(run: Run; built: BuiltIndex) =
   keys.sort()
   for k in keys:
     let path = run.sourcePath[k]
-    let src = decodeSource(readFile(path))
+    let src = decodeSource(run.workerText(path))
     if src.state != anOk: continue
     let archive = readFile(path & ".tar")
+    # Each archive is checked against the object that describes it before
+    # it is stored: one a worker altered after its object was admitted (a
+    # cache hit of an earlier generation is not re-admitted) is refused,
+    # and nothing is published. What was stored before it is only archives
+    # that are what their objects say.
+    if int64(archive.len) != src.facts.archiveSize or
+        toLowerAscii($sha256.digest(archive)) != src.facts.archiveSha256:
+      fail("the generation is not published: the archive of " &
+        $efSource & " " & k & " is not the one its object describes " &
+        "(size " & $archive.len & ", the object's " &
+        $src.facts.archiveSize & ")")
     for m in mirrors:
       if m.kind == mkDirectory:
         m.putObject(sourceObjectPath(src.facts.treeDigest), archive)
@@ -1103,11 +1255,18 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       if abbrs.len > 0: reason = "expand " & abbrs.join(",")
       if k in run.previousObservations:
         let prev = run.previousObservations[k]
-        let refs = decodeRefs(readFile(run.refsPath[k]))
+        let refs = decodeRefs(run.workerText(run.refsPath[k]))
         if refs.state == anOk and prev.state == osAnswering and
             prev.head.len > 0 and refs.head != prev.head and
             sameOrigin(prev.origin, recordableOrigin(t.origin)):
           reason.add " head " & prev.head
+        elif refs.state == anOk and prev.state != osAnswering and
+            k in run.previousEnvelopes and
+            run.previousEnvelopes[k].versions.len > 0 and
+            sameOrigin(prev.origin, recordableOrigin(t.origin)):
+          # Answering again after an observation that did not answer: the
+          # history says whether the recorded commits are still there.
+          reason.add " revived"
       if reason.len == 0 or historyAsked.getOrDefault(k) == reason: continue
       historyAsked[k] = reason
       changed = true
@@ -1125,7 +1284,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         if xk in run.expansions: continue
         var x = Expansion(kind: exUnavailable)
         if k in run.historyPath:
-          let h = decodeHistory(readFile(run.historyPath[k]))
+          let h = decodeHistory(run.workerText(run.historyPath[k]))
           if h.state == anOk:
             var matches: seq[string]
             for c in h.allCommits:
@@ -1143,7 +1302,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     for k in keysSorted:
       let t = run.targets[k]
       if not t.listed or k notin run.refsPath: continue
-      let refs = decodeRefs(readFile(run.refsPath[k]))
+      let refs = decodeRefs(run.workerText(run.refsPath[k]))
       var requested: seq[string]
       for c in commitRequests.getOrDefault(k): requested.add c
       requested.sort()
@@ -1189,7 +1348,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     sourceKeys.sort()
     for sk in sourceKeys:
       let path = run.sourcePath[sk]
-      let src = decodeSource(readFile(path))
+      let src = decodeSource(run.workerText(path))
       if src.state != anOk or src.facts.nimble != nlFound: continue
       let nb = readFile(path & ".nimble")
       let h = hex(nb)
@@ -1332,7 +1491,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         for path in [run.refsPath.getOrDefault(k), run.historyPath.getOrDefault(k)]:
           if path.len > 0:
             inputs.add path
-            run.objectHashes[path] = hex(readFile(path))
+            run.objectHashes[path] = hex(run.workerText(path))
             fp.add run.objectHashes[path]
         let ok = originKey(t.origin.url, t.origin.subdir)
         for s in run.sightings.getOrDefault(k):
@@ -1341,7 +1500,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
           if sk in run.sourcePath:
             let sp = run.sourcePath[sk]
             inputs.add sp
-            run.objectHashes[sp] = hex(readFile(sp))
+            run.objectHashes[sp] = hex(run.workerText(sp))
             fp.add run.objectHashes[sp]
             let nb = readFile(sp & ".nimble")
             if nb.len > 0 and hex(nb) in run.readPath:
@@ -1391,10 +1550,31 @@ proc generate*(config: GeneratorConfig): GenerationResult =
   result.built = BuiltIndex(rootId: indexObjectId(rootBytes),
     root: decodeRoot(rootBytes), rootBytes: rootBytes, objects: objects)
   if config.outputDir.len > 0:
+    let held = heldRoot(config.publishHold)
+    if held.len > 0 and (held == "*" or (run.previousRoot.isSome and
+        held == $run.previousRoot.get)):
+      fail("the generation is not published: the independent regeneration " &
+        "holds publishing on top of root " & held & " (" &
+        config.publishHold & "); an operator investigates and removes the " &
+        "hold")
     run.publishSources(result.built)
     writeIndexDir(result.built, config.outputDir)
   result.executed = run.executed
   result.refusals = run.refusals
+  result.workerRefusals = run.workerRefusals
+  var sourceKeys: seq[string]
+  for sk in run.sourcePath.keys: sourceKeys.add sk
+  sourceKeys.sort()
+  for sk in sourceKeys:
+    if sk notin run.sourceJobs: continue
+    let job = run.sourceJobs[sk]
+    let src = decodeSource(run.workerText(run.sourcePath[sk]))
+    if src.state != anOk: continue
+    for l in src.facts.links:
+      if l.verdict == lvOutside:
+        result.outsideLinks.add OutsideLink(package: job.package,
+          commit: job.commit, tree: src.facts.treeDigest, origin: job.url,
+          path: l.path, target: l.target)
   result.actions = all
   result.waves = run.waves
   result.events = sortedEvents(result.events)

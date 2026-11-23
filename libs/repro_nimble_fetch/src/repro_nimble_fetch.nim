@@ -13,9 +13,11 @@
 ## * `store` -- the local content-addressed source store.
 ## * `fetch` -- the `nimble.fetch` edges and their transports.
 ## * `verify` -- `repro nimble verify`, offline.
+## * `detectors` -- the durable store's scrub and the detectors' heartbeats.
 
 import repro_nimble_fetch/[tree_walk, archive_extract, https_get,
-  parallel_get, mirror, lock_rows, closure_index, store, fetch, verify]
+  parallel_get, mirror, lock_rows, closure_index, store, fetch, verify,
+  detectors]
 
 export tree_walk, archive_extract, https_get, parallel_get, mirror,
-  lock_rows, closure_index, store, fetch, verify
+  lock_rows, closure_index, store, fetch, verify, detectors

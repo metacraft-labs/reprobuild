@@ -18,7 +18,7 @@
 ## `cargo package` runs with a private, empty `CARGO_HOME`, never the
 ## user's, and offline.
 
-import std/[algorithm, os, osproc, strtabs, strutils, tempfiles]
+import std/[algorithm, os, osproc, strtabs, strutils, tables, tempfiles]
 
 import blake3
 import nimcrypto/sha2
@@ -69,6 +69,57 @@ proc packCrate*(work, name, version: string;
   doAssert code == 0, "cargo package failed:\n" & output
   readFile(work / "packager-target" / "package" / (name & "-" & version &
     ".crate"))
+
+type
+  FixturePackage* = object
+    ## One library package of a fixture workspace (`packCrates`).
+    name*, version*: string
+    manifestExtra*: string
+      ## TOML appended to its `Cargo.toml` after the `[lib]` table, e.g. a
+      ## `[dependencies]` table naming another member by `path` and
+      ## `version`, or a key of `[lib]` itself when it starts with one
+    files*: seq[(string, string)]  ## (relative path, content)
+
+proc packCrates*(work: string; packages: seq[FixturePackage]):
+    Table[string, string] =
+  ## Real `.crate` files of ``packages``, made by one `cargo package
+  ## --workspace` over a fixture workspace holding them, so a member may
+  ## depend on another by `path` and `version`: cargo resolves such a
+  ## dependency against a temporary local registry of the members it
+  ## packages, and writes it into the published manifest as a registry
+  ## dependency, as crates.io serves it. Returns name -> archive bytes.
+  let cargo = uncontrolledFindExe("cargo")
+  doAssert cargo.len > 0, "cargo is not on PATH"
+  let ws = work / "workspace"
+  createDir(ws)
+  var members: seq[string]
+  for p in packages:
+    let dir = ws / p.name
+    members.add "\"" & p.name & "\""
+    createDir(dir)
+    writeFile(dir / "Cargo.toml", "[package]\nname = \"" & p.name &
+      "\"\nversion = \"" & p.version & "\"\nedition = \"2021\"\n" &
+      "description = \"fixture\"\nlicense = \"MIT\"\n\n[lib]\npath = " &
+      "\"src/lib.rs\"\n" & p.manifestExtra)
+    for (rel, content) in p.files:
+      createDir(parentDir(dir / rel))
+      writeFile(dir / rel, content)
+  writeFile(ws / "Cargo.toml", "[workspace]\nmembers = [" &
+    members.join(", ") & "]\nresolver = \"2\"\n")
+  let env = newStringTable(modeCaseSensitive)
+  for k, v in envPairs(): env[k] = v
+  env["CARGO_HOME"] = work / "packager-cargo-home"
+  env["CARGO_TARGET_DIR"] = work / "packager-ws-target"
+  let p = uncontrolledStartProcess(cargo, workingDir = ws, args = ["package",
+    "--workspace", "--no-verify", "--allow-dirty", "--offline", "--quiet"],
+    env = env, options = {poStdErrToStdOut})
+  let output = drainStream(p.outputStream)
+  let code = p.waitForExit()
+  p.close()
+  doAssert code == 0, "cargo package --workspace failed:\n" & output
+  for pkg in packages:
+    result[pkg.name] = readFile(work / "packager-ws-target" / "package" /
+      (pkg.name & "-" & pkg.version & ".crate"))
 
 proc handCrate*(work: string; members: seq[TarMember]): string =
   ## A gzipped hand-made tar of ``members``, in order.

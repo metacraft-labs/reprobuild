@@ -164,6 +164,10 @@ const
     ## root, which the floor's exec confinement rightly refuses, and their
     ## units must keep the bytes they were measured with. A waived unit is
     ## rendered exactly as written; the waiver is printed in every plan.
+    ## An agent apply refuses a new unit under it (spec §10.1, *An agent
+    ## apply never weakens the floor*; threat model C102): a gate that
+    ## hands such a unit to the agent deploys it first through an
+    ## operator's apply (``operatorDeploysWaived``).
   DefaultBases* = ["debian-12-amd64", "debian-13-amd64", "ubuntu-24.04-amd64"]
     ## The amd64 matrix run under KVM when ``REPRO_ADDON_BASES`` is unset.
 
@@ -972,6 +976,24 @@ proc applyProfile*(g: Guest; repro, name, text: string; flags = ""): ExecOut =
   ## ``repro infra apply --profile <text>`` in the guest.
   let p = g.putProfile(name, text)
   g.exec(repro & " infra apply --profile " & p & flags, timeoutSec = 1200)
+
+proc operatorDeploysWaived*(g: Guest; repro, name, text: string;
+                           step: StepFn): bool =
+  ## The first deployment of fixture units under ``FixtureFloorWaiver``,
+  ## as an operator's apply of the profile ``text``: the accepted trade-off
+  ## of spec §10.1, *An agent apply never weakens the floor* (threat model
+  ## C102). An agent apply refuses a new unit with the whole-floor waiver,
+  ## and applies later generations of a stored one whose waiver and
+  ## account stay as they were.
+  ## So ``text`` names each waived unit the agent will apply, under the
+  ## same waiver and account settings as the agent's generation. False
+  ## (the step recorded red) when the apply failed. On a host with the
+  ## deploy agent's units, the switch re-arms the fetch timer: the caller
+  ## takes a new tick baseline (``recordTimerBaseline``) after it.
+  let r = g.applyProfile(repro, name, text)
+  step("an operator's apply deploys the waived fixture units first",
+       r.exitCode == 0, r.stdout & r.stderr)
+  r.exitCode == 0
 
 proc planProfile*(g: Guest; repro, name, text: string; flags = ""): ExecOut =
   ## ``repro infra plan --profile <text>`` in the guest.

@@ -71,6 +71,16 @@ for Windows' tools, a native call whose standard error is not raised under
 $ErrorActionPreference = 'Stop', the build's version, a PowerShell's own
 $PSHOME). It needs pwsh and is skipped, which counts as not passed, without
 it; the dev shell has it.
+
+test_the_windows_release_zip_is_written_by_the_portable_writer and
+test_windows_release_zip_entry_names_use_forward_slashes cover the Windows
+release zip itself: package_windows_release.ps1 writes it with
+scripts/release/write_release_zip.ps1 (not Compress-Archive, whose Windows
+PowerShell 5.1 version writes backslash entry names), and that writer's
+archive, read back with zipfile, names every entry with '/' under one
+top-level directory, with every directory and file of the tree and nothing
+else. The second needs pwsh and is skipped, which counts as not passed,
+without it.
 """
 
 import json
@@ -215,6 +225,19 @@ class PackagerFixture(unittest.TestCase):
         self.out = self.work / "out"
         self.pack()
 
+    def add_engine_and_graph_helper(self):
+        """Put the engine and its graph helper image in the fixture archive,
+        as the release archive carries them: on Linux each is a launcher
+        beside its `.X.real` image (the launcher contract above)."""
+        for name in ("reprobuild", "reprobuild-helper"):
+            launcher = self.archive_root / "bin" / name
+            launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            real = self.archive_root / "bin" / f".{name}.real"
+            real.write_text("real binary stand-in\n", encoding="utf-8")
+            real.chmod(0o755)
+        self.pack()
+
     def pack(self):
         """(Re)write the fixture tarball from the archive tree."""
         self.tarball = self.work / f"{self.archive_top}.tar.gz"
@@ -299,6 +322,34 @@ class PackagerOutputTests(PackagerFixture):
         self.assertEqual(0, ran.returncode, ran.stderr)
         self.assertEqual("ran\n", ran.stdout)
 
+
+    def test_deb_installs_the_graph_helper_beside_the_engine_off_path(self):
+        """The engine runs the build graph's helper commands with
+        bin/reprobuild-helper from beside its own image, so the package
+        installs it there, and only there: a user never runs it, so it gets
+        no /usr/bin wrapper."""
+        self.add_engine_and_graph_helper()
+        run = self.build("deb")
+        self.assertEqual(0, run.returncode, run.stderr)
+        deb = next(self.out.glob("*.deb"))
+        root = self.work / "installed-helper"
+        subprocess.run(["dpkg-deb", "-x", str(deb), str(root)], check=True)
+        tree = root / "usr" / "lib" / "reprobuild" / "bin"
+        for name in ("reprobuild", "reprobuild-helper"):
+            self.assertTrue((tree / name).is_file(), name)
+            self.assertTrue((tree / f".{name}.real").is_file(), name)
+        on_path = sorted(os.listdir(root / "usr" / "bin"))
+        self.assertEqual(["repro", "reprobuild"], on_path)
+
+    def test_an_engine_without_its_graph_helper_is_refused(self):
+        """An archive with bin/reprobuild and no bin/reprobuild-helper is a
+        broken release: every graph helper command would be refused."""
+        self.add_engine_and_graph_helper()
+        (self.archive_root / "bin" / "reprobuild-helper").unlink()
+        self.pack()
+        run = self.build("deb")
+        self.assertNotEqual(0, run.returncode, "packaged an engine without its helper")
+        self.assertIn("reprobuild-helper", run.stderr)
 
 
 def _newc_members(stream):
@@ -429,6 +480,38 @@ class CompletionFilesTests(PackagerFixture):
             run = self.build(fmt)
             self.assertNotEqual(0, run.returncode, f"{fmt} built without _repro")
             self.assertIn("share/repro/completions/_repro", run.stderr, fmt)
+
+    def package_paths(self, fmt, pkg):
+        """Every path a package installs, without a leading `./` or `/`."""
+        if fmt == "deb":
+            listing = subprocess.run(["dpkg-deb", "-c", str(pkg)], capture_output=True,
+                                     text=True, check=True).stdout
+            return {line.split(None, 5)[5].split(" -> ")[0].lstrip("./").rstrip("/")
+                    for line in listing.splitlines()}
+        if fmt == "rpm":
+            listing = subprocess.run(["rpm", "-qlp", str(pkg)], capture_output=True,
+                                     text=True, check=True).stdout
+            return {line.lstrip("/") for line in listing.splitlines()}
+        listing = subprocess.run(["bsdtar", "-tf", str(pkg)], capture_output=True,
+                                 text=True, check=True).stdout
+        return {line.rstrip("/") for line in listing.splitlines()}
+
+    def test_every_package_installs_the_graph_helper_image(self):
+        """deb, rpm and pacman each install bin/reprobuild-helper beside the
+        engine in the archive tree, and none puts it on PATH."""
+        self.add_engine_and_graph_helper()
+        globs = {"deb": "*.deb", "rpm": "*.rpm", "arch": "*.pkg.tar.zst"}
+        for fmt, glob in globs.items():
+            with self.subTest(package=fmt):
+                self.out = self.work / f"out-helper-{fmt}"
+                run = self.build(fmt)
+                self.assertEqual(0, run.returncode, f"{fmt}: {run.stderr}")
+                paths = self.package_paths(fmt, next(self.out.glob(glob)))
+                for name in ("reprobuild", "reprobuild-helper"):
+                    self.assertIn(f"usr/lib/reprobuild/bin/{name}", paths, fmt)
+                    self.assertIn(f"usr/lib/reprobuild/bin/.{name}.real", paths, fmt)
+                self.assertIn("usr/bin/reprobuild", paths, fmt)
+                self.assertNotIn("usr/bin/reprobuild-helper", paths, fmt)
 
 
 # ---------------------------------------------------------------------------
@@ -685,6 +768,7 @@ class MacosCompletionFilesTests(PackagerFixture):
 # which installs per user.
 MSI_COMPLETION_PATH = "ProgramFiles64Folder/Reprobuild/share/repro/completions/repro.ps1"
 MSI_REPRO_PATH = "ProgramFiles64Folder/Reprobuild/bin/repro.exe"
+MSI_GRAPH_HELPER_PATH = "ProgramFiles64Folder/Reprobuild/bin/reprobuild-helper.exe"
 MSI_CUSTOM_ACTIONS = {
     "ReproCompletionEnsure": "hooks ensure --shell-autocomplete --system",
     "ReproCompletionRemove": "hooks uninstall --shell-autocomplete --system",
@@ -710,8 +794,9 @@ class WindowsCompletionTests(PackagerFixture):
 
     def setUp(self):
         super().setUp()
-        # The Windows archive's command and engine are .exe images.
-        for name in ("repro.exe", "reprobuild.exe"):
+        # The Windows archive's command, engine and the engine's graph
+        # helper image are .exe images.
+        for name in ("repro.exe", "reprobuild.exe", "reprobuild-helper.exe"):
             (self.archive_root / "bin" / name).write_bytes(b"MZ stand-in\n")
         self.pack()
 
@@ -874,7 +959,10 @@ class WindowsCompletionTests(PackagerFixture):
             run = self.build_msi()
             self.assertEqual(0, run.returncode, run.stderr)
             msi = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.msi"
-            self.assert_msi_completion(*self.msi_contents(msi, "good"))
+            contents = self.msi_contents(msi, "good")
+            self.assert_msi_completion(*contents)
+            # The engine's graph helper image is installed beside it.
+            self.assertIn(MSI_GRAPH_HELPER_PATH, contents[0], sorted(contents[0]))
             wxs_text = msi.with_suffix(".wxs").read_text(encoding="utf-8")
 
         # (3) Negative control: the same source without the completion
@@ -919,6 +1007,91 @@ class WindowsCompletionTests(PackagerFixture):
             self.assertNotEqual(0, run.returncode, "an MSI was built without repro.ps1")
             self.assertIn("share/repro/completions/repro.ps1", run.stderr)
 
+    # -------------------------------------- the MSI read-back on Windows
+    # On Windows there is no msiinfo, and the packager reads the MSI back
+    # through powershell.exe and the Windows Installer API. The script it
+    # hands over holds double quotes (`@("SELECT * FROM `" + ... + "`")`).
+    # Passed as `-Command '<script>'` from bash, it reaches powershell.exe
+    # through a Windows command line, whose splitter takes each `"` as
+    # quoting and drops it: three parser errors, every table empty, and a
+    # correct MSI refused as not installing bin/repro.exe (seen on a real
+    # Windows host).
+    #
+    # The stand-in below is powershell.exe as the packager sees it: it drops
+    # every `"` from each argument as that splitter does, takes the script
+    # from -Command or decodes it from -EncodedCommand, refuses a script that
+    # lost the quoted table query (PowerShell's parser error), and otherwise
+    # answers the query as the COM object would, from msiinfo. The real
+    # COM object is not used: it exists only on Windows. A stand-in is
+    # justified here because what is under test is the hand-off of the
+    # script across the command line, which the stand-in reproduces, not
+    # the Windows Installer API.
+    POWERSHELL_STANDIN = r"""#!/bin/sh
+log="$STANDIN_LOG"
+script=""
+while [ $# -gt 0 ]; do
+  arg=$(printf '%s' "$1" | tr -d '"')
+  printf 'arg: %s\n' "$1" >> "$log"
+  case "$arg" in
+    -Command) shift; script=$(printf '%s' "$1" | tr -d '"') ;;
+    -EncodedCommand) shift; script=$(printf '%s' "$1" | base64 -d | iconv -f UTF-16LE -t UTF-8) ;;
+  esac
+  shift
+done
+printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
+case "$script" in
+  *'@("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`")'*) ;;
+  *) echo "ParserError: Unexpected token in expression or statement." >&2; exit 1 ;;
+esac
+"$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tail -n +4
+"""
+
+    def without_msiinfo_env(self):
+        """The environment with powershell.exe's stand-in first on PATH and
+        no msiinfo on it, so the packager takes its Windows read-back path;
+        wixl stays reachable to build the package."""
+        msiinfo = shutil.which("msiinfo")
+        wixl = shutil.which("wixl")
+        standin_dir = self.work / "standin-bin"
+        standin_dir.mkdir()
+        exe = standin_dir / "powershell.exe"
+        exe.write_text(self.POWERSHELL_STANDIN, encoding="utf-8")
+        exe.chmod(0o755)
+        (standin_dir / "wixl").symlink_to(wixl)
+        msitools_dir = str(Path(msiinfo).parent)
+        path = [str(standin_dir)] + [d for d in os.environ.get("PATH", "").split(os.pathsep)
+                                     if d and d != msitools_dir
+                                     and not (Path(d) / "msiinfo").exists()]
+        env = dict(os.environ, PATH=os.pathsep.join(path),
+                   STANDIN_LOG=str(self.work / "standin.log"),
+                   STANDIN_SCRIPTS=str(self.work / "standin-scripts.txt"),
+                   STANDIN_MSIINFO=msiinfo)
+        env.pop("REPRO_MSI_TOOLSET", None)
+        return env
+
+    def test_the_msi_read_back_survives_the_windows_command_line(self):
+        env = self.without_msiinfo_env()
+        self.assertIsNone(shutil.which("msiinfo", path=env["PATH"]))
+        run = subprocess.run(
+            ["sh", str(PACKAGER), "--version", VERSION,
+             "--tarball", str(self.tarball), "--out", str(self.out),
+             "--ecosystem", "msi", "--platform", self.PLATFORM,
+             "--asset-arch", self.ASSET_ARCH],
+            capture_output=True, text=True, check=False, env=env)
+        self.assertEqual(0, run.returncode, run.stderr)
+        log = (self.work / "standin.log").read_text(encoding="utf-8")
+        # The packager went through powershell.exe, with -EncodedCommand,
+        # and no argument it passed carries a double quote.
+        self.assertIn("arg: -EncodedCommand", log)
+        self.assertNotIn("arg: -Command", log)
+        for line in log.splitlines():
+            self.assertNotIn('"', line, line)
+        # Each read decoded to the exact table reader.
+        scripts = (self.work / "standin-scripts.txt").read_text(encoding="utf-8")
+        self.assertGreaterEqual(scripts.count("----"), 4, scripts)
+        self.assertIn('@("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`")', scripts)
+        self.assertIn("[Console]::Out.WriteLine(($f -join \"`t\"))", scripts)
+
 
 M8C_COMMON_UNIT = REPO_ROOT / "tools" / "multi-distro-harness" / "tests" / "m8c_common_unit.ps1"
 
@@ -940,6 +1113,105 @@ class WindowsHarnessHelperTests(unittest.TestCase):
         self.assertEqual(0, run.returncode, run.stdout + run.stderr)
         self.assertIn("0 failure(s)", run.stdout)
         self.assertNotIn("FAIL  ", run.stdout)
+
+
+
+WRITE_RELEASE_ZIP = REPO_ROOT / "scripts" / "release" / "write_release_zip.ps1"
+PACKAGE_WINDOWS_RELEASE = REPO_ROOT / "scripts" / "release" / "package_windows_release.ps1"
+
+
+def _powershell_code(path: Path) -> str:
+    """The lines of a PowerShell script that are not `#` comments."""
+    return "\n".join(line for line in path.read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+class WindowsReleaseZipWriterTests(unittest.TestCase):
+    """The Windows release zip is written by write_release_zip.ps1, not by
+    Compress-Archive, whose Windows PowerShell 5.1 version names entries with
+    backslashes (`reprobuild-<v>-windows-x86_64\\bin\\...`). The ZIP format
+    requires '/' (APPNOTE.TXT 4.4.17.1,
+    https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT), and
+    repro-build-packages.sh's unzip could not unpack such an archive, so no
+    MSI was built from it. This case needs no PowerShell: it reads the
+    packaging script, so it runs on every host."""
+
+    def test_the_windows_release_zip_is_written_by_the_portable_writer(self):
+        code = _powershell_code(PACKAGE_WINDOWS_RELEASE)
+        self.assertIn("write_release_zip.ps1", code)
+        self.assertNotIn("Compress-Archive", code)
+        self.assertNotIn("CreateFromDirectory", code)
+
+
+@unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7)")
+class WindowsReleaseZipEntryNameTests(unittest.TestCase):
+    """write_release_zip.ps1's archive, read back with Python's zipfile: every
+    entry name uses '/', the one top-level entry is the tree's own directory,
+    every directory (an empty one too) has its `<dir>/` entry, every file is
+    there with its bytes, and nothing else is. Under pwsh on Linux the
+    platform separator is already '/', so this case shows the names are
+    built by the script and not by the platform's paths only together with
+    the mutation recorded beside it (names joined with '\\' fail it); on
+    Windows PowerShell 5.1 the separator itself is what the script replaces.
+    It needs pwsh and is skipped, which counts as not passed, without it; the
+    dev shell has it."""
+
+    def build_tree(self, root: Path) -> dict:
+        files = {
+            "bin/repro.exe": b"MZ client\n",
+            "bin/reprobuild.exe": b"MZ engine\n",
+            "lib/runtime.dll": b"MZ dll\n",
+            "share/repro/completions/repro.ps1": b"Register-ArgumentCompleter\n",
+            "share/repro/source/.gitignore": b"build/\n",
+            "share/repro/source/deep/er/module.nim": b"echo 1\n",
+        }
+        for rel, data in files.items():
+            path = root.joinpath(*rel.split("/"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (root / "share" / "repro" / "empty").mkdir(parents=True)
+        return files
+
+    def write_zip(self, source: Path, zip_path: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(WRITE_RELEASE_ZIP),
+             "-SourceDir", str(source), "-DestinationPath", str(zip_path)],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
+
+    def test_windows_release_zip_entry_names_use_forward_slashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            top = f"reprobuild-{VERSION}-windows-x86_64"
+            root = Path(tmp) / "pkg" / top
+            files = self.build_tree(root)
+            zip_path = Path(tmp) / f"{top}.zip"
+            run = self.write_zip(root, zip_path)
+            self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+            self.assertEqual("", run.stdout, "the writer prints nothing on success")
+            with zipfile.ZipFile(zip_path) as archive:
+                names = archive.namelist()
+                self.assertEqual([], [n for n in names if "\\" in n],
+                                 "entry names with backslashes")
+                self.assertEqual([], [n for n in names if not n.startswith(top + "/")],
+                                 "entries outside the one top-level directory")
+                self.assertEqual(len(names), len(set(names)), "duplicate entries")
+                want_dirs = {f"{top}/"}
+                for rel in list(files) + ["share/repro/empty/x"]:
+                    parts = rel.split("/")[:-1]
+                    for i in range(1, len(parts) + 1):
+                        want_dirs.add(f"{top}/" + "/".join(parts[:i]) + "/")
+                self.assertEqual(want_dirs, {n for n in names if n.endswith("/")})
+                self.assertEqual({f"{top}/{rel}" for rel in files},
+                                 {n for n in names if not n.endswith("/")})
+                for rel, data in files.items():
+                    self.assertEqual(data, archive.read(f"{top}/{rel}"), rel)
+                    self.assertTrue(archive.getinfo(f"{top}/{rel}").compress_type
+                                    in (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED))
+            # A second run refuses to overwrite the archive and leaves it.
+            before = zip_path.read_bytes()
+            again = self.write_zip(root, zip_path)
+            self.assertNotEqual(0, again.returncode)
+            self.assertIn("already exists", again.stdout + again.stderr)
+            self.assertEqual(before, zip_path.read_bytes())
 
 
 if __name__ == "__main__":

@@ -82,7 +82,9 @@ proc toolProvisioningOverrideConfigPart*(projectRoot: string): string =
   ## The configuration files that may carry ``[tool-provisioning.overrides]``
   ## for an activation of ``projectRoot``, each by path and content: the
   ## user configuration, the workspace settings file found from
-  ## ``projectRoot`` and the local file beside it.
+  ## ``projectRoot``, the local file beside it (or, when no settings file
+  ## governs the project, the lone local file at ``projectRoot``) and the
+  ## project's own committed ``repro-tool-provisioning.toml``.
   ## Whole files rather than the parsed table: this module parses no TOML,
   ## and a key that moves on any edit of those files only costs a
   ## re-activation, never a stale one.
@@ -92,7 +94,9 @@ proc toolProvisioningOverrideConfigPart*(projectRoot: string): string =
   ## (``REPROBUILD_USER_CONFIG``, else ``<config dir>/reprobuild/config.toml``)
   ## and the discovery is ``repro_workspace_manifests``'
   ## ``findWorkspaceSettingsPath`` (``REPRO_WORKSPACE_CONFIG``, else the
-  ## nearest ``repro-workspace.toml`` at or above the project).
+  ## nearest ``repro-workspace.toml`` at or above the project); the lone
+  ## local file is ``readLoneLocalSettings``' and the project file
+  ## ``tool_provisioning_config``'s ``ProjectToolProvisioningFileName``.
   let userConfig =
     if getEnv("REPROBUILD_USER_CONFIG").len > 0: getEnv("REPROBUILD_USER_CONFIG")
     else: getConfigDir() / "reprobuild" / "config.toml"
@@ -109,10 +113,17 @@ proc toolProvisioningOverrideConfigPart*(projectRoot: string): string =
       dir = parent
   let localSettings =
     if settings.len > 0: parentDir(settings) / "repro-workspace.local.toml"
+    elif projectRoot.len > 0:
+      absolutePath(projectRoot) / "repro-workspace.local.toml"
+    else: ""
+  let projectFile =
+    if projectRoot.len > 0:
+      absolutePath(projectRoot) / "repro-tool-provisioning.toml"
     else: ""
   "user=" & fileFingerprintPart(userConfig) & "\nsettings=" &
     fileFingerprintPart(settings) & "\nlocal=" &
-    fileFingerprintPart(localSettings)
+    fileFingerprintPart(localSettings) & "\nproject=" &
+    fileFingerprintPart(projectFile)
 
 proc textBytes(text: string): seq[byte] =
   result = newSeq[byte](text.len)

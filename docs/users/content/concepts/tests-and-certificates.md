@@ -39,6 +39,12 @@ code it tests. `repro test` runs the project's `test` collection, and
 `repro test <name>` runs one test through the build engine. A test is a build
 target as well: `repro build .#test#<name>` runs the same action.
 
+A path names whose tests to run. `repro test ./sub` runs the `test` collection
+of the project in `sub/`, with or without `--shard`, and `repro test .` runs the
+current project's, as a plain `repro test` does. This differs from
+`repro build ./sub`, which builds that project but leaves its `test` collection
+out.
+
 ## Splitting a suite across machines
 
 `repro test --shard 2/4` runs the second of four parts of the suite. Run each

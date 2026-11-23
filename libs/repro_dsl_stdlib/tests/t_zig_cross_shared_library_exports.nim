@@ -27,6 +27,17 @@
 ## edge `emitZigCrossVersionScriptAction`) and refused otherwise; io-mon's
 ## shim script, which only versions `dlsym`, is the case the merge serves.
 ##
+## EVERY ENTRY POINT. A `-shared` link reaches zig in three ways: the `cc` /
+## `c++` wrappers, `zigCrossCc` (the `CC` a configure script is handed) and
+## the typed `link(kind = lokShared)` under `--target` (`operations/zig_c`).
+## The map once reached only the first: the other two each exported 385
+## symbols under zig 0.13.0, and `zigCrossCc` 411 under 0.14.1 (measured
+## 2026-11-17).
+## The last suite links through each of the other two. The typed link's argv
+## is the engine's own rendering (`argvForCall`) against the zig on PATH, run
+## after the inline-exec edges it orders after (the wrapper edge that writes
+## the map, a merge edge), as the engine runs them.
+##
 ## NO MOCKS: the real zig and the real linker. Without zig 0.13 or 0.14
 ## or nm on PATH the link cases skip with the reason, and fail in a gate run.
 ## Run them once per zig the recipes may declare (`zig >=0.13 <0.15`): the
@@ -36,7 +47,11 @@ import std/[os, osproc, sequtils, sets, strutils, tempfiles, unittest]
 
 import repro_test_support/reasoned_skip
 import repro_project_dsl
+import repro_cli_support
+import repro_tool_profiles
 import repro_dsl_stdlib/adapters/cross_zig
+import repro_dsl_stdlib/operations/link
+import repro_dsl_stdlib/types/options
 import repro_dsl_stdlib/adapters/zig_0_13_arm_compiler_rt_symbols
 import repro_dsl_stdlib/adapters/zig_0_14_arm_compiler_rt_symbols
 
@@ -158,7 +173,7 @@ suite "cross_zig: a shared library exports none of compiler-rt":
   test "a debug one-step link exports no UBSan runtime on any row":
     # zig 0.14 links its UBSan runtime into a library compiled and linked in
     # one invocation at its debug default, and the library exports it
-    # (`ZigCcUbsanTrapArg`). The wrappers and `zigCrossCc` add the trap flag,
+    # (`ZigCcUbsanTrapArg`). The wrappers (and so `zigCrossCc`) add the trap flag,
     # so at `-O0` and with no `-O` the library exports only its own symbols
     # and the `_init` / `_fini` zig 0.13 adds. Under zig 0.14 the bare driver
     # is linked the same way as a control: it must export the runtime, or
@@ -175,7 +190,7 @@ suite "cross_zig: a shared library exports none of compiler-rt":
         writeWrappers(wrappers, triple)
         for opt in ["-O0", ""]:
           for (name, cc) in [("wrapper", quoteShell(wrappers / "cc")),
-                             ("zigCrossCc", zigCrossCc(t))]:
+                             ("zigCrossCc", zigCrossCc(wrappers))]:
             checkpoint(triple & " " & name & " [" & opt & "]")
             let lib = dir / "l.so"
             removeFile(lib)
@@ -187,11 +202,7 @@ suite "cross_zig: a shared library exports none of compiler-rt":
             check "f" in names
             check "g" in names
             check names.filterIt(it.startsWith("__ubsan_")).len == 0
-            # `zigCrossCc` carries no version script, so on a 32-bit ARM
-            # row compiler-rt is exported through it whatever the
-            # optimization; that is the map's concern, not this case's.
-            if name == "wrapper" or t.nimCpu != "arm":
-              check names.filterIt(it notin allowed).len == 0
+            check names.filterIt(it notin allowed).len == 0
         if zigOnPathVersion().startsWith("0.14."):
           let bare = run("zig cc " & zigDriverArgSeq(t).join(" ") &
             " -O0 -shared -fPIC -o bare.so l.c", dir)
@@ -384,3 +395,196 @@ suite "cross_zig: `-o -` writes to stdout, not to a file named `-`":
         check r.code != 0
         check "-o -" in r.output
         check not fileExists(dir / "-")
+
+package zigSharedLinkFixture:
+  nativeBuildDeps:
+    "zig >=0.13 <0.15"
+
+proc withTarget(triple: string; body: proc()) =
+  ## Run `body` with the `--target` variant set as the CLI sets it.
+  let saved = getEnv("REPRO_VARIANTS")
+  putEnv("REPRO_VARIANTS", "targetTriple=" & triple)
+  try: body()
+  finally:
+    if saved.len > 0: putEnv("REPRO_VARIANTS", saved)
+    else: delEnv("REPRO_VARIANTS")
+
+proc inlineArgv(act: BuildActionDef): seq[string] =
+  for arg in act.call.arguments:
+    if arg.name == "argv":
+      return arg.encodedValue.split('\x1f')
+
+suite "cross_zig: every shared-library entry point hides compiler-rt":
+  ## The map once reached a `-shared` link only through the `cc` / `c++`
+  ## wrappers. `zigCrossCc`, the `CC` a configure script is handed, and the
+  ## typed `link(kind = lokShared)` under a zig target (`operations/zig_c`)
+  ## linked without it, and a 32-bit ARM library built through either
+  ## exported compiler-rt (385 symbols under zig 0.13.0, 411 under 0.14.1).
+
+  test "a -shared link through zigCrossCc exports only its own symbols":
+    requireTools:
+      let dir = createTempDir("zig-cross-cc-shared-", "")
+      defer: removeDir(dir)
+      writeWrappers(dir / "w", Glibc)
+      writeFile(dir / "l.c", LibSource)
+      let link = run(zigCrossCc(dir / "w") &
+        " -shared -fPIC -o l.so l.c", dir)
+      checkpoint(link.output)
+      require link.code == 0
+      let names = exported(dir / "l.so", dir)
+      checkpoint(names.join(" "))
+      check "f" in names
+      check "g" in names
+      check names.filterIt(it in zigArmCompilerRtSymbols().toHashSet).len == 0
+
+  proc typedSharedLink(triple: string; extra: seq[string] = @[];
+                       before: proc() = nil): BuildActionDef =
+    ## The edge `link(kind = lokShared)` emits under `--target=<triple>`
+    ## for `l.o`, in a fresh registry. `before` runs inside the build frame
+    ## first (a merge edge the link names).
+    var lib: BuildActionDef
+    withTarget(triple, proc() =
+      resetBuildActionRegistry()
+      resetTargetExportRegistry()
+      let state = beginBuildBlock("zigSharedLinkFixture")
+      try:
+        if before != nil: before()
+        lib = link(LinkOptions(
+          objects: @[BuildActionDef(outputs: @["l.o"])],
+          kind: lokShared, target: "lib/libl.so", soname: "libl.so",
+          extra: extra))
+      finally: endBuildBlock(state))
+    lib
+
+  proc runTypedSharedLink(lib: BuildActionDef; dir: string): seq[string] =
+    ## Run the edges the link orders after that are inline execs (the
+    ## wrapper edge, which writes the map; a merge edge), as the engine runs
+    ## them, then the link's own argv as the engine renders it against the
+    ## zig on PATH. The library's exports.
+    for act in registeredBuildActions():
+      if act.id != lib.id and act.id in lib.deps:
+        let argv = inlineArgv(act)
+        require argv.len > 0
+        let r = run(quoteShellCommand(argv), dir)
+        checkpoint(r.output)
+        require r.code == 0
+    let argv = argvForCall(lib.call,
+      PathOnlyToolProfile(resolvedExecutablePath: findExe("zig")))
+    checkpoint(argv.join(" "))
+    require lib.outputs.len == 1
+    createDir(dir / lib.outputs[0].parentDir)
+    let r = run(quoteShellCommand(argv), dir)
+    checkpoint(r.output)
+    require r.code == 0
+    result = exported(dir / lib.outputs[0], dir)
+    checkpoint(result.join(" "))
+
+  template inProject(dir, triple, body: untyped) =
+    ## A temp project, the working directory while `body` runs, holding
+    ## `l.o` compiled for `triple`.
+    let dir = createTempDir("zig-typed-shared-", "")
+    let saved = getCurrentDir()
+    setCurrentDir(dir)
+    try:
+      writeFile(dir / "l.c", ShimLikeSource & LibSource.replace(
+        "unsigned f(unsigned a, unsigned b) { return a / b; }\n", ""))
+      require run("zig cc " & zigDriverArgSeq(zigCrossTarget(triple)).join(" ") &
+        " -O2 -fPIC -c -o l.o l.c", dir).code == 0
+      body
+    finally:
+      setCurrentDir(saved)
+      removeDir(dir)
+
+  for triple in [Glibc, "armv7-unknown-linux-musleabihf",
+                 "aarch64-unknown-linux-musl"]:
+    test "the typed link of a shared library exports only its own symbols (" &
+        triple & ")":
+      requireTools:
+        inProject(dir, triple):
+          let lib = typedSharedLink(triple)
+          check lib.call.packageName == "zig"
+          let names = runTypedSharedLink(lib, dir)
+          check "f" in names
+          check "g" in names
+          check names.filterIt(it in zigArmCompilerRtSymbols().toHashSet).len == 0
+          if zigCrossTarget(triple).nimCpu != "arm":
+            # The row needs no map, and the link gets none.
+            check lib.deps.allIt(not it.startsWith("zig-cross-wrappers-"))
+
+  test "the typed link keeps a script that makes everything else local":
+    requireTools:
+      inProject(dir, Glibc):
+        writeFile(dir / "own.map", "{ global: f; local: *; };\n")
+        let lib = typedSharedLink(Glibc, @["-Wl,--version-script=own.map"])
+        check lib.deps.allIt(not it.startsWith("zig-cross-wrappers-"))
+        check runTypedSharedLink(lib, dir) == @["f"]
+
+  test "the typed link refuses a script that leaves compiler-rt exported":
+    let dir = createTempDir("zig-typed-refused-", "")
+    let saved = getCurrentDir()
+    setCurrentDir(dir)
+    defer:
+      setCurrentDir(saved)
+      removeDir(dir)
+    writeFile(dir / "shim.map", ShimLikeScript)
+    for spelling in [@["-Wl,--version-script=shim.map"],
+                     @["-Wl,--version-script,shim.map"],
+                     @["-Wl,--version-script", "-Wl,shim.map"]]:
+      checkpoint($spelling)
+      try:
+        discard typedSharedLink(Glibc, spelling)
+        check false
+      except ValueError as e:
+        check "shim.map leaves zig's compiler-rt exported" in e.msg
+        check "emitZigCrossVersionScriptAction" in e.msg
+    # A spelling the wrappers cannot read is refused too.
+    expect ValueError:
+      discard typedSharedLink(Glibc, @["-Wl,-T,x,--version-script=shim.map"])
+    # A row that needs no map takes the script as it is.
+    check typedSharedLink("aarch64-unknown-linux-musl",
+      @["-Wl,--version-script=shim.map"]).call.packageName == "zig"
+
+  test "the typed link accepts the merge edge's script and keeps its versions":
+    requireTools:
+      inProject(dir, Glibc):
+        writeFile(dir / "shim.map", ShimLikeScript)
+        let lib = typedSharedLink(Glibc,
+          @["-Wl,--version-script=merged.map"], proc() =
+            discard emitZigCrossVersionScriptAction("", "zigSharedLinkFixture",
+              Glibc, "shim.map", "merged.map"))
+        check lib.deps.allIt(not it.startsWith("zig-cross-wrappers-"))
+        # The link orders after the merge edge, which `runTypedSharedLink`
+        # therefore runs first.
+        check registeredBuildActions().anyIt(
+          it.commandStatsId == "zig-cross.version-script" and it.id in lib.deps)
+        let names = runTypedSharedLink(lib, dir)
+        check "f" in names
+        check names.filterIt(it in zigArmCompilerRtSymbols().toHashSet).len == 0
+        let (versions, _) = run("nm -D " & quoteShell(dir / lib.outputs[0]), dir)
+        check "dlsym@@GLIBC_2.2.5" in versions
+
+  test "the wrappers and the typed link read a version script alike":
+    # `zigCrossVersionScriptCovers` is the wrappers' `covers`, in Nim.
+    check zigCrossVersionScriptCovers("{ global: f; local: *; };")
+    check zigCrossVersionScriptCovers("V1 {\n  global:\n    f;\n  local:\n    *;\n};")
+    check zigCrossVersionScriptCovers("V1 { local:*; };")
+    check zigCrossVersionScriptCovers(ZigCrossCompilerRtMarker & "\nX { };")
+    check not zigCrossVersionScriptCovers(ShimLikeScript)
+    check not zigCrossVersionScriptCovers("{ global: *; };")
+    check zigCrossOwnVersionScript(["-O2", "-Wl,-version-script=a.map"]) == "a.map"
+    check zigCrossOwnVersionScript(["-Wl,-version-script,b.map"]) == "b.map"
+    check zigCrossOwnVersionScript(["-Wl,--version-script", "c.map"]) == "c.map"
+    check zigCrossOwnVersionScript(["-O2"]) == ""
+    # The argument after a bare -Wl,--version-script is still scanned.
+    expect ValueError:
+      discard zigCrossOwnVersionScript(["-Wl,--version-script",
+                                        "-Wl,foo-version-script.map"])
+    # A script that does not exist yet and that no merge edge writes is
+    # refused when the graph is built, by name.
+    try:
+      discard typedSharedLink(Glibc, @["-Wl,--version-script=later.map"])
+      check false
+    except ValueError as e:
+      check "later.map does not exist when the graph is built" in e.msg
+    # `zigCrossCc` is the `cc` wrapper, quoted for the shell.
+    check zigCrossCc("/w d") == quoteShell("/w d" / "cc")
