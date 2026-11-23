@@ -108281,8 +108281,9 @@ proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
     code: int; diagnostic: string] =
-  ## Stage ``paths``, commit with ``message``, and push ``HEAD`` to the
-  ## manifest repo's upstream when one is configured. Best-effort push: the
+  ## Stage ``paths``, commit those paths and nothing else with ``message``
+  ## (other staged changes stay staged and out of the commit), and push
+  ## ``HEAD`` to the manifest repo's upstream when one is configured. Best-effort push: the
   ## commit always lands locally; a missing upstream is reported, not fatal.
   ##
   ## The stage below is deliberately NOT forced: these are operator-AUTHORED
@@ -108308,7 +108309,19 @@ proc commitAndPushManifest(identity: GitToolIdentity;
     let st = gitOutput(gitBin, manifestRoot, ["add", "--", p])
     if st.code != 0:
       return (code: st.code, diagnostic: "git add failed: " & st.output)
-  let ci = gitOutput(gitBin, manifestRoot, ["commit", "-m", message])
+  # The commit is limited to ``paths`` with ``--only`` and a pathspec. Staging
+  # them is not enough: a bare ``git commit`` records the WHOLE index, so an
+  # edit the operator had already staged in the manifest repo (or what an
+  # earlier verb staged before its commit failed) would be committed and
+  # pushed under this verb's message. ``--only`` commits the listed paths
+  # alone and leaves every other staged change staged and untouched
+  # (https://git-scm.com/docs/git-commit#Documentation/git-commit.txt---only).
+  # Deletions are covered: the ``git add`` above staged them, and a pathspec
+  # naming a removed tracked file commits the removal.
+  var commitArgs = @["commit", "-m", message, "--only", "--"]
+  for p in paths:
+    commitArgs.add(p)
+  let ci = gitOutput(gitBin, manifestRoot, commitArgs)
   if ci.code != 0:
     return (code: ci.code, diagnostic: "git commit failed: " & ci.output)
   # Resolve the upstream from @{u}; push only when configured.
@@ -109112,9 +109125,9 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
       name & (if desc.len > 0: " (" & desc & ")" else: "") &
       (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    # AFTER the commit, never before: `commitAndPushManifest` stages exactly
-    # the `paths` it was handed and commits without `-a`, and the index is
-    # gitignored besides — but regenerating on the far side of the commit is
+    # AFTER the commit, never before: `commitAndPushManifest` commits exactly
+    # the `paths` it was handed (`git commit --only -- <paths>`), and the
+    # index is gitignored besides — but regenerating on the far side of the commit is
     # what makes that a property of the ORDER rather than of two other files
     # staying the way they are today.
     #
