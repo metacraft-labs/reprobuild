@@ -20,6 +20,11 @@
 ##   top of `[repo]`, in a string array, or in a `remotes` / `copyfile` /
 ##   `linkfile` entry — is refused naming the key, rather than read as text
 ##   (Workspace-Manifests.md §"`repos/<repo>.toml` — Repository Descriptor").
+## * a value of the wrong TOML type for a key that is not a string — an
+##   integer (`depth`), a boolean (`single_branch`), an array (`tags`,
+##   `remotes`) or an array entry — is refused naming the key, the type it
+##   takes and what was written, not "TOML parser raised with no message"
+##   (Workspace-Manifests.md §"Validation").
 ##
 ## No mocks: real files in a temporary directory, the real reader.
 
@@ -235,3 +240,48 @@ beta = "beta"
       check e.path == file
       check e.keyPath == keyPath
       check "`" & keyPath & "` must be a string, not " in e.msg
+
+  test "a wrong-typed value for a non-string [repo] key is refused naming the key":
+    # The typed decoder refuses these itself, but it raised with an empty
+    # message and no key, so the diagnostic read "TOML parser raised with no
+    # message". Workspace-Manifests.md §"Validation": the refusal names the
+    # key path, the type the key takes and what was written instead.
+    let dir = createTempDir("repro-repo-roles-", "")
+    defer: removeDir(dir)
+    let base = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
+      "mainline = \"dev\"\nname = \"x\"\npath = \"x\"\n"
+    var n = 0
+    for (extra, keyPath, wanted, written) in [
+        ("depth = \"3\"\n", "repo.depth", "an integer", "a string"),
+        ("depth = true\n", "repo.depth", "an integer", "`true`"),
+        ("depth = 1.5\n", "repo.depth", "an integer", "a float"),
+        ("single_branch = 1\n", "repo.single_branch", "a boolean",
+         "an integer"),
+        ("single_branch = \"yes\"\n", "repo.single_branch", "a boolean",
+         "a string"),
+        ("tags = \"a\"\n", "repo.tags", "an array", "a string"),
+        ("depends = 3\n", "repo.depends", "an array", "an integer"),
+        ("remotes = \"origin\"\n", "repo.remotes", "an array", "a string"),
+        ("remotes = [\"origin\"]\n", "repo.remotes[0]", "a table",
+         "a string"),
+        ("copyfile = { src = \"s\", dest = \"d\" }\n", "repo.copyfile",
+         "an array", "a table"),
+        # The typed decoder turns an array, an inline table or a number
+        # written for a STRING key into text, so such a value earlier in the
+        # record is not why the decode failed and must not take the blame
+        # from the key that is.
+        ("remote = [\"o\"]\ndepth = \"3\"\n", "repo.depth", "an integer",
+         "a string"),
+        ("revision = { a = \"b\" }\ndepth = \"3\"\n", "repo.depth",
+         "an integer", "a string"),
+        ("remote = 7\nsingle_branch = 1\n", "repo.single_branch",
+         "a boolean", "an integer")]:
+      inc n
+      let file = fragmentAt(dir, "wrong-kind-" & $n, base & extra)
+      let e = refusal(file)
+      checkpoint(extra & " -> " & e.keyPath & ": " & e.msg)
+      check e.path == file
+      check e.keyPath == keyPath
+      check ("`" & keyPath & "` must be " & wanted & ", not " & written) in
+        e.msg
+      check "no message" notin e.msg
