@@ -59,6 +59,13 @@ type
       ## The file the entry is written in.
     line*: int
       ## The 1-based line it is written on, or 0 when it was not located.
+    platform*: string
+      ## The platform the entry is written for: "" for the unqualified
+      ## `[tool-provisioning.overrides]` table, `<os>` for
+      ## `[tool-provisioning.overrides.<os>]` and `<cpu>-<os>` for
+      ## `[tool-provisioning.overrides.<cpu>-<os>]`. The resolver keeps only
+      ## the entries that apply to the host, the most specific one per
+      ## package.
 
   ToolProvisioningConfigBody* = object
     ## What the typed strict decoder of `reprobuild.config.v1` keeps of the
@@ -155,6 +162,12 @@ const
     ## VCS-private (layer 5) layers, plus every file an `apply_if`
     ## directive references. A `reprobuild.config.v1` file may carry `apply_if`
     ## path-scoped bindings (inline-table array) and/or `[locking]` routes.
+  schemaProjectToolProvisioningV1* = "reprobuild.project.tool-provisioning.v1"
+    ## Per-Tool-Provisioning-Overrides.md §4.1 — a project's committed
+    ## `repro-tool-provisioning.toml`: the per-tool provisioning overrides
+    ## every checkout of that project needs, standalone or inside a
+    ## workspace. It carries `[tool-provisioning.overrides]` only and is never
+    ## a workspace-root marker.
 
 type
   # --- branch roles (Workspace-Branch-Roles.md §2–§3) -------------------------
@@ -1021,6 +1034,42 @@ type
       ToolProvisioningConfigBody
       ## The same table in its `[tool-provisioning.overrides]` header
       ## spelling, which the typed decoder sees as one dotted top-level key.
+      ##
+      ## The platform tables `[tool-provisioning.overrides.<os>]` and
+      ## `[tool-provisioning.overrides.<cpu>-<os>]` reach the typed decoder
+      ## the same way, one dotted key per platform, so each is declared
+      ## below (the platform set is `tool_provisioning_config`'s
+      ## `ToolProvisioningPlatformOses` x `ToolProvisioningPlatformCpus`;
+      ## `t_tool_provisioning_override_precedence` reads each of them from a
+      ## user configuration). A header for any other platform stays an
+      ## unknown key, which the strict decoder refuses naming it.
+    tool_provisioning_overrides_linux*
+        {.serializedFieldName: "tool-provisioning.overrides.linux".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_macos*
+        {.serializedFieldName: "tool-provisioning.overrides.macos".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_windows*
+        {.serializedFieldName: "tool-provisioning.overrides.windows".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_x86_64_linux*
+        {.serializedFieldName: "tool-provisioning.overrides.x86_64-linux".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_x86_64_macos*
+        {.serializedFieldName: "tool-provisioning.overrides.x86_64-macos".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_x86_64_windows*
+        {.serializedFieldName: "tool-provisioning.overrides.x86_64-windows".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_aarch64_linux*
+        {.serializedFieldName: "tool-provisioning.overrides.aarch64-linux".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_aarch64_macos*
+        {.serializedFieldName: "tool-provisioning.overrides.aarch64-macos".}:
+      ToolProvisioningConfigBody
+    tool_provisioning_overrides_aarch64_windows*
+        {.serializedFieldName: "tool-provisioning.overrides.aarch64-windows".}:
+      ToolProvisioningConfigBody
 
   # NOTE on the schema probe: the reader does NOT define a typed "probe"
   # record. Instead it calls

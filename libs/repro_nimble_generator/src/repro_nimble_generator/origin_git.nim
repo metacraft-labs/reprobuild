@@ -453,24 +453,69 @@ proc fetchHistory*(g: OriginGit; v: VettedOrigin; scratch: string;
                    limits: EgressLimits): tuple[ok: bool;
                      branchCommits, allCommits: seq[string]; failure: string] =
   ## The commits of every branch and tag of the origin (commits only; trees
-  ## and blobs are filtered out where the origin supports it).
-  let repo = scratch / "history.git"
+  ## and blobs are filtered out where the origin supports it, and the
+  ## commits' root trees are fetched too when a tag names a tree). Both
+  ## attempts together stay within one fetch's limits.
   createDir(scratch)
-  let init = runBounded(g, @["init", "--bare", "-q", repo], scratch,
-    scratch / "home", limits)
-  if init.code != 0:
-    return (false, @[], @[], "git init failed")
-  var args = @["--git-dir=" & repo]
-  args.add networkArgs(v, limits)
-  args.add ["fetch", "--no-tags", "--no-write-fetch-head", "--filter=tree:0",
-    "--no-auto-maintenance", baseUrl(v.final),
-    "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
-  let r = runBounded(g, args, scratch, scratch / "home", limits,
-    url = baseUrl(v.final), watchDir = repo)
+  let started = epochTime()
+  proc fetchInto(repo, filter: string; limits: EgressLimits): GitRun =
+    let init = runBounded(g, @["init", "--bare", "-q", repo], scratch,
+      scratch / "home", limits)
+    if init.code != 0:
+      return GitRun(code: init.code, stderrText: "git init failed")
+    var args = @["--git-dir=" & repo]
+    args.add networkArgs(v, limits)
+    args.add ["fetch", "--no-tags", "--no-write-fetch-head",
+      "--filter=" & filter, "--no-auto-maintenance", baseUrl(v.final),
+      "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
+    runBounded(g, args, scratch, scratch / "home", limits,
+      url = baseUrl(v.final), watchDir = repo)
+  var repo = scratch / "history.git"
+  var r = fetchInto(repo, "tree:0", limits)
+  if r.code != 0:
+    # A tag may name a tree. `tree:0` filters every tree out, that tree too,
+    # and git then refuses the fetch as incomplete; an origin could use
+    # that to keep its rewritten history from being looked at. `tree:1`
+    # also brings each commit's root tree (never a blob or a subtree),
+    # which is all such a tag needs. A fresh repository: the objects the
+    # failed fetch left would be offered as already held, and the tree
+    # behind an annotated tag never sent. The retry gets what the first
+    # attempt left of the byte and time limits, so an origin that fails
+    # the first fetch on purpose cannot double what it may send.
+    var rest = limits
+    rest.maxBytes = max(1'i64, limits.maxBytes - treeBytes(repo))
+    rest.wallSeconds = max(1, limits.wallSeconds -
+      int(epochTime() - started))
+    repo = scratch / "history-trees.git"
+    r = fetchInto(repo, "tree:1", rest)
   if r.code != 0:
     return (false, @[], @[], r.stderrText.strip().splitLines().join(" | "))
-  let br = localGit(g, repo, ["rev-list", "--branches"], limits)
-  let al = localGit(g, repo, ["rev-list", "--all"], limits)
+  # The walks start from the commits the refs peel to. A ref that peels to
+  # no commit (a tag at a tree or a blob) is not a tip: handed to
+  # `rev-list` as a ref it would fail the whole walk.
+  proc commitTips(pattern: string): tuple[ok: bool; tips: string] =
+    let refs = localGit(g, repo, ["for-each-ref", "--format=%(objectname)",
+      pattern], limits)
+    if refs.code != 0: return (false, "")
+    var ask = ""
+    for l in refs.stdoutText.splitLines():
+      if isHexId(l): ask.add l & "^{commit}\n"
+    if ask.len == 0: return (true, "")
+    let peeled = localGit(g, repo, ["cat-file",
+      "--batch-check=%(objectname) %(objecttype)"], limits, input = ask)
+    if peeled.code != 0: return (false, "")
+    result.ok = true
+    for l in peeled.stdoutText.splitLines():
+      let parts = l.split(' ')
+      if parts.len == 2 and parts[1] == "commit" and isHexId(parts[0]):
+        result.tips.add parts[0] & "\n"
+  proc walk(pattern: string): GitRun =
+    let (ok, tips) = commitTips(pattern)
+    if not ok: return GitRun(code: 1)
+    if tips.len == 0: return GitRun(code: 0)
+    localGit(g, repo, ["rev-list", "--stdin"], limits, input = tips)
+  let br = walk("refs/heads/")
+  let al = walk("refs/")
   if br.code != 0 or al.code != 0:
     return (false, @[], @[], "rev-list failed")
   for l in br.stdoutText.splitLines():

@@ -403,5 +403,6 @@ proc clangStrip*(opts: StripOptions): BuildActionDef =
   ## declares no ``strip`` and provisions ``ld``. GNU ``strip`` keeps the gcc
   ## path's symmetry; clang's own ``llvm-strip`` is a separate package.
   let input = if opts.input.outputs.len > 0: opts.input.outputs[0] else: ""
-  binutilsModule.strip(output = opts.target, keepSymbols = opts.keepSymbols,
-    input = input, after = [opts.input])
+  binutilsModule.strip(
+    output = binutilsModule.separateStripOutput(input, opts.target),
+    keepSymbols = opts.keepSymbols, input = input, after = [opts.input])

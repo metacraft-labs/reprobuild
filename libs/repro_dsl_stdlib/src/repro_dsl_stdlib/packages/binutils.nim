@@ -29,6 +29,7 @@
 ## verified payload without a second extraction. Other command selectors keep
 ## their existing provisioning channels.
 
+import std/os
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 import repro_dsl_stdlib/winlibs_pin
@@ -199,6 +200,12 @@ package ranlib:
 #   strip -s -o <output> <input>        # strip all symbols (-s)
 #   strip -S -o <output> <input>        # strip debug symbols only (-S)
 #   strip -o <output> -K <symbol>... <input>   # keep the named symbols
+#
+# ``-o`` is required. Without it ``strip`` rewrites ``<input>`` in place, and
+# ``<input>`` is the declared output of the edge that linked it: a second
+# writer of that path that declares nothing, which
+# Filesystem-Policy-And-Observed-Inputs.md §"Double Writes" and §"Source
+# Rewrites" make an error by default. Strip to a separate output instead.
 # ---------------------------------------------------------------------------
 
 package strip:
@@ -248,7 +255,8 @@ package strip:
         flag output is string,
           alias = "-o",
           format = separate,
-          role = output
+          role = output,
+          required = true
         flag keepSymbols is seq[string],
           alias = "-K",
           format = separate,
@@ -256,6 +264,26 @@ package strip:
         pos input is string,
           position = 0,
           role = input
+
+proc separateStripOutput*(input, output: string): string =
+  ## ``output`` when it names a path other than ``input``; raises
+  ## ``ValueError`` otherwise. ``gccStrip`` and ``clangStrip`` call it before
+  ## they build the edge: an empty ``output`` (strip in place) or one naming
+  ## the input both rewrite the producing edge's declared output from a
+  ## second edge, which is refused by default
+  ## (Filesystem-Policy-And-Observed-Inputs.md §"Double Writes", §"Source
+  ## Rewrites"). Paths are compared after lexical normalization, so
+  ## ``./app`` and ``dir/../app`` are the input ``app``.
+  if output.len == 0 or (input.len > 0 and
+      normalizedPath(output) == normalizedPath(input)):
+    raise newException(ValueError,
+      "strip of '" & input & "' must name a separate output: " &
+      (if output.len == 0: "an empty target strips in place"
+       else: "target '" & output & "' is the input") &
+      ", which rewrites the output of the edge that produced it without " &
+      "declaring that write: two edges would write one path. Set " &
+      "StripOptions.target to a different path.")
+  output
 
 # ---------------------------------------------------------------------------
 # nm — list symbol table.

@@ -3324,6 +3324,14 @@ proc keyedOnGoverningLock*(fingerprint: ContentDigest;
   framed.add($lock.len & "\x1f" & lock & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+const RunQuotaStaticCapacityDeadlockReason* =
+  "runquota static-capacity deadlock"
+  ## ``ActionResult.reason`` of an action a RunQuota static-capacity deadlock
+  ## stopped before it was started: its lease could never be admitted by the
+  ## daemon's static budget (docs/runquota-policy.md). The reason is what
+  ## tells it from an action whose command failed; its stderr is the
+  ## deadlock diagnostic, naming the budget and the remedies.
+
 const UnsafePreserveOutputsDomain* = "reprobuild/unsafe-preserve-outputs/v1"
   ## The domain `preserveOutputsWeakFingerprint` frames a step's weak
   ## fingerprint under. Versioned so a change to the mode's semantics can
@@ -4490,6 +4498,74 @@ proc cwdRemovalRoot(action: BuildAction): string =
   when defined(windows):
     result = result.toLowerAscii()
 
+proc collectSpelledEntries(path: string; entries: var HashSet[string]) =
+  ## Terminates on a link cycle: an entry already collected is not walked
+  ## again.
+  let spelling = path.replace('\\', '/')
+  for stop in 1 .. spelling.len:
+    if stop < spelling.len and spelling[stop] != '/':
+      continue
+    if spelling[stop - 1] == '/':
+      # An empty component names no entry.
+      continue
+    when defined(windows):
+      if stop == 2 and spelling[1] == ':':
+        # A Windows drive (`C:`) names no entry. On POSIX a component may
+        # legitimately end in `:`, so this is not tested there.
+        continue
+    let entry = outputRemovalLocation("", spelling[0 ..< stop])
+    if entry.len == 0 or entry in entries:
+      continue
+    entries.incl(entry)
+    if symlinkExists(entry):
+      var target = ""
+      try:
+        target = expandSymlink(entry)
+      except CatchableError:
+        continue
+      if target.len == 0 or target == entry:
+        continue
+      if not target.isAbsolute:
+        # Joined WITHOUT `/`: a target such as `../x` is applied to the
+        # link's own physical directory by `outputRemovalLocation`.
+        let slash = entry.rfind('/')
+        target = (if slash <= 0: "" else: entry[0 ..< slash]) & "/" & target
+      collectSpelledEntries(target, entries)
+
+proc cwdSpellingEntries(cwd: string): HashSet[string] =
+  ## Every directory entry the action's working directory is REACHED through:
+  ## each component of its spelling, a symbolic link as the link itself, and
+  ## the same for every link's target, down to the physical directory. All in
+  ## the namespace `outputRemovalLocation` answers in.
+  ##
+  ## An output is removed as the entry its spelling names, a final link
+  ## included (`removePathNoFollow`), and `materialPath` joins a relative
+  ## output onto the cwd lexically. Under a cwd `<link>/work` the output `..`
+  ## therefore names `<link>` itself. The link does not contain the PHYSICAL
+  ## working directory, so a check against that directory alone accepted it,
+  ## and removing it leaves the action nowhere to start. macOS reaches its
+  ## default `$TMPDIR` through `/var` -> `/private/var`.
+  ##
+  ## Two spellings are walked. The one as written is what the kernel follows
+  ## when the action starts. The lexically normalized one is what
+  ## `materialPath` joins a relative output onto. They differ when a `..`
+  ## follows a link (`<link>/../work`).
+  ##
+  ## `expandSymlink` is a no-op on Windows, so there only the components of
+  ## the spelling are collected; a junction's target chain is not walked.
+  ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+  result = initHashSet[string]()
+  let spelled = absolutePath(if cwd.len > 0: cwd else: getCurrentDir())
+  collectSpelledEntries(spelled, result)
+  collectSpelledEntries(os.normalizedPath(spelled), result)
+
+proc removalTakesCwd(removalRoot, cwdRoot: string;
+                     cwdEntries: HashSet[string]): bool =
+  ## Whether removing `removalRoot` removes the working directory: the
+  ## physical directory `cwdRoot` or anything containing it, or an entry the
+  ## directory is reached through (`cwdSpellingEntries`).
+  removalTakesEntry(removalRoot, cwdRoot) or removalRoot in cwdEntries
+
 var
   containmentMemoDepth {.threadvar.}: int
   containmentMemo {.threadvar.}: Table[string, Option[string]]
@@ -5000,6 +5076,13 @@ proc validateGraph(g: BuildGraph) =
         "Spec: CLI/internal/fs-file-utilities.md §4, " &
         "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\".")
 
+  # One walk per distinct cwd: the actions of a directory share it.
+  var cwdEntriesByCwd = initTable[string, HashSet[string]]()
+  proc cwdEntriesOf(cwd: string): HashSet[string] =
+    if cwd notin cwdEntriesByCwd:
+      cwdEntriesByCwd[cwd] = cwdSpellingEntries(cwd)
+    cwdEntriesByCwd[cwd]
+
   var declaredIndex: seq[tuple[actionId: string; root: string;
     optional: bool; ordinary: bool]] = @[]
   let hasOptionalCandidates = g.actions.anyIt(it.optionalOutputs.len > 0)
@@ -5020,7 +5103,7 @@ proc validateGraph(g: BuildGraph) =
         raiseEngine("optional output path is empty for " & action.id)
       let removalRoot = outputRemovalLocation(action.cwd, raw)
       let cwdRoot = cwdRemovalRoot(action)
-      if removalTakesEntry(removalRoot, cwdRoot):
+      if removalTakesCwd(removalRoot, cwdRoot, cwdEntriesOf(action.cwd)):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
       indexRoot(raw, optional = true)
@@ -5071,7 +5154,7 @@ proc validateGraph(g: BuildGraph) =
       let root = outputRemovalLocation(action.cwd, raw)
       if root notin owned:
         continue
-      if removalTakesEntry(root, cwdRoot):
+      if removalTakesCwd(root, cwdRoot, cwdEntriesOf(action.cwd)):
         raiseEngine("output removed before run contains the action's cwd: " &
           raw & " for " & action.id)
       for input in action.inputs:
@@ -26292,13 +26375,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           commands[k] = staged.action.runQuotaCommand(config)
         var offers: seq[ReproRunQuotaOffer]
         var batchFailure = ""
+        var batchDeadlocked = false
         try:
           offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
-        except ReproRunQuotaDeadlockError:
-          # A whole frontier blocked by requests the authority cannot ever
-          # admit is a build-level scheduler deadlock, not an action process
-          # failure. Preserve the typed outcome for the CLI diagnostic.
-          raise
+        except ReproRunQuotaDeadlockError as err:
+          # A request the authority can never admit ends in a static-capacity
+          # deadlock (docs/runquota-policy.md). It fails the actions it
+          # stopped -- with the deadlock's own text and a reason that names
+          # it, so it is not mistaken for a command that failed -- and the
+          # build settles and is reported like any other failed build
+          # (CLI/build.md, "A build that ends in a RunQuota static-capacity
+          # deadlock"). It used to be re-raised here, which unwound the build
+          # in place of its result, so no report could be written from it.
+          # The batch has already rolled back what it owned.
+          batchFailure = err.msg
+          batchDeadlocked = true
         except CatchableError as err:
           batchFailure = err.msg
         finishStat("repro runquota launch", batchStart)
@@ -26317,7 +26408,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               cacheDecision: previousCacheDecision,
               dependencyPolicyKind: staged.action.dependencyPolicy.kind,
               monitorDepfilePath: staged.action.monitorDepfile,
-              stderr: "process launch failed: " & batchFailure,
+              reason:
+                if batchDeadlocked: RunQuotaStaticCapacityDeadlockReason
+                else: "",
+              stderr:
+                if batchDeadlocked: batchFailure
+                else: "process launch failed: " & batchFailure,
               runQuotaBackend: "runquota-inline",
               runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
             statuses[staged.id] = asFailed
@@ -26325,7 +26421,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             poolRunning[staged.pool] =
               if failedUsed > staged.poolUnits: failedUsed - staged.poolUnits
               else: 0'u32
-            runResult.trace(staged.id, "failed", "launch")
+            runResult.trace(staged.id, "failed",
+              if batchDeadlocked: "runquota-deadlock" else: "launch")
             blockClosure(staged.id, staged.id)
             emitProgress(bpkActionCompleted, staged.id)
           completed = terminalCount()
@@ -26417,7 +26514,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # build holds. That build releases it when its action exits.
           sleep(200)
           continue
-        if ready.len > 0 and not launchedAny:
+        if ready.len > 0:
+          # Something settled on this pass without leaving anything running:
+          # a staged batch whose launch failed, or that a RunQuota
+          # static-capacity deadlock stopped. Its pool units are back and the
+          # actions still ready do not depend on it, so scan again rather
+          # than call a graph that is still moving stuck. Bounded: every pass
+          # that sets ``launchedAny`` without a running action has moved at
+          # least one action to a terminal status.
+          if launchedAny:
+            continue
           raiseEngine("ready queue is blocked by pool capacity")
         # The graph can advance no further: nothing is running, ready, or
         # launchable, yet ``completed < total``. Historically this raised

@@ -745,6 +745,13 @@ lint:
     # Windows runner. A few minutes for both targets, nearly all of it Nim's
     # codegen; the C stage is seconds. See the script header.
     bash ./scripts/check_portable_engine_closure.sh 2>&1 | tee -a test-logs/lint.log
+    # The host-side counterpart: library code that no entry point reaches is
+    # compiled to C only by the tests that call it, hours into `just test`.
+    # This compiles those test files (C compiler included, no link) so a C
+    # error there fails here. It exists because t_execution_lease_confinement
+    # stopped compiling under gcc 15 and nothing earlier noticed. See the
+    # script header.
+    bash ./scripts/check_host_c_compile_of_unreached_code.sh 2>&1 | tee -a test-logs/lint.log
     # The commit hook enters its dev shell through a profile, so the closure
     # this lint runs from -- the MinGW compiler above among it -- has a
     # permanent GC root and an automatic Nix GC cannot collect it mid-commit.

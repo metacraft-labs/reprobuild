@@ -64,7 +64,20 @@ jobs:
     name: Lint
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
+      # No persisted credential. A persisted one is an
+      # `http.https://github.com/.extraheader` in this repo's .git/config,
+      # and setup-dev-env exports a second, owner-scoped extraHeader for
+      # `https://github.com/metacraft-labs/` through GIT_CONFIG_*. Both match
+      # every request to this org, `http.extraHeader` is multi-valued, and
+      # github answers the pair `Duplicate header: "Authorization"` (HTTP
+      # 400), so every git fetch the lint gates make from this checkout
+      # failed: the attribution-base fetch below (silently) and
+      # check_package_nix_pending_sources' fetch of package.nix's `src`
+      # commit (the gate went red). This job pushes nothing, and the
+      # installation token is the one credential its gates need.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Mint a GitHub App installation token via the CI Token Provider
       # app.  GitHub free plan restricts org-level secrets with
       # visibility ALL from being readable inside private repos, so we
@@ -511,15 +524,29 @@ jobs:
       # .github/sibling-repos, and scripts/run_tests.sh builds ../runquota.
       # Local clones let CI pick up sibling changes without waiting for a
       # flake.lock bump.
+      # The revision is read from .github/sibling-repos, the one record of it
+      # that flake.lock and repro.lock are held equal to. It is NOT a branch:
+      # runquota develops on ``agents`` and reaches ``dev`` only by promotion,
+      # so ``dev`` lags the pin and lacks modules this tree imports
+      # (``runquota_core/measurement``), which fails every interface
+      # extraction in the Test job with "cannot open file".
+      - name: Read the runquota pin
+        id: runquota_pin
+        timeout-minutes: 2
+        run: |
+          rev="$(sed -n 's/^runquota=\([0-9a-f]\{40\}\)$/\1/p' .github/sibling-repos)"
+          if [ -z "$rev" ]; then
+            echo "::error::.github/sibling-repos has no 'runquota=<40-hex revision>' line" >&2
+            exit 1
+          fi
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
       - name: Clone runquota sibling
         timeout-minutes: 10
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/runquota
-          # runquota's mainline is ``dev`` (its default branch); ``main`` is
-          # stale and lacks the b0 config.nims closure fix + the forking-lease
-          # completion fix the reprobuild b0 / cmake-develop tests depend on.
-          ref: dev
+          ref: ${{ steps.runquota_pin.outputs.rev }}
           path: ${{ github.workspace }}/../runquota
           gh-token: ${{ steps.ci_token.outputs.token }}
 

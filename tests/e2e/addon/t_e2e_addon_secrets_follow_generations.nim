@@ -7,11 +7,21 @@
 ##
 ## On each base (the seam build):
 ##
+## 0. *an operator deploys the units first.* They run the base's ``sh``
+##    under the fixture floor waiver, and an agent apply never adds a
+##    whole-floor waiver to a new unit (spec §10.1, *An agent apply never
+##    weakens the floor*; threat model C102). An operator's apply deploys
+##    ``old-web``, ``x-web`` and ``h-web`` with a placeholder command and
+##    no credential; the agent applies every later generation of them.
+##    ``h-web`` keeps its placeholder process through tick 1
+##    (``restartIfChanged = false``), so the gate restarts it once;
 ## 1. *a failed apply keeps the old generation's secrets.* Generation 1
 ##    (manifest 1, key K1) runs ``old-web`` loading ``old-web/legacy`` and
 ##    an exclusive ``x-web`` and a ``restartIfChanged = false`` ``h-web``
 ##    loading their ``token``s. Manifest 2's profile drops ``old-web`` and
-##    adds a unit whose health check fails; its sealed section lacks
+##    gives ``x-web`` a health check that cannot pass (not a new unit with
+##    one: the agent would refuse it before any switch, as above); its
+##    sealed section lacks
 ##    ``old-web/legacy``. The tick fails (``aoApplyFailed``, rolled back);
 ##    the latest envelope is unchanged and nothing is left staged; after a
 ##    reboot the re-assert unit reports ``ok`` and ``old-web`` runs with
@@ -89,11 +99,20 @@ proc gen1Profile(): string =
 proc failingProfile(): string =
   "addOn {\n  managedEtcPrefixes = []\n  confirmTimeout = 10\n}\n\n" &
     decl("x-web", "token") & decl("h-web", "token") &
-    reader("x-web", "token", "", "  exclusive = true\n") &
-    reader("h-web", "token", "", "  restartIfChanged = false\n") &
-    "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"a7-broken.service\"\n" &
-    "  content = \"[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\n" &
-    "WantedBy=multi-user.target\n\"\n  healthCheck = \"tcp:127.0.0.1:18999\"\n}\n"
+    reader("x-web", "token", "",
+           "  exclusive = true\n  healthCheck = \"tcp:127.0.0.1:18999\"\n") &
+    reader("h-web", "token", "", "  restartIfChanged = false\n")
+
+proc operatorProfile(): string =
+  ## The units' first deployment, an operator's (header, step 0): the
+  ## same waiver and account as ``reader``'s, a placeholder command and no
+  ## credential.
+  for (unit, fields) in [("old-web", ""), ("x-web", "  exclusive = true\n"),
+                         ("h-web", "")]:
+    result.add("systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"" &
+      unit & ".service\"\n  content = \"[Unit]\nDescription=a7 reader\n\n" &
+      "[Service]\nExecStart=/bin/sleep infinity\n\n[Install]\n" &
+      "WantedBy=multi-user.target\n\"\n" & fields & "}\n\n")
 
 proc lastValue(g: Guest; unit: string): string =
   let lines = g.exec("cat /var/lib/a7-" & unit & ".log 2>/dev/null").stdout.strip().splitLines()
@@ -136,12 +155,21 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if not ok: return fails
     let signer = anchors.deploySignerKeys[0]
     let k1 = g.recipientPubHex()
+    # 0. The operator's first deployment of the waived units (header).
+    if not g.operatorDeploysWaived(repro, "a7-operator", operatorProfile(),
+                                   step):
+      return fails
     # 1. Generation 1, then a failing apply with a narrower envelope.
     let m1 = g.publishManifest(signer, Target, 1, gen1Profile(),
       @[("old-web/legacy", "L1"), ("x-web/token", "X1"), ("h-web/token", "H1")], k1)
     var r = g.tick(repro, Target, @[m1])
     step("tick 1 applies generation 1", r.outcomeOf() == "aoApplied",
          r.stdout & r.stderr)
+    # h-web (restartIfChanged = false) still runs the operator's
+    # placeholder: started once by hand, it reads generation 1's token.
+    let hr = g.exec("systemctl restart h-web.service")
+    step("h-web is restarted once onto generation 1", hr.exitCode == 0,
+         hr.stdout & hr.stderr)
     step("old-web, x-web and h-web read their secrets",
          g.waitValue("old-web", "L1") == "L1" and g.waitValue("x-web", "X1") == "X1" and
          g.waitValue("h-web", "H1") == "H1", "")

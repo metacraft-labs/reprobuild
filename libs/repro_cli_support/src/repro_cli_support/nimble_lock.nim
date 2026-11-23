@@ -33,6 +33,7 @@ import repro_lock
 import repro_solver/version_encoder
 import repro_nimble_index
 import repro_nimble_fetch
+import repro_nimble_generator/capture
 import repro_nimble_generator/source_set
 
 import ./catalog_discovery
@@ -512,6 +513,8 @@ proc prepareLockedNimbleSources*(projectRoot, lockPath: string;
       else:
         cfg = defaultFetchConfig(stateDir, mirrors)
     if cfg.storeRoot.len == 0: cfg.storeRoot = store
+    if options.fetchConfig.isNone and cfg.captureLog.len == 0:
+      cfg.captureLog = projectCaptureLog(projectRoot)
     result.mirrors = cfg.mirrors
     let fetched = fetchLocked(missing, cfg)
     result.fetchEdges = fetched.executed.len
