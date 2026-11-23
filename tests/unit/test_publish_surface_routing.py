@@ -49,6 +49,7 @@ the publisher does around it, and a host that cannot run createrepo_c must
 still be able to prove that a skipped surface still announces.
 """
 
+import hashlib
 import os
 import shutil
 import subprocess
@@ -428,7 +429,6 @@ class PublishSurfaceRoutingTests(unittest.TestCase):
 
     # --------------------------------------------------------------- homebrew
     def test_a_homebrew_formula_is_generated_with_a_real_digest(self):
-        import hashlib
 
         tarball = self.packages / f"reprobuild-{VERSION}-darwin-aarch64.tar.gz"
         digest = hashlib.sha256(tarball.read_bytes()).hexdigest()
@@ -1120,6 +1120,234 @@ class PublishSurfaceRoutingTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertNotIn("--delete", calls[0])
         self.assertNotIn("sync", calls[0])
+
+
+
+SIGN_DIR = REPO_ROOT / "scripts" / "release-signing"
+VERIFY = SIGN_DIR / "repro-verify-release.sh"
+SIGN = SIGN_DIR / "repro-sign-release.sh"
+MAKE_TEST_KEY = SIGN_DIR / "make-test-key.sh"
+SUMS_ASSET = f"reprobuild-{VERSION}-windows-x86_64.zip"
+
+
+@unittest.skipUnless(shutil.which("gpg") and shutil.which("sha256sum"),
+                     "needs gpg and sha256sum (the verifier's own floor)")
+class Sha256SumsLineFormatTests(unittest.TestCase):
+    """The SHA256SUMS line format, on both sides of the signature.
+
+    A manifest line is GNU sha256sum's: 64 hex digits, a space, a mode
+    character (' ' text, '*' binary) and the name
+    (https://www.gnu.org/software/coreutils/manual/html_node/md5sum-invocation.html).
+    MSYS2's sha256sum writes the binary form by default, so a manifest made on
+    Windows read `<digest> *<name>`, and repro-verify-release.sh, which
+    compared everything after the first field with the name, rejected the
+    Windows archive with "has no entry in the signed SHA256SUMS". The verifier
+    now accepts both forms and nothing looser; the signer writes the text form
+    on every host.
+
+    Everything here is real: a throwaway key from make-test-key.sh, real gpg
+    signatures, the real verifier and signer. The one stand-in is the
+    `sha256sum` the signer case puts first on PATH: GNU sha256sum run with
+    `-b`, which prints exactly what MSYS2's prints by default, because no
+    MSYS2 host is available to a Linux suite.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sh = shutil.which("sh") or shutil.which("bash")
+        if cls.sh is None:
+            raise AssertionError("no sh/bash on PATH; the verifier cannot run")
+        cls.root = Path(tempfile.mkdtemp(prefix="sums-format-"))
+        cls.gnupg = cls.root / "gnupg"
+        proc = subprocess.run(
+            [cls.sh, str(MAKE_TEST_KEY), "--home", str(cls.gnupg)],
+            capture_output=True, text=True, timeout=300)
+        if proc.returncode != 0 or not proc.stdout.strip():
+            shutil.rmtree(cls.root, ignore_errors=True)
+            raise AssertionError(f"make-test-key.sh failed: {proc.stderr}")
+        cls.fpr = proc.stdout.strip().splitlines()[-1]
+        cls.keyring = cls.root / "keyring.asc"
+        with cls.keyring.open("wb") as out:
+            subprocess.run(["gpg", "--homedir", str(cls.gnupg), "--armor",
+                            "--export", cls.fpr], stdout=out, check=True)
+
+    @classmethod
+    def tearDownClass(cls):
+        subprocess.run(["gpgconf", "--homedir", str(cls.gnupg), "--kill", "all"],
+                       capture_output=True)
+        shutil.rmtree(cls.root, ignore_errors=True)
+
+    def setUp(self):
+        self.work = Path(tempfile.mkdtemp(prefix="case-", dir=self.root))
+        self.payload = b"PK\x03\x04 not really a zip, just bytes to hash\n"
+        self.digest = hashlib.sha256(self.payload).hexdigest()
+
+    def _sign(self, path: Path):
+        subprocess.run(
+            ["gpg", "--batch", "--yes", "--homedir", str(self.gnupg),
+             "--local-user", self.fpr, "--armor", "--detach-sign",
+             "--output", f"{path}.asc", str(path)],
+            check=True, capture_output=True)
+
+    def release(self, sums: str, name: str = "dl") -> Path:
+        """A download directory: the archive, its detached signature, and
+        `sums` as SHA256SUMS, signed with the test key."""
+        d = self.work / name
+        d.mkdir()
+        (d / SUMS_ASSET).write_bytes(self.payload)
+        self._sign(d / SUMS_ASSET)
+        (d / "SHA256SUMS").write_bytes(sums.encode())
+        self._sign(d / "SHA256SUMS")
+        return d
+
+    def verify(self, d: Path, *extra: str) -> Run:
+        args = list(extra) or ["--artifact", SUMS_ASSET]
+        proc = subprocess.run(
+            [self.sh, str(VERIFY), "--keyring", str(self.keyring), "--dir",
+             str(d), "--allow-test-key", *args],
+            capture_output=True, text=True, timeout=300,
+            env=dict(os.environ, TMPDIR=str(self.work)))
+        return Run(proc.returncode, proc.stdout, proc.stderr)
+
+    def assertAccepted(self, run: Run):
+        self.assertEqual(run.rc, 0, run.err)
+        self.assertIn("ACCEPTED 1 artifact(s)", run.err)
+
+    def assertRejected(self, run: Run, why: str):
+        self.assertEqual(run.rc, 1, run.err)
+        # The manifest signature itself was good: the rejection is the line.
+        self.assertIn("SHA256SUMS signature OK", run.err)
+        self.assertIn(why, run.err)
+
+    def test_the_verifier_accepts_the_text_form(self):
+        self.assertAccepted(self.verify(self.release(f"{self.digest}  {SUMS_ASSET}\n")))
+
+    def test_the_verifier_accepts_the_binary_form(self):
+        # The line MSYS2's sha256sum writes by default.
+        self.assertAccepted(self.verify(self.release(f"{self.digest} *{SUMS_ASSET}\n")))
+
+    def test_require_all_reads_names_without_the_mode_marker(self):
+        run = self.verify(self.release(f"{self.digest} *{SUMS_ASSET}\n"), "--require-all")
+        self.assertAccepted(run)
+        self.assertIn(f"OK  {SUMS_ASSET}  {self.digest}", run.err)
+
+    def test_a_binary_form_line_for_a_different_name_is_no_entry(self):
+        other = f"reprobuild-{VERSION}-linux-x86_64.tar.gz"
+        self.assertRejected(self.verify(self.release(f"{self.digest} *{other}\n")),
+                            f"{SUMS_ASSET} has no entry in the signed SHA256SUMS")
+
+    def test_near_miss_names_are_no_entry(self):
+        for line in (f"{self.digest} *{SUMS_ASSET}.bak",
+                     f"{self.digest} *x{SUMS_ASSET}",
+                     f"{self.digest} *{SUMS_ASSET} ",
+                     f"{self.digest} **{SUMS_ASSET}",
+                     f"{self.digest}  ./{SUMS_ASSET}",
+                     f"{self.digest}   {SUMS_ASSET}",
+                     f"{self.digest} * {SUMS_ASSET}"):
+            with self.subTest(line=line):
+                self.work = Path(tempfile.mkdtemp(prefix="case-", dir=self.root))
+                self.assertRejected(self.verify(self.release(line + "\n")),
+                                    f"{SUMS_ASSET} has no entry in the signed SHA256SUMS")
+
+    def test_malformed_lines_match_nothing(self):
+        for line in (f"{self.digest[:-1]} *{SUMS_ASSET}",      # 63 digits
+                     f"{self.digest}0 *{SUMS_ASSET}",          # 65 digits
+                     f"{self.digest[:-1]}g *{SUMS_ASSET}",     # not hex
+                     f"{self.digest} {SUMS_ASSET}",            # no mode character
+                     f"{self.digest}\t*{SUMS_ASSET}",          # tab separator
+                     f"{self.digest}-*{SUMS_ASSET}",
+                     f"\\{self.digest}  {SUMS_ASSET}",         # escaped line
+                     f"SHA256 ({SUMS_ASSET}) = {self.digest}",  # BSD tag
+                     f"{self.digest} *"):
+            with self.subTest(line=line):
+                self.work = Path(tempfile.mkdtemp(prefix="case-", dir=self.root))
+                d = self.release(line + "\n")
+                self.assertRejected(self.verify(d),
+                                    f"{SUMS_ASSET} has no entry in the signed SHA256SUMS")
+                # Asked to check every line, the malformed one is named.
+                self.assertRejected(self.verify(d, "--require-all"),
+                                    "line 1 of the signed SHA256SUMS is not a sha256sum line")
+
+    def test_a_text_and_a_binary_line_for_one_name_are_a_duplicate(self):
+        sums = f"{self.digest}  {SUMS_ASSET}\n{self.digest} *{SUMS_ASSET}\n"
+        self.assertRejected(self.verify(self.release(sums)),
+                            f"{SUMS_ASSET} appears 2 times in SHA256SUMS")
+
+    def test_a_binary_form_line_with_the_wrong_digest_is_a_mismatch(self):
+        wrong = "0" * 64
+        self.assertRejected(self.verify(self.release(f"{wrong} *{SUMS_ASSET}\n")),
+                            f"{SUMS_ASSET} digest mismatch")
+
+    def test_a_name_with_a_path_is_refused(self):
+        for name in (f"../{SUMS_ASSET}", f"sub/{SUMS_ASSET}", ".."):
+            with self.subTest(name=name):
+                self.work = Path(tempfile.mkdtemp(prefix="case-", dir=self.root))
+                d = self.release(f"{self.digest} *{name}\n")
+                self.assertRejected(self.verify(d, "--artifact", name),
+                                    "is not a plain file name")
+                self.assertRejected(self.verify(d, "--require-all"),
+                                    "is not a plain file name")
+
+    def test_a_download_directory_whose_path_holds_a_backslash(self):
+        # The PowerShell installer passes a Windows path as --dir. GNU
+        # sha256sum escapes the output line of a file name holding a
+        # backslash ("\<digest>  C:\\..."), which put a '\' in front of the
+        # digest the verifier compared. On Linux the same rule applies to a
+        # directory whose name holds a backslash.
+        self.assertAccepted(self.verify(
+            self.release(f"{self.digest} *{SUMS_ASSET}\n", name="dl\\with\\backslashes")))
+
+    def test_the_signer_writes_the_text_form_under_a_binary_mode_sha256sum(self):
+        stub = self.work / "msys-like-bin"
+        stub.mkdir()
+        real = shutil.which("sha256sum")
+        (stub / "sha256sum").write_text(f'#!/bin/sh\nexec "{real}" -b "$@"\n')
+        (stub / "sha256sum").chmod(0o755)
+        # The stand-in really prints the binary form.
+        probe = subprocess.run([str(stub / "sha256sum"), str(MAKE_TEST_KEY)],
+                               capture_output=True, text=True, check=True)
+        self.assertRegex(probe.stdout, r"^[0-9a-f]{64} \*")
+        d = self.work / "dl"
+        d.mkdir()
+        (d / SUMS_ASSET).write_bytes(self.payload)
+        (d / "second.tar.gz").write_bytes(b"second\n")
+        second = hashlib.sha256(b"second\n").hexdigest()
+        proc = subprocess.run(
+            [self.sh, str(SIGN), "--dir", str(d), "--key", self.fpr],
+            capture_output=True, text=True, timeout=300,
+            env=dict(os.environ, PATH=f"{stub}{os.pathsep}{os.environ['PATH']}",
+                     GNUPGHOME=str(self.gnupg), REPRO_SIGNING_ALLOW_TEST_KEY="1",
+                     TMPDIR=str(self.work)))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual((d / "SHA256SUMS").read_bytes(),
+                         f"{self.digest}  {SUMS_ASSET}\n{second}  second.tar.gz\n".encode())
+        # And GNU sha256sum -c reads it back.
+        check = subprocess.run([real, "-c", "SHA256SUMS"], cwd=d,
+                               capture_output=True, text=True)
+        self.assertEqual(check.returncode, 0, check.stdout + check.stderr)
+        self.assertAccepted(self.verify(d))
+
+    def test_the_signer_refuses_a_name_it_cannot_write_and_says_why(self):
+        # A name holding a backslash has only an escaped sha256sum spelling,
+        # so the signer refuses it. The refusal comes from a pipeline
+        # subshell; it must reach the operator, not end the signer silently
+        # under `set -e`, and the scratch manifest must not be left behind.
+        d = self.work / "dl"
+        d.mkdir()
+        (d / SUMS_ASSET).write_bytes(self.payload)
+        (d / "odd\\name.zip").write_bytes(b"odd\n")
+        scratch = self.work / "tmp"
+        scratch.mkdir()
+        proc = subprocess.run(
+            [self.sh, str(SIGN), "--dir", str(d), "--key", self.fpr],
+            capture_output=True, text=True, timeout=300,
+            env=dict(os.environ, GNUPGHOME=str(self.gnupg),
+                     REPRO_SIGNING_ALLOW_TEST_KEY="1", TMPDIR=str(scratch)))
+        self.assertNotEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("holds a backslash", proc.stderr)
+        self.assertFalse((d / "SHA256SUMS").exists())
+        self.assertEqual([], [p.name for p in scratch.iterdir()
+                              if p.name.startswith("repro-sums-")])
 
 
 if __name__ == "__main__":

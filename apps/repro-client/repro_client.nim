@@ -286,10 +286,6 @@ const
     ## ``apps/repro-trampoline`` documents for a bootstrap engine that must sit
     ## off ``PATH``. Kept as the LAST probe: it is what makes this binary
     ## correct in the M5 layout, and nothing else resolves there.
-  MakeWrapperHiddenPrefix = "."
-  MakeWrapperHiddenSuffix = "-wrapped"
-    ## nixpkgs `setup-hooks/make-wrapper.sh`: ``hidden="$(dirname
-    ## "$prog")/.$(basename "$prog")"-wrapped``. See ``resolveFullCli``.
   ExitExecFailed = 127
 
 proc thinClientDir(): string =

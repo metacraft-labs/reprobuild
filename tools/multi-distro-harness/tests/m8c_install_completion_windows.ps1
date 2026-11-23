@@ -36,6 +36,11 @@ What it needs:
   * Windows PowerShell 5.1 and PowerShell 7 (pwsh on PATH). A missing one is
     reported NOT RUN.
 
+Before the legs, two checks of the signed manifest: SHA256SUMS is GNU
+sha256sum's text form (`<digest>  <name>`) even under MSYS2, whose sha256sum
+writes the binary form by default, and repro-verify-release.sh accepts the
+binary form (`<digest> *<name>`) too.
+
 Legs:
   1  The archive install: the archive's share\ is installed, the user's
      completion script and one block in each PowerShell's CurrentUserAllHosts
@@ -166,6 +171,26 @@ try {
   }
   $anchorSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Join-Path $Www 'keys') $KeyringFile)).Hash.ToLowerInvariant()
   Pass "archive $Asset and its signatures are under $dl"
+
+  # The manifest's line format. repro-sign-release.sh writes GNU sha256sum's
+  # text form, `<digest>  <name>`, on every host -- including under MSYS2,
+  # whose sha256sum writes the binary form `<digest> *<name>` by default -- so
+  # a manifest signed on Windows is byte-identical to one signed on Linux.
+  $assetSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dl $Asset)).Hash.ToLowerInvariant()
+  $sumsText = [IO.File]::ReadAllText((Join-Path $dl 'SHA256SUMS'))
+  Assert-True ($sumsText -ceq "$assetSha  $Asset`n") "SHA256SUMS is GNU sha256sum's text form '<sha256>  $Asset' (got '$($sumsText.TrimEnd())')"
+
+  # And the verifier accepts the binary form, which releases signed or
+  # concatenated on Windows carry: the same archive and detached signature
+  # beside a manifest `<digest> *<name>`, signed with the same key.
+  $binForm = Join-Path $Work 'binary-form'
+  New-Item -ItemType Directory -Force -Path $binForm | Out-Null
+  foreach ($f in @($Asset, "$Asset.asc")) { Copy-Item -LiteralPath (Join-Path $dl $f) -Destination (Join-Path $binForm $f) }
+  [IO.File]::WriteAllText((Join-Path $binForm 'SHA256SUMS'), "$assetSha *$Asset`n", (New-Object System.Text.ASCIIEncoding))
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @('-c', "gpg --batch --yes --homedir '$(ConvertTo-ScriptPath $gnupg)' --local-user '$fpr' --armor --detach-sign --output '$(ConvertTo-ScriptPath (Join-Path $binForm 'SHA256SUMS.asc'))' '$(ConvertTo-ScriptPath (Join-Path $binForm 'SHA256SUMS'))'")
+  if ($r.Code -ne 0) { throw "gpg --detach-sign of the binary-form manifest failed (exit $($r.Code))" }
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @((ConvertTo-ScriptPath (Join-Path $SignDir 'repro-verify-release.sh')), '--keyring', (ConvertTo-ScriptPath (Join-Path (Join-Path $Www 'keys') $KeyringFile)), '--dir', (ConvertTo-ScriptPath $binForm), '--artifact', $Asset, '--allow-test-key')
+  Assert-Equal $r.Code 0 "repro-verify-release.sh accepts the binary-form line '<sha256> *$Asset'"
   $base = "http://localhost:$Port"
   if (Wait-Url -Url "$base/" -Seconds 1) { throw "$base answers before this run started its server" }
   $server = Start-FileServer -Root $Www -Port $Port -Work $Work

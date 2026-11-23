@@ -576,12 +576,10 @@ proc materializeLauncherFromTarget(stateDir, targetGenIdHex: string;
     plan.binding = when defined(macosx): lbkMacosScript else: lbkLinuxScript
     let scriptBody = generatePosixLauncherScript(plan,
       when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
-    writeFile(extendedPath(scriptPath), scriptBody)
-    try:
-      setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite, fpUserRead,
-        fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
-    except OSError:
-      discard
+    # The target generation is committed and about to become `current`:
+    # replace by rename, never write in place, so a kill cannot leave a
+    # truncated script that the `fileExists` check above would then keep.
+    replaceLauncherFile(scriptPath, scriptBody, LauncherScriptMode)
 
 # ---------------------------------------------------------------------------
 # Public entry point.

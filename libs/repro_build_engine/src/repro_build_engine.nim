@@ -4490,6 +4490,74 @@ proc cwdRemovalRoot(action: BuildAction): string =
   when defined(windows):
     result = result.toLowerAscii()
 
+proc collectSpelledEntries(path: string; entries: var HashSet[string]) =
+  ## Terminates on a link cycle: an entry already collected is not walked
+  ## again.
+  let spelling = path.replace('\\', '/')
+  for stop in 1 .. spelling.len:
+    if stop < spelling.len and spelling[stop] != '/':
+      continue
+    if spelling[stop - 1] == '/':
+      # An empty component names no entry.
+      continue
+    when defined(windows):
+      if stop == 2 and spelling[1] == ':':
+        # A Windows drive (`C:`) names no entry. On POSIX a component may
+        # legitimately end in `:`, so this is not tested there.
+        continue
+    let entry = outputRemovalLocation("", spelling[0 ..< stop])
+    if entry.len == 0 or entry in entries:
+      continue
+    entries.incl(entry)
+    if symlinkExists(entry):
+      var target = ""
+      try:
+        target = expandSymlink(entry)
+      except CatchableError:
+        continue
+      if target.len == 0 or target == entry:
+        continue
+      if not target.isAbsolute:
+        # Joined WITHOUT `/`: a target such as `../x` is applied to the
+        # link's own physical directory by `outputRemovalLocation`.
+        let slash = entry.rfind('/')
+        target = (if slash <= 0: "" else: entry[0 ..< slash]) & "/" & target
+      collectSpelledEntries(target, entries)
+
+proc cwdSpellingEntries(cwd: string): HashSet[string] =
+  ## Every directory entry the action's working directory is REACHED through:
+  ## each component of its spelling, a symbolic link as the link itself, and
+  ## the same for every link's target, down to the physical directory. All in
+  ## the namespace `outputRemovalLocation` answers in.
+  ##
+  ## An output is removed as the entry its spelling names, a final link
+  ## included (`removePathNoFollow`), and `materialPath` joins a relative
+  ## output onto the cwd lexically. Under a cwd `<link>/work` the output `..`
+  ## therefore names `<link>` itself. The link does not contain the PHYSICAL
+  ## working directory, so a check against that directory alone accepted it,
+  ## and removing it leaves the action nowhere to start. macOS reaches its
+  ## default `$TMPDIR` through `/var` -> `/private/var`.
+  ##
+  ## Two spellings are walked. The one as written is what the kernel follows
+  ## when the action starts. The lexically normalized one is what
+  ## `materialPath` joins a relative output onto. They differ when a `..`
+  ## follows a link (`<link>/../work`).
+  ##
+  ## `expandSymlink` is a no-op on Windows, so there only the components of
+  ## the spelling are collected; a junction's target chain is not walked.
+  ## Build-Engine-And-Scheduler.md §"A declared output is an obligation".
+  result = initHashSet[string]()
+  let spelled = absolutePath(if cwd.len > 0: cwd else: getCurrentDir())
+  collectSpelledEntries(spelled, result)
+  collectSpelledEntries(os.normalizedPath(spelled), result)
+
+proc removalTakesCwd(removalRoot, cwdRoot: string;
+                     cwdEntries: HashSet[string]): bool =
+  ## Whether removing `removalRoot` removes the working directory: the
+  ## physical directory `cwdRoot` or anything containing it, or an entry the
+  ## directory is reached through (`cwdSpellingEntries`).
+  removalTakesEntry(removalRoot, cwdRoot) or removalRoot in cwdEntries
+
 var
   containmentMemoDepth {.threadvar.}: int
   containmentMemo {.threadvar.}: Table[string, Option[string]]
@@ -5000,6 +5068,13 @@ proc validateGraph(g: BuildGraph) =
         "Spec: CLI/internal/fs-file-utilities.md §4, " &
         "Filesystem-Policy-And-Observed-Inputs.md §\"Double Writes\".")
 
+  # One walk per distinct cwd: the actions of a directory share it.
+  var cwdEntriesByCwd = initTable[string, HashSet[string]]()
+  proc cwdEntriesOf(cwd: string): HashSet[string] =
+    if cwd notin cwdEntriesByCwd:
+      cwdEntriesByCwd[cwd] = cwdSpellingEntries(cwd)
+    cwdEntriesByCwd[cwd]
+
   var declaredIndex: seq[tuple[actionId: string; root: string;
     optional: bool; ordinary: bool]] = @[]
   let hasOptionalCandidates = g.actions.anyIt(it.optionalOutputs.len > 0)
@@ -5020,7 +5095,7 @@ proc validateGraph(g: BuildGraph) =
         raiseEngine("optional output path is empty for " & action.id)
       let removalRoot = outputRemovalLocation(action.cwd, raw)
       let cwdRoot = cwdRemovalRoot(action)
-      if removalTakesEntry(removalRoot, cwdRoot):
+      if removalTakesCwd(removalRoot, cwdRoot, cwdEntriesOf(action.cwd)):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
       indexRoot(raw, optional = true)
@@ -5071,7 +5146,7 @@ proc validateGraph(g: BuildGraph) =
       let root = outputRemovalLocation(action.cwd, raw)
       if root notin owned:
         continue
-      if removalTakesEntry(root, cwdRoot):
+      if removalTakesCwd(root, cwdRoot, cwdEntriesOf(action.cwd)):
         raiseEngine("output removed before run contains the action's cwd: " &
           raw & " for " & action.id)
       for input in action.inputs:
@@ -13498,6 +13573,9 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## name every run. What the action observed there was its own doing, so
   ## it is not an input; a written file that still EXISTS is kept, because
   ## an action that read a file and then rewrote it did consume it.
+  ## Callers test a path with `transientOwnPath` (over `transientOwnPaths`),
+  ## which also covers what the action observed BENEATH a temporary
+  ## directory.
   ##
   ## WRITTEN means created or written (`monitorWrites`): a directory or a
   ## symbolic link the action made counts. A path it only REMOVED does not
@@ -13523,6 +13601,79 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
       else: key
     if not onDisk(path) and not onDisk(nativeKey):
       result.incl(key)
+
+type TransientOwnPaths* = object
+  ## What `transientOwnPath` decides from: the action's own temporaries and
+  ## the paths it only removed. Built once per action by `transientOwnPaths`.
+  written*: HashSet[string]
+    ## `transientOwnWrites`: written paths that are gone.
+  removedOnly*: HashSet[string]
+    ## Keys (`transientWriteKey`) of paths the action REMOVED and never
+    ## wrote: what was there before it ran, so not its own temporary even
+    ## when it lies beneath one.
+
+proc transientOwnPaths*(evidence: PathSetEvidence): TransientOwnPaths =
+  result.written = transientOwnWrites(evidence)
+  if result.written.len == 0:
+    return
+  var written = initHashSet[string]()
+  for path in evidence.monitorWrites:
+    written.incl(transientWriteKey(path))
+  for path in evidence.monitorRemovals:
+    let key = transientWriteKey(path)
+    if key notin written:
+      result.removedOnly.incl(key)
+
+proc transientOwnPath*(transient: TransientOwnPaths; path: string): bool =
+  ## Whether `path` is one of the action's own temporaries
+  ## (`transientOwnWrites`) or lies beneath one: the one filter the
+  ## determinism-probe key and the input accesses beside a record share.
+  ##
+  ## Beneath, because a temporary is often a DIRECTORY. rustc links
+  ## through `out/rustcXXXXXX/` and passes `-L <tmp>/raw-dylibs` to the
+  ## linker, which probes it for every `-l` library and finds nothing; then
+  ## rustc removes the directory. The action wrote the directory, not the
+  ## sixteen misses beneath it, so an exact lookup kept them, their random
+  ## parent entered the key, and no two runs of a Rust link agreed on it.
+  ##
+  ## This holds for every kind of access beneath it, reads included: a
+  ## linker's failed `open` of a missing library is recorded as a read, and
+  ## the directory is gone, so a read there is keyed `absent` and keeping it
+  ## adds the temporary's random name and no content. The transient keys
+  ## are written paths that are GONE; a written directory that still exists
+  ## is not one, and a directory the action only removed is not one either
+  ## (`transientOwnWrites`).
+  ##
+  ## Two descendants are never covered, because each can be a real input:
+  ##
+  ## * One the action REMOVED and never wrote (`removedOnly`). It was there
+  ##   before the action ran. An action that read `gen/input.txt`, ran
+  ##   `rm -rf gen`, and then made and removed `gen` again consumed that
+  ##   file; dropping it would let a portable record hit whatever the file
+  ##   held. The action's own files beneath a temporary are written, so
+  ##   they are covered exactly.
+  ## * One reached through a parent walk (`tmp/../src/main.c`). The kernel
+  ##   resolved it outside the temporary, so it is not beneath it.
+  ##
+  ## Ancestors are taken by whole components of the key's own spelling, so
+  ## a removed `proj/sr` does not cover `proj/src/main.c`.
+  if transient.written.len == 0:
+    return false
+  var key = transientWriteKey(path)
+  if key in transient.written:
+    return true
+  if key in transient.removedOnly:
+    return false
+  while true:
+    let cut = key.rfind('/')
+    if cut <= 0:
+      # The root itself is never a temporary the action made and removed.
+      return false
+    if key.substr(cut + 1) == "..":
+      return false
+    key.setLen(cut)
+    if key in transient.written:
+      return true
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -21901,7 +22052,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       toHex(action.weakFingerprint.bytes) & "\0"
     var inputs = action.cacheInputPaths(evidence.evidence)
     inputs.sort()
-    let transient = transientOwnWrites(evidence.evidence)
+    let transient = transientOwnPaths(evidence.evidence)
     # A directory CONTAINING the action's working directory: its listing is
     # how this host lays out everything else stored above the project (the
     # drive root, a home directory), which changes with anything on the
@@ -21917,7 +22068,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
       if isLaunchMachinery(path) or
-          (transient.len > 0 and transientWriteKey(path) in transient) or
+          transient.transientOwnPath(path) or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -22334,11 +22485,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## hit derives is the record this run produced (P3.4b).
     let containment = beginContainmentMemo()
     defer: endContainmentMemo(containment)
+    # Listings are filtered like reads and probes: a temporary directory the
+    # action made, listed and removed (rustc's `rustcXXXXXX/raw-dylibs`)
+    # names a new random path on every run.
+    let transient = transientOwnPaths(evidence)
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence,
         membershipTrackedRoots):
       enumerated.incl(path)
-      if not isHostTempListing(path) and not isOwnOutput(action, path):
+      if not isHostTempListing(path) and not isOwnOutput(action, path) and
+          not transient.transientOwnPath(path):
         result.enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
@@ -22354,10 +22510,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # Stored beside the record with the accesses, so a portable record
     # derived from a later local hit is host-bound exactly as this one is.
     result.hostBoundReason = evidence.hostBoundInput
-    let transient = transientOwnWrites(evidence)
     for path in keyed:
       if path in enumerated or isHostTempListing(path) or
-          (transient.len > 0 and transientWriteKey(path) in transient) or
+          transient.transientOwnPath(path) or
           isOwnOutput(action, path):
         continue
       elif path in probed:

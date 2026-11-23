@@ -16,6 +16,19 @@ package bash:
     nixPackage "nixpkgs#bash", executablePath = "bin/bash",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # linux x86_64: the static (musl) build from robxu9/bash-static -- one
+    # self-contained executable, so the realization needs no host
+    # libncurses or libc. A from-source bash is `local-only` and links the
+    # host's ncurses, so it cannot be shared through the binary cache.
+    tarball url = "https://github.com/robxu9/bash-static/releases/download/5.2.015-1.2.3-2/bash-linux-x86_64",
+      sha256 = "64469a9512a00199c85622ec56f870f97d50457a4e06e0cfa39bae7adf0cc8f2",
+      archiveType = "raw",
+      executablePath = "bin/bash",
+      version = "5.2.15",
+      packageId = "bash-static@5.2.15",
+      cpu = "x86_64",
+      os = "linux",
+      lockIdentity = "tarball:bash-static@5.2.15:linux-x86_64:sha256:64469a9512a00199c85622ec56f870f97d50457a4e06e0cfa39bae7adf0cc8f2"
     # Windows: there is no standalone `bash` Scoop package; bash is the
     # MSYS shell Git for Windows ships at `usr/bin/bash.exe`, through
     # Scoop's `main/git` or the pinned PortableGit archive. NOT
