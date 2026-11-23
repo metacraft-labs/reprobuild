@@ -67163,13 +67163,14 @@
         "repro_dev_env_engine",
         "repro_interface_artifacts",
         "repro_test_support",
-        "repro_tool_profiles"
+        "repro_tool_profiles",
+        "repro_workspace_manifests"
       ],
       "owner": "tests/unit",
       "requiresReproBinary": true,
       "source": "tests/unit/t_tool_provisioning_override_precedence.nim",
-      "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "sourceSuiteCount": 3,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

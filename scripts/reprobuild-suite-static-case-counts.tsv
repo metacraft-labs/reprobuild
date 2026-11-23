@@ -3180,7 +3180,7 @@ tests/unit/t_test_execution_extension_is_framework_neutral.nim	nim	10
 tests/unit/t_tool_identity_key_resolves_before_it_keys.nim	nim	10
 tests/unit/t_tool_profile_keys_on_resolution_not_search_path.nim	nim	21
 tests/unit/t_tool_provisioning_override_no_fallthrough.nim	nim	6
-tests/unit/t_tool_provisioning_override_precedence.nim	nim	8
+tests/unit/t_tool_provisioning_override_precedence.nim	nim	15
 tests/unit/t_tree_sitter_generate.nim	nim	4
 tests/unit/t_unit_hcr_linux_x86_64_trampoline_encoding_and_atomicity_preconditions.nim	nim	10
 tests/unit/t_unmonitorable_action_depfile_guards.nim	nim	16

@@ -176,7 +176,10 @@ suite "dev-env cache key frame":
             "user=" & fingerprintPart(userConfig) &
             "\nsettings=" & fingerprintPart(settingsFile) &
             "\nlocal=" & fingerprintPart(settingsDir /
-              "repro-workspace.local.toml"),
+              "repro-workspace.local.toml") &
+            # The project's committed override file (absent here).
+            "\nproject=" & fingerprintPart(root /
+              "repro-tool-provisioning.toml"),
           envPart("REPRO_STORE_ROOT"),
           # Keyed since c71f33495: the extracted interface depends on which
           # reprobuild libs the recipe is compiled against.
@@ -230,6 +233,15 @@ suite "dev-env cache key frame":
     putEnv("REPRO_TOOL_PROVISIONING_OVERRIDES", "sdk=tarball")
     note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
     delEnv("REPRO_TOOL_PROVISIONING_OVERRIDES")
+    # A standalone project: its committed override file, and the lone local
+    # file that outranks it (no workspace settings file governs `root`).
+    writeFile(root / "repro-tool-provisioning.toml",
+      "schema = \"reprobuild.project.tool-provisioning.v1\"\n")
+    note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
+    writeFile(root / "repro-workspace.local.toml",
+      "[tool-provisioning.overrides]\nsdk = \"path\"\n")
+    note(computeDevEnvEdgeCacheKey(root, "build", "s1", overrides))
+    removeFile(root / "repro-workspace.local.toml")
     let savedWsConfig = getEnv("REPRO_WORKSPACE_CONFIG")
     let hadWsConfig = existsEnv("REPRO_WORKSPACE_CONFIG")
     let settingsFile = root / "repro-workspace.toml"
