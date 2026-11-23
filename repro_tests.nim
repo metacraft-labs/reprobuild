@@ -14305,6 +14305,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_test_support_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_test_support/tests/t_remove_dir_eventually_classifies_the_windows_long_path_symptom.nim",
+    binary: "build/test-bin/t_remove_dir_eventually_classifies_the_windows_long_path_symptom",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_test_support_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_test_support/tests/t_scoped_env_restores_in_any_order.nim",
     binary: "build/test-bin/t_scoped_env_restores_in_any_order",
     defines: @[],
