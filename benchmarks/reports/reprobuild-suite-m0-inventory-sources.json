@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3160,
+    "nimTestBinaries": 3161,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 836,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3212
+    "testEntries": 3213
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1834,7 +1834,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1770,
+      "integration": 1771,
       "platform/destructive": 201,
       "pure unit": 836,
       "unclassified": 376
@@ -2057,9 +2057,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3160,
+    "nimTestBinaryCount": 3161,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3212
+    "testEntryCount": 3213
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12428,6 +12428,25 @@
       "source": "libs/repro_build_engine/tests/t_an_input_kept_under_dev_shm_is_never_left_out_of_a_portable_key.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_an_interrupted_build_stops_its_running_actions",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_an_interrupted_build_stops_its_running_actions.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

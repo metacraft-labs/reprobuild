@@ -165,6 +165,7 @@ import repro_build_engine/monitor_flush
 import repro_build_engine/cache_refusal
 import repro_build_engine/nim_edge_isolation
 import repro_build_engine/embedded_root_scan
+import repro_build_engine/termination_signals
 # Engine-Threadpool TP-1/TP-2: the flush above is one TENANT of the engine's
 # worker pool, not a thread of its own, and TP-2's monitor finish is the
 # second. The flush's tenancy is entirely inside ``monitor_flush``, so the
@@ -20685,6 +20686,15 @@ proc crossCheckoutSharingRefusal*(action: BuildAction;
   ""
 
 proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
+  # A terminating signal (SIGINT, SIGTERM, SIGHUP) that arrives while this
+  # build runs cancels it, so the teardown below stops every running action's
+  # process tree before the process dies of that signal; see
+  # `repro_build_engine/termination_signals`. Without the guard the default
+  # disposition killed the engine with its actions still running in process
+  # groups of their own, where the signal never reached them. Acquired first
+  # so that its release, the last deferred step, runs after the teardown.
+  acquireTerminationGuard()
+  defer: releaseTerminationGuard()
   # Process-global accumulators; zero them so this build reports its own cost
   # rather than its own plus every earlier build in this process.
   resetOutputStateCheckStats()
@@ -21061,6 +21071,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     config.cancelCallback != nil and config.cancelCallback()
 
   proc raiseIfCancelled() =
+    let sig = terminationSignal()
+    if sig != 0:
+      raiseEngine("build interrupted by signal " & $sig)
     if cancellationRequested():
       raiseEngine("build cancelled")
   let initStart = statStart()
