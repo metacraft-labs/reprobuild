@@ -1245,6 +1245,8 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
       boolFlag unmerged is bool, help = "Report unmerged branches"
       boolFlag fileDetails is bool, help = "List each changed file"
       boolFlag fix is bool, help = "Repair what can be repaired safely"
+      boolFlag verbose is bool, short = 'v',
+        help = "List routine clean repos too"
       `statusReport`
       pos project is string, required = false,
         help = "The project (default: the workspace's)"
