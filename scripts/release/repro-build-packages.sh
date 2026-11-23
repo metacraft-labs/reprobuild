@@ -661,14 +661,15 @@ write_msi_wxs() {
 # (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe,
 # -EncodedCommand).
 #
-# WHY NOT `-Command '<script>'`. From bash on Windows the argument reaches
-# powershell.exe through a Windows command line, which the callee splits
-# again with the C runtime's rules: a `"` inside the argument is taken as
-# quoting and removed. A script holding `@("SELECT * FROM `" + $x + "`")`
-# arrived as `@(SELECT * FROM ` + $x + `)`, three parse errors, an empty
-# table on every read, and an MSI refused as missing a file it installs. The
-# base64 alphabet has no character any command-line rule treats specially,
-# so the script arrives byte for byte.
+# WHY -EncodedCommand rather than `-Command '<script>'` or `-File`. The
+# base64 alphabet holds no character that the MSYS runtime's argument
+# quoting or the callee's command-line splitter treats specially, so the
+# script reaches powershell.exe byte for byte whatever it contains; and
+# unlike `-File` it is not subject to the host's execution policy, which a
+# group policy can set beyond the reach of `-ExecutionPolicy Bypass`
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_execution_policies).
+# It does not make a broken script work: the script text must parse as
+# PowerShell on its own (see MSI_TABLE_PS).
 powershell_encoded_command() {
   command -v iconv >/dev/null 2>&1 || die 'iconv is not available; cannot encode a PowerShell command'
   command -v base64 >/dev/null 2>&1 || die 'base64 is not available; cannot encode a PowerShell command'
@@ -676,21 +677,46 @@ powershell_encoded_command() {
 }
 
 # The table reader handed to powershell.exe. Kept as data, never spliced into
-# a command line: it carries double quotes and backticks, which is why it
-# travels -EncodedCommand (above).
-# shellcheck disable=SC2016 # PowerShell's own variables, expanded by PowerShell
-MSI_TABLE_PS='$i = New-Object -ComObject WindowsInstaller.Installer
-$db = $i.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $i, @($env:REPRO_MSI_DB, 0))
-$v = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"))
-$v.GetType().InvokeMember("Execute", "InvokeMethod", $null, $v, $null) | Out-Null
-$cols = $v.GetType().InvokeMember("ColumnInfo", "GetProperty", $null, $v, @(0))
-$n = $cols.GetType().InvokeMember("FieldCount", "GetProperty", $null, $cols, $null)
-while ($r = $v.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $v, $null)) {
-  $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember("StringData", "GetProperty", $null, $r, @($k)) }
-  [Console]::Out.WriteLine(($f -join "`t"))
-}'
+# a command line, and written as a quoted here-document so the shell changes
+# nothing in it.
+#
+# PowerShell quoting, which this text must respect
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_quoting_rules):
+# inside a DOUBLE-quoted string a backtick is the escape character, so
+# "`" is an escaped quote and never closes the string; inside a
+# SINGLE-quoted string a backtick is an ordinary character. The SQL query
+# quotes the table name in backticks (Windows Installer SQL,
+# https://learn.microsoft.com/windows/win32/msi/sql-syntax), so its pieces
+# are single-quoted. The earlier "SELECT * FROM `" + ... + "`" did not
+# parse at all ("Unexpected token '`"'"), every table read back empty, and a
+# correct MSI was refused as not installing bin/repro.exe.
+#
+# A failure inside the script is written to stderr as plain text and exits
+# 1, so msi_table can refuse it rather than read an empty table.
+MSI_TABLE_PS="$(cat <<'MSI_TABLE_PS_EOF'
+$ErrorActionPreference = 'Stop'
+try {
+  $i = New-Object -ComObject WindowsInstaller.Installer
+  $db = $i.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $i, @($env:REPRO_MSI_DB, 0))
+  $q = 'SELECT * FROM `' + $env:REPRO_MSI_TABLE + '`'
+  $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($q))
+  $v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null) | Out-Null
+  $cols = $v.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $v, @(0))
+  $n = $cols.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $cols, $null)
+  while ($r = $v.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $v, $null)) {
+    $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember('StringData', 'GetProperty', $null, $r, @($k)) }
+    [Console]::Out.WriteLine(($f -join [char]9))
+  }
+} catch {
+  [Console]::Error.WriteLine('reading MSI table ' + $env:REPRO_MSI_TABLE + ' failed: ' + $_.Exception.Message)
+  exit 1
+}
+MSI_TABLE_PS_EOF
+)"
 
 # msi_table <msi> <table>: the table's rows, tab-separated, no header.
+# Refuses (dies) when the reader fails, so an unreadable table is never
+# mistaken for an empty one.
 msi_table() {
   if command -v msiinfo >/dev/null 2>&1; then
     msiinfo export "$1" "$2" | tr -d '\r' | tail -n +4
@@ -702,8 +728,12 @@ msi_table() {
     # The database and table travel in the environment, the script as
     # -EncodedCommand: no value is quoted into a command line.
     _enc="$(powershell_encoded_command "$MSI_TABLE_PS")" || exit 1
+    _rc=0
     REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive \
-      -EncodedCommand "$_enc" | tr -d '\r'
+      -EncodedCommand "$_enc" > "$stage/msi-table.raw" || _rc=$?
+    [ "$_rc" -eq 0 ] ||
+      die "cannot read the $2 table of $1 back: powershell.exe exited $_rc (its stderr is above)"
+    tr -d '\r' < "$stage/msi-table.raw"
   else
     die 'cannot read the MSI back: neither msiinfo (msitools) nor the Windows Installer API (powershell.exe) is available'
   fi
