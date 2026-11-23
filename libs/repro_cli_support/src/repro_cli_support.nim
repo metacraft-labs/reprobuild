@@ -78273,6 +78273,10 @@ when defined(reproGitStdoutReaderTest):
     for head in found.heads:
       result.heads.add((head.oid, head.refName))
 
+  proc verifyLockPinnedProducerSourceForTest*(dep: LockedDep;
+      sourceRoot, consumerRoot: string) =
+    verifyLockPinnedProducerSource(dep, sourceRoot, consumerRoot)
+
 proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
     headOid: string): HashSet[string] =
   ## Branch names that MAY contain ``headOid`` on a remote, read from the

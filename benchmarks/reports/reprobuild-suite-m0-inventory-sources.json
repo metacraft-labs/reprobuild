@@ -47878,13 +47878,14 @@
       "localDependencyShape": [
         "repro_cli_support",
         "repro_core",
+        "repro_lock",
         "repro_test_support"
       ],
       "owner": "tests/integration",
       "requiresReproBinary": false,
       "source": "tests/integration/t_direct_git_readers_read_stdout_not_warnings.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
