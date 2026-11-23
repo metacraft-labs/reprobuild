@@ -250,6 +250,7 @@ libs/repro_build_engine/tests/t_shipped_macos_tools.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_store_realization_names_of_both_widths_are_content_addressed.nim	nim	1
 libs/repro_build_engine/tests/t_tool_cache_reader_never_leaves_its_host.nim	nim	3
+libs/repro_build_engine/tests/t_transient_directory_contents_leave_the_probe_key.nim	nim	7
 libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim	nim	5
 libs/repro_build_engine/tests/t_untracked_ancestor_change_does_not_re_run_an_edge.nim	nim	8
 libs/repro_build_engine/tests/t_untracked_scope_membership_is_not_an_input.nim	nim	7
@@ -289,6 +290,7 @@ libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	42
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim	nim	1
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim	nim	7
+libs/repro_cargo_fetch/tests/test_rqe_cg4a_registry_crate_rustc_edge.nim	nim	4
 libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim	nim	15
 libs/repro_cas_store/tests/t_cas_ingest_link.nim	nim	25
 libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim	nim	16
