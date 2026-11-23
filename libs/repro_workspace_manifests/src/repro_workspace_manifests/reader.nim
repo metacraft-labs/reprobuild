@@ -285,6 +285,92 @@ proc checkStringValueTypes[T](path, schema, keyPath: string;
   else:
     discard
 
+proc kindMismatchIn[T](node: TomlValueRef; keyPath: string; sample: T):
+    tuple[keyPath, message: string] =
+  ## The first value under ``node`` whose TOML type record type ``T``
+  ## (recursively, through its object, ``Option`` and ``seq`` fields) cannot
+  ## hold, with a message saying what the key takes and what was written;
+  ## ("", "") when every value fits.
+  ##
+  ## The pinned toml-serialization refuses such a value — `depth = "3"` for an
+  ## integer, `single_branch = 1` for a boolean, a string for an array — with
+  ## an EMPTY message and no key, so the strict decoder asks this after a
+  ## failure whose message names no key (Workspace-Manifests.md §"Validation":
+  ## a refusal names the file and the key path).
+  ##
+  ## Only mismatches the decoder itself refuses are reported. For a string
+  ## field the decoder accepts every value except a header-spelled table
+  ## (`[repo.name]`): a boolean, a number, a date-time, an array and an
+  ## inline table are all turned into text, and `decodeStrict` refuses them
+  ## after a successful decode against the generic tree
+  ## (`checkStringValueTypes`). Naming one of those here would name a key
+  ## that is not why the decode failed, and hide the one that is. Types read
+  ## through a custom ``readValue`` accept what they accept and are not
+  ## descended into.
+  template mismatch(wanted: string): untyped =
+    (keyPath, "`" & keyPath & "` must be " & wanted & ", not " &
+      tomlValuePhrase(node))
+  if node.isNil:
+    return
+  when T is Extensions or T is BranchRoleValue or T is CustomRoleTable or
+      T is ToolProvisioningConfigBody or T is TomlValueRef or
+      T is TomlTableRef:
+    discard
+  elif T is Option:
+    var inner: typeof(sample.get())
+    return kindMismatchIn(node, keyPath, inner)
+  elif T is bool:
+    if node.kind != TomlKind.Bool:
+      return mismatch("a boolean")
+  elif T is SomeInteger:
+    if node.kind != TomlKind.Int:
+      return mismatch("an integer")
+  elif T is SomeFloat:
+    if node.kind notin {TomlKind.Float, TomlKind.Int}:
+      return mismatch("a number")
+  elif T is string:
+    if node.kind in {TomlKind.Table, TomlKind.Tables}:
+      return mismatch("a string")
+  elif T is seq:
+    var element: typeof(sample[0])
+    case node.kind
+    of TomlKind.Array:
+      for i, item in node.arrayVal:
+        let found = kindMismatchIn(item, keyPath & "[" & $i & "]", element)
+        if found.keyPath.len > 0:
+          return found
+    of TomlKind.Tables:
+      for i, table in node.tablesVal:
+        let item = TomlValueRef(kind: TomlKind.Table, tableVal: table)
+        let found = kindMismatchIn(item, keyPath & "[" & $i & "]", element)
+        if found.keyPath.len > 0:
+          return found
+    else:
+      return mismatch("an array")
+  elif T is object:
+    if node.kind notin {TomlKind.Table, TomlKind.InlineTable}:
+      return mismatch("a table")
+    for name, field in fieldPairs(sample):
+      if name in node.tableVal:
+        let found = kindMismatchIn(node.tableVal[name],
+          (if keyPath.len > 0: keyPath & "." & name else: name), field)
+        if found.keyPath.len > 0:
+          return found
+  else:
+    discard
+
+proc firstKindMismatch[T](content: string; RecordType: typedesc[T]):
+    tuple[keyPath, message: string] =
+  ## ``kindMismatchIn`` over ``content`` read as a generic tree; ("", "")
+  ## when the content does not parse as a tree either.
+  var tree: TomlValueRef
+  try:
+    tree = Toml.decode(content, TomlValueRef)
+  except CatchableError:
+    return
+  var sample: T
+  kindMismatchIn(tree, "", sample)
+
 proc decodeStrict[T](path, content, expectedSchema: string;
                      RecordType: typedesc[T]): T =
   ## Strict-mode decode of the typed record. The `TomlUnknownFields` flag is
@@ -299,6 +385,10 @@ proc decodeStrict[T](path, content, expectedSchema: string;
   ## A typed decode that succeeds is then checked against the generic tree of
   ## the same text (`checkStringValueTypes`), because the typed decoder reads
   ## a boolean or a number written for a string field as text.
+  ##
+  ## A failure that names no unknown key is then checked for a value of the
+  ## wrong TOML type (`firstKindMismatch`), which the parser also refuses
+  ## without a message.
   try:
     result = Toml.decode(content, RecordType)
   except TomlError as e:
@@ -314,15 +404,22 @@ proc decodeStrict[T](path, content, expectedSchema: string;
           located.keyPath == keyPath or
           located.keyPath.endsWith("." & keyPath)):
         (keyPath, record) = located
-    let inner =
-      if keyPath.len > 0:
-        schemaSkewMessage(path, keyPath, record)
-      elif e.msg.len > 0:
-        e.msg
-      else:
-        fallbackTomlMessage(content)
-    raiseManifestError(path, keyPath, expectedSchema, expectedSchema, inner)
+    if keyPath.len > 0:
+      raiseManifestError(path, keyPath, expectedSchema, expectedSchema,
+        schemaSkewMessage(path, keyPath, record))
+    # No unknown key: the decoder also refuses, unnamed, a value of a type the
+    # field cannot hold. Name that key and both types.
+    let mistyped = firstKindMismatch(content, RecordType)
+    if mistyped.keyPath.len > 0:
+      raiseManifestError(path, mistyped.keyPath, expectedSchema,
+        expectedSchema, mistyped.message)
+    raiseManifestError(path, "", expectedSchema, expectedSchema,
+      if e.msg.len > 0: e.msg else: fallbackTomlMessage(content))
   except CatchableError as e:
+    let mistyped = firstKindMismatch(content, RecordType)
+    if mistyped.keyPath.len > 0:
+      raiseManifestError(path, mistyped.keyPath, expectedSchema,
+        expectedSchema, mistyped.message)
     let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage(content)
     raiseManifestError(path, "", expectedSchema, expectedSchema, inner)
   checkStringValueTypes(path, expectedSchema, "",
