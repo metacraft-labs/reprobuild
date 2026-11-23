@@ -44,6 +44,9 @@ suite "the nim unittest compile edge removes its nimcache before it runs":
     let removed = registeredRemoveBeforeRun(edge.action.id)
     checkpoint("removeBeforeRun: " & removed.join(", "))
     check Nimcache in removed
+    # The engine accepts a removal only of a declared output, so the same
+    # directory is in the action's outputs.
+    check Nimcache in edge.action.outputs
 
   test "only the nimcache is declared removed, not the source or the binary":
     freshRegistry()

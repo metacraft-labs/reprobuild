@@ -288,11 +288,15 @@ proc build*(tool: BuildNimUnittest;
     if actionId.len > 0: actionId
     else: defaultToolActionId(call)
 
+  # The nimcache is declared an output as well as removed before the run: the
+  # engine accepts a ``removeBeforeRun`` path only when it is a declared output
+  # of the action ("is listed to be removed before the action runs, but it is
+  # not a declared output of the action").
   result.action = recordToolInvocation(
     selectedActionId, call,
     deps = combineActionDeps(deps, after),
     extraInputs = extraInputs,
-    extraOutputs = extraOutputs,
+    extraOutputs = @extraOutputs & @[cacheDir],
     depfile = depfile,
     cacheable = cacheable,
     commandStatsId = commandStatsId,
