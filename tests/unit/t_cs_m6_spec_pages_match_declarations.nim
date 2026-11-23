@@ -255,12 +255,6 @@ const
     "flag\trepro dev\t--hcr-debug", "flag\trepro dev\t--hcr-mode",
     # The proposed `repro lock solve` options.
     "flag\trepro lock solve\t--activity", "flag\trepro lock solve\t--dry-run",
-    # `repro workspace status --verbose`: specified, not implemented yet.
-    # The page defines both the default output and what `--verbose` adds,
-    # and the two are implemented together, as a change to the command's
-    # output rather than to how its command line is parsed.
-    "flag\trepro workspace status\t--verbose",
-    "flag\trepro workspace status\t-v",
     # `repro build`'s `--no-write-stats` (turn the raw observation capture
     # off for one build): specified, not implemented yet (its issue is the
     # derived stats store's).
