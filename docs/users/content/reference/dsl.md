@@ -14,6 +14,7 @@ verifies:
     - tests/integration/t_sc_uses_import_resolves_workspace_project_schema.nim
     - tests/e2e/local-build-engine/t_e2e_repro_run_lists_tasks_and_edges.nim
     - libs/repro_resources/tests/t_rp4_resource_type_macro.nim
+    - libs/repro_project_dsl/tests/t_dsl_pinned_siblings.nim
 unverified:
   - claim: "`nativeBuildDeps:` entries are tools for the build machine, while `uses:`, `buildDeps:` and `runtimeDeps:` entries are for the machine the result runs on."
     reason: "Read from the dependency-kind declarations in the package macro; no cross-compiling build on this page is executed by a test."
@@ -196,6 +197,7 @@ not describe them yet:
 | `bootloader:` | Boot-menu entries for a package that is part of a system image |
 | `runtimeLibrary "<name>", dir = ...` | Where a library the package provides lies in its installed files |
 | `usesImportPath "<dir>"` | A directory of modules that `uses:` entries import in place of the bundled ones |
+| `pinned:` | Repositories the lock pins and a CI job clones, that no part of the build reads ([Pinning a sibling you only clone](#pinning-a-sibling-you-only-clone)) |
 | `dslDeps:` | Packages whose project files export Nim declarations this one imports |
 | `lockFile <name>` | The named lock file the package's dependencies are resolved in |
 | `packageSource "<package>", "<source>"` | Where a depended-on package's built result comes from: `"store"` or `"registry:<name>"` |
@@ -256,6 +258,35 @@ package imageTools:
   executable imageTool:
     name: "image-tool"
 ```
+
+### Pinning a sibling you only clone
+
+A CI job sometimes clones a sibling repository beside the checkout and runs a
+test harness against it, while nothing in the project's build reads it. The
+clone steps take the sibling's revision from the project's `repro.lock`, so
+the lock has to pin it. Naming it in `uses:` would do that, but `uses:` also
+makes the sibling a build dependency: its own `repro.nim` is compiled with
+yours and the lock records everything it depends on. `pinned:` pins the
+sibling and does nothing else:
+
+```nim title="repro.nim"
+import reprobuild
+
+package recorderTests:
+  uses:
+    "nim >=2.2 <3.0"
+  pinned:
+    "codetracer"
+    "codetracer-vscode-extension"
+```
+
+Each entry is a repository name, with no version constraint. `repro lock
+refresh` records the checkout's current commit for each one, the same way it
+does for a `uses:` sibling, and the sibling's own `repro.nim` is never
+compiled or read. The sibling must be checked out beside your repository (or
+already pinned in the committed lock). A name that appears in both `uses:` and
+`pinned:` of one package is a compile error: a `uses:` already pins its
+sibling.
 
 ## Executables, libraries and files
 

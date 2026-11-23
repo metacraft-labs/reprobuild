@@ -12,7 +12,12 @@
 ## 1. bootstrap; a producer on the test host publishes manifest 1, whose
 ##    sealed section carries canary C1 as ``canary-web/canary`` and whose
 ##    profile runs ``canary-web.service`` (``DynamicUser=yes``) loading it
-##    through ``credentials``; the tick applies it. The service writes the
+##    through ``credentials``; the tick applies it. (An operator's apply
+##    deployed ``canary-web`` first, with a placeholder command and no
+##    credential: it runs the base's ``sh`` under the fixture floor waiver,
+##    and an agent apply never adds a whole-floor waiver to a new unit;
+##    spec §10.1, *An agent apply never weakens the floor*; threat model
+##    C102.) The service writes the
 ##    SHA-256 of what it read to ``/run`` (a tmpfs): it must equal C1's;
 ## 2. the operator path: a second canary C2, generated in the guest, goes
 ##    in through ``repro system addon secret put`` on stdin, and a profile
@@ -92,6 +97,14 @@ proc profile(names: seq[string]): string =
     "[Install]\nWantedBy=multi-user.target\n\"\n" &
     "  credentials = [" & quoted.join(", ") & "]\n}\n"
 
+proc operatorProfile(): string =
+  ## ``canary-web``'s first deployment, an operator's (header, step 1): the
+  ## same waiver and account as ``profile``'s, no credential.
+  "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"canary-web.service\"\n" &
+    "  content = \"[Unit]\nDescription=canary consumer\n\n[Service]\n" &
+    "DynamicUser=yes\nExecStart=/bin/sleep infinity\n\n" &
+    "[Install]\nWantedBy=multi-user.target\n\"\n}\n"
+
 proc proof(g: Guest; name: string): string =
   g.exec("for i in $(seq 1 30); do [ -s /run/canary-proof/" & name &
          " ] && break; sleep 1; done; cat /run/canary-proof/" & name &
@@ -114,7 +127,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     if not ok: return fails
     let signer = anchors.deploySignerKeys[0]
     let pub = g.recipientPubHex()
-    # 1. The producer's sealed section, applied by the tick.
+    # 1. The producer's sealed section, applied by the tick, over the
+    # operator's first deployment of the waived unit (header).
+    if not g.operatorDeploysWaived(repro, "canary-web-operator",
+                                   operatorProfile(), step):
+      return fails
     let c1 = randomBytes(32)
     let m1 = g.publishManifest(signer, Target, 1, profile(@["canary"]),
       @[("canary-web/canary", c1)], pub)
