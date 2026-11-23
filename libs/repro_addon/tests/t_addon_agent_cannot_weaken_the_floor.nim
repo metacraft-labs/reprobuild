@@ -15,7 +15,8 @@
 ## Falsifying builds (``scripts/run_addon_unit_mutation.sh``):
 ## ``-d:reproAddonMutation=agent-may-weaken-floor`` turns every weakening
 ## case red; ``agent-may-change-package-dropins`` turns the package
-## drop-in cases red.
+## drop-in cases red; ``agent-take-over-reads-stored-bytes`` turns the
+## bootstrapped-host take-over case red.
 ##
 ## No mocks. The profiles are parsed by the production parsers the add-on
 ## plan uses -- the stored generation by ``parseStoredUserProfile``, the
@@ -268,6 +269,26 @@ suite "an agent apply cannot weaken the floor":
       @["c.service (whole floor waived on a new unit; runs as root)"]
     check agentApplyRefusal(r).len > 0
 
+  test "after an operator deploys a root service, the agent applies it beside a floored one":
+    # The adversarial-audit bed's shape (``t_e2e_addon_audit_bed``, gate
+    # ``addon_adversarial_audit_bed``):
+    # the agent's sequence 1 carries a waived root service and a new
+    # floored one. Straight onto the bootstrapped host (no stored user
+    # generation) the agent refuses it; once an operator has applied the
+    # waived service, the same sequence is the agent's to apply.
+    let waivedRoot = unitStanza("w.service", "ExecStart=/bin/sleep infinity\n",
+                                waived("a test fixture"))
+    let target = waivedRoot &
+      unitStanza("f.service", "ExecStart=" & Prefix & "/bin/f 864000\n")
+    let straight = planOf("", target)
+    check straight.floorWeakened ==
+      @["w.service (whole floor waived on a new unit; runs as root)"]
+    check agentApplyRefusal(straight).len > 0
+    let afterOperator = planOf(storedAs(waivedRoot), target)
+    check afterOperator.floorWeakened.len == 0
+    check afterOperator.floorIntroduced.len == 0
+    check agentApplyRefusal(afterOperator) == ""
+
   test "a legacy agent's units are taken over as they run":
     # A migration commits what the legacy agent already applied: the
     # add-on has no generation to compare with, but nothing on the host is
@@ -277,6 +298,48 @@ suite "an agent apply cannot weaken the floor":
     check r.floorWeakened.len == 1
     check agentApplyRefusal(r, migration = true) == ""
     check agentApplyRefusal(r).len > 0
+
+  test "a legacy agent's take-over of a bootstrapped host is not refused":
+    # The take-over happens on a bootstrapped host. Bootstrap stores
+    # generation 0 by applying the empty user profile, so the host HAS a
+    # stored user profile -- the empty one, stored as a lone newline -- but
+    # no add-on user generation of its own: the take-over is exempt from
+    # the weakening half. Over an operator's generation that declares
+    # units it is not. The stored profile is written and read back from a
+    # real state directory, as ``runAddonApply`` reads it.
+    let state = getTempDir() / ("repro-addon-takeover-" & $getCurrentProcessId())
+    removeDir(state)
+    createDir(state)
+    defer: removeDir(state)
+    let target = unitStanza("c.service", "ExecStart=" & Prefix & "/bin/c\n",
+                            waived("installed by the legacy agent"))
+    proc takeOver(stored: string; migratedFrom = "66ac8b48"): string =
+      ## The agent's refusal of ``target`` over the stored user profile
+      ## ``stored`` ("" for no ``user.profile`` at all).
+      if stored.len > 0:
+        createDir(parentDir(userProfilePath(state)))
+        writeFile(userProfilePath(state), stored)
+      elif fileExists(userProfilePath(state)):
+        removeFile(userProfilePath(state))
+      let text = if fileExists(userProfilePath(state)):
+                   readFile(userProfilePath(state)) else: ""
+      let r = planOf(text, target)
+      check r.floorWeakened ==
+        @["c.service (whole floor waived on a new unit; runs as root)"]
+      agentApplyRefusal(r, migration =
+        isLegacyAgentTakeOver(migratedFrom, text, state))
+    let bootstrapped = storedAs("")
+    check bootstrapped == "\n"
+    check takeOver(bootstrapped) == ""
+    check takeOver("") == ""
+    # Not a take-over: the same generation is the agent's ordinary apply.
+    check "whole floor waived on a new unit" in
+      takeOver(bootstrapped, migratedFrom = "")
+    # Over an operator's generation with a unit, the take-over is judged
+    # against it.
+    let operator = storedAs(Accounts & unitStanza("a.service",
+      "User=svc\nExecStart=" & Prefix & "/bin/a\n"))
+    check "whole floor waived on a new unit" in takeOver(operator)
 
   test "what does not weaken confinement is not refused":
     # The same profile again; a unit installed before the floor (stored
@@ -311,3 +374,49 @@ suite "an agent apply cannot weaken the floor":
       "User=svc\nExecStart=" & Prefix & "/bin/f\n"))
     check stricter.floorWeakened.len == 0
     check "exception UMask removed" in agentApplyRefusal(stricter)
+
+  test "the agent gates' waived fixture units are deployed by an operator first":
+    # The shapes of the agent VM gates under tests/e2e/addon/, which once
+    # handed such units straight to the agent and were refused:
+    # fixture units under the test-bed waiver that run the base's own
+    # binaries -- as root, under ``DynamicUser=``, and a disabled oneshot.
+    # Straight onto a host whose stored generation lacks them, the agent
+    # refuses them. Once an operator's apply stored each unit, under the
+    # same waiver and account but with a placeholder command and no
+    # credentials, the agent applies its real command, its credentials and
+    # its health check. A health check added later to such a unit, which
+    # is how those gates make a generation fail its confirm, is not refused
+    # either; nor is a new target beside it, which runs no command and is
+    # outside the floor.
+    const Fixture = "a test fixture that runs the base's own binaries"
+    let secretDecls = "secrets.secretFile {\n  service = \"r\"\n  name = \"tok\"\n" &
+      "}\n\nsecrets.secretFile {\n  service = \"d\"\n  name = \"tok\"\n}\n\n"
+    proc fixtures(placeholder: bool; health = ""): string =
+      let run = if placeholder: "ExecStart=/bin/sleep infinity\n"
+                else: "ExecStart=/bin/sh -c 'cat $$CREDENTIALS_DIRECTORY/tok; " &
+                        "exec sleep infinity'\n"
+      let creds = if placeholder: "" else: "  credentials = [\"tok\"]\n"
+      (if placeholder: "" else: secretDecls) &
+        unitStanza("r.service", run, waived(Fixture) & creds & health) &
+        unitStanza("d.service", "DynamicUser=yes\n" & run,
+                   waived(Fixture) & creds) &
+        unitStanza("o.service", "Type=oneshot\nExecStart=/usr/bin/true\n",
+                   waived(Fixture) & "  enabled = false\n")
+    let straight = planOf("", fixtures(placeholder = false))
+    check straight.floorWeakened == @[
+      "r.service (whole floor waived on a new unit; runs as root)",
+      "d.service (whole floor waived on a new unit)",
+      "o.service (whole floor waived on a new unit; runs as root)"]
+    check agentApplyRefusal(straight).len > 0
+    let operator = storedAs(fixtures(placeholder = true))
+    let after = planOf(operator, fixtures(placeholder = false))
+    check after.floorWeakened.len == 0
+    check after.floorIntroduced.len == 0
+    check agentApplyRefusal(after) == ""
+    let failing = planOf(storedAs(fixtures(placeholder = false)),
+      fixtures(placeholder = false, "  healthCheck = \"tcp:127.0.0.1:9\"\n") &
+      "systemd.systemUnit {\n  name = \"t.target\"\n  content = \"[Unit]\n" &
+      "Description=t\n\n[Install]\nWantedBy=multi-user.target\n\"\n}\n")
+    check failing.floorWeakened.len == 0
+    check failing.floorIntroduced.len == 0
+    check agentApplyRefusal(failing) == ""

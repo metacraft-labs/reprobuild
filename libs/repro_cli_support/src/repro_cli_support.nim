@@ -1128,6 +1128,47 @@ proc mode1WorkspaceCandidate(base: string): string =
       return dir
   ""
 
+proc testCollectionOfPath*(selector: string): string =
+  ## The selector ``repro test`` (and ``repro certify``) hands its plan and
+  ## build for ``selector``: a fragment-less path that anchors a project
+  ## selects that project's ``test`` collection (``repro test [args]`` is
+  ## ``repro build test [args]``, so the path says WHICH project's ``test``
+  ## runs). ``repro build ./sub`` selects ``sub``'s graph minus its ``test``
+  ## collection, and handing ``./sub`` through unchanged made an unsharded
+  ## ``repro test ./sub`` run no test and exit 0 -- a CI step that was green
+  ## without testing anything -- while the sharded run refused the same
+  ## selection as naming no test command.
+  ##
+  ## A path anchors a project when it is an existing directory or names a
+  ## project file (``<dir>/repro.nim``, ``<dir>/reprobuild.nim``). A
+  ## directory is anchored on its project FILE, as ``bareNameAnchor``
+  ## anchors a bare name: ``<dir>#test`` is the legacy ``<dir>#<module>``
+  ## form whenever ``<dir>/test.nim`` exists, and would build that module.
+  ## A directory with no project file is anchored on the ``repro.nim`` it
+  ## would hold, so a Mode-1 workspace still resolves through
+  ## ``mode1WorkspaceCandidate`` and anything else reports the missing
+  ## project file. Every other selector is returned unchanged: a name, a
+  ## selector that already carries a ``#<fragment>``, a module file, a
+  ## dotted action id, or a path that does not exist (the build reports it).
+  ## ``ProjectFileAmbiguousError`` propagates, as it does from
+  ## ``parseBuildTarget``.
+  if classifyBuildSelector(selector).kind != bskPath or
+      selector.find('#') >= 0:
+    return selector
+  if dirExists(extendedPath(selector)):
+    let match = resolveProjectFile(selector)
+    let fileName =
+      if match.fileName.len > 0: match.fileName else: CanonicalProjectFileName
+    return (selector / fileName) & "#" & TestCollectionSelector
+  if extractFilename(selector) in ProjectFileNames:
+    return selector & "#" & TestCollectionSelector
+  selector
+
+proc testCollectionSelectors*(selectors: openArray[string]): seq[string] =
+  ## ``testCollectionOfPath`` of each of ``selectors``, in order.
+  for selector in selectors:
+    result.add(testCollectionOfPath(selector))
+
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
                                currentDir = ""): ResolvedPositionalSelectors =
@@ -32130,11 +32171,18 @@ type UsesEdge* = tuple[owner, selector: string]
   ## One ``uses:`` declaration: the directory of the recipe that makes it
   ## (absolute) and the selector it names.
 
+type PinnedSiblingError* = object of CatchableError
+  ## A ``pinned:`` name (Unified-Locking-And-Hooks.md §14.2 item 4) that
+  ## ``lockedDepsForWorkspace`` cannot turn into a pin: no checkout of it where
+  ## the workspace places it, and no pin for it in the committed lock to carry
+  ## forward. Its own type so a lock-writing door can refuse by name.
+
 proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
                             sourceRecipeRoots: seq[string] = @[];
                             catalogRoots: seq[string] = @[];
-                            usesEdges: seq[UsesEdge] = @[]):
+                            usesEdges: seq[UsesEdge] = @[];
+                            pinnedSiblings: seq[string] = @[]):
                             seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
@@ -32179,6 +32227,17 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   ## (``repro develop --direct``; Unified-Locking-And-Hooks.md §14.2). With no
   ## edges to go on (a ``repro.solver`` sidecar, which names no producer), the
   ## root ``depends`` names every sibling, as it always did.
+  ##
+  ## ``pinnedSiblings`` (the root recipe's ``pinned:`` names, §14.2 item 4)
+  ## are siblings the lock must pin that the recipe does not use. Each is
+  ## recorded as an ordinary ``deps`` entry and a DIRECT dependency of the root,
+  ## observed from the checkout the workspace places it at
+  ## (``lockedDepCheckoutPath``: develop override, membership, beneath the
+  ## lock's directory, ``../<name>`` — the one rule every lock reader uses), or
+  ## carried forward from the committed lock when it is not checked out. Its
+  ## recipe is never read and its own dependencies never enter the set; a name
+  ## a ``uses:`` edge (or a nested checkout) already records is recorded once,
+  ## by that route. A name neither route can place raises ``PinnedSiblingError``.
   result = @[]
   let root = absolutePath(workspaceRoot)
   # Every ``path`` below — observed here, or derived for an entry of the
@@ -32266,6 +32325,64 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     # Only a checkout that is present was observed; a pin carried forward
     # for an absent one has no observation behind its derived location.
     if isGitCheckoutDir(key): observedCheckouts.add(key)
+  # ``pinned:`` — see the doc comment. After the ``uses:`` fold so that a
+  # name a ``uses:`` edge already placed is left to that edge (no duplicate).
+  var pinnedEntries: seq[string] = @[]
+  if pinnedSiblings.len > 0:
+    var placer = lockedDepLocator(root, pathBase)
+    for name in pinnedSiblings:
+      if name in pinnedEntries: continue
+      # The macro refuses a malformed name at the author's line, but this list
+      # also arrives from a decoded interface artifact (possibly cached or
+      # written by another tool). A name is joined onto a directory below, so
+      # a separator or `..` must not get that far.
+      let problem = pinnedSiblingNameProblem(name)
+      if problem.len > 0:
+        raise newException(PinnedSiblingError, "`pinned:` in " &
+          (root / CanonicalProjectFileName) & ": " & problem)
+      if name in seenNames:
+        pinnedEntries.add(name)
+        continue
+      let rel = placer.lockedDepCheckoutPath(name)
+      let depAbs = os.normalizedPath(absolutePath(rel, pathBase))
+      if isGitCheckoutDir(depAbs):
+        # The recipe's own checkout is not a sibling of itself.
+        if isRootCheckout(depAbs): continue
+        let dep = lockedDepFromCheckout(name, depAbs, pathBase)
+        if dep.coordinates.revision.len == 0:
+          raise newException(PinnedSiblingError, "`pinned:` names '" & name &
+            "' in " & (root / CanonicalProjectFileName) & ", but the " &
+            "checkout at " & depAbs & " has no commit to pin; commit in it " &
+            "(or check out the revision to pin) and run the command again")
+        if observedKey(dep.path) in observedCheckouts: continue
+        siblingDeps.add(dep)
+        seenNames.add(name)
+        observedCheckouts.add(observedKey(dep.path))
+        pinnedEntries.add(name)
+        continue
+      # Not checked out here: keep the pin the committed lock already
+      # carries, as a ``uses:`` sibling that is absent does.
+      var carried = false
+      for d in existingDeps:
+        if d.name == name and d.coordinates.kind == ckVcs and
+            d.coordinates.revision.len > 0 and not isSelfLockedDep(d):
+          var kept = d
+          kept.path = rel
+          kept.depends = @[]
+          siblingDeps.add(kept)
+          seenNames.add(name)
+          pinnedEntries.add(name)
+          carried = true
+          break
+      if not carried:
+        raise newException(PinnedSiblingError, "`pinned:` names '" & name &
+          "' in " & (root / CanonicalProjectFileName) & ", but there is no " &
+          "checkout of it at " & depAbs & " (the workspace places a " &
+          "sibling by a develop override, its membership, then " &
+          "`../" & name & "`) and the committed " & CommittedLockFileName &
+          " carries no pin for it, so there is no revision to record. " &
+          "Check it out (`repro sync`, or `repro ws enable` the project " &
+          "that declares it) and run the command again")
   # A federated source catalog is itself a reproducibility input. Recipe paths
   # live below that repository, so normalize each one to its enclosing Git
   # worktree and lock the repository once rather than recording hundreds of
@@ -32384,6 +32501,10 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       d.depends = siblingEdges.getOrDefault(d.name, @[])
       if d.name notin rootDepends and d.name notin reached:
         rootDepends.add(d.name)
+  # A pin is the ROOT's own statement: a direct dependency even when another
+  # sibling's recipe also uses it.
+  for name in pinnedEntries:
+    if name notin rootDepends: rootDepends.add(name)
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
@@ -94146,9 +94267,12 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
   ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  ## A fragment-less project path selects that project's ``test``
+  ## collection (``testCollectionOfPath``).
   withCallerVariants(opts):
     result = runBuildCommand(testBuildArgs(opts,
-      if selectors.len == 0: @[TestCollectionSelector] else: selectors),
+      if selectors.len == 0: @[TestCollectionSelector]
+      else: testCollectionSelectors(selectors)),
       publicCliPath)
 
 proc selectorSpelling(name: string; spellings: openArray[string]): string =
@@ -94500,7 +94624,10 @@ proc prepareCertifyingPlan(opts: ReproTestShardOpts; mode: ToolProvisioningMode;
   ## TC-8e, step 1: the plan, from the stored graph, as ``repro certificates
   ## plan`` reads it. Runs nothing but the provider's graph evaluation.
   let workRoot = opts.workRoot
-  result.selectors = opts.selectors
+  # A fragment-less project path selects that project's ``test`` collection
+  # (``testCollectionOfPath``), for the plan, the sharded partition and the
+  # build alike.
+  result.selectors = testCollectionSelectors(opts.selectors)
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch
@@ -96996,6 +97123,13 @@ type CompiledProviderSolverInputs = object
   text: string
   toolUses: seq[InterfaceToolUse]
   usesSelectors: seq[string]
+  pinnedSiblings: seq[string]
+    ## The root recipe's ``pinned:`` repository names: siblings the lock
+    ## records as plain ``deps`` entries and whose recipes are NOT read.
+    ## Filled only for the recipe the refresh started from — a pin a
+    ## ``uses:``-reached sibling declares is that sibling's own CI need, not
+    ## a dependency of this repo, so ``foldProviderSolverInputs`` never
+    ## carries it (Unified-Locking-And-Hooks.md §14.2 item 4).
   defaultToolProvisioning: string
   sourceRecipeRoots: seq[string]
   catalogRoots: seq[string]
@@ -97362,6 +97496,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
     if requireSolverBinding and artifact.projectInterface.toolUses.len == 0:
+      # A recipe whose only declaration is ``pinned:`` has nothing to solve
+      # but still has a dependency set: its pinned siblings. Answer the empty
+      # solve for them now, without compiling the provider — the provider is
+      # for the solve, and a pin contributes none (§14.2 item 4).
+      if allowEmptySolve and artifact.projectInterface.pinnedSiblings.len > 0:
+        return some(CompiledProviderSolverInputs(
+          pinnedSiblings: artifact.projectInterface.pinnedSiblings,
+          defaultToolProvisioning:
+            artifact.projectInterface.defaultToolProvisioning))
       return result
     # FUP-M — capture the recipe's declared ``uses:`` producer selectors so
     # ``lockedDepsForWorkspace`` can fold each sibling PRODUCER edge into the
@@ -97377,6 +97520,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       emptySolve = some(CompiledProviderSolverInputs(
         toolUses: artifact.projectInterface.toolUses,
         usesSelectors: usesSelectors,
+        pinnedSiblings: artifact.projectInterface.pinnedSiblings,
         defaultToolProvisioning:
           artifact.projectInterface.defaultToolProvisioning))
       result = emptySolve
@@ -97469,6 +97613,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       declarationSites: sites,
       toolUses: artifact.projectInterface.toolUses,
       usesSelectors: usesSelectors,
+      pinnedSiblings: artifact.projectInterface.pinnedSiblings,
       defaultToolProvisioning:
         artifact.projectInterface.defaultToolProvisioning))
   except CatchableError as e:
@@ -97763,9 +97908,11 @@ type RefreshSolverInputs = tuple[
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
     catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector];
-    rootDeclarationSites: Table[string, string]; usesEdges: seq[UsesEdge]]
+    rootDeclarationSites: Table[string, string]; usesEdges: seq[UsesEdge];
+    pinnedSiblings: seq[string]]
   ## What ``resolveRefreshSolverInputs`` answers. Named once because
-  ## ``repro lock validate`` declares a variable of it.
+  ## ``repro lock validate`` declares a variable of it. ``pinnedSiblings`` is
+  ## the root recipe's ``pinned:`` names (``CompiledProviderSolverInputs``).
 
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
     RefreshSolverInputs =
@@ -97807,17 +97954,20 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
           p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-          p.unreachedSelectors, p.declarationSites, p.usesEdges)
+          p.unreachedSelectors, p.declarationSites, p.usesEdges,
+          p.pinnedSiblings)
       return (true, p.variants, p.packages, p.text, "provider",
         p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-        p.unreachedSelectors, p.declarationSites, p.usesEdges)
+        p.unreachedSelectors, p.declarationSites, p.usesEdges,
+        p.pinnedSiblings)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[], @[], initTable[string, string](), newSeq[UsesEdge]())
+      @[], @[], @[], @[], initTable[string, string](), newSeq[UsesEdge](),
+      newSeq[string]())
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -97838,12 +97988,12 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
       return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[],
-        initTable[string, string](), newSeq[UsesEdge]())
+        initTable[string, string](), newSeq[UsesEdge](), newSeq[string]())
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
   return (false, @[], @[], "", "", @[], @[], @[], @[],
-    initTable[string, string](), newSeq[UsesEdge]())
+    initTable[string, string](), newSeq[UsesEdge](), newSeq[string]())
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -97877,6 +98027,16 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
       "`-adjacent recipe, a `" & SolverInputsFileName &
       "` sidecar, or pass --inputs <file>)")
     return 1
+  # A ``pinned:`` name no checkout or committed pin can place is refused here,
+  # named, like any other lock-generation error (§14.2 item 4).
+  let extraDeps =
+    try:
+      lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
+        resolved.sourceRecipeRoots, resolved.catalogRoots, resolved.usesEdges,
+        resolved.pinnedSiblings)
+    except PinnedSiblingError as e:
+      stderr.writeLine("repro lock " & verb & ": " & e.msg)
+      return 1
   # MO-11 — overlay each package's DECLARED source provenance (the
   # solver-inputs ``source:`` directive) onto the decls handed to the
   # generation path, which re-attaches it to the solved-graph ``source`` field
@@ -97891,8 +98051,7 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     endpoints: gen.registries,
     workDir: getTempDir() /
       ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
-    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
-      resolved.sourceRecipeRoots, resolved.catalogRoots, resolved.usesEdges),
+    extraDeps: extraDeps,
     entryPoint: entryPoint)
   unreached = resolved.unreachedSelectors
   rootSites = resolved.rootDeclarationSites
@@ -98287,7 +98446,8 @@ proc recipeDependencySet(projectDir: string): RecipeDependencySet =
       result.diagnostic = lines.join("; ")
       return
     for d in lockedDepsForWorkspace(root, inputs.usesSelectors,
-        inputs.sourceRecipeRoots, inputs.catalogRoots, inputs.usesEdges):
+        inputs.sourceRecipeRoots, inputs.catalogRoots, inputs.usesEdges,
+        inputs.pinnedSiblings):
       if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
       result.deps.add(d)
     result.ok = true
@@ -98353,7 +98513,8 @@ proc verifyCommittedLockDependencySet*(repoRoot: string;
       root & " has no repro.nim (nor repro.solver) that declares any " &
       "dependency [missing= extra=" & pinned.join(",") & "]"
     result.remediation = "declare each dependency in " & root /
-      CanonicalProjectFileName & " (`uses:`), then " & refresh
+      CanonicalProjectFileName & " (`uses:`, or `pinned:` for a sibling " &
+      "that is only cloned), then " & refresh
     return
   if not derived.ok:
     result.unverified = true
@@ -98408,7 +98569,7 @@ proc verifyCommittedLockDependencySet*(repoRoot: string;
     " extra=" & extra.join(",") & "]"
   result.remediation = refresh & " (a lock records only the dependencies " &
     "repro.nim derives; a dependency it needs is declared there, with " &
-    "`uses:`)"
+    "`uses:`, or with `pinned:` for a sibling that is only cloned)"
 
 type
   RefreshPinGate = object
@@ -108424,8 +108585,9 @@ proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
     code: int; diagnostic: string] =
-  ## Stage ``paths``, commit with ``message``, and push ``HEAD`` to the
-  ## manifest repo's upstream when one is configured. Best-effort push: the
+  ## Stage ``paths``, commit those paths and nothing else with ``message``
+  ## (other staged changes stay staged and out of the commit), and push
+  ## ``HEAD`` to the manifest repo's upstream when one is configured. Best-effort push: the
   ## commit always lands locally; a missing upstream is reported, not fatal.
   ##
   ## The stage below is deliberately NOT forced: these are operator-AUTHORED
@@ -108451,7 +108613,19 @@ proc commitAndPushManifest(identity: GitToolIdentity;
     let st = gitOutput(gitBin, manifestRoot, ["add", "--", p])
     if st.code != 0:
       return (code: st.code, diagnostic: "git add failed: " & st.output)
-  let ci = gitOutput(gitBin, manifestRoot, ["commit", "-m", message])
+  # The commit is limited to ``paths`` with ``--only`` and a pathspec. Staging
+  # them is not enough: a bare ``git commit`` records the WHOLE index, so an
+  # edit the operator had already staged in the manifest repo (or what an
+  # earlier verb staged before its commit failed) would be committed and
+  # pushed under this verb's message. ``--only`` commits the listed paths
+  # alone and leaves every other staged change staged and untouched
+  # (https://git-scm.com/docs/git-commit#Documentation/git-commit.txt---only).
+  # Deletions are covered: the ``git add`` above staged them, and a pathspec
+  # naming a removed tracked file commits the removal.
+  var commitArgs = @["commit", "-m", message, "--only", "--"]
+  for p in paths:
+    commitArgs.add(p)
+  let ci = gitOutput(gitBin, manifestRoot, commitArgs)
   if ci.code != 0:
     return (code: ci.code, diagnostic: "git commit failed: " & ci.output)
   # Resolve the upstream from @{u}; push only when configured.
@@ -109255,9 +109429,9 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
       name & (if desc.len > 0: " (" & desc & ")" else: "") &
       (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    # AFTER the commit, never before: `commitAndPushManifest` stages exactly
-    # the `paths` it was handed and commits without `-a`, and the index is
-    # gitignored besides — but regenerating on the far side of the commit is
+    # AFTER the commit, never before: `commitAndPushManifest` commits exactly
+    # the `paths` it was handed (`git commit --only -- <paths>`), and the
+    # index is gitignored besides — but regenerating on the far side of the commit is
     # what makes that a property of the ORDER rather than of two other files
     # staying the way they are today.
     #

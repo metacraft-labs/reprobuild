@@ -18,10 +18,12 @@
 ##      planned.
 ##
 ## And a selector that really selects only unmarked work must not end
-## silently (a fragment-less path whose default graph holds no marked node
-## included): ``repro test`` prints ``no certificate for '<selector>'`` with
+## silently: ``repro test`` prints ``no certificate for '<selector>'`` with
 ## the reason (reprobuild-pm issue
-## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md).
+## 2026-11-08-a-dotted-or-slashed-test-target-certifies-nothing.md). A
+## fragment-less project path given to ``repro test`` selects that project's
+## ``test`` collection, not its default graph: ``repro test [args]`` is
+## ``repro build test [args]``, so the path names whose tests run.
 ##
 ## No mock: real projects in real ``git init`` repositories, driven through
 ## the built ``repro``, so every selector goes through the real provider
@@ -126,22 +128,25 @@ suite "t_every_selector_spelling_plans_the_certificates_its_build_materializes":
     check "no certificate for '.#test#unit'" notin marked.output
     check "repro test: no certificate" in marked.output
 
-    # A fragment-less path whose default graph holds no marked node is
-    # named by its spelling, with a reason that does not claim tests ran:
-    # the default graph leaves the ``test`` collection out.
+    # A fragment-less project path given to ``repro test`` is that
+    # project's ``test`` collection (CLI/test.md §"Alias Semantics",
+    # amendment of 2026-11-23), not its default graph: ``repro test .``
+    # runs the marked ``unit`` and not ``gen``, and is not reported as a
+    # selector that certifies nothing. (``repro build .`` and ``repro
+    # certificates plan .`` still read it as the default graph, above.)
     let bare = fx.root / "bare"
     gitInit(bare)
     writeCertProject(bare, "barepkg", ["gen", "unit"],
       "    discard collect(\"test\", @[unit])\n" &
       "    certificate \"unit-only\", unit\n")
     let path = fx.runRepro(bare, ["test", ".", "--tool-provisioning=path"])
-    checkpoint("repro test . (no marked node outside test):\n" & path.output)
+    checkpoint("repro test . (the test collection):\n" & path.output)
     check path.code == 0
-    check "build/gen-out" in readFile(bare / ".repro" / "runs.log")
-    check "no certificate for '.'" in path.output
-    check "builds the project's default graph" in path.output
-    check "contains no certificate-producing node" in path.output
-    check "ran without one" notin path.output
+    let bareRan = readFile(bare / ".repro" / "runs.log")
+    check "build/unit-out" in bareRan
+    check "build/gen-out" notin bareRan
+    check "no certificate for '" notin path.output
+    check "builds the project's default graph" notin path.output
 
     # Two selectors, one certifying and one not: only the second is named.
     let mixed = fx.runRepro(project, ["test", ".#test#unit", ".#test#e2e",

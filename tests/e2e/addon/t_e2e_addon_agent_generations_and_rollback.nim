@@ -158,7 +158,8 @@ proc kindMix(lockText: string): string =
     quoteSystemValue(CredServiceText) & "\n}\n\n"
 
 proc profile(changeMarker, caches, anchors, lockText: string;
-             extra = ""; addOnExtra = ""; closureLockText = ""): string =
+             extra = ""; addOnExtra = ""; closureLockText = "";
+             changeExtra = ""): string =
   ## keep-svc reads a file of the profile; caches.conf and the anchors are
   ## generation 0's objects, declared as rpi2's profile declares them.
   "addOn {\n  managedEtcPrefixes = [\"" & parentDir(KeepConf) & "/\"]\n" &
@@ -172,7 +173,7 @@ proc profile(changeMarker, caches, anchors, lockText: string;
     fileResource(KeepConf, "keep = 1\n") &
     unitResource("keep-svc", "keep",
       "  depends_on = [\"fs.systemFile:" & KeepConf & "\"]\n") &
-    unitResource("change-svc", changeMarker) &
+    unitResource("change-svc", changeMarker, changeExtra) &
     fileResource(CachesConf, caches) & fileResource(Anchors, anchors)
 
 proc entriesAt(g: Guest; path: string): seq[LedgerEntry] =
@@ -389,9 +390,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let (fxLock, fxLockText) = g.fxToolLock()
     let (fxSvcLock, fxSvcLockText) = g.fxClosureLock()
     proc prof(marker: string; extra = ""; addOnExtra = "";
-              cachesText = caches): string =
+              cachesText = caches; changeExtra = ""): string =
       profile(marker, cachesText, anchorsText, fxLockText, extra, addOnExtra,
-              fxSvcLockText)
+              fxSvcLockText, changeExtra)
     # 1. Migration (c).
     g.fakeLegacyAgent(prof("v1"), caches, fxLock)
     g.fakeLegacyClosureUnit(fxSvcLock, fxSvcLockText)
@@ -640,26 +641,30 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
          r.outcomeOf() in ["aoConverged", "aoApplied"], r.stdout & r.stderr)
     # 4b. An agent switch that fails after its flip, over a caches.conf
     # changed by hand to the bytes manifest 3 declares (accepted without a
-    # write): manifest 3 adds a unit whose health check fails, and the
-    # switch is reverted automatically, with no pending marker left. (The
+    # write): manifest 3 changes change-svc and gives it a health check
+    # that cannot pass, and the switch is reverted automatically, with no
+    # pending marker left. Not a new unit with a failing check: every
+    # fixture unit here runs the base's own binaries under the fixture
+    # floor waiver, and an agent apply refuses a new waived unit before
+    # any switch (spec §10.1, *An agent apply never weakens the floor*;
+    # threat model C102).
+    # change-svc was taken over waived and stays so, on the same account:
+    # the agent may change it. (The
     # case where the failed switch had not yet written its ledger, the one
     # that refused at f25f69eda0, is e2e_addon_revert_keeps_earlier_drift.)
     let genBefore3 = g.currentGeneration()
     let caches3 = caches & "# changed by hand before manifest 3\n"
     writeFile(g.runDir / "caches3", caches3)
     g.copyTo(g.runDir / "caches3", CachesConf)
-    let m3 = g.publishManifest(signer, Target, 3, prof("v2",
-      extra = "systemd.systemUnit {\n" & FixtureFloorWaiver & "  name = \"repro-fx-fail.service\"\n" &
-        "  content = " & quoteSystemValue(unitText("repro-fx-fail", "fail")) &
-        "\n  healthCheck = \"tcp:127.0.0.1:9\"\n}\n\n",
+    let m3 = g.publishManifest(signer, Target, 3, prof("v3",
+      changeExtra = "  healthCheck = \"tcp:127.0.0.1:9\"\n",
       addOnExtra = "  confirmTimeout = 15\n", cachesText = caches3), @[], "")
     r = g.tick(repro, Target, @[m3])
     step("a switch that fails after its flip is reverted over earlier drift",
          r.outcomeOf() == "aoRolledBack" and
          ("rolled back to " & genBefore3) in r.stdout & r.stderr and
          g.exec("test ! -e /var/lib/repro/system/addon/pending").exitCode == 0 and
-         g.exec("systemctl is-active repro-fx-fail.service").stdout.strip() !=
-           "active",
+         "v2" in g.run("systemctl show -p Description --value change-svc.service"),
          r.stdout & r.stderr & "\ncaches.conf now:\n" &
          g.exec("cat " & CachesConf).stdout & "\npending:\n" &
          g.exec("cat /var/lib/repro/system/addon/pending").stdout)

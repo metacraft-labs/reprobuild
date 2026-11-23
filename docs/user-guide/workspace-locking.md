@@ -612,6 +612,25 @@ it) and refresh again. A sibling checked out without any recipe declares
 no constraints and is not a reason to refuse. `repro lock solve` without
 `--write` prints the same finding as a warning.
 
+**A sibling that CI only clones belongs in `pinned:`, not `uses:`.** The
+clone steps of CI take each sibling's revision from the committed `repro.lock`
+and refuse one it does not pin. A repo that clones a sibling just to run a
+test harness against it can name it in a `pinned:` block of its `package`:
+
+```nim
+package consumer:
+  pinned:
+    "codetracer"
+```
+
+`repro lock refresh` then records the sibling like any other (its commit and
+integrity, as a direct dependency of your repo), without compiling the
+sibling's `repro.nim` and without recording the sibling's own dependencies,
+which `uses:` would. If the sibling is not checked out and the committed lock
+does not pin it, the refresh refuses, names it and writes nothing. The
+pre-push gate derives the same set, so a lock that still pins a sibling the
+recipe no longer names is reported as stale.
+
 **A repo that shares a tool's name does not provide that tool.** `uses:`
 discovery looks for a sibling recipe in two places only: at
 `<ancestor>/<selector>` for each directory above the recipe, and at a

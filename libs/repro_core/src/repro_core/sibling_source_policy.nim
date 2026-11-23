@@ -74,7 +74,10 @@ type
       ## `config.nims` compiles against it and says so (it never stops a
       ## compile, see its `reportUnresolvedPackagePath`); the engine's recipe
       ## compiles refuse rather than compile a recipe against the wrong
-      ## sources (`repro_interface_artifacts`, `SiblingSourceUnavailableError`)
+      ## sources (`repro_interface_artifacts`, `SiblingSourceUnavailableError`),
+      ## except that a packaged engine compiling against its OWN source tree
+      ## uses the root it was built with, which is the pin, and says so
+      ## (`repro_interface_artifacts.staleSiblingRoot`)
     sskAbsent
       ## no sibling checkout: the caller's fallbacks decide
 
@@ -88,13 +91,337 @@ proc parseSiblingPolicy*(value: string): SiblingPolicy =
   of "pin": spPin
   else: spAuto
 
-proc pinnedSiblingRevisionIn*(lockText, siblingReposText, name: string):
+const SiblingPinnedPackagesEnvVar* = "REPRO_SIBLING_PINNED"
+  ## A comma-separated list of `<PKG>_SRC` names whose package takes the
+  ## tree `$<PKG>_SRC` names, as `REPRO_SIBLING_POLICY=pin` would, whatever
+  ## `REPRO_SIBLING_POLICY` says for the others. The engine sets it in the
+  ## environment of a compile that evaluates the recipe's `config.nims`
+  ## itself (the provider compile), for each package whose stale sibling it
+  ## replaced: there the file cannot judge the sibling on its own -- that
+  ## compile's `PATH` has no `git`, and "cannot tell" keeps the sibling --
+  ## and must not, since the engine's verdict (made against the pins of the
+  ## tree it compiles) is the one the command's own `--path`s already carry.
+
+proc siblingPolicyFor*(envName, policyValue, pinnedValue: string):
+    SiblingPolicy =
+  ## The policy for the package `$envName` names: `spPin` when
+  ## ``pinnedValue`` (`$REPRO_SIBLING_PINNED`) lists it, else
+  ## ``policyValue`` (`$REPRO_SIBLING_POLICY`).
+  for item in pinnedValue.split(','):
+    if item.strip() == envName:
+      return spPin
+  parseSiblingPolicy(policyValue)
+
+# ---------------------------------------------------------------------------
+# flake.lock: the pins the development shell exports.
+#
+# reprobuild's `flake.lock` pins io-mon, nim-shm-gset, runquota and others
+# that its `repro.lock` does not list, and the development shell exports
+# exactly those trees as `$IO_MON_SRC`, `$SHM_GSET_SRC`, `$RUNQUOTA_SRC`, ...
+# (Nix-Flake-Coexistence.md §3.2). It is the record of the revision every
+# in-shell compile reads, so a pin lookup must not depend on a second copy of
+# it being kept in `.github/sibling-repos` (which today repeats some of these
+# pins and names others only by a branch). The judgement this lookup feeds
+# (`chooseSiblingSource`) is what keeps a stale sibling out of a compile: a
+# sibling checkout 94 commits behind the pinned io-mon was compiled into the
+# dev env's interface extraction without a word, and the compile failed on an
+# `undeclared routine` naming neither checkout (measured 2026-11-21, `repro
+# exec` in a reprobuild checkout).
+#
+# A deliberately small scanner, not `std/json`: `config.nims` runs this in
+# the NimScript VM on every compile, where `parseJson` of the 85 KB lock costs
+# about half a second and this scan under a tenth of one (measured
+# 2026-11-22, `nim e`, Nim 2.2.4), once per load (`flakeLockDirectPins`). It
+# walks the JSON grammar (https://www.rfc-editor.org/rfc/rfc8259) once, keeps
+# only the fields of the lock format it needs (`nodes.<n>.inputs`,
+# `nodes.<n>.locked`, `root`;
+# https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-flake#lock-files),
+# and gives up -- "" , "cannot tell" -- on anything malformed.
+# ---------------------------------------------------------------------------
+
+type
+  FlakeLockNode = object
+    name: string
+    inputs: seq[string]
+      ## the nodes its inputs name DIRECTLY (a string value). An input that
+      ## `follows` another flake's input (a list value) is that flake's
+      ## choice, not this one's, and is not kept.
+    lockedType, lockedRepo, lockedUrl, lockedRev: string
+
+proc flakeSkipWs(t: string; i: var int) =
+  while i < t.len and t[i] in {' ', '\t', '\n', '\r'}: inc i
+
+proc flakeString(t: string; i: var int; ok: var bool): string =
+  ## A JSON string at ``i`` (which must be its opening quote). Escapes are
+  ## decoded except `\uXXXX`, kept as written: no name, URL or revision
+  ## in a lock carries one, and a kept escape only fails to match.
+  if i >= t.len or t[i] != '"':
+    ok = false
+    return ""
+  inc i
+  while i < t.len:
+    let c = t[i]
+    if c == '"':
+      inc i
+      return
+    if c == '\\' and i + 1 < t.len:
+      let e = t[i + 1]
+      case e
+      of 'n': result.add('\n')
+      of 't': result.add('\t')
+      of 'r': result.add('\r')
+      of 'b': result.add('\b')
+      of 'f': result.add('\f')
+      of 'u': result.add("\\u")
+      else: result.add(e)
+      i += 2
+    else:
+      result.add(c)
+      inc i
+  ok = false
+
+proc flakeSkipValue(t: string; i: var int; ok: var bool) =
+  ## Skips one JSON value of any kind at ``i``.
+  flakeSkipWs(t, i)
+  if i >= t.len:
+    ok = false
+    return
+  case t[i]
+  of '"':
+    discard flakeString(t, i, ok)
+  of '{', '[':
+    let close = if t[i] == '{': '}' else: ']'
+    inc i
+    flakeSkipWs(t, i)
+    if i < t.len and t[i] == close:
+      inc i
+      return
+    while ok and i < t.len:
+      if close == '}':
+        discard flakeString(t, i, ok)
+        flakeSkipWs(t, i)
+        if i >= t.len or t[i] != ':':
+          ok = false
+          return
+        inc i
+      flakeSkipValue(t, i, ok)
+      flakeSkipWs(t, i)
+      if i < t.len and t[i] == ',':
+        inc i
+        flakeSkipWs(t, i)
+      elif i < t.len and t[i] == close:
+        inc i
+        return
+      else:
+        ok = false
+  else:
+    # A number, `true`, `false` or `null`: up to the next delimiter. A
+    # delimiter where a value belongs is malformed, and stops the scan.
+    let start = i
+    while i < t.len and t[i] notin {',', '}', ']', ' ', '\t', '\n', '\r'}:
+      inc i
+    if i == start: ok = false
+
+proc flakeObjectKey(t: string; i: var int; ok: var bool;
+    first: var bool): tuple[present: bool, key: string] =
+  ## The next key of the object whose `{` has been consumed, positioned
+  ## after its `:`; (false, "") at the closing `}`.
+  flakeSkipWs(t, i)
+  if not first:
+    if i < t.len and t[i] == ',':
+      inc i
+      flakeSkipWs(t, i)
+    elif i < t.len and t[i] == '}':
+      inc i
+      return (false, "")
+    else:
+      ok = false
+      return (false, "")
+  elif i < t.len and t[i] == '}':
+    inc i
+    return (false, "")
+  first = false
+  let key = flakeString(t, i, ok)
+  flakeSkipWs(t, i)
+  if not ok or i >= t.len or t[i] != ':':
+    ok = false
+    return (false, "")
+  inc i
+  flakeSkipWs(t, i)
+  (true, key)
+
+proc flakeOpenObject(t: string; i: var int): bool =
+  ## Consumes a `{` at ``i``; false (without consuming) when the value
+  ## there is not an object.
+  flakeSkipWs(t, i)
+  if i < t.len and t[i] == '{':
+    inc i
+    return true
+  false
+
+proc flakeNode(t: string; i: var int; ok: var bool; name: string):
+    FlakeLockNode =
+  result.name = name
+  if not flakeOpenObject(t, i):
+    flakeSkipValue(t, i, ok)
+    return
+  var first = true
+  while ok:
+    let (present, key) = flakeObjectKey(t, i, ok, first)
+    if not present: break
+    if key == "inputs" and flakeOpenObject(t, i):
+      var firstInput = true
+      while ok:
+        let (more, _) = flakeObjectKey(t, i, ok, firstInput)
+        if not more: break
+        if i < t.len and t[i] == '"':
+          result.inputs.add(flakeString(t, i, ok))
+        else:
+          flakeSkipValue(t, i, ok)
+    elif key == "locked" and flakeOpenObject(t, i):
+      var firstField = true
+      while ok:
+        let (more, field) = flakeObjectKey(t, i, ok, firstField)
+        if not more: break
+        if i < t.len and t[i] == '"' and
+            field in ["type", "repo", "url", "rev"]:
+          let value = flakeString(t, i, ok)
+          case field
+          of "type": result.lockedType = value
+          of "repo": result.lockedRepo = value
+          of "url": result.lockedUrl = value
+          else: result.lockedRev = value
+        else:
+          flakeSkipValue(t, i, ok)
+    else:
+      flakeSkipValue(t, i, ok)
+
+proc parseFlakeLock(t: string; nodes: var seq[FlakeLockNode];
+    root: var string): bool =
+  var ok = true
+  var i = 0
+  root = "root"
+  if not flakeOpenObject(t, i): return false
+  var first = true
+  while ok:
+    let (present, key) = flakeObjectKey(t, i, ok, first)
+    if not present: break
+    if key == "nodes" and flakeOpenObject(t, i):
+      var firstNode = true
+      while ok:
+        let (more, name) = flakeObjectKey(t, i, ok, firstNode)
+        if not more: break
+        nodes.add(flakeNode(t, i, ok, name))
+    elif key == "root" and i < t.len and t[i] == '"':
+      root = flakeString(t, i, ok)
+    else:
+      flakeSkipValue(t, i, ok)
+  ok
+
+proc flakeNodeRepositoryName(node: FlakeLockNode): string =
+  ## The name of the repository a locked node fetches: the `repo` of a
+  ## forge reference (`github:`, `gitlab:`, `sourcehut:`), else the last
+  ## path component of its URL without a `.git` suffix (`git+https://…/
+  ## nim-bearssl` is `nim-bearssl`). "" for a node that fetches no
+  ## repository (`path:`, `indirect`).
+  case node.lockedType
+  of "github", "gitlab", "sourcehut":
+    return node.lockedRepo
+  of "git", "mercurial", "tarball", "file":
+    var url = node.lockedUrl
+    for sep in ['?', '#']:
+      let at = url.find(sep)
+      if at >= 0: url = url[0 ..< at]
+    while url.endsWith("/"): url.setLen(url.len - 1)
+    let slash = url.rfind('/')
+    var base = if slash >= 0: url[slash + 1 .. ^1] else: url
+    if base.endsWith(".git"): base.setLen(base.len - 4)
+    return base
+  else:
+    return ""
+
+type FlakeLockPin* = tuple[repository, revision: string]
+  ## One repository a `flake.lock` pins through a direct input of its root.
+
+proc flakeLockDirectPins*(flakeLockText: string): seq[FlakeLockPin] =
+  ## Every repository the committed `flake.lock` (``flakeLockText``) pins
+  ## through an input its ROOT names directly, keyed by the repository the
+  ## locked node fetches (``flakeNodeRepositoryName``), NEVER by the input's
+  ## name: the input is `io-mon-src`, the sibling directory `io-mon`, and
+  ## nothing ties the two spellings together but the locked repo.
+  ##
+  ## Only direct inputs count. The lock also holds the nodes of every
+  ## transitive input -- io-mon's own pins of its dependencies among them --
+  ## and those are other repositories' choices, not this one's; an input the
+  ## root takes by `follows` is likewise another flake's choice. When two
+  ## direct inputs fetch one repository at different revisions there is no
+  ## one pin: the entry's revision is "" ("cannot tell", which keeps the
+  ## sibling, as an unpinned one is kept). Empty for an empty or malformed
+  ## lock.
+  ##
+  ## Parsed ONCE per lock: `config.nims` keeps the result for every package
+  ## it registers (`flakeLockPins` there) rather than rescan 85 KB in the VM
+  ## per package.
+  if flakeLockText.len == 0:
+    return
+  var nodes: seq[FlakeLockNode]
+  var rootName: string
+  if not parseFlakeLock(flakeLockText, nodes, rootName):
+    return
+  var rootInputs: seq[string]
+  for node in nodes:
+    if node.name == rootName:
+      rootInputs = node.inputs
+      break
+  for target in rootInputs:
+    for node in nodes:
+      if node.name != target or node.lockedRev.len == 0: continue
+      let repository = flakeNodeRepositoryName(node).toLowerAscii()
+      if repository.len == 0: continue
+      var seen = false
+      for entry in result.mitems:
+        if entry.repository == repository:
+          seen = true
+          if entry.revision != node.lockedRev: entry.revision = ""
+      if not seen:
+        result.add((repository: repository, revision: node.lockedRev))
+
+proc pinnedFlakeInputRevisionIn*(flakePins: openArray[FlakeLockPin];
+    name: string): string =
+  ## The revision ``flakePins`` (`flakeLockDirectPins`) holds for the
+  ## repository ``name``, compared without regard to case; "" when it holds
+  ## none or no single one.
+  let wanted = name.toLowerAscii()
+  for entry in flakePins:
+    if entry.repository == wanted:
+      return entry.revision
+  ""
+
+proc pinnedFlakeInputRevisionIn*(flakeLockText, name: string): string =
+  ## `pinnedFlakeInputRevisionIn` over the text of a `flake.lock`.
+  pinnedFlakeInputRevisionIn(flakeLockDirectPins(flakeLockText), name)
+
+proc pinnedSiblingRevisionIn*(lockText: string;
+    flakePins: openArray[FlakeLockPin]; siblingReposText, name: string):
     string =
-  ## The revision a repository pins for the sibling directory ``name``: its
-  ## `deps` entry in the committed `repro.lock` (``lockText``), else a
-  ## `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos`
-  ## (``siblingReposText``, which lists a sibling `repro.lock` pins by its
-  ## bare name only). "" when neither pins it.
+  ## The revision a repository pins for the sibling directory ``name``, from
+  ## the first of its three records that pins it:
+  ##
+  ##   1. its `deps` entry in the committed `repro.lock` (``lockText``): the
+  ##      workspace lock is THE record of a sibling's revision, and
+  ##      `repro lock update` and the commit-time re-pin keep the flake in
+  ##      step with it;
+  ##   2. a direct input of the committed `flake.lock` (``flakePins``, as
+  ##      `flakeLockDirectPins` reads it) for a sibling `repro.lock` does not
+  ##      pin: the revision the development shell exports as `$<PKG>_SRC`,
+  ##      and so the tree every in-shell compile of this repository reads;
+  ##   3. a `name=<sha>` / `name!=<sha>` line of `.github/sibling-repos`
+  ##      (``siblingReposText``). Last, because its value may be a branch
+  ##      (`codetracer=dev`) where the other two hold revisions, and a commit
+  ##      id it does hold must equal flake.lock's
+  ##      (`scripts/check_sibling_lock_pins.py`).
+  ##
+  ## "" when none pins it.
   if lockText.len > 0:
     # One inline table per `deps` entry, with no nested braces.
     # A name also heads its `packages` entry, which has no revision.
@@ -109,6 +436,9 @@ proc pinnedSiblingRevisionIn*(lockText, siblingReposText, name: string):
         let close = lockText.find('"', start)
         if close > start: return lockText[start ..< close]
       at = lockText.find(key, at + key.len)
+  let flakePin = pinnedFlakeInputRevisionIn(flakePins, name)
+  if flakePin.len > 0:
+    return flakePin
   for raw in siblingReposText.splitLines():
     let line = raw.strip()
     if line.len == 0 or line[0] == '#': continue
