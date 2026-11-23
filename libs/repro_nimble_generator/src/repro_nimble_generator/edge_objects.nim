@@ -21,6 +21,12 @@ const
   HistoryHeader* = "reprobuild.nimble-generator.history.v1"
   SubmoduleHeader* = "reprobuild.nimble-generator.submodule.v1"
   MaxEdgeObjectBytes* = 64 * 1024 * 1024
+  MaxEdgeNameBytes* = 1024
+    ## a tag or ref name, an entry kind, a refusal kind, a failure phrase
+  MaxEdgePathBytes* = 4096
+    ## a path in a tree, a link's target, a URL
+  MaxEdgeDetailBytes* = 64 * 1024
+    ## a free-text detail (a git or transport message)
   GitmodulesBlobKey* = ".gitmodules"
     ## the key a tree's top-level `.gitmodules` bytes are stored under in a
     ## blobs companion (never an object id, which is hex)
@@ -124,6 +130,50 @@ proc need(fs: seq[string]; n: int) =
     raise newException(EdgeObjectError, "record " & fs[0].escape() &
       " has " & $(fs.len - 1) & " fields, not " & $(n - 1))
 
+# The schema of each record's fields (threat model G36, FLOW-2): a worker's
+# output is hostile until these pass, so every field has a size limit and
+# every object id and digest its exact shape before any of it is used.
+
+type FieldShape = enum
+  fsName    ## at most ``MaxEdgeNameBytes``
+  fsPath    ## at most ``MaxEdgePathBytes``
+  fsDetail  ## at most ``MaxEdgeDetailBytes``
+  fsOid     ## a git object id: 40 or 64 lower-case hex
+  fsOidOpt  ## an object id, or empty
+  fsDigest  ## 64 lower-case hex
+  fsInt     ## a decimal integer
+
+proc isLowerHex(s: string): bool =
+  for c in s:
+    if c notin {'0'..'9', 'a'..'f'}: return false
+  true
+
+proc shape(fs: seq[string]; shapes: varargs[FieldShape]) =
+  ## Check fields 1.. of a record against ``shapes``, in order.
+  for i, sh in shapes:
+    let v = fs[i + 1]
+    let what = "record " & fs[0].escape() & " field " & $(i + 1)
+    template over(limit: int) =
+      if v.len > limit:
+        raise newException(EdgeObjectError, what & " is " & $v.len &
+          " bytes, over its limit of " & $limit)
+    case sh
+    of fsName: over(MaxEdgeNameBytes)
+    of fsPath: over(MaxEdgePathBytes)
+    of fsDetail: over(MaxEdgeDetailBytes)
+    of fsOid, fsOidOpt:
+      if not (sh == fsOidOpt and v.len == 0) and
+          (v.len notin [40, 64] or not isLowerHex(v)):
+        raise newException(EdgeObjectError, what & " is not an object id")
+    of fsDigest:
+      if v.len != 64 or not isLowerHex(v):
+        raise newException(EdgeObjectError, what & " is not a digest")
+    of fsInt:
+      over(20)
+      try: discard parseBiggestInt(v)
+      except ValueError:
+        raise newException(EdgeObjectError, what & " is not an integer")
+
 proc kindWord(k: TreeEntryKind): string =
   case k
   of teFile: "file"
@@ -182,6 +232,10 @@ proc decodeBlobs*(text: string; tree: var FetchedTree) =
     if size < 0 or pos + size + 1 > text.len or text[pos + size] != '\n':
       raise newException(EdgeObjectError, "truncated blobs record")
     let bytes = text[pos ..< pos + size]
+    if head[0] != GitmodulesBlobKey and
+        (head[0].len notin [40, 64] or not isLowerHex(head[0])):
+      raise newException(EdgeObjectError, "a blobs record's key is not an " &
+        "object id")
     if head[0] == GitmodulesBlobKey:
       tree.hasGitmodules = true
       tree.gitmodules = bytes
@@ -213,16 +267,19 @@ proc decodeRefs*(text: string): RefsAnswer =
     case fs[0]
     of "state":
       need(fs, 4)
+      shape(fs, fsName, fsName, fsDetail)
       result.state = parseState(fs[1])
       result.refusal = fs[2]
       result.detail = fs[3]
       sawState = true
     of "head":
       need(fs, 3)
+      shape(fs, fsName, fsOidOpt)
       result.headRef = fs[1]
       result.head = fs[2]
     of "tag":
       need(fs, 3)
+      shape(fs, fsName, fsOid)
       result.tags.add (fs[1], fs[2])
     else:
       raise newException(EdgeObjectError, "unknown refs record " &
@@ -263,25 +320,31 @@ proc decodeSource*(text: string): SourceAnswer =
     case fs[0]
     of "state":
       need(fs, 4)
+      shape(fs, fsName, fsName, fsDetail)
       result.state = parseState(fs[1])
       result.refusal = fs[2]
       result.detail = fs[3]
       sawState = true
     of "commit":
       need(fs, 2)
+      shape(fs, fsOidOpt)
       result.commit = fs[1]
     of "tree":
       need(fs, 2)
+      shape(fs, fsDigest)
       result.facts.treeDigest = fs[1]
     of "archive":
       need(fs, 3)
+      shape(fs, fsDigest, fsInt)
       result.facts.archiveSha256 = fs[1]
       result.facts.archiveSize = parseBiggestInt(fs[2])
     of "committed":
       need(fs, 2)
+      shape(fs, fsInt)
       result.facts.commitTime = parseBiggestInt(fs[1])
     of "nimble":
       need(fs, 3)
+      shape(fs, fsName, fsPath)
       case fs[1]
       of "found": result.facts.nimble = nlFound
       of "none": result.facts.nimble = nlNone
@@ -290,12 +353,15 @@ proc decodeSource*(text: string): SourceAnswer =
       result.facts.nimblePath = fs[2]
     of "nimble-candidate":
       need(fs, 2)
+      shape(fs, fsPath)
       result.facts.nimbleCandidates.add fs[1]
     of "file":
       need(fs, 2)
+      shape(fs, fsPath)
       result.facts.files.add fs[1]
     of "link":
       need(fs, 4)
+      shape(fs, fsPath, fsPath, fsName)
       let v = case fs[3]
         of "in": lvInside
         of "out": lvOutside
@@ -303,9 +369,11 @@ proc decodeSource*(text: string): SourceAnswer =
       result.facts.links.add SourceLink(path: fs[1], target: fs[2], verdict: v)
     of "gitlink":
       need(fs, 3)
+      shape(fs, fsPath, fsOid)
       result.facts.gitlinks.add (fs[1], fs[2])
     of "submodule":
       need(fs, 4)
+      shape(fs, fsPath, fsPath, fsDetail)
       result.facts.submodules.add SubmoduleUrl(path: fs[1], url: fs[2],
         verdict: fs[3])
     of "gitmodules":
@@ -313,12 +381,15 @@ proc decodeSource*(text: string): SourceAnswer =
       result.hasGitmodules = true
     of "entry":
       need(fs, 4)
+      shape(fs, fsName, fsPath, fsOid)
       result.entries.add entryOf(fs)
     of "pin":
       need(fs, 4)
+      shape(fs, fsPath, fsPath, fsOid)
       result.pins.add SubmodulePin(path: fs[1], url: fs[2], commit: fs[3])
     of "unobtainable":
       need(fs, 5)
+      shape(fs, fsPath, fsName, fsName, fsDetail)
       result.unobtainable.add Unobtainable(path: fs[1],
         failure: failureOf(fs[2]), refusal: fs[3], detail: fs[4])
     else:
@@ -345,15 +416,18 @@ proc decodeHistory*(text: string): HistoryAnswer =
     case fs[0]
     of "state":
       need(fs, 4)
+      shape(fs, fsName, fsName, fsDetail)
       result.state = parseState(fs[1])
       result.refusal = fs[2]
       result.detail = fs[3]
       sawState = true
     of "branch":
       need(fs, 2)
+      shape(fs, fsOid)
       result.branchCommits.add fs[1]
     of "commit":
       need(fs, 2)
+      shape(fs, fsOid)
       result.allCommits.add fs[1]
     else:
       raise newException(EdgeObjectError, "unknown history record " &
@@ -381,22 +455,26 @@ proc decodeSubmodule*(text: string): SubmoduleAnswer =
     case fs[0]
     of "state":
       need(fs, 4)
+      shape(fs, fsName, fsName, fsDetail)
       result.state = parseState(fs[1])
       result.refusal = fs[2]
       result.detail = fs[3]
       sawState = true
     of "fetched":
       need(fs, 3)
+      shape(fs, fsPath, fsOidOpt)
       result.url = fs[1]
       result.commit = fs[2]
     of "failure":
       need(fs, 2)
+      shape(fs, fsName)
       result.failure = $failureOf(fs[1])
     of "gitmodules":
       need(fs, 1)
       result.hasGitmodules = true
     of "entry":
       need(fs, 4)
+      shape(fs, fsName, fsPath, fsOid)
       result.entries.add entryOf(fs)
     else:
       raise newException(EdgeObjectError, "unknown submodule record " &

@@ -12,9 +12,13 @@
 ## * `assemble` -- one package's records, observation and origin events.
 ## * `generator` -- the edges and the generation.
 ## * `verify` -- comparing two generations of one index.
+## * `capture` -- the append-only log of refusals and origin events.
+## * `regeneration` -- the independent regeneration's verdict and hold.
+## * `probe` -- the probe's sandbox.
 
 import repro_nimble_generator/[source_set, egress, origin_git, source_tree,
-  submodules, registry, edge_objects, assemble, generator, verify]
+  submodules, registry, edge_objects, assemble, generator, verify, capture,
+  regeneration, probe]
 
 export source_set, egress, origin_git, source_tree, submodules, registry,
-  edge_objects, assemble, generator, verify
+  edge_objects, assemble, generator, verify, capture, regeneration, probe

@@ -65,6 +65,13 @@ proc generateIndex(rootFlag, sourceSetFlag, stateFlag, generatedAtFlag: string;
     outputDir: indexDir, policy: policy, shardBits: -1)
   let r = generate(cfg)
   printResult(r)
+  # Every refusal and origin event of the generation, kept (threat model
+  # § 9): appended to this host's capture log.
+  let captures = capturesOfGeneration(r, generatedAt)
+  let captureLog = cfg.stateDir / "captures.log"
+  appendCaptures(captureLog, captures)
+  if captures.len > 0:
+    echo "captured " & $captures.len & " record(s) in " & captureLog
   echo "root blake3:" & $r.built.rootId & " packages=" &
     $r.built.root.packageCount & " versions=" & $r.built.root.versionCount &
     " events=" & $r.built.root.eventCount
