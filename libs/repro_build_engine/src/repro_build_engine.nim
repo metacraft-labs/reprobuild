@@ -3324,6 +3324,14 @@ proc keyedOnGoverningLock*(fingerprint: ContentDigest;
   framed.add($lock.len & "\x1f" & lock & "\x1e")
   blake3DomainDigest(framed.textBytes(), hdActionFingerprint)
 
+const RunQuotaStaticCapacityDeadlockReason* =
+  "runquota static-capacity deadlock"
+  ## ``ActionResult.reason`` of an action a RunQuota static-capacity deadlock
+  ## stopped before it was started: its lease could never be admitted by the
+  ## daemon's static budget (docs/runquota-policy.md). The reason is what
+  ## tells it from an action whose command failed; its stderr is the
+  ## deadlock diagnostic, naming the budget and the remedies.
+
 const UnsafePreserveOutputsDomain* = "reprobuild/unsafe-preserve-outputs/v1"
   ## The domain `preserveOutputsWeakFingerprint` frames a step's weak
   ## fingerprint under. Versioned so a change to the mode's semantics can
@@ -26367,13 +26375,21 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           commands[k] = staged.action.runQuotaCommand(config)
         var offers: seq[ReproRunQuotaOffer]
         var batchFailure = ""
+        var batchDeadlocked = false
         try:
           offers = offerWithRunQuotaBatch(inlineRunQuotaSession, requests, commands)
-        except ReproRunQuotaDeadlockError:
-          # A whole frontier blocked by requests the authority cannot ever
-          # admit is a build-level scheduler deadlock, not an action process
-          # failure. Preserve the typed outcome for the CLI diagnostic.
-          raise
+        except ReproRunQuotaDeadlockError as err:
+          # A request the authority can never admit ends in a static-capacity
+          # deadlock (docs/runquota-policy.md). It fails the actions it
+          # stopped -- with the deadlock's own text and a reason that names
+          # it, so it is not mistaken for a command that failed -- and the
+          # build settles and is reported like any other failed build
+          # (CLI/build.md, "A build that ends in a RunQuota static-capacity
+          # deadlock"). It used to be re-raised here, which unwound the build
+          # in place of its result, so no report could be written from it.
+          # The batch has already rolled back what it owned.
+          batchFailure = err.msg
+          batchDeadlocked = true
         except CatchableError as err:
           batchFailure = err.msg
         finishStat("repro runquota launch", batchStart)
@@ -26392,7 +26408,12 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
               cacheDecision: previousCacheDecision,
               dependencyPolicyKind: staged.action.dependencyPolicy.kind,
               monitorDepfilePath: staged.action.monitorDepfile,
-              stderr: "process launch failed: " & batchFailure,
+              reason:
+                if batchDeadlocked: RunQuotaStaticCapacityDeadlockReason
+                else: "",
+              stderr:
+                if batchDeadlocked: batchFailure
+                else: "process launch failed: " & batchFailure,
               runQuotaBackend: "runquota-inline",
               runQuotaSocket: getEnv("RUNQUOTA_SOCKET", ""))
             statuses[staged.id] = asFailed
@@ -26400,7 +26421,8 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             poolRunning[staged.pool] =
               if failedUsed > staged.poolUnits: failedUsed - staged.poolUnits
               else: 0'u32
-            runResult.trace(staged.id, "failed", "launch")
+            runResult.trace(staged.id, "failed",
+              if batchDeadlocked: "runquota-deadlock" else: "launch")
             blockClosure(staged.id, staged.id)
             emitProgress(bpkActionCompleted, staged.id)
           completed = terminalCount()
@@ -26492,7 +26514,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           # build holds. That build releases it when its action exits.
           sleep(200)
           continue
-        if ready.len > 0 and not launchedAny:
+        if ready.len > 0:
+          # Something settled on this pass without leaving anything running:
+          # a staged batch whose launch failed, or that a RunQuota
+          # static-capacity deadlock stopped. Its pool units are back and the
+          # actions still ready do not depend on it, so scan again rather
+          # than call a graph that is still moving stuck. Bounded: every pass
+          # that sets ``launchedAny`` without a running action has moved at
+          # least one action to a terminal status.
+          if launchedAny:
+            continue
           raiseEngine("ready queue is blocked by pool capacity")
         # The graph can advance no further: nothing is running, ready, or
         # launchable, yet ``completed < total``. Historically this raised

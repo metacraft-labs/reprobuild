@@ -307,23 +307,53 @@ suite "integration_build_engine_api_ready_queue":
     createDir(workRoot)
     let outputPath = workRoot / "denied" / "out.txt"
 
-    var deadlock = ""
-    try:
-      discard runBuild(graph([
-        action("inline-denied", [app, "fixture-action", "wide", "denied",
-          outputPath], cwd = workRoot, outputs = ["denied/out.txt"],
-          cpuMilli = 2000'u32, commandStatsId = "inline-denied",
-          governingLockIdentity = lockIdentityOutsideSolvedGraph())
-      ]), BuildEngineConfig(
-        cacheRoot: cacheRoot,
-        runQuotaCliPath: app,
-        maxParallelism: 1'u32,
-        stdoutLimit: 256 * 1024,
-        stderrLimit: 256 * 1024,
-        inlineRunQuota: true))
-    except ReproRunQuotaDeadlockError as err:
-      deadlock = err.msg
-
+    # The deadlock is a build OUTCOME, not an exception: ``runBuild``
+    # returns, so the caller can still report the build (CLI/build.md, "A
+    # build that ends in a RunQuota static-capacity deadlock"). The action
+    # it stopped fails without being started, with the deadlock diagnostic
+    # as its stderr and a reason that tells it from a failed command.
+    # Its dependent is blocked behind it; an action that does not depend on
+    # it and fits the budget still runs.
+    let dependentPath = workRoot / "dependent" / "out.txt"
+    let independentPath = workRoot / "independent" / "out.txt"
+    let run = runBuild(graph([
+      action("inline-denied", [app, "fixture-action", "wide", "denied",
+        outputPath], cwd = workRoot, outputs = ["denied/out.txt"],
+        cpuMilli = 2000'u32, commandStatsId = "inline-denied",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()),
+      action("after-denied", [app, "fixture-action", "wide", "dependent",
+        dependentPath], cwd = workRoot, outputs = ["dependent/out.txt"],
+        deps = ["inline-denied"], cpuMilli = 500'u32,
+        commandStatsId = "after-denied",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph()),
+      action("beside-denied", [app, "fixture-action", "wide", "independent",
+        independentPath], cwd = workRoot, outputs = ["independent/out.txt"],
+        cpuMilli = 500'u32, commandStatsId = "beside-denied",
+        governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    ]), BuildEngineConfig(
+      cacheRoot: cacheRoot,
+      runQuotaCliPath: app,
+      maxParallelism: 1'u32,
+      stdoutLimit: 256 * 1024,
+      stderrLimit: 256 * 1024,
+      inlineRunQuota: true))
+    check run.results.len == 3
+    var denied, dependent, independent: ActionResult
+    for item in run.results:
+      case item.id
+      of "inline-denied": denied = item
+      of "after-denied": dependent = item
+      of "beside-denied": independent = item
+      else: discard
+    check dependent.status == asBlocked
+    check dependent.blockedBy == "inline-denied"
+    check not fileExists(dependentPath)
+    check independent.status == asSucceeded
+    check fileExists(independentPath)
+    check denied.status == asFailed
+    check denied.reason == RunQuotaStaticCapacityDeadlockReason
+    let deadlock = denied.stderr
+    checkpoint(deadlock)
     check deadlock.contains("static-capacity deadlock")
     check deadlock.contains("shared CPU budget") or
       deadlock.contains("machine CPU budget")

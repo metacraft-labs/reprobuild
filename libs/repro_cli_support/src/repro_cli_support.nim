@@ -7361,6 +7361,12 @@ type
     brpkLoweredGraphCache
       ## The lowered graph was read back from the lowered-graph cache and no
       ## provider ran at all.
+    brpkNotReached
+      ## No provider ran, because an edge that prepares the build failed
+      ## first: the provider compile, the interface extraction or the CMake
+      ## regeneration (CLI/build.md, "A preparation edge that fails"). The
+      ## report then records that edge, under the member for its stage, and
+      ## an empty ``actions``.
 
   BuildReportProviderContext* = object
     ## The provider half of a full build report: what produced the graph the
@@ -7389,6 +7395,23 @@ type
         ## ``buildReportJson``.
     of brpkLoweredGraphCache:
       loweredGraphCachePath*: string
+    of brpkNotReached:
+      notReachedStage*: string
+        ## ``provider-compile``, ``interface-extraction`` or
+        ## ``cmake-regeneration``: the edge whose failure ended the build.
+      notReachedProviderCompile*: BuildRunResult
+        ## The failed provider-compile edge's run, for the
+        ## ``provider-compile`` stage; empty for the other two, whose edges
+        ## have members of their own (``interfaceExtractActions``,
+        ## ``cmakeRegenerationActions``).
+
+proc notReachedReportContext*(stage: string;
+                               providerCompileResult = BuildRunResult()):
+    BuildReportProviderContext =
+  ## Context for a build that a failed preparation edge ended before any
+  ## provider ran (``brpkNotReached``).
+  BuildReportProviderContext(kind: brpkNotReached, route: "not-reached",
+    notReachedStage: stage, notReachedProviderCompile: providerCompileResult)
 
 proc compiledProviderReportContext*(provider: ProviderCompileArtifact;
                                     providerCompileResult: BuildRunResult;
@@ -7675,6 +7698,14 @@ proc emitBuildReport(sink: var BuildReportSink;
       "path": context.loweredGraphCachePath,
       "keyAvailable": false
     })
+    sink.member("providerInvocations", %0)
+  of brpkNotReached:
+    # No provider ran: say which preparation edge stopped the build, and
+    # write no provider identity rather than an empty one.
+    sink.member("providerNotReached", %*{"stage": context.notReachedStage})
+    sink.arrayMember("providerCompileActions"):
+      for item in context.notReachedProviderCompile.results:
+        sink.element(actionResultJson(item))
     sink.member("providerInvocations", %0)
   # The interface-extraction edges this invocation ran, and their trace (see
   # ``interfaceExtractActionJson``).
@@ -13306,17 +13337,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     except CatchableError:
       discard
 
-  template persistingExtractionFailure(body: untyped): untyped =
-    ## An interface-extraction edge fails in an engine pass of its own, so
-    ## none of the build results below ever sees it. Its failure report is
-    ## written here, from the run the error carries, before the error goes
-    ## on to end the build.
-    try:
-      body
-    except InterfaceExtractionEdgeFailure as failure:
-      persistFailureReport(failure.run, failure.actions)
-      raise
-
   proc userTargetSelectors(): seq[string] =
     ## The selectors the USER named on this invocation (the ``#action``
     ## fragment and any extra name-shaped positionals), in order, without
@@ -13372,6 +13392,49 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro report write", reportStart)
     buildResult.stats = buildStats
     writtenBuildReportPath = reportPath
+
+  # The CMake regeneration edge's run, once it has run: the reports of a
+  # preparation edge that fails after it still record it.
+  var reportedCmakeRegeneration: BuildRunResult
+
+  proc persistPreparationFailure(stage: string; run: BuildRunResult;
+                                 actions: openArray[BuildAction]) =
+    ## CLI/build.md, "A preparation edge that fails". The provider compile,
+    ## the interface extraction and the CMake regeneration each run in an
+    ## engine pass of their own, before the build's graph exists, so when one
+    ## fails -- its command failed, or a RunQuota static-capacity deadlock
+    ## stopped it -- its own run is the only result there is. Write the
+    ## failure report from it and, when asked, the full report with
+    ## ``providerRoute: not-reached``, before the error ends the build. A
+    ## report that cannot be written must not replace that error.
+    persistFailureReport(run, actions)
+    var empty = BuildRunResult()
+    try:
+      if stage == "cmake-regeneration":
+        persistFullReport(notReachedReportContext(stage), run, empty,
+          none(seq[TargetResolutionRecord]))
+      elif stage == "provider-compile":
+        persistFullReport(notReachedReportContext(stage, run),
+          reportedCmakeRegeneration, empty, none(seq[TargetResolutionRecord]))
+      else:
+        persistFullReport(notReachedReportContext(stage),
+          reportedCmakeRegeneration, empty, none(seq[TargetResolutionRecord]))
+    except CatchableError:
+      return
+    if writtenBuildReportPath.len > 0:
+      logSummary("buildReport: " & writtenBuildReportPath)
+
+  template persistingExtractionFailure(body: untyped): untyped =
+    ## An interface-extraction edge fails in an engine pass of its own, so
+    ## none of the build results below ever sees it. Its reports are written
+    ## here, from the run the error carries, before the error goes on to end
+    ## the build.
+    try:
+      body
+    except InterfaceExtractionEdgeFailure as failure:
+      persistPreparationFailure("interface-extraction", failure.run,
+        failure.actions)
+      raise
 
   proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
     for item in runResult.results:
@@ -13965,13 +14028,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         eventSink("diagnostic", item.stdout, "{\"stream\":\"stdout\"}")
       elif logMode != blmQuiet and item.stdout.len > 0:
         stdout.write(item.stdout)
+        # End the line the edge's output left open, so the status line
+        # printed next starts on its own line (``buildFailureReport:`` was
+        # read back glued to a deadlock diagnostic, which has no newline).
+        if not item.stdout.endsWith('\n'):
+          stdout.write('\n')
         stdout.flushFile()
       if eventSink != nil and logMode != blmQuiet and item.stderr.len > 0:
         eventSink("diagnostic", item.stderr, "{\"stream\":\"stderr\"}")
       elif logMode != blmQuiet and item.stderr.len > 0:
         stderr.write(item.stderr)
+        if not item.stderr.endsWith('\n'):
+          stderr.write('\n')
         stderr.flushFile()
+    reportedCmakeRegeneration = cmakeRegenerationResult
     if cmakeRegenerationResult.hasFailedActions():
+      persistPreparationFailure("cmake-regeneration",
+        cmakeRegenerationResult, [cmakeRegenerationAction])
       raise newException(OSError,
         "CMake regeneration edge failed: " &
           providerCompileFailure(cmakeRegenerationResult))
@@ -15175,6 +15248,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           (if item.reason.len > 0: " reason=" & item.reason else: "") &
           providerCompileInvocationSummary())
       if providerCompileResult.hasFailedActions():
+        # The edge's action is built inside ``runProviderCompileEdge``, so
+        # the failure report carries its result without the declaration.
+        persistPreparationFailure("provider-compile", providerCompileResult,
+          newSeq[BuildAction]())
         raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
           providerArtifactPath))
       if not fileExists(extendedPath(providerArtifactPath)):
