@@ -230,10 +230,12 @@ suite "static reader: unreadable":
     check f.readerClass == rcUnreadable
     check f.hasIssue(ikMalformedRequirement)
 
-  test "an untranslatable requirement needs an override":
+  test "a requirement naming a version of more than three components reads":
+    # Needs-override before NPC-AREQ6's "any number of components"; read
+    # since (NPC-M15).
     let f = read("requires \"secp256k1 >= 0.6.0.3.1\"\n")
-    check f.readerClass == rcNeedsOverride
-    check f.hasIssue(ikUntranslatableRequirement)
+    check f.readerClass == rcPlain
+    check not f.hasIssue(ikUntranslatableRequirement)
 
 suite "package directories":
   test "findNimbleFile finds exactly one":

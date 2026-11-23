@@ -2509,6 +2509,7 @@ command	repro catalog publish
 flag	repro catalog publish	--check
 flag	repro catalog publish	--root
 command	repro catalog generate
+flag	repro catalog generate	--full-history
 flag	repro catalog generate	--generated-at
 flag	repro catalog generate	--root
 flag	repro catalog generate	--source-set

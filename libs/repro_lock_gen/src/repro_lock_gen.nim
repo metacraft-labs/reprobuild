@@ -87,6 +87,7 @@ import repro_build_engine
 import repro_hash
 import repro_lock
 import repro_solver
+import repro_solver/nimble_versions
 
 import repro_lock_gen/metadata_objects
 import repro_lock_gen/solve_path_set
@@ -1332,7 +1333,10 @@ proc holdCommittedPins*(req: var LockGenerationRequest;
   # Sorted so that, of several conflicts, the one reported does not depend on
   # the fold's arrival order.
   var order: seq[(string, int)] = @[]
-  for i in 0 ..< req.packages.len: order.add((req.packages[i].name, i))
+  var schemes = initTable[string, VersionScheme]()
+  for i in 0 ..< req.packages.len:
+    order.add((req.packages[i].name, i))
+    schemes[req.packages[i].name] = req.packages[i].versionScheme
   order.sort()
   for (_, i) in order:
     let decl = req.packages[i]
@@ -1343,7 +1347,13 @@ proc holdCommittedPins*(req: var LockGenerationRequest;
       let locked = pins.packages[dep.name]
       var satisfied = true
       try:
-        satisfied = satisfies(parseSemver(locked), parseSemverRange(dep.range))
+        if schemes.getOrDefault(dep.name, vsSemver) == vsNimble:
+          # A Nimble package's versions are ordered as Nimble orders them,
+          # with any number of components (NPC-AREQ6).
+          satisfied = admits(parseNimbleRange(dep.range),
+            parseNimbleVersion(locked))
+        else:
+          satisfied = satisfies(parseSemver(locked), parseSemverRange(dep.range))
       except ESemverParse:
         continue
       if not satisfied:

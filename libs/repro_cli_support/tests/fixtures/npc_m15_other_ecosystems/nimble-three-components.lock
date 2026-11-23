@@ -1,0 +1,10 @@
+schema = "reprobuild.solved-graph-lock.v3"
+
+[lock]
+platform = "amd64-linux"
+optimal = false
+inputs_digest = "fnv1a64:5ca309f82610f4b1"
+variants = []
+packages = [{ name = "app", version = "1.0.0", source = "app", selection = "selected" }, { name = "nimble:alpha", version = "1.0.0", source = "nimble:alpha", selection = "selected" }, { name = "nimble:beta", version = "0.3.1", source = "nimble:beta", selection = "selected" }]
+deps = [{ name = "nimble:alpha", coord_kind = "vcs", url = "https://example.invalid/nim/alpha", revision = "38ae371b09f665f58b9484ec67e8f489d9718240", integrity = "blake3:59383e87ea72eae10214eb9b6bbb2708ad56154dc4b738ef9e77d6d1f86760df", version = "1.0.0", visibility = "public", participation = "", depends = "", tags = "", catalog = "nimble-index" }, { name = "nimble:beta", coord_kind = "vcs", url = "https://example.invalid/nim/beta", revision = "028688eb4bf5b5eed6f943c32adc43e51d8108ef", integrity = "blake3:1e8b89139405318a03cca945f2a48891cad76a48ff8672c5eadf84380f4841e8", version = "0.3.1", visibility = "public", participation = "", depends = "", tags = "", catalog = "nimble-index" }, { name = "p1", self = "true", coord_kind = "vcs", url = "", revision = "", integrity = "blake3:c67de5ec6cf659c698f998b017d8a79da5912f7f169ce6ea37fea51511694200", version = "", visibility = "public", participation = "", depends = "", tags = "" }]
+catalog_imports = [{ record = "reprobuild.locked-catalog-import.v2", repo = "nimble-index", remote = "https://example.invalid/nim/nimble-index", kind = "nimble-index", ref = "main", revision = "deec8644f6e5fe6c91ca8326d08484f41304f7d4", interface_artifact = "08b3c972e1b55a63f948a7c95bf584372cb1d320aa8991fb25af5af2890779a8" }]

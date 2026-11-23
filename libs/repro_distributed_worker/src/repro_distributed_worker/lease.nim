@@ -895,13 +895,52 @@ when defined(posix):
       p.reaped = true
     p.status
 
+  proc parentLinks(): seq[(int, int)] =
+    ## The (pid, ppid) pair of every process in the process table.
+    ##
+    ## Linux: read from `/proc/<pid>/stat` (proc(5)). `/bin/ps` is not
+    ## there on every Linux host (NixOS has none), and a `ps` found on PATH
+    ## would be whatever the daemon's environment happens to name. The
+    ## second field, the command name, is in parentheses and may itself hold
+    ## spaces and `)`, so the fields after it are counted from the LAST `)`:
+    ## state, then ppid. A process that exits between the directory listing
+    ## and the read is skipped (it has no descendants left to find).
+    ##
+    ## Elsewhere (macOS, where the Seatbelt backend runs): `/bin/ps`, a fixed
+    ## system binary there, so no PATH lookup is involved. Returns nothing
+    ## when the table cannot be read.
+    result = newSeq[(int, int)]()
+    when defined(linux):
+      for kind, name in walkDir("/proc", relative = true):
+        if kind != pcDir or name.len == 0 or not name[0].isDigit: continue
+        var pid, ppid: int
+        try:
+          pid = parseInt(name)
+          let stat = readFile("/proc" / name / "stat")
+          let close = stat.rfind(')')
+          if close < 0: continue
+          let rest = stat.substr(close + 1).splitWhitespace
+          if rest.len < 2: continue
+          ppid = parseInt(rest[1])
+        except ValueError, IOError, OSError:
+          continue
+        result.add((pid, ppid))
+    else:
+      let (text, code) = uncontrolledExecCmdEx("/bin/ps -A -o pid= -o ppid=")
+      if code != 0: return
+      for line in text.splitLines:
+        let f = line.splitWhitespace
+        if f.len != 2: continue
+        try:
+          result.add((parseInt(f[0]), parseInt(f[1])))
+        except ValueError: discard
+
   proc descendantsOf*(root: Pid): seq[Pid] =
     ## Every live descendant of `root` (not `root` itself), found by walking
-    ## the parent links of the process table (`ps`, a fixed system binary).
-    ## This finds what a process group cannot: a descendant that called
+    ## the parent links of the process table (`parentLinks`). This finds
+    ## what a process group cannot: a descendant that called
     ## `setsid`/`setpgid` and so left the group.
     var children: Table[int, seq[int]]
-    let (text, code) = uncontrolledExecCmdEx("/bin/ps -A -o pid= -o ppid=")
     # `newSeq[Pid]()`, never `@[]`, for an empty `seq[Pid]` (here and in
     # `killProcessTree`). Under ORC, Nim (2.2.8 upstream and the dev shell's
     # fork alike) types an empty `@[]` through a cache that does not tell
@@ -912,13 +951,9 @@ when defined(posix):
     # assignment (`-Wincompatible-pointer-types` is an error), so this module
     # stops compiling in any binary that reaches these procs. `newSeq` is
     # instantiated with the element type written out and is not affected.
-    if code != 0: return newSeq[Pid]()
-    for line in text.splitLines:
-      let f = line.splitWhitespace
-      if f.len != 2: continue
-      try:
-        children.mgetOrPut(parseInt(f[1]), @[]).add(parseInt(f[0]))
-      except ValueError: discard
+    result = newSeq[Pid]()
+    for (pid, ppid) in parentLinks():
+      children.mgetOrPut(ppid, @[]).add(pid)
     var todo = @[int(root)]
     while todo.len > 0:
       let cur = todo.pop()
@@ -931,8 +966,9 @@ when defined(posix):
     ## descendant, including those that left the group with `setsid`.
     ##
     ## The descendants are listed BEFORE anything dies, because killing a
-    ## process reparents its children to launchd and the parent links the walk
-    ## follows are gone. They are SIGSTOPped as they are found (and the walk
+    ## process reparents its children (to launchd on macOS, to init or a
+    ## subreaper on Linux) and the parent links the walk follows are gone.
+    ## They are SIGSTOPped as they are found (and the walk
     ## repeated until nothing new appears) so none can fork its way out of the
     ## snapshot while it is taken; SIGKILL ends a stopped process.
     var victims = newSeq[Pid]()  # not `@[]`: see `descendantsOf`
