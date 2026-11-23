@@ -14,11 +14,12 @@
 ##
 ## - *pacnew*: ``repro-fx-up`` is upgraded to a version whose packaged file
 ##   changed: pacman keeps the add-on's copy and writes ``up.conf.pacnew``;
-##   the hook reports the vendor change, and the next plan lists it as
-##   actionable drift;
+##   the hook reports the vendor change, and the next plan reports it too
+##   (a note that never changes the plan's outcome: the ``.pacnew`` is
+##   pacman's normal state after a vendor update under a ``takeOver``);
 ## - *pacsave*: ``repro-fx-gone`` is removed: pacman moves the add-on's copy
 ##   to ``gone.conf.pacsave``; the hook reports it (and the ledger path
-##   gone), and the next plan lists it;
+##   gone), and the next plan reports it;
 ## - *install*: ``repro-fx-new`` ships ``new.conf``, installed with
 ##   ``--overwrite`` (pacman refuses an unowned file otherwise): the hook
 ##   reports the changed object and the package that now owns the path, and
@@ -106,9 +107,10 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
   of "alpm-hook-ignores-pacnew":
     Falsifier(
       required: @["pacnew: the hook names repro-fx-up and up.conf.pacnew",
-                  "pacnew: the next plan lists the .pacnew as drift",
+                  "pacnew: the next plan reports the .pacnew",
+                  "pacnew: the profile still applies, reporting the .pacnew",
                   "pacsave: the hook names repro-fx-gone and gone.conf.pacsave",
-                  "pacsave: the next plan lists the .pacsave as drift"],
+                  "pacsave: the next plan reports the .pacsave"],
       mayBeRed: @[],
       mustRunGreen: common & @[
         "hangs: the transaction finishes within the watchdog's bound plus 5 s",
@@ -181,9 +183,15 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              (UpConf & ".pacnew") in g.logLines(AlpmHookLog).join("\n") and
              (UpConf & ".pacnew") in g.journalOf(AlpmHookTag), said)
       let p = g.planProfile(repro, "gen1", profile(exe))
-      step("pacnew: the next plan lists the .pacnew as drift",
+      step("pacnew: the next plan reports the .pacnew",
            p.exitCode == 0 and ("repro-fx-up installed " & UpConf & ".pacnew") in p.stdout,
            "exit " & $p.exitCode & "\n" & p.stdout & p.stderr)
+      # A .pacnew beside a taken-over file is pacman's normal state after a
+      # vendor update (spec §4.3.1): reported, it must not fail the apply.
+      let a = g.applyProfile(repro, "gen1", profile(exe))
+      step("pacnew: the profile still applies, reporting the .pacnew",
+           a.exitCode == 0 and ("repro-fx-up installed " & UpConf & ".pacnew") in a.stdout,
+           "exit " & $a.exitCode & "\n" & a.stdout & a.stderr)
     # pacsave.
     block:
       let r = g.pacmanRemove("repro-fx-gone")
@@ -195,7 +203,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
              (GoneConf & ".pacsave") in g.logLines(AlpmHookLog).join("\n"),
            hookSaid(r.stdout))
       let p = g.planProfile(repro, "gen1", profile(exe))
-      step("pacsave: the next plan lists the .pacsave as drift",
+      step("pacsave: the next plan reports the .pacsave",
            ("repro-fx-gone was removed and pacman kept " & GoneConf & ".pacsave") in
              (p.stdout & p.stderr),
            "exit " & $p.exitCode & "\n" & p.stdout & p.stderr)

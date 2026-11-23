@@ -342,6 +342,13 @@ type
       ## The snapshot this switch took (``<config>#<number>
       ## (repro-addon=<key>)``); "" when none.
     snapshotNotes*: seq[string]
+    reportedNotes*: seq[string]
+      ## Reported by every plan and apply, never changing their outcome or
+      ## exit status (AR6): a ``.pacnew`` or ``.pacsave`` beside a ledger
+      ## path (spec §4.3.1, §7.8) -- pacman's normal state after a vendor
+      ## update under a ``takeOver``, resolved by the operator -- and an
+      ## Omarchy post-update hook the account changed (§4.3.2), which no
+      ## apply repairs. Drift would fail every later apply until resolved.
       ## What the switch did with the add-on's other snapshots: the ones
       ## the sweep or retention deleted, and an ``EAddOnSnapshotLeft`` line
       ## for each it could not delete (spec §7.2, §8.4).
@@ -4396,9 +4403,11 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     for why in newOwnerFindings(stillDeclared, driver):
       result.drift.add(why)
     # A `.pacnew` or `.pacsave` beside a ledger path (spec §4.3.1, §7.8;
-    # AR6): what the ALPM hook reported, every plan reports too.
+    # AR6): what the ALPM hook reported, every plan reports too -- as a
+    # note: it is pacman's normal state after a vendor update under a
+    # `takeOver`, and as drift it would fail every apply until resolved.
     for why in pacnewFindings(stillDeclared, driver):
-      result.drift.add(why)
+      result.reportedNotes.add(why)
   # The Omarchy post-update hook (spec §4.3.2; AR6): the account owns its
   # directory and can delete or replace the hook, which is drift every plan
   # reports (observed without following a link, owner-checked).
@@ -4406,9 +4415,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     if e.class == lcOmarchyHook:
       let d = observeDrift(e)
       if d.len > 0:
-        result.drift.add("the Omarchy post-update hook " & e.path & ": " & d &
-          "; the add-on does not rewrite it (the account's directory): " &
-          "put it back, or uninstall and bootstrap again")
+        result.reportedNotes.add("the Omarchy post-update hook " & e.path &
+          ": " & d & "; the add-on does not rewrite it (the account's " &
+          "directory): put its bytes back, or uninstall and bootstrap again")
   let newDriver: DriverFactory = proc(): CollisionDriver = driver
   var dropIns = initHashSet[string]()
   var userResources = reshape(user, dropIns)

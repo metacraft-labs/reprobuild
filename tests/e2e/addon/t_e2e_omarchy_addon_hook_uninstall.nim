@@ -14,7 +14,8 @@
 ## script for its binary, root-owned 0644, ``post-update.d`` (created when
 ## it was missing) the account's; the re-assert unit compares the hook with
 ## the ledger (``ok``, then ``drift`` naming it once the account replaces
-## it, and the next plan lists the same drift).
+## it), and the next plan reports it (a note: no apply repairs it, so it
+## must not fail every later apply).
 ##
 ## Negative controls (spec §4.3.2: the no-follow writer and the owner
 ## checks), each followed by the proof that nothing outside the home was
@@ -201,7 +202,7 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     step("a hook the account replaced: the re-assert unit reports drift naming it",
          rd.stdout.contains("drift") and hook in rd.stdout, rd.stdout & rd.stderr)
     let pd = g.planProfile(repro, "gen2", gen2Profile(account))
-    step("a hook the account replaced: the next plan lists the drift",
+    step("a hook the account replaced: the next plan reports it",
          ("the Omarchy post-update hook " & hook) in pd.stdout,
          "exit " & $pd.exitCode & "\n" & pd.stdout & pd.stderr)
     discard g.exec("rm -f " & hook & " && printf '%s' " & original &

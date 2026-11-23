@@ -987,6 +987,8 @@ proc renderAddonSections*(r: AddonApplyResult): string =
   if r.rootSnapshot.len > 0:
     result.add("root snapshot taken: " & r.rootSnapshot & "\n")
   for n in r.snapshotNotes: result.add("root snapshots: " & n & "\n")
+  # Reported, never acted on and never changing the outcome (AR6).
+  for n in r.reportedNotes: result.add("reported: " & n & "\n")
   # The network class's report and what its guard did (spec §4.5, §8.5).
   for l in r.networkPlan: result.add(l & "\n")
   for n in r.guardNotes: result.add("network guard: " & n & "\n")
