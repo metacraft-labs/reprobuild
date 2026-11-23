@@ -15,7 +15,8 @@
 ## Falsifying builds (``scripts/run_addon_unit_mutation.sh``):
 ## ``-d:reproAddonMutation=agent-may-weaken-floor`` turns every weakening
 ## case red; ``agent-may-change-package-dropins`` turns the package
-## drop-in cases red.
+## drop-in cases red; ``agent-take-over-reads-stored-bytes`` turns the
+## bootstrapped-host take-over case red.
 ##
 ## No mocks. The profiles are parsed by the production parsers the add-on
 ## plan uses -- the stored generation by ``parseStoredUserProfile``, the
@@ -297,6 +298,48 @@ suite "an agent apply cannot weaken the floor":
     check r.floorWeakened.len == 1
     check agentApplyRefusal(r, migration = true) == ""
     check agentApplyRefusal(r).len > 0
+
+  test "a legacy agent's take-over of a bootstrapped host is not refused":
+    # The take-over happens on a bootstrapped host. Bootstrap stores
+    # generation 0 by applying the empty user profile, so the host HAS a
+    # stored user profile -- the empty one, stored as a lone newline -- but
+    # no add-on user generation of its own: the take-over is exempt from
+    # the weakening half. Over an operator's generation that declares
+    # units it is not. The stored profile is written and read back from a
+    # real state directory, as ``runAddonApply`` reads it.
+    let state = getTempDir() / ("repro-addon-takeover-" & $getCurrentProcessId())
+    removeDir(state)
+    createDir(state)
+    defer: removeDir(state)
+    let target = unitStanza("c.service", "ExecStart=" & Prefix & "/bin/c\n",
+                            waived("installed by the legacy agent"))
+    proc takeOver(stored: string; migratedFrom = "66ac8b48"): string =
+      ## The agent's refusal of ``target`` over the stored user profile
+      ## ``stored`` ("" for no ``user.profile`` at all).
+      if stored.len > 0:
+        createDir(parentDir(userProfilePath(state)))
+        writeFile(userProfilePath(state), stored)
+      elif fileExists(userProfilePath(state)):
+        removeFile(userProfilePath(state))
+      let text = if fileExists(userProfilePath(state)):
+                   readFile(userProfilePath(state)) else: ""
+      let r = planOf(text, target)
+      check r.floorWeakened ==
+        @["c.service (whole floor waived on a new unit; runs as root)"]
+      agentApplyRefusal(r, migration =
+        isLegacyAgentTakeOver(migratedFrom, text, state))
+    let bootstrapped = storedAs("")
+    check bootstrapped == "\n"
+    check takeOver(bootstrapped) == ""
+    check takeOver("") == ""
+    # Not a take-over: the same generation is the agent's ordinary apply.
+    check "whole floor waived on a new unit" in
+      takeOver(bootstrapped, migratedFrom = "")
+    # Over an operator's generation with a unit, the take-over is judged
+    # against it.
+    let operator = storedAs(Accounts & unitStanza("a.service",
+      "User=svc\nExecStart=" & Prefix & "/bin/a\n"))
+    check "whole floor waived on a new unit" in takeOver(operator)
 
   test "what does not weaken confinement is not refused":
     # The same profile again; a unit installed before the floor (stored

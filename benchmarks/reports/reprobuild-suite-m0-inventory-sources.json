@@ -9857,7 +9857,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_agent_cannot_weaken_the_floor.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 14,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
