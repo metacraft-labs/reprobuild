@@ -49369,7 +49369,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

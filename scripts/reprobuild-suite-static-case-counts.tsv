@@ -2187,7 +2187,7 @@ tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
 tests/integration/t_git_answer_probes_read_stdout_not_warnings.nim	nim	4
 tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim	nim	10
 tests/integration/t_go_convention_embeds_and_rekeys_on_observed_reads.nim	nim	5
-tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim	nim	3
+tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim	nim	4
 tests/integration/t_graph_helper_image_loads_no_openssl.nim	nim	4
 tests/integration/t_hcr_native_library_prerequisite.nim	nim	6
 tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim	nim	7
