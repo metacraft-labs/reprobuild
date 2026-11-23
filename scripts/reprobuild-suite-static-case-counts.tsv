@@ -1589,6 +1589,7 @@ tests/e2e/dev-env/t_e2e_repro_test_run_edges_get_the_dev_env.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
+tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim	nim	2
 tests/e2e/dev-env/t_e2e_shell_hook_prompt_key_sees_flake_inputs.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_templates.nim	nim	10

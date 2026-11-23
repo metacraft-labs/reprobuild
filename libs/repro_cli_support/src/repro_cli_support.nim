@@ -19189,8 +19189,10 @@ proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
     result = "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
     result.add("set -gx __REPRO_WARNED \"" & path.replace("\"", "\\\"") & "\"\n")
   of skNushell:
-    result = "print -e \"" & msg.replace("\"", "\\\"") & "\"\n"
-    result.add("$env.__REPRO_WARNED = \"" & path.replace("\"", "\\\"") & "\"\n")
+    # NUON operation list, like every nushell activation; see formatNushell.
+    result = nuonList(@[
+      nuonRecord({"op": "warn", "message": msg}),
+      nuonRecord({"op": "set", "name": "__REPRO_WARNED", "value": path})])
   of skPwsh:
     result = "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
     result.add("$env:__REPRO_WARNED = '" & path.replace("'", "''") & "'\n")
@@ -19199,8 +19201,18 @@ proc emitWarnedResetScript(shell: ShellKind): string =
   case shell
   of skBash, skZsh: "unset __REPRO_WARNED\n"
   of skFish: "set -e __REPRO_WARNED\n"
-  of skNushell: "hide-env __REPRO_WARNED\n"
+  of skNushell: ""  # nushell's reset is an operation; see activationScriptFor
   of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+
+proc activationScriptFor(shell: ShellKind; plan: ExportPlan): string =
+  ## The bytes ``dev-env export`` prints for ``plan`` and the rollback
+  ## manifest seals: the warned-marker reset, then the plan. Nushell's form
+  ## is one data list, so its reset is an operation inside that list rather
+  ## than a prefix that would make two lists.
+  if shell == skNushell:
+    return formatExportPlan(
+      @[ExportOp(kind: opUnset, unsetName: "__REPRO_WARNED")] & plan, shell)
+  emitWarnedResetScript(shell) & formatExportPlan(plan, shell)
 
 proc runReproAllowCommand(directory: string): int =
   ## ``repro allow [<directory>]``: trust the directory (the current one when
@@ -19485,8 +19497,7 @@ proc runDevEnvExportCommand(conf: ReproCommandLineDevEnvExport;
   # next cd-out.
   plan.appendReproActiveManifestMarker(manifestPath)
   plan.appendReproAppliedMarker(fingerprint)
-  let activationScript =
-    emitWarnedResetScript(parsed.shell) & formatExportPlan(plan, parsed.shell)
+  let activationScript = activationScriptFor(parsed.shell, plan)
 
   # M75 — write the rollback manifest alongside the RBDE artifact.
   let preEnv =
@@ -19591,8 +19602,7 @@ proc runDevEnvDeactivateCommand(conf: ReproCommandLineDevEnvDeactivate):
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
   let rederivedScript =
-    emitWarnedResetScript(manifest.activationShell) &
-    formatExportPlan(rederivedPlan, manifest.activationShell)
+    activationScriptFor(manifest.activationShell, rederivedPlan)
   let rederivedHash = computeActivationScriptHash(rederivedScript)
   if rederivedHash != manifest.activationScriptHash:
     stderr.writeLine("repro dev-env deactivate: tamper detected — " &
