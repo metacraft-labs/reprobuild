@@ -13705,6 +13705,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_resources_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_resources/tests/t_service_registry_writes_are_concurrency_safe.nim",
+    binary: "build/test-bin/t_service_registry_writes_are_concurrency_safe",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim",
     binary: "build/test-bin/t_removing_the_pin_makes_the_version_collectable",
     defines: @[],

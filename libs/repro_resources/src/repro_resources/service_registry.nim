@@ -1810,58 +1810,71 @@ proc reconcileServiceRegistrations*(
       "parallel by construction (`contributionMemberAttribution` " &
       "builds them together), so a length mismatch means they came " &
       "from different folds and the attribution would be wrong.")
-  let existing = readServiceRegistrations(storeRoot, key)
-  var kept: seq[ServiceRegistration] = @[]
-  var outcomes: seq[tuple[member: string;
-                          outcome: ServiceRegistrationOutcome]] = @[]
-  for i in 0 ..< members.len:
-    var found = false
-    for reg in existing.registrations:
-      if reg.member != members[i] or reg.registrar != registrar:
-        continue
-      kept.add(reg)
-      outcomes.add((member: members[i], outcome: sroReused))
-      found = true
-      break
-    if found:
-      continue
-    let minted = mint(members[i], contributors[i])
-    if minted.len == 0:
-      raise newException(ServiceRegistryError,
-        "registering `" & members[i] & "` in instance `" &
-        serviceInstanceAddress(key) & "` produced an EMPTY identifier. " &
-        "An empty minted id is not an identifier; it is a missing one " &
-        "wearing the shape of one, and it would reach a consuming " &
-        "service's argv as an empty argument.")
-    kept.add(ServiceRegistration(
-      member: members[i],
-      contributor: contributors[i],
-      mintedId: minted,
-      mintedAtUnix: now.toUnix(),
-      registrar: registrar,
-      provenance: provenance))
-    outcomes.add((member: members[i], outcome: sroMinted))
-  for reg in existing.registrations:
-    var stillAsked = false
+  # UNDER THE RECORD LOCK, the read through the write
+  # (Ephemeral-State-Leases §4.6). Another owner converge of this instance
+  # -- or `reconcileServiceInstanceAttributes` in it -- writes the same
+  # record, and without the lock the last rename wins: one erases the
+  # other's rows, and each calls `mint` for members the other already
+  # registered. `mint` therefore runs inside the lock, and so a minter
+  # MUST NOT call an issuer or a provider, and must not touch this store:
+  # `flock` on a second descriptor blocks, so re-taking this lock would
+  # deadlock the process. The CLI's minters qualify -- a lookup of answers
+  # the external registrar gave before this call, or a digest -- so the
+  # lock is held for milliseconds.
+  let store = openStateStore(storeRoot)
+  withStateRecordLock(store, serviceRegistrationsAddress(key)):
+    let existing = readServiceRegistrations(storeRoot, key)
+    var kept: seq[ServiceRegistration] = @[]
+    var outcomes: seq[tuple[member: string;
+                            outcome: ServiceRegistrationOutcome]] = @[]
     for i in 0 ..< members.len:
-      if members[i] == reg.member:
-        stillAsked = true
+      var found = false
+      for reg in existing.registrations:
+        if reg.member != members[i] or reg.registrar != registrar:
+          continue
+        kept.add(reg)
+        outcomes.add((member: members[i], outcome: sroReused))
+        found = true
         break
-    if not stillAsked:
-      outcomes.add((member: reg.member, outcome: sroWithdrawn))
-  result.set = ServiceRegistrationSet(
-    address: serviceRegistrationsAddress(key), registrations: kept,
-    # §7.3's attribute rows are CARRIED FORWARD, never rewritten here.
-    # This proc's whole write is `result.set`, so a set built without
-    # them would ERASE every instance attribute on every converge --
-    # the silent drop, inside the fix for one. The attributes are
-    # `reconcileServiceInstanceAttributes`' to decide, and the two procs
-    # are separate precisely so that neither can quietly clear the
-    # other's rows: this one cannot touch attributes, and that one
-    # cannot touch registrations.
-    attributes: existing.attributes)
-  result.outcomes = outcomes
-  writeServiceRegistrations(storeRoot, key, result.set, now)
+      if found:
+        continue
+      let minted = mint(members[i], contributors[i])
+      if minted.len == 0:
+        raise newException(ServiceRegistryError,
+          "registering `" & members[i] & "` in instance `" &
+          serviceInstanceAddress(key) & "` produced an EMPTY identifier. " &
+          "An empty minted id is not an identifier; it is a missing one " &
+          "wearing the shape of one, and it would reach a consuming " &
+          "service's argv as an empty argument.")
+      kept.add(ServiceRegistration(
+        member: members[i],
+        contributor: contributors[i],
+        mintedId: minted,
+        mintedAtUnix: now.toUnix(),
+        registrar: registrar,
+        provenance: provenance))
+      outcomes.add((member: members[i], outcome: sroMinted))
+    for reg in existing.registrations:
+      var stillAsked = false
+      for i in 0 ..< members.len:
+        if members[i] == reg.member:
+          stillAsked = true
+          break
+      if not stillAsked:
+        outcomes.add((member: reg.member, outcome: sroWithdrawn))
+    result.set = ServiceRegistrationSet(
+      address: serviceRegistrationsAddress(key), registrations: kept,
+      # §7.3's attribute rows are CARRIED FORWARD, never rewritten here.
+      # This proc's whole write is `result.set`, so a set built without
+      # them would ERASE every instance attribute on every converge --
+      # the silent drop, inside the fix for one. The attributes are
+      # `reconcileServiceInstanceAttributes`' to decide, and the two procs
+      # are separate precisely so that neither can quietly clear the
+      # other's rows: this one cannot touch attributes, and that one
+      # cannot touch registrations.
+      attributes: existing.attributes)
+    result.outcomes = outcomes
+    writeServiceRegistrations(storeRoot, key, result.set, now)
 
 proc reconcileServiceInstanceAttributes*(
     storeRoot: string;
@@ -1938,15 +1951,20 @@ proc reconcileServiceInstanceAttributes*(
     rows.add(ServiceInstanceAttribute(
       name: attr.name, value: attr.value, registrar: registrar,
       provenance: provenance, recordedAtUnix: now.toUnix()))
-  let existing = readServiceRegistrations(storeRoot, key)
-  result = ServiceRegistrationSet(
-    address: serviceRegistrationsAddress(key),
-    # The REGISTRATIONS are carried forward untouched, the mirror image
-    # of `reconcileServiceRegistrations` carrying the attributes
-    # forward. Neither proc may clear the other's rows.
-    registrations: existing.registrations,
-    attributes: rows)
-  writeServiceRegistrations(storeRoot, key, result, now)
+  # Under the record lock, for `reconcileServiceRegistrations`' reason:
+  # carrying its rows forward is only sound if it cannot write between
+  # this read and this write.
+  let store = openStateStore(storeRoot)
+  withStateRecordLock(store, serviceRegistrationsAddress(key)):
+    let existing = readServiceRegistrations(storeRoot, key)
+    result = ServiceRegistrationSet(
+      address: serviceRegistrationsAddress(key),
+      # The REGISTRATIONS are carried forward untouched, the mirror image
+      # of `reconcileServiceRegistrations` carrying the attributes
+      # forward. Neither proc may clear the other's rows.
+      registrations: existing.registrations,
+      attributes: rows)
+    writeServiceRegistrations(storeRoot, key, result, now)
 
 # ---------------------------------------------------------------------------
 # Shared-Development-Services D-SS11 (§4.6) — THE CROSS-PROCESS
@@ -2166,19 +2184,28 @@ proc depositServiceContributions*(storeRoot: string;
         "`. A deposit replaces exactly one contributor's rows, so a " &
         "mixed batch would either write rows this deposit cannot " &
         "replace later or silently re-attribute them.")
-  var kept: seq[ServiceContribution] = @[]
-  let existing = readServiceContributions(storeRoot, key)
-  for c in existing.contributions:
-    if c.contributor == contributor:
-      inc result.replaced
-    else:
+  #
+  # SERIALISED PER INSTANCE. Every consumer deposits from its own
+  # process, so two consumers converging at once are two read-modify-
+  # writes of this one record. Under the record lock
+  # (Ephemeral-State-Leases §4.6) they serialise; without it the last
+  # rename wins, the other consumer's rows are dropped, and the owner's
+  # next reconcile withdraws its registrations.
+  let store = openStateStore(storeRoot)
+  withStateRecordLock(store, serviceContributionsAddress(key)):
+    var kept: seq[ServiceContribution] = @[]
+    let existing = readServiceContributions(storeRoot, key)
+    for c in existing.contributions:
+      if c.contributor == contributor:
+        inc result.replaced
+      else:
+        kept.add(c)
+    for c in contributions:
       kept.add(c)
-  for c in contributions:
-    kept.add(c)
-    inc result.added
-  result.set = ServiceContributionSet(
-    address: serviceContributionsAddress(key), contributions: kept)
-  writeServiceContributions(storeRoot, key, result.set, now)
+      inc result.added
+    result.set = ServiceContributionSet(
+      address: serviceContributionsAddress(key), contributions: kept)
+    writeServiceContributions(storeRoot, key, result.set, now)
 
 proc contributionPrecedenceFromWord(word: string;
                                    c: ServiceContribution):

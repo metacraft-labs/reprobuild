@@ -1149,6 +1149,7 @@ libs/repro_resources/tests/t_resource_provider_lane.nim	nim	7
 libs/repro_resources/tests/t_rp4_resource_type_macro.nim	nim	5
 libs/repro_resources/tests/t_rp5b_resource_protocol_marshalling.nim	nim	4
 libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim	nim	18
+libs/repro_resources/tests/t_service_registry_writes_are_concurrency_safe.nim	nim	3
 libs/repro_selfhost/tests/t_removing_the_pin_makes_the_version_collectable.nim	nim	7
 libs/repro_selfhost/tests/t_self_store_root_matches_the_store.nim	nim	7
 libs/repro_selfhost/tests/t_the_bootstrap_hands_over_only_to_a_different_pin.nim	nim	10

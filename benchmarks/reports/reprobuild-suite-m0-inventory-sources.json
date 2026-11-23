@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3211,
+    "nimTestBinaries": 3212,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 844,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3263
+    "testEntries": 3264
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1844,7 +1844,7 @@
       "integration": 1804,
       "platform/destructive": 203,
       "pure unit": 844,
-      "unclassified": 383
+      "unclassified": 384
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2064,9 +2064,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3211,
+    "nimTestBinaryCount": 3212,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3263
+    "testEntryCount": 3264
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30597,6 +30597,25 @@
       "source": "libs/repro_resources/tests/t_rss_ssz_envelope_roundtrip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_service_registry_writes_are_concurrency_safe",
+      "class": "unclassified",
+      "classificationReason": "re-enters its own executable",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl",
+        "repro_resources"
+      ],
+      "owner": "libs/repro_resources",
+      "requiresReproBinary": false,
+      "source": "libs/repro_resources/tests/t_service_registry_writes_are_concurrency_safe.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
