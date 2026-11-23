@@ -66908,7 +66908,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/t_strip_edge_selects_the_strip_package.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
