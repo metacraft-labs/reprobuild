@@ -10,9 +10,22 @@
 ## the safety property (`tier2` 0/24 crashes, no third value) intact in every
 ## run (reprobuild-pm `issues/2026-09-26-hcr-concurrent-patch-gate-verdict-
 ## depends-on-host-load.md`). Loosening the 50% bound would make the controls
-## mean less, so the bound stays; instead the gate states the host condition it
+## mean less, so the bound stays; instead the gate states the condition it
 ## was calibrated under, measures it before every run, and reports a run
 ## measured outside it as NOT EVIDENCE rather than as a failure.
+##
+## WHAT THE CONDITION IS, AND WHERE ITS BOUND LIVES. `m4_conditions` defines
+## the reading (contention by others on the CPU set the fixture may use, per
+## CPU actually available to it, over a short window before each run) and
+## loads the bound from the committed calibration record. The previous
+## condition, host `/proc/loadavg` over `countProcessors()` <= 2.0, was retired
+## because no host in the fleet could meet it and the gate's own threads moved
+## it (reprobuild-pm `issues/2026-11-22-no-ci-host-meets-the-hlx-m4-gates-
+## calibrated-load-conditions.md`). Until a dedicated-host calibration of the
+## new quantity is committed and approved, NO run is inside the conditions:
+## the gate still asserts everything unconditional, still records every
+## reading, and withholds the calibrated remainder as "condition not yet
+## calibrated on a dedicated host".
 ##
 ## WHAT IS NEVER CONDITIONAL. Anything that would be a real regression however
 ## loaded the host: a `tier2` crash, stray exit or third value; a writable and
@@ -26,25 +39,18 @@
 ## timeout is a defined outcome) and the HLX-M4 gate's "Conditions" note in
 ## `HCR-Linux-ELF-Provider.milestones.org`.
 
-import std/[json, strutils]
+import std/[json, math, strutils]
+
+import m4_conditions
+export m4_conditions
 
 const
-  ## The host condition the negative-control thresholds were calibrated under:
-  ## the 1-minute load average divided by the CPU count, read immediately
-  ## BEFORE each fixture process starts. Read before, not during, so the
-  ## reading cannot depend on how the run turned out — a crashing run and a
-  ## surviving one are classified by the same number, and excluding runs
-  ## cannot bias the crash rate of what remains.
-  ##
-  ## The bound is the envelope MEASURED to hold, not an extrapolation: every
-  ## arm met its thresholds at up to this ratio (32-CPU x86_64 host, kernel
-  ## 6.18.55, 2026-10-15; see the milestone's Conditions note), and the
-  ## failures in the issue above were all at 4.7-6.7. Raise it only with a
-  ## measurement at the new ratio.
-  MaxLoadPerCpu* = 2.0
-  ## How many fixture processes an arm may start while collecting its runs
-  ## inside the conditions. A host that stays outside them for this many
-  ## attempts produces "conditions not met", not a failure.
+  ## How many fixture processes an arm may start, per run it needs, while
+  ## collecting its runs inside the conditions. A host that stays outside them
+  ## for this many attempts produces "conditions not met", not a failure. With
+  ## no approved calibration record no run can be inside them, so an arm then
+  ## starts exactly the runs it needs (retrying could not help) -- enough for
+  ## the unconditional checks and for the readings to be recorded.
   AttemptsPerRun* = 3
   ## The size of the verdict's check list, and how many of its checks are
   ## asserted whatever the conditions. Pinned so the gate can assert it is
@@ -63,7 +69,7 @@ type
     faultSignal*: int
     stderrText*: string
     payload*: JsonNode      ## nil when the process printed no result
-    loadPerCpu*: float      ## host load / CPUs, read before the process started
+    condition*: ConditionReading ## read before the process started
 
   ArmTally* = object
     runs*, crashes*, anomalies*, publications*, adjust*, nested*: int
@@ -80,8 +86,19 @@ type
     mode*: string
     all*: ArmTally          ## every run the arm started
     measured*: ArmTally     ## only the runs started inside the conditions
-    maxLoadPerCpu*: float   ## the highest reading among the runs started
-    minLoadPerCpu*: float   ## the lowest reading among the runs started
+    maxReading*: float      ## the highest condition reading among the runs
+    minReading*: float      ## the lowest condition reading among the runs
+    minCpus*, maxCpus*: float ## the available-CPU counts the readings used
+    cpuSource*: string      ## where the last run's CPU count came from
+    readings*: seq[RunReading] ## every run's reading, in order, for evidence
+
+  RunReading* = object
+    ## One run's condition reading beside its outcome, so the evidence file
+    ## can be bucketed by reading after the fact.
+    condition*: ConditionReading
+    exitCode*: int
+    crashed*: bool
+    counted*: bool          ## inside the conditions
 
   Check* = object
     message*: string
@@ -92,9 +109,6 @@ type
     checks*: seq[Check]
     conditionsMet*: bool
     conditionsReason*: string ## why not, when not; names the arm and readings
-
-proc inConditions*(loadPerCpu: float): bool =
-  loadPerCpu <= MaxLoadPerCpu
 
 proc intField(payload: JsonNode; key: string): int =
   ## A missing key reads as 0. Every key read here is printed unconditionally
@@ -144,38 +158,53 @@ proc add*(tally: var ArmTally; run: ArmRun; index: int) =
     if p.hasKey("lastTextReplaced") and p["lastTextReplaced"].getBool():
       tally.textReplacedRuns += 1
 
-proc add*(arm: var ArmResult; run: ArmRun) =
+proc noteReading(arm: var ArmResult; condition: ConditionReading;
+                 first: bool) =
+  # `first` rather than a sentinel: a default-constructed ArmResult has
+  # minReading 0.0, which would read as "an attempt started on an idle CPU
+  # set" for every arm that never started one.
+  let value = condition.value
+  let cpus = condition.budget.cpus
+  if first or value > arm.maxReading: arm.maxReading = value
+  if first or value < arm.minReading: arm.minReading = value
+  if first or cpus > arm.maxCpus: arm.maxCpus = cpus
+  if first or cpus < arm.minCpus: arm.minCpus = cpus
+  arm.cpuSource = condition.budget.source
+
+proc add*(arm: var ArmResult; run: ArmRun; calibration: Calibration) =
   let index = arm.all.runs
   arm.all.add(run, index)
-  if run.loadPerCpu > arm.maxLoadPerCpu:
-    arm.maxLoadPerCpu = run.loadPerCpu
-  # `index == 0` rather than a sentinel: a default-constructed ArmResult has
-  # minLoadPerCpu 0.0, which would read as "an attempt started on an idle
-  # host" for every arm that never started one.
-  if index == 0 or run.loadPerCpu < arm.minLoadPerCpu:
-    arm.minLoadPerCpu = run.loadPerCpu
-  if inConditions(run.loadPerCpu):
+  arm.noteReading(run.condition, index == 0)
+  let counted = calibration.inConditions(run.condition.value)
+  arm.readings.add(RunReading(condition: run.condition,
+    exitCode: run.exitCode, crashed: run.crashed, counted: counted))
+  if counted:
     arm.measured.add(run, index)
 
 proc complete*(arm: ArmResult; runs: int): bool =
   arm.measured.runs >= runs
 
-proc collectArm*(mode: string; runs: int;
+proc attemptCap*(calibration: Calibration; runs: int): int =
+  ## How many processes an arm (or, with `runs = 1`, the sample arm) may
+  ## start. See `AttemptsPerRun`.
+  if calibration.calibrated: runs * AttemptsPerRun else: runs
+
+proc collectArm*(mode: string; runs: int; calibration: Calibration;
                  runOnce: proc (): ArmRun {.closure.}): ArmResult =
   ## Start fixture processes until `runs` of them were started inside the
-  ## conditions, or `runs * AttemptsPerRun` were started in all. Runs outside
-  ## the conditions are KEPT in `all`, so their unconditional outcomes still
+  ## conditions, or `attemptCap` were started in all. Runs outside the
+  ## conditions are KEPT in `all`, so their unconditional outcomes still
   ## count.
   result.mode = mode
-  while result.measured.runs < runs and
-      result.all.runs < runs * AttemptsPerRun:
-    result.add(runOnce())
+  let cap = calibration.attemptCap(runs)
+  while result.measured.runs < runs and result.all.runs < cap:
+    result.add(runOnce(), calibration)
 
 type
   SampleRun* = object
     exitCode*: int
     payload*: JsonNode
-    loadPerCpu*: float
+    condition*: ConditionReading ## read before the process started
 
 proc sampleChecks*(attempts: openArray[SampleRun];
                    rounds, slots, workers: int): seq[Check] =
@@ -318,32 +347,56 @@ proc armChecks*(tier2, tier1, noAdjust, torn: ArmResult;
   add "the nested-signal-frame adjustment engaged at least once",
     tier2.all.nested > 0
 
-proc conditionsReason(arms: openArray[ArmResult]; runs: int;
-                      samples: openArray[SampleRun]): string =
+proc fmt2(x: float): string =
+  if x.classify == fcInf: "unreadable" else: formatFloat(x, ffDecimal, 2)
+
+proc cpusText(lo, hi: float; source: string): string =
+  ## "8.00 CPUs from affinity 8-15 (8); ..." or "4.00-8.00 CPUs from ...".
+  let count = if lo == hi: fmt2(lo) else: fmt2(lo) & "-" & fmt2(hi)
+  count & " CPUs from " & source
+
+proc conditionsReason*(arms: openArray[ArmResult]; runs: int;
+                       samples: openArray[SampleRun];
+                       calibration: Calibration): string =
+  ## Why the calibrated checks were not evaluated, or "" when they were. Every
+  ## arm that fell short names its lowest and highest reading and the CPU
+  ## count they were divided by; the sample arm names its lowest and its LAST
+  ## (the attempt the conditional sample checks judge). Without the lowest a
+  ## reason cannot tell a CPU set that was busy throughout from one that was
+  ## pushed over the line now and then.
   var parts: seq[string]
+  let bound =
+    if calibration.calibrated: " at reading <= " & fmt2(calibration.maxReading)
+    else: ""
+  if not calibration.calibrated:
+    parts.add(calibration.reason)
   if samples.len == 0:
     parts.add("sample: never started")
-  elif not inConditions(samples[^1].loadPerCpu):
-    var lowest = samples[0].loadPerCpu
+  elif not calibration.inConditions(samples[^1].condition.value):
+    var lowest = samples[0].condition.value
+    var lo = samples[0].condition.budget.cpus
+    var hi = lo
     for attempt in samples:
-      if attempt.loadPerCpu < lowest: lowest = attempt.loadPerCpu
-    parts.add("sample: no run started at load/CPU <= " & $MaxLoadPerCpu &
-      " in " & $samples.len & " attempts (lowest " &
-      formatFloat(lowest, ffDecimal, 2) & ", last " &
-      formatFloat(samples[^1].loadPerCpu, ffDecimal, 2) & ")")
+      lowest = min(lowest, attempt.condition.value)
+      lo = min(lo, attempt.condition.budget.cpus)
+      hi = max(hi, attempt.condition.budget.cpus)
+    parts.add("sample: no run started" & bound & " in " & $samples.len &
+      " attempts (lowest " & fmt2(lowest) & ", last " &
+      fmt2(samples[^1].condition.value) & "; " &
+      cpusText(lo, hi, samples[^1].condition.budget.source) & ")")
   for arm in arms:
     if not arm.complete(runs):
       parts.add(arm.mode & ": " & $arm.measured.runs & "/" & $runs &
-        " runs started at load/CPU <= " & $MaxLoadPerCpu & " in " &
-        $arm.all.runs & " attempts (lowest " &
-        formatFloat(arm.minLoadPerCpu, ffDecimal, 2) & ", highest " &
-        formatFloat(arm.maxLoadPerCpu, ffDecimal, 2) & ")")
+        " runs started" & bound & " in " & $arm.all.runs &
+        " attempts (lowest " & fmt2(arm.minReading) & ", highest " &
+        fmt2(arm.maxReading) & "; " &
+        cpusText(arm.minCpus, arm.maxCpus, arm.cpuSource) & ")")
   parts.join("; ")
 
 proc gateVerdict*(samples: openArray[SampleRun];
                   tier2, tier1, noAdjust, torn: ArmResult;
                   runs, publications, sampleRounds, slots,
-                  workers: int): Verdict =
+                  workers: int; calibration: Calibration): Verdict =
   ## Every check, conditional or not, plus whether the conditions held. The
   ## caller asserts the unconditional checks always and the conditional ones
   ## only when `conditionsMet`; otherwise it reports the case as not having
@@ -353,15 +406,15 @@ proc gateVerdict*(samples: openArray[SampleRun];
   result.checks = sampleChecks(samples, sampleRounds, slots, workers) &
     armChecks(tier2, tier1, noAdjust, torn, runs, publications)
   result.conditionsReason = conditionsReason(
-    [tier2, tier1, noAdjust, torn], runs, samples)
+    [tier2, tier1, noAdjust, torn], runs, samples, calibration)
   result.conditionsMet = result.conditionsReason.len == 0
 
 proc gateVerdict*(sample: SampleRun; tier2, tier1, noAdjust, torn: ArmResult;
-                  runs, publications, sampleRounds, slots,
-                  workers: int): Verdict =
+                  runs, publications, sampleRounds, slots, workers: int;
+                  calibration: Calibration): Verdict =
   ## The verdict for a gate that started the `sample` arm once.
   gateVerdict([sample], tier2, tier1, noAdjust, torn, runs, publications,
-    sampleRounds, slots, workers)
+    sampleRounds, slots, workers, calibration)
 
 proc failures*(verdict: Verdict; includeConditional: bool): seq[string] =
   for check in verdict.checks:

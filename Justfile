@@ -1669,6 +1669,21 @@ hcr_lane_macos:
 hcr_lane_windows:
     bash ./scripts/run_hcr_lane.sh --platform windows-x86_64 --verify-unsupported
 
+# HLX-M4: measure the concurrency gate's run-condition envelope on THIS host
+# and propose a calibration record (never adopts one). Only meaningful on a
+# dedicated host -- it refuses otherwise. Options and the adoption procedure
+# are in the header of tests/e2e/hcr-linux-threads/m4_calibrate.nim; CI runs
+# it through .github/workflows/hcr-m4-calibration.yml. Positional arguments,
+# so a `--phase='cmd:<shell command>'` keeps its spaces.
+[positional-arguments]
+hcr_m4_calibrate *args:
+    mkdir -p build/test-bin build/nimcache
+    nim c --threads:on --hints:off \
+        --nimcache:build/nimcache/hcr_m4_calibrate \
+        --out:build/test-bin/hcr_m4_calibrate \
+        tests/e2e/hcr-linux-threads/m4_calibrate.nim
+    ./build/test-bin/hcr_m4_calibrate "$@"
+
 # The two gates that PROVE the lanes. The first is the static one -- three
 # lanes exist and each invokes the family. The second is the dynamic one -- a
 # zero-case result, an undeclared skip and a below-floor count each redden a

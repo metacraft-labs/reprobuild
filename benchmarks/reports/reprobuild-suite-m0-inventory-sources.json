@@ -3245,7 +3245,7 @@
             "repoRoot",
             "targetBin"
           ],
-          "line": 280,
+          "line": 321,
           "path": "tests/e2e/hcr-linux-threads/t_e2e_hcr_linux_concurrent_patch_no_torn_instruction.nim",
           "patterns": [
             "gcc"
@@ -32532,8 +32532,8 @@
       "owner": "tests/e2e",
       "requiresReproBinary": false,
       "source": "tests/e2e/hcr-linux-threads/t_integration_hcr_linux_concurrent_patch_gate_conditions.nim",
-      "sourceSuiteCount": 4,
-      "staticCaseCount": 19,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 38,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

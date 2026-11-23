@@ -39,6 +39,17 @@ const
   ## a die-before-output wearing a crash's label is indistinguishable from a
   ## crash unless the code is asserted.
   CrashExitCode* = 70
+  ## The concurrency gate's fixture shape: 12 hot workers, 8 publications per
+  ## process, 2 signal-storm threads, 200 sampling rounds, 24 runs per arm.
+  ## Shared with the calibration driver (`m4_calibrate.nim`) so a calibration
+  ## is measured on exactly the processes the gate starts; a bound calibrated
+  ## on a different shape would not describe the gate.
+  M4Workers* = 12
+  M4Publications* = 8
+  M4ChaosThreads* = 2
+  M4SampleRounds* = 200
+  ## Runs per arm the gate's calibrated checks are judged over.
+  M4RunsPerArm* = 24
 
 type
   FixtureRun* = object
@@ -176,25 +187,6 @@ proc hex*(bytes: seq[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
 
-proc hostCpuCount*(): int =
-  ## The denominator of `hostLoadPerCpu`, reported beside it so a reading can
-  ## be read: the same run queue is inside the envelope on a 32-CPU host and
-  ## far outside it on a 4-CPU one, and the gate's own 15 threads are a larger
-  ## share of a smaller host.
-  countProcessors()
-
-proc hostLoadPerCpu*(): float =
-  ## The host condition the HLX-M4 gate's statistical thresholds are
-  ## calibrated against (`m4_verdict.MaxLoadPerCpu`): the 1-minute load average
-  ## from `/proc/loadavg` (proc(5)) divided by the online CPU count. An
-  ## unreadable or unparsable reading is reported as +Inf — "outside the
-  ## conditions" — so a host this cannot measure never has its runs counted as
-  ## calibrated evidence.
-  try:
-    let fields = readFile("/proc/loadavg").splitWhitespace()
-    let cpus = countProcessors()
-    if fields.len == 0 or cpus <= 0:
-      return Inf
-    parseFloat(fields[0]) / float(cpus)
-  except CatchableError:
-    Inf
+# The run condition the HLX-M4 gate is judged by, and its calibration record,
+# live in `m4_conditions` (no build or fixture dependency, so the verdict and
+# the calibration driver share one reader).

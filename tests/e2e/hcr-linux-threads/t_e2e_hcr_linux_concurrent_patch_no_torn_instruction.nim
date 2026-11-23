@@ -37,9 +37,12 @@
 ## was calibrated on a host that was not saturated: at load 150-215 on 32 CPUs
 ## it stopped holding while `tier2` stayed clean in every run (reprobuild-pm
 ## `issues/2026-09-26-hcr-concurrent-patch-gate-verdict-depends-on-host-load.md`).
-## So every fixture process is classified by the host load read just before it
-## starts, the calibrated checks are judged over the runs started inside
-## `m4_verdict.MaxLoadPerCpu`, and a host that never gets inside it produces
+## So every fixture process is classified by a condition reading taken just
+## before it starts -- contention by others on the CPU set the fixture may
+## use, per available CPU (`m4_conditions`) -- the calibrated checks are judged
+## over the runs started inside the envelope of the committed calibration
+## record `hlx_m4_calibration.json`, and a host that never gets inside it, or
+## a tree whose record is not yet calibrated and approved, produces
 ## "conditions not met" — an explained skip, plus a `HCR-CONDITIONS-NOT-MET:`
 ## line the HCR lane reports as NO VERDICT — never a failure and never a pass.
 ## What would be a regression on any host is asserted over EVERY run, whatever
@@ -68,11 +71,11 @@ when defined(linux) and defined(amd64):
   import repro_hcr_agent
 
   const
-    Workers = 12
-    Publications = 8
-    ChaosThreads = 2
-    Runs = 24
-    SampleRounds = 200
+    Workers = M4Workers
+    Publications = M4Publications
+    ChaosThreads = M4ChaosThreads
+    Runs = M4RunsPerArm
+    SampleRounds = M4SampleRounds
 
   template expectCount(actual, expected: int) =
     ## Trap 4c: promote the assertion-count fingerprint into the check itself,
@@ -113,6 +116,12 @@ when defined(linux) and defined(amd64):
       let hexA = hex(bodies.a)
       let hexB = hex(bodies.b)
 
+      # Which readings count is data: the committed calibration record. A
+      # missing, pending or unapproved record counts none of them.
+      let calibration = loadCalibration(
+        calibrationRecordPath(m4CaseDir(repoRoot)))
+      checkpoint(describe(calibration))
+
       # ---------------------------------------------------------------------
       # 1. ADVERSARIAL PRESSURE, MEASURED.
       #
@@ -121,18 +130,19 @@ when defined(linux) and defined(amd64):
       # this number the rest of the gate is an anecdote: "no tear was observed"
       # means nothing unless the window was actually occupied.
       #
-      # The host condition is read BEFORE each process starts (see
-      # `m4_verdict.MaxLoadPerCpu`); a sample started outside it is retried,
-      # and EVERY attempt is kept: the unconditional checks judge them all.
+      # The condition is read BEFORE each process starts, over a window in
+      # which no fixture process of the gate's is running (`m4_conditions`);
+      # a sample started outside it is retried, and EVERY attempt is kept: the
+      # unconditional checks judge them all.
       # ---------------------------------------------------------------------
       var samples: seq[SampleRun]
-      for attempt in 0 ..< AttemptsPerRun:
-        let load = hostLoadPerCpu()
+      for attempt in 0 ..< calibration.attemptCap(1):
+        let condition = sampleCondition(calibration.windowMs)
         let r = runFixture(threadsBin, [
           "sample", hexA, hexB, $Workers, $SampleRounds, $ChaosThreads])
         samples.add(SampleRun(exitCode: r.exitCode, payload: r.payload,
-                              loadPerCpu: load))
-        if inConditions(load):
+                              condition: condition))
+        if calibration.inConditions(condition.value):
           break
       let sample = samples[^1]
       let s = if sample.payload != nil: sample.payload else: newJObject()
@@ -141,14 +151,14 @@ when defined(linux) and defined(amd64):
       # 2. THE FIVE ARMS.
       # ---------------------------------------------------------------------
       proc runArm(mode: string): ArmResult =
-        collectArm(mode, Runs, proc (): ArmRun =
-          let load = hostLoadPerCpu()
+        collectArm(mode, Runs, calibration, proc (): ArmRun =
+          let condition = sampleCondition(calibration.windowMs)
           let r = runFixture(threadsBin, [
             mode, hexA, hexB, $Workers, $Publications, $ChaosThreads])
           ArmRun(exitCode: r.exitCode, crashed: r.crashed,
                  windowAddress: r.windowAddress, faultPc: r.faultPc,
                  faultSignal: r.faultSignal, stderrText: r.stderrText,
-                 payload: r.payload, loadPerCpu: load))
+                 payload: r.payload, condition: condition))
 
       let tier2 = runArm("tier2")
       let tier1 = runArm("tier1")
@@ -158,8 +168,10 @@ when defined(linux) and defined(amd64):
       for arm in [tier2, tier1, noAdjust, torn]:
         checkpoint(arm.mode & " crashes " & $arm.measured.crashes & "/" &
           $arm.measured.runs & " inside the conditions, " & $arm.all.crashes &
-          "/" & $arm.all.runs & " overall (highest load/CPU " &
-          formatFloat(arm.maxLoadPerCpu, ffDecimal, 2) & "); fault offsets " &
+          "/" & $arm.all.runs & " overall (condition reading " &
+          formatFloat(arm.minReading, ffDecimal, 2) & "-" &
+          formatFloat(arm.maxReading, ffDecimal, 2) & " over " &
+          formatFloat(arm.maxCpus, ffDecimal, 2) & " CPUs); fault offsets " &
           $arm.all.faultOffsets & " signals " & $arm.all.faultSignals &
           "; quiescence aborts " & $arm.all.quiesceAborts & ", abandoned " &
           $arm.all.quiesceAbandoned)
@@ -168,17 +180,32 @@ when defined(linux) and defined(amd64):
 
       let verdict = gateVerdict(samples, tier2, tier1, noAdjust, torn,
         runs = Runs, publications = Publications, sampleRounds = SampleRounds,
-        slots = Workers + ChaosThreads, workers = Workers)
+        slots = Workers + ChaosThreads, workers = Workers,
+        calibration = calibration)
 
       # Evidence, written unconditionally so a reviewer re-reading this
       # milestone has the measured rates and the conditions they were measured
       # under rather than the assertions' verdict. `checkpoint` output is only
       # flushed on failure, so a green run would otherwise leave no numbers.
+      proc readingsEvidence(readings: seq[RunReading]): JsonNode =
+        result = newJArray()
+        for r in readings:
+          var row = toJson(r.condition)
+          row["exitCode"] = %r.exitCode
+          row["crashed"] = %r.crashed
+          row["counted"] = %r.counted
+          result.add(row)
       proc armEvidence(arm: ArmResult): JsonNode =
         %*{"crashes": arm.measured.crashes, "runs": arm.measured.runs,
            "allCrashes": arm.all.crashes, "allRuns": arm.all.runs,
-           "maxLoadPerCpu": arm.maxLoadPerCpu,
-           "minLoadPerCpu": arm.minLoadPerCpu,
+           "maxReading": finiteOrNull(arm.maxReading),
+           "minReading": finiteOrNull(arm.minReading),
+           "minCpus": arm.minCpus, "maxCpus": arm.maxCpus,
+           "cpuSource": arm.cpuSource,
+           # Every run's reading beside its outcome, so the rates can be
+           # bucketed by reading after the fact (`m4_calibrate` reads the
+           # same shape).
+           "readings": readingsEvidence(arm.readings),
            "anomalies": arm.all.anomalies,
            "publications": arm.measured.publications,
            "ipAdjustments": arm.all.adjust,
@@ -189,23 +216,38 @@ when defined(linux) and defined(amd64):
            "faultOffsets": arm.all.faultOffsets,
            "faultSignals": arm.all.faultSignals,
            "strayExits": arm.all.strayExits}
+      proc sampleReadingsEvidence(samples: seq[SampleRun]): JsonNode =
+        result = newJArray()
+        for attempt in samples:
+          var row = toJson(attempt.condition)
+          row["exitCode"] = %attempt.exitCode
+          row["counted"] = %calibration.inConditions(attempt.condition.value)
+          result.add(row)
       let inWindow = s{"parkedPcInWindow"}.getInt()
       let observations = s{"parkedObservations"}.getInt()
       let logDir = repoRoot / "test-logs"
       createDir(logDir)
       writeFile(logDir / "e2e_hcr_linux_concurrent_patch_no_torn_instruction.json",
         pretty(%*{
-          "schemaId": "reprobuild.hcr.hlx-m4.concurrency-evidence.v2",
+          "schemaId": "reprobuild.hcr.hlx-m4.concurrency-evidence.v3",
           "workers": Workers,
           "publicationsPerRun": Publications,
           "chaosThreads": ChaosThreads,
           "runsPerArm": Runs,
           "sampleRounds": SampleRounds,
-          "maxLoadPerCpu": MaxLoadPerCpu,
-          "hostCpus": hostCpuCount(),
+          "conditionMeasure": ConditionMeasure,
+          "calibration": {
+            "record": calibration.recordPath,
+            "calibrated": calibration.calibrated,
+            "status": calibration.status,
+            "maxReading":
+              if calibration.calibrated: %calibration.maxReading
+              else: newJNull(),
+            "windowMs": calibration.windowMs,
+            "reason": calibration.reason},
           "conditionsMet": verdict.conditionsMet,
           "conditionsReason": verdict.conditionsReason,
-          "sampleLoadPerCpu": sample.loadPerCpu,
+          "sampleReadings": sampleReadingsEvidence(samples),
           "sampleAttempts": samples.len,
           "parkedObservations": observations,
           "parkedPcInWindow": inWindow,
@@ -248,9 +290,8 @@ when defined(linux) and defined(amd64):
         # failed check: that would turn a regression into a "conditions not
         # met". The count check above is included in that.
         if not anyFailed and asserted == 6 + GateUnconditionalCheckCount:
-          let reason = "conditions not met (HLX-M4 calibrated at load/CPU <= " &
-            $MaxLoadPerCpu & " and measured on " & $hostCpuCount() &
-            " CPUs): " & verdict.conditionsReason
+          let reason = "conditions not met (" & describe(calibration) &
+            "): " & verdict.conditionsReason
           # The line the HCR lane keys on to report NO VERDICT rather than a
           # refusal (`scripts/lib/hcr_lane_verdict.sh`).
           echo "HCR-CONDITIONS-NOT-MET: " &

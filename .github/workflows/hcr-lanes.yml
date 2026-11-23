@@ -88,8 +88,14 @@ jobs:
     name: HCR lane (linux-x86_64)
     # The dedicated benchmark runner, not the shared ephemeral pool. One gate
     # here, e2e_hcr_linux_concurrent_patch_no_torn_instruction, measures a
-    # race and is calibrated at host load/CPU <= 2.0 (HLX-M4); on a busier
-    # host it reports CONDITIONS NOT MET and the lane ends INCONCLUSIVE. The
+    # race and counts only runs started inside a calibrated envelope (HLX-M4);
+    # outside it it reports CONDITIONS NOT MET and the lane ends INCONCLUSIVE.
+    # Since 2026-11-23 the condition is contention on this job's own CPU set
+    # (tests/e2e/hcr-linux-threads/m4_conditions.nim), and its bound comes
+    # from hlx_m4_calibration.json, measured on THIS runner by
+    # hcr-m4-calibration.yml; until that record is approved the gate withholds
+    # its verdict ("condition not yet calibrated on a dedicated host"). The
+    # history below is of the retired host load/CPU <= 2.0 condition. The
     # ephemeral pool's guests sit on hosts far above that: measured
     # 2026-11-06 04:12Z, node_load5 per CPU was 7.0 on high-mem-server and
     # 4.0 on gpu-server-002, and two consecutive lanes at eb13e243 ended
