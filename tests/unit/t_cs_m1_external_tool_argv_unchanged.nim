@@ -74,6 +74,14 @@
 ##   (``key = ...``), from which the package's configuration description is
 ##   derived. ``--color`` is rendered only when a caller sets it; the keys
 ##   are not part of argv.
+## * ``strip`` gained the optional repeated ``keepSymbols`` flag (``-K``,
+##   79a6e725d7, which did not refresh this golden): ``gccStrip`` and
+##   ``clangStrip`` pass ``StripOptions.keepSymbols`` through it. It is
+##   rendered only when a caller sets it.
+## * ``strip``'s ``output`` flag (``-o``) is ``required``: without it
+##   ``strip`` rewrites its input, the producing edge's declared output, in
+##   place, a write that edge does not declare.
+##   The argv rendered with every parameter supplied is unchanged.
 ##
 ## The negative controls prove the comparison can fail: a model with one
 ## flag's ``alias`` changed, one with a flag's ``format`` changed, one with a

@@ -6,7 +6,13 @@
 ## ``repro-agent-fetch.service`` (unprivileged, egress to the origin only)
 ## then ``repro-agent-apply.service`` (root, no network):
 ##
-## 1. sequence 1 adds a service; applied (``aoApplied``), the service answers;
+## 0. an operator's apply deploys the service first (page ``zero``): it runs
+##    python3 from the base under the fixture floor waiver, and an agent
+##    apply never adds a whole-floor waiver to a new unit (spec §10.1, *An
+##    agent apply never weakens the floor*; threat model C102). The agent
+##    applies every later generation of it;
+## 1. sequence 1 changes the service; applied (``aoApplied``), the service
+##    answers;
 ## 2. sequence 2 changes it; applied, the new page is served;
 ## 3. sequence 3 is bad: its health check cannot pass. The switch reverts
 ##    it (``aoRolledBack``, exit 2) and the host serves sequence 2's page;
@@ -70,6 +76,11 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     producer = bs.producer
     if not bs.ok: return fails
     let good = "http://127.0.0.1:" & $Port & "/"
+    # 0. The service's first deployment is an operator's (header).
+    if not g.operatorDeploysWaived(repro, "a8-web-operator",
+                                   profile("zero", good), step):
+      return fails
+    g.recordTimerBaseline()
     discard producer.publish(PublishSpec(sequence: 1,
       profileText: profile("one", good)))
     let t1 = g.tickUnits()

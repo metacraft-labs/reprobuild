@@ -130,8 +130,10 @@ type
     input*: BuildActionDef
       ## The binary / library edge feeding ``strip``.
     target*: string
-      ## Output path. Empty means strip in-place (the per-compiler
-      ## implementation drops the ``-o`` flag).
+      ## Output path, required and distinct from the input. There is no
+      ## in-place form: it would rewrite the input edge's declared output
+      ## from a second edge, so an empty target, or one naming the input,
+      ## raises ``ValueError``.
     keepSymbols*: seq[string]
       ## Symbols to retain (``-K <name>``). Empty for the canonical
       ## "strip everything" shape.

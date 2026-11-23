@@ -693,9 +693,43 @@ suite "envelope lanes -- a tarball record's gem-closure step begins at v36":
     check toolUseRealizationDigest(stepped.toolUses[0]) !=
       toolUseRealizationDigest(plain.toolUses[0])
 
-  test "v37 is the default":
-    # version-literal-ok: a pin that must fail when the envelope moves past v37, so this matrix is extended
-    check interfaceEnvelopeVersion() == 37'u16
+  test "v38 is the default":
+    # version-literal-ok: a pin that must fail when the envelope moves past v38, so this matrix is extended
+    check interfaceEnvelopeVersion() == 38'u16
+
+suite "envelope lanes -- a recipe's pinned siblings begin at v38":
+
+  proc withPins(pi: ProjectInterface): ProjectInterface =
+    result = withToolUses(pi, envPrefixArm = true)
+    result.pinnedSiblings = @["codetracer", "codetracer-vscode-extension"]
+
+  test "v38 carries the pins; v30..v37 decode none with every other " &
+      "field intact":
+    let pi = withPins(bothLanesInterface())
+    for v in 30'u16 .. 37'u16:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.pinnedSiblings.len == 0
+      check back.toolUses.len == 1
+      check back.toolUses[0].location.line == 30
+    for v in [38'u16, interfaceEnvelopeVersion()]:
+      checkpoint "v" & $v
+      let back = atVersion(pi, v)
+      check back.pinnedSiblings == pi.pinnedSiblings
+      check back.toolUses.len == 1
+      check back.toolUses[0].location.line == 30
+
+  test "an interface that pins nothing keeps its v37 fingerprint; a pin " &
+      "moves it, whatever order the recipe lists its pins in":
+    let plain = withToolUses(bothLanesInterface(), envPrefixArm = true)
+    check fingerprintBytes(plain, interfaceEnvelopeVersion()) ==
+      fingerprintBytes(plain, 37'u16)
+    check interfaceFingerprint(withPins(bothLanesInterface())) !=
+      interfaceFingerprint(plain)
+    var reordered = withPins(bothLanesInterface())
+    reordered.pinnedSiblings = @["codetracer-vscode-extension", "codetracer"]
+    check interfaceFingerprint(reordered) ==
+      interfaceFingerprint(withPins(bothLanesInterface()))
 
 suite "envelope lanes -- the version is the ONLY thing that varies":
 

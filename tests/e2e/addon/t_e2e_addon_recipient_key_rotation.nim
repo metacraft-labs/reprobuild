@@ -8,8 +8,12 @@
 ##
 ## On each base:
 ##
-## 1. bootstrap; manifest 1 sealed to key K1 (value V1) is applied by the
-##    tick; the service loads V1;
+## 1. bootstrap; an operator's apply deploys ``rot-web`` first, with a
+##    placeholder command and no credential (it runs the base's ``sh``
+##    under the fixture floor waiver, and an agent apply never adds a
+##    whole-floor waiver to a new unit: spec §10.1, *An agent apply never
+##    weakens the floor*; threat model C102); manifest 1 sealed to key K1
+##    (value V1) is applied by the tick; the service loads V1;
 ## 2. ``rotate-recipient-key`` prints K2's public half; the current key is
 ##    still K1 and the next key is ``0400`` root; running it again prints
 ##    the same K2 (a pending rotation is not replaced);
@@ -50,6 +54,14 @@ const Profile = "secrets.secretFile {\n  service = \"rot-web\"\n  name = \"value
   "exec sleep infinity'\n\n[Install]\nWantedBy=multi-user.target\n\"\n" &
   "  credentials = [\"value\"]\n}\n"
 
+const OperatorProfile = "systemd.systemUnit {\n" & FixtureFloorWaiver &
+  "  name = \"rot-web.service\"\n" &
+  "  content = \"[Unit]\nDescription=rotation probe\n\n[Service]\n" &
+  "DynamicUser=yes\nExecStart=/bin/sleep infinity\n\n[Install]\n" &
+  "WantedBy=multi-user.target\n\"\n}\n"
+  ## ``rot-web``'s first deployment, an operator's (header, step 1): the
+  ## same waiver and account as ``Profile``'s, no credential.
+
 proc seen(g: Guest; want: string): string =
   g.exec("for i in $(seq 1 30); do [ \"$(cat /run/rot-web/seen 2>/dev/null)\" = '" &
          want & "' ] && break; sleep 1; done; cat /run/rot-web/seen 2>/dev/null").stdout
@@ -73,6 +85,9 @@ proc runBase(b: BaseImage; record: JsonNode): seq[string] =
     let k1 = g.recipientPubHex()
     let k1Scalar = g.run("cat /var/lib/repro/agent/recipient.key").strip()
     # 1.
+    if not g.operatorDeploysWaived(repro, "rot-web-operator", OperatorProfile,
+                                   step):
+      return fails
     let m1 = g.publishManifest(signer, Target, 1, Profile,
                                @[("rot-web/value", "V1")], k1)
     var r = g.tick(repro, Target, @[m1])

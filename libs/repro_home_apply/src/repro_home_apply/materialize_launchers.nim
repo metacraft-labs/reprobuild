@@ -16,9 +16,21 @@
 ## this module). This module locates the bin dir for the generation
 ## being applied, writes the artifacts, and returns one
 ## `MaterializedLauncherRecord` per command for the manifest writer.
+##
+## The bin dir may belong to a generation that is already committed:
+## generation ids are content-addressed, so re-applying an earlier profile
+## (A, then B, then A) or re-applying the active one after drift
+## materializes into a directory that retention keeps, and partial-apply
+## recovery keeps it even when the apply dies. So no entry is ever written
+## in place: each launcher, sidecar and shim is staged under a temporary
+## name and renamed over the old one (`replaceLauncherEntry`), and a kill
+## at any instant leaves every entry either its old bytes or its new ones.
+## This module is step 9 of the home apply pipeline.
 
 import std/[os, strutils]
 from repro_core/paths import extendedPath
+from repro_core/durable_replace import replaceFileDurably,
+  removeStaleDurableTemps
 
 import repro_home_generations
 import repro_local_store
@@ -146,6 +158,35 @@ proc buildLaunchPlan(rec: RealizedRecord; commandName, executablePath: string;
     packageId: rec.packageId,
     realizationHashHex: prefixIdHex(rec.prefixId))
 
+const LauncherScriptMode* = {fpUserExec, fpUserWrite, fpUserRead,
+  fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead}
+  ## 0o755: the mode of a POSIX launcher script.
+
+proc replaceLauncherFile*(dest, content: string;
+                          mode: set[FilePermission] = {}) =
+  ## Replace one entry of a generation's ``bin/`` atomically and durably: a
+  ## synced temporary file beside it, given ``mode`` and then renamed over
+  ## it (``repro_core/durable_replace``). Never truncates or removes the old
+  ## entry first, so a kill leaves the old bytes or the new ones, never a
+  ## torn launcher. Temporaries a killed writer left behind
+  ## (``.<name>.<unique>.tmp``) are swept once they are an hour old.
+  ##
+  ## Every writer of a generation's ``bin/`` uses this: apply step 9 below,
+  ## rollback re-materializing a missing script, and remote activation. A
+  ## generation id is content-addressed, so any of them may be writing into
+  ## a generation that is already committed. Raises ``IOError`` /
+  ## ``OSError``, leaving ``dest`` unchanged.
+  discard removeStaleDurableTemps(dest)
+  replaceFileDurably(dest, content, mode = mode)
+
+proc replaceLauncherEntry(dest, content: string;
+                          mode: set[FilePermission] = {}) =
+  try:
+    replaceLauncherFile(dest, content, mode)
+  except CatchableError as err:
+    raiseLauncherFailed(extractFilename(dest),
+      "could not replace launcher entry '" & dest & "': " & err.msg)
+
 proc digestFromKey(key: PrefixIdBytes): Digest256 =
   for i in 0 ..< 32:
     result[i] = key[i]
@@ -155,7 +196,7 @@ when defined(windows):
     let lower = path.toLowerAscii()
     lower.endsWith(".exe")
 
-  proc materializeWindowsLauncher(binDir, commandName, launcherBinary,
+  proc materializeWindowsLauncher(binDir, commandName, launcherBytes,
                                   storeRoot, idHex, exePath: string;
                                   prefix: string): MaterializedLauncherRecord =
     let cmdExe = binDir / (commandName & ".exe")
@@ -169,11 +210,14 @@ when defined(windows):
     # `.cmd` shim that delegates through `cmd.exe /c`. The activation
     # manifest records `launcher-script` in that case so the on-disk
     # artifact and the manifest record stay consistent.
-    if launcherBinary.len > 0 and fileExists(extendedPath(launcherBinary)) and
-        isNativeExe(exePath):
-      if fileExists(extendedPath(cmdExe)):
-        removeFile(extendedPath(cmdExe))
-      copyFile(extendedPath(launcherBinary), extendedPath(cmdExe))
+    if launcherBytes.len > 0 and isNativeExe(exePath):
+      # The launcher binary first, then its sidecar: each is replaced
+      # atomically, so a kill between them pairs the new binary with the
+      # sidecar it replaced, never a torn file. Within one generation id the
+      # sidecar records the same launch plan either way; the pair stays
+      # readable as long as a launcher binary reads the sidecar version an
+      # earlier one wrote.
+      replaceLauncherEntry(cmdExe, launcherBytes)
       let sidecarRec = LaunchSidecar(
         schemaVersion: LaunchSidecarCurrentVersion,
         launchPlanIdHex: idHex,
@@ -182,7 +226,11 @@ when defined(windows):
         exportedCommand: commandName,
         requiresExecutionProfile: false,
         executionProfileHex: "")
-      writeSidecarFile(sidecar, sidecarRec)
+      let sidecarBytes = encodeLaunchSidecar(sidecarRec)
+      var sidecarText = newString(sidecarBytes.len)
+      for i, b in sidecarBytes:
+        sidecarText[i] = char(b)
+      replaceLauncherEntry(sidecar, sidecarText)
       result.binDirArtifactKind = "windows-launcher"
     else:
       # Fallback: a thin `.cmd` shim that calls through to the resolved
@@ -190,7 +238,7 @@ when defined(windows):
       # when the launcher binary is missing.
       let cmdShim = binDir / (commandName & ".cmd")
       let body = "@echo off\r\n\"" & exePath & "\" %*\r\n"
-      writeFile(extendedPath(cmdShim), body)
+      replaceLauncherEntry(cmdShim, body)
       result.binDirArtifactKind = "launcher-script"
 
 proc materializeLaunchers*(store: var Store; binDir: string;
@@ -215,7 +263,16 @@ proc materializeLaunchers*(store: var Store; binDir: string;
     raiseLauncherFailed(pkg,
       "no realized record for package while materializing launchers " &
       "(planner/realize-step bug)")
-  let launcherBinary = locateLauncherBinary()
+  # The launcher binary is copied once per command; read it once.
+  let launcherBytes =
+    when defined(windows):
+      let launcherBinary = locateLauncherBinary()
+      if launcherBinary.len > 0 and fileExists(extendedPath(launcherBinary)):
+        readFile(extendedPath(launcherBinary))
+      else:
+        ""
+    else:
+      ""
   for l in launchers:
     let rec = lookup(l.fromPackageId)
     # M74: a Scoop package whose manifest declares no `bin` field (a
@@ -261,7 +318,7 @@ proc materializeLaunchers*(store: var Store; binDir: string;
     matRec.launchPlanDigest = digest
     when defined(windows):
       let winRec = materializeWindowsLauncher(binDir, l.commandName,
-        launcherBinary, store.root, idHex, exePath,
+        launcherBytes, store.root, idHex, exePath,
         rec.prefixAbsolutePath)
       matRec.binDirArtifactKind = winRec.binDirArtifactKind
       matRec.binDirRelativePath =
@@ -284,15 +341,8 @@ proc materializeLaunchers*(store: var Store; binDir: string;
               p
           generatePosixLauncherScript(posixPlan,
             when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
-      writeFile(extendedPath(scriptPath), scriptBody)
-      when not defined(windows):
-        # 0o755
-        try:
-          setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite, fpUserRead,
-            fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
-        except OSError as err:
-          raiseLauncherFailed(l.commandName,
-            "setFilePermissions failed for " & scriptPath & ": " & err.msg)
+      # 0o755, set on the staged file before it is renamed into place.
+      replaceLauncherEntry(scriptPath, scriptBody, LauncherScriptMode)
       matRec.binDirRelativePath = l.commandName
       matRec.binDirArtifactKind = "launcher-script"
     result.add(matRec)

@@ -268,6 +268,26 @@ suite "an agent apply cannot weaken the floor":
       @["c.service (whole floor waived on a new unit; runs as root)"]
     check agentApplyRefusal(r).len > 0
 
+  test "after an operator deploys a root service, the agent applies it beside a floored one":
+    # The adversarial-audit bed's shape (``t_e2e_addon_audit_bed``, gate
+    # ``addon_adversarial_audit_bed``):
+    # the agent's sequence 1 carries a waived root service and a new
+    # floored one. Straight onto the bootstrapped host (no stored user
+    # generation) the agent refuses it; once an operator has applied the
+    # waived service, the same sequence is the agent's to apply.
+    let waivedRoot = unitStanza("w.service", "ExecStart=/bin/sleep infinity\n",
+                                waived("a test fixture"))
+    let target = waivedRoot &
+      unitStanza("f.service", "ExecStart=" & Prefix & "/bin/f 864000\n")
+    let straight = planOf("", target)
+    check straight.floorWeakened ==
+      @["w.service (whole floor waived on a new unit; runs as root)"]
+    check agentApplyRefusal(straight).len > 0
+    let afterOperator = planOf(storedAs(waivedRoot), target)
+    check afterOperator.floorWeakened.len == 0
+    check afterOperator.floorIntroduced.len == 0
+    check agentApplyRefusal(afterOperator) == ""
+
   test "a legacy agent's units are taken over as they run":
     # A migration commits what the legacy agent already applied: the
     # add-on has no generation to compare with, but nothing on the host is
@@ -311,3 +331,49 @@ suite "an agent apply cannot weaken the floor":
       "User=svc\nExecStart=" & Prefix & "/bin/f\n"))
     check stricter.floorWeakened.len == 0
     check "exception UMask removed" in agentApplyRefusal(stricter)
+
+  test "the agent gates' waived fixture units are deployed by an operator first":
+    # The shapes of the agent VM gates under tests/e2e/addon/, which once
+    # handed such units straight to the agent and were refused:
+    # fixture units under the test-bed waiver that run the base's own
+    # binaries -- as root, under ``DynamicUser=``, and a disabled oneshot.
+    # Straight onto a host whose stored generation lacks them, the agent
+    # refuses them. Once an operator's apply stored each unit, under the
+    # same waiver and account but with a placeholder command and no
+    # credentials, the agent applies its real command, its credentials and
+    # its health check. A health check added later to such a unit, which
+    # is how those gates make a generation fail its confirm, is not refused
+    # either; nor is a new target beside it, which runs no command and is
+    # outside the floor.
+    const Fixture = "a test fixture that runs the base's own binaries"
+    let secretDecls = "secrets.secretFile {\n  service = \"r\"\n  name = \"tok\"\n" &
+      "}\n\nsecrets.secretFile {\n  service = \"d\"\n  name = \"tok\"\n}\n\n"
+    proc fixtures(placeholder: bool; health = ""): string =
+      let run = if placeholder: "ExecStart=/bin/sleep infinity\n"
+                else: "ExecStart=/bin/sh -c 'cat $$CREDENTIALS_DIRECTORY/tok; " &
+                        "exec sleep infinity'\n"
+      let creds = if placeholder: "" else: "  credentials = [\"tok\"]\n"
+      (if placeholder: "" else: secretDecls) &
+        unitStanza("r.service", run, waived(Fixture) & creds & health) &
+        unitStanza("d.service", "DynamicUser=yes\n" & run,
+                   waived(Fixture) & creds) &
+        unitStanza("o.service", "Type=oneshot\nExecStart=/usr/bin/true\n",
+                   waived(Fixture) & "  enabled = false\n")
+    let straight = planOf("", fixtures(placeholder = false))
+    check straight.floorWeakened == @[
+      "r.service (whole floor waived on a new unit; runs as root)",
+      "d.service (whole floor waived on a new unit)",
+      "o.service (whole floor waived on a new unit; runs as root)"]
+    check agentApplyRefusal(straight).len > 0
+    let operator = storedAs(fixtures(placeholder = true))
+    let after = planOf(operator, fixtures(placeholder = false))
+    check after.floorWeakened.len == 0
+    check after.floorIntroduced.len == 0
+    check agentApplyRefusal(after) == ""
+    let failing = planOf(storedAs(fixtures(placeholder = false)),
+      fixtures(placeholder = false, "  healthCheck = \"tcp:127.0.0.1:9\"\n") &
+      "systemd.systemUnit {\n  name = \"t.target\"\n  content = \"[Unit]\n" &
+      "Description=t\n\n[Install]\nWantedBy=multi-user.target\n\"\n}\n")
+    check failing.floorWeakened.len == 0
+    check failing.floorIntroduced.len == 0
+    check agentApplyRefusal(failing) == ""

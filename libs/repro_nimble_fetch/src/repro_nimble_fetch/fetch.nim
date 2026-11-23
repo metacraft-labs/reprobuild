@@ -57,7 +57,7 @@
 ## transports too) needs the engine to run executor-backed edges in
 ## parallel, which milestone NPC-M10 owns.
 
-import std/[net, options, os, strutils, tables, tempfiles]
+import std/[net, options, os, strutils, tables, tempfiles, times]
 
 import blake3
 from repro_domain_types/nimble_index/types import toHexLower
@@ -68,6 +68,9 @@ import repro_lock/identity
 import repro_core/zlib_inflate
 import git_tool
 
+import repro_peer_cache/evidence_record
+
+import repro_nimble_generator/capture
 import repro_nimble_generator/edge_objects
 import repro_nimble_generator/egress
 import repro_nimble_generator/origin_git
@@ -102,6 +105,9 @@ type
     location*: string
     outcome*: AttemptOutcome
     rule*: string   ## the egress refusal kind or the extraction rule
+    observed*: string
+      ## for a mismatch: the digest of what was received (the tree digest,
+      ## or the archive's sha256 for an `archive_sha256` refusal)
     detail*: string
 
   PackageState* = enum
@@ -151,6 +157,11 @@ type
     useClosureIndex*: bool
     limits*: ExtractLimits
     observer*: FetchObserver
+    captureLog*: string
+      ## where the wave's digest mismatches and refusals are appended
+      ## (``capture``); "" keeps no log
+    captureReporter*: DetectionReporter
+      ## the evidence appender the same records are handed to, if any
     parallelDownloads*: int
       ## concurrent mirror downloads of one wave; <= 0: the default
       ## (`DefaultParallelDownloads`)
@@ -246,6 +257,7 @@ proc installFrom(cfg: FetchConfig; row: NimbleLockRow; archive: string;
     let got = treeDigestOf(staging)
     if got != row.tree:
       attempt.outcome = aoMismatch
+      attempt.observed = got
       attempt.detail = "the tree from " & location & " hashes to " & got &
         ", the lock records " & row.tree
       discardStaging(staging)
@@ -298,6 +310,7 @@ proc tryMirror(cfg: FetchConfig; row: NimbleLockRow; m: Mirror;
     # Tarball Acquisition"): a substituted archive is never parsed.
     attempt.outcome = aoMismatch
     attempt.rule = "archive_sha256"
+    attempt.observed = sha256Hex(r.bytes)
     attempt.detail = "the archive from " & attempt.location & " has sha256 " &
       sha256Hex(r.bytes) & ", the index records " & row.archiveSha256
     return false
@@ -582,6 +595,28 @@ proc encodeReceipt(p: PackageFetch): string =
     result.add "attempt " & $a.transport & " " & enc(a.location) & " " &
       $a.outcome & " " & enc(a.rule) & " " & enc(a.detail) & "\n"
 
+proc capturesOfFetch*(r: FetchResult; at: uint64): seq[CaptureRecord] =
+  ## A fetch wave's records (``capture``): each transport that held other
+  ## bytes than the lock's, and each refusal by the egress policy or the
+  ## extractor, with the package, the expected and received digests and the
+  ## location.
+  for p in r.packages:
+    for a in p.attempts:
+      let source = $a.transport & " " & withoutCredentials(a.location)
+      case a.outcome
+      of aoMismatch:
+        result.add CaptureRecord(class: ccDigestMismatch, package: p.row.name,
+          expected: (if a.rule == "archive_sha256": p.row.archiveSha256
+                     else: p.row.tree),
+          observed: a.observed, source: source, detail: a.detail, at: at)
+      of aoRefused:
+        result.add CaptureRecord(
+          class: (if isEgressRefusalKind(a.rule): ccEgressRefusal
+                  else: ccExtractionRefusal),
+          package: p.row.name, expected: p.row.tree, observed: a.rule,
+          source: source, detail: a.detail, at: at)
+      else: discard
+
 proc fetchLocked*(rows: seq[NimbleLockRow]; cfg: FetchConfig): FetchResult =
   ## Fetch every row as one wave of edges (see the module docstring).
   if cfg.stateDir.len == 0:
@@ -713,3 +748,5 @@ proc fetchLocked*(rows: seq[NimbleLockRow]; cfg: FetchConfig): FetchResult =
   result.ok = failures.len == 0
   for p in result.packages:
     if p.state == psFailed: result.ok = false
+  appendCaptures(cfg.captureLog, capturesOfFetch(result, uint64(epochTime())),
+    cfg.captureReporter)

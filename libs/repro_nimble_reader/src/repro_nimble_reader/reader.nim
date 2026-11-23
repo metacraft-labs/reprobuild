@@ -834,6 +834,16 @@ proc readIni(w: var Walker; src: string) =
         w.issue(ikParseError, {}, "ini: " & ev.msg, 0)
   except CatchableError as e:
     w.issue(ikParseError, {}, "ini: " & e.msg, 0)
+  except Defect as d:
+    raise d # a bug, not a parse error; re-raised by name (see below)
+  except Exception as e:
+    # Nim 2.2.4's `std/streams` declares its implementation callbacks without
+    # a `raises` list, so every `CfgParser` call is typed as raising bare
+    # `Exception`, which `{.push raises: [].}` refuses. Such an exception
+    # reports the file as unparseable, like any other parser failure. A
+    # `Defect` is let through above, and by name: a bare `raise` is itself
+    # typed `Exception` there.
+    w.issue(ikParseError, {}, "ini: " & e.msg, 0)
 
 # ---------------------------------------------------------------------------
 # Entry points
