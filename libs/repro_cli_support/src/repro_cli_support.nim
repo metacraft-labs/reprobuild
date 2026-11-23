@@ -111375,6 +111375,12 @@ proc runThinAppDispatch(programName: string): int =
       args[0] == BrokerModeFlag:
     return runPrivilegedBrokerMode(args)
   if programName == "repro":
+    if args.len > 0 and args[0] in ["test", "build"]:
+      # Both run the RunQuota auto-start twice (dev-env preparation, then the
+      # build's session); one hold must cover both, or a retiring daemon this
+      # command adopted exits in between (`withInvocationRunQuotaHold`).
+      withInvocationRunQuotaHold:
+        return runReproCommandLine(programName, args, publicCliPath)
     return runReproCommandLine(programName, args, publicCliPath)
   # Every role of this image is a command of repro's command line (the
   # daemon is `repro daemon serve`, the store daemon `repro store serve`),
