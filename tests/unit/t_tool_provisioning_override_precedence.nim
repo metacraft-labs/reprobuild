@@ -11,6 +11,14 @@
 ##     flag > variable > local file > committed file > user file >
 ##     invocation-wide mode (an override beats an explicit
 ##     `--tool-provisioning`);
+##   * a `[tool-provisioning.overrides.<os>]` or `.<cpu>-<os>` table applies
+##     on its platform only, the more specific one winning within a file, in
+##     every configuration layer; another platform's entries are no override
+##     here, and a misspelt platform or a bad mode in any table is refused;
+##   * a project's committed `repro-tool-provisioning.toml` is read standalone
+##     and inside a workspace, never makes the project a workspace root, and
+##     ranks below the workspace-local layer and above the committed
+##     workspace file;
 ##   * one package twice at one level is a usage error, and a mode outside
 ##     the vocabulary is refused naming where it is written;
 ##   * an override naming a package no `uses:` entry references is an error
@@ -36,6 +44,7 @@ import repro_dev_env_engine
 import repro_interface_artifacts
 import repro_tool_profiles
 import repro_test_support/process_fixtures
+import repro_workspace_manifests/settings
 
 proc writeExecutable(path, body: string) =
   createDir(parentDir(path))
@@ -344,3 +353,228 @@ suite "per-tool provisioning overrides: store, kind and identity":
     check overrideSetDigest(initTable[string, ToolModeSelection]()) == ""
     b["x"] = ToolModeSelection(mode: tpmNix, overriddenBy: "flag")
     check overrideSetDigest(a) != overrideSetDigest(b)
+
+# ---- platform-qualified tables and the committed project file ---------------
+#
+# A package's arms differ by platform and an override never falls through,
+# so a committed table must be able to say `nix` on Linux and `tarball` on
+# Windows for the same package. And a product repository built both
+# standalone and inside a workspace needs a committed home for such an
+# override that does not make it a workspace root: a `repro-workspace.toml`
+# in it would become the nearer root inside the workspace and shadow the real
+# root's settings.
+
+proc hostOsName(): string =
+  ## The `<os>` half of `hostPlatformName()` (`<cpu>-<os>`).
+  hostPlatformName().split('-')[^1]
+
+proc otherOsName(): string =
+  if hostOsName() == "windows": "linux" else: "windows"
+
+const
+  projectFileName = "repro-tool-provisioning.toml"
+    ## Spelt here, not imported: the file's name is part of the contract.
+  projectSchema = "reprobuild.project.tool-provisioning.v1"
+
+proc projectFile(dir, body: string) =
+  ## A committed `repro-tool-provisioning.toml` in the project at `dir`.
+  createDir(dir)
+  writeFile(dir / projectFileName,
+    "schema = \"" & projectSchema & "\"\n" & body)
+
+suite "per-tool provisioning overrides: per platform and per project":
+  putEnv("REPRO_CACHE_DISABLE", "1")
+  let scratch = createTempDir("repro-tool-overrides-platform-", "")
+  releaseDirAtProcessExit(scratch)
+  let ws = scratch / "ws"
+  let userPath = scratch / "user-config.toml"
+
+  test "a platform table applies on its platform only, the more specific winning":
+    withEnv("REPRO_WORKSPACE_CONFIG", ""):
+      withEnv(ToolProvisioningOverridesEnvVar, ""):
+        userConfig(userPath, "")
+        createDir(ws / "proj")
+        # `zstd` everywhere, then for this OS, then for this cpu-os pair;
+        # `only-foreign` is overridden on another OS only.
+        writeFile(ws / "repro-workspace.toml",
+          "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+          "[tool-provisioning.overrides]\n" &
+          "zstd = \"nix\"\n" &
+          "osonly = \"nix\"\n\n" &
+          "[tool-provisioning.overrides." & otherOsName() & "]\n" &
+          "zstd = \"scoop\"\n" &
+          "only-foreign = \"tarball\"\n\n" &
+          "[tool-provisioning.overrides." & hostOsName() & "]\n" &
+          "zstd = \"from-source\"\n" &
+          "osonly = \"tarball\"\n\n" &
+          "[tool-provisioning.overrides." & hostPlatformName() & "]\n" &
+          "zstd = \"tarball\"\n")
+        createDir(ws / "proj")
+        removeFile(ws / "repro-workspace.local.toml")
+        let zstd = selectionFor(@[], ws, userPath, package = "zstd")
+        check zstd.mode == tpmTarball
+        # The location names the line inside the cpu-os table (line 16).
+        check (ws / "repro-workspace.toml" & ":16") in zstd.location
+        let osonly = selectionFor(@[], ws, userPath, package = "osonly")
+        check osonly.mode == tpmTarball
+        check (ws / "repro-workspace.toml" & ":13") in osonly.location
+        # Another platform's entry is not an override here at all, so it is
+        # neither applied nor reported as unmatched.
+        let foreign = selectionFor(@[], ws, userPath,
+          requested = tpmPathOnly, package = "only-foreign")
+        check foreign.mode == tpmPathOnly and foreign.overriddenBy == ""
+        let overrides = loadToolProvisioningOverrides(@[], ws / "proj",
+          userPath)
+        for entry in overrides.entries:
+          check entry.packageSelector != "only-foreign"
+
+  test "platform tables are read in every configuration layer":
+    withEnv("REPRO_WORKSPACE_CONFIG", ""):
+      withEnv(ToolProvisioningOverridesEnvVar, ""):
+        workspace(ws, "", "")
+        # Each layer also carries a less specific entry for the same
+        # package, which its more specific platform table must beat.
+        writeFile(userPath, "schema = \"reprobuild.config.v1\"\n\n" &
+          "[tool-provisioning.overrides]\nu = \"tarball\"\n\n" &
+          "[tool-provisioning.overrides." & hostOsName() & "]\n" &
+          "u = \"nix\"\n")
+        writeFile(ws / "repro-workspace.local.toml",
+          "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+          "[tool-provisioning.overrides]\nl = \"nix\"\n\n" &
+          "[tool-provisioning.overrides." & hostOsName() & "]\n" &
+          "l = \"scoop\"\n\n" &
+          "[tool-provisioning.overrides." & hostPlatformName() & "]\n" &
+          "l = \"tarball\"\n")
+        projectFile(ws / "proj",
+          "\n[tool-provisioning.overrides]\np = \"nix\"\n\n" &
+          "[tool-provisioning.overrides." & hostOsName() & "]\n" &
+          "p = \"tarball\"\n")
+        let p = selectionFor(@[], ws, userPath, package = "p")
+        check p.mode == tpmTarball
+        check p.overriddenBy == "config:" & ws / "proj" / projectFileName
+        removeFile(ws / "proj" / projectFileName)
+        let u = selectionFor(@[], ws, userPath, package = "u")
+        check u.mode == tpmNix and u.overriddenBy == "config:" & userPath
+        let l = selectionFor(@[], ws, userPath, package = "l")
+        check l.mode == tpmTarball
+        check l.overriddenBy == "config:" & ws / "repro-workspace.local.toml"
+        removeFile(ws / "repro-workspace.local.toml")
+        userConfig(userPath, "")
+
+  test "a misspelt platform or a bad mode in any platform's table is refused":
+    withEnv("REPRO_WORKSPACE_CONFIG", ""):
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[tool-provisioning.overrides.plan9]\nzstd = \"nix\"\n")
+      try:
+        discard loadToolProvisioningOverrides(@[], ws / "proj", "")
+        check false
+      except CatchableError as err:
+        check (ws / "repro-workspace.toml") in err.msg
+        check "plan9" in err.msg
+      # A mode outside the vocabulary is refused even in a table for another
+      # platform: the file is wrong on every host.
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[tool-provisioning.overrides." & otherOsName() & "]\n" &
+        "zstd = \"brew\"\n")
+      try:
+        discard loadToolProvisioningOverrides(@[], ws / "proj", "")
+        check false
+      except ToolProvisioningOverrideError as err:
+        check "brew" in err.msg
+      workspace(ws, "", "")
+
+  test "a standalone project commits its overrides in its own file":
+    withEnv("REPRO_WORKSPACE_CONFIG", ""):
+      withEnv(ToolProvisioningOverridesEnvVar, ""):
+        let standalone = scratch / "standalone"
+        projectFile(standalone,
+          "\n[tool-provisioning.overrides]\nsdk = \"nix\"\n\n" &
+          "[tool-provisioning.overrides." & otherOsName() & "]\n" &
+          "sdk = \"scoop\"\n")
+        check findWorkspaceSettingsPath(standalone) == ""
+        let overrides = loadToolProvisioningOverrides(@[], standalone, "")
+        check overrides.entries.len == 1
+        let sel = resolveToolUseProvisioning(tpmPathOnly, overrides,
+          artifactOf(@[]), InterfaceToolUse(packageSelector: "sdk"))
+        check sel.mode == tpmNix
+        check sel.overriddenBy ==
+          "config:" & standalone / projectFileName
+        # A lone local file in the checkout still outranks the committed one.
+        writeFile(standalone / "repro-workspace.local.toml",
+          "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" &
+          "[tool-provisioning.overrides]\nsdk = \"tarball\"\n")
+        let local = resolveToolUseProvisioning(tpmPathOnly,
+          loadToolProvisioningOverrides(@[], standalone, ""),
+          artifactOf(@[]), InterfaceToolUse(packageSelector: "sdk"))
+        check local.mode == tpmTarball
+
+  test "inside a workspace the project file is read and is not a root":
+    withEnv("REPRO_WORKSPACE_CONFIG", ""):
+      withEnv(ToolProvisioningOverridesEnvVar, ""):
+        workspace(ws, "sdk = \"scoop\"\nwsonly = \"nix\"\n", "")
+        userConfig(userPath, "sdk = \"path\"\n")
+        projectFile(ws / "proj",
+          "\n[tool-provisioning.overrides]\nsdk = \"tarball\"\n")
+        # The workspace root is still the real one: the project file is not
+        # a root marker, so the root's settings still govern the project.
+        check findWorkspaceSettingsPath(ws / "proj") ==
+          ws / "repro-workspace.toml"
+        # project file > committed workspace file > user scope
+        let sdk = selectionFor(@[], ws, userPath, package = "sdk")
+        check sdk.mode == tpmTarball
+        check sdk.overriddenBy ==
+          "config:" & ws / "proj" / projectFileName
+        let wsonly = selectionFor(@[], ws, userPath, package = "wsonly")
+        check wsonly.mode == tpmNix
+        # workspace-local layer > project file
+        workspace(ws, "sdk = \"scoop\"\n", "sdk = \"from-source\"\n")
+        let byLocal = selectionFor(@[], ws, userPath, package = "sdk")
+        check byLocal.mode == tpmFromSource
+        workspace(ws, "", "")
+        userConfig(userPath, "")
+        removeFile(ws / "proj" / projectFileName)
+
+  test "the project file carries overrides only, under its schema":
+    withEnv("REPRO_WORKSPACE_CONFIG", ""):
+      let dir = scratch / "bad-project"
+      projectFile(dir, "\n[profiles.x]\nmainline = \"dev\"\n")
+      try:
+        discard loadToolProvisioningOverrides(@[], dir, "")
+        check false
+      except CatchableError as err:
+        check (dir / projectFileName) in err.msg
+        check "profiles" in err.msg
+      createDir(dir)
+      writeFile(dir / projectFileName,
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[tool-provisioning.overrides]\nsdk = \"nix\"\n")
+      try:
+        discard loadToolProvisioningOverrides(@[], dir, "")
+        check false
+      except CatchableError as err:
+        check (dir / projectFileName) in err.msg
+        check projectSchema in err.msg
+
+  test "the user configuration accepts every platform table, and no other":
+    # The strict typed decode of `reprobuild.config.v1` sees each platform
+    # header as its own dotted key, so each must be declared.
+    var body = "schema = \"reprobuild.config.v1\"\n"
+    var platforms = @["linux", "macos", "windows"]
+    for cpu in ["x86_64", "aarch64"]:
+      for os in ["linux", "macos", "windows"]:
+        platforms.add(cpu & "-" & os)
+    for platform in platforms:
+      body.add("\n[tool-provisioning.overrides." & platform & "]\n" &
+        "p-" & platform & " = \"nix\"\n")
+    writeFile(userPath, body)
+    check userConfigToolProvisioningOverrides(userPath).len == platforms.len
+    writeFile(userPath, "schema = \"reprobuild.config.v1\"\n\n" &
+      "[tool-provisioning.overrides.plan9]\np = \"nix\"\n")
+    try:
+      discard userConfigToolProvisioningOverrides(userPath)
+      check false
+    except CatchableError as err:
+      check "plan9" in err.msg
+    userConfig(userPath, "")

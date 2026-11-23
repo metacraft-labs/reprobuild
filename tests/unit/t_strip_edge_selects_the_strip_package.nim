@@ -16,8 +16,12 @@
 ##   * ``gccStrip`` and ``clangStrip`` name a registered package that declares
 ##     the executable their call names;
 ##   * the edge still renders ``-o <target>``, one ``-K <symbol>`` per kept
-##     symbol and the input, in ``strip``'s own argument order, and an
-##     in-place strip carries no ``-o``;
+##     symbol and the input, in ``strip``'s own argument order;
+##   * a strip that would rewrite its input in place (no target, or a target
+##     naming the input) is refused, and the ``strip`` package's typed call
+##     cannot be written without an output: an in-place strip would
+##     rewrite the link edge's declared output from a second edge that
+##     declares no write;
 ##   * the edge is ordered after the edge that produces its input;
 ##   * ``strip`` selects its own program and the Binutils version in the
 ##     WinLibs archive (Windows x64) and in the Bootlin archive (Linux
@@ -29,14 +33,19 @@
 ##
 ## Falsifying mutations: sending either edge back through ``binutils`` turns
 ## the first case red; dropping the ``keepSymbols`` flag from the ``strip``
-## package (or not passing it) turns the second red; not passing ``after``
-## turns the third red; removing a view arm, or giving it ``gcc``'s version
-## or executable, turns the fourth and fifth red; dropping ``strip`` from
-## ``LinuxHostToolchainPackages`` turns the last red.
+## package (or not passing it) turns the second red; accepting an empty or
+## input-naming target turns the refusal case red, and giving the package's
+## ``output`` flag a default turns the typed-call case red; not passing
+## ``after`` turns the ordering case red; removing a view arm, or giving it
+## ``gcc``'s version or executable, turns the WinLibs and Bootlin cases red;
+## dropping ``strip`` from ``LinuxHostToolchainPackages`` turns the last red.
 ##
 ## No mocks: the real registered stdlib packages, the production selection
 ## function and the production argv renderer. Nothing is downloaded or run.
-import std/[strutils, unittest]
+# ``strutils.strip`` would shadow the ``strip`` package's typed call that the
+# typed-call case below compiles.
+import std/strutils except strip
+import std/unittest
 import repro_project_dsl
 import repro_interface_artifacts
 import repro_tool_profiles
@@ -44,6 +53,7 @@ import repro_cli_support
 import repro_dsl_stdlib/packages_schema
 import repro_dsl_stdlib/packages/gcc as gccPackage
 import repro_dsl_stdlib/packages/clang as clangPackage
+import repro_dsl_stdlib/packages/binutils as binutilsModule
 import repro_dsl_stdlib/types/options
 
 proc toolUse(selector, versionRange: string): InterfaceToolUse =
@@ -100,13 +110,33 @@ suite "a strip edge selects the strip package":
         "-K", "main", "-K", "init_hook", "app"]
       check action.outputs == @["app.stripped"]
 
-  test "an in-place strip carries no -o and declares no output":
+  test "a strip that would rewrite its input is refused":
+    # ``strip <input>`` (no ``-o``) and ``strip -o <input> <input>`` both
+    # rewrite the link edge's declared output from a second edge: a double
+    # write and a rewrite of a nominally read-only input, both errors by
+    # default (Filesystem-Policy-And-Observed-Inputs.md §"Double Writes",
+    # §"Source Rewrites"). The edge is refused when it is built, before any
+    # graph holds it.
     for (name, edge) in stripEdges:
-      checkpoint name
-      let action = edge(StripOptions(
-        input: BuildActionDef(outputs: @["app"])))
-      check stripArgv(action) == @["strip", "app"]
-      check action.outputs.len == 0
+      for target in ["", "app", "./app", "dir/../app"]:
+        checkpoint name & " target='" & target & "'"
+        var refusal = ""
+        try:
+          discard edge(StripOptions(
+            input: BuildActionDef(id: "link-app", outputs: @["app"]),
+            target: target))
+        except ValueError as error:
+          refusal = error.msg
+        check "separate output" in refusal
+        check "'app'" in refusal
+
+  test "the strip package's typed call cannot omit its output":
+    # The refusal above guards the stdlib operation; the package's own typed
+    # call must not offer the in-place form either, so ``output`` has no
+    # default. The positive control beside it keeps the negative check from
+    # passing for an unrelated reason, such as another ``strip`` in scope.
+    check not compiles(strip(input = "app"))
+    check compiles(strip(output = "app.stripped", input = "app"))
 
   test "the edge runs after the edge that produces its input":
     for (name, edge) in stripEdges:

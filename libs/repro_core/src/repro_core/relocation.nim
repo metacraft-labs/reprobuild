@@ -17,7 +17,7 @@
 ## records a source location, so the two cannot disagree about which files
 ## travel with the recipe.
 
-import std/[macros, os, strutils]
+import std/[macros, os, strutils, tables]
 
 const
   reproRecipeRelative* {.booldefine.} = false
@@ -265,6 +265,15 @@ proc importPathName*(file: string): string =
   if at >= 0: s[at + "/src/".len .. ^1]
   else: s.extractFilename
 
+var
+  recipeRelativeAnchors {.compileTime.}: seq[string]
+    ## `effectiveAnchors` of this compile's recipe directory and
+    ## `reproRecipeAnchors`, computed once (`recipeSourceName`).
+  recipeRelativeAnchorsReady {.compileTime.} = false
+  recipeSourceNames {.compileTime.}: Table[string, string]
+    ## Every name `recipeSourceName` has answered in this compile, by the
+    ## file it was asked about.
+
 proc recipeSourceName*(file: string): string {.compileTime.} =
   ## A DSL source site (`lineInfoObj().filename`, always absolute) as the
   ## compiled program records it. In a recipe-relative provider compile
@@ -278,13 +287,33 @@ proc recipeSourceName*(file: string): string {.compileTime.} =
   ## build-host path the image must not carry (the builder-path gate), and
   ## the installed sources sit under the same import paths. Everywhere else
   ## the name is unchanged.
+  ##
+  ## The DSL asks once per source site (`lineFile` in the DSL macros), and a
+  ## recipe's sites are nearly all in a few files, inside one `package`
+  ## expansion. That expansion runs in the Nim VM, which refuses a single
+  ## evaluation of more than `--maxLoopIterationsVM` (10 million) loop
+  ## iterations. Splitting and normalizing every anchor afresh for each site
+  ## cost about 118,000 iterations per site with the 147 anchors (20 KB) of a
+  ## CI job that builds reprobuild in its workspace, so a recipe with a
+  ## hundred `uses:` entries — or a consumer that folds such a recipe in
+  ## through `uses:` — exceeded the limit. The recipe directory and the
+  ## anchors cannot change within one compile, and the answer depends on
+  ## nothing else (the compile-time branch of `relocatableName` reads no
+  ## filesystem), so the anchors are computed once and each file's answer is
+  ## kept.
   when reproRecipeRelative:
+    if file in recipeSourceNames:
+      return recipeSourceNames[file]
     let base = getProjectPath()
-    var anchors: seq[string] = @[]
-    for anchor in reproRecipeAnchors.split(':'):
-      if anchor.len > 0:
-        anchors.add(anchor)
-    relocatableName(file, base, effectiveAnchors(base, anchors))
+    if not recipeRelativeAnchorsReady:
+      var anchors: seq[string] = @[]
+      for anchor in reproRecipeAnchors.split(':'):
+        if anchor.len > 0:
+          anchors.add(anchor)
+      recipeRelativeAnchors = effectiveAnchors(base, anchors)
+      recipeRelativeAnchorsReady = true
+    result = relocatableName(file, base, recipeRelativeAnchors)
+    recipeSourceNames[file] = result
   elif defined(reproInstalledPrefix):
     importPathName(file)
   else:
