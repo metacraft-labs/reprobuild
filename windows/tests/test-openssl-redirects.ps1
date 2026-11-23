@@ -83,6 +83,8 @@ function Invoke-TimedTransaction([string]$Mode, [string]$Id) {
   }
   $timer.Stop()
   $evidence = $script:fixture.Current
+  Write-Host ("TIMELINE $Mode (client returned after $([int]$timer.Elapsed.TotalMilliseconds)ms; " +
+    "server: $($evidence.Timeline)tcp=$($evidence.TcpConnections) handshakes=$($evidence.Handshakes))")
   Require ($evidence.Failure -eq '') "The TLS fixture failed: $($evidence.Failure)"
   Require ($evidence.Id -eq $Id -and $evidence.Redirects -eq 1) 'The timed request did not follow its own redirect.'
   Require ($evidence.Handshakes -eq 1 -and $script:pin.AcceptedUri -eq $target) 'Timed transaction did not complete authenticated TLS.'

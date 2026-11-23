@@ -120,6 +120,17 @@ namespace VerifiedDownloadTests
         // separately so a control can say which it got.
         public volatile string HandshakeRefusal = "";
         private long firstBody, lastBody;
+        // A timeline of the transaction in milliseconds since the epoch began,
+        // so a control that fails can say WHEN each step happened rather than
+        // only whether it did (e.g. whether the redirect target was even
+        // dialled before the client's whole-source deadline).
+        private readonly Stopwatch clock = Stopwatch.StartNew();
+        private readonly StringBuilder timeline = new StringBuilder();
+        public void Mark(string what)
+        {
+            lock (timeline) { timeline.Append(clock.ElapsedMilliseconds).Append("ms ").Append(what).Append("; "); }
+        }
+        public string Timeline { get { lock (timeline) { return timeline.ToString(); } } }
         public Evidence(string id, string mode) { Id = id; Mode = mode; }
         public void Body(int count)
         {
@@ -214,11 +225,13 @@ namespace VerifiedDownloadTests
                 if (tls)
                 {
                     Interlocked.Increment(ref transaction.TcpConnections);
+                    transaction.Mark("https tcp accepted");
                     if (transaction.Mode == "no-tls") { stop.WaitOne(5500); return; }
                     SslStream secured = new SslStream(network, false);
                     secured.AuthenticateAsServer(certificate, false, SslProtocols.Tls12, false);
                     stream = secured;
                     Interlocked.Increment(ref transaction.Handshakes);
+                    transaction.Mark("tls handshake done");
                 }
                 using (stream)
                 {
@@ -233,7 +246,9 @@ namespace VerifiedDownloadTests
                     if (!path.Contains(transaction.Id)) throw new Exception("Request belongs to another transaction: " + path);
                     if (!tls)
                     {
+                        transaction.Mark("http request read");
                         if (stop.WaitOne(3000)) return;
+                        transaction.Mark("redirect written");
                         Redirect(stream, "https://localhost:" + HttpsPort + "/body/" + transaction.Id, transaction);
                         return;
                     }
