@@ -193,7 +193,11 @@ repro self install --from=<built-tree> --version=0.1.4
 ```
 
 `<built-tree>` is the directory that *contains* `bin/repro`, not the binary.
-Several versions coexist; each gets its own content-addressed prefix:
+Its `bin/` must hold all three images a build produces: `repro` (the command
+you type), `reprobuild` (the engine it hands over to) and `reprobuild-helper`
+(the image the engine runs its own build-graph helper steps with); the
+install refuses a tree that lacks one. Several versions coexist; each gets
+its own content-addressed prefix:
 
 ```console
 $ repro self list

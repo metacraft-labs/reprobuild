@@ -132,6 +132,13 @@ proc copyDaemonFixture(tempRoot: string): string =
   copyFile(engineReproBin(), result)
   setFilePermissions(result, {fpUserRead, fpUserWrite, fpUserExec,
     fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
+  # The engine's graph helper image goes beside it: the daemon's builds run
+  # their provider-compile and interface-extraction edges with the
+  # `reprobuild-helper` next to the engine image, and refuse without it.
+  let helper = sourceDir / reprobuildHelperExeName()
+  copyFile(parentDir(engineReproBin()) / reprobuildHelperExeName(), helper)
+  setFilePermissions(helper, {fpUserRead, fpUserWrite, fpUserExec,
+    fpGroupRead, fpGroupExec, fpOthersRead, fpOthersExec})
 
 when defined(posix):
   proc processAlive(pidValue: int64): bool =

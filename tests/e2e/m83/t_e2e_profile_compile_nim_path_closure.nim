@@ -145,7 +145,7 @@ suite "profile-compile Nim path closure":
     # the image and hands the helper body their values.
     let action = profileCompileBuildAction(
       profileRoot, binaryPath, nimcacheDir,
-      publicCliPath = "repro", workDir = profileDir,
+      helperImage = "repro", workDir = profileDir,
       repoRoot = reprobuildRepoRoot(),
       weak = weakFingerprintFromText("nim-path-closure-gate"))
     check action.argv[1 .. 2] == @["internal", "compile-profile"]

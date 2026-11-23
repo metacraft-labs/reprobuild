@@ -361,12 +361,20 @@ proc reproPathWithSpaces(c: M6Case): string =
   ## Both images are copied, not symlinked: the client names its directory
   ## through ``getAppFilename``, which resolves a symlink back to
   ## ``build/bin`` and would silently stop exercising the spaced path.
+  ##
+  ## The engine's graph helper image is copied with them: the engine runs the
+  ## activation's introspection and render edges with the
+  ## ``reprobuild-helper`` beside its own image, and refuses the activation
+  ## when that is missing.
   let dir = c.tempRoot / "bin with spaces"
   createDir(dir)
   result = dir / addFileExt("repro", ExeExt)
   let engineSrc = parentDir(c.reproBin) / reprobuildEngineExeName()
   let engineDst = dir / reprobuildEngineExeName()
-  for (src, dst) in [(c.reproBin, result), (engineSrc, engineDst)]:
+  let helperSrc = parentDir(c.reproBin) / reprobuildHelperExeName()
+  let helperDst = dir / reprobuildHelperExeName()
+  for (src, dst) in [(c.reproBin, result), (engineSrc, engineDst),
+                     (helperSrc, helperDst)]:
     if not fileExists(dst):
       copyFile(src, dst)
       setFilePermissions(dst, {fpUserRead, fpUserWrite, fpUserExec,
