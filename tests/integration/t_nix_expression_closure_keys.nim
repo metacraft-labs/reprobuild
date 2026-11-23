@@ -34,6 +34,11 @@
 ##   * a remote selector-only use (no ``expressionFile``) stays cacheable and is
 ##     keyed deterministically -- the same key every call -- and its key
 ##     moves with the selector and the nixpkgs pin it names.
+##   * a selector whose text looks remote but that Nix reads as a path in
+##     the workspace (``github:o#…`` with ``<workspace>/github:o`` present)
+##     is uncacheable in every layer, and cacheable without that entry; the
+##     shared corpus ``tests/fixtures/nix-evaluation-policy.json`` carries
+##     such workspace entries per case.
 ##
 ## No Nix realization is run (none is possible on the Windows host this was
 ## written on): the keys are measured directly, and the identity is resolved
@@ -126,14 +131,46 @@ proc planOf(useDef: InterfaceToolUse): NixAcquisitionPlan =
     nixExpressionFile: entry.expressionFile, nixpkgsRev: entry.nixpkgsRev,
     lockIdentity: entry.selector)
 
-proc materializationKey(expr: string; selector = "reprobuild-test-expr-tool";
+proc materializationKey(expr, workspace: string;
+                        selector = "reprobuild-test-expr-tool";
                         nixpkgsRev = ""): NixMaterializationKey =
   let useDef = exprUse(expr, selector, nixpkgsRev)
-  nixMaterializationCacheKey(useDef, planOf(useDef))
+  nixMaterializationCacheKey(useDef, planOf(useDef), workspace)
 
-template checkNeverServed(expr: string; selector: string = "reprobuild-test-expr-tool") =
+proc emptyWorkspace(): string =
+  ## A workspace root holding nothing Nix could read a selector as.
+  createTempDir("repro-nix-workspace-", "")
+
+proc populateWorkspace(root, outside: string; entries: JsonNode) =
+  ## The corpus's ``workspaceEntries`` (see
+  ## tests/unit/test_nix_evaluation_policy.py for the format): each entry is
+  ## created under ``root``; symlinks point into ``outside``.
+  for entry in entries:
+    let path = root / entry["path"].getStr()
+    createDir(parentDir(path))
+    case entry["kind"].getStr()
+    of "dir":
+      createDir(path)
+    of "file":
+      writeFile(path, "entry\n")
+    of "symlink":
+      createDir(outside / "target")
+      createSymlink(outside / "target", path)
+    of "dangling-symlink":
+      createSymlink(outside / "absent", path)
+    else:
+      raise newException(ValueError,
+        "unknown workspace entry kind: " & entry["kind"].getStr())
+
+template checkNeverServed(expr, workspace: string;
+                          selector: string = "reprobuild-test-expr-tool") =
   ## Every key that could serve an identity or a realization for ``expr``
-  ## is uncacheable and never equals itself recomputed.
+  ## is uncacheable and never equals itself recomputed. The tool-identity
+  ## key classifies selectors against the process's working directory (see
+  ## ``toolIdentityCacheKeyInfo``), so it is measured from ``workspace``.
+  let savedDir = getCurrentDir()
+  setCurrentDir(workspace)
+  defer: setCurrentDir(savedDir)
   let artifact = consumer(expr, selector)
   for mode in AllModes:
     checkpoint("mode " & $mode)
@@ -144,8 +181,8 @@ template checkNeverServed(expr: string; selector: string = "reprobuild-test-expr
     check first.key != second.key
   check loweredGraphCacheKey(artifact, tpmNix, "p", "", "") !=
     loweredGraphCacheKey(artifact, tpmNix, "p", "", "")
-  let m1 = materializationKey(expr, selector)
-  let m2 = materializationKey(expr, selector)
+  let m1 = materializationKey(expr, workspace, selector)
+  let m2 = materializationKey(expr, workspace, selector)
   check not m1.cacheable
   check not m2.cacheable
   check m1.key != m2.key
@@ -155,24 +192,47 @@ suite "a Nix expressionFile tool use is never served from a cache":
   test "local selectors share the helper policy and never reuse predicted keys":
     let corpus = currentSourcePath().parentDir.parentDir / "fixtures" /
       "nix-evaluation-policy.json"
+    var withEntries = 0
     for item in parseFile(corpus):
       let selector = item["selector"].getStr()
-      check isMutableLocalNixSelector(selector) == item["local"].getBool()
+      let entries =
+        if item.hasKey("workspaceEntries"): item["workspaceEntries"]
+        else: newJArray()
+      if entries.len > 0:
+        when defined(windows):
+          # Entry names such as ``github:o`` cannot exist on Windows, where
+          # Nix does not run.
+          continue
+        inc withEntries
+      checkpoint(selector & " with " & $entries)
+      # A fresh workspace per case, holding exactly the case's entries.
+      let scratch = createTempDir("repro-nix-policy-", "")
+      defer: removeDir(scratch)
+      let workspace = scratch / "workspace"
+      createDir(workspace)
+      createDir(scratch / "outside")
+      populateWorkspace(workspace, scratch / "outside", entries)
+      check isMutableLocalNixSelector(selector, workspace) ==
+        item["local"].getBool()
       if item["local"].getBool():
-        checkNeverServed("", selector)
+        checkNeverServed("", workspace, selector)
+      else:
+        check materializationKey("", workspace, selector).cacheable
+    when not defined(windows):
+      check withEntries > 0
 
   test "every key carries a nonce, in every mode, whatever the expression":
     let project = makeProject()
     defer: removeDir(project)
     let expr = toolExpr(project)
     check fileExists(expr)
-    checkNeverServed(expr)
+    checkNeverServed(expr, project)
     for text in AdversarialTexts:
       checkpoint(text)
       writeText(expr, text)
-      checkNeverServed(expr)
+      checkNeverServed(expr, project)
     # A path that does not exist is no different: there is nothing to key.
-    checkNeverServed(project / "nix" / "absent" / "default.nix")
+    checkNeverServed(project / "nix" / "absent" / "default.nix", project)
 
   test "the identity is re-resolved on every call and nothing is kept under a nonce":
     # Path mode resolves the tool from $PATH, so this runs on any host; the
@@ -212,6 +272,11 @@ suite "a Nix expressionFile tool use is never served from a cache":
   test "a remote selector-only use stays cacheable, keyed by what it names":
     # The control: without an expressionFile the keys are deterministic, so
     # the nonce above is the expressionFile's doing, not the fixture's.
+    let workspace = emptyWorkspace()
+    defer: removeDir(workspace)
+    let savedDir = getCurrentDir()
+    setCurrentDir(workspace)
+    defer: setCurrentDir(savedDir)
     let artifact = consumer("")
     for mode in AllModes:
       checkpoint("mode " & $mode)
@@ -221,16 +286,64 @@ suite "a Nix expressionFile tool use is never served from a cache":
         pathValue = "").key
     check loweredGraphCacheKey(artifact, tpmNix, "p", "", "") ==
       loweredGraphCacheKey(artifact, tpmNix, "p", "", "")
-    let m1 = materializationKey("")
+    let m1 = materializationKey("", workspace)
     check m1.cacheable
-    check m1.key == materializationKey("").key
-    check materializationKey("", selector = "nixpkgs#other").key != m1.key
-    check materializationKey("", nixpkgsRev = repeat('a', 40)).key != m1.key
+    check m1.key == materializationKey("", workspace).key
+    check materializationKey("", workspace,
+      selector = "nixpkgs#other").key != m1.key
+    check materializationKey("", workspace,
+      nixpkgsRev = repeat('a', 40)).key != m1.key
     check toolIdentityCacheKey(consumer("", selector = "nixpkgs#other"),
       tpmNix, pathValue = "") != toolIdentityCacheKey(artifact, tpmNix,
         pathValue = "")
 
   when not defined(windows):
+    test "a selector Nix reads as a workspace path is never served from a cache":
+      # Regression: the cache layers used to decide "remote" from the
+      # selector text alone, so a fallback path in the workspace was
+      # cached and served stale after it changed. ``github:o#x`` reads as
+      # a remote URL, but Nix 2.34's fetcher rejects it (no repository)
+      # and Nix then reads ``github:o`` as a path relative
+      # to its working directory -- the workspace. With that entry present
+      # every cache layer must re-evaluate; without it they stay cacheable.
+      # Measured by the helper against real Nix in
+      # tests/integration/test_nix_daemon_cache.py.
+      const selector = "github:o#packages.x86_64-linux.default"
+      let workspace = emptyWorkspace()
+      defer: removeDir(workspace)
+      let savedDir = getCurrentDir()
+      setCurrentDir(workspace)
+      defer: setCurrentDir(savedDir)
+      let useDef = exprUse("", selector = selector)
+      let store = workspace / ".store"
+
+      # The control: an empty workspace, so nothing Nix could fall back to.
+      check isMutableLocalNixSelectorText(selector) == false
+      check not requiresFreshNixEvaluation(selector, "", workspace)
+      check materializationKey("", workspace, selector).cacheable
+      check toolIdentityCacheKeyInfo(consumer("", selector), tpmNix,
+        pathValue = "").cacheable
+      let remoteEdges = nixToolProvisioningEdges(useDef, store, workspace,
+        allOutputs = true)
+      check remoteEdges.actions.len == 1
+      check remoteEdges.actions[0].cacheable
+
+      createDir(workspace / "github:o")
+      writeFile(workspace / "github:o" / "flake.nix", "{ outputs = _: {}; }\n")
+      check requiresFreshNixEvaluation(selector, "", workspace)
+      checkNeverServed("", workspace, selector)
+      # The edge appends ``^*`` for every output; still the same fallback.
+      let localEdges = nixToolProvisioningEdges(useDef, store, workspace,
+        allOutputs = true)
+      check localEdges.actions.len == 1
+      check not localEdges.actions[0].cacheable
+      # The same entry under ANOTHER root is irrelevant: the classification
+      # is against the root the request names.
+      let other = emptyWorkspace()
+      defer: removeDir(other)
+      check not requiresFreshNixEvaluation(selector, "", other)
+      check materializationKey("", other, selector).cacheable
+
     # ``nixAcquisitionPlan`` plans Nix only for a host Nix runs on.
     test "the Nix tool provision edge is never cacheable for an expressionFile":
       # ``agents``' provisioning edge (``nixToolProvisioningEdges``) declares
@@ -279,10 +392,12 @@ suite "every workspace expressionFile is uncacheable":
       "python3-opentelemetry-1.34.0", "python3-with-modules-1.0.0",
       "rust-1.94.0", "rust-1.94.0", "rust-1.97.1", "rust-1.97.1",
       "stylus-0.64.0"]
+    let workspace = emptyWorkspace()
+    defer: removeDir(workspace)
     for expr in exprs:
       checkpoint(expr)
       check fileExists(expr)
-      checkNeverServed(expr)
+      checkNeverServed(expr, workspace)
 
   test "the DSL resolves each stdlib expressionFile to the same file":
     var declared: seq[string] = @[]

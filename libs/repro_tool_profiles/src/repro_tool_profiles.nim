@@ -1854,10 +1854,15 @@ type
     ## and the materialization cache is neither read nor written.
 
 proc nixMaterializationCacheKey*(useDef: InterfaceToolUse;
-                                 plan: NixAcquisitionPlan):
+                                 plan: NixAcquisitionPlan;
+                                 workspaceRoot: string):
     NixMaterializationKey =
   ## An explicit local flake is mutable too: like an expressionFile, its
   ## imports are absent from this predicted key, so it uses a fresh nonce.
+  ## ``workspaceRoot`` is the directory the selector is resolved against
+  ## (the helper request's ``workspaceRoot``): a selector whose text looks
+  ## remote is still local when Nix can read it as a path there
+  ## (``isMutableLocalNixSelector``).
   ## Immutable remote selectors retain their existing v3 keys and reuse.
   ## v3 (2026-10-14). A plan with an ``expressionFile`` is uncacheable
   ## (``uncacheableNixExpressionKey``). A selector-only plan binds exactly
@@ -1876,7 +1881,8 @@ proc nixMaterializationCacheKey*(useDef: InterfaceToolUse;
   ## complete only as far as the selector itself is content-locked: a
   ## ``nixpkgs#`` selector with a pinned ``nixpkgsRev`` and
   ## ``nixpkgsNarHash`` (``effectiveNixSelector``).
-  if requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile):
+  if requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile,
+      workspaceRoot):
     return (cacheable: false, key: uncacheableNixExpressionKey())
   var payload: seq[byte] = @[]
   payload.writeString("reprobuild.nix.materialization.v3")
@@ -2683,7 +2689,8 @@ else:
     # working directory is the requester's only for an in-process resolve.
     let workspaceRoot =
       if requesterDir.len > 0: requesterDir else: getCurrentDir()
-    let materializationKey = nixMaterializationCacheKey(useDef, plan)
+    let materializationKey = nixMaterializationCacheKey(useDef, plan,
+      workspaceRoot)
     let cached = readCachedNixMaterialization(storeRoot, useDef, plan,
       materializationKey)
     if cached.hit:
@@ -5820,6 +5827,7 @@ proc addNixProvisionEdge(edges: var ProvisioningEdges; useDef: InterfaceToolUse;
     identity[0 .. 11]
   let receipt = provisioningStateRoot(storeRoot) / "receipts" /
     (id & ".receipt")
+  let workspaceRoot = getCurrentDir()
   result = ProvisionEdgeRef(id: id, receipt: receipt, kind: NixProvisionerName,
     executablePath: plan.declaredExecutablePath)
   for existing in edges.actions:
@@ -5830,8 +5838,11 @@ proc addNixProvisionEdge(edges: var ProvisioningEdges; useDef: InterfaceToolUse;
     cwd = storeRoot,
     outputs = [receipt],
     commandStatsId = "repro nix provision edge",
-    cacheable = not requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile),
-    text = $(%*{"workspaceRoot": getCurrentDir(),
+    # Resolved against this process's working directory, the same
+    # ``workspaceRoot`` the edge's text hands the helper.
+    cacheable = not requiresFreshNixEvaluation(plan.nixSelector,
+      plan.nixExpressionFile, workspaceRoot),
+    text = $(%*{"workspaceRoot": workspaceRoot,
                 "expressionFile": plan.nixExpressionFile}),
     weakFingerprint = weakFingerprintFromText(
       "reprobuild.nix-provision.v1\0" & plan.nixSelector & "\0" &
@@ -6523,10 +6534,14 @@ proc nixToolProvisioningEdges*(useDef: InterfaceToolUse; storeRoot: string;
     # so a recorded result would be served after an edit of a file the
     # expression imports. For such a use it runs every time; its
     # fingerprint's materialization key is then a nonce anyway.
-    cacheable = not requiresFreshNixEvaluation(plan.nixSelector, plan.nixExpressionFile),
+    # ``selector`` (with any ``^*`` this edge appends) is what the helper
+    # receives, resolved against ``workspaceRoot``.
+    cacheable = not requiresFreshNixEvaluation(selector,
+      plan.nixExpressionFile, workspaceRoot),
     weakFingerprint = weakFingerprintFromText(
       NixToolProvisionEdgeSchema & "\0" &
-      nixMaterializationCacheKey(useDef, plan).key & "\0" & selector &
+      nixMaterializationCacheKey(useDef, plan, workspaceRoot).key & "\0" &
+      selector &
       "\0" & workspaceRoot),
     actionCachePolicy = ffpChecksum,
     text = text,
