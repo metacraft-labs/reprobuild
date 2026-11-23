@@ -374,6 +374,56 @@ proc parseOutputsBlock(packageName: string; node: NimNode;
     if calleeName(stmt).normalize == "output":
       outputs.add(parseOutputDef(packageName, stmt))
 
+proc parseSourceGitlinks(libraryName: string; stmt: NimNode):
+    seq[GitlinkSourceRequirement] =
+  ## Cross-Repo-Source-Consumption §4.2a.2a: the bounded ``sourceGitlinks``
+  ## form. It accepts ONLY a literal sequence of normalized
+  ## repository-relative paths::
+  ##
+  ##   sourceGitlinks:
+  ##     "src/isonim/layout/yoga"
+  ##
+  ## (or ``sourceGitlinks: "a"`` / ``sourceGitlinks "a"`` for one path).
+  ## Everything else is a compile error rather than the library body's
+  ## usual unknown-member warning: the declaration is mandatory source
+  ## semantics, so a statement inside it that does nothing must not compile.
+  ## In particular no action, command, script, pool, environment, output,
+  ## branch or revision field exists — the URL and commit come from the
+  ## selected source's ``.gitmodules`` and gitlink, and acquisition is the
+  ## engine's fixed operation, not a program the recipe supplies.
+  let ctx = "library " & libraryName & " sourceGitlinks"
+  if stmt.len < 2:
+    error(ctx & ": requires at least one literal gitlink path", stmt)
+  var items: seq[NimNode] = @[]
+  for i in 1 ..< stmt.len:
+    let arg = stmt[i]
+    if arg.kind == nnkStmtList:
+      for child in arg:
+        items.add(child)
+    else:
+      items.add(arg)
+  if items.len == 0:
+    error(ctx & ": requires at least one literal gitlink path", stmt)
+  for item in items:
+    case item.kind
+    of nnkStrLit, nnkRStrLit, nnkTripleStrLit:
+      let path = item.strVal
+      let problem = gitlinkRequirementPathProblem(path)
+      if problem.len > 0:
+        error(ctx & ": '" & path & "' " & problem & "; a gitlink path is " &
+          "a normalized repository-relative path such as " &
+          "\"src/vendor/lib\"", item)
+      result.add(GitlinkSourceRequirement(relativePath: path))
+    of nnkCommentStmt:
+      discard
+    else:
+      let member = calleeName(item)
+      error(ctx & ": only literal gitlink path strings are accepted" &
+        (if member.len > 0: ", not '" & member & "'" else: "") &
+        "; the URL and commit are derived from the source's .gitmodules " &
+        "and gitlink, and no action, command, script, pool, environment, " &
+        "output, branch or revision field exists", item)
+
 proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
   ## Mirrors ``parseExecutable``. Accepts two shapes:
   ##
@@ -444,6 +494,16 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
       # ``LibraryDef`` produced by the emitted literal it carries the evaluated
       # VALUE. They are different instances, and the emitter is the seam.
       result.exportedPath = pathNode.repr
+    of "sourcegitlinks":
+      result.sourceGitlinks.add(parseSourceGitlinks(result.name, stmt))
+      var seen: seq[string] = @[]
+      for req in result.sourceGitlinks:
+        let key = gitlinkPortableCaseKey(req.relativePath)
+        if key in seen:
+          error("library " & result.name & " sourceGitlinks: '" &
+            req.relativePath & "' is declared twice (paths are compared " &
+            "case-insensitively, as they collide on macOS and Windows)", stmt)
+        seen.add(key)
     of "discard":
       discard
     # Members this parser does not handle but ANOTHER pass does. The library
@@ -453,7 +513,8 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
     #
     # The cross-pass inventory for a ``library <name>:`` body:
     #
-    #   kind, exportedPath, discard  → here
+    #   kind, exportedPath,
+    #   sourceGitlinks, discard      → here
     #   build                        → emitM4ArtifactBuildLowering, which
     #                                  re-classifies the body and claims
     #                                  soM4Build (macros_b.nim)
@@ -501,12 +562,13 @@ proc parseLibrary(packageName: string; node: NimNode): LibraryDef =
         let member = calleeName(stmt)
         if member.len > 0:
           warning("unknown library body member '" & member &
-            "' — recognised members are kind, exportedPath, build, cli and " &
-            "discard; this statement is ignored", stmt)
+            "' — recognised members are kind, exportedPath, " &
+            "sourceGitlinks, build, cli and discard; this statement is " &
+            "ignored", stmt)
         else:
           warning("this statement in a library body is not a recognised " &
             "member and is ignored; recognised members are kind, " &
-            "exportedPath, build, cli and discard", stmt)
+            "exportedPath, sourceGitlinks, build, cli and discard", stmt)
 
 proc selectorFromConstraint(value: string): string =
   let parts = value.strip().splitWhitespace()
@@ -2976,10 +3038,22 @@ proc packageLiteral(pkg: PackageDef): string =
     # literal empty string rather than nothing, or the constructor breaks.
     let exportedPathCode =
       if lib.exportedPath.len == 0: "\"\"" else: lib.exportedPath
+    # §4.2a.2a: literals only (the parser refused anything else), so each
+    # path is re-quoted rather than inlined.
+    var sourceGitlinksCode = "@["
+    for gitlinkIndex, req in lib.sourceGitlinks:
+      if gitlinkIndex > 0:
+        sourceGitlinksCode.add(", ")
+      sourceGitlinksCode.add("GitlinkSourceRequirement(relativePath: " &
+        escForCode(req.relativePath) & ")")
+    sourceGitlinksCode.add("]")
+    if lib.sourceGitlinks.len == 0:
+      sourceGitlinksCode = "newSeq[GitlinkSourceRequirement]()"
     result.add("LibraryDef(name: " & escForCode(lib.name) &
       ", kind: " & $lib.kind &
       ", lockFile: " & escForCode(lib.lockFile) &
       ", exportedPath: " & exportedPathCode &
+      ", sourceGitlinks: " & sourceGitlinksCode &
       ", sourceFile: " & escForCode(lib.sourceFile) &
       ", sourceLine: " & $lib.sourceLine & ")")
   # Producer-side runtime library declarations. `dir` / `cpu` / `os` hold

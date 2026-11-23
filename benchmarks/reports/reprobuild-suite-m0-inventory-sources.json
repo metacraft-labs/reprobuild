@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3168,
+    "nimTestBinaries": 3171,
     "pureUnitConsolidationGroups": 95,
-    "pureUnitTests": 837,
+    "pureUnitTests": 838,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3220
+    "testEntries": 3223
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -525,7 +525,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 2,
+      "count": 3,
       "defines": [],
       "dependencyShape": [
         "repro_hash",
@@ -534,6 +534,7 @@
       ],
       "owner": "libs/repro_interface_artifacts",
       "sources": [
+        "libs/repro_interface_artifacts/tests/t_library_source_gitlinks_codec.nim",
         "libs/repro_interface_artifacts/tests/t_runtime_tool_uses_codec.nim",
         "libs/repro_interface_artifacts/tests/test_imported_contribution_typecheck_identity.nim"
       ],
@@ -1835,10 +1836,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1777,
+      "integration": 1778,
       "platform/destructive": 201,
-      "pure unit": 837,
-      "unclassified": 376
+      "pure unit": 838,
+      "unclassified": 377
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2058,9 +2059,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3168,
+    "nimTestBinaryCount": 3171,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3220
+    "testEntryCount": 3223
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -22112,6 +22113,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_library_source_gitlinks_codec",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_hash",
+        "repro_interface_artifacts",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_library_source_gitlinks_codec.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_multi_package_merge",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -29036,6 +29056,23 @@
       "source": "libs/repro_project_dsl/tests/t_l9_supervision_facts_reach_the_dev_env_artifact.nim",
       "sourceSuiteCount": 7,
       "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_library_source_gitlinks",
+      "class": "unclassified",
+      "classificationReason": "spawns a subprocess (through `libs/repro_project_dsl/tests/dsl_port/service_block_compile_probe.nim`)",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_library_source_gitlinks.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -45945,6 +45982,25 @@
       "source": "tests/integration/t_cose_rfc9052_vectors.nim",
       "sourceSuiteCount": 6,
       "staticCaseCount": 21,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cross_repo_nim_library_required_gitlink_source",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_dsl_stdlib",
+        "repro_lock",
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cross_repo_nim_library_required_gitlink_source.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

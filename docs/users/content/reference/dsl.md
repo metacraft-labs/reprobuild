@@ -280,6 +280,7 @@ sources and builds the artifact.
 | `name: "<file name>"` | `executable` | The file name of the program when it differs from `<name>`, such as `"image-tool"` |
 | `kind: <kind>` | `library` | `static`, `shared`, `both` or `headerOnly` |
 | `exportedPath: "<dir>"` | `library` | The directory that holds the library's sources for a consumer, by default `src` |
+| `sourceGitlinks:` | `library` | Git submodules inside `exportedPath` that the sources cannot be compiled without ([Required submodules](#required-submodules)) |
 | `build:` | `executable`, `library`, `files` | The actions that produce the artifact ([Build actions](#build-actions)) |
 | `cli:` | `executable` | The program's typed command-line interface ([Typed tool interfaces](#typed-tool-interfaces)) |
 | `lockFile <name>` | `executable`, `library` | The named lock file the artifact's dependencies are resolved in, when it differs from the package's |
@@ -303,6 +304,39 @@ package `my-lib`:
     build:
       discard writeText("build/version.txt", "1.0\n")
 ```
+
+### Required submodules
+
+A Nim library whose exported sources read a vendored tree from a Git
+submodule names the submodule's path with `sourceGitlinks:`. The paths are
+repository-relative and must lie inside `exportedPath`:
+
+```nim title="repro.nim"
+library isonim:
+  sourceGitlinks:
+    "src/isonim/layout/yoga"
+```
+
+A project that consumes the library then compiles against a read-only copy
+of the exported directory with each submodule's files at its declared
+place. Its own checkout of the library, and the submodule there, are only
+read; nothing initializes or updates them.
+
+- When the submodule is not initialized, Reprobuild fetches the commit that
+  the library's committed tree records for that path, from the URL its
+  committed `.gitmodules` gives. An uncommitted change to `.gitmodules` or to
+  the recorded commit stops the build with an explanation, because neither
+  identifies a revision.
+- When the submodule is initialized, its files are copied as they are,
+  including uncommitted edits.
+- A submodule inside a required submodule is not fetched. If it is not
+  initialized, the build stops.
+
+The form takes only string literals. The URL and the commit always come
+from the library's Git metadata, and there is no field to run a command,
+choose a branch or override the revision. An entry that is not a
+normalized relative path, a duplicate, or any other statement in the block
+is a compile error.
 
 ## Build actions
 
