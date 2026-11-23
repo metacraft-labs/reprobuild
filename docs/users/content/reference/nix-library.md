@@ -261,12 +261,14 @@ agents and each differing field.
 
 ```nix
 reprobuildFacts { pkgs, repro, profileDir, host, system, nixos ? null,
-                  catalogClones ? null }
+                  catalogClones ? null, homeDirectory ? null }
 ```
 
 A derivation that runs `repro home facts` on a profile. `nixos` states whether
 the host is NixOS (`--nixos`), for a profile with `nixos` guards.
 `catalogClones` is the shared clone root of the catalogs the profile imports.
+`homeDirectory` is the host's home directory, so that a `PATH` entry spelled as
+the home directory is named by its absolute path.
 
 ### `reprobuild.lib.homeEquivalenceCheck`
 
@@ -334,28 +336,28 @@ Import `reprobuild.homeManagerModules.intent`. Its options are under
 <!-- generated:begin nix-library-options -->
 ### `reprobuild.intent.buildSystem`
 
-IFD mode: the system that runs `repro home export` -- the evaluator's, not the target's. Defaults to builtins.currentSystem where the evaluation exposes it.
+For import-from-derivation mode: the system that runs `repro home export`. This is the evaluator's system, not the target's. Defaults to `builtins.currentSystem` where the evaluation exposes it.
 
 - Type: null or string
 - Default: `null`
 
 ### `reprobuild.intent.catalogClones`
 
-IFD mode: a directory laid out as the shared clone root (`github.com/<owner>/<repo>.git`, a bare clone holding each pinned commit) that the sandboxed `repro home export` reads the catalogs the profile imports (`repro-catalogs.toml`) from (`$REPRO_WORKSPACE_CLONES`). Without it, an IFD export of a profile with imports is refused. Ignored in snapshot mode.
+For import-from-derivation mode: a directory laid out as the shared clone root (`github.com/<owner>/<repo>.git`, a bare clone holding each pinned commit). The sandboxed `repro home export` reads the catalogs the profile imports (`repro-catalogs.toml`) from it (`$REPRO_WORKSPACE_CLONES`). Without it, an export of a profile with imports is refused. Ignored in snapshot mode.
 
 - Type: null or absolute path
 - Default: `null`
 
 ### `reprobuild.intent.enable`
 
-Whether to enable applying a Reprobuild profile's evaluated intent through Home Manager.
+Whether to enable applying a reprobuild profile's evaluated intent through Home Manager.
 
 - Type: boolean
 - Default: `false`
 
 ### `reprobuild.intent.environment.enable`
 
-Whether to enable home.sessionVariables / home.sessionPath from env.userVariable / env.userPath resources.
+Whether to enable `home.sessionVariables` and `home.sessionPath` from `env.userVariable` and `env.userPath` resources.
 
 - Type: boolean
 - Default: on exactly when the host's `hosts:` entry declares `applies:` and does not list `environment`
@@ -369,7 +371,7 @@ The evaluated intent (output): what `repro home export --target` reports for thi
 
 ### `reprobuild.intent.files.enable`
 
-Whether to enable home.file from fs.userFile resources.
+Whether to enable `home.file` from `fs.userFile` resources.
 
 - Type: boolean
 - Default: on exactly when the host's `hosts:` entry declares `applies:` and does not list `files`
@@ -383,7 +385,7 @@ Cask tokens the intent asks for (output).
 
 ### `reprobuild.intent.homebrew.enable`
 
-Whether to enable Homebrew token lists from pkg.homebrewCask / pkg.homebrewFormula resources and Homebrew-realized packages.
+Whether to enable Homebrew token lists from `pkg.homebrewCask` and `pkg.homebrewFormula` resources and from Homebrew-realized packages.
 
 - Type: boolean
 - Default: on exactly when the host's `hosts:` entry declares `applies:` and does not list `applications`
@@ -397,7 +399,7 @@ Formula tokens the intent asks for (output).
 
 ### `reprobuild.intent.homebrew.realizationOf`
 
-Hook: `{ name, system }` -> null or `{ kind = "cask" | "formula"; token; tap; }`, the Homebrew realization of a canonical package. Defaults to `reprobuild.lib.brewRealizationOf`, which reads the Homebrew contribution catalog the reprobuild flake pins (reprobuild-brew-packages): a cask claims a package on darwin systems, a formula on darwin and Linux. A package it claims goes to the token lists instead of home.packages; set `_: null` to claim nothing.
+A function that takes `{ name, system }` and returns the Homebrew realization of that canonical package: `null`, or `{ kind = "cask" | "formula"; token; tap; }`. The default, `reprobuild.lib.brewRealizationOf`, reads the Homebrew contribution catalog the reprobuild flake pins (`reprobuild-brew-packages`). There a cask claims a package on darwin systems, and a formula claims one on darwin and Linux. A package the function claims goes to the token lists instead of `home.packages`. Set it to `_: null` to claim nothing.
 
 - Type: function that evaluates to a(n) (null or (attribute set of string))
 - Default: `reprobuild.lib.brewRealizationOf`
@@ -410,42 +412,42 @@ The host the profile is evaluated for (its `hosts:` entry selects the activities
 
 ### `reprobuild.intent.nixos`
 
-Whether this host is NixOS, for the profile's `nixos` guards. Whether a Linux target is NixOS is not part of its system name (Home Manager configurations for both exist), so it is stated here; null leaves it unstated, and a profile whose guards reach `nixos` then fails the evaluation instead of reading it as false.
+Whether this host is NixOS, for the profile's `nixos` guards. A Linux target's system name does not say whether it is NixOS, since Home Manager configurations exist for both, so it is stated here. `null` leaves it unstated: a profile whose guards reach `nixos` then fails the evaluation instead of reading it as `false`.
 
 - Type: null or boolean
 - Default: `null`
 
 ### `reprobuild.intent.packages.enable`
 
-Whether to enable home.packages from the intent's packages (nixpkgs attributes from the reprobuild-nix-packages catalog).
+Whether to enable `home.packages` from the intent's packages (nixpkgs attributes from the `reprobuild-nix-packages` catalog).
 
 - Type: boolean
 - Default: on exactly when the host's `hosts:` entry declares `applies:` and does not list `packages`
 
 ### `reprobuild.intent.packagesCatalog`
 
-IFD mode: a `reprobuild-packages` checkout the sandboxed `repro home export` reads package definitions from (`$REPROBUILD_PACKAGES_ROOT`). Needed for the export's per-package classification (which packages are applications) on a host whose `hosts:` entry declares `applies:`; without it, every package that catalog defines is `unresolved`. Ignored in snapshot mode.
+For import-from-derivation mode: a `reprobuild-packages` checkout that the sandboxed `repro home export` reads package definitions from (`$REPROBUILD_PACKAGES_ROOT`). The export needs it to tell which packages are applications on a host whose `hosts:` entry declares `applies:`. Without it, every package that catalog defines is `unresolved`. Ignored in snapshot mode.
 
 - Type: null or absolute path
 - Default: `null`
 
 ### `reprobuild.intent.profileBin`
 
-The directory holding the launchers of the concerns Reprobuild applies on this host (output): set when the host's `hosts:` entry gives Reprobuild `packages` or `applications` and leaves `environment` to Nix, null otherwise. The `environment` category puts it first on home.sessionPath.
+The directory holding the launchers of the concerns reprobuild applies on this host (output). It is set when the host's `hosts:` entry gives reprobuild `packages` or `applications` and leaves `environment` to Nix, and is `null` otherwise. The `environment` category puts it first on `home.sessionPath`.
 
 - Type: null or string
 - Read-only: set by the module
 
 ### `reprobuild.intent.profileDir`
 
-The profile directory, for IFD mode (used when `snapshot` is null).
+The profile directory, for import-from-derivation mode (used when `snapshot` is `null`).
 
 - Type: null or absolute path
 - Default: `null`
 
 ### `reprobuild.intent.realizationSources`
 
-Where the Nix realization of a canonical package comes from when it is not this configuration's nixpkgs, by canonical name. A source is `{ nixpkgs = <package set>; attribute ? null; }` (the attribute is the one the catalog names, unless given), `{ packages = <package set>; attribute ? null; }` (a flake's `packages.<system>`; the attribute is the canonical name, unless given), or `{ derivation = <derivation>; }`. A mapping is realization, never selection: it decides where a package the profile selects comes from, not whether a host gets it. A mapping for a name that is not a canonical package, and one for a canonical package the profile selects on no host, fail the evaluation. A selected package with neither a mapping nor a catalog record is still unmapped.
+Where the Nix realization of a canonical package comes from when it is not this configuration's nixpkgs, by canonical name. A source is `{ nixpkgs = <package set>; attribute ? null; }`, `{ packages = <package set>; attribute ? null; }` (a flake's `packages.<system>`), or `{ derivation = <derivation>; }`. Without `attribute`, a `nixpkgs` source takes the attribute the catalog names, and a `packages` source takes the canonical name. A mapping is realization, never selection: it decides where a package the profile selects comes from, not whether a host gets it. A mapping for a name that is not a canonical package, and one for a canonical package the profile selects on no host, fail the evaluation. A selected package with neither a mapping nor a catalog record is still unmapped.
 
 - Type: attribute set of raw value
 - Default: `{ }`
@@ -473,7 +475,7 @@ Entries no category covers (output): `{ category, id, reason }`.
 
 ### `reprobuild.intent.uncategorizedPolicy`
 
-What an entry no category covers (config overrides, resource kinds Home Manager has no option for) does: fail the evaluation (an assertion, the default) or, as an explicit opt-in while Reprobuild applies those entries, warn.
+What an entry no category covers (config overrides, resource kinds Home Manager has no option for) does. It fails the evaluation (an assertion, the default) or, as an explicit opt-in while reprobuild applies those entries, warns.
 
 - Type: one of "error", "warn"
 - Default: `"error"`
@@ -487,7 +489,7 @@ Entries of enabled categories that could not be mapped (output): `{ category, id
 
 ### `reprobuild.intent.unmappedPolicy`
 
-What an entry of an enabled category that cannot be mapped does: fail the evaluation (an assertion, the default) or, as an explicit opt-in, warn.
+What an entry of an enabled category that cannot be mapped does. It fails the evaluation (an assertion, the default) or, as an explicit opt-in, warns.
 
 - Type: one of "error", "warn"
 - Default: `"error"`

@@ -26,6 +26,15 @@
 #     own declarations (name, description, type, declared default, read-only)
 #     by `lib.optionAttrSetToDocList`. Options marked `internal` or invisible
 #     are left out, as Nix's own option manuals leave them out.
+#   * Description style. The region cannot be edited by hand, so each
+#     option's description, and a default written as prose, is held, in the
+#     module, to the rules of the
+#     authoring guide's "Language and style" that a pattern can decide: no
+#     `--` or `->` in prose, no "Reprobuild" mid-sentence, no undefined
+#     "IFD", no dotted identifier outside a code span, no sentence over 30
+#     words. One probe per rule must be rejected, and a set of acceptable
+#     sentences accepted (`styleControlPasses` is empty). Reported in reprobuild-pm, file
+#     issues/2026-11-17-home-manager-module-option-descriptions-render-unedited-on-the-user-reference.md.
 #
 # The check also runs itself against the page with one option's block
 # deleted and requires that to fail, so a checker that accepts anything
@@ -140,6 +149,80 @@ let
     );
 
   render = concatStringsSep "\n\n" (map renderOption moduleOptions);
+
+  # ── Description style ───────────────────────────────────────────────────
+  # The options region is part of a user page and cannot be edited by hand,
+  # so each description, and each default written as prose (`literalMD`), is
+  # held to the authoring guide's "Language and style"
+  # (docs/contributors/user-documentation.md) where it is written: in the
+  # module. Only the rules a pattern can decide are checked, and only in
+  # prose, with code spans replaced by one word.
+  maxSentenceWords = 30;
+  proseOf =
+    text: concatStringsSep "" (map (p: if isString p then p else "CODE") (split "`[^`]*`" text));
+  proseProblems =
+    what: text:
+    let
+      prose = proseOf text;
+      sentences = filter (s: isString s && s != "") (split "[.?!]( |\n|$)" prose);
+      wordsIn = s: length (filter (w: isString w && w != "") (split "[ \n]+" s));
+      long = filter (s: wordsIn s > maxSentenceWords) sentences;
+      # "Reprobuild" only where a sentence starts; the site writes the
+      # product "reprobuild".
+      beforeProduct = lib.init (lib.splitString "Reprobuild" prose);
+      productMidSentence = lib.any (p: match "(.*[.?!][ \n]+)?" p == null) beforeProduct;
+      # IFD is allowed only where the same text defines it.
+      undefinedIfd = if lib.hasInfix "import-from-derivation (IFD)" prose then "" else prose;
+      say = problem: "${what} ${problem}";
+    in
+    lib.optional (lib.hasInfix "--" prose) (say "writes `--` for a dash outside code")
+    ++ lib.optional (lib.hasInfix "->" prose) (say "writes `->` for \"returns\" or \"to\" outside code")
+    ++ lib.optional productMidSentence (
+      say "writes \"Reprobuild\" mid-sentence; the site writes \"reprobuild\""
+    )
+    ++ lib.optional (match "(.*[^A-Za-z])?IFDs?([^A-Za-z].*)?" undefinedIfd != null) (
+      say "uses the abbreviation IFD without defining it (write \"import-from-derivation\")"
+    )
+    # Two or more characters before the dot, so "e.g." and "i.e." are prose.
+    ++ lib.optional (
+      match "(.*[^A-Za-z0-9_./$-])?[a-z][A-Za-z0-9_]+\\.[a-z][A-Za-z0-9_.]*.*" prose != null
+    ) (say "names a dotted identifier outside a code span")
+    ++ map (
+      s:
+      say "has a sentence of ${toString (wordsIn s)} words (at most ${toString maxSentenceWords}): \"${s}\""
+    ) long;
+  styleProblems = concatLists (
+    map (
+      o:
+      proseProblems "${o.name}: the description" (lib.trim (textOf (o.description or null)))
+      ++ lib.optionals ((o.default._type or "") == "literalMD") (
+        proseProblems "${o.name}: the default" (textOf o.default)
+      )
+    ) moduleOptions
+  );
+  # One probe per rule, each of which must be rejected, and text each rule
+  # must accept; a rule that stops matching, or starts matching too much,
+  # fails the check instead of passing it.
+  styleRejectProbes = [
+    "The system that runs it -- the evaluator's."
+    "A function `{ name }` -> null."
+    "Whether to enable applying a Reprobuild profile."
+    "IFD mode: the system that runs it."
+    "Defaults to builtins.currentSystem here."
+    (concatStringsSep " " (lib.genList (_: "word") (maxSentenceWords + 1)) + ".")
+    (concatStringsSep ": " (lib.genList (_: "word word word word word word word word word") 4) + ".")
+  ];
+  styleAcceptProbes = [
+    "Applies to dotfiles, e.g. shell profiles."
+    "Does it apply? Reprobuild does."
+    "For an import-from-derivation (IFD) build, the IFD runs in the sandbox."
+    "Reads `repro.nim`, version 2.2 or later. Defaults to `builtins.currentSystem`."
+  ];
+  styleControlPasses =
+    filter (p: proseProblems "probe" p == [ ]) styleRejectProbes
+    ++ map (p: "(should be accepted) ${p}") (
+      filter (p: proseProblems "probe" p != [ ]) styleAcceptProbes
+    );
 
   # ── Realization sources, as the library resolves them ───────────────────
   probeDrv = {
@@ -362,7 +445,10 @@ let
   mutatedText = builtins.replaceStrings [ ("\n\n" + renderOption removedOption) ] [ "" ] pageText;
 in
 {
-  failures = check pageText;
+  failures = check pageText ++ styleProblems;
+  # The style probes the description check got wrong; the flake check
+  # requires this to be empty.
+  inherit styleControlPasses;
   # Empty when the deletion did not change the page (the page does not carry
   # that option's block), which the flake check treats as a failure.
   controlFailures = if mutatedText == pageText then [ ] else check mutatedText;
