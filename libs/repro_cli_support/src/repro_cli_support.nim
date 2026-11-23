@@ -14826,11 +14826,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                 skipCacheHitEvidence = mcCacheEvidence notin measureSet,
                 statsEnabled = statsEnabled,
                 cancelCheck = cancelCheck)
-          except CatchableError:
+          except CatchableError as err:
+            # Carry the cause. Without it the build said only that the
+            # interface "could not be loaded", and the compile error behind
+            # it (a recipe import the search path could not open, say) was
+            # left in a failure report nobody was pointed at.
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
               producerRootAbs & "'s interface could not be loaded to bind " &
-              "the declared executable / library to its output.")
+              "the declared executable / library to its output:\n" &
+              err.msg, err)
         if producerArtifact.projectInterface.runtimeToolUses.len > 0:
           var runtimeArtifact = producerArtifact
           runtimeArtifact.projectInterface.toolUses =
