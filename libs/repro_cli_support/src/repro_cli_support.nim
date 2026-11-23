@@ -2110,17 +2110,27 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
   # Written by the renderer from the helper's declaration (`repro internal
   # cmake-regenerate`), so the child parses back exactly these values.
-  let argv = @[publicCliPath] & reproArgvOf(["internal", "cmake-regenerate"], [
+  # Run by the graph helper image beside the engine (`repro_core/
+  # cli_images`, ``ReprobuildHelperName``), never by the engine itself, so
+  # this process loads no OpenSSL. ``--public-cli`` still names the ENGINE:
+  # CMake may call back into it (``repro build --prepare-only``), and that
+  # call needs every verb.
+  let helperCliPath =
+    requireGraphHelperImage(publicCliPath, "__repro_cmake_regenerate")
+  let argv = @[helperCliPath] & reproArgvOf(["internal", "cmake-regenerate"], [
     ("metadata", @[meta.metadataFile]),
     ("publicCli", @[publicCliPath]),
     ("depfile", @[depfilePath])])
+  var inputs = cmakeRegenerationInputs(meta, publicCliPath)
+  if helperCliPath.len > 0 and fileExists(extendedPath(helperCliPath)):
+    inputs.addUniquePath(helperCliPath)
   action("__repro_cmake_regenerate", argv,
     # Named-Lock-Files §7.2. CMake regeneration re-runs the generator over
     # recorded metadata; no solved package instance reaches it. See
     # `lockIdentityOutsideSolvedGraph`.
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = meta.binaryDir,
-    inputs = cmakeRegenerationInputs(meta, publicCliPath),
+    inputs = inputs,
     outputs = cmakeRegenerationOutputs(meta),
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
@@ -10225,6 +10235,19 @@ when defined(reproImageIdentityTest):
   proc internalReproHelperCliPathForTest*(publicCliPath = ""): string =
     internalReproHelperCliPath(publicCliPath)
 
+proc graphHelperCliPath(publicCliPath: string; edge: string): string =
+  ## The image the build graph runs its helper commands with: the graph
+  ## helper image (``reprobuild-helper``) beside the engine that
+  ## ``internalReproHelperCliPath`` names, or "" when that names none (the
+  ## caller's existing "no engine image" state, unchanged).
+  ##
+  ## Raises ``GraphHelperImageMissingError`` naming the expected path when
+  ## the engine is there and its helper is not. Never answers with the
+  ## engine instead: an engine process in the action's tree is the start-up
+  ## entropy read the helper image exists to remove (see
+  ## `repro_core/cli_images`, ``ReprobuildHelperName``).
+  requireGraphHelperImage(internalReproHelperCliPath(publicCliPath), edge)
+
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## Pre-built Tier 2a direct provider binary, normally shipped next to
   ## the repro CLI by ``scripts/build_apps.sh``. Empty string means the
@@ -12513,11 +12536,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   ## and served a stale interface with a green build. The engine's decision
   ## comes from the monitored read set, which does see those files.
   discard ensureLockPinnedCatalog(modulePath, consumerRoot)
-  let helperCliPath = internalReproHelperCliPath(publicCliPath)
-  if helperCliPath.len == 0 or not cliPathExists(helperCliPath):
+  let engineCliPath = internalReproHelperCliPath(publicCliPath)
+  if engineCliPath.len == 0 or not cliPathExists(engineCliPath):
     # No engine-executable image to spawn back into. Embedded callers and
     # the bootstrap path land here; they get the pre-existing in-process
-    # extraction, which is the same code the helper runs.
+    # extraction, which is the same code the helper runs. (This is about a
+    # missing ENGINE. A present engine whose graph helper image is missing
+    # is refused below, never served from here.)
     result = extractInterfaceFromModule(modulePath, artifactPath, stubPath,
       workDir, scratchDir, requireStub, resourceModule, extraPaths,
       consumerRoot)
@@ -12528,6 +12553,10 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     writeInterfaceArtifactProvenance(artifactPath, modulePath,
       resourceModule = resourceModule, extraPaths = extraPaths)
     return
+  # The edge runs the graph helper image beside that engine; a missing one
+  # raises here, naming the path.
+  let helperCliPath =
+    requireGraphHelperImage(engineCliPath, "__repro_interface_extract")
 
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" (owner decision 2026-10-09): the extraction runs IN the
@@ -15157,7 +15186,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("running provider compile")
       providerCompileResult = runProviderCompileEdge(providerPlan,
         modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
         compileScratchDir, result.projectRoot, providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult,
@@ -34081,7 +34110,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
     let providerCompileResult = runProviderCompileEdge(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
       compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
@@ -34311,7 +34340,7 @@ proc refreshRecipeProviderSnapshot(target: string;
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
     let providerCompileResult = runProviderCompileEdge(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
       compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
@@ -97040,7 +97069,8 @@ proc tryLoadDurableSolverProviderArtifacts(
       # The edge the build ran: recipe-relative where it could be
       # (`runProviderCompileEdge`), whose record is keyed by the recipe-relative
       # plan, not by the caller's.
-      let helperCliPath = internalReproHelperCliPath(publicCliPath)
+      let helperCliPath =
+        graphHelperCliPath(publicCliPath, ProviderCompileActionId)
       let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
         helperCliPath, compileWorkDir, projectRootForModule(modulePath))
       proc locationBoundAction(): BuildAction =
@@ -97251,7 +97281,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
         let compiled = runProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
-          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir,
+          graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir, scratchDir,
           providerRoot, BuildEngineConfig(
           cacheRoot: cacheRoot,
           actionCacheRoot: currentActionCacheRoot(),
@@ -111053,6 +111083,102 @@ proc runThinApp*(programName: string): int =
     # nearest engine is the one whose protocol its children speak.
     putEnv("REPRO_INVOKING_CLI", stablePublicCliPath())
   result = runThinAppDispatch(programName)
+  flushStagedFailureReport(result)
+
+const GraphHelperRoles* = [
+    "compile-provider", "extract-interface", "compile-profile",
+    "probe-profile-platforms", "dev-env-introspect", "render-dev-env-shell",
+    "cmake-regenerate"]
+  ## The helper commands the BUILD GRAPH runs inside its own actions, and
+  ## so the only commands the graph helper image (``reprobuild-helper``,
+  ## `apps/reprobuild-helper`) answers. Each is spelt ``internal <role>``
+  ## or ``__repro-<role>``.
+  ##
+  ## Left out on purpose: the roles that are not a process INSIDE an
+  ## action's monitored tree. ``internal io monitor`` and
+  ## ``internal runquota-helper`` wrap the monitored command from outside
+  ## (the monitor injects into its child, not into itself), the shell-hook
+  ## roles (``direnv-activate``, ``native-shell-activate``) are run by a
+  ## user's shell, and the dev-session roles are long-lived services. They
+  ## stay in the engine.
+
+proc selectsGraphHelperRole*(args: openArray[string]): bool =
+  ## Whether ``args`` (without the image) start with one of
+  ## ``GraphHelperRoles``, in either spelling.
+  if args.len >= 2 and args[0] == "internal":
+    return args[1] in GraphHelperRoles
+  if args.len >= 1 and args[0].startsWith("__repro-"):
+    return args[0]["__repro-".len .. ^1] in GraphHelperRoles
+  false
+
+proc graphHelperEngineImage(): string =
+  ## The engine whose helper this image is, as the engine itself would name
+  ## its own image (``publicCliImagePath()`` run in the engine):
+  ## ``REPRO_PUBLIC_CLI_PATH`` when it names a file (a portable Linux
+  ## archive's launcher exports it naming the engine's launcher), else the
+  ## engine beside this image: makeWrapper's hidden image first (a Nix
+  ## package runs the engine as ``bin/.reprobuild-wrapped``), then
+  ## ``reprobuild``, then the engine's legacy name ``repro`` (a bootstrap tree
+  ## compiles the engine straight to ``bin/repro`` and has no thin client;
+  ## see ``ReproLegacyEngineName``). "" when there is none.
+  let configured = configuredPublicCliPath()
+  if configured.len > 0:
+    return configured
+  let dir = parentDir(absolutePath(getAppFilename()))
+  for name in [MakeWrapperHiddenPrefix & ReprobuildEngineName &
+                 MakeWrapperHiddenSuffix,
+               reprobuildEngineExeName(), reproLegacyEngineExeName()]:
+    let candidate = dir / name
+    if fileExists(extendedPath(candidate)):
+      return os.normalizedPath(candidate)
+  ""
+
+proc runGraphHelperApp*(): int =
+  ## The entry of the graph helper image (`apps/reprobuild-helper`): run one
+  ## of ``GraphHelperRoles`` exactly as the engine would, and refuse
+  ## anything else.
+  ##
+  ## THE SAME DISPATCH, A DIFFERENT IMAGE. The role is parsed by the same
+  ## generated parser and run by the same code as in the engine; the image
+  ## differs only in what it links (no ``-d:ssl``, so no OpenSSL to load and
+  ## no start-up entropy draw on Windows). So this entry reproduces what the
+  ## engine's entry does for these roles and nothing more:
+  ##
+  ##   * the ENGINE stays the public CLI. Whatever the role starts or bakes
+  ##     in (a nested self-spawn, ``-d:reproBin`` in an interface compile,
+  ##     the ``REPRO_INVOKING_CLI`` a provider calls back through) names the
+  ##     engine that scheduled the edge, as it did when the engine ran the
+  ##     role itself. ``REPRO_PUBLIC_CLI_PATH`` is set to it when unset
+  ##     (the portable launcher's ``:=``), and ``REPRO_INVOKING_CLI`` is
+  ##     overwritten with it (``runThinApp``'s rule).
+  ##   * no project pins: the roles are exempt in the engine too
+  ##     (``exemptFromPins``), since the image that scheduled them already
+  ##     decided.
+  ##   * no "this image is repro" mark: nothing here self-spawns this
+  ##     image, and with the engine as the public CLI nothing needs to.
+  ##
+  ## A missing engine is refused, loudly, rather than guessed: the roles'
+  ## results depend on which engine they name.
+  let args = commandLineParams()
+  if not selectsGraphHelperRole(args):
+    stderr.writeLine(ReprobuildHelperName & ": runs only the build " &
+      "graph's helper commands (internal " & GraphHelperRoles.join(", ") &
+      ", or their __repro-<role> spellings); got " &
+      (if args.len == 0: "no arguments" else: quoteShellCommand(args)) &
+      ". Run " & ReproThinClientName & " (or " & ReprobuildEngineName &
+      ") for everything else.")
+    return 2
+  let engine = graphHelperEngineImage()
+  if engine.len == 0:
+    stderr.writeLine(ReprobuildHelperName & ": no " & ReprobuildEngineName &
+      " engine beside " & os.normalizedPath(getAppFilename()) &
+      " and REPRO_PUBLIC_CLI_PATH is not set; the helper commands name the " &
+      "engine that scheduled them, so this image is installed beside it")
+    return 2
+  if getEnv(PublicCliPathEnvVar).len == 0:
+    putEnv(PublicCliPathEnvVar, engine)
+  putEnv("REPRO_INVOKING_CLI", engine)
+  result = runThinAppDispatch(ReproThinClientName)
   flushStagedFailureReport(result)
 
 when defined(reproSourceRevalidationTest):

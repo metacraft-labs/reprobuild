@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3170,
+    "nimTestBinaries": 3172,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 837,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3222
+    "testEntries": 3224
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1835,8 +1835,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1779,
-      "platform/destructive": 201,
+      "integration": 1780,
+      "platform/destructive": 202,
       "pure unit": 837,
       "unclassified": 376
     },
@@ -2058,9 +2058,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3170,
+    "nimTestBinaryCount": 3172,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3222
+    "testEntryCount": 3224
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -8170,7 +8170,7 @@
             "summary",
             "unitConfig"
           ],
-          "line": 587,
+          "line": 592,
           "path": "tests/integration/t_repro_test_runner_process_group_cleanup.nim",
           "patterns": [
             "nim-c"
@@ -44450,7 +44450,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_bootstrap_guard_names_the_host_artefact.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 12,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -48832,6 +48832,46 @@
       "source": "tests/integration/t_go_convention_embeds_and_rekeys_on_observed_reads.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_graph_helper_draws_no_entropy_at_start_windows",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_core",
+        "repro_profile_compile",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_graph_helper_image_loads_no_openssl",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_graph_helper_image_loads_no_openssl.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
