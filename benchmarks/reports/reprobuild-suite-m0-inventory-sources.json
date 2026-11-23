@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3209,
+    "nimTestBinaries": 3210,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 844,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3261
+    "testEntries": 3262
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1841,7 +1841,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1802,
+      "integration": 1803,
       "platform/destructive": 203,
       "pure unit": 844,
       "unclassified": 383
@@ -2064,9 +2064,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3209,
+    "nimTestBinaryCount": 3210,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3261
+    "testEntryCount": 3262
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -31765,6 +31765,29 @@
       "source": "libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rust_convention_emit_cache_inputs",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [
+        "reproProviderMode"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl",
+        "repro_provider_runtime",
+        "repro_standard_provider",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_standard_provider",
+      "requiresReproBinary": false,
+      "source": "libs/repro_standard_provider/tests/test_rust_convention_emit_cache_inputs.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 11,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

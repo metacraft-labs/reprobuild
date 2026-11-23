@@ -62,13 +62,47 @@
 ## edge-cases buys nothing here.
 ##
 ## M18 lands a fingerprint sidecar (see
-## ``conventions/emit_cache.nim``): the convention hashes every
-## ``Cargo.toml``/``Cargo.lock``/``.rs`` file in the project tree plus
-## the cargo driver path, compares against
+## ``conventions/emit_cache.nim``): the convention digests every file
+## ``cargo metadata`` reads for the workspace plus the cargo driver path
+## and version, compares against
 ## ``<projectRoot>/.repro/build/.emit-cache/cargo-metadata.repro-emit-fingerprint``,
 ## and on a hit reads the cached JSON output (``cargo-metadata.cached.json``
 ## next to the sidecar) instead of re-spawning cargo. Cold-snapshot
 ## re-emits become pure on-disk I/O when nothing has changed.
+##
+## The key (Rust.md §"The ``cargo metadata`` emit cache";
+## ``rustEmitCacheInputs``) covers:
+##
+##   * the manifests, ``.rs`` files and READMEs below the project root,
+##     symbolic links to such files included. This walk does not follow
+##     symbolic links to directories: a project root routinely holds
+##     links into large trees Cargo never reads (nix-direnv's
+##     ``.direnv/flake-inputs/*-source`` links into the Nix store, a
+##     ``result`` link from ``nix build``), and following them made every
+##     emit walk them;
+##   * for every package the cached output lists: its manifest; the
+##     ``Cargo.lock``, ``build.rs`` and READMEs beside it; the same
+##     sources below its ``src/``, ``tests/``, ``examples/`` and
+##     ``benches/``, the directories Cargo discovers targets in
+##     (https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery),
+##     walked through links to files and directories, with the spelling
+##     of each second link to a directory already walked; its targets'
+##     ``src_path``; its ``readme``; and its path dependencies'
+##     manifests. So a member outside the root, or behind a link, is
+##     covered;
+##   * the workspace root's ``Cargo.toml`` and ``Cargo.lock``;
+##   * the ``Cargo.toml`` of every directory above a root that is no
+##     workspace, which Cargo searches for the package's workspace
+##     (https://doc.rust-lang.org/cargo/reference/workspaces.html#the-packageworkspace-field);
+##   * and the directories each glob ``members`` pattern can match, which
+##     Cargo all loads as members
+##     (https://doc.rust-lang.org/cargo/reference/workspaces.html#the-members-and-exclude-fields).
+##
+## Until 2026-11-22 it was the regular files below the root alone, so an
+## emit could use stale metadata: a member outside the root, a member or
+## manifest reached through a symbolic link, or a new directory under a
+## glob ``members`` pattern changed what Cargo reports without changing
+## the key.
 ##
 ## **M23 extensions** over M13's outstanding tasks:
 ##
@@ -144,6 +178,7 @@ import repro_standard_provider/convention
 import repro_standard_provider/conventions/emit_cache
 import repro_standard_provider/crude
 import repro_cargo_edge/edge_cli
+import repro_standard_provider/conventions/cargo_workspace_toml
 
 const
   ScratchDirName* = ".repro/build"
@@ -722,56 +757,500 @@ proc rustEmitCacheScratchDir(projectRoot: string): string =
   ## on demand by ``writeEmitCacheFingerprint``.
   projectRoot / ScratchDirName / ".emit-cache"
 
-proc collectRustSources(projectRoot: string): seq[string] =
-  ## Every input file ``cargo metadata`` could possibly inspect on a
-  ## ``--no-deps --offline`` run:
+const
+  RustEmitCacheKeyLayout = "rust-emit-cache-key-layout:2"
+    ## Folded into the key as a text input. Layout 2 (2026-11-22) is the
+    ## key of Rust.md §"The ``cargo metadata`` emit cache": the walk of
+    ## the project root takes in symbolic links to files, and the
+    ## per-package walks (which follow links to directories too) and the
+    ## ancestor and glob inputs below join it. Layout 1 (the
+    ## unlabelled key before it) covered the regular files below the
+    ## root alone, so a sidecar written under it may sit beside a cached
+    ## JSON that is stale for a file layout 1 did not cover. Such a
+    ## sidecar must never match: this label is absent from every layout-1
+    ## key, so none does. It is a Rust-local label rather than a bump of
+    ## ``EmitCacheVersion`` because that constant is shared by the Nim
+    ## and Go conventions, whose keys did not change and whose caches
+    ## need not be thrown away. Change it whenever the set of inputs
+    ## changes in a way that could let an older sidecar match.
+
+type
+  RustEmitCacheInputs = object
+    ## The inputs of the ``cargo metadata`` emit-cache key other than the
+    ## fixed ones (cargo path and version, project root, command line):
+    ## a deterministic, deduplicated, sorted set, so that two sets
+    ## computed from the same state compare equal (``==``), which the
+    ## race rule in ``runCargoMetadata`` relies on.
+    usable: bool
+      ## false when a manifest the key depends on cannot be read as
+      ## TOML. Its glob members are then unknown, so no key can cover
+      ## them: the cache must be neither used nor written.
+    files: seq[string]
+      ## absolute, lexically normalised paths, each digested by
+      ## ``fileInput`` (an absent file digests as ``missing``)
+    texts: seq[string]
+      ## text inputs, such as the directory listing of a glob pattern
+
+  RustEmitCacheInputBuilder = object
+    ## Accumulates ``RustEmitCacheInputs`` while it is being computed.
+    usable: bool
+    files: HashSet[string]
+    texts: HashSet[string]
+
+proc rustEmitCachePath(path: string): string =
+  ## The spelling a path takes in the key. Absolute and lexically
+  ## normalised, as cargo spells the paths it reports (it normalises
+  ## ``..`` without resolving links), so a path the walk finds and the
+  ## same path cargo reports are one entry. Symbolic links are kept as
+  ## they are spelled: the file a link names is digested through it.
+  var absolute = path
+  try:
+    absolute = absolutePath(path)
+  except CatchableError:
+    discard
+  os.normalizedPath(absolute)
+
+proc isRustEmitCacheSource(path: string): bool =
+  ## The files below a directory that ``cargo metadata`` may read or whose
+  ## presence changes its output:
   ##
-  ##   * the workspace ``Cargo.toml`` and (optionally) ``Cargo.lock``
-  ##   * every member's ``Cargo.toml``
-  ##   * every ``.rs`` source under ``src/``, ``examples/``, ``tests/``,
-  ##     ``benches/``, ``build.rs``, ``bin/`` (these are NOT
-  ##     interpreted by cargo metadata, but they DO determine the set
-  ##     of bin/lib targets when ``[[bin]]`` entries auto-discover from
-  ##     the filesystem — auto-discovery is on by default).
+  ##   * ``Cargo.toml`` and ``Cargo.lock``;
+  ##   * every ``.rs`` file. ``cargo metadata`` does not parse them, but
+  ##     their presence decides the targets Cargo discovers without a
+  ##     ``[[bin]]``/``[lib]`` table (``src/main.rs``, ``src/bin/*.rs``,
+  ##     ``build.rs``, ``tests/``, ``examples/``, ``benches/``; Cargo
+  ##     reference, "Cargo Targets", "Target auto-discovery":
+  ##     https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery);
   ##   * every ``README``, ``README.md`` and ``README.txt``: with no
   ##     ``readme`` key in the manifest, cargo metadata reports the one it
   ##     finds beside it, and that value becomes ``CARGO_PKG_README``.
+  let basename = extractFilename(path).toLowerAscii
+  let ext = splitFile(path).ext.toLowerAscii
+  basename == "cargo.toml" or basename == "cargo.lock" or ext == ".rs" or
+    basename in ["readme", "readme.md", "readme.txt"]
+
+proc directoryIdentity(path: string): string =
+  ## The identity of the directory ``path`` names, after following every
+  ## symbolic link: its device and file id. "" when it cannot be read.
+  ## Two paths with one identity are one directory, which is how a walk
+  ## that follows links recognises a link cycle.
+  try:
+    let info = getFileInfo(extendedPath(path), followSymlink = true)
+    if info.kind != pcDir:
+      return ""
+    $info.id.device & ":" & $info.id.file
+  except CatchableError:
+    ""
+
+proc walkVisitKey(id: string; depth, maxDepth: int): string =
+  ## The key under which ``walkTree`` remembers a directory it has
+  ## entered: its identity, plus its depth when the walk is bounded.
+  if maxDepth >= 0: id & "@" & $depth else: id
+
+iterator walkTree(walkRoot: string; visited: var HashSet[string];
+                  maxDepth = -1; followDirLinks = true;
+                  skipTopLevel: openArray[string] = []):
+    tuple[path: string; depth: int; isDir: bool; entered: bool] =
+  ## Every entry below ``walkRoot`` (not ``walkRoot`` itself), with its
+  ## depth (1 for a direct child), whether it is a directory and, for a
+  ## directory, whether the walk enters it (``entered``). Unlike
+  ## ``walkDirRec`` it follows symbolic links to files, and with
+  ## ``followDirLinks`` to directories as well, and spells each entry
+  ## through the links that lead to it. ``walkRoot`` itself is entered
+  ## even when it is a link.
   ##
-  ## We walk recursively but skip ``target/`` and ``.repro/`` so build
-  ## scratch doesn't pollute the fingerprint.
-  if not dirExists(extendedPath(projectRoot)):
-    return @[]
-  for entry in walkDirRec(projectRoot, yieldFilter = {pcFile}):
-    let rel = entry.relativePath(projectRoot)
-    let lowered = rel.replace('\\', '/').toLowerAscii
-    if lowered.startsWith("target/") or lowered.startsWith(".repro/"):
+  ## Without ``followDirLinks`` a symbolic link to a directory is not
+  ## yielded at all: the walk of the project root uses that, because the
+  ## trees such links lead to are not the project's (see
+  ## ``addProjectRootSources``).
+  ##
+  ## ``visited`` holds the directories entered so far (``walkVisitKey``),
+  ## ``walkRoot`` among them once the walk starts, and a caller may share
+  ## it between several walks so that a directory one walk entered is not
+  ## entered again by the next. A directory reached twice (through a link
+  ## cycle, or through a link and directly) is entered once. With
+  ## ``maxDepth >= 0`` the walk stops at that depth, and a directory
+  ## counts as reached twice only when it is reached at the same depth: a
+  ## bounded walk lists every depth at which a directory appears, and
+  ## still ends, because the depth is bounded. Directories named in
+  ## ``skipTopLevel`` (compared without case) are skipped when they are
+  ## direct children of ``walkRoot``.
+  ##
+  ## Every spelling of a directory is still yielded, the ones the walk
+  ## does not enter with ``entered = false``. Cargo reads each spelling as
+  ## a directory of its own: a member's ``tests -> examples`` makes every
+  ## example a test target too, and ``crates/c -> b`` under ``crates/*``
+  ## is a second member. A caller that folds those spellings into the key
+  ## sees such a link appear, although the walk never enters it.
+  ##
+  ## An unreadable directory is skipped (``checkDir = false``): cargo
+  ## cannot read it either, and a manifest it would need there makes
+  ## cargo fail, which no cache entry outlives. A dangling link is
+  ## yielded as a file, so a caller that digests it sees it appear.
+  let rootId = directoryIdentity(walkRoot)
+  if rootId.len > 0:
+    visited.incl(walkVisitKey(rootId, 0, maxDepth))
+    var stack: seq[tuple[dir: string; depth: int]] = @[(walkRoot, 0)]
+    while stack.len > 0:
+      let (dir, depth) = stack.pop()
+      if maxDepth >= 0 and depth >= maxDepth:
+        continue
+      var children: seq[tuple[kind: PathComponent; path: string]] = @[]
+      for child in walkDir(dir, relative = false, checkDir = false):
+        children.add(child)
+      # Sorted so the walk, and the first spelling of a directory reached
+      # twice, does not depend on the order the file system lists them in.
+      children.sort(proc(a, b: tuple[kind: PathComponent; path: string]):
+          int = cmp(a.path, b.path))
+      for (kind, path) in children:
+        let childDepth = depth + 1
+        if depth == 0 and skipTopLevel.len > 0 and
+            extractFilename(path).toLowerAscii in skipTopLevel:
+          continue
+        case kind
+        of pcFile, pcLinkToFile:
+          yield (path, childDepth, false, false)
+        of pcDir, pcLinkToDir:
+          if kind == pcLinkToDir and not followDirLinks:
+            continue
+          let id = directoryIdentity(path)
+          if id.len == 0:
+            continue
+          let key = walkVisitKey(id, childDepth, maxDepth)
+          if key in visited:
+            yield (path, childDepth, true, false)
+            continue
+          visited.incl(key)
+          yield (path, childDepth, true, true)
+          stack.add((path, childDepth))
+
+proc addSourcesBelow(builder: var RustEmitCacheInputBuilder; dir: string;
+                     visited: var HashSet[string]; followDirLinks: bool;
+                     skipTopLevel: openArray[string] = []) =
+  ## Fold in every ``isRustEmitCacheSource`` file below ``dir`` (a walk of
+  ## ``walkTree`` sharing ``visited``), and the spelling of every
+  ## directory the walk reaches but does not enter because it entered the
+  ## same directory through another spelling, ``dir`` itself included.
+  ## The files below such a spelling are the ones below the spelling it
+  ## entered, so they are covered; the spelling itself is not, and Cargo
+  ## discovers targets through it (``tests -> examples``). An absent
+  ## ``dir`` adds nothing: a file created in it later is found by the
+  ## next walk, and so changes the key.
+  if dir.len == 0:
+    return
+  let id = directoryIdentity(dir)
+  if id.len == 0:
+    return
+  if walkVisitKey(id, 0, -1) in visited:
+    builder.texts.incl("dir-alias:" & rustEmitCachePath(dir))
+    return
+  for entry in walkTree(dir, visited, followDirLinks = followDirLinks,
+                        skipTopLevel = skipTopLevel):
+    if not entry.isDir:
+      if isRustEmitCacheSource(entry.path):
+        builder.files.incl(rustEmitCachePath(entry.path))
+    elif not entry.entered:
+      builder.texts.incl("dir-alias:" & rustEmitCachePath(entry.path))
+
+proc addProjectRootSources(builder: var RustEmitCacheInputBuilder;
+                           root: string) =
+  ## Fold in the ``isRustEmitCacheSource`` files below the project root,
+  ## outside its ``target/`` (cargo's default build output) and
+  ## ``.repro/`` (this tool's scratch, which holds the cache itself)
+  ## directories, symbolic links to such files included.
+  ##
+  ## This walk does not follow symbolic links to directories (Rust.md
+  ## §"The ``cargo metadata`` emit cache"). A project root routinely holds
+  ## links into large trees Cargo never reads: nix-direnv's
+  ## ``.direnv/flake-inputs/*-source`` links into the Nix store, a
+  ## ``result`` link from ``nix build``, a pnpm ``node_modules``.
+  ## Following them made every emit walk those trees: 24 to 65 s an emit
+  ## instead of 0.07 s, with keys thousands of lines long. Nothing is lost
+  ## by not following them. Cargo reads a package's files only below the
+  ## directories it discovers targets in (Cargo reference, "Cargo
+  ## Targets", "Target auto-discovery":
+  ## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery),
+  ## and ``addPackageInputs`` walks those for every package the cached
+  ## output lists, through links, wherever they lie. A member behind a
+  ## link is in the cached output, or is a new member, which changes a
+  ## manifest or a glob listing the key holds.
+  var visited: HashSet[string]
+  builder.addSourcesBelow(root, visited, followDirLinks = false,
+    skipTopLevel = ["target", ".repro"])
+
+proc addFile(builder: var RustEmitCacheInputBuilder; path: string) =
+  ## Fold in ``path``, present or absent (an absent file digests as
+  ## ``missing``, so its creation changes the key).
+  if path.len > 0:
+    builder.files.incl(rustEmitCachePath(path))
+
+proc addFileIfPresent(builder: var RustEmitCacheInputBuilder; path: string) =
+  ## Fold in ``path`` when it exists, through a symbolic link or not, or
+  ## is a dangling link. Its absence needs no entry: the key is computed
+  ## afresh on every emit, so a file created later is present then and
+  ## changes the key. Leaving absent files out keeps the set the key
+  ## covers before the first run equal to the one it covers after it, for
+  ## a workspace under its root, so the race rule in ``runCargoMetadata``
+  ## writes the key on the first emit.
+  if path.len > 0 and (fileExists(extendedPath(path)) or
+      symlinkExists(extendedPath(path))):
+    builder.addFile(path)
+
+proc isGlobComponent(component: string): bool =
+  ## The characters that make a ``members`` entry a glob pattern (Cargo
+  ## expands one with the ``glob`` crate:
+  ## https://doc.rust-lang.org/cargo/reference/workspaces.html#the-members-and-exclude-fields).
+  component.contains({'*', '?', '['})
+
+proc addGlobMemberInputs(builder: var RustEmitCacheInputBuilder;
+                         workspaceRoot, pattern: string) =
+  ## For a glob ``members`` pattern: a text input listing every directory
+  ## the pattern can match, and the ``Cargo.toml`` of each, present or
+  ## absent. Cargo loads every directory a pattern matches as a member
+  ## and refuses one with no ``Cargo.toml``, so a directory created under
+  ## the pattern changes its output; the listing makes the key see it.
+  ##
+  ## The literal prefix is the run of leading components with no glob
+  ## character. Below it, the listing holds every directory exactly as
+  ## deep as the pattern has components after the prefix, or every
+  ## directory at any depth when one of them is ``**``. That
+  ## over-approximates the match (``a*`` lists ``b`` too), which costs at
+  ## most a needless ``cargo metadata`` run, never a stale one.
+  ##
+  ## The listing holds every spelling: a link at the matched depth to a
+  ## directory listed already (``crates/c -> b``) is a member of its own
+  ## to Cargo, and a link above that depth that the walk does not enter
+  ## is listed too, so that the directories below it, which Cargo also
+  ## matches, cannot appear unseen.
+  var components: seq[string] = @[]
+  let separators = when defined(windows): {'/', '\\'} else: {'/'}
+  for component in pattern.split(separators):
+    if component.len > 0 and component != ".":
+      components.add(component)
+  var prefixLen = 0
+  while prefixLen < components.len and
+      not isGlobComponent(components[prefixLen]):
+    inc prefixLen
+  if prefixLen == components.len:
+    return   # no glob: cargo reports the member, and the package inputs cover it
+  var prefix = components[0 ..< prefixLen].join($DirSep)
+  if pattern.isAbsolute:
+    prefix = (when defined(windows): "" else: "/") & prefix
+  else:
+    prefix = workspaceRoot / prefix
+  # The prefix is walked as Cargo's glob expansion reads it, through the
+  # file system, and not folded lexically first: when a component before
+  # a ``..`` is a symbolic link, the two name different directories. So
+  # the listed directories keep that spelling too, and their
+  # ``Cargo.toml`` is digested through it.
+  var prefixDir = prefix
+  try:
+    prefixDir = absolutePath(prefix)
+  except CatchableError:
+    discard
+  let rest = components[prefixLen .. ^1]
+  let maxDepth = if "**" in rest: -1 else: rest.len
+  var matched: seq[string] = @[]
+  var listed: seq[string] = @[]
+  var visited: HashSet[string]
+  for entry in walkTree(prefixDir, visited, maxDepth = maxDepth):
+    if not entry.isDir:
       continue
-    let basename = extractFilename(entry).toLowerAscii
-    let ext = splitFile(entry).ext.toLowerAscii
-    if basename == "cargo.toml" or basename == "cargo.lock" or ext == ".rs" or
-        basename in ["readme", "readme.md", "readme.txt"]:
-      result.add(entry)
-  result.sort(system.cmp[string])
+    if maxDepth < 0 or entry.depth == maxDepth:
+      matched.add(entry.path)
+      listed.add(entry.path)
+    elif not entry.entered:
+      listed.add(entry.path)
+  for dir in matched:
+    builder.files.incl(dir / "Cargo.toml")
+  listed.sort(system.cmp[string])
+  # The listing itself is a text input: a directory that appears or
+  # disappears changes the key even before it has a manifest.
+  builder.texts.incl("member-glob:" & rustEmitCachePath(workspaceRoot) &
+    ":" & pattern & ":" & listed.join("\x1f"))
+
+proc addWorkspaceRootInputs(builder: var RustEmitCacheInputBuilder;
+                            workspaceRoot: string) =
+  ## The workspace root's ``Cargo.toml`` and ``Cargo.lock`` (present or
+  ## absent) and the inputs of its glob ``members`` patterns. A manifest
+  ## that cannot be read leaves its glob members unknown, so it makes
+  ## the key unusable.
+  let manifest = workspaceRoot / "Cargo.toml"
+  builder.addFile(manifest)
+  builder.addFile(workspaceRoot / "Cargo.lock")
+  let members = readCargoWorkspaceMembers(manifest)
+  if not members.ok:
+    builder.usable = false
+    return
+  for pattern in members.patterns:
+    builder.addGlobMemberInputs(workspaceRoot, pattern)
+
+proc jsonString(node: JsonNode; key: string): string =
+  ## ``node[key]`` when it is a string, else "".
+  if node.isNil or node.kind != JObject or key notin node or
+      node[key].kind != JString:
+    return ""
+  node[key].getStr()
+
+const
+  CargoTargetDirs = ["src", "tests", "examples", "benches"]
+    ## The directories beside a manifest that Cargo discovers targets in
+    ## (Cargo reference, "Cargo Targets", "Target auto-discovery":
+    ## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#target-auto-discovery).
+  CargoFilesBesideManifest = ["Cargo.lock", "build.rs", "README.md",
+                              "README.txt", "README"]
+    ## The files beside a manifest whose content or presence changes the
+    ## ``cargo metadata`` output: the lockfile, the build script Cargo
+    ## discovers without a ``build`` key (Cargo reference, "The Manifest
+    ## Format", "The ``build`` field":
+    ## https://doc.rust-lang.org/cargo/reference/manifest.html#the-build-field),
+    ## and the READMEs Cargo reports without a ``readme`` key (same
+    ## reference, "The ``readme`` field":
+    ## https://doc.rust-lang.org/cargo/reference/manifest.html#the-readme-field).
+
+proc addPackageInputs(builder: var RustEmitCacheInputBuilder;
+                      pkg: JsonNode) =
+  ## The files one package of the ``cargo metadata`` output names, so
+  ## that a member outside the root, or one reached through a symbolic
+  ## link, is covered:
+  ##
+  ##   * its manifest, present or absent;
+  ##   * the ``CargoFilesBesideManifest`` beside it that exist;
+  ##   * the sources below each of its ``CargoTargetDirs``, each of which
+  ##     may itself be a link. These walks follow links to files and to
+  ##     directories and share one set of visited directories, so a link
+  ##     cycle is walked once and a second spelling of a directory one of
+  ##     them entered (``tests -> examples``) goes into the key as a
+  ##     ``dir-alias`` (``addSourcesBelow``). They do not walk the rest of
+  ##     the manifest's directory: for a package at the project root that
+  ##     directory is the root, whose links into trees Cargo never reads
+  ##     the walk of the root leaves alone (``addProjectRootSources``);
+  ##   * each target's ``src_path``, which may lie anywhere the manifest
+  ##     names;
+  ##   * the file its ``readme`` names (relative to the manifest's
+  ##     directory when relative; Cargo reference, "The Manifest Format",
+  ##     "The ``readme`` field":
+  ##     https://doc.rust-lang.org/cargo/reference/manifest.html#the-readme-field).
+  ##
+  ## Also the ``Cargo.toml`` of each path dependency (the dependency's
+  ## ``path``), present or absent. Cargo reads it to decide whether the
+  ## dependency belongs to the workspace: one inside the workspace's
+  ## directory always does, and one outside it does when its
+  ## ``package.workspace`` names this workspace (Cargo reference,
+  ## "Workspaces", "The ``members`` and ``exclude`` fields":
+  ## https://doc.rust-lang.org/cargo/reference/workspaces.html#the-members-and-exclude-fields).
+  ## So a dependency's manifest gaining that key adds a package to the
+  ## output although the output did not list it before.
+  let manifestPath = jsonString(pkg, "manifest_path")
+  if manifestPath.len == 0:
+    return
+  let manifestDir = manifestPath.parentDir
+  builder.addFile(manifestPath)
+  for name in CargoFilesBesideManifest:
+    builder.addFileIfPresent(manifestDir / name)
+  var visited: HashSet[string]
+  for name in CargoTargetDirs:
+    builder.addSourcesBelow(manifestDir / name, visited, followDirLinks = true)
+  if "targets" in pkg and pkg["targets"].kind == JArray:
+    for target in pkg["targets"]:
+      builder.addFile(jsonString(target, "src_path"))
+  let readme = jsonString(pkg, "readme")
+  if readme.len > 0:
+    builder.addFile(if readme.isAbsolute: readme else: manifestDir / readme)
+  if "dependencies" in pkg and pkg["dependencies"].kind == JArray:
+    for dependency in pkg["dependencies"]:
+      let dependencyDir = jsonString(dependency, "path")
+      if dependencyDir.len > 0:
+        builder.addFile(dependencyDir / "Cargo.toml")
+
+proc rustEmitCacheInputs(projectRoot: string; metadata: JsonNode):
+    RustEmitCacheInputs =
+  ## The file and text inputs of the emit-cache key (Rust.md §"The
+  ## ``cargo metadata`` emit cache"), computed from ``metadata``, the
+  ## output of a ``cargo metadata`` run, or from the project root alone
+  ## when ``metadata`` is nil (no cached output yet):
+  ##
+  ##   * the sources below the project root, without following links to
+  ##     directories (``addProjectRootSources``);
+  ##   * the project root's ``Cargo.toml`` and ``Cargo.lock`` and, when
+  ##     that manifest has no ``[workspace]`` table, the ``Cargo.toml``
+  ##     of every directory above the root, present or absent: Cargo
+  ##     searches them for the package's workspace (Cargo reference,
+  ##     "Workspaces", "The ``package.workspace`` field":
+  ##     https://doc.rust-lang.org/cargo/reference/workspaces.html#the-packageworkspace-field);
+  ##   * the inputs of the workspace root as ``metadata`` reports
+  ##     ``workspace_root`` (the project root without ``metadata``):
+  ##     ``addWorkspaceRootInputs``;
+  ##   * the inputs of each package ``metadata`` lists, its path
+  ##     dependencies' manifests among them (``addPackageInputs``).
+  var builder = RustEmitCacheInputBuilder(usable: true)
+  let root = rustEmitCachePath(projectRoot)
+  builder.addProjectRootSources(root)
+  builder.addFile(root / "Cargo.toml")
+  builder.addFile(root / "Cargo.lock")
+  let rootManifest = readCargoWorkspaceMembers(root / "Cargo.toml")
+  if not rootManifest.ok:
+    builder.usable = false
+  elif not rootManifest.hasWorkspace:
+    var dir = root.parentDir
+    while dir.len > 0:
+      builder.addFile(dir / "Cargo.toml")
+      let parent = dir.parentDir
+      if parent == dir:
+        break
+      dir = parent
+  var workspaceRoot = jsonString(metadata, "workspace_root")
+  if workspaceRoot.len == 0:
+    workspaceRoot = root
+  builder.addWorkspaceRootInputs(workspaceRoot)
+  if not metadata.isNil and metadata.kind == JObject and
+      "packages" in metadata and metadata["packages"].kind == JArray:
+    for pkg in metadata["packages"]:
+      builder.addPackageInputs(pkg)
+  result.usable = builder.usable
+  for path in builder.files:
+    result.files.add(path)
+  for text in builder.texts:
+    result.texts.add(text)
+  result.files.sort(system.cmp[string])
+  result.texts.sort(system.cmp[string])
 
 proc rustEmitCacheFingerprint(projectRoot, cargoExe: string;
-                              sources: openArray[string]): string =
-  ## Fingerprint key for the cargo-metadata cache. See the analogous
-  ## comment in ``nim.nim`` for the rationale around what is and isn't
-  ## folded in.
+                              inputs: RustEmitCacheInputs): string =
+  ## Fingerprint key for the cargo-metadata cache: the fixed inputs (the
+  ## cargo path and the version it reports, the project root, the command
+  ## line, the key layout) followed by ``inputs``. See the analogous
+  ## comment in ``nim.nim`` for the rationale around the fixed inputs.
   ##
   ## **M29 Part A**: ``cargo --version`` output is folded in via
   ## ``toolVersionInput``. An in-place ``cargo`` upgrade (or a host
   ## ``rustup`` toolchain switch keeping the same shim path) flips the
   ## reported version and naturally misses the cache.
-  var inputs: seq[EmitCacheInput] = @[
+  var keyInputs: seq[EmitCacheInput] = @[
+    textInput(RustEmitCacheKeyLayout),
     textInput("cargo-exe:" & cargoExe),
     toolVersionInput(cargoExe),
     textInput("project-root:" & projectRoot),
     textInput("cmd:cargo metadata --format-version=1 --no-deps --offline"),
   ]
-  for source in sources:
-    inputs.add(fileInput(source))
-  computeEmitCacheFingerprint(inputs)
+  for text in inputs.texts:
+    keyInputs.add(textInput(text))
+  for path in inputs.files:
+    keyInputs.add(fileInput(path))
+  computeEmitCacheFingerprint(keyInputs)
+
+proc readCachedCargoMetadata(cachedJsonPath: string): JsonNode =
+  ## The cached ``cargo metadata`` output, or nil when there is none or it
+  ## does not parse (a partial write, say): either way the emit runs
+  ## cargo, and the set of package inputs is computed without it.
+  if not fileExists(extendedPath(cachedJsonPath)):
+    return nil
+  try:
+    result = parseFile(extendedPath(cachedJsonPath))
+    if result.kind != JObject:
+      result = nil
+  except CatchableError:
+    result = nil
 
 proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
   ## Execute ``cargo metadata --format-version=1 --no-deps --offline`` and
@@ -785,28 +1264,40 @@ proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
   ## the Windows OS pipe. See the original M4 commit message for the
   ## rationale.
   ##
-  ## **M18 emit-cache fast path**: hash the project's Cargo manifests +
-  ## ``.rs`` sources and, when the fingerprint matches a sidecar in the
-  ## convention's emit-cache scratch dir AND a cached JSON output is on
-  ## disk, return the cached parse directly without re-running cargo.
-  ## ``cargo metadata`` is fast (~200 ms locally) but the bigger win is
-  ## that the convention's emit becomes purely-on-disk-I/O when nothing
-  ## has changed — important when the provider snapshot is wiped (e.g.,
-  ## the build engine cache is cleared but the convention's manifests
-  ## are still on disk).
+  ## **Emit cache** (M18; Rust.md §"The ``cargo metadata`` emit cache"):
+  ## when the key (``rustEmitCacheFingerprint``) matches the sidecar in
+  ## the convention's emit-cache scratch dir AND a cached JSON output is
+  ## on disk, return the cached parse without re-running cargo. The emit
+  ## then becomes purely on-disk I/O when nothing has changed, which
+  ## matters when the provider snapshot is wiped but the manifests are
+  ## still on disk.
+  ##
+  ## The key covers files the cached output names (its packages'
+  ## manifests and sources, wherever they lie), so the set of files it
+  ## covers is known only once cargo has run. The race rule: the key is
+  ## computed before the run, from the cached output's set (or from the
+  ## project root's inputs alone when there is no cached output), with
+  ## the digests taken then. After a run the sidecar is first removed,
+  ## the new output written, and the pre-run key written again only when
+  ## the new output names the same set. Otherwise no sidecar remains,
+  ## and the next emit runs cargo again. So a file that changes while
+  ## cargo reads it never leaves a key that matches output cargo produced
+  ## from the older file, and a run that brings new files into the set
+  ## (a first run with a member outside the root, a new member) is
+  ## followed by one more run before the cache is used.
   let scratchDir = rustEmitCacheScratchDir(projectRoot)
-  let sources = collectRustSources(projectRoot)
-  let fingerprint = rustEmitCacheFingerprint(projectRoot, cargoExe, sources)
   let cachedJsonPath = scratchDir / RustEmitCacheJsonName
-  if emitCacheIsUsable(scratchDir, RustEmitCacheBaseName, fingerprint,
-      [cachedJsonPath]):
-    try:
-      return parseFile(extendedPath(cachedJsonPath))
-    except CatchableError:
-      # Stale cache (corrupted JSON, partial write). Fall through to the
-      # subprocess; the writeFile at the bottom of this proc rewrites
-      # both sidecar + JSON together.
-      discard
+  let cached = readCachedCargoMetadata(cachedJsonPath)
+  let preRunInputs = rustEmitCacheInputs(projectRoot, cached)
+  let fingerprint =
+    if preRunInputs.usable:
+      rustEmitCacheFingerprint(projectRoot, cargoExe, preRunInputs)
+    else:
+      ""
+  if not cached.isNil and fingerprint.len > 0 and
+      emitCacheIsUsable(scratchDir, RustEmitCacheBaseName, fingerprint,
+        [cachedJsonPath]):
+    return cached
   let argv = @[
     cargoExe,
     "metadata",
@@ -834,15 +1325,25 @@ proc runCargoMetadata(projectRoot, cargoExe: string): JsonNode =
     raise newException(ValueError,
       "rust convention: failed to parse 'cargo metadata' JSON output for " &
         projectRoot & ": " & err.msg)
-  # Persist the cached output BEFORE the fingerprint sidecar so a crash
-  # between the two writes leaves the cache miss-but-correct, not
-  # hit-but-stale.
+  # Remove the sidecar BEFORE replacing the cached output: a sidecar must
+  # never sit beside an output other than the one its key was checked
+  # for. When it cannot be removed, leave the old pair alone: it is
+  # consistent with itself, and the next emit checks it again.
+  if not removeEmitCacheFingerprint(scratchDir, RustEmitCacheBaseName):
+    return
   try:
     createDir(extendedPath(scratchDir))
     writeFile(extendedPath(cachedJsonPath), jsonText)
-    writeEmitCacheFingerprint(scratchDir, RustEmitCacheBaseName, fingerprint)
   except CatchableError:
-    discard
+    return
+  let postRunInputs = rustEmitCacheInputs(projectRoot, result)
+  if fingerprint.len > 0 and postRunInputs.usable and
+      postRunInputs == preRunInputs:
+    try:
+      writeEmitCacheFingerprint(scratchDir, RustEmitCacheBaseName,
+        fingerprint)
+    except CatchableError:
+      discard   # no sidecar: the next emit runs cargo, which is correct
 
 proc normalisedManifestDir(path: string): string =
   ## Canonicalise a manifest directory path for cross-package comparison:
@@ -1083,15 +1584,15 @@ proc packageHasBuildScript(pkgNode: JsonNode; manifestDir: string): bool =
   ## workspace member and both spellings, given fresh metadata.
   ##
   ## A ``build.rs`` beside the manifest (``manifestDir``) counts as well,
-  ## whatever the metadata says. ``metadata`` may come from the emit cache
-  ## (``runCargoMetadata``), whose fingerprint walks regular files under
-  ## the project root: a ``build.rs`` that is a symbolic link, or that
-  ## belongs to a member outside the root, can appear without the cache
-  ## missing. The price is that a ``build.rs`` Cargo is told not to run
-  ## (``build = false``) also sends the workspace to Mode B, which builds
-  ## it correctly. A ``build`` key added outside the root, or behind a
-  ## link, is still missed while the cache holds (reprobuild-pm
-  ## issues/2026-11-19-rust-emit-cache-fingerprint-misses-symbolic-links-and-members-outside-the-root.md).
+  ## whatever the metadata says (Rust.md §"Recognition" item 5).
+  ## ``metadata`` may come from the emit cache (``runCargoMetadata``).
+  ## That cache's key now covers every package's manifest and the
+  ## ``build.rs`` beside it, through symbolic links and outside the
+  ## project root, so a ``build.rs`` or ``build`` key added there misses
+  ## it. This check stays as a second guard: it reads the file system
+  ## itself, so it does not depend on the key being complete. The price
+  ## is that a ``build.rs`` Cargo is told not to run (``build = false``)
+  ## also sends the workspace to Mode B, which builds it correctly.
   if manifestDir.len > 0 and
       fileExists(extendedPath(manifestDir / "build.rs")):
     return true

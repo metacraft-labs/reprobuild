@@ -256,6 +256,23 @@ proc writeEmitCacheFingerprint*(scratchDir, cacheBaseName, fingerprint: string) 
   except CatchableError:
     discard
 
+proc removeEmitCacheFingerprint*(scratchDir, cacheBaseName: string): bool =
+  ## Remove the fingerprint sidecar, if there is one. True when no sidecar
+  ## remains, false when one is there and could not be removed.
+  ##
+  ## A convention whose key depends on its own cached output (Rust's set
+  ## of package files is read from the cached ``cargo metadata`` JSON)
+  ## calls this before it replaces that output, so that a sidecar never
+  ## sits beside an output other than the one its key was checked for,
+  ## and writes the sidecar again only once it knows the key still holds.
+  let path = emitCacheFingerprintPath(scratchDir, cacheBaseName)
+  try:
+    if fileExists(extendedPath(path)) or symlinkExists(extendedPath(path)):
+      removeFile(extendedPath(path))
+    not fileExists(extendedPath(path))
+  except CatchableError:
+    false
+
 proc emitCacheIsUsable*(scratchDir, cacheBaseName, currentFingerprint: string;
                        requiredOutputs: openArray[string]): bool =
   ## Atomic helper: true iff the on-disk fingerprint matches AND every
