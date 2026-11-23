@@ -193,7 +193,7 @@ libs/repro_build_engine/tests/t_declared_output_not_produced_fails_the_action.ni
 libs/repro_build_engine/tests/t_directory_listing_above_outputs_is_the_graph_view.nim	nim	7
 libs/repro_build_engine/tests/t_dry_run_restores_no_cached_output.nim	nim	2
 libs/repro_build_engine/tests/t_endpoint_daemon_trust.nim	nim	7
-libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	6
+libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim	nim	7
 libs/repro_build_engine/tests/t_engine_implicit_target_name_basename_rule.nim	nim	1
 libs/repro_build_engine/tests/t_engine_implicit_target_name_hook_overrides_canonical.nim	nim	1
 libs/repro_build_engine/tests/t_engine_macos_sip_safe_launch.nim	nim	9
@@ -3215,12 +3215,12 @@ tests/unit/test_package_nix_pending_sources.py	python	10
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	7
-tests/unit/test_publish_surface_routing.py	python	32
+tests/unit/test_publish_surface_routing.py	python	44
 tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	13
+tests/unit/test_release_native_packages.py	python	15
 tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12

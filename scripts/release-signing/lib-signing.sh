@@ -255,8 +255,17 @@ rs_artifact_names() {
 }
 
 # SHA256SUMS over every artifact in $1. Sorted by name (stable, diffable,
-# and reproducible across runners) and written with the two-space
-# `sha256sum` separator so `sha256sum -c` reads it back.
+# and reproducible across runners) and written in GNU sha256sum's TEXT form,
+# `<64 hex digits><two spaces><name>`, on every host, so `sha256sum -c` reads
+# it back and the manifest is byte-identical whichever runner wrote it
+# (https://www.gnu.org/software/coreutils/manual/html_node/md5sum-invocation.html).
+# The line is assembled here rather than taken from sha256sum's output:
+# MSYS2's and Cygwin's sha256sum default to binary mode and write
+# `<hex> *<name>`, which repro-verify-release.sh accepts but which made a
+# manifest signed on Windows differ from one signed on Linux. The digest is
+# read from stdin in binary mode, so it is byte-exact everywhere and no name
+# escaping can reach it. A name holding a backslash is refused: GNU would
+# escape it, and no installer asks for such a name.
 rs_write_sha256sums() {
   _dir="$1"
   command -v sha256sum >/dev/null 2>&1 \
@@ -270,8 +279,28 @@ rs_write_sha256sums() {
   _tmp="$(mktemp "${TMPDIR:-/tmp}/repro-sums-XXXXXX")" || rs_die 'mktemp failed'
   _n=0
   rs_artifact_names "$_dir" | while IFS= read -r _b; do
-    ( cd "$_dir" && sha256sum "$_b" ) >> "$_tmp"
-  done
+    case "$_b" in
+      *\\*) echo "rs-error: artifact name '$_b' holds a backslash; refusing to write an escaped manifest line" >> "$_tmp.err"; exit 1 ;;
+    esac
+    _d="$(sha256sum -b < "$_dir/$_b")" || { echo "rs-error: sha256sum failed for $_b" >> "$_tmp.err"; exit 1; }
+    _d="${_d%% *}"
+    case "$_d" in
+      *[!0-9a-f]*|'') echo "rs-error: sha256sum printed no digest for $_b" >> "$_tmp.err"; exit 1 ;;
+    esac
+    [ "${#_d}" -eq 64 ] || { echo "rs-error: sha256sum printed a ${#_d}-character digest for $_b" >> "$_tmp.err"; exit 1; }
+    printf '%s  %s\n' "$_d" "$_b" >> "$_tmp"
+  done || :
+  # The loop runs in a pipeline subshell, so its failures come back through
+  # this side file rather than through a variable. The `|| :` keeps errexit
+  # from ending this function (called inside a command substitution, which
+  # inherits `set -e` in POSIX sh) before the side file is read, which would
+  # fail the signer without saying why and leave both scratch files behind.
+  if [ -s "$_tmp.err" ]; then
+    _err="$(cat "$_tmp.err")"
+    rm -f "$_tmp" "$_tmp.err"
+    rs_die "${_err#rs-error: }"
+  fi
+  rm -f "$_tmp.err"
   _n="$(wc -l < "$_tmp" | tr -d ' ')"
   if [ "$_n" -lt 1 ]; then
     rm -f "$_tmp"

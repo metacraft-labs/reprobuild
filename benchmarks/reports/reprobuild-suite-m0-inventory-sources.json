@@ -12875,7 +12875,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -67677,7 +67677,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -67685,7 +67685,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_publish_surface_routing.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 32,
+      "staticCaseCount": 44,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -67760,7 +67760,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
