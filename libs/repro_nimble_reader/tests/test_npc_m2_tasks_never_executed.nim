@@ -75,6 +75,9 @@ suite "npc-m2 tasks never executed":
     const Allowed = ["strutils", "unicode", "options", "parsecfg", "streams",
                      "sequtils", "algorithm", "os",
                      "repro_solver/version_constraints",
+                     # Nimble's version order (NPC-AREQ6); it imports
+                     # `options`, `strutils` and `version_constraints` only
+                     "repro_solver/nimble_versions",
                      "./lexer", "./syntax", "./conditions", "./requirements",
                      "./reader", "repro_nimble_reader/reader"]
     const Banned = ["staticExec", "gorge", "gorgeEx", "staticRead", "slurp",

@@ -27,6 +27,15 @@ type
     observations*: seq[PackageObservation]
       ## the origin answers the generator recorded (the generator's state
       ## for the next generation); each in its own name key's shard
+    aliasCandidates*: Table[string, string]
+      ## name key of an alias -> the canonical name the registry points
+      ## the alias at now, when that is not the alias's recorded target
+      ## (NPC-AREQ3): kept in the name map as the alias's candidate
+    fullHistory*: bool
+      ## this generation ran the full history check (NPC-AREQ4)
+    lastFullCheck*: uint64
+      ## the generation time of the last full history check, this
+      ## generation's when ``fullHistory``; 0 for none
 
   BuiltIndex* = object
     rootId*: IndexObjectId
@@ -121,7 +130,8 @@ proc buildRootFromShards*(input: IndexBuildInput; shardBits: int;
     sourceSet: input.sourceSet, generatedAt: input.generatedAt,
     previousRoot: input.previousRoot, packageCount: uint32(packageCount),
     versionCount: uint32(versionCount), eventCount: uint32(input.events.len),
-    shardBits: uint8(shardBits))
+    shardBits: uint8(shardBits), fullHistory: input.fullHistory,
+    lastFullCheck: input.lastFullCheck)
   var objects = initTable[IndexObjectId, seq[byte]]()
   for (s, bytes) in decoded:
     let id = indexObjectId(bytes)
@@ -131,7 +141,13 @@ proc buildRootFromShards*(input: IndexBuildInput; shardBits: int;
   var names = NimbleNameMap()
   for k, n in canonical: names.entries.add NameEntry(name: n)
   for a in aliases:
-    names.entries.add NameEntry(name: a.alias, target: a.target)
+    var candidate = input.aliasCandidates.getOrDefault(nameKey(a.alias))
+    candidate =
+      if candidate.len > 0 and nameKey(candidate) in canonical:
+        canonical[nameKey(candidate)]
+      else: ""
+    names.entries.add NameEntry(name: a.alias, target: a.target,
+      candidate: candidate)
   names.entries.sort(proc (a, b: NameEntry): int =
     cmp(nameKey(a.name), nameKey(b.name)))
   let nameBytes = encodeNameMap(names)

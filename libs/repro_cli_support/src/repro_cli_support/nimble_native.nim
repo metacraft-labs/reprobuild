@@ -28,7 +28,7 @@ import repro_lock
 import repro_nimble_index
 import repro_nimble_reader
 import repro_nimble_generator/source_set
-import repro_solver/version_constraints
+import repro_solver/nimble_versions
 
 import ./nimble_lock
 
@@ -52,20 +52,21 @@ type
     outputs*: seq[string]   ## the built executables, in the plan's order
     failures*: seq[string]
 
-proc versionRangeOf(n: NativeOverride): Option[SemverRange] =
+proc versionRangeOf(n: NativeOverride): Option[NimbleRange] =
   let reading = readRequirements(n.package & " " & n.versions)
   if reading.errors.len == 0 and reading.requirements.len == 1 and
       reading.requirements[0].version.kind == vkRange:
-    result = some(reading.requirements[0].version.range)
+    result = some(reading.requirements[0].version.nimbleRange)
 
 proc nativeOverridesFor*(name, version: string;
                          natives: openArray[NativeOverride]):
     seq[NativeOverride] =
   ## The native overrides of package ``name`` whose range admits
-  ## ``version`` (a solver version, `1.2.0`). A pseudo-version (`#head`)
-  ## is in no range, so no override applies to it.
-  let parsed = try: some(parseSemver(version))
-               except CatchableError: none(SemverVersion)
+  ## ``version`` (a solver version, `1.2.0` or `0.7.0.8.0`), compared as
+  ## Nimble compares versions (NPC-AREQ6). A pseudo-version (`#head`) is in
+  ## no range, so no override applies to it.
+  let parsed = try: some(parseNimbleVersion(version))
+               except CatchableError: none(NimbleVersion)
   if parsed.isNone:
     return
   for n in natives:
@@ -73,7 +74,7 @@ proc nativeOverridesFor*(name, version: string;
         repro_nimble_reader.nameKey(name):
       continue
     let r = versionRangeOf(n)
-    if r.isSome and satisfies(parsed.get, r.get):
+    if r.isSome and admits(r.get, parsed.get):
       result.add n
 
 proc nativeOverridesFor*(p: LockedNimblePackage;
@@ -95,31 +96,6 @@ proc hooksOf(p: LockedNimblePackage): seq[string] =
         discard
       return
 
-proc recordBinaries(rec: VersionRecord; plat: NimblePlatform;
-                    nim: Option[NimVersionValue]; undecided: var string):
-    tuple[bin: seq[string]; named: seq[NamedBin]] =
-  ## `bin` and `namedBin` on ``plat`` at Nim ``nim``: the plain
-  ## assignments, then the conditional ones whose condition holds there (an
-  ## append extends, an assignment replaces), in record order. An
-  ## assignment whose condition depends on the Nim version when ``nim`` is
-  ## none sets ``undecided`` to that condition.
-  result.bin = rec.binaries.bin
-  result.named = rec.binaries.namedBin
-  for c in rec.layout.conditional:
-    if c.field notin {rfBin, rfNamedBin}: continue
-    let t = decideOn(c.condition, plat, nim)
-    if t == tUnknown and undecided.len == 0:
-      undecided = renderCondition(c.condition)
-    if t != tTrue: continue
-    case c.field
-    of rfBin:
-      if c.append: result.bin.add c.values
-      else: result.bin = c.values
-    of rfNamedBin:
-      if c.append: result.named.add c.pairs
-      else: result.named = c.pairs
-    else: discard
-
 proc insideTree(root, rel: string): string =
   ## ``root``/``rel`` when ``rel`` stays inside ``root``, else "".
   let r = rel.replace('\\', '/')
@@ -140,8 +116,18 @@ proc planNimbleBinaries*(report: NimbleSourcesReport;
     result.defines.add o.defines
     result.passC.add o.passC
     result.passL.add o.passL
+  # NPC-AREQ5: `backend`, `bin` and `namedBin` as they hold on the lock's
+  # platform, at the Nim it was solved for -- the conditional entries
+  # applied, in record order.
+  let eff = effectiveLayout(p.record, plat, nimVersionValueOf(report.solvedNim))
+  let undecided = eff.undecidedText({rfBackend, rfBin, rfNamedBin})
+  if undecided.len > 0:
+    result.refusal = "nimble:" & p.row.name & " " & p.version & ": its " &
+      "binaries depend on the Nim version (`" & undecided & "`), and the " &
+      "lock records no Nim: declare `uses: nim` and re-lock"
+    return
   result.backend =
-    if p.record.binaries.backend.len > 0: p.record.binaries.backend else: "c"
+    if eff.binaries.backend.len > 0: eff.binaries.backend else: "c"
   if result.backend notin ["c", "cpp", "js"]:
     result.refusal = "nimble:" & p.row.name & " " & p.version &
       ": backend " & result.backend.escape() & " is not one the Nim " &
@@ -149,14 +135,8 @@ proc planNimbleBinaries*(report: NimbleSourcesReport;
     return
   var supplied: seq[string]
   for o in result.overrides: supplied.add o.binaries
-  var undecided = ""
-  let (bins, named) = recordBinaries(p.record, plat,
-    nimVersionValueOf(report.solvedNim), undecided)
-  if undecided.len > 0:
-    result.refusal = "nimble:" & p.row.name & " " & p.version & ": its " &
-      "binaries depend on the Nim version (`" & undecided & "`), and the " &
-      "lock records no Nim: declare `uses: nim` and re-lock"
-    return
+  let bins = eff.binaries.bin
+  let named = eff.binaries.namedBin
   if bins.len == 0 and named.len == 0 and supplied.len == 0:
     return
   if flHasHooks in p.record.flags and supplied.len == 0:
@@ -252,14 +232,34 @@ proc buildNimbleBinaries*(plan: NimbleBinaryPlan;
     if res.status == asFailed:
       result.failures.add res.id & ": " & (res.stderr & res.stdout).strip()
 
-proc uninstalledModules(p: LockedNimblePackage): seq[string] =
+proc treeModules(dir: string): seq[string] =
+  ## The top-level module names of a source directory of a verified tree:
+  ## `<dir>/<name>.nim`, as the generator lists them for a record.
+  if not dirExists(dir):
+    return
+  for kind, path in walkDir(dir):
+    if kind in {pcFile, pcLinkToFile} and path.endsWith(".nim"):
+      let name = extractFilename(path)[0 ..< extractFilename(path).len - 4]
+      if name.len > 0 and name notin result: result.add name
+  result.sort()
+
+proc uninstalledModules(p: LockedNimblePackage; plat: NimblePlatform;
+                        nim: Option[NimVersionValue]): seq[string] =
   ## The top-level modules of the package's source directory that Nimble's
   ## install rules (`installDirs`/`installFiles`/`installExt`, else
-  ## `skipDirs`/`skipFiles`/`skipExt`) would not install (NPC-AREQ21). The
-  ## whole tree is stored, so they compile here; a build that relies on one
-  ## would not build with Nimble.
-  let l = p.record.layout
-  for m in l.modules:
+  ## `skipDirs`/`skipFiles`/`skipExt`) would not install (NPC-AREQ21), the
+  ## rules as they hold on the lock's platform (NPC-AREQ5). The whole tree
+  ## is stored, so they compile here; a build that relies on one would not
+  ## build with Nimble. The record lists the modules under its plain
+  ## `srcDir`; when a conditional `srcDir` holds, they are read from that
+  ## directory of the verified tree, which the `--path` names.
+  let eff = effectiveLayout(p.record, plat, nim)
+  let l = eff.layout
+  let modules =
+    if l.srcDir != p.record.layout.srcDir and p.srcPath.len > 0:
+      treeModules(p.srcPath)
+    else: l.modules
+  for m in modules:
     let file = m & ".nim"
     var installed = true
     if l.installDirs.len + l.installFiles.len + l.installExt.len > 0:
@@ -314,7 +314,14 @@ proc nimbleCheck*(report: NimbleSourcesReport): tuple[lines: seq[string];
       result.lines.add "  binary refused: " & plan.refusal
     for b in plan.binaries:
       result.lines.add "  binary " & b.name & " from " & b.source
-    for m in uninstalledModules(p):
+    let installRules = effectiveLayout(p.record, plat,
+      nimVersionValueOf(report.solvedNim)).undecidedText({rfSrcDir,
+        rfInstallDirs, rfInstallFiles, rfInstallExt, rfSkipDirs, rfSkipFiles,
+        rfSkipExt})
+    if installRules.len > 0:
+      result.lines.add "  install rules depend on the Nim version (`" &
+        installRules & "`), and the lock records no Nim to decide them"
+    for m in uninstalledModules(p, plat, nimVersionValueOf(report.solvedNim)):
       result.lines.add "  module " & m & " is not one Nimble would install"
 
 proc runNimbleCheckCommand*(lockFlag, storeFlag: string): int =

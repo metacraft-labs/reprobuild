@@ -1573,8 +1573,7 @@ type
 # the auto-start twice -- once while they prepare the dev env, and again when
 # the build opens its session -- and each step paired it with a release. The
 # first release let go of an adopted, retiring daemon from another build, and
-# it exited before the build's step (reprobuild-pm issue 2026-11-22, "the
-# adoption hold on a retiring `runquotad` ends with the dev-env preparation").
+# it exited before the build's step, which then found no daemon.
 # Inside `withInvocationRunQuotaHold` a step's release is deferred to the end
 # of the scope, so the hold covers the whole command.
 # ---------------------------------------------------------------------------
@@ -1630,9 +1629,8 @@ proc holdRunQuotaDaemon*(): bool =
   ##
   ## The hold of an arm ``decideRunQuotaHandover`` does not cover: on POSIX
   ## every invocation that adopts OR STARTS the shared per-user daemon keeps
-  ## one connection to it until it ends (reprobuild-pm
-  ## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
-  ## (POSIX)") -- a daemon that could not be asked to retire, and the one
+  ## one connection to it until it ends (see the
+  ## RunQuota host configuration notes on the shared per-user daemon) -- a daemon that could not be asked to retire, and the one
   ## this invocation has just started, included. Without it the daemon could
   ## idle out, or be retired by another install's ``repro``, in the gap
   ## before the build opens its first session. The launcher uses it as its
@@ -1655,8 +1653,7 @@ proc decideRunQuotaHandover*(candidate: string;
   ##
   ## WHY. On Windows the daemon outlives every build, so after an installer
   ## replaced the bundle it kept serving the new ``repro`` from the old image
-  ## for as long as its user stayed logged on (reprobuild-pm issue
-  ## 2026-10-26-windows-runquotad-from-a-replaced-bundle-keeps-serving-the-new-repro).
+  ## for as long as its user stayed logged on.
   ## Since 2026-11-11 the shared per-user daemon on POSIX outlives every
   ## build too, and its adopt-or-start asks the same question of it
   ## (reprobuild-specs/RunQuota-Host-Configuration.md, "The shared per-user

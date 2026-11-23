@@ -49,7 +49,7 @@ proc printResult(r: GenerationResult) =
       " before=" & e.before.escape() & " after=" & e.after.escape()
 
 proc generateIndex(rootFlag, sourceSetFlag, stateFlag, generatedAtFlag: string;
-                   policy: EgressPolicy) =
+                   policy: EgressPolicy; fullHistory: bool) =
   let root = absolutePath(if rootFlag.len > 0: rootFlag else: getCurrentDir())
   let ssPath = if sourceSetFlag.len > 0: absolutePath(sourceSetFlag)
                else: root / SourceSetFileName
@@ -62,7 +62,8 @@ proc generateIndex(rootFlag, sourceSetFlag, stateFlag, generatedAtFlag: string;
     previousIndex: (if fileExists(indexDir / IndexRootFile): indexDir else: ""),
     stateDir: (if stateFlag.len > 0: absolutePath(stateFlag)
                else: defaultState(root)),
-    outputDir: indexDir, policy: policy, shardBits: -1)
+    outputDir: indexDir, policy: policy, shardBits: -1,
+    historyMode: (if fullHistory: hmFull else: hmScheduled))
   let r = generate(cfg)
   printResult(r)
   # Every refusal and origin event of the generation, kept (threat model
@@ -74,18 +75,22 @@ proc generateIndex(rootFlag, sourceSetFlag, stateFlag, generatedAtFlag: string;
     echo "captured " & $captures.len & " record(s) in " & captureLog
   echo "root blake3:" & $r.built.rootId & " packages=" &
     $r.built.root.packageCount & " versions=" & $r.built.root.versionCount &
-    " events=" & $r.built.root.eventCount
+    " events=" & $r.built.root.eventCount & " history-check=" &
+    (if r.fullHistory: "full" else: "per-generation")
   echo "wrote " & indexDir
 
 proc runCatalogGenerateCommand*(rootFlag, sourceSetFlag, stateFlag,
                                 generatedAtFlag: string;
-                                policy = defaultPolicy()): int =
+                                policy = defaultPolicy();
+                                fullHistory = false): int =
   ## The verb: 0 when the index was written, 1 when the generation failed.
   ## ``policy`` is the origin egress policy; the command line always uses
   ## the default one, and only a test that serves its origins locally names
-  ## another resolver and dialer.
+  ## another resolver and dialer. ``fullHistory`` (`--full-history`) runs
+  ## the full history check now, whatever the source set's schedule says.
   try:
-    generateIndex(rootFlag, sourceSetFlag, stateFlag, generatedAtFlag, policy)
+    generateIndex(rootFlag, sourceSetFlag, stateFlag, generatedAtFlag, policy,
+      fullHistory)
     0
   except CatchableError as err:
     stderr.writeLine("repro catalog generate: error: " & err.msg)

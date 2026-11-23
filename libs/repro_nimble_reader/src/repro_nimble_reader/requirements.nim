@@ -33,16 +33,22 @@
 ##   expands it (`gh:`, `gitlab:`, `srht:`, `codeberg:` and their short
 ##   forms).
 ##
-## The solver's versions have three numeric components. Nimble versions may
-## have more; a fourth component that is zero is dropped (Nimble compares
-## missing components as zero), and any other is an error, because the
-## solver cannot represent the version.
+## A version may have any number of numeric components (NPC-AREQ6,
+## "Versions with any number of components"). It is written padded to three
+## components, with zero components after the third dropped (Nimble compares
+## a missing component as zero, so the reading is the same); a version with a
+## non-zero fourth or later component keeps every component up to the last
+## non-zero one (`>= 0.6.0.3.1`). The normalized text is a range in the
+## solver's grammar read in Nimble's order
+## (`repro_solver/nimble_versions.parseNimbleRange`); when every version in
+## it has at most three components it is also a semver range.
 
 {.push raises: [].}
 
 import std/[options, strutils]
 
 import repro_solver/version_constraints
+import repro_solver/nimble_versions
 
 import ./lexer
 
@@ -75,6 +81,12 @@ type
     of vkRange:
       normalized*: string ## `>= 1.2.2, < 2.0.0`
       range*: SemverRange
+        ## ``normalized`` read as a semver range, when every version in it
+        ## has at most three components. Otherwise (`>= 0.6.0.3.1`) it is a
+        ## range that admits nothing, and only ``nimbleRange`` reads it.
+      nimbleRange*: NimbleRange
+        ## ``normalized`` in Nimble's order, for any number of components:
+        ## what the requirement means
     of vkCommit:
       commit*: string     ## lower-case hex
       abbreviated*: bool  ## shorter than a full object id; NOT resolved here
@@ -185,15 +197,17 @@ proc nextIncompatible(version: string; semver: bool): seq[int] {.raises: [RangeE
   components(numbers.join("."))
 
 proc solverVersion(parts: seq[int]; written: string): string {.raises: [RangeError].} =
-  ## Three components for the solver: pad with zeros, drop zero extras.
+  ## The version as the normalized range spells it: padded with zeros to
+  ## three components, zero components after the third dropped. Nimble
+  ## compares a missing component as zero, so this is the same version.
   var p = parts
   while p.len < 3:
     p.add 0
-  for extra in p[3 .. ^1]:
-    if extra != 0:
-      raise newException(RangeError, "version '" & written &
-        "' has more than three components; the solver's versions have three")
-  $p[0] & "." & $p[1] & "." & $p[2]
+  while p.len > 3 and p[^1] == 0:
+    p.setLen(p.len - 1)
+  var texts: seq[string]
+  for c in p: texts.add $c
+  texts.join(".")
 
 proc boundsText(op: Op; version: string): string {.raises: [RangeError].} =
   let v = solverVersion(components(version), version)
@@ -409,9 +423,18 @@ proc readOne(item: string; reading: var RequirementReading) =
   else:
     try:
       let text = rangeText(rest)
-      let parsed = parseSemverRange(text)
+      let nimble = parseNimbleRange(text)
+      var parsed: SemverRange
+      try:
+        parsed = parseSemverRange(text)
+      except ESemverParse:
+        # A version of more than three components: no semver range says
+        # it, so the semver reading admits nothing.
+        parsed = SemverRange(lower: some(semver(1, 0, 0)),
+                             upper: some(semver(0, 0, 0)))
       version = VersionRequirement(kind: vkRange, written: rest.strip,
-                                   normalized: text, range: parsed)
+                                   normalized: text, range: parsed,
+                                   nimbleRange: nimble)
     except NimbleRangeError as e:
       reading.errors.add RequirementError(kind: reMalformed, input: item,
                                           reason: e.msg)

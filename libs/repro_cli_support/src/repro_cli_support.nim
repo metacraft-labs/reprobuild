@@ -32797,13 +32797,13 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
                              committedLock: string;
                              solved: var UnifiedSolution): int
 
-proc runBuildCommand(args: openArray[string]; publicCliPath: string;
-                     forceDirect = false;
-                     daemonHosted = false;
-                     eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil;
-                     graphAugmenter: BuildGraphAugmenter = nil): int =
+proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
+                         forceDirect: bool;
+                         daemonHosted: bool;
+                         eventSink: BuildCommandEventSink;
+                         cancelCheck: BuildCancelCallback;
+                         actionOutcomeSink: BuildActionOutcomeSink;
+                         graphAugmenter: BuildGraphAugmenter): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -33738,6 +33738,29 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     stderr.writeLine("repro build: daemon unavailable; falling back to " &
       "direct mode: " & err.msg)
     return runDirectBuild()
+
+
+proc runBuildCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     daemonHosted = false;
+                     eventSink: BuildCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int =
+  ## `runBuildCommandBody`, then the one-line summary of the provider startup
+  ## failures it met (`providerStartupFailureSummary`). Those stay non-fatal:
+  ## each skips only its own package's registrations, and the build goes on.
+  ## The summary is written however the body ends, so a build that stopped
+  ## for another reason still names them last.
+  resetProviderStartupFailures()
+  try:
+    result = runBuildCommandBody(args, publicCliPath, forceDirect,
+      daemonHosted, eventSink, cancelCheck, actionOutcomeSink, graphAugmenter)
+  finally:
+    let summary = providerStartupFailureSummary()
+    if summary.len > 0:
+      stderr.writeLine(summary)
+    resetProviderStartupFailures()
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
@@ -78273,6 +78296,10 @@ when defined(reproGitStdoutReaderTest):
     for head in found.heads:
       result.heads.add((head.oid, head.refName))
 
+  proc verifyLockPinnedProducerSourceForTest*(dep: LockedDep;
+      sourceRoot, consumerRoot: string) =
+    verifyLockPinnedProducerSource(dep, sourceRoot, consumerRoot)
+
 proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
     headOid: string): HashSet[string] =
   ## Branch names that MAY contain ``headOid`` on a remote, read from the
@@ -110887,7 +110914,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineCatalogCommand.generate:
       let r = conf.catalog.generate
       return runCatalogGenerateCommand(r.root, r.sourceSet, r.state,
-        r.generatedAt)
+        r.generatedAt, fullHistory = r.fullHistory)
     of ReproCommandLineCatalogCommand.verify:
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
