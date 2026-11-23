@@ -173,8 +173,9 @@ If something doesn't work after the home apply:
 The home apply realizes each tool exactly once into the M56 content-
 addressed store. A second apply with the same `home.nim` cache-hits;
 a third apply with a bumped version pin realizes the new version
-alongside the old (a future `repro home gc` will reclaim the old
-prefix when no active generation references it).
+alongside the old (`repro home gc` reclaims the old prefix once the
+generations that used it are outside its keep window and nothing else,
+such as a workspace or a dev shell, still holds it).
 
 Compare with the legacy `D:/metacraft-dev-deps/<tool>/<version>/` tree
 that `ensure-*.ps1` writes: the per-tool root is the same shape, but
