@@ -92,7 +92,11 @@ const
     # Whether a detector's scheduled positive control tripped (DET-4: the
     # add-on's tick, egress check and apt hook records): a fixed word, or
     # ``missed: <why>``.
-    "control"]
+    "control",
+    # The Nimble catalog's captured refusals (``repro_nimble_generator/
+    # capture``): the package, and where the refused bytes came from (a
+    # URL, a mirror location or an edge's name; never the bytes).
+    "package", "bytesFrom"]
     ## The only field names a record may carry (EVID-6). Deliberately no
     ## free-form "data"/"body"/"env" field: an environment can hold
     ## credentials, a body can hold source.

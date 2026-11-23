@@ -60,7 +60,7 @@
 ## are not re-hashed by this module yet.
 
 import std/[algorithm, options, os, osproc, sequtils, streams, strtabs,
-            strutils, tables]
+            strutils, tables, times]
 
 {.push warning[Deprecated]: off.}
 import std/sha1
@@ -73,6 +73,7 @@ import repro_interface_artifacts/catalog_declaration
 import repro_interface_artifacts/contribution_fingerprint
 import repro_lock
 import repro_nimble_index
+import repro_nimble_generator/capture
 import git_tool
 import shared_clones
 
@@ -874,10 +875,14 @@ proc rewindCheck(d: CatalogImportDeclaration; revision, projectRoot: string;
         p.revision & "; accepted because --allow-rewind names \"" & d.repo &
         "\"")
       return ""
+    # Kept (threat model § 9): the refusal goes to the project's capture
+    # log, the only thing a refused refresh writes.
+    appendCaptures(projectCaptureLog(projectRoot), [rewoundRefreshCapture(
+      who, d.remote, p.revision, revision, defect, uint64(epochTime()))])
     return who & ": refresh refused: ref " & d.gitRef.escape() & " now " &
       "names " & revision & ", and " & defect & ". A refresh moves a " &
       "catalog only forward; if this revision is intended, pass " &
-      "--allow-rewind=" & d.repo & " (nothing was written)"
+      "--allow-rewind=" & d.repo & " (nothing was written to the lock)"
   ""
 
 proc nimbleIndexHistory*(d: DiscoveredNimbleIndex; fromRevision,
