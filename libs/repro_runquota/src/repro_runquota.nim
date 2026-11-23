@@ -1568,19 +1568,48 @@ type
 # let one build's release drop the hold another build still relies on.
 # ---------------------------------------------------------------------------
 
+#
+# ONE HOLD PER INVOCATION, NOT PER STEP. `repro test` and `repro build` run
+# the auto-start twice -- once while they prepare the dev env, and again when
+# the build opens its session -- and each step paired it with a release. The
+# first release let go of an adopted, retiring daemon from another build, and
+# it exited before the build's step, which then found no daemon.
+# Inside `withInvocationRunQuotaHold` a step's release is deferred to the end
+# of the scope, so the hold covers the whole command.
+# ---------------------------------------------------------------------------
+
 var
   adoptedDaemonHold {.threadvar.}: RunQuotaClient
   adoptedDaemonHeld {.threadvar.}: bool
+  invocationHoldDepth {.threadvar.}: int
 
-proc releaseAdoptedDaemonHold*() =
-  ## Close the connection that keeps an adopted daemon from retiring, if
-  ## this thread holds one. Idempotent; called when the invocation is done
-  ## with RunQuota (``releaseAutoRunQuotaProcess``). Process exit closes it
-  ## as well, so a path that never calls this only keeps the old daemon
-  ## until the process ends.
+proc closeAdoptedDaemonHold() =
   if adoptedDaemonHeld:
     adoptedDaemonHold.close()
     adoptedDaemonHeld = false
+
+proc releaseAdoptedDaemonHold*() =
+  ## Close the connection that keeps an adopted daemon from retiring, if
+  ## this thread holds one. Idempotent; called when a step is done with
+  ## RunQuota (``releaseAutoRunQuotaProcess``). Inside
+  ## ``withInvocationRunQuotaHold`` it does nothing: the scope releases the
+  ## hold when the invocation ends. Process exit closes it as well, so a path
+  ## that never calls this only keeps the old daemon until the process ends.
+  if invocationHoldDepth > 0:
+    return
+  closeAdoptedDaemonHold()
+
+template withInvocationRunQuotaHold*(body: untyped) =
+  ## Keep any hold this thread takes on a RunQuota daemon until ``body``
+  ## ends, across every step inside it that releases its own. For one
+  ## top-level command on its own thread; the user daemon's builds, which
+  ## share a process, do not use it.
+  inc invocationHoldDepth
+  try:
+    body
+  finally:
+    dec invocationHoldDepth
+    releaseAdoptedDaemonHold()
 
 proc holdsAdoptedDaemon*(): bool =
   ## Whether this thread holds a connection to a daemon it adopted.
@@ -1590,7 +1619,7 @@ proc holdAdoptedDaemon(client: var RunQuotaClient) =
   ## Keep ``client`` open until ``releaseAdoptedDaemonHold``. A hold this
   ## thread already had is closed first: one is enough to keep the daemon,
   ## and the newer one is the connection to the daemon now serving.
-  releaseAdoptedDaemonHold()
+  closeAdoptedDaemonHold()
   adoptedDaemonHold = client
   adoptedDaemonHeld = true
 
@@ -1600,9 +1629,8 @@ proc holdRunQuotaDaemon*(): bool =
   ##
   ## The hold of an arm ``decideRunQuotaHandover`` does not cover: on POSIX
   ## every invocation that adopts OR STARTS the shared per-user daemon keeps
-  ## one connection to it until it ends (reprobuild-pm
-  ## ``spec/RunQuota-Host-Configuration.md``, "The shared per-user daemon
-  ## (POSIX)") -- a daemon that could not be asked to retire, and the one
+  ## one connection to it until it ends (see the
+  ## RunQuota host configuration notes on the shared per-user daemon) -- a daemon that could not be asked to retire, and the one
   ## this invocation has just started, included. Without it the daemon could
   ## idle out, or be retired by another install's ``repro``, in the gap
   ## before the build opens its first session. The launcher uses it as its
@@ -1625,8 +1653,7 @@ proc decideRunQuotaHandover*(candidate: string;
   ##
   ## WHY. On Windows the daemon outlives every build, so after an installer
   ## replaced the bundle it kept serving the new ``repro`` from the old image
-  ## for as long as its user stayed logged on (reprobuild-pm issue
-  ## 2026-10-26-windows-runquotad-from-a-replaced-bundle-keeps-serving-the-new-repro).
+  ## for as long as its user stayed logged on.
   ## Since 2026-11-11 the shared per-user daemon on POSIX outlives every
   ## build too, and its adopt-or-start asks the same question of it
   ## (reprobuild-specs/RunQuota-Host-Configuration.md, "The shared per-user

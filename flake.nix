@@ -1846,9 +1846,18 @@
                                     # hidden target. Enumerate rather than hard-code the current
                                     # binaries so newly installed helpers (including scripts)
                                     # cannot bypass the packaged defaults.
+                                    #
+                                    # The one exception is the engine's graph helper image,
+                                    # which only the engine runs (as the argv of its own
+                                    # helper actions, where it ran its unwrapped image
+                                    # before) and which package.nix leaves unwrapped on
+                                    # purpose: it must be there, executable, and NOT wrapped.
                                     wrapperCount=0
+                                    test -x ${reprobuild}/bin/reprobuild-helper
+                                    test ! -e ${reprobuild}/bin/.reprobuild-helper-wrapped
                                     for wrapper in ${reprobuild}/bin/*; do
                                       name=$(basename "$wrapper")
+                                      test "$name" = reprobuild-helper && continue
                                       hidden=${reprobuild}/bin/.$name-wrapped
                                       if test ! -x "$wrapper"; then
                                         echo "unexpected non-executable bin artifact: $wrapper" >&2
@@ -3127,6 +3136,10 @@
               pkgs.tree-sitter
               pkgs.zsh
               pkgs.fish
+              # The Nushell hook gate
+              # (tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim)
+              # runs the hook in a real nu.
+              pkgs.nushell
             ]
             # libbpf for the CodeTracer `ct` build: CodeTracer's
             # native monitor under src/ct/bpf_monitor_native.nim and

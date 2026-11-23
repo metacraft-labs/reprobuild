@@ -7,7 +7,7 @@
 #
 # Produces <OutDir>\reprobuild-<version>-<platform>-<arch>\ holding
 #
-#   bin\     build\bin\* (repro.exe, reprobuild.exe, the other images and the
+#   bin\     build\bin\* (repro.exe, reprobuild.exe, reprobuild-helper.exe, the other images and the
 #            runtime DLLs windows\stage-release-dlls.ps1 stages beside them),
 #            plus runquotad.exe and runquota.exe, built by
 #            scripts/release/stage_release_runquota.sh
@@ -54,7 +54,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "reprobuild.nimble")) -or
     -not (Test-Path -LiteralPath (Join-Path $repoRoot "libs\repro_project_dsl\src\repro_project_dsl.nim"))) {
   throw "package_windows_release: run from the reprobuild checkout root (cwd is $repoRoot)"
 }
-foreach ($required in @("build\bin\repro.exe", "build\bin\reprobuild.exe")) {
+# The graph helper image is required beside the engine: the engine runs the
+# build graph's own helper commands with it and refuses to run them itself
+# when it is missing (an engine process in an action loads OpenSSL, which
+# reads entropy at start-up on Windows).
+foreach ($required in @("build\bin\repro.exe", "build\bin\reprobuild.exe", "build\bin\reprobuild-helper.exe")) {
   if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $required))) {
     throw "package_windows_release: $required is missing; build first (bash ./scripts/build_apps.sh)"
   }

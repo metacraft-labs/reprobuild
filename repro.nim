@@ -455,7 +455,8 @@ const
     for name in ["t_e2e_shell_hook_noop_io_bounded",
                  "t_e2e_shell_hook_noop_latency",
                  "t_e2e_shell_hook_realistic_workload",
-                 "t_e2e_shell_hook_cd_activate_deactivate"]:
+                 "t_e2e_shell_hook_cd_activate_deactivate",
+                 "t_e2e_shell_hook_nushell_activates"]:
       rows.add TestGraphArtifacts(
         source: "tests/e2e/dev-env/" & name & ".nim",
         artifacts: @[TestGraphArtifact(
@@ -1578,6 +1579,14 @@ package reprobuild:
 
   executable reproEngine:
     name: "reprobuild"
+
+  # The engine's GRAPH HELPER image: the build graph's own helper commands
+  # (`internal compile-provider`, `extract-interface`, `compile-profile`,
+  # `probe-profile-platforms`, `dev-env-introspect`, `render-dev-env-shell`,
+  # `cmake-regenerate`) run from it, beside the engine. Built without `ssl`
+  # so no OpenSSL loads in an action's tree (see `apps/entrypoints.txt`).
+  executable reproGraphHelper:
+    name: "reprobuild-helper"
 
   executable reproAgentConformance:
     name: "repro-agent-conformance"
@@ -3098,6 +3107,26 @@ package reprobuild:
       runInSourceDir = true,
       actionId = "reprobuild.apps.reprobuild"))
 
+    # The graph helper image (`apps/entrypoints.txt`'s `reprobuild-helper`
+    # row): the engine's sources, the engine's defines and paths, and NO
+    # `ssl`. Its whole purpose is that no OpenSSL loads in a process the
+    # build graph runs inside an action (on Windows the OpenSSL DLLs read
+    # entropy at start-up, which keeps the action from being cached), so
+    # `ssl` must never be added here; the engine edge above keeps it.
+    # `t_graph_helper_image_loads_no_openssl` fails if either changes.
+    reprobuildAppsActions.add(nim.c(
+      source = "apps/reprobuild-helper/reprobuild_helper.nim",
+      binary = "build/bin/reprobuild-helper",
+      defines = @["release", "reproVendoredHash"] &
+        @["reproGeneratedSourceRevision"],
+      paths = ioMonNimPaths & sourceOnlyNimPaths & @[sourceRevisionModuleDir],
+      extraInputs = @[sourceRevisionModule],
+      passL = reproRuntimePassL,
+      nimcache = "build/nimcache/reprobuild-helper",
+      extraEnv = sourceOnlyEnv & @[("REPROBUILD_USE_SYSTEM_HASH_LIBS", "0")],
+      runInSourceDir = true,
+      actionId = "reprobuild.apps.reprobuild-helper"))
+
     reprobuildAppsActions.add(nim.c(
       source = "apps/repro-peer-cache-tier2/repro_peer_cache_tier2.nim",
       binary = "build/bin/repro-peer-cache-tier2",
@@ -4583,7 +4612,8 @@ package reprobuild:
     # machine (reprobuild-pm Distribution-And-Packaging.md §5.3, approved by
     # Zahary Karadjov, 2026-11-03). `repro build --target=<triple> .#prefix`
     # lays the cross-built images out as `scripts/cross/build_linux_cross.sh`
-    # did -- the engine and the two providers it spawns, the sandbox
+    # did -- the engine, its graph helper image and the two providers it
+    # spawns, the sandbox
     # launcher, the monitor shim and the DSL runtime, the Nim fork under
     # `nim/`, and the sources an installed compile builds against -- with
     # its own runtime libraries, the builder-path gate and the build record.
@@ -4684,7 +4714,8 @@ package reprobuild:
             dest: "bin/" & name)
         let spec = InstalledPrefixSpec(name: "reprobuild", triple: triple,
           output: prefixDir,
-          entries: @[image("reprobuild"), image("repro"),
+          entries: @[image("reprobuild"), image("reprobuild-helper"),
+            image("repro"),
             image("repro-standard-provider"),
             image("repro-cmake-trycompile-provider"),
             PrefixEntry(source: projectRoot / keyed / "bin" /

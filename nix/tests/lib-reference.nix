@@ -33,8 +33,7 @@
 #     `--` or `->` in prose, no "Reprobuild" mid-sentence, no undefined
 #     "IFD", no dotted identifier outside a code span, no sentence over 30
 #     words. One probe per rule must be rejected, and a set of acceptable
-#     sentences accepted (`styleControlPasses` is empty). Reported in reprobuild-pm, file
-#     issues/2026-11-17-home-manager-module-option-descriptions-render-unedited-on-the-user-reference.md.
+#     sentences accepted (`styleControlPasses` is empty).
 #
 # The check also runs itself against the page with one option's block
 # deleted and requires that to fail, so a checker that accepts anything

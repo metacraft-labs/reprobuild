@@ -541,8 +541,12 @@ jobs:
           fi
           echo "rev=$rev" >> "$GITHUB_OUTPUT"
 
+      # 8, not the 10 the other clones get: the two-minute pin step above
+      # has to fit in the job's 1440-minute ceiling with every other step's
+      # limit (scripts/check_ci_test_budget.py, invariant (c)), and one
+      # repository cloned at one revision is far inside 8 minutes.
       - name: Clone runquota sibling
-        timeout-minutes: 10
+        timeout-minutes: 8
         uses: metacraft-labs/metacraft-github-actions/clone-repo@dev
         with:
           repo: metacraft-labs/runquota
