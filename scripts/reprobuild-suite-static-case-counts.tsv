@@ -1201,7 +1201,7 @@ libs/repro_standard_provider/tests/test_python_convention.nim	nim	12
 libs/repro_standard_provider/tests/test_python_direct_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_ruby_bundler_convention.nim	nim	10
 libs/repro_standard_provider/tests/test_rust_convention.nim	nim	15
-libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim	nim	5
+libs/repro_standard_provider/tests/test_rust_convention_build_script_members.nim	nim	6
 libs/repro_standard_provider/tests/test_rust_convention_crate_env_vs_cargo.nim	nim	2
 libs/repro_standard_provider/tests/test_rust_convention_lib_bin_and_path_deps.nim	nim	12
 libs/repro_standard_provider/tests/test_rust_convention_mode_b_test_target.nim	nim	2
