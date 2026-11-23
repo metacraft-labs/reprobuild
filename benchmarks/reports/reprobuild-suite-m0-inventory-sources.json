@@ -62379,7 +62379,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_workspace_status_shows_active_branch_and_drift.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 11,
+      "staticCaseCount": 12,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
