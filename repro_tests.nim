@@ -30385,6 +30385,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "module-level statement runs at every start-up: registerCodecs()"),
   TestSpec(
+    source: "tests/integration/t_provider_startup_failures_are_summarised_at_the_end.nim",
+    binary: "build/test-bin/t_provider_startup_failures_are_summarised_at_the_end",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let reproBin = getEnv(\"REPROBUILD_REPRO\","),
+  TestSpec(
     source: "tests/integration/t_provision_binding.nim",
     binary: "build/test-bin/t_provision_binding",
     defines: @[],
