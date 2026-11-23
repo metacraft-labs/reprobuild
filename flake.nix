@@ -3136,6 +3136,10 @@
               pkgs.tree-sitter
               pkgs.zsh
               pkgs.fish
+              # The Nushell hook gate
+              # (tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim)
+              # runs the hook in a real nu.
+              pkgs.nushell
             ]
             # libbpf for the CodeTracer `ct` build: CodeTracer's
             # native monitor under src/ct/bpf_monitor_native.nim and
