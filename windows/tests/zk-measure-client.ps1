@@ -154,7 +154,7 @@ try {
   }
 
   # ---- measurement only: an instrumented copy of the production redirect loop ----
-  function Measure-Transaction([int]$n) {
+  function Measure-Transaction([string]$n) {
     $id = Set-Transaction -Mode 'normal'
     $current = [Uri]::new("http://127.0.0.1:$($script:fixture.HttpPort)/delay/$id")
     $handler = New-VerifiedDownloadHttpHandler
@@ -183,7 +183,7 @@ try {
     }
     $ev = $script:fixture.Current
     $bad = ($ev.TcpConnections -eq 0)
-    Write-Host ("MEASURE {0} {1} tcp={2} hs={3} server[{4}] client[{5}]" -f $n, $(if ($bad) { 'NO-TCP' } else { 'ok' }), $ev.TcpConnections, $ev.Handshakes, $ev.Timeline, ($log -join '; '))
+    Write-Host ("MEASURE {0} {1} runner=$($env:COMPUTERNAME) tcp={2} hs={3} server[{4}] client[{5}]" -f $n, $(if ($bad) { 'NO-TCP' } else { 'ok' }), $ev.TcpConnections, $ev.Handshakes, $ev.Timeline, ($log -join '; '))
     $client.Dispose()
     return $bad
   }
