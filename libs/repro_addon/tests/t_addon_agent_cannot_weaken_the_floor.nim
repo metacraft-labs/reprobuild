@@ -268,6 +268,26 @@ suite "an agent apply cannot weaken the floor":
       @["c.service (whole floor waived on a new unit; runs as root)"]
     check agentApplyRefusal(r).len > 0
 
+  test "after an operator deploys a root service, the agent applies it beside a floored one":
+    # The adversarial-audit bed's shape (``t_e2e_addon_audit_bed``, gate
+    # ``addon_adversarial_audit_bed``):
+    # the agent's sequence 1 carries a waived root service and a new
+    # floored one. Straight onto the bootstrapped host (no stored user
+    # generation) the agent refuses it; once an operator has applied the
+    # waived service, the same sequence is the agent's to apply.
+    let waivedRoot = unitStanza("w.service", "ExecStart=/bin/sleep infinity\n",
+                                waived("a test fixture"))
+    let target = waivedRoot &
+      unitStanza("f.service", "ExecStart=" & Prefix & "/bin/f 864000\n")
+    let straight = planOf("", target)
+    check straight.floorWeakened ==
+      @["w.service (whole floor waived on a new unit; runs as root)"]
+    check agentApplyRefusal(straight).len > 0
+    let afterOperator = planOf(storedAs(waivedRoot), target)
+    check afterOperator.floorWeakened.len == 0
+    check afterOperator.floorIntroduced.len == 0
+    check agentApplyRefusal(afterOperator) == ""
+
   test "a legacy agent's units are taken over as they run":
     # A migration commits what the legacy agent already applied: the
     # add-on has no generation to compare with, but nothing on the host is

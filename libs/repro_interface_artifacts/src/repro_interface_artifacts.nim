@@ -889,6 +889,17 @@ type
       ## flattened tool-use surface. Cross-repository executable consumers use
       ## this closure to launch the produced binary with its declared tools.
     provisioningContributions*: seq[InterfaceProvisioningContribution]
+    pinnedSiblings*: seq[string]
+      ## The workspace repositories the recipe's ``pinned:`` block names:
+      ## siblings the lock must pin (a CI job clones them at the locked
+      ## revision) that the recipe does NOT use as a dependency. They are
+      ## repository names, never ``uses:`` selectors, so no consumer builds
+      ## against them and lock generation records each as a plain ``deps``
+      ## entry without reading its recipe or its dependencies
+      ## (Unified-Locking-And-Hooks.md §14.2 item 4). Encoded in the v38
+      ## codec AFTER ``provisioningContributions``; v<38 readers' artifacts
+      ## decode it empty. In the fingerprint only when non-empty, so no
+      ## interface that declares none changes its fingerprint.
     publicSignatureDependencies*: seq[string]
     location*: SourceLocation
     standardBuildEligible*: bool
@@ -1303,8 +1314,20 @@ proc `==`*(a, b: InterfaceToolUse): bool {.noSideEffect.} =
 
 const
   EnvelopeMagic = [byte(ord('R')), byte(ord('B')), byte(ord('S')), byte(ord('Z'))]
-  EnvelopeVersion = 37'u16
-    ## v37 (current): ``TarballArchiveDetail`` retains
+  EnvelopeVersion = 38'u16
+    ## v38 (current): ``ProjectInterface`` retains ``pinnedSiblings`` (the
+    ##                recipe's ``pinned:`` block, Unified-Locking-And-Hooks.md
+    ##                §14.2 item 4), a string list after
+    ##                ``provisioningContributions``. v37 and older payloads
+    ##                decode it empty, which is what every recipe declared.
+    ##                The fingerprint projection writes it, under its own
+    ##                tag, only when non-empty, so no fingerprint or key
+    ##                hashed from an interface that pins nothing moves. An
+    ##                engine that reads up to v37 refuses a v38 envelope
+    ##                with the "engine older than the envelope" refusal
+    ##                (``unsupportedInterfaceEnvelopeMessage``), as it does
+    ##                for every newer envelope.
+    ## v37: ``TarballArchiveDetail`` retains
     ##                ``elfRuntimePackage`` (the package whose realized
     ##                prefix carries the loader and C library an archive
     ##                with none of its own is relocated onto) and
@@ -1607,6 +1630,8 @@ const
   ImportedContributionMetadataTag =
     "reprobuild.imported-contribution-metadata.v1"
     ## Domain tag of ``importedProvisioningMetadataDigest``.
+  PinnedSiblingsTag = "reprobuild.pinned-siblings.v1"
+    ## Opens the pinned-siblings section of a v38 fingerprint payload.
   ToolUseRealizationsTag = "reprobuild.tool-use-realizations.v1"
     ## Domain tag of ``toolUseRealizationDigest``.
   InterfaceExtractionCacheRecordMagic =
@@ -2862,6 +2887,20 @@ proc encodeInterfacePayload*(value: ProjectInterface;
       for contribution in value.provisioningContributions:
         result.writeProvisioningContribution(contribution, version,
           forFingerprint)
+  if version >= 38'u16:
+    # The ``pinned:`` block. The wire form always carries the list (a count
+    # of zero for a recipe that pins nothing); the fingerprint form carries
+    # it only when there is one, under a tag, so an interface that pins
+    # nothing hashes to the fingerprint v37 computed for it. Sorted in the
+    # fingerprint: the order a recipe lists its pins in is not observable.
+    if forFingerprint:
+      if value.pinnedSiblings.len > 0:
+        var sorted = value.pinnedSiblings
+        sorted.sort(cmp)
+        result.writeString(PinnedSiblingsTag)
+        result.writeStringSeq(sorted)
+    else:
+      result.writeStringSeq(value.pinnedSiblings)
 
 proc importedProvisioningMetadataDigest*(value: ProjectInterface): string =
   ## The realization metadata of the IMPORTED contribution records that
@@ -2995,6 +3034,10 @@ proc decodeInterfacePayload*(bytes: openArray[byte];
     for i in 0 ..< contributionCount:
       result.provisioningContributions[i] =
         readProvisioningContribution(bytes, pos, version)
+  # v38 added pinnedSiblings after the contributions; v<38 payloads have no
+  # such block, which is a recipe that pins nothing.
+  if version >= 38'u16:
+    result.pinnedSiblings = readStringSeq(bytes, pos)
   if pos != bytes.len:
     raiseEnvelopeError(eeMalformed, "trailing interface payload bytes")
 
@@ -3606,6 +3649,7 @@ proc toProjectInterface*(pkg: PackageDef;
   result.packageName = pkg.packageName
   result.defaultToolProvisioning = pkg.defaultToolProvisioning
   result.publicSignatureDependencies = pkg.publicSignatureDependencies
+  result.pinnedSiblings = pkg.pinnedSiblings
   result.location = SourceLocation(file: pkg.sourceFile, line: pkg.sourceLine)
   # NLF-M8 — `PackageDef.toolUses` is no longer the concatenation of the
   # three dependency lists (`allToolUses` is), so the union is taken HERE.
@@ -4095,6 +4139,10 @@ proc mergeProjectInterfaces(matches: openArray[PackageDef];
         continue
       seenSigDeps.add(dep)
       result.publicSignatureDependencies.add(dep)
+    # ``pinned:`` — unioned across the file's packages, in source order.
+    for sibling in projection.pinnedSiblings:
+      if sibling notin result.pinnedSiblings:
+        result.pinnedSiblings.add(sibling)
     # ``defaultToolProvisioning`` resolution: the first non-empty wins.
     # An explicit value on a later package overrides a default-empty
     # earlier one, matching the "first explicit declaration in source

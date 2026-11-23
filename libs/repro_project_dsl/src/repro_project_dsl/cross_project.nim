@@ -415,6 +415,11 @@ proc isKnownPackageSection(stmt: NimNode): bool =
                  # identifier.
                  "platforms",
                  "devenv", "uses", "usesimportpath", "defaulttoolprovisioning",
+                 # ``pinned:`` — lock-pinned siblings that are cloned but not
+                 # built against (Unified-Locking-And-Hooks.md §14.2 item 4).
+                 # Unlisted, the partition would emit it at module top level
+                 # as a call to nothing.
+                 "pinned",
                  "toolprovisioning", "provisioning", "versions", "config",
                  "depends_on", "dependson",
                  # Recipe-Val M8: the ``outputs:`` block declaring
