@@ -24,9 +24,8 @@
 ## recovery keeps it even when the apply dies. So no entry is ever written
 ## in place: each launcher, sidecar and shim is staged under a temporary
 ## name and renamed over the old one (`replaceLauncherEntry`), and a kill
-## at any instant leaves every entry either its old bytes or its new ones
-## (reprobuild-pm `spec/Home-Profile-Generations-And-State.md`
-## §"Apply Pipeline" step 7, which this module implements as step 9).
+## at any instant leaves every entry either its old bytes or its new ones.
+## This module is step 9 of the home apply pipeline.
 
 import std/[os, strutils]
 from repro_core/paths import extendedPath
