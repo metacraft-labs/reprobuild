@@ -124,7 +124,7 @@ proc hasValidPointer(stateDir, generationId: string): bool =
   except CatchableError:
     true
 
-proc quarantineGenerationDir(stateDir, generationId, reason: string):
+proc quarantineGenerationDir*(stateDir, generationId, reason: string):
     string =
   ## Move `<state-dir>/generations/<id>/` to
   ## `<state-dir>/generations/.aborted/<id>-<reason>-<timestamp>/`.
@@ -144,7 +144,7 @@ proc quarantineGenerationDir(stateDir, generationId, reason: string):
       "could not quarantine aborted generation " & src & " -> " & result &
       ": " & err.msg)
 
-proc quarantinedGenerationId(leaf: string): string =
+proc quarantinedGenerationId*(leaf: string): string =
   ## The generation id a `.aborted/` entry was named after
   ## (`<id>-<reason>-<timestamp>`, `generationIdHex`: lowercase hex), or ""
   ## for an entry this module did not name.
