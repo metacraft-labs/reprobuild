@@ -8754,7 +8754,7 @@
       "requiresReproBinary": false,
       "source": "libs/repro_addon/tests/t_addon_alpm_and_omarchy_hooks.nim",
       "sourceSuiteCount": 6,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

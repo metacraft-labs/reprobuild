@@ -4409,8 +4409,9 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
     for why in pacnewFindings(stillDeclared, driver):
       result.reportedNotes.add(why)
   # The Omarchy post-update hook (spec §4.3.2; AR6): the account owns its
-  # directory and can delete or replace the hook, which is drift every plan
-  # reports (observed without following a link, owner-checked).
+  # directory and can delete or replace the hook; every plan reports that
+  # (observed without following a link, owner-checked), as a note: no
+  # apply repairs it, so as drift it would fail every later apply.
   for e in previous.entries:
     if e.class == lcOmarchyHook:
       let d = observeDrift(e)

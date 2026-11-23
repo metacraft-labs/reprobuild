@@ -614,15 +614,15 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcAccount:
       result.add(ExpectedRecord(component: fcAccounts, key: e.path,
         value: e.value, baseValue: e.replaced))
+      for f in AccountDatabaseFiles:
+        result.add(ExpectedRecord(component: fcEtc, key: f, value: "*",
+                                  anyChange: true))
     of lcOmarchyHook:
       # ``omarchy-hooks`` records every inode under the account's hook
       # directory as ``etcEntryValue`` does (spec §12.2).
       result.add(ExpectedRecord(component: fcOmarchyHooks, key: e.path,
         value: (if e.kindHint == KindDir: "d " & e.mode & " " & e.owner
                 else: "f " & e.mode & " " & e.owner & " sha256:" & e.sha256)))
-      for f in AccountDatabaseFiles:
-        result.add(ExpectedRecord(component: fcEtc, key: f, value: "*",
-                                  anyChange: true))
     of lcSysctl:
       # The fingerprint spells a key by its /proc/sys path components
       # joined with dots, whichever separator form the profile used.

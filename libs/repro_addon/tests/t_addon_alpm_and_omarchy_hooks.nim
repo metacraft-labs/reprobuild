@@ -416,6 +416,23 @@ suite "generation 0, the ledger and the fingerprint":
     check (fcOmarchyHooks, l.entries[1].path,
            "f 0644 0:0 sha256:" & sha256Hex("x")) in recs
 
+  test "an account entry still accounts for the account database files":
+    # Regression (AR6 measurement at 7b1aa9d76e): inserting the hook's
+    # branch into ``expectedRecords`` once moved these records under it,
+    # and every generation that created an account failed its delta.
+    var recs: seq[(FingerprintComponent, string, bool)]
+    for r in expectedRecords(Ledger(entries: @[LedgerEntry(class: lcAccount,
+        path: "user:svc", value: "x")])):
+      recs.add((r.component, r.key, r.anyChange))
+    check (fcEtc, "/etc/passwd", true) in recs
+    check (fcEtc, "/etc/shadow", true) in recs
+    var hookRecs: seq[FingerprintComponent]
+    for r in expectedRecords(Ledger(entries: @[LedgerEntry(class: lcOmarchyHook,
+        path: "/home/o/.config/omarchy/hooks/post-update.d/90-repro-addon",
+        unit: "o", kindHint: KindFile, sha256: "x", mode: "0644", owner: "0:0")])):
+      hookRecs.add(r.component)
+    check hookRecs == @[fcOmarchyHooks]
+
 suite "pacman's side files and the hook's name":
   test ".pacnew and .pacsave beside ledger paths are reported, naming the package":
     let d = createTempDir("repro-ar6-pacnew-", "")
