@@ -427,6 +427,9 @@ when defined(linux):
     "repro_lease_pidfd_supported".}
   proc c_repro_lease_userns_supported(): cint {.importc:
     "repro_lease_userns_supported".}
+  proc c_repro_lease_idmap_probe(newuidmap, newgidmap: cstring;
+      uid, gid, subuid, subgid: clong; err: cstring; errcap: cint): cint
+    {.importc: "repro_lease_idmap_probe".}
 
   proc subordinateIds*(): tuple[ok: bool; uid, gid, count: int] =
     ## The first subordinate uid/gid range of the current user
@@ -446,6 +449,24 @@ when defined(linux):
     (u.start > 0 and g.start > 0, u.start, g.start, min(u.count, g.count))
 
   proc landlockAbi*(): int = int(c_repro_lease_supported())
+
+  proc idMappingRefusal*(newuidmap, newgidmap: string): string =
+    ## Why the floor's id mapping cannot be installed here, or "" when it
+    ## can: the helpers are run on a throwaway user namespace with the
+    ## mapping of lease slot 0 (`c/repro_lease_linux.c`
+    ## `repro_lease_idmap_probe`), so the answer is what a floor lease would
+    ## meet, not whether the helpers merely exist.
+    let ids = subordinateIds()
+    if not ids.ok:
+      return "no subordinate uid/gid range for the lease user"
+    var err = newString(512)
+    let mapped = c_repro_lease_idmap_probe(newuidmap.cstring,
+      newgidmap.cstring, clong(getuid()), clong(getgid()), clong(ids.uid),
+      clong(ids.gid), err.cstring, cint(err.len))
+    err.setLen(err.cstring.len)
+    if mapped != 0: ""
+    elif err.len > 0: err
+    else: "the id-mapping helpers refused the map"
 
   proc kv(buf: var string; k, v: string) =
     buf.add(k); buf.add('\0'); buf.add(v); buf.add('\0')
@@ -1508,6 +1529,13 @@ type
     subordinateIds*: bool
     idMappingTools*: bool
       ## newuidmap and newgidmap installed.
+    idMappingRefusal*: string
+      ## Empty when the helpers mapped a throwaway user namespace exactly as
+      ## a floor lease maps its own (or were not tried); otherwise why they
+      ## could not -- the helper's own refusal. Installed setuid helpers
+      ## still refuse every map where real root is not mapped into the
+      ## namespace the worker runs in, so being installed is not the same
+      ## as working.
 
 proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
     tuple[ok: bool; layers: set[LeaseLayer]; reason: string] =
@@ -1537,6 +1565,9 @@ proc decideLinuxLeaseLayers*(probe: LinuxLeaseHostProbe; hardened: bool):
     missing.add("the floor: no subordinate uid/gid range for the lease user")
   elif not probe.idMappingTools:
     missing.add("the floor: newuidmap/newgidmap are not installed")
+  elif probe.idMappingRefusal.len > 0:
+    missing.add("the floor: newuidmap/newgidmap cannot map the lease " &
+      "user on this host (" & probe.idMappingRefusal & ")")
   else:
     layers.incl(llFloor)
   if hardened and missing.len > 0:
@@ -1552,8 +1583,12 @@ when defined(linux):
     result.pidfdGetfd = c_repro_lease_pidfd_supported() != 0
     result.landlock = landlockAbi() >= 1
     result.subordinateIds = subordinateIds().ok
-    result.idMappingTools = uncontrolledFindExe("newuidmap").len > 0 and
-      uncontrolledFindExe("newgidmap").len > 0
+    let newuidmap = uncontrolledFindExe("newuidmap")
+    let newgidmap = uncontrolledFindExe("newgidmap")
+    result.idMappingTools = newuidmap.len > 0 and newgidmap.len > 0
+    if result.subordinateIds and result.idMappingTools and
+        result.userNamespaces and not result.noConfinementBackend:
+      result.idMappingRefusal = idMappingRefusal(newuidmap, newgidmap)
 
 proc availableLeaseLayers*(hardened = false):
     tuple[ok: bool; layers: set[LeaseLayer]; reason: string] =
@@ -1570,7 +1605,10 @@ proc availableLeaseLayers*(hardened = false):
   ## * TRUSTED: namespaces + noexec always; Landlock when the kernel has it
   ##   and the floor (a subordinate uid per slot + the derived seccomp
   ##   allow-list) when the user has a subordinate id range and
-  ##   newuidmap/newgidmap. A missing one is NOT a refusal: the lease runs
+  ##   newuidmap/newgidmap map it: the helpers are run once on a throwaway
+  ##   user namespace (`idMappingRefusal`), because installed helpers that
+  ##   refuse every map would otherwise surface as a start failure in every
+  ##   floor lease. A missing one is NOT a refusal: the lease runs
   ##   without it and its isolation level says what it got
   ##   (`linux-namespace+landlock+floor` vs `linux-namespace`).
   ## * HARDENED: Landlock and the floor are REQUIRED; without either the

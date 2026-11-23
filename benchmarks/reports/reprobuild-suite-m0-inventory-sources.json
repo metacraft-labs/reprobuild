@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3212,
+    "nimTestBinaries": 3213,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 844,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3264
+    "testEntries": 3265
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1844,7 +1844,7 @@
       "integration": 1805,
       "platform/destructive": 203,
       "pure unit": 844,
-      "unclassified": 383
+      "unclassified": 384
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2064,9 +2064,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3212,
+    "nimTestBinaryCount": 3213,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3264
+    "testEntryCount": 3265
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18435,6 +18435,24 @@
       "source": "libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_lease_floor_probe_matches_what_a_lease_maps",
+      "class": "unclassified",
+      "classificationReason": "imports `asyncdispatch`, which grants out-of-process reach",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_distributed_worker",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_distributed_worker",
+      "requiresReproBinary": false,
+      "source": "libs/repro_distributed_worker/tests/t_lease_floor_probe_matches_what_a_lease_maps.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
