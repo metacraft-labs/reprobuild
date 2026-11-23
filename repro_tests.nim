@@ -8185,6 +8185,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_interface_artifacts_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_interface_nimcache_survives_an_interrupted_compile.nim",
+    binary: "build/test-bin/t_interface_nimcache_survives_an_interrupted_compile",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_l3_lift_carries_service_and_activity_signatures.nim",
     binary: "build/test-bin/t_l3_lift_carries_service_and_activity_signatures",
     defines: @[],
