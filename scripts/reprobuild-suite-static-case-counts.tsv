@@ -286,7 +286,7 @@ libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	15
 libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	18
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
-libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	42
+libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	43
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim	nim	1
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim	nim	7
