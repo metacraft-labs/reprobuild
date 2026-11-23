@@ -2550,6 +2550,10 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
             "(default: under the user cache directory)"
         flag generatedAt is string,
           help = "The generation time in Unix seconds (default: now)"
+        boolFlag fullHistory is bool,
+          help = "Run the full history check now: report every recorded " &
+            "commit no branch of its origin reaches (by default it runs " &
+            "every history_check_days days)"
       subcmd "verify",
           help = "Repeat the generation of a Nimble index from the inputs it " &
             "names and compare the roots":

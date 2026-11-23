@@ -10,6 +10,7 @@
 import std/[options, strutils, unittest]
 
 import repro_solver/version_constraints
+import repro_solver/nimble_versions
 import repro_nimble_reader
 
 proc one(s: string): Requirement =
@@ -142,14 +143,31 @@ suite "nimble requirement forms":
       check e.reason.len > 0
 
   test "forms Nimble accepts but the solver cannot express are untranslatable":
-    for s in ["a >= 1.2.3.4", "a == 1.89.9.6", "a ^= 2.1.1.1", "a >", "a & >= 1",
-              "a >= 1..2", "scrypt.nim >= 1.0"]:
+    for s in ["a >", "a & >= 1", "a >= 1..2", "scrypt.nim >= 1.0"]:
       checkpoint s
       let e = errorOf(s)
       check e.kind == reUntranslatable
       check e.input == s
     # A zero fourth component is the same version to Nimble and is dropped.
     check normalized("a >= 1.2.3.0") == ">= 1.2.3"
+
+  test "versions of more than three components are translated (NPC-AREQ6)":
+    # Every component up to the last non-zero one is kept; `^=` and `~=`
+    # find their bound as Nimble's `getNextIncompatibleVersion` does.
+    check normalized("a >= 1.2.3.4") == ">= 1.2.3.4"
+    check normalized("a == 1.89.9.6") == "== 1.89.9.6"
+    check normalized("a >= 1.2.3.4.0") == ">= 1.2.3.4"
+    check normalized("a ^= 2.1.1.1") == ">= 2.1.1.1, < 3.0.0"
+    check normalized("a ~= 0.6.0.3.1") == ">= 0.6.0.3.1, < 0.6.0.4"
+    check normalized("a ^= 0.6.0.3.1") == ">= 0.6.0.3.1, < 0.7.0"
+    check normalized("a ^= 0.0.3.1") == ">= 0.0.3.1, < 0.0.4"
+    # The semver reading of such a range admits nothing; Nimble's reading
+    # is the requirement's meaning.
+    let r = one("a >= 0.6.0.3.1").version
+    check not satisfies(semver(0, 7, 0), r.range)
+    check admits(r.nimbleRange, @[0'u64, 7, 0, 8, 0])
+    check admits(r.nimbleRange, @[0'u64, 6, 0, 3, 1])
+    check not admits(r.nimbleRange, @[0'u64, 6, 0, 3])
 
   test "names map to the nimble namespace identity":
     check identity("chronicles") == "nimble:chronicles"
