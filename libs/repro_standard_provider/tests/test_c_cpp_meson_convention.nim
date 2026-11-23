@@ -20,13 +20,14 @@
 ##     toolchain is missing):
 ##     - the convention emits a ``ccpp-meson-configure`` action.
 ##     - the convention emits a ``ccpp-meson-build-hello`` action that
-##       depends on the configure action and declares an executable
-##       output under ``.repro/build/meson/``.
+##       depends on configure and consumes its tool-authored output
+##       metadata through a dynamic-output fragment.
 ##     - the configure action's argv carries ``meson setup`` (plus the
 ##       scratch dir and project root), and the build action's argv
 ##       carries ``meson compile -C <scratch> hello``.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import repro_test_support
 
 import repro_core
@@ -283,13 +284,8 @@ suite "c-cpp-meson convention M39":
           break
       check foundHello
       check helloBuild.deps == @["ccpp-meson-configure"]
-      var sawBinary = false
-      for outPath in helloBuild.outputs:
-        let lower = outPath.toLowerAscii.replace('\\', '/')
-        if ".repro/build/meson/" in lower and
-            (lower.endsWith("/hello") or lower.endsWith("/hello.exe")):
-          sawBinary = true
-      check sawBinary
+      check helloBuild.outputs.len == 0
+      check helloBuild.dynamicDepsFile.endsWith("outputs-hello.dyndep")
 
       # meson compile argv: meson, "compile", "-C", "<scratch>", "hello"
       let buildArgv = inlineArgvOf(helloBuild)

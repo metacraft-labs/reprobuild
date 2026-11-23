@@ -81,6 +81,12 @@ type
       ## every entry published before PMC-4 — is served to such a host anyway
       ## because ``{}`` is a subset of everything.
     storeDir*: string
+const
+  UnknownPlatformCpu* = "unknown"
+    ## What ``detectLocalPlatform`` reports for a CPU it has no name for.
+    ## ``checkCompat`` refuses it on either side; it never compares equal.
+  UnknownPlatformOs* = "unknown"
+
 
 proc detectLocalPlatform*(storeDir: string; microarch = ""): LocalPlatform =
   ## Returns the local solve target. The platform values match the
@@ -105,12 +111,34 @@ proc detectLocalPlatform*(storeDir: string; microarch = ""): LocalPlatform =
   ## every entry published before this milestone. Defaulting to the build
   ## host's real capability would have been Spack's default, and Spack's
   ## default is the reason its binaries famously do not run elsewhere.
+  # Every family this module can name is spelled the way the catalog's
+  # ``PlatformCpu`` spells it, so an entry published with
+  # ``repro cache publish --platform-cpu`` for a host and the host's own
+  # apply derive one key. A family it cannot name is ``UnknownPlatformCpu``,
+  # which ``checkCompat`` refuses on either side.
   when defined(amd64) or defined(x86_64):
     result.cpu = "x86_64"
   elif defined(arm64) or defined(aarch64):
     result.cpu = "aarch64"
+  elif defined(arm):
+    # 32-bit ARM. Every supported 32-bit ARM host is ARMv7 with the
+    # hard-float ABI (Debian/Raspbian ``armhf``, Arch ``armv7h``), and the
+    # cache names the family ``armv7`` (``packages_schema.PlatformCpu``),
+    # which is also what ``repro cache publish --platform-cpu`` takes for
+    # an entry built elsewhere for such a host. Before this arm existed an
+    # armhf client keyed every entry ``unknown``, so the compat gate
+    # compared ``unknown`` with ``unknown`` and would have accepted an
+    # entry published for any other platform that fell through here.
+    result.cpu = "armv7"
+  elif defined(i386):
+    result.cpu = "i686"
+  elif defined(riscv64):
+    result.cpu = "riscv64"
   else:
-    result.cpu = "unknown"
+    # UnknownPlatformCpu: a host this module cannot name. ``checkCompat``
+    # refuses every entry for it rather than letting two unnamed hosts of
+    # different architectures agree on "unknown" and exchange binaries.
+    result.cpu = UnknownPlatformCpu
   when defined(linux):
     result.os = "linux"
     result.abi = "gnu"
@@ -124,7 +152,7 @@ proc detectLocalPlatform*(storeDir: string; microarch = ""): LocalPlatform =
     result.abi = ""
     result.libcVariant = ""
   else:
-    result.os = "unknown"
+    result.os = UnknownPlatformOs
   result.microarch = microarch
   result.storeDir = storeDir
 
@@ -137,6 +165,18 @@ proc checkCompat*(manifest: BinaryCacheManifest;
       $manifest.formatVersion & " vs local " &
       $bcsTypes.BinaryCacheFormatVersion)
   let p = manifest.entryKey.platform
+  # Fail closed on an unnamed host or entry BEFORE the equality gates: two
+  # hosts this module cannot name (i686 and a 32-bit ARM variant it does not
+  # know, say) would otherwise both say "unknown", compare equal, and run
+  # each other's binaries. An unknown platform substitutes nothing.
+  if p.cpu == UnknownPlatformCpu or local.cpu == UnknownPlatformCpu or
+     p.cpu.len == 0 or local.cpu.len == 0:
+    return (false, "CPU platform is unknown (manifest=" & p.cpu &
+      " local=" & local.cpu & "); an unnamed platform is never substituted")
+  if p.os == UnknownPlatformOs or local.os == UnknownPlatformOs or
+     p.os.len == 0 or local.os.len == 0:
+    return (false, "OS platform is unknown (manifest=" & p.os &
+      " local=" & local.os & "); an unnamed platform is never substituted")
   if p.cpu != local.cpu:
     return (false, "CPU mismatch: manifest=" & p.cpu & " local=" & local.cpu)
   if p.os != local.os:

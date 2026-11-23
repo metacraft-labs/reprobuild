@@ -31,6 +31,7 @@
 ## preserving a historical limitation as a permanent skip.
 
 import std/[json, os, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_test_support
 

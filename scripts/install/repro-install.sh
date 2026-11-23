@@ -173,16 +173,23 @@ TARBALL_MANIFEST="${REPRO_TARBALL_MANIFEST:-/var/lib/reprobuild/installed-files.
 # Nix and NixOS: the metacraft-labs/nixpkgs fork IS the repository.
 #
 # The fork carries every released Metacraft package on standing branches
-# named after the upstream channel each one tracks (nixos-unstable,
-# nixpkgs-unstable, nixos-YY.MM, nixpkgs-YY.MM-darwin), rebased and
+# named after the upstream channel each one tracks plus the suffix
+# -metacraft (nixos-unstable-metacraft, nixpkgs-unstable-metacraft,
+# nixos-YY.MM-metacraft, nixpkgs-YY.MM-darwin-metacraft), rebased and
 # rebuilt continuously (metacraft-specs infrastructure/
 # package-distribution.md §6.4). A NixOS system is declarative, so the
 # installer does not install anything there: it picks the branch that
 # matches the system's own channel and PRINTS the change to make. It
 # never edits /etc/nixos, and never installs from reprobuild's own flake
 # at `dev` -- that would be unreleased code under a release's name.
+#
+# Until 2026-10-02 the branches carried the bare channel names
+# (nixos-26.05). The fork publishes those too until 2026-10-17 and then
+# freezes them, so `--method nix` moves a profile entry that follows a
+# bare name onto its -metacraft branch.
 # ---------------------------------------------------------------------
 NIX_FORK="${REPRO_NIX_FORK:-metacraft-labs/nixpkgs}"
+NIX_BRANCH_SUFFIX='-metacraft'
 NIX_ATTR="${REPRO_NIX_ATTR:-reprobuild}"
 OS_RELEASE="${REPRO_OS_RELEASE:-/etc/os-release}"
 NIXOS_MARKER="${REPRO_NIXOS_MARKER:-/etc/NIXOS}"
@@ -240,8 +247,9 @@ Environment (see the comment block at the top of this file):
   REPRO_VERIFY_SCRIPT   Path to repro-verify-release.sh (tarball method).
   REPRO_ALLOW_TEST_KEY=1
                         Pass --allow-test-key to the verifier.
-  REPRO_NIX_BRANCH      Branch of the nixpkgs fork to use (nix, nixos);
-                        default: the one matching this system's channel.
+  REPRO_NIX_BRANCH      Branch of the nixpkgs fork to use (nix, nixos), by
+                        its full name (nixos-26.05-metacraft); default:
+                        the one matching this system's channel.
 USAGE
 }
 
@@ -848,7 +856,8 @@ nixos_flake_channel() {
 # Pick the fork branch for this system, in order: an explicit
 # REPRO_NIX_BRANCH; the channel the flake configuration follows; the
 # NixOS release (os-release VERSION_ID, i.e. what nixos-version reports);
-# nixos-unstable. A candidate the fork has no branch for (a release
+# nixos-unstable. Each candidate channel names the branch
+# <channel>-metacraft. A candidate the fork has no branch for (a release
 # upstream no longer supports, or the unstable version number) falls
 # through, and the fallback is said out loud.
 nixos_fork_branch() {
@@ -858,10 +867,10 @@ nixos_fork_branch() {
     [ -n "$_c" ] || continue
     case "$_tried" in *" $_c "*) continue ;; esac
     _tried="$_tried$_c "
-    if fork_has_branch "$_c"; then echo "$_c"; return 0; fi
-    log "$NIX_FORK has no branch $_c (unstable, or no longer supported upstream)"
+    if fork_has_branch "$_c$NIX_BRANCH_SUFFIX"; then echo "$_c$NIX_BRANCH_SUFFIX"; return 0; fi
+    log "$NIX_FORK has no branch $_c$NIX_BRANCH_SUFFIX (unstable, or no longer supported upstream)"
   done
-  echo 'nixos-unstable'
+  echo "nixos-unstable$NIX_BRANCH_SUFFIX"
 }
 
 print_nixos_instructions() {
@@ -910,20 +919,40 @@ EOT
 
 nix_cmd() { nix --extra-experimental-features 'nix-command flakes' "$@"; }
 
-# Nix outside NixOS: the fork's nixpkgs-unstable branch (nixpkgs-unstable
-# is the channel for Nix on other Linux distributions and on macOS). The
-# profile then updates with `nix profile upgrade`, never with this script.
+# The fork branch an existing profile entry follows: the first
+# github:<fork>/<branch> in `nix profile list`, which is the original
+# (unlocked) URL in every output format nix has used. Empty if none.
+nix_profile_fork_branch() {
+  nix_cmd profile list 2>/dev/null | tr -s '[:blank:]' '\n' |
+    sed -n "s|^github:$NIX_FORK/\([^#]*\).*|\1|p" | head -n 1
+}
+
+# Nix outside NixOS: the fork's nixpkgs-unstable-metacraft branch
+# (nixpkgs-unstable is the channel for Nix on other Linux distributions
+# and on macOS). The profile then updates with `nix profile upgrade`,
+# never with this script.
 install_nix() {
   command -v nix >/dev/null 2>&1 || die 'method=nix needs the nix command on PATH (https://nixos.org/download)'
   [ -z "$want_version" ] || warn "--version is ignored for method=nix: $NIX_FORK carries the current release"
-  _branch="${REPRO_NIX_BRANCH:-nixpkgs-unstable}"
-  _ref="github:$NIX_FORK/$_branch#$NIX_ATTR"
-  if nix_cmd profile list 2>/dev/null | grep -q "github:$NIX_FORK/"; then
-    log "$PRODUCT is already in your Nix profile from $NIX_FORK; upgrading it"
+  _branch="${REPRO_NIX_BRANCH:-nixpkgs-unstable$NIX_BRANCH_SUFFIX}"
+  _installed="$(nix_profile_fork_branch)"
+  case "$_installed" in
+    *"$NIX_BRANCH_SUFFIX") ;;
+    nixos-*|nixpkgs-*)
+      # A bare channel name: frozen after 2026-10-17, so `profile upgrade`
+      # would stop finding new releases. Reinstall from its -metacraft twin.
+      _branch="${REPRO_NIX_BRANCH:-$_installed$NIX_BRANCH_SUFFIX}"
+      log "$PRODUCT is in your Nix profile from $NIX_FORK/$_installed, a branch name that stops receiving updates; moving it to $_branch"
+      run nix_cmd profile remove "$NIX_ATTR"
+      _installed=''
+      ;;
+  esac
+  if [ -n "$_installed" ]; then
+    log "$PRODUCT is already in your Nix profile from $NIX_FORK/$_installed; upgrading it"
     run nix_cmd profile upgrade "$NIX_ATTR"
   else
-    log "nix profile install $_ref"
-    run nix_cmd profile install "$_ref"
+    log "nix profile install github:$NIX_FORK/$_branch#$NIX_ATTR"
+    run nix_cmd profile install "github:$NIX_FORK/$_branch#$NIX_ATTR"
   fi
   log "Future upgrades: nix profile upgrade $NIX_ATTR"
 }

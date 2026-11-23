@@ -1,0 +1,8 @@
+[[package]]
+name = "nvim"
+activity = "default"
+
+[[package]]
+name = "sway"
+activity = "default"
+when = "linux and headless"

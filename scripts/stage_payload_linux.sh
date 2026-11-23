@@ -26,8 +26,8 @@
 #   scripts/stage_payload_linux.sh <nix-store-out> <reprobuild-checkout>
 #
 #     <nix-store-out>       the result of `nix build .#default`
-#     <reprobuild-checkout> the checkout whose libs/ becomes the package's
-#                           $REPROBUILD_SOURCE_ROOT tree
+#     <reprobuild-checkout> the checkout the package's $REPROBUILD_SOURCE_ROOT
+#                           tree is cut from
 #
 #   PREBUILT_DEST=<dir> overrides where the payload is written, so the script
 #   can be checked AGAINST a payload already on disk without destroying it.
@@ -79,24 +79,15 @@ cp -RL "$XXHASH_PREFIX/include/." "$INC/"
 cp -RL "$CLINGO_PREFIX/include/." "$INC/"
 chmod -R u+w "$INC"
 
-# ---- 4. tree/share/repro/source: reprobuild's own libs/ --------------
+# ---- 4. tree/share/repro/source: the $REPROBUILD_SOURCE_ROOT tree ---
 #
-# The MINIMUM `$REPROBUILD_SOURCE_ROOT` has to be, measured rather than
-# guessed: `repro_cli_support.reprobuildLibraryWorkDir` accepts a root
-# whose `libs/repro_project_dsl/src` exists, `reproLibPathFlags` puts
-# every `libs/*/src` on `--path:`, and `reproPackagePathFlags` resolves
-# each third-party package against `libs/<pkg>` candidates.  Nothing
-# outside `libs/` is consulted by either.  Each package's own `tests/`
-# is dropped: it is never on `--path:` and it is a third of the bytes.
-SOURCE="$PRE/tree/share/repro/source"
-mkdir -p "$SOURCE/libs"
-(cd "$SRCROOT/libs" && find . -type f \
-   -not -path './*/tests/*' -not -path './*/*/tests/*' \
-   -print) | while IFS= read -r f; do
-  mkdir -p "$SOURCE/libs/$(dirname "$f")"
-  cp -L "$SRCROOT/libs/$f" "$SOURCE/libs/$f"
-done
-chmod -R u+w "$SOURCE"
+# What a source root carries -- `libs/`, `lints/` and `config.nims`, tests
+# excluded -- is one list, shared with the release archives' stager, in
+# scripts/lib/stage_source_root.sh. The profile compile refuses a source
+# root without `config.nims`.
+# shellcheck source=scripts/lib/stage_source_root.sh
+. "$(dirname "$0")/lib/stage_source_root.sh"
+stage_source_root "$SRCROOT" "$PRE/tree/share/repro/source"
 
 # ---- 5. tree/share/repro/src/<input>: the twelve sibling trees -------
 #
@@ -106,6 +97,8 @@ chmod -R u+w "$SOURCE"
 # consume, because that is the only thing a `--path:` entry is for: the
 # unfiltered trees are 113 MB of which 56 MB is web assets, test
 # fixtures and vendored binaries no compile can open.
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "$0")/lib/stage_package_nimble.sh"
 stage_src() {
   var="$1"; dest="$2"
   from=$(wrapper_value "$var")
@@ -120,6 +113,10 @@ stage_src() {
     mkdir -p "$PRE/tree/share/repro/src/$dest/$(dirname "$f")"
     cp -L "$from/$f" "$PRE/tree/share/repro/src/$dest/$f"
   done
+  # A `<package>/src` tree also gets the package's nimble file beside it,
+  # from beside the store path's `src`: a module may read it at compile time
+  # (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$from" "$PRE/tree/share/repro/src/$dest"
 }
 stage_src NIMCRYPTO_SRC                  nimcrypto
 stage_src BEARSSL_SRC                    bearssl
@@ -131,6 +128,7 @@ stage_src SHM_QUEUE_SRC                  nim-shm-queue/src
 stage_src CODETRACER_PINNED_SRC          codetracer/src
 stage_src REPRO_CT_TEST_RUNNER_SRC       reprobuild-ct-test-runner
 stage_src REPRO_TEST_ADAPTERS_SRC        reprobuild-test-adapters/src
+stage_src TEST_CERTIFICATES_TOOLS_SRC    test-certificates-tools/src
 # CT_INTERPOSE_SRC IS GONE, and this line is where the scratch copy of
 # this script would still abort: M1's N16/N19 removed the variable from
 # `ReprobuildWrapperVariables`, from the flake and from the forwarding

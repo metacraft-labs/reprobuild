@@ -106,12 +106,11 @@ proc buildProviderLibrary(tempRoot: string): string =
   writeFile(modulePath, providerBody)
   let soPath = tempRoot / ("libm4b_own_provider." & soExt())
   let repoRoot = getCurrentDir()
-  var cmd = providerCompileCommand(modulePath, soPath, repoRoot,
-    scratchDir = tempRoot)
-  # The module path is the LAST argument; insert the library + allocator
-  # toggles just before it.
-  cmd.insert("--app:lib", cmd.len - 1)
-  cmd.insert("--define:useMalloc", cmd.len - 1)
+  # The library + allocator toggles go through `extraFlags` (placed before
+  # the module argument, and keyed into the nimcache with the rest of the
+  # configuration).
+  let cmd = providerCompileCommand(modulePath, soPath, repoRoot,
+    scratchDir = tempRoot, extraFlags = @["--app:lib", "--define:useMalloc"])
   let (output, code) = execCmdEx(quoteShellCommand(cmd), workingDir = repoRoot)
   if code != 0 or not fileExists(soPath):
     raise newException(IOError,

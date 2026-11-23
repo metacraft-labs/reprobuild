@@ -13,7 +13,7 @@
 ## ``t_sc_producer_exports_typed_cli_contract_across_workspace``. It proves:
 ##
 ##   1. **export-by-default resource contract.** A sibling producer declaring a
-##      ``resourceType "vm_harness.container"`` block (attrs ``image``/``cpus``,
+##      ``resourceType "gosti.container"`` block (attrs ``image``/``cpus``,
 ##      wrapper ``container``, determinism ``rdVolatile``) is discoverable BY THE
 ##      WORKSPACE PROJECT NAME, and its exported resource schema is exactly the
 ##      RP4 ``InterfaceResource`` projected off the shipped
@@ -83,7 +83,7 @@ let containerDriver = ResourceProviderDriver(
 # (1) A resource-exporting producer. The ``resourceType`` block declares the
 #     typed contract a consumer binds.
 const producerResourceRepro = resourceProducerHeader & """
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -127,7 +127,7 @@ proc cApply(inst: ResourceInstance; action: ResourceActionKind;
 let containerDriver = ResourceProviderDriver(
   identity: cIdentity, digest: cDigest, observe: cObserve, apply: cApply)
 
-resourceType "vm_harness.container":
+resourceType "gosti.container":
   attrs: ContainerAttrs
   wrapper: container
   determinism: rdVolatile
@@ -188,12 +188,12 @@ suite "RP5a: producer exports resource contract across workspace":
     check hasResourceContract(resContract)
     # The exported resource contract carries the declared ``typeId``.
     check resContract.publicResources.len == 1
-    check typedContractResourceTypeIds(resContract) == @["vm_harness.container"]
+    check typedContractResourceTypeIds(resContract) == @["gosti.container"]
     let res = resContract.publicResources[0]
-    check res.typeId == "vm_harness.container"
+    check res.typeId == "gosti.container"
     check res.determinism == irdVolatile
     # The typed ``attr`` schema — the wrapper formals a consumer binds.
-    check typedContractResourceAttrs(resContract, "vm_harness.container") ==
+    check typedContractResourceAttrs(resContract, "gosti.container") ==
       @["image", "cpus"]
     check res.attributes[0].name == "image"
     check res.attributes[0].nimType == "string"
@@ -202,9 +202,9 @@ suite "RP5a: producer exports resource contract across workspace":
     # (3) The producer's DRIVER is absent: what crossed is protocol entry-point
     #     descriptors (ids), not a driver value. Only schema crossed the
     #     boundary (the interface artifact has no driver field at all).
-    check res.entrypoints.observe == "vm_harness.container.observe"
-    check res.entrypoints.plan == "vm_harness.container.plan"
-    check res.entrypoints.apply == "vm_harness.container.apply"
+    check res.entrypoints.observe == "gosti.container.observe"
+    check res.entrypoints.plan == "gosti.container.plan"
+    check res.entrypoints.apply == "gosti.container.apply"
 
     # ---- (1b) discovery via a DEVELOP OVERRIDE (the other arm). ----
     createDir(workspace / ".repro")
@@ -221,8 +221,8 @@ created_at = "2026-07-02T00:00:00Z"
     check resViaOverride.kind == ptckContract
     check hasResourceContract(resViaOverride)
     check typedContractResourceTypeIds(resViaOverride) ==
-      @["vm_harness.container"]
-    check typedContractResourceAttrs(resViaOverride, "vm_harness.container") ==
+      @["gosti.container"]
+    check typedContractResourceAttrs(resViaOverride, "gosti.container") ==
       @["image", "cpus"]
     removeFile(workspace / ".repro" / "develop-overrides.toml")
 
@@ -240,7 +240,7 @@ created_at = "2026-07-02T00:00:00Z"
     check renamed.kind == ptckContract
     check hasResourceContract(renamed)
     let renamedAttrs =
-      typedContractResourceAttrs(renamed, "vm_harness.container")
+      typedContractResourceAttrs(renamed, "gosti.container")
     check "vcpus" in renamedAttrs        # the NEW attr appears
     check "cpus" notin renamedAttrs      # the OLD attr is gone
     check "image" in renamedAttrs        # the untouched attr stays

@@ -15,10 +15,10 @@
 ## engine, and it asserts on both halves of the switch:
 ##
 ##   * WITH ``--restore-cached-outputs``: the CAS under the run's own
-##     ``--action-cache-root`` gains a blob, and after the materialized
+##     ``--action-cache-root`` gains the edge's output bytes, and after the materialized
 ##     output is deleted the next build reports ``asCacheHit`` / ``cdHit``
 ##     / ``reason=restored`` with the bytes back on disk.
-##   * WITHOUT it: the CAS stays empty (metadata-only records), and the
+##   * WITHOUT it: the CAS does not hold them (metadata-only records), and the
 ##     next build after the same deletion RE-RUNS the action.
 ##
 ## The negative half is not decoration. A test that only asserted the
@@ -55,16 +55,31 @@ proc findRepoRoot(): string =
 
 proc q(value: string): string = quoteShell(value)
 
-proc casBlobCount(actionCacheRoot: string): int =
+const PayloadBytes = "payload-bytes\n"
+
+proc casHoldsPayload(actionCacheRoot: string): bool =
+  ## Whether the run's CAS holds the fixture edge's OWN output bytes.
+  ##
+  ## Not "whether the CAS holds any blob": the recipe-relative interface
+  ## extraction the CLI runs for every recipe stores its outputs' payloads in
+  ## the same CAS whatever this flag says (its output directory is shared by
+  ## records of different observed environments, so a record has to be able
+  ## to restore its own bytes there — reprobuild-specs issues/2026-10-12-
+  ## interface-extraction-variants-of-one-recipe-overwrite-each-others-
+  ## outputs.md). A blob count then reads > 0 in both halves, which made the
+  ## positive half vacuous and the negative half wrong. What this test is
+  ## about is the BUILD edge's payload, and the CAS stores blobs raw, so look
+  ## for its bytes.
   let blobs = actionCacheRoot / "cas" / "blake3"
   if not dirExists(blobs):
-    return 0
-  for _ in walkDirRec(blobs, yieldFilter = {pcFile}):
-    inc result
+    return false
+  for path in walkDirRec(blobs, yieldFilter = {pcFile}):
+    if getFileSize(path) == PayloadBytes.len and readFile(path) == PayloadBytes:
+      return true
 
 proc writeFixture(projRoot: string) =
   createDir(projRoot / "src")
-  writeFile(projRoot / "src" / "payload.txt", "payload-bytes\n")
+  writeFile(projRoot / "src" / "payload.txt", PayloadBytes)
   writeFile(projRoot / "repro.nim", """
 import repro_dsl_stdlib
 
@@ -142,7 +157,7 @@ suite "S7 repro build reaches the CAS-restore configuration":
       check fileExists(outputPath)
       # Nothing to restore FROM unless the payload is in the CAS. This is
       # the assertion that failed for all 181 records before S7.
-      check casBlobCount(onCache) > 0
+      check casHoldsPayload(onCache)
 
       removeFile(outputPath)
       check not fileExists(outputPath)
@@ -174,7 +189,7 @@ suite "S7 repro build reaches the CAS-restore configuration":
       checkpoint(out3)
       check code3 == 0
       check fileExists(offOutput)
-      check casBlobCount(offCache) == 0
+      check not casHoldsPayload(offCache)
 
       removeFile(offOutput)
       let (code4, out4) = buildOnce(offProj, offCache, scratch / "off2.json",

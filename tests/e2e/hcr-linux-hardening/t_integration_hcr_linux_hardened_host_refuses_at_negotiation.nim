@@ -65,6 +65,13 @@
 ## sentence and only the policy-naming assertions go red.
 
 import std/[json, os, osproc, streams, strtabs, strutils, unittest]
+# Agent sockets go in a short directory under /tmp, not under the scratch
+# tree: on a runner whose work directory is long (the persistent benchmark
+# runner's `/var/lib/github-runner-work/mcl-bench-001/...`) a socket under
+# `build/` exceeds the 107-byte sun_path limit and the gate fails before it
+# asserts anything (process_fixtures.shortSocketDirAtProcessExit says why).
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 when defined(linux) and defined(amd64):
   import repro_hcr_agent
@@ -172,7 +179,7 @@ when defined(linux) and defined(amd64):
       # THE CONTROL. Without the kernel policy this host patches normally, so
       # the refusal below is attributable to the policy and not to the fixture.
       # ==================================================================
-      let healthy = runArm(repoRoot, target, workDir / "healthy.sock",
+      let healthy = runArm(repoRoot, target, shortSocketDirAtProcessExit("hcr-") / "healthy.sock",
         mdwe = false, patchBytes = patchBytes)
       check healthy.negotiationError.len == 0
       check healthy.patchSent
@@ -185,7 +192,7 @@ when defined(linux) and defined(amd64):
       # ==================================================================
       # THE HARDENED ARM. Same binary, `--mdwe`.
       # ==================================================================
-      let hardened = runArm(repoRoot, target, workDir / "hardened.sock",
+      let hardened = runArm(repoRoot, target, shortSocketDirAtProcessExit("hcr-") / "hardened.sock",
         mdwe = true, patchBytes = patchBytes)
       check hardened.node["mdwe"].getBool()
 

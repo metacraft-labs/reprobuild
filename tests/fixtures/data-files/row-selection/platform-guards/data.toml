@@ -1,0 +1,29 @@
+[[package]]
+name = "iterm2"
+activity = "default"
+when = "macos"
+
+[[package]]
+name = "valgrind"
+activity = "default"
+when = "linux"
+
+[[package]]
+name = "windows-terminal"
+activity = "default"
+when = "windows"
+
+[[package]]
+name = "rosetta-tools"
+activity = "default"
+when = "arm64"
+
+[[package]]
+name = "cpuid"
+activity = "default"
+when = "x86_64"
+
+[[package]]
+name = "wsl-utils"
+activity = "default"
+when = "wsl"

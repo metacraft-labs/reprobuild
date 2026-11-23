@@ -15,6 +15,7 @@
 ## meaningful only when both have been built.
 
 import std/[json, os, osproc, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 from repro_test_support import ctShimFixturePath, requireBinary
 
 proc repoRoot(): string =

@@ -1,5 +1,5 @@
 ## Workspace-Manifest-Optional MO-8 — the committed lock is SELF-DESCRIBING:
-## ``repro lock refresh`` writes a ``reprobuild.solved-graph-lock.v2`` lock in
+## ``repro lock refresh`` writes a ``reprobuild.solved-graph-lock.v3`` lock in
 ## which every locked dependency carries checkout COORDINATES (url / ref /
 ## revision) AND a self-describing INTEGRITY multihash (``<alg>:<digest>``).
 ##
@@ -102,7 +102,7 @@ suite "MO-8: committed lock carries coordinates + self-describing integrity":
       let refresh = run(reproBinary & " lock refresh " & q(repo))
       check refresh.code == 0
       let lockBody = readFile(repo / "repro.lock")
-      check "reprobuild.solved-graph-lock.v2" in lockBody
+      check "reprobuild.solved-graph-lock.v3" in lockBody
 
       # ---- (2) the dep carries coordinates. ----
       check "deps = [" in lockBody
@@ -114,8 +114,13 @@ suite "MO-8: committed lock carries coordinates + self-describing integrity":
       # is why it went unseen. Escaping here rather than weakening the check
       # keeps it exact: a lock recording the wrong URL, or ``""``, still fails.
       check ("url = \"" & tomlBasicString(originUrl) & "\"") in lockBody
-      check "ref = \"main\"" in lockBody
-      check "path = \".\"" in lockBody
+      # A pin records the commit, never the branch a remote publishes it on
+      # (Unified-Locking-And-Hooks.md §14.2).
+      check "ref = " notin lockBody
+      # The repo's own entry is MARKED, not located: a lock records identity
+      # and never a checkout path (schema v3).
+      check "self = \"true\"" in lockBody
+      check "path =" notin lockBody
 
       # ---- (3) the dep carries a well-formed self-describing integrity, and
       # for this content-addressed VCS it is the commit object id (git-sha1).

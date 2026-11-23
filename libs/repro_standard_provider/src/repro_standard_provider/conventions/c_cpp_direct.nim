@@ -87,10 +87,9 @@ import repro_standard_provider/convention
 const
   ScratchDirName* = ".repro/build"
     ## Identical to the C/C++ Make convention's scratch dir so the two
-    ## conventions produce co-located outputs and ``repro clean`` finds
-    ## both. The Mode 3 convention is registered AFTER c_cpp_make, so
-    ## the scratch path stays stable when a project flips between Make
-    ## and Mode 3.
+    ## conventions produce co-located outputs. The Mode 3 convention is
+    ## registered AFTER c_cpp_make, so the scratch path stays stable when a
+    ## project flips between Make and Mode 3.
 
 type
   CCppMemberKind = enum

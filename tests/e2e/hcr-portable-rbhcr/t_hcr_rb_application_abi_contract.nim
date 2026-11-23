@@ -124,6 +124,7 @@ when ReproHcrApplicationAbiAvailable:
   # `#include`s that same file, so importing both puts every dispatch-table
   # symbol in the link twice.
   import repro_hcr_agent/[coordinator, ipc, protocol, session]
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
   const
     TargetFlag = "--rb-abi-target"
@@ -366,6 +367,19 @@ when ReproHcrApplicationAbiAvailable:
     result = getCurrentDir() / "build" / "hcr-portable-rbhcr"
     createDir(result)
 
+  var agentSocketRoot = ""
+
+  proc agentSocketDir(): string =
+    ## Where the agent socket goes, which is NOT under ``workDir``: the
+    ## checkout prefix plus ``build/hcr-portable-rbhcr/`` plus the socket
+    ## name ran to 112-121 bytes in a workspace checkout, past ``sun_path``
+    ## (108 Linux, 104 macOS, 92 through Nim's ``std/net`` on macOS), so
+    ## ``listenHcrAgentUnixSocket`` failed before the case asserted anything.
+    ## One directory per process; it is removed when the process exits.
+    if agentSocketRoot.len == 0:
+      agentSocketRoot = shortSocketDirAtProcessExit("hcrabi-")
+    agentSocketRoot
+
   proc portableRequest(patchId: string; body: openArray[byte];
                        targetSymbol = VictimSymbol;
                        changedFiles: openArray[string] = [ProbeChangedFile];
@@ -396,7 +410,7 @@ when ReproHcrApplicationAbiAvailable:
     ##
     ## A non-zero exit is raised rather than returned, so no caller can read
     ## "the target refused to run" as "the target ran and observed nothing".
-    let socketPath = workDir() / socketName
+    let socketPath = agentSocketDir() / socketName
     removeFile(socketPath)
     var listener = listenHcrAgentUnixSocket(socketPath)
     defer: listener.close()

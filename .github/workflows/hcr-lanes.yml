@@ -86,8 +86,42 @@ permissions:
 jobs:
   hcr-lane-linux:
     name: HCR lane (linux-x86_64)
-    runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) -> eph-linux-x64
-    timeout-minutes: 60
+    # The dedicated benchmark runner, not the shared ephemeral pool. One gate
+    # here, e2e_hcr_linux_concurrent_patch_no_torn_instruction, measures a
+    # race and counts only runs started inside a calibrated envelope (HLX-M4);
+    # outside it it reports CONDITIONS NOT MET and the lane ends INCONCLUSIVE.
+    # Since 2026-11-23 the condition is contention on this job's own CPU set
+    # (tests/e2e/hcr-linux-threads/m4_conditions.nim), and its bound comes
+    # from hlx_m4_calibration.json, measured on THIS runner by
+    # hcr-m4-calibration.yml; until that record is approved the gate withholds
+    # its verdict ("condition not yet calibrated on a dedicated host"). The
+    # history below is of the retired host load/CPU <= 2.0 condition. The
+    # ephemeral pool's guests sit on hosts far above that: measured
+    # 2026-11-06 04:12Z, node_load5 per CPU was 7.0 on high-mem-server and
+    # 4.0 on gpu-server-002, and two consecutive lanes at eb13e243 ended
+    # INCONCLUSIVE on it. `benchmark` is the fleet's one capability label for
+    # a single-slot runner with no co-tenant job (ci-workflow-standards.md,
+    # "Capability-label taxonomy"), which is the condition a calibrated
+    # measurement needs; its host measured 1.05 at the same time. The labels
+    # match benchmark.yml's Linux leg, which omits `self-hosted` on purpose.
+    # The cost is queueing behind the benchmark jobs on that slot.
+    runs-on: [linux, x64, benchmark]
+    # 150 was set on measurement while the lane also built the `ct-mcr`
+    # recorder bundle for the replay gate. On ephemeral runners, with a cold
+    # store, the steps before the lane took 33-44 min: dev-shell realisation
+    # in the first `dev-exec` (manifest check, 4-14 min) plus `Build repro`
+    # (23-29 min); jobs 125018472940, 127073386863 and 127107318850. The lane
+    # itself ran 31 min across every gate but the replay gate (job
+    # 125018472940), and building the bundle measured 17.5 min on a warm
+    # workstation. The fix for the setup time is a warm store on this runner
+    # class, which is a fleet change, not a workflow edit.
+    #
+    # The replay gate and the bundle left this lane on 2026-11-07 (they run
+    # from codetracer-native-recorder now; downstream-tests.yml), so the sum
+    # above is roughly 64-75 min. The limit stays at 150 until a run of the
+    # lane without the bundle has been measured: lowering it on arithmetic
+    # alone is how a lane ends up cancelled while still running.
+    timeout-minutes: 150
     steps:
       - uses: actions/checkout@v4
       - name: Mint installation token for cross-repo sibling access
@@ -107,6 +141,13 @@ jobs:
           attic-token: ${{ secrets.ATTIC_TOKEN }}
           attic-cache: ${{ vars.ATTIC_CACHE }}
           attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          # App credentials start setup-dev-env's job credential broker, which
+          # re-mints the Nix GitHub token before the hour an installation
+          # token lives. This job runs past that hour: without the broker,
+          # every gate that fetched through Nix after minute ~60 failed with
+          # `401 Bad credentials` (run 44372733079, five gates refused).
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
       # The manifest-vs-tree check first: it is a source scan that answers in
       # seconds, and if the work list disagrees with the tree there is no point
       # compiling 46 gate binaries to find out.

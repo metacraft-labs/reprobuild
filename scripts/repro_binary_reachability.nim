@@ -49,6 +49,14 @@
 ##      symbol that is VISIBLE to it — its own module's symbols, plus the
 ##      exported symbols of its transitive import closure. Iterate to a
 ##      fixed point.
+##
+##      ``include`` is not ``import``: it pastes the file into the
+##      including module, so every symbol of an included file — exported
+##      or not — is one of the includer's own symbols. Each module's
+##      symbol list is therefore extended with a copy of the symbols (and
+##      module-initialisation code) of its transitive ``include`` closure
+##      before propagation, and taint flows between them in both
+##      directions exactly as it does between a module's own symbols.
 ##   4. CLASSIFY: a test needs the repro binary when its own body spells
 ##      a literal, or when it mentions a tainted symbol visible to it.
 ##
@@ -80,7 +88,7 @@
 ##   larger action-cache key on that edge; the cost of the other error is
 ##   a green test that never ran.
 
-import std/[os, sets, strutils, tables]
+import std/[os, sequtils, sets, strutils, tables]
 
 const
   ReproBinaryLiterals* = ["build/bin/repro", "build\\bin\\repro"]
@@ -98,10 +106,17 @@ type
   ModuleInfo = object
     rel: string             ## repo-relative, forward slashes
     stripped: string        ## comments blanked, string literals kept
-    imports: seq[string]    ## resolved repo-relative module paths
-    symbols: seq[Symbol]
+    imports: seq[string]    ## resolved repo-relative module paths,
+                            ## ``include``d files among them
+    includes: seq[string]   ## the subset of ``imports`` that is ``include``d
+    symbols: seq[Symbol]    ## own definitions, then (after
+                            ## ``expandIncludes``) those pasted in by
+                            ## ``include``
+    includedNames: HashSet[string]
+      ## names of the symbols pasted in by the transitive include closure
     leftover: string        ## top-level code not inside any named symbol
-    tokens: HashSet[string] ## identifiers appearing anywhere in the module
+    tokens: HashSet[string] ## identifiers appearing anywhere in the
+                            ## module's OWN text (not its included files)
 
   Reachability* = object
     ## Result of one whole-repo analysis pass. Query it with
@@ -343,11 +358,13 @@ proc splitSymbols(stripped: string): tuple[symbols: seq[Symbol];
       leftover.add(line & "\n")
   (symbols, leftover)
 
-proc parseImportSpecs(stripped: string): seq[string] =
+type ImportSpec = tuple[spec: string; isInclude: bool]
+
+proc parseImportSpecs(stripped: string): seq[ImportSpec] =
   ## Every module path named by an ``import`` / ``from`` / ``include``
   ## statement, in the source's own spelling (dotted, slashed, or
-  ## quoted). ``std/`` and ``pkg/`` prefixes are dropped: nothing outside
-  ## this repository is scanned.
+  ## quoted), and whether it was ``include``d. ``std/`` and ``pkg/``
+  ## prefixes are dropped: nothing outside this repository is scanned.
   result = @[]
   var pending = ""
   for rawLine in stripped.splitLines():
@@ -363,7 +380,8 @@ proc parseImportSpecs(stripped: string): seq[string] =
       pending = ""
     else:
       var head = ""
-      for kw in ["import ", "from ", "include ", "import\t", "from\t"]:
+      for kw in ["import ", "from ", "include ", "import\t", "from\t",
+                 "include\t"]:
         if line.startsWith(kw):
           head = kw
           break
@@ -375,7 +393,8 @@ proc parseImportSpecs(stripped: string): seq[string] =
 
     # Normalise: strip the leading keyword and, for ``from X import Y``,
     # everything from `` import `` onwards.
-    var body = line
+    var body = line.replace('\t', ' ')
+    let isInclude = body.startsWith("include ")
     for kw in ["import ", "from ", "include "]:
       if body.startsWith(kw):
         body = body[kw.len .. ^1]
@@ -394,7 +413,7 @@ proc parseImportSpecs(stripped: string): seq[string] =
         for part in inner.split(','):
           let leaf = part.strip()
           if leaf.len > 0:
-            result.add(prefix & leaf)
+            result.add((prefix & leaf, isInclude))
         continue
 
     for part in body.split(','):
@@ -405,7 +424,7 @@ proc parseImportSpecs(stripped: string): seq[string] =
         spec = spec[0 ..< asCut].strip()
       spec = spec.strip(chars = {'"', ' '})
       if spec.len > 0:
-        result.add(spec)
+        result.add((spec, isInclude))
 
 proc resolveImport(repoRoot, fromRel, spec: string;
                    searchRoots: seq[string]): string =
@@ -502,14 +521,43 @@ proc collectModules(repoRoot: string; seeds: openArray[string]):
     var info = ModuleInfo(rel: rel, stripped: stripped, symbols: symbols,
                           leftover: leftover, tokens: identifiers(stripped))
     var seen = initHashSet[string]()
-    for spec in parseImportSpecs(stripped):
+    for (spec, isInclude) in parseImportSpecs(stripped):
       let resolved = resolveImport(repoRoot, rel, spec, roots)
-      if resolved.len > 0 and resolved != rel and resolved notin seen:
+      if resolved.len == 0 or resolved == rel: continue
+      if isInclude and resolved notin info.includes:
+        info.includes.add(resolved)
+      if resolved notin seen:
         seen.incl(resolved)
         info.imports.add(resolved)
         if resolved notin result:
           pending.add(resolved)
     result[rel] = info
+
+proc expandIncludes(modules: var Table[string, ModuleInfo]) =
+  ## Paste every transitively ``include``d file's symbols and
+  ## module-initialisation code into its includer, as Nim does. Copies are
+  ## taken from each file's OWN symbols, so a file reached through two
+  ## include paths, or an include cycle, contributes once.
+  var own = initTable[string, tuple[symbols: seq[Symbol]; leftover: string]]()
+  for rel, info in modules:
+    own[rel] = (info.symbols, info.leftover)
+  for rel in toSeq(modules.keys):
+    if modules[rel].includes.len == 0: continue
+    var seen = toHashSet([rel])
+    var stack = modules[rel].includes
+    var info = modules[rel]
+    info.includedNames = initHashSet[string]()
+    while stack.len > 0:
+      let included = stack.pop()
+      if included in seen or included notin modules: continue
+      seen.incl(included)
+      for sym in own[included].symbols:
+        info.symbols.add(sym)
+        info.includedNames.incl(sym.name)
+      info.leftover.add(own[included].leftover)
+      for nested in modules[included].includes:
+        stack.add(nested)
+    modules[rel] = info
 
 proc importClosure(modules: Table[string, ModuleInfo]; start: string):
     seq[string] =
@@ -562,6 +610,7 @@ proc analyze*(repoRoot: string; seeds: openArray[string] = []): Reachability =
   ## transitive in-repo import closure. An empty ``seeds`` scans every Nim
   ## file under the repository's source roots.
   result.modules = collectModules(repoRoot, seeds)
+  expandIncludes(result.modules)
   result.closure = initTable[string, seq[string]]()
   result.tainted = initTable[string, HashSet[string]]()
   for rel in result.modules.keys:
@@ -628,6 +677,12 @@ proc reachedThrough(r: Reachability; rel: string): seq[string] =
   result = @[]
   if rel notin r.modules: return
   let info = r.modules[rel]
+  # Symbols pasted in by ``include`` are the file's own: private ones
+  # count, and a mention in the file's own text is a use.
+  for sym in info.symbols:
+    if sym.name in info.includedNames and sym.name in r.tainted[rel] and
+        sym.name in info.tokens and sym.name notin result:
+      result.add(sym.name)
   for dep in r.closure[rel]:
     if dep notin r.modules: continue
     let depTainted = r.tainted[dep]

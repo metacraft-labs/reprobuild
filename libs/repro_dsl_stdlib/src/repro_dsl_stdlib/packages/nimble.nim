@@ -14,12 +14,15 @@ package nimble:
       requiresExecutionProfileChecksum = false)
     # Direct-download: same nim-X.Y.Z_x64.zip as `nim.nim` since the
     # archive ships both binaries; executablePath selects which one is
-    # exposed to the typed-tool wrapper.
+    # exposed to the typed-tool wrapper. ``version`` is nimble's, not Nim's:
+    # every archive below carries ``dist/nimble/nimble.nimble`` at 0.22.2,
+    # and the Windows ``bin/nimble.exe --version`` reports the same.
     tarball url = "https://nim-lang.org/download/nim-2.2.10_x64.zip",
       sha256 = "fe0686a9b298e5b13d0a983df37e002a8c6320f8b16cc45a51d15cf4046a109f",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "bin/nimble.exe",
+      version = "0.22.2",
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "windows",
@@ -31,6 +34,7 @@ package nimble:
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/nimble",
+      version = "0.22.2",
       packageId = "nim@2.2.10",
       cpu = "x86_64",
       os = "linux",
@@ -44,6 +48,7 @@ package nimble:
       archiveType = "tar.xz",
       stripComponents = 1,
       executablePath = "bin/nimble",
+      version = "0.22.2",
       packageId = "nim@2.2.10",
       cpu = "aarch64",
       os = "macos",

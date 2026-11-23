@@ -7,8 +7,11 @@
 ##      verb that performs that operation), ``repro branch`` reports ``<name>``
 ##      in both its text line and its report document, with an EMPTY per-repo
 ##      array — it is a query, not a plan.
-##   2. On a freshly initialised workspace with no branch recorded, it falls
-##      back to the manifest trunk rather than inventing one.
+##   2. On a freshly initialised workspace it reports the branch ``workspace
+##      init`` recorded: the workspace ROOT repository's declared mainline,
+##      read from ``repro-workspace.toml`` ``[workspace] mainline`` (the
+##      project-level ``trunk`` key that used to supply it is retired). It
+##      never invents one from live HEADs.
 ##
 ## The former third case here — ``repro branch <name>`` creating a branch
 ## WITHOUT switching onto it — tested a retired verb and is gone. A
@@ -86,9 +89,7 @@ proc projectTomlWithRemotes(libAUrl, libBUrl: string): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
-    "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "name = \"myproject\"\n\n" &
     "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
     "[[remote]]\nname = \"lib-b-origin\"\nfetch = \"" & libBUrl & "\"\n\n" &
     "includes = [\n" &
@@ -97,23 +98,30 @@ proc projectTomlWithRemotes(libAUrl, libBUrl: string): string =
     "]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 const libBFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
 remote = "lib-b-origin"
-revision = "main"
+mainline = "main"
+"""
+
+const settingsToml = """
+schema = "reprobuild.workspace.settings.v1"
+
+[workspace]
+mainline = "main"
 """
 
 # ---- fixture builder ------------------------------------------------------
@@ -150,6 +158,11 @@ proc setupFixture(gitBin, slug: string): M14MetaFixture =
       fileUrl(libBOrigin)))
   writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
   writeFile(manifestsRoot / "repos" / "lib-b.toml", libBFragmentToml)
+  # The workspace root's own mainline — the project's default workspace
+  # branch, which ``workspace init`` records. ``main`` deliberately matches
+  # the repos' mainline so the recorded branch is one every repo has.
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    settingsToml)
   result.workspaceRoot = workspaceRoot
 
 proc runInit(fx: M14MetaFixture): CmdResult =
@@ -218,8 +231,9 @@ suite "M14 — repro branch records metadata round-trip":
       let fx = setupFixture(gitBin, "show-after-init")
       defer: removeDirEventually(fx.scratch)
 
-      # ``workspace init`` records the resolver's ``trunk`` (``main``
-      # in this fixture) as the active branch. ``repro branch``
+      # ``workspace init`` records the workspace root's declared mainline
+      # (``[workspace] mainline = "main"`` in ``repro-workspace.toml``) as
+      # the active branch. ``repro branch``
       # without a positional must return that recorded value
       # WITHOUT ever consulting the live-HEAD heuristic.
       check runInit(fx).code == 0

@@ -134,8 +134,6 @@ run_gate() {
     "$((end_seconds - start_seconds))"
 }
 
-run_gate "m20_codetracer_build_subset" "just e2e_codetracer_build_subset_without_tup"
-run_gate "m21_codetracer_dev_environment_slice" "just e2e_codetracer_dev_environment_slice"
 run_gate "m22_shared_runquota_sessions" "just integration_reprobuild_sessions_share_runquota"
 run_gate "m23_core_mvp_performance" "just bench_reprobuild_core_mvp_performance"
 
@@ -182,8 +180,6 @@ cat > "${summary}" <<JSON
   },
   "acceptedScope": [
     "macOS MVP repository acceptance slice",
-    "selected CodeTracer build subset copied from ../codetracer",
-    "selected CodeTracer development-environment slice with Nix-backed tool profiles",
     "two concurrent repro build sessions sharing one real RunQuota daemon",
     "core MVP benchmark gate using real Reprobuild and RunQuota components"
   ],

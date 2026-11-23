@@ -61,6 +61,8 @@
 
 import std/[algorithm, net, os, strutils, unittest]
 
+import repro_test_support/process_fixtures
+
 import repro_attest
 import repro_attest_verify
 import repro_cli_support/attest
@@ -69,6 +71,12 @@ include ./attestation_verifier_harness
 include ./snp_digest_vectors
 
 let scratch = getTempDir() / "repro-cloud-dry-run-" & $getCurrentProcessId()
+# Removed when THIS process exits, whichever cases it ran — not by a final
+# "teardown" case, which under the runner's one-process-per-case model ran in
+# one process and left every other case process's scratch behind. Registering
+# a path that is never created is harmless. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(scratch)
 
 proc scratchDir(name: string): string =
   result = scratch / name
@@ -735,9 +743,3 @@ suite "the command line still cannot launch anything":
     for path in moduleClosure(libRoot, backend):
       if path.endsWith("/tsm_report.nim"): seamReached = true
     check seamReached
-
-suite "teardown":
-
-  test "the scratch directory is removed":
-    removeDir(scratch)
-    check not dirExists(scratch)

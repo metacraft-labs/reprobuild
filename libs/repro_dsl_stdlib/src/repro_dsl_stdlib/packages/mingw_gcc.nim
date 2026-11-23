@@ -14,9 +14,11 @@
 ## driver from the sysroot it resolves against. ``executablePath`` therefore
 ## reaches into the tree rather than sitting at the prefix root.
 ##
-## The version string is upstream's compound release tag — GCC version, the
+## ``MingwGccVersion`` is upstream's compound release tag — GCC version, the
 ## threading model, the mingw-w64 runtime version and a release revision —
-## not a semver. Digest is Agent Harbor's ``MINGW_GCC_SHA256_X86_64``.
+## not a semver. The record's ``version`` is GCC's, 16.1.0, as this WinLibs
+## release's ``gcc --version`` reports. Digest is Agent Harbor's
+## ``MINGW_GCC_SHA256_X86_64``.
 
 import repro_project_dsl
 
@@ -30,6 +32,7 @@ package `mingw-gcc`:
       sha256 = "78eff1e2e804b6a6320c713f084b8f820c662104a24cea6a3bfcab82032bdd60",
       archiveType = "zip",
       executablePath = "mingw64/bin/gcc.exe",
+      version = "16.1.0",
       packageId = "mingw-gcc@" & MingwGccVersion,
       cpu = "x86_64",
       os = "windows",

@@ -108,6 +108,7 @@ Reprobuild integrates all build, runtime, task, and workspace workflows into a s
 *   `repro graph` — output the build target graph (JSON format via `--json`).
 *   `repro capabilities` — query installed build-system-neutral capability configuration (JSON by default, text via `--format=text`).
 *   `repro --version` — print version and self-identification info of the `repro` binary.
+*   `repro version [--json]` — the same line as `repro --version`; `--json` prints one object with the client version and the user-daemon, store-daemon and provider protocol versions this binary speaks. Works outside any project and contacts no daemon.
 
 ### Shell Environment & Services
 *   `repro shell` — enter an interactive, activated dev-env subshell.

@@ -1,0 +1,1 @@
+{ "description": "GM9: a resource row's activity must be a name an `activity` block could declare.", "error": ["resource row 1", "`activity`", "contains '-'"] }

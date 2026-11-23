@@ -45,6 +45,7 @@ import std/[os, tables, tempfiles, unittest]
 import repro_dsl_stdlib/configurables/variants
 import repro_dsl_stdlib/configurables/api
 import repro_dsl_stdlib/configurables/types
+import repro_dsl_stdlib/toolchain_policy
 import repro_lock
 import repro_solver
 
@@ -85,6 +86,25 @@ template withScenario(body: untyped) =
       resetVariantState()
       ungovern()
       removeDir(scratch)
+
+template makeStringVariant(name, default: string): Configurable[string] =
+  let info = instantiationInfo(fullPaths = true)
+  let site = newSourceSite(info.filename, info.line, info.column, ckDefault)
+  declareVariant[string](
+    defaultValue = default,
+    scopeName = name,
+    description = "",
+    explicitId = "",
+    descriptionFile = "",
+    descriptionLine = 0,
+    descriptionColumn = 0,
+    site = site)
+
+proc registerUnsatisfiable() =
+  ## Two parents whose ranges on one dependency share no version: a
+  ## package-only registry no model satisfies.
+  registerSolverDependency("appAlpha", LibFoo, LibFoo & " >=2.0")
+  registerSolverDependency("appBeta", LibFoo, LibFoo & " <1.0")
 
 template makeBoolVariant(name: string): Configurable[bool] =
   let info = instantiationInfo(fullPaths = true)
@@ -272,3 +292,200 @@ suite "a registration made after the finalize reaches the deferred solve":
       check chosenVersion("latetool").len > 0
       # The widening does not cost the answer the eager solve did give.
       check chosenVersion(LibFoo) == FreeResolution
+
+suite "a toolchain read pays no owed solve that cannot answer it":
+  ## Reprobuild-pm issue
+  ## `2026-11-07-test-binaries-pay-minutes-of-module-init-before-any-case-runs`,
+  ## option A1. A `build:` body runs at module init in every non-provider
+  ## binary and reaches `activeSolvedVariants`. When nothing the owed solve
+  ## reads declares `targetTriple` or `compiler`, the solve cannot assign
+  ## either, so the read is skipped. Solves are COUNTED
+  ## (`unifiedSolveCount`), not timed: every case below that claims "no
+  ## solve" has a paired read in the same scenario that does solve, so a
+  ## counter that never moved would fail it.
+
+  test "nothing declares them: defaults, and the solve stays owed":
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariantsAtModuleInit()
+      let selected = activeSolvedVariants()
+      check selected.targetTriple == targetTripleFromEnv()
+      check selected.compiler == ""
+      check unifiedSolveCount() == 0
+      # The control: the debt is still owed and the counter sees it paid.
+      check chosenVersion(LibFoo) == FreeResolution
+      check unifiedSolveCount() == 1
+
+  test "the --target env still reaches the skipped read":
+    withScenario:
+      resetUnifiedSolveMemo()
+      let saved = getEnv(VariantEnvVar)
+      putEnv(VariantEnvVar, "targetTriple=aarch64-unknown-linux-gnu")
+      try:
+        registerSolverDependency("appAlpha", LibFoo,
+                                 LibFoo & " " & DeclaredRange)
+        finalizeVariantsAtModuleInit()
+        check activeSolvedVariants().targetTriple ==
+          "aarch64-unknown-linux-gnu"
+        check unifiedSolveCount() == 0
+      finally:
+        if saved.len > 0: putEnv(VariantEnvVar, saved)
+        else: delEnv(VariantEnvVar)
+
+  test "a block that declared targetTriple solved and its answer is read":
+    ## The recipe-shaped case: the root recipe's own block declares the
+    ## variant, so its finalize solves eagerly and the read is a lookup.
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      discard makeStringVariant("targetTriple", "riscv64-unknown-linux-gnu")
+      finalizeVariantsAtModuleInit()
+      check unifiedSolveCount() == 1
+      check activeSolvedVariants().targetTriple == "riscv64-unknown-linux-gnu"
+      check unifiedSolveCount() == 1
+
+  test "an open declaration of compiler makes the owed solve answer it":
+    ## The skip's other arm: a solve is owed AND the inputs it would read
+    ## declare `compiler`, so the read must pay it and return the solver's
+    ## value rather than the default.
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariantsAtModuleInit()
+      discard makeStringVariant("compiler", "clang")
+      check activeSolvedVariants().compiler == "clang"
+      check unifiedSolveCount() == 1
+
+  test "a governing lock keeps the read, so its refusal stays in the body":
+    ## A lock that contradicts a declared range is refused by the read. A
+    ## build body that reads nothing but the toolchain must still be refused,
+    ## so a governing lock is one of the things that "could answer".
+    withScenario:
+      let lockPath = scratch / "repro.lock"
+      writeLock(lockPath, {LibFoo: LockedVersion}, [])
+      governWith(lockPath)
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariantsAtModuleInit()
+      expect ELockConflict:
+        discard activeSolvedVariants()
+
+suite "an unsatisfiable package-only solve is still reported":
+  ## The caveat A1 settles. Before A1 an unsatisfiable package-only registry
+  ## was refused by the first `build:` body that reached
+  ## `activeSolvedVariants`. After it, that read does not solve, and the
+  ## refusal is raised by the first read of the solved answer instead —
+  ## with the same message, which carries the unsat core
+  ## (`Locking-And-Solver.md`: "An unsatisfiable solve names what it could not
+  ## satisfy, on every entry point"). The spec fixes WHAT the refusal says,
+  ## not at which read it surfaces.
+
+  test "eager: refused at the finalize":
+    withScenario:
+      registerUnsatisfiable()
+      expect EUnsatisfiable:
+        finalizeVariants()
+
+  test "deferred: not refused by the toolchain read, refused at first read":
+    var eagerMsg = ""
+    withScenario:
+      registerUnsatisfiable()
+      try:
+        finalizeVariants()
+      except EUnsatisfiable as e:
+        eagerMsg = e.msg
+    check eagerMsg.len > 0
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerUnsatisfiable()
+      finalizeVariantsAtModuleInit()
+      let selected = activeSolvedVariants()
+      check selected.compiler == ""
+      check unifiedSolveCount() == 0
+      var deferredMsg = ""
+      try:
+        discard lastSolverSolution()
+      except EUnsatisfiable as e:
+        deferredMsg = e.msg
+      check deferredMsg == eagerMsg
+
+  test "deferred: chosenVersion reports it too":
+    withScenario:
+      registerUnsatisfiable()
+      finalizeVariantsAtModuleInit()
+      discard activeSolvedVariants()
+      expect EUnsatisfiable:
+        discard chosenVersion(LibFoo)
+
+suite "identical solves run clingo once":
+  ## Option A2: `runUnifiedSolve` is memoised in-process on the ASP program
+  ## it would hand clingo, which is a pure function of every input the solve
+  ## reads.
+
+  test "an identical re-solve is a memo hit with the same answer":
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariants()
+      let first = lastSolverSolution()
+      # An include-shim copy of the same recipe: same edge again, deduplicated
+      # by the registry, so the re-armed solve sees identical inputs.
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariants()
+      check unifiedSolveCount() == 1
+      check unifiedSolveMemoHitCount() == 1
+      check lastSolverSolution().packages == first.packages
+      check lastSolverSolution().variants == first.variants
+
+  test "a grown registry re-solves":
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariants()
+      registerSolverDependency("appAlpha", "libbar", "libbar >=2.0")
+      finalizeVariants()
+      check unifiedSolveCount() == 2
+      check unifiedSolveMemoHitCount() == 0
+      check chosenVersion("libbar") == "2.0.0"
+
+  test "a changed variant input re-solves and answers the new value":
+    var first = ""
+    withScenario:
+      resetUnifiedSolveMemo()
+      let v = makeStringVariant("compiler", "gcc")
+      finalizeVariants()
+      first = v.value
+    withScenario:
+      let v = makeStringVariant("compiler", "clang")
+      finalizeVariants()
+      check first == "gcc"
+      check v.value == "clang"
+      check unifiedSolveCount() == 2
+
+  test "a lock pin is part of the key":
+    ## Same registrations, one governed by a lock: the pin changes the
+    ## program, so the governed solve is not served the free answer.
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariants()
+      check chosenVersion(LibFoo) == FreeResolution
+    withScenario:
+      let lockPath = scratch / "repro.lock"
+      writeLock(lockPath, {LibFoo: "1.7.0"}, [])
+      governWith(lockPath)
+      registerSolverDependency("appAlpha", LibFoo, LibFoo & " " & DeclaredRange)
+      finalizeVariants()
+      check chosenVersion(LibFoo) == "1.7.0"
+      check unifiedSolveCount() == 2
+
+  test "a refused solve is not memoised":
+    withScenario:
+      resetUnifiedSolveMemo()
+      registerUnsatisfiable()
+      expect EUnsatisfiable:
+        finalizeVariants()
+      expect EUnsatisfiable:
+        finalizeVariants()
+      check unifiedSolveCount() == 2
+      check unifiedSolveMemoHitCount() == 0

@@ -19,6 +19,10 @@
 #   * Every declared-`run` gate must reach a PASS under
 #     `scripts/lib/hcr_lane_verdict.sh` -- rc 0, no [FAILED], NO [SKIPPED],
 #     a non-zero case count, and a case count at or above its declared floor.
+#     The one exception is a case its gate reports as CONDITIONS NOT MET (it
+#     prints `HCR-CONDITIONS-NOT-MET: ...` and skips its calibrated checks):
+#     that gate reaches NO VERDICT, and a lane whose only departure from green
+#     is such gates ends INCONCLUSIVE with exit code 3 instead of RED with 1.
 #   * Every declared-`unsupported` gate is NAMED in the census with the lane
 #     that does cover it, so executed + unsupported == the whole census and a
 #     gate cannot fall out of the accounting.
@@ -114,7 +118,12 @@ if [[ -n "${REPRO_HCR_LANE_MANIFEST:-}" ]]; then
 fi
 
 echo "== HCR lane: $PLATFORM =="
-echo "-- host: $host_os $host_arch"
+# The kernel release belongs in the banner, not just the OS and arch.
+# These gates park and signal threads, and a kernel change has already
+# moved five of them from pass to SIGSEGV with the tree unchanged.
+# Without the release here, attributing that from a lane log alone is
+# impossible and the comparison has to be re-derived by hand per host.
+echo "-- host: $host_os $host_arch $(uname -r 2>/dev/null || echo 'kernel unknown')"
 echo
 
 # STEP 1 — the work list must agree with the tree before any gate runs.
@@ -166,6 +175,8 @@ total_cases=0
 total_skipped=0
 total_declared_skips=0
 failed_gates=()
+inconclusive_gates=()
+total_conditions=0
 REASONS_ALL=""
 
 run_one() {
@@ -179,7 +190,28 @@ run_one() {
     end=$(date +%s)
 
     if [[ "$expectation" == "run" ]]; then
-        if hcr_lane_verdict "$gate" "$rc" "$logfile" "$floor" "$declared_skips"; then
+        local verdict=0
+        hcr_lane_verdict "$gate" "$rc" "$logfile" "$floor" "$declared_skips" || verdict=$?
+        if [[ $verdict -eq 2 ]]; then
+            # NO VERDICT: the gate asserted everything that would be a
+            # regression on any host and found nothing, but could not collect
+            # its calibrated evidence inside its stated conditions. Neither a
+            # pass nor a refusal; see scripts/lib/hcr_lane_verdict.sh.
+            printf 'run-conditions-not-met\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$gate" "$source" "$rc" "$HCR_VERDICT_OK" "$HCR_VERDICT_FAILED" \
+                "$HCR_VERDICT_SKIPPED" "$HCR_VERDICT_CASES" "${floor:-unmeasured}" >> "$CENSUS"
+            printf '  NO-VERDICT %-67s %3d case(s) in %3ds\n' "$gate" "$HCR_VERDICT_CASES" "$((end-start))"
+            while IFS= read -r line; do
+                [[ -n "$line" ]] && printf '         %s\n' "$line"
+            done <<< "$HCR_VERDICT_REASONS"
+            printf '         log: %s\n' "${logfile#"$REPO_ROOT"/}"
+            total_cases=$(( total_cases + HCR_VERDICT_CASES ))
+            total_skipped=$(( total_skipped + HCR_VERDICT_SKIPPED ))
+            total_conditions=$(( total_conditions + HCR_VERDICT_CONDITIONS ))
+            inconclusive_gates+=("$gate")
+            return 0
+        fi
+        if [[ $verdict -eq 0 ]]; then
             printf 'run\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
                 "$gate" "$source" "$rc" "$HCR_VERDICT_OK" "$HCR_VERDICT_FAILED" \
                 "$HCR_VERDICT_SKIPPED" "$HCR_VERDICT_CASES" "${floor:-unmeasured}" >> "$CENSUS"
@@ -282,6 +314,7 @@ echo "   executed assertion cases    : $total_cases"
 echo "   platform case floor         : $PLATFORM_FLOOR (sum of the per-gate floors in the manifest)"
 echo "   gates with UNMEASURED floor : $UNMEASURED_CELLS (they contribute 0 to the floor above)"
 echo "   [SKIPPED] markers seen      : $total_skipped (declared: $total_declared_skips; every declared one also carries a loud UNSUPPORTED naming its covering lane)"
+echo "   of which conditions not met : $total_conditions (gates that could not collect their calibrated evidence: ${#inconclusive_gates[@]})"
 echo "   census artifact             : ${CENSUS#"$REPO_ROOT"/}"
 echo
 
@@ -297,6 +330,16 @@ if [[ -n "$PLATFORM_FLOOR" && "$PLATFORM_FLOOR" -gt 0 && "$total_cases" -lt "$PL
     echo "              quietly running less than it used to, which is how a case population drifts" >&2
     echo "              without any single gate looking wrong." >&2
     verdict_rc=1
+fi
+
+# A lane with no refusal but with gates that did not meet their stated
+# conditions is INCONCLUSIVE, exit 3: not green, because nothing calibrated was
+# shown for those gates, and not red, because nothing was shown wrong. A
+# caller that only keys on "non-zero" still sees a non-pass; one that reads the
+# code can tell "re-run on a quieter host" from "something broke".
+if [[ $verdict_rc -eq 0 && ${#inconclusive_gates[@]} -gt 0 ]]; then
+    echo "run_hcr_lane: LANE INCONCLUSIVE — ${#inconclusive_gates[@]} gate(s) did not meet their stated conditions, so they reached no verdict: ${inconclusive_gates[*]}. Nothing failed; re-run them on a host inside those conditions." >&2
+    verdict_rc=3
 fi
 
 if [[ $verdict_rc -eq 0 ]]; then

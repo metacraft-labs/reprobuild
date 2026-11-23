@@ -30,6 +30,7 @@ package `cargo-sort`:
       sha256 = "83c7e38a9eec715a3e316371e660d210d20c3b197099dcc38577a9d343b027d5",
       archiveType = "zip",
       executablePath = "cargo-sort.exe",
+      version = CargoSortVersion,
       packageId = "cargo-sort@" & CargoSortVersion,
       cpu = "x86_64",
       os = "windows",

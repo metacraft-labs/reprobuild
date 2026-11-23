@@ -2,18 +2,23 @@
 ##
 ## Subcommands:
 ##
-##   ``harvest``  — clone / refresh one or more Scoop buckets, parse
-##                  each ``<app>.json``, translate to the M63
-##                  ``VersionedProvisioning`` schema, and write
-##                  ``packages/<tool>.nim`` files.
+##   ``harvest``  — clone / refresh one or more Scoop buckets (or read
+##                  MSYS2 / GitHub Releases), parse each upstream
+##                  description, and write ``packages/<tool>.nim``
+##                  modules whose ``package <tool>:`` block carries the
+##                  harvested ``tarball`` realizations (GM4b — the
+##                  parsers' ``VersionedProvisioning`` value is an
+##                  in-memory parse model only; see ``src/nim_emit``).
+##                  ``--contributor <id>`` emits a ``provisioningFor``
+##                  contribution instead.
 ##
-##   ``inspect``  — translate a SINGLE manifest and print the result
-##                  to stdout without writing a file. Useful for
-##                  debugging a sticky translation.
+##   ``inspect``  — translate a SINGLE manifest and print the emitted
+##                  ``tarball`` statements to stdout without writing a
+##                  file. Useful for debugging a sticky translation.
 ##
 ##   ``verify``   — re-harvest a checked-in ``packages/<tool>.nim``
 ##                  and assert byte-identical output. Catches drift
-##                  between the catalog and the upstream bucket.
+##                  between the module and the upstream bucket.
 ##
 ## Examples:
 ##
@@ -41,7 +46,13 @@ import src/gh_releases_source
 import repro_dsl_stdlib/packages_schema
 
 const HelpText = """
-catalog-harvester — multi-source harvester for the reprobuild M63 catalog.
+catalog-harvester — multi-source harvester of reprobuild package realizations.
+
+Emits packages/<tool>.nim modules whose `package <tool>:` block carries
+one `tarball` realization per (version, platform). For an existing stdlib
+package, paste the emitted `tarball` statements into its `provisioning:`
+block after the existing ones (an unpinned reference takes the first
+eligible realization in declaration order).
 
 USAGE
   catalog-harvester <subcommand> [options]
@@ -72,7 +83,7 @@ SOURCE SELECTION
                                        the latest non-prerelease release
                                        (or the --version pin), picks the
                                        asset matching --asset-pattern,
-                                       and emits a VersionedProvisioning.
+                                       and emits its tarball realizations.
   --asset-pattern <regex>              (M7) REQUIRED for gh-releases.
                                        Regex matched against each release
                                        asset's name. The match is ALWAYS
@@ -168,14 +179,27 @@ COMMON OPTIONS
                             relative paths. Repeatable. Required for
                             tools like maven/elixir/ruby whose Scoop
                             manifest exposes binaries via PATH only.
-  --app-alias <src>=<dst>   Rename the catalog identifier on emit;
-                            the manifest stays addressed by <src> in
-                            the bucket, but the output file is
-                            <dst>.nim and the seq is <dst>Catalog.
+  --app-alias <src>=<dst>   Rename the package on emit; the manifest
+                            stays addressed by <src> in the bucket,
+                            but the output file is <dst>.nim and the
+                            package is `package <dst>:`.
                             Repeatable. Required when Scoop's
                             manifest name contains characters Nim
                             forbids in identifiers (e.g.
                             'haskell-cabal' -> 'cabal').
+
+CONTRIBUTION OUTPUT
+  --contributor <id>        Emit a `provisioningFor "<tool>":` contribution
+                            from contributor <id> (e.g.
+                            github:metacraft-labs/reprobuild-scoop-packages)
+                            instead of a `package` block — for a catalog
+                            that realizes a package defined elsewhere.
+  --interface-fingerprint <hex>
+                            With --contributor: pin the contribution to
+                            the target's interface fingerprint. Without
+                            it the contribution binds through
+                            `developInterface`, which a published catalog
+                            must replace.
 
 VERIFY-ONLY OPTIONS
   --catalog <path>          The existing packages/<tool>.nim file.
@@ -235,6 +259,11 @@ type
     dryRun: bool
     noRefresh: bool
     catalog: string
+    contributor: string
+      ## GM4b: ``--contributor <id>`` — emit a ``provisioningFor``
+      ## contribution instead of a ``package`` block.
+    interfaceFingerprint: string
+      ## GM4b: ``--interface-fingerprint <hex>`` for ``--contributor``.
     binDefaults: Table[string, seq[string]]
       ## M67: per-app bin_relpath synthesis defaults for manifests
       ## whose ``bin`` field is absent / empty. CLI: ``--bin-default
@@ -246,10 +275,9 @@ type
       ## M67: rename a manifest's logical tool name on emit. CLI:
       ## ``--app-alias <manifestApp>=<toolName>``, repeatable. Used
       ## when the Scoop bucket carries a manifest under one name
-      ## (e.g. ``haskell-cabal``) but the reprobuild catalog wants a
-      ## different identifier (``cabal``). Affects the emitted
-      ## filename (``cabal.nim``) AND the seq identifier
-      ## (``cabalCatalog``). Also enforces a valid Nim identifier —
+      ## (e.g. ``haskell-cabal``) but reprobuild wants a different
+      ## package name (``cabal``). Affects the emitted filename
+      ## (``cabal.nim``) AND the package name (``package cabal:``). Also enforces a valid Nim identifier —
       ## hyphens, dots, and other non-identifier chars in the source
       ## manifest name would otherwise produce uncompilable output.
 
@@ -393,6 +421,8 @@ proc parseCli(argv: openArray[string]): CliOptions =
       of "dry-run": result.dryRun = true
       of "no-refresh": result.noRefresh = true
       of "catalog": result.catalog = p.val
+      of "contributor": result.contributor = p.val.strip()
+      of "interface-fingerprint": result.interfaceFingerprint = p.val.strip()
       of "app-alias":
         # ``--app-alias <manifestApp>=<toolName>``
         let eq = p.val.find('=')
@@ -404,16 +434,14 @@ proc parseCli(argv: openArray[string]): CliOptions =
         if srcName.len == 0 or dstName.len == 0:
           stderr.writeLine("error: --app-alias both sides must be non-empty")
           quit(2)
-        # Validate dstName is a usable Nim identifier head — leading
-        # underscore is fine, leading digit is not, hyphens are not.
-        if dstName[0] notin {'a'..'z', 'A'..'Z', '_'}:
-          stderr.writeLine("error: --app-alias target '" & dstName &
-            "' must start with a letter or underscore")
-          quit(2)
+        # The target is a package name, held to ``isValidAppName``'s rule:
+        # letters, digits and underscores, a leading digit or a Nim keyword
+        # included (``7zip`` is written ``package "7zip":``, ``nil``
+        # ``package "nil":``). Hyphens are not.
         for ch in dstName:
           if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
             stderr.writeLine("error: --app-alias target '" & dstName &
-              "' contains invalid identifier character '" & $ch & "'")
+              "' contains invalid character '" & $ch & "'")
             quit(2)
         result.appAliases[srcName] = dstName
       of "bin-default":
@@ -447,41 +475,36 @@ proc writeDiagnostics(diagnostics: openArray[Diagnostic]) =
     stderr.writeLine($d.kind & " [" & d.app & "]: " & d.detail)
 
 # ---------------------------------------------------------------------------
-# Output-app-name validation (Nim-identifier check)
+# Output-app-name validation
 # ---------------------------------------------------------------------------
 
-proc isValidNimIdent(name: string): bool =
-  ## Nim identifier rules (matchFull ``^[A-Za-z_][A-Za-z0-9_]*$``):
-  ## first char is a letter or underscore; remaining chars are
-  ## alphanumerics or underscores. Hyphens, dots, leading digits, and
-  ## the empty string are all rejected.
+proc isValidAppName(name: string): bool =
+  ## An output app name is a package name, so it need not be a Nim
+  ## identifier (Package-Model.md §"Package names"): ``7zip`` is declared
+  ## ``package "7zip":`` in ``pkg_7zip.nim``, and the keyword ``nil``
+  ## ``package "nil":`` in ``pkg_nil.nim`` (``harvestModuleName``). It is
+  ## restricted to letters, digits and underscores, so hyphens and dots
+  ## (``dotnet-sdk``, ``foo.bar``) still need ``--app-alias``.
   if name.len == 0: return false
-  if name[0] notin {'a'..'z', 'A'..'Z', '_'}: return false
   for ch in name:
     if ch notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}: return false
   return true
 
 proc validateResolvedAppName(name: string) =
   ## Fail fast (exit 2) if the resolved output app name (post-alias) is
-  ## not a usable Nim identifier. The harvester writes
-  ## ``packages/<name>.nim`` containing ``let <name>Catalog* = @[...]``;
-  ## a name like ``7zip`` would emit ``7zipCatalog`` which fails
-  ## ``nim check``. M8 reviewer flagged this for ``7zip`` /
-  ## ``dotnet-sdk``; the remedy is ``--app-alias <bad>=<good>``.
-  if isValidNimIdent(name): return
+  ## not usable. M8 reviewer flagged ``dotnet-sdk``; the remedy is
+  ## ``--app-alias <bad>=<good>``.
+  if isValidAppName(name): return
   let reason =
     if name.len == 0:
-      "an empty name is not a Nim identifier"
-    elif name[0] in {'0'..'9'}:
-      "Nim identifiers cannot start with a digit"
-    elif name[0] notin {'a'..'z', 'A'..'Z', '_'}:
-      "Nim identifiers must start with a letter or underscore"
+      "an empty name is not a package name"
     else:
-      "Nim identifiers may only contain letters, digits, and underscores"
+      "app names may only contain letters, digits, and underscores"
   stderr.writeLine("repro_catalog_harvester: invalid output app name '" &
     name & "' (" & reason & ").")
-  stderr.writeLine("  Re-run with --app-alias to specify a valid identifier, e.g.:")
-  stderr.writeLine("    --app-alias " & name & "=" & "sevenzip")
+  stderr.writeLine("  Re-run with --app-alias to specify a valid name, e.g.:")
+  stderr.writeLine("    --app-alias " & name & "=" &
+    name.multiReplace(("-", "_"), (".", "_")))
   quit(2)
 
 proc validateResolvedAppNames(opts: CliOptions) =
@@ -638,6 +661,18 @@ proc sortCatalog(items: var seq[VersionedProvisioning]) =
 # Subcommands
 # ---------------------------------------------------------------------------
 
+proc emitModule(opts: CliOptions; toolName, bucketSpec: string;
+                catalog: openArray[VersionedProvisioning]):
+    tuple[ok: bool; body: string] =
+  ## Render the harvested realizations (``nim_emit.emitHarvestModule``);
+  ## an arm the DSL cannot express is reported and refused.
+  try:
+    (true, emitHarvestModule(toolName, bucketSpec, opts.contributor,
+      opts.interfaceFingerprint, catalog))
+  except EmitError as err:
+    stderr.writeLine("error: cannot emit '" & toolName & "': " & err.msg)
+    (false, "")
+
 proc cmdHarvestMsys2(opts: CliOptions): int =
   ## M6: harvest one or more packages from an MSYS2 pacman repository.
   ## Each ``--source msys2:<pkg>`` invocation contributes one package
@@ -692,8 +727,12 @@ proc cmdHarvestMsys2(opts: CliOptions): int =
       anyError = true
       continue
     let bucketSpec = "msys2:" & $opts.msys2Env & "/" & packageHint
-    let body = emitCatalogFile(toolName, bucketSpec, @[entry])
-    let outPath = opts.outputDir / (toolName & ".nim")
+    let emitted = emitModule(opts, toolName, bucketSpec, @[entry])
+    if not emitted.ok:
+      anyError = true
+      continue
+    let body = emitted.body
+    let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
     if opts.dryRun:
       echo "DRY-RUN would write " & outPath & " (version=" &
         entry.version & ")"
@@ -785,8 +824,11 @@ proc cmdHarvestGhReleases(opts: CliOptions): int =
     return 3
 
   let bucketSpec = "gh-releases:" & opts.ghOrg & "/" & opts.ghRepo
-  let body = emitCatalogFile(toolName, bucketSpec, @[entry])
-  let outPath = opts.outputDir / (toolName & ".nim")
+  let emitted = emitModule(opts, toolName, bucketSpec, @[entry])
+  if not emitted.ok:
+    return 3
+  let body = emitted.body
+  let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
   if opts.dryRun:
     echo "DRY-RUN would write " & outPath & " (version=" & entry.version & ")"
     var n = 0
@@ -854,8 +896,12 @@ proc cmdHarvest(opts: CliOptions): int =
       # Apply --app-alias rename to control filename + variable name.
       let toolName =
         if app in opts.appAliases: opts.appAliases[app] else: app
-      let body = emitCatalogFile(toolName, bucketSpec, ordered)
-      let outPath = opts.outputDir / (toolName & ".nim")
+      let emitted = emitModule(opts, toolName, bucketSpec, ordered)
+      if not emitted.ok:
+        anyError = true
+        continue
+      let body = emitted.body
+      let outPath = opts.outputDir / (harvestModuleName(toolName) & ".nim")
       if opts.dryRun:
         echo "DRY-RUN would write " & outPath & " (" & $ordered.len &
           " version(s))"
@@ -896,7 +942,11 @@ proc cmdInspect(opts: CliOptions): int =
   writeDiagnostics(parsed.diagnostics)
   if not parsed.ok:
     return 3
-  echo serializeAsCode(parsed.entry)
+  try:
+    stdout.write(tarballStatements(opts.apps[0], [parsed.entry]))
+  except EmitError as err:
+    stderr.writeLine("error: " & err.msg)
+    return 3
   return 0
 
 proc cmdVerify(opts: CliOptions): int =
@@ -934,7 +984,10 @@ proc cmdVerify(opts: CliOptions): int =
   let toolName =
     if opts.apps[0] in opts.appAliases: opts.appAliases[opts.apps[0]]
     else: opts.apps[0]
-  let body = emitCatalogFile(toolName, opts.buckets[0], ordered)
+  let emitted = emitModule(opts, toolName, opts.buckets[0], ordered)
+  if not emitted.ok:
+    return 3
+  let body = emitted.body
   if body == existing:
     echo "verify OK: " & opts.catalog
     return 0

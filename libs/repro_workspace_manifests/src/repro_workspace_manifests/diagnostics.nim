@@ -7,6 +7,11 @@
 import std/[os, strutils]
 import types
 
+const missingManifestMessage* = "manifest file does not exist"
+  ## The inner message of the file-level diagnostic for a manifest that is not
+  ## there, whichever source was asked (a directory, or a git revision through
+  ## `manifest_source.nim`), so the two cannot word it differently.
+
 proc raiseManifestError*(
     path: string;
     keyPath, expectedSchema, observedSchema, innerMessage: string) {.noreturn.} =
@@ -127,3 +132,64 @@ proc schemaSkewMessage*(path, fieldName, recordName: string): string =
   result.add " If that is already the pinned build, then `"
   result.add fieldName
   result.add "` is genuinely not part of this schema — check the spelling."
+
+# ---- set-aside of malformed workspace files (``repro health`` only) --------
+
+type
+  MalformedWorkspaceFileKind* = enum
+    ## Which workspace file a set-aside diagnostic is about; ``repro health``
+    ## reports each kind in a row of its own.
+    mwkSettings = "workspace-settings"
+      ## ``repro-workspace.toml`` / ``repro-workspace.local.toml``, or a
+      ## settings file under its retired name.
+    mwkState = "workspace-state"
+      ## ``.repro/workspace-state.toml``, or the state file under its retired
+      ## name.
+    mwkManifest = "manifest"
+      ## A file of the manifest closure the workspace resolves through — a
+      ## ``repos/*.toml`` fragment, a project / variant / repo-set manifest.
+      ## Reported in health's existing ``manifest`` row.
+
+  SetAsideWorkspaceFile* = object
+    kind*: MalformedWorkspaceFileKind
+    message*: string  ## the strict reader's diagnostic: file, key, problem
+    path*: string     ## the file the diagnostic is about
+    keyPath*: string  ## the offending key; "" for a TOML syntax error
+
+var malformedWorkspaceFilesTolerated {.threadvar.}: bool
+var setAsideWorkspaceFiles {.threadvar.}: seq[SetAsideWorkspaceFile]
+
+template toleratingMalformedWorkspaceFiles*(failures, body: untyped) =
+  ## Run ``body`` with a state or settings file that does not parse read as
+  ## if it recorded / declared nothing, and return the strict readers'
+  ## diagnostics in ``failures`` — for ``repro health`` ONLY. Every other verb
+  ## refuses such a file; health is the one command whose job is to localize
+  ## every broken layer in a single run (CLI/health.md), so it keeps
+  ## diagnosing the rest and reports each set-aside file as a failing row of
+  ## its own. Nothing set aside here is silent: it is what ``failures``
+  ## carries back to be reported.
+  let previousTolerated = malformedWorkspaceFilesTolerated
+  let previousFailures = setAsideWorkspaceFiles
+  malformedWorkspaceFilesTolerated = true
+  setAsideWorkspaceFiles = @[]
+  try:
+    body
+  finally:
+    failures = setAsideWorkspaceFiles
+    malformedWorkspaceFilesTolerated = previousTolerated
+    setAsideWorkspaceFiles = previousFailures
+
+proc setAsideMalformedWorkspaceFile*(err: ref WorkspaceManifestParseError;
+                                     kind: MalformedWorkspaceFileKind): bool =
+  ## Inside ``toleratingMalformedWorkspaceFiles``: record ``err`` for the
+  ## caller to report and answer ``true`` (the reader then proceeds as if the
+  ## file recorded / declared nothing). Outside it: answer ``false``, and the
+  ## reader must re-raise.
+  if not malformedWorkspaceFilesTolerated:
+    return false
+  for seen in setAsideWorkspaceFiles:
+    if seen.message == err.msg:
+      return true
+  setAsideWorkspaceFiles.add(SetAsideWorkspaceFile(kind: kind,
+    message: err.msg, path: err.path, keyPath: err.keyPath))
+  true

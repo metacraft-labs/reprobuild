@@ -1,5 +1,5 @@
 ## M10 cross-backend matrix runner: drive the Phase-5 + M69-POSIX gate
-## set across every Mac-host-runnable vm-harness backend cell.
+## set across every Mac-host-runnable gosti backend cell.
 ##
 ## Per the M10 deliverables (Multi-OS-VM-Automation-Campaign milestone
 ## file, "Reprobuild Harness Runs M69 + Phase-5 Gates Across All
@@ -57,7 +57,7 @@
 ## Per the M0 *Per-Gate Reset Performance Contract*, every backend
 ## must revert to baseline within a documented per-backend budget. This
 ## runner records the wall-clock for the revert + exec phase of every
-## cell (``vm-harness run`` end-to-end includes both phases plus
+## cell (``gosti run`` end-to-end includes both phases plus
 ## post-run cleanup). The summary block calls out any cell whose
 ## elapsed time exceeds 90s (Tart) / 240s (Lima) — the documented
 ## budgets from M2 and M5 respectively.
@@ -82,14 +82,14 @@ when not defined(macosx):
 const ProjectRoot = currentSourcePath().parentDir().parentDir()
   .parentDir().parentDir()
 
-const VmHarnessBin = "/Users/zahary/metacraft/vm-harness/build/bin/vm-harness"
+const GostiBin = "/Users/zahary/metacraft/gosti/build/bin/gosti"
 
 const ZigBin = "/opt/homebrew/bin/zig"
 
 # The cirruslabs Ubuntu image ships as ``ubuntu`` with passwordless
-# sudo (no separate ``admin`` user); the vm-harness Tart backend
+# sudo (no separate ``admin`` user); the gosti Tart backend
 # already handles the user/password defaults internally per
-# ``DefaultCirrusLabsUser`` in ``vm-harness/src/vm_harness/backends/tart.nim``.
+# ``DefaultCirrusLabsUser`` in ``gosti/src/gosti/backends/tart.nim``.
 
 # ---------------------------------------------------------------------------
 # Backend cell types.
@@ -336,7 +336,7 @@ proc buildGateBinary(gate: GateRow; arch: GuestArch;
   binPath
 
 # ---------------------------------------------------------------------------
-# vm-harness invocation per cell. We use the CLI binary (same
+# gosti invocation per cell. We use the CLI binary (same
 # pattern as run_phase5_in_tart.nim) so the runner is a thin
 # auditable wrapper.
 
@@ -356,7 +356,7 @@ proc runCell(cell: Cell; binPath, outDir: string): CellResult =
   else:
     guestCmd = @["env", cell.gate.envVar & "=1", guestBin]
 
-  var args = @[VmHarnessBin, "run",
+  var args = @[GostiBin, "run",
                "--backend", backendId(cell.backend),
                "--guest", guestKind(cell.backend),
                "--baseline",
@@ -373,7 +373,7 @@ proc runCell(cell: Cell; binPath, outDir: string): CellResult =
   args.add("--")
   args.add(guestCmd)
 
-  echo "  [vm-harness] backend=" & backendId(cell.backend) &
+  echo "  [gosti] backend=" & backendId(cell.backend) &
     " gate=" & cell.gate.name & " output=" & outDir
   let runStart = epochTime()
   let proc1 = startProcess(args[0], args = args[1 .. ^1],
@@ -409,15 +409,15 @@ proc checkPrerequisites(): bool =
   if findExe("limactl").len == 0:
     echo "[skip] limactl not on PATH (needed for the Lima row)"
     return false
-  if not fileExists(VmHarnessBin):
-    echo "[skip] vm-harness binary missing at " & VmHarnessBin
+  if not fileExists(GostiBin):
+    echo "[skip] gosti binary missing at " & GostiBin
     return false
   if not fileExists(ZigBin):
     echo "[skip] zig missing at " & ZigBin &
       " (needed to cross-build Linux ARM gate binaries)"
     return false
-  if getEnv("VMH_TART_SKIP_MACOS", "") == "1":
-    echo "[note] VMH_TART_SKIP_MACOS=1 set; tart-macos rows " &
+  if getEnv("GOSTI_TART_SKIP_MACOS", "") == "1":
+    echo "[note] GOSTI_TART_SKIP_MACOS=1 set; tart-macos rows " &
       "will be skipped (not failed)"
   true
 
@@ -431,7 +431,7 @@ proc main(): int =
   let workRoot = createTempDir("repro-m10-cross-", "")
   echo "[m10-runner] workRoot=" & workRoot
   echo "[m10-runner] ProjectRoot=" & ProjectRoot
-  echo "[m10-runner] vm-harness=" & VmHarnessBin
+  echo "[m10-runner] gosti=" & GostiBin
   echo "[m10-runner] zig=" & ZigBin
 
   let zigWrapper = createZigCcWrapper(workRoot)
@@ -444,7 +444,7 @@ proc main(): int =
   #    fast on any build error before incurring multi-minute VM
   #    provisioning costs.
   var binaries: Table[string, string]    ## key = gateName & "|" & arch
-  let skipMacos = getEnv("VMH_TART_SKIP_MACOS", "") == "1"
+  let skipMacos = getEnv("GOSTI_TART_SKIP_MACOS", "") == "1"
 
   for cell in matrix:
     if cell.backend == bkTartMacos and skipMacos:
@@ -479,7 +479,7 @@ proc main(): int =
       continue
     if cell.backend == bkTartMacos and skipMacos:
       echo "  [skip-cell] backend=" & backendId(cell.backend) &
-        " gate=" & cell.gate.name & " (VMH_TART_SKIP_MACOS=1)"
+        " gate=" & cell.gate.name & " (GOSTI_TART_SKIP_MACOS=1)"
       continue
     let outDir = workRoot / ("output-" & backendId(cell.backend) &
                              "-" & cell.gate.name)

@@ -1,73 +1,64 @@
-## M1 (Realize-Closure spec) — fpc resolves through the default
-## Windows chain via cakBuiltin.
+## M1 (Realize-Closure spec) → GM4b — fpc resolves on a Windows target
+## through its `tarball` realization.
 ##
-## Validates the end-to-end resolution path that the M1 spec
-## unblocks for the M71 Pascal Phase-2 partial:
+## Validates the resolution path the M1 spec unblocked for the M71 Pascal
+## Phase-2 partial, restated for GM4b (the `fpcCatalog` record is now a
+## `tarball` realization of `package fpc:`):
 ##
-##   * the catalog registry knows ``fpc``;
-##   * ``chainResolvePackage`` with the default Windows chain returns a
-##     resolution whose ``adapter == cakBuiltin``;
-##   * the resolution carries a non-empty sha1 digest (the M1 weak-hash
-##     fallback) and the digestAlgorithm is "sha1";
-##   * the cakBuiltin step is the resolving one (the chain trace ends
-##     at csoResolved on cakBuiltin).
+##   * the engine links a definition of `fpc`, whose only archive is the
+##     upstream Windows installer pinned by a SHA-1 (the M1 weak-hash case:
+##     upstream publishes nothing stronger);
+##   * a profile reference resolves, for an x86_64-windows target under the
+##     default policy, to that `tarball` realization at version 3.2.2;
+##   * both callers project that same Inno Setup realization through the
+##     provisioning edge, retaining its SHA-1 digest and installer metadata;
+##   * its installer helper is an explicit provisioning requirement.
 ##
-## The test does NOT actually realize the package (no network). It
-## only asserts the resolution shape so the realize-time pipeline has
-## a structurally-valid CatalogResolution to consume.
+## Nothing is realized (no network). No mocks.
 
-import std/[options, strutils, unittest]
+import std/[options, unittest]
 
-import repro_dsl_stdlib/packages_schema
-import repro_dsl_stdlib/catalog_registry
+import repro_dsl_stdlib/package_registry
+import repro_tool_profiles
 import repro_home_apply/package_catalog
 
-suite "M1 — fpc end-to-end resolvable":
+let windowsX64 = realizationTargetFor(pcX86_64, poWindows, mlX86_64_v1)
 
-  test "catalog_registry knows fpc and the catalog is non-empty":
-    let cat = getCatalog("fpc")
-    check cat.isSome
-    check cat.get.len > 0
-    check isRegistered("fpc")
+suite "M1/GM4b — fpc end-to-end resolvable":
 
-  test "selectDefault returns fpc 3.2.2 with a Windows platform slice":
-    let cat = getCatalog("fpc").get
-    let def = selectDefault(cat)
-    check def.found
-    check def.entry.version == "3.2.2"
-    # The platform slice is the (pcAny, poWindows) one harvested from
-    # the top-level url + hash (no architecture block in the Scoop
-    # freepascal manifest).
-    let pb = selectPlatformBinary(def.entry, pcAny, poWindows)
-    check pb.found
-    check pb.binary.sha1.len == 40
-    check pb.binary.sha256 == ""
-    check pb.binary.sha512 == ""
+  test "the engine links fpc, with a sha1-pinned Windows archive at 3.2.2":
+    check isLinkedPackage("fpc")
+    let useDef = profileToolUse("fpc").useDef
+    check useDef.tarballProvisioning.len == 1
+    let record = useDef.tarballProvisioning[0]
+    check record.os == "windows"
+    check record.detail.version == "3.2.2"
+    check record.sha256 == ""
+    check record.detail.sha512 == ""
+    check record.detail.sha1.len == 40
+    check offeredVersions("fpc") == @["3.2.2"]
 
-  test "validateCatalog accepts fpc (0 errors + 1 sha1 warning)":
-    let cat = getCatalog("fpc").get
-    var warnings: seq[string] = @[]
-    let errors = validateCatalogEx(cat, warnings)
-    check errors.len == 0
-    check warnings.len == 1
-    check "sha1 digest is weaker than sha256" in warnings[0]
+  test "fpc resolves via its tarball realization on x86_64-windows":
+    let r = resolveProfilePackage("fpc", windowsX64, DefaultSelectionPolicy)
+    check r.selection.kind == rkTarball
+    check r.selection.version == "3.2.2"
+    check r.selection.lockIdentity == "sha1:" & r.selection.tarball.detail.sha1
+    check r.archiveRoute == arExtract
+    check r.archive.builtinVersion == "3.2.2"
+    check r.archive.digestAlgorithm == "sha1"
+    check r.archive.digestValue.len == 40
+    check r.archive.installMethod == imInstallerInnoSetup
+    check r.selection.trace.len == 1
+    check r.selection.trace[0].kind == rkTarball
+    check r.selection.trace[0].selected
 
-  test "chainResolvePackage resolves fpc via cakBuiltin on Windows":
-    ## Use the explicit Windows default chain so the test is meaningful
-    ## on every host (the platform default is consulted only when the
-    ## test runs on Windows; on Linux/macOS the default chain skips
-    ## cakBuiltin first via cakNix/cakPath, but we pin the chain so the
-    ## assertion is host-independent).
-    var cat = openProductionCatalog()
-    let resolution = chainResolvePackage(cat, "fpc",
-      chain = @[cakBuiltin, cakPath],
-      hostCpu = pcX86_64, hostOs = poWindows)
-    check resolution.adapter == cakBuiltin
-    check resolution.builtinVersion == "3.2.2"
-    check resolution.digestAlgorithm == "sha1"
-    check resolution.digestValue.len == 40
-    # The chain trace records cakBuiltin as the resolving step.
-    check resolution.chainTrace.len >= 1
-    let last = resolution.chainTrace[resolution.chainTrace.len - 1]
-    check last.adapter == cakBuiltin
-    check last.outcome == csoResolved
+  test "a recipe's uses: edge accepts the same installer record and digest":
+    let useDef = profileToolUse("fpc").useDef
+    let home = resolveProfilePackage("fpc", windowsX64, DefaultSelectionPolicy)
+    let recipe = tarballAcquisitionPlan(useDef, target = windowsX64)
+    check recipe.record == home.selection.tarball
+    check recipe.digestAlgorithm == "sha1"
+    check recipe.digestValue == home.archive.digestValue
+    check recipe.url == home.archive.urlUsed
+    check recipe.record.detail.installMethod == "installer-inno-setup"
+    check "innounp" in installationToolRoles(recipe.record)

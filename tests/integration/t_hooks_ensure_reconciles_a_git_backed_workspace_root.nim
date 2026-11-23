@@ -137,8 +137,8 @@ proc seedOrigin(gitBin, originPath, workPath: string) =
 proc projectToml(urls: openArray[string]): string =
   result =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"wsroot\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"wsroot\"\n" &
+    "\n"
   for i, url in urls:
     result.add("[[remote]]\nname = \"lib-" & $i & "-origin\"\nfetch = \"" &
       url & "\"\n\n")
@@ -148,9 +148,9 @@ proc projectToml(urls: openArray[string]): string =
   result.add("]\n")
 
 proc repoFragment(i: int): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"lib-" & $i & "\"\npath = \"lib-" & $i & "\"\n" &
-  "remote = \"lib-" & $i & "-origin\"\nrevision = \"main\"\n"
+  "remote = \"lib-" & $i & "-origin\"\nmainline = \"main\"\n"
 
 proc setupWorkspace(gitBin, slug: string; gitBackedRoot: bool): WsFixture =
   result.scratch = createTempDir("repro-wsroot-" & slug & "-", "")
@@ -177,8 +177,8 @@ proc setupWorkspace(gitBin, slug: string; gitBackedRoot: bool): WsFixture =
   for i in 0 ..< 3:
     writeFile(result.root / "repos" / ("lib-" & $i & ".toml"), repoFragment(i))
   createDir(result.root / ".repro")
-  writeFile(result.root / ".repro" / "workspace.toml",
-    "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+  writeFile(result.root / ".repro" / "workspace-state.toml",
+    "schema = \"reprobuild.workspace.state.v1\"\n\n" &
     "[workspace]\nproject = \"wsroot\"\nprojects = [\"wsroot\"]\n")
 
   if gitBackedRoot:
@@ -429,7 +429,7 @@ suite "hooks ensure reconciles a git-backed workspace root":
       let fx = setupWorkspace(gitBin, "backend", gitBackedRoot = true)
       defer: removeDir(fx.scratch)
       # Same tree, minus the one thing that DECLARES a workspace.
-      removeFile(fx.root / ".repro" / "workspace.toml")
+      removeFile(fx.root / ".repro" / "workspace-state.toml")
       check dirExists(fx.root / "projects")   # positively still manifest-shaped
       check dirExists(fx.root / "repos")
 

@@ -84,14 +84,19 @@ proc waitForFileContent(path, expected: string; tempRoot = "";
 
 proc buildCommand(projectRoot, tempRoot, workName: string;
                   extra: openArray[string] = [];
-                  envExtra: openArray[(string, string)] = []): CmdSpec =
+                  envExtra: openArray[(string, string)] = [];
+                  logArgs: openArray[string] = ["--log=summary"]): CmdSpec =
+  ## ``logArgs`` defaults to ``--log=summary`` because most cases read status
+  ## lines (``project:``, ``buildReport:``). A case that checks what the
+  ## DEFAULT log mode prints passes ``[]``; one that checks an explicit mode
+  ## passes it here instead, so the summary default cannot win a last-wins
+  ## parse.
   shellCommand(@[
     publicReproBin(), "build", projectRoot,
     "--tool-provisioning=path",
     "--work-root=" & tempRoot / workName,
     "--action-cache-root=" & tempRoot / "action-cache",
-    "--progress=quiet",
-    "--log=summary",
+    "--progress=quiet"] & @logArgs & @[
     "--no-runquota",
     # The assertions below read the ``buildReport:`` line, so the full report
     # is requested explicitly: persisting one is opt-in on success.
@@ -245,6 +250,26 @@ when isNixSupported:
       waitForFileContent(unavailableProject / "dist" / "copied.txt",
         "fallback\n", tempRoot)
 
+      # The route switch is reported under the DEFAULT ``--log`` too. It used
+      # to be gated on ``logMode != blmQuiet``, so with no ``--log`` nothing
+      # said the daemon was gone and every later build went direct in silence
+      # (reprobuild-pm issues/2026-10-17-daemon-hosted-build-ignores-log-and-
+      # direct-fallback-is-silent.md).
+      let quietFallbackProject = tempRoot / "quiet-fallback-project"
+      writeCopyProject(quietFallbackProject, "daemonM11QuietFallback",
+        "quiet fallback\n")
+      let quietFallback = requireSuccess(buildCommand(quietFallbackProject,
+        tempRoot, "quiet-fallback-work", envExtra = [
+          ("REPRO_DAEMON_STATE_DIR", blockedState)
+        ], logArgs = []), repoRoot())
+      check quietFallback.contains(
+        "repro build: daemon unavailable; falling back to direct mode:")
+      # The notice is all the quiet default adds: the direct build's own
+      # status lines stay governed by ``--log``.
+      check not quietFallback.contains("project: daemonM11QuietFallback")
+      waitForFileContent(quietFallbackProject / "dist" / "copied.txt",
+        "quiet fallback\n", tempRoot)
+
       let requireFailureOutput = requireFailure(buildCommand(
         tempRoot / "require-project", tempRoot, "require-work",
         ["--daemon=require"], envExtra = [
@@ -391,6 +416,51 @@ when isNixSupported:
       checkpoint("daemon sessions:\n" & sessions)
       check sessions.contains("daemonM11Output") or sessions.contains(
         daemonProject)
+
+    test "integration_daemon_hosted_build_honours_log_mode":
+      # ``--log`` selects the same status lines whichever route serves the
+      # build. The daemon worker used to forward every ``logSummary`` line to
+      # the client before consulting ``logMode``, so a daemon-hosted build
+      # printed the whole status block under the quiet default and under an
+      # explicit ``--log=quiet``, while the direct build printed none
+      # (reprobuild-pm issues/2026-10-17-daemon-hosted-build-ignores-log-and-
+      # direct-fallback-is-silent.md). ``--daemon=require`` keeps a fallback to
+      # direct mode from passing the quiet assertions for the wrong reason.
+      let tempRoot = createTempDir("repro-daemon-m11-log", "")
+      defer:
+        stopDaemon(tempRoot)
+        removeDir(tempRoot)
+
+      let project = tempRoot / "log-project"
+      writeCopyProject(project, "daemonM11Log", "log\n")
+      let defaultLog = requireSuccess(buildCommand(project, tempRoot,
+        "default-work", ["--daemon=require", "--force-rebuild"],
+        logArgs = []), repoRoot())
+      checkpoint("daemon-hosted, default --log:\n" & defaultLog)
+      check not defaultLog.contains("project: daemonM11Log")
+
+      let quietLog = requireSuccess(buildCommand(project, tempRoot,
+        "quiet-work", ["--daemon=require", "--force-rebuild"],
+        logArgs = ["--log=quiet"]), repoRoot())
+      checkpoint("daemon-hosted, --log=quiet:\n" & quietLog)
+      check not quietLog.contains("project: daemonM11Log")
+
+      # Positive control: the same daemon route does print the line when the
+      # caller asks for it, so the two checks above observe filtering and not
+      # a build that printed nothing at all.
+      let summaryLog = requireSuccess(buildCommand(project, tempRoot,
+        "summary-work", ["--daemon=require", "--force-rebuild"],
+        logArgs = ["--log=summary"]), repoRoot())
+      check summaryLog.contains("project: daemonM11Log")
+
+      # The direct route under the same default prints the same nothing.
+      let directLog = requireSuccess(buildCommand(project, tempRoot,
+        "direct-work", ["--daemon=off", "--force-rebuild"],
+        logArgs = []), repoRoot())
+      check not directLog.contains("project: daemonM11Log")
+
+      let sessions = waitForSessionsContains(tempRoot, "\tbuild\tsucceeded")
+      checkpoint("daemon sessions:\n" & sessions)
 
     test "default watch uses daemon-hosted sessions and direct watch stays explicit":
       let tempRoot = createTempDir("repro-daemon-m11-watch", "")

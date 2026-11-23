@@ -133,6 +133,23 @@ def run_command(args, cwd=None, env=None, check=True,
     return result
 
 
+def timing_summary(wall_values):
+    """Spread of a list of wall times, in the order they were measured.
+
+    The median is the upper middle sample for an even count, matching the
+    sample ``repeated_result`` reports as its representative run.
+    """
+    ordered = sorted(wall_values)
+    return {
+        "runs": len(wall_values),
+        "firstWallMs": wall_values[0],
+        "bestWallMs": ordered[0],
+        "medianWallMs": ordered[len(ordered) // 2],
+        "worstWallMs": ordered[-1],
+        "meanWallMs": round(sum(wall_values) / len(wall_values), 3),
+    }
+
+
 def repeated_result(run_once, runs):
     if runs <= 1:
         return run_once()
@@ -144,14 +161,7 @@ def repeated_result(run_once, runs):
     result = dict(median)
     wall_values = [sample["wallMs"] for sample in samples]
     result["timingSamples"] = wall_values
-    result["timingSummary"] = {
-        "runs": runs,
-        "firstWallMs": wall_values[0],
-        "bestWallMs": min(wall_values),
-        "medianWallMs": median["wallMs"],
-        "worstWallMs": max(wall_values),
-        "meanWallMs": round(sum(wall_values) / len(wall_values), 3),
-    }
+    result["timingSummary"] = timing_summary(wall_values)
     return result
 
 
@@ -930,6 +940,321 @@ def benchmark_project(args, context, key, source_dir, configure_args, build_targ
     return project_report
 
 
+# --- cross_project_trycompile_reuse ---------------------------------------
+#
+# Cache-Scope Phase 1 lifts the action cache out of the project work-root so
+# two projects configured against the same toolchain can share the answers to
+# their CMake try_compile() probes. This scenario measures whether they do:
+# project A primes a fresh action cache, project B is then configured against
+# it, and B's TryCompile builds are compared with B configured against an
+# empty cache.
+#
+# Every TryCompile is one `repro build` invocation that CMake runs with
+# `--log=quiet --no-write-report`, so the only per-probe evidence is the
+# record each invocation writes into $REPRO_STATS_DIR. Its `actions` tally
+# says how many actions the engine served from the cache and how many it ran.
+
+CROSS_PROJECT_SCENARIO = "cross_project_trycompile_reuse"
+CROSS_PROJECT_MIN_HIT_RATE_ENV = "REPROBUILD_CMAKE_BENCH_MIN_CROSS_PROJECT_HIT_RATE"
+TRYCOMPILE_SCRATCH_MARKER = "/CMakeScratch/TryCompile-"
+
+
+def parse_cross_project_pair(text):
+    parts = text.split(":")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        fail(f"--cross-project-pair expects PROJECT_A:PROJECT_B, got '{text}'")
+    return parts[0], parts[1]
+
+
+def default_cross_project_pairs(profile, explicit):
+    if explicit:
+        return [parse_cross_project_pair(text) for text in explicit]
+    # zlib then libuv is the pair Cache-Scope Phase 1's validation criteria
+    # name, and both are already in the medium profile.
+    if profile == "medium":
+        return [("zlib", "libuv")]
+    return []
+
+
+def normalized_path_text(path):
+    return str(path).replace("\\", "/").rstrip("/")
+
+
+def is_trycompile_record(record):
+    return TRYCOMPILE_SCRATCH_MARKER in normalized_path_text(
+        record.get("projectRoot", ""))
+
+
+def load_stats_records(stats_dir):
+    records = []
+    for entry in sorted(Path(stats_dir).glob("*.json")):
+        try:
+            records.append(json.loads(entry.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    return records
+
+
+def parse_configure_log_checks(log_path):
+    """Map each try_compile scratch directory to the check that created it.
+
+    Reads CMake's configure log (CMakeFiles/CMakeConfigureLog.yaml) line by
+    line rather than through a YAML parser: only the `checks:` list and the
+    `directories: source:` entry of each try_compile event are needed.
+    """
+    path = Path(log_path)
+    if not path.exists():
+        return {}
+    checks_by_dir = {}
+    in_trycompile = False
+    in_checks = False
+    checks = []
+    source = None
+
+    def flush():
+        if in_trycompile and source:
+            checks_by_dir[normalized_path_text(source).lower()] = (
+                "; ".join(checks) if checks else "(unnamed try_compile)")
+
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        kind = re.match(r'^(?:-\s+)?kind:\s*"?([^"]+)"?\s*$', stripped)
+        if kind:
+            flush()
+            in_trycompile = kind.group(1).startswith("try_compile")
+            in_checks = False
+            checks = []
+            source = None
+            continue
+        if not in_trycompile:
+            continue
+        if stripped == "checks:":
+            in_checks = True
+            continue
+        if in_checks:
+            item = re.match(r'^-\s+"(.*)"\s*$', stripped)
+            if item:
+                checks.append(item.group(1))
+                continue
+            in_checks = False
+        directory = re.match(r'^source:\s*"(.*)"\s*$', stripped)
+        if directory and source is None:
+            source = directory.group(1)
+    flush()
+    return checks_by_dir
+
+
+def summarize_trycompile_stats(stats_dir, configure_log=None):
+    """Roll the per-invocation stats records of one configure into the
+    TryCompile hit counts the scenario reports."""
+    records = [r for r in load_stats_records(stats_dir)
+               if is_trycompile_record(r)]
+    checks_by_dir = (parse_configure_log_checks(configure_log)
+                     if configure_log else {})
+    summary = {
+        "invocations": len(records),
+        "failedInvocations": sum(1 for r in records
+                                 if r.get("exitCode", 0) != 0),
+        "wallMs": round(sum(r.get("wallMs", 0.0) for r in records), 3),
+        "actions": 0,
+        "launchedActions": 0,
+        "cacheHitActions": 0,
+        "failedActions": 0,
+        "invocationsServedFromCache": 0,
+        "hitRate": None,
+        "executedProbes": [],
+    }
+    tallied = bool(records) and all(
+        isinstance(r.get("actions"), dict) for r in records)
+    if records and not tallied:
+        summary["hitRateUnavailable"] = (
+            "stats records carry no 'actions' tally; the repro binary "
+            "predates it")
+        return summary
+    for record in records:
+        tally = record["actions"]
+        summary["actions"] += tally.get("total", 0)
+        summary["launchedActions"] += tally.get("launched", 0)
+        summary["cacheHitActions"] += tally.get("cacheHit", 0)
+        summary["failedActions"] += tally.get("failed", 0)
+        if tally.get("total", 0) > 0 and tally.get("launched", 0) == 0:
+            summary["invocationsServedFromCache"] += 1
+        else:
+            root = normalized_path_text(record.get("projectRoot", "")).lower()
+            summary["executedProbes"].append({
+                "check": checks_by_dir.get(root, "(unknown check)"),
+                "exitCode": record.get("exitCode"),
+                "launched": tally.get("launched", 0),
+                "cacheHit": tally.get("cacheHit", 0),
+                "total": tally.get("total", 0),
+            })
+    if summary["actions"] > 0:
+        summary["hitRate"] = round(
+            summary["cacheHitActions"] / summary["actions"], 4)
+    return summary
+
+
+def cross_project_env(base_env, repro, store_root, stats_dir):
+    env = dict(base_env)
+    env.update({
+        "REPROBUILD_REPRO": str(repro),
+        "REPROBUILD_SOURCE_ROOT": str(ROOT),
+        # The action cache, its CAS and the generator's canonical TryCompile
+        # sources all live under the store root, so a fresh root is a fresh
+        # cache for every component the scenario is about.
+        "REPROBUILD_STORE_ROOT": str(store_root),
+        "REPRO_STATS_DIR": str(stats_dir),
+    })
+    # A direct cache-root override would win over the store root and point
+    # every configure at the same, already-warm cache.
+    env.pop("REPROBUILD_ACTION_CACHE_ROOT", None)
+    # A per-user build daemon auto-started from inside a TryCompile inherits
+    # CMake's output pipe and CMake then waits for it to exit. Measure the
+    # direct client unless the caller chose a daemon mode explicitly.
+    env.setdefault("REPRO_DAEMON", "off")
+    return env
+
+
+def configure_cross_project_role(context, role_root, key, source_dir,
+                                 configure_args, store_root,
+                                 configure=None):
+    configure = configure or configure_project
+    role_root = Path(role_root)
+    # Configure may write into its source tree (zlib renames zconf.h), so each
+    # configure starts from its own pristine copy.
+    source = copy_source_tree(source_dir, role_root / "source")
+    stats_dir = role_root / "stats"
+    if stats_dir.exists():
+        rmtree_long(stats_dir)
+    stats_dir.mkdir(parents=True)
+    binary_dir = role_root / "build"
+    env = cross_project_env(os.environ.copy(), context["repro"], store_root,
+                            stats_dir)
+    result = configure(
+        context["cmake"], context["ninja"], "Reprobuild", source, binary_dir,
+        context["cCompiler"], context["cxxCompiler"], role_root / "install",
+        configure_args, env=env)
+    return {
+        "project": key,
+        "storeRoot": str(store_root),
+        "wallMs": result["wallMs"],
+        "status": result["status"],
+        "commandLine": result["commandLine"],
+        "tryCompile": summarize_trycompile_stats(
+            stats_dir,
+            Path(binary_dir) / "CMakeFiles" / "CMakeConfigureLog.yaml"),
+    }
+
+
+def run_cross_project_once(context, run_root, project_a, project_b,
+                           configure=None):
+    """One sample: B on an empty cache, then A priming a fresh shared cache,
+    then B against that shared cache. The cold baseline is measured in the
+    same sample as the warm run so host load drifts across both."""
+    run_root = Path(run_root)
+    if run_root.exists():
+        rmtree_long(run_root)
+    empty_store = run_root / "store-empty"
+    shared_store = run_root / "store-shared"
+    empty_store.mkdir(parents=True)
+    shared_store.mkdir(parents=True)
+    cold_b = configure_cross_project_role(
+        context, run_root / "b-cold", project_b["key"],
+        project_b["sourceDir"], project_b["configureArgs"], empty_store,
+        configure=configure)
+    prime_a = configure_cross_project_role(
+        context, run_root / "a-prime", project_a["key"],
+        project_a["sourceDir"], project_a["configureArgs"], shared_store,
+        configure=configure)
+    warm_b = configure_cross_project_role(
+        context, run_root / "b-warm", project_b["key"],
+        project_b["sourceDir"], project_b["configureArgs"], shared_store,
+        configure=configure)
+    return {"coldB": cold_b, "primeA": prime_a, "warmB": warm_b}
+
+
+def aggregate_hit_rate(summaries):
+    actions = sum(s["actions"] for s in summaries)
+    hits = sum(s["cacheHitActions"] for s in summaries)
+    if any(s["hitRate"] is None and s["invocations"] > 0 for s in summaries):
+        return None
+    if actions == 0:
+        return None
+    return round(hits / actions, 4)
+
+
+def cross_project_summary(project_a, project_b, samples):
+    cold_walls = [s["coldB"]["wallMs"] for s in samples]
+    warm_walls = [s["warmB"]["wallMs"] for s in samples]
+    savings = [round(c - w, 3) for c, w in zip(cold_walls, warm_walls)]
+    cold_summary = timing_summary(cold_walls)
+    saving_summary = timing_summary(savings)
+    warm_try = [s["warmB"]["tryCompile"] for s in samples]
+    cold_try = [s["coldB"]["tryCompile"] for s in samples]
+    hit_rate = aggregate_hit_rate(warm_try)
+
+    threshold_text = os.environ.get(CROSS_PROJECT_MIN_HIT_RATE_ENV)
+    threshold = None
+    status = "recorded"
+    if threshold_text:
+        try:
+            threshold = float(threshold_text)
+        except ValueError:
+            fail(f"{CROSS_PROJECT_MIN_HIT_RATE_ENV} must be a number")
+        status = ("pass" if hit_rate is not None and hit_rate >= threshold
+                  else "fail")
+
+    median_cold = cold_summary["medianWallMs"]
+    return {
+        "scenario": CROSS_PROJECT_SCENARIO,
+        "projectA": project_a,
+        "projectB": project_b,
+        "runs": len(samples),
+        "hitRate": hit_rate,
+        "warmBTryCompileActions": sum(t["actions"] for t in warm_try),
+        "warmBTryCompileCacheHits": sum(t["cacheHitActions"] for t in warm_try),
+        "warmBTryCompileLaunched": sum(t["launchedActions"] for t in warm_try),
+        "warmBTryCompileInvocations": sum(t["invocations"] for t in warm_try),
+        "warmBInvocationsServedFromCache": sum(
+            t["invocationsServedFromCache"] for t in warm_try),
+        "coldBaselineHitRate": aggregate_hit_rate(cold_try),
+        "coldBWallMs": cold_summary,
+        "warmBWallMs": timing_summary(warm_walls),
+        "wallSavingMs": saving_summary,
+        "wallSavingPct": (round(100.0 * saving_summary["medianWallMs"] /
+                                median_cold, 2) if median_cold > 0 else None),
+        "threshold": threshold,
+        "thresholdEnv": CROSS_PROJECT_MIN_HIT_RATE_ENV,
+        "status": status,
+        "samples": samples,
+    }
+
+
+def run_cross_project_pair(context, work_root, runs, project_a, project_b,
+                           configure=None):
+    # Short names on purpose: each TryCompile nests the engine's own work-root
+    # several levels below this directory, and on Windows the monitor capture
+    # path at the bottom of it already runs into the path-length limit.
+    pair_root = Path(work_root) / "xproj" / (
+        f"{project_a['key']}-{project_b['key']}")
+    samples = []
+    for index in range(runs):
+        print(f"{CROSS_PROJECT_SCENARIO}: {project_a['key']} then "
+              f"{project_b['key']}, run {index + 1}/{runs}", file=sys.stderr)
+        samples.append(run_cross_project_once(
+            context, pair_root / f"r{index + 1}", project_a, project_b,
+            configure=configure))
+    summary = cross_project_summary(project_a["key"], project_b["key"],
+                                    samples)
+    print(f"{CROSS_PROJECT_SCENARIO}: {project_a['key']} -> "
+          f"{project_b['key']}: hitRate={summary['hitRate']} "
+          f"({summary['warmBTryCompileCacheHits']}/"
+          f"{summary['warmBTryCompileActions']} TryCompile actions), "
+          f"median saving {summary['wallSavingMs']['medianWallMs']} ms "
+          f"({summary['wallSavingPct']}%)", file=sys.stderr)
+    return summary
+
+
 def selected_projects(profile, explicit):
     if explicit:
         return explicit
@@ -951,7 +1276,10 @@ def build_report(args):
 
     cmake = resolve_executable(args.cmake, "forked cmake")
     repro = resolve_executable(args.repro, "repro")
-    runquotad = resolve_executable(args.runquotad, "runquotad")
+    # The cross-project scenario only configures; RunQuota is reached the way
+    # any configure reaches it, so it needs no harness-owned runquotad.
+    runquotad = (None if args.cross_project_only
+                 else resolve_executable(args.runquotad, "runquotad"))
     ninja = find_ninja()
 
     c_compiler = args.c_compiler or cache_value(cmake, cmake_root / "build", "CMAKE_C_COMPILER") or which_first("cc", "gcc", "clang")
@@ -997,7 +1325,8 @@ def build_report(args):
                 "cmake": {"path": str(cmake), "version": command_version([cmake, "--version"])},
                 "ninja": {"path": str(ninja), "version": command_version([ninja, "--version"])},
                 "repro": {"path": str(repro), "version": command_version([repro, "--version"])},
-                "runquotad": {"path": str(runquotad), "version": command_version([runquotad, "--help"])},
+                "runquotad": ({"path": str(runquotad), "version": command_version([runquotad, "--help"])}
+                              if runquotad else None),
                 "cCompiler": {"path": str(c_compiler), "version": command_version([c_compiler, "--version"])},
                 "cxxCompiler": {"path": str(cxx_compiler), "version": command_version([cxx_compiler, "--version"])},
             },
@@ -1006,6 +1335,10 @@ def build_report(args):
             "runquotaMatrix": args.runquota_matrix,
             "executionModes": selected_execution_modes(args.execution_mode),
             "noopRuns": args.noop_runs,
+            "crossProjectPairs": [f"{a}:{b}" for a, b in args.cross_project_pairs],
+            "crossProjectRuns": args.cross_project_runs,
+            "crossProjectOnly": args.cross_project_only,
+            "reproDaemon": os.environ.get("REPRO_DAEMON", "off (scenario default)"),
             "ninjaDiagnostics": {
                 "enabled": args.ninja_diagnostics != "none",
                 "mode": args.ninja_diagnostics,
@@ -1026,13 +1359,22 @@ def build_report(args):
         "ratioSummary": [],
     }
 
-    project_keys = selected_projects(args.profile, args.projects)
-    for key in project_keys:
+    extracted = {}
+
+    def pinned_source(key):
         if key not in locks:
             fail(f"project {key} is not present in {lock_file}")
+        if key not in extracted:
+            archive = ensure_archive(key, locks[key], source_cache)
+            extracted[key] = (archive, extract_project(
+                key, locks[key], archive, sources_root))
+        return extracted[key]
+
+    project_keys = ([] if args.cross_project_only
+                    else selected_projects(args.profile, args.projects))
+    for key in project_keys:
+        archive, source_dir = pinned_source(key)
         project = locks[key]
-        archive = ensure_archive(key, project, source_cache)
-        source_dir = extract_project(key, project, archive, sources_root)
         compiled = bool_field(project, "EXPECT_COMPILE_ACTIONS")
         project_report = benchmark_project(
             args,
@@ -1053,20 +1395,36 @@ def build_report(args):
         report["projects"].append(project_report)
         report["ratioSummary"].extend(project_report["ratios"])
 
-    generated_report = benchmark_project(
-        args,
-        context,
-        "generated_custom_command",
-        generated_source,
-        [],
-        "genbench",
-        True,
-        "main.c",
-        custom_seed=generated_source / "seed.txt",
-    )
-    generated_report["coverageNote"] = "local generated-source/custom-command fixture"
-    report["projects"].append(generated_report)
-    report["ratioSummary"].extend(generated_report["ratios"])
+    if not args.cross_project_only:
+        generated_report = benchmark_project(
+            args,
+            context,
+            "generated_custom_command",
+            generated_source,
+            [],
+            "genbench",
+            True,
+            "main.c",
+            custom_seed=generated_source / "seed.txt",
+        )
+        generated_report["coverageNote"] = "local generated-source/custom-command fixture"
+        report["projects"].append(generated_report)
+        report["ratioSummary"].extend(generated_report["ratios"])
+
+    report["crossProjectReuse"] = []
+    for key_a, key_b in args.cross_project_pairs:
+        def described(key):
+            _, source_dir = pinned_source(key)
+            return {"key": key, "sourceDir": source_dir,
+                    "configureArgs": many(locks[key], "CONFIGURE_ARGS")}
+        project_a = described(key_a)
+        project_b = described(key_b)
+        summary = run_cross_project_pair(
+            context, args.work_root, args.cross_project_runs, project_a,
+            project_b)
+        summary["projectAVersion"] = one(locks[key_a], "VERSION")
+        summary["projectBVersion"] = one(locks[key_b], "VERSION")
+        report["crossProjectReuse"].append(summary)
 
     failed_thresholds = [r for r in report["ratioSummary"] if r["status"] == "fail"]
     missing_ratios = [r for r in report["ratioSummary"] if r["ratioReprobuildToNinja"] is None]
@@ -1074,6 +1432,13 @@ def build_report(args):
         fail(f"missing ratio records: {missing_ratios}")
     if failed_thresholds:
         fail(f"benchmark ratio threshold failures: {failed_thresholds}")
+    failed_reuse = [{"projectA": r["projectA"], "projectB": r["projectB"],
+                     "hitRate": r["hitRate"], "threshold": r["threshold"]}
+                    for r in report["crossProjectReuse"]
+                    if r["status"] == "fail"]
+    if failed_reuse:
+        fail(f"{CROSS_PROJECT_SCENARIO} hit-rate threshold failures: "
+             f"{failed_reuse}")
     return report
 
 
@@ -1117,9 +1482,32 @@ def parse_args():
                             "REPROBUILD_CMAKE_BENCH_NOOP_RUNS", "5")),
                         help="repeat no-op rebuild scenarios and report the median wall time")
     parser.add_argument("--fresh", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--cross-project-pair", action="append", default=None,
+        metavar="PROJECT_A:PROJECT_B",
+        help=f"run the {CROSS_PROJECT_SCENARIO} scenario: configure "
+             "PROJECT_A on a fresh action cache, then PROJECT_B against the "
+             "same cache, and compare PROJECT_B with an empty-cache configure. "
+             "Repeatable. The medium profile runs zlib:libuv by default.")
+    parser.add_argument(
+        "--cross-project-runs", type=int,
+        default=int(os.environ.get(
+            "REPROBUILD_CMAKE_BENCH_CROSS_PROJECT_RUNS", "3")),
+        help="samples per cross-project pair; each sample re-measures the "
+             "empty-cache baseline next to the warm configure")
+    parser.add_argument(
+        "--cross-project-only", action="store_true",
+        help="skip the Ninja-vs-Reprobuild project matrix and run only the "
+             f"{CROSS_PROJECT_SCENARIO} pairs")
     args = parser.parse_args()
     if args.noop_runs <= 0:
         fail("--noop-runs must be greater than zero")
+    if args.cross_project_runs <= 0:
+        fail("--cross-project-runs must be greater than zero")
+    args.cross_project_pairs = default_cross_project_pairs(
+        args.profile, args.cross_project_pair)
+    if args.cross_project_only and not args.cross_project_pairs:
+        fail("--cross-project-only needs at least one --cross-project-pair")
     args.work_root = args.work_root.expanduser().resolve()
     args.output = args.output.expanduser().resolve()
     args.cmake_root = args.cmake_root.expanduser().resolve()

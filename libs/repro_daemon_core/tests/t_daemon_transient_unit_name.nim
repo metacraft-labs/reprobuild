@@ -38,6 +38,7 @@
 ## about.
 
 import std/[os, osproc, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_daemon_core
 

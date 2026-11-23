@@ -7,7 +7,7 @@
 ##
 ##   1. Fast-forwards every configured manifest layer (no-op here:
 ##      these fixtures use M6 / M7 single-project mode so there's no
-##      ``.repro/workspace.toml``).
+##      ``.repro/workspace-state.toml``).
 ##   2. Resolves the named project / variant via the M6 surface.
 ##   3. Gathers a structured ``RepoSyncObservation`` per declared
 ##      repo (HEAD SHA, clean/dirty, current branch, branch tips,
@@ -153,41 +153,44 @@ proc projectTomlWithRemote(libUrl: string): string =
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
     "[project]\n" &
     "name = \"myproject\"\n" &
-    "default_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n" &
+    "\n" &
     "[[remote]]\nname = \"lib-origin\"\nfetch = \"" & libUrl & "\"\n\n" &
     "includes = [\n" &
     "  \"repos/lib.toml\",\n" &
     "]\n"
 
 const libFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib"
 path = "lib"
 remote = "lib-origin"
-revision = "main"
+mainline = "main"
 """
 
-proc libFragmentTomlPinned(sha: string; branch = ""): string =
-  ## Fragment variant pinned to an explicit SHA rather than a branch
-  ## name. This is the shape every vendored / third-party reference tree
-  ## in a real workspace uses (``repos/mold.toml``, ``repos/llvm-project.toml``,
-  ## …): ``revision`` names the exact commit the workspace is pinned to,
-  ## and the branch it came from is not the correctness boundary.
+proc libFragmentTomlPinned(sha: string; mainline = "main"): string =
+  ## Fragment variant pinned to an explicit SHA. This is the shape every
+  ## vendored / third-party reference tree in a real workspace uses
+  ## (``repos/mold.toml``, ``repos/llvm-project.toml``, …): ``revision``
+  ## names the exact commit the workspace is pinned to, and the branch it
+  ## came from is not the correctness boundary.
   ##
-  ## ``branch`` adds the declared tracking branch alongside the pin — the
-  ## two-field form those real fragments actually use ("`branch` says what
-  ## this tracks; `revision` says where it sits").
+  ## Every fragment declares its ``mainline`` (a fragment that resolves
+  ## none does not load, and this fixture has no settings file whose
+  ## profile could supply one), so the pin is always written in the
+  ## two-field form those real fragments use: "`mainline` says what this
+  ## tracks; `revision` says where it sits". The cases below therefore pin
+  ## the property they name — how sync treats a detached checkout at a SHA
+  ## pin — WITH the mainline declared, which is the only shape a pin can
+  ## now take.
   result =
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"lib\"\n" &
     "path = \"lib\"\n" &
     "remote = \"lib-origin\"\n"
-  if branch.len > 0:
-    result.add("branch = \"" & branch & "\"\n")
+  result.add("mainline = \"" & mainline & "\"\n")
   result.add("revision = \"" & sha & "\"\n")
 
 # ---- fixture builder ------------------------------------------------------
@@ -220,12 +223,12 @@ proc setupFixture(gitBin, slug: string): M10Fixture =
   writeFile(manifestsRoot / "repos" / "lib.toml", libFragmentToml)
   result.workspaceRoot = workspaceRoot
 
-proc repinFragment(fixture: M10Fixture; sha: string; branch = "") =
+proc repinFragment(fixture: M10Fixture; sha: string; mainline = "main") =
   ## Rewrite the fixture's repo fragment to pin an explicit SHA. Called
   ## after ``setupFixture`` because the SHA only exists once the origin
   ## has been seeded.
   writeFile(fixture.workspaceRoot / "repos" / "lib.toml",
-    libFragmentTomlPinned(sha, branch))
+    libFragmentTomlPinned(sha, mainline))
 
 proc readReport(fixture: M10Fixture): JsonNode =
   let reportPath = fixture.workspaceRoot / ".repro" / "build" / "reports" /
@@ -467,7 +470,7 @@ suite "M10 — repro workspace sync (seven sync corner cases)":
 
   test "test_m10_sync_declared_branch_does_not_override_the_pin":
     ## The exact shape of every vendored fragment in a real workspace —
-    ## ``branch = "main"`` AND ``revision = <sha>`` together, where the
+    ## ``mainline = "main"`` AND ``revision = <sha>`` together, where the
     ## tracked branch has moved past the pin. The declared branch says what
     ## the repo TRACKS; it does not license moving the checkout to that
     ## branch's tip. Sync must respect the pin and leave the tree alone.
@@ -488,7 +491,7 @@ suite "M10 — repro workspace sync (seven sync corner cases)":
         " switch --detach " & pinnedSha)
       discard requireGit(q(gitBin) & " -C " & q(libPath) &
         " branch -f main " & advancedSha)
-      repinFragment(fx, pinnedSha, branch = "main")
+      repinFragment(fx, pinnedSha, mainline = "main")
 
       let res = invokeSync(fx)
       if res.code != 0:

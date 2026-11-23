@@ -51,7 +51,7 @@ three reasons:
 1. **ABI consistency** with DE0-D (which copies host-installed dbus
    binaries from the jammy build host). Mixing nixpkgs-cached mesa
    with jammy-host libsystemd would risk silent ABI breakage that
-   nothing in the gate catches until vm-harness boot.
+   nothing in the gate catches until gosti boot.
 2. **No new fetcher needed.** The build script reuses
    `curl + sha256sum + dpkg-deb -x`, the same toolchain DE0-D's
    `plant_pkg` helper uses transitively. Teaching the builder how to

@@ -25,7 +25,7 @@
 ## it is the only rule that can end a spinner — and it must stay
 ## distinguishable in the log from the no-progress rule.
 ##
-## Three real arms, one runner invocation, ``--test-timeout=6``
+## Four real arms, one runner invocation, ``--test-timeout=6``
 ## (⇒ absolute ceiling 24 s):
 ##
 ##   1. ``t_cpu_liveness_working``  — prints once, then a CHILD burns CPU
@@ -43,6 +43,13 @@
 ##      it. MUST be killed at ~24 s and MUST be reported as
 ##      ``ABSOLUTE TIMEOUT``, not ``IDLE TIMEOUT``. Under the old rule it died
 ##      at 6 s with the wrong label.
+##   4. ``t_cpu_liveness_detached_tree`` — prints once; a child leaves the
+##      case's process group with ``setsid`` and runs short (0.4 s) CPU
+##      burners back to back for 12 s, each exiting between two samples.
+##      MUST PASS. This is the shape of an in-process ``repro build``, whose
+##      engine puts every action in a process group of its own; a liveness
+##      signal that summed only the case's process group read zero and
+##      killed it at 6 s.
 ##
 ## MOCKS: none, and none are justifiable here. Every claim this file makes is
 ## about how the runner reads the operating system's own accounting of real
@@ -107,6 +114,46 @@ sleep(120_000)
 quit(0)
 """
 
+const DetachedTreeFixtureSource = """
+import std/[os, osproc, posix, times]
+# The shape of an in-process ``repro build`` inside a case: the reprobuild
+# engine moves every build action into a process group of its own
+# (``assignProcessGroup`` -> ``setpgid(pid, pid)``), so the compile CPU is
+# spent OUTSIDE the case's process group. Here the leader only waits; a
+# middle process leaves the group with ``setsid`` and then runs a series of
+# short burners, each of which starts and exits between two liveness samples
+# and is reaped by the middle process. Neither the leader nor the middle
+# process burns anything measurable, so a group-only signal reads a flat zero.
+# Every process still carries the runner's owner token in its environment.
+if paramCount() >= 1 and paramStr(1) == "burn":
+  let deadline = epochTime() + 0.4
+  var acc = 0.0
+  var i = 0
+  while epochTime() < deadline:
+    acc += float(i mod 7) * 1.000001
+    i = (i + 1) mod 1_000_000
+  quit(if acc < 0.0: 1 else: 0)
+if paramCount() >= 1 and paramStr(1) == "mid":
+  if setsid() < 0:
+    quit(3)
+  let deadline = epochTime() + """ & $WorkingBurnSec & """.0
+  while epochTime() < deadline:
+    let burner = startProcess(getAppFilename(), args = ["burn"],
+      options = {poParentStreams})
+    let code = burner.waitForExit()
+    burner.close()
+    if code != 0:
+      quit(code)
+  quit(0)
+echo "cpu-liveness detached-tree fixture: CPU is spent only outside this group"
+stdout.flushFile()
+let mid = startProcess(getAppFilename(), args = ["mid"],
+  options = {poParentStreams})
+let code = mid.waitForExit()
+mid.close()
+quit(code)
+"""
+
 const LivelockFixtureSource = """
 echo "cpu-liveness livelock fixture: spinning forever, always 'making progress'"
 stdout.flushFile()
@@ -134,6 +181,7 @@ type
     working: CaseFindings
     wedged: CaseFindings
     livelock: CaseFindings
+    detachedTree: CaseFindings
 
 proc findRepoRoot(): string =
   var dir = currentSourcePath().parentDir
@@ -251,7 +299,8 @@ proc runFixtures(): RunFindings =
   for (stem, source) in {
       "t_cpu_liveness_working": WorkingFixtureSource,
       "t_cpu_liveness_wedged": WedgedFixtureSource,
-      "t_cpu_liveness_livelock": LivelockFixtureSource}.items:
+      "t_cpu_liveness_livelock": LivelockFixtureSource,
+      "t_cpu_liveness_detached_tree": DetachedTreeFixtureSource}.items:
     compileFixture(tmpDir / (stem & ".nim"), binDir / addFileExt(stem, ExeExt),
       source, tmpDir / "nimcache" / stem)
 
@@ -285,6 +334,7 @@ proc runFixtures(): RunFindings =
   result.working = readCase(tests, "t_cpu_liveness_working")
   result.wedged = readCase(tests, "t_cpu_liveness_wedged")
   result.livelock = readCase(tests, "t_cpu_liveness_livelock")
+  result.detachedTree = readCase(tests, "t_cpu_liveness_detached_tree")
 
 # One runner invocation feeds all three behavioural arms; spawning it once
 # per ``test`` block would triple a ~45 s cost for no extra evidence.
@@ -314,6 +364,10 @@ suite "repro_test_runner liveness is progress-based, not silence-based":
     # The signal itself, and the fact that it is read from the kernel's own
     # accounting rather than inferred from the output stream.
     check "processGroupCpuSeconds" in text
+    # ...and on Linux the signal covers the case's whole process TREE: its
+    # group plus every process carrying its owner token.
+    check "sampleCaseCpuSeconds" in text
+    check "environHasExactEntry(environment, expected)" in text
     check "/proc" in text
     check "cpuProgressThresholdSec" in text
     # "Unavailable" must be a distinct third state from "measured zero",
@@ -328,7 +382,7 @@ suite "repro_test_runner liveness is progress-based, not silence-based":
     let f = findings()
     checkpoint("runner exit=" & $f.runnerExit & " wall=" &
       formatFloat(f.wallSec, ffDecimal, 1) & "s")
-    check f.entries == 3
+    check f.entries == 4
     check f.working.found
     checkpoint("working: status=" & f.working.status & " duration=" &
       $f.working.durationMs & "ms stdout=" & f.working.stdout)
@@ -398,3 +452,20 @@ suite "repro_test_runner liveness is progress-based, not silence-based":
     # bound is deliberately loose so a loaded host cannot flake it, while
     # still being unreachable by the wedged fixture's ~0.00 s.
     check groupCpu > 3.0
+
+  test "CPU spent outside the case's process group still counts as progress":
+    # The in-process ``repro build`` shape: the work runs in processes the
+    # engine moved into process groups of their own, and each one starts and
+    # exits between two liveness samples. A group-only signal saw a flat zero
+    # here and killed the case at the idle deadline (full-suite runs 33-35:
+    # 288 s of real user CPU credited as 13.59 s). The owner-token tree
+    # signal, with reaped child time, must see it.
+    let f = findings()
+    check f.detachedTree.found
+    checkpoint("detached tree: status=" & f.detachedTree.status &
+      " duration=" & $f.detachedTree.durationMs & "ms stdout=" &
+      f.detachedTree.stdout)
+    check f.detachedTree.status == "PASS"
+    check "IDLE TIMEOUT" notin f.detachedTree.stdout
+    check f.detachedTree.durationMs >= (WorkingBurnSec - 2) * 1000
+    check f.detachedTree.durationMs < AbsoluteCeilingSec * 1000

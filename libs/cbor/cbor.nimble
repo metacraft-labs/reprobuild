@@ -1,6 +1,6 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "RFC 8949 CBOR: encoder, fail-closed decoder, and a diagnostic-notation reader"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"

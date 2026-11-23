@@ -86,19 +86,25 @@
 ##   * **It applies no policy.** Whether the measurements are ACCEPTABLE
 ##     is a verifier's question and is answered against a pinned
 ##     manifest, not here.
-##   * **It issues no TPM command.** `Tpm2Source` is the seam a command
-##     transaction plugs into; the implementation shipped here reads
-##     artifacts a TPM has already produced, from paths it is configured
-##     with.
+##   * **It issues no TPM command itself.** `Tpm2Source` is the seam a
+##     command transaction plugs into, and two implementations plug into
+##     it: `CapturedTpm2Source`, which reads artifacts a TPM has already
+##     produced from paths it is configured with, and
+##     `DeviceTpm2Source`, which runs `TPM2_Quote` against a device or a
+##     socket through `tpm2_device`. The checks below are the same for
+##     both, which is the point of the seam — a misbehaving device is
+##     refused by the rule that refuses a stale capture.
 ##
 ## ## Mocking
 ##
 ## None. `CapturedTpm2Source` is not a mock of a TPM: every byte it
 ## returns was produced by one, and it reads them from the filesystem
-## rather than synthesizing them. The checks in `driverQuote` run against
-## those real bytes, which is the point — a source that returns a stale
-## or foreign quote is refused by the same rule that would refuse a
-## misbehaving device.
+## rather than synthesizing them. `DeviceTpm2Source` has no pretend mode
+## either — a machine with no TPM reachable gets a refusal naming the
+## endpoint. The checks in `driverQuote` run against real bytes in both
+## cases, which is the point: a source that returns a stale or foreign
+## quote is refused by the same rule that would refuse a misbehaving
+## device.
 
 import std/[options, os, strutils]
 
@@ -107,6 +113,7 @@ import ./driver
 import ./event_log
 import ./report
 import ./tpm2
+import ./tpm2_device
 
 const
   Tpm2EvidenceSchema* = "reproos.tpm2-evidence.v1"
@@ -391,6 +398,16 @@ method sourceCertificates*(s: Tpm2Source): seq[string] {.base.} =
   ## chain" stay two different answers.
   @[]
 
+method sourceClose*(s: Tpm2Source) {.base.} =
+  ## Release whatever the source holds open.
+  ##
+  ## The default does nothing, because a source that reads files holds
+  ## nothing: a seam whose every implementation had to write an empty
+  ## override would collect empty overrides. A source that holds a
+  ## device handle and a transient key handle overrides it, and the
+  ## driver's `driverClose` is what calls it.
+  discard
+
 # ---------------------------------------------------------------------
 # A source backed by artifacts a TPM already produced
 # ---------------------------------------------------------------------
@@ -466,7 +483,7 @@ method sourceCertificates*(s: CapturedTpm2Source): seq[string] =
     result.add readArtifact(path, "certificate")
 
 # ---------------------------------------------------------------------
-# The driver
+# What a quote covers
 # ---------------------------------------------------------------------
 
 const
@@ -482,6 +499,176 @@ proc defaultQuotedSelection*(): TpmlPcrSelection =
   ## The selection a `Tpm2Driver` is configured with when it is not told
   ## otherwise.
   pcrSelection(DefaultQuotedPcrBank, DefaultQuotedPcrs)
+
+# ---------------------------------------------------------------------
+# A source backed by a TPM this machine can talk to
+# ---------------------------------------------------------------------
+
+type
+  DeviceTpm2Source* = ref object of Tpm2Source
+    ## Runs `TPM2_Quote` against a device node or a socket, and reads
+    ## the event log from the path firmware's record is exposed at.
+    ##
+    ## The quote comes from a transaction and the log comes from a file,
+    ## because that is how the two artifacts exist: a TPM has no command
+    ## that returns the log, and firmware has no way to sign one. The
+    ## pairing is the machine's own claim that these two describe the
+    ## same boot, and `driverQuote` is what checks it.
+    ##
+    ## The register selection is held here as well as in the driver, and
+    ## that is not a duplicated setting: the driver's copy is the
+    ## *expectation*, the source's copy is what goes on the wire, and
+    ## the TPM echoes the selection it actually quoted back inside the
+    ## signed structure. So the driver's comparison is a check against
+    ## the TPM's answer rather than against this object. Build both
+    ## through `newTpm2DeviceDriver` and they cannot be set apart by
+    ## accident.
+    transport: Tpm2Transport
+    eventLogPath: string
+    certificatePaths: seq[string]
+    selection: TpmlPcrSelection
+    key: Tpm2SigningKey
+    keyLoaded: bool
+
+const
+  DefaultTpmDevicePath* = "/dev/tpmrm0"
+    ## The kernel's TPM resource manager. Preferred over `/dev/tpm0`,
+    ## which admits one caller at a time: a daemon holding the raw
+    ## device open locks every other user of the machine's TPM out.
+
+  DefaultTpmEventLogPath* =
+    "/sys/kernel/security/tpm0/binary_bios_measurements"
+    ## Where a Linux kernel exposes the log firmware wrote. It is in
+    ## securityfs, so a machine that has not mounted it has no log to
+    ## offer and `sourceProbe` says which path was missing.
+
+proc newDeviceTpm2Source*(transport: Tpm2Transport;
+                          eventLogPath = DefaultTpmEventLogPath;
+                          selection: TpmlPcrSelection =
+                            defaultQuotedSelection();
+                          certificatePaths: seq[string] = @[]):
+                         DeviceTpm2Source =
+  if transport.isNil:
+    raise newException(Tpm2EvidenceError,
+      "a TPM-backed source needs a transport; a source with none could " &
+      "only report that it has nothing, and it would do so on a machine " &
+      "that has a TPM")
+  if eventLogPath.len == 0:
+    raise newException(Tpm2EvidenceError,
+      "a TPM-backed source needs the path its platform's event log is " &
+      "exposed at; a quote with no log says that some registers held " &
+      "some values and nothing about what put them there")
+  if selectedPcrs(selection).len == 0:
+    raise newException(Tpm2EvidenceError,
+      "a TPM-backed source asked to quote no register would make the TPM " &
+      "sign the digest of the empty string, which is the same on every " &
+      "machine")
+  result = DeviceTpm2Source(
+    transport: transport,
+    eventLogPath: eventLogPath,
+    certificatePaths: certificatePaths,
+    selection: selection,
+    keyLoaded: false)
+  initTpm2Source(result, "device:" & transport.endpoint)
+
+proc attestationKey*(s: DeviceTpm2Source): Tpm2SigningKey =
+  ## The key quotes from this source are signed by, as the TPM
+  ## describes it, or a zeroed record before the first quote has been
+  ## taken.
+  ##
+  ## Read by whoever has to decide whether a quote came from this
+  ## machine's TPM: the key's qualified name is the field a quote's
+  ## `qualifiedSigner` carries, so holding both is what turns "a quote"
+  ## into "a quote from this key".
+  s.key
+
+proc transportEndpoint*(s: DeviceTpm2Source): string =
+  ## What this source is talking to. Diagnostics only.
+  s.transport.endpoint
+
+proc ensureKey(s: DeviceTpm2Source) =
+  ## The attestation key, created once per source.
+  ##
+  ## Lazily rather than at construction, so building a source is not a
+  ## TPM transaction: `sourceProbe` has to be answerable on a machine
+  ## whose TPM is busy, and a constructor that took the hierarchy's
+  ## authorization would make "can this machine attest?" cost the thing
+  ## it is asking about.
+  if s.keyLoaded: return
+  s.key = tpmCreateAttestationKey(s.transport)
+  s.keyLoaded = true
+
+method sourceProbe*(s: DeviceTpm2Source): BackendReadiness =
+  ## Reads registers and a path, and takes no quote.
+  ##
+  ## `TPM2_PCR_Read` is the probe because it is the cheapest command
+  ## that proves the conversation works end to end — framing,
+  ## authorization-free parameter marshalling, response parsing — and
+  ## it consumes nothing. A probe that created the key would make a
+  ## liveness check a way to use up the TPM's object slots.
+  var absent: seq[string] = @[]
+  if not fileExists(s.eventLogPath): absent.add s.eventLogPath
+  var registers = 0
+  var deviceDetail = ""
+  try:
+    var indices: seq[int] = @[]
+    var bank = TpmAlgNull
+    for e in selectedPcrs(s.selection):
+      if bank == TpmAlgNull: bank = e.bank
+      if e.bank == bank: indices.add e.index
+    registers = tpmPcrRead(s.transport, bank, indices).len
+    deviceDetail = "tpm2: " & s.transport.endpoint & " answered for " &
+      $registers & " " & $bank & " register(s)"
+  except CatchableError as e:
+    return BackendReadiness(ready: false,
+      detail: "tpm2: " & s.transport.endpoint & " did not answer: " & e.msg)
+  if absent.len > 0:
+    return BackendReadiness(ready: false,
+      detail: deviceDetail & ", but there is no event log at " &
+        absent.join(", no event log at ") &
+        "; a quote with no log describes no boot")
+  BackendReadiness(ready: true,
+    detail: deviceDetail & ", event log at " & s.eventLogPath)
+
+method sourceQuote*(s: DeviceTpm2Source; reportData: string):
+                   Tpm2QuoteBytes =
+  ## One `TPM2_Quote`, with the 64 bytes as `qualifyingData`.
+  ##
+  ## Every transport and command refusal is translated to this module's
+  ## error type, because `driverQuote` catches that one and turns it
+  ## into the `DriverError` the seam promises. A `Tpm2TransportError`
+  ## escaping here would be a refusal that a caller catching
+  ## `DriverError` does not catch, which is the difference between a
+  ## machine that refuses and a machine that crashes.
+  try:
+    ensureKey(s)
+    let quoted = tpmQuote(s.transport, s.key.handle, reportData,
+                          s.selection)
+    Tpm2QuoteBytes(attest: quoted.attest, signature: quoted.signature)
+  except Tpm2TransportError as e:
+    raise newException(Tpm2EvidenceError, e.msg)
+
+method sourceEventLog*(s: DeviceTpm2Source): string =
+  readArtifact(s.eventLogPath, "event log")
+
+method sourceCertificates*(s: DeviceTpm2Source): seq[string] =
+  result = @[]
+  for path in s.certificatePaths:
+    result.add readArtifact(path, "certificate")
+
+method sourceClose*(s: DeviceTpm2Source) =
+  ## Flush the key, then close the transport. In that order: the handle
+  ## is the transport's to release, so closing first would leave a
+  ## transient object loaded in a TPM nobody is talking to any more.
+  if s.keyLoaded:
+    try: tpmFlushContext(s.transport, s.key.handle)
+    except CatchableError: discard
+    s.keyLoaded = false
+  s.transport.transportClose()
+
+# ---------------------------------------------------------------------
+# The driver
+# ---------------------------------------------------------------------
 
 type
   Tpm2Driver* = ref object of AttestationDriver
@@ -511,8 +698,31 @@ proc quotedSelection*(d: Tpm2Driver): TpmlPcrSelection =
   ## whatever renders a machine's attestation capability.
   d.selection
 
+proc newTpm2DeviceDriver*(transport: Tpm2Transport;
+                          eventLogPath = DefaultTpmEventLogPath;
+                          selection: TpmlPcrSelection =
+                            defaultQuotedSelection();
+                          certificatePaths: seq[string] = @[]):
+                         Tpm2Driver =
+  ## A driver over a TPM this machine can talk to, with the source and
+  ## the driver given the SAME register selection.
+  ##
+  ## It exists so the two cannot be set apart by accident. The source
+  ## sends a selection to the TPM; the driver checks what the TPM says
+  ## it quoted; and if those were configured separately, a machine
+  ## quoting the wrong registers would refuse its own evidence at
+  ## run time instead of being impossible to build.
+  newTpm2Driver(newDeviceTpm2Source(transport, eventLogPath, selection,
+                                    certificatePaths),
+                selection)
+
 method driverProbe*(d: Tpm2Driver): BackendReadiness =
   d.source.sourceProbe()
+
+method driverClose*(d: Tpm2Driver) =
+  ## Hand the close on to the source, which is the only thing here that
+  ## can be holding anything.
+  d.source.sourceClose()
 
 proc quoteImpl(d: Tpm2Driver; req: QuoteRequest): QuoteResult =
   let quoted = d.source.sourceQuote(req.reportData)

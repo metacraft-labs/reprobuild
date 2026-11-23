@@ -1,0 +1,7 @@
+PRETTY_NAME="Raspbian GNU/Linux 13 (trixie)"
+NAME="Raspbian GNU/Linux"
+VERSION_ID="13"
+VERSION="13 (trixie)"
+VERSION_CODENAME=trixie
+ID=raspbian
+ID_LIKE=debian

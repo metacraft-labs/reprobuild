@@ -46,6 +46,9 @@ import repro_home_resources/drivers/launchd_user
 import repro_home_resources/drivers/systemd_user
 import repro_home_resources/drivers/user_file
 import repro_home_resources/drivers/vscode_extension
+import repro_home_resources/drivers/app_bundle
+import repro_home_resources/concerns
+import repro_home_resources/test_home_fence
 
 export errors
 export types
@@ -58,6 +61,7 @@ export env_user
 export managed_block
 export registry
 export shell_integration
+export app_bundle
 export windows_startup
 export dconf_key
 export defaults
@@ -68,6 +72,8 @@ export systemd_user
 export user_file
 export vscode_extension
 export builtin_registrations
+export concerns
+export test_home_fence
 
 # Populate the resource-type registry at import time so the closed-set
 # built-ins are available to `digestOfResource` / `observeResource`

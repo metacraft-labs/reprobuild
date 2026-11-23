@@ -15,6 +15,7 @@
 ## debuggable byte-for-byte under cross-platform fuzzing.
 
 import std/strutils
+from repro_core/codec import elementCountFits
 
 import ./types
 
@@ -195,11 +196,17 @@ proc decodeAdvertise*(data: openArray[byte]): Advertise =
     raise newException(PeerCacheCodecError,
       "Advertise mode tag out of range: " & $modeRaw)
   result.mode = AdvertiseMode(modeRaw)
-  let addedLen = int(readU32(data, pos))
+  let addedCount = readU32(data, pos)
+  if not elementCountFits(addedCount, data.len - pos, 32):
+    raise newException(PeerCacheCodecError, "added digest count exceeds payload")
+  let addedLen = int(addedCount)
   result.added = newSeq[BlobDigest](addedLen)
   for i in 0 ..< addedLen:
     result.added[i] = readDigest(data, pos)
-  let removedLen = int(readU32(data, pos))
+  let removedCount = readU32(data, pos)
+  if not elementCountFits(removedCount, data.len - pos, 32):
+    raise newException(PeerCacheCodecError, "removed digest count exceeds payload")
+  let removedLen = int(removedCount)
   result.removed = newSeq[BlobDigest](removedLen)
   for i in 0 ..< removedLen:
     result.removed[i] = readDigest(data, pos)
@@ -280,7 +287,10 @@ proc decodeWant*(data: openArray[byte]): Want =
     raise newException(PeerCacheCodecError,
       "Want kind tag out of range: " & $kindRaw)
   result.kind = WantKind(kindRaw)
-  let count = int(readU32(data, pos))
+  let rawCount = readU32(data, pos)
+  if not elementCountFits(rawCount, data.len - pos, 32):
+    raise newException(PeerCacheCodecError, "element count exceeds payload")
+  let count = int(rawCount)
   result.digests = newSeq[BlobDigest](count)
   for i in 0 ..< count:
     result.digests[i] = readDigest(data, pos)
@@ -320,6 +330,106 @@ proc decodeFetchResponse*(data: openArray[byte]): FetchResponse =
   if pos != data.len:
     raise newException(PeerCacheCodecError,
       "trailing bytes after FetchResponse payload: " & $(data.len - pos))
+
+# ---------------------------------------------------------------------------
+# Distributed-Execution M0: two-phase memoization payloads.
+#
+#   GetSelectorsRequest       weak[32]
+#   GetSelectorsResponse      weak[32] u32 count {pathSet[32] strong[32]}*
+#   GetActionRecordRequest    weak[32] strong[32]
+#   GetActionRecordResponse   weak[32] strong[32] bool found u32 len entry
+# ---------------------------------------------------------------------------
+
+const MaxSelectorsPerResponse* = 4096
+  ## Upper bound a decoder accepts for one selector list. A weak
+  ## fingerprint with thousands of distinct path sets is already a
+  ## pathological action; the bound keeps a hostile count field from
+  ## turning one frame into a multi-gigabyte allocation before the
+  ## per-element length checks run.
+
+proc encodeGetSelectorsRequest*(msg: GetSelectorsRequest): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+
+proc decodeGetSelectorsRequest*(data: openArray[byte]): GetSelectorsRequest =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetSelectorsRequest payload: " & $(data.len - pos))
+
+proc encodeGetSelectorsResponse*(msg: GetSelectorsResponse): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+  result.writeU32(uint32(msg.selectors.len))
+  for sel in msg.selectors:
+    result.writeDigest(sel.pathSetDigest)
+    result.writeDigest(sel.strongFingerprint)
+
+proc decodeGetSelectorsResponse*(data: openArray[byte]): GetSelectorsResponse =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  let rawCount = readU32(data, pos)
+  if not elementCountFits(rawCount, data.len - pos, 64):
+    raise newException(PeerCacheCodecError,
+      "GetSelectorsResponse selector count exceeds remaining bytes")
+  let count = int(rawCount)
+  if count > MaxSelectorsPerResponse:
+    raise newException(PeerCacheCodecError,
+      "GetSelectorsResponse selector count " & $count & " exceeds " &
+      $MaxSelectorsPerResponse)
+  ensureBytes(data.len - pos, count * 64, "GetSelectorsResponse selectors")
+  result.selectors = newSeq[MemoSelector](count)
+  for i in 0 ..< count:
+    result.selectors[i].pathSetDigest = readDigest(data, pos)
+    result.selectors[i].strongFingerprint = readDigest(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetSelectorsResponse payload: " & $(data.len - pos))
+
+proc encodeGetActionRecordRequest*(msg: GetActionRecordRequest): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+  result.writeDigest(msg.strongFingerprint)
+
+proc decodeGetActionRecordRequest*(data: openArray[byte]):
+    GetActionRecordRequest =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  result.strongFingerprint = readDigest(data, pos)
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetActionRecordRequest payload: " &
+      $(data.len - pos))
+
+proc encodeGetActionRecordResponse*(msg: GetActionRecordResponse): seq[byte] =
+  result = @[]
+  result.writeDigest(msg.weakFingerprint)
+  result.writeDigest(msg.strongFingerprint)
+  result.writeBool(msg.found)
+  result.writeU32(uint32(msg.entry.len))
+  for b in msg.entry:
+    result.add(b)
+
+proc decodeGetActionRecordResponse*(data: openArray[byte]):
+    GetActionRecordResponse =
+  var pos = 0
+  result.weakFingerprint = readDigest(data, pos)
+  result.strongFingerprint = readDigest(data, pos)
+  result.found = readBool(data, pos)
+  let entryLen = int(readU32(data, pos))
+  ensureBytes(data.len - pos, entryLen, "GetActionRecordResponse entry bytes")
+  result.entry = newSeq[byte](entryLen)
+  for i in 0 ..< entryLen:
+    result.entry[i] = data[pos + i]
+  inc pos, entryLen
+  if not result.found and entryLen != 0:
+    raise newException(PeerCacheCodecError,
+      "GetActionRecordResponse carries entry bytes but found = false")
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after GetActionRecordResponse payload: " &
+      $(data.len - pos))
 
 proc encodePing*(msg: Ping): seq[byte] =
   result = @[]
@@ -398,7 +508,10 @@ proc writeGossip(buf: var seq[byte]; gossip: seq[SwimMember]) =
     buf.writeSwimMember(member)
 
 proc readGossip(data: openArray[byte]; pos: var int): seq[SwimMember] =
-  let count = int(readU32(data, pos))
+  let rawCount = readU32(data, pos)
+  if not elementCountFits(rawCount, data.len - pos, 47):
+    raise newException(PeerCacheCodecError, "element count exceeds payload")
+  let count = int(rawCount)
   result = newSeq[SwimMember](count)
   for i in 0 ..< count:
     result[i] = readSwimMember(data, pos)
@@ -520,6 +633,70 @@ proc decodeSwimRefute*(data: openArray[byte]): SwimMember =
       "trailing bytes after SwimRefute payload: " & $(data.len - pos))
 
 # ---------------------------------------------------------------------------
+# Distributed-Execution M7: identity proof and refusal notices.
+# ---------------------------------------------------------------------------
+
+const
+  MaxIdentityProofBytes* = 8 * 1024
+  MaxRefusalReasonBytes* = 512
+
+type
+  RefusedNotice* = object
+    ## What a receiver tells a sender about a frame it refused. The reason
+    ## is diagnostic only; the refusal class is the contract.
+    refusedTag*: uint16
+    refusalClass*: uint8
+    reason*: string
+
+proc encodeIdentityProof*(leafDer: openArray[byte]): seq[byte] =
+  result = @[]
+  result.writeU32(uint32(leafDer.len))
+  for b in leafDer:
+    result.add(b)
+
+proc decodeIdentityProof*(data: openArray[byte]): seq[byte] =
+  var pos = 0
+  let n = int(readU32(data, pos))
+  if n > MaxIdentityProofBytes:
+    raise newException(PeerCacheCodecError, "identity proof too large: " & $n)
+  ensureBytes(data.len - pos, n, "identity proof")
+  result = newSeq[byte](n)
+  for i in 0 ..< n:
+    result[i] = data[pos + i]
+  pos += n
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after IdentityProof payload")
+
+proc encodeRefused*(msg: RefusedNotice): seq[byte] =
+  result = @[]
+  result.writeU16(msg.refusedTag)
+  result.writeU8(msg.refusalClass)
+  let reason =
+    if msg.reason.len > MaxRefusalReasonBytes:
+      msg.reason[0 ..< MaxRefusalReasonBytes]
+    else: msg.reason
+  result.writeU32(uint32(reason.len))
+  for ch in reason:
+    result.add(byte(ord(ch)))
+
+proc decodeRefused*(data: openArray[byte]): RefusedNotice =
+  var pos = 0
+  result.refusedTag = readU16(data, pos)
+  result.refusalClass = readU8(data, pos)
+  let n = int(readU32(data, pos))
+  if n > MaxRefusalReasonBytes:
+    raise newException(PeerCacheCodecError, "refusal reason too long")
+  ensureBytes(data.len - pos, n, "refusal reason")
+  result.reason = newString(n)
+  for i in 0 ..< n:
+    result.reason[i] = char(data[pos + i])
+  pos += n
+  if pos != data.len:
+    raise newException(PeerCacheCodecError,
+      "trailing bytes after Refused payload")
+
+# ---------------------------------------------------------------------------
 # Frame encode / decode.
 # ---------------------------------------------------------------------------
 
@@ -602,6 +779,14 @@ type
   SwimSuspectHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
   SwimConfirmHandler*   = proc (msg: SwimMember)    {.gcsafe, closure.}
   SwimRefuteHandler*    = proc (msg: SwimMember)    {.gcsafe, closure.}
+  GetSelectorsRequestHandler* =
+    proc (msg: GetSelectorsRequest) {.gcsafe, closure.}
+  GetSelectorsResponseHandler* =
+    proc (msg: GetSelectorsResponse) {.gcsafe, closure.}
+  GetActionRecordRequestHandler* =
+    proc (msg: GetActionRecordRequest) {.gcsafe, closure.}
+  GetActionRecordResponseHandler* =
+    proc (msg: GetActionRecordResponse) {.gcsafe, closure.}
 
 proc dispatch*(frame: Frame;
                onHello: HelloHandler = nil;
@@ -620,7 +805,12 @@ proc dispatch*(frame: Frame;
                onSwimProbeAckIndirect: SwimProbeAckIndirectHandler = nil;
                onSwimSuspect: SwimSuspectHandler = nil;
                onSwimConfirm: SwimConfirmHandler = nil;
-               onSwimRefute: SwimRefuteHandler = nil) =
+               onSwimRefute: SwimRefuteHandler = nil;
+               onGetSelectorsRequest: GetSelectorsRequestHandler = nil;
+               onGetSelectorsResponse: GetSelectorsResponseHandler = nil;
+               onGetActionRecordRequest: GetActionRecordRequestHandler = nil;
+               onGetActionRecordResponse: GetActionRecordResponseHandler =
+                 nil) =
   ## Decodes the frame's payload to the concrete record type and invokes
   ## the matching handler. Handlers default to `nil`, in which case the
   ## frame for that kind is silently dropped — useful for the test
@@ -678,6 +868,24 @@ proc dispatch*(frame: Frame;
   of mkSwimRefute:
     if not onSwimRefute.isNil:
       onSwimRefute(decodeSwimRefute(frame.payload))
+  of mkGetSelectorsRequest:
+    if not onGetSelectorsRequest.isNil:
+      onGetSelectorsRequest(decodeGetSelectorsRequest(frame.payload))
+  of mkGetSelectorsResponse:
+    if not onGetSelectorsResponse.isNil:
+      onGetSelectorsResponse(decodeGetSelectorsResponse(frame.payload))
+  of mkGetActionRecordRequest:
+    if not onGetActionRecordRequest.isNil:
+      onGetActionRecordRequest(decodeGetActionRecordRequest(frame.payload))
+  of mkGetActionRecordResponse:
+    if not onGetActionRecordResponse.isNil:
+      onGetActionRecordResponse(decodeGetActionRecordResponse(frame.payload))
+  of mkIdentityProof, mkRefused, mkReachGoalRequest, mkReachGoalResponse,
+     mkAttach, mkGraphDescriptorFetch, mkExecutePips, mkNotifyPipResults,
+     mkShardDispatch:
+    # Distributed-Execution M7 Boundary messages are handled by the
+    # server's gate and the worker receiver, not by this table.
+    discard
 
 # ---------------------------------------------------------------------------
 # Hex helpers — useful for diagnostics + test failure messages.

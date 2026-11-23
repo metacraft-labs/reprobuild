@@ -108,7 +108,32 @@ var
   ZSTD_getErrorName: ZstdGetErrorNameProc
   ZSTD_DStreamOutSize: ZstdDStreamOutSizeProc
 
+when defined(reproStaticZstd):
+  {.passL: "-lzstd".}
+  proc zstdStatic_ZSTD_createDStream() {.importc: "ZSTD_createDStream", cdecl.}
+  proc zstdStatic_ZSTD_freeDStream() {.importc: "ZSTD_freeDStream", cdecl.}
+  proc zstdStatic_ZSTD_initDStream() {.importc: "ZSTD_initDStream", cdecl.}
+  proc zstdStatic_ZSTD_decompressStream() {.importc: "ZSTD_decompressStream", cdecl.}
+  proc zstdStatic_ZSTD_isError() {.importc: "ZSTD_isError", cdecl.}
+  proc zstdStatic_ZSTD_getErrorName() {.importc: "ZSTD_getErrorName", cdecl.}
+  proc zstdStatic_ZSTD_DStreamOutSize() {.importc: "ZSTD_DStreamOutSize", cdecl.}
+
 proc ensureZstdLoaded() =
+  when defined(reproStaticZstd):
+    # A statically linked binary (the ReproOS add-on's musl build) cannot
+    # dlopen: libzstd is linked in (``scripts/build_addon_static.sh``) and
+    # its entry points are taken directly.
+    if zstdLibHandle != nil:
+      return
+    ZSTD_createDStream = cast[ZstdCreateDStreamProc](zstdStatic_ZSTD_createDStream)
+    ZSTD_freeDStream = cast[ZstdFreeDStreamProc](zstdStatic_ZSTD_freeDStream)
+    ZSTD_initDStream = cast[ZstdInitDStreamProc](zstdStatic_ZSTD_initDStream)
+    ZSTD_decompressStream = cast[ZstdDecompressStreamProc](zstdStatic_ZSTD_decompressStream)
+    ZSTD_isError = cast[ZstdIsErrorProc](zstdStatic_ZSTD_isError)
+    ZSTD_getErrorName = cast[ZstdGetErrorNameProc](zstdStatic_ZSTD_getErrorName)
+    ZSTD_DStreamOutSize = cast[ZstdDStreamOutSizeProc](zstdStatic_ZSTD_DStreamOutSize)
+    zstdLibHandle = cast[LibHandle](1)
+    return
   ## dlopen libzstd on first ckZstd use; raise ``DecompressUnavailable`` if it
   ## (or any expected symbol) is missing so the caller can fall back to ckNone.
   if zstdLibHandle != nil:

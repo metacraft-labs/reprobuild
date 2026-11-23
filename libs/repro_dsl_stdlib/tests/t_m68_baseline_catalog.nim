@@ -1,3 +1,10 @@
+## GM4b: the M68 ``<tool>Catalog`` records are now ``tarball`` realizations
+## of each tool's canonical ``package`` definition. The properties below are
+## asserted over the records a recipe's ``uses:`` and a home profile select
+## from (``profileToolUse``, via ``realization_checks``); the retired
+## catalog's "default entry" is what an unpinned reference selects for
+## x86_64-windows. The original M68 notes follow.
+##
 ## M68 baseline-catalog test.
 ##
 ## Imports every M68-harvested ``packages/<tool>Catalog`` and asserts:
@@ -72,144 +79,76 @@
 ## hand-off. The catalog files record the manifest truthfully — the
 ## realization gap belongs to M69, not M68.
 
-import std/[strutils, unittest]
-import repro_project_dsl
-import repro_dsl_stdlib/packages_schema
+import std/[options, unittest]
 
-# The merged + auto-generated files all re-export ``packages_schema``
-# so importing any one of them brings the enum literals and validators
-# into scope.
-import repro_dsl_stdlib/packages/cmake
-import repro_dsl_stdlib/packages/dotnet_sdk
-import repro_dsl_stdlib/packages/gcc
-import repro_dsl_stdlib/packages/gh
-import repro_dsl_stdlib/packages/git
-import repro_dsl_stdlib/packages/just
-import repro_dsl_stdlib/packages/meson
-import repro_dsl_stdlib/packages/nim
-import repro_dsl_stdlib/packages/ninja
-import repro_dsl_stdlib/packages/node
-import repro_dsl_stdlib/packages/python3
+import ./realization_checks
 
-type
-  CatalogUnderTest = object
-    name: string
-    entries: seq[VersionedProvisioning]
+const M68Tools = ["cmake", "dotnet-sdk", "gcc", "gh", "git", "just", "meson",
+  "nim", "ninja", "node", "python3"]
 
-proc allCatalogs(): seq[CatalogUnderTest] =
-  result.add(CatalogUnderTest(name: "cmake",      entries: cmakeCatalog))
-  result.add(CatalogUnderTest(name: "dotnet-sdk", entries: dotnet_sdkCatalog))
-  result.add(CatalogUnderTest(name: "gcc",        entries: gccCatalog))
-  result.add(CatalogUnderTest(name: "gh",         entries: ghCatalog))
-  result.add(CatalogUnderTest(name: "git",        entries: gitCatalog))
-  result.add(CatalogUnderTest(name: "just",       entries: justCatalog))
-  result.add(CatalogUnderTest(name: "meson",      entries: mesonCatalog))
-  result.add(CatalogUnderTest(name: "nim",        entries: nimCatalog))
-  result.add(CatalogUnderTest(name: "ninja",      entries: ninjaCatalog))
-  result.add(CatalogUnderTest(name: "node",       entries: nodeCatalog))
-  result.add(CatalogUnderTest(name: "python3",    entries: python3Catalog))
+suite "M68 — baseline dev-tool realizations validate":
 
-suite "M68 — baseline dev-tool catalog validates":
+  test "every harvested tool has archive realizations":
+    for name in M68Tools:
+      checkpoint name
+      check tarballRecordsOf(name).len > 0
 
-  test "every harvested catalog is non-empty":
-    for c in allCatalogs():
-      check c.entries.len > 0
-      if c.entries.len == 0:
-        echo "EMPTY catalog: " & c.name
-
-  test "validateCatalog returns no errors for any harvested file":
+  test "every realization is well-formed":
     var failures: seq[string] = @[]
-    for c in allCatalogs():
-      let errors = validateCatalog(c.entries)
-      if errors.len > 0:
-        for err in errors:
-          failures.add(c.name & ": " & err)
-    if failures.len > 0:
-      for f in failures: echo f
+    for name in M68Tools:
+      failures.add(realizationProblems(name))
+    for f in failures: echo f
     check failures.len == 0
 
-  test "selectDefault returns a populated entry per catalog":
-    for c in allCatalogs():
-      let (found, entry) = selectDefault(c.entries)
-      check found
-      check entry.version.len > 0
-      check entry.platforms.len > 0
+  test "an unpinned reference selects a versioned record per tool":
+    for name in M68Tools:
+      let picked = unpinnedSelection(name, pcX86_64, poWindows)
+      checkpoint name
+      check picked.isSome
+      if picked.isSome:
+        check picked.get.detail.version.len > 0
+        check picked.get.executablePath.len > 0
 
-  test "every default entry has at least one bin_relpath":
-    for c in allCatalogs():
-      let (found, entry) = selectDefault(c.entries)
-      check found
-      check entry.bin_relpath.len > 0
-      if entry.bin_relpath.len == 0:
-        echo "NO BIN: " & c.name & " v" & entry.version
+  test "no realization carries two digests":
+    for name in M68Tools:
+      for r in tarballRecordsOf(name):
+        check not (r.sha256.len > 0 and r.detail.sha512.len > 0)
 
-  test "no platform has both sha256 and sha512":
-    for c in allCatalogs():
-      for vp in c.entries:
-        for pb in vp.platforms:
-          check not (pb.sha256.len > 0 and pb.sha512.len > 0)
+  test "all M68 tools keep a Windows realization":
+    ## The M68 baseline harvest is Windows-focused (the env.ps1 deprecation
+    ## target is Windows-only).
+    for name in M68Tools:
+      var sawWindows = false
+      for r in tarballRecordsOf(name):
+        if r.os == "windows": sawWindows = true
+      checkpoint name
+      check sawWindows
 
-  test "all M68 catalogs declare a Windows platform slice":
-    ## The M68 baseline harvest is Windows-focused (the env.ps1
-    ## deprecation target is also Windows-only — the macOS/Linux side
-    ## continues to flow through the Nix branch of the resolver chain).
-    ## Every harvested catalog must expose at least one ``poWindows``
-    ## slice.
-    for c in allCatalogs():
-      for vp in c.entries:
-        var sawWindows = false
-        for pb in vp.platforms:
-          if pb.os == poWindows: sawWindows = true
-        check sawWindows
-        if not sawWindows:
-          echo "NO WINDOWS: " & c.name & " v" & vp.version
+  test "default versions are non-empty and contain a digit":
+    ## Soft guard — the M68 spec ties the default version to what
+    ## ``env.ps1`` installed. The format is loose (mingw-winlibs uses
+    ## ``16.1.0posix-14.0.0-ucrt-r2``) but it must contain a digit.
+    for name in M68Tools:
+      let picked = unpinnedSelection(name, pcX86_64, poWindows)
+      check picked.isSome
+      if picked.isSome:
+        var sawDigit = false
+        for ch in picked.get.detail.version:
+          if ch in {'0' .. '9'}: sawDigit = true
+        checkpoint name & " version='" & picked.get.detail.version & "'"
+        check sawDigit
 
-  test "default versions are non-empty semver-shaped strings":
-    ## Soft guard — the M68 spec ties ``defaultVersion`` to the version
-    ## ``env.ps1`` currently installs (regression target for the M70
-    ## deprecation cut). The version string format is intentionally
-    ## loose (e.g. mingw-winlibs uses ``16.1.0-14.0.0-r2``) but it
-    ## must at minimum contain a digit.
-    for c in allCatalogs():
-      let (found, entry) = selectDefault(c.entries)
-      check found
-      var sawDigit = false
-      for ch in entry.version:
-        if ch in {'0' .. '9'}: sawDigit = true
-      check sawDigit
-      if not sawDigit:
-        echo "NO DIGIT: " & c.name & " version='" & entry.version & "'"
-
-  test "nim package and catalog cover macOS tarball platforms":
-    var sawDslMacArm = false
-    var sawDslMacX64 = false
-    for pkg in registeredPackages():
-      if pkg.packageName != "nim":
-        continue
-      for tb in pkg.tarballProvisioning:
-        if tb.os == "macos" and tb.cpu == "aarch64":
-          sawDslMacArm = tb.sha256.len == 64 and
-            tb.archiveType == "tar.xz" and
-            tb.executablePath == "bin/nim"
-        if tb.os == "macos" and tb.cpu == "x86_64":
-          sawDslMacX64 = tb.sha256.len == 64 and
-            tb.archiveType == "tar.xz" and
-            tb.executablePath == "bin/nim"
-    check sawDslMacArm
-    check sawDslMacX64
-
-    let selected = selectVersion(nimCatalog, "2.2.10")
-    check selected.found
-    if selected.found:
-      let arm = selectPlatformBinary(selected.entry, pcAArch64, poMacos)
-      let x64 = selectPlatformBinary(selected.entry, pcX86_64, poMacos)
-      check arm.found
-      check x64.found
-      if arm.found:
-        check arm.binary.sha256.len == 64
-        check arm.binary.archive_format_override == afTarXz
-        check "bin/nim" in arm.binary.bin_relpath_override
-      if x64.found:
-        check x64.binary.sha256.len == 64
-        check x64.binary.archive_format_override == afTarXz
-        check "bin/nim" in x64.binary.bin_relpath_override
+  test "nim covers the macOS tarball platforms":
+    # GM4b: the in-package statement and the former catalog arm were the
+    # same archive; the in-package statement is the single record.
+    for cpu in [pcAArch64, pcX86_64]:
+      let picked = unpinnedSelection("nim", cpu, poMacos)
+      checkpoint $cpu
+      check picked.isSome
+      if picked.isSome:
+        check picked.get.sha256.len == 64
+        check picked.get.archiveType == "tar.xz"
+        check picked.get.executablePath == "bin/nim"
+        check picked.get.detail.version == "2.2.10"
+        # The catalog's other tools survived the merge as extras.
+        check "bin/nimble" in picked.get.detail.extraExecutables

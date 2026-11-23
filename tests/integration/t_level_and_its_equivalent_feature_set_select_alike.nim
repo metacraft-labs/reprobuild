@@ -27,8 +27,12 @@
 ##      ``cpu_features: featuresForLevel(L)`` produce the SAME resolution —
 ##      the same found/refused verdict, the same URL, and the same missing
 ##      set;
-##   2. the same over the resolution ENTRY POINT, not just the selector, so
-##      the equivalence is what a caller observes and not an internal detail;
+##   2. the same over the realization SELECTION a caller reaches
+##      (``realization_selection.selectTarballRecord``) with the requirement
+##      spelled the way a ``tarball`` statement spells it (``cpuLevel =
+##      "x86-64-v3"`` vs ``cpuFeatures = "<v3's features>"``), so the
+##      equivalence holds through the token parsing and is what a recipe or a
+##      profile observes, not an internal detail;
 ##   3. an arm declaring BOTH (level L and L's own set) is equivalent to
 ##      either alone — the union of a set with itself;
 ##   4. the two spellings are indistinguishable to the RANKING step as well as
@@ -58,13 +62,13 @@
 ## list. A version of this test that also pinned the contents would be
 ## asserting ``featuresForLevel`` against a transcription of itself.
 ##
-## Hermetic: synthetic catalogs, synthetic hosts through the defaulted
-## parameters.
+## Hermetic: synthetic catalogs and records, explicit synthetic targets.
 
 import std/[strutils, unittest]
 
 import repro_dsl_stdlib/packages_schema
 import repro_home_apply/package_catalog
+import ./pmc_selection_support
 
 const Url = "https://example.invalid/demo-1.0.0.tar.gz"
 const Sha =
@@ -178,15 +182,19 @@ suite "PMC-3 — a level and its feature set select alike":
           check describeFeatureShortfall(selL) ==
             describeFeatureShortfall(selF)
 
-        # (2) the resolution entry point, which is what a caller sees.
-        let resL = resolveBuiltinPackage("demo", asLevel, "", pcX86_64,
-          poLinux, h.target.level, h.target.features)
-        let resF = resolveBuiltinPackage("demo", asFeatures, "", pcX86_64,
-          poLinux, h.target.level, h.target.features)
-        check resL.found == resF.found
-        check resL.error == resF.error
-        check resL.resolution.urlUsed == resF.resolution.urlUsed
-        check resL.resolution.digestValue == resF.resolution.digestValue
+        # (2) the selection a caller reaches, over tarball records whose
+        # requirement is spelled as a `tarball` statement spells it.
+        let recL = @[tarballRecord(Url, Sha,
+          level = describeMicroarchLevel(level))]
+        let recF = @[tarballRecord(Url, Sha,
+          features = renderCpuFeatureTokens(featuresForLevel(level)))]
+        let target = targetOf(pcX86_64, poLinux, h.target.level,
+          h.target.features)
+        let resL = selectTarballRecord(recL, target)
+        let resF = selectTarballRecord(recF, target)
+        check resL.status == resF.status
+        check resL.status in {kcSelected, kcCapabilityShortfall}
+        check resL.index == resF.index
 
     # ---- (4) indistinguishable to the RANKING step too --------------------
     #

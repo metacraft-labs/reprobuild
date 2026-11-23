@@ -296,3 +296,45 @@ suite "M9.R.83 install-mirror store publication":
     check info.storeRelativePath == ""
     withEnv(InstallMirrorModeEnvVar, "hashed"):
       check hashedDepMirrorRoot(recipesRoot, "legacy-tiny") == ""
+
+  test "the legacy snippet records declared exemptions and still exits 0":
+    # The exemptions loop is the snippet's last command in legacy mode, so its
+    # status is the action's; an empty last line must not fail the mirror.
+    let scratch = createTempDir("m9r84-legacy-exemptions-", "")
+    defer: removeScratch(scratch)
+    let recipesRoot = scratch / "recipes"
+    let sourceRoot = recipesRoot / "legacy-ex" / ".repro" / "output" /
+      "install"
+    let scriptPath = scratch / "publish-legacy-ex.sh"
+    writeTinyMirror(sourceRoot)
+    writeFile(scriptPath, emitInstallMirrorStorePublish(recipesRoot,
+      "legacy-ex", "1.0.0", sourceRoot))
+    withoutEnv(InstallMirrorModeEnvVar):
+      withEnv("REPRO_TARGET_OBJECT_EXEMPTIONS",
+          "usr/lib/bpf/p.o\tan eBPF program\nusr/lib/fw.bin\tfirmware"):
+        let run = runBashScript(scriptPath)
+        checkpoint run.output
+        check run.exitCode == 0
+    let sidecar = readFile(realizationInfoPath(recipesRoot, "legacy-ex"))
+    check "target-object-exemption=usr/lib/bpf/p.o\tan eBPF program\n" in sidecar
+    check "target-object-exemption=usr/lib/fw.bin\tfirmware\n" in sidecar
+
+  test "the snippet runs the publish helper beside the invoking engine":
+    # An edge's PATH is assembled from its tools' directories, so a shared
+    # bin directory can put an older release's helper first; the engine's
+    # own sibling is named by absolute path when the engine named itself.
+    let scratch = createTempDir("m9r84-invoking-", "")
+    defer: removeScratch(scratch)
+    let engine = scratch / "bin" / "repro"
+    createDir(scratch / "bin")
+    writeFile(engine, "")
+    writeFile(scratch / "bin" / InstallMirrorPublishToolName, "")
+    withEnv("REPRO_INVOKING_CLI", engine):
+      let snippet = emitInstallMirrorStorePublish("/recipes", "pkg", "1.0",
+        "/recipes/pkg/.repro/output/install")
+      check ("\"" & scratch / "bin" / InstallMirrorPublishToolName &
+        "\" --recipes-root") in snippet
+    withoutEnv("REPRO_INVOKING_CLI"):
+      let snippet = emitInstallMirrorStorePublish("/recipes", "pkg", "1.0",
+        "/recipes/pkg/.repro/output/install")
+      check (") " & InstallMirrorPublishToolName & " --recipes-root") in snippet

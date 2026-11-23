@@ -1,0 +1,439 @@
+## Gate ``e2e_addon_zero_touch_image_synthesis_boots_converged`` (milestone
+## A16; ReproOS Add-On Mode §6.5.2, §6.5.4).
+##
+## A ready-to-flash image of a test-bed host is synthesised with ``repro
+## infra image`` from a base of the matrix, then booted -- from a fresh
+## overlay of the output, with no seed volume, no network command and no
+## login before the checks. The image's own cloud-init seed (declared in the
+## profile's ``baseOs:``) authorises this run's key; everything else must
+## already be there:
+##
+## - the guest reaches ``multi-user.target`` and the system is ``running``;
+## - ``/repro/store`` is mounted read-only and holds the add-on binary's
+##   prefix, generation 0's files prefix and the fixture apt closure;
+## - ``/etc/repro`` holds exactly the anchors the profile names;
+## - generation 0 and the host's initial generation are recorded, the
+##   latter ``current``;
+## - the profile's service (``tb-image-hello.service``, running from its apt
+##   closure) and generation 0's units are active;
+## - the first boot's ``repro-addon-reassert.service`` reported ``ok``;
+## - ``repro infra plan`` on the booted guest predicts nothing (no ledger
+##   change, no transition) and ``repro system addon verify`` is ok;
+## - the boot was a first boot: a machine id and SSH host keys of its own,
+##   none of them the assembly boot's (recorded in the manifest), systemd
+##   initialised the machine id itself, and cloud-init ran the declared
+##   instance;
+## - the image holds no secrets recipient key, read offline from the built
+##   file (spec §6.5.2: the key is deferred), and the first boot created
+##   one, ``0400`` root, whose public half the re-assert reported;
+## - a second first boot of the same image creates a different key and a
+##   different machine id;
+## - ``repro system addon uninstall`` on the booted image succeeds and takes
+##   the late key with it.
+##
+## Falsifying mutations (``REPRO_ADDON_MUTATION``):
+## ``image-omits-gen0-ledger`` and ``image-omits-store-closure`` make the
+## assembly delete the ledger copy, or the apt closure's store prefixes,
+## before power-off. The first boot's re-assert must then report
+## ``degraded`` (and the plan or verify fail): red.
+## ``image-bakes-recipient-key`` makes the assembly create the recipient key
+## after bootstrap: the image command must refuse the image (red).
+## ``image-keeps-first-boot-state`` makes the clean-up keep the assembly
+## boot's machine id and SSH host keys: the first-boot step goes red.
+##
+## Opt-in: ``REPRO_ADDON_VM_GATES=1`` (``just
+## e2e_addon_zero_touch_image_synthesis_boots_converged``). Bases:
+## ``REPRO_ADDON_BASES`` (the recipe's default: ``debian-13-amd64``). The
+## full engine must be built (``just build``): ``repro infra image`` runs
+## on the build host, the static add-on (built by the gate runner, mutated
+## when asked) inside the image.
+##
+## *Mocking.* None of behaviour. The fixture ``.deb`` is built here (a
+## static binary in a ustar-in-ar container, ``deb_fixture_support``) and
+## handed to the image command's ``--deb-cache``, which checks it against
+## the lock exactly as it checks a download; the lock's archive URL is
+## never contacted. The upstream image is the test bed's digest-pinned
+## cloud image, named by ``file://`` URL with its SHA-256.
+
+import std/[algorithm, json, os, osproc, strutils, times, unittest]
+
+import repro_test_support/reasoned_skip
+
+import repro_dsl_stdlib/packages/apt_closure
+import repro_peer_cache/auth as peerAuth
+
+import ./addon_testbed
+import ./deb_fixture_support
+
+const
+  Gate = "e2e_addon_zero_touch_image_synthesis_boots_converged"
+  Host = "tb-image"
+  ServiceUnit = "tb-image-hello.service"
+
+proc hexKey(k: openArray[byte]): string =
+  for b in k: result.add(toHex(int(b), 2).toLowerAscii())
+
+proc engine(): string =
+  ## The full engine of this checkout: `repro infra image` compiles the
+  ## profile on the build host.
+  result = reproRoot() / "build" / "bin" / "repro".addFileExt(ExeExt)
+  if not fileExists(result):
+    raise newException(TestBedError, "no engine at " & result &
+      "; build it with `just build`")
+
+proc helloDeb(work, debArch: string): tuple[path: string; lock: AptClosureLock] =
+  ## A closure whose only member ships a static binary that waits forever:
+  ## the unit's /usr IS the closure's, so it cannot be a script.
+  let src = reproRoot() / "tests/e2e/addon/fixtures/image_service/a16_pause.c"
+  let bin = work / "tb-hello"
+  let cc = staticCc(debArch)
+  let (o, c) = execCmdEx(quoteShell(cc) & " -static -O2 -o " & quoteShell(bin) &
+                         " " & quoteShell(src))
+  if c != 0: raise newException(TestBedError, "static cc failed: " & o)
+  result.path = work / "tb-hello.deb"
+  writeDeb(result.path, @[dir("./"), dir("./usr/"), dir("./usr/bin/"),
+    ("./usr/bin/tb-hello", '0', 0o755, readFile(bin), "")])
+  result.lock = fixtureLock("tb-hello", result.path, debArch)
+
+proc offlineAgentDir(raw: string): tuple[found: bool; listing, machineId: string] =
+  ## Read the built image WITHOUT booting it: for each partition sfdisk
+  ## reports, ask debugfs (read-only) for ``/var/lib/repro/agent`` and
+  ## ``/etc/machine-id``. ``found`` is false when no partition holds the
+  ## agent directory -- the positive control that the check looked at the
+  ## right filesystem.
+  let (j, c) = execCmdEx("sfdisk -J " & quoteShell(raw))
+  if c != 0: raise newException(TestBedError, "sfdisk -J: " & j)
+  let table = parseJson(j)["partitiontable"]
+  let sector = table{"sectorsize"}.getInt(512)
+  for part in table["partitions"]:
+    let spec = quoteShell(raw & "?offset=" & $(part["start"].getInt() * sector))
+    let (st, _) = execCmdEx("debugfs -R 'stat /var/lib/repro/agent' " & spec &
+                            " 2>&1")
+    if "Type: directory" notin st: continue
+    result.found = true
+    result.listing = execCmdEx("debugfs -R 'ls -l /var/lib/repro/agent' " &
+                               spec & " 2>/dev/null").output
+    result.machineId = execCmdEx("debugfs -R 'cat /etc/machine-id' " & spec &
+                                 " 2>/dev/null").output
+    return
+
+proc hostKeyShas(g: Guest): seq[string] =
+  ## The SHA-256 of each SSH host public key the booted guest holds.
+  for line in g.exec("sha256sum /etc/ssh/ssh_host_*_key.pub").stdout.splitLines():
+    let f = line.splitWhitespace()
+    if f.len >= 1 and f[0].len == 64: result.add(f[0])
+
+proc isKeyHex(s: string): bool =
+  ## A recipient public key as ``recipient.pub`` holds it: hex, non-empty.
+  s.len >= 64 and s.allCharsInSet(HexDigits)
+
+proc firstBootIdentity(g: Guest): tuple[machineId, recipientPub: string] =
+  result.machineId = g.exec("cat /etc/machine-id").stdout.strip()
+  result.recipientPub = g.exec("cat /var/lib/repro/agent/recipient.pub").stdout.strip()
+
+proc profileText(b: BaseImage; imageUrl, imageSha, pubKey: string): string =
+  """import repro_profile
+
+const helloLock = staticRead("tb-hello.lock")
+
+profile "tb-image":
+  baseOs:
+    image: """" & imageUrl & """"
+    sha256: """" & imageSha & """"
+    arch: """" & b.debArch & """"
+    buildBoot: "pc"
+    diskSize: "6G"
+    hostname: "tb-image"
+    layout:
+      disks:
+        "main":
+          table: "gpt"
+          partitions:
+            "root":
+              size: "100%"
+              content:
+                filesystem:
+                  format: "ext4"
+                  mountpoint: "/"
+            "bios":
+              size: "3M"
+            "esp":
+              size: "124M"
+              content:
+                filesystem:
+                  format: "vfat"
+                  mountpoint: "/boot/efi"
+    cloudInit:
+      seed: "rootSeedDir"
+      userData: "#cloud-config\ndisable_root: false\nssh_pwauth: false\nssh_authorized_keys:\n  - """ &
+        pubKey & """\n"
+      metaData: "instance-id: tb-image-first-boot\nlocal-hostname: tb-image\n"
+    bootstrap:
+      deploySigners: "deploy-signers.anchors"
+      cachePublishers: "cache-publishers.anchors"
+      cacheUrl: """" & TestCacheUrl & """"
+
+  addOn:
+    managedEtcPrefixes:
+      "/etc/tb-image/"
+
+  resources:
+    fsSystemFile(path = "/etc/tb-image/motd",
+      content = "built by repro infra image\n", address = "motd")
+    systemdSystemUnit(name = "tb-image-hello.service",
+      content = "[Unit]\nDescription=A16 image fixture\n\n[Service]\nExecStart=/usr/bin/tb-hello\nProtectSystem=strict\n\n[Install]\nWantedBy=multi-user.target\n",
+      aptClosureLock = helloLock,
+      floorExceptions = @["serviceFloor: a test fixture binary"],
+      healthCheck = "active", address = "hello")
+"""
+
+proc runBase(b: BaseImage; record: JsonNode; work: string): seq[string] =
+  var g: Guest
+  let steps = newJArray()
+  var fails: seq[string]
+  proc step(name: string; ok: bool; detail: string) =
+    steps.add(%*{"step": name, "ok": ok, "detail": detail})
+    if not ok: fails.add(b.name & ": " & name & ": " & detail)
+  try:
+    # The inputs: the pinned upstream image, anchors, a key, a closure.
+    let upstream = fetchImage(b)
+    let (sha, _) = execCmdEx("sha256sum " & quoteShell(upstream))
+    let imageSha = sha.splitWhitespace()[0]
+    let prof = work / "profile"
+    createDir(prof)
+    var signers: seq[string]
+    for i in 0 ..< 2: signers.add hexKey(peerAuth.generateKeypair().publicKey)
+    let publisher = hexKey(peerAuth.generateKeypair().publicKey)
+    writeFile(prof / "deploy-signers.anchors", "# A16 signers\n" &
+              signers.join("\n") & "\n")
+    writeFile(prof / "cache-publishers.anchors", publisher & "\n")
+    let key = work / "id_ed25519"
+    discard execCmd("ssh-keygen -q -t ed25519 -N '' -C a16-image -f " &
+                    quoteShell(key))
+    let hello = helloDeb(work, b.debArch)
+    writeFile(prof / "tb-hello.lock", renderAptClosureLock(hello.lock))
+    let debs = work / "debs"
+    createDir(debs)
+    copyFile(hello.path, debs / (hello.lock.debs[0].sha256 & ".deb"))
+    writeFile(prof / "system.nim", profileText(b, "file://" & upstream,
+      imageSha, readFile(key & ".pub").strip()))
+    let (addonPath, addonSha) = artefact(b.debArch)
+    record["artefactSha256"] = %addonSha
+    record["upstream"] = %*{"file": upstream, "sha256": imageSha}
+
+    # The image, built on this host without privilege.
+    let output = work / "tb-image.img.xz"
+    let cmd = quoteShell(engine()) & " infra image --host " & Host &
+      " --profile " & quoteShell(prof / "system.nim") &
+      " --addon-binary " & quoteShell(addonPath) & " --addon-sha256 " & addonSha &
+      " --deb-cache " & quoteShell(debs) & " --compress xz --output " &
+      quoteShell(output)
+    let started = epochTime()
+    let (imgOut, imgRc) = execCmdEx(cmd)
+    record["imageCommand"] = %cmd
+    record["imageSeconds"] = %int(epochTime() - started)
+    step("repro infra image synthesises the image", imgRc == 0 and
+         fileExists(output), imgOut)
+    if imgRc != 0: return fails
+    let manifest = parseJson(readFile(output & ".manifest.json"))
+    record["manifest"] = manifest
+    let (osha, _) = execCmdEx("sha256sum " & quoteShell(output))
+    step("the output's digest is the one beside it",
+         readFile(output & ".sha256").splitWhitespace()[0] ==
+           osha.splitWhitespace()[0], readFile(output & ".sha256"))
+    let raw = work / "tb-image.raw"
+    let (xo, xc) = execCmdEx("xz -dc " & quoteShell(output) & " > " &
+                             quoteShell(raw))
+    step("the xz output unpacks", xc == 0, xo)
+    let assembly = manifest["assembly"]
+    let off = offlineAgentDir(raw)
+    record["offlineAgentDir"] = %off.listing
+    step("the built image holds no recipient key (read offline)",
+         off.found and "recipient.key" notin off.listing and
+           "recipient.pub" notin off.listing,
+         "agent dir found: " & $off.found & "\n" & off.listing)
+    let assemblyId = assembly{"assemblyMachineId"}.getStr()
+    step("the built image does not carry the assembly boot's machine id",
+         assemblyId.len == 32 and assemblyId notin off.machineId,
+         "assembly " & assemblyId & ", image " & off.machineId.strip())
+
+    # The boot: a fresh overlay of the output, the image's own seed.
+    g = newImageGuest(b, raw, key)
+    g.boot()
+    let running = g.exec("systemctl is-system-running --wait", timeoutSec = 600)
+    step("the first boot reaches a running system", running.stdout.strip() ==
+         "running", running.stdout & running.stderr &
+         g.exec("systemctl --failed --no-legend").stdout)
+    let mu = g.exec("systemctl is-active multi-user.target")
+    step("multi-user.target is active", mu.stdout.strip() == "active", mu.stdout)
+    let ci = g.exec("cloud-init status --long; cloud-init query instance-id")
+    step("cloud-init ran the declared instance", "status: done" in ci.stdout and
+         "tb-image-first-boot" in ci.stdout, ci.stdout & ci.stderr)
+    # Its own identity, compared with the one the assembly boot recorded
+    # in the manifest: a kept machine id or host key is the same bytes.
+    let first = g.firstBootIdentity()
+    let keys = g.hostKeyShas()
+    var assemblyKeys: seq[string]
+    for k in assembly{"assemblySshHostKeys"}.getElems():
+      assemblyKeys.add(k.getStr().splitWhitespace()[^1])
+    var shared: seq[string]
+    for k in keys:
+      if k in assemblyKeys: shared.add(k)
+    let serial = (try: readFile(g.serialLog) except IOError: "")
+    step("a first boot: its own machine id and SSH host keys",
+         first.machineId.len == 32 and assemblyId.len == 32 and
+           first.machineId != assemblyId and keys.len > 0 and
+           shared.len == 0 and
+           "Initializing machine ID from random generator" in serial,
+         "machine id " & first.machineId & " (assembly " & assemblyId &
+           "); host keys " & $keys & " (assembly " & $assemblyKeys &
+           "); shared " & $shared & "; serial initialised the id: " &
+           $("Initializing machine ID from random generator" in serial))
+    let rk = g.exec("stat -c '%a %U' /var/lib/repro/agent/recipient.key")
+    step("the first boot created its own recipient key, 0400 root",
+         rk.stdout.strip() == "400 root" and first.recipientPub.isKeyHex,
+         rk.stdout & rk.stderr & " pub " & first.recipientPub)
+
+    let store = g.exec("findmnt -n -o OPTIONS /repro/store; " &
+                       "ls -d /repro/store/prefixes/*/*")
+    let prefixes = store.stdout
+    step("/repro/store is mounted read-only", store.exitCode == 0 and
+         prefixes.splitLines()[0].split(',')[0] == "ro", prefixes)
+    let union = aptClosurePrefixPath(AddOnSystemStoreRoot, hello.lock)
+    step("the store holds the fixture closure", union in prefixes, prefixes)
+    let reproExe = manifest["assembly"]["reproExe"].getStr()
+    step("the store holds the add-on binary", reproExe.len > 0 and
+         g.exec("test -x " & quoteShell(reproExe)).exitCode == 0, reproExe)
+    # Exactly: the signer set and the cache publishers equal the declared
+    # ones, not merely contain them.
+    let signerFile = g.exec("cat /etc/repro/anchors/deploy-signers.anchors")
+    var gotSigners: seq[string]
+    for l in signerFile.stdout.splitLines():
+      let s = l.strip()
+      if s.len > 0 and not s.startsWith("#"): gotSigners.add(s)
+    let anchorFiles = g.exec("ls -A /etc/repro/anchors").stdout.strip()
+    let caches = g.exec("cat /etc/repro/caches.conf")
+    var gotPublishers, sections, urls: seq[string]
+    for l in caches.stdout.splitLines():
+      let s = l.strip()
+      if s.startsWith("["): sections.add(s)
+      elif s.startsWith("url"): urls.add(s.split('=', 1)[1].strip().strip(chars = {'"'}))
+      elif s.startsWith("trusted-public-keys"):
+        for k in s.split('=', 1)[1].strip().strip(chars = {'"'}).split(','):
+          gotPublishers.add(k.strip())
+    step("/etc/repro holds exactly the declared anchors",
+         signerFile.exitCode == 0 and caches.exitCode == 0 and
+           gotSigners.sorted() == signers.sorted() and
+           sections.len == 1 and urls == @[TestCacheUrl] and
+           anchorFiles == "deploy-signers.anchors" and
+           gotPublishers == @[publisher],
+         "signers " & $gotSigners & " (declared " & $signers &
+           "); anchor files " & anchorFiles & "; publishers " & $gotPublishers & " (declared " & publisher &
+           ")\n" & caches.stdout)
+
+    let status = g.exec(reproExe & " system addon status")
+    record["status"] = %status.stdout
+    var current = ""
+    for line in status.stdout.splitLines():
+      if line.startsWith("current generation:"):
+        current = line.split(':', 1)[1].strip()
+    step("the initial generation is current", current.len > 0 and
+         current == manifest["assembly"]["generationId"].getStr(),
+         current & " / " & status.stdout)
+    let gens = g.exec("ls -1 /var/lib/repro/system/generations")
+    var gotGens: seq[string]
+    for l in gens.stdout.splitLines():
+      if l.strip().len > 0: gotGens.add(l.strip())
+    let gen0 = assembly{"generation0Id"}.getStr()
+    step("generation 0 and the initial generation are recorded",
+         gen0.len > 0 and current.len > 0 and gen0 != current and
+           gotGens.sorted() == @[gen0, current].sorted(),
+         "recorded " & $gotGens & ", expected generation 0 " & gen0 &
+           " and " & current)
+    let active = g.exec("systemctl is-active " & ServiceUnit &
+      " repro-addon.target repro-store.mount repro-addon-reassert.service")
+    step("the profile's service and generation 0's units are active",
+         active.exitCode == 0, active.stdout & active.stderr)
+    # The report file could be the assembly boot's; this boot's journal
+    # cannot.
+    let report = g.exec("cat /var/lib/repro/system/addon/reassert-report")
+    let journal = g.exec("journalctl -b -u repro-addon-reassert.service " &
+                         "--no-pager -o cat")
+    record["reassert"] = %(report.stdout & "\n--- journal ---\n" & journal.stdout)
+    step("the first boot's re-assert reported ok",
+         "\nrepro-addon reassert: ok\n" in "\n" & report.stdout and
+           "repro-addon reassert: ok" in journal.stdout and
+           "reassert: degraded" notin journal.stdout and
+           "reassert: drift" notin journal.stdout,
+         report.stdout & journal.stdout)
+    writeFile(g.runDir / "applied.profile", manifest["profileText"].getStr())
+    g.copyTo(g.runDir / "applied.profile", "/root/applied.profile")
+    let plan = g.exec(reproExe & " infra plan --profile /root/applied.profile")
+    record["plan"] = %(plan.stdout & plan.stderr)
+    step("repro infra plan on the booted guest predicts nothing",
+         plan.exitCode == 0 and "ledger diff: no change" in plan.stdout and
+         "service transitions: none" in plan.stdout, plan.stdout & plan.stderr)
+    let v = g.exec(reproExe & " system addon verify")
+    step("repro system addon verify is ok", v.exitCode == 0 and
+         "verify: ok" in v.stdout, v.stdout & v.stderr)
+    step("the re-assert reported the recipient key's public half",
+         first.recipientPub.isKeyHex and first.recipientPub in journal.stdout,
+         journal.stdout)
+
+    # Uninstall the booted image: the late key goes with everything else.
+    # From a copy outside the store, which uninstall unmounts (as every
+    # other gate runs it, from the artefact it installed).
+    let un = g.exec("cp " & quoteShell(reproExe) & " /root/repro-uninstall && " &
+                    "/root/repro-uninstall system addon uninstall")
+    let keyLeft = g.exec("ls -A /var/lib/repro/agent 2>/dev/null; " &
+                         "test -e /var/lib/repro/agent/recipient.key")
+    step("uninstall on the booted image succeeds and removes the late key",
+         un.exitCode == 0 and keyLeft.exitCode != 0,
+         un.stdout & un.stderr & "\nleft: " & keyLeft.stdout)
+    g.destroy()
+    g = nil
+
+    # A second first boot of the same image: another device.
+    g = newImageGuest(b, raw, key)
+    g.boot()
+    discard g.exec("systemctl is-system-running --wait", timeoutSec = 600)
+    let second = g.firstBootIdentity()
+    record["recipientKeys"] = %[first.recipientPub, second.recipientPub]
+    step("a second first boot of the image creates a different key",
+         second.recipientPub.isKeyHex and first.recipientPub.isKeyHex and
+           second.recipientPub != first.recipientPub and
+           second.machineId.len == 32 and second.machineId != first.machineId,
+         "first " & first.recipientPub & " / " & first.machineId &
+           ", second " & second.recipientPub & " / " & second.machineId)
+  except CatchableError as e:
+    fails.add(b.name & ": " & e.msg)
+    steps.add(%*{"step": "exception", "ok": false, "detail": e.msg})
+  finally:
+    record["steps"] = steps
+    if g != nil:
+      record["guest"] = %g.name
+      record["log"] = %g.log
+      g.destroy()
+  fails
+
+suite Gate:
+  test "an image from repro infra image boots converged with no touch":
+    if not gatesEnabled():
+      skip("add-on VM gate: set REPRO_ADDON_VM_GATES=1 (just " & Gate & ")")
+    else:
+      let work = getTempDir() / ("repro-a16-image-" & $getCurrentProcessId())
+      createDir(work)
+      defer: removeDir(work)
+      var failures: seq[string]
+      for b in selectedBases():
+        let record = %*{"gate": Gate, "base": b.name, "arch": b.debArch,
+          "backend": "qemu", "mutation": mutation(), "reprobuild": gitHead(),
+          "gosti": gostiHead(), "started": $now().utc,
+          "host": getEnv("HOSTNAME", "")}
+        let f = runBase(b, record, work)
+        record["verdict"] = %(if f.len == 0: "green" else: "red")
+        record["finished"] = %($now().utc)
+        echo "record: ", writeRecord(Gate, record)
+        failures.add(f)
+      for f in failures: echo "FAIL ", f
+      check failures.len == 0

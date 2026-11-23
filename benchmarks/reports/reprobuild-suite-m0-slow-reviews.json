@@ -96,20 +96,10 @@
       "justification": "Producing the dev-env artifact requires compiling and evaluating the fixture provider through the production graph.",
       "followUp": "Make the provider output a graph-owned fixture and keep artifact contents, provenance, and invalidation assertions in the test."
     },
-    "t_e2e_codetracer_build_subset_without_tup": {
-      "classification": "oversized fixture",
-      "justification": "The test evaluates a pinned CodeTracer checkout and builds a representative subset to prove the Tup-free path, making the external product fixture the dominant cost.",
-      "followUp": "Keep the pinned capstone but isolate it in the CodeTracer integration shard and publish reusable provider/build artifacts."
-    },
     "t_a3_p2_cli_substitute": {
       "classification": "justified integration scope",
       "justification": "The A3/P2 check intentionally exercises CLI substitution across producer, cache, and consumer process boundaries.",
       "followUp": "Retain the cross-process contract while reusing a prepared producer/cache fixture across substitution variants."
-    },
-    "t_e2e_codetracer_dev_environment_slice": {
-      "classification": "oversized fixture",
-      "justification": "A pinned multi-repository CodeTracer workspace is evaluated to validate the real development-environment slice, so fixture breadth is intentional and expensive.",
-      "followUp": "Run this in the pinned CodeTracer shard and reuse its provider artifact with the adjacent subset and in-place tests."
     },
     "t_e2e_dev_env_deactivate_round_trip": {
       "classification": "redundant setup",
@@ -335,11 +325,6 @@
       "classification": "runtime compilation",
       "justification": "Listing implicit and explicit targets goes through production provider compilation and graph lowering for the fixture project.",
       "followUp": "Prebuild the provider/lowered graph and retain CLI target enumeration and attribution assertions."
-    },
-    "t_e2e_codetracer_in_place_project_file": {
-      "classification": "oversized fixture",
-      "justification": "The capstone builds the real pinned CodeTracer project in place across its multi-repository workspace and validates deliberate missing-edge behavior.",
-      "followUp": "Keep this exact pinned capstone in an exclusive CodeTracer shard and reuse its immutable provider artifacts across cold/warm phases."
     },
     "t_repro_watch_unknown_target_diagnostic": {
       "classification": "runtime compilation",

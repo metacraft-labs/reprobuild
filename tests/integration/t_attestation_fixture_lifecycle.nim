@@ -26,13 +26,20 @@
 ##    against a directory scan and against the constants the corpus
 ##    modules declare. This is the check that stops a corpus growing a
 ##    member nothing tracks.
-## 4. **Pinned clocks agree with the material they judge.** Five gates
-##    state their own `Now`. Each must fall inside the validity window
-##    of the collateral it evaluates, or that gate is testing nothing —
-##    and this is the concrete failure a refresh causes: a revocation
-##    list reissued next month has a `thisUpdate` AFTER those clocks,
+## 4. **Pinned clocks agree with the material they judge.** Six gates
+##    state their own `Now`, and each one is DERIVED rather than chosen:
+##    it is the first UTC midnight at which every artifact that gate
+##    judges is in force, recomputed here from the artifacts' own dates
+##    and required to be equal. "Inside the window" alone is satisfied
+##    by any instant in a fifty-day interval, which is how a clock ends
+##    up far ahead of its evidence.
+##
+##    The failure this catches is not hypothetical and was MEASURED, not
+##    argued: the vendor reissued all three of its revocation lists with
+##    a `thisUpdate` three weeks after the instant those gates pinned,
 ##    and the chain evaluators set a list that is not yet in force
-##    aside, so three gates would start reporting "no revocation data"
+##    aside. Refreshing the bytes while leaving the clocks alone makes
+##    FOUR gates report "no revocation data" — 12 cases across them —
 ##    with nothing in their own diffs to explain it.
 ## 5. **Nothing here is a secret.** Every one of these artifacts was
 ##    either captured from a machine by a script that handles real key
@@ -85,37 +92,90 @@ const
 
 type
   PinnedClockGate = object
-    ## A gate that states its own `Now`, and the ledger rows that clock
-    ## has to sit inside.
+    ## A gate that states its own `Now`, and what that clock judges.
+    ##
+    ## The two lists together are a PARTITION of the windowed ledger rows
+    ## the gate's own source references, and the suite below derives that
+    ## set by reading the source rather than trusting either list. Before
+    ## that, `mustBeCurrent` was hand-kept with nothing tying it to the
+    ## gate at all, and four of the six rows disagreed with their gate:
+    ## three names in `t_snp_fixture_verify` and one in
+    ## `t_snp_chain_requires_amd_root` that those gates do not reference,
+    ## and one in `t_snp_tcb_policy` that it does. None of the four moved
+    ## a derived clock on the day they were found, which is why they had
+    ## gone unnoticed — a hand-kept list is wrong for a while before it
+    ## is wrong expensively.
     source: string
     now: int64
+
     mustBeCurrent: seq[string]
+      ## Artifacts this gate requires to be IN FORCE at `now`. The clock
+      ## is the first midnight at which all of them are, so adding a row
+      ## with a later start moves the clock and dropping the latest one
+      ## moves it back.
+
+    notRequiredCurrent: seq[string]
+      ## Artifacts the gate references and deliberately does NOT require
+      ## in force: material pinned to be refused, and vintages pinned for
+      ## being old. Without this list the partition could only be made to
+      ## hold by requiring an impostor certificate to be current, which
+      ## would be a false statement about what the gate needs; with it,
+      ## the excuse is written down and costs something. Two rules make
+      ## it more than a free-form note, and they are cases below: nothing
+      ## named here may be named in ANY gate's `mustBeCurrent`, and
+      ## nothing named here may carry an OBSERVATION DATE — which every
+      ## artifact somebody went to a publisher for does, and no artifact
+      ## that came out of a project's committed test data or was minted
+      ## here does. So the list cannot be used to silence the next
+      ## reissue; that has to be answered with new bytes and a
+      ## recomputed clock.
 
 const
   PinnedClockGates: array[6, PinnedClockGate] = [
     PinnedClockGate(
-      source: "t_snp_fixture_verify.nim", now: 1_788_220_800'i64,
-      mustBeCurrent: @["KdsMilanCrlDerHex", "KdsGenoaCrlDerHex",
+      source: "t_snp_fixture_verify.nim", now: 1_790_121_600'i64,
+      mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
+                       "VirteeMilanVcekDerHex"],
+      notRequiredCurrent: @[]),
+    PinnedClockGate(
+      source: "t_snp_chain_requires_amd_root.nim", now: 1_790_121_600'i64,
+      mustBeCurrent: @["KdsGenoaCrlDerHex", "KdsMilanCrlDerHex",
                        "KdsTurinCrlDerHex", "VirteeMilanVcekDerHex",
-                       "GsgMilanVcekDerHex", "VirteeTurinVcekDerHex"]),
+                       "VirteeTurinVcekDerHex"],
+      notRequiredCurrent: @["ImpostorArkHex", "ImpostorAskHex",
+                            "ImpostorVcekHex"]),
     PinnedClockGate(
-      source: "t_snp_chain_requires_amd_root.nim", now: 1_788_220_800'i64,
-      mustBeCurrent: @["KdsMilanCrlDerHex", "KdsGenoaCrlDerHex",
-                       "KdsTurinCrlDerHex", "VirteeMilanVcekDerHex",
-                       "GsgMilanVcekDerHex", "VirteeTurinVcekDerHex"]),
+      source: "t_snp_tcb_policy.nim", now: 1_790_121_600'i64,
+      mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
+                       "VirteeMilanVcekDerHex"],
+      notRequiredCurrent: @[]),
     PinnedClockGate(
-      source: "t_snp_tcb_policy.nim", now: 1_788_220_800'i64,
-      mustBeCurrent: @["KdsMilanCrlDerHex", "VirteeMilanVcekDerHex"]),
+      source: "t_tdx_chain_requires_intel_root.nim", now: 1_790_985_600'i64,
+      mustBeCurrent: @["IntelRootCrlDerHex", "IntelSgxRootCaDerHex",
+                       "PcsPckCrlPlatformDerHex",
+                       "PcsPckCrlProcessorDerHex"],
+      notRequiredCurrent: @["ImpostorCaDerHex",
+                            "ImpostorCaNotAnAuthorityDerHex",
+                            "ImpostorCaWithoutCertSignDerHex",
+                            "ImpostorLeafDerHex",
+                            "ImpostorLeafWithUnknownCriticalDerHex",
+                            "ImpostorLeafWithoutFmspcDerHex",
+                            "ImpostorLeafWithoutPlatformDerHex",
+                            "ImpostorLeafWithoutTcbDerHex",
+                            "ImpostorRootDerHex", "IntelSampleCaDerHex",
+                            "IntelSampleLeafDerHex", "IntelSampleRootDerHex",
+                            "PcsPckCrlPlatformWithoutNextUpdateDerHex"]),
     PinnedClockGate(
-      source: "t_tdx_chain_requires_intel_root.nim", now: 1_790_294_400'i64,
-      mustBeCurrent: @["PcsPckCrlPlatformDerHex", "IntelRootCrlDerHex",
-                       "IntelTcbSigningCertDerHex"]),
-    PinnedClockGate(
-      source: "t_tdx_collateral_and_verifier_arm.nim", now: 1_790_294_400'i64,
-      mustBeCurrent: @["PcsTcbInfoSprJson", "PcsTcbInfoEmrJson",
-                       "PcsTdxQeIdentityJson", "PcsSgxQeIdentityJson",
-                       "PcsSgxTcbInfoJson", "PcsPckCrlPlatformDerHex",
-                       "IntelTcbSigningCertDerHex"]),
+      source: "t_tdx_collateral_and_verifier_arm.nim", now: 1_790_985_600'i64,
+      mustBeCurrent: @["IntelSgxRootCaDerHex", "IntelTcbSigningCertDerHex",
+                       "PcsPckCrlPlatformDerHex", "PcsSgxQeIdentityJson",
+                       "PcsSgxTcbInfoJson", "PcsTcbInfoEmrJson",
+                       "PcsTcbInfoSprJson", "PcsTdxQeIdentityJson"],
+      notRequiredCurrent: @["GtgQeIdentityJson", "GtgTcbInfoEmrJson",
+                            "GtgTcbInfoSprJson", "ImpostorCaDerHex",
+                            "ImpostorLeafDerHex", "ImpostorRootDerHex",
+                            "IntelSampleCaDerHex", "IntelSampleLeafDerHex",
+                            "IntelSampleRootDerHex"]),
     PinnedClockGate(
       # FOUND BY REVIEW. This gate states its clock as `const Now = …`
       # on ONE line, and the scan below read only a line that BEGINS
@@ -124,9 +184,10 @@ const
       # the other three do, and the one refreshing that list will break
       # without the ledger naming it. The scan now reads both spellings.
       source: "t_snp_evidence_reaches_the_verdict.nim",
-      now: 1_789_000_000'i64,
-      mustBeCurrent: @["KdsMilanCrlDerHex", "VirteeMilanVcekDerHex",
-                       "GsgMilanVcekDerHex"])]
+      now: 1_790_121_600'i64,
+      mustBeCurrent: @["GsgMilanVcekDerHex", "KdsMilanCrlDerHex",
+                       "VirteeMilanVcekDerHex"],
+      notRequiredCurrent: @[])]
 
 proc sha256Hex(s: string): string =
   let d = sha256.digest(s)
@@ -153,6 +214,20 @@ proc jsonMember(js, key: string): string =
   doAssert i >= 0, "no " & key & " member"
   let j = js.find('"', i + k.len)
   js[i + k.len ..< j]
+
+proc jsonNumber(js, key: string): int =
+  ## An unquoted numeric member, read the same way `jsonMember` reads a
+  ## quoted one: by finding the member and taking the digits after it.
+  let k = "\"" & key & "\":"
+  let i = js.find(k)
+  doAssert i >= 0, "no " & key & " member"
+  var j = i + k.len
+  var digits = ""
+  while j < js.len and js[j] in {'0' .. '9'}:
+    digits.add js[j]
+    inc j
+  doAssert digits.len > 0, key & " is not a number"
+  parseInt(digits)
 
 proc windowOfRow(row: LedgerRow): LifecycleWindow =
   ## The window an artifact states, read out of the artifact.
@@ -182,6 +257,130 @@ proc rowNamed(name: string): LedgerRow =
   for r in ledgerRows():
     if r.name == name: return r
   raise newException(ValueError, "no ledger row named " & name)
+
+proc firstMidnightAtOrAfter(t: int64): int64 =
+  ## The first UTC midnight at or after `t`. Exact at the boundary: a
+  ## `t` that already IS a midnight is its own answer, which matters
+  ## because it is the difference between a clock sitting on the
+  ## instant its material came into force and a clock a whole day past
+  ## it for no stated reason.
+  ((t + Day - 1) div Day) * Day
+
+proc openingMidnight(g: PinnedClockGate): int64 =
+  ## THE CLOCK RULE, as a computation over the bytes.
+  ##
+  ## A gate's `Now` is the first UTC midnight at which every artifact
+  ## that gate judges is simultaneously in force — the midnight at or
+  ## after the latest `notBefore` among them. Everything on the right
+  ## of this is read out of an artifact's own DER or JSON by
+  ## `windowOfRow`, so the only thing the gate source contributes is
+  ## the constant being checked.
+  ##
+  ## Why an equality and not a bound. "Inside the window" is satisfied
+  ## by any instant in a fifty-day interval, and a refresh that has to
+  ## move a clock will reach for one that passes — which is how a clock
+  ## ends up far past the evidence and the next refresh silently stops
+  ## testing anything. The earliest defensible instant is a decision
+  ## nobody has to make twice, and it moves if and only if the material
+  ## moves.
+  result = low(int64)
+  for name in g.mustBeCurrent:
+    let w = windowOfRow(rowNamed(name))
+    doAssert w.hasNotBefore, name & " states no start"
+    if w.notBefore > result: result = w.notBefore
+  result = firstMidnightAtOrAfter(result)
+
+proc codeOnly(text: string): string =
+  ## `text` with every comment and every string literal replaced by a
+  ## space, so what is left is the code.
+  ##
+  ## Both removals are load-bearing and both have cost this repository a
+  ## gate that could not fail. A name left in a COMMENT is the
+  ## most-repeated way a check in this tree has turned out to check
+  ## nothing, and a name in a STRING is a label rather than a use — the sibling gate that
+  ## records provenance writes `pin "KdsMilanCrlDerHex", …`, and a scan
+  ## that counted that would call every artifact referenced by every gate
+  ## that merely names it.
+  ##
+  ## Nim's character literal IS tracked, and the thing that makes that
+  ## delicate is that `'` is also the numeric-suffix sigil — a reader
+  ## that treated `1_790_985_600'i64` as an opening quote would swallow
+  ## the rest of the line, including any reference on it. The two are
+  ## told apart the way the compiler tells them apart: a `'` directly
+  ## after an identifier or a number character is a suffix, and anywhere
+  ## else it opens a literal. Both halves have input in the sources this
+  ## scans — `check line == '"'` is a literal carrying a quote, and
+  ## `'i64` appears in every one of the six gates — and both are cases
+  ## below.
+  result = newStringOfCap(text.len)
+  var i = 0
+  while i < text.len:
+    if text[i] == '\'' and
+       (i == 0 or text[i - 1] notin {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}):
+      var j = i + 1
+      while j < text.len and text[j] != '\'' and text[j] != '\n':
+        if text[j] == '\\': inc j
+        inc j
+      i = min(j + 1, text.len)
+      result.add ' '
+    elif text[i] == '"':
+      if i + 2 < text.len and text[i + 1] == '"' and text[i + 2] == '"':
+        var j = i + 3
+        while j + 2 < text.len and
+              not (text[j] == '"' and text[j + 1] == '"' and text[j + 2] == '"'):
+          inc j
+        i = min(j + 3, text.len)
+      else:
+        var j = i + 1
+        while j < text.len and text[j] != '"' and text[j] != '\n':
+          if text[j] == '\\': inc j
+          inc j
+        i = min(j + 1, text.len)
+      result.add ' '
+    elif text[i] == '#':
+      if i + 1 < text.len and text[i + 1] == '[':
+        var j = i + 2
+        while j + 1 < text.len and not (text[j] == ']' and text[j + 1] == '#'):
+          inc j
+        i = min(j + 2, text.len)
+        result.add ' '
+      else:
+        while i < text.len and text[i] != '\n': inc i
+        result.add ' '
+    else:
+      result.add text[i]
+      inc i
+
+proc referencedCorpusNames(source: string): seq[string] =
+  ## Every WINDOWED ledger row the named gate's source references as an
+  ## identifier, in the gate's own code.
+  ##
+  ## This is the mechanical side of the two lists above: the gate source
+  ## is the authority and the table is what is checked against it, so a
+  ## gate that starts or stops referencing an artifact cannot stay in
+  ## silent disagreement with its row.
+  let code = codeOnly(readFile(integrationDir() / source))
+  var seen: seq[string] = @[]
+  for row in ledgerRows():
+    if not hasWindow(row): continue
+    if row.name in seen: continue
+    # Whole-identifier, so `PcsPckCrlPlatformDerHex` is not found inside
+    # `PcsPckCrlPlatformWithoutNextUpdateDerHex`.
+    var at = 0
+    while true:
+      let k = code.find(row.name, at)
+      if k < 0: break
+      let beforeOk = k == 0 or code[k - 1] notin
+        {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}
+      let after = k + row.name.len
+      let afterOk = after >= code.len or code[after] notin
+        {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}
+      if beforeOk and afterOk:
+        seen.add row.name
+        break
+      at = k + 1
+  seen.sort()
+  seen
 
 proc constantsDeclaredBy(module: string): seq[string] =
   ## Every top-level constant a corpus module declares, by a scan of its
@@ -504,7 +703,226 @@ suite "pinned clocks agree with the material they judge":
         check g.now >= w.notBefore
         check g.now < w.notAfter
         inc pairs
-    check pairs == 27
+    check pairs == 26
+
+  test "the two lists are exactly what the gate's own source references":
+    # THE MECHANICAL TIE, and the residual this closes. `mustBeCurrent`
+    # was hand-kept against sources that change, which is the shape this
+    # whole file exists to remove one instance of: the only thing that
+    # related a row to its gate was somebody remembering, and four of six
+    # rows had stopped agreeing.
+    #
+    # The gate's SOURCE is the authority and the table is the side under
+    # test. For every windowed ledger row a gate's code names, the row
+    # must appear in exactly one of the two lists; and neither list may
+    # name a row the code does not name. So a gate that starts
+    # referencing an artifact is red until its row says what the clock
+    # must do about it, and a gate that stops referencing one is red
+    # until the stale name goes.
+    var referenced = 0
+    for g in PinnedClockGates:
+      checkpoint(g.source)
+      var declared = g.mustBeCurrent & g.notRequiredCurrent
+      # Neither list may repeat a name and the two may not overlap: a
+      # name in both would satisfy the partition while saying the gate
+      # does and does not require the artifact in force.
+      check declared.deduplicate.len == declared.len
+      declared.sort()
+      let scanned = referencedCorpusNames(g.source)
+      check declared == scanned
+      referenced += scanned.len
+    # The scan is not vacuous and the two lists are not one list: both
+    # have members, and the counts are pinned so a scan that returned
+    # nothing — or everything — could not satisfy the loop.
+    check referenced == 51
+    var mustTotal, excusedTotal = 0
+    for g in PinnedClockGates:
+      mustTotal += g.mustBeCurrent.len
+      excusedTotal += g.notRequiredCurrent.len
+    check mustTotal == 26
+    check excusedTotal == 25
+    check mustTotal + excusedTotal == referenced
+
+  test "the scan reads CODE, not comments and not string literals":
+    # Without this the case above is satisfied by a scan over the raw
+    # file, and the two shapes that defeats are the two this repository
+    # has paid for most often: a name that stayed behind in a comment after
+    # the code using it was deleted, and a name that only ever appears as
+    # a LABEL in a string.
+    #
+    # Both halves have real input in the tree rather than constructed
+    # ones. `t_snp_evidence_reaches_the_verdict` names each of its
+    # artifacts once in its header prose and once in its code, and
+    # `t_snp_fixture_verify` names `KdsTurinCrlDerHex` in a comment and
+    # NOWHERE in its code — so a `codeOnly` that stopped stripping
+    # comments would put that name in that gate's referenced set, and the
+    # partition case above would be red. That is the stripping's reachable
+    # input, said out loud because without it the only thing exercising it
+    # would be this case's own constructed strings.
+    let verdictGate = "t_snp_evidence_reaches_the_verdict.nim"
+    let raw = readFile(integrationDir() / verdictGate)
+    let code = codeOnly(raw)
+    proc occurrences(hay, needle: string): int =
+      var at = 0
+      while true:
+        let k = hay.find(needle, at)
+        if k < 0: return
+        inc result
+        at = k + 1
+    check occurrences(raw, "KdsMilanCrlDerHex") == 2
+    check occurrences(code, "KdsMilanCrlDerHex") == 1
+    check occurrences(raw, "GsgMilanVcekDerHex") == 3
+    check occurrences(code, "GsgMilanVcekDerHex") == 2
+    # So the transform removes mentions, and it does not remove them all:
+    # a `codeOnly` that returned the empty string would satisfy the first
+    # half of each pair and not the second.
+    check code.len > raw.len div 2
+    # And each shape directly, because the real input above only exercises
+    # the single-hash comment.
+    const Name = "KdsTurinCrlDerHex"
+    for hidden in ["# " & Name,
+                   "## " & Name,
+                   "#[ " & Name & " ]#",
+                   "\"" & Name & "\"",
+                   "\"\"\"" & Name & "\"\"\"",
+                   "check f(\"" & Name & "\") # and " & Name]:
+      checkpoint(hidden)
+      check Name notin codeOnly(hidden)
+    # The positive control: the same name in code survives, so the
+    # transform is not simply deleting the name.
+    check Name in codeOnly("let x = " & Name)
+    check Name in codeOnly("let x = " & Name & " # not here though")
+    # And on the real file: the name is in the text and not in the code.
+    let snpGate = readFile(integrationDir() / "t_snp_fixture_verify.nim")
+    check Name in snpGate
+    check Name notin codeOnly(snpGate)
+    check Name notin referencedCorpusNames("t_snp_fixture_verify.nim")
+    # A numeric suffix is not a character literal, and mistaking it for
+    # one would swallow the rest of the line — including the next
+    # reference on it. A character literal that CARRIES a quote is the
+    # other half, and both shapes are in the gates this scans: the
+    # trust-domain collateral gate writes `'"'` and every gate writes
+    # `'i64`.
+    check Name in codeOnly("check now == 1_790_985_600'i64 and " & Name)
+    check Name in codeOnly("if c == '\"': discard " & Name)
+    check Name in codeOnly("for x in s.split('\\t'): discard " & Name)
+    check Name in codeOnly("if c == '#': discard " & Name)
+    # And a character literal is still a literal: what is INSIDE one is
+    # not code, so a name spelled there does not count as a reference.
+    check "Kds" notin codeOnly("let c = 'K'")
+
+  test "nothing a gate excuses is material this corpus requires in force":
+    # The first of two costs on `notRequiredCurrent`, and what stops it
+    # being a place to put an artifact that is about to expire. An
+    # artifact is either material some gate needs in force or material
+    # pinned to be refused; it cannot be both, and the partition is
+    # asserted across ALL gates rather than within each one.
+    var required, excused: seq[string] = @[]
+    for g in PinnedClockGates:
+      for n in g.mustBeCurrent:
+        if n notin required: required.add n
+      for n in g.notRequiredCurrent:
+        if n notin excused: excused.add n
+    check required.len == 16
+    check excused.len == 19
+    for n in excused:
+      checkpoint(n)
+      check n notin required
+    # Both directions, so the disjointness is not a statement about an
+    # empty set on either side.
+    for n in required:
+      checkpoint(n)
+      check n notin excused
+
+  test "nothing a gate excuses is material somebody fetched from a publisher":
+    # The second cost, and the one aimed at this file's own recurring
+    # failure: the next time a vendor reissues, the answer has to be new
+    # bytes and a recomputed clock, and it must not be possible to make
+    # the reissue quiet by moving the name from one list to the other.
+    #
+    # The property that separates the two is the ledger's `observed`
+    # column. An artifact somebody went to a publisher for is an artifact
+    # this corpus tracks as CURRENT, and a publisher can reissue it. An
+    # artifact with no observation date arrived from a project's
+    # committed test data at a pinned commit, or from a vendor's sample
+    # data, or was minted here — none of which has a current answer to
+    # drift to. So an excuse is available for exactly the second kind.
+    #
+    # This covers more than a fetch-route rule would, which is why it
+    # replaced one: all five of the trust-domain documents, both of its
+    # withdrawal lists and both of its certificates carry observation
+    # dates, and only two of those nine can be re-fetched in one request.
+    var excusable, refused = 0
+    for g in PinnedClockGates:
+      for n in g.notRequiredCurrent:
+        checkpoint(g.source & " excuses " & n)
+        check rowNamed(n).observed == "-"
+        inc excusable
+    check excusable == 25
+    # The complement, and it is the control: every artifact any gate
+    # requires in force that DOES carry an observation date could not be
+    # excused by this rule. Without this the rule above could be
+    # satisfied by a corpus in which nothing is observed at all.
+    var required: seq[string] = @[]
+    for g in PinnedClockGates:
+      for n in g.mustBeCurrent:
+        if n notin required: required.add n
+    check required.len == 16
+    for n in required:
+      if rowNamed(n).observed != "-": inc refused
+    check refused == 13
+    # And the fetch table, which is the weaker statement of the same
+    # thing and is kept because it is the one the scheduled tool acts on:
+    # nothing excused has an unattended refresh route, and the table is
+    # not empty of things the gates require.
+    var routes: seq[string] = @[]
+    for f in fetchRows(): routes.add f.name
+    for g in PinnedClockGates:
+      for n in g.notRequiredCurrent:
+        check n notin routes
+    var withRoute = 0
+    for n in required:
+      if n in routes: inc withRoute
+    check withRoute == 5
+
+  test "each pinned clock IS the first midnight its material is all in force":
+    # The rule, as an equality rather than as a range. The case above
+    # establishes that each clock sits somewhere inside the windows; a
+    # fifty-day interval has a lot of somewheres, and "inside" is
+    # satisfied by a value picked because it passed. This says WHICH
+    # instant, computed from the artifacts' own dates, and the gate
+    # sources are the other side — so a clock nudged by hand to clear a
+    # boundary is red even though it is still inside the window.
+    for g in PinnedClockGates:
+      checkpoint(g.source & ": states " & iso(g.now) & ", rule gives " &
+                 iso(openingMidnight(g)))
+      check g.now == openingMidnight(g)
+    # And the rule is not a constant function: the two vendors' material
+    # came into force on different days, so the six gates carry two
+    # distinct clocks and not one. Without this a derivation that
+    # returned the same midnight for every input would satisfy the loop.
+    var clocks = initCountTable[int64]()
+    for g in PinnedClockGates: clocks.inc g.now
+    check clocks.len == 2
+    check iso(1_790_121_600'i64) == "2026-09-23T00:00:00Z"
+    check iso(1_790_985_600'i64) == "2026-10-03T00:00:00Z"
+
+  test "the rule rounds UP to a midnight, and is exact when it lands on one":
+    # `firstMidnightAtOrAfter` is the whole of the "pick one instant"
+    # half of the rule, and an off-by-one there would move every clock a
+    # day — in the direction that matters, since a day early is a clock
+    # before its material is in force.
+    check firstMidnightAtOrAfter(0) == 0
+    check firstMidnightAtOrAfter(1) == Day
+    check firstMidnightAtOrAfter(Day - 1) == Day
+    check firstMidnightAtOrAfter(Day) == Day
+    check firstMidnightAtOrAfter(Day + 1) == 2 * Day
+    # On the real material: the latest start among what the two AMD
+    # chain gates judge is the Turin list, and it is NOT a midnight.
+    let turin = windowOfRow(rowNamed("KdsTurinCrlDerHex"))
+    check turin.notBefore mod Day != 0
+    check firstMidnightAtOrAfter(turin.notBefore) == 1_790_121_600'i64
+    check turin.notBefore < 1_790_121_600'i64
 
   test "the scan reads BOTH spellings a gate can declare its clock in":
     # The repair above, with its own case. Without this the scan could
@@ -557,32 +975,227 @@ suite "pinned clocks agree with the material they judge":
 
 suite "the corpus as it stands, at a pinned instant":
 
-  test "the pinned instant is the one the constant names":
-    check iso(LedgerReferenceInstant) == "2026-09-29T00:00:00Z"
+  test "the pinned instant is the close of the day the corpus was last looked at":
+    # Derived, not chosen. The ledger records an observation date for
+    # every artifact somebody went and fetched; the reference instant is
+    # the UTC midnight that ENDS the latest of them, so it is "the corpus
+    # as of the last time anybody looked" rather than a number that stays
+    # where it was put while the corpus moves underneath it.
+    var latest = ""
+    var observed = 0
+    for row in ledgerRows():
+      if row.observed == "-": continue
+      inc observed
+      if row.observed > latest: latest = row.observed
+    check observed == 22
+    check latest == "2026-10-02"
+    check LedgerReferenceInstant ==
+      parseIsoInstant(latest & "T00:00:00Z", "the latest observation") + Day
+    check iso(LedgerReferenceInstant) == "2026-10-03T00:00:00Z"
 
-  test "the three vendor revocation lists are due for refresh, not expired":
-    # The state this whole gate exists to make visible: still usable,
-    # and days from not being.
-    var due = 0
+  test "the instant the corpus was last looked at is one every observation reaches":
+    # WHY THE CLOSING MIDNIGHT AND NOT THE OPENING ONE, as the property
+    # the opening one violated rather than as a preference.
+    #
+    # `observed` is a DATE, so it fixes the instant only to within a day,
+    # and the OPENING midnight is the one instant in that day at which a
+    # document fetched later the same day is not yet in force. That is
+    # measured, not imagined: seven observed artifacts were re-fetched
+    # between 17:13 and 17:28 UTC, and at the opening midnight every one
+    # of them classifies `lsNotYetInForce` — a corpus freshly taken from
+    # its publisher reported as a clock fault. At the closing midnight
+    # none does, and that holds for a reason rather than by luck: a
+    # publisher that SERVED a document on a given day served one that was
+    # in force at some instant in that day, hence at its end.
+    var reachedAtClose, notReachedAtOpen = 0
+    for row in ledgerRows():
+      if row.observed == "-" or not hasWindow(row): continue
+      checkpoint(row.name & " observed " & row.observed)
+      let w = windowOfRow(row)
+      check classify(w, LedgerReferenceInstant) != lsNotYetInForce
+      inc reachedAtClose
+      if classify(w, LedgerReferenceInstant - Day) == lsNotYetInForce:
+        inc notReachedAtOpen
+    check reachedAtClose == 13
+    # And the opening midnight is NOT equivalent, which is what makes this
+    # a repair. A corpus in which no observation started late would leave
+    # this at zero and the case would be a tautology.
+    check notReachedAtOpen == 7
+
+  test "an observation date overlaps the window the artifact states":
+    # What stops the column above being free. You cannot have fetched,
+    # on a given day, a document that was not yet in force or had
+    # already expired — so each observation is tied to dates read out of
+    # the observed artifact's own bytes, and the reference instant
+    # derived from the column inherits that.
+    var checked = 0
+    for row in ledgerRows():
+      if row.observed == "-" or not hasWindow(row): continue
+      checkpoint(row.name & " observed " & row.observed)
+      let w = windowOfRow(row)
+      let dayStart = parseIsoInstant(row.observed & "T00:00:00Z", row.name)
+      check dayStart + Day - 1 >= w.notBefore
+      if w.hasNotAfter: check dayStart < w.notAfter
+      inc checked
+    check checked == 13
+
+  test "the three vendor revocation lists are current, and say until when":
+    # They were two days from unusable and were refreshed; this is the
+    # state the refresh produced, asserted rather than assumed.
+    var current = 0
     for name in ["KdsMilanCrlDerHex", "KdsGenoaCrlDerHex",
                  "KdsTurinCrlDerHex"]:
       checkpoint(name)
       let w = windowOfRow(rowNamed(name))
-      check classify(w, LedgerReferenceInstant) == lsDueForRefresh
+      check classify(w, LedgerReferenceInstant) == lsCurrent
       check isUsable(classify(w, LedgerReferenceInstant))
-      check w.notAfter - LedgerReferenceInstant < 7 * Day
-      inc due
-    check due == 3
+      check iso(w.notAfter) == "2026-11-09T01:00:00Z"
+      # And they came into force AFTER the clocks the gates used to
+      # pin, which is the whole reason the clocks moved in the same
+      # change. 1_788_220_800 is 2026-09-01T00:00:00Z, what the three
+      # AMD gates stated before this refresh.
+      check w.notBefore > 1_788_220_800'i64
+      check classify(w, 1_788_220_800'i64) == lsNotYetInForce
+      check not isUsable(classify(w, 1_788_220_800'i64))
+      inc current
+    check current == 3
 
-  test "three collateral documents have already expired":
+  test "the trust-domain vendor's seven documents are current, and say until when":
+    # The second refresh, with the same shape as the one above. These
+    # seven stated a next update of 2026-10-21, which the capped horizon
+    # would have begun announcing on 2026-10-06 — on every landing, for
+    # fifteen days. This is the state the refresh produced.
+    var current = 0
+    for name in ["PcsPckCrlPlatformDerHex", "PcsPckCrlProcessorDerHex",
+                 "PcsTcbInfoSprJson", "PcsTcbInfoEmrJson",
+                 "PcsTdxQeIdentityJson", "PcsSgxQeIdentityJson",
+                 "PcsSgxTcbInfoJson"]:
+      checkpoint(name)
+      let w = windowOfRow(rowNamed(name))
+      check classify(w, LedgerReferenceInstant) == lsCurrent
+      check isUsable(classify(w, LedgerReferenceInstant))
+      # Thirty days to the second, which is this vendor's invariant and
+      # the whole reason the horizon is capped at half a lifetime.
+      check w.notAfter - w.notBefore == 30 * Day
+      # And they came into force AFTER the clock the two trust-domain
+      # gates stated before this refresh, which is why those clocks moved
+      # in the same change. 1_790_035_200 is 2026-09-22T00:00:00Z.
+      check w.notBefore > 1_790_035_200'i64
+      check classify(w, 1_790_035_200'i64) == lsNotYetInForce
+      check not isUsable(classify(w, 1_790_035_200'i64))
+      inc current
+    check current == 7
+
+  test "a later issue carries a HIGHER evaluation-data number, not an older one":
+    # The replay invariant for a trusted-computing-base document, and the
+    # counterpart to "the revocation number went up and the revocation
+    # survived" on the other vendor.
+    #
+    # A reissued document is not proved genuine by its dates — those are
+    # the part an attacker rewrites — and a signature only proves the
+    # vendor signed SOMETHING. What distinguishes a later issue from an
+    # older one replayed under a new name is the vendor's own collateral
+    # version: `tcbEvaluationDataNumber` is monotone in the vendor's
+    # publication order, so a document stating a LOWER one than a vintage
+    # this corpus already holds for the same platform is a rollback
+    # whatever its issue date says.
+    #
+    # Three pairs, each an older vintage and the document refreshed here,
+    # and the pairs come from DIFFERENT publishers — the earlier member of
+    # each is committed test data in a third-party project, so the two
+    # sides cannot both be whatever the service served today.
+    var pairs = 0
+    for (older, newer) in [("GtgTcbInfoSprJson", "PcsTcbInfoSprJson"),
+                           ("GtgTcbInfoEmrJson", "PcsTcbInfoEmrJson"),
+                           ("GtgQeIdentityJson", "PcsTdxQeIdentityJson")]:
+      checkpoint(older & " then " & newer)
+      let a = jsonNumber(bytesOf(older), "tcbEvaluationDataNumber")
+      let b = jsonNumber(bytesOf(newer), "tcbEvaluationDataNumber")
+      check b > a
+      # And the ORDER of the two is read out of the documents' own dates
+      # rather than assumed from the names.
+      let wa = windowOfRow(rowNamed(older))
+      let wb = windowOfRow(rowNamed(newer))
+      check wb.notBefore > wa.notBefore
+      inc pairs
+    check pairs == 3
+    # The numbers themselves, so this is not a comparison of two values a
+    # single reader could be returning identically: three distinct older
+    # numbers are not one number.
+    var older: seq[int] = @[]
+    for n in ["GtgTcbInfoSprJson", "GtgTcbInfoEmrJson", "GtgQeIdentityJson"]:
+      older.add jsonNumber(bytesOf(n), "tcbEvaluationDataNumber")
+    check older == @[15, 18, 15]
+    # All five documents refreshed here state the SAME number, which is
+    # the finding this refresh carries: the vendor moved the dates and
+    # left the trusted-computing-base content alone, so no level, status
+    # or advisory changed and no verdict here had cause to move.
+    for n in ["PcsTcbInfoSprJson", "PcsTcbInfoEmrJson", "PcsTdxQeIdentityJson",
+              "PcsSgxQeIdentityJson", "PcsSgxTcbInfoJson"]:
+      checkpoint(n)
+      check jsonNumber(bytesOf(n), "tcbEvaluationDataNumber") == 20
+
+  test "the next thing in this corpus to expire is named, with its date":
+    # The deliverable of the whole file in one line: a reader who wants
+    # to know when this corpus next needs a hand does not have to run
+    # anything. It is re-derived here rather than recorded, so it cannot
+    # go stale quietly — refresh anything and this case says so.
+    var soonest = high(int64)
+    var who = ""
+    for row in ledgerRows():
+      if not hasWindow(row) or row.class == "historical-vintage": continue
+      let w = windowOfRow(row)
+      if not w.hasNotAfter: continue
+      if w.notAfter < soonest:
+        soonest = w.notAfter
+        who = row.name
+    check who == "PcsTcbInfoSprJson"
+    check iso(soonest) == "2026-11-01T17:13:18Z"
+    check soonest > LedgerReferenceInstant
+
+  test "everything expired here is pinned for being expired":
+    # The strong form, and the teeth on `historical-vintage`. The class
+    # quietens a row in the scheduled monitor, so it has to cost
+    # something: nothing else in the corpus may be expired at the
+    # reference instant, and every row carrying the class must actually
+    # be in the state it claims.
     var expired = 0
     for row in ledgerRows():
       if not hasWindow(row): continue
       if classify(windowOfRow(row), LedgerReferenceInstant) == lsExpired:
         checkpoint(row.name & " expired " & row.notAfter)
-        check row.class == "vendor-collateral"
+        check row.class == "historical-vintage"
         inc expired
     check expired == 3
+    var vintages = 0
+    for row in ledgerRows():
+      if row.class != "historical-vintage": continue
+      checkpoint(row.name)
+      check hasWindow(row)
+      check classify(windowOfRow(row), LedgerReferenceInstant) == lsExpired
+      check not isUsable(classify(windowOfRow(row), LedgerReferenceInstant))
+      inc vintages
+    check vintages == expired
+
+  test "a vintage pinned for being old has no unattended refresh route":
+    # The other half of the cost, and the one that stops the class
+    # being a mute button. "This cannot be made current" and "one HTTP
+    # GET returns the publisher's current answer" are contradictory
+    # claims; a row making both would be using the class to silence an
+    # artifact that is simply out of date. The monitor refuses such a
+    # row outright; this is the same rule where the suite can see it.
+    var routes: seq[string] = @[]
+    for f in fetchRows(): routes.add f.name
+    check routes.len == 8
+    for row in ledgerRows():
+      if row.class != "historical-vintage": continue
+      checkpoint(row.name)
+      check row.name notin routes
+    # The positive control: the list is not empty and does name rows of
+    # the class next door, so "not in it" is a statement about these
+    # three rather than about an empty list.
+    check "KdsMilanCrlDerHex" in routes
+    check rowNamed("KdsMilanCrlDerHex").class == "vendor-collateral"
 
   test "the whole corpus partitions across the statuses":
     var byStatus = initCountTable[LifecycleStatus]()
@@ -590,8 +1203,8 @@ suite "the corpus as it stands, at a pinned instant":
       if not hasWindow(row): continue
       byStatus.inc classify(windowOfRow(row), LedgerReferenceInstant)
     check byStatus[lsExpired] == 3
-    check byStatus[lsDueForRefresh] == 10
-    check byStatus[lsCurrent] == 21
+    check byStatus[lsDueForRefresh] == 0
+    check byStatus[lsCurrent] == 31
     check byStatus[lsNoStatedEnd] == 1
     check byStatus[lsNotYetInForce] == 0
     var total = 0
@@ -605,6 +1218,32 @@ suite "the corpus as it stands, at a pinned instant":
       if needsAttention(status): attention += n
       else: check status == lsCurrent
     check attention == 35 - byStatus[lsCurrent]
+    # A freshly refreshed corpus has nothing due, which is the point of
+    # refreshing it — and it means `lsDueForRefresh` has no input HERE.
+    # Said out loud rather than left to be inferred from a zero: the
+    # status is exercised by the boundary cases below and by the
+    # projection in the case that follows, and by nothing in this table.
+    check byStatus[lsDueForRefresh] == 0
+
+  test "every artifact here becomes due before it expires":
+    # `lsDueForRefresh` reaches no row of this corpus today, so the
+    # property that matters — that the warning arrives while there is
+    # still time — is asserted as a projection over each artifact's own
+    # window instead of being left unmeasured. One instant before the
+    # end is due and not yet expired, and the announcement opens
+    # strictly after the artifact comes into force, so no artifact is
+    # born due.
+    var projected = 0
+    for row in ledgerRows():
+      if not hasWindow(row): continue
+      let w = windowOfRow(row)
+      if not w.hasNotAfter: continue
+      checkpoint(row.name)
+      check classify(w, w.notAfter - 1) == lsDueForRefresh
+      check isUsable(classify(w, w.notAfter - 1))
+      check classify(w, w.notBefore) != lsDueForRefresh
+      inc projected
+    check projected == 34
 
   test "no stable-protocol or minted artifact is in the expiring set":
     # The separation, asserted rather than described: the material that
@@ -614,7 +1253,7 @@ suite "the corpus as it stands, at a pinned instant":
       let status = classify(windowOfRow(row), LedgerReferenceInstant)
       if status in {lsExpired, lsDueForRefresh}:
         checkpoint(row.name)
-        check row.class == "vendor-collateral"
+        check row.class in ["vendor-collateral", "historical-vintage"]
       if row.class in ["protocol-vector", "derived-reading"]:
         check not hasWindow(row)
 
@@ -699,6 +1338,98 @@ suite "the lifecycle decision":
     let w = window(0, 100 * Day)
     check classify(w, 100 * Day - 31 * Day) == lsCurrent
     check classify(w, 100 * Day - 30 * Day) == lsDueForRefresh
+
+  test "the horizon is capped at half an artifact's own lifetime":
+    # The repair, at its boundary. Thirty days is a CEILING; the
+    # horizon an artifact actually gets is the lesser of it and half
+    # that artifact's stated life, so there is always a quiet period at
+    # least as long as the warning.
+    check effectiveHorizon(window(0, 100 * Day), 30 * Day) == 30 * Day
+    check effectiveHorizon(window(0, 60 * Day), 30 * Day) == 30 * Day
+    check effectiveHorizon(window(0, 59 * Day), 30 * Day) ==
+      29 * Day + Day div 2
+    check effectiveHorizon(window(0, 30 * Day), 30 * Day) == 15 * Day
+    check effectiveHorizon(window(0, 2), 30 * Day) == 1
+    # Sixty days is the exact crossover: at and above it the ceiling
+    # binds, below it the proportion does.
+    check effectiveHorizon(window(0, 60 * Day), 30 * Day) ==
+      effectiveHorizon(window(0, 10_000 * Day), 30 * Day)
+
+  test "a short-lived document is NOT born due for refresh":
+    # The defect, stated as the property it violated. A thirty-day
+    # document under a flat thirty-day horizon is due from the instant
+    # it is issued, so the announcement is true for its whole life and
+    # says nothing. Under the capped horizon it is current for the
+    # first half and due for the second.
+    let w = window(0, 30 * Day)
+    check classify(w, 0) == lsCurrent
+    check classify(w, 14 * Day) == lsCurrent
+    check classify(w, 15 * Day) == lsDueForRefresh
+    check classify(w, 29 * Day) == lsDueForRefresh
+    check classify(w, 30 * Day) == lsExpired
+    # Under the UNCAPPED rule the same document is due at every instant
+    # of its life, which is the comparison that makes the repair a
+    # repair rather than a preference. `horizonSeconds` is still honest
+    # about what it is handed: a caller asking for a horizon SHORTER
+    # than half the life gets exactly that.
+    check classify(w, 0, horizonSeconds = 1) == lsCurrent
+    check classify(w, 30 * Day - 1, horizonSeconds = 1) == lsDueForRefresh
+    check classify(w, 30 * Day - 2, horizonSeconds = 1) == lsCurrent
+    # And the cap never makes something usable that was not: the expiry
+    # instant is untouched by any horizon.
+    for h in [0'i64, 1'i64, 15 * Day, 30 * Day, 10_000 * Day]:
+      check classify(w, 30 * Day, horizonSeconds = h) == lsExpired
+      check classify(w, 30 * Day - 1, horizonSeconds = h) != lsExpired
+
+  test "the quiet period is at least as long as the warning, always":
+    # What "half" buys, over every lifetime rather than at the three
+    # points above. For any window, the instant the announcement opens
+    # is at or after the window's own midpoint.
+    for days in [2, 3, 7, 29, 30, 31, 59, 60, 61, 365, 4_000]:
+      let w = window(0, days.int64 * Day)
+      let opens = w.notAfter - effectiveHorizon(w, 30 * Day)
+      checkpoint($days & " days: opens at " & $(opens div Day))
+      check opens >= (w.notAfter - w.notBefore) div 2
+      check opens > w.notBefore
+      check opens < w.notAfter
+
+  test "a historical vintage is quiet when expired and loud otherwise":
+    # `expiryNeedsAttention` is where the class is spent, and it is the
+    # only place in this module where a class changes what a status
+    # means. Both directions, because the quietening is the part that
+    # could hide something.
+    check not expiryNeedsAttention(lcHistoricalVintage, lsExpired)
+    for s in LifecycleStatus:
+      if s == lsExpired: continue
+      checkpoint($s)
+      check expiryNeedsAttention(lcHistoricalVintage, s)
+    # Every other class is unchanged: the status alone decides, and
+    # `lsExpired` is loud for all of them.
+    for c in LifecycleClass:
+      if c == lcHistoricalVintage: continue
+      for s in LifecycleStatus:
+        checkpoint($c & " / " & $s)
+        check expiryNeedsAttention(c, s) == needsAttention(s)
+      check expiryNeedsAttention(c, lsExpired)
+    # And it is not a procedure that answers the same way whatever it
+    # is handed: every class has at least one quiet status and at least
+    # one loud one, and for the vintage class the quiet one is
+    # `lsExpired` while for every other class it is `lsCurrent`. That
+    # inversion is the whole content of the procedure, stated as what
+    # distinguishes the arms rather than as the arms themselves.
+    for c in LifecycleClass:
+      var quiet, loud = 0
+      for s in LifecycleStatus:
+        if expiryNeedsAttention(c, s): inc loud else: inc quiet
+      checkpoint($c & ": " & $quiet & " quiet, " & $loud & " loud")
+      check quiet == 1
+      check loud == ord(high(LifecycleStatus))
+      if c == lcHistoricalVintage:
+        check not expiryNeedsAttention(c, lsExpired)
+        check expiryNeedsAttention(c, lsCurrent)
+      else:
+        check expiryNeedsAttention(c, lsExpired)
+        check not expiryNeedsAttention(c, lsCurrent)
 
   test "a window that has not opened is reported as that, not as expiring":
     let w = window(1_000, 1_001)
@@ -794,6 +1525,7 @@ suite "the lifecycle decision":
     # classes with no publisher REFUSE rather than answering — asserted
     # as a partition over the enumeration so a class added without a
     # decision cannot slip through as one of these counts.
+    check driftOf(lcHistoricalVintage, "aa", "bb") == doDrifted
     var drifted, expected, refused = 0
     for c in LifecycleClass:
       try:
@@ -803,7 +1535,7 @@ suite "the lifecycle decision":
         of doUnchanged: check false
       except LifecycleError:
         inc refused
-    check drifted == 3
+    check drifted == 4
     check expected == 1
     check refused == 2
     check drifted + expected + refused == ord(high(LifecycleClass)) + 1
@@ -892,6 +1624,80 @@ suite "the lifecycle decision":
       if line.strip().startsWith("\""): inc quoted
     check quoted == ord(high(LifecycleClass)) + 1
     check ("DEFAULT_HORIZON_DAYS = " & $DefaultRefreshHorizonDays) in monitor
+    # The two decisions this module added after that review, each of
+    # which the monitor has to carry its own copy of for the same
+    # reason: it cannot link this library. Pinned by the SHAPE of the
+    # rule and not only by the name, because a procedure that exists
+    # and returns its argument is worse than one that is absent.
+    check "def effective_horizon(" in monitor
+    check "return min(horizon, lifetime // 2)" in monitor
+    check "def expiry_needs_attention(" in monitor
+    check "if cls == \"historical-vintage\":" in monitor
+    check "return status != \"expired\"" in monitor
+    # And it is CALLED, not merely defined. A definition left in place
+    # beside a second answer is the most-repeated way a check in this
+    # tree has turned out to check nothing.
+    check "effective_horizon(not_before, not_after, horizon)" in monitor
+    check "expiry_needs_attention(row[\"class\"], status)" in monitor
+
+  test "the scheduled run has a trigger it can actually reach":
+    # The other half of "a check that cannot catch what it is for", and
+    # the one no amount of care inside the tool could have fixed.
+    #
+    # A GitHub Actions `schedule:` trigger fires ONLY from the
+    # repository's default branch. A workflow that lives on a
+    # development branch therefore has no periodic run at all — not
+    # late, absent — and nothing anywhere says so: the API reports the
+    # workflow as active either way. Measured on this one: between it
+    # being added and the first expiry it was written to announce, it
+    # had run exactly once, from the `push` that introduced it.
+    #
+    # So an alarm whose whole subject is the calendar must also carry a
+    # trigger that fires from the branch it is sitting on. This reads
+    # the `on:` BLOCK rather than the file, and strips comments first,
+    # because the reasoning above is prose in that same file and a
+    # whole-file grep for "push" would be satisfied by it.
+    let wf = readFile(integrationDir().parentDir.parentDir / ".github" /
+                      "workflows" / "attestation-collateral.yml")
+    check wf.len > 0
+    var inOn = false
+    var triggers: seq[string] = @[]
+    var body: seq[string] = @[]
+    for raw in wf.splitLines():
+      if raw.len == 0: continue
+      let bare = raw.strip()
+      if bare.startsWith("#"): continue
+      let topLevel = raw[0] notin {' ', '\t'}
+      if topLevel:
+        inOn = bare.startsWith("on:")
+        continue
+      if inOn:
+        # One indent level under `on:` is an event name.
+        if raw.startsWith("  ") and not raw.startsWith("   "):
+          triggers.add bare.split(':')[0]
+      else:
+        body.add bare
+    triggers.sort()
+    # The schedule stays — it is correct and it starts working the day
+    # this file reaches the default branch. What it may not be is the
+    # ONLY periodic trigger.
+    check "schedule" in triggers
+    check "push" in triggers
+    check triggers.len == 3
+    # And the per-landing arm must be the OFFLINE one. Asking a
+    # vendor's service once a week is courteous; asking it on every
+    # landing is not, and a per-push run that reached the network would
+    # be removed within the month — which would take the expiry half
+    # with it.
+    var offlineRuns, onlineRuns = 0
+    for line in body:
+      if not line.startsWith("run: python3 tools/attestation_collateral_monitor.py"):
+        continue
+      if "--offline" in line: inc offlineRuns else: inc onlineRuns
+    check offlineRuns == 1
+    check onlineRuns == 1
+    check ("if: github.event_name == 'push'") in body
+    check ("if: github.event_name != 'push'") in body
 
   test "every ledger class is a class the decision module knows":
     var spelled: seq[string] = @[]

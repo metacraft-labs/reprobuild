@@ -8,7 +8,7 @@
 version       = "0.1.0"
 author        = "Metacraft Labs"
 description   = "Binary-cache server daemon — ReproOS-Generations-And-Foreign-Packages A2"
-license       = "MIT"
+license       = "Apache-2.0"
 srcDir        = "."
 bin           = @["repro_binary_cache"]
 

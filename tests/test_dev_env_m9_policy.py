@@ -15,44 +15,75 @@ def text(path):
     return path.read_text(encoding="utf-8")
 
 
+SKIP_CALL = re.compile(r"\bskip\s*\(")
+
+# `ignore` / `ignored` as a WORD. The look-arounds reject a hyphen as well as
+# a word character on either side, so the word inside a kebab-case issue slug
+# or file name (`...-is-silently-ignored`, `...-key-ignores-...`) is part of
+# one token, not the word itself. `\b` alone treats `-` as a boundary and so
+# matched those slugs.
+IGNORE_WORD = re.compile(r"(?<![\w-])ignored?(?![\w-])", re.IGNORECASE)
+
+FORBIDDEN_PATTERNS = [
+    SKIP_CALL,
+    IGNORE_WORD,
+    re.compile(r"\bdisabled\b", re.IGNORECASE),
+    re.compile(r"platform\s+N/A", re.IGNORECASE),
+    re.compile(r"platform-skip", re.IGNORECASE),
+    re.compile(r"\bcheck\s+true\b"),
+]
+
+# Lines guarded by a known capability check are not coverage hiding —
+# they're declaring that the underlying syscall/binary is absent on
+# the host. The policy still rejects skips outside such guards.
+CAPABILITY_GUARDED = re.compile(
+    r"\b(isIoMonitorSupported|bash\.len\s*==\s*0|"
+    r"monitorCliPath\.len\s*==\s*0|"
+    r"monitorShim\.len\s*==\s*0)\b"
+)
+
+
+def policy_violations(lines):
+    """Return `(lineno, line)` for each line of a dev-env test source that
+    looks like hidden coverage: a skip outside a capability guard, an
+    `ignore`, a `disabled` marker, a platform-N/A branch or a `check true`.
+
+    The gate exists so positive-path dev-env tests cannot quietly stop
+    testing anything. Every pattern applies to comments as well as code: a
+    note such as `# ignored until ...` or `# disabled ...` is how hidden
+    coverage is usually announced. The one shape it must not match is a
+    kebab-case issue slug or file name that happens to end in `ignored`
+    (`...-is-silently-ignored`), which `IGNORE_WORD` treats as one token.
+    """
+    violations = []
+    for lineno, line in enumerate(lines, 1):
+        for pattern in FORBIDDEN_PATTERNS:
+            if not pattern.search(line):
+                continue
+            # Allow skips that sit one indented level under a
+            # capability-check `if` (or `elif`). Walk up at most
+            # a few non-blank lines looking for the guard.
+            if pattern is SKIP_CALL:
+                guarded = False
+                for back in range(max(0, lineno - 5), lineno - 1):
+                    if CAPABILITY_GUARDED.search(lines[back]):
+                        guarded = True
+                        break
+                if guarded:
+                    continue
+            violations.append((lineno, line))
+    return violations
+
+
 class DevEnvM9PolicyTest(unittest.TestCase):
     def test_integration_dev_env_no_ignored_tests(self):
-        forbidden = [
-            re.compile(r"\bskip\s*\("),
-            re.compile(r"\bignored?\b", re.IGNORECASE),
-            re.compile(r"\bdisabled\b", re.IGNORECASE),
-            re.compile(r"platform\s+N/A", re.IGNORECASE),
-            re.compile(r"platform-skip", re.IGNORECASE),
-            re.compile(r"\bcheck\s+true\b"),
-        ]
-        # Lines guarded by a known capability check are not coverage hiding —
-        # they're declaring that the underlying syscall/binary is absent on
-        # the host. The policy still rejects skips outside such guards.
-        capability_guarded = re.compile(
-            r"\b(isIoMonitorSupported|bash\.len\s*==\s*0|"
-            r"monitorCliPath\.len\s*==\s*0|"
-            r"monitorShim\.len\s*==\s*0)\b"
-        )
         failures = []
         for path in sorted(DEV_ENV_TEST_DIR.glob("t*.nim")):
             lines = text(path).splitlines()
-            for lineno, line in enumerate(lines, 1):
-                for pattern in forbidden:
-                    if pattern.search(line):
-                        # Allow skips that sit one indented level under a
-                        # capability-check `if` (or `elif`). Walk up at most
-                        # a few non-blank lines looking for the guard.
-                        if pattern.pattern == r"\bskip\s*\(":
-                            guarded = False
-                            for back in range(max(0, lineno - 5), lineno - 1):
-                                if capability_guarded.search(lines[back]):
-                                    guarded = True
-                                    break
-                            if guarded:
-                                continue
-                        failures.append(
-                            f"{path.relative_to(REPO)}:{lineno}: {line.strip()}"
-                        )
+            for lineno, line in policy_violations(lines):
+                failures.append(
+                    f"{path.relative_to(REPO)}:{lineno}: {line.strip()}"
+                )
         self.assertEqual(
             [],
             failures,
@@ -217,6 +248,65 @@ class DevEnvM9PolicyTest(unittest.TestCase):
             "CI and full-suite runners must not hide dev-env gates with "
             "dev-env-specific skip/exclude/ignore controls",
         )
+
+
+class DevEnvPolicyLineMatchingTest(unittest.TestCase):
+    """Pin what `policy_violations` flags, line by line.
+
+    The gate scans real test sources, so a regression in the matcher shows up
+    only when some test file happens to contain the shape it gets wrong. These
+    cases name the shapes directly: coverage hiding stays flagged in code and
+    in comments, and a kebab-case slug that merely ends in `ignored` does not.
+    """
+
+    def flagged(self, *lines):
+        return [lineno for lineno, _ in policy_violations(list(lines))]
+
+    def test_code_level_ignored_is_still_flagged(self):
+        self.assertEqual([1], self.flagged("  let ignored = runCase()"))
+        self.assertEqual([1], self.flagged("  ignore runCase()"))
+        # A trailing comment on a code line is not a whole-line comment.
+        self.assertEqual([1], self.flagged("  discard run()  # ignore result"))
+
+    def test_skip_outside_a_capability_guard_is_still_flagged(self):
+        self.assertEqual([2], self.flagged(
+            "  test \"x\":",
+            "    skip()",
+        ))
+
+    def test_skip_under_a_capability_guard_is_allowed(self):
+        self.assertEqual([], self.flagged(
+            "    if not isIoMonitorSupported():",
+            "      skip()",
+        ))
+
+    def test_issue_slug_in_a_doc_comment_is_not_flagged(self):
+        self.assertEqual([], self.flagged(
+            "## 2026-10-13-unknown-activity-selector-is-silently-ignored; spec",
+        ))
+
+    def test_ignored_note_in_a_comment_is_still_flagged(self):
+        # Only the slug is exempt, not the word: a comment announcing that a
+        # case is ignored is exactly what the gate is for.
+        self.assertEqual([1, 2], self.flagged(
+            "  # ignored until the monitor lands on this host",
+            "  ## Ignore this case on CI",
+        ))
+
+    def test_slug_in_code_is_not_the_word_ignored(self):
+        # A kebab-case file name is one token, not the word `ignored`.
+        self.assertEqual([], self.flagged(
+            '  const issue = "dev-env-prompt-key-ignores-flake-inputs.md"',
+            '  const other = "selector-is-silently-ignored.md"',
+        ))
+
+    def test_other_patterns_still_apply_to_comment_lines(self):
+        # The other markers keep their comment-inclusive behaviour too.
+        self.assertEqual([1, 2, 3], self.flagged(
+            "  # disabled until the monitor lands",
+            "  # platform N/A here",
+            "  # check true",
+        ))
 
 
 if __name__ == "__main__":

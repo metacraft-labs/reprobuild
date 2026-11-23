@@ -77,8 +77,10 @@ package duktapeSource:
         "-f", "Makefile.sharedlibrary",
         "INSTALL_PREFIX=/usr",
       ]
+      # Copying the shipped Makefile variants produces the configure stamp,
+      # without generating a bare Makefile.
       let pkg = autotools_package(srcDir = "./src", configureOptions = opts,
-                                  skipConfigure = true)
+                                  skipConfigure = true, configureOutputFiles = @[])
       discard pkg.library("libDuktape")
     finally:
       clearCurrentOwningPackageOverride()

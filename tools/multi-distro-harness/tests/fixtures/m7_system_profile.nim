@@ -31,8 +31,9 @@
 # The fixture is intentionally bare. `system.nim` profiles do NOT
 # have `activity` / `hosts` blocks at the M69 parser level; the
 # typed-DSL macro library accepts them but the system-scope
-# adapter (`profileIntentToSystemProfile`) ignores anything that
-# isn't a system-scope resource. So we declare only `resources:`.
+# adapter (`profileIntentToSystemProfile`) reads only system-scope
+# resources (and refuses a resource of any other scope). So we
+# declare only `resources:`.
 
 import repro_profile
 

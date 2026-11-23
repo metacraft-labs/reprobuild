@@ -14,8 +14,9 @@
 ##   (d) a cert claiming a REGISTERED key_id but signed by a DIFFERENT key →
 ##       ``svBadSignature`` (the allowed-signers line for that id is the wrong
 ##       key, so the signature does not verify).
-## The ``required`` gate, given an attached cert of each kind, must REFUSE
-## (exit 2) — no trusted cert covers the requirement.
+## The ``required`` gate, given a cert of each kind in the local certificate
+## store (TC-8c: where the client gate looks), must REFUSE (exit 2) — no
+## trusted cert covers the requirement.
 ##
 ## Falsifiability (recorded, then reverted):
 ##   - make the verifier skip the signature check (accept any attached cert) →
@@ -30,6 +31,9 @@ import std/[base64, json, os, osproc, strutils, tempfiles, unittest]
 import repro_test_support
 import repro_cli_support
 import repro_workspace_manifests
+import repro_lock
+import repro_lock/certificate_policy
+import ./every_branch_policy
 
 include tc5_cert_signing_helpers
 
@@ -54,6 +58,20 @@ proc reproBinary(): string =
   requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
     "reprobuild.apps.repro")
 
+proc requiredPolicy(): string =
+  ## TC-9d: the policy is the pushed content's own -- a
+  ## ``[certificate_policy]`` snapshot in its committed ``repro.lock`` --
+  ## requiring t-unit on this platform, under one rule for every branch
+  ## (``everyBranchSnapshot``).
+  everyBranchSnapshot(pmRequired, ["t-unit"],
+    [currentPlatformTag()], name = "lib-a")
+
+proc policyLockText(snapshot: string): string =
+  ## A committed ``repro.lock`` that pins nothing and records ``snapshot``.
+  replaceCertificatePolicySection(serializeLockedDependencies(
+    LockedDependencies(schema: "reprobuild.solved-graph-lock.v2", deps: @[])),
+    snapshot)
+
 proc seedGitOrigin(gitBin, originPath, workPath: string;
                    branch = "main"): string =
   discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
@@ -64,7 +82,8 @@ proc seedGitOrigin(gitBin, originPath, workPath: string;
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " config user.name \"TC5 Tester\"")
   writeFile(workPath / "README.md", "TC-5 reject fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
+  writeFile(workPath / "repro.lock", policyLockText(requiredPolicy()))
+  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add -A")
   discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m fixture")
   discard requireGit(q(gitBin) & " -C " & q(workPath) &
     " remote add origin " & q(originPath))
@@ -80,24 +99,22 @@ proc cloneInto(gitBin, originPath, targetPath: string) =
   discard requireGit(q(gitBin) & " -C " & q(targetPath) &
     " config user.name \"TC5 Tester\"")
 
-proc projectToml(libAUrl, certificatesTable: string): string =
+proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
-  certificatesTable &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -109,19 +126,14 @@ type
     libAPath: string
     libASha: string
 
-proc writeProjectManifest(fx: Fixture; certificatesTable: string) =
+proc writeProjectManifest(fx: Fixture) =
   let manifestsRoot = fx.workspaceRoot
   writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(fx.libAOrigin), certificatesTable))
-
-proc requiredPolicy(): string =
-  "[certificates]\n" &
-  "gate_mode = \"required\"\n" &
-  "required_targets = [\"t-unit\"]\n" &
-  "required_platforms = [\"" & currentPlatformTag() & "\"]\n\n"
+    projectToml(fileUrl(fx.libAOrigin)))
 
 proc setupFixture(gitBin: string): Fixture =
   result.scratch = createTempDir("repro-tc5-reject-", "")
+  discard isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -135,7 +147,7 @@ proc setupFixture(gitBin: string): Fixture =
   result.workspaceRoot = workspaceRoot
   seedManifestLockStore(gitBin, workspaceRoot)
   result.libAPath = workspaceRoot / "lib-a"
-  writeProjectManifest(result, requiredPolicy())
+  writeProjectManifest(result)
   cloneInto(gitBin, result.libAOrigin, result.libAPath)
   writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
@@ -170,10 +182,13 @@ proc baseCert(fx: Fixture; keyId: string): TestCertificate =
   ## acceptance. ``keyId`` is set so the cert can claim a (possibly wrong) id.
   ##
   ## TC-7: there is no lock DIGEST to match any more. The gate resolves the
-  ## lock at ``vcs.commit`` itself, and the fixture's committed lock record is
-  ## keyed by exactly this commit, so a hand-built cert naming it passes the
+  ## lock at the pushed commit itself, and the fixture's committed lock record
+  ## is keyed by exactly this commit, so a hand-built cert passes the
   ## framework-specific step for free — leaving the signature as the only
   ## thing under test here, which is the point.
+  ##
+  ## TC-8b: the cert names the pushed commit's CONTENT (its tree), which is
+  ## what makes it describe the pushed commit; ``base`` is informational.
   TestCertificate(
     schema: testCertificateSchemaV1,
     framework: reprobuildFrameworkId,
@@ -182,27 +197,33 @@ proc baseCert(fx: Fixture; keyId: string): TestCertificate =
     targets: @["t-unit"], result: tcrPassed,
     issuedAt: "2026-06-25T00:00:00Z",
     issuer: "tc5-test", keyId: keyId,
-    vcs: TestCertificateVcs(repo: "lib-a", commit: fx.libASha,
-      clean: true, untracked: false),
+    vcs: TestCertificateVcs(repo: "lib-a",
+      content: "git-tree-sha1:" & requireGit("git -C " & q(fx.libAPath) &
+        " rev-parse " & fx.libASha & "^{tree}").strip(),
+      untracked: false, base: fx.libASha),
     commands: @[TestCertificateCommand(argv: @["repro", "test"])])
 
 proc gateRefuses(fx: Fixture; cert: TestCertificate; gitBin: string): bool =
-  ## Attach ``cert`` to the pushed commit and assert the `required` gate
-  ## REFUSES (exit 2 with a certificate-coverage failure). Clears any prior
-  ## note so each case is judged on its own attached cert.
-  discard execCmdEx(quoteShellCommand(@[gitBin, "-C", fx.libAPath,
-    "notes", "--ref", certificateNotesRef, "remove", fx.libASha]))
-  let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
+  ## Deliver ``cert`` to the local certificate store — where the client gate
+  ## looks (TC-8c) — and assert the `required` gate REFUSES (exit 2 with a
+  ## certificate-coverage failure). Empties the store first so each case is
+  ## judged on its own certificate.
+  let storeRoot = getEnv("TEST_CERTIFICATES_DIR")
+  doAssert storeRoot.len > 0 and storeRoot.startsWith(fx.scratch)
+  removeDir(storeRoot)
+  let delivered = publishCertificateToLocalStore(cert, fx.libAPath)
   # ``doAssert``, NOT ``check``. A ``check`` inside a plain proc has no
   # ``testStatusIMPL`` to fail, so it prints "Check failed", sets the process
   # exit code, and leaves the case reporting ``[OK]`` (measured). That matters
-  # HERE more than anywhere else in this file: if the attach silently fails the
-  # commit carries NO cert, the `required` gate refuses it as UNCOVERED with the
-  # same ``certificate-coverage`` failure, and this proc returns true — so every
-  # negative case below would pass while testing nothing. That is precisely the
-  # vacuous-pass shape W10 exists to remove.
-  doAssert att.ok, "attachCertificate failed; the negative cases below would " &
-    "pass vacuously against a commit that carries no certificate at all"
+  # HERE more than anywhere else in this file: if the delivery silently fails
+  # the store holds NO cert, the `required` gate refuses it as UNCOVERED with
+  # the same ``certificate-coverage`` failure, and this proc returns true — so
+  # every negative case below would pass while testing nothing. That is
+  # precisely the vacuous-pass shape W10 exists to remove.
+  doAssert delivered.written and delivered.error.len == 0,
+    "the certificate was not delivered to the local store (" &
+    delivered.error & "); the negative cases below would pass vacuously " &
+    "against a commit no certificate describes"
   let refsFile = fx.scratch / "pushed-refs.txt"
   writeRefsFile(refsFile, fx.libASha)
   let res = invokeCheckPrePush(fx, refsFile)

@@ -1,43 +1,26 @@
-## M2.5 (Realize-Closure-And-Catalog-Expansion) hermetic gate for the
-## `adapterPreference:` end-to-end plumbing. The DSL parser landed in
-## `test_m25_adapter_preference_parse.nim`; this gate asserts the
-## resolved per-host chain reaches BOTH ends of the realize/preview
-## resolver call surface, AND that the fallback path (no
-## `adapterPreference:` block, or block missing the current OS key)
-## preserves the M65 platform-default chain byte-for-byte.
+## M2.5 (Realize-Closure-And-Catalog-Expansion) → GM4b hermetic gate for the
+## `adapterPreference:` end-to-end plumbing. The DSL parser is covered by
+## `test_m25_adapter_preference_parse.nim`; this gate asserts the block —
+## since GM4b the profile's SELECTION POLICY (Provisioning-Contributions.md
+## §"Selection policy") — reaches the resolver the preview and the realize
+## step share, and that the fallback is the single default policy.
 ##
-## Contract (from the M2.5 spec):
+## Contract, restated for GM4b:
 ##
-##   1. ``resolveAdapterChainFor`` resolves the per-host chain from a
-##      profile's `adapterPreference` table per the M2.5 rules:
-##      present + OS-key set  → that entry's chain;
-##      present + OS-key missing → M65 platform default for that OS;
-##      absent (empty table) → M65 platform default for that OS;
-##      empty list (`[]`)    → M65 platform default for that OS.
+##   1. ``selectionPolicyFor`` maps a profile's `adapterPreference` table to
+##      the policy for a target OS: present + OS key set → that entry
+##      (`builtin` read as `tarball`); OS key missing, table empty, or entry
+##      `[]` → `DefaultSelectionPolicy`, which is the SAME on every OS (the
+##      per-platform default chains are gone).
+##   2. `previewPackageResolutions(…, ctx)` walks the context's policy in
+##      order: the preview's `steps` record the customised order.
+##   3. The default policy (no block) walks tarball first on every target.
+##   4. Per-OS isolation: a `linux:` entry does not affect a Windows target.
+##   5. `buildPlan` copies `Profile.adapterPreference` into the `ApplyPlan`.
 ##
-##   2. `previewPackageResolutions(..., chain = customChain)` invokes
-##      `chainResolvePackage` with the supplied chain — the resolved
-##      `PackagePreview.chainTrace` records the customised order, NOT
-##      the platform default. Asserted via a chain-spy stub on the M71
-##      reference catalog (`jdk`).
-##
-##   3. The default-fallback (no `chain` argument, or empty `chain`)
-##      preserves the M65 platform default order — the trace's first
-##      step is `cakBuiltin` on Windows, `cakNix` on Linux + macOS.
-##
-##   4. Per-OS isolation: a profile with `linux: [...]` only does NOT
-##      affect the chain on a Windows host (`resolveAdapterChainFor`
-##      with `osKey = "windows"` falls back to the Windows platform
-##      default).
-##
-## Hermetic: no network, no real Scoop install. Uses the same sandbox
-## pattern as `t_adapter_chain.nim` (an empty Scoop root + nonexistent
-## scoop binary so every cakScoop probe records `csoToolNotFound` or
-## `csoAdapterUnavailable`). The realize-side test is exercised
-## indirectly via `chainResolvePackage` (the same chain entry point
-## `realizeViaProductionCatalog` consumes); a full
-## `realizePlannedPackages` run would download bytes from the catalog
-## URL which would breach the "no network" rule.
+## Hermetic: the preview cases resolve for an x86_64-windows target that is
+## NOT this machine, so the host's PATH and Scoop are never consulted, and
+## selection reads static metadata only (no network). No mocks.
 
 import std/[os, strutils, tables, unittest]
 from repro_core/paths import extendedPath
@@ -47,7 +30,6 @@ import repro_home_intent
 import repro_home_apply/plan
 import repro_home_apply/realize
 import repro_home_apply/package_catalog
-import repro_dsl_stdlib/packages_schema
 
 # Per-case private scratch — the cases of one binary run as CONCURRENT
 # PROCESSES (``<binary> --run "<suite>::<case>"``, one process each), so a
@@ -79,7 +61,7 @@ proc resetDir(path: string) =
 
 proc isolateProdCatalog() =
   ## Sandbox the production catalog the same way `t_preview_chain.nim`
-  ## does so cakScoop never sees the host's real Scoop install.
+  ## does so no Scoop probe ever sees the host's real Scoop install.
   let sandboxRoot = FixtureRoot / "fake-scoop-root"
   resetDir(sandboxRoot)
   putEnv("SCOOP", sandboxRoot)
@@ -88,186 +70,138 @@ proc isolateProdCatalog() =
   delEnv("REPRO_TEST_PACKAGE_SOURCE")
   delEnv("REPRO_TEST_PACKAGE_SCOOP")
 
-proc findStepFor(trace: seq[ChainStep]; adapter: CatalogAdapterKind):
-    tuple[found: bool; idx: int; step: ChainStep] =
-  for i, s in trace:
-    if s.adapter == adapter:
-      return (true, i, s)
-  (false, -1, ChainStep())
+proc windowsContext(ap: OrderedTable[string, seq[string]]):
+    ProfileResolutionContext =
+  profileResolutionContext(ap, "windows", "x86_64", isHost = false)
+
+proc jdkPreview(ap: OrderedTable[string, seq[string]]): PackagePreview =
+  resetDir(FixtureRoot)
+  isolateProdCatalog()
+  let planned = @[PlannedPackage(packageId: "jdk",
+    requestedVersion: "21.0.5", fromActivity: "test")]
+  let previews = previewPackageResolutions(planned, windowsContext(ap))
+  check previews.len == 1
+  previews[0]
 
 # ---------------------------------------------------------------------------
-# Tests: resolveAdapterChainFor — the M2.5 chain selection helper
+# Tests: selectionPolicyFor — adapterPreference → selection policy
 # ---------------------------------------------------------------------------
 
-suite "M2.5 — resolveAdapterChainFor selects the per-host chain":
+suite "M2.5/GM4b — selectionPolicyFor selects the per-OS policy":
 
   test "test_m25_adapter_preference_empty_table_falls_back_windows":
-    var ap = initOrderedTable[string, seq[string]]()
-    let chain = resolveAdapterChainFor(ap, "windows")
-    # M65 Windows default
-    check chain == @[cakBuiltin, cakScoop, cakPath]
+    let p = selectionPolicyFor(initOrderedTable[string, seq[string]](),
+      poWindows)
+    check p.policy == DefaultSelectionPolicy
+    check p.source == "default"
 
   test "test_m25_adapter_preference_empty_table_falls_back_linux":
-    var ap = initOrderedTable[string, seq[string]]()
-    let chain = resolveAdapterChainFor(ap, "linux")
-    check chain == @[cakNix, cakBuiltin, cakPath]
+    let p = selectionPolicyFor(initOrderedTable[string, seq[string]](),
+      poLinux)
+    check p.policy == DefaultSelectionPolicy
 
   test "test_m25_adapter_preference_empty_table_falls_back_darwin":
-    var ap = initOrderedTable[string, seq[string]]()
-    let chain = resolveAdapterChainFor(ap, "darwin")
-    check chain == @[cakNix, cakPath]
+    let p = selectionPolicyFor(initOrderedTable[string, seq[string]](),
+      poMacos)
+    check p.policy == DefaultSelectionPolicy
 
   test "test_m25_adapter_preference_present_entry_used_verbatim":
     var ap = initOrderedTable[string, seq[string]]()
     ap["windows"] = @["scoop", "builtin", "path"]
-    let chain = resolveAdapterChainFor(ap, "windows")
-    # The override reorders cakScoop to the FRONT of the chain.
-    check chain == @[cakScoop, cakBuiltin, cakPath]
+    let p = selectionPolicyFor(ap, poWindows)
+    # `builtin` is the former spelling of `tarball`.
+    check p.policy == @[rkScoop, rkTarball, rkPath]
+    check p.source == "adapterPreference.windows"
 
   test "test_m25_adapter_preference_partial_missing_os_falls_back":
-    # Only `windows` set; query for `linux` → M65 Linux default.
     var ap = initOrderedTable[string, seq[string]]()
     ap["windows"] = @["scoop", "builtin", "path"]
-    let linuxChain = resolveAdapterChainFor(ap, "linux")
-    check linuxChain == @[cakNix, cakBuiltin, cakPath]
-    let darwinChain = resolveAdapterChainFor(ap, "darwin")
-    check darwinChain == @[cakNix, cakPath]
-    # AND the windows entry still works.
-    let winChain = resolveAdapterChainFor(ap, "windows")
-    check winChain == @[cakScoop, cakBuiltin, cakPath]
+    check selectionPolicyFor(ap, poLinux).policy == DefaultSelectionPolicy
+    check selectionPolicyFor(ap, poMacos).policy == DefaultSelectionPolicy
+    check selectionPolicyFor(ap, poWindows).policy ==
+      @[rkScoop, rkTarball, rkPath]
 
   test "test_m25_adapter_preference_empty_chain_list_falls_back":
-    # `windows: []` is parsed as a present-but-empty chain (per the
-    # parser tests). The resolve-time helper treats it the same as
-    # "absent" — falls back to the M65 platform default.
     var ap = initOrderedTable[string, seq[string]]()
     ap["windows"] = @[]
-    let chain = resolveAdapterChainFor(ap, "windows")
-    check chain == @[cakBuiltin, cakScoop, cakPath]
+    let p = selectionPolicyFor(ap, poWindows)
+    check p.policy == DefaultSelectionPolicy
+    check p.source == "default"
 
   test "test_m25_adapter_preference_three_adapter_chain_full_override":
     var ap = initOrderedTable[string, seq[string]]()
     ap["windows"] = @["path", "scoop", "builtin"]
-    ap["linux"]   = @["builtin", "nix", "path"]
+    ap["linux"]   = @["tarball", "nix", "path"]
     ap["darwin"]  = @["path"]
-    check resolveAdapterChainFor(ap, "windows") ==
-      @[cakPath, cakScoop, cakBuiltin]
-    check resolveAdapterChainFor(ap, "linux") ==
-      @[cakBuiltin, cakNix, cakPath]
-    check resolveAdapterChainFor(ap, "darwin") == @[cakPath]
+    check selectionPolicyFor(ap, poWindows).policy ==
+      @[rkPath, rkScoop, rkTarball]
+    check selectionPolicyFor(ap, poLinux).policy ==
+      @[rkTarball, rkNix, rkPath]
+    check selectionPolicyFor(ap, poMacos).policy == @[rkPath]
 
 # ---------------------------------------------------------------------------
-# Tests: previewPackageResolutions honours the per-host chain
+# Tests: previewPackageResolutions walks the context's policy
 # ---------------------------------------------------------------------------
 
-suite "M2.5 — previewPackageResolutions honours chain":
+suite "M2.5/GM4b — previewPackageResolutions honours the policy":
 
   test "test_m25_preview_uses_custom_chain_order":
-    # Custom chain `[scoop, builtin, path]` reorders cakScoop to the
-    # FRONT. With the sandbox Scoop root empty + no scoop binary, the
-    # cakScoop step records `csoToolNotFound` / `csoAdapterUnavailable`
-    # and the chain falls through to cakBuiltin — but the trace's
-    # FIRST step must be cakScoop, proving the custom chain reached
-    # `chainResolvePackage` (not the platform default).
-    resetDir(FixtureRoot)
-    isolateProdCatalog()
-    let customChain = @[cakScoop, cakBuiltin, cakPath]
-    let planned = @[PlannedPackage(packageId: "jdk",
-      requestedVersion: "21.0.5",
-      fromActivity: "test")]
-    # Pin host facts to Windows-x64: the builtin catalog's jdk slice is
-    # Windows-only at this milestone; the chain-plumbing contract is
-    # host-independent (cf. commit 9bdf81d).
-    let previews = previewPackageResolutions(planned, chain = customChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
-    check previews.len == 1
-    let p = previews[0]
-    # jdk is in the registered catalog; the chain MUST have routed it.
-    check p.kind != ppkMissing
-    check p.chainTrace.len >= 1
-    # FIRST step is cakScoop — the override reached the chain.
-    check p.chainTrace[0].adapter == cakScoop
-    check p.chainTrace[0].outcome != csoResolved
-    # SECOND step is cakBuiltin — that's where jdk resolves on a clean
-    # sandbox.
-    let builtinStep = findStepFor(p.chainTrace, cakBuiltin)
-    check builtinStep.found
-    check builtinStep.step.outcome == csoResolved
+    var ap = initOrderedTable[string, seq[string]]()
+    ap["windows"] = @["scoop", "builtin", "path"]
+    let p = jdkPreview(ap)
+    check p.kind == ppkRealize
+    check p.resolved
+    check p.steps.len == 2
+    # FIRST step is scoop — the override reached the resolver. jdk
+    # declares no scoopApp, so it declines.
+    check p.steps[0].kind == rkScoop
+    check not p.steps[0].selected
+    check p.steps[1].kind == rkTarball
+    check p.steps[1].selected
 
   test "test_m25_preview_default_fallback_preserves_m65_default":
-    # No `chain` argument → the M65 platform default. We pass
-    # `WindowsDefaultChain` explicitly + pin host facts to Windows-x64
-    # so the test exercises the Windows arm of the contract regardless
-    # of the runner's actual OS (the builtin catalog ships only
-    # Windows slices for jdk at this milestone).
-    resetDir(FixtureRoot)
-    isolateProdCatalog()
-    let planned = @[PlannedPackage(packageId: "jdk",
-      requestedVersion: "21.0.5",
-      fromActivity: "test")]
-    let previews = previewPackageResolutions(planned,
-      chain = WindowsDefaultChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
-    check previews.len == 1
-    let p = previews[0]
-    check p.kind != ppkMissing
-    check p.chainTrace.len >= 1
-    # With host facts pinned to Windows-x64 and the Windows default
-    # chain, the FIRST step is cakBuiltin regardless of the runner OS.
-    check p.chainTrace[0].adapter == cakBuiltin
+    let p = jdkPreview(initOrderedTable[string, seq[string]]())
+    check p.kind == ppkRealize
+    check p.steps.len == 1
+    check p.steps[0].kind == rkTarball
+    check p.steps[0].selected
 
   test "test_m25_preview_empty_chain_falls_back_to_platform_default":
-    # Empty `chain` falls back to the M65 platform default. We pass
-    # `WindowsDefaultChain` explicitly + pin host facts so the test
-    # verifies the Windows arm regardless of the runner's actual OS
-    # (the platform-default fallback path is exercised by the
-    # `test_m25_adapter_preference_*` table-driven tests above; this
-    # test asserts the call shape reaches `chainResolvePackage`).
-    resetDir(FixtureRoot)
-    isolateProdCatalog()
-    let planned = @[PlannedPackage(packageId: "jdk",
-      requestedVersion: "21.0.5",
-      fromActivity: "test")]
-    let previewsExplicit = previewPackageResolutions(planned,
-      chain = WindowsDefaultChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
-    check previewsExplicit.len == 1
-    check previewsExplicit[0].chainTrace.len >= 1
-    check previewsExplicit[0].chainTrace[0].adapter == cakBuiltin
+    var ap = initOrderedTable[string, seq[string]]()
+    ap["windows"] = @[]
+    let p = jdkPreview(ap)
+    check p.steps[0].kind == rkTarball
 
   test "test_m25_preview_chain_order_path_first":
-    # cakPath first → if jdk is NOT on PATH (the sandbox isolates this
-    # implicitly — the actual `java.exe` may or may not be on the host
-    # PATH but `jdk` as an executable name is not), the chain falls
-    # through to cakBuiltin. The trace's FIRST step is cakPath either
-    # way, proving the chain order is honored.
-    resetDir(FixtureRoot)
-    isolateProdCatalog()
-    let customChain = @[cakPath, cakBuiltin]
-    let planned = @[PlannedPackage(packageId: "jdk",
-      requestedVersion: "21.0.5",
-      fromActivity: "test")]
-    # Pin host facts to Windows-x64 so the cakBuiltin fall-through
-    # resolves against the Windows-only slice regardless of the
-    # runner's OS.
-    let previews = previewPackageResolutions(planned, chain = customChain,
-      hostCpu = pcX86_64, hostOs = poWindows)
-    check previews.len == 1
-    let p = previews[0]
-    check p.kind != ppkMissing
-    check p.chainTrace.len >= 1
-    check p.chainTrace[0].adapter == cakPath
+    # path first: the target is not this machine, so PATH is not
+    # consulted and the walk proceeds to the archive. The trace's FIRST
+    # step is path either way, proving the order is honoured.
+    var ap = initOrderedTable[string, seq[string]]()
+    ap["windows"] = @["path", "builtin"]
+    let p = jdkPreview(ap)
+    check p.kind == ppkRealize
+    check p.steps.len == 2
+    check p.steps[0].kind == rkPath
+    check not p.steps[0].selected
+    check "host only" in p.steps[0].reason
+    check p.steps[1].kind == rkTarball
+
+  test "test_m25_preview_other_os_entry_does_not_apply":
+    var ap = initOrderedTable[string, seq[string]]()
+    ap["linux"] = @["nix", "path"]
+    let p = jdkPreview(ap)
+    check p.steps[0].kind == rkTarball
 
 # ---------------------------------------------------------------------------
 # Tests: end-to-end profile -> ApplyPlan -> chain selection
 # ---------------------------------------------------------------------------
 
-suite "M2.5 — Profile.adapterPreference plumbs through ApplyPlan":
+suite "M2.5/GM4b — Profile.adapterPreference plumbs through ApplyPlan":
 
   test "test_m25_apply_plan_copies_adapter_preference_from_profile":
     # `buildPlan` must carry `Profile.adapterPreference` over to
-    # `ApplyPlan.adapterPreference` so the pipeline can resolve the
-    # chain at realize + preview time.
+    # `ApplyPlan.adapterPreference` so the pipeline builds the resolution
+    # context for preview and realize from it.
     let body = """
 import repro/profile
 
@@ -306,8 +240,7 @@ profile "no-pref":
     let profile = loadProfile(path)
     let applyPlan = buildPlan(profile, dir, "any-host")
     check applyPlan.adapterPreference.len == 0
-    # Resolving the chain through the helper on an empty table falls
-    # back to the M65 platform default — same as before M2.5 landed.
-    let winChain = resolveAdapterChainFor(applyPlan.adapterPreference,
-      "windows")
-    check winChain == @[cakBuiltin, cakScoop, cakPath]
+    # No block: the default policy, the same on every OS.
+    for os in [poWindows, poLinux, poMacos]:
+      check selectionPolicyFor(applyPlan.adapterPreference, os).policy ==
+        DefaultSelectionPolicy

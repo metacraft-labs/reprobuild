@@ -29,6 +29,7 @@
 
 import std/[algorithm, monotimes, options, os, sequtils, strutils, tempfiles,
             times, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_core
 import repro_hash
@@ -841,15 +842,29 @@ suite "records written before the trust epoch are refused":
       metadata: FileMetadata(kind: ffkRegular, sizeBytes: 1, mtimeNs: 2))]
     let encoded = encodeActionResultRecord(record)
     let version = uint16(encoded[4]) or (uint16(encoded[5]) shl 8)
+    # version-literal-ok: a deliberate PIN on the version an env-free
+    # record is stamped with, and the counterpart to the DERIVED refusal
+    # loop below. The pin is supposed to redden on a bump; the loop is
+    # supposed not to.
     check version == 6'u16
     check decodeActionResultRecord(encoded).inputs.len == 1
 
-    # Every pre-epoch version is refused on bytes that are otherwise a valid
-    # v6 frame — 5 included. 5 is the one worth naming: it is what a binary
+    # Every untrusted version is refused on bytes that are otherwise a valid
+    # frame — 5 included. 5 is the one worth naming: it is what a binary
     # built from mainline writes today, and accepting it would drain the old
     # records while leaving the recent ones, which is the failure mode this
     # whole change exists to avoid.
-    for stale in [2'u16, 3'u16, 4'u16, 5'u16]:
+    #
+    # DERIVED, not hand-listed. This file carried a second copy of the
+    # `[2, 3, 4, 5]` list -- the same list, with the same prose, in
+    # `test_m10_observed_env_cache_key` and `t_dark_window_...` too. All
+    # three were written when the epoch was 6 and all three survived the
+    # move to 7 green while silently ceasing to cover 6. The pin above
+    # (`check version == 6'u16`) is the assertion that is SUPPOSED to
+    # redden on a bump; this is the probe that must not.
+    let refused = actionRecordVersionsThisBuildRefuses()
+    check refused.len > 0
+    for stale in refused:
       var patched = encoded
       patched[4] = byte(stale and 0xff'u16)
       patched[5] = byte((stale shr 8) and 0xff'u16)
@@ -859,8 +874,9 @@ suite "records written before the trust epoch are refused":
     # And an unknown FUTURE version is refused rather than guessed at, which
     # is the same rule applied in the same direction.
     var future = encoded
-    future[4] = byte(99)
-    future[5] = byte(0)
+    let unknown = firstUnknownActionRecordVersion()
+    future[4] = byte(unknown and 0xff'u16)
+    future[5] = byte((unknown shr 8) and 0xff'u16)
     expect EnvelopeError:
       discard decodeActionResultRecord(future)
 

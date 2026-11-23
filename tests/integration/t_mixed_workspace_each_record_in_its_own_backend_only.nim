@@ -145,8 +145,7 @@ proc projectToml(pubUrl, coreUrl, secretUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"mix\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"pub-origin\"\nfetch = \"" & pubUrl & "\"\n\n" &
   "[[remote]]\nname = \"core-origin\"\nfetch = \"" & coreUrl & "\"\n\n" &
   "[[remote]]\nname = \"secret-origin\"\nfetch = \"" & secretUrl & "\"\n\n" &
@@ -157,12 +156,12 @@ proc projectToml(pubUrl, coreUrl, secretUrl: string): string =
   "]\n"
 
 proc repoFragment(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"main\"\n"
+  "mainline = \"main\"\n"
 
 suite "HL-2 — mixed workspace: each record in its own backend only":
 
@@ -237,9 +236,9 @@ suite "HL-2 — mixed workspace: each record in its own backend only":
       # ---- the [locking] routes (named → tier-by-layer) ----------------
       # public → committed-file; team → git-checkout at the EXISTING
       # ``.repo/manifests``; personal → external-cli. Each route NAMES its repo.
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [" &

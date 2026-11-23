@@ -89,16 +89,16 @@ proc setupFixture(gitBin: string): Fixture =
   cloneInto(gitBin, origin, result.workspaceRoot / "repo-a")
 
   writeFile(result.workspaceRoot / "repos" / "repo-a.toml",
-    "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+    "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
     "[repo]\n" &
     "name = \"repo-a\"\n" &
     "path = \"repo-a\"\n" &
     "remote = \"origin\"\n" &
-    "revision = \"main\"\n")
+    "mainline = \"main\"\n")
 
   writeFile(result.workspaceRoot / "projects" / "p1.toml",
     "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"p1\"\ndefault_revision = \"main\"\ntrunk = \"main\"\n\n" &
+    "[project]\nname = \"p1\"\n\n" &
     "[[remote]]\nname = \"origin\"\nfetch = \"" & origin & "\"\n\n" &
     "includes = [\"repos/repo-a.toml\"]\n")
 

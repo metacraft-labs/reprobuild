@@ -1,6 +1,6 @@
 version = "0.1.0"
 author = "Metacraft Labs"
 description = "Reprobuild typed launch plans, binding decisions, and platform launchers"
-license = "MIT"
+license = "Apache-2.0"
 srcDir = "src"
 requires "nim >= 2.2.0"

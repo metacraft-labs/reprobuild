@@ -527,8 +527,9 @@ proc emitInstallMirrorPublishAction(projectRoot, dslPackageName, outPath,
   ## mirror and synthesize it from ``$out`` only when it is absent.
   let recipesRoot = parentDir(projectRoot)
   let recipeName = extractFilename(projectRoot)
-  let mirrorRoot = recipesRoot / recipeName / ".repro" / "output" /
-    "install"
+  # Keyed by the target like every other mirror (``installMirrorSubpath``):
+  # under ``--target`` the unkeyed path would be the native build's.
+  let mirrorRoot = recipesRoot / recipeName / installMirrorSubpath()
   let mirrorUsr = mirrorRoot / "usr"
   createDir(extendedPath(mirrorRoot))
   let mirrorStamp = mirrorRoot / ".from-source-custom-install-mirror.stamp"

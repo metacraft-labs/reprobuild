@@ -40,24 +40,37 @@ name: Attestation collateral
 # cost minutes for a shell the check never enters, and running it hosted keeps
 # a weekly job off the self-hosted pool that pull requests are waiting on.
 
+#
+# WHY THERE ARE TWO TRIGGERS AND NOT ONE
+#
+# A `schedule:` trigger runs ONLY from the repository's default branch.
+# That is not a detail: this file reached a development branch first and
+# the default branch does not carry it, so for as long as that is true
+# the weekly run does not exist -- not late, not throttled, absent. It
+# was measured rather than suspected. Between this job being added and
+# the first expiry it was meant to announce, the API recorded exactly one
+# run of it, event `push`, from the commit that introduced it; the one
+# Monday in between fell before the file existed and the next fell AFTER
+# the documents expired. A job whose only periodic trigger it cannot
+# reach is indistinguishable from a job that is passing.
+#
+# So the periodic evaluation is anchored to something that does happen on
+# the branch the work lands on: every push. The expiry half is offline,
+# costs seconds, and needs nothing but python3, so running it per landing
+# is cheaper than the checkout in front of it. The network half stays on
+# the schedule and on manual dispatch, because asking a vendor's service
+# once a week is courteous and asking it on every landing is not.
+#
+# Keep the `schedule:` line. It is correct, and it starts working the
+# moment this file reaches the default branch.
+
 on:
   schedule:
-    # Mondays, early. A weekly cadence against a 30-day refresh horizon
-    # gives four notices before anything expires, which is the point of
-    # the horizon: the first notice must not be the outage.
+    # Mondays, early -- the network half.
     - cron: "17 6 * * 1"
   workflow_dispatch:
   push:
-    paths:
-      # Only when the ledger itself moves. The tool reads these three
-      # tables and a change to any of them can make it unable to run at
-      # all -- exit 2 -- which is worth finding out at the commit that
-      # caused it rather than the following Monday.
-      - "tests/integration/attestation-fixture-ledger.tsv"
-      - "tests/integration/attestation-fixture-publishers.tsv"
-      - "tests/integration/attestation-fixture-fetch.tsv"
-      - "tools/attestation_collateral_monitor.py"
-      - ".github/workflows/attestation-collateral.yml"
+    branches: [dev, agents]
 
 permissions:
   contents: read
@@ -68,5 +81,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The paths filter this trigger used to carry is deliberately gone.
+      # It fired only when the ledger itself moved, which answers "did
+      # this edit break the tool" and cannot answer "has the calendar
+      # moved" -- and the calendar moves on days nobody edits a table.
+      - name: Expiry, offline, on every landing
+        if: github.event_name == 'push'
+        run: python3 tools/attestation_collateral_monitor.py --offline
       - name: Expiry and drift, against the wall clock and the publishers
+        if: github.event_name != 'push'
         run: python3 tools/attestation_collateral_monitor.py

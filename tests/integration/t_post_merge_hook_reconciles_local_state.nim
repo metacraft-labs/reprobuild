@@ -123,16 +123,16 @@ suite "the post-merge hook reconciles workspace-local git state":
       createDir(root / "repos")
       createDir(root / ".repro")
       writeFile(root / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "remote = \"metacraft-labs\"\nbranch = \"dev\"\n")
+        "remote = \"metacraft-labs\"\nmainline = \"dev\"\n")
       writeFile(root / "projects" / "demo.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
         "[project]\nname = \"demo\"\n\n" &
         "[[remote]]\nname = \"metacraft-labs\"\nfetch = \"" & prefix &
         "\"\n\nincludes = [\"repos/lib-a.toml\"]\n")
-      writeFile(root / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(root / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"demo\"\nprojects = [\"demo\"]\n")
 
       let checkout = root / "lib-a"
@@ -204,8 +204,8 @@ suite "the post-merge hook reconciles workspace-local git state":
       createDir(root / "projects")
       createDir(root / "repos")
       createDir(root / ".repro")
-      writeFile(root / ".repro" / "workspace.toml",
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
+      writeFile(root / ".repro" / "workspace-state.toml",
+        "schema = \"reprobuild.workspace.state.v1\"\n\n" &
         "[workspace]\nproject = \"gone\"\nprojects = [\"gone\"]\n")
       let checkout = root / "lib-a"
       createDir(checkout)

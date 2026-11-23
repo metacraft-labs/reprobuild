@@ -30,11 +30,11 @@
 ##     unverified index for the hash) and keeps the harvester's
 ##     dependency footprint to ``std/httpclient`` + a sha256 hasher.
 ##     Re-running the harvester on the same upstream artifact produces
-##     byte-identical output (the catalog's ``serializeAsCode`` is
+##     byte-identical output (the emitter (``src/nim_emit``) is
 ##     deterministic; the upstream artifact's SHA-256 is by definition
 ##     stable per artifact).
 ##
-## Output flatten (M6 realize hook in cakBuiltin / builtin_adapter):
+## Output flatten (M6 realize hook in the home archive realizer, builtin_adapter):
 ## MSYS2 packages ship a top-level prefix subdir matching the env
 ## (``mingw64/``, ``ucrt64/``, …) carrying ``bin/``, ``lib/``,
 ## ``share/`` underneath. The harvester emits ``extract_path: "mingw64"``

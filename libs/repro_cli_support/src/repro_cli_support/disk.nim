@@ -31,21 +31,27 @@ import repro_profile/disk_tools
 import repro_profile/disk_apply
 import repro_profile/disk_identity
 
-const CompiledReprobuildRoot = currentSourcePath().parentDir.parentDir.
-  parentDir.parentDir.parentDir
+from repro_core/source_root import resolveReprobuildSourceRoot
 
-proc diskoCompilerRoot(): string =
+proc diskoCompilerRoot*(): string =
   ## Locate the reprobuild sources needed when compiling a user-authored
   ## ``hardware.nim`` file. The command may be invoked from any working
   ## directory, so the process cwd is only a fallback.
+  ##
+  ## Resolved by `resolveReprobuildSourceRoot`, the resolver every
+  ## post-install compile uses. This used to try `$REPROBUILD_SOURCE_ROOT`
+  ## and then the checkout this module was COMPILED in
+  ## (``currentSourcePath()``), which for a released engine is the release
+  ## job's checkout: a dead path on the user's machine, so an installed
+  ## archive without that variable never reached the ``share/repro/source``
+  ## it ships, and a binary copied out of a checkout silently compiled
+  ## against whatever that checkout held now.
   proc hasProfileSources(root: string): bool =
     dirExists(root / "libs" / "repro_profile" / "src")
 
-  let configuredRoot = getEnv("REPROBUILD_SOURCE_ROOT")
-  if configuredRoot.len > 0 and hasProfileSources(configuredRoot):
-    return configuredRoot
-  if hasProfileSources(CompiledReprobuildRoot):
-    return CompiledReprobuildRoot
+  let resolved = resolveReprobuildSourceRoot()
+  if hasProfileSources(resolved):
+    return resolved
   getCurrentDir()
 
 # ---------------------------------------------------------------------

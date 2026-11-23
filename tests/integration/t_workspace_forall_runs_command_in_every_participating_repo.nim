@@ -76,8 +76,8 @@ proc writeProjectManifest(workspaceRoot, project: string;
   createDir(manifestsRoot / "projects")
   createDir(manifestsRoot / "repos")
   var project_toml = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"" & project & "\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"" & project & "\"\n" &
+    "\n"
   for r in repos:
     project_toml.add("[[remote]]\nname = \"" & r.name & "-origin\"\nfetch = \"" &
       r.originUrl & "\"\n\n")
@@ -88,9 +88,9 @@ proc writeProjectManifest(workspaceRoot, project: string;
   writeFile(manifestsRoot / "projects" / (project & ".toml"), project_toml)
   for r in repos:
     writeFile(manifestsRoot / "repos" / (r.name & ".toml"),
-      "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+      "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
       "[repo]\nname = \"" & r.name & "\"\npath = \"" & r.name & "\"\n" &
-      "remote = \"" & r.name & "-origin\"\nrevision = \"main\"\n")
+      "remote = \"" & r.name & "-origin\"\nmainline = \"main\"\n")
   writeWorkspaceBranch(workspaceRoot, project = project, branch = "main")
 
 suite "RA-20 — workspace forall runs in every participating repo":

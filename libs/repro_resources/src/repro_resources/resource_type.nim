@@ -94,7 +94,7 @@ macro resourceType*(typeIdNode: untyped; body: untyped): untyped =
   #
   # Two callsite forms are accepted, matching the old ``static string`` param's
   # runtime semantics (which folded both to the same string value):
-  #   * a string literal — ``resourceType "vm_harness.container":``
+  #   * a string literal — ``resourceType "gosti.container":``
   #   * a ``const`` identifier bound to a string — ``resourceType TypeContainer:``
   # For BOTH we pass the node THROUGH into the emitted code wherever the runtime
   # typeId VALUE is needed, so a const resolves at compile/runtime exactly as it
@@ -107,7 +107,7 @@ macro resourceType*(typeIdNode: untyped; body: untyped): untyped =
     discard
   else:
     error("resourceType: the type id must be a string literal or a const " &
-      "bound to a string, e.g. resourceType \"vm_harness.container\": or " &
+      "bound to a string, e.g. resourceType \"gosti.container\": or " &
       "resourceType TypeContainer:", typeIdNode)
   let typeIdExpr = copyNimTree(typeIdNode)
 

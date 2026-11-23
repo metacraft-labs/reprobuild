@@ -27,6 +27,7 @@ package ergo:
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "ergo.exe",
+      version = ErgoVersion,
       packageId = "ergo@" & ErgoVersion,
       cpu = "x86_64",
       os = "windows",

@@ -1485,6 +1485,58 @@ suite "repro_elevation: passwd.user pure logic (Phase C)":
     check canonicalPasswdUserStateMaskedBy(observed, desired) !=
       canonicalPasswdUserDesired(desired)
 
+  test "a declared group that is also the primary group counts as membership":
+    # rpi2, 2026-10-30, reprobuild d7c86107b: `passwdGroup("nut")` plus
+    # `passwdUser("nut", extraGroups = @["nut"])`. The account's primary
+    # group is `nut`; `id -nG nut` prints `nut` once, the parser files it
+    # as the primary, and the declared group read as missing forever --
+    # the post-apply re-probe failed closed on every tick.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["nut"])
+    let observed = parsePasswdObservation(
+      "nut:x:999:1002::/nonexistent:/usr/sbin/nologin", "nut", "nut")
+    check observed.groups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, desired) ==
+      canonicalPasswdUserDesired(desired)
+    check not passwdUserNeedsUpdate(diffPasswdUser(desired, observed))
+    # A primary group the resource does not declare still does not count
+    # as a declared supplementary group, and one missing declared group
+    # is still drift.
+    let wantsMore = PasswdUserDesired(name: "nut", groups: @["dialout", "nut"])
+    let d = diffPasswdUser(wantsMore, observed)
+    check d.missingGroups == @["dialout"]
+    check d.extraGroups.len == 0
+    check canonicalPasswdUserStateMaskedBy(observed, wantsMore) !=
+      canonicalPasswdUserDesired(wantsMore)
+
+  test "the declared set is authoritative: apply removes an undeclared group":
+    # The post-apply check is additive (macOS adds default groups nobody
+    # declared), but the apply itself is not: `usermod --groups` REPLACES
+    # the supplementary set with the declared one, so a group the account
+    # is in and the resource does not declare is dropped.
+    let desired = PasswdUserDesired(name: "nut", groups: @["nut"])
+    let observed = PasswdUserObservation(present: true, uid: "999",
+      primaryGroup: "nut", shell: "/usr/sbin/nologin",
+      groups: @["sudo"])
+    let diff = diffPasswdUser(desired, observed)
+    check diff.extraGroups == @["sudo"]
+    check passwdUserNeedsUpdate(diff)
+    check buildUsermodArgs(desired, diff) == @["--groups", "nut", "nut"]
+
+  test "useradd takes an existing same-named group as the primary only when declared":
+    # `useradd nut` with USERGROUPS_ENAB refuses when group `nut` exists
+    # ("use -g"); rpi2 tick-1 at d7c86107b.
+    let desired = PasswdUserDesired(name: "nut",
+      shell: "/usr/sbin/nologin", groups: @["dialout", "nut"])
+    check buildUseraddArgs(desired, sameNameGroupExists = true) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--gid", "nut",
+        "--groups", "dialout"]
+    check buildUseraddArgs(desired) ==
+      @["nut", "--shell", "/usr/sbin/nologin", "--groups", "dialout,nut"]
+    expect EUseraddGroupCollision:
+      discard buildUseraddArgs(PasswdUserDesired(name: "nut"),
+        sameNameGroupExists = true)
+
   test "parsePasswdObservation: primary group filtered out of supplementary set":
     # Debian / Ubuntu's `useradd reprotest --groups users` (with the
     # default `USERGROUPS_ENAB=yes`) creates a per-user primary
@@ -2779,7 +2831,7 @@ kernel.x = 7
       expect ENotImplementedPlatform:
         discard observeLinuxSysctl(op)
       expect ENotImplementedPlatform:
-        discard applyLinuxSysctl(op)
+        discard applyLinuxSysctl(FixtureContext(), op)
       expect ENotImplementedPlatform:
         discard destroyLinuxSysctl(op)
 
@@ -3694,6 +3746,82 @@ suite "repro_elevation: systemd.systemTimer pure surface":
     check w2.operation.kind == pokSystemdSystemTimer
     check w2.operation.stDestroy
 
+  test "a unit's changed closure lock is an update, not drift":
+    # rpi2 (legacy agent 76f0f4f7a9): re-locking the nut closures turned
+    # the six units bound to them into actionable drift on every tick.
+    let old = "[Service]\nBindReadOnlyPaths=/repro/store/prefixes/a/1-x/usr:/usr\n"
+    let desired = "[Service]\nBindReadOnlyPaths=/repro/store/prefixes/a/1-y/usr:/usr\n"
+    # The file is the old rendering and the new closure is not realised:
+    # the file's own digest, which the last apply recorded.
+    check unitObservedDigestHex(old, desired, false, "/p/a/1-y") ==
+      posixDigestHexOfText(old)
+    # The file is already the desired one but its closure is missing: not
+    # converged.
+    check unitObservedDigestHex(desired, desired, false, "/p/a/1-y") !=
+      posixDigestHexOfText(desired)
+    check unitObservedDigestHex(desired, desired, true, "/p/a/1-y") ==
+      posixDigestHexOfText(desired)
+
+  test "a systemd.systemTimer that is not running as declared is not converged":
+    # rpi2 (legacy agent at 76f0f4f7a9): seven probe timers enabled, never
+    # active, each planned as a no-op on every apply because the observed
+    # digest covered the file alone.
+    let content = "[Timer]\nOnBootSec=3min\nOnUnitInactiveSec=10min\n"
+    let fileDigest = posixDigestHexOfText(content)
+    # Enabled and waiting: converged.
+    check timerObservedDigestHex(content, true, true, "enabled", "active",
+                                 "n/a") == fileDigest
+    # Enabled, never started: not converged.
+    check timerObservedDigestHex(content, true, true, "enabled", "inactive",
+                                 "n/a") != fileDigest
+    check timerObservedDigestHex(content, true, true, "enabled", "inactive",
+                                 "") != fileDigest
+    # A repeating timer that fired once and then stopped is not running
+    # (review of d14cd72e9f: LastTriggerUSec made it look converged).
+    check timerObservedDigestHex(content, true, true, "enabled", "inactive",
+      "Sun 2026-11-01 12:25:09 EET") != fileDigest
+    # A timer that fires once per activation, inactive after triggering:
+    # running as declared (starting it again would run its service again).
+    let oneShot = "[Timer]\nOnBootSec=3min\n"
+    check not timerRepeats(oneShot) and timerRepeats(content)
+    check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
+      "Sun 2026-11-01 12:25:09 EET") == posixDigestHexOfText(oneShot)
+    check timerObservedDigestHex(oneShot, true, true, "enabled", "inactive",
+      "n/a") != posixDigestHexOfText(oneShot)
+    # Static, generated, aliased and transient timers are not re-enabled
+    # (enable does nothing for them); a linked, indirect or runtime-only
+    # one is not enabled for the next boot, so it is (review of
+    # 0a0cb3f4a3: those three counted as enabled and never were).
+    for st in ["alias", "generated", "static", "transient"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") == fileDigest
+    for st in ["linked", "linked-runtime", "indirect", "enabled-runtime"]:
+      check timerObservedDigestHex(content, true, true, st, "active",
+                                   "n/a") != fileDigest
+    check timerObservedDigestHex(content, false, false, "linked",
+                                 "inactive", "n/a") == fileDigest
+    # A drop-in that adds a repeating trigger makes the timer repeating.
+    check timerRepeats(oneShot & "\n[Timer]\nOnCalendar=daily\n")
+    # An empty assignment to ANY trigger in a later drop-in resets every
+    # trigger, monotonic and calendar (systemd.timer(5)); a drop-in that
+    # resets them and sets a lone OnBootSec= turns a repeating timer into
+    # a one-shot (review of d6f04a2843: only the same key was reset).
+    check not timerRepeats("[Timer]\nOnBootSec=1min\nOnCalendar=daily\n" &
+                           "[Timer]\nOnCalendar=\n")
+    check not timerRepeats("[Timer]\nOnUnitActiveSec=10min\n" &
+                           "[Timer]\nOnBootSec=\nOnBootSec=5min\n")
+    check timerRepeats("[Timer]\nOnBootSec=1min\n" &
+                       "[Timer]\nOnBootSec=\nOnCalendar=hourly\n")
+    # Running but not enabled, and the stopped direction.
+    check timerObservedDigestHex(content, true, true, "disabled", "active",
+                                 "n/a") != fileDigest
+    check timerObservedDigestHex(content, false, false, "disabled",
+                                 "inactive", "n/a") == fileDigest
+    check timerObservedDigestHex(content, false, false, "disabled", "active",
+                                 "n/a") != fileDigest
+    # Nothing reported: not judged.
+    check timerObservedDigestHex(content, true, true, "", "", "") == fileDigest
+
   test "posix desired digest for systemd.systemTimer matches content bytes":
     let op = PrivilegedOperation(kind: pokSystemdSystemTimer,
       address: "x",
@@ -4327,7 +4455,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
     check usesSystemdFromOsRelease("ID=arch\n")
     check usesSystemdFromOsRelease("")  # conservative default
 
-  test "REPRO_OS_RELEASE_PATH override drives hostOsReleaseId":
+  test "the in-process os-release seam drives hostOsReleaseId":
     # The host-probe + override seam is the wire that lets the
     # destructive `applySystemdSystemUnit` carve-out be tested from
     # a non-Alpine host (e.g. this Windows / macOS test machine).
@@ -4338,14 +4466,29 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
     let dir = createTempDir("reprobuild-os-release-", "")
     let fakePath = dir / "os-release-alpine"
     writeFile(fakePath, "ID=alpine\nVERSION_ID=3.21\n")
-    putEnv(OsReleaseOverrideEnvVar, fakePath)
+    setOsReleasePathForTests(fakePath)
     try:
       check hostOsReleaseId() == "alpine"
       check not hostUsesSystemd()
     finally:
-      delEnv(OsReleaseOverrideEnvVar)
+      setOsReleasePathForTests("")
       try: removeFile(fakePath) except OSError: discard
       try: removeDir(dir) except OSError: discard
+
+  test "REPRO_OS_RELEASE_PATH is ignored by hostOsReleaseId":
+    # A12 review finding 5: the variable once redirected every engine's
+    # distro probe; nothing reads it now.
+    when defined(linux) or defined(macosx):
+      let dir = createTempDir("reprobuild-os-release-", "")
+      let fakePath = dir / "os-release-ignored"
+      writeFile(fakePath, "ID=reprobuild-ignored-id\n")
+      putEnv("REPRO_OS_RELEASE_PATH", fakePath)
+      try:
+        check hostOsReleaseId() != "reprobuild-ignored-id"
+      finally:
+        delEnv("REPRO_OS_RELEASE_PATH")
+        try: removeFile(fakePath) except OSError: discard
+        try: removeDir(dir) except OSError: discard
 
   test "applySystemdSystemUnit raises EProtocol on Alpine":
     # Wire the override to a fake Alpine `os-release`; on Linux the
@@ -4357,7 +4500,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
       let dir = createTempDir("reprobuild-os-release-", "")
       let fakePath = dir / "os-release-alpine-carveout"
       writeFile(fakePath, "ID=alpine\n")
-      putEnv(OsReleaseOverrideEnvVar, fakePath)
+      setOsReleasePathForTests(fakePath)
       try:
         let op = PrivilegedOperation(kind: pokSystemdSystemUnit,
           address: "m7-hello.service",
@@ -4366,7 +4509,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
           suEnabled: false)
         var caught = false
         try:
-          discard applySystemdSystemUnit(op)
+          discard applySystemdSystemUnit(FixtureContext(), op)
         except EProtocol as e:
           caught = true
           # The diagnostic must name the distro AND point at the
@@ -4376,7 +4519,7 @@ suite "Recipe-Val side-findings: parseOsReleaseId / systemd carve-out":
           check "openrc" in e.msg.toLowerAscii()
         check caught
       finally:
-        delEnv(OsReleaseOverrideEnvVar)
+        setOsReleasePathForTests("")
         try: removeFile(fakePath) except OSError: discard
         try: removeDir(dir) except OSError: discard
 
@@ -4854,6 +4997,47 @@ ScheduleStartAt=2030-01-01T00:00:00Z
     check obs.schedule.kind == wstskInterval
     check obs.schedule.everyMinutes == 15
     check obs.schedule.startAt == "2030-01-01T00:00:00Z"
+
+  test "scheduledTaskMatchesDesired: multi-argument task read back through the probe converges":
+    # Regression, win-ci-bare-001 2026-10-28 12:50Z: the first registration
+    # of `\Reprobuild\CacheRoute` failed its post-apply check with
+    # "observation disagrees with desired state" while the observed and
+    # desired renderings were byte-identical. Task Scheduler stores ONE
+    # argument string, the probe returns it as `Arguments=<line>`, and the
+    # comparator used to compare that one-element list against the
+    # eight-element desired list. Driven through the real parser on purpose.
+    let probe = "TaskName=\\Reprobuild\\CacheRoute\r\n" &
+      "Executable=powershell.exe\r\n" &
+      "Arguments=-NoProfile -NonInteractive -ExecutionPolicy Bypass " &
+        "-File C:\\ProgramData\\repro\\cache-route\\cache-route.ps1 " &
+        "-StateDir C:\\ProgramData\\repro\\cache-route\r\n" &
+      "WorkingDirectory=\r\n" &
+      "RunAsUser=SYSTEM\r\n" &
+      "RunWithHighestPrivileges=True\r\n" &
+      "Enabled=True\r\n" &
+      "ScheduleKind=interval\r\n" &
+      "ScheduleEveryMinutes=5\r\n" &
+      "ScheduleStartAt=1970-01-01T00:00:00+00:00\r\n"
+    let wantArgs = @["-NoProfile", "-NonInteractive", "-ExecutionPolicy",
+      "Bypass", "-File",
+      "C:\\ProgramData\\repro\\cache-route\\cache-route.ps1",
+      "-StateDir", "C:\\ProgramData\\repro\\cache-route"]
+    let want = ScheduledTaskScheduleSpec(kind: wstskInterval,
+      everyMinutes: 5, startAt: "")
+    let obs = parseScheduledTaskQuery(probe)
+    check obs.present
+    check canonicalScheduledTaskState(obs) ==
+      canonicalScheduledTaskDesired("\\Reprobuild\\CacheRoute",
+        "powershell.exe", wantArgs, "", "SYSTEM", true, want, true)
+    check scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", wantArgs, "", "SYSTEM", true, want, true)
+    # Still a real drift detector on the argument line.
+    var otherArgs = wantArgs
+    otherArgs[^1] = "C:\\elsewhere"
+    check not scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", otherArgs, "", "SYSTEM", true, want, true)
+    check not scheduledTaskMatchesDesired(obs, "\\Reprobuild\\CacheRoute",
+      "powershell.exe", wantArgs[0 ..< ^1], "", "SYSTEM", true, want, true)
 
   test "canonicalScheduledTaskState == canonicalScheduledTaskDesired on convergence":
     # Drift-digest equality property: the broker's digest computation

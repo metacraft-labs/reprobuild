@@ -1,0 +1,19 @@
+{
+  "schemaId": "reprobuild.hcr.hlx-m4.calibration.v1",
+  "measure": "hlx-m4.cpuset-runnable-per-available-cpu.v1",
+  "status": "pending",
+  "statusNote": "Not yet calibrated. The gate counts no run as calibrated evidence until this record carries status \"calibrated\", a maxReading measured on a dedicated host with m4_calibrate.nim, and the name of the person who approved it (reprobuild-pm issues/2026-11-22-no-ci-host-meets-the-hlx-m4-gates-calibrated-load-conditions.md). Until then the HLX-M4 concurrency gate reports CONDITIONS NOT MET: condition not yet calibrated on a dedicated host.",
+  "windowMs": 100,
+  "maxReading": null,
+  "host": "",
+  "date": "",
+  "kernel": "",
+  "cpuSet": "",
+  "availableCpus": null,
+  "cpuSource": "",
+  "approvedBy": "",
+  "requiredControlRate": 0.5,
+  "margin": null,
+  "runsPerArm": null,
+  "buckets": []
+}

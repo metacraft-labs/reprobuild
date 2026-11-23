@@ -9,7 +9,7 @@
 import std/[os, strutils, tempfiles, unittest]
 import repro_tool_profiles
 import repro_interface_artifacts
-import repro_dsl_stdlib/nixpkgs_pin
+import repro_test_support/reasoned_skip
 
 suite "bootstrap Nim monitoring":
   test "Linux uses the pinned compiler channel instead of the static archive":
@@ -31,11 +31,15 @@ suite "bootstrap Nim monitoring":
         let source = tool.nixProvisioning[0]
         check source.selector == "nixpkgs#nim"
         check source.executablePath == "bin/nim"
-        check source.nixpkgsRev == CanonicalNixpkgsRev
-        check source.nixpkgsNarHash == CanonicalNixpkgsNarHash
-        check source.nixpkgsRef == "github:NixOS/nixpkgs/" & CanonicalNixpkgsRev
+        # The bootstrap Nim carries its own nixpkgs pin, deliberately apart
+        # from the catalog's canonical one, because it must be the declared
+        # Nim release (see ``BootstrapNimNixpkgsRev``). Compare against that
+        # pin; ``CanonicalNixpkgsRev`` moves independently of it.
+        check source.nixpkgsRev == BootstrapNimNixpkgsRev
+        check source.nixpkgsNarHash == BootstrapNimNixpkgsNarHash
+        check source.nixpkgsRef == "github:NixOS/nixpkgs/" & BootstrapNimNixpkgsRev
         check source.lockIdentity == source.nixpkgsRef & "?narHash=" &
-          CanonicalNixpkgsNarHash & "#nim"
+          BootstrapNimNixpkgsNarHash & "#nim"
     else:
       skip("not Linux — the pinned nixpkgs compiler channel is the Linux bootstrap path")
 

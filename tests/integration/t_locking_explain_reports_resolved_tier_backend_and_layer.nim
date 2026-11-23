@@ -93,9 +93,9 @@ suite "HL-1 — repro locking explain reports tier + backend + layer":
       check git(gitBin, teamManifest, "add seed.txt").code == 0
       check git(gitBin, teamManifest, "commit -m seed").code == 0
 
-      writeFile(repo / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(repo / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"team\", backend = \"git-checkout\", " &
@@ -134,11 +134,11 @@ suite "HL-1 — repro locking explain reports tier + backend + layer":
       for r in parsed["repos"]:
         if r["path"].getStr() == ".":
           found = r
-      check found != nil
+      check not found.isNil
       if found != nil:
         # (2) tier + backend from the declaring layer, not the per-repo field.
         check found["tier"].getStr() == "team"
         check found["backend"].getStr() == "git-checkout"
         # (3) the DECLARING LAYER + its source are attributed.
         check found["layer"].getStr() == "parent-workspace-repo"
-        check found["source"].getStr().contains(".repro-workspace.toml")
+        check found["source"].getStr().contains("repro-workspace.toml")

@@ -15,7 +15,9 @@
 # LAYOUT (Distribution-And-Packaging §5; identical to the native packages):
 #
 #   <pkg>/share/repro/source/libs/...        reprobuild's libs/, tests excluded
+#   <pkg>/share/repro/source/config.nims     the profile compile includes it
 #   <pkg>/share/repro/src/<input>/...        one tree per source-only input
+#   <pkg>/share/repro/reprobuild-packages/   the pinned catalog's interfaces
 #
 # The running image finds these itself (repro_interface_artifacts.
 # ensureInstalledSourcePackageEnvironment): no wrapper, no environment.
@@ -29,7 +31,8 @@
 # the defect this script exists to prevent. `verify_release.sh` re-checks the
 # result from the other side.
 #
-# Run from the reprobuild checkout root.
+# Run from the reprobuild checkout root. With $STAGE_RELEASE_SOURCES_MANIFEST
+# set, each staged input's `<ENV_VAR> <dest> <root>` is appended to that file.
 set -euo pipefail
 
 if [[ $# -ne 1 ]]; then
@@ -46,12 +49,27 @@ src_root="$pkg/share/repro/src"
 rm -rf "$pkg/share/repro"
 mkdir -p "$source_root" "$src_root"
 
+# Copy the files named on stdin (NUL-separated, relative to <from>) into <to>,
+# keeping their relative paths. One tar pair for the whole list, not a
+# `mkdir` + `cp` per file: on Windows every process spawn costs tens of
+# milliseconds in Git for Windows' bash, and the per-file loop this replaces
+# took the better part of an hour to stage one archive (measured 2026-10-13 on
+# eli-pc: ~1 file/s). The archive's file set is unchanged -- the lists are
+# produced exactly as before. Both GNU tar and bsdtar read a NUL-separated
+# name list with `--null -T -`; the archive itself goes through a pipe, so no
+# `-C <drive>:\...` argument is ever parsed as a remote host.
+copy_listed() {
+  local from=$1 to=$2 to_abs
+  mkdir -p "$to"
+  to_abs=$(cd "$to" && pwd)
+  (cd "$from" && tar --null -T - -cf -) | (cd "$to_abs" && tar -xf -)
+}
+
 # Copy <from> to <to>, keeping only what a `nim c` reads: Nim sources and
 # configs, the C/C++ sources and headers `{.compile.}`/`-I` name, and licence
 # files. Build products, VCS metadata and test trees are dropped.
 copy_tree() {
-  local from=$1 to=$2 f
-  mkdir -p "$to"
+  local from=$1 to=$2
   (cd "$from" && find . \
       \( -name .git -o -name build -o -name nimcache -o -name .repro \
          -o -name tests -o -name node_modules \) -prune -o \
@@ -60,30 +78,47 @@ copy_tree() {
         -o -name '*.h' -o -name '*.hpp' -o -name '*.c' -o -name '*.cc' \
         -o -name '*.cpp' -o -name '*.inc' -o -name '*.S' -o -name '*.s' \
         -o -name '*.asm' -o -name 'LICENSE*' -o -name 'COPYING*' \) \
-      -print) |
-  while IFS= read -r f; do
-    mkdir -p "$to/$(dirname "$f")"
-    cp "$from/$f" "$to/$f"
-  done
+      -print0) | copy_listed "$from" "$to"
   # Store paths are read-only; the archive tree must stay removable.
   chmod -R u+w "$to"
 }
 
-# ---- reprobuild's own libs ---------------------------------------------------
-# Every tracked file outside tests/: some lib modules read data files at compile
-# time (`staticRead` of recipe templates), so no extension filter here.
+# ---- reprobuild's own source root ------------------------------------------
+# What it carries -- trees and root-level files -- is the list in
+# scripts/lib/stage_source_root.sh, shared with the native-package payload
+# stagers so an entry added for one format reaches every format. This stager
+# keeps its own copy: every tracked file of each tree outside tests/ (some lib
+# modules read data files at compile time, `staticRead` of recipe templates, so
+# no extension filter here), in one tar pipe. The filter loop uses only shell
+# builtins, so it spawns nothing per file.
+# shellcheck source=scripts/lib/stage_source_root.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/stage_source_root.sh"
+# shellcheck disable=SC2086 # the lists are deliberately word-split
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  git ls-files -z -- libs | while IFS= read -r -d '' f; do
+  git ls-files -z -- $REPRO_SOURCE_ROOT_TREES | while IFS= read -r -d '' f; do
     case "/$f/" in */tests/*) continue ;; esac
     [[ -f "$f" ]] || continue
-    mkdir -p "$source_root/$(dirname "$f")"
-    cp "$f" "$source_root/$f"
-  done
+    printf '%s\0' "$f"
+  done | copy_listed . "$source_root"
 else
-  copy_tree libs "$source_root/libs"
+  for tree in $REPRO_SOURCE_ROOT_TREES; do
+    copy_tree "$tree" "$source_root/$tree"
+  done
 fi
+# The root-level files beside the trees. The profile compile (`repro home
+# apply`, `repro infra apply`) includes `<source root>/config.nims` from a
+# wrapper it stages next to the profile; that file turns the `*_SRC` roots into
+# search paths (nimcrypto, bearssl, io-mon, ...) and points the C compiler at
+# the vendored hash headers. Without it the archive's profile compile saw only
+# `libs/*/src` and failed with `cannot open file: nimcrypto/sha2`.
+# shellcheck disable=SC2086 # the list is deliberately word-split
+for file in $REPRO_SOURCE_ROOT_FILES; do
+  cp "$file" "$source_root/$file"
+done
 
 # ---- source-only inputs ------------------------------------------------------
+# shellcheck source=scripts/lib/stage_package_nimble.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../lib/stage_package_nimble.sh"
 # stage <ENV_VAR> <dest under share/repro/src> <marker> <candidate>...
 # The destination names are repro_interface_artifacts.InstalledSourcePackageTrees
 # (and the native packages' wrapper values); the marker is relative to the
@@ -104,10 +139,21 @@ stage() {
   fi
   echo "stage_release_sources: $dest <- $root"
   copy_tree "$root" "$src_root/$dest"
+  # A `<package>/src` destination also gets the package's nimble file beside
+  # it: a module may read it at compile time (scripts/lib/stage_package_nimble.sh).
+  stage_package_nimble "$root" "$src_root/$dest"
+  # Which tree each input came from, for a caller that records it (the
+  # installed prefix's `cross-build-info`, Distribution-And-Packaging
+  # §5.3): one `<ENV_VAR> <dest> <root>` line per staged input.
+  if [[ -n "${STAGE_RELEASE_SOURCES_MANIFEST:-}" ]]; then
+    printf '%s %s %s\n' "$env_name" "$dest" "$root" >> "$STAGE_RELEASE_SOURCES_MANIFEST"
+  fi
 }
 
 stage REPRO_TEST_ADAPTERS_SRC reprobuild-test-adapters/src \
   repro_test_adapters/test_runner.nim ../reprobuild-test-adapters/src
+stage TEST_CERTIFICATES_TOOLS_SRC test-certificates-tools/src \
+  test_certificates.nim ../test-certificates-tools/src
 stage REPRO_CT_TEST_RUNNER_SRC reprobuild-ct-test-runner \
   libs/ct_incremental_adapter/src/ct_incremental_adapter.nim \
   ../reprobuild-ct-test-runner
@@ -131,6 +177,13 @@ stage RUNQUOTA_SRC runquota libs/runquota_core/src/runquota_core.nim ../runquota
 # as `scripts/source_paths.sh`, `config.nims` and the recipe's probe.
 stage BEARSSL_SRC bearssl bearssl/abi/consttypes.nim ../nim-bearssl \
   libs/nim-bearssl
+
+# ---- the reprobuild-packages catalog -----------------------------------------
+# An installed reprobuild carries the catalog it was released with, beside its
+# sources; see stage_release_catalog.sh.
+if ! bash scripts/release/stage_release_catalog.sh "$pkg"; then
+  missing+=("reprobuild-packages (stage_release_catalog.sh said why, above)")
+fi
 
 if (( ${#missing[@]} > 0 )); then
   echo "stage_release_sources: ERROR: source-only inputs not found:" >&2

@@ -9,10 +9,14 @@
 ## This adapter builds a `SystemProfile` value that is BYTE-EQUIVALENT
 ## — under the apply pipeline's reads — to what `parseSystemProfile`
 ## would have produced from the equivalent legacy text. Only
-## system-scope resource kinds appear in the resulting profile;
-## activities, config, and hosts are no-ops (the system parser has no
-## syntax for those blocks — `system.nim` profiles are bare resource
-## stanzas).
+## system-scope resource kinds appear in the resulting profile, and only
+## those that apply on the planned host: system scope selects per host as
+## home scope does -- runtime predicates and `activity <name>:` blocks,
+## the activities chosen by the home profile's host registry
+## (`adaptSystemProfile`, spec ReproOS-Add-On-Mode §8.2). For an add-on
+## host every selected field is classified by the `add-on-debian`
+## realisation profile (`addon_realisation`). The output is still bare
+## resource stanzas: selection happens here, before the M69 text.
 ##
 ## Resource-kind mapping (macro side -> apply parser side):
 ##
@@ -22,11 +26,15 @@
 ## Phase A constructor names are themselves derived from the M69
 ## `SystemResourceKind` string-enum values.
 
-import std/[strutils, tables]
+import std/[algorithm, sets, strutils, tables]
 
 import repro_elevation
 import repro_profile
 import repro_infra
+import repro_home_intent
+import ./resource_scope
+import ./adapter_home
+import ./addon_realisation
 
 proc fieldString(r: ResourceIntent; key: string;
                  default: string = ""): string =
@@ -302,7 +310,35 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
     result = SystemResource(kind: srkSystemdSystemUnit,
       suName: fieldString(r, "name"),
       suContent: fieldString(r, "content"),
-      suEnabled: fieldBool(r, "enabled", true))
+      suEnabled: fieldBool(r, "enabled", true),
+      suAptClosureLock: fieldString(r, "aptClosureLock"),
+      suRestartHeld: not fieldBool(r, "restartIfChanged", true),
+      suCollision: parseCollisionField("systemd.systemUnit",
+        fieldString(r, "collision"), UnitCollisionOptIns),
+      suDropInName: fieldString(r, "dropInName"),
+      suStopHeld: not fieldBool(r, "stopOnRemoval", true),
+      suReloadIfChanged: fieldBool(r, "reloadIfChanged", false),
+      suExclusive: fieldBool(r, "exclusive", false),
+      suHealthCheck: fieldString(r, "healthCheck"),
+      suCredentials: fieldList(r, "credentials"),
+      suHardening: fieldString(r, "hardening"),
+      suFloorExceptions: fieldList(r, "floorExceptions"))
+    try:
+      result.suStateDirectories = parseStateDirectories(result.suName,
+        fieldList(r, "stateDirectories"))
+    except ESystemProfileInvalid as e:
+      raise newException(ValueError, e.msg)
+    if result.suHealthCheck.len > 0:
+      discard parseHealthCheck(result.suHealthCheck)
+    if result.suDropInName.len > 0 and result.suCollision != "dropIn":
+      raise newException(ValueError, "systemd.systemUnit '" &
+        result.suName & "' sets dropInName without `collision = \"dropIn\"`")
+    if result.suDropInName.len > 0 and not isSafeDropInName(result.suDropInName):
+      raise newException(ValueError, "systemd.systemUnit '" &
+        result.suName & "' dropInName '" & result.suDropInName &
+        "' must be one path segment of letters, digits, '.', '-' or '_'")
+    # Same parse-time refusal as the text path (`parseSystemProfile`).
+    discard renderedSystemUnitContent(result)
   of "launchd.systemDaemon":
     result = SystemResource(kind: srkLaunchdSystemDaemon,
       sdaLabel: fieldString(r, "label"),
@@ -342,7 +378,9 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
       sfContent: sfContent,
       sfSourceUrl: sfSourceUrl,
       sfSha256: sfSha256,
-      sfSourceLocal: sfSourceLocal)
+      sfSourceLocal: sfSourceLocal,
+      sfCollision: parseCollisionField("fs.systemFile",
+        fieldString(r, "collision"), FileCollisionOptIns))
   of "fs.systemDirectory":
     let dirPath = fieldString(r, "path")
     # ACL is optional. The fsSystemDirectory template emits the three
@@ -608,6 +646,42 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
         "' must end with '.nix'")
     result = SystemResource(kind: srkMacosDarwinSystemModule,
       darwinModuleName: n, darwinModuleContent: c)
+  of "systemd.unitState":
+    let stateStr = fieldString(r, "state", "Running").toLowerAscii()
+    if stateStr notin ["running", "stopped"]:
+      raise newException(ValueError,
+        "systemd.unitState state '" & stateStr &
+        "' is not one of Running / Stopped")
+    result = SystemResource(kind: srkSystemdUnitState,
+      usName: fieldString(r, "name"),
+      usEnabled: fieldBool(r, "enabled", true),
+      usRunning: stateStr == "running")
+    # Same parse-time refusals as the text path.
+    checkUnitStateResource(result)
+  of "linux.addOnTool":
+    let command = fieldString(r, "command")
+    result = SystemResource(kind: srkLinuxAddOnTool,
+      atCommand: command,
+      atAptClosureLock: fieldString(r, "aptClosureLock"),
+      atProgram: fieldString(r, "program", "/usr/bin/" & command))
+    checkAddOnToolResource(result)
+  of "systemd.systemDropIn":
+    result = SystemResource(kind: srkSystemdSystemDropIn,
+      diUnit: fieldString(r, "unit"),
+      diName: fieldString(r, "name", "addon"),
+      diContent: fieldString(r, "content"),
+      diRestartHeld: not fieldBool(r, "restartIfChanged", true))
+    # Same parse-time refusals as the text path.
+    checkDropInResource(result)
+  of "linux.sysusersEntry":
+    result = SystemResource(kind: srkLinuxSysusersEntry,
+      seName: fieldString(r, "name"),
+      seKind: fieldString(r, "kind", "user"),
+      seId: fieldString(r, "id"),
+      seDescription: fieldString(r, "description"),
+      seHome: fieldString(r, "home"),
+      seShell: fieldString(r, "shell"))
+    checkSysusersEntryResource(result)
   of "linux.fhsSandbox":
     # Linux-Third-Party-Sandbox-MVP M1. The closed-set / shape checks
     # mirror the `parseSystemProfile` arm in repro_infra/profile.nim
@@ -652,45 +726,393 @@ proc buildSystemResource(r: ResourceIntent): SystemResource =
     deps.add((kind: d.kind, name: d.name))
   result.dependsOn = deps
 
-proc isSystemScopeResource(kind: string): bool =
-  ## System-scope resource kinds (M69 + M82). The home-scope kinds
-  ## (env.userPath, env.userVariable, fs.managedBlock, shell.integration,
-  ## windows.registryValueHKCU, windows.startup, fs.userFile) are
-  ## filtered out and handled by the home adapter instead.
-  case kind
-  of "windows.registryValueHKLM",
-     "windows.optionalFeature", "windows.capability",
-     "windows.service", "windows.scheduledTask",
-     "windows.vsInstaller",
-     "windows.firewallRule", "windows.acl",
-     "macos.systemDefault", "systemd.systemUnit",
-     "launchd.systemDaemon", "fs.systemFile", "fs.systemDirectory",
-     "env.systemVariable", "passwd.user",
-     "os.timezone", "os.hostname",
-     "linux.sysctl", "linux.udevRule", "linux.polkitRule",
-     "linux.tmpfilesRule", "linux.sudoersRule",
-     "passwd.group", "linux.nixDaemonSetting",
-     "systemd.systemTimer", "linux.firewallRule",
-     "linux.nixosSystemModule", "macos.darwinSystemModule",
-     "linux.fhsSandbox":
-    true
+proc systemResourceLabel(r: ResourceIntent): string =
+  ## `pkg.homebrewCask `ghostty`` -- the kind, and the address when it has
+  ## one, the way the planner's other diagnostics name a resource.
+  r.kind & (if r.address.len > 0: " `" & r.address & "`" else: "")
+
+type
+  SystemRealisation* = enum
+    ## How the selected resources are realised on the planned host.
+    srFull = "full"
+      ## The host's whole system is this configuration's (ReproOS, or a host
+      ## the registry does not mark): every system-scope kind the planner
+      ## knows is applied as is.
+    srAddOnDebian = "add-on-debian"
+      ## ReproOS add-on mode on a Debian-family distribution: every field is
+      ## classified by the `add-on-debian` realisation profile
+      ## (`addon_realisation`), and an invalid one is `EAddOnOutOfScope`.
+
+  SystemPlanTarget* = object
+    ## The host a system profile is planned for. System scope selects per
+    ## host exactly as home scope does (spec ReproOS-Add-On-Mode §8.2): the
+    ## runtime predicates of guarded resources are evaluated against `facts`,
+    ## and an activity-scoped resource is planned only when `activities`
+    ## enables its activity.
+    facts*: HostContext
+      ## The planned host: its name (`facts.host`, the resolved identity) and
+      ## platform facts.
+    activities*: HashSet[string]
+      ## The system activities the host enables: `default` plus what its
+      ## host-registry entry selects (`host_system.enabledSystemActivities`).
+    realisation*: SystemRealisation
+
+  SystemAdaptation* = object
+    ## The adapter's result for one target.
+    profile*: SystemProfile
+      ## The resources the target gets, in declaration order.
+    projection*: Projection
+      ## `srAddOnDebian` only: the classification of every field of every
+      ## selected resource -- the plan reports the ignored ones.
+
+proc systemPlanTarget*(host: string; activities: HashSet[string];
+                       realisation = srFull): SystemPlanTarget =
+  ## A target for `host` on the running machine: the platform facts are the
+  ## running machine's (`currentHostContext`), the name is `host` (the
+  ## identity the command resolved, which may differ from the OS hostname).
+  result.facts = currentHostContext()
+  if host.len > 0:
+    result.facts.host = host
+  result.activities = activities
+  if DefaultSystemActivity notin result.activities:
+    result.activities.incl DefaultSystemActivity
+  result.realisation = realisation
+
+const AddonMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's falsifying-mutation switch (``repro_addon/mutations``),
+  ## read here directly because this module cannot import that one.
+
+proc selectedBuildActions*(actions: openArray[ProfileBuildAction];
+                           target: SystemPlanTarget): seq[ProfileBuildAction] =
+  ## The action edges ``target`` realises: every profile-level edge, and an
+  ## activity's edges only when the target selects that activity (spec
+  ## ReproOS-Add-On-Mode §8.2), so a host fetches only the store packages
+  ## its activities use.
+  for a in actions:
+    when AddonMutation == "activity-edges-unselected":
+      # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages,
+      # e2e_addon_reproos_service_parity): every edge on every host.
+      result.add a
+    else:
+      if a.activity.len == 0 or a.activity in target.activities:
+        result.add a
+
+proc runtimePathTexts(r: SystemResource):
+    seq[tuple[what, text: string]] =
+  ## Every text of ``r`` from which a unit's executables and paths can come
+  ## when it runs (A12 round-2 review): the unit body and its health check
+  ## (`exec:/repro/store/...`), a drop-in for another unit (which can set
+  ## `ExecStart=` or `Environment=`), a timer, a file a unit execs or reads
+  ## (a wrapper script, an `EnvironmentFile=`), a system variable, an
+  ## account's home and shell, and the other rule files that name programs
+  ## (udev `RUN+=`, tmpfiles symlinks, polkit, sudoers), plus the paths of
+  ## an FHS sandbox, an add-on tool and a launchd daemon. A kind that cannot
+  ## name a path (a sysctl, a group, a firewall rule) has none.
+  ## ``what`` names the resource the way a refusal shows it.
+  case r.kind
+  of srkSystemdSystemUnit:
+    result.add ("unit " & r.suName, r.suContent)
+    if r.suHealthCheck.len > 0:
+      result.add ("the health check of unit " & r.suName, r.suHealthCheck)
+  of srkSystemdSystemDropIn:
+    result.add ("drop-in " & r.diName & " of unit " & r.diUnit, r.diContent)
+  of srkSystemdSystemTimer:
+    result.add ("timer " & r.stName, r.stContent)
+  of srkFsSystemFile:
+    result.add ("file " & r.sfPath, r.sfContent)
+  of srkEnvSystemVariable:
+    result.add ("system variable " & r.evName, r.evContribution.join("\n"))
+  of srkPasswdUser:
+    result.add ("user " & r.puName, r.puHome & "\n" & r.puShell)
+  of srkLinuxSysusersEntry:
+    result.add ("sysusers entry " & r.seName, r.seHome & "\n" & r.seShell)
+  of srkLinuxUdevRule:
+    result.add ("udev rule " & r.udevName, r.udevContent)
+  of srkLinuxPolkitRule:
+    result.add ("polkit rule " & r.polkitName, r.polkitContent)
+  of srkLinuxTmpfilesRule:
+    result.add ("tmpfiles rule " & r.tmpfilesName, r.tmpfilesContent)
+  of srkLinuxSudoersRule:
+    result.add ("sudoers rule " & r.sudoersName, r.sudoersContent)
+  of srkLinuxFhsSandbox:
+    result.add ("FHS sandbox " & r.fsbBinPath, (@[r.fsbBinPath] &
+      r.fsbFhsTreeRoots & r.fsbArgv).join("\n"))
+  of srkLinuxAddOnTool:
+    result.add ("add-on tool " & r.atCommand, r.atProgram)
+  of srkLaunchdSystemDaemon:
+    result.add ("launchd daemon " & r.sdaLabel, r.sdaProgramArgs.join("\n"))
   else:
-    false
+    discard
+
+const
+  PrefixLeftBounds = {'=', ' ', '\t', '\n', ':', '"', '\'', ',', '(', '[',
+                      '@', '-', '+', '!', '|'}
+    ## What may stand before a store prefix where it is used as a path:
+    ## an assignment, whitespace, a separator, a quote, and the systemd
+    ## `Exec*=` prefixes (`@`, `-`, `+`, `!`, `|`... `-` also opens an
+    ## optional `EnvironmentFile=-/path`).
+  PrefixRightBounds = {'/', ' ', '\t', '\n', ':', '"', '\'', ',', ')', ']',
+                       ';'}
+    ## What may follow it: a path below it, or the end of the token.
+
+proc namesPrefix(text, prefix: string): bool =
+  ## Whether ``text`` uses the store ``prefix`` as a path -- bounded on both
+  ## sides, so `/…/geth-prefix/12` does not match `/…/geth-prefix/1`.
+  var i = text.find(prefix)
+  while i >= 0:
+    let after = i + prefix.len
+    if (i == 0 or text[i - 1] in PrefixLeftBounds) and
+       (after >= text.len or text[after] in PrefixRightBounds):
+      return true
+    i = text.find(prefix, i + 1)
+  false
+
+proc unitPrefixRefusal*(profile: SystemProfile;
+                        actions, selected: openArray[ProfileBuildAction]):
+    string =
+  ## Why the selected resources cannot run on this target, or "": a
+  ## resource names the store prefix of an action edge the target does not
+  ## realise (A12 review finding 12, spec ReproOS-Add-On-Mode §8.2). An
+  ## activity's edges are realised only where the activity is selected
+  ## (``selectedBuildActions``), so a unit that runs from another activity's
+  ## package would start without its executable on a host that selects the
+  ## unit's activity but not the package's. The executable can come from the
+  ## unit body, but equally from a drop-in, a health check, a wrapper file
+  ## the unit execs, an environment file or variable, or an account's shell
+  ## (``runtimePathTexts``), and each is checked (A12 round-2 review).
+  ## Refused at plan time, naming the resource, the prefix and the activity
+  ## that owns it; declare the package in the resource's own activity (or at
+  ## profile level) instead.
+  when AddonMutation == "unit-prefix-unchecked":
+    # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages).
+    return ""
+  var realised: HashSet[string]
+  for a in selected:
+    realised.incl a.id
+  for a in actions:
+    if a.id in realised or a.cwd.len == 0 or not a.cwd.startsWith("/"):
+      continue
+    let prefix = a.cwd.strip(leading = false, chars = {'/'})
+    for r in profile.resources:
+      when AddonMutation == "unit-prefix-bodies-only":
+        # FALSIFYING MUTATION (t_system_activity_selects_its_store_packages):
+        # the round-1 check, which read unit bodies and nothing else.
+        if r.kind != srkSystemdSystemUnit: continue
+        let texts = @[("unit " & r.suName, r.suContent)]
+      else:
+        let texts = runtimePathTexts(r)
+      for (what, text) in texts:
+        if namesPrefix(text, prefix):
+          return what & " runs from the store prefix " & prefix &
+            ", which action edge `" & a.id & "` of activity `" & a.activity &
+            "` produces, and this host does not select that activity, so " &
+            "the prefix would never be realised; declare the package in " &
+            "the resource's own activity or at profile level"
+  ""
+
+proc defaultSystemPlanTarget*(host = ""): SystemPlanTarget =
+  ## The target of a plan that reads no host registry: the running machine
+  ## (named `host` when given), the `default` system activity only, realised
+  ## in full -- what `repro infra` did for a host the registry does not
+  ## declare before system scope had host selection, and still does.
+  systemPlanTarget(host, toHashSet([DefaultSystemActivity]))
+
+proc activityBodyHasPackages(body: seq[ActivityElement]): bool =
+  for el in body:
+    case el.kind
+    of aekPackageRef:
+      return true
+    of aekWhenGuard:
+      if activityBodyHasPackages(el.guardedBody):
+        return true
+
+proc adaptSystemProfile*(p: ProfileIntent;
+                         target: SystemPlanTarget): SystemAdaptation =
+  ## Build the `SystemProfile` `target` gets from the compiled system
+  ## profile `p`: equivalent to what `parseSystemProfile(text)` would return
+  ## for the resources that apply on the target.
+  ##
+  ## Selection (spec ReproOS-Add-On-Mode §8.2, the home rule): a resource
+  ## under a runtime predicate (`when linux():`, `when host() == "x":`)
+  ## applies where the predicate holds on `target.facts`, and a resource in
+  ## `activity <name>:` applies where `target.activities` enables the
+  ## activity. Both are decided by ONE walker, the home planner's
+  ## `applicableResourceEntries`, so the two scopes cannot disagree.
+  ##
+  ## Refusals (Core-Invariants.md §Unrecognised Input Is Rejected, Not
+  ## Skipped): a declaration system scope does not apply is refused, naming
+  ## it, rather than left out -- data files, catalogs, `stow:` claims,
+  ## package references in activities, a `hosts:` block (system activities
+  ## are selected by the home profile's host registry), a home-scope or
+  ## unknown resource kind, a resource of an undeclared activity, and a
+  ## target that enables an activity the profile does not declare. For an
+  ## add-on target every selected resource is then projected through the
+  ## `add-on-debian` profile (`EAddOnOutOfScope` on an invalid field).
+  # GM4: data-file rows expand into ACTIVITIES' package references, which
+  # system scope does not apply. Ignoring the `data:` section would leave its
+  # rows declared but never applied while the run reports success.
+  if p.dataFiles.len > 0:
+    raise newException(ValueError,
+      "system profiles do not read plan-time data files (`data:` declares " &
+      p.dataFiles.join(", ") & "); data rows expand into activity package " &
+      "references, which only home profiles apply")
+  # System profiles carry no package references yet, so there is nothing
+  # an imported contribution catalog could reach; accepting the section
+  # would make it look effective.
+  if p.catalogImports.len > 0:
+    raise newException(ValueError,
+      "system profiles do not import contribution catalogs (`catalogs:` " &
+      "declares " & p.catalogImports.join(", ") & "); catalogs serve " &
+      "package references, which only home profiles have")
+  # GM11: a `stow:` block claims `stow/` packages, which only a home apply
+  # materializes.
+  if p.stowScopes.len > 0:
+    raise newException(ValueError,
+      "system profiles have no `stow/` tree: activity `" &
+      p.stowScopes[0].activity & "` claims stow package `" &
+      p.stowScopes[0].package & "`; declare `stow:` blocks in the home " &
+      "profile")
+  # The host registry is the home profile's `hosts:` (Gradual-Nix-To-
+  # Reprobuild-Migration.md §Hosts): it says how a host's system is managed
+  # (GM10, add-on mode) and which system activities it selects (§8.2). A
+  # `hosts:` block in a system profile would be a second registry that
+  # nothing reads, so it is refused rather than ignored.
+  if p.hostSystems.len > 0 or p.hosts.len > 0:
+    var hosts: seq[string]
+    for h in p.hosts.keys:
+      hosts.add h
+    for h in p.hostSystems.keys:
+      if h notin hosts:
+        hosts.add h
+    hosts.sort()
+    raise newException(ValueError,
+      "a system profile's `hosts:` (" & hosts.join(", ") & ") would be a " &
+      "second host registry that nothing reads; declare each host in the " &
+      "home profile's `hosts:` registry, which `repro infra plan` / " &
+      "`apply` read -- `system: managedElsewhere(...)`, `system: addOn`, or " &
+      "`system: {mode: addOn, activities: [...]}` to select system " &
+      "activities")
+  # An activity's package references are home scope's; the system planner
+  # applies resources only, so a package listed in a system activity would
+  # look installed and never be.
+  var declaredActivities: seq[string]
+  for act in p.activities:
+    declaredActivities.add act.name
+    if activityBodyHasPackages(act.body):
+      raise newException(ValueError,
+        "system profile activity `" & act.name & "` lists package " &
+        "references; the system planner applies only the activity's " &
+        "`resources:`. Declare packages in the home profile")
+  # The selection must name activities the profile has. `default` is always
+  # enabled and needs no `activity default:` block (a profile without one
+  # simply has no resources in it).
+  var undeclared: seq[string]
+  for a in target.activities:
+    if a != DefaultSystemActivity and a notin declaredActivities:
+      undeclared.add a
+  if undeclared.len > 0:
+    undeclared.sort()
+    raise newException(ValueError,
+      "host `" & target.facts.host & "` selects system activit" &
+      (if undeclared.len == 1: "y " else: "ies ") & undeclared.join(", ") &
+      " (host registry `system:` entry), which the system profile does " &
+      "not declare (declared: " &
+      (if declaredActivities.len > 0: declaredActivities.join(", ")
+       else: "none") & ")")
+  var nodes: seq[IntentNode]
+  for i, r in p.resources:
+    # A resource the system planner does not apply is refused, naming it,
+    # rather than left out -- whether or not it is selected on this host:
+    # the declaration is misplaced everywhere. The home adapter refuses the
+    # converse; both read `resource_scope.resourceScope`.
+    case resourceScope(r.kind)
+    of rsSystem:
+      discard
+    of rsHome:
+      raise newException(ValueError,
+        "system profile resource " & systemResourceLabel(r) & " is " &
+        "home-scope: the system planner (`repro infra apply`) does not " &
+        "apply it. Declare it in the home profile (`home.nim`, applied by " &
+        "`repro home apply`)")
+    of rsUnknown:
+      raise newException(ValueError,
+        "system profile resource " & systemResourceLabel(r) & " has a " &
+        "kind that neither the home nor the system planner applies")
+    # GM9's rule: an activity-scoped resource names a declared activity; an
+    # unknown one would be planned on no host at all.
+    if r.activity.len > 0 and r.activity notin declaredActivities:
+      raise newException(ValueError,
+        "system profile resource " & systemResourceLabel(r) & " belongs " &
+        "to activity `" & r.activity & "`, which the profile does not " &
+        "declare (declared: " &
+        (if declaredActivities.len > 0: declaredActivities.join(", ")
+         else: "none") & ")")
+    nodes.add guardedBy(r.guard, IntentNode(kind: nkResourceEntry,
+      resourceKind: r.kind, resourceAddress: r.address,
+      resourceIntentOrdinal: i + 1, resourceActivity: r.activity))
+  var selected: seq[ResourceIntent]
+  for entry in applicableResourceEntries(nodes, target.facts,
+      target.activities):
+    selected.add p.resources[entry.resourceIntentOrdinal - 1]
+  case target.realisation
+  of srFull:
+    discard
+  of srAddOnDebian:
+    result.projection = projectResources(addOnDebianProfile(), selected)
+  # The `addOn:` section is carried whatever the target: it is what the
+  # text form's `addOn { ... }` stanza renders, and the add-on apply is what
+  # gives it meaning. Each prefix is validated as the text parser would.
+  if p.addOn.declared:
+    result.profile.addOn.declared = true
+    for prefix in p.addOn.managedEtcPrefixes:
+      let problem = managedPrefixError(prefix)
+      if problem.len > 0:
+        raise newException(ValueError, "addOn: " & problem)
+      if prefix notin result.profile.addOn.managedEtcPrefixes:
+        result.profile.addOn.managedEtcPrefixes.add prefix
+    if p.addOn.confirmTimeoutSec != 0:
+      if p.addOn.confirmTimeoutSec notin 1 .. MaxConfirmTimeoutSec:
+        raise newException(ValueError, "addOn: confirmTimeout " &
+          $p.addOn.confirmTimeoutSec & " must be between 1 and " &
+          $MaxConfirmTimeoutSec & " seconds")
+      result.profile.addOn.confirmTimeoutSec = p.addOn.confirmTimeoutSec
+  for r in selected:
+    if r.kind == SecretFileStanzaTag:
+      # A declaration, not a resource (`SecretFileDecl`): it is carried
+      # beside the resources, as the text form's stanza is.
+      let d = SecretFileDecl(service: fieldString(r, "service"),
+                             name: fieldString(r, "name"))
+      for (what, v) in [("service", d.service), ("name", d.name)]:
+        if not isSafeSecretComponent(v):
+          raise newException(ValueError, SecretFileStanzaTag & " " & what &
+            " '" & v & "' must be one path segment of letters, digits, " &
+            "'.', '-' or '_', at most 64 bytes, not starting with '.'")
+      result.profile.secretFiles.add(d)
+      continue
+    result.profile.resources.add(buildSystemResource(r))
+  # The add-on realisation's default hardening (spec §10.1): the same
+  # default the add-on's own parse applies (`parseSystemProfile(...,
+  # addOnDefaults = true)`), so the canonical text a producer compiles for
+  # an add-on host names the floor explicitly.
+  if target.realisation == srAddOnDebian:
+    applyAddOnServiceFloor(result.profile)
+  # Same cross-resource refusal as the text path (`parseSystemProfile`).
+  checkUnitStateConflicts(result.profile.resources)
+  checkPasswdPrimaryGroups(result.profile.resources)
+  checkSecretDeclarations(result.profile)
+  checkStateDirectories(result.profile)
+
+proc profileIntentToSystemProfile*(p: ProfileIntent;
+                                   target: SystemPlanTarget): SystemProfile =
+  ## The resources `target` gets (`adaptSystemProfile`), without the
+  ## projection report.
+  adaptSystemProfile(p, target).profile
 
 proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
-  ## Build a `SystemProfile` value equivalent to what
-  ## `parseSystemProfile(text)` would return for the same logical
-  ## profile. Activities, config, and hosts are no-ops at system scope
-  ## (the M69 parser has no syntax for them — `system.nim` is bare
-  ## resource stanzas).
-  ##
-  ## Mapping:
-  ##   ProfileIntent.resources filtered to system-scope kinds ->
-  ##     seq[SystemResource] with SystemResourceKind tags + per-kind fields.
-  for r in p.resources:
-    if not isSystemScopeResource(r.kind):
-      continue
-    result.resources.add(buildSystemResource(r))
+  ## The resources the running machine gets when no host registry selects
+  ## anything (`defaultSystemPlanTarget`): runtime predicates evaluated for
+  ## this machine, the `default` system activity only, realised in full.
+  profileIntentToSystemProfile(p, defaultSystemPlanTarget())
 
 # ---------------------------------------------------------------------------
 # `SystemProfile -> text` round-tripper.
@@ -710,20 +1132,12 @@ proc profileIntentToSystemProfile*(p: ProfileIntent): SystemProfile =
 # whitespace are not preserved (they have no semantic meaning).
 # ---------------------------------------------------------------------------
 
-proc quoteSystemValue(s: string): string =
-  ## Quote a string for the system-profile text format. The parser
-  ## reads `"..."` literals; backslashes and embedded quotes are
-  ## NOT escaped by the M69 parser (`unquote` strips one surrounding
-  ## pair and stops), so we reject embedded quotes outright — the
-  ## adapter is fed by `ProfileIntent` values whose strings would be
-  ## authored at Nim source level, where embedded quotes already need
-  ## explicit escaping, so this is a structural invariant rather than
-  ## an arbitrary restriction.
-  if '"' in s:
-    raise newException(ValueError,
-      "system-profile string value contains an embedded double quote; " &
-      "the M69 text format cannot represent this verbatim")
-  "\"" & s & "\""
+# Values are quoted with `repro_infra`'s `quoteSystemValue`, the format's
+# one encoder: verbatim, with a `"` doubled. Every string a profile can hold
+# round-trips through it, so YAML, udev rules, unit files with quoted
+# `Environment=` values and shell scripts can be declared inline. (It used
+# to raise on any embedded `"`, which forced such content out of the
+# profile and onto a side channel.)
 
 proc renderListLiteral(items: openArray[string]): string =
   result = "["
@@ -766,6 +1180,23 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
   ## `repro infra apply` integration to feed the existing
   ## `runInfraApply(text, opts)` lib entry point with the
   ## compile-then-adapt output without restructuring the infra lib API.
+  # The profile-wide `addOn` stanza first, as `parseSystemProfile` reads it
+  # anywhere and the editor's renderer puts it first too.
+  if sp.addOn.declared:
+    result.add(AddOnStanzaTag & " {\n  managedEtcPrefixes = " &
+      renderListLiteral(sp.addOn.managedEtcPrefixes) & "\n" &
+      (if sp.addOn.confirmTimeoutSec > 0:
+         "  confirmTimeout = " & $sp.addOn.confirmTimeoutSec & "\n"
+       else: "") & "}\n\n")
+  # The secrets the profile declares (`secrets.secretFile`), each once and
+  # in profile order: they are not resources, but a unit's `credentials`
+  # must name one, and the apply materialises exactly these (spec
+  # ReproOS-Add-On-Mode §10.3). Leaving them out of the text would make a
+  # compiled profile lose every secret its units load.
+  for d in sp.secretFiles:
+    result.add(SecretFileStanzaTag & " {\n  service = " &
+      quoteSystemValue(d.service) & "\n  name = " & quoteSystemValue(d.name) &
+      "\n}\n\n")
   for r in sp.resources:
     var pairs: seq[(string, string)] = @[]
     case r.kind
@@ -861,6 +1292,31 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
       pairs.add(("name", quoteSystemValue(r.suName)))
       pairs.add(("content", quoteSystemValue(r.suContent)))
       pairs.add(("enabled", (if r.suEnabled: "true" else: "false")))
+      if r.suAptClosureLock.len > 0:
+        pairs.add(("aptClosureLock", quoteSystemValue(r.suAptClosureLock)))
+      if r.suRestartHeld:
+        pairs.add(("restartIfChanged", "false"))
+      if r.suCollision.len > 0:
+        pairs.add(("collision", quoteSystemValue(r.suCollision)))
+      if r.suDropInName.len > 0:
+        pairs.add(("dropInName", quoteSystemValue(r.suDropInName)))
+      if r.suStopHeld:
+        pairs.add(("stopOnRemoval", "false"))
+      if r.suReloadIfChanged:
+        pairs.add(("reloadIfChanged", "true"))
+      if r.suExclusive:
+        pairs.add(("exclusive", "true"))
+      if r.suHealthCheck.len > 0:
+        pairs.add(("healthCheck", quoteSystemValue(r.suHealthCheck)))
+      if r.suCredentials.len > 0:
+        pairs.add(("credentials", renderListLiteral(r.suCredentials)))
+      if r.suHardening.len > 0:
+        pairs.add(("hardening", quoteSystemValue(r.suHardening)))
+      if r.suFloorExceptions.len > 0:
+        pairs.add(("floorExceptions", renderListLiteral(r.suFloorExceptions)))
+      if r.suStateDirectories.len > 0:
+        pairs.add(("stateDirectories",
+          renderListLiteral(stateDirectoryEntries(r))))
     of srkLaunchdSystemDaemon:
       pairs.add(("label", quoteSystemValue(r.sdaLabel)))
       pairs.add(("programArgs", renderListLiteral(r.sdaProgramArgs)))
@@ -880,6 +1336,8 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
         pairs.add(("sha256", quoteSystemValue(r.sfSha256)))
       if r.sfSourceLocal.len > 0:
         pairs.add(("sourceLocal", quoteSystemValue(r.sfSourceLocal)))
+      if r.sfCollision.len > 0:
+        pairs.add(("collision", quoteSystemValue(r.sfCollision)))
     of srkFsSystemDirectory:
       pairs.add(("path", quoteSystemValue(r.dirPath)))
       if r.dirAclPresent:
@@ -954,6 +1412,35 @@ proc renderSystemProfileToText*(sp: SystemProfile): string =
     of srkMacosDarwinSystemModule:
       pairs.add(("name", quoteSystemValue(r.darwinModuleName)))
       pairs.add(("content", quoteSystemValue(r.darwinModuleContent)))
+    of srkLinuxDpkgDiversion:
+      pairs.add(("path", quoteSystemValue(r.ddPath)))
+    of srkSystemdUnitState:
+      pairs.add(("name", quoteSystemValue(r.usName)))
+      pairs.add(("enabled", (if r.usEnabled: "true" else: "false")))
+      pairs.add(("state",
+        quoteSystemValue(if r.usRunning: "Running" else: "Stopped")))
+    of srkLinuxAddOnTool:
+      pairs.add(("command", quoteSystemValue(r.atCommand)))
+      pairs.add(("aptClosureLock", quoteSystemValue(r.atAptClosureLock)))
+      pairs.add(("program", quoteSystemValue(r.atProgram)))
+    of srkSystemdSystemDropIn:
+      pairs.add(("unit", quoteSystemValue(r.diUnit)))
+      pairs.add(("name", quoteSystemValue(r.diName)))
+      pairs.add(("content", quoteSystemValue(r.diContent)))
+      if r.diRestartHeld:
+        pairs.add(("restartIfChanged", "false"))
+    of srkLinuxSysusersEntry:
+      pairs.add(("name", quoteSystemValue(r.seName)))
+      pairs.add(("kind", quoteSystemValue(
+        if r.seKind.len > 0: r.seKind else: "user")))
+      if r.seId.len > 0:
+        pairs.add(("id", quoteSystemValue(r.seId)))
+      if r.seDescription.len > 0:
+        pairs.add(("description", quoteSystemValue(r.seDescription)))
+      if r.seHome.len > 0:
+        pairs.add(("home", quoteSystemValue(r.seHome)))
+      if r.seShell.len > 0:
+        pairs.add(("shell", quoteSystemValue(r.seShell)))
     of srkLinuxFhsSandbox:
       pairs.add(("binPath", quoteSystemValue(r.fsbBinPath)))
       pairs.add(("fhsTrees", renderListLiteral(r.fsbFhsTreeRoots)))

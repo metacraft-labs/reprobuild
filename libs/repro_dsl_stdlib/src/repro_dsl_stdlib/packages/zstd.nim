@@ -1,10 +1,26 @@
-## ``zstd`` -- Facebook's Zstandard compressor.
+## ``zstd`` -- Facebook's Zstandard compressor, THE CLI TOOL.
 ##
-## On Linux/macOS the consumer is the recorder build path:
-## ``codetracer_trace_writer_nim``'s build.rs Nim compile step needs
-## ``zstd.h`` on the include path and the final cargo link step needs
-## ``-lzstd``. nix provisioning supplies both via ``nixpkgs#zstd``'s
-## ``dev`` + ``out`` outputs.
+## ## This package is the executable. The headers are ``zstd-dev``.
+##
+## ``nixPackage "nixpkgs#zstd"`` realizes nixpkgs' DEFAULT output, and for
+## this derivation that is ``bin`` -- ``bin/zstd`` and nothing else.
+## ``zstd.h`` lives in the ``dev`` output and ``libzstd`` in ``out``, so a
+## recipe that compiles against the header must declare
+## ``uses: "zstd-dev"`` (``packages/zstd_dev.nim``), which realizes every
+## output. ``uses: "zstd"`` means "I run the zstd binary".
+##
+## This docstring used to say the opposite -- "nix provisioning supplies
+## both via ``nixpkgs#zstd``'s ``dev`` + ``out`` outputs" -- which the
+## provisioning block below has never done. The claim cost three C-stage
+## failures in codetracer's ``ct-binary`` (``zstd_bindings.nim.c``,
+## ``record_chunk.nim.c``, ``span_stream.nim.c``: ``'zstd.h' file not
+## found``) because a declared input whose include directory does not exist
+## is dropped silently by ``repro_tool_profiles.addUniquePath`` rather than
+## refused. ``zstd_dev.nim`` carries the full account.
+##
+## The recorder build path (``codetracer_trace_writer_nim``'s build.rs Nim
+## compile step, plus the cargo link step that needs ``-lzstd``) is a
+## ``zstd-dev`` consumer on Linux/macOS, not a ``zstd`` one.
 ##
 ## On Windows the cargo crate ``zstd-sys`` (a transitive dep through
 ## ``zstd``/``zeekstd``) vendors libzstd from source and builds it with
@@ -45,6 +61,7 @@ package zstd:
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "zstd.exe",
+      version = "1.5.6",
       packageId = "zstd@1.5.6",
       cpu = "x86_64",
       os = "windows",

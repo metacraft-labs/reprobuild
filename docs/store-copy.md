@@ -1,0 +1,79 @@
+# Copying a Store Closure
+
+> **Status:** Draft, not yet reviewed. Implemented by `repro store copy` for a
+> destination that is another local store root. POSIX only.
+
+```
+repro store copy [PREFIX...] [--root-id=ID]... --to=STORE-ROOT
+                 [--store-root=PATH] [--json]
+```
+
+`repro store copy` moves already realized store prefixes from one store root
+into another: a mirror on another disk, a store you will carry to an
+air-gapped machine, or a worker store you want to prewarm. Unlike a store
+bundle (see [store-bundles.md](./store-bundles.md)) it carries store prefixes
+only, writes straight into the destination store, and the destination may
+live at any path.
+
+## What is copied
+
+The source store is the one `--store-root` names (otherwise
+`$REPRO_STORE_ROOT`, otherwise the per-user default).
+
+* A `PREFIX` is a prefix of the source store, given as an absolute path or as
+  `prefixes/<pkg>/<dir>`. A path inside a prefix, such as an installed
+  program, names the prefix that owns it.
+* `--root-id=ID` selects every prefix a registered root holds
+  (`repro store roots` lists them).
+
+A prefix produced as one output of a multi-output package brings its sibling
+outputs along, because its receipt names them. A prefix with a symbolic link
+into another prefix of the store brings that prefix along too, so no copied
+link dangles. Links are followed the way the system follows them, one path
+component at a time, and every prefix the path walks through is brought
+along, even one it enters and leaves again with `..`, because the system
+needs those directories to exist for the link to resolve. A link that leads into the store
+outside any known prefix cannot be carried, and the copy is refused.
+
+## What is checked
+
+Before anything is written, every prefix of the closure is checked in the
+source: its directory and sealed `.repro-receipt` exist, the receipt agrees
+with the index row, the directory name is the one the receipt derives, and
+the directory's content digest is the one the receipt records. The
+destination is checked too: a prefix it indexes at another path or holds
+with different content, a prefix path that a symbolic link leads anywhere
+but to that path in the destination store, or a directory it does not index
+where a prefix would land, is a conflict. Any failure stops the copy with the prefix and the reason, and the
+destination is left as it was.
+
+Each prefix is then copied into the destination's staging area, its digest
+is checked again, and it is renamed into place at the same store-relative
+path. The receipt is copied byte for byte, so the prefix keeps its identity,
+and the source's index row is inserted unchanged. Files are copied, never
+hard-linked, so the destination shares no inodes with the source.
+
+A prefix the destination already has is skipped, so copying the same closure
+twice transfers nothing the second time. "Already has" means the same prefix
+id with the same content, whoever sealed it: a worker store that built the
+prefix itself is prewarmed, not refused. Every prefix of the closure is held
+by a destination root `copy:<closure-id>`, so the destination's
+`repro store gc` keeps it. An existing root is never replaced, and a copy
+that fails part-way leaves everything it found or wrote held.
+
+Neither store may be inside the other (compared after resolving symbolic
+links).
+
+## What the report says
+
+* **unverified**: the receipt records no content digest (an adopted prefix,
+  or one sealed by an older store). The copy was checked against the source
+  tree, but nothing vouches for the source tree itself.
+* **external**: the prefix has a symbolic link whose target lies outside the
+  source store. The link was copied; the content it points at was not.
+
+Absolute paths inside a prefix are not rewritten. A prefix that names its own
+store root works from the destination only where the destination is mounted
+at the source's path.
+
+Exit status: 0 on success, 1 when the copy failed, 2 on a usage error.

@@ -26,6 +26,7 @@ package capnp:
       sha256 = "8b5d72177d3e3ed4808baf43494f871ae05c7ba0bb7db7dcf0e92ba47136a407",
       archiveType = "zip",
       executablePath = "capnproto-tools-win32-1.4.0/capnp.exe",
+      version = "1.4.0",
       packageId = "capnp@1.4.0",
       cpu = "x86_64",
       os = "windows",

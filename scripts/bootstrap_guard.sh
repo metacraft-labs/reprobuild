@@ -133,6 +133,76 @@ binary_format() {
   printf '%s' "unknown"
 }
 
+# True when ``root`` is the top of a git work tree (a linked worktree
+# counts). Only then is the checkout's ignore policy THIS tree's policy: a
+# fixture root that merely sits somewhere below another checkout (a TMPDIR
+# inside a repo, say) must not be judged by that outer repo's .gitignore,
+# which may well ignore the whole fixture and so hide every source in it.
+root_is_git_toplevel() {
+  command -v git >/dev/null 2>&1 || return 1
+  top="$(git -C "$1" rev-parse --show-toplevel 2>/dev/null)" || return 1
+  [ -n "${top}" ] || return 1
+  here="$(cd "$1" && pwd -P)" || return 1
+  there="$(cd "${top}" && pwd -P)" || return 1
+  [ "${here}" = "${there}" ]
+}
+
+# Print the first bootstrap source under ``$1`` that is newer than ``$2``,
+# or nothing.
+#
+# WHAT COUNTS AS A SOURCE. Inside a git checkout: the files git tracks,
+# plus untracked files git does NOT ignore (``ls-files --cached --others
+# --exclude-standard``) -- so a new, not-yet-added source file still counts.
+# Build output does not: every ``build/`` directory is ignored by the
+# top-level ``.gitignore``, so an artefact written under a source root can
+# no longer pass for a newer source. It used to. ``build_lib.sh`` mirrors
+# the HCR agent library into ``libs/repro_hcr_agent/build/lib/`` even when
+# its caller hands it a private output directory, so any test that built
+# that library made the next ``just bootstrap`` relink every app in
+# ``build/bin`` underneath whatever was running from it.
+#
+# Outside git (an exported tarball, a test fixture) there is no ignore
+# policy to consult, so the plain ``find`` is the fallback, with the one
+# graph-owned output directory known to live under the roots pruned: the
+# native HCR producer bootstraps its engine BEFORE writing those outputs,
+# and counting them would bootstrap all apps again on the next library
+# request. Its canonical ``c/`` source tree stays in the scan either way.
+newer_bootstrap_source() {
+  src_root="$1"
+  src_target="$2"
+  existing=""
+  for entry in ${BOOTSTRAP_SOURCE_ROOTS}; do
+    if [ -e "${src_root}/${entry}" ]; then
+      existing="${existing} ${entry}"
+    fi
+  done
+  [ -n "${existing}" ] || return 0
+
+  if root_is_git_toplevel "${src_root}"; then
+    # shellcheck disable=SC2086
+    git -C "${src_root}" ls-files -z --cached --others --exclude-standard \
+        -- ${existing} 2>/dev/null |
+      while IFS= read -r -d '' rel; do
+        # --cached also lists tracked files deleted from the work tree.
+        if [ -f "${src_root}/${rel}" ] &&
+            [ "${src_root}/${rel}" -nt "${src_target}" ]; then
+          printf '%s\n' "${src_root}/${rel}"
+          break
+        fi
+      done
+    return 0
+  fi
+
+  rooted=""
+  for entry in ${existing}; do
+    rooted="${rooted} ${src_root}/${entry}"
+  done
+  # shellcheck disable=SC2086
+  find ${rooted} \
+    -path "${src_root}/libs/repro_hcr_agent/build" -prune -o \
+    -type f -newer "${src_target}" -print -quit 2>/dev/null || true
+}
+
 decide() {
   root="${1:-.}"
   suffix="$(host_exe_suffix)"
@@ -172,20 +242,11 @@ decide() {
     return 0
   fi
 
-  existing=""
-  for entry in ${BOOTSTRAP_SOURCE_ROOTS}; do
-    if [ -e "${root}/${entry}" ]; then
-      existing="${existing} ${root}/${entry}"
-    fi
-  done
-  if [ -n "${existing}" ]; then
-    # shellcheck disable=SC2086
-    newer="$(find ${existing} -type f -newer "${target}" -print -quit 2>/dev/null || true)"
-    if [ -n "${newer}" ]; then
-      printf 'bootstrap stale:%s newer than build/bin/repro%s\n' \
-        "${newer#"${root}/"}" "${suffix}"
-      return 0
-    fi
+  newer="$(newer_bootstrap_source "${root}" "${target}")"
+  if [ -n "${newer}" ]; then
+    printf 'bootstrap stale:%s newer than build/bin/repro%s\n' \
+      "${newer#"${root}/"}" "${suffix}"
+    return 0
   fi
 
   printf 'skip fresh:build/bin/repro%s is %s and newer than its sources\n' \

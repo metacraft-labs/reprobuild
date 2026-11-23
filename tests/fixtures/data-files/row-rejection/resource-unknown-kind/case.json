@@ -1,0 +1,1 @@
+{ "description": "Only home-scope constructors with plain-data parameters can be rows; system-scope kinds are refused.", "error": ["resource row 1", "`kind`", "not a resource kind a data row can declare"] }

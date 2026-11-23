@@ -1,0 +1,1105 @@
+## The deploy agent on an add-on host, split across two units (spec §9.1):
+##
+##   repro system addon agent-fetch   (``repro-agent-fetch.service``)
+##       Unprivileged (a dynamic user, no capabilities, egress to the pinned
+##       origins only). Polls, decodes, verifies and selects a manifest;
+##       compiles its profile when it ships as source; substitutes every
+##       build action's outputs from the cache, trusting only the bootstrap
+##       anchors; downloads every ``.deb`` an apt closure lock names; and
+##       publishes all of it as one staging directory. It never reads the
+##       recipient key or the sequence floor and never writes outside its
+##       state directory.
+##   repro system addon agent-apply   (``repro-agent-apply.service``)
+##       Root, with no network. Copies the newest staging directory into
+##       its own directory through ``O_NOFOLLOW`` descriptors and from then
+##       on reads only that copy. Runs the whole agent tick again over the
+##       copied envelope -- signature, anchors, the v3 attestation block,
+##       freshness, pause, sequence floor, quarantine -- re-checks the
+##       compiled profile, verifies each staged output against the digest
+##       the signed manifest pins, moves it into ``/repro/store`` and runs
+##       the switch.
+##   repro system addon agent-tick --source S...
+##       The single-process tick A7 introduced, kept for operators and
+##       tests: the same apply, over a manifest it reads itself. It
+##       compiles nothing and takes no staged outputs.
+##   repro system addon resume
+##       Clear the pause an operator's ``repro system rollback`` set
+##       (spec §9.3).
+##
+## Everything the fetch unit produces is untrusted input to the apply
+## unit: the fetch unit is the network-facing half, and a compromise of it
+## must yield at most what the signed manifest already allows.
+
+import std/[algorithm, json, os, posix, strutils, tables, times]
+
+import repro_core/host_apply_lock
+import repro_infra
+import repro_infra/addon_diagnostics
+import repro_infra/profile
+import repro_profile
+import repro_profile_compile/binary_cache_build_actions
+import repro_dsl_stdlib/packages/apt_closure
+import repro_peer_cache/auth as peerAuth
+
+import repro_deploy_agent/agent
+import repro_deploy_agent/manifest
+import repro_deploy_agent/profile_stage
+import repro_deploy_agent/tick_record
+import repro_deploy_agent/tick_status
+
+import ./addon_apply
+import ./addon_secrets
+import ./agent_checks
+import ./agent_record
+import ./agent_switch
+import ./contain_marker
+import repro_local_store/store
+import ./store_custody
+import ./apt_hook
+import ./evidence
+import ./evidence_ship
+import ./tick_evidence
+import ./fingerprint
+import ./generation0
+import ./host_exec
+import ./ledger
+import ./mutations
+import ./verified_compile
+
+export agent_checks, verified_compile, tick_evidence
+import ./preflight
+import ./seams
+import ./secrets_ops
+import ./store_root
+
+type
+  AgentConf* = object
+    ## ``/etc/repro/agent.conf`` (``generation0.renderAgentConf``).
+    target*: string
+    sources*: seq[string]
+    profileCompiler*: string
+
+  EAgentStaging* = object of CatchableError
+    ## The staging area cannot be copied as the apply unit requires.
+
+const
+  StagingLatestName* = "latest"
+  StagingResultName* = "result"
+  StagedManifestName* = "manifest.rdm"
+  StagedCanonicalName* = "profile.canonical"
+  StagedActionsName* = "actions.json"
+  StagedCompilerRevisionName* = "compiler.revision"
+    ## The fetch unit's compiler's own revision (untrusted, diagnostic: it
+    ## names the cause of a mismatch, the digest decides).
+  StagedOutputsDir* = "outputs"
+  StagedDebsDir* = "debs"
+  StagedUnservedName* = "unserved"
+    ## In ``StagedDebsDir``: the staged names of the archives the archive
+    ## answered 404/410 for, one per line.
+  StagedNotesName* = "notes"
+  ApplyCopyDirName* = "apply"
+  MaxStagedBytes* = 8'i64 * 1024 * 1024 * 1024
+    ## The largest staging area the apply unit copies; more is refused.
+  MaxStagedDepth* = 64
+  CompileTimeoutSec* = 1800
+
+# ---------------------------------------------------------------------------
+# Configuration.
+# ---------------------------------------------------------------------------
+
+proc parseAgentConf*(text: string): AgentConf =
+  ## ``key = value`` lines; ``#`` comments (any bytes, UTF-8 included);
+  ## ``source`` repeats. A leading UTF-8 byte-order mark is skipped.
+  let text = if text.startsWith("\xEF\xBB\xBF"): text[3 .. ^1] else: text
+  for raw in text.splitLines():
+    let line = raw.strip()
+    if line.len == 0 or line[0] == '#': continue
+    let eq = line.find('=')
+    if eq <= 0:
+      raise newException(ValueError, AgentConfPath & ": not key = value: " & line)
+    let (k, v) = (line[0 ..< eq].strip(), line[eq + 1 .. ^1].strip())
+    case k
+    of "target": result.target = v
+    of "source": result.sources.add(v)
+    of "profile-compiler": result.profileCompiler = v
+    else:
+      raise newException(ValueError, AgentConfPath & ": unknown key " & k)
+  if result.target.len == 0 or result.sources.len == 0:
+    raise newException(ValueError, AgentConfPath &
+      " names no target or no source")
+
+proc loadAgentConf*(path = AgentConfPath): AgentConf =
+  if not fileExists(path):
+    raise newException(ValueError, path & " is absent: this host was " &
+      "bootstrapped without a deploy agent (--target, --manifest)")
+  parseAgentConf(readFile(path))
+
+proc applyStagingRoot*(): string =
+  ## Where the apply unit reads the staging area: the dynamic user's real
+  ## state directory, not the ``/var/lib/<name>`` link systemd keeps to it.
+  let priv = "/var/lib/private" / AgentFetchStateName / "staging"
+  if dirExists(priv): priv else: "/var/lib" / AgentFetchStateName / "staging"
+
+proc fetchStagingRoot*(): string =
+  ## The fetch unit's staging area: under its ``StateDirectory=``
+  ## (``$STATE_DIRECTORY`` in the unit), else the path the apply unit
+  ## reads.
+  let sd = getEnv("STATE_DIRECTORY")
+  (if sd.len > 0: sd.split(':')[0] else: "/var/lib" / AgentFetchStateName) /
+    "staging"
+
+proc applyCopyDir*(): string = AgentDir / ApplyCopyDirName
+
+proc actionsToJson*(actions: seq[ProfileBuildAction]): string = $(%actions)
+
+proc actionsFromJson*(text: string): seq[ProfileBuildAction] =
+  to(parseJson(text), seq[ProfileBuildAction])
+
+proc stagedDebName*(url: string): string =
+  ## The file a ``.deb`` is staged under: the SHA-256 of its URL, so the
+  ## name carries nothing the archive chose.
+  sha256Hex(url) & ".deb"
+
+# ---------------------------------------------------------------------------
+# The fetch unit.
+# ---------------------------------------------------------------------------
+
+type FetchReport* = object
+  kind*: string        ## an agent outcome name, or "staged"
+  message*: string
+  stagingDir*: string
+
+proc writeResult(dir, kind, message, errorCode: string) =
+  writeFile(dir / StagingResultName, kind & "\n" & errorCode & "\n" &
+    message.replace('\n', ' ') & "\n")
+
+proc publishStaging(root, dir: string): string =
+  ## Rename the finished ``dir`` into place and point ``latest`` at it
+  ## (written beside and renamed, so a reader sees the old name or the new
+  ## one); older staging directories are removed.
+  let name = format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
+             $getTime().nanosecond & "-" & $getCurrentProcessId()
+  result = root / name
+  moveDir(dir, result)
+  let tmp = root / (".latest-" & $getCurrentProcessId())
+  writeFile(tmp, name & "\n")
+  moveFile(tmp, root / StagingLatestName)
+  for kind, p in walkDir(root):
+    if kind == pcDir and p != result and not extractFilename(p).startsWith("."):
+      try: removeDir(p) except CatchableError: discard
+
+proc runProfileCompiler*(argv: openArray[string];
+                         timeoutSec = CompileTimeoutSec): HostToolResult =
+  ## Run the fetch unit's profile compiler. Its ``PATH`` is the one
+  ## bootstrap's preflight probed (``ProfileCompilePath``, §13 decision 31),
+  ## not the host tools' narrower one: the C compiler Nim runs is found
+  ## through it, so the probe and the compile agree on whether there is
+  ## one.
+  runHostTool(argv, timeoutSec = timeoutSec, path = ProfileCompilePath)
+
+proc compileProfile(conf: AgentConf; m: DeployManifest;
+                    dir, workspace: string): string =
+  ## Run the configured profile compiler over the staged source as this
+  ## (unprivileged) process; "" when it produced ``profile.canonical`` and
+  ## ``actions.json``, else why not. Refused outright as root: compiling
+  ## runs code the profile's macros choose, which the fetch unit's dynamic
+  ## user may do and root never does (threat model F2, G25).
+  if geteuid() == 0:
+    return "refusing to compile a profile as root: only the unprivileged " &
+      "fetch unit compiles (spec §9.1)"
+  if conf.profileCompiler.len == 0:
+    return "the manifest's profile is source and this host has no " &
+      "profile-compiler configured in " & AgentConfPath
+  # The compile works in its own scratch directory, never in the staging
+  # area (only the compiler's two outputs are handed over), and the dynamic
+  # user has no home, so the compiler's caches go there too.
+  let module = stageProfileSources(workspace / "source", m.profileText,
+                                   m.profileFiles)
+  for v in ["HOME", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME"]:
+    putEnv(v, workspace / "home")
+  createDir(workspace / "home")
+  let argv = @[conf.profileCompiler, "deploy-agent", "compile-profile",
+    "--staged", module, "--canonical-out", dir / StagedCanonicalName,
+    "--actions-out", dir / StagedActionsName,
+    "--state-dir", workspace / "state",
+    "--revision-out", dir / StagedCompilerRevisionName] & compileFactArgs(m)
+  let r = runProfileCompiler(argv)
+  if r.exitCode != 0:
+    return "the profile compiler failed (exit " & $r.exitCode & "): " &
+      r.output.strip()
+  if not fileExists(dir / StagedCanonicalName):
+    return "the profile compiler wrote no canonical text"
+  ""
+
+proc stageOutputs(m: DeployManifest; actions: seq[ProfileBuildAction];
+                  dir, scratch: string; notes: var seq[string]) =
+  ## Substitute every action's outputs into ``dir/outputs/<n>/`` from the
+  ## caches ``caches.conf`` names, each with exactly the publisher keys it
+  ## lists (default-untrusted), and each bound to the digest the signed
+  ## manifest pins: a trusted publisher's archive with other bytes is a
+  ## miss, never staged.
+  let pinned = pinActionsToClosureDigests(m, actions)
+  if pinned.refusal.len > 0:
+    notes.add("closure digests: " & pinned.refusal)
+    return
+  var cfg = resolveBuildActionCacheConfig()
+  when mutated("agent-substitutes-untrusted"):
+    # An endpoint list with no trusted keys and trust enforcement off: the
+    # apply path before reprobuild 1c2752eef9.
+    for e in cfg.endpoints.mitems:
+      e.enforceTrust = false
+      e.trustedSigners = @[]
+  for i, a in pinned.actions:
+    var b = a
+    b.cwd = dir / StagedOutputsDir / $i
+    createDir(b.cwd)
+    let r = trySubstituteBuildAction(b, cfg, scratch)
+    if not r.hit:
+      notes.add("action " & a.id & ": not staged: " & r.reason)
+
+proc debNeedsStaging*(lock: AptClosureLock; d: AptLockedDeb;
+                      storeRoot = StoreRoot): bool =
+  ## Whether the apply unit will need ``d``'s archive: not when its
+  ## closure is realised, nor when the member is already published at its
+  ## store path. (An older realiser's prefix of it does not count: the
+  ## archive is the source whenever it is served, threat model C20.) The
+  ## store is world-readable, so the fetch unit's dynamic user decides this
+  ## itself.
+  ##
+  ## A member whose prefix is gone needs its archive WHATEVER the union's
+  ## state: the add-on's custody moves an altered member aside and realises
+  ## it again from that archive (A11 review finding 1).
+  when mutated("fetch-skips-missing-member"):
+    not aptClosureRealised(storeRoot, lock) and
+      not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+  else:
+    not fileExists(aptDebPrefixPath(storeRoot, d) / ".repro-apt-deb")
+
+proc stageDebs(canonical: string; dir: string; notes: var seq[string];
+               storeRoot = StoreRoot) =
+  ## Download each ``.deb`` an apt closure lock in ``canonical`` names that
+  ## the apply unit will need (``debNeedsStaging``) into ``dir/debs``,
+  ## verified against the lock (the apply unit verifies its copy again:
+  ## these bytes are untrusted to it). Before, every member of every lock
+  ## was downloaded on every tick, realised or not -- on rpi2 its 185
+  ## archives every five minutes, twice copied, on the filesystem its own
+  ## services write to.
+  var prof: SystemProfile
+  try: prof = parseSystemProfile(canonical)
+  except CatchableError: return
+  let fetch = httpDebFetcher()
+  for r in prof.resources:
+    # A unit's closure and an operator tool's (`linux.addOnTool`): the
+    # apply unit realises both from these copies.
+    let lockText =
+      if r.kind == srkSystemdSystemUnit: r.suAptClosureLock
+      elif r.kind == srkLinuxAddOnTool: r.atAptClosureLock
+      else: ""
+    if lockText.len == 0: continue
+    let lock = parseAptClosureLock(lockText)
+    for d in lock.debs:
+      if not debNeedsStaging(lock, d, storeRoot): continue
+      let url = debUrl(lock, d)
+      let dest = dir / StagedDebsDir / stagedDebName(url)
+      if fileExists(dest): continue
+      createDir(parentDir(dest))
+      try:
+        fetch(url, dest, d.size)
+        if sha256Hex(readFile(dest)) != d.sha256:
+          removeFile(dest)
+          notes.add(d.name & ": the download does not match the lock")
+      except EAptDebUnserved as e:
+        # The archive's own answer that it does not serve it: the one case
+        # the apply may stand an older realiser's prefix in (C20).
+        try: removeFile(dest) except CatchableError: discard
+        let f = dir / StagedDebsDir / StagedUnservedName
+        writeFile(f, (if fileExists(f): readFile(f) else: "") &
+          stagedDebName(url) & "\n")
+        notes.add(d.name & ": " & e.msg)
+      except CatchableError as e:
+        try: removeFile(dest) except CatchableError: discard
+        notes.add(d.name & ": " & e.msg)
+
+proc runAgentFetch*(conf: AgentConf; anchors: TrustAnchors;
+                    stagingRoot: string; deps: AgentDeps;
+                    fetchTimeoutMs = 30_000): FetchReport =
+  ## One fetch: select, stage and publish (see the module header).
+  createDir(stagingRoot)
+  # One fetch runs at a time (one unit); a build directory another one left
+  # (killed mid-download) is garbage, and holds downloaded archives.
+  for kind, p in walkDir(stagingRoot):
+    if kind == pcDir and extractFilename(p).startsWith(".build-"):
+      try: removeDir(p) except CatchableError: discard
+  let dir = stagingRoot / (".build-" & $getCurrentProcessId())
+  if dirExists(dir): removeDir(dir)
+  createDir(dir)
+  let cfg = AgentConfig(target: conf.target, sources: conf.sources,
+    anchors: anchors, fetchTimeoutMs: fetchTimeoutMs)
+  let sel = selectManifest(cfg, deps)
+  # Test seam (seam builds only): the gates observe the fetch unit from
+  # inside its control group while it is paused here.
+  seamPause(stagingRoot.parentDir, "agent-fetch-after-select")
+  if not sel.found:
+    writeResult(dir, $sel.outcome.kind, sel.outcome.message,
+                sel.outcome.errorCode)
+    result = FetchReport(kind: $sel.outcome.kind, message: sel.outcome.message)
+    result.stagingDir = publishStaging(stagingRoot, dir)
+    return
+  var bytes = newString(sel.bytes.len)
+  for i, b in sel.bytes: bytes[i] = char(b)
+  writeFile(dir / StagedManifestName, bytes)
+  let m = sel.manifest
+  var notes: seq[string]
+  var canonical = m.profileText
+  var actions = m.buildActions
+  if not isCanonicalProfileText(m.profileText):
+    # The compile works under the unit's state directory, so its caches
+    # (the compiled profile binary, the nimcache) survive to the next tick
+    # and an unchanged profile is not compiled again. systemd mounts a
+    # DynamicUser unit's StateDirectory= noexec (measured on Debian 13,
+    # systemd 257), and the compile runs the binary it links; the unit
+    # therefore names this directory in ExecPaths= (generation0
+    # `agentFetchUnit`), and the compile refuses a noexec state directory
+    # by name rather than failing on the exec.
+    let workspace = stagingRoot.parentDir / AgentCompileDirName
+    # The staged sources are rebuilt on every tick (`stageProfileSources`);
+    # only the compiler's state persists. A profile no pin can vouch for is
+    # not compiled at all (``compiledProfilePrecheck``): the apply unit
+    # refuses it whatever the compile emits.
+    let early = compiledProfilePrecheck(m)
+    let why = if early.len > 0: early
+              else: compileProfile(conf, m, dir, workspace)
+    if why.len > 0:
+      notes.add("profile: " & why)
+      canonical = ""
+    else:
+      canonical = readFile(dir / StagedCanonicalName)
+      if actions.len == 0 and fileExists(dir / StagedActionsName):
+        actions = actionsFromJson(readFile(dir / StagedActionsName))
+  if actions.len > 0:
+    stageOutputs(m, actions, dir, stagingRoot.parentDir / "substitute", notes)
+  if canonical.len > 0:
+    stageDebs(canonical, dir, notes)
+  if notes.len > 0:
+    writeFile(dir / StagedNotesName, notes.join("\n") & "\n")
+  result = FetchReport(kind: "staged",
+    message: "sequence " & $m.sequence & " (" & m.deploymentId & ")" &
+      (if notes.len > 0: "; " & notes.join("; ") else: ""))
+  result.stagingDir = publishStaging(stagingRoot, dir)
+
+# ---------------------------------------------------------------------------
+# The hand-off: copying the staging area by descriptor.
+# ---------------------------------------------------------------------------
+
+var
+  AtFdCwd {.importc: "AT_FDCWD", header: "<fcntl.h>".}: cint
+  ONoFollow {.importc: "O_NOFOLLOW", header: "<fcntl.h>".}: cint
+  ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+  OCloExec {.importc: "O_CLOEXEC", header: "<fcntl.h>".}: cint
+  ONonBlockFlag {.importc: "O_NONBLOCK", header: "<fcntl.h>".}: cint
+  AtSymlinkNoFollow {.importc: "AT_SYMLINK_NOFOLLOW", header: "<fcntl.h>".}: cint
+
+proc c_openat(dirfd: cint; path: cstring; flags: cint; mode: Mode): cint
+  {.importc: "openat", header: "<fcntl.h>", varargs.}
+proc c_fstatat(dirfd: cint; path: cstring; st: var Stat; flags: cint): cint
+  {.importc: "fstatat", header: "<sys/stat.h>".}
+proc c_fdopendir(fd: cint): ptr DIR {.importc: "fdopendir", header: "<dirent.h>".}
+
+const StagingCopyChunk = 65536
+  ## The staging copy reads and writes in chunks of this size, so its
+  ## memory does not grow with the size of a staged file (spec §9.1).
+
+proc openStagedNoFollow*(dirfd: cint; name: string; dir: bool): cint =
+  ## Open ``name`` relative to ``dirfd`` for the staging copy: never
+  ## following a link (``O_NOFOLLOW``), and never blocking. The fetch unit
+  ## owns the staging area and can swap an entry between the copy's
+  ## ``fstatat`` and this open; a FIFO swapped in would block a plain
+  ## ``O_RDONLY`` open until a writer appeared, stalling every later tick.
+  ## So the open carries ``O_NONBLOCK`` (a FIFO then opens at once, and a
+  ## regular file or directory ignores the flag), and the type is checked
+  ## again on the descriptor: anything but the expected directory or
+  ## regular file is refused. The caller owns the descriptor.
+  var flags = O_RDONLY or ONoFollow or OCloExec or
+              (if dir: ODirectory else: 0)
+  when not mutated("agent-staging-open-blocks"):
+    flags = flags or ONonBlockFlag
+  result = c_openat(dirfd, name.cstring, flags, 0.Mode)
+  if result < 0:
+    raise newException(EAgentStaging, "cannot open " & name & " in the " &
+      "staging area without following a link: " & osErrorMsg(osLastError()))
+  when not mutated("agent-staging-open-blocks"):
+    var st: Stat
+    let ok = fstat(result, st) == 0 and
+             (if dir: S_ISDIR(st.st_mode) else: S_ISREG(st.st_mode))
+    if not ok:
+      discard posix.close(result)
+      raise newException(EAgentStaging, name & " in the staging area is " &
+        "not a " & (if dir: "directory" else: "regular file") &
+        " once opened (it was replaced); refused")
+
+proc openNoFollow(dirfd: cint; name: string; dir: bool): cint =
+  openStagedNoFollow(dirfd, name, dir)
+
+proc readAllFd(fd: cint; limit: int64): string =
+  ## A small staged file read whole (the latest pointer); bounded by
+  ## ``limit``.
+  var buf = newString(StagingCopyChunk)
+  while true:
+    let n = posix.read(fd, addr buf[0], buf.len)
+    if n < 0:
+      raise newException(EAgentStaging, "read failed: " &
+        osErrorMsg(osLastError()))
+    if n == 0: break
+    result.add(buf[0 ..< n])
+    if result.len.int64 > limit:
+      raise newException(EAgentStaging, "the staging area exceeds " &
+        $MaxStagedBytes & " bytes")
+
+proc streamCopyFd(src: cint; dest: string; mode: int; budget: var int64) =
+  ## Copy the open regular file ``src`` to the new file ``dest`` in
+  ## ``StagingCopyChunk`` pieces, charging each piece to ``budget`` (the
+  ## whole staging area's byte limit); ``dest`` is created exclusively,
+  ## without following a link, with ``mode``'s permission bits, and
+  ## fsynced. Memory stays one chunk whatever the file's size.
+  let outFd = posix.open(dest.cstring,
+    O_WRONLY or O_CREAT or O_EXCL or ONoFollow or OCloExec, 0o600.Mode)
+  if outFd < 0:
+    raise newException(EAgentStaging, "cannot create the copy " & dest &
+      ": " & osErrorMsg(osLastError()))
+  var ok = false
+  try:
+    var buf = newString(StagingCopyChunk)
+    while true:
+      let n = posix.read(src, addr buf[0], buf.len)
+      if n < 0:
+        raise newException(EAgentStaging, "read failed: " &
+          osErrorMsg(osLastError()))
+      if n == 0: break
+      budget -= n.int64
+      if budget < 0:
+        raise newException(EAgentStaging, "the staging area exceeds " &
+          $MaxStagedBytes & " bytes")
+      var off = 0
+      while off < n:
+        let w = posix.write(outFd, addr buf[off], n - off)
+        if w <= 0:
+          raise newException(EAgentStaging, "cannot write the copy " & dest &
+            ": " & osErrorMsg(osLastError()))
+        off += w
+    if fchmod(outFd, Mode(mode)) != 0 or fsync(outFd) != 0:
+      raise newException(EAgentStaging, "cannot finish the copy " & dest &
+        ": " & osErrorMsg(osLastError()))
+    ok = true
+  finally:
+    discard posix.close(outFd)
+    if not ok:
+      try: removeFile(dest) except CatchableError: discard
+
+proc copyTreeFd(srcFd: cint; dest: string; depth: int; budget: var int64) =
+  if depth > MaxStagedDepth:
+    raise newException(EAgentStaging, "the staging area is nested deeper " &
+      "than " & $MaxStagedDepth)
+  createDir(dest)
+  let dupFd = posix.dup(srcFd)
+  let d = c_fdopendir(dupFd)
+  if d == nil:
+    discard posix.close(dupFd)
+    raise newException(EAgentStaging, "cannot list a staging directory: " &
+      osErrorMsg(osLastError()))
+  defer: discard closedir(d)
+  while true:
+    let ent = readdir(d)
+    if ent == nil: break
+    let name = $cast[cstring](addr ent.d_name)
+    if name == "." or name == "..": continue
+    var st: Stat
+    if c_fstatat(srcFd, name.cstring, st, AtSymlinkNoFollow) != 0:
+      raise newException(EAgentStaging, "cannot stat " & name & ": " &
+        osErrorMsg(osLastError()))
+    if S_ISDIR(st.st_mode):
+      let sub = openNoFollow(srcFd, name, dir = true)
+      try: copyTreeFd(sub, dest / name, depth + 1, budget)
+      finally: discard posix.close(sub)
+      # Its own permission bits, after its entries are written (the owner
+      # keeps write access to a directory while it is being filled).
+      if chmod((dest / name).cstring, Mode(st.st_mode.int and 0o777)) != 0:
+        raise newException(EAgentStaging, "cannot set the mode of the copy " &
+          "of " & name & ": " & osErrorMsg(osLastError()))
+    elif S_ISREG(st.st_mode):
+      let fd = openNoFollow(srcFd, name, dir = false)
+      try:
+        var st2: Stat
+        if fstat(fd, st2) != 0 or not S_ISREG(st2.st_mode):
+          raise newException(EAgentStaging, name & " is not a regular file")
+        # The permission bits are kept (never set-id or sticky): a staged
+        # output's archive digest covers them, and the copy must hash to
+        # the same pin the fetch unit's bytes were checked against.
+        when mutated("agent-staging-reads-whole-file"):
+          # Falsifying build: the whole file in memory before the write.
+          let data = readAllFd(fd, budget)
+          budget -= data.len.int64
+          writeFileAtomic(dest / name, data, st2.st_mode.int and 0o777)
+        else:
+          streamCopyFd(fd, dest / name, st2.st_mode.int and 0o777, budget)
+      finally: discard posix.close(fd)
+    else:
+      # A symbolic link, a device, a FIFO: nothing the fetch unit has a
+      # reason to stage, and each a way to make the apply read elsewhere.
+      raise newException(EAgentStaging, "the staging area holds " & name &
+        ", which is neither a directory nor a regular file; refused")
+
+proc copyLatestStaging*(stagingRoot, dest: string): string =
+  ## Copy the newest complete staging directory into ``dest`` (emptied
+  ## first, ``0700``), opening every component relative to its parent's
+  ## descriptor with ``O_NOFOLLOW``; return its name. Afterwards nothing
+  ## reads the staging area again (threat model T38, G33).
+  if dirExists(dest): removeDir(dest)
+  createDir(parentDir(dest))
+  createDir(dest)
+  setFilePermissions(dest, {fpUserRead, fpUserWrite, fpUserExec})
+  let rootFd = c_openat(AtFdCwd, stagingRoot.cstring,
+    O_RDONLY or ONoFollow or ODirectory or OCloExec, 0.Mode)
+  if rootFd < 0:
+    raise newException(EAgentStaging, "cannot open the staging area " &
+      stagingRoot & ": " & osErrorMsg(osLastError()))
+  defer: discard posix.close(rootFd)
+  let lfd = openNoFollow(rootFd, StagingLatestName, dir = false)
+  var name = ""
+  try: name = readAllFd(lfd, 4096).strip()
+  finally: discard posix.close(lfd)
+  if name.len == 0 or '/' in name or name.startsWith("."):
+    raise newException(EAgentStaging, "the staging area's latest pointer " &
+      "is malformed: '" & name & "'")
+  let dfd = openNoFollow(rootFd, name, dir = true)
+  defer: discard posix.close(dfd)
+  var budget = MaxStagedBytes
+  copyTreeFd(dfd, dest, 0, budget)
+  name
+
+# ---------------------------------------------------------------------------
+# The apply.
+# ---------------------------------------------------------------------------
+
+proc stagedAptFetcher(copyDir: string): AptDebFetcher =
+  ## The apply unit's ``.deb`` source: its own copy of what the fetch unit
+  ## staged, never the network. A member that was not staged fails the
+  ## apply; the realiser verifies every member against the lock.
+  result = proc (url: string; dest: string; expectedSize: int64) =
+    let src = copyDir / StagedDebsDir / stagedDebName(url)
+    if not fileExists(src):
+      let unserved = copyDir / StagedDebsDir / StagedUnservedName
+      if fileExists(unserved) and
+          stagedDebName(url) in readFile(unserved).splitLines():
+        raise newException(EAptDebUnserved, url & " is not served by the " &
+          "archive (the fetch unit's answer)")
+      raise newException(IOError, url & " was not staged by the fetch " &
+        "unit, and the apply unit has no network")
+    if getFileSize(src) > expectedSize:
+      raise newException(IOError, url & ": the staged file is larger than " &
+        "the lock's size")
+    copyFile(src, dest)
+
+proc stagedOutputsTree(copyDir: string;
+                       group: openArray[tuple[i: int; a: ProfileBuildAction]];
+                       dst: string) =
+  ## ``dst`` holding exactly the declared outputs of the actions in
+  ## ``group`` (one ``cwd``), copied from the staged copy: what the store
+  ## object at that ``cwd`` must hold, and nothing else.
+  removeDir(dst)
+  createDir(dst)
+  for (i, a) in group:
+    let src = copyDir / StagedOutputsDir / $i
+    when mutated("agent-install-copies-undeclared"):
+      var rels: seq[string]
+      for kind, p in walkDir(src, relative = true): rels.add(p)
+    else:
+      let rels = outputRelPaths(a)
+    for rel in rels:
+      let p = src / rel
+      let d = dst / rel
+      createDir(parentDir(d))
+      if dirExists(p): copyDirWithPermissions(p, d)
+      elif fileExists(p): copyFileWithPermissions(p, d)
+
+proc installStagedOutputs*(m: DeployManifest; actions: seq[ProfileBuildAction];
+                           copyDir: string; storeRoot = StoreRoot;
+                           custody = custodySite(DefaultStateDir)) =
+  ## Verify each action's staged outputs against the digest the signed
+  ## manifest pins, BEFORE anything is moved into the store, linked or
+  ## named in a unit; then copy exactly those declared outputs -- nothing
+  ## else the staging directory holds -- under the action's ``cwd`` in the
+  ## store, through the private writable view. Raises on the first
+  ## refusal, mismatch or missing output; nothing is written before every
+  ## action has passed.
+  ##
+  ## Custody (spec §13 decisions 47, 48): the store object at a ``cwd``
+  ## must hold exactly its declared outputs, and its digest -- computed
+  ## from the staged, pin-verified bytes -- goes into the realisation
+  ## index. One that holds other bytes is another's and is refused, as
+  ## before, UNLESS the index (or a ledger) records that this path was
+  ## realised with exactly these outputs: then it is an altered copy of
+  ## them, moved into the evidence directory and installed again from the
+  ## pinned outputs, with a DET-AO-5 record.
+  let pinned = pinActionsToClosureDigests(m, actions)
+  if pinned.refusal.len > 0:
+    raise newException(AddonApplyError, "closure digests: " & pinned.refusal)
+  for i, a in pinned.actions:
+    let bad = stagedCwdRefusal(a.cwd, storeRoot)
+    if bad.len > 0:
+      raise newException(AddonApplyError, "build action " & a.id &
+        " may not materialise there: " & bad & "; nothing was written")
+    var staged = a
+    staged.cwd = copyDir / StagedOutputsDir / $i
+    let refusal = closureDigestRefusal(m, a.id, localOutputsDigest(staged))
+    if refusal.len > 0:
+      raise newException(AddonApplyError, refusal & "; nothing of it was " &
+        "moved into the store")
+  # One store object per cwd, holding the outputs of every action there.
+  var groups = initOrderedTable[string, seq[tuple[i: int; a: ProfileBuildAction]]]()
+  for i, a in pinned.actions:
+    groups.mgetOrPut(a.cwd, @[]).add((i, a))
+  let expectedAll = expectedDigests(custody)
+  let scratch = copyDir / ".custody"
+  var plan: seq[tuple[cwd, digest, tree: string; recover: bool;
+                     observed: string]]
+  var n = 0
+  for cwd, group in groups:
+    let tree = scratch / $n
+    inc n
+    stagedOutputsTree(copyDir, group, tree)
+    let digest = storeTreeDigest(tree)
+    if dirExists(cwd) or fileExists(cwd) or symlinkExists(cwd):
+      let observed = if dirExists(cwd): storeTreeDigest(cwd) else: "(not a directory)"
+      if observed == digest:
+        plan.add((cwd, digest, tree, false, observed))
+        continue
+      # Other bytes than these outputs. Recovered only when this very path
+      # was realised with them before; otherwise it is not ours to replace.
+      if expectedAll.getOrDefault(cwd, "") == digest and dirExists(cwd):
+        plan.add((cwd, digest, tree, true, observed))
+        continue
+      raise newException(AddonApplyError, cwd & " already holds outputs " &
+        "that do not hash to " & group[0].a.id & "'s pin; refusing to " &
+        "overwrite them")
+    plan.add((cwd, digest, tree, false, ""))
+  defer: removeDir(scratch)
+  for (cwd, digest, tree, recover, observed) in plan:
+    if storeRoot == StoreRoot: enterWritableStoreView()
+    var entry = ""
+    if recover:
+      entry = preserveEvidence(custody, cwd, digest, observed,
+        "altered; re-installed from the signed manifest's pinned outputs")
+    if not dirExists(cwd):
+      createDir(parentDir(cwd))
+      copyDirWithPermissions(tree, cwd)
+    if storeTreeDigest(cwd) != digest:
+      raise newException(AddonApplyError, "the store object " & cwd &
+        " does not hold exactly its declared outputs after the copy")
+    recordRealised(custody, cwd, digest)
+    if recover:
+      recordRecovered(custody, StoreObjectRef(path: cwd, kind: sokPrefix,
+        referrer: "build-action"), digest, observed, entry,
+        "the signed manifest's pinned outputs")
+      markRecorded(entry)
+
+type AgentApplyContext* = object
+  ## What one agent apply works from: the copy of the staging area (""
+  ## for ``agent-tick``, which has none), and what it reports beside the
+  ## outcome.
+  copyDir*: string
+  drift*: seq[string]
+  refusal*: string
+    ## Why the apply refused what the fetch unit staged (DET-AO-2), "" when
+    ## it did not; the tick's evidence record carries it with the staged
+    ## bytes (EVID-1), and the staged copy is preserved for investigation.
+  refusalPayload*: string
+  refusalRecorded*: bool
+    ## The refusal already left its own record (the compiled-profile pin).
+  stagingCopy*: string
+    ## Where a refused staging copy will be preserved, chosen before the
+    ## tick so its record can name it (A11 drill D6).
+  compiler*: string
+  compilerSha256*: string
+
+proc refuse(ctx: ptr AgentApplyContext; why: string; payload = "";
+            recorded = false): tuple[ok: bool; message: string] =
+  ## A refusal of staged input, noted for the tick's evidence record.
+  ctx.refusal = why
+  ctx.refusalPayload = payload
+  ctx.refusalRecorded = recorded
+  (false, why)
+
+proc stagedText(copyDir, name: string): string =
+  if copyDir.len > 0 and fileExists(copyDir / name):
+    try: readFile(copyDir / name) except IOError: ""
+  else: ""
+
+proc agentApplyHook*(ctx: ptr AgentApplyContext; layout: SecretsLayout): ApplyHook =
+  ## The apply of one selected, verified manifest on an add-on host.
+  result = proc(m: DeployManifest): tuple[ok: bool; message: string] {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let copyDir = ctx.copyDir
+      seamPause(DefaultStateDir, "agent-apply-after-verify")
+      # The profile: the signed text when it is canonical; otherwise what
+      # the fetch unit compiled, which is untrusted.
+      var text = m.profileText
+      var actions = m.buildActions
+      when mutated("agent-rereads-staging"):
+        # Falsifying build: the profile is taken from the staging area
+        # again after the copy was verified.
+        let staged = applyStagingRoot() / readFile(applyStagingRoot() /
+          StagingLatestName).strip() / StagedManifestName
+        if fileExists(staged):
+          var raw = readFile(staged)
+          text = decodeManifest(cast[seq[byte]](raw)).profileText
+      let canonical = isCanonicalProfileText(text)
+      if not canonical:
+        when mutated("agent-compiles-in-apply"):
+          # Falsifying build: the reused single-process hook's resolver,
+          # i.e. the profile compiled by this root process.
+          let conf = loadAgentConf()
+          let d = applyCopyDir() / "compile"
+          createDir(d)
+          let module = stageProfileSources(d / "source", m.profileText,
+                                           m.profileFiles)
+          let r = runHostTool(@[conf.profileCompiler, "deploy-agent",
+            "compile-profile", "--staged", module, "--canonical-out",
+            d / StagedCanonicalName, "--actions-out", d / StagedActionsName] &
+            compileFactArgs(m), timeoutSec = CompileTimeoutSec)
+          if r.exitCode != 0:
+            return (false, "profile compile failed: " & r.output)
+          text = readFile(d / StagedCanonicalName)
+        else:
+          if copyDir.len == 0 or not fileExists(copyDir / StagedCanonicalName):
+            var why = "the manifest's profile is source, and no compiled " &
+              "text was staged for it"
+            if copyDir.len > 0 and fileExists(copyDir / StagedNotesName):
+              why.add(" (fetch unit: " &
+                readFile(copyDir / StagedNotesName).strip() & ")")
+            return ctx.refuse(why)
+          text = readFile(copyDir / StagedCanonicalName)
+          let actionsJson = if fileExists(copyDir / StagedActionsName):
+                              readFile(copyDir / StagedActionsName) else: ""
+          # The fetch unit's compile is a cache of the producer's: what it
+          # emitted is applied only when it hashes to the signed pin (B1).
+          let revision = if fileExists(copyDir / StagedCompilerRevisionName):
+                           readFile(copyDir / StagedCompilerRevisionName).strip()
+                         else: ""
+          let pin = compiledProfileCheck(m, text, actionsJson, revision)
+          if pin.len > 0:
+            # The tick's record carries the refusal and the compiled text
+            # (EVID-1), under the A8 record's kind.
+            return ctx.refuse(pin, text)
+          if actions.len == 0 and actionsJson.len > 0:
+            actions = actionsFromJson(actionsJson)
+      var prof: SystemProfile
+      try: prof = parseAddOnUserProfile(text)
+      except CatchableError as e:
+        return ctx.refuse("the profile does not parse: " & e.msg, text)
+      let refusal = agentProfileRefusal(m, prof, not canonical,
+                                        DefaultStateDir)
+      if refusal.len > 0:
+        return ctx.refuse(refusal, text)
+      if actions.len > 0:
+        if copyDir.len == 0:
+          return (false, "the manifest carries build actions, which only " &
+            "the fetch unit substitutes; agent-tick takes none")
+        try:
+          installStagedOutputs(m, actions, copyDir)
+        except CatchableError as e:
+          return ctx.refuse(e.msg, stagedText(copyDir, StagedActionsName))
+      var failedAtFloor: seq[string]
+      let r = tickApply(DefaultStateDir, layout, m, proc(o: AddonApplyOptions):
+          AddonApplyResult =
+        var o2 = o
+        o2.userProfileText = text
+        o2.agentSequence = m.sequence
+        o2.agentRecord = agentRecordOf(m)
+        o2.rollbackFloor = m.rollbackFloor
+        if copyDir.len > 0: o2.aptFetch = stagedAptFetcher(copyDir)
+        try:
+          result = runAddonApply(o2)
+        except AddonRolledBack as e:
+          raise newException(EApplyRolledBack, e.msg)
+        except AddonNeedsOperator as e:
+          raise newException(EApplyNeedsOperator, e.msg)
+        except AddonFailedAtFloor as e:
+          # Not committed, not reverted: the floor kept the switch in place.
+          raise newException(EApplyFailedAtFloor, e.msg)
+        failedAtFloor = result.failedAtFloor
+        for d in result.drift: ctx.drift.add("apply drift " & d))
+      if r.ok and failedAtFloor.len > 0:
+        raise newException(EApplyFailedAtFloor, failedAtFloor.join("; "))
+      r
+
+# ---------------------------------------------------------------------------
+# The tick's evidence (spec §10.4, threat model §9, milestone A11).
+# ---------------------------------------------------------------------------
+
+const RefusedStagingKeep* = 4
+  ## Preserved copies of refused staging (EVID-5: the staged bytes a refusal
+  ## names stay on the host for investigation); older ones are removed.
+
+proc refusedStagingRoot*(): string = AgentDir / "refused"
+
+proc plannedRefusedStaging*(): string =
+  ## The name the next refused staging copy will be kept under.
+  refusedStagingRoot() / (format(getTime(), "yyyyMMdd'T'HHmmss") & "-" &
+                          $getTime().nanosecond)
+
+proc preserveRefusedStaging*(copyDir: string; dest = ""): string =
+  ## Move the apply unit's copy of a refused staging area under
+  ## ``refusedStagingRoot`` (at ``dest`` when given: the name its record
+  ## already carries) and return where it went ("" when it could not be
+  ## kept).
+  if copyDir.len == 0 or not dirExists(copyDir): return ""
+  try:
+    let root = refusedStagingRoot()
+    createDir(root)
+    setFilePermissions(root, {fpUserRead, fpUserWrite, fpUserExec})
+    result = if dest.len > 0: dest else: plannedRefusedStaging()
+    moveDir(copyDir, result)
+    var kept: seq[string]
+    for kind, p in walkDir(root):
+      if kind == pcDir: kept.add(p)
+    kept.sort()
+    while kept.len > RefusedStagingKeep:
+      try: removeDir(kept[0]) except CatchableError: discard
+      kept.delete(0)
+  except CatchableError:
+    result = ""
+
+proc refusalOf(ctx: AgentApplyContext): TickRefusal =
+  TickRefusal(refusal: ctx.refusal, payload: ctx.refusalPayload,
+    recorded: ctx.refusalRecorded,
+    manifestPayload: stagedText(ctx.copyDir, StagedManifestName),
+    stagingCopy: ctx.stagingCopy, compiler: ctx.compiler,
+    compilerSha256: ctx.compilerSha256)
+
+proc tickDetection*(t: RecordedTick; ctx: AgentApplyContext):
+    tuple[found: bool; detector: AddonDetector; trigger: string;
+          offHostOnly: bool] =
+  tickDetection(t, refusalOf(ctx))
+
+proc recordTickEvidence*(t: RecordedTick; ctx: AgentApplyContext;
+                         site = defaultSite()) =
+  ## ``tick_evidence.recordTickEvidence`` for one of the add-on agent's own
+  ## ticks, with what its apply refused.
+  recordTickEvidence(t, refusalOf(ctx), site)
+
+proc runAddonAgentTick*(cfg: AgentConfig; ctx: var AgentApplyContext;
+                        what: string): RecordedTick =
+  ## One tick on an add-on host: the agent's checks (v3 required), the
+  ## sealed section through the add-on, the apply above.
+  var cfg = cfg
+  cfg.requireAttestations = true
+  let layout = defaultSecretsLayout()
+  cfg.secretsSink = proc(m: DeployManifest): string {.gcsafe.} =
+    {.cast(gcsafe).}:
+      acceptSealedSection(DefaultStateDir, layout, m)
+  var deps: AgentDeps
+  deps.apply = agentApplyHook(addr ctx, layout)
+  let ctxp = addr ctx
+  deps.driftProbe = proc(): seq[string] {.gcsafe.} =
+    {.cast(gcsafe).}:
+      result = hookEventsSince(AgentStateDir / AptHookCursorName)
+      result.add(ctxp.drift)
+  var hostLock = acquireHostApplyLock(what)
+  defer: hostLock.release()
+  retryPendingSecretsCommit(DefaultStateDir, layout)
+  # An operator rollback pauses this agent (spec §9.3): it is registered
+  # with the add-on, whose rollback writes the agent's pause marker.
+  registerAgentState(DefaultStateDir, cfg.stateDir)
+  # A host whose agent applied outside the switch before (its generations
+  # in the agent's own state directory) is taken over first (§9
+  # "Migration"): one switch that adopts what that agent applied.
+  if needsLegacyMigration(DefaultStateDir, cfg.stateDir):
+    let legacyGen = legacyAgentGeneration(cfg.stateDir)
+    try:
+      let r = migrateLegacyAgentState(DefaultStateDir, cfg.stateDir,
+                                      cfg.target, readHostname())
+      stdout.write("migration: add-on generation " & r.generationId &
+        " took over agent generation " & legacyGen & "\n")
+    except CatchableError as e:
+      return RecordedTick(exitCode: deployAgentExitCode(aoApplyFailed),
+        outcome: AgentOutcome(kind: aoApplyFailed, target: cfg.target,
+          errorCode: "addon_migration_failed",
+          message: "migrating agent generation " & legacyGen & " into " &
+            "the add-on switch failed; nothing was applied: " & e.msg))
+  result = runAgentTickRecorded(cfg, deps)
+  recordAgentDrift((if result.raised: "tickRaised" else: $result.outcome.kind),
+                   (if result.raised: 0'u64 else: result.outcome.sequence),
+                   result.addOnDrift)
+  recordTickEvidence(result, ctx)
+
+proc printTick(t: RecordedTick) =
+  if t.raised:
+    stdout.write("outcome: tickRaised\nmessage: " & t.error & "\n")
+  else:
+    stdout.write("outcome: " & $t.outcome.kind & "\n" &
+                 "sequence: " & $t.outcome.sequence & "\n" &
+                 "message: " & t.outcome.message & "\n")
+  for d in t.addOnDrift: stdout.write("add-on drift: " & d & "\n")
+
+# ---------------------------------------------------------------------------
+# The verbs.
+# ---------------------------------------------------------------------------
+
+proc takeArg(args: seq[string]; i: var int; flag: string): string =
+  let a = args[i]
+  if a.startsWith(flag & "="): return a[flag.len + 1 .. ^1]
+  if i + 1 >= args.len: raise newException(ValueError, flag & " needs a value")
+  inc i
+  args[i]
+
+proc runAgentFetchCli*(args: seq[string]): int =
+  ## ``repro system addon agent-fetch``: exit 0 when a staging directory
+  ## was published (whatever it says), 1 when it could not be.
+  if args.len != 0:
+    stderr.write("usage: repro system addon agent-fetch\n")
+    return 2
+  try:
+    let conf = loadAgentConf()
+    let r = runAgentFetch(conf, peerAuth.loadTrustAnchors(DeploySignersPath),
+                          fetchStagingRoot(), AgentDeps())
+    stdout.write("fetch: " & r.kind & ": " & r.message & "\nstaged: " &
+                 r.stagingDir & "\n")
+    0
+  except CatchableError as e:
+    stderr.write("repro system addon agent-fetch: " & e.msg & "\n")
+    1
+
+proc stagedResult(copyDir: string; target: string): AgentOutcome =
+  ## The fetch unit's own outcome when it selected nothing (reported as
+  ## the fetch unit's word: it changes nothing on the host).
+  let lines = readFile(copyDir / StagingResultName).splitLines()
+  var kind = aoSourceError
+  for k in AgentOutcomeKind:
+    if lines.len > 0 and $k == lines[0].strip(): kind = k
+  if kind notin {aoWaiting, aoSourceError, aoRejected, aoAmbiguous}:
+    kind = aoSourceError
+  AgentOutcome(kind: kind, target: target,
+    errorCode: (if lines.len > 1: lines[1].strip() else: ""),
+    message: "fetch unit: " & (if lines.len > 2: lines[2].strip() else: ""))
+
+proc runAgentApplyCli*(args: seq[string]): int =
+  ## ``repro system addon agent-apply``: one apply from the newest staging
+  ## directory; exits with the agent's outcome code.
+  if args.len != 0:
+    stderr.write("usage: repro system addon agent-apply\n")
+    return 2
+  if isContained():
+    # An operator contained the host (decision 51): its units do not start;
+    # should anything start it regardless, it applies nothing.
+    stderr.write("repro system addon agent-apply: the host is contained by " &
+      "an operator (" & containedMarkerPath() & "); nothing was applied\n")
+    return 0
+  var conf: AgentConf
+  try: conf = loadAgentConf()
+  except CatchableError as e:
+    stderr.write("repro system addon agent-apply: " & e.msg & "\n")
+    return 2
+  var ctx = AgentApplyContext(copyDir: applyCopyDir() / "current",
+    stagingCopy: plannedRefusedStaging())
+  # The compiler the fetch unit runs, as this unit reads it (RESP-1, D6).
+  if conf.profileCompiler.len > 0:
+    ctx.compiler = conf.profileCompiler
+    ctx.compilerSha256 = try: sha256OfFile(conf.profileCompiler)
+                         except CatchableError: "(unreadable)"
+  try:
+    discard copyLatestStaging(applyStagingRoot(), ctx.copyDir)
+  except CatchableError as e:
+    stderr.write("repro system addon agent-apply: " & e.msg & "\n")
+    return 1
+  # Falsifying build: the sequence floor kept in the fetch unit's state
+  # directory, where its dynamic user can rewrite it.
+  let floorDir = when mutated("agent-floor-in-fetch-state"):
+                   applyStagingRoot().parentDir / "floor"
+                 else: ""
+  if not fileExists(ctx.copyDir / StagedManifestName):
+    let o = stagedResult(ctx.copyDir, conf.target)
+    let t = RecordedTick(outcome: o, exitCode: deployAgentExitCode(o.kind))
+    recordTick(AgentStateDir, conf.target, tickStatusFor(o))
+    recordTickEvidence(t, ctx)
+    printTick(t)
+    return t.exitCode
+  let cfg = AgentConfig(target: conf.target,
+    sources: @[ctx.copyDir / StagedManifestName],
+    anchors: peerAuth.loadTrustAnchors(DeploySignersPath),
+    stateDir: AgentStateDir, floorDir: floorDir)
+  let t = runAddonAgentTick(cfg, ctx, "repro system addon agent-apply")
+  # The copy has served this apply (its archives are realised or refused);
+  # keeping it would hold a second copy of every staged archive until the
+  # next tick -- unless the apply refused it, when it is what an
+  # investigation needs (EVID-5) and is kept, bounded.
+  if ctx.refusal.len > 0:
+    discard preserveRefusedStaging(ctx.copyDir, ctx.stagingCopy)
+  try: removeDir(ctx.copyDir) except CatchableError: discard
+  when mutated("agent-floor-in-fetch-state"):
+    # The floor belongs to the fetch unit there, as anything in its state
+    # directory does.
+    for p in walkDirRec(floorDir, yieldFilter = {pcFile, pcDir}):
+      setFilePermissions(p, {fpUserRead, fpUserWrite, fpUserExec,
+        fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite,
+        fpOthersExec})
+    setFilePermissions(floorDir, {fpUserRead, fpUserWrite, fpUserExec,
+      fpGroupRead, fpGroupWrite, fpGroupExec, fpOthersRead, fpOthersWrite,
+      fpOthersExec})
+  printTick(t)
+  t.exitCode
+
+proc runAgentTickCli*(args: seq[string]): int =
+  ## ``repro system addon agent-tick --source S... [--target T]
+  ## [--allowed-signers F]``: the single-process tick (see the header).
+  var sources: seq[string]
+  var target = ""
+  var signers = DeploySignersPath
+  var i = 0
+  try:
+    while i < args.len:
+      let a = args[i]
+      if a == "--source" or a.startsWith("--source="):
+        sources.add(takeArg(args, i, "--source"))
+      elif a == "--target" or a.startsWith("--target="):
+        target = takeArg(args, i, "--target")
+      elif a == "--allowed-signers" or a.startsWith("--allowed-signers="):
+        signers = takeArg(args, i, "--allowed-signers")
+      else:
+        raise newException(ValueError, "unknown option " & a)
+      inc i
+    if sources.len == 0:
+      raise newException(ValueError, "at least one --source is required")
+  except ValueError as e:
+    stderr.write("repro system addon agent-tick: " & e.msg & "\n")
+    return 2
+  if target.len == 0: target = readHostname()
+  let cfg = AgentConfig(target: target, sources: sources,
+    anchors: peerAuth.loadTrustAnchors(signers), stateDir: AgentStateDir,
+    fetchTimeoutMs: 30_000)
+  var ctx: AgentApplyContext
+  let t = runAddonAgentTick(cfg, ctx, "repro system addon agent-tick")
+  printTick(t)
+  t.exitCode
+
+proc runResumeCli*(args: seq[string]): int =
+  ## ``repro system addon resume``: clear the pause marker (spec §9.3).
+  if args.len != 0:
+    stderr.write("usage: repro system addon resume\n")
+    return 2
+  # The configured agent's marker, and every agent the add-on's rollback
+  # pauses (registered with it, or at a well-known state directory).
+  var resumed = resumeAgents(DefaultStateDir)
+  if clearPauseMarker(AgentStateDir) and AgentStateDir notin resumed:
+    resumed.add(AgentStateDir)
+  if resumed.len > 0:
+    stdout.write("the deploy agent of " & resumed.join(", ") & " is no " &
+      "longer paused; the next tick converges to the latest manifest\n")
+  else:
+    stdout.write("the deploy agent was not paused\n")
+  0
+
+proc pauseAfterRollback*(generation: string) =
+  ## An operator rollback on a host whose deploy agent is configured
+  ## pauses it (spec §9.3), naming the generation and the operator.
+  if not fileExists(AgentConfPath): return
+  writePauseMarker(AgentStateDir, generation, currentOperator())

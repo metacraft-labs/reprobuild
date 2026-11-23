@@ -54,8 +54,9 @@ const
   recordBodyMarker = "@@reprobuild-lockstore-body@@"
     ## Sentinel line separating the record header from the verbatim body.
   lockStoreNotesRef* = "refs/notes/reprobuild/locks"
-    ## git-notes carrier ref for lock records (parallel to the TC-2
-    ## ``refs/notes/reprobuild/certificates`` cert carrier).
+    ## git-notes carrier ref for lock records, keyed by commit (lock records
+    ## are per-commit and sit outside the content; the certificate carrier is
+    ## ``refs/notes/test-certificates/certificates``, keyed by tree).
   separateBranchRef* = "refs/heads/reprobuild-lockstore"
     ## The orphan branch the separate-branch backend commits records onto.
 

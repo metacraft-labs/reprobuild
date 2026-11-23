@@ -1,214 +1,79 @@
-## TC-1 — ``repro test`` withholds the certificate (with an ambient remedy)
-## when the workspace is NOT in a publishable state.
+## TC-1 / TC-8d — ``repro test`` withholds the certificate (with an ambient
+## remedy) when a develop-mode SIBLING is not in a publishable state, and
+## certifies a modified CURRENT repository by its content.
 ##
-## Principle 2 (Interactive-UX): the tests STILL RUN, but no certificate is
-## issued, and the run ends with an actionable message naming the offender and
-## the remedy:
-##   1. DIRTY working tree → "working tree dirty" + "commit ..." remedy.
-##   2. UNPUSHED HEAD       → "unpushed" + "git push" remedy.
+## Principle 2 (Interactive-UX): when the certificate is withheld the tests
+## STILL RUN, the exit code is the run's, and the run ends with an actionable
+## message naming the offender and the remedy.
 ##
-## In both cases the certificate file is NOT written even though the trivial
-## test target passes.
+## Cases (a committed-lock workspace: app → lib-b → lib-c):
+##   1. The CURRENT repository is modified (a tracked edit and an untracked
+##      scratch file): CERTIFIED. TC-8d inverted this case. Before it, a dirty
+##      current repository was refused with "commit first"; the standard now
+##      binds a certificate to the content of the tracked files (Standard
+##      §3.2.2), so the modified tree is certified as its own content, with
+##      ``untracked = true``.
+##   2. A SIBLING (lib-b) has an uncommitted change: WITHHELD, naming lib-b
+##      and a commit / stash remedy. Siblings are outside the content a
+##      certificate names, so they must be clean — that half did not change.
 ##
-## Falsifiability: if issuance were forced in a dirty/unpushed state, the
-## "cert file absent" check would fail. See the milestone note.
+## The unpushed-HEAD case of the current repository was removed on
+## 2026-10-06: its publication IS the gated push (Agents-Push-Gate.md §4.1),
+## so issuance exempts it. Every sibling must still be published. The
+## positive case is "an unpushed clean current HEAD is certified before push"
+## in t_repro_test_issues_certificate_by_default_in_clean_state.
 ##
-## Skip rule: ``git`` missing on PATH.
+## Falsifiability: issuing with a dirty sibling fails case 2's "no
+## certificate"; restoring the clean-current-repository rule fails case 1.
+##
+## NO MOCKS: real repositories, the built ``repro``. Skip rule: ``git`` or
+## ``ssh-keygen`` missing.
 
-import std/[json, os, osproc, strutils, tempfiles, unittest]
-
-import repro_test_support
+import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 import repro_cli_support
-import repro_workspace_manifests
-
-proc q(value: string): string = quoteShell(value)
-
-proc runCmd(command: string; cwd = ""): tuple[code: int; output: string] =
-  let res = execCmdEx(command, workingDir = cwd)
-  (code: res.exitCode, output: res.output)
-
-proc requireGit(command: string; cwd = ""): string =
-  let res = runCmd(command, cwd)
-  if res.code != 0:
-    checkpoint("command failed: " & command & "\nexit=" & $res.code &
-      "\n" & res.output)
-    quit 1
-  res.output
-
-proc repoRoot(): string =
-  result = currentSourcePath().parentDir.parentDir.parentDir
-
-proc reproBinary(): string =
-  requireBinary(repoRoot() / "build" / "bin" / addFileExt("repro", ExeExt),
-    "reprobuild.apps.repro")
-
-proc seedGitOrigin(gitBin, originPath, workPath: string;
-                   branch = "main"): string =
-  discard requireGit(q(gitBin) & " init --bare -b " & branch & " " &
-    q(originPath))
-  discard requireGit(q(gitBin) & " init -b " & branch & " " & q(workPath))
-  discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.email tester@example.invalid")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " config user.name \"TC1 Tester\"")
-  writeFile(workPath / "README.md", "TC-1 fixture\n")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " add README.md")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " commit -m fixture")
-  discard requireGit(q(gitBin) & " -C " & q(workPath) &
-    " remote add origin " & q(originPath))
-  discard requireGit(q(gitBin) & " -C " & q(workPath) & " push origin " & branch)
-  result = requireGit(q(gitBin) & " -C " & q(workPath) &
-    " rev-parse HEAD").strip()
-
-proc cloneInto(gitBin, originPath, targetPath: string) =
-  discard requireGit(q(gitBin) & " clone " &
-    q(fileUrl(originPath)) & " " & q(targetPath))
-  discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.email tester@example.invalid")
-  discard requireGit(q(gitBin) & " -C " & q(targetPath) &
-    " config user.name \"TC1 Tester\"")
-
-proc projectToml(libAUrl: string): string =
-  "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\n" &
-  "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
-  "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
-  "includes = [\n  \"repos/lib-a.toml\",\n]\n"
-
-const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
-
-[repo]
-name = "lib-a"
-path = "lib-a"
-remote = "lib-a-origin"
-revision = "main"
-"""
-
-type
-  Fixture = object
-    scratch: string
-    reproBin: string
-    workspaceRoot: string
-    libAOrigin: string
-    libASeed: string
-    libASha: string
-
-proc setupFixture(gitBin, slug: string): Fixture =
-  result.scratch = createTempDir("repro-tc1d-" & slug & "-", "")
-  result.reproBin = reproBinary()
-  result.libAOrigin = result.scratch / "origin-lib-a.git"
-  result.libASeed = result.scratch / "seed-lib-a"
-  result.libASha = seedGitOrigin(gitBin, result.libAOrigin, result.libASeed)
-
-  let workspaceRoot = result.scratch / "workspace"
-  createDir(workspaceRoot)
-  let manifestsRoot = workspaceRoot
-  createDir(manifestsRoot / "projects")
-  createDir(manifestsRoot / "repos")
-  writeFile(manifestsRoot / "projects" / "lib-a.toml",
-    projectToml(fileUrl(result.libAOrigin)))
-  writeFile(manifestsRoot / "repos" / "lib-a.toml", libAFragmentToml)
-  result.workspaceRoot = workspaceRoot
-  cloneInto(gitBin, result.libAOrigin, workspaceRoot / "lib-a")
-  writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
-
-proc seedLock(fx: Fixture) =
-  let res = runShell(shellCommand(@[
-    fx.reproBin, "workspace", "lock",
-    "--workspace-root=" & fx.workspaceRoot]))
-  if res.code != 0:
-    checkpoint("workspace lock failed: " & res.output)
-  check res.code == 0
-
-proc writePassingFixture(path, selector: string) =
-  var obj = newJObject()
-  obj["fallbackBuildCostNs"] = %1
-  obj["fallbackTestCostNs"] = %1
-  var edges = newJArray()
-  var e = newJObject()
-  e["id"] = %1
-  e["selector"] = %selector
-  e["historyKey"] = %selector
-  e["buildDeps"] = newJArray()
-  var cmd = newJArray()
-  cmd.add(%"sh"); cmd.add(%"-c"); cmd.add(%"exit 0")
-  e["runCmd"] = cmd
-  e["testName"] = %selector
-  edges.add(e)
-  obj["testEdges"] = edges
-  obj["buildActions"] = newJArray()
-  let parent = parentDir(path)
-  if parent.len > 0 and not dirExists(parent): createDir(parent)
-  writeFile(path, obj.pretty() & "\n")
-
-proc runReproTest(fx: Fixture; fixtureJson: string): CmdResult =
-  runShell(shellCommand(@[
-    fx.reproBin, "test",
-    "--fixture-from=" & fixtureJson,
-    "--shard=1/1",
-    "--certify",
-    "--workspace-root=" & fx.workspaceRoot,
-    "--current-repo=" & (fx.workspaceRoot / "lib-a")]),
-    fx.workspaceRoot)
-
-proc certPath(fx: Fixture): string =
-  defaultCertificatePath(fx.workspaceRoot, fx.libASha, currentPlatformTag())
+import ./certify_working_tree_fixture
 
 suite "TC-1 — repro test withholds the certificate on a non-publishable state":
 
   test "t_repro_test_reports_no_certificate_with_remedy_when_dirty_or_unpushed":
-    let gitBin = findExe("git")
-    if gitBin.len == 0:
-      skip()
+    if findExe("git").len == 0 or findExe("ssh-keygen").len == 0:
+      skip("git or ssh-keygen not on PATH; this test signs a certificate " &
+        "in real repositories")
     else:
-      # --- case 1: DIRTY working tree --------------------------------------
+      # --- case 1: a modified CURRENT repository is certified ---------------
       block:
-        let fx = setupFixture(gitBin, "dirty")
-        defer: removeDir(fx.scratch)
-        seedLock(fx)
-        # Dirty the in-scope repo AFTER locking.
-        writeFile(fx.workspaceRoot / "lib-a" / "scratch.txt", "uncommitted\n")
+        var fx = setupCertifyFixture("tc1d-dirty-current")
+        defer: removeDir(fx.sib.scratch)
+        let app = fx.sib.app
+        writeFile(app / "README.md", "uncommitted edit\n")
+        writeFile(app / "scratch.txt", "uncommitted\n")
+        let content = fx.workingTreeContentId(app)
+        let res = fx.certify(fx.writeFixtureJson("t-unit", "exit 0"))
+        checkpoint(res.output)
+        check res.code == 0
+        let certs = fx.issuedFor(content)
+        check certs.len == 1
+        if certs.len == 1:
+          check certs[0].vcs.content == content
+          check certs[0].vcs.base == fx.sib.headOf(app)
+          check certs[0].vcs.untracked
 
-        let fixtureJson = fx.scratch / "fixture.json"
-        writePassingFixture(fixtureJson, "t-unit")
-
-        let res = runReproTest(fx, fixtureJson)
+      # --- case 2: a dirty SIBLING withholds, with a remedy ------------------
+      block:
+        var fx = setupCertifyFixture("tc1d-dirty-sibling")
+        defer: removeDir(fx.sib.scratch)
+        let libB = fx.sib.ws / "lib-b"
+        writeFile(libB / "README.md", "uncommitted in a sibling\n")
+        let res = fx.certify(fx.writeFixtureJson("t-unit", "exit 0"))
+        checkpoint(res.output)
         # The trivial target still PASSES (the run executed), so the shard
-        # exit code is 0 — the only effect of the dirty state is no cert.
+        # exit code is 0 — the only effect of the dirty sibling is no cert.
         check res.code == 0
-        check (not fileExists(certPath(fx)))
-        check res.output.contains("no certificate")
-        check res.output.contains("dirty")
+        check fx.runs == 1
+        check not fx.anyCertificateIssued()
+        check "no certificate" in res.output
+        check "dirty" in res.output
+        check "lib-b" in res.output
         # RA-28 remedy: name a concrete next step (commit / stash).
-        check (res.output.contains("commit") or res.output.contains("stash"))
-
-      # --- case 2: UNPUSHED HEAD -------------------------------------------
-      block:
-        let fx = setupFixture(gitBin, "unpushed")
-        defer: removeDir(fx.scratch)
-        # Commit a new revision in the in-scope repo but do NOT push it.
-        writeFile(fx.workspaceRoot / "lib-a" / "feature.txt", "new\n")
-        discard requireGit(q(gitBin) & " -C " &
-          q(fx.workspaceRoot / "lib-a") & " add feature.txt")
-        discard requireGit(q(gitBin) & " -C " &
-          q(fx.workspaceRoot / "lib-a") & " commit -m feature")
-        let newSha = requireGit(q(gitBin) & " -C " &
-          q(fx.workspaceRoot / "lib-a") & " rev-parse HEAD").strip()
-
-        let fixtureJson = fx.scratch / "fixture.json"
-        writePassingFixture(fixtureJson, "t-unit")
-
-        let res = runReproTest(fx, fixtureJson)
-        check res.code == 0
-        let cp = defaultCertificatePath(
-          fx.workspaceRoot, newSha, currentPlatformTag())
-        check (not fileExists(cp))
-        check res.output.contains("no certificate")
-        # Offender named + the ``git push`` remedy surfaced.
-        check (res.output.contains("unpushed") or
-               res.output.contains("unpublished") or
-               res.output.contains("push"))
-        check res.output.contains("push")
+        check ("commit" in res.output or "stash" in res.output)

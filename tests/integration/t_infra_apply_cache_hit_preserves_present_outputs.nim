@@ -51,11 +51,13 @@
 ## than passing vacuously.
 ##
 ## Note on property 2: the flag is named ``rebuildMissingOutputsOnCache
-## Hit`` because a hit with MISSING outputs is downgraded to a miss and
-## the action is RE-EXECUTED — it is not restored from the CAS. The
-## assertion below is written against that actual contract (the output
-## comes back, produced by a relaunch) rather than against a restore
-## that does not happen on this path.
+## Hit`` because a hit with MISSING outputs used to be downgraded to a
+## miss and the action RE-EXECUTED. Owner decision 2026-11-03
+## (Incremental-Invalidation.md, "Minimum check set" step 3.3) reversed
+## that: a payload-backed record whose inputs match is RESTORED from the
+## CAS, and only a record the CAS cannot serve re-runs. The assertion
+## below is written against that contract: the output comes back, from
+## the cache, without a relaunch.
 ##
 ## No mocks. The test drives the real build engine through the real
 ## ``applyBuildActionsEngineConfig`` against a real on-disk action
@@ -185,8 +187,11 @@ suite "integration_infra_apply_cache_hit_preserves_present_outputs":
 
       let second = runBuild(g, applyCfg(cacheRoot))
       check second.results.len == 1
-      # Downgraded to a miss and relaunched — NOT restored from the CAS.
-      check second.results[0].status == asSucceeded
+      # Restored from the CAS, not relaunched: the record is payload-backed
+      # and its inputs match (owner decision 2026-11-03, see the note on
+      # property 2 above).
+      check second.results[0].status == asCacheHit
+      check not second.results[0].launched
       check fileExists(outputPath)
       check readFile(outputPath) == payload
       check leakedTempFiles(outDir) == newSeq[string]()

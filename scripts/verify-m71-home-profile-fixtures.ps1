@@ -20,8 +20,8 @@
 #   3. Set ``REPRO_HOST=m71-test-host`` so the host-activity map lifts
 #      every activity.
 #   4. Run ``repro home apply`` against the sandboxed state. This drives
-#      the M64/M65 cakBuiltin chain — every M67/M68-catalog package
-#      either realizes (downloads the catalog URL into the CAS) or
+#      the packages' ``tarball`` realizations (GM4b) — every package
+#      either realizes (downloads the realization's URL into the CAS) or
 #      cache-hits a prior realization. Tools in M69's deferred-8 list
 #      surface a structured "not yet implemented" diagnostic; the
 #      harness records them as a partial-graduate (planned-only)
@@ -43,7 +43,7 @@
 # The actual home apply step is gated behind ``$Env:REPRO_M71_LIVE=1``
 # because realizing the full catalog footprint downloads >4 GB. Without
 # the env var the harness runs in PLAN mode: it asserts the resolver
-# picks a cakBuiltin slice for every listed package and that the
+# selects a ``tarball`` realization for every listed package and that the
 # Phase-2 partials' validate scripts SKIP cleanly (no spurious FAIL on
 # a host that hasn't been provisioned). The PLAN mode is what CI runs
 # by default; LIVE mode is for operator-driven validation runs.
@@ -161,7 +161,7 @@ $GraduationTable = @(
     RequiredTools = @('ghc', 'cabal');
     CatalogStatus = 'CLEAN';
     ExpectedStatus= 'GRADUATED-PASS';
-    Reason        = 'M67 ghc + cabal both CLEAN; cakBuiltin realize end-to-end via downloads.haskell.org URLs.';
+    Reason        = 'M67 ghc + cabal both CLEAN; tarball realize end-to-end via downloads.haskell.org URLs.';
   },
   @{
     Fixture       = 'php-composer/hello-binary';
@@ -266,7 +266,7 @@ $GraduationTable = @(
     RequiredTools = @('erlang');
     CatalogStatus = 'DEFERRED';
     ExpectedStatus= 'STILL-SKIPPED';
-    Reason        = 'erlang M69-deferred (rebar3 bootstrap — escript wrapping not yet a cakBuiltin install_method).';
+    Reason        = 'erlang M69-deferred (rebar3 bootstrap — escript wrapping not yet an archive-realizer installMethod).';
   },
   @{
     Fixture       = 'elixir-mix/hello-binary';

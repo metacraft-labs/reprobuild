@@ -9,8 +9,16 @@
 ## host will not publish them; and
 ## several candidate path sets for one weak fingerprint are all discoverable,
 ## with a republish reusing its slot.
+##
+## Campaign M17 (Edge-Derived-Identities.md §3.3a): only checksum- and
+## hybrid-policy records are published, so every action here is recorded
+## under `ffpChecksum` (they were `ffpTimestamp` until then, whose records
+## the publisher now refuses), and "a timestamp-policy record is not
+## published" pins the refusal against this live server.
 
 import std/[net, options, os, osproc, strutils, times, unittest]
+
+import cbor
 
 import repro_build_engine
 import repro_core/edge_determinism
@@ -78,7 +86,8 @@ proc fingerprintForPayload(payload: string): ContentDigest =
             domain = hdActionFingerprint)
 
 proc buildIn(projectRoot: string; publisher: PortableMemoPublisher;
-             tagged = true): tuple[result: ActionResult, trace: string] =
+             tagged = true; policy = ffpChecksum):
+    tuple[result: ActionResult, trace: string] =
   let action = BuildAction(
     governingLockIdentity: lockIdentityOutsideSolvedGraph(),
     kind: bakWriteText,
@@ -89,7 +98,7 @@ proc buildIn(projectRoot: string; publisher: PortableMemoPublisher;
     cwd: projectRoot,
     cacheable: true,
     publishToBinaryCache: tagged,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: policy,
     weakFingerprint: fingerprintForPayload("t-pmc-write"),
     builtinText: "built from " & readFile(projectRoot / "src" / "main.c"))
   createDir(projectRoot / "out")
@@ -114,16 +123,18 @@ proc recordFor(project, weakHex: string; output: string;
   var inputs: seq[PortableInput] = @[]
   for r in reads:
     inputs.add(PortableInput(kind: pikRead, path: "project:" & r,
-      digest: fileContentHex(project / r)))
+      digest: readIdentity(project / r)))
   for p in probes:
     inputs.add(PortableInput(kind: pikProbe, path: "project:" & p,
-      digest: if fileExists(project / p): "present" else: "absent"))
+      digest: probeIdentity(project / p)))
   let pathSet = pathSetOf(inputs)
   let strong = strongForPathSet(roots, weakHex, pathSet).get()
   let outs = portableOutputs(roots, [project / output])
   doAssert outs.portable
-  PortableMemoRecord(weakHex: weakHex, pathSet: pathSet, strongHex: strong,
-    outputs: outs.outputs)
+  # A checksum record of a monitored Level-0 execution: what a conforming
+  # producer publishes (`rbpm-v2`, campaign M17 chunk 2).
+  newPortableMemoRecord(weakHex, inputs, strong, outs.outputs, ffpChecksum,
+    elComplete, MonitoredEvidence)
 
 var srvProc: Process
 var baseUrl = ""
@@ -190,7 +201,7 @@ proc buildChain(projectRoot: string; publisher: PortableMemoPublisher = nil;
     inputs: @[projectRoot / "src" / "main.c"],
     outputs: @[projectRoot / "obj" / "main.o"],
     cwd: projectRoot, cacheable: true, publishToBinaryCache: false,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: ffpChecksum,
     weakFingerprint: fingerprintForPayload("t-pmc-compile"),
     builtinText: "object of " & readFile(projectRoot / "src" / "main.c"))
   let link = BuildAction(
@@ -199,7 +210,7 @@ proc buildChain(projectRoot: string; publisher: PortableMemoPublisher = nil;
     inputs: @[projectRoot / "obj" / "main.o"],
     outputs: @[projectRoot / "bin" / "app"],
     cwd: projectRoot, cacheable: true, publishToBinaryCache: true,
-    actionCachePolicy: ffpTimestamp,
+    actionCachePolicy: ffpChecksum,
     weakFingerprint: fingerprintForPayload("t-pmc-link"),
     builtinText: "linked app\n")
   createDir(projectRoot / "obj")
@@ -247,6 +258,24 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     check restoreMemoOutputs(remote("b"), record, rootsOf(b)) == ""
     check readFile(b / "out" / "result.txt") ==
       readFile(a / "out" / "result.txt")
+
+  test "a timestamp-policy record is not published":
+    ## Campaign M17 (Edge-Derived-Identities.md §3.3a): the case above,
+    ## recorded under `ffpTimestamp`. The portable record is still computed
+    ## (it serves this host), but nothing reaches the server, and the trace
+    ## names the policy.
+    let a = project("ts-a", "int timestamp;\n")
+    let built = buildIn(a, publisherFor(remote("ts-a")),
+      policy = ffpTimestamp)
+    checkpoint(built.trace)
+    require built.result.portable
+    check "portable-memo-published" notin built.trace
+    check "portable-memo-publish-refused" in built.trace
+    check "ffpTimestamp input-check policy" in built.trace
+    let b = project("ts-b/elsewhere", "int timestamp;\n")
+    let found = lookupRemoteMemo(remote("ts-b"), rootsOf(b),
+      built.result.portableWeakHex)
+    check found.hit.isNone
 
   test "an untagged action publishes its record but not its bytes":
     let a = project("meta-a", "int meta;\n")
@@ -308,6 +337,161 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     check "not the content its record names" in restored
     check not fileExists(c / "out" / "x.txt")
 
+  test "rbpm-v2: a record altered in any new field, re-signed by an untrusted key, is refused":
+    # Campaign M17 chunk 2 (Edge-Derived-Identities.md §3.1: "the trace is
+    # part of the signed manifest"). The record's policy, evidence level and
+    # source, fixed-output flag and every input's kind and executable bit
+    # are in the bytes the producer signs. None of them is in the entry's KEY,
+    # so a forger can publish an altered record under the honest key -- but
+    # only signed with a key the consumer does not trust, and it is refused.
+    # Falsifier: a consumer that skips the signer-trust checks (the closure
+    # walk's `isTrustedSigner` AND `checkCompat`'s trusted-signer list) takes
+    # the altered policy and fixed-output flag; the other alterations are
+    # refused even then, by the publication rule (source, level) or the
+    # record's self-consistency (role).
+    let a = project("forged", "int main;\n")
+    createDir(a / "out")
+    writeFile(a / "out" / "x.txt", "good")
+    let weak = repeat('f', 64)
+    let honest = recordFor(a, weak, "out/x.txt", reads = @["src/main.c"])
+    let r = remote("forged")
+    require publishMemo(r, rootsOf(a), honest, withOutputs = false).ok
+    let consumer = project("forged-consumer", "int main;\n")
+    check lookupRemoteMemo(remote("forged-c0"), rootsOf(consumer),
+      weak).hit.isSome
+    var forger = remote("forger")
+    forger.keypair = peerAuth.generateKeypair()
+    var variants: seq[(string, PortableMemoRecord)] = @[]
+    var v = honest
+    v.evidenceSource = UnstatedEvidence
+    variants.add(("evidence source stripped", v))
+    v = honest
+    v.evidenceLevel = elKnownScopeLoss
+    variants.add(("evidence level", v))
+    v = honest
+    v.policy = ffpHybrid
+    variants.add(("policy", v))
+    v = honest
+    v.fixedOutput = true
+    variants.add(("fixed-output flag", v))
+    v = honest
+    v.declared = honest.observed
+    v.observed = honest.declared
+    for input in v.declared.mitems: input.role = irDeclared
+    for input in v.observed.mitems: input.role = irObserved
+    variants.add(("role", v))
+    for i, (label, altered) in variants:
+      checkpoint(label)
+      let stage = TmpDir / ("forged-stage-" & $i)
+      stageMemoRecord(altered, stage)
+      let id = memoRecordIdentity(r, weak, pathSetHash(honest.pathSet),
+        honest.strongHex)
+      check publishInProcess(PublishInProcessRequest(
+        entryKeyHex: deriveCacheEntryKeyHex(id), prefixDir: stage,
+        identity: id, endpoint: baseUrl, keypair: forger.keypair)).ok
+      let found = lookupRemoteMemo(remote("forged-c" & $(i + 1)),
+        rootsOf(consumer), weak)
+      checkpoint(found.reason)
+      check found.hit.isNone
+    # Control: the honest record, republished by its producer, is used again.
+    let id = memoRecordIdentity(r, weak, pathSetHash(honest.pathSet),
+      honest.strongHex)
+    let stage = TmpDir / "forged-stage-honest"
+    stageMemoRecord(honest, stage)
+    check publishInProcess(PublishInProcessRequest(
+      entryKeyHex: deriveCacheEntryKeyHex(id), prefixDir: stage,
+      identity: id, endpoint: baseUrl, keypair: kp)).ok
+    let again = lookupRemoteMemo(remote("forged-c-honest"), rootsOf(consumer),
+      weak)
+    checkpoint(again.reason)
+    check again.hit.isSome
+
+  test "rbpm-v2: an rbpm-v1 record, and records the rule refuses, are a miss naming why":
+    # A producer that publishes an `rbpm-v1` record under a current key (a
+    # non-conforming one: a conforming publisher's keys moved with the
+    # format), or a record that may not cross hosts, signed by a TRUSTED key:
+    # the consumer refuses either, as a miss, and says why.
+    let a = project("legacy", "int main;\n")
+    createDir(a / "out")
+    writeFile(a / "out" / "x.txt", "good")
+    let weak = repeat('9', 64)
+    let honest = recordFor(a, weak, "out/x.txt", reads = @["src/main.c"])
+    let r = remote("legacy")
+    require publishMemo(r, rootsOf(a), honest, withOutputs = false).ok
+    let consumer = project("legacy-consumer", "int main;\n")
+    let id = memoRecordIdentity(r, weak, pathSetHash(honest.pathSet),
+      honest.strongHex)
+    proc publishStaged(stage: string) =
+      check publishInProcess(PublishInProcessRequest(
+        entryKeyHex: deriveCacheEntryKeyHex(id), prefixDir: stage,
+        identity: id, endpoint: baseUrl, keypair: kp)).ok
+    # rbpm-v1, the pre-M17 layout: [tag, weak, pathSet, strong, outputs].
+    let v1Stage = TmpDir / "legacy-stage-v1"
+    createDir(v1Stage)
+    writeFile(v1Stage / StagedMemoName, encodeDeterministic(cArray([
+      cText(LegacyMemoTag), cText(weak), cArray([]), cText(honest.strongHex),
+      cArray([])])))
+    publishStaged(v1Stage)
+    let v1 = lookupRemoteMemo(remote("legacy-c1"), rootsOf(consumer), weak)
+    checkpoint(v1.reason)
+    check v1.hit.isNone
+    check LegacyMemoTag in v1.reason
+    # The same record, signed by its trusted producer, made under the
+    # timestamp policy: the consumer applies the publication rule itself.
+    var timestamp = honest
+    timestamp.policy = ffpTimestamp
+    let tsStage = TmpDir / "legacy-stage-ts"
+    stageMemoRecord(timestamp, tsStage)
+    publishStaged(tsStage)
+    let ts = lookupRemoteMemo(remote("legacy-c2"), rootsOf(consumer), weak)
+    checkpoint(ts.reason)
+    check ts.hit.isNone
+    check "ffpTimestamp" in ts.reason
+    # And one stating no evidence source.
+    var unsourced = honest
+    unsourced.evidenceSource = UnstatedEvidence
+    let srcStage = TmpDir / "legacy-stage-src"
+    stageMemoRecord(unsourced, srcStage)
+    publishStaged(srcStage)
+    let src = lookupRemoteMemo(remote("legacy-c3"), rootsOf(consumer), weak)
+    checkpoint(src.reason)
+    check src.hit.isNone
+    check "evidence source" in src.reason
+    # And one whose evidence is a depfile, not the monitor or a builtin
+    # (owner decision 2026-10-29, "builtins yes, depfiles no"): refused by
+    # the consumer whatever its signer. Falsifier: a rule that passes
+    # `format:` sources takes it.
+    var depfile = honest
+    depfile.evidenceSource = formatEvidence("make-depfile")
+    let depStage = TmpDir / "legacy-stage-depfile"
+    stageMemoRecord(depfile, depStage)
+    publishStaged(depStage)
+    let dep = lookupRemoteMemo(remote("legacy-c5"), rootsOf(consumer), weak)
+    checkpoint(dep.reason)
+    check dep.hit.isNone
+    check "make-depfile" in dep.reason
+    # Control: the honest (monitored) record, republished, is used.
+    let honestStage = TmpDir / "legacy-stage-honest"
+    stageMemoRecord(honest, honestStage)
+    publishStaged(honestStage)
+    check lookupRemoteMemo(remote("legacy-c6"), rootsOf(consumer),
+      weak).hit.isSome
+    # An rbps-v1 path set in a slot is refused, naming the format.
+    let legacyWeak = repeat('8', 64)
+    let slotStage = TmpDir / "legacy-stage-slot"
+    createDir(slotStage)
+    writeFile(slotStage / StagedPathSetName, encodeDeterministic(cArray([
+      cText(LegacyPathSetTag), cArray([])])))
+    let slotId = pathSetSlotIdentity(r, legacyWeak, 0)
+    check publishInProcess(PublishInProcessRequest(
+      entryKeyHex: deriveCacheEntryKeyHex(slotId), prefixDir: slotStage,
+      identity: slotId, endpoint: baseUrl, keypair: kp)).ok
+    let slot = lookupRemoteMemo(remote("legacy-c4"), rootsOf(consumer),
+      legacyWeak)
+    checkpoint(slot.reason)
+    check slot.hit.isNone
+    check LegacyPathSetTag in slot.reason
+
   test "a record whose path set is EMPTY is discoverable":
     ## A fixed-output fetch with no declared inputs is keyed by its
     ## description alone. Its empty path set once doubled as the marker for
@@ -315,8 +499,9 @@ suite "Cache-Scope P3.3 — remote memoization plane":
     ## never offered to a lookup.
     let weak = repeat('e', 64)
     let r = remote("empty-pathset")
-    let record = PortableMemoRecord(weakHex: weak, pathSet: @[],
-      strongHex: portableStrongFingerprint(weak, @[]), outputs: @[])
+    let record = newPortableMemoRecord(weak, newSeq[PortableInput](),
+      portableStrongFingerprint(weak, @[]), newSeq[PortableOutput](),
+      ffpChecksum, elComplete, MonitoredEvidence, fixedOutput = true)
     let published = publishMemo(r, @[], record, withOutputs = false)
     checkpoint(published.reason)
     require published.ok
@@ -416,23 +601,28 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     proc fetchGraph(p: string; fixed: bool): seq[BuildAction] =
       createDir(p / "upstream" / "pkg")
       writeFile(p / "upstream" / "pkg" / "index.js", "module.exports=1\n")
+      # The fetch's stand-in is a `write-text` builtin, a kind whose record
+      # may cross hosts. It was a `preserve-tree` until owner decision
+      # 2026-10-31 refused that kind (it copies its sources' mode bits and
+      # reads its previous manifest; Edge-Derived-Identities.md §10 decision
+      # 23 rider), which would keep this record local whatever its
+      # fixed-output status.
       let fetch = BuildAction(
         governingLockIdentity: lockIdentityOutsideSolvedGraph(),
-        kind: bakPreserveTree, id: "t-pmc-fetch", deps: @[],
+        kind: bakWriteText, id: "t-pmc-fetch", deps: @[],
         inputs: @[p / "upstream" / "pkg" / "index.js"],
-        outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-fetch.manifest"],
-        declaredOutputs: @[p / "fetched"],
+        outputs: @[p / "fetched" / "pkg" / "index.js"],
         cwd: p, cacheable: false, fixedOutput: fixed,
-        publishToBinaryCache: false, actionCachePolicy: ffpTimestamp,
+        publishToBinaryCache: false, actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-fetch"),
-        builtinText: "upstream\nfetched", builtinEntries: @["pkg/index.js"])
+        builtinText: "module.exports=1\n")
       let build = BuildAction(
         governingLockIdentity: lockIdentityOutsideSolvedGraph(),
         kind: bakWriteText, id: "t-pmc-bundle", deps: @["t-pmc-fetch"],
         inputs: @[p / "fetched" / "pkg" / "index.js"],
         outputs: @[p / "bin" / "bundle.js"],
         cwd: p, cacheable: true, publishToBinaryCache: true,
-        actionCachePolicy: ffpTimestamp,
+        actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-bundle"),
         builtinText: "bundled\n")
       createDir(p / "bin")
@@ -480,7 +670,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
       kind: bakWriteText, id: "t-pmc-hostbound", deps: @[],
       inputs: @[a / "src" / "main.c"], outputs: @[a / "out" / "hb.txt"],
       cwd: a, cacheable: true, publishToBinaryCache: true,
-      actionCachePolicy: ffpTimestamp,
+      actionCachePolicy: ffpChecksum,
       weakFingerprint: fingerprintForPayload("t-pmc-hostbound"),
       builtinText: "host specific\n", determinism: some(edHostBound))
     createDir(a / "out")
@@ -495,7 +685,16 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     check "portable-memo-host-bound" in trace
     check "portable-memo-published" notin trace
 
-  test "reads inside a produced directory resolve from its manifest":
+  test "a preserve-tree producer is not published, so a consumer runs it and its reader":
+    # Owner decision 2026-10-31 (Edge-Derived-Identities.md §10 decision 23
+    # rider): a builtin publishes only when its kind reads exactly its
+    # declared inputs. `preserve-tree` copies its sources' mode bits and
+    # reads its previous manifest, so its record stays on its host. This
+    # case used to assert that the reader of the produced tree was served on
+    # another checkout through the producer's published manifest; with the
+    # producer refused, the reader's input under `tree/` has no published
+    # identity, and both run. (The manifest-resolution path itself needs a
+    # publishable directory producer, which no allowed builtin kind is.)
     proc treeGraph(p: string): seq[BuildAction] =
       # The source tree the builtin copies from, identical on both hosts.
       createDir(p / "tree-src" / "sub")
@@ -511,7 +710,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
         outputs: @[p / ".repro" / "preserve-tree" / "t-pmc-tree.manifest"],
         declaredOutputs: @[p / "tree"],
         cwd: p, cacheable: true, publishToBinaryCache: false,
-        actionCachePolicy: ffpTimestamp,
+        actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-tree"),
         builtinText: "tree-src\ntree",
         builtinEntries: @["a.txt", "sub/b.txt"])
@@ -521,7 +720,7 @@ suite "Cache-Scope P3.4 — lookup without materialization":
         inputs: @[p / "tree" / "a.txt", p / "tree" / "sub" / "b.txt"],
         outputs: @[p / "bin" / "use"],
         cwd: p, cacheable: true, publishToBinaryCache: true,
-        actionCachePolicy: ffpTimestamp,
+        actionCachePolicy: ffpChecksum,
         weakFingerprint: fingerprintForPayload("t-pmc-use"),
         builtinText: "used the tree\n")
       createDir(p / "bin")
@@ -547,17 +746,17 @@ suite "Cache-Scope P3.4 — lookup without materialization":
     checkpoint(first.trace)
     for r in first.results:
       require r.status == asSucceeded
-      require r.portable
+    # (`$event` quotes the detail, so the kind is matched without its quotes.)
+    check "portable-memo-publish-refused" in first.trace
+    check "preserve-tree" in first.trace and "builtin" in first.trace
     let b = project("tree-b/elsewhere", "int main;\n")
     let served = run(b, lookup = lookupFor(remote("tree-b")),
       restorer = restorerFor(remote("tree-b")))
     checkpoint(served.trace)
     for r in served.results:
-      check not r.launched
-      check r.status == asCacheHit
-    # The directory was never fetched; the file read inside it, one level
-    # down, was identified from the tree action's record.
-    check not dirExists(b / "tree")
+      check r.launched
+      check r.status == asSucceeded
+    check dirExists(b / "tree")
     check readFile(b / "bin" / "use") == "used the tree\n"
 
   test "an output that cannot be restored falls back to executing":

@@ -1,4 +1,5 @@
 import std/[algorithm, os, osproc, streams, strutils, tables, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import io_mon/hooks
 import io_mon

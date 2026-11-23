@@ -696,8 +696,9 @@ const
     ## when no git crate in the closure inherits from a workspace.
 
   CargoVendorSubdir* = ".repro/cargo-vendor"
-    ## Scratch root for the unpacked tree and the download cache. Under
-    ## `.repro/` so `repro clean` takes it with everything else.
+    ## Scratch root for the unpacked tree and the download cache, under the
+    ## gitignored `.repro/` tree. Only the vendor stamp is a declared
+    ## output, so `repro clean` removes the stamp and keeps the download.
 
 proc cargoVendorManifestPath*(projectRoot: string): string =
   projectRoot / CargoVendorManifestName
@@ -735,7 +736,9 @@ proc cargoExtractedSourceDir*(projectRoot: string): string =
   projectRoot / "src"
 
 proc cargoConfigDir*(projectRoot: string): string =
-  ## `.cargo/` beside the EXTRACTED SOURCE, not beside the recipe: cargo
-  ## searches upward from the manifest directory it is building, and the
-  ## recipe root is not on that path.
+  ## `.cargo/` beside the EXTRACTED SOURCE. Cargo reads configuration from
+  ## its WORKING directory upward, not from the manifest's, so a build run
+  ## from the recipe root names this file explicitly (`cargo --config
+  ## <dir>/config.toml`; cargo_package does) rather than relying on the
+  ## search (https://doc.rust-lang.org/cargo/reference/config.html#hierarchical-structure).
   cargoExtractedSourceDir(projectRoot) / ".cargo"

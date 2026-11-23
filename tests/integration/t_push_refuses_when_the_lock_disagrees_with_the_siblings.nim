@@ -54,6 +54,135 @@ import nf3_override_state_fixture
 
 suite "NF-3: push refuses when the lock disagrees with the siblings":
 
+  test "opaque history does not hide stale flake pins":
+    require nf3Prerequisites("independent pre-push refusals")
+    let fx = setupNf2Fixture("independent-refusals")
+    defer: removeDir(fx.scratch)
+    isolateNf2Config(fx)
+    defer: releaseNf2Config()
+    removePreCommitDispatch(fx)
+    let alphaHead = advanceSibling(fx, "alpha", 2)
+    publishAll(fx)
+    commitLockAndPublish(fx, "leave stale pins for the gate to diagnose")
+    let lockBefore = readFile(lockPath(fx))
+    let committedBefore = readFile(fx.ws / "repro.lock")
+    let appBefore = headOf(fx, fx.app)
+    let refs = fx.scratch / "opaque-refs"
+    let missingOld = repeat('a', 40)
+    check run(q(fx.gitBin) & " -C " & q(fx.app) &
+      " cat-file -e " & missingOld & "^{commit}").code != 0
+    writeFile(refs, "refs/heads/main " & appBefore &
+      " refs/heads/main " & missingOld & "\n")
+    let reportPath = checkReportPath(fx)
+    # Receive-pack cannot advertise a nonexistent object, so drive the real
+    # managed dispatch boundary with an explicitly unobservable remote tip.
+    # Unlike a direct check, dispatch supplies Git's remote identity too.
+    let gate = run(q(fx.repro) & " hooks dispatch pre-push --protocol=2" &
+      " --repo-root=" & q(fx.app) & " --refs-file=" & q(refs) &
+      " -- origin " & q(originUrl(fx, "app")), cwd = fx.app)
+    checkpoint(gate.output)
+    require fileExists(reportPath)
+    let report = parseJson(readFile(reportPath))
+    check gate.code == 2
+    check hasGateFailure(report, "history-rewrite-unverifiable")
+    check hasGateFailure(report, "flake_lock_stale")
+    check gate.output.contains("history-rewrite-unverifiable")
+    check gate.output.contains("flake_lock_stale")
+    if hasGateFailure(report, "flake_lock_stale"):
+      let failure = gateFailureOf(report, "flake_lock_stale")
+      check failure["evidence"].getStr().contains(alphaHead)
+      check failure["remediation"].getStr().len > 0
+    check readFile(lockPath(fx)) == lockBefore
+    check readFile(fx.ws / "repro.lock") == committedBefore
+    check headOf(fx, fx.app) == appBefore
+
+  test "dirty and unpublished siblings do not hide stale flake pins":
+    require nf3Prerequisites("independent checkout refusals")
+    let fx = setupNf2Fixture("independent-checkouts")
+    defer: removeDir(fx.scratch)
+    isolateNf2Config(fx)
+    defer: releaseNf2Config()
+    publishAll(fx)
+    removePreCommitDispatch(fx)
+    let alphaHead = advanceSibling(fx, "alpha", 1)
+    writeFile(siblingDir(fx, "beta") / "dirty.txt", "uncommitted\n")
+    let lockBefore = readFile(lockPath(fx))
+    let gate = gatePrePush(fx)
+    checkpoint(gate.output)
+    check gate.code == 2
+    for property in ["dirty", "unpublished", "flake_lock_stale"]:
+      check hasGateFailure(gate.report, property)
+      check gate.output.contains(property)
+    check readFile(lockPath(fx)) == lockBefore
+
+    # A revision-pinned recipe that disagrees with its committed lock is
+    # independent of dirty/unpublished siblings and stale checkout pins.
+    # Alpha becomes exact-pinned below; gamma stays floating and stale.
+    discard advanceSibling(fx, "gamma", 1)
+    let recipePath = fx.app / "flake.nix"
+    let recipeBefore = readFile(recipePath)
+    let pinnedRecipe = recipeBefore.replace(originUrl(fx, "alpha") & "?ref=main\";",
+      originUrl(fx, "alpha") & "?ref=main&rev=" & alphaHead & "\";")
+    require pinnedRecipe != recipeBefore
+    writeFile(recipePath, pinnedRecipe)
+    discard commitInApp(fx, "pin recipe without refreshing the lock")
+    let consistencyGate = gatePrePush(fx)
+    checkpoint(consistencyGate.output)
+    check consistencyGate.code == 2
+    for property in ["recipe_lock_constraint_violated", "dirty", "unpublished",
+        "flake_lock_stale"]:
+      check hasGateFailure(consistencyGate.report, property)
+      check consistencyGate.output.contains(property)
+    check readFile(lockPath(fx)) == lockBefore
+    writeFile(recipePath, recipeBefore)
+    discard commitInApp(fx, "restore floating recipe")
+
+    # The same independence holds within one develop override: a dirty tree
+    # does not prevent observing that its HEAD also needs publication.
+    writeFile(siblingDir(fx, "alpha") / "dirty.txt", "uncommitted\n")
+    writeFile(fx.ws / ".repro" / "develop-overrides.toml",
+      "schema = \"reprobuild.workspace.develop-overrides.v1\"\n\n" &
+      "[[override]]\npackage = \"alpha\"\nlocal_path = \"alpha\"\n" &
+      "state = \"editable\"\ncreated_at = \"2026-07-22T00:00:00Z\"\n")
+    let overrideGate = gatePrePush(fx)
+    checkpoint(overrideGate.output)
+    check overrideGate.code == 2
+    for property in ["develop_override_dirty", "develop_override_unpublished",
+        "flake_lock_stale"]:
+      check hasGateFailure(overrideGate.report, property)
+    check readFile(lockPath(fx)) == lockBefore
+
+    # A missing private dependency is a blocker, but cannot hide observations
+    # about the checkouts that are present. Epsilon is not a flake input, so
+    # withdrawing its source leaves stale alpha pins independently observable.
+    let workspaceLock = fx.ws / "repro.lock"
+    var lockText = readFile(workspaceLock)
+    let epsilonStart = lockText.find("{ name = \"epsilon\"")
+    require epsilonStart >= 0
+    let epsilonEnd = lockText.find('}', epsilonStart)
+    require epsilonEnd > epsilonStart
+    let epsilonEntry = lockText[epsilonStart .. epsilonEnd]
+    let privateEntry = epsilonEntry.replace("visibility = \"public\"",
+      "visibility = \"team\"")
+    require privateEntry != epsilonEntry
+    lockText = lockText.replace(epsilonEntry, privateEntry)
+    writeFile(workspaceLock, lockText)
+    removeDir(siblingDir(fx, "epsilon"))
+    let privateGate = gatePrePush(fx)
+    checkpoint(privateGate.output)
+    check privateGate.code == 2
+    var privateRefusal = false
+    for failure in privateGate.report["failures"]:
+      let property = failure["property"].getStr()
+      if property == "clone-required" or property.startsWith("evidence-only-"):
+        privateRefusal = true
+    check privateRefusal
+    for property in ["dirty", "unpublished", "flake_lock_stale"]:
+      check hasGateFailure(privateGate.report, property)
+      check privateGate.output.contains(property)
+    check readFile(lockPath(fx)) == lockBefore
+    check readFile(workspaceLock) == lockText
+
   test "t_push_refuses_when_the_lock_disagrees_with_the_siblings":
     const caseName = "t_push_refuses_when_the_lock_disagrees_with_the_siblings"
     if not nf3Prerequisites(caseName):

@@ -38,6 +38,22 @@ the build report and `why`/introspection commands. Cache misses must report a
 specific reason such as `input-changed`, `missing-output`, `tool-identity-drift`,
 `provider-evaluation-input-changed`, or `directory-membership-changed`.
 
+## Partial tool inspection
+
+Development-environment activation can retain usable tools when another request
+cannot be resolved. Its ordinary inspection JSON then records `partial: true`,
+requested and unresolved uses, and the actual unfiltered resolved profiles,
+including executable paths/digests and probe arguments, output, status and
+timeouts. A tool already on PATH remains an observation even when activation
+does not prepend its directory. Failed probes remain failed observations;
+activation success does not imply tool conformance.
+
+This partial dump is diagnostic, not a complete binary identity or cache entry.
+Incomplete resolution publishes no complete `.rbtp`, keyed identity/cache or
+current-key marker. Inspection is replaced atomically so an older complete dump
+does not describe the new fallback. An inspection-write failure is reported as
+a warning without changing activation's existing nonfatal behavior.
+
 ## Bootstrap Compilers
 
 Before any recipe is compiled, `repro` provisions the Nim compiler and the C
@@ -82,8 +98,12 @@ does not fall back to a `nim` or `gcc` on `PATH`.
 
 The sanctioned way to supply the toolchain yourself is explicit:
 `REPRO_NIM_COMPILER` (an absolute path, or a bare `nim` to use the one on
-`PATH` on purpose) and `REPRO_BOOTSTRAP_CC` (an absolute path; it is probed,
-and an unusable one is refused by name). The installed packages and the flake
+`PATH` on purpose) and `REPRO_BOOTSTRAP_CC` (an absolute path; it is probed
+with ambient SDK and header search-path variables such as `SDKROOT`,
+`DEVELOPER_DIR`, `CPATH`, and `C_INCLUDE_PATH` scrubbed just as isolated build
+actions scrub them, and an unusable one is refused by name — under Nix, it must
+point to a wrapped `clang-wrapper-*` or `gcc-wrapper-*` store path, not an
+unwrapped `clang-*` or `gcc-*` binary). The installed packages and the flake
 set `REPRO_NIM_COMPILER` to the Nim they ship. These overrides do not waive
 monitoring: a compiler that cannot be monitored still cannot produce a
 normally cacheable interface extraction. Windows also raises the stack reserve

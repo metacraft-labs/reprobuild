@@ -13,7 +13,6 @@
 ## so the Autotools dispatch path has a closed-set catalog footprint
 ## matching the existing ``autoreconf`` (autoconf-archive bundle).
 
-import std/tables
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
 # DSL-port M9.R.2c — typed slot var for ``executable autoconfBin:``.
@@ -26,6 +25,20 @@ package autoconf:
     nixPackage "nixpkgs#autoconf", executablePath = "bin/autoconf",
       nixpkgsRev = CanonicalNixpkgsRev,
       nixpkgsNarHash = CanonicalNixpkgsNarHash
+    # GM4b: archive realizations formerly held by the retired
+    # `VersionedProvisioning` catalog record (see the conflict notes
+    # in the Gradual-Nix-To-Reprobuild-Migration GM4b milestone).
+    tarball url = "https://repo.msys2.org/msys/x86_64/autoconf-2.71-3-any.pkg.tar.zst",
+      sha256 = "703ea0566c4ec85278d23c626eee976af5bfec2d935d1ef3b5995f1ed4c180e7",
+      archiveType = "tar.zst",
+      executablePath = "bin/autoconf",
+      version = "2.71-3",
+      packageId = "autoconf@2.71-3",
+      installMethod = "msys2-pacman",
+      extractPath = "usr",
+      pacmanPackage = "autoconf",
+      cpu = "x86_64",
+      os = "windows"
 
   # -------------------------------------------------------------------
   # DSL-port M9.R.2 — typed Layer-3 CLI surface for ``autoconf``.
@@ -60,22 +73,3 @@ package autoconf:
         pos configureAc is string,
           position = 0,
           role = input
-
-# ---------------------------------------------------------------------------
-# Harvested MSYS2 catalog (cakBuiltin adapter consumer on Windows).
-# ---------------------------------------------------------------------------
-
-let autoconfCatalog* = @[
-  VersionedProvisioning(
-    version: "2.71-3",
-    archive_format: afTarZst,
-    install_method: imMsys2Pacman,
-    bin_relpath: @["bin/autoconf"],
-    platforms: @[
-      PlatformBinary(cpu: pcX86_64, os: poWindows, url: "https://repo.msys2.org/msys/x86_64/autoconf-2.71-3-any.pkg.tar.zst", sha256: "703ea0566c4ec85278d23c626eee976af5bfec2d935d1ef3b5995f1ed4c180e7", sha512: "", sha1: "", extract_path: "usr")
-    ],
-    installer_args: @[],
-    pacman_packages: @["autoconf"],
-    bootstrap_argv: @[],
-    env: initTable[string, string]())
-]

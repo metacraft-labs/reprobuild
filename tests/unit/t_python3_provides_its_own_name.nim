@@ -69,7 +69,14 @@ suite "python3 answers to the name it is declared under":
     # Pinned on its own because this is the slice that regressed, and a
     # loop that passes for the wrong reason would hide it: the POSIX
     # entries satisfy the rule above through `executablePath` alone.
+    #
+    # Every Windows slice, not one: the embeddable zip is the default, and
+    # the full installer bundles beside it ship `python.exe` too. Those
+    # arrived without the alias and regressed exactly this way, which a
+    # check pinned to a single slice could not see.
     let windows = slices("python3").filterIt(it.os == "windows")
-    check windows.len == 1
-    check windows[0].executablePath == "python.exe"
-    check windows[0].executableAlias == "python3.exe"
+    check windows.len >= 1
+    for slice in windows:
+      checkpoint(slice.cpu & " " & slice.url)
+      check slice.executablePath == "python.exe"
+      check slice.executableAlias == "python3.exe"

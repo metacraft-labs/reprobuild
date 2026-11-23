@@ -121,10 +121,9 @@ import repro_standard_provider/convention
 const
   ScratchDirName* = ".repro/build"
     ## Identical to the Mode 2 Rust convention's scratch dir so the two
-    ## conventions produce co-located outputs and ``repro clean`` finds
-    ## both. The Mode 3 convention is registered AFTER ``rust``, so the
-    ## scratch path stays stable when a project flips between Cargo and
-    ## Mode 3.
+    ## conventions produce co-located outputs. The Mode 3 convention is
+    ## registered AFTER ``rust``, so the scratch path stays stable when a
+    ## project flips between Cargo and Mode 3.
 
   RustEdition* = "2021"
     ## Edition fed to ``rustc --edition``. M30 hard-codes 2021; a

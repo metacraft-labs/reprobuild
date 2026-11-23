@@ -99,11 +99,12 @@
 ## (non-forking) actions cannot declare an environment at all, so their
 ## records survive.
 
-import std/[algorithm, os, sequtils, strutils, tempfiles, unittest]
+import std/[algorithm, os, sequtils, strutils, tables, tempfiles, unittest]
 
 import repro_build_engine
 import repro_hash
 import repro_local_store
+import repro_platform
 
 ## Both decisions mean "the recorded result is still valid, do not
 ## re-execute" (Incremental-Invalidation.md §"File Fingerprint Policies").
@@ -776,17 +777,110 @@ suite "the environment key rendering is canonical and host-independent":
     checkpoint("no PATH entry -> child saw " & $inherited.len & " bytes")
     check inherited.len > 0
 
-    # A declaration REPLACES it. The child does not see the caller's.
+    # A declaration REPLACES it. The child does not see the caller's —
+    # nor anything else behind the declared value: no host tail, and on a
+    # Windows host no Visual Studio directories either, because this edge
+    # declares no MSVC consumer (case 14 pins the edge that does).
     let replaced = pathSeenBy(["PATH=/nonexistent-repro-probe-dir"])
     checkpoint("PATH=<dir> -> child saw: " & replaced)
-    check replaced.contains("/nonexistent-repro-probe-dir")
+    check replaced == "/nonexistent-repro-probe-dir"
     check replaced != inherited
 
     # And an EMPTY declaration replaces it with nothing. Not a
     # fall-through, not a no-op: the child runs with no PATH.
+    #
+    # How a POSIX shell SPELLS that on Windows is the shell's business.
+    # The Cygwin/MSYS runtime under Git-Bash's `sh` converts `PATH` from
+    # its Windows form at startup and renders a defined-but-empty value as
+    # `=`. Measured outside the engine: a bare `startProcess` of `sh` with
+    # `PATH=""` prints `[=]`, while a native child launched the same way
+    # reports `PATH` defined with length 0. So `=` is this probe's reading
+    # of an empty `PATH`; a fall-through or an appended tail still reads as
+    # hundreds of bytes and fails.
+    const emptyPathAsShSeesIt = (when defined(windows): "=" else: "")
     let emptied = pathSeenBy(["PATH="])
     checkpoint("PATH= -> child saw: " & $emptied.len & " bytes: " & emptied)
-    check emptied.len == 0
+    check emptied == emptyPathAsShSeesIt
+
+  test "14. the MSVC search lists reach an edge only through a declared MSVC consumer":
+    # Case 12's two declarations, on a Windows host with Visual Studio
+    # Build Tools, used to come back with the MSVC and Windows SDK
+    # directories appended — 1411 bytes of them behind an EMPTY `PATH=`.
+    # The append is deliberate: the Rust `cc` crate trusts
+    # `VCINSTALLDIR` and then looks for `cl.exe` on `PATH` alone, so an
+    # edge running cargo must keep those directories when it declares its
+    # own `PATH`. It was applied to every edge. Case 12 pins the edge that
+    # declares no MSVC consumer; this pins the decision and the edge that
+    # does, so the two halves cannot be traded against each other again.
+    proc probe(env, passthrough, refs: openArray[string];
+               argv0 = "/bin/true"): BuildAction =
+      result = action("probe", [argv0],
+        governingLockIdentity = lockIdentityOutsideSolvedGraph(),
+        env = env, envPassthrough = passthrough)
+      result.toolIdentityRefs = @refs
+
+    # Hermetic or empty, no consumer: the declared value is the PATH.
+    check not actionUsesMsvcToolchain(probe(["PATH=/a/bin"], [],
+      ["sh", "npm", "node"]))
+    check not actionUsesMsvcToolchain(probe(["PATH="], [], []))
+    check not actionUsesMsvcToolchain(probe(["PATH=/a/bin"], [], ["gcc"],
+      argv0 = r"C:\store\gcc\bin\gcc.exe"))
+    # Hermetic, consumer declared as a ref or run as the executable.
+    check actionUsesMsvcToolchain(probe(["PATH=/a/bin"], [], ["sh", "cargo"]))
+    check actionUsesMsvcToolchain(probe(["PATH=/a/bin"], [], ["sh"],
+      argv0 = r"C:\store\rust\bin\rustc.exe"))
+    check actionUsesMsvcToolchain(probe(["PATH="], [], ["cmake"]))
+    # The wrapped-monitor form is read through to the action's own argv,
+    # and the monitor CLI itself is not mistaken for the executable.
+    var wrapped = probe(["PATH=/a/bin"], [], ["sh"])
+    wrapped.argv = @["/opt/repro", "internal", "io", "monitor", "--depfile",
+      "/tmp/d", "--", r"C:\BuildTools\VC\bin\cl.exe", "/c", "x.c"]
+    check actionUsesMsvcToolchain(wrapped, monitorCli = "/opt/repro")
+    wrapped.argv = @["/opt/repro", "internal", "io", "monitor", "--", "sh"]
+    check not actionUsesMsvcToolchain(wrapped, monitorCli = "/opt/repro")
+    # Inherited or absent: the host's PATH, activation included, as before.
+    check actionUsesMsvcToolchain(probe([], ["PATH"], ["sh"]))
+    check actionUsesMsvcToolchain(probe([], [], []))
+
+    # END TO END, the consumer half. The edge declares `cargo` and runs
+    # `sh` by absolute path; no resolver is configured, so the declared
+    # PATH is the whole of what the edge itself contributes.
+    let sh = shPath()
+    check sh.len > 0
+    let f = makeFixture()
+    defer: removeDir(f.root)
+    var edge = action("path/probe",
+      [sh, "-c", "printf '%s' \"${PATH-<unset>}\" > out/seen.txt"],
+      cwd = f.workRoot,
+      inputs = [],
+      outputs = ["out/seen.txt"],
+      cacheable = false,
+      weakFingerprint = weak("path/probe-cargo"),
+      env = ["PATH=/nonexistent-repro-probe-dir"],
+      governingLockIdentity = lockIdentityOutsideSolvedGraph())
+    edge.toolIdentityRefs = @["cargo"]
+    let res = runBuild(graph([edge]), warmConfig(f.cacheRoot))
+    check res.byId("path/probe").status == asSucceeded
+    let seen = readFile(f.workRoot / "out" / "seen.txt")
+    checkpoint("PATH=<dir> + uses cargo -> child saw: " & seen)
+    check seen.startsWith("/nonexistent-repro-probe-dir")
+    let devEnv = activateMsvcDevEnv()
+    if devEnv.available:
+      # The host has an activation: cl.exe's directory follows the
+      # declared entry. `VCToolsInstallDir` (fresh activation) or the
+      # inherited one names the toolchain root the entry lies under.
+      var vcTools = devEnv.env.getOrDefault("VCToolsInstallDir",
+        getEnv("VCToolsInstallDir"))
+      vcTools = vcTools.replace('\\', '/').strip(chars = {'/'})
+      checkpoint("VCToolsInstallDir: " & vcTools)
+      check vcTools.len > 0
+      # Git-Bash spells `C:/x` as `/c/x`; compare from the drive's tail.
+      let tail = vcTools[min(2, vcTools.len) .. ^1].toLowerAscii()
+      check seen.toLowerAscii().contains(tail & "/bin/hostx64/x64")
+    else:
+      # No activation on this host (not Windows, or no Build Tools): there
+      # is nothing to append, and nothing is.
+      check seen == "/nonexistent-repro-probe-dir"
 
   test "9. the rendering distinguishes the two classes explicitly":
     # A cache key that cannot be explained cannot be debugged. The

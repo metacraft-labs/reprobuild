@@ -260,6 +260,13 @@ proc postBaselineCorpusActions*(): seq[BuildAction] =
     deps = ["stat4/fetch-libfoo-versions"],
     inputs = ["generation/libfoo.versions"],
     outputs = ["generation/repro.lock"]))
+  # HL-10 (`bakLockUpdate`): the lock-update node of a certifying plan. It is
+  # never cached and declares no output (it rewrites tracked sources), and it
+  # is built through `builtinAction` like every other built-in kind.
+  result.add(builtinAction(bakLockUpdate, "stat4/lock-update",
+    governingLockIdentity = CorpusLockIdentity,
+    cacheable = false,
+    text = "."))
 
 proc everyEdgeKindActions*(): seq[BuildAction] =
   ## The baseline corpus plus every post-baseline kind: the graph the §7.2

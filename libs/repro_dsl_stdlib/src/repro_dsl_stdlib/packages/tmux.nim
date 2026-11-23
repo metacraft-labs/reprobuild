@@ -17,9 +17,10 @@
 ##   environment's bash has it. That is a real assumption rather than an
 ##   oversight, and it is the same one the environment this replaces made.
 ##
-## The version is an MSYS2 package version (``pkgver-pkgrel``), not upstream
-## tmux's. Digest matches the ``TMUX_SHA256_X86_64`` pin its consumer
-## harvested independently.
+## ``TmuxMsys2Version`` is an MSYS2 package version (``pkgver-pkgrel``), not
+## upstream tmux's; the record's ``version`` is upstream's, 3.6a, which MSYS2
+## spells ``3.6.a``. Digest matches the ``TMUX_SHA256_X86_64`` pin its
+## consumer harvested independently.
 
 import repro_project_dsl
 import repro_dsl_stdlib/nixpkgs_pin
@@ -37,6 +38,7 @@ package tmux:
       sha256 = "873137dc39f54d3b86829c43878877ccd3ca642669a51641d6470d8caf28277c",
       archiveType = "tar.zst",
       executablePath = "usr/bin/tmux.exe",
+      version = "3.6a",
       packageId = "tmux@" & TmuxMsys2Version,
       cpu = "x86_64",
       os = "windows",

@@ -45,6 +45,7 @@
 import std/[os]
 
 import repro_core/cli_images
+from repro_core/installed_prefix_nim import InstalledPrefixNimEnvVar
 
 import ../repro_selfhost
 
@@ -167,11 +168,15 @@ proc handOverEnvironment*(decision: HandOverDecision;
   ##     pinned reprobuild AND TOOLCHAIN; passing the compiler this way is
   ##     what makes the pin hold for a pinned reprobuild that predates
   ##     compiler pins, since every reprobuild honours this variable.
+  ##   * ``REPRO_INSTALLED_PREFIX_NIM`` removed with it: an inherited record
+  ##     that the provider compiler is the installed prefix's Nim is false
+  ##     once the pin names another (N3, as ``publishPinnedProviderNim``).
   result.add(EnvEdit(name: ResolvedEnvVar, value: decision.prefixIdHex))
   result.add(EnvEdit(name: PublicCliEnvVar, value: decision.engine))
   result.add(EnvEdit(name: FullCliEnvVar, remove: true))
   if providerNimCompiler.len > 0:
     result.add(EnvEdit(name: NimCompilerEnvVar, value: providerNimCompiler))
+    result.add(EnvEdit(name: InstalledPrefixNimEnvVar, remove: true))
 
 proc applyEnvEdits*(edits: openArray[EnvEdit]) =
   for e in edits:

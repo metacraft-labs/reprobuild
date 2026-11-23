@@ -71,15 +71,15 @@ suite "managed post-commit recursion context":
       createDir(manifestsRoot / "repos")
       writeFile(manifestsRoot / "projects" / "lib-a.toml",
         "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-        "[project]\nname = \"lib-a\"\ndefault_revision = \"main\"\n" &
-        "trunk = \"main\"\n\n" &
+        "[project]\nname = \"lib-a\"\n" &
+        "\n" &
         "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" &
           fileUrl(origin) & "\"\n\n" &
         "includes = [\n  \"repos/lib-a.toml\",\n]\n")
       writeFile(manifestsRoot / "repos" / "lib-a.toml",
-        "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
         "[repo]\nname = \"lib-a\"\npath = \"lib-a\"\n" &
-        "remote = \"lib-a-origin\"\nrevision = \"main\"\n")
+        "remote = \"lib-a-origin\"\nmainline = \"main\"\n")
       writeWorkspaceBranch(workspaceRoot, project = "lib-a", branch = "main")
 
       # Install a real preserved hook before the canonical dispatcher wraps it.

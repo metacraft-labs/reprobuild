@@ -65,8 +65,10 @@
 ## ``st_blocks`` are not exercised here and no claim is made about them.
 
 import std/[os, sequtils, strutils, times, unittest]
+import repro_test_support/reasoned_skip
 
 from repro_core/paths import extendedPath
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
 import repro_cas_store
 
@@ -226,12 +228,13 @@ type
     reflink: bool
     hardlink: bool
 
-var scratchDirs: seq[string] = @[]
-
 proc claimScratchDir(parent, tag: string): string =
   if parent.len == 0 or not dirExists(extendedPath(parent)):
     return ""
   let candidate = parent / ("repro-m4-" & $getCurrentProcessId() & "-" & tag)
+  # Owned by THIS process: removed when it exits, whichever cases it ran.
+  # Registered before the directory exists, so it is never on disk unowned.
+  releaseDirAtProcessExit(candidate)
   try:
     createDir(extendedPath(candidate))
     let witness = candidate / "witness"
@@ -239,7 +242,6 @@ proc claimScratchDir(parent, tag: string): string =
     removeFile(extendedPath(witness))
   except CatchableError, Defect:
     return ""
-  scratchDirs.add(candidate)
   candidate
 
 proc candidateParents(): seq[string] =
@@ -272,7 +274,23 @@ proc discoverVolumes(): seq[CostVolume] =
     result.add(CostVolume(dir: dir, fsName: filesystemName(dir),
                           reflink: cap.reflink, hardlink: cap.hardlink))
 
-let volumes = discoverVolumes()
+## Discovery is LAZY: it runs on first use, from inside a case, never at
+## module scope. The runner runs every case in its own process and probes
+## the binary with ``--list-json`` besides; discovery at module scope made
+## each of those processes claim a scratch directory on every volume, and
+## only the final "teardown" case removed any — its own process's.
+var discoveredVolumes: seq[CostVolume] = @[]
+var volumesDiscovered = false
+
+proc hostVolumes(): seq[CostVolume] =
+  if not volumesDiscovered:
+    volumesDiscovered = true
+    discoveredVolumes = discoverVolumes()
+  discoveredVolumes
+
+template volumes(): untyped =
+  ## Every discovered volume; discovers on first use.
+  hostVolumes()
 
 proc reflinkVolumes(): seq[CostVolume] = volumes.filterIt(it.reflink)
 proc copyOnlyVolumes(): seq[CostVolume] = volumes.filterIt(not it.reflink)
@@ -587,20 +605,11 @@ suite "M4 store occupancy — the live measurement":
       check res.verdict.consumed >
         (res.logicalBytes - int64(LivePayloadBytes)) div 2
 
-suite "M4 store occupancy — teardown":
-
-  test "every scratch directory this suite created is removed":
-    var surviving: seq[string] = @[]
-    for dir in scratchDirs:
-      try:
-        removeDir(extendedPath(dir))
-      except CatchableError, Defect:
-        discard
-      if dirExists(extendedPath(dir)):
-        surviving.add(dir)
-    # NAMED rather than counted — M3 made the same change to its own
-    # teardown, and the reason holds here: the only interesting question
-    # about a survivor is WHICH volume it is on.
-    if surviving.len > 0:
-      echo "    surviving: ", surviving.join(", ")
-    check surviving.len == 0
+# There is deliberately no "teardown" suite. This file used to end with a
+# case that removed every scratch directory, and the runner runs each case
+# in its own process: that case removed only what ITS OWN process had
+# claimed, while every other case process and the ``--list-json`` probe left
+# a directory per volume behind. Release now belongs to the process that
+# claimed the directory (``claimScratchDir``), and the guarantee is checked
+# the way the runner runs this file by
+# ``tests/integration/t_when_each_case_runs_alone_no_fixture_outlives_its_process``.

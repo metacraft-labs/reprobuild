@@ -84,24 +84,24 @@ proc seedGitOrigin(gitBin, originPath, workPath, content: string): string =
 
 proc projectToml(secretUrl, publicUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-  "[project]\nname = \"hl6\"\ndefault_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "[project]\nname = \"hl6\"\n" &
+  "\n" &
   "[[remote]]\nname = \"secret-origin\"\nfetch = \"" & secretUrl & "\"\n\n" &
   "[[remote]]\nname = \"public-origin\"\nfetch = \"" & publicUrl & "\"\n\n" &
   "includes = [\n  \"repos/secret.toml\",\n  \"repos/public.toml\",\n]\n"
 
 proc secretFragment(): string =
   ## The EVIDENCE-ONLY private repo (``participation = "evidence-only"``).
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"secret\"\npath = \"secret\"\n" &
-  "remote = \"secret-origin\"\nrevision = \"main\"\n" &
+  "remote = \"secret-origin\"\nmainline = \"main\"\n" &
   "participation = \"evidence-only\"\n"
 
 proc publicFragment(): string =
   ## A NORMAL shared/public repo — its objects MUST still propagate.
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\nname = \"pub\"\npath = \"pub\"\n" &
-  "remote = \"public-origin\"\nrevision = \"main\"\n"
+  "remote = \"public-origin\"\nmainline = \"main\"\n"
 
 proc silenceLayers(scratch: string) =
   putEnv("REPROBUILD_SYSTEM_CONFIG", scratch / "no-system.toml")
@@ -165,9 +165,9 @@ suite "HL-6 — post-commit publishes evidence and excludes from cache push":
       # dir — no remote needed). This is the backend the post-commit evidence
       # refresh publishes to and reads back for throttling.
       let evStoreDir = ws / "evidence-store"
-      writeFile(ws / ".repro-workspace.toml",
-        "schema = \"reprobuild.workspace.bootstrap.v1\"\n\n" &
-        "[manifest]\n" &
+      writeFile(ws / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[records]\n" &
         "url = \"https://example.invalid/manifests.git\"\n\n" &
         "[locking]\n" &
         "route = [{ visibility = \"personal\", " &

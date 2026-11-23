@@ -21,11 +21,16 @@
 ##     100  aoApplied           Information   exit 0
 ##     101  aoConverged         Information   exit 0
 ##     102  aoWaiting           Information   exit 0
+##     103  aoPaused            Information   exit 0
 ##     110  aoApplyFailed       Error         exit 1  (retryable)
 ##     111  aoSourceError       Error         exit 1  (retryable)
 ##     120  aoRejected          Error         exit 2  (operator must act)
 ##     121  aoAmbiguous         Error         exit 2  (operator must act)
 ##     122  aoSecretsFailed     Error         exit 2  (operator must act)
+##     123  aoUnsupportedBase   Error         exit 2  (operator must act)
+##     124  aoStale             Error         exit 2  (operator must act)
+##     125  aoRolledBack        Error         exit 2  (operator must act)
+##     126  aoOperatorAction    Error         exit 2  (operator must act)
 ##     190  tickRaised          Error         exit 1  (tick fell over)
 ##     199  <unrecognised>      Warning
 ##
@@ -79,11 +84,16 @@ const
   EventIdTickApplied* = 100
   EventIdTickConverged* = 101
   EventIdTickWaiting* = 102
+  EventIdTickPaused* = 103
   EventIdTickApplyFailed* = 110
   EventIdTickSourceError* = 111
   EventIdTickRejected* = 120
   EventIdTickAmbiguous* = 121
   EventIdTickSecretsFailed* = 122
+  EventIdTickUnsupportedBase* = 123
+  EventIdTickStale* = 124
+  EventIdTickRolledBack* = 125
+  EventIdTickOperatorAction* = 126
   EventIdTickRaised* = 190
   EventIdTickUnknownOutcome* = 199
 
@@ -120,6 +130,11 @@ proc tickEventId*(outcome: string): int =
   of "aoRejected": EventIdTickRejected
   of "aoAmbiguous": EventIdTickAmbiguous
   of "aoSecretsFailed": EventIdTickSecretsFailed
+  of "aoUnsupportedBase": EventIdTickUnsupportedBase
+  of "aoStale": EventIdTickStale
+  of "aoRolledBack": EventIdTickRolledBack
+  of "aoOperatorAction": EventIdTickOperatorAction
+  of "aoPaused": EventIdTickPaused
   of TickRaisedOutcome: EventIdTickRaised
   else: EventIdTickUnknownOutcome
 

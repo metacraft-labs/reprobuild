@@ -43,6 +43,7 @@ from repro_core/process_streams import drainStream
 from repro_home_generations import Digest256
 
 import ./../manifest_record
+import ./../test_home_fence
 import ./../types
 
 # ---------------------------------------------------------------------------
@@ -59,7 +60,16 @@ proc observeUserFile*(hostPath: string): ObservedState =
     result.present = false
     result.digest = zeroDigest()
     return
-  let content = readFile(extendedPath(hostPath))
+  var content: string
+  try:
+    content = readFile(extendedPath(hostPath))
+  except IOError, OSError:
+    # A dangling symlink or unreadable path at `hostPath` (e.g. a stale symlink
+    # left behind by an earlier tool whose target no longer exists) has no
+    # readable target content: treat as absent so create/write replaces it cleanly.
+    result.present = false
+    result.digest = zeroDigest()
+    return
   var raw = newSeq[byte](content.len)
   for i, ch in content:
     raw[i] = byte(ord(ch))
@@ -143,7 +153,11 @@ proc runContentCommand*(argv: openArray[string]): seq[byte] =
   var args: seq[string] = @[]
   if argv.len > 1:
     for i in 1 ..< argv.len:
-      args.add(argv[i])
+      let a = argv[i]
+      if a == "~" or a.startsWith("~/") or a.startsWith("~\\"):
+        args.add(expandTilde(a))
+      else:
+        args.add(a)
   # `poUsePath` resolves `prog` against the inherited PATH. No shell
   # interpretation — `args` are passed verbatim, so a shell
   # metacharacter in `src` / `identity` cannot escape the argument.
@@ -211,6 +225,7 @@ proc writeUserFileBytes*(hostPath: string;
   ## `contentFromCommand` path (`applyUserFileResourceCmd`) so the
   ## atomic-write, mode-apply, and post-apply-reprobe contract is
   ## implemented once.
+  enforceTestHomeFence(hostPath, "fs.userFile apply")
   let parent = parentDir(hostPath)
   if parent.len > 0:
     createDir(extendedPath(parent))
@@ -228,7 +243,7 @@ proc writeUserFileBytes*(hostPath: string;
         discard f.writeBuffer(unsafeAddr payload[0], payload.len)
     finally:
       close(f)
-  if fileExists(extendedPath(hostPath)):
+  if fileExists(extendedPath(hostPath)) or symlinkExists(extendedPath(hostPath)):
     try: removeFile(extendedPath(hostPath)) except OSError: discard
   moveFile(extendedPath(tmp), extendedPath(hostPath))
   # Apply mode on POSIX; on Windows the field is recorded but not
@@ -321,7 +336,8 @@ proc destroyUserFileResource*(hostPath: string) =
   ## flag needed on a whole-file owner). A missing file is a no-op
   ## (the lifecycle algorithm catches "destroy a thing that's not
   ## there" upstream; this guard is defence-in-depth).
-  if fileExists(extendedPath(hostPath)):
+  enforceTestHomeFence(hostPath, "fs.userFile destroy")
+  if fileExists(extendedPath(hostPath)) or symlinkExists(extendedPath(hostPath)):
     try: removeFile(extendedPath(hostPath)) except OSError: discard
   # Also clean a stray `.repro.tmp` if one happens to exist — a crash
   # between tmp-write and rename would leave one behind; this gives a

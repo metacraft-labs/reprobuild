@@ -3,6 +3,7 @@
 import std/[options, os, tempfiles, unittest]
 
 import repro_workspace_manifests
+import repro_test_support/process_fixtures
 
 const happyToml = """
 schema = "reprobuild.workspace.develop-overrides.v1"
@@ -70,6 +71,11 @@ proc writeFixture(dir, name, content: string): string =
 
 suite "M5 — DevelopOverrides round-trip":
   let dir = createTempDir("reprobuild-m5-develop-overrides-", "")
+  # Removed when THIS process exits. Suite-level code runs in every
+  # process the runner starts -- one per case, plus its ``--list-json``
+  # probe -- and nothing removed this directory in any of them. See
+  # ``repro_test_support/process_fixtures``.
+  releaseDirAtProcessExit(dir)
 
   test "happy path populates every override entry":
     let path = writeFixture(dir, "develop-overrides-happy.toml", happyToml)

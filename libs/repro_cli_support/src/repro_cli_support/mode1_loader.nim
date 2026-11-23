@@ -22,8 +22,8 @@
 ## existing engine plumbing (which compiles the project provider from
 ## an on-disk ``repro.nim``), we write the synthesised project files
 ## under ``<workspaceRoot>/.repro/mode1-synth/`` rather than the
-## workspace root itself. The synth dir is plain build scratch — every
-## ``repro clean`` wipes it, and the user's source tree is never
+## workspace root itself. The synth dir is plain build scratch under the
+## gitignored ``.repro/`` tree, and the user's source tree is never
 ## touched. The test ``test_mode1_no_persistence.nim`` guards against
 ## regression by asserting that ``<workspaceRoot>/repro.scanned-deps.nim``
 ## is absent after a Mode 1 build.
@@ -151,8 +151,9 @@ const
   Mode1ScratchDirName* = ".repro/mode1-synth"
     ## Sub-path under the workspace root where the loader materializes
     ## the synthesised ``repro.nim`` + ``repro.scanned-deps.nim``.
-    ## Plain build scratch — wiped by ``repro clean`` and gitignored
-    ## by every fixture's standard ``.gitignore`` ``\.repro/`` rule.
+    ## Plain build scratch, gitignored by every fixture's standard
+    ## ``.gitignore`` ``\.repro/`` rule. No action declares it as an
+    ## output, so ``repro clean`` leaves it in place.
 
   LayoutContainerDirs* = ["apps", "libs", "tools", "cmd", "pkg", "bin"]
     ## Directory names under the workspace root that the loader scans

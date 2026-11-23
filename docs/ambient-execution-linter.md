@@ -97,12 +97,11 @@ and shrinking.
   wired packages, so the obvious fix is for the edge to copy out of the realized
   store prefix. There is currently no way to express that:
 
-  * The `provisioning:` DSL forms accept no `env:` key — `tarball` takes
-    url / sha256 / archiveType / executablePath / packageId / cpu / os /
-    stripComponents / mirror / lockIdentity, and `nixPackage` a similar set. So a
-    package cannot export `CLINGO_ROOT=${prefix}` for consumers to address into.
-    (The `env:` field on `VersionedProvisioning` is the *harvested catalog*
-    surface, a different thing.)
+  * A `tarball` realization can declare `env = "NAME=${prefix}"` (GM4b moved
+    it there from the retired harvested-catalog records), but only a home
+    profile binds it; a recipe's tool mechanism does not hand it to actions,
+    and `nixPackage` has no such key. So a package cannot export
+    `CLINGO_ROOT=${prefix}` for consuming ACTIONS to address into.
   * The engine's tool mechanism is `toolIdentityRefs`, which prepends the
     realized tool's **bin directory to PATH**. That hands an action the
     *executable*, not the *prefix* — enough to run `clingo`, not enough to copy

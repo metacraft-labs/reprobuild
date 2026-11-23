@@ -1,0 +1,3 @@
+let backend = "gcc"
+let command = backend & " -c input.c -o output.o"
+discard execCmdEx(command)

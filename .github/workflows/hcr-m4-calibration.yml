@@ -1,0 +1,100 @@
+name: HCR HLX-M4 condition calibration
+
+# Measures the HLX-M4 concurrency gate's run-condition envelope on the
+# dedicated benchmark runner and uploads a PROPOSED calibration record.
+#
+# The gate (`e2e_hcr_linux_concurrent_patch_no_torn_instruction`, in the HCR
+# lane) counts a fixture process as calibrated evidence only when the reading
+# taken before it starts -- contention by others on the CPU set the process
+# may use, per available CPU (tests/e2e/hcr-linux-threads/m4_conditions.nim)
+# -- is inside the envelope committed in
+# tests/e2e/hcr-linux-threads/hlx_m4_calibration.json. Until that record is
+# calibrated and approved, the gate withholds its verdict ("condition not yet
+# calibrated on a dedicated host") and the lane ends INCONCLUSIVE.
+#
+# This workflow is how the record gets its numbers. It never adopts them: the
+# record it uploads has status "proposed", which the gate refuses. A person
+# reads summary.txt, copies proposed-calibration.json over the committed
+# record, sets status "calibrated" and approvedBy, and lands it.
+#
+# Dispatch only, never on push or pull_request: one run occupies the single
+# benchmark slot for the whole measurement, and the numbers mean something
+# only when nothing else is running there (the tool checks and refuses
+# otherwise). GitHub offers workflow_dispatch only for workflows that exist on
+# the repository's default branch, so this cannot be dispatched until this
+# file has been promoted there; once it has, a dispatch may still pick any
+# branch as the ref to measure. Until then, run the same measurement over SSH
+# with `just hcr_m4_calibrate` (header of m4_calibrate.nim).
+
+on:
+  workflow_dispatch:
+    inputs:
+      runs:
+        description: Fixture runs per arm per phase
+        default: '48'
+        required: true
+      phases:
+        description: >-
+          Space-separated phases (idle, busy:K). A cmd:<shell> phase is not
+          offered here, to keep dispatch input out of a shell.
+        default: 'idle busy:2 busy:4 busy:8 busy:16'
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  calibrate:
+    name: HLX-M4 condition calibration (benchmark runner)
+    # The runner the HCR lane uses: [linux, x64, benchmark] is the fleet's
+    # single-slot, no-co-tenant label (gpu-server-001-mcl-bench-001, cgroup
+    # AllowedCPUs 8-15; its unit asks for CFS at Nice=-20, which is to be
+    # confirmed before a calibration from it is trusted). The envelope must
+    # be measured where the gate is judged.
+    runs-on: [linux, x64, benchmark]
+    # Five phases x 48 rounds x 5 arms is 1,200 fixture processes; the gate's
+    # ~97 take ~230 s (~2.4 s each, the 100 ms reading included), so ~50 min,
+    # plus each phase's warm-up and the dev-shell setup.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - name: Mint installation token for cross-repo sibling access
+        id: ci_token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+          owner: metacraft-labs
+          permission-contents: read
+      - uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
+        with:
+          env-flavor: nix
+          gh-token: ${{ steps.ci_token.outputs.token }}
+          substituters: ${{ vars.SUBSTITUTERS }}
+          trusted-public-keys: ${{ vars.TRUSTED_PUBLIC_KEYS }}
+          attic-token: ${{ secrets.ATTIC_TOKEN }}
+          attic-cache: ${{ vars.ATTIC_CACHE }}
+          attic-endpoint: ${{ vars.ATTIC_ENDPOINT }}
+          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
+          app-private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
+      - name: Measure the envelope
+        env:
+          RUNS: ${{ inputs.runs }}
+          PHASES: ${{ inputs.phases }}
+        run: |
+          set -euo pipefail
+          args=(--runs="$RUNS" --out-dir=build/hcr-m4-calibration/run)
+          for phase in $PHASES; do
+            case "$phase" in
+              idle|busy:[0-9]*) args+=(--phase="$phase") ;;
+              *) echo "refusing phase '$phase' (idle or busy:K only)" >&2; exit 2 ;;
+            esac
+          done
+          dev-exec just hcr_m4_calibrate "${args[@]}"
+      - name: Upload the measurement and the proposed record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hcr-m4-calibration
+          path: build/hcr-m4-calibration/run/
+          retention-days: 90

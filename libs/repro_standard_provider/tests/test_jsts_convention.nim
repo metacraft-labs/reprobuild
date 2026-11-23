@@ -28,8 +28,8 @@
 ##     - at least one ``jsts-tsc-compile`` action exists
 ##     - the action's argv carries ``npx`` as argv[0] and ``tsc`` in the
 ##       argv
-##     - at least one ``.js`` and one ``.d.ts`` appear in the action's
-##       declared outputs
+##     - a discovery edge supplies the compiler-authoritative dynamic
+##       output fragment consumed by the compile action
 ##   * ``emitFragment`` against ``node-server`` (skipped if node isn't on
 ##     PATH):
 ##     - at least one ``jsts-copy-js-*`` action exists
@@ -52,7 +52,7 @@
 ##     tests): no ``jsts-npm-ci`` / ``jsts-esbuild-*`` / ``jsts-shim-*``
 ##     / ``jsts-test-run`` actions emitted.
 
-import std/[os, strutils, unittest]
+import std/[os, osproc, strutils, unittest]
 import repro_test_support
 
 import repro_core
@@ -328,18 +328,15 @@ suite "javascript/typescript convention M16":
       check sawTsc
       check tsc.pool == "compile"
 
-      var sawJs = false
-      var sawDts = false
-      for outPath in tsc.outputs:
-        let lower = outPath.toLowerAscii
-        if lower.endsWith(".d.ts"):
-          sawDts = true
-          check ".repro" in outPath.replace('\\', '/')
-        elif lower.endsWith(".js"):
-          sawJs = true
-          check ".repro" in outPath.replace('\\', '/')
-      check sawJs
-      check sawDts
+      check tsc.outputs.len == 0
+      check tsc.dynamicDepsFile.endsWith("tsc-outputs.dyndep")
+      check "jsts-tsc-outputs" in tsc.deps
+      var discovery: BuildActionDef
+      for node in fragment.nodes:
+        if node.kind == gnkAction:
+          let candidate = decodeBuildActionPayload(toBytes(node.payload))
+          if candidate.id == "jsts-tsc-outputs": discovery = candidate
+      check discovery.outputs == @[tsc.dynamicDepsFile]
 
   test "emitFragment: node-server produces a JS-copy action":
     if not nodeOnPath():
@@ -756,3 +753,53 @@ suite "javascript/typescript convention M16":
       # checking for the space-separated verb sentinel ``" ci "``.
       check " ci " in shellLine
       check " install " notin shellLine
+
+  test "real TypeScript convention fulfills outputs for mts cts exclude and noEmit":
+    # Execute the convention's actual actions, including its discovery edge;
+    # comparing a helper's output alone would miss a broken graph connection.
+    let scratch = getTempDir() / ("repro-ts-convention-outputs-" & $getCurrentProcessId())
+    if dirExists(scratch): removeDir(scratch)
+    createDir(scratch / "src")
+    defer: removeDir(scratch)
+    writeFile(scratch / "package.json", "{\"name\":\"output-regression\",\"version\":\"1.0.0\",\"type\":\"module\"}\n")
+    writeFile(scratch / "src/module.mts", "export const answer = 42;\n")
+    writeFile(scratch / "src/common.cts", "const answer = 42; export = answer;\n")
+    writeFile(scratch / "src/index.ts", "export const entry = 42;\n")
+    writeFile(scratch / "src/excluded.ts", "export const excluded = 0;\n")
+    writeFile(scratch / "reprobuild.nim", "import repro_project_dsl\npackage outputRegression:\n  uses:\n    \"node >=20\"\n    \"typescript >=5.6\"\n  library outputRegression\n")
+    for mode in ["", ",\"noEmit\":true", ",\"emitDeclarationOnly\":true"]:
+      if dirExists(scratch / ".repro"): removeDir(scratch / ".repro")
+      writeFile(scratch / "tsconfig.json", "{\"compilerOptions\":{\"module\":\"NodeNext\",\"target\":\"ES2020\",\"isolatedModules\":true,\"verbatimModuleSyntax\":true" & mode & "},\"include\":[\"src/**/*\"],\"exclude\":[\"src/excluded.ts\"]}\n")
+      let conv = jsts_convention.javaScriptTypeScriptConvention()
+      require conv.recognize(scratch, dummyRequest(scratch))
+      let fragment = conv.emitFragment(scratch, dummyRequest(scratch))
+      var sawCompile = false
+      for node in fragment.nodes:
+        if node.kind != gnkAction: continue
+        let action = decodeBuildActionPayload(toBytes(node.payload))
+        let argv = inlineArgvOf(action)
+        if argv.len == 0: continue
+        let outcome = execCmdEx(argv.quoteShellCommand(), workingDir = scratch)
+        checkpoint "mode=" & mode & " action=" & action.id & "\n" & outcome.output
+        require outcome.exitCode == 0
+        var outputs = action.outputs
+        if action.dynamicDepsFile.len > 0:
+          for line in readFile(action.dynamicDepsFile).splitLines():
+            if line.startsWith("output\t"):
+              outputs.add(line.split('\t')[2])
+        for output in outputs:
+          checkpoint "declared output: " & output
+          check fileExists(output) or dirExists(output)
+          check "excluded" notin output
+        if action.id == "jsts-tsc-compile":
+          sawCompile = true
+          let dist = scratch / ".repro/build/dist"
+          if mode.contains("noEmit"):
+            check outputs.len == 0
+          else:
+            check dist / "module.d.mts" in outputs
+            check dist / "common.d.cts" in outputs
+            if not mode.contains("emitDeclarationOnly"):
+              check dist / "module.mjs" in outputs
+              check dist / "common.cjs" in outputs
+      check sawCompile

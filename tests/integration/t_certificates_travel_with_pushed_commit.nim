@@ -1,25 +1,33 @@
 ## TC-2 — certificates TRAVEL with the pushed commit.
 ##
 ## A certificate issued by the TC-1 path (``repro test`` in a clean state) is
-## attached to its commit C as a git note under
-## ``refs/notes/reprobuild/certificates`` and carried to the upstream bare by
-## ``repro push`` so reviewers / the gate / CI can read exactly what was
+## delivered to the local certificate store, and that is all issuance does. The
+## managed pre-push hook that ``repro push``'s own ``git push`` runs publishes it
+## as a git note on the TREE its content names, under the shared
+## ``refs/notes/test-certificates/certificates``, and pushes that ref to the
+## upstream bare, so reviewers / the gate / CI can read exactly what was
 ## attested. The transport must:
 ##
-##   1. Carry the attached certificate to the upstream: after ``repro push``,
+##   1. Carry the stored certificate to the upstream: after ``repro push``,
 ##      the cert is READABLE from the upstream bare (fetch the notes ref) and
 ##      its content round-trips + attests C.
 ##   2. Carry MULTIPLE certificates (e.g. two platforms) on the same commit —
 ##      BOTH travel and are BOTH readable on the upstream (accumulate, no
 ##      overwrite).
-##   3. The reader ``readAttachedCertificates(…, C)`` IGNORES a record whose
-##      internal ``commit`` field != C (defense against a stale/misfiled note).
+##   3. The reader ``readAttachedCertificatesFrom(…, C, …)`` looks the note up on
+##      ``C^{tree}`` and IGNORES a record in it whose ``content`` does not name
+##      that tree, REPORTING it as a carrier fault (misattached note). A record
+##      whose ``base`` names another commit but whose content IS C's tree is
+##      kept, because ``base`` is never compared.
 ##
 ## Falsifiability (see the milestone note):
-##   - no attach → the upstream has no cert note → assert 1 fails.
+##   - no propagation in the hook → the upstream has no cert note → assert 1
+##     fails.
 ##   - overwrite-instead-of-accumulate → only one platform survives → the
 ##     multi-cert assert (2) fails.
-##   - no mismatch filter → the wrong-commit cert is returned → assert 3 fails.
+##   - no mismatch filter → the other-content cert is returned → assert 3 fails.
+##   - a filter on ``base`` → the same-content, other-base cert is dropped →
+##     assert 3 fails.
 ##
 ## Hermetic: only local ``git init`` / ``git init --bare`` repos; no network.
 ## Skip rule: ``git`` or ``ssh-keygen`` missing on PATH.
@@ -32,6 +40,7 @@ import std/[json, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_cli_support
+import ./certificate_note_seed
 import repro_workspace_manifests
 
 include tc5_cert_signing_helpers
@@ -89,19 +98,18 @@ proc projectToml(libAUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"lib-a\"\n" &
-  "default_revision = \"main\"\n" &
-  "trunk = \"main\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"lib-a-origin\"\nfetch = \"" & libAUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n]\n"
 
 const libAFragmentToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "lib-a-origin"
-revision = "main"
+mainline = "main"
 """
 
 type
@@ -113,9 +121,11 @@ type
     libAPath: string
     libASha: string
     daemonKey: string
+    certStore: string
 
 proc setupFixture(gitBin, slug: string): Fixture =
   result.scratch = createTempDir("repro-tc2-" & slug & "-", "")
+  result.certStore = isolateCertificateStore(result.scratch)
   result.reproBin = reproBinary()
   result.libAOrigin = result.scratch / "origin-lib-a.git"
   result.libASha = seedGitOrigin(gitBin, result.libAOrigin,
@@ -192,13 +202,16 @@ proc issueRealCert(fx: Fixture; fixtureJson: string): CmdResult =
 
 proc invokePush(fx: Fixture): CmdResult =
   ## ``--no-certify`` so the push's own certify slot stays a no-op; the
-  ## certificate transport (carry the attached notes) runs regardless.
+  ## certificate transport is the managed hook's, and runs regardless.
   runShell(shellCommand(@[
     fx.reproBin, "push", "--write-report",
     "--no-certify",
     "--workspace-root=" & fx.workspaceRoot,
     "--current-repo=" & fx.libAPath,
     "--json"], @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+
+proc gitInRepoFails(gitBin, repo, args: string): bool =
+  runCmd(q(gitBin) & " -C " & q(repo) & " " & args).code != 0
 
 proc clonedUpstreamCerts(gitBin, originPath, commit, scratch, slug: string):
     seq[TestCertificate] =
@@ -210,9 +223,9 @@ proc clonedUpstreamCerts(gitBin, originPath, commit, scratch, slug: string):
   discard requireGit(q(gitBin) & " clone " &
     q(fileUrl(originPath)) & " " & q(verifyClone))
   discard requireGit(q(gitBin) & " -C " & q(verifyClone) &
-    " fetch origin refs/notes/reprobuild/certificates:" &
-    "refs/notes/reprobuild/certificates")
-  readAttachedCertificates(gitBin, verifyClone, commit)
+    " fetch origin " & certificateNotesRef & ":" & certificateNotesRef)
+  readAttachedCertificatesFrom(gitBin, verifyClone, commit,
+    certificateNotesRef).certs
 
 suite "TC-2 — certificates travel with the pushed commit":
 
@@ -223,6 +236,13 @@ suite "TC-2 — certificates travel with the pushed commit":
     else:
       let fx = setupFixture(gitBin, "travel")
       defer: removeDir(fx.scratch)
+      # An unpublished commit: only a push that introduces it runs the hook.
+      writeFile(fx.libAPath / "travel.txt", "travel\n")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) & " add travel.txt")
+      discard requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " commit -m " & q("change to certify"))
+      let head = requireGit(q(gitBin) & " -C " & q(fx.libAPath) &
+        " rev-parse HEAD").strip()
       seedLock(fx)
 
       # --- issue a REAL certificate via the TC-1 path ---------------------
@@ -233,16 +253,16 @@ suite "TC-2 — certificates travel with the pushed commit":
         checkpoint("repro test output: " & issued.output)
       check issued.code == 0
 
-      let certFile = defaultCertificatePath(
-        fx.workspaceRoot, fx.libASha, currentPlatformTag())
-      check fileExists(certFile)
-      let cert = readCertificateFile(certFile)
-      check cert.vcs.commit == fx.libASha
+      let libATree = treeContentId(gitBin, fx.libAPath, head)
+      let cert = issuedCertificate(fx.certStore, libATree,
+        currentPlatformTag()).cert
+      check cert.vcs.content == libATree
+      check cert.vcs.base == head
       check "t-unit" in cert.targets
 
-      # --- attach it to commit C (the TC-2 carrier) -----------------------
-      let att = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert)
-      check att.ok
+      # Issuance wrote the store and no note.
+      check gitInRepoFails(gitBin, fx.libAPath, "rev-parse --verify --quiet " &
+        certificateNotesRef)
 
       # A SECOND platform's certificate for the SAME commit. We can only run
       # on one real platform, so this one is a synthetic-platform clone of the
@@ -253,41 +273,43 @@ suite "TC-2 — certificates travel with the pushed commit":
         if cert.platform == "linux/other": "linux/second"
         else: "linux/other"
       cert2.targets = @["t-integration"]
-      let att2 = attachCertificate(gitBin, fx.libAPath, fx.libASha, cert2)
-      check att2.ok
+      check publishCertificateToLocalStore(cert2, fx.libAPath).written
 
-      # Locally, BOTH certs are now attached to C (accumulated, not clobbered).
-      let localCerts = readAttachedCertificates(gitBin, fx.libAPath, fx.libASha)
-      check localCerts.len == 2
-      var localPlatforms: seq[string]
-      for c in localCerts: localPlatforms.add(c.platform)
-      check cert.platform in localPlatforms
-      check cert2.platform in localPlatforms
-
-      # --- push: the attached certs must travel to the upstream bare ------
+      # --- push: the stored certs must travel to the upstream bare --------
+      let hooks = runShell(shellCommand(@[fx.reproBin, "hooks", "ensure",
+        "--vcs", fx.libAPath],
+        @[(name: "REPROBUILD_REPRO", value: fx.reproBin)]))
+      checkpoint("hooks ensure: " & hooks.output)
+      check hooks.code == 0
       let pushed = invokePush(fx)
       checkpoint("push output: " & pushed.output)
       check pushed.code == 0
       let report = parseFile(
         fx.workspaceRoot / ".repro" / "build" / "reports" / "push-report.json")
       check report["exitCode"].getInt() == 0
-      # The push report records that the cert notes were carried for lib-a.
-      var carried: seq[string]
-      for n in report["certNotesPushed"]: carried.add(n.getStr())
-      check "lib-a" in carried
+      check not report.hasKey("certNotesPushed")
+
+      # Locally, BOTH certs are now noted on C (accumulated, not clobbered).
+      let localCerts = readAttachedCertificatesFrom(gitBin, fx.libAPath,
+        head, certificateNotesRef).certs
+      check localCerts.len == 2
+      var localPlatforms: seq[string]
+      for c in localCerts: localPlatforms.add(c.platform)
+      check cert.platform in localPlatforms
+      check cert2.platform in localPlatforms
 
       # ASSERT 1 + 2: read the certs back FROM THE UPSTREAM (a fresh clone +
       # fetch of the notes ref). BOTH platforms' certs travelled and attest C.
-      # Falsifiable: no attach → no note on the upstream → upstreamCerts empty.
+      # Falsifiable: no hook call → no note on the upstream → upstreamCerts empty.
       # Falsifiable: overwrite-instead-of-accumulate → only ONE platform here.
       let upstreamCerts = clonedUpstreamCerts(
-        gitBin, fx.libAOrigin, fx.libASha, fx.scratch, "after-push")
+        gitBin, fx.libAOrigin, head, fx.scratch, "after-push")
       check upstreamCerts.len == 2
       var upstreamPlatforms: seq[string]
       for c in upstreamCerts:
         upstreamPlatforms.add(c.platform)
         # Each travelled cert genuinely attests C (round-trips the binding).
-        check c.vcs.commit == fx.libASha
+        check c.vcs.content == libATree
         check c.schema == testCertificateSchemaV1
       check cert.platform in upstreamPlatforms
       check cert2.platform in upstreamPlatforms
@@ -296,20 +318,38 @@ suite "TC-2 — certificates travel with the pushed commit":
         if c.platform == cert.platform:
           check "t-unit" in c.targets
 
-      # ASSERT 3: a cert whose INTERNAL commit != C is IGNORED by the reader.
-      # Attach a misfiled cert (its body claims a DIFFERENT commit) under C's
-      # note, then confirm the reader for C does NOT return it. Falsifiable:
-      # drop the mismatch filter and this cert is returned (count climbs to 3,
-      # and the wrong-commit platform appears).
+      # ASSERT 3: a cert whose CONTENT is not C's tree is IGNORED by the
+      # reader and REPORTED as misattached. Attach a misfiled cert (its body
+      # names DIFFERENT content) to the note on C's tree, then confirm the
+      # reader for C does NOT return it. Falsifiable: drop the misattachment
+      # filter and this cert is returned (count climbs, and the misfiled
+      # platform appears).
       var mismatch = cert
-      mismatch.vcs.commit = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+      mismatch.vcs.content =
+        "git-tree-sha1:deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
       mismatch.platform = "linux/mismatch"
-      let attM = attachCertificate(gitBin, fx.libAPath, fx.libASha, mismatch)
+      let cTree = libATree["git-tree-sha1:".len .. ^1]
+      let attM = seedCertificateRecord(gitBin, fx.libAPath, cTree, mismatch)
       check attM.ok
-      let afterMismatch =
-        readAttachedCertificates(gitBin, fx.libAPath, fx.libASha)
-      # Still exactly the two genuine certs for C; the misfiled one is dropped.
-      check afterMismatch.len == 2
+      # …and a cert issued on top of ANOTHER commit whose content IS C's tree
+      # is KEPT: the filter never compares ``base``. Falsifiable: filter on
+      # ``base`` and this one disappears.
+      var otherBase = cert
+      otherBase.vcs.base = "0123456789abcdef0123456789abcdef01234567"
+      otherBase.platform = "linux/other-base"
+      let attB = seedCertificateNote(gitBin, fx.libAPath, otherBase)
+      check attB.ok
+      let read = readAttachedCertificatesFrom(gitBin, fx.libAPath, head,
+        certificateNotesRef)
+      check read.misattached.len == 1
+      check "deadbeef" in read.misattached.join("\n")
+      let afterMismatch = read.certs
+      # The two genuine certs for C plus the other-base one; the misfiled one
+      # is dropped.
+      check afterMismatch.len == 3
+      var afterPlatforms: seq[string]
       for c in afterMismatch:
-        check c.vcs.commit == fx.libASha
+        check c.vcs.content == libATree
         check c.platform != "linux/mismatch"
+        afterPlatforms.add(c.platform)
+      check "linux/other-base" in afterPlatforms

@@ -6,9 +6,10 @@
 ##
 ## Hermetic: every fixture is materialized on disk and served via a
 ## ``file://`` URL. The single non-hermetic dependency is a host
-## ``7z.exe`` on PATH (or in a pre-staged ``7zip`` catalog prefix). Per
+## ``7z.exe`` on PATH (or in a pre-staged ``7zip`` store prefix). Per
 ## the M3 ``discoverSevenZipExe`` contract, the test pre-seeds the
-## store with a hand-rolled ``7zip`` prefix that aliases the host's
+## store with a hand-rolled ``7zip`` prefix (the stdlib 7-Zip
+## package's name) that aliases the host's
 ## ``7z.exe`` so the catalog-prefix branch (Step i) of the discovery
 ## order is exercised end-to-end alongside the PATH-fallback (Step ii).
 ## Step (iii) — fail-closed via ``EBuiltinSevenZipUnavailable`` — is
@@ -27,11 +28,15 @@ from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
+from repro_test_support import testCaseScratchSlug
+import repro_test_support/reasoned_skip
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter-7z-sfx"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter-7z-sfx" /
+  testCaseScratchSlug()
 
 proc resetDir(path: string) =
   if dirExists(extendedPath(path)):
@@ -72,24 +77,25 @@ proc resolveRealSevenZip(hostExe: string): string =
           return value
   hostExe
 
-proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
-  ## Pre-populate the store with a ``7zip``-packaged prefix containing
+proc seedSevenZipPrefix(store: var Store; hostSevenZ: string;
+                        packageName = "7zip"): string =
+  ## Pre-populate the store with a ``packageName`` prefix containing
   ## ``bin/7z.exe`` (aliased from the host's discovered 7z). Returns
   ## the abs path of the realized prefix. Drives the M3
   ## ``discoverSevenZipExe`` Step (i) — catalog-prefix lookup —
-  ## without actually exercising the cakBuiltin downloader (we want
+  ## without actually exercising the archive realizer's downloader (we want
   ## the test to focus on SFX flatten, not on the 7zip-as-package
   ## bootstrap).
   ##
   ## Uses the same ``realizePrefix`` plumbing the real adapter does, so
   ## the on-disk layout + the ``prefixes`` index row both look identical
   ## to a "real" 7zip realize.
-  let prefixId = computeRealizationHash("7zip", "test-seed",
+  let prefixId = computeRealizationHash(packageName, "test-seed",
     "builtin", "sha256:seed", "bin/7z.exe", "file:///seed",
     "seed", @["fixture"])
   let hint = StoreReceiptHint(
     adapter: "builtin",
-    packageName: "7zip",
+    packageName: packageName,
     version: "test-seed",
     declaredExecutablePath: "bin/7z.exe",
     exportedExecutables: @["bin/7z.exe"],
@@ -117,7 +123,61 @@ proc seedSevenZipPrefix(store: var Store; hostSevenZ: string): string =
       mechanism = "copy")
   outcome.absolutePath
 
-suite "M3 — cakBuiltin 7z SFX flatten":
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
+
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+suite "M3 — archive realizer 7z SFX flatten":
 
   test "test_m3_discover_sevenzip_finds_catalog_prefix":
     ## M3 ``discoverSevenZipExe`` Step (i): a store-resident 7zip
@@ -138,6 +198,23 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       let discovered = discoverSevenZipExe(store, "test-tool")
       check discovered.startsWith(prefixAbs)
       check fileExists(extendedPath(discovered))
+
+  test "test_discover_sevenzip_accepts_legacy_sevenzip_prefix":
+    ## Between GM4b and the fix that let ``package "7zip"`` be declared,
+    ## the stdlib 7-Zip package was named ``sevenzip``; a prefix realized
+    ## in that window is recorded under that name and must still be found.
+    let fixtureDir = FixtureRoot / "discover-legacy-name"
+    let storeDir = fixtureDir / "store"
+    resetDir(fixtureDir); resetDir(storeDir)
+    let hostSeven = findExe("7z")
+    if hostSeven.len == 0:
+      skip("no host 7z on PATH; cannot seed the legacy `sevenzip` prefix")
+    else:
+      var store = openStore(storeDir)
+      defer: store.close()
+      let prefixAbs = seedSevenZipPrefix(store, hostSeven, "sevenzip")
+      let discovered = discoverSevenZipExe(store, "test-tool")
+      check discovered.startsWith(prefixAbs)
 
   test "test_m3_discover_sevenzip_fails_closed_without_7zip":
     ## M3 ``discoverSevenZipExe`` Step (iii): no catalog prefix + no
@@ -195,6 +272,8 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       createDir(extendedPath(innerDir / "etc"))
       writeFile(extendedPath(innerDir / "bin" / "git.exe"),
         "stub-git-payload-bytes\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "git.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "etc" / "gitconfig"),
         "# stub system gitconfig\n")
       let plain7z = fixtureDir / "git-plain.7z"
@@ -213,23 +292,12 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       defer: store.close()
       discard seedSevenZipPrefix(store, hostSeven)
 
-      let vp = initVersionedProvisioning(
-        version = "stub-2.54.0",
-        archive_format = afSevenZipSfx,
-        install_method = imExtract,
-        bin_relpath = @["bin/git.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(absolutePath(sfxPath)),
-            sha256 = sha,
-            extract_path = innerName)
-        ])
-      let res = resolveBuiltinPackage("git-sfx", @[vp])
-      check res.found
-      check res.resolution.archiveFormat == afSevenZipSfx
+      let res = selectArchive("git-sfx", [hostRecord(
+        fileToUrl(absolutePath(sfxPath)), "7z-sfx", "bin/git.exe",
+        sha256 = sha, version = "stub-2.54.0", extractPath = innerName)])
+      check res.archiveFormat == afSevenZipSfx
 
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       let realizedGit = outR.prefixAbsolutePath / "bin" / "git.exe"
       check fileExists(extendedPath(realizedGit))
@@ -254,8 +322,12 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       createDir(extendedPath(innerDir / "bin"))
       writeFile(extendedPath(innerDir / "bin" / "erl.exe"),
         "stub-erl-bytes\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "erl.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "bin" / "erlc.exe"),
         "stub-erlc-bytes\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "erlc.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       let archivePath = fixtureDir / "otp.7z"
       let addRes = execCmdEx(
         quoteShell(hostSeven) & " a -t7z " &
@@ -267,21 +339,11 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       var store = openStore(storeDir)
       defer: store.close()
       discard seedSevenZipPrefix(store, hostSeven)
-      let vp = initVersionedProvisioning(
-        version = "stub-28.5",
-        archive_format = afSevenZip,
-        install_method = imExtract,
-        bin_relpath = @["bin/erl.exe", "bin/erlc.exe"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(absolutePath(archivePath)),
-            sha256 = sha,
-            extract_path = "otp-stub-28.5")
-        ])
-      let res = resolveBuiltinPackage("erlang-basic", @[vp])
-      check res.found
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let res = selectArchive("erlang-basic", [hostRecord(
+        fileToUrl(absolutePath(archivePath)), "7z", "bin/erl.exe",
+        @["bin/erlc.exe"], sha256 = sha, version = "stub-28.5",
+        extractPath = "otp-stub-28.5")])
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       check fileExists(extendedPath(outR.prefixAbsolutePath / "bin" / "erl.exe"))
       check fileExists(extendedPath(outR.prefixAbsolutePath / "bin" / "erlc.exe"))
@@ -304,8 +366,12 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       createDir(extendedPath(innerDir / "bin"))
       writeFile(extendedPath(innerDir / "bin" / "ruby.exe"),
         "stub-ruby-payload\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "ruby.exe"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "bin" / "gem.cmd"),
         "@echo stub-gem\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "gem.cmd"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       let plain7z = fixtureDir / "ruby-plain.7z"
       discard execCmdEx(
         quoteShell(hostSeven) & " a -t7z " &
@@ -319,21 +385,11 @@ suite "M3 — cakBuiltin 7z SFX flatten":
       var store = openStore(storeDir)
       defer: store.close()
       discard seedSevenZipPrefix(store, hostSeven)
-      let vp = initVersionedProvisioning(
-        version = "stub-4.0.5-1",
-        archive_format = afSevenZipSfx,
-        install_method = imExtract,
-        bin_relpath = @["bin/ruby.exe", "bin/gem.cmd"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(), os = detectHostOs(),
-            url = fileToUrl(absolutePath(sfxPath)),
-            sha256 = sha,
-            extract_path = innerName)
-        ])
-      let res = resolveBuiltinPackage("ruby-sfx", @[vp])
-      check res.found
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let res = selectArchive("ruby-sfx", [hostRecord(
+        fileToUrl(absolutePath(sfxPath)), "7z-sfx", "bin/ruby.exe",
+        @["bin/gem.cmd"], sha256 = sha, version = "stub-4.0.5-1",
+        extractPath = innerName)])
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       check fileExists(extendedPath(outR.prefixAbsolutePath / "bin" / "ruby.exe"))
       check fileExists(extendedPath(outR.prefixAbsolutePath / "bin" / "gem.cmd"))

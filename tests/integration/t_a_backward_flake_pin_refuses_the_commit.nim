@@ -46,6 +46,7 @@
 ## headers of `nf2_flake_lock_fixture.nim` and `nf3_override_state_fixture.nim`.
 
 import std/[os, strutils, unittest]
+import repro_test_support/reasoned_skip
 
 import nf3_override_state_fixture
 
@@ -72,9 +73,10 @@ proc lineWith(text: string; needles: varargs[string]): string =
     if all: return line
   ""
 
-proc depEntryPresent(reproLockText, path: string): bool =
-  ## Does the committed `repro.lock` carry a `deps` entry at ``path``?
-  ("path = \"" & path & "\"") in reproLockText
+proc depEntryPresent(reproLockText, name: string): bool =
+  ## Does the committed `repro.lock` carry a `deps` entry named ``name``? By
+  ## name: a lock records no checkout path.
+  ("{ name = \"" & name & "\"") in reproLockText
 
 proc lockedRev(lockText, node: string): string =
   ## `locked.rev` of one node, read from its raw text.
@@ -87,8 +89,11 @@ proc lockedRev(lockText, node: string): string =
 
 proc gammaBehindByTwo(fx: Nf2Fixture): tuple[pinned, checkout: string] =
   ## The flake pins gamma two commits ahead of where its checkout sits; the
-  ## pinned objects stay in gamma's store, so the relation is BEHIND.
-  result.pinned = advanceSibling(fx, "gamma", 2)
+  ## pinned objects stay in gamma's store, so the relation is BEHIND. The
+  ## pinned revision is PUBLISHED, as every recorded pin is
+  ## (Nix-Flake-Coexistence.md §4): an allowed downgrade re-reads the pinned
+  ## source to compare dependency locks, and an unfetchable one is withheld.
+  result.pinned = advancePublishedSibling(fx, "gamma", 2)
   result.checkout = rewindSibling(fx, "gamma", 2)
   setFlakePins(fx, fx.seedSha[0], fx.seedSha[1], result.pinned)
   commitLockAndPublish(fx, "a lock pinned two ahead of the gamma checkout")
@@ -271,8 +276,8 @@ suite "the commit-time flake.lock refresh never moves a pin backward silently":
       check refresh.code == 0
       commitLockAndPublish(fx, "commit repro.lock beside the flake")
       let reproLock = fx.app / "repro.lock"
-      check depEntryPresent(readFile(reproLock), "../epsilon")
-      check depEntryPresent(readFile(reproLock), "../alpha")
+      check depEntryPresent(readFile(reproLock), "epsilon")
+      check depEntryPresent(readFile(reproLock), "alpha")
 
       # epsilon advances and a commit records it (ahead), then its checkout
       # is rewound: repro.lock now pins epsilon one ahead of the checkout.

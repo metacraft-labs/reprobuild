@@ -124,7 +124,11 @@ proc runParallelCheck() =
   const NumFixtures = 12
   var fixtureSources: seq[string] = @[]
   for i in 0 ..< NumFixtures:
-    let src = srcDir / ("t_fixture_" & $i & ".nim")
+    let stem =
+      if i == 0: "t_b0_repro_build_runquota_daemon"
+      elif i == 1: "t_d2_cross_project_selector_recognised"
+      else: "t_fixture_" & $i
+    let src = srcDir / (stem & ".nim")
     writeFixtureSource(src, i)
     fixtureSources.add(src)
 
@@ -152,6 +156,7 @@ proc runParallelCheck() =
   if exitCode != 0:
     checkpoint(output)
   check exitCode == 0
+  check "cases require exclusive execution" notin output
 
   # Parse the per-test window log and compute the max overlap of
   # [start, end] timestamps. Each line: pid,start,end,name.
@@ -215,14 +220,12 @@ proc runExclusiveResourceCheck() =
   const ExclusiveFixtures = [
     "t_a2_5_p3_streaming_sink",
     "t_a2_5_p8_throughput_bench",
-    "t_b0_repro_build_runquota_daemon",
     "t_b1_apps_action_cache_hit",
     "t_b1_repro_build_apps_collection",
     "t_b2_helper_invalidation",
     "t_b3_test_execute_edge_cache_hit",
     "t_b3_test_invalidation_rebuilds_repro",
     "t_d1_pythonunittest_resolves_in_path_mode",
-    "t_d2_cross_project_selector_recognised",
     "t_d5_collection_member_selector",
     "t_e2e_native_shell_hooks",
     "t_e2e_repro_dev_sessions",

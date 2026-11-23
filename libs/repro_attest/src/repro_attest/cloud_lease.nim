@@ -84,6 +84,9 @@ import std/[algorithm, exitprocs, options, os, osproc, strtabs, streams,
 import ./cloud_launch
 import repro_resources/lease
 
+when defined(macosx):
+  import repro_daemon_core/writer_identity
+
 export lease.LeaseKind, lease.LeasePolicy, lease.immediate, lease.delayed,
        lease.keep, lease.deadlineFrom
 
@@ -207,38 +210,66 @@ type
 const
   BootTokenPath = "/proc/sys/kernel/random/boot_id"
 
+when defined(macosx):
+  proc sysctlbyname(name: cstring; oldp: pointer; oldlenp: ptr csize_t;
+                    newp: pointer; newlen: csize_t): cint
+    {.importc, header: "<sys/sysctl.h>".}
+
+  proc kernelIdentityString(name: cstring): string =
+    # Both queried values are short, NUL-terminated kernel strings. Refuse
+    # errors and incomplete answers instead of using a partial identity.
+    var buffer: array[1024, char]
+    var size = csize_t(buffer.len)
+    if sysctlbyname(name, addr buffer[0], addr size, nil, 0) == 0 and
+        size > 1 and size <= csize_t(buffer.len) and buffer[int(size) - 1] == '\0':
+      result = newString(int(size) - 1)
+      copyMem(addr result[0], addr buffer[0], result.len)
+
+  proc cloudStartToken(stamp: string): string =
+    # A start token also travels in cloud provider labels, whose grammar
+    # excludes the dot separating the kernel probe's seconds/microseconds.
+    stamp.replace('.', '-')
+
 proc readBootToken*(): string =
   ## This boot's identifier, or the empty string where the platform does
   ## not publish one. Empty is a *reported* absence: every rule below
   ## treats it as "cannot tell" rather than as "they match".
-  try:
-    if fileExists(BootTokenPath):
-      return readFile(BootTokenPath).strip()
-  except IOError, OSError:
-    discard
-  ""
+  when defined(macosx):
+    # Unlike kern.boottime this UUID does not move when the calendar clock
+    # is corrected, so a mismatch really does establish a different boot.
+    return kernelIdentityString("kern.bootsessionuuid")
+  else:
+    try:
+      if fileExists(BootTokenPath):
+        return readFile(BootTokenPath).strip()
+    except IOError, OSError:
+      discard
+    ""
 
 proc readStartToken*(pid: int): string =
   ## The field a process's own accounting record spells its start time
-  ## in, or the empty string where it cannot be read. Read from the raw
-  ## record rather than parsed, because the executable name in it may
-  ## itself contain the separator: everything up to the last `)` is
-  ## skipped first.
-  let path = "/proc/" & $pid & "/stat"
-  if not fileExists(path): return ""
-  var text = ""
-  try:
-    text = readFile(path)
-  except IOError, OSError:
-    return ""
-  let close = text.rfind(')')
-  if close < 0: return ""
-  let fields = text[close + 1 .. ^1].splitWhitespace()
-  # Field 22 of the record, counted from one; the two fields before the
-  # executable name are gone, and the state field is now the first.
-  const StartTimeIndexAfterName = 19
-  if fields.len <= StartTimeIndexAfterName: return ""
-  fields[StartTimeIndexAfterName]
+  ## in, or the empty string where it cannot be read. Darwin uses its
+  ## kernel process record. Linux reads the raw stat record, skipping
+  ## through the last `)` because an executable name may contain spaces
+  ## and parentheses itself.
+  when defined(macosx):
+    return cloudStartToken(processStartStamp(pid))
+  else:
+    let path = "/proc/" & $pid & "/stat"
+    if not fileExists(path): return ""
+    var text = ""
+    try:
+      text = readFile(path)
+    except IOError, OSError:
+      return ""
+    let close = text.rfind(')')
+    if close < 0: return ""
+    let fields = text[close + 1 .. ^1].splitWhitespace()
+    # Field 22 of the record, counted from one; the two fields before the
+    # executable name are gone, and the state field is now the first.
+    const StartTimeIndexAfterName = 19
+    if fields.len <= StartTimeIndexAfterName: return ""
+    fields[StartTimeIndexAfterName]
 
 const HostNamePath = "/proc/sys/kernel/hostname"
 
@@ -256,6 +287,9 @@ proc hostName*(): string =
   ## An empty answer is carried as empty rather than replaced by a
   ## guess, and an empty host makes every liveness question unknowable
   ## rather than answerable by accident.
+  when defined(macosx):
+    let name = kernelIdentityString("kern.hostname")
+    if name.len > 0: return name
   try:
     if fileExists(HostNamePath):
       let name = readFile(HostNamePath).strip()
@@ -287,11 +321,23 @@ proc processOwnerLiveness*(): OwnerLivenessProbe =
       # process it names is gone whatever occupies its number now.
       return olDead
     if owner.pid <= 0: return olUnknowable
-    if not dirExists("/proc/" & $owner.pid): return olDead
-    let started = readStartToken(owner.pid)
-    if started.len == 0 or owner.startToken.len == 0: return olUnknowable
-    if started != owner.startToken: return olDead
-    olAlive
+    when defined(macosx):
+      # A failed query is not evidence of death. Reuse the structured
+      # kernel probe so absent pids and unavailable accounting differ.
+      let started = probeProcessStart(owner.pid)
+      if owner.startToken.len == 0: return olUnknowable
+      case started.status
+      of pssAbsent: return olDead
+      of pssUnknown: return olUnknowable
+      of pssPresent:
+        return (if cloudStartToken(started.stamp) == owner.startToken:
+                  olAlive else: olDead)
+    else:
+      if not dirExists("/proc/" & $owner.pid): return olDead
+      let started = readStartToken(owner.pid)
+      if started.len == 0 or owner.startToken.len == 0: return olUnknowable
+      if started != owner.startToken: return olDead
+      olAlive
 
 proc fixedOwnerLiveness*(answer: OwnerLiveness): OwnerLivenessProbe =
   ## A stated answer, for a caller that means a particular one. Used by

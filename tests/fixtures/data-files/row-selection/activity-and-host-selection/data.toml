@@ -1,0 +1,16 @@
+# default rows apply on every host; others only where hosts selects them.
+[[package]]
+name = "ripgrep"
+activity = "default"
+
+[[package]]
+name = "ghostty"
+activity = "desktop"
+
+[[package]]
+name = "jq"
+activity = "cli"
+
+[[package]]
+name = "gimp"
+activity = "graphics"

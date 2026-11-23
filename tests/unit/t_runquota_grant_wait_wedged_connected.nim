@@ -44,6 +44,8 @@
 ## object or GC heap is shared across threads.
 
 import std/[os, osproc, strutils, tempfiles, times, unittest]
+when defined(posix):
+  from repro_test_support/process_fixtures import shortSocketDirAtProcessExit
 
 import repro_runquota
 
@@ -145,7 +147,13 @@ proc privateSocketPath(): string =
   ##
   ## The per-pid name is kept inside the directory so a crashed run leaves
   ## an obvious trail.
-  let dir = createTempDir("repro-wedged-rq-", "")
+  ##
+  ## The directory is ``shortSocketDirAtProcessExit``'s, directly under
+  ## ``/tmp``, not one under ``$TMPDIR``: the socket must fit ``sun_path``,
+  ## and a suite TMPDIR under a long CI work directory does not leave room.
+  let dir =
+    when defined(posix): shortSocketDirAtProcessExit("rwq")
+    else: createTempDir("repro-wedged-rq-", "")
   setFilePermissions(dir, {fpUserRead, fpUserWrite, fpUserExec})
   dir / ("rq-" & $getCurrentProcessId() & ".sock")
 

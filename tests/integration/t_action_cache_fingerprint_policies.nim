@@ -318,7 +318,11 @@ suite "integration_action_cache_fingerprint_policies":
           ffpChecksum, verifyOutputBlobs = false)
         check skippedLookup.status == aclHit
         let lookup = cache.lookupActionResult(cas, weakFor("corrupt"), ffpChecksum)
-        check lookup.status == aclRejectedCorruptOutput
+        # A payload that fails verification is a fact about the STORE,
+        # separated from "an output differs from the record" (owner decision
+        # 2026-11-03): its own status, naming the corrupt blob to drop.
+        check lookup.status == aclRejectedCorruptPayload
+        check lookup.corruptPayloads == @[record.outputs[0].blob.digest]
         check not fileExists(outputPath)
         expect CacheIntegrityError:
           cas.restoreOutputs(record, root)
@@ -480,5 +484,7 @@ suite "integration_action_cache_fingerprint_policies":
           [newInput], ["out.txt"], newRoot)
         writeFile(cas.blobPath(newRecord.outputs[0].blob.digest), "corrupted")
 
+        # Still rejects rather than falling through to the older candidate;
+        # the status is the payload one (owner decision 2026-11-03).
         let lookup = cache.lookupActionResult(cas, weak, ffpChecksum)
-        check lookup.status == aclRejectedCorruptOutput
+        check lookup.status == aclRejectedCorruptPayload

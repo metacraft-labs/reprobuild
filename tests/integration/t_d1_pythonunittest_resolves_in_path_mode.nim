@@ -229,7 +229,7 @@ suite "Deferred-Item D1: pythonUnittest resolves in path mode":
         if action{"id"}.getStr() == ExecuteActionId:
           pyAction = action
           break
-      check pyAction != nil
+      check not pyAction.isNil
       if pyAction != nil:
         let status = pyAction{"status"}.getStr()
         let launched = pyAction{"launched"}.getBool()

@@ -1,0 +1,1 @@
+{ "description": "headless is a profile-side helper, not a built-in predicate.", "error": ["row 2", "`when`", "'headless'", "not a built-in predicate"] }

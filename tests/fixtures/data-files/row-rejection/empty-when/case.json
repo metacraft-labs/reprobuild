@@ -1,0 +1,1 @@
+{ "description": "An empty guard is refused; omit the key instead.", "error": ["row 1", "`when`", "empty predicate"] }

@@ -83,14 +83,27 @@ import std/[os, osproc, sequtils, strtabs, strutils, unittest]
 import repro_dsl_stdlib/packages/apt_jammy {.all.}
 from repro_core/paths import extendedPath
 from repro_core/host_tar import resolveHostTar, HostTarOverrideEnv
+from repro_test_support/process_fixtures import releaseDirAtProcessExit
 
-const N48Root = "build/test-tmp/t-n48-apt-jammy"
+let N48Root = "build/test-tmp/t-n48-apt-jammy/" & $getCurrentProcessId()
   ## Deliberately RELATIVE and forward-slash-only, and deliberately NOT
   ## ``createTempDir``: the defect under test is that GNU tar unquotes the
   ## path it is handed, so what the case proves depends entirely on which
   ## backslashes are in that path, and a temp root is whatever ``TMPDIR``
   ## happens to be. The first scratch root W16 was probed under contained
   ## ``\7``, which GNU tar read as an octal escape.
+  ##
+  ## Per PROCESS, though: the runner executes every case of this binary in
+  ## its own process, concurrently with the others. One shared root let each
+  ## case's ``n48Reset`` delete the payload or archive another case's ``tar``
+  ## was still reading ("File removed before we read it"). A decimal pid adds
+  ## no backslash, so the vacuity guarantee above is unchanged.
+
+# Removed when THIS process exits. Absolute, because a case may change the
+# working directory before then. Not an ``addExitProc`` closure: under ORC the
+# ``N48Root`` global it read is destroyed before exit procs run. See
+# ``repro_test_support/process_fixtures``.
+releaseDirAtProcessExit(absolutePath(N48Root))
 
 const N48RaisingFirstChars = {'a', 'b', 'f', 'n', 'r', 't', 'v'}
   ## The seven letters GNU tar turns into a control character. ``\0`` is NOT
@@ -257,11 +270,11 @@ if n48ChildSpec.len > 0:
   echo "N48-CHILD-TAR=",
     (if banner.output.len > 0: banner.output.splitLines()[0].strip()
      else: "<no output>")
-  let bytes = readFile(extendedPath(parts[1]))
+  # The fixture IS the member: the reader copies it from offset 0.
+  let member = extendedPath(parts[1])
   var childRaised = ""
   try:
-    tarExtractDataMember("n48-fixture.deb", bytes, parts[0], 0, bytes.len,
-      parts[2])
+    tarExtractDataMember(member, parts[0], 0, getFileSize(member), parts[2])
   except CatchableError as err:
     childRaised = err.msg.replace("\n", " ~ ")
   echo "N48-CHILD-RAISED=", childRaised
@@ -333,10 +346,9 @@ proc n48ExtractMember(driverDir, dataTar, outDir: string): string =
     checkpoint("driver spawned: " & run.tarBanner)
     result = run.raised
   else:
-    let bytes = readFile(extendedPath(dataTar))
+    let member = extendedPath(dataTar)
     try:
-      tarExtractDataMember("n48-fixture.deb", bytes, "data.tar", 0,
-        bytes.len, outDir)
+      tarExtractDataMember(member, "data.tar", 0, getFileSize(member), outDir)
     except CatchableError as err:
       result = err.msg
 

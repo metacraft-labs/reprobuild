@@ -5,9 +5,8 @@
 ## a single ``*.csproj`` at the project root and shells out to a stock
 ## ``dotnet`` driver for a single offline ``dotnet build -c Release
 ## --no-restore --nologo --verbosity quiet`` invocation. The action graph
-## is intentionally coarse: one build action that produces
-## ``bin/Release/<TargetFramework>/<AssemblyName>.exe`` (or ``.dll`` for
-## libraries) per declared member.
+## is intentionally coarse: one build action, whose products MSBuild
+## itself names (see **Output paths**).
 ##
 ## **Distinction from a hypothetical future Tier 2c .NET provider.**
 ## A Tier 2c .NET provider would parse MSBuild's binary-log output and
@@ -65,37 +64,49 @@
 ## something goes wrong.
 ##
 ## **Emitted actions**:
-##   1. ``csharp-dotnet-build`` — single ``<dotnet> build -c Release
-##      --no-restore --nologo --verbosity quiet <csproj>`` action under
-##      the project root. Inputs: the ``.csproj`` plus
-##      ``packages.lock.json`` plus every ``.cs`` source file recursively
-##      walked from the project root (excluding ``bin/`` / ``obj/`` /
-##      ``.repro/`` / ``.git/``). Outputs: one
-##      ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>`` per
-##      declared member, where ``<ext>`` is ``.exe`` when the csproj
-##      ``<OutputType>`` is ``Exe`` and ``.dll`` otherwise. Uses
-##      ``automaticMonitorPolicy`` (automatic monitoring is the spec
-##      baseline for opaque tools, Reprobuild-Development M17): ``dotnet``
-##      spawns MSBuild worker processes and the engine monitors their
-##      real read-set instead of trusting only statically declared
-##      inputs.
+##   1. ``csharp-dotnet-outputs`` -- asks MSBuild where the build puts its
+##      products: ``dotnet msbuild <csproj> -p:Configuration=Release
+##      -getProperty:TargetPath -getProperty:TargetDir -getProperty:ProjectDir
+##      -getProperty:IntermediateOutputPath`` (MSBuild 17.8 / SDK 8), run by
+##      the standard provider itself (``output_discovery.dotnetOutputs``).
+##      Writes a dynamic-output fragment. Monitored, so
+##      ``Directory.Build.props``, imported targets and the restore's
+##      generated props key the answer.
+##   2. ``csharp-dotnet-build`` -- a single ``<dotnet> build -c Release
+##      --no-restore --nologo --verbosity quiet --disable-build-servers
+##      <csproj>`` action under the project root. Inputs: the ``.csproj``
+##      plus ``packages.lock.json`` plus every ``.cs`` source file
+##      recursively walked from the project root (excluding ``bin/`` /
+##      ``obj/`` / ``.repro/`` / ``.git/``) and the fragment, which is also
+##      its ``dynamicDepsFile``. Its outputs come from the fragment. Uses
+##      ``automaticMonitorPolicy``: ``dotnet`` spawns MSBuild worker
+##      processes and the engine monitors their real read-set.
 ##
-## **Output paths** (parsed from ``.csproj``):
-##   * ``<TargetFramework>`` (e.g. ``net8.0``). When the csproj uses
-##     the plural ``<TargetFrameworks>`` (multi-target) M42 picks the
-##     first one; multi-target output is DEFERRED.
-##   * ``<AssemblyName>`` (optional). Defaults to the csproj filename
-##     without the ``.csproj`` extension, matching MSBuild's own
-##     default.
-##   * ``<OutputType>`` (``Exe`` or ``Library``; defaults to
-##     ``Library`` when absent). Determines the produced file's
-##     extension (``.exe`` vs ``.dll``).
-##   * Predicted path:
-##     ``<projectRoot>/bin/Release/<TargetFramework>/<AssemblyName>.<ext>``.
+## Both edges run with ``DOTNET_CLI_TELEMETRY_OPTOUT=1``, ``DOTNET_NOLOGO=1``
+## and ``DOTNET_SKIP_FIRST_TIME_EXPERIENCE=1`` (CSharp-DotNet.md §"Mode B"),
+## and the build with ``--disable-build-servers``: telemetry, the first-run
+## sentinel and persistent compiler / MSBuild servers otherwise write under
+## the user's home and the temporary directory, outside anything the edge
+## declares, and outlive the action.
+##
+## **Output paths** (Build-Engine-And-Scheduler.md §"Outputs a delegated
+## build decides"):
+##   * ``TargetDir`` (``bin/Release/<tfm>/[<rid>/]`` by default) and
+##     ``IntermediateOutputPath`` (``obj/Release/<tfm>/``) are opaque output
+##     directories: removed before the build runs, recorded whole and
+##     restored exactly. The apphost, the ``.deps.json``, the
+##     ``.runtimeconfig.json`` and the PDB are recorded with ``TargetDir``.
+##     The restore's own files at the root of ``obj/`` are outside both.
+##   * ``TargetPath`` is the obligatory main assembly: ``OutputPath``,
+##     ``BaseOutputPath``, ``AssemblyName``, ``OutputType``,
+##     ``RuntimeIdentifier``, ``Append*ToOutputPath`` and a .NET Framework
+##     ``.exe`` are MSBuild's to apply, wherever they are set.
 ##
 ## **Honest scope** (deferred):
-##   * Multi-target ``<TargetFrameworks>`` (plural) — M42 picks the
-##     first target; emitting per-TFM outputs is deferred.
+##   * Multi-target ``<TargetFrameworks>`` (plural) — one coarse build
+##     edge builds every framework; discovery declares each framework's
+##     ``TargetDir`` and ``IntermediateOutputPath`` opaque and its
+##     ``TargetPath`` obligatory. A per-framework edge is deferred.
 ##   * Multi-project solutions (``*.sln``) — single ``.csproj`` only.
 ##   * F# (``*.fsproj``) — a separate convention is the right shape.
 ##   * VB.NET (``*.vbproj``) — deferred.
@@ -117,38 +128,16 @@ import repro_core
 import repro_provider_runtime
 import repro_project_dsl
 import repro_standard_provider/convention
+import repro_standard_provider/conventions/output_discovery
 
 const
   ScratchDirName* = ".repro/build"
-    ## Top-level scratch directory under the project root. Identical to
-    ## the M40 / M41 conventions' value, but M42 doesn't actually use
-    ## it as a build dir — MSBuild writes to ``<projectRoot>/bin/`` and
-    ## ``<projectRoot>/obj/`` (its own convention). The constant is
-    ## retained for consistency.
+    ## Top-level scratch directory under the project root. MSBuild builds
+    ## into its own ``bin/`` and ``obj/``; this convention keeps its output
+    ## discovery here.
 
-  DotnetBinSubdir* = "bin"
-    ## Sub-directory under the project root where MSBuild lays its
-    ## final build outputs. Hard-coded by MSBuild's default
-    ## ``$(OutputPath)`` derivation; the convention predicts the
-    ## ``bin/Release/<TargetFramework>/`` path under it.
-
-  DotnetReleaseSubdir* = "Release"
-    ## Sub-directory under ``bin/`` corresponding to the build
-    ## configuration. The convention pins ``-c Release`` so the path
-    ## is fixed.
-
-  DefaultTargetFramework* = "net8.0"
-    ## Fallback target framework when the csproj omits both
-    ## ``<TargetFramework>`` and ``<TargetFrameworks>``. ``net8.0`` is
-    ## the M42 documented provisioning target (.NET SDK 8 LTS); .NET
-    ## SDK 9 (the current latest on the M42 review host) ships an
-    ## ``Microsoft.NETCore.App`` runtime pack that covers net8.0 by
-    ## default so the fallback is widely buildable.
-
-  DefaultOutputType* = "Library"
-    ## MSBuild's default when ``<OutputType>`` is omitted from the
-    ## csproj. The convention encodes the same default explicitly so
-    ## the output-path prediction is unambiguous.
+  ConventionName = "csharp-dotnet"
+  BuildActionId = ConventionName & "-build"
 
 type
   CSharpDotnetMemberKind = enum
@@ -162,23 +151,8 @@ type
   CSharpDotnetCoordinates = object
     csprojPath: string
       ## Absolute path to the project's ``.csproj``. Empty when no
-      ## ``.csproj`` is present at the project root.
-    csprojName: string
-      ## ``<csprojPath>`` basename without the ``.csproj`` extension.
-      ## Used as the default ``<AssemblyName>`` when the csproj omits
-      ## the tag (matching MSBuild's own default).
-    targetFramework: string
-      ## Value of the first ``<TargetFramework>`` tag, or the first
-      ## entry of ``<TargetFrameworks>`` (semicolon-separated list)
-      ## when only the plural form is present. Falls back to
-      ## ``DefaultTargetFramework`` when both are absent.
-    assemblyName: string
-      ## Value of ``<AssemblyName>`` when present, otherwise
-      ## ``csprojName``.
-    outputType: string
-      ## Value of ``<OutputType>`` when present, otherwise
-      ## ``DefaultOutputType``. Compared case-insensitively against
-      ## ``Exe`` to decide the produced file's extension.
+      ## ``.csproj`` is present at the project root. Everything about where
+      ## the build writes is MSBuild's answer, not parsed here.
 
 proc readReprobuildSource(projectRoot: string): string =
   ## Read the project file (``repro.nim`` or legacy ``reprobuild.nim``)
@@ -348,80 +322,11 @@ proc dotnetExecutable(): string =
   ## PATHEXT.
   findExe("dotnet")
 
-proc extractSimpleXmlTag(source, tagName: string): string =
-  ## Return the inner text of the first ``<tagName>...</tagName>``
-  ## occurrence in ``source``. Intentionally crude — avoids pulling
-  ## in an XML parser for parsing three scalar fields out of the M42
-  ## csproj shape (``<TargetFramework>`` / ``<AssemblyName>`` /
-  ## ``<OutputType>``). The helper assumes the tag's value is on a
-  ## single line, the standard SDK-style csproj layout. Returns the
-  ## empty string when the tag isn't found.
-  ##
-  ## NB: this does NOT handle XML comments or CDATA sections — the
-  ## minimal M42 fixture (and 99% of real-world SDK-style csprojs)
-  ## use a flat ``<PropertyGroup>`` shape that the naive search
-  ## handles correctly. Matches the M40 ``extractSimpleXmlTag`` in
-  ## ``java_maven.nim``.
-  let openTag = "<" & tagName & ">"
-  let closeTag = "</" & tagName & ">"
-  let openIdx = source.find(openTag)
-  if openIdx < 0:
-    return ""
-  let valueStart = openIdx + openTag.len
-  let closeIdx = source.find(closeTag, start = valueStart)
-  if closeIdx < 0:
-    return ""
-  source[valueStart ..< closeIdx].strip()
-
 proc parseCsprojCoordinates(projectRoot: string): CSharpDotnetCoordinates =
-  ## Parse ``<TargetFramework>`` (singular preferred), ``<AssemblyName>``
-  ## (optional; defaults to csproj filename), and ``<OutputType>``
-  ## (optional; defaults to ``Library``) from the project's
-  ## ``.csproj`` so we can predict the produced binary's filename and
-  ## path. Returns blank ``csprojPath`` when no ``.csproj`` is present;
-  ## callers detect the blank and either raise or fall through.
-  let csproj = findFirstCsproj(projectRoot)
-  if csproj.len == 0:
-    return
-  result.csprojPath = csproj
-  let basename = extractFilename(csproj)
-  # Strip the ``.csproj`` extension — case-insensitive match per
-  # MSBuild's own convention.
-  let lowerBase = basename.toLowerAscii
-  if lowerBase.endsWith(".csproj"):
-    result.csprojName = basename[0 ..< basename.len - len(".csproj")]
-  else:
-    result.csprojName = basename
-  var csprojSource = ""
-  try:
-    csprojSource = readFile(extendedPath(csproj))
-  except CatchableError:
-    discard
-  if csprojSource.len > 0:
-    # ``<TargetFramework>`` (singular) wins when present; otherwise
-    # peel the first entry off ``<TargetFrameworks>`` (plural,
-    # semicolon-separated).
-    var tf = extractSimpleXmlTag(csprojSource, "TargetFramework")
-    if tf.len == 0:
-      let plural = extractSimpleXmlTag(csprojSource, "TargetFrameworks")
-      if plural.len > 0:
-        let first = plural.split(';')[0].strip()
-        if first.len > 0:
-          tf = first
-    if tf.len > 0:
-      result.targetFramework = tf
-    let asmName = extractSimpleXmlTag(csprojSource, "AssemblyName")
-    if asmName.len > 0:
-      result.assemblyName = asmName
-    let outType = extractSimpleXmlTag(csprojSource, "OutputType")
-    if outType.len > 0:
-      result.outputType = outType
-  if result.targetFramework.len == 0:
-    result.targetFramework = DefaultTargetFramework
-  if result.assemblyName.len == 0:
-    result.assemblyName = result.csprojName
-  if result.outputType.len == 0:
-    result.outputType = DefaultOutputType
+  ## Locate the project's ``.csproj``. Returns a blank ``csprojPath`` when
+  ## there is none; callers detect the blank and either raise or fall
+  ## through.
+  result.csprojPath = findFirstCsproj(projectRoot)
 
 proc csharpDotnetRecognize(projectRoot: string;
                            request: ProviderGraphRequest): bool {.gcsafe.} =
@@ -456,28 +361,6 @@ proc sanitizeNamePart(value: string): string =
       result.add('_')
   if result.len == 0:
     result = "x"
-
-proc producedBinaryExtension(outputType: string): string =
-  ## ``.exe`` when the csproj declares ``<OutputType>Exe</OutputType>``,
-  ## ``.dll`` otherwise. Compared case-insensitively so ``Exe`` and
-  ## ``exe`` both work.
-  if outputType.toLowerAscii == "exe":
-    ".exe"
-  else:
-    ".dll"
-
-proc producedBinaryPath(projectRoot: string;
-                        coords: CSharpDotnetCoordinates): string =
-  ## Predicted output path for the dotnet build's produced binary.
-  ## MSBuild's default ``$(OutputPath)`` for a Release build with the
-  ## SDK-style csproj is
-  ## ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>``. The
-  ## extension depends on ``<OutputType>`` — ``.exe`` for ``Exe`` and
-  ## ``.dll`` for ``Library`` (or any other value).
-  let ext = producedBinaryExtension(coords.outputType)
-  let fileName = coords.assemblyName & ext
-  projectRoot / DotnetBinSubdir / DotnetReleaseSubdir /
-    coords.targetFramework / fileName
 
 proc collectCsharpInputs(projectRoot: string;
                         csprojPath: string): seq[string] =
@@ -526,46 +409,44 @@ proc collectCsharpInputs(projectRoot: string;
   result = seen
   result.sort(system.cmp[string])
 
-proc emitBuildAction(projectRoot, dotnetExe: string;
+proc emitBuildAction(projectRoot, dotnetExe, fragment, discoveryId: string;
                      coords: CSharpDotnetCoordinates): BuildActionDef =
   ## Emit the single ``dotnet build -c Release --no-restore --nologo
-  ## --verbosity quiet <csproj>`` action. Outputs the predicted
-  ## ``bin/Release/<TargetFramework>/<AssemblyName>.<ext>`` path under
-  ## the project root.
+  ## --verbosity quiet --disable-build-servers <csproj>`` action. Its
+  ## outputs are the ones ``csharp-dotnet-outputs`` discovered: ``TargetDir``
+  ## and ``IntermediateOutputPath`` as opaque output trees and
+  ## ``TargetPath`` as an obligatory output.
   ##
-  ## ``-c Release`` enforces the Release-configuration build (debug
-  ## builds use ``$(OutputPath)`` = ``bin/Debug/``; the convention
-  ## hard-pins Release to keep predicted output paths stable).
-  ## ``--no-restore`` enforces the M42 hermetic contract: ``dotnet``
-  ## MUST NOT consult NuGet during the action — the
-  ## ``packages.lock.json`` + warmed ``~/.nuget/packages/`` cache
-  ## covers every package. ``--nologo`` + ``--verbosity quiet`` keep
-  ## per-action logs readable; MSBuild's default chatter (one line
-  ## per target per project) is extremely verbose.
-  let binaryPath = producedBinaryPath(projectRoot, coords)
-  createDir(extendedPath(parentDir(binaryPath)))
+  ## ``-c Release`` enforces the Release-configuration build; its discovery
+  ## evaluates the same configuration. ``--no-restore`` enforces the M42
+  ## hermetic contract: ``dotnet`` MUST NOT consult NuGet during the
+  ## action — the ``packages.lock.json`` + warmed ``~/.nuget/packages/``
+  ## cache covers every package. ``--nologo`` + ``--verbosity quiet`` keep
+  ## per-action logs readable. ``--disable-build-servers`` (SDK 7+) keeps
+  ## the compiler and MSBuild servers from outliving the action.
   let argv = @[dotnetExe, "build",
                "-c", "Release",
                "--no-restore",
                "--nologo",
                "--verbosity", "quiet",
+               "--disable-build-servers",
                coords.csprojPath]
-  let inputs = collectCsharpInputs(projectRoot, coords.csprojPath)
+  let inputs = collectCsharpInputs(projectRoot, coords.csprojPath) &
+    @[fragment]
   buildAction(
-    id = "csharp-dotnet-build",
+    id = BuildActionId,
     call = inlineExecCall(argv, projectRoot),
+    deps = @[discoveryId],
     inputs = inputs,
-    outputs = @[binaryPath],
+    outputs = @[],
+    dynamicDepsFile = fragment,
     pool = "compile",
-    # ``dotnet`` spawns MSBuild worker processes (Csc.exe, the SDK
-    # resolver, the framework-pack loader, etc.) whose FS reads
-    # aren't reliably observed via the Windows DLL-interpose path.
-    # Same constraint M38/M39/M40/M41 face for their configure /
-    # package / build actions. Enumerate inputs explicitly via
-    # ``collectCsharpInputs`` so per-source invalidation still works
-    # without monitoring.
+    # ``dotnet`` spawns MSBuild worker processes (Csc, the SDK resolver,
+    # the framework-pack loader, etc.); the monitor records their real
+    # read-set on top of the enumerated sources.
     dependencyPolicy = automaticMonitorPolicy(),
-    commandStatsId = "csharp-dotnet.build")
+    commandStatsId = "csharp-dotnet.build",
+    env = DotnetQuietEnvironment)
 
 proc syntheticPackage(projectRoot: string;
                       members: seq[CSharpDotnetMember]): PackageDef =
@@ -620,9 +501,17 @@ proc csharpDotnetEmitFragment(projectRoot: string;
     let pkg = syntheticPackage(projectRoot, members)
     let registerAll = proc() =
       discard buildPool("compile", 8'u32)
-      let buildAct = emitBuildAction(projectRoot,
-        dotnetExecutable(), coords)
-      defaultTarget(target("default", @[buildAct]))
+      let dotnetExe = dotnetExecutable()
+      var projectFiles = @[coords.csprojPath]
+      let lockPath = projectRoot / "packages.lock.json"
+      if fileExists(extendedPath(lockPath)):
+        projectFiles.add(lockPath)
+      let discovery = delegatedOutputsAction(ConventionName, "dotnet",
+        BuildActionId, projectRoot, dotnetExe, inputs = projectFiles,
+        extra = @[coords.csprojPath], env = DotnetQuietEnvironment)
+      let buildAct = emitBuildAction(projectRoot, dotnetExe,
+        discovery.fragment, discovery.action.id, coords)
+      defaultTarget(target("default", @[discovery.action, buildAct]))
     result = buildPackageFragment(pkg, request, registerAll,
       includeDefault = false)
 

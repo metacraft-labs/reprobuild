@@ -326,6 +326,11 @@ suite "M10 the observed-environment record round-trips":
     # version and pin nothing. A number a contributor has to change on
     # purpose is the whole mechanism.
     let version = uint16(encoded[4]) or (uint16(encoded[5]) shl 8)
+    # version-literal-ok: a deliberate PIN on the version an env-free
+    # record is stamped with. It is MEANT to redden on a bump and name
+    # itself, so that moving the trust epoch is a conscious act with a
+    # reviewer attached; asserting against the constant would hold at
+    # every version and pin nothing.
     check version == 6'u16
     check decodeActionResultRecord(encoded).envInputs.len == 0
 
@@ -338,20 +343,40 @@ suite "M10 the observed-environment record round-trips":
       withEnv.weakFingerprint, withEnv.inputs, withEnv.envInputs)
     let encodedEnv = encodeActionResultRecord(withEnv)
     let envVersion = uint16(encodedEnv[4]) or (uint16(encodedEnv[5]) shl 8)
+    # version-literal-ok: the matching deliberate PIN for a record that
+    # DOES carry environment inputs. Same reason as the pin above: it
+    # must fail by name when the epoch moves.
     check envVersion == 7'u16
     check decodeActionResultRecord(encodedEnv).envInputs.len == 1
+    # DERIVED: the version an ENV-FREE record gets, which is the thing
+    # this patch means -- not the number 6, which it happens to be today.
     var oldEnv = encodedEnv
-    oldEnv[4] = 6'u8
-    oldEnv[5] = 0'u8
+    let envFree = actionRecordVersionWithoutEnvInputs()
+    oldEnv[4] = byte(envFree and 0xff'u16)
+    oldEnv[5] = byte((envFree shr 8) and 0xff'u16)
     expect EnvelopeError:
       discard decodeActionResultRecord(oldEnv)
 
     # 3. THE REFUSAL, which is what makes the epoch a drain rather than a
     #    relabelling. A frame that is byte-identical to one this encoder
     #    produces, differing ONLY in its version word, is refused for every
-    #    pre-epoch version — including 5, which is the one a binary built
+    #    untrusted version — including 5, which is the one a binary built
     #    from mainline today still writes.
-    for stale in [2'u16, 3'u16, 4'u16, 5'u16]:
+    #
+    #    DERIVED, not hand-listed, and this is the one assertion in this
+    #    test that must be. The two `check version == 6` / `== 7` above are
+    #    PINS: a bump is supposed to redden them, by name, on purpose. This
+    #    is a PROBE: it has to keep measuring "every untrusted version is
+    #    refused" after a bump, and the hand-listed `[2, 3, 4, 5]` it
+    #    replaces could not. That list was written when the epoch was 6 and
+    #    survived the move to 7 without failing, at which point it no longer
+    #    covered 6 and nothing said so.
+    let refused = actionRecordVersionsThisBuildRefuses()
+    # A derived list can go empty and take the loop with it, which is the
+    # one way this probe could become vacuous while still reading as
+    # coverage. Assert it is not.
+    check refused.len > 0
+    for stale in refused:
       var patched = encoded
       patched[4] = byte(stale and 0xff'u16)
       patched[5] = byte((stale shr 8) and 0xff'u16)

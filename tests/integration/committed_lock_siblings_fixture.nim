@@ -58,9 +58,9 @@ proc headOf*(fx: SiblingFixture; repo: string): string =
   fx.git(repo, "rev-parse HEAD").strip()
 
 proc fragment(name: string; depends: seq[string]): string =
-  result = "schema = \"reprobuild.workspace.repo.v1\"\n\n[repo]\n" &
+  result = "schema = \"reprobuild.workspace.repo.v2\"\n\n[repo]\n" &
     "name = \"" & name & "\"\npath = \"" & name & "\"\n" &
-    "remote = \"" & name & "-origin\"\nrevision = \"main\"\n"
+    "remote = \"" & name & "-origin\"\nmainline = \"main\"\n"
   if depends.len > 0:
     result.add("depends = [")
     for i, d in depends:
@@ -99,8 +99,8 @@ proc setupSiblingFixture*(label: string): SiblingFixture =
   createDir(result.ws / "projects")
   createDir(result.ws / "repos")
   var project = "schema = \"reprobuild.workspace.project.v1\"\n\n" &
-    "[project]\nname = \"app\"\ndefault_revision = \"main\"\n" &
-    "trunk = \"main\"\n\n"
+    "[project]\nname = \"app\"\n" &
+    "\n"
   for (name, origin) in result.origins:
     project.add("[[remote]]\nname = \"" & name & "-origin\"\nfetch = \"" &
       fileUrl(origin) & "\"\n\n")
@@ -135,10 +135,16 @@ proc advance*(fx: SiblingFixture; name: string): string =
   discard fx.git(work, "push -q origin main")
   fx.headOf(work)
 
-proc depEntry*(lockBody, path: string): string =
-  ## The inline table of the `deps` entry whose `path` is `path`, or "".
-  let key = "path = \"" & path & "\""
-  let at = lockBody.find(key)
+proc depEntry*(lockBody, name: string): string =
+  ## The inline table of the `deps` entry named `name`, or "". `"."` names
+  ## the lock's OWN entry, the one marked `self = "true"` — the spelling a
+  ## lock reader holds it at. Entries are found by name because a lock records
+  ## no checkout path (Workspace-Manifests.md §"The committed lock carries the
+  ## full set (schema v3)").
+  let at =
+    if name == ".": lockBody.find("self = \"true\"")
+    # After `deps = [`: a `packages` entry starts with the same prefix.
+    else: lockBody.find("{ name = \"" & name & "\"", max(0, lockBody.find("deps = [")))
   if at < 0: return ""
   let open = lockBody.rfind('{', 0, at)
   let close = lockBody.find('}', at)

@@ -40,6 +40,7 @@
 import std/[json, os, osproc, strutils, tempfiles, times]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import repro_tool_profiles
 

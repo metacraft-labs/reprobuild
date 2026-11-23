@@ -16,6 +16,9 @@
 ##      structured ``WorkspaceManifestParseError`` shape.
 ##   6. ``addOverride`` followed by ``removeOverride`` for the same
 ##      package round-trips to a value equivalent to the original.
+##   7. ``isExplicitDevelopOverride`` tells an explicit selection's entry
+##      from a bulk one, legacy and provenance-less entries counting as bulk
+##      (HL-11 M5).
 ##
 ## This is a pure-library round-trip; no ``git`` and no compiled
 ## ``repro`` binary are involved.
@@ -209,3 +212,39 @@ suite "M20 — develop overrides round-trip through workspace metadata":
     # surface.
     let stillEmpty = restored.removeOverride("never-there")
     check serializeDevelopOverridesToToml(stillEmpty) == originalBody
+
+  test "test_explicit_and_bulk_override_provenance_is_classified":
+    # HL-11 M5 (Unified-Locking-And-Hooks.md §16.4): an exact recipe pin is
+    # substituted only by an override an EXPLICIT selection recorded. The
+    # managed hooks decide that from ``provenance``, so the classifier is
+    # pinned here for every spelling a writer has produced.
+    proc entry(pkg: string; provenance: Option[string]): DevelopOverrideEntry =
+      result = sampleEntry(pkg, "../" & pkg, "editable",
+        "2026-10-15T00:00:00Z")
+      result.provenance = provenance
+    # Explicit: `repro develop --only=<dependency>` (the set form) …
+    check developOverrideOnlyProvenance("beta") == "repro develop --only=beta"
+    check isExplicitDevelopOverride(entry("beta",
+      some("repro develop --only=beta")))
+    # … `repro develop <dependency>` (the single-dependency form) …
+    check isExplicitDevelopOverride(entry("cairo",
+      some("repro develop cairo")))
+    # … and a per-project `repro develop <dependency> --into` entry.
+    check isExplicitDevelopOverride(entry("lib", some("repro develop --into")))
+    # Bulk: what `--all` writes, and what `--all` AND `--only` both wrote
+    # before provenance told them apart (the migration rule) …
+    check developOverrideBulkProvenance == "repro develop --all"
+    check not isExplicitDevelopOverride(entry("beta",
+      some("repro develop --all")))
+    # … an entry with no provenance, or an empty one …
+    check not isExplicitDevelopOverride(entry("beta", none(string)))
+    check not isExplicitDevelopOverride(entry("beta", some("")))
+    # … a `--only=` with no name, a single-dependency spelling naming ANOTHER
+    # package, and any provenance naming no selection at all.
+    check not isExplicitDevelopOverride(entry("beta",
+      some("repro develop --only=")))
+    check not isExplicitDevelopOverride(entry("beta",
+      some("repro develop cairo")))
+    check not isExplicitDevelopOverride(entry("beta",
+      some("repro develop --direct")))
+    check not isExplicitDevelopOverride(entry("beta", some("test fixture")))

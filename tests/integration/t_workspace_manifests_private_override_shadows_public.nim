@@ -1,7 +1,13 @@
 ## M8 — Manifest-layer composition.
 ##
-## The composer reads `<workspaceRoot>/.repro/workspace.toml` (M5
-## surface), acquires each manifest layer (via M2 `bakWorkspaceVcs`
+## The composer reads the workspace's state (`<workspaceRoot>/.repro/
+## workspace-state.toml`: the active project) and the manifest layers the
+## settings files declare (`repro-workspace.toml` for shared layers,
+## `repro-workspace.local.toml` for one person's own;
+## Workspace-Settings-Files.md §3–§4), behind the root repository, which is
+## always the base layer. This fixture's root carries no `projects/`, so the
+## base layer contributes nothing and the declared layers decide the result.
+## It acquires each manifest layer (via M2 `bakWorkspaceVcs`
 ## clone for `url`-backed layers, in-tree for `local_path`-backed
 ## layers), resolves each layer's `projects/<project>.toml` via M6's
 ## `resolveProject`, and merges the per-layer `ResolvedProject` values
@@ -12,13 +18,13 @@
 ## private manifest URLs. Each bare repo is built by committing a real
 ## working-tree of project + repo-fragment TOMLs, then `git clone
 ## --bare` into the bare path so the URL the test feeds into
-## `workspace.toml` is a valid `file://` remote with one commit on
+## `repro-workspace.toml` is a valid `file://` remote with one commit on
 ## `main`.
 ##
 ## Skip rule: skip only when `git` is missing from PATH (same rule as
 ## the M2/M3 VCS tests). All four cases otherwise run.
 
-import std/[os, osproc, strutils, tempfiles, unittest]
+import std/[options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
 import repro_workspace_manifests
@@ -73,9 +79,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -88,21 +92,21 @@ includes = [
 """
 
 const publicLibAToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
-revision = "main"
+mainline = "main"
 """
 
 const publicLibBToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
-revision = "main"
+mainline = "main"
 """
 
 const privateProjectToml = """
@@ -110,9 +114,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -125,21 +127,22 @@ includes = [
 """
 
 const privateLibBToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-b"
 path = "lib-b"
+mainline = "main"
 revision = "private-pin"
 """
 
 const privateLibCToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-c"
 path = "lib-c"
-revision = "main"
+mainline = "main"
 """
 
 # A copy of the private toml with the same triple as a public repo to
@@ -149,9 +152,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -167,9 +168,7 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "myproject"
-default_revision = "main"
 default_remote = "origin"
-trunk = "main"
 
 [[remote]]
 name = "origin"
@@ -189,32 +188,45 @@ includes = [
 # check catches this and surfaces the structured diagnostic that the
 # composer wraps with the layer's provenance.
 const conflictTwinToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "origin"
-revision = "main"
+mainline = "main"
 """
 
 const conflictLibAToml = """
-schema = "reprobuild.workspace.repo.v1"
+schema = "reprobuild.workspace.repo.v2"
 
 [repo]
 name = "lib-a"
 path = "lib-a"
 remote = "origin"
-revision = "main"
+mainline = "main"
 """
 
 # ---- helpers --------------------------------------------------------------
 
-proc writeWorkspaceToml(workspaceRoot, body: string): string =
+proc writeWorkspaceState(workspaceRoot, workspaceBody: string): string =
+  ## The state file (`[workspace]` only); returns its path, which the
+  ## composer carries on its diagnostics.
   let dotRepo = workspaceRoot / ".repro"
   createDir(dotRepo)
-  result = dotRepo / "workspace.toml"
-  writeFile(result, body)
+  result = dotRepo / "workspace-state.toml"
+  writeFile(result, "schema = \"reprobuild.workspace.state.v1\"\n\n" &
+    "[workspace]\n" & workspaceBody)
+
+proc writeSharedSettings(workspaceRoot, body: string) =
+  ## `repro-workspace.toml`: the shared, committed manifest layers.
+  writeFile(workspaceRoot / "repro-workspace.toml",
+    "schema = \"reprobuild.workspace.settings.v1\"\n\n" & body)
+
+proc writeLocalSettings(workspaceRoot, body: string) =
+  ## `repro-workspace.local.toml`: one person's own (unnamed) layers.
+  writeFile(workspaceRoot / "repro-workspace.local.toml",
+    "schema = \"reprobuild.workspace.settings-local.v1\"\n\n" & body)
 
 suite "M8 — manifest-layer composition":
 
@@ -244,22 +256,24 @@ suite "M8 — manifest-layer composition":
 
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let workspaceTomlBody =
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+      let tomlPath = writeWorkspaceState(workspaceRoot,
+        "project = \"myproject\"\nbranch = \"main\"\n")
+      # The root's mainline is the project-level branch the composed result
+      # carries (it replaced the project file's `default_revision` /
+      # `trunk`), so declare it and check it survives composition.
+      writeSharedSettings(workspaceRoot,
+        "[workspace]\nmainline = \"main\"\n\n" &
         "[[manifest]]\n" &
         "url = \"" & fileUrl(publicBare) & "\"\n" &
         "visibility = \"public\"\nbranch = \"main\"\n\n" &
         "[[manifest]]\n" &
         "url = \"" & fileUrl(privateBare) & "\"\n" &
-        "visibility = \"private\"\nbranch = \"main\"\n"
-      let tomlPath = writeWorkspaceToml(workspaceRoot, workspaceTomlBody)
+        "visibility = \"private\"\nbranch = \"main\"\n")
 
       let resolved = composeManifestLayersFromFile(tomlPath)
 
       check resolved.projectName == "myproject"
-      check resolved.defaultRevision == "main"
-      check resolved.trunk == "main"
+      check resolved.workspaceMainline == "main"
       # Three repos total: lib-a (public-only), lib-b (private shadows
       # public), lib-c (private-only).
       check resolved.repos.len == 3
@@ -321,8 +335,10 @@ suite "M8 — manifest-layer composition":
       createDir(workspaceRoot)
 
       # Pre-populate an in-tree local manifest directory containing the
-      # private project + repo fragments.
-      let localManifestRel = ".repro/manifests-personal"
+      # private project + repo fragments. It is one person's own layer, so
+      # the local settings file declares it, outside `.repro/` (§4 refuses a
+      # `local_path` there: everything under `.repro/` is disposable state).
+      let localManifestRel = "manifests-personal"
       let localManifestAbs = workspaceRoot / localManifestRel
       createDir(localManifestAbs / "projects")
       createDir(localManifestAbs / "repos")
@@ -331,16 +347,16 @@ suite "M8 — manifest-layer composition":
       writeFile(localManifestAbs / "repos" / "lib-b.toml", privateLibBToml)
       writeFile(localManifestAbs / "repos" / "lib-c.toml", privateLibCToml)
 
-      let workspaceTomlBody =
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"myproject\"\nbranch = \"main\"\n\n" &
+      let tomlPath = writeWorkspaceState(workspaceRoot,
+        "project = \"myproject\"\nbranch = \"main\"\n")
+      writeSharedSettings(workspaceRoot,
         "[[manifest]]\n" &
         "url = \"" & fileUrl(publicBare) & "\"\n" &
-        "visibility = \"public\"\nbranch = \"main\"\n\n" &
+        "visibility = \"public\"\nbranch = \"main\"\n")
+      writeLocalSettings(workspaceRoot,
         "[[manifest]]\n" &
         "local_path = \"" & localManifestRel & "\"\n" &
-        "visibility = \"personal\"\n"
-      let tomlPath = writeWorkspaceToml(workspaceRoot, workspaceTomlBody)
+        "visibility = \"personal\"\n")
 
       let resolved = composeManifestLayersFromFile(tomlPath)
       check resolved.projectName == "myproject"
@@ -388,7 +404,6 @@ schema = "reprobuild.workspace.project.v1"
 
 [project]
 name = "otherproject"
-default_revision = "main"
 default_remote = "origin"
 
 [[remote]]
@@ -403,20 +418,26 @@ includes = []
 
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let workspaceTomlBody =
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"myproject\"\n\n" &
-        "[[manifest]]\n" &
-        "url = \"" & fileUrl(publicBare) & "\"\n" &
-        "visibility = \"public\"\nbranch = \"main\"\n\n" &
-        "[[manifest]]\n" &
-        "url = \"" & fileUrl(privateBare) & "\"\n" &
-        "visibility = \"private\"\nbranch = \"main\"\n"
-      let tomlPath = writeWorkspaceToml(workspaceRoot, workspaceTomlBody)
+      # The layer list is built IN MEMORY and handed to the composer, not
+      # written to a settings file. The rule under test belongs to layers
+      # that do not come from the settings files (`from_settings` unset):
+      # such a layer must declare the project. A settings-file layer instead
+      # composes additively per project (Workspace-Settings-Files.md §4) and
+      # would contribute nothing here rather than raise — that rule is
+      # covered by `t_settings_layers_apply_without_state_file`.
+      let tomlPath = writeWorkspaceState(workspaceRoot,
+        "project = \"myproject\"\n")
+      let local = WorkspaceLocal(schema: schemaWorkspaceStateV1,
+        workspace: WorkspaceBody(project: "myproject"),
+        manifest: @[
+          ManifestLayer(url: some(fileUrl(publicBare)),
+            visibility: "public", branch: some("main")),
+          ManifestLayer(url: some(fileUrl(privateBare)),
+            visibility: "private", branch: some("main"))])
 
       var raised = false
       try:
-        discard composeManifestLayersFromFile(tomlPath)
+        discard composeManifestLayers(local, workspaceRoot, tomlPath)
       except WorkspaceManifestParseError as e:
         raised = true
         check e.path == tomlPath
@@ -458,16 +479,15 @@ includes = []
 
       let workspaceRoot = scratch / "workspace"
       createDir(workspaceRoot)
-      let workspaceTomlBody =
-        "schema = \"reprobuild.workspace.local.v1\"\n\n" &
-        "[workspace]\nproject = \"myproject\"\n\n" &
+      let tomlPath = writeWorkspaceState(workspaceRoot,
+        "project = \"myproject\"\n")
+      writeSharedSettings(workspaceRoot,
         "[[manifest]]\n" &
         "url = \"" & fileUrl(publicBare) & "\"\n" &
         "visibility = \"public\"\nbranch = \"main\"\n\n" &
         "[[manifest]]\n" &
         "url = \"" & fileUrl(privateBare) & "\"\n" &
-        "visibility = \"private\"\nbranch = \"main\"\n"
-      let tomlPath = writeWorkspaceToml(workspaceRoot, workspaceTomlBody)
+        "visibility = \"private\"\nbranch = \"main\"\n")
 
       var raised = false
       try:

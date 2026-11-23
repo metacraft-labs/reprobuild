@@ -103,8 +103,7 @@ suite "MO-9 — gate + sync consume the unified locked deps regardless of source
       proc lockLdWith(integrity: string): LockedDependencies =
         LockedDependencies(schema: SolvedGraphLockSchemaV2, deps: @[
           LockedDep(name: "app", path: ".",
-            coordinates: Coordinates(kind: ckVcs, url: appUrl, gitRef: "main",
-              revision: appSha),
+            coordinates: Coordinates(kind: ckVcs, url: appUrl, revision: appSha),
             integrity: integrity, visibility: "public")])
 
       # Source 2: a store (DB) source. Record the SAME revision in a store and

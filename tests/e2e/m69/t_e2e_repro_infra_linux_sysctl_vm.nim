@@ -33,6 +33,7 @@
 import std/[os, strutils]
 
 import std/unittest
+import repro_test_support/reasoned_skip
 
 import repro_elevation
 
@@ -80,7 +81,7 @@ proc main() =
     echo "  drop-in path: ", path
 
     # 1. APPLY — writes the drop-in + runs `sysctl -p <path>`.
-    discard applyLinuxSysctl(op)
+    discard applyLinuxSysctl(FixtureContext(), op)
     doAssert fileExists(path),
       "expected drop-in file " & path & " to exist after apply"
     let live = readFile(path)

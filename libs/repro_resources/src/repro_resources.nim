@@ -14,6 +14,10 @@
 ##     graph; a defining repo exports thin typed wrapper procs on top.
 ##   * `reconcileResources` — the generic dependency-ordered reconciler
 ##     that dispatches every leaf op through the registered driver.
+##   * `readiness_edge` — Shared-Development-Services D-SS10 (§7.1): the
+##     shared-service NODE and the REGISTRATION resource, so that a
+##     registration's ordering edge onto a live service is an ordinary
+##     `dependsOn` whose completion is the service's DECLARED READINESS.
 ##   * `marshalAttrs` / `unmarshalAttrs` — provider<->client attribute
 ##     marshalling reusing the Typed-Graph-Extensions registry.
 ##
@@ -33,6 +37,7 @@ import repro_resources/state_store
 import repro_resources/reaper
 import repro_resources/run_edge
 import repro_resources/resource_graph
+import repro_resources/readiness_edge
 
 export lease
 export instance
@@ -46,3 +51,4 @@ export state_store
 export reaper
 export run_edge
 export resource_graph
+export readiness_edge

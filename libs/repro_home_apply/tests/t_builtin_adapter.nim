@@ -1,4 +1,4 @@
-## M64 — cakBuiltin adapter unit tests.
+## M64 — home archive realizer (`builtin_adapter`) unit tests.
 ##
 ## All tests are HERMETIC: artifacts are served from `file://` URLs
 ## pointing at fixtures the test materializes on disk, so no network
@@ -8,7 +8,8 @@
 ## it.
 ##
 ## Coverage:
-##   1. resolveBuiltinPackage(): default + explicit version + miss
+##   1. Tarball selection feeding the realizer (GM4b): default (first
+##      declared) + explicit version + miss + no record
 ##   2. realizeBuiltinPackage() with imExtract + afRaw on a synthetic
 ##      file:// URL — verifies the realized prefix carries the
 ##      declared binary and the env bindings are substituted.
@@ -19,24 +20,30 @@
 ##   5. Zip extraction with extract_path flatten — requires a host
 ##      zip tool (unzip or PowerShell). Skipped on
 ##      hosts without one.
-##   6. Installer mode: mocked via `REPRO_TEST_BUILTIN_INSTALLER_MOCK`
-##      so the test does not exec a real installer; asserts the argv
-##      composition (NSIS-style `/S /D=<dir>`).
-##   7. Dispatch through the realize.nim cakBuiltin branch:
-##      `realizeBuiltinAdapter` produces a `RealizedRecord` with
-##      `adapter == akBuiltin` and populated digest/url fields.
+##   6. An installer without its primary executable is refused before execution;
+##      real native installer invocation is covered by t_one_tarball_realizer.
+##   7. The realized prefix's receipt records the archive realizer
+##      (`tarball`) and populated digest/url fields.
+##
+## GM4b: resolutions are synthetic `tarball` records selected by
+## `selectRealization` and projected by `archiveRealizationOf` (see the
+## helpers below); the `VersionedProvisioning` catalogs they replaced
+## are gone.
 
 import std/[os, osproc, strutils, tables, unittest]
+import repro_test_support/reasoned_skip
 from repro_core/paths import extendedPath
 
 import repro_local_store
 import repro_dsl_stdlib/packages_schema
+import repro_interface_artifacts
 
 import repro_home_apply/package_catalog
 import repro_home_apply/builtin_adapter
 import repro_home_apply/realize
+from repro_test_support import testCaseScratchSlug
 
-const FixtureRoot = "build/test-tmp/t-builtin-adapter"
+let FixtureRoot = "build/test-tmp/t-builtin-adapter" / testCaseScratchSlug()
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -80,49 +87,83 @@ proc writePayloadFile(path: string; content: string): string =
   writeFile(extendedPath(path), content)
   fileShaHex(path, "sha256")
 
-proc makeRawVp(version, url, sha256: string;
-               binRelpath: seq[string] = @["bin/tool"]):
-    VersionedProvisioning =
-  initVersionedProvisioning(
-    version = version,
-    archive_format = afRaw,
-    install_method = imExtract,
-    bin_relpath = binRelpath,
-    platforms = @[
-      initPlatformBinary(
-        cpu = detectHostCpu(),
-        os = detectHostOs(),
-        url = url,
-        sha256 = sha256),
-    ],
-    env = {"TOOL_HOME": "${prefix}", "TOOL_BIN": "${prefix}/bin/tool"})
+# ---------------------------------------------------------------------------
+# GM4b: an archive realization is a `tarball` record of a package definition
+# (Provisioning-Contributions.md §"Profile Package References"). A test
+# realization is a synthetic record for this host, SELECTED by the same
+# `selectRealization` a profile reference goes through and projected by
+# `archiveRealizationOf` into the archive realizer's input — so the realizer
+# is driven exactly as `repro home apply` drives it.
+# ---------------------------------------------------------------------------
 
-proc makeRawVpSha1(version, url, sha1: string;
+proc hostRecord(url, archiveType, executablePath: string;
+                extraExecutables: seq[string] = @[];
+                sha256 = ""; sha1 = ""; version = "1.0.0";
+                installMethod = ""; extractPath = "";
+                installerArgs: seq[string] = @[];
+                pacmanPackages: seq[string] = @[];
+                env: seq[string] = @[]; nested7z = false;
+                msiAdminInstall = false;
+                preInstall: seq[string] = @[];
+                preInstallUnrecognized: seq[string] = @[];
+                launcherEmit: seq[string] = @[];
+                anyCpu = false): InterfaceTarballProvisioning =
+  ## A synthetic `tarball` record for this host's (cpu, os); ``anyCpu``
+  ## leaves the cpu open, as a record for every CPU family does.
+  let host = hostRealizationTarget()
+  result = InterfaceTarballProvisioning(url: url, sha256: sha256,
+    archiveType: archiveType, executablePath: executablePath,
+    cpu: (if anyCpu: "" else: $host.platform.family), os: $host.os)
+  result.detail.version = version
+  result.detail.sha1 = sha1
+  result.detail.installMethod = installMethod
+  result.detail.extractPath = extractPath
+  result.detail.extraExecutables = extraExecutables
+  result.detail.installerArgs = installerArgs
+  result.detail.pacmanPackages = pacmanPackages
+  result.detail.env = env
+  result.detail.nested7z = nested7z
+  result.detail.msiAdminInstall = msiAdminInstall
+  result.detail.preInstall = preInstall
+  result.detail.preInstallUnrecognized = preInstallUnrecognized
+  result.detail.launcherEmit = launcherEmit
+
+proc selectArchive(packageId: string;
+                   records: openArray[InterfaceTarballProvisioning];
+                   version = ""): ArchiveRealization =
+  ## Select among ``records`` for this host (policy ``[tarball]``) and
+  ## project the selection into the archive realizer's input.
+  var useDef = InterfaceToolUse(rawConstraint: packageId,
+    packageSelector: packageId, executableName: packageId)
+  useDef.tarballProvisioning = @records
+  let selection = selectRealization(useDef, SelectionRequest(
+    packageName: packageId, target: hostRealizationTarget(),
+    policy: @[rkTarball], version: version, definitionKnown: true))
+  archiveRealizationOf(packageId, selection.tarball)
+
+proc rawRecord(version, url, sha256: string;
+               binRelpath: seq[string] = @["bin/tool"]):
+    InterfaceTarballProvisioning =
+  hostRecord(url, "raw", binRelpath[0], binRelpath[1 .. ^1],
+    sha256 = sha256, version = version,
+    env = @["TOOL_BIN=${prefix}/bin/tool", "TOOL_HOME=${prefix}"])
+
+proc rawRecordSha1(version, url, sha1: string;
                    binRelpath: seq[string] = @["bin/tool"]):
-    VersionedProvisioning =
-  ## Mirrors ``makeRawVp`` but populates the ``sha1`` field. Used by
-  ## the M1 test that exercises the sha1 verification path.
-  initVersionedProvisioning(
-    version = version,
-    archive_format = afRaw,
-    install_method = imExtract,
-    bin_relpath = binRelpath,
-    platforms = @[
-      initPlatformBinary(
-        cpu = detectHostCpu(),
-        os = detectHostOs(),
-        url = url,
-        sha1 = sha1),
-    ],
-    env = {"TOOL_HOME": "${prefix}", "TOOL_BIN": "${prefix}/bin/tool"})
+    InterfaceTarballProvisioning =
+  ## Mirrors ``rawRecord`` but pins the archive by ``sha1``. Used by the
+  ## M1 test that exercises the sha1 verification path.
+  hostRecord(url, "raw", binRelpath[0], binRelpath[1 .. ^1],
+    sha1 = sha1, version = version,
+    env = @["TOOL_BIN=${prefix}/bin/tool", "TOOL_HOME=${prefix}"])
 
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
 
-suite "M64 — cakBuiltin adapter":
+suite "M64 — home archive realizer":
 
-  test "resolveBuiltinPackage: default version + explicit version + miss":
+  test "tarball selection: default version + explicit version + miss":
     let fixtureDir = FixtureRoot / "resolve"
     resetDir(fixtureDir)
     let payload = "v2-payload"
@@ -130,35 +171,41 @@ suite "M64 — cakBuiltin adapter":
     let sha = writePayloadFile(payloadPath, payload)
     let url = fileToUrl(absolutePath(payloadPath))
 
-    let catalog = @[
-      makeRawVp("1.0.0", url, sha),
-      makeRawVp("2.0.0", url, sha),
+    let records = @[
+      rawRecord("2.0.0", url, sha),
+      rawRecord("1.0.0", url, sha),
     ]
 
-    # Default: last entry (2.0.0) per `selectDefault`.
-    let defRes = resolveBuiltinPackage("tool", catalog)
-    check defRes.found
-    check defRes.resolution.adapter == cakBuiltin
-    check defRes.resolution.builtinVersion == "2.0.0"
-    check defRes.resolution.urlUsed == url
-    check defRes.resolution.digestAlgorithm == "sha256"
-    check defRes.resolution.digestValue == sha
-    check defRes.resolution.archiveFormat == afRaw
+    # Default: the FIRST eligible record in declaration order (2.0.0) —
+    # GM4b's rule (a package lists its default version first).
+    let defRes = selectArchive("tool", records)
+    check defRes.builtinVersion == "2.0.0"
+    check defRes.urlUsed == url
+    check defRes.digestAlgorithm == "sha256"
+    check defRes.digestValue == sha
+    check defRes.archiveFormat == afRaw
 
-    # Explicit: 1.0.0 must resolve to the first entry.
-    let explicit = resolveBuiltinPackage("tool", catalog, version = "1.0.0")
-    check explicit.found
-    check explicit.resolution.builtinVersion == "1.0.0"
+    # Explicit: 1.0.0 must resolve to the second record.
+    let explicit = selectArchive("tool", records, version = "1.0.0")
+    check explicit.builtinVersion == "1.0.0"
 
-    # Version miss: structured error, no resolution.
-    let miss = resolveBuiltinPackage("tool", catalog, version = "9.9.9")
-    check (not miss.found)
-    check miss.error == breVersionNotInCatalog
+    # Version miss: a structured missing-realization error naming the
+    # version and the versions offered; no resolution.
+    var missMsg = ""
+    try:
+      discard selectArchive("tool", records, version = "9.9.9")
+    except EMissingRealization as err:
+      missMsg = err.msg
+    check "9.9.9" in missMsg
+    check "2.0.0" in missMsg and "1.0.0" in missMsg
 
-    # Empty catalog: structured error.
-    let empty = resolveBuiltinPackage("tool", @[])
-    check (not empty.found)
-    check empty.error == breEmptyCatalog
+    # No record at all: structured error too.
+    var emptyMsg = ""
+    try:
+      discard selectArchive("tool", newSeq[InterfaceTarballProvisioning]())
+    except EMissingRealization as err:
+      emptyMsg = err.msg
+    check "no tarball realization declared" in emptyMsg
 
   test "realizeBuiltinPackage: imExtract + afRaw materializes the prefix":
     let fixtureDir = FixtureRoot / "raw-realize"
@@ -171,15 +218,14 @@ suite "M64 — cakBuiltin adapter":
     let payloadPath = payloadDir / "tool.bin"
     let sha = writePayloadFile(payloadPath, payload)
     let url = fileToUrl(absolutePath(payloadPath))
-    let catalog = @[makeRawVp("1.0.0", url, sha,
+    let records = @[rawRecord("1.0.0", url, sha,
       binRelpath = @["bin/tool"])]
-    let res = resolveBuiltinPackage("tool", catalog)
-    check res.found
+    let res = selectArchive("tool", records)
 
     var store = openStore(storeDir)
     defer: store.close()
 
-    let out1 = realizeBuiltinPackage(store, res.resolution)
+    let out1 = realizeBuiltinPackage(store, res)
     check (not out1.cacheHit)
     check out1.prefixAbsolutePath.len > 0
     check dirExists(extendedPath(out1.prefixAbsolutePath))
@@ -210,19 +256,18 @@ suite "M64 — cakBuiltin adapter":
     let payloadPath = payloadDir / "tool.bin"
     let sha = writePayloadFile(payloadPath, payload)
     let url = fileToUrl(absolutePath(payloadPath))
-    let catalog = @[makeRawVp("3.0.0", url, sha)]
-    let res = resolveBuiltinPackage("tool", catalog)
-    check res.found
+    let records = @[rawRecord("3.0.0", url, sha)]
+    let res = selectArchive("tool", records)
 
     var store = openStore(storeDir)
     defer: store.close()
 
-    let out1 = realizeBuiltinPackage(store, res.resolution)
+    let out1 = realizeBuiltinPackage(store, res)
     check (not out1.cacheHit)
     # Wipe the source payload so a second download would FAIL — the
     # cache-hit must skip the download entirely.
     removeFile(extendedPath(payloadPath))
-    let out2 = realizeBuiltinPackage(store, res.resolution)
+    let out2 = realizeBuiltinPackage(store, res)
     check out2.cacheHit
     check out2.prefixId == out1.prefixId
     check out2.prefixAbsolutePath == out1.prefixAbsolutePath
@@ -240,9 +285,8 @@ suite "M64 — cakBuiltin adapter":
     let url = fileToUrl(absolutePath(payloadPath))
     # Declare a digest that does NOT match the payload.
     let wrong = "deadbeef".repeat(8)  # 64 hex chars
-    let catalog = @[makeRawVp("1.0.0", url, wrong)]
-    let res = resolveBuiltinPackage("tool", catalog)
-    check res.found
+    let records = @[rawRecord("1.0.0", url, wrong)]
+    let res = selectArchive("tool", records)
 
     var store = openStore(storeDir)
     defer: store.close()
@@ -251,7 +295,7 @@ suite "M64 — cakBuiltin adapter":
     var expected = ""
     var observed = ""
     try:
-      discard realizeBuiltinPackage(store, res.resolution)
+      discard realizeBuiltinPackage(store, res)
     except EBuiltinDigestMismatch as err:
       raised = true
       expected = err.expectedDigest
@@ -295,17 +339,21 @@ suite "M64 — cakBuiltin adapter":
     createDir(extendedPath(innerDir / "lib"))
     writeFile(extendedPath(innerDir / "bin" / "tool.cmd"),
       "@echo hello from tool\n")
+    setFilePermissions(extendedPath(innerDir / "bin" / "tool.cmd"),
+      {fpUserRead, fpUserWrite, fpUserExec})
     writeFile(extendedPath(innerDir / "lib" / "runtime.txt"),
       "runtime-marker\n")
 
     # Produce the zip. Prefer `zip` (POSIX) then PowerShell.
-    let zipPath = fixtureDir / "tool-1.0.0.zip"
+    let zipPath = absolutePath(fixtureDir / "tool-1.0.0.zip")
     let posixZip = findExe("zip")
     var zipped = false
     if posixZip.len > 0:
       let cmd = quoteShell(posixZip) & " -q -r " & quoteShell(zipPath) &
         " " & quoteShell("tool-1.0.0")
       let res = execCmdEx(cmd, workingDir = stagingDir)
+      checkpoint res.output
+      require res.exitCode == 0
       zipped = res.exitCode == 0
     if not zipped:
       when defined(windows):
@@ -319,6 +367,8 @@ suite "M64 — cakBuiltin adapter":
           let cmd = quoteShell(pwsh) &
             " -NoProfile -ExecutionPolicy Bypass -Command " & quoteShell(ps)
           let res = execCmdEx(cmd)
+          checkpoint res.output
+          require res.exitCode == 0
           zipped = res.exitCode == 0
     if not zipped:
       echo "  [skip] no zip producer on PATH; skipping afZip test"
@@ -326,26 +376,14 @@ suite "M64 — cakBuiltin adapter":
     else:
       let sha = fileShaHex(zipPath, "sha256")
       let url = fileToUrl(absolutePath(zipPath))
-      let vp = initVersionedProvisioning(
-        version = "1.0.0",
-        archive_format = afZip,
-        install_method = imExtract,
-        bin_relpath = @["bin/tool.cmd", "lib/runtime.txt"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(),
-            os = detectHostOs(),
-            url = url,
-            sha256 = sha,
-            extract_path = "tool-1.0.0"),
-        ])
-      let res = resolveBuiltinPackage("tool", @[vp])
-      check res.found
+      let res = selectArchive("tool", [hostRecord(url, "zip",
+        "bin/tool.cmd", @["lib/runtime.txt"], sha256 = sha,
+        extractPath = "tool-1.0.0")])
 
       var store = openStore(storeDir)
       defer: store.close()
 
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       # The flatten removed the `tool-1.0.0/` prefix.
       let bin = outR.prefixAbsolutePath / "bin" / "tool.cmd"
@@ -382,6 +420,8 @@ suite "M64 — cakBuiltin adapter":
       createDir(extendedPath(innerDir / "lib"))
       writeFile(extendedPath(innerDir / "bin" / "tool.cmd"),
         "@echo hello from 7z tool\n")
+      setFilePermissions(extendedPath(innerDir / "bin" / "tool.cmd"),
+        {fpUserRead, fpUserWrite, fpUserExec})
       writeFile(extendedPath(innerDir / "lib" / "runtime.txt"),
         "seven-zip-runtime-marker\n")
 
@@ -397,26 +437,14 @@ suite "M64 — cakBuiltin adapter":
 
       let sha = fileShaHex(archivePath, "sha256")
       let url = fileToUrl(absolutePath(archivePath))
-      let vp = initVersionedProvisioning(
-        version = "1.0.0",
-        archive_format = afSevenZip,
-        install_method = imExtract,
-        bin_relpath = @["bin/tool.cmd", "lib/runtime.txt"],
-        platforms = @[
-          initPlatformBinary(
-            cpu = detectHostCpu(),
-            os = detectHostOs(),
-            url = url,
-            sha256 = sha,
-            extract_path = "tool-1.0.0"),
-        ])
-      let res = resolveBuiltinPackage("tool-7z", @[vp])
-      check res.found
+      let res = selectArchive("tool-7z", [hostRecord(url, "7z",
+        "bin/tool.cmd", @["lib/runtime.txt"], sha256 = sha,
+        extractPath = "tool-1.0.0")])
 
       var store = openStore(storeDir)
       defer: store.close()
 
-      let outR = realizeBuiltinPackage(store, res.resolution)
+      let outR = realizeBuiltinPackage(store, res)
       check (not outR.cacheHit)
       # The flatten removed the `tool-1.0.0/` prefix.
       let bin = outR.prefixAbsolutePath / "bin" / "tool.cmd"
@@ -426,86 +454,36 @@ suite "M64 — cakBuiltin adapter":
       check readFile(extendedPath(lib)).contains("seven-zip-runtime-marker")
       check outR.archiveFormat == afSevenZip
 
-  test "realizeBuiltinPackage: installer mode captures argv via mock":
-    # Mock the installer invocation so the test is hermetic. The
-    # adapter writes the recorded argv into `$REPRO_TEST_BUILTIN_INSTALLER_MOCK`
-    # and synthesizes the install_dir on disk; we assert the argv
-    # composition + that the staged tree contains the declared bin.
-    let fixtureDir = FixtureRoot / "installer-mock"
-    let storeDir = fixtureDir / "store"
-    let payloadDir = fixtureDir / "payload"
+  test "an installer with no primary executable is refused before execution":
+    # A canonical tarball always names its exported primary. The retired
+    # home loop accepted a cleared binRelpath and skipped validation; the
+    # compatibility API must enforce the common edge's invariant instead.
+    # The real installer/argv path is covered without a mock by
+    # t_one_tarball_realizer's native silent-installer fixture.
+    let fixtureDir = FixtureRoot / "installer-no-primary"
     resetDir(fixtureDir)
-    resetDir(storeDir)
-    resetDir(payloadDir)
-    # The fake "installer" is a stub file — the mock dispatch never
-    # executes it, only records the argv that would have run.
-    let installerPath = payloadDir / "fake-installer.exe"
-    let installerSha = writePayloadFile(installerPath,
-      "fake-installer-bytes")
-    let url = fileToUrl(absolutePath(installerPath))
-    # The bin_relpath must point at a file the mock places under the
-    # install dir. We use a tiny post-install hook: after the mock
-    # writes the argv, the test creates the expected bin so the
-    # post-extraction `bin_relpath` check passes.
-    #
-    # We do this by registering a custom mock that ALSO writes the bin
-    # — but the adapter's mock path only ensures destDir exists. So
-    # we use a two-step approach: realize INSIDE a wrapper that
-    # post-populates the staging directory before validation runs.
-    #
-    # Simpler: declare an empty `bin_relpath` so the validation loop
-    # is a no-op. The schema requires at least one entry for
-    # imExtract; for imInstallerSilent the schema requires
-    # installer_args, not bin_relpath, so an empty bin_relpath is
-    # valid. We still set executableName via packageId.
-    let argvCapture = fixtureDir / "argv.txt"
-    putEnv(BuiltinTestInstallerMockEnvVar, argvCapture)
-    defer: delEnv(BuiltinTestInstallerMockEnvVar)
-
-    let vp = initVersionedProvisioning(
-      version = "1.0.0",
-      archive_format = afInstallerNsis,
-      install_method = imInstallerSilent,
-      bin_relpath = @[],
-      platforms = @[
-        initPlatformBinary(
-          cpu = detectHostCpu(),
-          os = detectHostOs(),
-          url = url,
-          sha256 = installerSha)],
-      installer_args = @["/S"])
-    let res = resolveBuiltinPackage("tool-with-installer", @[vp])
-    check res.found
-
-    var store = openStore(storeDir)
+    let installerPath = fixtureDir / "installer.exe"
+    let digest = writePayloadFile(installerPath, "must never execute")
+    var resolution = selectArchive("installer-no-primary", [hostRecord(
+      fileToUrl(absolutePath(installerPath)), "installer-nsis", "tool.exe",
+      sha256 = digest, installMethod = "installer-silent",
+      installerArgs = @["/S"])])
+    resolution.binRelpath = @[]
+    var store = openStore(fixtureDir / "store")
     defer: store.close()
+    try:
+      discard realizeBuiltinPackage(store, resolution)
+      check false
+    except ValueError as err:
+      check "incomplete tarball metadata" in err.msg
+    var published = false
+    for path in walkDirs(fixtureDir / "store" / "prefixes" / "*" / "*"):
+      published = true
+    check not published
 
-    let outR = realizeBuiltinPackage(store, res.resolution)
-    check (not outR.cacheHit)
-    check outR.installerArgvUsed.len >= 3  # installer + /S + /D=<dir>
-    check outR.installerArgvUsed[0] == absolutePath(installerPath) or
-      outR.installerArgvUsed[0].endsWith("fake-installer.exe") or
-      outR.installerArgvUsed[0].contains("artifact.")
-        # The download is staged into a CAS-tmp dir; the adapter
-        # invokes the staged copy, not the source. We accept any of
-        # these for robustness.
-    check outR.installerArgvUsed.contains("/S")
-    var sawDFlag = false
-    for a in outR.installerArgvUsed:
-      if a.startsWith("/D="):
-        sawDFlag = true
-    check sawDFlag
-    # The capture file recorded the argv.
-    check fileExists(extendedPath(argvCapture))
-    let argvFile = readFile(extendedPath(argvCapture))
-    check argvFile.contains("/S")
-    check argvFile.contains("/D=")
-
-  test "realize.nim dispatch: cakBuiltin produces a RealizedRecord":
-    # End-to-end: produce a CatalogResolution with adapter == cakBuiltin
-    # and drive `realizeBuiltinAdapter` (the realize.nim bridge) so we
-    # verify the dispatch table is wired and the RealizedRecord carries
-    # the M64 fields populated.
+  test "archive realizer: realized prefix carries the dispatch fields":
+    # End-to-end from a selected record: the realizer's outcome carries
+    # url/digest/format and its receipt names the archive realizer.
     let fixtureDir = FixtureRoot / "dispatch"
     let storeDir = fixtureDir / "store"
     let payloadDir = fixtureDir / "payload"
@@ -515,20 +493,16 @@ suite "M64 — cakBuiltin adapter":
     let payloadPath = payloadDir / "tool.bin"
     let sha = writePayloadFile(payloadPath, "dispatch-bytes")
     let url = fileToUrl(absolutePath(payloadPath))
-    let catalog = @[makeRawVp("4.0.0", url, sha,
+    let records = @[rawRecord("4.0.0", url, sha,
       binRelpath = @["bin/tool"])]
-    let res = resolveBuiltinPackage("dispatch-tool", catalog)
-    check res.found
+    let res = selectArchive("dispatch-tool", records)
 
     var store = openStore(storeDir)
     defer: store.close()
 
-    # We exercise `realizeBuiltinPackage` (the low-level entry point —
-    # `realizeBuiltinAdapter` in realize.nim is currently not exported
-    # because it's an internal dispatch detail). The fact that
-    # realize.nim's `case` over `CatalogAdapterKind` now includes the
-    # `cakBuiltin` branch is verified by the build_apps gate.
-    let outR = realizeBuiltinPackage(store, res.resolution)
+    # `realizeBuiltinPackage` is the entry point realize.nim's
+    # `realizeBuiltinAdapter` calls for an installer-route selection.
+    let outR = realizeBuiltinPackage(store, res)
     check (not outR.cacheHit)
     check outR.urlUsed == url
     check outR.digestAlgorithm == "sha256"
@@ -536,15 +510,15 @@ suite "M64 — cakBuiltin adapter":
     check outR.archiveFormat == afRaw
     check outR.resolvedExecutablePath ==
       outR.prefixAbsolutePath / "bin" / "tool"
-    # The realized prefix's receipt records adapter == BuiltinAdapterName.
+    # The realized prefix's receipt records the common tarball owner.
     let receiptPath = outR.prefixAbsolutePath / ".repro-receipt"
     check fileExists(extendedPath(receiptPath))
     let receipt = readReceiptFile(receiptPath)
-    check receipt.adapter == BuiltinAdapterName
+    check receipt.adapter == "tarball"
     check receipt.packageName == "dispatch-tool"
     check receipt.version == "4.0.0"
     check receipt.provenanceUrl == url
-    check receipt.provenanceChecksum == "sha256:" & sha
+    check receipt.provenanceChecksum == sha
 
   # ===========================================================================
   # M1 (Realize-Closure spec) — sha1 weak-hash realize path.
@@ -552,7 +526,7 @@ suite "M64 — cakBuiltin adapter":
 
   test "test_m1_realize_accepts_sha1_digest":
     ## Hermetic file:// realize against a fixture whose sha1 digest is
-    ## the slice's declared hash. The realize loop verifies via sha1
+    ## the record's declared hash. The realize loop verifies via sha1
     ## and the prefix lands successfully. Mirrors the SHA-256 happy-
     ## path test up-suite.
     let fixtureDir = FixtureRoot / "sha1-realize"
@@ -570,17 +544,16 @@ suite "M64 — cakBuiltin adapter":
     let sha1 = fileShaHex(payloadPath, "sha1")
     check sha1.len == 40
     let url = fileToUrl(absolutePath(payloadPath))
-    let catalog = @[makeRawVpSha1("1.0.0", url, sha1,
+    let records = @[rawRecordSha1("1.0.0", url, sha1,
       binRelpath = @["bin/tool"])]
-    let res = resolveBuiltinPackage("sha1-tool", catalog)
-    check res.found
-    check res.resolution.digestAlgorithm == "sha1"
-    check res.resolution.digestValue == sha1
+    let res = selectArchive("sha1-tool", records)
+    check res.digestAlgorithm == "sha1"
+    check res.digestValue == sha1
 
     var store = openStore(storeDir)
     defer: store.close()
 
-    let outR = realizeBuiltinPackage(store, res.resolution)
+    let outR = realizeBuiltinPackage(store, res)
     check (not outR.cacheHit)
     check outR.digestAlgorithm == "sha1"
     check outR.digestValue == sha1
@@ -605,10 +578,9 @@ suite "M64 — cakBuiltin adapter":
     let url = fileToUrl(absolutePath(payloadPath))
     # Declare a sha1 digest that does NOT match the payload.
     let wrong = "deadbeef".repeat(5)  # 40 hex chars
-    let catalog = @[makeRawVpSha1("1.0.0", url, wrong)]
-    let res = resolveBuiltinPackage("sha1-tool", catalog)
-    check res.found
-    check res.resolution.digestAlgorithm == "sha1"
+    let records = @[rawRecordSha1("1.0.0", url, wrong)]
+    let res = selectArchive("sha1-tool", records)
+    check res.digestAlgorithm == "sha1"
 
     var store = openStore(storeDir)
     defer: store.close()
@@ -618,7 +590,7 @@ suite "M64 — cakBuiltin adapter":
     var observed = ""
     var expectedAlgo = ""
     try:
-      discard realizeBuiltinPackage(store, res.resolution)
+      discard realizeBuiltinPackage(store, res)
     except EBuiltinDigestMismatch as err:
       raised = true
       expected = err.expectedDigest

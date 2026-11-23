@@ -870,13 +870,27 @@ proc start*(srv: BinaryCacheHttpServer; listenAddr: string) {.async.} =
   proc cb(req: Request) {.async, gcsafe.} =
     {.cast(gcsafe).}:
       await handleRequest(srv, req)
-  # Hold the serve future instead of ``asyncCheck``-ing it: ``close``
-  # tears down the listening socket while this accept loop is still
-  # pending, which surfaces as a ``Bad file descriptor`` ``OSError``.
-  # That failure is expected during shutdown, so ``close`` installs a
-  # handler that consumes it; ``asyncCheck`` would instead reraise it
-  # into the next ``poll`` and crash an in-process caller.
-  srv.serveFut = srv.server.serve(port, cb, host)
+  # Bind HERE, synchronously, so a bind failure (the port taken) raises
+  # out of ``start`` instead of being stored in the accept loop's future,
+  # where nothing reads it and the process would report "listening" on a
+  # port it never bound. Port 0 asks the kernel for a free port, which is
+  # race-free; ``listenPort`` is then the port actually bound.
+  srv.server.listen(port, host)
+  srv.listenPort = srv.server.getPort()
+  proc acceptLoop() {.async.} =
+    # ``std/asynchttpserver.serve`` without its own ``listen``.
+    while srv.running:
+      if srv.server.shouldAcceptRequest():
+        await srv.server.acceptRequest(cb)
+      else:
+        await sleepAsync(10)
+  # Hold the accept loop's future instead of ``asyncCheck``-ing it:
+  # ``close`` tears down the listening socket while this accept loop is
+  # still pending, which surfaces as a ``Bad file descriptor``
+  # ``OSError``. That failure is expected during shutdown, so ``close``
+  # installs a handler that consumes it; ``asyncCheck`` would instead
+  # reraise it into the next ``poll`` and crash an in-process caller.
+  srv.serveFut = acceptLoop()
   asyncCheck sweeperLoop(srv)
 
 proc close*(srv: BinaryCacheHttpServer) =

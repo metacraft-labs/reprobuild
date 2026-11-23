@@ -138,11 +138,10 @@ proc buildProviderLibrary(tempRoot: string): string =
   # LIBRARY by appending ``--app:lib`` — the C-ABI ``{.exportc, dynlib.}`` procs
   # in ``library_abi.nim`` are then emitted. (M4a proves the transport with a
   # mock lib; the full "provider library build edge" — §4.3 — is M4-later.)
-  var cmd = providerCompileCommand(modulePath, soPath, repoRoot,
-    scratchDir = tempRoot)
-  # The module path is the LAST argument; flags after it are treated as run
-  # args. Insert the library toggles just before it.
-  cmd.insert("--app:lib", cmd.len - 1)
+  # The library toggle goes through `extraFlags` (placed before the module
+  # argument, and keyed into the nimcache with the rest of the configuration).
+  let cmd = providerCompileCommand(modulePath, soPath, repoRoot,
+    scratchDir = tempRoot, extraFlags = @["--app:lib"])
   let (output, code) = execCmdEx(quoteShellCommand(cmd), workingDir = repoRoot)
   if code != 0 or not fileExists(soPath):
     raise newException(IOError,

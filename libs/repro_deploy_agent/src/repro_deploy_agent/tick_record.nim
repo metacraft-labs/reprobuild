@@ -37,6 +37,13 @@ proc recordTick*(stateDir, target: string; rec: TickStatusRecord) =
   recordTickHistory(stateDir, target, rec)
   reportTickEvent(rec, tickHistoryPath(stateDir, target))
 
+proc collectDrift(deps: AgentDeps): seq[string] =
+  ## ``deps.driftProbe``, once, on every tick -- a converged one included,
+  ## which is the tick that returns before it would plan anything.
+  if deps.driftProbe == nil: return
+  try: deps.driftProbe()
+  except CatchableError as e: @["the drift probe failed: " & e.msg]
+
 proc runAgentTickRecorded*(cfg: AgentConfig; deps: AgentDeps): RecordedTick =
   ## One tick that ALWAYS leaves a durable record — the entry point the CLI
   ## uses. `runAgentTick` itself stays pure with respect to observability so
@@ -49,8 +56,14 @@ proc runAgentTickRecorded*(cfg: AgentConfig; deps: AgentDeps): RecordedTick =
     let outcome = runAgentTick(cfg, deps)
     result = RecordedTick(outcome: outcome,
       exitCode: deployAgentExitCode(outcome.kind), raised: false, error: "")
-    recordTick(cfg.stateDir, cfg.target, tickStatusFor(outcome))
+    var rec = tickStatusFor(outcome)
+    rec.addOnDrift = collectDrift(deps)
+    result.addOnDrift = rec.addOnDrift
+    recordTick(cfg.stateDir, cfg.target, rec)
   except CatchableError as e:
     # Unchanged semantics: a raised tick is exit 1, the retryable class.
     result = RecordedTick(exitCode: 1, raised: true, error: e.msg)
-    recordTick(cfg.stateDir, cfg.target, tickStatusForRaise(cfg.target, e.msg))
+    var rec = tickStatusForRaise(cfg.target, e.msg)
+    rec.addOnDrift = collectDrift(deps)
+    result.addOnDrift = rec.addOnDrift
+    recordTick(cfg.stateDir, cfg.target, rec)

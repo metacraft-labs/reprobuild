@@ -2,7 +2,7 @@
 
 Typed reprobuild recipe that takes a kernel + initramfs and emits a
 **deterministic hybrid (BIOS + UEFI) bootable ISO** that the R0
-vm-harness boots under Hyper-V Gen-2 UEFI.
+gosti boots under Hyper-V Gen-2 UEFI.
 
 ## What this is for
 
@@ -58,7 +58,7 @@ wsl -d repro-debian -- bash -c "SOURCE_DATE_EPOCH=1735689600 LC_ALL=C TZ=UTC bas
 # Verify reproducibility (3 back-to-back rebuilds with sha256 equality).
 bash tests/reproducibility/t_r2_iso_reproducibility.sh
 
-# Boot the produced ISO via vm-harness (Hyper-V Gen-2 UEFI).
+# Boot the produced ISO via gosti (Hyper-V Gen-2 UEFI).
 # Requires an elevated PowerShell session.
 nim c -r --threads:on --hints:off --warnings:off tests/integration/t_r2_iso_boot.nim
 ```
@@ -105,7 +105,7 @@ console=tty1 console=ttyS0,115200n8 quiet
 The vendored d-i initramfs runs busybox + the Debian Installer
 framework. Reads the `console=` cmdline option and writes its
 text-mode installer banner to ttyS0. Under Hyper-V Gen-2 UEFI with
-COM1 wired to a named pipe, the R0 vm-harness `bootFromMedia` boot
+COM1 wired to a named pipe, the R0 gosti `bootFromMedia` boot
 gate tails the pipe and asserts on the installer banner.
 
 R2 does NOT drive the installer (we just verify the kernel reaches

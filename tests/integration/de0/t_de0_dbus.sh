@@ -21,7 +21,7 @@
 #   - A second invocation is a no-op (idempotency).
 #
 # What this test does NOT gate (covered by DE0-G smoke test):
-#   - Booting the augmented ISO in vm-harness.
+#   - Booting the augmented ISO in gosti.
 #   - `busctl --system` returning a service list.
 #   - `dbus-send --session` succeeding inside a logged-in session.
 #

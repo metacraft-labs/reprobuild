@@ -28,6 +28,8 @@
 ##     system.nim                   # Windows intent layer lives here
 
 import std/[os]
+when defined(posix):
+  import std/posix
 from repro_core/paths import extendedPath
 
 import ./errors
@@ -156,7 +158,34 @@ proc readCurrentGenerationId*(stateDir: string): string =
         return raw
       return ""
 
-proc writeCurrentGenerationId*(stateDir, generationId: string) =
+const InfraMutation {.strdefine: "reproAddonMutation".} = ""
+  ## The add-on's compile-time falsifying mutations
+  ## (``repro_addon/mutations``); ``current-remove-then-create`` is the one
+  ## that lives here. A build without the define contains none of it.
+
+when defined(posix):
+  var ODirectory {.importc: "O_DIRECTORY", header: "<fcntl.h>".}: cint
+
+  proc fsyncDirPath*(dir: string) =
+    ## Make a rename or unlink in ``dir`` durable: a rename is atomic but
+    ## not durable until its directory is synced.
+    let fd = posix.open(dir.cstring, O_RDONLY or ODirectory or O_CLOEXEC)
+    if fd < 0:
+      raiseOSError(osLastError(), "open directory " & dir)
+    try:
+      if fsync(fd) != 0:
+        raiseOSError(osLastError(), "fsync directory " & dir)
+    finally:
+      discard posix.close(fd)
+
+proc writeCurrentGenerationId*(stateDir, generationId: string;
+                               onPoint: proc(point: string) = nil) =
+  ## Move `current` to ``generationId`` -- the commit point of a system
+  ## generation. On POSIX it is one ``rename(2)`` of a fresh symlink over
+  ## the old one, followed by an fsync of the state directory: a crash
+  ## leaves the old `current` or the new one, never none, and once this
+  ## returns the new one survives a power cut. ``onPoint`` is a test seam
+  ## (the add-on's crash gate); production callers pass nothing.
   ensureSystemStateDir(stateDir)
   let p = currentPath(stateDir)
   when defined(windows):
@@ -166,9 +195,18 @@ proc writeCurrentGenerationId*(stateDir, generationId: string) =
     moveFile(extendedPath(tmpPath), extendedPath(p))
   else:
     let target = generationDir(stateDir, generationId)
-    if symlinkExists(extendedPath(p)) or fileExists(extendedPath(p)):
-      try: removeFile(extendedPath(p)) except OSError: discard
-    try:
+    when InfraMutation == "current-remove-then-create":
+      # The falsifying mutation: the pre-A5 commit, which removed the old
+      # link (durably) before creating the new one -- a crash between leaves
+      # no `current` at all, whatever the writeback.
+      if symlinkExists(extendedPath(p)) or fileExists(extendedPath(p)):
+        try: (removeFile(extendedPath(p)); fsyncDirPath(stateDir)) except OSError: discard
+      if onPoint != nil: onPoint("commit-current-removed")
       createSymlink(extendedPath(target), extendedPath(p))
-    except OSError:
-      writeFile(extendedPath(p), generationId)
+      fsyncDirPath(stateDir)
+    else:
+      let tmp = p & ".tmp-" & $getCurrentProcessId()
+      if symlinkExists(tmp) or fileExists(tmp): removeFile(tmp)
+      createSymlink(extendedPath(target), extendedPath(tmp))
+      moveFile(tmp, p)              # rename(2): atomic replacement
+      fsyncDirPath(stateDir)

@@ -7,7 +7,7 @@
 ## extracted from a REAL relocatable object, a victim translation unit compiled
 ## WITHOUT the patchable profile, one compiled with a DELIBERATELY SHORT sled,
 ## and a fixture binary linked against the PRODUCTION transaction through the
-## no-mock probe shim and against the REAL cross-patcher claim map. Duplicating
+## no-mock probe shim. Duplicating
 ## that across three files is how two gates end up compiling different things
 ## and only one of them exercising the code under test.
 ##
@@ -19,6 +19,18 @@
 ## exactly one property removed, run the same arm, and measure that it goes red.
 ## A gate that only ever builds the healthy provider cannot tell a passing
 ## assertion from a vacuous one.
+##
+## NO CLAIM MAP, AND NOTHING FROM THE RECORDER. The cross-patcher claim map is
+## the recorder's (`codetracer-native-recorder/ct_inline_hook/
+## claimed_guest_text.c`), and the arms that assert on it moved to the recorder
+## on 2026-11-07 (`tests/reprobuild-hcr/`, run against this checkout by
+## `.github/workflows/downstream-tests.yml`). The fixture here is built with
+## `REPRO_HCR_HLX_M3_NO_CLAIM_MAP`, so `hcr_lx_m3_txn.c` links no claim-count
+## call, and the production claim/release calls take the bridge's no-map path
+## (`repro_hcr_mcr_bridge.h`: weak symbols left NULL, the recorder call
+## answered -ENOSYS) exactly as in a process no recorder is in. The rollback,
+## byte-identity and page-leak arms observe text, values and
+## `/proc/self/maps`, none of which the map takes part in.
 
 import std/[exitprocs, json, os, osproc, streams, strutils, tempfiles]
 
@@ -42,29 +54,6 @@ const
   OriginalA* = 11
   OriginalB* = 22
   OriginalC* = 33
-
-  ## The cross-patcher claim map lives in the recorder's repo. A missing
-  ## sibling is a LOUD failure, never a skip: "no claim is leaked" is one of
-  ## the three things the commit-failure gate asserts, and there is no version
-  ## of that assertion which does not need the real map.
-  RecorderClaimMap* = "codetracer-native-recorder/ct_inline_hook/claimed_guest_text.c"
-
-  ## …and the translation unit the claim map calls into. `claimed_guest_text.c`
-  ## does not use libc: every syscall it issues goes through
-  ## `ct_recorder_gated_syscall`, the recorder's single identifiable doorway to
-  ## the kernel, which lives in a DIFFERENT file. Linking the map without the
-  ## doorway fails at LINK with `undefined reference to
-  ## ct_recorder_gated_syscall` — which is how these three gates were found red
-  ## on committed `dev` on 2026-09-19.
-  ##
-  ## The REAL doorway, not a stub. A stub would be a second definition of a
-  ## symbol whose whole purpose is that there is exactly one of it, in one
-  ## place, at one address (Verification-Harness-Traps §30a: a re-derived copy
-  ## agrees with itself while the original is wrong). It is self-contained —
-  ## `nm -u` on it reports only `_GLOBAL_OFFSET_TABLE_` — so linking it costs
-  ## these fixtures nothing else.
-  RecorderSyscallGate* =
-    "codetracer-native-recorder/ct_interpose/src/ct_interpose/recorder_syscall_gate.c"
 
 proc q(value: string): string = quoteShell(value)
 
@@ -106,12 +95,6 @@ proc m3WorkDir*(repoRoot: string): string =
 
 proc m3CaseDir*(repoRoot: string): string =
   repoRoot / "tests" / "e2e" / "hcr-linux-txn"
-
-proc claimMapPath*(repoRoot: string): string =
-  repoRoot.parentDir / RecorderClaimMap
-
-proc recorderSyscallGatePath*(repoRoot: string): string =
-  repoRoot.parentDir / RecorderSyscallGate
 
 ## Compile the patch object and extract all three bodies.
 proc buildPatchBodies*(repoRoot: string): tuple[a, b, c: seq[byte]] =
@@ -164,7 +147,8 @@ proc buildFixture*(repoRoot, outputName: string;
   doAssert compileFlags.contains("-fpatchable-function-entry=16,0")
   doAssert compileFlags.contains("-falign-functions=16")
   doAssert linkFlags.contains("-Wl,--build-id=sha1")
-  var args = @["gcc", "-O2", "-g"] & compileFlags & @["-fcf-protection=full"]
+  var args = @["gcc", "-O2", "-g"] & compileFlags & @["-fcf-protection=full",
+    "-DREPRO_HCR_HLX_M3_NO_CLAIM_MAP"]
   for d in defines:
     args.add("-D" & d)
   args = args & @[
@@ -172,9 +156,7 @@ proc buildFixture*(repoRoot, outputName: string;
     "-o", result,
     caseDir / "hcr_lx_m3_txn.c", objs.plain, objs.short,
     repoRoot / "libs" / "repro_hcr_agent" / "c" /
-      "repro_hcr_linux_x86_64_probe.c",
-    claimMapPath(repoRoot),
-    recorderSyscallGatePath(repoRoot)] & linkFlags & @["-lpthread"]
+      "repro_hcr_linux_x86_64_probe.c"] & linkFlags & @["-lpthread"]
   discard runOrFail(shellCommand(args), repoRoot)
 
 proc hex*(bytes: seq[byte]): string =

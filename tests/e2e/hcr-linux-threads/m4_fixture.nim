@@ -26,6 +26,7 @@ import "../hcr-linux-direct/elf_rel_reader"
 # without `--build-id` is refused `absent-sled (sled-object-build-id-mismatch)`
 # before anything about threads is exercised.
 import repro_project_dsl
+from repro_test_support import testScratchSlug
 
 const
   PatchSymbolA* = "hcr_lx_m4_patch_body_a"
@@ -38,6 +39,17 @@ const
   ## a die-before-output wearing a crash's label is indistinguishable from a
   ## crash unless the code is asserted.
   CrashExitCode* = 70
+  ## The concurrency gate's fixture shape: 12 hot workers, 8 publications per
+  ## process, 2 signal-storm threads, 200 sampling rounds, 24 runs per arm.
+  ## Shared with the calibration driver (`m4_calibrate.nim`) so a calibration
+  ## is measured on exactly the processes the gate starts; a bound calibrated
+  ## on a different shape would not describe the gate.
+  M4Workers* = 12
+  M4Publications* = 8
+  M4ChaosThreads* = 2
+  M4SampleRounds* = 200
+  ## Runs per arm the gate's calibrated checks are judged over.
+  M4RunsPerArm* = 24
 
 type
   FixtureRun* = object
@@ -71,7 +83,11 @@ proc runOrFail*(command, cwd: string): string =
   res.output
 
 proc m4WorkDir*(repoRoot: string): string =
-  result = repoRoot / "build" / "hcr-linux-m4"
+  # Private to the process running ONE case of ONE binary: several binaries
+  # import this helper and the suite runs them (and their cases) concurrently,
+  # so a shared directory had one process relink a fixture or rewrite a patch
+  # object while another was executing or parsing it.
+  result = repoRoot / "build" / "hcr-linux-m4" / testScratchSlug()
   createDir(result)
 
 proc m4CaseDir*(repoRoot: string): string =
@@ -156,6 +172,21 @@ proc runFixture*(binary: string; args: openArray[string]): FixtureRun =
     except CatchableError:
       result.payload = nil
 
+  # Deliberate crash controls emit HCR-M4-CRASH and are inspected by the
+  # concurrent-publication gate. Every other missing result is a fixture
+  # failure: name its fate before a caller can dereference nil JSON and hide
+  # the original signal behind the test process's own SIGSEGV.
+  if result.payload == nil and not result.crashed:
+    var fate = "fixture " & binary & " exited " & $result.exitCode
+    if result.exitCode > 128:
+      fate.add " (signal " & $(result.exitCode - 128) & ")"
+    raise newException(IOError, fate & "; no valid JSON result\n" &
+      result.stderrText & result.output)
+
 proc hex*(bytes: seq[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
+
+# The run condition the HLX-M4 gate is judged by, and its calibration record,
+# live in `m4_conditions` (no build or fixture dependency, so the verdict and
+# the calibration driver share one reader).

@@ -34,8 +34,14 @@ jobs:
           # that change, and never matches the macOS benchmark runner.
           - platform: linux
             runner: '["linux", "x64", "benchmark"]'
+          # Dedicated m3 benchmark runner (m3-mcl-bench-001); continuous-benchmarking
+          # policy §4: benchmarks run only on dedicated benchmark hosts. CIP-5
+          # lowercase capability labels plus `benchmark`, which only the dedicated
+          # runner carries. GitHub matches labels case-insensitively, so this
+          # matches the runner's registered `macOS`/`ARM64` labels. Never the
+          # shared `darwin`/`nix-darwin`/`aarch64-darwin` or ephemeral runners.
           - platform: macos
-            runner: '["self-hosted", "macos", "arm64"]'  # CIP-5: nix macOS benchmark leg → eph-macos-arm64
+            runner: '["self-hosted", "macos", "arm64", "benchmark"]'
     runs-on: ${{ fromJSON(matrix.runner) }}
     # Successful runs take <=72 min (linux, 68 runs) and <=30 min (macos, 31 runs);
     # hung runs have held the single benchmark runner for 10h+. Fail them instead.
@@ -143,9 +149,9 @@ jobs:
           # Pinned, not the moving `reprobuild` branch. The fork writes
           # trycompile.rbsz, and this tree's reader
           # (libs/repro_cmake_trycompile, TryCompileMetadataVersion) accepts
-          # versions up to 4. 1a59932635 is the last fork commit that writes
-          # version 4. The branch tip writes 6, and this job then fails with
-          # "unsupported trycompile.rbsz version". Move this pin together
+          # versions 1 through 5. 1a59932635 is the last fork commit that
+          # writes version 4. The branch tip writes 6, and this job then fails
+          # with "unsupported trycompile.rbsz version". Move this pin together
           # with TryCompileMetadataVersion.
           ref: 1a59932635c3f083892e70b2cc8a3111047eef70
           path: reprobuild-cmake
@@ -197,9 +203,10 @@ jobs:
       # read Username` on a status-im URL indicates the token was REJECTED, not
       # absent. Check the token, not the quota.
       #
-      # It is macOS-only by luck, not by design: the Linux leg
-      # runs on a persistent bare-metal host whose fetcher cache is already warm,
-      # so it never performs the fetch, while `eph-macos-arm64` is cold every job.
+      # The original failure was macOS-only by luck: the Linux leg ran on
+      # a persistent bare-metal host with a warm fetcher cache, while the
+      # former general ephemeral macOS pool was cold every job. Both legs
+      # now use dedicated benchmark runners; cold fetches still need auth.
       #
       # A URL-embedded credential CANNOT fix this: git does not send a URL's
       # userinfo preemptively, and a public repo never issues the 401 that would

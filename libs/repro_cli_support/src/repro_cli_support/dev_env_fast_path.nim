@@ -153,8 +153,17 @@ proc tryDevEnvExportFastPath*(args: openArray[string]): DevEnvFastPathResult =
   let activeKey = getEnv("__REPRO_APPLIED")
   if activeKey.len == 0:
     return
+  # Compared against the ACTIVE activation's prompt watch manifest -- the
+  # observed inputs it was built from -- located from
+  # `$__REPRO_ACTIVE_MANIFEST` (spelled literally: this module stays off the
+  # shell-export module's imports). The engine's own fast-path check in
+  # `repro dev-env export` derives the same path through the same proc, and
+  # the two must agree byte for byte. See the prompt watch section of
+  # `repro_dev_env_engine/cache_key`.
+  let watchManifest = promptWatchManifestPathFor(
+    getEnv("__REPRO_ACTIVE_MANIFEST"))
   let candidateKey = computeDevEnvEdgeCacheKey(parsed.projectRoot,
-    parsed.activity, "", parsed.developOverridesPath)
+    parsed.activity, "", parsed.developOverridesPath, watchManifest)
   if candidateKey != activeKey:
     return
   stdout.write(script)

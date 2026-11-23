@@ -114,22 +114,21 @@ proc projectToml(aUrl, bUrl: string): string =
   "schema = \"reprobuild.workspace.project.v1\"\n\n" &
   "[project]\n" &
   "name = \"myproject\"\n" &
-  "default_revision = \"dev\"\n" &
-  "trunk = \"dev\"\n\n" &
+  "\n" &
   "[[remote]]\nname = \"a-origin\"\nfetch = \"" & aUrl & "\"\n\n" &
   "[[remote]]\nname = \"b-origin\"\nfetch = \"" & bUrl & "\"\n\n" &
   "includes = [\n  \"repos/lib-a.toml\",\n  \"repos/lib-b.toml\",\n]\n"
 
 proc repoToml(name, remote: string): string =
-  "schema = \"reprobuild.workspace.repo.v1\"\n\n" &
+  "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
   "[repo]\n" &
   "name = \"" & name & "\"\n" &
   "path = \"" & name & "\"\n" &
   "remote = \"" & remote & "\"\n" &
-  "revision = \"dev\"\n"
+  "mainline = \"dev\"\n"
 
 proc workspaceMetadata(branch: string): string =
-  "schema = \"reprobuild.workspace.local.v1\"\n" &
+  "schema = \"reprobuild.workspace.state.v1\"\n" &
   "[workspace]\n" &
   "project = \"myproject\"\n" &
   "branch = \"" & branch & "\"\n"
@@ -142,7 +141,7 @@ type
     originA, originB: string
 
 proc metadataPath(fx: Fixture): string =
-  fx.workspaceRoot / ".repro" / "workspace.toml"
+  fx.workspaceRoot / ".repro" / "workspace-state.toml"
 
 proc cachePath(fx: Fixture): string =
   fx.workspaceRoot / ".repro" / "build" / "prompt-cache.json"
@@ -169,7 +168,7 @@ proc setupFixture(gitBin, slug: string): Fixture =
   writeFile(workspaceRoot / "repos" / "lib-b.toml",
     repoToml("lib-b", "b-origin"))
   createDir(workspaceRoot / ".repro")
-  writeFile(workspaceRoot / ".repro" / "workspace.toml",
+  writeFile(workspaceRoot / ".repro" / "workspace-state.toml",
     workspaceMetadata("dev"))
   result.workspaceRoot = workspaceRoot
 

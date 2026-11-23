@@ -22,6 +22,9 @@ content store; that arrives in **M1**.
 | `repro_peer_cache/server` | `asyncnet` TCP server, handshake handler, advertisement responder, CIDR allowlist. |
 | `repro_peer_cache/client` | `asyncnet` TCP dialer, handshake initiator, advertisement publisher. |
 | `repro_peer_cache/loopback` | Convenience helpers for spawning N peers on distinct loopback ports (tests + smoke). |
+| `repro_peer_cache/memo_store` | Distributed-Execution M0: on-disk two-phase memo store (`WeakFingerprint -> {PathSet, StrongFingerprint}` selectors -> memo entry), PathSet blob codec, strong fingerprint, advertisement keys. |
+| `repro_peer_cache/two_phase` | Two-phase publish (producer) and Steps 1–4 lookup (consumer) over the memo and content planes. |
+| `repro_peer_cache/workspace_paths` | `$WORKSPACE/...` normalization and rebasing under `REPRO_PORTABLE_CACHE=1`. |
 
 The umbrella module `repro_peer_cache` re-exports all of the above.
 

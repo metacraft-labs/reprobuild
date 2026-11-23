@@ -17,12 +17,15 @@ const PiperVersion = "2023.11.14-2"
 
 package piper:
   provisioning:
+    # `version` is the program's: the release tag above names a date, and
+    # this archive's `piper.exe --version` reports 1.2.0.
     tarball url = "https://github.com/rhasspy/piper/releases/download/" &
         PiperVersion & "/piper_windows_amd64.zip",
       sha256 = "f3c58906402b24f3a96d92145f58acba6d86c9b5db896d207f78dc80811efcea",
       archiveType = "zip",
       stripComponents = 1,
       executablePath = "piper.exe",
+      version = "1.2.0",
       packageId = "piper@" & PiperVersion,
       cpu = "x86_64",
       os = "windows",

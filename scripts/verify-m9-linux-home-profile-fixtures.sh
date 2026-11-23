@@ -3,8 +3,9 @@
 # M9 end-to-end verification harness for the Linux home-profile flow.
 #
 # Linux/WSL counterpart of scripts/verify-m71-home-profile-fixtures.ps1.
-# Drives the M65 ``LinuxDefaultChain = @[cakNix, cakBuiltin, cakPath]``
-# end-to-end against the M9 reference home profile
+# Drives home-profile package resolution (GM4b: the selection a recipe's
+# ``uses:`` makes, default policy tarball, nix, scoop, path) end-to-end
+# against the M9 reference home profile
 # (reprobuild-examples/m9-linux-home-profile/home.nim).
 #
 # Mechanics (mirrors M71's Windows harness):
@@ -17,12 +18,10 @@
 #      sandbox's ``REPRO_HOME_PROFILE_DIR``.
 #   3. Set ``REPRO_HOST=m9-test-host`` so the host-activity map lifts
 #      every activity.
-#   4. Run ``repro home apply`` against the sandboxed state. This drives
-#      the M65 cakNix / cakBuiltin / cakPath chain. On a vanilla Linux
-#      host with no Nix daemon and no Linux URLs in the catalog (the
-#      current state), every package falls through to cakPath and is
-#      resolved from the host's existing PATH (apt/yum/pacman, manual
-#      install, etc.).
+#   4. Run ``repro home apply`` against the sandboxed state. Each package
+#      selects a Linux ``tarball`` realization when its definition has
+#      one, else its ``nixPackage``, else the host's PATH
+#      (apt/yum/pacman, manual install, etc.).
 #   5. Lift the activation-generation's per-package bin dir onto the
 #      harness's PATH (the apply pipeline writes a stable bin dir at
 #      ``<state-dir>/bin``).
@@ -33,15 +32,15 @@
 # The actual home apply step is gated behind ``REPRO_LIVE=1`` because
 # realizing the full catalog footprint downloads gigabytes when the
 # Linux URLs eventually land. Without the env var the harness runs in
-# PLAN mode: it asserts the resolver picks SOME slice for every listed
-# package (cakBuiltin, cakNix, or cakPath) and that the Phase-2
+# PLAN mode: it asserts the resolver selects SOME realization for every
+# listed package (tarball, nix or path) and that the Phase-2
 # partials' validate scripts SKIP cleanly (no spurious FAIL on a host
 # that hasn't been provisioned).
 #
-# **Linux catalog reality.** As of the M9 landing, NO ``packages/<tool>.nim``
-# carries a ``poLinux`` platform slice (every M67/M68 harvest pulled
-# from Scoop). The chain resolves through cakPath on Linux when the
-# tool is already provisioned via the distro package manager; the
+# **Linux catalog reality.** At the M9 landing NO ``packages/<tool>.nim``
+# carried a Linux archive (every M67/M68 harvest pulled from Scoop);
+# several do now. A package without one resolves through the host's PATH
+# on Linux when the tool is provisioned via the distro package manager; the
 # fixtures graduate to PASS once the operator has the toolchain on
 # PATH. The hermetic resolver-level contract is asserted by
 # ``tests/e2e/m9/t_e2e_m9_linux_phase2_partials_resolve.nim``.

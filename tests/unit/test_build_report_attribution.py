@@ -75,13 +75,65 @@ assert the outcome rather than the text:
    both must be archived. Without it, a caller that did nothing whatever
    would pass 7 and 8.
 
-NO MOCKS
---------
+THE SECOND DEFECT: AN ARCHIVE THAT OUTLIVES ITS BUILD
+-----------------------------------------------------
+Everything above guards the OUT-DIR copy. The ARCHIVED copy — the one under
+``test-logs/build-report-<slug>.json`` that people actually open — went stale
+by a different route: ``repro_build_collection`` called the collector only
+when the build FAILED, so a successful build archived nothing and left the
+previous archive sitting under the current name. Measured
+(reprobuild-pm ``issues/2026-09-24-successful-build-report-never-archived.md``):
+a 3,074,899,124-byte ``build-report-__test_builds.json`` dated 2026-09-12 was
+read as current on 2026-09-23, after the ``.#test-builds`` runs of that day
+had all succeeded. The rule is now: *a file in the log directory named for a
+collection never describes an earlier build than the latest one run for that
+collection.* Cases 10-15 hold it, each failing on the code that had the
+defect:
+
+10. the collector, told the build SUCCEEDED (its fourth argument), archives
+    the success report and does NOT print the "No failure report was
+    written … never reached its post-mortem" banner, which is false on a
+    success;
+11. the caller's own ``repro_build_collection`` archives a successful build
+    — the issue itself, observed as behaviour rather than read as text;
+12. an archived copy from an EARLIER run is removed when THIS build leaves
+    nothing attributable — killed, or a report naming another target — so
+    the absence is an absence and not yesterday's file under today's name;
+13. a successful build removes a stale archived FAILURE report for the same
+    collection, through the caller's own function: otherwise the log
+    directory holds this run's success beside an earlier run's failure,
+    both named for this collection;
+14. a copy that fails part-way leaves no partial file under the name, and
+    says so;
+15. an archived copy that cannot be removed is announced and the collector
+    exits non-zero, the same contract ``repro_build_report_reset`` keeps for
+    the out-dir;
+16. when a ``.#test-builds`` build FAILS and the archive cannot be trusted to
+    be its own — an earlier failure report survived removal, or the out-dir
+    reset failed so the collector never ran — ``run_tests.sh``'s own
+    post-build block stops instead of handing that archive to
+    ``drop_failed_test_binaries.py``, which would delete the binaries of the
+    EARLIER build's failures. A control with a trustworthy archive shows the
+    block does reach the script.
+
+Case 6 also asserts, by STRUCTURE with comments stripped, that the
+collector call in ``repro_build_collection`` sits at the function's top
+level — inside no ``if``, ``case`` or loop — and is handed the build's exit
+status. A call nested back under ``if (( build_status != 0 ))`` is exactly
+the defect, and is the shape a well-meant tidy-up would restore.
+
+NO MOCKS, SAVE TWO STAND-INS
+----------------------------
 Real ``bash``, the real library file, the caller's own function extracted from
-the real ``run_tests.sh``, real reports on a real filesystem. The one stand-in
-is ``timeout``, shadowed so the build can be killed without waiting four hours
-for a real one; what is under test is what the caller does around it, and
-there is no way to reach the killed-build path without a build that is killed.
+the real ``run_tests.sh``, real reports on a real filesystem. The first
+stand-in is ``timeout``, shadowed so the build can be killed without waiting
+four hours for a real one; what is under test is what the caller does around
+it, and there is no way to reach the killed-build path without a build that is
+killed. The second, in case 14 only, is ``cp``, shadowed to write a few bytes
+and fail: a real ``cp`` that fails AFTER creating its destination needs a full
+disk or an I/O error, neither of which a unit test can produce on demand, and
+the unwritable-directory failure it CAN produce fails before writing anything
+— which is case 15's path, not this one.
 """
 
 import json
@@ -102,6 +154,12 @@ REPORT_NAME = "build-report.json"
 # The caller's own function, extracted verbatim so case 7 runs the real thing.
 BUILD_COLLECTION_RE = re.compile(
     r"^repro_build_collection\(\) \{\n.*?^\}$", re.MULTILINE | re.DOTALL
+)
+
+# The caller's own handling of a failed ``.#test-builds``, extracted verbatim
+# for case 16: from the status initialisation to the end of its ``if``.
+TEST_BUILDS_BLOCK_RE = re.compile(
+    r"^test_builds_status=0\n.*?^fi$", re.MULTILINE | re.DOTALL
 )
 
 
@@ -212,6 +270,61 @@ def strip_shell_comments(text: str) -> str:
             index += 1
         out.append("".join(result))
     return "\n".join(out)
+
+
+# Statement-position openers and closers of the shell's compound commands.
+# Matched only where a statement can start, so a quoted "if" in a printf or a
+# word like "diff" does not move the depth.
+_STATEMENT_START = r"(?:^|;|&&|\|\||\bthen\b|\bdo\b|\belse\b)[ \t]*"
+_OPENERS = re.compile(_STATEMENT_START + r"(?:if|case|for|while|until)\b")
+_CLOSERS = re.compile(r"(?:^|;)[ \t]*(?:fi|esac|done)\b")
+
+
+def top_level_calls_in_build_collection(name: str) -> dict:
+    """Where ``repro_build_collection`` calls ``name``, by nesting depth.
+
+    Returns ``{"top_level": [lines], "nested_under": [opening lines]}``. A
+    call counts as top-level only when it is a statement of its own — the
+    first word on its line, not continued from a previous line by ``&&``,
+    ``||``, ``|`` or ``\\`` — and no ``if``/``case``/loop encloses it. That is
+    what "runs on every outcome" means as text; the behavioural cases (11,
+    13) are what say it also runs.
+    """
+    body = BUILD_COLLECTION_RE.search(RUN_TESTS.read_text())
+    if body is None:
+        raise AssertionError(
+            "could not extract repro_build_collection from %s" % RUN_TESTS
+        )
+    # Join backslash-continued lines first, so a call whose arguments run
+    # onto the next line is judged -- and its arguments read -- as one
+    # statement.
+    joined = re.sub(r"\\\n[ \t]*", " ", strip_shell_comments(body.group(0)))
+    lines = joined.splitlines()[1:-1]
+    depth = 0
+    openers: list = []
+    previous = ""
+    found = {"top_level": [], "nested_under": []}
+    for raw in lines:
+        line = raw.strip()
+        if not line:
+            continue
+        continued = previous.endswith(("&&", "||", "|", "\\"))
+        if re.match(r"%s\b" % re.escape(name), line):
+            if depth == 0 and not continued:
+                found["top_level"].append(line)
+            else:
+                found["nested_under"].append(
+                    openers[-1] if openers else "a continued line: %s" % previous
+                )
+        for _ in _OPENERS.findall(line):
+            depth += 1
+            openers.append(line)
+        for _ in _CLOSERS.findall(line):
+            depth -= 1
+            if openers:
+                openers.pop()
+        previous = line
+    return found
 
 
 class BuildReportAttribution(unittest.TestCase):
@@ -463,6 +576,27 @@ class BuildReportAttribution(unittest.TestCase):
         lib_source = strip_shell_comments(LIB.read_text())
         self.assertTrue(re.search(r"build-failure-report\.json", lib_source))
         self.assertTrue(re.search(r"build-report\.json", lib_source))
+        # And the collector must run on EVERY outcome, which is a question
+        # about where the call sits, not whether it is present: before
+        # 2026-10 it was present, and nested under ``if (( build_status !=
+        # 0 ))``, so a successful build archived nothing and the previous
+        # archive kept the current name.
+        calls = top_level_calls_in_build_collection("repro_collect_build_reports")
+        self.assertTrue(
+            calls["top_level"],
+            "repro_build_collection does not call repro_collect_build_reports "
+            "at its top level; calls found nested under %s. A collector "
+            "reached only on some outcomes leaves the archive of an earlier "
+            "build under this collection's name on the others."
+            % calls["nested_under"],
+        )
+        for line in calls["top_level"]:
+            self.assertRegex(
+                line,
+                r'"\$\{?build_status\}?"',
+                "the collector is not told the build's exit status, so it "
+                "cannot tell a success from a killed build: %s" % line,
+            )
 
     # ------------------------------------------------------------------ 7
     def run_extracted_build_collection(
@@ -586,6 +720,310 @@ class BuildReportAttribution(unittest.TestCase):
             )
             self.assertIn("Failed actions for .#test-builds", done.stderr)
             self.assertNotIn("No failure report was written", done.stderr)
+
+    # ----------------------------------------------------------------- 10
+    def test_a_successful_build_is_archived_without_the_failure_banner(self):
+        """Told the build succeeded, the collector archives and stays quiet.
+
+        The "never reached its post-mortem" banner is the right diagnosis for
+        a killed build and a false one for a successful build, so it must
+        depend on the outcome the caller passes, not only on the absence of a
+        failure report (a success never writes one).
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            logs = root / "logs"
+            write_success_report(out / REPORT_NAME, "test-builds")
+            done = run_shell(
+                'repro_collect_build_reports "%s" ".#test-builds" "%s" 0'
+                % (out, logs),
+                root,
+            )
+            self.assertEqual(done.returncode, 0, done.stderr)
+            self.assertEqual(
+                sorted(p.name for p in logs.glob("*.json")),
+                ["build-report-__test_builds.json"],
+            )
+            self.assertNotIn("No failure report was written", done.stderr)
+            self.assertNotIn("post-mortem", done.stderr)
+            self.assertEqual(
+                (logs / "build-report-__test_builds.json").read_text(),
+                (out / REPORT_NAME).read_text(),
+            )
+
+    # ----------------------------------------------------------------- 11
+    def test_the_callers_own_path_archives_a_successful_build(self):
+        """The issue as behaviour: a successful build leaves its report.
+
+        On the code that had the defect this fails with an EMPTY log
+        directory, because the collector was reached only when the build
+        failed.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            staging = root / "written-by-the-build"
+            write_success_report(staging / REPORT_NAME, "test-builds")
+            writer = 'mkdir -p "%s"; cp "%s/%s" "%s"/; return 0;' % (
+                REPRO_OUT_DIR, staging, REPORT_NAME, REPRO_OUT_DIR
+            )
+            done = self.run_extracted_build_collection(
+                root, writer, ".#test-builds"
+            )
+            self.assertIn("rc=0", done.stdout, done.stderr)
+            logs = root / "test-logs"
+            self.assertEqual(
+                sorted(p.name for p in logs.glob("*.json")) if logs.is_dir() else [],
+                ["build-report-__test_builds.json"],
+                "a successful build archived nothing; the archive under this "
+                "collection's name is whatever an earlier build left. "
+                "stderr: %s" % done.stderr,
+            )
+            self.assertNotIn("No failure report was written", done.stderr)
+
+    # ----------------------------------------------------------------- 12
+    def test_an_earlier_archive_is_removed_when_this_build_has_none(self):
+        """No attributable report from THIS build means no file by the name.
+
+        The stale archives here name ``.#test-builds`` themselves — they are
+        that collection's reports, just from an earlier build — so nothing
+        about their CONTENTS gives them away. Only their removal does.
+        """
+        for label, prepare in (
+            ("killed: no report at all", lambda out: None),
+            (
+                "the out-dir report names another target",
+                lambda out: write_success_report(out / REPORT_NAME, "other"),
+            ),
+        ):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                out = root / "out"
+                out.mkdir()
+                logs = root / "logs"
+                write_success_report(
+                    logs / "build-report-__test_builds.json", "test-builds"
+                )
+                write_failure_report(
+                    logs / "build-failure-report-__test_builds.json",
+                    ".#test-builds",
+                    "an-action-from-an-earlier-build",
+                )
+                # A different collection's archive is not this one's to remove.
+                write_success_report(
+                    logs / "build-report-__apps.json", "apps"
+                )
+                prepare(out)
+                done = run_shell(
+                    'repro_collect_build_reports "%s" ".#test-builds" "%s" 124'
+                    % (out, logs),
+                    root,
+                )
+                self.assertEqual(
+                    sorted(p.name for p in logs.glob("*.json")),
+                    ["build-report-__apps.json"],
+                    "an archive from an earlier build is still under this "
+                    "collection's name. stderr: %s" % done.stderr,
+                )
+                self.assertIn("No failure report was written", done.stderr)
+                self.assertNotIn("an-action-from-an-earlier-build", done.stderr)
+
+    # ----------------------------------------------------------------- 13
+    def test_a_successful_build_removes_an_earlier_failure_archive(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            logs = root / "test-logs"
+            write_failure_report(
+                logs / "build-failure-report-__test_builds.json",
+                ".#test-builds",
+                "an-action-from-an-earlier-build",
+            )
+            staging = root / "written-by-the-build"
+            write_success_report(staging / REPORT_NAME, "test-builds")
+            writer = 'mkdir -p "%s"; cp "%s/%s" "%s"/; return 0;' % (
+                REPRO_OUT_DIR, staging, REPORT_NAME, REPRO_OUT_DIR
+            )
+            done = self.run_extracted_build_collection(
+                root, writer, ".#test-builds"
+            )
+            self.assertIn("rc=0", done.stdout, done.stderr)
+            self.assertEqual(
+                sorted(p.name for p in logs.glob("*.json")),
+                ["build-report-__test_builds.json"],
+                "the log directory still holds an earlier build's failure "
+                "under this collection's name beside this build's success. "
+                "stderr: %s" % done.stderr,
+            )
+
+    # ----------------------------------------------------------------- 14
+    def test_a_copy_that_fails_leaves_no_partial_file(self):
+        """A truncated archive under the name is a stale one by another route.
+
+        ``cp`` is shadowed to write a few bytes and fail — see the module
+        docstring for why that cannot be produced for real here.
+        """
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            logs = root / "logs"
+            write_success_report(out / REPORT_NAME, "test-builds")
+            done = run_shell(
+                'cp() { printf "{\\"trunc" > "${@: -1}"; return 1; }\n'
+                'repro_collect_build_reports "%s" ".#test-builds" "%s" 0'
+                % (out, logs),
+                root,
+            )
+            self.assertEqual(
+                list(logs.glob("*.json")),
+                [],
+                "a failed copy left a partial file under this collection's "
+                "name. stderr: %s" % done.stderr,
+            )
+            self.assertIn("Could not archive", done.stderr)
+            self.assertNotEqual(done.returncode, 0, done.stderr)
+
+    # ----------------------------------------------------------------- 15
+    @unittest.skipIf(
+        os.geteuid() == 0, "root removes files regardless of directory mode"
+    )
+    def test_an_earlier_archive_that_survives_removal_is_announced(self):
+        """The log-directory twin of case 3b: the removal is CHECKED."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "out"
+            out.mkdir()
+            logs = root / "logs"
+            write_success_report(
+                logs / "build-report-__test_builds.json", "test-builds"
+            )
+            logs.chmod(0o500)
+            try:
+                done = run_shell(
+                    'repro_collect_build_reports "%s" ".#test-builds" "%s" 0'
+                    % (out, logs),
+                    root,
+                )
+            finally:
+                logs.chmod(0o700)
+            self.assertNotEqual(done.returncode, 0, done.stderr)
+            self.assertIn(
+                "Could not remove a previously archived build report",
+                done.stderr,
+            )
+            self.assertIn("build-report-__test_builds.json", done.stderr)
+
+
+    # ----------------------------------------------------------------- 16
+    def run_extracted_test_builds_block(
+        self, root: Path, timeout_body: str
+    ) -> subprocess.CompletedProcess:
+        """Run ``run_tests.sh``'s own ``.#test-builds`` block.
+
+        ``repro_build_collection`` is the real one; the build is the
+        ``timeout`` stand-in of case 7. ``python3`` is shadowed to record
+        that ``drop_failed_test_binaries.py`` was reached, and with which
+        report, rather than to delete anything: what is under test is
+        whether the caller hands the archive over at all.
+        """
+        function = BUILD_COLLECTION_RE.search(RUN_TESTS.read_text())
+        block = TEST_BUILDS_BLOCK_RE.search(RUN_TESTS.read_text())
+        self.assertIsNotNone(function, "repro_build_collection not found")
+        self.assertIsNotNone(
+            block,
+            "could not extract the .#test-builds block from %s; re-aim this "
+            "check rather than let it test nothing" % RUN_TESTS,
+        )
+        self.assertIn("drop_failed_test_binaries.py", block.group(0))
+        script = "\n".join(
+            [
+                "set -uo pipefail",
+                'source "%s"' % LIB,
+                'exe_ext=""',
+                'BUILD_TIMEOUT="4h"',
+                "timeout() { %s }" % timeout_body,
+                'python3() { printf "%%s\\n" "$@" > "%s/dropper-ran"; return 0; }'
+                % root,
+                function.group(0),
+                block.group(0),
+                'echo "reached-the-suite status=${test_builds_status}"',
+            ]
+        )
+        return subprocess.run(
+            ["bash", "-c", script], cwd=str(root), capture_output=True, text=True
+        )
+
+    def _failing_build_writer(self, root: Path) -> str:
+        staging = root / "written-by-the-build"
+        write_failure_report(
+            staging / FAILURE_NAME, ".#test-builds", "an-action-of-this-build"
+        )
+        return 'mkdir -p "%s"; cp "%s/%s" "%s"/; return 1;' % (
+            REPRO_OUT_DIR, staging, FAILURE_NAME, REPRO_OUT_DIR
+        )
+
+    @unittest.skipIf(
+        os.geteuid() == 0, "root removes files regardless of directory mode"
+    )
+    def test_a_failed_build_with_an_untrusted_archive_stops_the_suite(self):
+        """An earlier failure report that survived must not pick the victims."""
+        for label in ("an earlier archive survives removal", "the reset failed"):
+            with self.subTest(label), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                logs = root / "test-logs"
+                stale = logs / "build-failure-report-__test_builds.json"
+                write_failure_report(
+                    stale, ".#test-builds", "an-action-from-an-earlier-build"
+                )
+                # Read-only as well as undeletable: in a read-only directory
+                # ``cp`` can still overwrite a writable file in place, which
+                # would make the archive this build's after all.
+                stale.chmod(0o400)
+                locked = logs
+                if label == "the reset failed":
+                    out = root / REPRO_OUT_DIR
+                    write_failure_report(
+                        out / FAILURE_NAME, ".#yesterday", "yesterday"
+                    )
+                    locked = out
+                locked.chmod(0o500)
+                try:
+                    done = self.run_extracted_test_builds_block(
+                        root, self._failing_build_writer(root)
+                    )
+                finally:
+                    locked.chmod(0o700)
+                self.assertNotIn("reached-the-suite", done.stdout, done.stderr)
+                self.assertFalse(
+                    (root / "dropper-ran").exists(),
+                    "drop_failed_test_binaries.py was handed an archive that "
+                    "may be an earlier build's. stderr: %s" % done.stderr,
+                )
+                self.assertIn(
+                    "an-action-from-an-earlier-build", stale.read_text(),
+                    "the precondition did not hold: the stale archive was "
+                    "removed, so this case tested nothing",
+                )
+
+    def test_a_failed_build_with_a_trusted_archive_reaches_the_dropper(self):
+        """The vacuity control for case 16."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            write_failure_report(
+                root / "test-logs" / "build-failure-report-__test_builds.json",
+                ".#test-builds",
+                "an-action-from-an-earlier-build",
+            )
+            done = self.run_extracted_test_builds_block(
+                root, self._failing_build_writer(root)
+            )
+            self.assertIn("reached-the-suite status=1", done.stdout, done.stderr)
+            handed = (root / "dropper-ran").read_text()
+            self.assertIn("build-failure-report-__test_builds.json", handed)
+            archived = (
+                root / "test-logs" / "build-failure-report-__test_builds.json"
+            ).read_text()
+            self.assertIn("an-action-of-this-build", archived)
+            self.assertNotIn("an-action-from-an-earlier-build", archived)
 
 
 if __name__ == "__main__":

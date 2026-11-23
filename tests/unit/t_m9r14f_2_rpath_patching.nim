@@ -39,6 +39,7 @@
 ##      ``patchelf --print-rpath`` matches.
 
 import std/[os, osproc, streams, strtabs, strutils, tempfiles, unittest]
+import repro_test_support/reasoned_skip
 
 import repro_project_dsl
 import repro_project_dsl/install_mirror_resolver

@@ -1,0 +1,45 @@
+# Profile-bundle (RDMF v3 `profileFiles`) path corpus — ONE list for both
+# validators: render-deploy-manifest.py `profile_file_path_error` /
+# `validate_profile_files` (infra, the producer) and manifest.nim
+# `profileFilePathError` / `validateProfileFiles` (reprobuild, the agent).
+# tests/unit/test-deploy-manifest.sh case 16 feeds every line to the Python
+# side; reprobuild's manifest tests are expected to read this same file (or a
+# verbatim copy, checked equal) so the two implementations cannot drift.
+#
+# Format, one case per line, fields separated by a single TAB:
+#   ok    <path>                 the path is accepted on its own
+#   bad   <path>                 the path is refused on its own
+#   setok <path> <path> ...      the set of paths is accepted together
+#   setbad <path> <path> ...     the set is refused (each path valid alone)
+# Escapes in a path: \t TAB, \0 NUL, \\ backslash; the field `<empty>` is the
+# empty string (a bare empty field would be trailing whitespace). Blank and #
+# lines are ignored.
+ok	locks/node-exporter.lock
+ok	fleet.hosts
+ok	a/b/c.lock
+ok	.hidden
+ok	..dotdot-prefix.lock
+ok	locks/x..y.lock
+ok	with space.lock
+ok	unicode-ünïcödé.lock
+ok	manifest_profile.nim.bak
+bad	<empty>
+bad	/abs.lock
+bad	//double-leading.lock
+bad	a//b.lock
+bad	a/./b.lock
+bad	./a.lock
+bad	a/../b.lock
+bad	../escape.lock
+bad	..
+bad	.
+bad	trailing/
+bad	back\\slash.lock
+bad	nul\0byte.lock
+bad	manifest_profile.nim
+bad	locks/manifest_profile.nim
+setok	locks/a.lock	locks/b.lock	fleet.hosts
+setbad	locks/a.lock	locks/a.lock
+setbad	locks	locks/a.lock
+setbad	locks/a.lock	locks
+setbad	a/b	a/b/c

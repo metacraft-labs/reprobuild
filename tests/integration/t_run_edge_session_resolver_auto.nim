@@ -204,7 +204,8 @@ suite "N3b: auto-built out-of-tree session resolver (hermetic)":
 
     # ── Reconcile over the AUTO-BUILT session, with the store ───────────────
     let first = reconcileConsumedStateGroups(consumes, "topology-lease-auto",
-      decoded.resources, decoded.groups, store, endpoint = NoDaemon, now = t0,
+      decoded.resources, decoded.groups, store, decoded.providerArtifacts,
+      endpoint = NoDaemon, now = t0,
       sessionResolver = resolver)
     check first.missingGroups.len == 0
     check first.renewedGroups == @["topology"]
@@ -223,7 +224,8 @@ suite "N3b: auto-built out-of-tree session resolver (hermetic)":
     # ── REUSE within ttl over the same pooled session (no re-apply) ─────────
     let t1 = t0 + initDuration(minutes = 10)
     let second = reconcileConsumedStateGroups(consumes, "topology-lease-auto",
-      decoded.resources, decoded.groups, store, endpoint = NoDaemon, now = t1,
+      decoded.resources, decoded.groups, store, decoded.providerArtifacts,
+      endpoint = NoDaemon, now = t1,
       sessionResolver = resolver)
     check second.renewedGroups == @["topology"]
     let afterSecond = readFile(extendedPath(worldPath)).split('\n')
