@@ -235,7 +235,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Measure the redirect client
+      - name: Measure the redirect client, IPv4 listener only
+        continue-on-error: true
+        env:
+          ZK_V6: '0'
+        shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
+        run: .\windows\tests\zk-measure-client.ps1
+
+      - name: Measure the redirect client, IPv4 and IPv6 listeners
+        continue-on-error: true
+        env:
+          ZK_V6: '1'
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: .\windows\tests\zk-measure-client.ps1
 

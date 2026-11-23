@@ -149,6 +149,7 @@ namespace VerifiedDownloadTests
         private readonly X509Certificate2 certificate;
         private readonly TcpListener http, https;
         private readonly Thread httpThread, httpsThread;
+        private TcpListener https6; private Thread https6Thread;
         private readonly ManualResetEvent stop = new ManualResetEvent(false);
         private readonly object gate = new object();
         private readonly List<TcpClient> clients = new List<TcpClient>();
@@ -167,6 +168,17 @@ namespace VerifiedDownloadTests
             httpsThread = new Thread(delegate() { Accept(https, true); });
             httpThread.IsBackground = true; httpsThread.IsBackground = true;
             httpThread.Start(); httpsThread.Start();
+            if (Environment.GetEnvironmentVariable("ZK_V6") == "1")
+            {
+                try
+                {
+                    https6 = new TcpListener(IPAddress.IPv6Loopback, ((IPEndPoint)https.LocalEndpoint).Port);
+                    https6.Start();
+                    https6Thread = new Thread(delegate() { Accept(https6, true); });
+                    https6Thread.IsBackground = true; https6Thread.Start();
+                }
+                catch (Exception ex) { Console.WriteLine("ZK v6 listener failed: " + ex.Message); }
+            }
         }
         public void Reset(string id, string mode)
         {

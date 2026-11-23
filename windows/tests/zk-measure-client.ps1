@@ -187,12 +187,10 @@ try {
     $client.Dispose()
     return $bad
   }
-  foreach ($variant in @('pool', 'dedicated', 'pool', 'dedicated')) {
-    [Environment]::SetEnvironmentVariable('ZK_DEDICATED', $(if ($variant -eq 'dedicated') { '1' } else { '0' }), 'Process')
-    $noTcp = 0
-    for ($n = 1; $n -le 20; $n++) { if (Measure-Transaction "$variant-$n") { $noTcp++ } }
-    Write-Host "MEASURE SUMMARY variant=$variant no-tcp=$noTcp of 20"
-  }
+  $v6 = $env:ZK_V6
+  $noTcp = 0
+  for ($n = 1; $n -le 30; $n++) { if (Measure-Transaction "v6=$v6-$n") { $noTcp++ } }
+  Write-Host "MEASURE SUMMARY zk_v6=$v6 no-tcp=$noTcp of 30"
   exit 0
   $id = Set-Transaction
   $uri = "https://localhost:$($script:fixture.HttpsPort)/good/$id"
