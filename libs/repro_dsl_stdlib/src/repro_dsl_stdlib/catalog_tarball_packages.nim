@@ -62,7 +62,7 @@ const CatalogTarballModules* = [
     "sh",
     "solc", "stylus", "swift", "swig", "taplo", "tar", "tmux", "uv",
     "wasm_opt", "whisper_ggml_base", "windows_terminal", "winfsp", "wix",
-    "wix3", "wix3_tools", "zig", "zstd", "zstd_dev"
+    "wix3", "wix3_tools", "zig", "zlib_dev", "zstd", "zstd_dev"
   ]
   ## The ``repro_dsl_stdlib/packages/<module>`` basenames that declare at
   ## least one ``tarball`` arm. Keep it sorted; the gate names the module it

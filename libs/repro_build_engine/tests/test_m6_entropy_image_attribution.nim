@@ -122,8 +122,9 @@ proc setupScenario(name: string): Scenario =
   createDir(result.workRoot / "out")
   createDir(result.binRoot)
   writeFile(result.sourcePath, "payload\n")
-  # Real files, because an `mrProcessExec` record is ALSO folded into the
-  # action's read set and the cache key fingerprints what it reads. A
+  # Real files, because an `mrProcessExec` record, and a successful
+  # `mrProcessSpawn` with an absolute path, is ALSO folded into the action's
+  # read set and the cache key fingerprints what it reads. A
   # made-up path would make these cases fail for a reason that has nothing
   # to do with the blessing.
   for image in [BlessedImage, UnblessedImage, "git", "otherrand"]:

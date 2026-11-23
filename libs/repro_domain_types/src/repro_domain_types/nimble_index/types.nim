@@ -31,6 +31,15 @@ const
     ## written in this schema exactly when one of its condition nodes is of
     ## such a kind, so a reader from before NPC-M14 refuses it as an unknown
     ## schema instead of misreading the condition.
+  NimbleShardSnapshotsSchema* = 4'u16
+    ## The shard schema whose version records and held versions may be of
+    ## kind ``rvkSnapshot`` (NPC-AREQ31 item 5, the operator's A5 ruling;
+    ## spec § 4.4, the NPC-M10 amendment). Its layout is schema 3's: the
+    ## kind is a value of the version's existing kind byte, and the
+    ## snapshot's date is its one component. A shard is written in this
+    ## schema exactly when it holds a snapshot, so a reader from before
+    ## snapshots refuses it as an unknown schema instead of reading a kind
+    ## it does not know.
 
   RootTypeId* = 0x1201'u16      ## RBSZ type id of a root object.
   ShardTypeId* = 0x1202'u16     ## RBSZ type id of a shard.
@@ -294,12 +303,17 @@ type
     rvkHead = "head"     ## the origin's default branch (`#head`)
     rvkRef = "ref"       ## a named branch (`#<branch>`)
     rvkCommit = "commit" ## a commit a requirement names (`#<commit>`)
+    rvkSnapshot = "snapshot"
+      ## the commit `HEAD` named when the package had no tag that reads as
+      ## a version (NPC-AREQ31 item 5): shard schema 4 only
 
   RecordVersion* = object
     kind*: RecordVersionKind
     components*: seq[uint64]
       ## the numeric components of a `rvkTag`, as many as the tag has (up
-      ## to ``MaxVersionComponents``); empty for every other kind
+      ## to ``MaxVersionComponents``); for a `rvkSnapshot` exactly one, its
+      ## date as the decimal number `YYYYMMDD` (the UTC date of the
+      ## record's `first_seen`); empty for every other kind
     tag*: string
       ## the source tag (`rvkTag`, `rvkLabel`), the branch (`rvkHead`,
       ## `rvkRef`), or empty (`rvkCommit`)
@@ -531,6 +545,78 @@ proc parseObjectId*(hex: string; id: var IndexObjectId): bool =
 
 proc `$`*(id: IndexObjectId): string = toHexLower(id)
 
+proc utcDateOf*(unixSeconds: uint64): uint64 =
+  ## The UTC calendar date of a Unix time as the number `YYYYMMDD` (the
+  ## proleptic Gregorian calendar; `civil_from_days`).
+  let z = int64(unixSeconds div 86400) + 719468
+  let era = z div 146097
+  let doe = z - era * 146097
+  let yoe = (doe - doe div 1460 + doe div 36524 - doe div 146096) div 365
+  var y = yoe + era * 400
+  let doy = doe - (365 * yoe + yoe div 4 - yoe div 100)
+  let mp = (5 * doy + 2) div 153
+  let d = doy - (153 * mp + 2) div 5 + 1
+  let m = if mp < 10: mp + 3 else: mp - 9
+  if m <= 2: inc y
+  uint64(y * 10000 + m * 100 + d)
+
+proc isCalendarDate*(date: uint64): bool =
+  ## Whether `YYYYMMDD` names a day of the proleptic Gregorian calendar
+  ## between the years 1970 and 9999.
+  let y = date div 10000
+  let m = (date div 100) mod 100
+  let d = date mod 100
+  if y < 1970 or y > 9999 or m < 1 or m > 12 or d < 1:
+    return false
+  let leap = (y mod 4 == 0 and y mod 100 != 0) or y mod 400 == 0
+  let days = case m
+    of 2: (if leap: 29'u64 else: 28'u64)
+    of 4, 6, 9, 11: 30'u64
+    else: 31'u64
+  d <= days
+
+proc snapshotVersion*(firstSeen: uint64): RecordVersion =
+  ## The version of a snapshot first seen at ``firstSeen``: dated by the
+  ## generator's own observation, never by the commit.
+  RecordVersion(kind: rvkSnapshot, components: @[utcDateOf(firstSeen)])
+
+proc snapshotDateText*(v: RecordVersion): string =
+  ## A snapshot's date as eight digits; "" for any other kind.
+  if v.kind == rvkSnapshot and v.components.len == 1:
+    align($v.components[0], 8, '0')
+  else: ""
+
+const SnapshotVersionPrefix* = "#snapshot/"
+  ## How a snapshot is spelled as a solver version and in a lock row:
+  ## `#snapshot/<YYYYMMDD>/<commit>` (spec NPC-AREQ31, "The snapshot's
+  ## spelling").
+
+proc snapshotVersionText*(v: RecordVersion; commit: string): string =
+  ## `#snapshot/<YYYYMMDD>/<commit>`; "" for any other kind.
+  if v.kind != rvkSnapshot: return ""
+  SnapshotVersionPrefix & snapshotDateText(v) & "/" & commit
+
+proc parseSnapshotVersionText*(text: string; date: var uint64;
+                               commit: var string): bool =
+  ## Read `#snapshot/<YYYYMMDD>/<commit>` back: eight digits naming a
+  ## calendar date, and a full-width lower-case object id.
+  if not text.startsWith(SnapshotVersionPrefix): return false
+  let rest = text[SnapshotVersionPrefix.len .. ^1]
+  let slash = rest.find('/')
+  if slash != 8: return false
+  var d = 0'u64
+  for c in rest[0 ..< 8]:
+    if c notin {'0'..'9'}: return false
+    d = d * 10 + uint64(ord(c) - ord('0'))
+  let c = rest[9 .. ^1]
+  if c.len notin [40, 64]: return false
+  for ch in c:
+    if ch notin {'0'..'9', 'a'..'f'}: return false
+  if not isCalendarDate(d): return false
+  date = d
+  commit = c
+  true
+
 proc versionText*(v: RecordVersion): string =
   ## The version as the inspection view and diagnostics print it.
   case v.kind
@@ -542,3 +628,4 @@ proc versionText*(v: RecordVersion): string =
   of rvkHead: "#head"
   of rvkRef: "#" & v.tag
   of rvkCommit: "#commit"
+  of rvkSnapshot: "#snapshot/" & snapshotDateText(v)

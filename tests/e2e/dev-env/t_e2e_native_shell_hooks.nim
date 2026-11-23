@@ -92,6 +92,13 @@ proc prepareCase(prefix: string): M6Case =
   result.projectA = result.tempRoot / "project-a"
   result.projectB = result.tempRoot / "project-b"
   createDir(result.homeDir)
+  when defined(windows):
+    # The Documents folder every Windows user profile has. Both repro's
+    # `SHGetFolderPathW` and `[Environment]::GetFolderPath('MyDocuments')`
+    # verify that the folder exists and report nothing when it does not;
+    # with it present they resolve it through the same verified call, so
+    # `windowsDocumentsFromPowerShell` names the folder repro writes to.
+    createDir(result.homeDir / "Documents")
   createDir(result.xdgConfig)
   createDir(result.tempRoot / "runtime-libs")
   writeFixture(result.projectA, "one", "alpha")

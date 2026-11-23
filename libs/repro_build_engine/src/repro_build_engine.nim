@@ -183,6 +183,11 @@ import repro_build_engine/embedded_root_scan
 # allocates is freed in one proc (``dropMonitorFinishNode``).
 import repro_build_engine/worker_pool
 export action_extension
+# Bounded concurrent dispatch of executor-backed built-in edges: worker
+# threads that run a ``BuiltinWork`` (a bare code pointer over plain text)
+# while the scheduler waits. See ``ConcurrentBuiltinExecutor``.
+import repro_build_engine/builtin_dispatch
+export builtin_dispatch
 
 # M9.L.4-refactor Step A: the engine learns ABOUT binary-cache publishing
 # but is identity-agnostic — the convention populates the identity tuple
@@ -4476,6 +4481,15 @@ proc removalTakesEntry(removalRoot, targetRoot: string): bool =
   let entry = entryAtDepthOf(targetRoot, removalRoot)
   entry.len > 0 and isSameEntryOnDisk(removalRoot, entry)
 
+proc cwdRemovalRoot(action: BuildAction): string =
+  ## The action's working directory as `removalTakesEntry` compares it with
+  ## a removal location: absolute (the process's own cwd when the action
+  ## declares none) and resolved to its physical directory.
+  result = normalizeWriteRoot(canonicalPolicyPath(
+    absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
+  when defined(windows):
+    result = result.toLowerAscii()
+
 var
   containmentMemoDepth {.threadvar.}: int
   containmentMemo {.threadvar.}: Table[string, Option[string]]
@@ -5005,10 +5019,7 @@ proc validateGraph(g: BuildGraph) =
       if raw.len == 0:
         raiseEngine("optional output path is empty for " & action.id)
       let removalRoot = outputRemovalLocation(action.cwd, raw)
-      var cwdRoot = normalizeWriteRoot(canonicalPolicyPath(
-        absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
-      when defined(windows):
-        cwdRoot = cwdRoot.toLowerAscii()
+      let cwdRoot = cwdRemovalRoot(action)
       if removalTakesEntry(removalRoot, cwdRoot):
         raiseEngine("optional output contains the action's cwd: " & raw &
           " for " & action.id)
@@ -5048,10 +5059,7 @@ proc validateGraph(g: BuildGraph) =
   for action in g.actions:
     if action.removeBeforeRun.len == 0:
       continue
-    var cwdRoot = normalizeWriteRoot(canonicalPolicyPath(
-      absolutePath(if action.cwd.len > 0: action.cwd else: getCurrentDir())))
-    when defined(windows):
-      cwdRoot = cwdRoot.toLowerAscii()
+    let cwdRoot = cwdRemovalRoot(action)
     var owned = initHashSet[string]()
     for output in action.outputs & action.optionalOutputs &
         action.declaredOutputs:
@@ -8765,6 +8773,39 @@ proc isRemovalMutation*(detail: string): bool =
       return true
   false
 
+func spawnedImagePath(record: MonitorRecord): string =
+  ## The image an `mrProcessSpawn` record says its child started running, or
+  ## "" when the record does not establish one.
+  ##
+  ## THE ONE ANSWER to "which image did this spawn start", read by both of its
+  ## consumers: `observeSpawnImage` (the child pid's image, for entropy
+  ## attribution) and the `mrProcessSpawn` arm of `foldOneMonitorRecord` (the
+  ## image as a content input of the action). Two copies of these guards
+  ## would be two chances to disagree about the same record, and the cost of
+  ## disagreement is asymmetric: a spawn attributed but not keyed is a stale
+  ## hit.
+  ##
+  ## `mrProcessSpawn` is several shapes under one kind, and only one of them
+  ## names an image. Each guard below excludes a shape io-mon really writes:
+  ##
+  ## * `result == 0` — a POSIX `posix_spawn`-family call that SUCCEEDED (it
+  ##   returns 0, and io-mon's Linux shim writes the record only then). A
+  ##   `fork` record carries the child pid in `result` and no path; a Windows
+  ##   `CreateProcessW` record carries the call's BOOL (1 on success) and, as
+  ##   `path`, possibly the whole command line, which is not a path at all.
+  ## * `childOsPid != 0` — there is a child to attribute. A Windows
+  ##   `CreateProcessW` that failed has none.
+  ## * an ABSOLUTE `path` — `posix_spawnp` records the name the caller passed,
+  ##   before glibc's PATH walk (the `execvp` limit; see the `mrProcessExec`
+  ##   content arm), and io-mon's synthetic root spawn carries no path. A
+  ##   relative name names nothing this engine can resolve without guessing
+  ##   the child's search PATH.
+  if record.kind == mrProcessSpawn and record.result == 0 and
+      record.childOsPid != 0 and record.path.isAbsolute:
+    record.path
+  else:
+    ""
+
 proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
                           evidence: var PathSetEvidence;
                           seen: var EvidenceSeenSets;
@@ -8925,6 +8966,10 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     of mrFileRead, mrLibraryLoad, mrProcessExec, mrPathProbe,
        mrDirectoryEnumerate: true
     of mrFileOpen: record.observationKind in {moFileRead, moFileOpen}
+    # Only a spawn that names an image is an input. A `fork` record has no
+    # path, and `materialPath` would turn that into the action's cwd and hand
+    # it to the volatile-runtime verdict below as if it were a read.
+    of mrProcessSpawn: spawnedImagePath(record).len > 0
     else: false
   let isWrite =
     case record.kind
@@ -9138,6 +9183,40 @@ proc foldOneMonitorRecord(record: MonitorRecord; cwd: string;
     #     is for; it must not enter the key as a content read.
     if record.path.isAbsolute and
         not record.detail.contains(FailedExecDetailToken):
+      evidence.monitorReads.observe(evidence.evidenceProvenance,
+        evcMonitorCapture, seen.monitorReads, materialized)
+  of mrProcessSpawn:
+    # A binary the action started through `posix_spawn` (or `pidfd_spawn`, or
+    # the macOS equivalent). The same content dependency as an executed
+    # image, for the same reason, so it goes to `monitorReads` beside the
+    # `mrProcessExec` arm's.
+    #
+    # WHY IT NEEDS ITS OWN ARM, AND WHY THE EXEC ARM DOES NOT COVER IT. glibc's
+    # `posix_spawn` performs the child's `execve` itself, inside libc and
+    # below the interposed symbol, so no `mrProcessExec` is ever written for
+    # the child's image; the child's own shim starts only once that image is
+    # mapped, and the loaded-object enumeration excludes the main executable.
+    # The ONLY record naming the image is the parent's `mrProcessSpawn`
+    # (io-mon `shim/linux_preload.nim` :: `recordPosixSpawn`). Until this arm
+    # existed it was read solely to attribute the child's pid
+    # (`observeSpawnImage`) and otherwise landed in the `else: discard` below,
+    # so a tool started through Nim's `osproc` without a shell, Rust's
+    # `std::process::Command` or Python's `subprocess` was in no cache key: an
+    # ordinary rebuild of that tool in place left the action a stale cache
+    # hit (`t_executed_binary_is_a_recorded_input.nim`, the `spawn` shape).
+    #
+    # THE GUARDS ARE `spawnedImagePath`'s, shared with `observeSpawnImage` so
+    # the attribution and the key cannot disagree about one record. They
+    # mirror the exec arm's: (1) absolute paths only — `posix_spawnp` records
+    # the UNRESOLVED name, and folding it would manufacture `<cwd>/<name>`
+    # exactly as an unresolved `execvp` would (pinned by the `spawnp` case);
+    # (2) no failed spawns — a failed spawn ran nothing, and glibc reports a
+    # child's failed exec as the call's own non-zero result. The other two
+    # conditions exclude the record shapes that are not a POSIX spawn at all:
+    # `fork` (no path) and Windows `CreateProcessW` (a BOOL result and a
+    # command line where the path would be).
+    let image = spawnedImagePath(record)
+    if image.len > 0:
       evidence.monitorReads.observe(evidence.evidenceProvenance,
         evcMonitorCapture, seen.monitorReads, materialized)
   of mrPathProbe:
@@ -9392,12 +9471,12 @@ proc observeSpawnImage(record: MonitorRecord;
   ## read before the child's stream regardless of which PID sorts first.
   ## Conflicting paths for a recycled child PID cannot establish its initial
   ## image: keep an empty binding until an explicit exec supplies one.
-  if record.kind != mrProcessSpawn or record.result != 0 or
-      record.childOsPid == 0 or not record.path.isAbsolute:
+  let image = spawnedImagePath(record)
+  if image.len == 0:
     return
   if not images.hasKey(record.childOsPid):
-    images[record.childOsPid] = record.path
-  elif images[record.childOsPid] != record.path:
+    images[record.childOsPid] = image
+  elif images[record.childOsPid] != image:
     images[record.childOsPid] = ""
 
 proc foldMonitorDepFileEvidence*(path, cwd: string;
@@ -10258,7 +10337,8 @@ proc executedToolImagePath(action: BuildAction;
   ## CHILD — it is installed by the preloaded shim's constructor, which runs
   ## only once the new image is already mapped. The launcher's exec of the
   ## action's ROOT image therefore happens strictly BEFORE any hook exists, so
-  ## `mrProcessExec` covers NESTED execs and nothing else. Measured: an action
+  ## `mrProcessExec` covers NESTED execs and nothing else (and `mrProcessSpawn`
+  ## nested spawns, written by the spawning parent). Measured: an action
   ## whose `argv[0]` IS the tool produced a 19-record depfile containing that
   ## binary's six glibc shared objects and NOT the binary itself. No arm in
   ## `foldOneMonitorRecord` can close that, because there is no record.
@@ -10581,6 +10661,23 @@ proc dropScratchEvidence*(action: BuildAction; evidence: var PathSetEvidence) =
 
 proc scratchDirProblem*(action: BuildAction): string =
   ## Why emptying the action's scratch directories would be unsafe, or "".
+  ##
+  ## A scratch directory is emptied before the action runs
+  ## (`resetScratchDirs`), so it may not be close to a filesystem root,
+  ## contain the action's cwd, or overlap a declared input or output.
+  ## Build-Engine-And-Scheduler.md §"Scratch directories".
+  ##
+  ## Two judgements, and a directory must pass both. The first compares the
+  ## containment keys (`scratchRoots`) by spelling, and also covers the
+  ## canonical work tree. The second judges each declared scratch directory
+  ## by the ENTRY ON DISK that emptying it removes, as the optional-output
+  ## and removed-before-run checks do (`removalTakesEntry`): a spelling says
+  ## nothing about which directory it reaches. `../work` under a cwd
+  ## `<T>/work` is the cwd itself, a walk far enough up is `/`, and on a
+  ## filesystem that folds case (macOS's default APFS, Windows, a Linux
+  ## `casefold` directory) `<T>/WORK` is the same directory as `<T>/work`.
+  ## Each of those passed the first judgement, and the engine then emptied
+  ## the working directory, an input or the filesystem root.
   let roots = action.scratchRoots()
   if roots.len == 0:
     return ""
@@ -10606,6 +10703,38 @@ proc scratchDirProblem*(action: BuildAction): string =
   for output in action.outputs & action.optionalOutputs & action.declaredOutputs:
     let why = overlaps(output, "declared output")
     if why.len > 0: return why
+  # On disk. `outputRemovalLocation` names the entry `resetScratchDirs`
+  # removes: the spelling `materialPath` gives, its parent resolved through
+  # the filesystem, its last component not followed (a scratch directory
+  # that is a link is unlinked, not emptied through).
+  if action.scratchDirs.allIt(it.len == 0):
+    return ""
+  let cwdRoot = cwdRemovalRoot(action)
+  # Each declared path resolved once, not once per scratch directory: the
+  # resolution walks the filesystem, and an action may declare many inputs.
+  var declared: seq[tuple[path, what, location: string]] = @[]
+  for input in action.inputs:
+    declared.add((path: input, what: "declared input",
+                  location: outputRemovalLocation(action.cwd, input)))
+  for output in action.outputs & action.optionalOutputs &
+      action.declaredOutputs:
+    declared.add((path: output, what: "declared output",
+                  location: outputRemovalLocation(action.cwd, output)))
+  for dir in action.scratchDirs:
+    if dir.len == 0:
+      continue
+    let location = outputRemovalLocation(action.cwd, dir)
+    if location.count('/') < 2:
+      return "scratch directory '" & dir & "' (" & location & ") is too " &
+        "close to a filesystem root to empty"
+    if removalTakesEntry(location, cwdRoot):
+      return "scratch directory '" & dir & "' (" & location & ") contains " &
+        "the action's cwd"
+    for other in declared:
+      if removalTakesEntry(location, other.location) or
+          removalTakesEntry(other.location, location):
+        return "scratch directory '" & dir & "' (" & location & ") " &
+          "overlaps the action's " & other.what & " '" & other.path & "'"
   ""
 
 # `removeTreeNoFollow` and `removePathNoFollow` live in
@@ -10752,8 +10881,14 @@ proc resetScratchDirs*(action: BuildAction): string =
       continue
     let physical = extendedPath(materialPath(action.cwd, dir))
     try:
-      if dirExists(physical):
-        removeTreeNoFollow(physical)
+      # A scratch directory that is itself a link (a symlink, or a junction
+      # on Windows) is unlinked, never emptied through: `scratchDirProblem`
+      # judges the entry, not the link's target, so a link to the cwd or an
+      # input passes it. `removeTreeNoFollow` lists what its argument
+      # resolves to and would empty the target; `removePathNoFollow`
+      # removes the link itself and leaves the target alone.
+      if dirExists(physical) or symlinkExists(physical):
+        removePathNoFollow(physical)
       createDir(physical)
     except CatchableError as err:
       return "cannot empty scratch directory '" & dir & "': " & err.msg
@@ -13363,6 +13498,9 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
   ## name every run. What the action observed there was its own doing, so
   ## it is not an input; a written file that still EXISTS is kept, because
   ## an action that read a file and then rewrote it did consume it.
+  ## Callers test a path with `transientOwnPath` (over `transientOwnPaths`),
+  ## which also covers what the action observed BENEATH a temporary
+  ## directory.
   ##
   ## WRITTEN means created or written (`monitorWrites`): a directory or a
   ## symbolic link the action made counts. A path it only REMOVED does not
@@ -13388,6 +13526,79 @@ proc transientOwnWrites*(evidence: PathSetEvidence): HashSet[string] =
       else: key
     if not onDisk(path) and not onDisk(nativeKey):
       result.incl(key)
+
+type TransientOwnPaths* = object
+  ## What `transientOwnPath` decides from: the action's own temporaries and
+  ## the paths it only removed. Built once per action by `transientOwnPaths`.
+  written*: HashSet[string]
+    ## `transientOwnWrites`: written paths that are gone.
+  removedOnly*: HashSet[string]
+    ## Keys (`transientWriteKey`) of paths the action REMOVED and never
+    ## wrote: what was there before it ran, so not its own temporary even
+    ## when it lies beneath one.
+
+proc transientOwnPaths*(evidence: PathSetEvidence): TransientOwnPaths =
+  result.written = transientOwnWrites(evidence)
+  if result.written.len == 0:
+    return
+  var written = initHashSet[string]()
+  for path in evidence.monitorWrites:
+    written.incl(transientWriteKey(path))
+  for path in evidence.monitorRemovals:
+    let key = transientWriteKey(path)
+    if key notin written:
+      result.removedOnly.incl(key)
+
+proc transientOwnPath*(transient: TransientOwnPaths; path: string): bool =
+  ## Whether `path` is one of the action's own temporaries
+  ## (`transientOwnWrites`) or lies beneath one: the one filter the
+  ## determinism-probe key and the input accesses beside a record share.
+  ##
+  ## Beneath, because a temporary is often a DIRECTORY. rustc links
+  ## through `out/rustcXXXXXX/` and passes `-L <tmp>/raw-dylibs` to the
+  ## linker, which probes it for every `-l` library and finds nothing; then
+  ## rustc removes the directory. The action wrote the directory, not the
+  ## sixteen misses beneath it, so an exact lookup kept them, their random
+  ## parent entered the key, and no two runs of a Rust link agreed on it.
+  ##
+  ## This holds for every kind of access beneath it, reads included: a
+  ## linker's failed `open` of a missing library is recorded as a read, and
+  ## the directory is gone, so a read there is keyed `absent` and keeping it
+  ## adds the temporary's random name and no content. The transient keys
+  ## are written paths that are GONE; a written directory that still exists
+  ## is not one, and a directory the action only removed is not one either
+  ## (`transientOwnWrites`).
+  ##
+  ## Two descendants are never covered, because each can be a real input:
+  ##
+  ## * One the action REMOVED and never wrote (`removedOnly`). It was there
+  ##   before the action ran. An action that read `gen/input.txt`, ran
+  ##   `rm -rf gen`, and then made and removed `gen` again consumed that
+  ##   file; dropping it would let a portable record hit whatever the file
+  ##   held. The action's own files beneath a temporary are written, so
+  ##   they are covered exactly.
+  ## * One reached through a parent walk (`tmp/../src/main.c`). The kernel
+  ##   resolved it outside the temporary, so it is not beneath it.
+  ##
+  ## Ancestors are taken by whole components of the key's own spelling, so
+  ## a removed `proj/sr` does not cover `proj/src/main.c`.
+  if transient.written.len == 0:
+    return false
+  var key = transientWriteKey(path)
+  if key in transient.written:
+    return true
+  if key in transient.removedOnly:
+    return false
+  while true:
+    let cut = key.rfind('/')
+    if cut <= 0:
+      # The root itself is never a temporary the action made and removed.
+      return false
+    if key.substr(cut + 1) == "..":
+      return false
+    key.setLen(cut)
+    if key in transient.written:
+      return true
 
 proc undeclaredSurvivingWrites*(action: BuildAction;
                                 evidence: PathSetEvidence): seq[string] =
@@ -13880,7 +14091,7 @@ func interestConsumer*(category: EventCategory): string =
   of ecFileWrites: "monitorWrites (and undeclaredSurvivingWrites)"
   of ecProcessTree:
     "seen.execImageByPid (exec/spawn pid->image attribution) and the mrProcessExec " &
-      "content-dependency arm of the fold"
+      "and mrProcessSpawn content-dependency arms of the fold"
   of ecLibraryLoads: "the mrLibraryLoad arm of the fold (monitorReads)"
   of ecEnvReads: "cacheEnvInputs — the ACTION CACHE KEY"
   of ecEntropy: "applyEntropyBlessingPolicy — the CACHE-PUBLISH GATE"
@@ -18651,6 +18862,83 @@ type
     ## mirror client, the archive extractor and the stores live above the
     ## engine.
 
+type
+  BuiltinWorkItem* = object
+    ## What a ``ConcurrentBuiltinExecutor``'s ``prepare`` hands the engine:
+    ## the work to run on a worker thread and its input. ``work`` nil means
+    ## there is nothing to run there; ``finish`` is then called with
+    ## ``dispatched`` false when the batch is settled, in its turn.
+    work*: BuiltinWork
+    input*: string
+
+  ConcurrentBuiltinExecutor* = object
+    ## An executor that lets the engine run its edges concurrently, at most
+    ## ``maxParallelism`` at a time, instead of one at a time inline in the
+    ## scheduling loop. It is split in three: ``prepare`` runs on the
+    ## scheduler's thread when the edge is ready (it may use the
+    ## executor's closures and state); the ``BuiltinWork`` it returns runs
+    ## on a worker thread with plain text in and out (``builtin_dispatch``
+    ## says why nothing else may cross); ``finish`` runs on the scheduler's
+    ## thread with the work's outcome and returns the edge's result. The
+    ## scheduler collects the ready edges of one pass, runs their work as
+    ## one bounded batch, then settles each -- with work or without, or
+    ## failed in ``prepare`` -- in the order they were prepared, exactly as
+    ## an inline result is settled.
+    prepare*: proc(action: BuildAction): BuiltinWorkItem {.gcsafe.}
+    finish*: proc(action: BuildAction; dispatched: bool;
+                  outcome: BuiltinWorkOutcome): ActionResult {.gcsafe.}
+
+var concurrentMetadataFetchExecutor {.threadvar.}: ConcurrentBuiltinExecutor
+
+proc registerConcurrentMetadataFetchExecutor*(
+    executor: ConcurrentBuiltinExecutor) =
+  ## Register the per-thread concurrent executor for ``bakMetadataFetch``
+  ## edges. While it is registered and ``maxParallelism`` is above 1, the
+  ## engine dispatches those edges through it (see
+  ## ``ConcurrentBuiltinExecutor``) instead of the inline executor.
+  concurrentMetadataFetchExecutor = executor
+
+proc clearConcurrentMetadataFetchExecutor*() =
+  concurrentMetadataFetchExecutor = ConcurrentBuiltinExecutor()
+
+proc concurrentExecutorFor(kind: BuildActionKind;
+                           executor: var ConcurrentBuiltinExecutor): bool =
+  ## The concurrent executor registered for ``kind``, if any.
+  if kind == bakMetadataFetch and not concurrentMetadataFetchExecutor.prepare.isNil and
+      not concurrentMetadataFetchExecutor.finish.isNil:
+    executor = concurrentMetadataFetchExecutor
+    return true
+  false
+
+proc settledConcurrentResult(action: BuildAction; finished: ActionResult):
+    ActionResult =
+  ## A concurrent executor's result in the shape ``executeBuiltinAction``
+  ## gives an inline one.
+  result = ActionResult(id: action.id, launched: true,
+    runQuotaBackend: "builtin",
+    dependencyPolicyKind: action.dependencyPolicy.kind)
+  result.status = finished.status
+  result.exitCode = finished.exitCode
+  result.stdout = finished.stdout
+  result.stderr = finished.stderr
+  result.reason = finished.reason
+  result.launched = finished.launched
+  result.runQuotaBackend = if finished.runQuotaBackend.len > 0:
+    finished.runQuotaBackend else: "metadata-fetch"
+
+proc finishConcurrent(executor: ConcurrentBuiltinExecutor; action: BuildAction;
+                      dispatched: bool; outcome: BuiltinWorkOutcome):
+    ActionResult =
+  ## ``executor.finish``, failing the edge when it raises, with the result
+  ## ``executeBuiltinAction`` gives when an inline executor raises.
+  try:
+    settledConcurrentResult(action, executor.finish(action, dispatched,
+      outcome))
+  except CatchableError as e:
+    ActionResult(id: action.id, launched: true, status: asFailed,
+      exitCode: 1, stderr: e.msg, runQuotaBackend: "builtin",
+      dependencyPolicyKind: action.dependencyPolicy.kind)
+
 var workspaceVcsExecutor {.threadvar.}: WorkspaceVcsExecutor
 var catalogIndexExecutor {.threadvar.}: CatalogIndexExecutor
 var sourceFetchExecutor {.threadvar.}: SourceFetchExecutor
@@ -21689,7 +21977,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       toHex(action.weakFingerprint.bytes) & "\0"
     var inputs = action.cacheInputPaths(evidence.evidence)
     inputs.sort()
-    let transient = transientOwnWrites(evidence.evidence)
+    let transient = transientOwnPaths(evidence.evidence)
     # A directory CONTAINING the action's working directory: its listing is
     # how this host lays out everything else stored above the project (the
     # drive root, a home directory), which changes with anything on the
@@ -21705,7 +21993,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     let ancestors = graphAncestorsOf(action.id)
     for path in inputs:
       if isLaunchMachinery(path) or
-          (transient.len > 0 and transientWriteKey(path) in transient) or
+          transient.transientOwnPath(path) or
           isOwnOutput(action, path):
         continue
       var pathKey = path.replace('\\', '/')
@@ -22122,11 +22410,16 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     ## hit derives is the record this run produced (P3.4b).
     let containment = beginContainmentMemo()
     defer: endContainmentMemo(containment)
+    # Listings are filtered like reads and probes: a temporary directory the
+    # action made, listed and removed (rustc's `rustcXXXXXX/raw-dylibs`)
+    # names a new random path on every run.
+    let transient = transientOwnPaths(evidence)
     var enumerated = initHashSet[string]()
     for path in action.cacheEnumeratedDirectories(evidence,
         membershipTrackedRoots):
       enumerated.incl(path)
-      if not isHostTempListing(path) and not isOwnOutput(action, path):
+      if not isHostTempListing(path) and not isOwnOutput(action, path) and
+          not transient.transientOwnPath(path):
         result.enumerations.add(path)
     var probed = initHashSet[string]()
     for path in evidence.monitorProbes:
@@ -22142,10 +22435,9 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     # Stored beside the record with the accesses, so a portable record
     # derived from a later local hit is host-bound exactly as this one is.
     result.hostBoundReason = evidence.hostBoundInput
-    let transient = transientOwnWrites(evidence)
     for path in keyed:
       if path in enumerated or isHostTempListing(path) or
-          (transient.len > 0 and transientWriteKey(path) in transient) or
+          transient.transientOwnPath(path) or
           isOwnOutput(action, path):
         continue
       elif path in probed:
@@ -24497,6 +24789,172 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
     action: BuildAction
     resultPath: string
 
+  type PendingConcurrentBuiltin = object
+    ## A ready built-in edge prepared for this pass's batch
+    ## (``ConcurrentBuiltinExecutor``): its work, when ``prepare`` returned
+    ## some, waits to run; either way it is settled with the batch, in the
+    ## order the edges were prepared.
+    id: string
+    plan: tuple[action: BuildAction; diagnostic: string; capturePath: string;
+                hostInProcess: bool]
+    executor: ConcurrentBuiltinExecutor
+    item: BuiltinWorkItem
+    prepareError: string ## ``prepare`` raised: the edge fails with this
+
+  template settleBuiltinResult(id, plan, finished, launchedAny: untyped) =
+    ## Settle a built-in edge's result: record it, collect its evidence,
+    ## publish it to the cache, and release or block its dependents. Ends
+    ## with ``continue``: it is the last thing done for the edge, inline
+    ## in the ready scan or in the loop over a concurrent batch.
+    let idx = idToIndex.resultIndex(id)
+    let previousCacheDecision = runResult.results[idx].cacheDecision
+    # M17: the cache-lookup facts were recorded BEFORE the action
+    # ran and would be wiped by this assignment. They are carried
+    # for the same reason the cache decision is -- the settled
+    # result describes the execution, not the lookup that led to
+    # it, and the lookup is the only place either fact exists.
+    let previousMissReason = runResult.results[idx].cacheMissReason
+    let previousStrongFingerprint =
+      runResult.results[idx].strongFingerprintHex
+    let previousPreserved =
+      runResult.results[idx].preservedModifiedOutputs
+    let previousDropped = runResult.results[idx].droppedCorruptPayloads
+    runResult.results[idx] = finished
+    runResult.results[idx].cacheMissReason = previousMissReason
+    runResult.results[idx].preservedModifiedOutputs = previousPreserved
+    runResult.results[idx].droppedCorruptPayloads = previousDropped
+    runResult.results[idx].strongFingerprintHex =
+      previousStrongFingerprint
+    runResult.results[idx].dependencyPolicyKind =
+      plan.action.dependencyPolicy.kind
+    runResult.results[idx].cacheDecision =
+      if actionsById[finished.id].cacheable and
+          previousCacheDecision == cdNotCacheable:
+        cdMiss
+      else:
+        previousCacheDecision
+    statuses[id] = finished.status
+    if finished.status == asSucceeded:
+      invalidateCachedOutputs(plan.action)
+      if plan.action.kind == bakLockUpdate:
+        # HL-10: the node rewrites tracked sources (``repro.lock``,
+        # ``flake.lock``) that no action declares as an output, so
+        # nothing else would drop a stat or digest this run cached for
+        # them before it ran. Its dependents are looked up after this.
+        for written in finished.rewrittenSources:
+          invalidateCachedPath(materialPath(plan.action.cwd, written))
+      if failedForMissingOutputs(finished.id, plan.action):
+        completed = terminalCount()
+        launchedAny = true
+        continue
+      let evidenceStart = statStart()
+      var evidence = collectEvidence(plan.action, strict = true,
+        config = addr config,
+        sourceTreeSpellings = addr sourceTreeSpellings)
+      finishStat("repro evidence collect", evidenceStart)
+      siteTables.learnSiteTableImages(plan.action, evidence.evidence)
+      # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
+      # cannot re-derive: what a foreign provisioner daemon reported
+      # about its own evaluation. `collectEvidence` builds a fresh
+      # `PathSetEvidence` from the action and its reports, so this
+      # assignment used to discard the daemon's report entirely — which
+      # is the only reason that report's former home in `monitorReads`
+      # was inert. Carried forward explicitly, into the channel that
+      # names its source, so the attribution survives instead of
+      # depending on nobody noticing it was dropped.
+      if finished.evidence.provisionerReportedInputs.len > 0:
+        evidence.evidence.provisionerReportedInputs =
+          finished.evidence.provisionerReportedInputs
+        evidence.evidence.evidenceProvenance.incl(
+          evcForeignProvisionerReport)
+      runResult.results[idx].evidence = evidence.evidence
+      traceVolatileRuntimeDrops(finished.id, evidence.evidence)
+      if not evidence.publishable:
+        runResult.results[idx].status = asFailed
+        runResult.results[idx].stderr =
+          evidence.evidence.diagnostics.join("\n")
+        statuses[id] = asFailed
+        runResult.trace(finished.id, "failed", "dependency evidence invalid")
+        blockClosure(finished.id, finished.id)
+        emitProgress(bpkActionCompleted, finished.id)
+        completed = terminalCount()
+        launchedAny = true
+        continue
+      invalidateCachedWrites(plan.action, evidence.evidence)
+      # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
+      # session-disable flag) into the session-scoped accumulator
+      # so downstream cache LOOKUPS can skip narrowly.
+      registerEvidenceInvalidation(evidence)
+      # Cache ineligibility withholds publication, not successful outputs.
+      if plan.action.cacheable and (not evidence.disableCacheHits or
+          determinismProbeAdmits(plan.action, evidence)):
+        try:
+          let recordStart = statStart()
+          # Peer-Cache M1: when a publisher closure is set, force
+          # output-blob retention so the publisher can read the
+          # blob payloads back out of the local CAS. The
+          # publisher-less path (legacy CLI default) keeps the
+          # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
+          # M9.L.4-refactor Step A: ALSO force retention when the
+          # binary-cache publisher is configured AND this action
+          # opted into publishing — the publish hook guards on
+          # ``outputPayloadKind == opkCasBlobs`` and would
+          # silently skip otherwise.
+          let storeOutputBlobs =
+            storeOutputBlobsFor(plan.action, evidence.evidence)
+          let keyed = plan.action.cacheInputPaths(evidence.evidence)
+          let record = cache.recordActionResult(cas.inner,
+            plan.action.weakFingerprint,
+            plan.action.actionCachePolicy,
+            plan.action.recordedInputNames(keyed),
+            plan.action.recordedOutputPaths(), plan.action.cwd,
+            storeOutputBlobs = storeOutputBlobs,
+            metadataCache = addr fileMetadataCache,
+            envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
+            # Same omission as the elevated site above, reached by
+            # builtin edges and by anything whose plan is not a
+            # `bakProcess`. A builtin cannot be wrapped in the
+            # io-monitor, so its enumeration evidence arrives either
+            # from a converter path set or from a monitor depfile a
+            # direct engine caller prewired — both of which
+            # `collectEvidence` has already folded by this point.
+            enumeratedDirectories = plan.action.recordedInputNames(
+              enumeratedDirectoriesForKey(plan.action, evidence.evidence)),
+            determinism = entryDeterminismFor(config, plan.action),
+            computationStagingDir = plan.action.computationStagingDir)
+          finishStat("repro cache record", recordStart)
+          runResult.results[idx].computationOutputDir =
+            recordComputationDir(record)
+          writeActionResultRecordFile(
+            dependencyEvidencePath(cacheRoot, plan.action.id), record)
+          recordPortableFingerprint(idx, plan.action, evidence.evidence,
+            record, evidenceLevelOf(evidence.monitorStatus), keyed)
+          recordCapturedOutput(idx, record)
+          publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
+            evidenceLevelOf(evidence.monitorStatus), plan.action,
+            evidence.evidence.hostBoundInput)
+          publishBinaryCacheBundle(plan.action, record,
+            hostBoundInput = evidence.evidence.hostBoundInput)
+        except UnreadableInputError as err:
+          runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
+      elif plan.action.cacheable and evidence.disableCacheHits:
+        runResult.traceCacheIneligibility(finished.id, evidence,
+          idToIndex.resultIndex(finished.id),
+          unobservableRootImageNote(plan.action, unsafeAddr config))
+      elif plan.action.fixedOutput:
+        recordFixedOutputPortable(
+          idToIndex.resultIndex(finished.id), plan.action,
+          evidenceLevelOf(evidence.monitorStatus))
+      completeSuccess(finished.id, asSucceeded,
+        runResult.results[idx].cacheDecision, true, "builtin")
+    else:
+      runResult.trace(finished.id, "failed", finished.stderr)
+      blockClosure(finished.id, finished.id)
+      emitProgress(bpkActionCompleted, finished.id)
+    inc completed
+    launchedAny = true
+    continue
+
   # The exception unwinding out of the scheduling loop, if any, recorded by
   # the ``except`` clause at the end of this ``try`` as it passes through.
   #
@@ -24531,6 +24989,7 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
       var canonicalWaiting = false
       sweepCanonicalLeases()
       var stagedInlineLaunches: seq[StagedInlineLaunch] = @[]
+      var builtinBatch: seq[PendingConcurrentBuiltin] = @[]
       var i = 0
       while i < ready.len and
           uint32(running.len + stagedInlineLaunches.len) < maxParallel and
@@ -25607,157 +26066,31 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
           continue
 
         if plan.action.kind != bakProcess:
+          var concurrentExec: ConcurrentBuiltinExecutor
+          if maxParallel > 1'u32 and
+              concurrentExecutorFor(plan.action.kind, concurrentExec):
+            # Bounded concurrent dispatch: prepared here, on this thread,
+            # and joins this pass's batch, which runs the work after the
+            # ready scan and settles every edge of it in preparation order --
+            # also one with no work to run or whose ``prepare`` raised, so
+            # that whatever ``finish`` records comes in the order an inline
+            # run would record it.
+            var item = BuiltinWorkItem()
+            var prepareError = ""
+            try:
+              item = concurrentExec.prepare(plan.action)
+            except CatchableError as e:
+              prepareError = e.msg
+            statuses[id] = asRunning
+            builtinBatch.add PendingConcurrentBuiltin(id: id, plan: plan,
+              executor: concurrentExec, item: item,
+              prepareError: prepareError)
+            launchedAny = true
+            continue
           let builtinStart = statStart()
           let finished = executeBuiltinAction(plan.action)
           finishStat("repro builtin execute", builtinStart)
-          let idx = idToIndex.resultIndex(id)
-          let previousCacheDecision = runResult.results[idx].cacheDecision
-          # M17: the cache-lookup facts were recorded BEFORE the action
-          # ran and would be wiped by this assignment. They are carried
-          # for the same reason the cache decision is -- the settled
-          # result describes the execution, not the lookup that led to
-          # it, and the lookup is the only place either fact exists.
-          let previousMissReason = runResult.results[idx].cacheMissReason
-          let previousStrongFingerprint =
-            runResult.results[idx].strongFingerprintHex
-          let previousPreserved =
-            runResult.results[idx].preservedModifiedOutputs
-          let previousDropped = runResult.results[idx].droppedCorruptPayloads
-          runResult.results[idx] = finished
-          runResult.results[idx].cacheMissReason = previousMissReason
-          runResult.results[idx].preservedModifiedOutputs = previousPreserved
-          runResult.results[idx].droppedCorruptPayloads = previousDropped
-          runResult.results[idx].strongFingerprintHex =
-            previousStrongFingerprint
-          runResult.results[idx].dependencyPolicyKind =
-            plan.action.dependencyPolicy.kind
-          runResult.results[idx].cacheDecision =
-            if actionsById[finished.id].cacheable and
-                previousCacheDecision == cdNotCacheable:
-              cdMiss
-            else:
-              previousCacheDecision
-          statuses[id] = finished.status
-          if finished.status == asSucceeded:
-            invalidateCachedOutputs(plan.action)
-            if plan.action.kind == bakLockUpdate:
-              # HL-10: the node rewrites tracked sources (``repro.lock``,
-              # ``flake.lock``) that no action declares as an output, so
-              # nothing else would drop a stat or digest this run cached for
-              # them before it ran. Its dependents are looked up after this.
-              for written in finished.rewrittenSources:
-                invalidateCachedPath(materialPath(plan.action.cwd, written))
-            if failedForMissingOutputs(finished.id, plan.action):
-              completed = terminalCount()
-              launchedAny = true
-              continue
-            let evidenceStart = statStart()
-            var evidence = collectEvidence(plan.action, strict = true,
-              config = addr config,
-              sourceTreeSpellings = addr sourceTreeSpellings)
-            finishStat("repro evidence collect", evidenceStart)
-            siteTables.learnSiteTableImages(plan.action, evidence.evidence)
-            # DA-1f — the one thing the BUILT-IN knew that `collectEvidence`
-            # cannot re-derive: what a foreign provisioner daemon reported
-            # about its own evaluation. `collectEvidence` builds a fresh
-            # `PathSetEvidence` from the action and its reports, so this
-            # assignment used to discard the daemon's report entirely — which
-            # is the only reason that report's former home in `monitorReads`
-            # was inert. Carried forward explicitly, into the channel that
-            # names its source, so the attribution survives instead of
-            # depending on nobody noticing it was dropped.
-            if finished.evidence.provisionerReportedInputs.len > 0:
-              evidence.evidence.provisionerReportedInputs =
-                finished.evidence.provisionerReportedInputs
-              evidence.evidence.evidenceProvenance.incl(
-                evcForeignProvisionerReport)
-            runResult.results[idx].evidence = evidence.evidence
-            traceVolatileRuntimeDrops(finished.id, evidence.evidence)
-            if not evidence.publishable:
-              runResult.results[idx].status = asFailed
-              runResult.results[idx].stderr =
-                evidence.evidence.diagnostics.join("\n")
-              statuses[id] = asFailed
-              runResult.trace(finished.id, "failed", "dependency evidence invalid")
-              blockClosure(finished.id, finished.id)
-              emitProgress(bpkActionCompleted, finished.id)
-              completed = terminalCount()
-              launchedAny = true
-              continue
-            invalidateCachedWrites(plan.action, evidence.evidence)
-            # M9.R.73.2 — fold Level 1 invalidated-path set (or Level 2
-            # session-disable flag) into the session-scoped accumulator
-            # so downstream cache LOOKUPS can skip narrowly.
-            registerEvidenceInvalidation(evidence)
-            # Cache ineligibility withholds publication, not successful outputs.
-            if plan.action.cacheable and (not evidence.disableCacheHits or
-                determinismProbeAdmits(plan.action, evidence)):
-              try:
-                let recordStart = statStart()
-                # Peer-Cache M1: when a publisher closure is set, force
-                # output-blob retention so the publisher can read the
-                # blob payloads back out of the local CAS. The
-                # publisher-less path (legacy CLI default) keeps the
-                # ``deferLocalOutputBlobs`` knob honoured byte-for-byte.
-                # M9.L.4-refactor Step A: ALSO force retention when the
-                # binary-cache publisher is configured AND this action
-                # opted into publishing — the publish hook guards on
-                # ``outputPayloadKind == opkCasBlobs`` and would
-                # silently skip otherwise.
-                let storeOutputBlobs =
-                  storeOutputBlobsFor(plan.action, evidence.evidence)
-                let keyed = plan.action.cacheInputPaths(evidence.evidence)
-                let record = cache.recordActionResult(cas.inner,
-                  plan.action.weakFingerprint,
-                  plan.action.actionCachePolicy,
-                  plan.action.recordedInputNames(keyed),
-                  plan.action.recordedOutputPaths(), plan.action.cwd,
-                  storeOutputBlobs = storeOutputBlobs,
-                  metadataCache = addr fileMetadataCache,
-                  envInputs = plan.action.cacheEnvInputs(evidence.evidence, unsafeAddr config),
-                  # Same omission as the elevated site above, reached by
-                  # builtin edges and by anything whose plan is not a
-                  # `bakProcess`. A builtin cannot be wrapped in the
-                  # io-monitor, so its enumeration evidence arrives either
-                  # from a converter path set or from a monitor depfile a
-                  # direct engine caller prewired — both of which
-                  # `collectEvidence` has already folded by this point.
-                  enumeratedDirectories = plan.action.recordedInputNames(
-                    enumeratedDirectoriesForKey(plan.action, evidence.evidence)),
-                  determinism = entryDeterminismFor(config, plan.action),
-                  computationStagingDir = plan.action.computationStagingDir)
-                finishStat("repro cache record", recordStart)
-                runResult.results[idx].computationOutputDir =
-                  recordComputationDir(record)
-                writeActionResultRecordFile(
-                  dependencyEvidencePath(cacheRoot, plan.action.id), record)
-                recordPortableFingerprint(idx, plan.action, evidence.evidence,
-                  record, evidenceLevelOf(evidence.monitorStatus), keyed)
-                recordCapturedOutput(idx, record)
-                publishPeerCacheBundle(peerCacheQueryOf(plan.action), record,
-                  evidenceLevelOf(evidence.monitorStatus), plan.action,
-                  evidence.evidence.hostBoundInput)
-                publishBinaryCacheBundle(plan.action, record,
-                  hostBoundInput = evidence.evidence.hostBoundInput)
-              except UnreadableInputError as err:
-                runResult.traceUnreadableInput(finished.id, idToIndex.resultIndex(finished.id), err.msg)
-            elif plan.action.cacheable and evidence.disableCacheHits:
-              runResult.traceCacheIneligibility(finished.id, evidence,
-                idToIndex.resultIndex(finished.id),
-                unobservableRootImageNote(plan.action, unsafeAddr config))
-            elif plan.action.fixedOutput:
-              recordFixedOutputPortable(
-                idToIndex.resultIndex(finished.id), plan.action,
-                evidenceLevelOf(evidence.monitorStatus))
-            completeSuccess(finished.id, asSucceeded,
-              runResult.results[idx].cacheDecision, true, "builtin")
-          else:
-            runResult.trace(finished.id, "failed", finished.stderr)
-            blockClosure(finished.id, finished.id)
-            emitProgress(bpkActionCompleted, finished.id)
-          inc completed
-          launchedAny = true
-          continue
+          settleBuiltinResult(id, plan, finished, launchedAny)
 
         # In-Process-Monitor-Hosting P3 — A HOSTED PLAN MAY ONLY REACH A
         # LAUNCH SITE THAT HOSTS. This is the enforcement half of the
@@ -26035,6 +26368,45 @@ proc runBuild*(g: BuildGraph; config: BuildEngineConfig): BuildRunResult =
             emitProgress(bpkActionStarted, staged.id)
             launchedAny = true
           frontier.noteGrantedAtOnce(grantedAtOnce)
+
+      if builtinBatch.len > 0:
+        # The ready built-in edges this pass prepared for concurrent
+        # dispatch: their work runs as one batch, at most ``maxParallel``
+        # at a time, and each is then settled as an inline result is, in
+        # the order it was prepared.
+        var work: seq[(BuiltinWork, string)] = @[]
+        var workIndex = newSeq[int](builtinBatch.len)
+        for k, pending in builtinBatch:
+          workIndex[k] = -1
+          if pending.prepareError.len == 0 and not pending.item.work.isNil:
+            workIndex[k] = work.len
+            work.add (pending.item.work, pending.item.input)
+        let batchStart = statStart()
+        let outcomes = runBuiltinWork(work, int(maxParallel))
+        finishStat("repro builtin execute", batchStart)
+        let batch = move(builtinBatch)
+        builtinBatch = @[]
+        for k, pending in batch:
+          let id = pending.id
+          let plan = pending.plan
+          let finished =
+            if pending.prepareError.len > 0:
+              # As ``executeBuiltinAction`` fails an edge whose inline
+              # executor raises.
+              ActionResult(id: plan.action.id, launched: true,
+                status: asFailed, exitCode: 1, stderr: pending.prepareError,
+                runQuotaBackend: "builtin",
+                dependencyPolicyKind: plan.action.dependencyPolicy.kind)
+            elif workIndex[k] < 0:
+              finishConcurrent(pending.executor, plan.action, false,
+                BuiltinWorkOutcome(ok: true))
+            else:
+              finishConcurrent(pending.executor, plan.action, true,
+                outcomes[workIndex[k]])
+          settleBuiltinResult(id, plan, finished, launchedAny)
+        # Settling released their dependents into the ready queue: scan it
+        # again before deciding whether anything is left to wait for.
+        continue
 
       if completed >= buildGraph.actions.len:
         break

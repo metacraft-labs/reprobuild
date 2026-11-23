@@ -63,6 +63,14 @@ Neither package is installed: installing an MSI changes the machine (Program
 Files, the machine PATH, the all-users PowerShell profiles), and Scoop's
 hooks write the user's profiles. Running them, and building the MSI with WiX v3
 on Windows, is tools/multi-distro-harness/tests/m8c_windows_packages_carry_completion.ps1.
+
+test_cs_m8c_harness_helpers_under_pwsh runs
+tools/multi-distro-harness/tests/m8c_common_unit.ps1, the unit checks of the
+helpers those Windows checks share (the MSYS form of a Windows path for Git
+for Windows' tools, a native call whose standard error is not raised under
+$ErrorActionPreference = 'Stop', the build's version, a PowerShell's own
+$PSHOME). It needs pwsh and is skipped, which counts as not passed, without
+it; the dev shell has it.
 """
 
 import json
@@ -910,6 +918,28 @@ class WindowsCompletionTests(PackagerFixture):
             run = self.build_msi()
             self.assertNotEqual(0, run.returncode, "an MSI was built without repro.ps1")
             self.assertIn("share/repro/completions/repro.ps1", run.stderr)
+
+
+M8C_COMMON_UNIT = REPO_ROOT / "tools" / "multi-distro-harness" / "tests" / "m8c_common_unit.ps1"
+
+
+@unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7)")
+class WindowsHarnessHelperTests(unittest.TestCase):
+    """The host-independent helpers of the Windows completion checks
+    (m8c_common.ps1): the MSYS form of a Windows path, a native call whose
+    standard error is not raised under $ErrorActionPreference = 'Stop', the
+    build's version, and a PowerShell's own $PSHOME. Without them the
+    Windows checks die in the harness before they test anything."""
+
+    def test_cs_m8c_harness_helpers_under_pwsh(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, TMPDIR=tmp)
+            run = subprocess.run(
+                ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(M8C_COMMON_UNIT)],
+                cwd=REPO_ROOT, env=env, capture_output=True, text=True, timeout=300)
+        self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+        self.assertIn("0 failure(s)", run.stdout)
+        self.assertNotIn("FAIL  ", run.stdout)
 
 
 if __name__ == "__main__":

@@ -1337,6 +1337,26 @@
 ##                                            heartbeat lands after the
 ##                                            containment (decision 51, A11
 ##                                            round 23b)
+## ``contain-busy-unknown-is-idle``          a tick unit whose state systemctl
+##                                            cannot report reads as idle to
+##                                            contain's wait (decision 51, the
+##                                            containment, A11 round 24)
+## ``contain-resume-reports-already``         a containment marker naming no
+##                                            record reads as a containment
+##                                            made (decision 51, A11 round 24)
+## ``uninstall-forgets-ship-state``           an incomplete uninstall drops the
+##                                            shipping unit's ledger entry with
+##                                            the unit, so the re-run leaves the
+##                                            dynamic user's outbox (decision
+##                                            181, A11 round 24)
+## ``outbox-listed-by-path``                  the outbox is listed by path,
+##                                            through a link its dynamic user
+##                                            planted (decision 181)
+## ``confined-output-unescaped``              a confined run's output reaches
+##                                            root's terminal with its control
+##                                            bytes (decision 181)
+## ``confined-copy-shared``                   every confined run shares one
+##                                            binary copy (decision 181)
 ## ``first-use-without-ledger-copy``         with no identity and no ledger
 ##                                            copy, the records' directory is
 ##                                            recorded at first use, a
@@ -2473,6 +2493,12 @@ const
                           "outbox-written-by-path",
                           "egress-units-unix-sockets",
                           "contain-records-before-quiesce",
+                          "contain-busy-unknown-is-idle",
+                          "contain-resume-reports-already",
+                          "uninstall-forgets-ship-state",
+                          "outbox-listed-by-path",
+                          "confined-output-unescaped",
+                          "confined-copy-shared",
                           "verify-absent-dir-without-identity-noted",
                           "unbound-when-no-birth-time",
                           "identity-file-torn-accepted",
