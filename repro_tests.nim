@@ -23053,6 +23053,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker isMainModule"),
   TestSpec(
+    source: "tests/integration/t_build_ending_in_runquota_deadlock_writes_its_reports.nim",
+    binary: "build/test-bin/t_build_ending_in_runquota_deadlock_writes_its_reports",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level putEnv"),
+  TestSpec(
     source: "tests/integration/t_build_honours_override_provenance_for_exact_pins.nim",
     binary: "build/test-bin/t_build_honours_override_provenance_for_exact_pins",
     defines: @[],

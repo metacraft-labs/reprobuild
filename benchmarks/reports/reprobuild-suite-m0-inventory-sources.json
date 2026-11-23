@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3175,
+    "nimTestBinaries": 3176,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 838,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3227
+    "testEntries": 3228
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1836,7 +1836,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1782,
+      "integration": 1783,
       "platform/destructive": 201,
       "pure unit": 838,
       "unclassified": 377
@@ -2059,9 +2059,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3175,
+    "nimTestBinaryCount": 3176,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3227
+    "testEntryCount": 3228
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -44641,6 +44641,25 @@
       "source": "tests/integration/t_build_declares_sizing_to_runquota.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_build_ending_in_runquota_deadlock_writes_its_reports",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cmake_trycompile",
+        "repro_project_dsl",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_build_ending_in_runquota_deadlock_writes_its_reports.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
