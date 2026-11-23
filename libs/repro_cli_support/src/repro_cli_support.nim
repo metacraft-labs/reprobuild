@@ -14826,11 +14826,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                 skipCacheHitEvidence = mcCacheEvidence notin measureSet,
                 statsEnabled = statsEnabled,
                 cancelCheck = cancelCheck)
-          except CatchableError:
+          except CatchableError as err:
+            # Carry the cause. Without it the build said only that the
+            # interface "could not be loaded", and the compile error behind
+            # it (a recipe import the search path could not open, say) was
+            # left in a failure report nobody was pointed at.
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
               producerRootAbs & "'s interface could not be loaded to bind " &
-              "the declared executable / library to its output.")
+              "the declared executable / library to its output:\n" &
+              err.msg, err)
         if producerArtifact.projectInterface.runtimeToolUses.len > 0:
           var runtimeArtifact = producerArtifact
           runtimeArtifact.projectInterface.toolUses =
@@ -111370,6 +111375,12 @@ proc runThinAppDispatch(programName: string): int =
       args[0] == BrokerModeFlag:
     return runPrivilegedBrokerMode(args)
   if programName == "repro":
+    if args.len > 0 and args[0] in ["test", "build"]:
+      # Both run the RunQuota auto-start twice (dev-env preparation, then the
+      # build's session); one hold must cover both, or a retiring daemon this
+      # command adopted exits in between (`withInvocationRunQuotaHold`).
+      withInvocationRunQuotaHold:
+        return runReproCommandLine(programName, args, publicCliPath)
     return runReproCommandLine(programName, args, publicCliPath)
   # Every role of this image is a command of repro's command line (the
   # daemon is `repro daemon serve`, the store daemon `repro store serve`),
