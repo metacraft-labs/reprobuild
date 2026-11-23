@@ -3027,6 +3027,34 @@
               # `could not load: libcrypto.so(...)` the moment openssl leaves
               # the path), and it would not touch the LD_PRELOAD channel at all.
               pkgs.git
+            ]
+            # `ssh-keygen`, from this flake's nixpkgs, for the same reason as
+            # `pkgs.git` above: reprobuild runs it itself. Test certificates
+            # are signed and verified with `ssh-keygen -Y sign` /
+            # `ssh-keygen -Y verify`, and the certificate signer mints its
+            # per-worker signing CA and one-issuance keys with it, all
+            # resolved on PATH. A host `ssh-keygen` links `libcrypto.so.3`, and
+            # `LD_LIBRARY_PATH` above hands it this shell's OpenSSL instead of
+            # the host's. Measured on an Ubuntu CI runner (glibc 2.35):
+            # `/usr/bin/ssh-keygen` died before `main` with "version
+            # `GLIBC_2.38' not found (required by .../openssl-3.6.1/lib/
+            # libcrypto.so.3)", so the signer could mint no CA and every
+            # certificate-signing test failed.
+            #
+            # Only `ssh-keygen`, not all of `pkgs.openssh`: `ssh` on PATH would
+            # shadow the contributor's own client and its configuration, and
+            # nothing in reprobuild runs it. Linux only, because the
+            # `LD_LIBRARY_PATH` channel is: dyld does not consult it for a
+            # system binary, and macOS's own `ssh-keygen` is fine there.
+            # `scripts/check_dev_shell_env.sh` lists `ssh-keygen` among the
+            # programs it checks, so dropping this line fails `just lint`.
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              (pkgs.runCommand "dev-shell-ssh-keygen-${pkgs.openssh.version}" { } ''
+                mkdir -p "$out/bin"
+                ln -s ${pkgs.openssh}/bin/ssh-keygen "$out/bin/ssh-keygen"
+              '')
+            ]
+            ++ [
               pkgs.libsodium
               pkgs.boost
               pkgs.libgit2

@@ -47402,7 +47402,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
