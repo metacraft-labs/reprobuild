@@ -46,7 +46,8 @@
 #
 # SCOPE
 # -----
-# First-party production Nim (`libs`, `apps`, `tools`, `repro.nim`), matching
+# First-party production Nim (`libs`, `apps`, `tools`, `repro.nim` and the
+# `repro_recipe_support.nim` it includes), matching
 # `check_ambient_execution.sh`. Tests are out of the gate because they
 # legitimately drive fixtures through a shell and several are POSIX-VM-only by
 # construction; point the scanner at them by hand when that matters:

@@ -449,7 +449,7 @@ nix/tests/host-facts-duplicates.nix	2
 nix/tests/repro-portable-host-root/probe-nix-host.sh	1
 recipes/repro-daemon-worker/confinement-threshold	1
 recipes/repro-daemon-worker/systemd-units/repro-daemon-worker.service	1
-repro.nim	7
+repro.nim	5
 scripts/addon_a13_classify.py	2
 scripts/build_addon_static.sh	1
 scripts/build_apps.sh	2
