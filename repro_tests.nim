@@ -18985,6 +18985,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "its binary is named by tests/integration/t_repro_test_runner_parallel_n_workers.nim"),
   TestSpec(
+    source: "tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim",
+    binary: "build/test-bin/t_e2e_shell_hook_nushell_activates",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_e2e_dev_env_g01",
+    singleReason: ""),
+  TestSpec(
     source: "tests/e2e/dev-env/t_e2e_shell_hook_prompt_key_sees_flake_inputs.nim",
     binary: "build/test-bin/t_e2e_shell_hook_prompt_key_sees_flake_inputs",
     defines: @[],

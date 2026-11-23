@@ -455,7 +455,8 @@ const
     for name in ["t_e2e_shell_hook_noop_io_bounded",
                  "t_e2e_shell_hook_noop_latency",
                  "t_e2e_shell_hook_realistic_workload",
-                 "t_e2e_shell_hook_cd_activate_deactivate"]:
+                 "t_e2e_shell_hook_cd_activate_deactivate",
+                 "t_e2e_shell_hook_nushell_activates"]:
       rows.add TestGraphArtifacts(
         source: "tests/e2e/dev-env/" & name & ".nim",
         artifacts: @[TestGraphArtifact(

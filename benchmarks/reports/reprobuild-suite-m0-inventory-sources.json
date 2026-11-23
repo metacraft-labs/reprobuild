@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3205,
+    "nimTestBinaries": 3206,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 843,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3257
+    "testEntries": 3258
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1840,7 +1840,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1799,
+      "integration": 1800,
       "platform/destructive": 203,
       "pure unit": 843,
       "unclassified": 383
@@ -2063,9 +2063,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3205,
+    "nimTestBinaryCount": 3206,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3257
+    "testEntryCount": 3258
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14698,7 +14698,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_bundle/tests/t_repro_bundle_halves.nim",
       "sourceSuiteCount": 19,
-      "staticCaseCount": 42,
+      "staticCaseCount": 43,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -38542,6 +38542,23 @@
       "owner": "tests/e2e",
       "requiresReproBinary": true,
       "source": "tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_e2e_shell_hook_nushell_activates",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/e2e",
+      "requiresReproBinary": true,
+      "source": "tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
