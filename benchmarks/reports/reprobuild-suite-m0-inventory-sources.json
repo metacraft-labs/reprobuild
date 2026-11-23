@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3184,
+    "nimTestBinaries": 3185,
     "pureUnitConsolidationGroups": 95,
-    "pureUnitTests": 838,
+    "pureUnitTests": 839,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3236
+    "testEntries": 3237
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -254,7 +254,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 5,
+      "count": 6,
       "defines": [],
       "dependencyShape": [
         "repro_core"
@@ -265,6 +265,7 @@
         "libs/repro_core/tests/t_installed_prefix_anchors.nim",
         "libs/repro_core/tests/t_nix_store_references_scan.nim",
         "libs/repro_core/tests/t_normalized_path_folds_absolute_dotdot.nim",
+        "libs/repro_core/tests/t_recipe_source_names_cost_once_per_compile.nim",
         "libs/repro_core/tests/t_target_object_check.nim"
       ],
       "targetOs": "soAny"
@@ -1838,7 +1839,7 @@
       "graph-fixture": 29,
       "integration": 1787,
       "platform/destructive": 201,
-      "pure unit": 838,
+      "pure unit": 839,
       "unclassified": 381
     },
     "graphOwnedTestArtifacts": [
@@ -2059,9 +2060,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3184,
+    "nimTestBinaryCount": 3185,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3236
+    "testEntryCount": 3237
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17515,6 +17516,23 @@
       "source": "libs/repro_core/tests/t_python_dep_scanner.nim",
       "sourceSuiteCount": 4,
       "staticCaseCount": 16,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_source_names_cost_once_per_compile",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_recipe_source_names_cost_once_per_compile.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

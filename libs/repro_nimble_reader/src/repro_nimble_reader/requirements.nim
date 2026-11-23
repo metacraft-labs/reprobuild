@@ -228,7 +228,10 @@ proc rangeText(s: string): string {.raises: [RangeError, NimbleRangeError].} =
         except RangeError as e:
           if e.msg.startsWith("invalid operator"):
             raise newException(NimbleRangeError, e.msg)
-          raise
+          # Re-raised by name: a bare `raise` is typed `Exception` by Nim
+          # 2.2.4's effect system, which then rejects this proc's
+          # `.raises: [RangeError, NimbleRangeError]` list.
+          raise e
       let rest = s.substr(i + 1)
       if '&' in rest:
         raise newException(NimbleRangeError,

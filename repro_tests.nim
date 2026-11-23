@@ -5173,6 +5173,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_core_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_core/tests/t_recipe_source_names_cost_once_per_compile.nim",
+    binary: "build/test-bin/t_recipe_source_names_cost_once_per_compile",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "per-file config libs/repro_core/tests/t_recipe_source_names_cost_once_per_compile.nim.cfg"),
+  TestSpec(
     source: "libs/repro_core/tests/t_relocatable_names_keep_dotdot_after_a_symlink.nim",
     binary: "build/test-bin/t_relocatable_names_keep_dotdot_after_a_symlink",
     defines: @[],
