@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 843,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3257
+    "testEntries": 3258
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1843,7 +1843,7 @@
       "integration": 1799,
       "platform/destructive": 203,
       "pure unit": 843,
-      "unclassified": 383
+      "unclassified": 384
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2064,8 +2064,8 @@
       }
     ],
     "nimTestBinaryCount": 3205,
-    "pythonTestFileCount": 52,
-    "testEntryCount": 3257
+    "pythonTestFileCount": 53,
+    "testEntryCount": 3258
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -68098,6 +68098,21 @@
       "source": "tests/unit/test_install_nix_paths.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 14,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_install_ps1_verifier_handoff.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

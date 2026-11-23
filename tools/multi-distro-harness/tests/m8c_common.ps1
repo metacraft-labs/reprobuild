@@ -449,6 +449,23 @@ function Get-PowerShellHome {
   return $reported.Trim()
 }
 
+# The directory that holds a PowerShell's own executable, for the PATH of an
+# isolated process that must find `pwsh`: its $PSHOME, where the executable
+# lives, and not the directory of the path it was found at. A package
+# manager's shim directory (Scoop's `shims`, which is where `pwsh` is found on
+# a Scoop machine) holds a shim for every program that manager installed, so
+# putting it on an isolated PATH hands the process whatever `sh`, `gpg` or
+# other tool happens to be installed there, ahead of the tools the check
+# chose. Throws when $PSHOME holds no pwsh executable.
+function Get-PowerShellDirectory {
+  param([Parameter(Mandatory = $true)][string]$PowerShell)
+  $home7 = Get-PowerShellHome -PowerShell $PowerShell
+  foreach ($name in @('pwsh.exe', 'pwsh')) {
+    if (Test-Path -LiteralPath (Join-Path $home7 $name) -PathType Leaf) { return $home7 }
+  }
+  throw "Get-PowerShellDirectory: $PowerShell reports `$PSHOME $home7, which holds no pwsh executable"
+}
+
 # The version this checkout builds, from reprobuild.nimble, as
 # scripts/release/package_windows_release.ps1 reads it: the archive a check
 # makes from a build tree is named for the version of that build.
