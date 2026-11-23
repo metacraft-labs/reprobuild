@@ -1007,6 +1007,91 @@ class WindowsCompletionTests(PackagerFixture):
             self.assertNotEqual(0, run.returncode, "an MSI was built without repro.ps1")
             self.assertIn("share/repro/completions/repro.ps1", run.stderr)
 
+    # -------------------------------------- the MSI read-back on Windows
+    # On Windows there is no msiinfo, and the packager reads the MSI back
+    # through powershell.exe and the Windows Installer API. The script it
+    # hands over holds double quotes (`@("SELECT * FROM `" + ... + "`")`).
+    # Passed as `-Command '<script>'` from bash, it reaches powershell.exe
+    # through a Windows command line, whose splitter takes each `"` as
+    # quoting and drops it: three parser errors, every table empty, and a
+    # correct MSI refused as not installing bin/repro.exe (seen on a real
+    # Windows host).
+    #
+    # The stand-in below is powershell.exe as the packager sees it: it drops
+    # every `"` from each argument as that splitter does, takes the script
+    # from -Command or decodes it from -EncodedCommand, refuses a script that
+    # lost the quoted table query (PowerShell's parser error), and otherwise
+    # answers the query as the COM object would, from msiinfo. The real
+    # COM object is not used: it exists only on Windows. A stand-in is
+    # justified here because what is under test is the hand-off of the
+    # script across the command line, which the stand-in reproduces, not
+    # the Windows Installer API.
+    POWERSHELL_STANDIN = r"""#!/bin/sh
+log="$STANDIN_LOG"
+script=""
+while [ $# -gt 0 ]; do
+  arg=$(printf '%s' "$1" | tr -d '"')
+  printf 'arg: %s\n' "$1" >> "$log"
+  case "$arg" in
+    -Command) shift; script=$(printf '%s' "$1" | tr -d '"') ;;
+    -EncodedCommand) shift; script=$(printf '%s' "$1" | base64 -d | iconv -f UTF-16LE -t UTF-8) ;;
+  esac
+  shift
+done
+printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
+case "$script" in
+  *'@("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`")'*) ;;
+  *) echo "ParserError: Unexpected token in expression or statement." >&2; exit 1 ;;
+esac
+"$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tail -n +4
+"""
+
+    def without_msiinfo_env(self):
+        """The environment with powershell.exe's stand-in first on PATH and
+        no msiinfo on it, so the packager takes its Windows read-back path;
+        wixl stays reachable to build the package."""
+        msiinfo = shutil.which("msiinfo")
+        wixl = shutil.which("wixl")
+        standin_dir = self.work / "standin-bin"
+        standin_dir.mkdir()
+        exe = standin_dir / "powershell.exe"
+        exe.write_text(self.POWERSHELL_STANDIN, encoding="utf-8")
+        exe.chmod(0o755)
+        (standin_dir / "wixl").symlink_to(wixl)
+        msitools_dir = str(Path(msiinfo).parent)
+        path = [str(standin_dir)] + [d for d in os.environ.get("PATH", "").split(os.pathsep)
+                                     if d and d != msitools_dir
+                                     and not (Path(d) / "msiinfo").exists()]
+        env = dict(os.environ, PATH=os.pathsep.join(path),
+                   STANDIN_LOG=str(self.work / "standin.log"),
+                   STANDIN_SCRIPTS=str(self.work / "standin-scripts.txt"),
+                   STANDIN_MSIINFO=msiinfo)
+        env.pop("REPRO_MSI_TOOLSET", None)
+        return env
+
+    def test_the_msi_read_back_survives_the_windows_command_line(self):
+        env = self.without_msiinfo_env()
+        self.assertIsNone(shutil.which("msiinfo", path=env["PATH"]))
+        run = subprocess.run(
+            ["sh", str(PACKAGER), "--version", VERSION,
+             "--tarball", str(self.tarball), "--out", str(self.out),
+             "--ecosystem", "msi", "--platform", self.PLATFORM,
+             "--asset-arch", self.ASSET_ARCH],
+            capture_output=True, text=True, check=False, env=env)
+        self.assertEqual(0, run.returncode, run.stderr)
+        log = (self.work / "standin.log").read_text(encoding="utf-8")
+        # The packager went through powershell.exe, with -EncodedCommand,
+        # and no argument it passed carries a double quote.
+        self.assertIn("arg: -EncodedCommand", log)
+        self.assertNotIn("arg: -Command", log)
+        for line in log.splitlines():
+            self.assertNotIn('"', line, line)
+        # Each read decoded to the exact table reader.
+        scripts = (self.work / "standin-scripts.txt").read_text(encoding="utf-8")
+        self.assertGreaterEqual(scripts.count("----"), 4, scripts)
+        self.assertIn('@("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`")', scripts)
+        self.assertIn("[Console]::Out.WriteLine(($f -join \"`t\"))", scripts)
+
 
 M8C_COMMON_UNIT = REPO_ROOT / "tools" / "multi-distro-harness" / "tests" / "m8c_common_unit.ps1"
 

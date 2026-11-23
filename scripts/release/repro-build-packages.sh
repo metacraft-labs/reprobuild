@@ -656,6 +656,40 @@ write_msi_wxs() {
     }'
 }
 
+# powershell_encoded_command <script>: <script> as PowerShell's
+# -EncodedCommand wants it, the base64 of its UTF-16LE bytes
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe,
+# -EncodedCommand).
+#
+# WHY NOT `-Command '<script>'`. From bash on Windows the argument reaches
+# powershell.exe through a Windows command line, which the callee splits
+# again with the C runtime's rules: a `"` inside the argument is taken as
+# quoting and removed. A script holding `@("SELECT * FROM `" + $x + "`")`
+# arrived as `@(SELECT * FROM ` + $x + `)`, three parse errors, an empty
+# table on every read, and an MSI refused as missing a file it installs. The
+# base64 alphabet has no character any command-line rule treats specially,
+# so the script arrives byte for byte.
+powershell_encoded_command() {
+  command -v iconv >/dev/null 2>&1 || die 'iconv is not available; cannot encode a PowerShell command'
+  command -v base64 >/dev/null 2>&1 || die 'base64 is not available; cannot encode a PowerShell command'
+  printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n'
+}
+
+# The table reader handed to powershell.exe. Kept as data, never spliced into
+# a command line: it carries double quotes and backticks, which is why it
+# travels -EncodedCommand (above).
+# shellcheck disable=SC2016 # PowerShell's own variables, expanded by PowerShell
+MSI_TABLE_PS='$i = New-Object -ComObject WindowsInstaller.Installer
+$db = $i.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $i, @($env:REPRO_MSI_DB, 0))
+$v = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"))
+$v.GetType().InvokeMember("Execute", "InvokeMethod", $null, $v, $null) | Out-Null
+$cols = $v.GetType().InvokeMember("ColumnInfo", "GetProperty", $null, $v, @(0))
+$n = $cols.GetType().InvokeMember("FieldCount", "GetProperty", $null, $cols, $null)
+while ($r = $v.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $v, $null)) {
+  $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember("StringData", "GetProperty", $null, $r, @($k)) }
+  [Console]::Out.WriteLine(($f -join "`t"))
+}'
+
 # msi_table <msi> <table>: the table's rows, tab-separated, no header.
 msi_table() {
   if command -v msiinfo >/dev/null 2>&1; then
@@ -665,17 +699,11 @@ msi_table() {
     command -v cygpath >/dev/null 2>&1 && _m="$(cygpath -w "$1")"
     # The Windows Installer database API (WindowsInstaller.Installer):
     # https://learn.microsoft.com/windows/win32/msi/installer-opendatabase
-    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive -Command '
-      $i = New-Object -ComObject WindowsInstaller.Installer
-      $db = $i.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $i, @($env:REPRO_MSI_DB, 0))
-      $v = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"))
-      $v.GetType().InvokeMember("Execute", "InvokeMethod", $null, $v, $null) | Out-Null
-      $cols = $v.GetType().InvokeMember("ColumnInfo", "GetProperty", $null, $v, @(0))
-      $n = $cols.GetType().InvokeMember("FieldCount", "GetProperty", $null, $cols, $null)
-      while ($r = $v.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $v, $null)) {
-        $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember("StringData", "GetProperty", $null, $r, @($k)) }
-        [Console]::Out.WriteLine(($f -join "`t"))
-      }' | tr -d '\r'
+    # The database and table travel in the environment, the script as
+    # -EncodedCommand: no value is quoted into a command line.
+    _enc="$(powershell_encoded_command "$MSI_TABLE_PS")" || exit 1
+    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive \
+      -EncodedCommand "$_enc" | tr -d '\r'
   else
     die 'cannot read the MSI back: neither msiinfo (msitools) nor the Windows Installer API (powershell.exe) is available'
   fi
