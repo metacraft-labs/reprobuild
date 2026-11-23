@@ -176,6 +176,13 @@ proc hex*(bytes: seq[byte]): string =
   for b in bytes:
     result.add(toHex(int(b), 2).toLowerAscii())
 
+proc hostCpuCount*(): int =
+  ## The denominator of `hostLoadPerCpu`, reported beside it so a reading can
+  ## be read: the same run queue is inside the envelope on a 32-CPU host and
+  ## far outside it on a 4-CPU one, and the gate's own 15 threads are a larger
+  ## share of a smaller host.
+  countProcessors()
+
 proc hostLoadPerCpu*(): float =
   ## The host condition the HLX-M4 gate's statistical thresholds are
   ## calibrated against (`m4_verdict.MaxLoadPerCpu`): the 1-minute load average
