@@ -129,7 +129,8 @@ proc makeImageTree(dir, label, stub: string): string =
   ## was exec'd (the stub prints its `VERSION`), not which of the two binaries
   ## inside it ran, and the launcher execs `bin/repro`.
   createDir(dir / "bin")
-  for name in [selfExecutableName(), reprobuildEngineExeName()]:
+  for name in [selfExecutableName(), reprobuildEngineExeName(),
+                 reprobuildHelperExeName()]:
     copyFile(stub, dir / "bin" / name)
     when not defined(windows):
       setFilePermissions(dir / "bin" / name,

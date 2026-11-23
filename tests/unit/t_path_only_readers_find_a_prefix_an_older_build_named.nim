@@ -79,7 +79,8 @@ suite "path-only readers find a prefix an older build named":
     writeFile(project / "repro.lock", lockPinning("0.1.4-legacy"))
     let tree = root / "img"
     createDir(tree / "bin")
-    for name in [selfExecutableName(), reprobuildEngineExeName()]:
+    for name in [selfExecutableName(), reprobuildEngineExeName(),
+                 reprobuildHelperExeName()]:
       writeFile(tree / "bin" / name, "image " & name & "\n")
     let first = installSelfImage(storeRoot, "0.1.4-legacy", Platform, tree)
     let pin = selfPinForProject(project)
