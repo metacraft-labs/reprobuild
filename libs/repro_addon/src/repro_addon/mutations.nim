@@ -2529,6 +2529,12 @@ const
                           # weakens the floor* closed
                           # (t_addon_agent_cannot_weaken_the_floor).
                           "agent-may-weaken-floor",
+                          # A legacy agent's take-over is judged by the
+                          # stored user profile's byte length, so the
+                          # bootstrapped host's stored empty profile counts
+                          # as an operator's generation and the take-over is
+                          # refused (t_addon_agent_cannot_weaken_the_floor).
+                          "agent-take-over-reads-stored-bytes",
                           # An agent apply may add, change or remove a
                           # drop-in over a unit the profile does not define
                           # (a package's, which may run as root) unattended
