@@ -24371,6 +24371,9 @@ proc describeReproBuild*(build: ReproBuildIdentity): string =
     if build.version.len > 0: " (" & build.version & ")"
     else: " (version unknown; it did not answer --version)")
 
+proc thisBuildInstallingPath*(): string
+  ## Forward declaration; defined below with its rationale.
+
 proc probeHookContractServicing*(reproPath, contract: string):
     tuple[servicing: HookContractServicing; exitCode: int] =
   ## Ask the build at ``reproPath`` the generated body's own question.
@@ -24385,7 +24388,10 @@ proc probeHookContractServicing*(reproPath, contract: string):
     return (hcsUnresolved, -1)
   var isSelf = false
   try:
-    isSelf = sameFile(reproPath, getAppFilename())
+    # The wrapper ``thisBuildInstallingPath`` bakes for a Nix build execs
+    # this very image, so it is answered in process like the image itself.
+    isSelf = sameFile(reproPath, getAppFilename()) or
+      (reproPath.len > 0 and reproPath == thisBuildInstallingPath())
   except CatchableError:
     isSelf = false
   if isSelf:
@@ -24420,6 +24426,22 @@ proc executableFile(path: string): bool =
   else:
     result = true
 
+const MaxWrapperScriptBytes = 1 shl 20
+  ## makeWrapper scripts are a few kilobytes (reprobuild's carries about 30
+  ## ``--set-default`` lines, ~11 KB). Anything larger is not one, and is not
+  ## read into memory to find out.
+
+proc wrapperExecsImage(wrapper, image: string): bool =
+  ## True when the script at ``wrapper`` names ``image`` by its absolute path,
+  ## as makeWrapper's generated ``exec -a "$0" "<image>" "$@"`` line does.
+  ## False for anything unreadable or too large to be a wrapper script.
+  try:
+    if getFileSize(wrapper) > MaxWrapperScriptBytes:
+      return false
+    result = ("\"" & image & "\"") in readFile(wrapper)
+  except CatchableError:
+    result = false
+
 proc thisBuildInstallingPath*(): string =
   ## The installing-build path THIS build bakes into the bodies it writes
   ## (``ManagedHookSite.installingBuild``), and therefore step 2 of the
@@ -24430,11 +24452,29 @@ proc thisBuildInstallingPath*(): string =
   ## CLI. An embedded caller (a test binary linking the engine) gets "": a hook
   ## that executed it would re-run the test binary with a verb it does not
   ## implement (see ``ManagedHookSite.installingBuild``).
+  ##
+  ## A Nix-packaged build is the exception to "that image": its image is the
+  ## makeWrapper HIDDEN image (``$out/bin/.reprobuild-wrapped``), and what
+  ## installed the hook is the wrapper script in front of it
+  ## (``$out/bin/reprobuild``), so the wrapper is baked instead. The hidden
+  ## image run on its own has none of the wrapper's variables. A hook runs in
+  ## whatever environment ``git`` has, so the gate it starts would compile
+  ## recipes without ``REPROBUILD_SOURCE_ROOT``, against the sibling reprobuild
+  ## checkout when there is one and against nothing when there is not: on a
+  ## cache miss the pre-push gate then refused every push, with ``cannot open
+  ## file: repro_interface_artifacts`` (no sibling) or ``unsupported interface
+  ## envelope version`` (a sibling newer than the build). The wrapper is taken
+  ## only when it names this image, so an unrelated file that happens to sit
+  ## at the public name is never baked.
   let path =
     try: publicCliImagePath()
     except CatchableError: ""
   if path.len == 0 or not spawnableWithInternalVerb(path):
     return ""
+  let wrapper = makeWrapperPublicPath(path)
+  if wrapper.len > 0 and executableFile(wrapper) and
+      wrapperExecsImage(wrapper, path):
+    return wrapper
   path
 
 proc resolveManagedHookInterpreter*(repoRoot, installingBuild: string):
@@ -24590,10 +24630,16 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
   ## installing into two repos of two workspaces bakes two different
   ## directories, and a repo that moves between workspaces counts as drift and
   ## is re-anchored, exactly as the author path is.
+  ##
+  ## ``authorBin`` names the same file as ``installingBuild`` whenever there is
+  ## one: the refusal prints it as ``REPROBUILD_REPRO=<authorBin> git push``,
+  ## and under Nix the hidden image it would otherwise name runs the gate
+  ## without the wrapper's variables (see ``thisBuildInstallingPath``).
+  let installing = thisBuildInstallingPath()
   vcsManagedHookBody(hookName, managedHookContract(hookName),
     ManagedHookSite(
-      authorBin: publicCliImagePath(),
-      installingBuild: thisBuildInstallingPath(),
+      authorBin: (if installing.len > 0: installing else: publicCliImagePath()),
+      installingBuild: installing,
       refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
