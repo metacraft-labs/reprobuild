@@ -188,7 +188,17 @@ namespace VerifiedDownloadTests
                         clients.Add(client);
                         transaction = evidence;
                     }
-                    ThreadPool.QueueUserWorkItem(delegate(object ignored) { Serve(client, tls, transaction); });
+                    // A dedicated thread, not the thread pool: Serve blocks for seconds
+                    // by design (the 3 s redirect delay, the 5.5 s stalls), and the
+                    // client under test needs pool threads for its own continuations.
+                    // Blocking pool threads here starves the client on a host with few
+                    // cores, so a redirect target is sometimes never dialled before the
+                    // 5 s deadline (tcp=0 after the redirect was written, measured on
+                    // win-ci-vm-001: 1 of 12 runs, while a passing run accepts the
+                    // connection 15-20 ms after the redirect).
+                    Thread worker = new Thread(delegate() { Serve(client, tls, transaction); });
+                    worker.IsBackground = true;
+                    worker.Start();
                 }
             }
             catch (Exception ex) { if (!stop.WaitOne(0)) evidence.Failure = ex.ToString(); }
