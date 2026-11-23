@@ -32,6 +32,7 @@
 import std/[algorithm, options, sets, strutils, tables]
 
 import repro_domain_types/nimble_index
+import repro_nimble_index/builder
 import repro_nimble_reader/requirements except nameKey
 
 import ./edge_objects
@@ -250,6 +251,14 @@ proc buildRecord*(input: PackageInput; params: GenerationParams;
   result.firstSeen = firstSeen
   result.origin = originIndex
   result.layout.modules = modulesUnder(f.files, result.layout.srcDir)
+  if result.layout.modules.len > MaxModules:
+    # More top-level modules than a record holds: without the list, the
+    # closure's module collisions (G16) could not be checked.
+    diagnostics.add label & ": " & $result.layout.modules.len &
+      " top-level modules under srcDir, more than a record holds (" &
+      $MaxModules & "); the version is unreadable"
+    result.layout.modules = @[]
+    result.flags.incl flUnreadable
   var linkOut = false
   for l in f.links:
     if l.verdict == lvOutside:
@@ -395,6 +404,58 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
             result.events.add OriginEvent(kind: oeHistoryRewritten,
               package: input.name, version: versionLabel(r),
               before: r.commit, after: "", observedAt: now)
+  elif comparable and obs.state == osAnswering:
+    # The origin answers again after an observation that did not answer
+    # (gone or refused): that observation lists no tag and no `HEAD`, so
+    # the records are the comparison. A tag recorded for a version that now
+    # names another commit is `tag-moved`, one that is no longer listed is
+    # `tag-removed` (NPC-AREQ4). An origin whose branches now reach none of
+    # the recorded commits -- a re-registered name serving other history --
+    # is `history-rewritten` for each recorded commit it no longer holds at
+    # all. A commit a tag still holds may never have been on a branch (a
+    # tag cut from a branch deleted since), so with no earlier answer to
+    # compare with it is not reported: an origin that comes back unchanged
+    # records nothing.
+    var recordedCommits = initTable[string, seq[string]]()
+    var latest = initTable[string, (uint64, string)]()
+    for r in prevRecords:
+      if r.version.kind in {rvkTag, rvkLabel} and int(r.origin) == originIndex:
+        recordedCommits.mgetOrPut(r.version.tag, @[]).add r.commit
+        if r.version.tag notin latest or
+            latest[r.version.tag][0] <= r.firstSeen:
+          latest[r.version.tag] = (r.firstSeen, r.commit)
+    var now2 = initTable[string, string]()
+    for t in obs.tags: now2[t.name] = t.commit
+    var tags: seq[string]
+    for t in recordedCommits.keys: tags.add t
+    tags.sort()
+    for t in tags:
+      let b = latest[t][1]
+      let a = now2.getOrDefault(t, "")
+      if a in recordedCommits[t]: continue
+      if a.len == 0:
+        result.events.add OriginEvent(kind: oeTagRemoved, package: input.name,
+          version: t, before: b, after: "", observedAt: now)
+      else:
+        result.events.add OriginEvent(kind: oeTagMoved, package: input.name,
+          version: t, before: b, after: a, observedAt: now)
+    if input.history.isSome and input.history.get.state == anOk:
+      let onBranches = toHashSet(input.history.get.branchCommits)
+      let held = toHashSet(input.history.get.allCommits)
+      var mine: seq[VersionRecord]
+      var anyReached = false
+      for r in prevRecords:
+        if int(r.origin) == originIndex:
+          mine.add r
+          if r.commit in onBranches: anyReached = true
+      if not anyReached:
+        var seen = initHashSet[string]()
+        for r in mine:
+          if r.commit notin seen and r.commit notin held:
+            seen.incl r.commit
+            result.events.add OriginEvent(kind: oeHistoryRewritten,
+              package: input.name, version: versionLabel(r),
+              before: r.commit, after: "", observedAt: now)
 
   # ---- versions -------------------------------------------------------------
   var records = prevRecords
@@ -473,6 +534,34 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
   if records.len > 0 or input.previous.isSome:
     result.envelope = some(PackageEnvelope(name: input.name, origins: origins,
       registryOrigin: uint16(originIndex), versions: records))
+  # One package must not stop the index: what an origin lists (its tags,
+  # its versions, the origins its name was moved to) can pass a bound of
+  # the index format, and a shard holding it would be refused, and with it
+  # the whole generation. Such a package keeps what the previous generation
+  # recorded; nothing new of it is admitted, and its events are still
+  # reported. Its observation says `refused`, not the previous answer: a
+  # package held at old versions is visible as such, by a `gone` event when
+  # it answered before, and the generation after it fits again compares
+  # with the records as after any refusal.
+  try:
+    discard buildShard(0, 0,
+      (if result.envelope.isSome: @[result.envelope.get] else: @[]), @[],
+      @[result.observation])
+  except NimbleIndexError as e:
+    result.diagnostics.add input.name & ": " & e.msg & "; the package " &
+      "keeps the records of the previous generation, nothing new of it is " &
+      "admitted, and its origin is recorded refused"
+    result.envelope = input.previous
+    result.observation = PackageObservation(name: input.name,
+      origin: input.origin, state: osRefused)
+    if comparable and prevObs.get.state == osAnswering:
+      var already = false
+      for ev in result.events:
+        if ev.kind == oeGone and ev.version.len == 0: already = true
+      if not already:
+        result.events.add OriginEvent(kind: oeGone, package: input.name,
+          before: "answering", after: "past a bound of the index format",
+          observedAt: now)
 
 proc sightingsOf*(name: string; refs: RefsAnswer; trackHead: bool;
                   pinnedCommit: string;
@@ -487,6 +576,14 @@ proc sightingsOf*(name: string; refs: RefsAnswer; trackHead: bool;
     return @[Sighting(version: RecordVersion(kind: rvkCommit),
       commit: pinnedCommit)]
   if refs.state != anOk:
+    return
+  var listed = 0
+  for (t, c) in refs.tags:
+    if validTagName(t): inc listed
+  if listed > MaxObservedTags:
+    # More tags than an observation holds: the package cannot be observed
+    # (``assemblePackage`` keeps its previous generation), so nothing of it
+    # is fetched.
     return
   var commits = initHashSet[string]()
   var versionTag = false

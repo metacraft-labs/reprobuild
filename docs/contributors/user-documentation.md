@@ -229,6 +229,12 @@ block-nesting constraint inside lists:
   when it does not.
 - Give every code block a language.
 - Split a sentence that runs past about 30 words.
+- Put every identifier, attribute path and value in a code span:
+  `home.packages`, `builtins.currentSystem`, `null`. In prose, write a dash
+  as a dash or start a new sentence, never `--`; write "returns" or "to",
+  never `->`. Spell out an abbreviation the page has not defined.
+- Write the product "reprobuild", as the rest of the site does, except at the
+  start of a sentence or a title.
 - Write British English (behaviour, organise, licence as a noun). Code,
   commands, flags, file names and environment variables keep their exact
   spelling: `--color`, `repro allow`.
@@ -249,6 +255,10 @@ block-nesting constraint inside lists:
 - Promise nothing about a future release, and offer nothing for sale. A user
   page describes what the version it ships with does.
 
+These rules apply to a generated region as much as to hand-written text: a
+reader cannot tell them apart. Fix the source the region is generated from
+(an option's `description`, a docstring), never the generator's output.
+
 ## What checks a page
 
 | Check | What it rejects | Built? |
@@ -259,6 +269,7 @@ block-nesting constraint inside lists:
 | Provenance gate | A `verifies` entry that does not resolve; a `repro` command shown on the page but missing from `verifies.commands` | No |
 | Generated-region check | A hand edit inside a generated region | No |
 | Style checker | The words and patterns in [Language and style](#language-and-style), glossary synonyms, American spellings outside code | No |
+| Option-description style | In the Home Manager module's option descriptions and prose defaults: `--` or `->` in prose, "Reprobuild" mid-sentence, an undefined "IFD", a dotted identifier outside a code span, a sentence over 30 words | Yes: the flake check `lib-reference` |
 | Scenario runner | A tutorial step that fails or whose result differs | No |
 | Command-equivalents check | A stale `command-equivalents.md`, or a row naming a top-level verb `repro` does not dispatch | Yes: `python3 scripts/render_command_equivalents.py --check` |
 
