@@ -199,7 +199,14 @@ namespace VerifiedDownloadTests
                         clients.Add(client);
                         transaction = evidence;
                     }
-                    ThreadPool.QueueUserWorkItem(delegate(object ignored) { Serve(client, tls, transaction); });
+                    if (Environment.GetEnvironmentVariable("ZK_DEDICATED") == "1")
+                    {
+                        Thread worker = new Thread(delegate() { Serve(client, tls, transaction); });
+                        worker.IsBackground = true; worker.Start();
+                    }
+                    else
+                    { ThreadPool.QueueUserWorkItem(delegate(object ignored) { Serve(client, tls, transaction); }); }
+                    transaction.Mark("accepted by listener (tls=" + tls + ")");
                 }
             }
             catch (Exception ex) { if (!stop.WaitOne(0)) evidence.Failure = ex.ToString(); }
