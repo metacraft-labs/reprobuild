@@ -4417,6 +4417,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_cli_support_tests_g02",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_cli_support/tests/t_repro_test_reads_a_project_path_as_its_test_collection.nim",
+    binary: "build/test-bin/t_repro_test_reads_a_project_path_as_its_test_collection",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: privateAccess(ParsedBuildTarget)"),
+  TestSpec(
     source: "libs/repro_cli_support/tests/t_reused_result_refused_when_key_does_not_cover_reads.nim",
     binary: "build/test-bin/t_reused_result_refused_when_key_does_not_cover_reads",
     defines: @[],
@@ -28150,7 +28162,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_manifest_commit_targets_the_manifest_repo_under_inherited_git_dir.nim",
@@ -28930,7 +28942,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_plan_reports_its_certificate_producing_nodes.nim",
@@ -29590,7 +29602,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g11",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim",
@@ -30274,7 +30286,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_refusals.nim",
@@ -30663,6 +30675,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_repro_test_issues_certificate_by_default_in_clean_state.nim",
     binary: "build/test-bin/t_repro_test_issues_certificate_by_default_in_clean_state",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g13",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_repro_test_of_a_project_path_runs_that_projects_tests.nim",
+    binary: "build/test-bin/t_repro_test_of_a_project_path_runs_that_projects_tests",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,

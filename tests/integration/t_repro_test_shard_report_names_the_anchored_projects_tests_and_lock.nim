@@ -21,11 +21,11 @@
 ##      ``app/sub/repro.lock`` with that lock's ``inputs_digest``, not the
 ##      current directory's lock (the lock each assigned command's build
 ##      ``./sub#<action id>`` pins);
-##   3. a selector that names nothing exits 2 and runs nothing, and so does
-##      the fragment-less ``./sub``: by the build's rule it selects ``sub``'s
-##      graph minus its ``test`` collection, which holds no test command
+##   3. a selector that names nothing exits 2 and runs nothing
 ##      (CI-Sharding.md §"CLI Surface": refused, exit 2, not an empty green
-##      shard).
+##      shard). The fragment-less ``./sub`` is ``sub``'s ``test`` collection
+##      (CLI/test.md §"Alias Semantics"), sharded or not:
+##      ``t_repro_test_of_a_project_path_runs_that_projects_tests`` covers it.
 ##
 ## Runs with ``--no-certify``: what is under test is selection and the lock
 ## provenance, not issuance (``t_repro_test_shard_certifies_only_nodes_it_ran_whole``
@@ -148,10 +148,4 @@ suite "a sharded repro test anchors on its selectors":
       checkpoint(unknown.output)
       check unknown.code == 2
       check "no-such-suite" in unknown.output
-      check fx.executedOutputs().len == before
-      let subOnly = fx.reproIn(["test", "--tool-provisioning=path",
-        "--no-certify", "--shard", "1/1", "./sub"])
-      checkpoint(subOnly.output)
-      check subOnly.code == 2
-      check "names no test command" in subOnly.output
       check fx.executedOutputs().len == before
