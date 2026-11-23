@@ -4467,6 +4467,18 @@ package reprobuild:
         # A soname, too: a shared library with a version script and none
         # names its base version definition after the `-o` path, which is
         # a path of this build host (lld; measured, one `.dynstr` entry).
+        #
+        # No `-Wl,--as-needed` / `-static-libgcc` here, though io-mon's
+        # builder links with both: they come from io-mon's
+        # `linux_preload.nim.cfg`, which this compile reads like every compile
+        # of that file. `--as-needed` has to precede the `-lm -lrt -ldl
+        # -pthread` Nim adds, so it is the head of the link template, which a
+        # `passL` (placed after them) cannot express. Without it the shim
+        # needs `libm`/`librt`/`libdl`/`libpthread`, and a program that finds
+        # its own C runtime through DT_RUNPATH cannot load it: that runpath
+        # serves only the program's own dependencies, never a preloaded
+        # library's. ``t_preloaded_monitor_shim_carries_no_runpath.nim``
+        # replays this edge and checks its DT_NEEDED and that case.
         passL = @["-Wl,--version-script=" & linuxShimVersionScript] &
           (if shimZigTarget != nil:
              @["-Wl,--strip-debug", "-Wl,-soname,librepro_monitor_shim.so"]
