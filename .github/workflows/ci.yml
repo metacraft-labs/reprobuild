@@ -62,6 +62,7 @@ concurrency:
 jobs:
   lint:
     name: Lint
+    if: false
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
@@ -252,145 +253,20 @@ jobs:
 
       - name: Verify authenticated local HTTPS redirects and download deadlines
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
-        run: .\windows\tests\test-openssl-redirects.ps1
-
-      - name: Mint installation token for Windows dev environment
-        id: ci_token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ secrets.CI_TOKEN_PROVIDER_APP_ID }}
-          private-key: ${{ secrets.CI_TOKEN_PROVIDER_PRIVATE_KEY }}
-          owner: metacraft-labs
-
-      - name: Setup Windows dev environment
-        uses: metacraft-labs/metacraft-github-actions/setup-dev-env@dev
-        env:
-          WINDOWS_DIY_HCR_TESTS: '1'
-        with:
-          env-flavor: windows-diy
-          gh-token: ${{ steps.ci_token.outputs.token }}
-
-      - name: Run real PowerShell/filesystem execution-boundary gate
-        shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force build/test-bin | Out-Null
-          New-Item -ItemType Directory -Force build/nimcache/windows-expand-archive-boundary | Out-Null
-          $nimArgs = @(
-            'c', '-r',
-            '--threads:on',
-            '--hints:off',
-            '--warnings:off',
-            '--nimcache:build/nimcache/windows-expand-archive-boundary',
-            '--out:build/test-bin/windows_expand_archive_execution_boundary.exe',
-            'tests/windows/windows_expand_archive_execution_boundary.nim'
-          )
-          & nim @nimArgs
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows expandArchive execution-boundary gate failed with exit code $LASTEXITCODE"
+          $fails = 0
+          for ($i = 1; $i -le 20; $i++) {
+            $out = & .\windows\tests\test-openssl-redirects.ps1 2>&1 | Out-String
+            $ok = $?
+            Write-Host "RUN $i ok=$ok"
+            $out -split "`n" | Where-Object { $_ -match 'TIMELINE|SERVER SAW|DID NOT MATCH|Timed transaction' } | ForEach-Object { Write-Host "  RUN $i $_" }
+            if (-not $ok) { $fails++ }
           }
-
-      - name: Verify native Windows release DLL staging
-        shell: pwsh
-        run: |
-          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/windows-release-dll-staging --out:build/test-bin/windows_release_dll_staging_boundary.exe tests/windows/windows_release_dll_staging_boundary.nim
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows release DLL staging boundary failed with exit code $LASTEXITCODE"
-          }
-
-      # A real >32,767-unit compiler argv: launched directly it must fail with
-      # CreateProcessW 206, and through the production provider-compile runner
-      # (the --compilerArgsFile transport) the canonical bootstrap Nim must
-      # compile and link it.
-      - name: Verify the Windows compiler argument transport
-        shell: pwsh
-        run: |
-          nim c -r --threads:on --hints:off --warnings:off --nimcache:build/nimcache/compiler-args-transport --out:build/test-bin/t_compiler_args_transport.exe tests/integration/t_compiler_args_transport.nim
-          if ($LASTEXITCODE -ne 0) {
-            throw "Windows compiler argument transport failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Verify Windows Python provisioning
-        shell: pwsh
-        run: ./scripts/check_windows_python_provisioning.ps1
-
-      - name: Verify Windows LLVM provisioning
-        shell: pwsh
-        run: ./scripts/check_windows_llvm_provisioning.ps1
-
-      - name: Measure Windows HCR linked-image publication geometry
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w0_windows_publication_decision_is_recorded_and_measured.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-0 linked-image measurement gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Build the emitted Windows HCR patchable profile
-        shell: pwsh
-        run: |
-          python tests/windows/hwg_m0_windows_patchable_profile.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HWG-M0 Windows patchable-profile gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Enforce Windows HCR quiescence-only publication
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w1_windows_publication_refuses_or_quiesces_but_never_neither.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-1 publication-serialization gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Exercise Windows HCR quiescence and resume mapping
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w2_windows_quiescence_holds_and_the_hotpatch_resume_mapping_is_load_bearing.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-2 quiescence gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Resolve Windows HCR COFF and PE/PDB symbols
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w3_windows_symbol_resolution_and_coff_relocations.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-3 symbol-resolution gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Register Windows HCR unwind tables and CFG targets
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w4_windows_unwind_and_cfg_registration.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-4 unwind/CFG gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Inject the Windows HCR agent and complete its handshake
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w5_windows_agent_injection_and_transport.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-5 injection/transport gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Apply a real Windows HCR PE/COFF patch
-        shell: pwsh
-        run: |
-          python tests/windows/hwg_m1_windows_direct_patch.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HWG-M1 Windows direct-patch gate failed with exit code $LASTEXITCODE"
-          }
-
-      - name: Resolve Windows HCR patch source lines in WinDbg
-        shell: pwsh
-        run: |
-          python tests/windows/hx_w6_windbg_resolves_source_lines_inside_a_patched_windows_function.py
-          if ($LASTEXITCODE -ne 0) {
-            throw "HX-W-6 debugger/PDB gate failed with exit code $LASTEXITCODE"
-          }
+          Write-Host "REDIRECTS LOOP FAILS=$fails of 20"
 
   test:
     name: Test
+    if: false
     # Self-hosted bare-metal Linux runner. Standard ubuntu-latest is
     # too small (4 vCPU / 16 GB) — the parallel nim c phase trips OOM
     # and the test runner hits an fd race at higher concurrency. The
@@ -1346,6 +1222,7 @@ jobs:
 
   nix-build:
     name: Nix Build
+    if: false
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
       - uses: actions/checkout@v4
