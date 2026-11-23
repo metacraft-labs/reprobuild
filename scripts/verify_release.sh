@@ -161,7 +161,7 @@ exe_suffix=""
 # not every bootstrap entrypoint. The evidence-sink binary remains absent
 # from that collection; this check does not decide its scope.
 required_bins=(
-  repro reprobuild
+  repro reprobuild reprobuild-helper
   repro-peer-cache-tier2 repro-peer-cache-admin repro-peer-cache-mint-cert
   repro-cmake-dyndep-fragment repro-tests-fragment repro-completion-files
   repro-cmake-trycompile-provider

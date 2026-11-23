@@ -121,6 +121,17 @@ payload="$stage/$topdir"
 nbin="$(find "$payload/bin" -type f 2>/dev/null | wc -l | tr -d ' ')"
 [ "$nbin" -gt 0 ] || die "$topdir/bin contains no files; refusing to build an empty package"
 log "payload: $nbin file(s) in bin/"
+# An engine without its graph helper image is a broken release, not a smaller
+# one: the engine runs the build graph's own helper commands with
+# bin/reprobuild-helper and refuses to run them itself when it is missing (an
+# engine process inside an action loads OpenSSL, which reads entropy at
+# start-up on Windows). Refuse it here rather than ship it.
+for _engine in reprobuild reprobuild.exe; do
+  [ -e "$payload/bin/$_engine" ] || continue
+  case "$_engine" in *.exe) _helper=reprobuild-helper.exe ;; *) _helper=reprobuild-helper ;; esac
+  [ -f "$payload/bin/$_helper" ] \
+    || die "$topdir/bin has $_engine but no $_helper (the graph helper image the engine runs beside itself); refusing to package it"
+done
 
 # ---------------------------------------------------------------------
 # The installed filesystem tree, shared by every ecosystem
@@ -171,9 +182,10 @@ stage_tree() {
   for _c in "$payload/bin"/*; do
     _n="$(basename "$_c")"
     # Public commands only: not the dot-prefixed `.X.real` binaries the
-    # launchers exec, not data files that live beside them, and not
-    # runquota's commands (above).
-    case "$_n" in .*|*.json|runquotad|runquota) continue ;; esac
+    # launchers exec, not data files that live beside them, not runquota's
+    # commands (above), and not the engine's graph helper image, which only
+    # the engine runs (from beside itself, never through PATH).
+    case "$_n" in .*|*.json|runquotad|runquota|reprobuild-helper) continue ;; esac
     [ -f "$_c" ] && [ -x "$_c" ] || continue
     # shellcheck disable=SC2059 # the format is assembled from fixed text
     printf "#!/bin/sh\n${_runquotad_line}exec /$_pfx/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/$_pfx/bin/$_n"

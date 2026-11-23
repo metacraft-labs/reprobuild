@@ -225,6 +225,19 @@ class PackagerFixture(unittest.TestCase):
         self.out = self.work / "out"
         self.pack()
 
+    def add_engine_and_graph_helper(self):
+        """Put the engine and its graph helper image in the fixture archive,
+        as the release archive carries them: on Linux each is a launcher
+        beside its `.X.real` image (the launcher contract above)."""
+        for name in ("reprobuild", "reprobuild-helper"):
+            launcher = self.archive_root / "bin" / name
+            launcher.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            launcher.chmod(0o755)
+            real = self.archive_root / "bin" / f".{name}.real"
+            real.write_text("real binary stand-in\n", encoding="utf-8")
+            real.chmod(0o755)
+        self.pack()
+
     def pack(self):
         """(Re)write the fixture tarball from the archive tree."""
         self.tarball = self.work / f"{self.archive_top}.tar.gz"
@@ -309,6 +322,34 @@ class PackagerOutputTests(PackagerFixture):
         self.assertEqual(0, ran.returncode, ran.stderr)
         self.assertEqual("ran\n", ran.stdout)
 
+
+    def test_deb_installs_the_graph_helper_beside_the_engine_off_path(self):
+        """The engine runs the build graph's helper commands with
+        bin/reprobuild-helper from beside its own image, so the package
+        installs it there, and only there: a user never runs it, so it gets
+        no /usr/bin wrapper."""
+        self.add_engine_and_graph_helper()
+        run = self.build("deb")
+        self.assertEqual(0, run.returncode, run.stderr)
+        deb = next(self.out.glob("*.deb"))
+        root = self.work / "installed-helper"
+        subprocess.run(["dpkg-deb", "-x", str(deb), str(root)], check=True)
+        tree = root / "usr" / "lib" / "reprobuild" / "bin"
+        for name in ("reprobuild", "reprobuild-helper"):
+            self.assertTrue((tree / name).is_file(), name)
+            self.assertTrue((tree / f".{name}.real").is_file(), name)
+        on_path = sorted(os.listdir(root / "usr" / "bin"))
+        self.assertEqual(["repro", "reprobuild"], on_path)
+
+    def test_an_engine_without_its_graph_helper_is_refused(self):
+        """An archive with bin/reprobuild and no bin/reprobuild-helper is a
+        broken release: every graph helper command would be refused."""
+        self.add_engine_and_graph_helper()
+        (self.archive_root / "bin" / "reprobuild-helper").unlink()
+        self.pack()
+        run = self.build("deb")
+        self.assertNotEqual(0, run.returncode, "packaged an engine without its helper")
+        self.assertIn("reprobuild-helper", run.stderr)
 
 
 def _newc_members(stream):
@@ -439,6 +480,38 @@ class CompletionFilesTests(PackagerFixture):
             run = self.build(fmt)
             self.assertNotEqual(0, run.returncode, f"{fmt} built without _repro")
             self.assertIn("share/repro/completions/_repro", run.stderr, fmt)
+
+    def package_paths(self, fmt, pkg):
+        """Every path a package installs, without a leading `./` or `/`."""
+        if fmt == "deb":
+            listing = subprocess.run(["dpkg-deb", "-c", str(pkg)], capture_output=True,
+                                     text=True, check=True).stdout
+            return {line.split(None, 5)[5].split(" -> ")[0].lstrip("./").rstrip("/")
+                    for line in listing.splitlines()}
+        if fmt == "rpm":
+            listing = subprocess.run(["rpm", "-qlp", str(pkg)], capture_output=True,
+                                     text=True, check=True).stdout
+            return {line.lstrip("/") for line in listing.splitlines()}
+        listing = subprocess.run(["bsdtar", "-tf", str(pkg)], capture_output=True,
+                                 text=True, check=True).stdout
+        return {line.rstrip("/") for line in listing.splitlines()}
+
+    def test_every_package_installs_the_graph_helper_image(self):
+        """deb, rpm and pacman each install bin/reprobuild-helper beside the
+        engine in the archive tree, and none puts it on PATH."""
+        self.add_engine_and_graph_helper()
+        globs = {"deb": "*.deb", "rpm": "*.rpm", "arch": "*.pkg.tar.zst"}
+        for fmt, glob in globs.items():
+            with self.subTest(package=fmt):
+                self.out = self.work / f"out-helper-{fmt}"
+                run = self.build(fmt)
+                self.assertEqual(0, run.returncode, f"{fmt}: {run.stderr}")
+                paths = self.package_paths(fmt, next(self.out.glob(glob)))
+                for name in ("reprobuild", "reprobuild-helper"):
+                    self.assertIn(f"usr/lib/reprobuild/bin/{name}", paths, fmt)
+                    self.assertIn(f"usr/lib/reprobuild/bin/.{name}.real", paths, fmt)
+                self.assertIn("usr/bin/reprobuild", paths, fmt)
+                self.assertNotIn("usr/bin/reprobuild-helper", paths, fmt)
 
 
 # ---------------------------------------------------------------------------
@@ -695,6 +768,7 @@ class MacosCompletionFilesTests(PackagerFixture):
 # which installs per user.
 MSI_COMPLETION_PATH = "ProgramFiles64Folder/Reprobuild/share/repro/completions/repro.ps1"
 MSI_REPRO_PATH = "ProgramFiles64Folder/Reprobuild/bin/repro.exe"
+MSI_GRAPH_HELPER_PATH = "ProgramFiles64Folder/Reprobuild/bin/reprobuild-helper.exe"
 MSI_CUSTOM_ACTIONS = {
     "ReproCompletionEnsure": "hooks ensure --shell-autocomplete --system",
     "ReproCompletionRemove": "hooks uninstall --shell-autocomplete --system",
@@ -720,8 +794,9 @@ class WindowsCompletionTests(PackagerFixture):
 
     def setUp(self):
         super().setUp()
-        # The Windows archive's command and engine are .exe images.
-        for name in ("repro.exe", "reprobuild.exe"):
+        # The Windows archive's command, engine and the engine's graph
+        # helper image are .exe images.
+        for name in ("repro.exe", "reprobuild.exe", "reprobuild-helper.exe"):
             (self.archive_root / "bin" / name).write_bytes(b"MZ stand-in\n")
         self.pack()
 
@@ -884,7 +959,10 @@ class WindowsCompletionTests(PackagerFixture):
             run = self.build_msi()
             self.assertEqual(0, run.returncode, run.stderr)
             msi = self.out / f"reprobuild-{VERSION}-{self.PLATFORM}-{self.ASSET_ARCH}.msi"
-            self.assert_msi_completion(*self.msi_contents(msi, "good"))
+            contents = self.msi_contents(msi, "good")
+            self.assert_msi_completion(*contents)
+            # The engine's graph helper image is installed beside it.
+            self.assertIn(MSI_GRAPH_HELPER_PATH, contents[0], sorted(contents[0]))
             wxs_text = msi.with_suffix(".wxs").read_text(encoding="utf-8")
 
         # (3) Negative control: the same source without the completion

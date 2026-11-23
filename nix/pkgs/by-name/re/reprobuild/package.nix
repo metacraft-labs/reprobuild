@@ -540,8 +540,18 @@ stdenv.mkDerivation (finalAttrs: {
     # two RunQuota executables supplied only by the Nix runtime closure.
     # `t_packaging_wrapper_vars_match_flake.nim` checks both, so common source
     # defaults cannot drift and native wrappers never name unbundled tools.
+    #
+    # THE GRAPH HELPER IMAGE IS NOT WRAPPED. `bin/reprobuild-helper` is never
+    # typed by a user: the engine runs it (from beside its own image, see
+    # `graphHelperImagePath` in `libs/repro_core/src/repro_core/cli_images.nim`)
+    # as the argv of the build graph's own helper actions, in place of the
+    # engine image it used to run there. The engine named its UNWRAPPED image
+    # (`.reprobuild-wrapped`, its `getAppFilename()`) for those actions, so the
+    # helper runs unwrapped too: same environment as before, no wrapper shell
+    # in the action's process tree. Asserted below.
     for b in "$out"/bin/*; do
       test -x "$b" || continue
+      [ "$(basename "$b")" = reprobuild-helper ] && continue
       wrapProgram "$b" \
         --set-default REPROBUILD_RUNTIME_LIBRARY_PATH ${runtimeLibraryPath} \
         --set-default REPROBUILD_SOURCE_ROOT ${finalAttrs.src} \
@@ -626,6 +636,17 @@ stdenv.mkDerivation (finalAttrs: {
     ln -sfn "$out/bin/.repro-wrapped" "$out/libexec/reprobuild/repro"
     ln -sfn "$out/bin/.reprobuild-wrapped" \
       "$out/libexec/reprobuild/reprobuild"
+    # The engine's graph helper image ships beside the engine wherever the
+    # engine is, and unwrapped (see the wrapProgram loop): the engine refuses
+    # to run the build graph's helper commands itself when it is missing.
+    test -x "$out/bin/reprobuild-helper" && \
+      ! test -e "$out/bin/.reprobuild-helper-wrapped" || {
+        echo "expected an unwrapped $out/bin/reprobuild-helper beside the" \
+             "engine; it is missing or was wrapped" >&2
+        exit 1
+      }
+    ln -sfn "$out/bin/reprobuild-helper" \
+      "$out/libexec/reprobuild/reprobuild-helper"
   '';
 
   # Exposed so a consumer that has to compile against the SAME prefixes this
