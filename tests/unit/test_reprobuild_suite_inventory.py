@@ -292,6 +292,106 @@ class BuiltTreeCapabilityTests(unittest.TestCase):
                 self.assertEqual(built_test_binaries(root), (expected, 3))
 
 
+class RepeatedTestRowTests(unittest.TestCase):
+    """`repro_tests.nim` lists each test source, and each binary, once.
+
+    `repro.nim` turns every row into a compile edge whose id is a hash of its
+    command line, so a repeated row is two edges with one id. The recipe then
+    cannot be loaded at all: v0.2.34's Windows release build stopped at
+    `duplicate graph node id: project:action:nim-c-e738e50c618fc608`, the
+    compile of `t_launcher_rematerialize_replaces_atomically`, whose row a
+    commit had added twice. The table those cases read is the real tracked
+    one, or a real file written into a scratch tree: the parser under test
+    reads files, so a mock of the file would be a mock of the thing tested.
+    """
+
+    def scratch(self):
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        return Path(directory.name)
+
+    def test_the_tracked_table_lists_each_source_and_binary_once(self):
+        """Counted here directly, not only through the parser's own refusal,
+        so this case still fails if that refusal is ever removed."""
+        nim_specs, python_specs = inventory.parse_repro_tests(REPO_ROOT)
+        for label, values in (
+            ("source", [spec.source for spec in nim_specs]),
+            ("binary", [spec.binary for spec in nim_specs]),
+            ("Python test", [spec.source for spec in python_specs]),
+        ):
+            repeated = sorted(
+                {value for value in values if values.count(value) > 1}
+            )
+            self.assertEqual(
+                repeated,
+                [],
+                f"repro_tests.nim repeats a {label}; regenerate it with "
+                f"{inventory.REPRO_TESTS_REGENERATE_COMMAND}",
+            )
+
+    def test_a_repeated_row_is_refused_and_named(self):
+        root = write_synthetic_test_tree(
+            self.scratch(),
+            declared=["tests/unit/t_twice.nim", "tests/unit/t_twice.nim"],
+            present=["tests/unit/t_twice.nim"],
+        )
+        with self.assertRaises(SystemExit) as refused:
+            inventory.parse_repro_tests(root)
+        message = str(refused.exception)
+        self.assertIn("'tests/unit/t_twice.nim' has more than one TestSpec row",
+                      message)
+        self.assertIn(inventory.REPRO_TESTS_REGENERATE_COMMAND, message)
+
+    def test_two_sources_that_write_one_binary_are_refused(self):
+        """Distinct sources, one stem: two edges that declare one output."""
+        root = write_synthetic_test_tree(
+            self.scratch(),
+            declared=["tests/unit/t_same.nim", "tests/integration/t_same.nim"],
+            present=["tests/unit/t_same.nim", "tests/integration/t_same.nim"],
+        )
+        with self.assertRaises(SystemExit) as refused:
+            inventory.parse_repro_tests(root)
+        message = str(refused.exception)
+        self.assertIn("'build/test-bin/t_same' is written by more than one row",
+                      message)
+        self.assertIn("tests/integration/t_same.nim, tests/unit/t_same.nim",
+                      message)
+
+    def test_a_repeated_python_test_is_refused(self):
+        root = write_synthetic_test_tree(
+            self.scratch(), declared=["tests/unit/t_once.nim"],
+            present=["tests/unit/t_once.nim"])
+        table = root / "repro_tests.nim"
+        table.write_text(
+            table.read_text(encoding="utf-8").replace(
+                "const pythonTestPaths*: seq[string] = @[\n]",
+                "const pythonTestPaths*: seq[string] = @[\n"
+                '  "tests/unit/test_x.py",\n  "tests/unit/test_x.py",\n]'),
+            encoding="utf-8")
+        with self.assertRaises(SystemExit) as refused:
+            inventory.parse_repro_tests(root)
+        self.assertIn("'tests/unit/test_x.py' is listed more than once",
+                      str(refused.exception))
+
+    def test_the_lint_gate_refuses_a_table_with_a_repeated_row(self):
+        """`just lint` runs `--check-declared-sources`; it must exit non-zero
+        and say why, rather than pass a table the recipe cannot load."""
+        root = write_synthetic_test_tree(
+            self.scratch(),
+            declared=["tests/unit/t_twice.nim", "tests/unit/t_twice.nim"],
+            present=["tests/unit/t_twice.nim"],
+        )
+        result = subprocess.run(
+            [sys.executable, str(MODULE_PATH), "--repo-root", str(root),
+             "--check-declared-sources"],
+            capture_output=True, text=True,
+        )
+        self.assertNotEqual(result.returncode, 0,
+                            result.stdout + result.stderr)
+        self.assertIn("has more than one TestSpec row",
+                      result.stdout + result.stderr)
+
+
 class StaticCaseCountBaselineTests(unittest.TestCase):
     """The always-on half of the suite-inventory gate.
 

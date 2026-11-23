@@ -3236,7 +3236,7 @@ tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12
 tests/unit/test_release_tag_names_build.py	python	11
-tests/unit/test_reprobuild_suite_inventory.py	python	110
+tests/unit/test_reprobuild_suite_inventory.py	python	115
 tests/unit/test_sibling_lock_pins.py	python	10
 tests/unit/test_source_revision.py	python	18
 tests/unit/test_suite_drift_attribution.py	python	12
