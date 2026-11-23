@@ -19,6 +19,8 @@ export tool_provisioning
 # The helpers' command lines are declared in repro's description; only their
 # spellings are read here, at compile time.
 from repro_cli_support/cli_description import reproLongFlags
+from repro_core/cli_images import requireGraphHelperImage,
+  GraphHelperImageMissingError
 
 const
   CompileProviderFlags = reproLongFlags(@["internal", "compile-provider"])
@@ -312,6 +314,19 @@ proc providerCompileCliPath(config: DevEnvEdgeConfig): string =
       config.monitorCliPath.len > 0:
     return os.normalizedPath(config.monitorCliPath)
   config.publicCliPath
+
+proc devEnvHelperImage(engineImage, edge: string): string =
+  ## The image this module's edges run their helper commands with: the
+  ## graph helper image beside the engine at ``engineImage`` (`repro_core/
+  ## cli_images`), never the engine itself. The engine links OpenSSL, whose
+  ## start-up reads entropy on Windows, and an edge whose process tree reads
+  ## entropy is not cached on its first run, so a warm re-entry would launch
+  ## the edge again. A missing helper beside a present engine is refused
+  ## naming the path.
+  try:
+    requireGraphHelperImage(engineImage, edge)
+  except GraphHelperImageMissingError as err:
+    raiseDevEnvEdge(err.msg)
 
 proc invalidateStaleProviderCompileArtifact(plan: ProviderCompilePlan;
                                             artifactPath: string) =
@@ -747,7 +762,7 @@ proc devEnvIntrospectionAction(config: DevEnvEdgeConfig;
   # The helper's command line in the words the CLI's generated parser reads
   # back to these values: each value attached to its declared flag.
   var argv = @[
-    config.publicCliPath,
+    devEnvHelperImage(config.publicCliPath, "__repro_dev_env_introspection"),
     "internal", "dev-env-introspect",
     DevEnvIntrospectFlags.providerBinary & "=" & provider.outputBinaryPath,
     DevEnvIntrospectFlags.providerArtifactId & "=" & providerArtifactId,
@@ -803,7 +818,7 @@ proc shellRenderAction(config: DevEnvEdgeConfig; artifactPath,
     artifactPath
   ])
   let argv = @[
-    config.publicCliPath,
+    devEnvHelperImage(config.publicCliPath, "__repro_dev_env_shell_render"),
     "internal", "render-dev-env-shell",
     RenderDevEnvShellFlags.artifact & "=" & artifactPath,
     RenderDevEnvShellFlags.`out` & "=" & shellFragmentPath,
@@ -1019,7 +1034,8 @@ proc computeDevEnvEdge*(config: DevEnvEdgeConfig): DevEnvEdgeResult =
       result.providerArtifactPath)
     var providerAction = providerCompileBuildAction(providerPlan,
       active.modulePath, interfacePath, result.providerArtifactPath,
-      providerCompileCliPath(active), workDir, compileScratchDir)
+      devEnvHelperImage(providerCompileCliPath(active),
+        "__repro_provider_compile"), workDir, compileScratchDir)
 
     # Wire the provisioning receipts as inputs to the compiler action
     for receipt in provisioningReceipts:

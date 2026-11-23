@@ -15,7 +15,7 @@ When invoking `repro` from an automated tool call (with no interactive TTY):
 - **Preview host or account changes before applying**: run `repro infra plan` before `repro infra apply --plan <id>`, and `repro home plan` before `repro home apply`.
 - **Never hand-edit generated lock or scan files**: update `repro.lock` with `repro lock update [<dep>]` or `repro lock refresh`, and update `repro.scanned-deps.nim` with `repro deps refresh`.
 
-## `repro` Is Two Binaries
+## `repro` Is Two Binaries, Plus the Engine's Graph Helper
 
 `repro` on `PATH` is a ~520 KB **thin daemon client**
 (`apps/repro-client/repro_client.nim`). It hands a routable `repro build` to
@@ -23,15 +23,40 @@ the already-running per-user daemon and `execv`s the ~17 MB **engine**,
 installed beside it as **`reprobuild`** (`apps/repro/repro.nim`), for
 everything else — every other verb, and every build it cannot route.
 
+A third image, **`reprobuild-helper`** (`apps/reprobuild-helper`), sits
+beside the engine and is never typed by a user. The build graph runs its own
+helper commands with it: `internal compile-provider`, `extract-interface`,
+`compile-profile`, `probe-profile-platforms`, `dev-env-introspect`,
+`render-dev-env-shell` and `cmake-regenerate` (also spelt
+`__repro-<role>`). It is built from the same sources and dispatches through
+the same parser as the engine, but **without `-d:ssl`**. Those helpers run
+inside monitored actions, so whatever their process does at start-up is
+evidence for the action; with `-d:ssl` the OpenSSL libraries load at start-up
+and, on Windows, read entropy while they do, which kept every such action
+from being cached on its first run. The engine keeps TLS for its https cache
+and deploy paths.
+
 Practical consequences when you are working in this repo:
 
-- `just build` / `scripts/build_apps.sh` produce **both** `build/bin/repro`
-  and `build/bin/reprobuild`. A tree with only one of them is not a working
-  tree; `scripts/bootstrap_guard.sh` checks for both.
+- `just build` / `scripts/build_apps.sh` produce `build/bin/repro`,
+  `build/bin/reprobuild` **and** `build/bin/reprobuild-helper`. A tree
+  without all three is not a working tree; `scripts/bootstrap_guard.sh`
+  checks for them.
 - Keep them **siblings**. `siblingTryCompileProviderPath` /
   `siblingStandardProviderPath` resolve the Tier-2a/2b provider binaries from
   `parentDir(publicCliPath)` and degrade to per-project provider compile with
-  **no error** if they are not there.
+  **no error** if they are not there. The graph helper is resolved the same
+  way (`graphHelperImagePath` in `libs/repro_core/src/repro_core/cli_images.nim`),
+  but a missing one is an **error naming the expected path**: the engine never
+  runs those helpers itself instead.
+- Never add `-d:ssl` to the helper image (`apps/entrypoints.txt`, and its
+  `nim.c` edge in `repro.nim`), and never route a helper verb that needs TLS
+  through it. `tests/integration/t_graph_helper_image_loads_no_openssl.nim`
+  fails if either build table gains it or the built image maps OpenSSL.
+- The helper image answers only those helper commands and refuses everything
+  else with exit 2. Inside it the engine stays the public CLI: anything a
+  helper starts or bakes in names `reprobuild`, as it did when the engine ran
+  the helper itself.
 - The engine still *declares* itself `repro` (`runThinApp("repro")`), so its
   usage text, its diagnostics and its permission to self-spawn internal verbs
   are all independent of the filename. Do not "fix" code that looks for a file
@@ -41,8 +66,8 @@ Practical consequences when you are working in this repo:
   stderr not a terminal, no `--daemon`/`REPRO_DAEMON`, none of
   `ClientHandledFlags`. Anything else hands over and pays ~1–3 ms extra. An
   interactive `repro build` always hands over.
-- `libs/repro_core/src/repro_core/cli_images.nim` holds the two names and the
-  rationale for them.
+- `libs/repro_core/src/repro_core/cli_images.nim` holds the three names and
+  the rationale for them.
 
 ## Before You Edit a `repro.nim`
 

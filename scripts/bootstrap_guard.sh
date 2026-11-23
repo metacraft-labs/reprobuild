@@ -227,6 +227,15 @@ decide() {
     printf 'bootstrap missing:%s\n' "build/bin/reprobuild${suffix}"
     return 0
   fi
+  # The engine's graph helper image, for the same reason one level down: the
+  # engine runs the build graph's own helper commands (provider compile,
+  # interface extraction, dev-env introspection, ...) with
+  # `build/bin/reprobuild-helper` and refuses to run them itself when it is
+  # missing, so a tree without it fails its first build.
+  if [ ! -f "${root}/build/bin/reprobuild-helper${suffix}" ]; then
+    printf 'bootstrap missing:%s\n' "build/bin/reprobuild-helper${suffix}"
+    return 0
+  fi
 
   got="$(binary_format "${target}")"
   if [ "${got}" != "${want}" ]; then

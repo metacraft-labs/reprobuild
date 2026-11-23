@@ -102,6 +102,10 @@ const
     ## freshest thing in `build/bin` -- and then answers every invocation with
     ## "no reprobuild image to fall back to". The existence of the engine is
     ## therefore part of "is this tree bootstrapped?".
+  HostHelperBinName = "reprobuild-helper".addFileExt(ExeExt)
+    ## And a THIRD: the engine's graph helper image. The engine runs the
+    ## build graph's own helper commands with it and refuses to run them
+    ## itself when it is missing, so a tree without it fails its first build.
 
 proc stage(path, bytes: string; executable: bool) =
   createDir(path.parentDir())
@@ -141,9 +145,10 @@ proc newFixtureRoot(slug: string): string =
 proc stageHostPair(root: string; secondsAgo = -1) =
   ## Both host artefacts, so a case that is about FORMAT or FRESHNESS is not
   ## silently answered by the engine-existence clause instead.
-  stage(root / "build" / "bin" / HostEngineBinName, hostImage(), true)
-  if secondsAgo >= 0:
-    touchAt(root / "build" / "bin" / HostEngineBinName, secondsAgo)
+  for name in [HostEngineBinName, HostHelperBinName]:
+    stage(root / "build" / "bin" / name, hostImage(), true)
+    if secondsAgo >= 0:
+      touchAt(root / "build" / "bin" / name, secondsAgo)
 
 proc ageSources(root: string; secondsAgo: int) =
   touchAt(root / "apps" / "entrypoints.txt", secondsAgo)
@@ -396,6 +401,23 @@ suite "W15 bootstrap guard":
     check decision.startsWith("bootstrap")
     check "missing:" in decision
     check HostEngineBinName in decision
+
+  test "an engine with no graph helper image beside it is not a bootstrapped tree":
+    ## The thin client and the engine are present, host format, executable
+    ## and fresh; only `build/bin/reprobuild-helper` is missing. Deleting the
+    ## helper clause from `scripts/bootstrap_guard.sh` turns this case red.
+    let root = newFixtureRoot("helper-missing")
+    defer: removeDirEventually(root)
+    ageSources(root, 600)
+    stage(root / "build" / "bin" / HostBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostBinName, 60)
+    stage(root / "build" / "bin" / HostEngineBinName, hostImage(), true)
+    touchAt(root / "build" / "bin" / HostEngineBinName, 60)
+    let decision = decisionFor(root)
+    checkpoint("decision = " & decision)
+    check decision.startsWith("bootstrap")
+    check "missing:" in decision
+    check HostHelperBinName in decision
 
   test "a missing artefact still bootstraps":
     let root = newFixtureRoot("empty")

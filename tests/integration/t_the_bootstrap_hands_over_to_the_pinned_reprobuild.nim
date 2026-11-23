@@ -131,6 +131,7 @@ proc copyOfCheckoutImage(dest: string): string =
       continue
     let name = lastPathPart(path)
     let keep = name == reprobuildEngineExeName() or
+      name == reprobuildHelperExeName() or
       name == selfExecutableName() or
       name.toLowerAscii.endsWith(".dll") or name.contains(".so") or
       name.endsWith(".dylib") or name == "cacert.pem"
@@ -141,7 +142,8 @@ proc copyOfCheckoutImage(dest: string): string =
 
 proc stubImage(dest, label: string): string =
   createDir(dest / "bin")
-  for name in [selfExecutableName(), reprobuildEngineExeName()]:
+  for name in [selfExecutableName(), reprobuildEngineExeName(),
+                 reprobuildHelperExeName()]:
     copyFile(stubBinary(), dest / "bin" / name)
     makeExecutable(dest / "bin" / name)
   writeFile(dest / "VERSION", label & "\n")

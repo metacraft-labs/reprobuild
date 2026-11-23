@@ -289,6 +289,20 @@ if ! "${NIM_BIN}" c -d:release \
 fi
 log "  built: ${WORK_ROOT}/bin/repro"
 
+# The engine's graph helper image, beside it: the engine runs the build
+# graph's own helper commands (provider compile, interface extraction, ...)
+# with bin/reprobuild-helper and refuses to run them itself without it.
+# Same flags, no -d:ssl (apps/entrypoints.txt).
+if ! "${NIM_BIN}" c -d:release \
+    --hints:off --warnings:off \
+    --nimcache:"${WORK_ROOT}/nimcache/reprobuild-helper" \
+    --out:"${WORK_ROOT}/bin/reprobuild-helper" \
+    apps/reprobuild-helper/reprobuild_helper.nim >>"${BUILD_LOG}" 2>&1; then
+  err "nim build of apps/reprobuild-helper/reprobuild_helper.nim failed; see ${BUILD_LOG}"
+  exit 5
+fi
+log "  built: ${WORK_ROOT}/bin/reprobuild-helper"
+
 if ! "${NIM_BIN}" c -d:release -d:reproProviderMode \
     --hints:off --warnings:off \
     --nimcache:"${WORK_ROOT}/nimcache/repro-standard-provider" \
