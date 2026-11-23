@@ -1089,7 +1089,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/1004b4bf991df19e086ae28360c2306702c5798f";
+      url = "github:metacraft-labs/reprobuild-brew-packages/a243977cddfba2bd66b075cc1186493f9baa2434";
       flake = false;
     };
   };

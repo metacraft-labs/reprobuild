@@ -2524,17 +2524,17 @@
     "reprobuild-brew-packages-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795128291,
-        "narHash": "sha256-x95oDvPH7TMXBRkOOdp5LKT5rUY72ZqJmRDCud4thrQ=",
+        "lastModified": 1795474831,
+        "narHash": "sha256-SDcFOvYWw5hLa29fcTEq1+t/BFT/iBNna7yiCJ1qRCo=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-brew-packages",
-        "rev": "1004b4bf991df19e086ae28360c2306702c5798f",
+        "rev": "a243977cddfba2bd66b075cc1186493f9baa2434",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-brew-packages",
-        "rev": "1004b4bf991df19e086ae28360c2306702c5798f",
+        "rev": "a243977cddfba2bd66b075cc1186493f9baa2434",
         "type": "github"
       }
     },
