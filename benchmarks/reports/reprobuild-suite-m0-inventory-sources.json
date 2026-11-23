@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3168,
+    "nimTestBinaries": 3170,
     "pureUnitConsolidationGroups": 95,
     "pureUnitTests": 837,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3220
+    "testEntries": 3222
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1835,7 +1835,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1777,
+      "integration": 1779,
       "platform/destructive": 201,
       "pure unit": 837,
       "unclassified": 376
@@ -2058,9 +2058,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3168,
+    "nimTestBinaryCount": 3170,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3220
+    "testEntryCount": 3222
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -12874,7 +12874,7 @@
       "requiresReproBinary": true,
       "source": "libs/repro_build_engine/tests/t_engine_action_create_dyndep.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -13971,6 +13971,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_transient_directory_contents_leave_the_probe_key",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "io_mon",
+        "repro_build_engine",
+        "repro_core",
+        "repro_local_store",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_build_engine",
+      "requiresReproBinary": true,
+      "source": "libs/repro_build_engine/tests/t_transient_directory_contents_leave_the_probe_key.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_transient_probed_with_trailing_separator",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -14731,6 +14752,27 @@
       "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim",
       "sourceSuiteCount": 5,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_registry_crate_rustc_edge",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_registry_crate_rustc_edge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -67564,7 +67606,7 @@
     {
       "binary": "",
       "class": "unclassified",
-      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
       "localDependencyShape": [],
@@ -67572,7 +67614,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_publish_surface_routing.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 32,
+      "staticCaseCount": 44,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -67647,7 +67689,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 13,
+      "staticCaseCount": 15,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
