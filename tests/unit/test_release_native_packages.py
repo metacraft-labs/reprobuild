@@ -71,6 +71,16 @@ for Windows' tools, a native call whose standard error is not raised under
 $ErrorActionPreference = 'Stop', the build's version, a PowerShell's own
 $PSHOME). It needs pwsh and is skipped, which counts as not passed, without
 it; the dev shell has it.
+
+test_the_windows_release_zip_is_written_by_the_portable_writer and
+test_windows_release_zip_entry_names_use_forward_slashes cover the Windows
+release zip itself: package_windows_release.ps1 writes it with
+scripts/release/write_release_zip.ps1 (not Compress-Archive, whose Windows
+PowerShell 5.1 version writes backslash entry names), and that writer's
+archive, read back with zipfile, names every entry with '/' under one
+top-level directory, with every directory and file of the tree and nothing
+else. The second needs pwsh and is skipped, which counts as not passed,
+without it.
 """
 
 import json
@@ -940,6 +950,105 @@ class WindowsHarnessHelperTests(unittest.TestCase):
         self.assertEqual(0, run.returncode, run.stdout + run.stderr)
         self.assertIn("0 failure(s)", run.stdout)
         self.assertNotIn("FAIL  ", run.stdout)
+
+
+
+WRITE_RELEASE_ZIP = REPO_ROOT / "scripts" / "release" / "write_release_zip.ps1"
+PACKAGE_WINDOWS_RELEASE = REPO_ROOT / "scripts" / "release" / "package_windows_release.ps1"
+
+
+def _powershell_code(path: Path) -> str:
+    """The lines of a PowerShell script that are not `#` comments."""
+    return "\n".join(line for line in path.read_text(encoding="utf-8").splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+class WindowsReleaseZipWriterTests(unittest.TestCase):
+    """The Windows release zip is written by write_release_zip.ps1, not by
+    Compress-Archive, whose Windows PowerShell 5.1 version names entries with
+    backslashes (`reprobuild-<v>-windows-x86_64\\bin\\...`). The ZIP format
+    requires '/' (APPNOTE.TXT 4.4.17.1,
+    https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT), and
+    repro-build-packages.sh's unzip could not unpack such an archive, so no
+    MSI was built from it. This case needs no PowerShell: it reads the
+    packaging script, so it runs on every host."""
+
+    def test_the_windows_release_zip_is_written_by_the_portable_writer(self):
+        code = _powershell_code(PACKAGE_WINDOWS_RELEASE)
+        self.assertIn("write_release_zip.ps1", code)
+        self.assertNotIn("Compress-Archive", code)
+        self.assertNotIn("CreateFromDirectory", code)
+
+
+@unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7)")
+class WindowsReleaseZipEntryNameTests(unittest.TestCase):
+    """write_release_zip.ps1's archive, read back with Python's zipfile: every
+    entry name uses '/', the one top-level entry is the tree's own directory,
+    every directory (an empty one too) has its `<dir>/` entry, every file is
+    there with its bytes, and nothing else is. Under pwsh on Linux the
+    platform separator is already '/', so this case shows the names are
+    built by the script and not by the platform's paths only together with
+    the mutation recorded beside it (names joined with '\\' fail it); on
+    Windows PowerShell 5.1 the separator itself is what the script replaces.
+    It needs pwsh and is skipped, which counts as not passed, without it; the
+    dev shell has it."""
+
+    def build_tree(self, root: Path) -> dict:
+        files = {
+            "bin/repro.exe": b"MZ client\n",
+            "bin/reprobuild.exe": b"MZ engine\n",
+            "lib/runtime.dll": b"MZ dll\n",
+            "share/repro/completions/repro.ps1": b"Register-ArgumentCompleter\n",
+            "share/repro/source/.gitignore": b"build/\n",
+            "share/repro/source/deep/er/module.nim": b"echo 1\n",
+        }
+        for rel, data in files.items():
+            path = root.joinpath(*rel.split("/"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(data)
+        (root / "share" / "repro" / "empty").mkdir(parents=True)
+        return files
+
+    def write_zip(self, source: Path, zip_path: Path) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(WRITE_RELEASE_ZIP),
+             "-SourceDir", str(source), "-DestinationPath", str(zip_path)],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=300)
+
+    def test_windows_release_zip_entry_names_use_forward_slashes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            top = f"reprobuild-{VERSION}-windows-x86_64"
+            root = Path(tmp) / "pkg" / top
+            files = self.build_tree(root)
+            zip_path = Path(tmp) / f"{top}.zip"
+            run = self.write_zip(root, zip_path)
+            self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+            self.assertEqual("", run.stdout, "the writer prints nothing on success")
+            with zipfile.ZipFile(zip_path) as archive:
+                names = archive.namelist()
+                self.assertEqual([], [n for n in names if "\\" in n],
+                                 "entry names with backslashes")
+                self.assertEqual([], [n for n in names if not n.startswith(top + "/")],
+                                 "entries outside the one top-level directory")
+                self.assertEqual(len(names), len(set(names)), "duplicate entries")
+                want_dirs = {f"{top}/"}
+                for rel in list(files) + ["share/repro/empty/x"]:
+                    parts = rel.split("/")[:-1]
+                    for i in range(1, len(parts) + 1):
+                        want_dirs.add(f"{top}/" + "/".join(parts[:i]) + "/")
+                self.assertEqual(want_dirs, {n for n in names if n.endswith("/")})
+                self.assertEqual({f"{top}/{rel}" for rel in files},
+                                 {n for n in names if not n.endswith("/")})
+                for rel, data in files.items():
+                    self.assertEqual(data, archive.read(f"{top}/{rel}"), rel)
+                    self.assertTrue(archive.getinfo(f"{top}/{rel}").compress_type
+                                    in (zipfile.ZIP_DEFLATED, zipfile.ZIP_STORED))
+            # A second run refuses to overwrite the archive and leaves it.
+            before = zip_path.read_bytes()
+            again = self.write_zip(root, zip_path)
+            self.assertNotEqual(0, again.returncode)
+            self.assertIn("already exists", again.stdout + again.stderr)
+            self.assertEqual(before, zip_path.read_bytes())
 
 
 if __name__ == "__main__":

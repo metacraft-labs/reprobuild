@@ -250,6 +250,7 @@ libs/repro_build_engine/tests/t_shipped_macos_tools.nim	nim	2
 libs/repro_build_engine/tests/t_soft_rebuild_and_retention.nim	nim	6
 libs/repro_build_engine/tests/t_store_realization_names_of_both_widths_are_content_addressed.nim	nim	1
 libs/repro_build_engine/tests/t_tool_cache_reader_never_leaves_its_host.nim	nim	3
+libs/repro_build_engine/tests/t_transient_directory_contents_leave_the_probe_key.nim	nim	7
 libs/repro_build_engine/tests/t_transient_probed_with_trailing_separator.nim	nim	5
 libs/repro_build_engine/tests/t_untracked_ancestor_change_does_not_re_run_an_edge.nim	nim	8
 libs/repro_build_engine/tests/t_untracked_scope_membership_is_not_an_input.nim	nim	7
@@ -289,6 +290,7 @@ libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	42
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim	nim	1
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim	nim	7
+libs/repro_cargo_fetch/tests/test_rqe_cg4a_registry_crate_rustc_edge.nim	nim	4
 libs/repro_cargo_gc/tests/t_rqe_cg2_cargo_gc.nim	nim	15
 libs/repro_cas_store/tests/t_cas_ingest_link.nim	nim	25
 libs/repro_cas_store/tests/t_cas_link_mutation_safety.nim	nim	16
@@ -2508,7 +2510,10 @@ tests/integration/t_provisioning_contributions.nim	nim	6
 tests/integration/t_public_committed_team_manifest_personal_db_mixed.nim	nim	2
 tests/integration/t_pull_refuses_to_rewind_unpublished_work.nim	nim	2
 tests/integration/t_push_gateway_opt_out_is_a_settings_key.nim	nim	1
+tests/integration/t_push_of_a_flake_lock_only_change_names_the_certified_content.nim	nim	1
+tests/integration/t_push_of_a_lock_only_change_names_the_certified_content.nim	nim	1
 tests/integration/t_push_refuses_when_the_lock_disagrees_with_the_siblings.nim	nim	3
+tests/integration/t_push_with_a_non_lock_change_makes_no_lock_only_claim.nim	nim	1
 tests/integration/t_r2_iso_boot.nim	nim	2
 tests/integration/t_r9_systemd_boot.nim	nim	2
 tests/integration/t_recertify_is_noop_when_no_executed_function_changed.nim	nim	1
@@ -2517,6 +2522,7 @@ tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim	nim	5
 tests/integration/t_recipe_imports_a_module_of_a_declared_package_by_name.nim	nim	1
 tests/integration/t_recipe_lock_consistency_refuses.nim	nim	4
 tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim	nim	4
+tests/integration/t_record_store_preconditions_run_inside_the_lock_update_node.nim	nim	1
 tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	6
 tests/integration/t_remedies_quote_paths_for_the_hook_shell.nim	nim	1
 tests/integration/t_remote_alignment_never_strips_a_checkouts_remotes.nim	nim	3
@@ -2764,6 +2770,7 @@ tests/integration/t_tpm_quote_comes_from_the_tpm.nim	nim	4
 tests/integration/t_tpm_quote_verifies.nim	nim	7
 tests/integration/t_tpm_read_wait_tells_a_signal_from_a_timeout.nim	nim	3
 tests/integration/t_transparency_log_inclusion_against_a_witnessed_root.nim	nim	15
+tests/integration/t_tree_comparison_never_fetches_in_a_partial_clone.nim	nim	1
 tests/integration/t_trycompile_probe_is_served_across_scratch_directories.nim	nim	3
 tests/integration/t_tsm_report_transport.nim	nim	39
 tests/integration/t_two_checkouts_share_a_static_library_edge.nim	nim	2
@@ -3204,12 +3211,12 @@ tests/unit/test_package_nix_pending_sources.py	python	10
 tests/unit/test_package_root_anchor.py	python	3
 tests/unit/test_profile_daemon_worker_syscalls.py	python	6
 tests/unit/test_prune_undeclared_test_binaries.py	python	7
-tests/unit/test_publish_surface_routing.py	python	32
+tests/unit/test_publish_surface_routing.py	python	44
 tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	13
+tests/unit/test_release_native_packages.py	python	15
 tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12

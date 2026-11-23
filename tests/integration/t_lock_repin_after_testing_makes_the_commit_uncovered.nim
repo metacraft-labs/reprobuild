@@ -10,7 +10,8 @@
 ##   2. lib-b advances; ``git commit -a`` fires the managed refresh, which
 ##      re-pins and stages ``repro.lock`` as decided on 2026-09-30, and the
 ##      certificate gate, running last, refuses the commit and names that
-##      re-pin as the cause. HEAD does not move.
+##      re-pin as the cause, and the certified content that differs from the
+##      index only in ``repro.lock``. HEAD does not move.
 ##   3. ``repro test`` again: the content now carries the re-pinned lock (the
 ##      refused attempt left it staged), so it is certified, and the same
 ##      ``git commit -a`` goes through, covered.
@@ -53,6 +54,11 @@ suite "HL-10 — a re-pin after testing leaves the commit uncovered":
       check fx.cf.sib.headOf(fx.app) == head0
       check "no trusted certificate covers" in refused.output
       check repinCauseLine in refused.output
+      # The gate also names the certified content the commit missed, found
+      # in the local store by tree entries: it differs only in the lock.
+      check ("cause: certified content " & content) in refused.output
+      check "differs from the content being committed only in repro.lock" in
+        refused.output
       # `commit -a` stages into a temporary index git discards on refusal, so
       # the re-pin survives in the working tree only.
       check libBNext in fx.lockText()
