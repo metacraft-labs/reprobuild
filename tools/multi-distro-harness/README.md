@@ -895,11 +895,11 @@ The test driver:
    `repro home history` and asserts the `[active]` marker is now
    on A's row (NOT on B's).
 8. Runs `repro home gc --dry-run --keep-generations 1`; asserts the
-   log contains `no orphaned prefixes` (the M9 profile is
-   package-free, so the M10 gc engine has nothing to reclaim —
-   the assertion confirms the engine ran against the right
-   state-dir + store-root + correctly computed the empty
-   live-prefix set).
+   log says it would drop exactly `${ID_B}` (A is active again and
+   always kept) and lists `0 prefix(es) no root would hold` (the M9
+   profile is package-free, so store GC has nothing to collect —
+   the two assertions confirm the gc ran against the right
+   state-dir and store-root).
 9. Runs `repro store gc`; asserts the `reclaimed: <N>` line is
    present and `repro store roots` still lists `${ID_A}` (the
    active generation MUST stay registered).
@@ -934,18 +934,18 @@ non-debian distros with a clear error message.
   the user's real `~/.cache/repro/store` if M6 ever started
   asserting on store contents. Flagging for a future M6 cleanup.
 
-- **Package-free profile + `no orphaned prefixes` assertion.** The
+- **Package-free profile + `0 prefix(es)` assertion.** The
   M9 fixtures declare a single `fs.userFile` resource with no
-  package realization. The M10 home-gc engine reclaims orphaned
-  content-addressed prefixes (i.e. realized packages); the
-  `fs.userFile` primitive is rolled back/forward via the
-  in-process file manager, not via store prefixes. So
-  `repro home gc --keep-generations 1` deterministically reports
-  `no orphaned prefixes — store is clean` on this profile shape.
-  Asserting that exact outcome IS the M9 gate for a package-free
-  profile — it confirms the engine runs against the right
-  state-dir + store-root + that it correctly computes the empty
-  live-prefix set across the kept generations. Package-realization
+  package realization. `repro home gc` drops the generations
+  outside its keep window and lets store GC collect the
+  content-addressed prefixes (i.e. realized packages) no root
+  holds; the `fs.userFile` primitive is rolled back/forward via
+  the in-process file manager, not via store prefixes. So
+  `repro home gc --dry-run --keep-generations 1` deterministically
+  proposes dropping B and collecting `0 prefix(es)` on this profile
+  shape. Asserting that exact outcome IS the M9 gate for a
+  package-free profile — it confirms the gc runs against the right
+  state-dir + store-root. Package-realization
   gc IS exercised by the Nim e2e suite (`t_home_gc.nim`,
   `t_integration_local_store_gc.nim`,
   `t_e2e_repro_home_rollback_round_trip.nim`); that surface uses
