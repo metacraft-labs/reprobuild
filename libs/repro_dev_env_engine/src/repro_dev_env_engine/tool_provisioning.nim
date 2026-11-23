@@ -15,7 +15,11 @@
 ## 2. a ``REPRO_TOOL_PROVISIONING_OVERRIDES`` entry naming it;
 ## 3. a ``[tool-provisioning.overrides]`` configuration entry naming it, the
 ##    more specific layer winning: ``repro-workspace.local.toml``, then the
-##    committed ``repro-workspace.toml``, then the user configuration;
+##    project's committed ``repro-tool-provisioning.toml``, then the
+##    committed ``repro-workspace.toml``, then the user configuration. Within
+##    one file the entry for this host's ``<cpu>-<os>`` beats the one for its
+##    ``<os>``, which beats the unqualified one; an entry for another
+##    platform is not an override here at all;
 ## 4. the invocation-wide mode: ``--tool-provisioning``, then
 ##    ``REPRO_TOOL_PROVISIONING``, then the recipe's
 ##    ``defaultToolProvisioning`` (``effectiveToolProvisioning``).
@@ -51,6 +55,7 @@ type
     tosFlag            ## ``--tool-provisioning-for``
     tosEnv             ## ``REPRO_TOOL_PROVISIONING_OVERRIDES``
     tosWorkspaceLocal  ## ``repro-workspace.local.toml``
+    tosProject         ## the project's committed ``repro-tool-provisioning.toml``
     tosWorkspace       ## the committed ``repro-workspace.toml``
     tosUser            ## the user configuration (``reprobuild.config.v1``)
 
@@ -144,7 +149,8 @@ proc overriddenBy*(entry: ToolProvisioningOverride): string =
   case entry.source
   of tosFlag: "flag"
   of tosEnv: "env"
-  of tosWorkspaceLocal, tosWorkspace, tosUser: "config:" & entry.path
+  of tosWorkspaceLocal, tosProject, tosWorkspace, tosUser:
+    "config:" & entry.path
 
 proc location*(entry: ToolProvisioningOverride): string =
   ## Where ``entry`` is written, as a diagnostic names it: the flag as
@@ -153,7 +159,7 @@ proc location*(entry: ToolProvisioningOverride): string =
   case entry.source
   of tosFlag: ToolProvisioningForFlag & "=" & spelled
   of tosEnv: ToolProvisioningOverridesEnvVar & " entry " & spelled
-  of tosWorkspaceLocal, tosWorkspace, tosUser:
+  of tosWorkspaceLocal, tosProject, tosWorkspace, tosUser:
     "`" & entry.packageSelector & " = \"" & provisioningModeName(entry.mode) &
       "\"` in " & entry.path & (if entry.line > 0: ":" & $entry.line else: "")
 
@@ -205,9 +211,30 @@ proc parseToolProvisioningOverrideList*(values: openArray[string];
       result.add(ToolProvisioningOverride(packageSelector: parsed.package,
         mode: parsed.mode, source: source))
 
-proc configOverrides(entries: openArray[ToolProvisioningConfigEntry];
-                     source: ToolOverrideSource):
+proc platformSpecificity(platform, hostPlatform: string): int =
+  ## How specifically an entry written for ``platform`` applies to
+  ## ``hostPlatform`` (``<cpu>-<os>``): 2 for the exact pair, 1 for its OS, 0
+  ## for the unqualified table, -1 when it is written for another platform.
+  if platform.len == 0:
+    return 0
+  if platform == hostPlatform:
+    return 2
+  let dash = hostPlatform.find('-')
+  if dash >= 0 and platform == hostPlatform[dash + 1 .. ^1]:
+    return 1
+  -1
+
+proc configOverrides*(entries: openArray[ToolProvisioningConfigEntry];
+                      source: ToolOverrideSource;
+                      hostPlatform = hostPlatformName()):
     seq[ToolProvisioningOverride] =
+  ## The overrides one configuration file contributes on ``hostPlatform``:
+  ## per package, the entry of its most specific table that applies here
+  ## (``<cpu>-<os>``, then ``<os>``, then the unqualified table). Every
+  ## entry's mode is checked first, whatever platform it is written for, so
+  ## a file that is wrong on some host is refused on every host.
+  var chosen = initOrderedTable[string, tuple[rank: int;
+    entry: ToolProvisioningOverride]]()
   for entry in entries:
     var mode: ToolProvisioningMode
     try:
@@ -218,8 +245,16 @@ proc configOverrides(entries: openArray[ToolProvisioningConfigEntry];
         ": [tool-provisioning.overrides] `" & entry.package & "` names `" &
         entry.mode & "`, which is not a provisioning mode (path, nix, " &
         "tarball, scoop or from-source)")
-    result.add(ToolProvisioningOverride(packageSelector: entry.package,
-      mode: mode, source: source, path: entry.path, line: entry.line))
+    let rank = platformSpecificity(entry.platform, hostPlatform)
+    if rank < 0:
+      continue
+    if chosen.hasKey(entry.package) and chosen[entry.package].rank >= rank:
+      continue
+    chosen[entry.package] = (rank: rank, entry: ToolProvisioningOverride(
+      packageSelector: entry.package, mode: mode, source: source,
+      path: entry.path, line: entry.line))
+  for _, picked in chosen:
+    result.add(picked.entry)
 
 proc userConfigToolProvisioningOverrides*(path: string):
     seq[ToolProvisioningConfigEntry] =
@@ -240,7 +275,10 @@ proc loadToolProvisioningOverrides*(flagValues: openArray[string];
   ## Every override that applies to an invocation over the project at
   ## ``projectRoot``: the flag's values, ``REPRO_TOOL_PROVISIONING_OVERRIDES``,
   ## the workspace settings found from ``projectRoot`` (the local file and the
-  ## committed one) and the user configuration at ``userConfigPath``. Each
+  ## committed one), the project's own committed
+  ## ``repro-tool-provisioning.toml`` at ``projectRoot`` (read standalone and
+  ## inside a workspace alike: it is not a root marker) and the user
+  ## configuration at ``userConfigPath``. Each
   ## source is parsed and checked here, so a bad override fails the
   ## invocation before anything runs. The precedence between them is
   ## ``resolveToolUseProvisioning``'s.
@@ -261,6 +299,8 @@ proc loadToolProvisioningOverrides*(flagValues: openArray[string];
       if lone.isSome:
         result.entries.add(configOverrides(
           lone.get().localToolProvisioningOverrides, tosWorkspaceLocal))
+    result.entries.add(configOverrides(
+      readProjectToolProvisioningOverrides(projectRoot), tosProject))
   result.entries.add(configOverrides(
     userConfigToolProvisioningOverrides(userConfigPath), tosUser))
 

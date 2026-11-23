@@ -1,7 +1,5 @@
 ## Materializing launchers into a generation that already exists replaces
-## each entry atomically; it never writes the old file in place
-## (reprobuild-pm `spec/Home-Profile-Generations-And-State.md`
-## §"Apply Pipeline" step 7 and §"Partial Apply Recovery").
+## each entry atomically; it never writes the old file in place.
 ##
 ## Generation ids are content-addressed, so re-applying an earlier profile
 ## (A, then B, then A) or re-applying the active one after drift materializes
@@ -23,9 +21,6 @@
 ##
 ## `materializeLaunchers` is the production function step 9 calls. No mocks;
 ## the store is a real scratch store.
-##
-## Recorded from reprobuild-pm
-## `issues/2026-11-18-home-reapply-rewrites-a-committed-generations-launchers-in-place.md`.
 
 import std/[os, strutils, tempfiles, times, unittest]
 

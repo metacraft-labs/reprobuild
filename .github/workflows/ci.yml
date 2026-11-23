@@ -64,7 +64,20 @@ jobs:
     name: Lint
     runs-on: [self-hosted, linux, x64]  # CIP-5: nix job (setup-dev-env) → eph-linux-x64
     steps:
+      # No persisted credential. A persisted one is an
+      # `http.https://github.com/.extraheader` in this repo's .git/config,
+      # and setup-dev-env exports a second, owner-scoped extraHeader for
+      # `https://github.com/metacraft-labs/` through GIT_CONFIG_*. Both match
+      # every request to this org, `http.extraHeader` is multi-valued, and
+      # github answers the pair `Duplicate header: "Authorization"` (HTTP
+      # 400), so every git fetch the lint gates make from this checkout
+      # failed: the attribution-base fetch below (silently) and
+      # check_package_nix_pending_sources' fetch of package.nix's `src`
+      # commit (the gate went red). This job pushes nothing, and the
+      # installation token is the one credential its gates need.
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # Mint a GitHub App installation token via the CI Token Provider
       # app.  GitHub free plan restricts org-level secrets with
       # visibility ALL from being readable inside private repos, so we
