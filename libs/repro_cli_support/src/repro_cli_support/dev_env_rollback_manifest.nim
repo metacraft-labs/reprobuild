@@ -438,17 +438,6 @@ proc fishQuoteValue(value: string): string =
 proc pwshQuoteValue(value: string): string =
   "'" & value.replace("'", "''") & "'"
 
-proc nuQuoteValue(value: string): string =
-  if not value.contains('\''):
-    return "'" & value & "'"
-  result = "\""
-  for ch in value:
-    case ch
-    of '\\': result.add("\\\\")
-    of '"': result.add("\\\"")
-    else: result.add(ch)
-  result.add("\"")
-
 proc formatDeactivateBash*(manifest: RollbackManifest): string =
   ## Walk ``vars`` in REVERSE order — last activation op rolls back
   ## first so PATH-style ops compose cleanly with the set-then-unset
@@ -505,27 +494,23 @@ proc formatDeactivatePwsh*(manifest: RollbackManifest): string =
         " -ErrorAction SilentlyContinue\n")
 
 proc formatDeactivateNushell*(manifest: RollbackManifest): string =
-  ## Nushell's reverse-walk: restorations group into a single
-  ## ``load-env`` block (when there are any) followed by ``hide-env``
-  ## lines for ops whose name was unset pre-activation.
-  var setBlock = ""
-  var trailer = ""
+  ## Nushell's reverse-walk, in the same NUON operation-list form the
+  ## activation uses (see ``formatNushell``): a ``set`` record restores a
+  ## variable that was set before activation, an ``unset`` record removes
+  ## one that was not.
+  var records: seq[string] = @[]
   for i in countdown(manifest.vars.high, 0):
     let v = manifest.vars[i]
     case v.op
     of rokSet, rokUnset, rokPrepend, rokAppend:
       if v.wasSet:
-        setBlock.add("  " & v.name & ": " &
-          nuQuoteValue(v.previous) & "\n")
+        records.add(nuonRecord({"op": "set", "name": v.name,
+          "value": v.previous}))
       else:
-        trailer.add("hide-env " & v.name & "\n")
+        records.add(nuonRecord({"op": "unset", "name": v.name}))
     of rokMarker:
-      trailer.add("hide-env " & v.name & "\n")
-  if setBlock.len > 0:
-    result.add("load-env {\n")
-    result.add(setBlock)
-    result.add("}\n")
-  result.add(trailer)
+      records.add(nuonRecord({"op": "unset", "name": v.name}))
+  nuonList(records)
 
 proc formatDeactivate*(manifest: RollbackManifest;
                       shell: ShellKind): string =
@@ -547,5 +532,5 @@ proc emitNoOpScript*(shell: ShellKind): string =
   case shell
   of skBash, skZsh: ": # repro dev-env deactivate: tamper detected, env left as-is\n"
   of skFish: "# repro dev-env deactivate: tamper detected, env left as-is\n"
-  of skNushell: "# repro dev-env deactivate: tamper detected, env left as-is\n"
+  of skNushell: "[]\n"  # an empty NUON operation list
   of skPwsh: "# repro dev-env deactivate: tamper detected, env left as-is\n"

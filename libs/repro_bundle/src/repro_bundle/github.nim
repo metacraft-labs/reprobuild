@@ -14,9 +14,15 @@
 ## `https://raw.githubusercontent.com`); `REPRO_BUNDLE_GITHUB_API` (default
 ## `https://api.github.com`). The two download bases must be `https://` (or
 ## `file://`, which the tests use): nothing in a bundle is signed, so a plain
-## `http://` transport would let anyone on the path choose its content.
+## `http://` transport would let anyone on the path choose its content. The
+## same holds for the remote when a restore resolves `latest` to a commit
+## (`lsRemoteHead`): over `http://` or `git://` anyone on the path could
+## answer with an older commit and roll the restore back to an older bundle.
+## Publishing may push to any remote git accepts (an `ssh://` one, say); it
+## is the publisher's own credentials and choice, and holding it to https://
+## would gain little: a plain-http push can be rewritten on the path anyway.
 
-import std/[algorithm, os, strutils, tempfiles]
+import std/[algorithm, os, strtabs, strutils, tempfiles]
 import repro_local_store/store_bundle
 import ./exec
 
@@ -82,10 +88,38 @@ type GithubSource* = object
 
 proc isGithubSource*(s: string): bool = s.startsWith("github:")
 
+const GitFetchProtocols* = ["-c", "protocol.allow=never",
+  "-c", "protocol.https.allow=always", "-c", "protocol.file.allow=always"]
+  ## The git counterpart of `CurlProtocols` for the remote a restore reads:
+  ## only https:// and file://, which also bounds the protocols git's curl
+  ## may follow a redirect to (git-config(1), `protocol.allow`). A
+  ## per-protocol key (`protocol.http.allow`) in any config layer would
+  ## outrank `protocol.allow`, so `gitFetchEnv` also sets
+  ## `GIT_ALLOW_PROTOCOL`, which outranks every config layer (git(1)).
+
+proc gitFetchEnv*(): StringTableRef =
+  ## This process's environment, with `GIT_ALLOW_PROTOCOL=https:file`
+  ## replacing any inherited value.
+  result = newStringTable(modeCaseSensitive)
+  for k, v in envPairs(): result[k] = v
+  result["GIT_ALLOW_PROTOCOL"] = "https:file"
+
+proc fetchRemote*(repo: string): string =
+  ## The remote a restore resolves `latest` against, refused unless
+  ## `REPRO_BUNDLE_GITHUB_REMOTE` is https:// or file://.
+  let base = githubRemoteBase()
+  let lower = base.toLowerAscii()
+  if not (lower.startsWith("https://") or lower.startsWith("file://")):
+    bundleFail("refusing REPRO_BUNDLE_GITHUB_REMOTE=" & base & ": a " &
+      "restore resolves `" & LatestBranch & "` over https:// (or file:// " &
+      "in tests)")
+  base & "/" & repo
+
 proc lsRemoteHead*(repo, branch: string): string =
-  ## The commit `branch` points at, or "" when it does not exist.
-  let r = runTool(requireExe("git"), ["ls-remote", githubRemote(repo),
-    "refs/heads/" & branch])
+  ## The commit `branch` points at, or "" when it does not exist. Read over
+  ## https:// (or file://) only, since the commit picks the bundle.
+  let r = runTool(requireExe("git"), @GitFetchProtocols & @["ls-remote",
+    fetchRemote(repo), "refs/heads/" & branch], env = gitFetchEnv())
   if r.code != 0:
     bundleFail("cannot reach " & githubRemote(repo) & ": " & r.errors.strip())
   for line in r.output.splitLines():

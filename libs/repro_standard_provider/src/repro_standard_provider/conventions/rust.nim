@@ -133,6 +133,9 @@
 ##     Mode B crude fallback inside ``emitFragment``. One such package,
 ##     the root's or any workspace member's, sends the whole workspace
 ##     there (``RustProject.hasBuildScript``).
+##   * Procedural macro packages (``[lib] proc-macro = true``) — Mode A
+##     does not compile a crate for the host, so one such member sends
+##     the whole workspace to Mode B (``RustProject.hasProcMacro``).
 ##   * Full Mode A for crates.io / git deps — the convention currently
 ##     drops to the crude fallback when an external dep is detected.
 ##     A future milestone can graduate this to per-dep ``--extern``
@@ -311,6 +314,12 @@ type
       ## (``packageHasBuildScript``). Mode A runs no build script, so
       ## such a package sends the whole workspace to Mode B (Rust.md
       ## §"Recognition" item 5).
+    hasProcMacro: bool
+      ## True when the package's library is a procedural macro: ``cargo
+      ## metadata`` reports a target of kind ``proc-macro`` for it
+      ## (``packageHasProcMacro``). Mode A compiles no crate for the host
+      ## and passes no ``--extern`` for one, so such a package sends the
+      ## whole workspace to Mode B (Rust.md §"Recognition" item 5).
     harnessUnattributed: bool
       ## True when the package's ``Cargo.toml`` may set ``harness = false``
       ## where ``scanHarnessSettings`` cannot tell on which ``[[test]]``
@@ -354,6 +363,10 @@ type
       ## through Mode B: per-package delegation, in which the other
       ## members stay in Mode A and consume cargo's rlib of this one, is
       ## not implemented.
+    hasProcMacro: bool
+      ## True when any package is a procedural macro crate
+      ## (``RustPackage.hasProcMacro``). Routes the entire project through
+      ## Mode B, like ``hasBuildScript``.
     harnessUnattributed: bool
       ## True when any package may set ``harness = false`` where Mode A
       ## cannot tell on which target (``RustPackage.harnessUnattributed``).
@@ -1539,6 +1552,27 @@ proc packageDeclaresFeatures(pkgNode: JsonNode): bool =
         return true
   false
 
+proc packageHasProcMacro(pkgNode: JsonNode): bool =
+  ## True when the package's library is a procedural macro. ``cargo
+  ## metadata`` reports a ``[lib] proc-macro = true`` library as a target
+  ## whose ``kind`` (and ``crate_types``) is ``["proc-macro"]`` (Cargo
+  ## reference, "Cargo Targets", "The ``proc-macro`` field":
+  ## https://doc.rust-lang.org/cargo/reference/cargo-targets.html#the-proc-macro-field).
+  ## ``extractTargets`` drops such a target, since Mode A cannot build it:
+  ## a proc-macro is a dynamic library loaded by the ``rustc`` that
+  ## compiles its dependents, so it has to be built for the host and
+  ## handed to them with ``--extern``.
+  if "targets" notin pkgNode or pkgNode["targets"].kind != JArray:
+    return false
+  for target in pkgNode["targets"]:
+    if target.kind != JObject or "kind" notin target or
+       target["kind"].kind != JArray:
+      continue
+    for k in target["kind"]:
+      if k.kind == JString and k.getStr() == "proc-macro":
+        return true
+  false
+
 proc packageHasBuildScript(pkgNode: JsonNode; manifestDir: string): bool =
   ## True when the package has a build script. ``cargo metadata`` reports
   ## it as a target whose ``kind`` is ``["custom-build"]``: the
@@ -1704,6 +1738,9 @@ proc loadProject(projectRoot: string;
     let hasBuildScript = packageHasBuildScript(pkgNode, manifestDir)
     if hasBuildScript:
       result.hasBuildScript = true
+    let hasProcMacro = packageHasProcMacro(pkgNode)
+    if hasProcMacro:
+      result.hasProcMacro = true
     let harness = scanHarnessSettings(
       if manifestPath.len > 0: manifestPath
       else: projectRoot / "Cargo.toml")
@@ -1731,6 +1768,7 @@ proc loadProject(projectRoot: string;
         hasExternalDeps: hasExternalDeps,
         hasFeatures: hasFeatures,
         hasBuildScript: hasBuildScript,
+        hasProcMacro: hasProcMacro,
         harnessUnattributed: harnessUnattributed,
         crateEnv: crateEnv))
       continue
@@ -1744,6 +1782,7 @@ proc loadProject(projectRoot: string;
       hasExternalDeps: hasExternalDeps,
       hasFeatures: hasFeatures,
       hasBuildScript: hasBuildScript,
+      hasProcMacro: hasProcMacro,
       harnessUnattributed: harnessUnattributed,
       crateEnv: crateEnv))
   # Workspace detection: prefer ``workspace_members.len > 1`` (the
@@ -2961,6 +3000,13 @@ proc rustEmitFragment(projectRoot: string;
     # script provides: a failed compile, or code other than cargo's. A
     # build script on any package sends the whole workspace to Mode B.
     if project.hasBuildScript:
+      return rustCrudeFallback(projectRoot, request)
+    # Rust.md §"Recognition" item 5: a proc-macro is compiled for the host
+    # and loaded by the ``rustc`` of each crate that depends on it. Mode A
+    # builds neither, so a dependent's ``rustc`` would fail on an
+    # unresolved crate. No allow list exists yet: any proc-macro member
+    # sends the whole workspace to Mode B.
+    if project.hasProcMacro:
       return rustCrudeFallback(projectRoot, request)
     # Rust.md §"Recognition" item 6: Mode A passes no ``--cfg feature``
     # because it does no feature resolution, so a crate with default
