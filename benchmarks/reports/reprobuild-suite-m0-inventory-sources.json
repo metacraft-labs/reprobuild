@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3191,
+    "nimTestBinaries": 3195,
     "pureUnitConsolidationGroups": 95,
-    "pureUnitTests": 841,
+    "pureUnitTests": 842,
     "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3243
+    "testEntries": 3247
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -254,7 +254,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 7,
       "defines": [],
       "dependencyShape": [
         "repro_core"
@@ -266,6 +266,7 @@
         "libs/repro_core/tests/t_nix_store_references_scan.nim",
         "libs/repro_core/tests/t_normalized_path_folds_absolute_dotdot.nim",
         "libs/repro_core/tests/t_recipe_source_names_cost_once_per_compile.nim",
+        "libs/repro_core/tests/t_sibling_pin_lookup_reads_flake_lock.nim",
         "libs/repro_core/tests/t_target_object_check.nim"
       ],
       "targetOs": "soAny"
@@ -1838,9 +1839,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1789,
+      "integration": 1792,
       "platform/destructive": 201,
-      "pure unit": 841,
+      "pure unit": 842,
       "unclassified": 383
     },
     "graphOwnedTestArtifacts": [
@@ -2061,9 +2062,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3191,
+    "nimTestBinaryCount": 3195,
     "pythonTestFileCount": 52,
-    "testEntryCount": 3243
+    "testEntryCount": 3247
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17591,6 +17592,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_sibling_pin_lookup_reads_flake_lock",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_sibling_pin_lookup_reads_flake_lock.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_source_root_installed_layout",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -22062,6 +22080,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_extraction_search_path_drops_a_displaced_sibling",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_extraction_search_path_drops_a_displaced_sibling.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_installed_layout_source_roots",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -22283,6 +22319,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_provider_compile_environment_selects_the_resolved_root",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_provider_compile_environment_selects_the_resolved_root.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_provider_link_flags_bake_no_host_rpath",
       "class": "unclassified",
       "classificationReason": "mutates the process environment",
@@ -22386,6 +22441,24 @@
       "source": "libs/repro_interface_artifacts/tests/t_recipe_compile_openssl_path_follows_the_installed_package.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_compile_refuses_a_stale_flake_pinned_sibling",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_recipe_compile_refuses_a_stale_flake_pinned_sibling.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
