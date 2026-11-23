@@ -286,7 +286,7 @@ libs/repro_build_engine/tests/test_s7_cached_output_restore_mode.nim	nim	15
 libs/repro_build_engine/tests/test_tool_identity_env_plumbing.nim	nim	18
 libs/repro_build_engine/tests/test_umask_wrap_both_spawn_paths.nim	nim	8
 libs/repro_build_engine/tests/test_wrapped_monitor_evidence_ownership.nim	nim	3
-libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	42
+libs/repro_bundle/tests/t_repro_bundle_halves.nim	nim	43
 libs/repro_cargo_edge/tests/t_rqe_cg3_cargo_edge.nim	nim	22
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_compile_edges_offline.nim	nim	1
 libs/repro_cargo_fetch/tests/test_rqe_cg4a_crate_fetch_checked.nim	nim	7
@@ -1589,6 +1589,7 @@ tests/e2e/dev-env/t_e2e_repro_test_run_edges_get_the_dev_env.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_cd_activate_deactivate.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_io_bounded.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_noop_latency.nim	nim	2
+tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim	nim	2
 tests/e2e/dev-env/t_e2e_shell_hook_prompt_key_sees_flake_inputs.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_realistic_workload.nim	nim	1
 tests/e2e/dev-env/t_e2e_shell_hook_templates.nim	nim	10
@@ -1860,6 +1861,7 @@ tests/integration/t_a_mixed_workspace_records_only_the_publishable_inputs.nim	ni
 tests/integration/t_a_narrowed_required_name_is_not_trusted_by_the_ratchet_or_ci_skip.nim	nim	1
 tests/integration/t_a_pinned_nim_is_provisioned_from_a_cold_store.nim	nim	3
 tests/integration/t_a_pinned_sibling_is_locked_without_reading_its_recipe.nim	nim	6
+tests/integration/t_a_producer_recipe_that_does_not_compile_names_its_error.nim	nim	1
 tests/integration/t_a_project_under_a_volatile_prefix_keeps_its_reads.nim	nim	7
 tests/integration/t_a_pushed_sibling_is_still_recorded.nim	nim	1
 tests/integration/t_a_read_outside_the_logical_roots_stays_local.nim	nim	2
@@ -2658,6 +2660,7 @@ tests/integration/t_runquota_auto_start_keeps_the_daemon_it_found.nim	nim	2
 tests/integration/t_runquota_bypass_is_reported_in_build_header_and_report.nim	nim	7
 tests/integration/t_runquota_close_refusal_names_the_leaked_lease.nim	nim	1
 tests/integration/t_runquota_daemon_from_another_build_makes_way.nim	nim	5
+tests/integration/t_runquota_hold_covers_the_whole_invocation.nim	nim	1
 tests/integration/t_runquota_long_temp_rendezvous.nim	nim	4
 tests/integration/t_runquota_test_threads_follow_grant.nim	nim	3
 tests/integration/t_rust_mode_a_depfile_is_read_not_cached.nim	nim	1
@@ -3162,6 +3165,7 @@ tests/unit/t_recipe_pin_edit.nim	nim	19
 tests/unit/t_repo_fragment_role_keys.nim	nim	8
 tests/unit/t_repo_fragment_writer_emits_only_repo_v2.nim	nim	5
 tests/unit/t_repo_relocation_move_ordering.nim	nim	16
+tests/unit/t_repo_scalar_remote_stays_primary_beside_extra_remotes.nim	nim	2
 tests/unit/t_repo_v1_and_v2_resolve_identically.nim	nim	1
 tests/unit/t_role_falls_back_toward_mainline.nim	nim	3
 tests/unit/t_role_validation_refused_at_manifest_load.nim	nim	7
