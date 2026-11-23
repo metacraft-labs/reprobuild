@@ -30,6 +30,7 @@ import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/force_push_records
 import repro_cli_support/repository_identities
+import repro_cli_support/health_progress
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
@@ -60130,15 +60131,15 @@ proc pinnedRevisionEvidence(identity: GitToolIdentity;
         if raw.strip() == gitRemote:
           scope = gitRemote
           break
-  let pattern =
-    if scope.len > 0: "refs/remotes/" & scope & "/"
-    else: "refs/remotes/"
-  let contains = gitRunPlainQuery(identity, ["-C", checkout, "for-each-ref",
-    "--format=%(refname)", "--contains", revision, pattern])
-  if contains.code != 0:
-    return "could not be checked (git for-each-ref --contains failed: " &
+  # One history walk, never a per-ref ``--contains`` sweep: on a reference
+  # tree with thousands of remote-tracking refs the sweep does not finish
+  # (``git_actions.revisionOnRemoteTrackingRef`` has the measurements).
+  let contains = revisionOnRemoteTrackingRef(identity, checkout, revision,
+    scope)
+  if not contains.ok:
+    return "could not be checked (" &
       firstOutputLine(contains.diagnostic) & ")"
-  if contains.output.strip().len > 0:
+  if contains.contained:
     return ""
   if scope.len > 0:
     "is on no '" & scope & "/*' remote-tracking branch"
@@ -74012,8 +74013,9 @@ type
     ## F0.3 — the answer to "is this checkout's HEAD published?", with the two
     ## cases the bare predicate cannot tell apart kept SEPARATE.
     ##
-    ## ``git branch -r --contains HEAD`` answers "is HEAD on a remote-tracking
-    ## branch **that this checkout has fetched**". Two very different states
+    ## The local predicate (``git_actions.remoteBranchContainsHead``) answers
+    ## "is HEAD on a remote-tracking branch **that this checkout has
+    ## fetched**". Two very different states
     ## come back as the same "no":
     ##
     ##   * the commit exists on a remote nobody has fetched here (a stale
@@ -80679,6 +80681,9 @@ type
     json: bool
     fix: bool
     verbose: bool
+    progress: HealthProgress
+      ## Where the gatherer announces each row and each checkout it reaches
+      ## (``health_progress``); ``nil`` is silent.
 
   HealthContext = object
     ## Resolved facts the gatherer shares across checks so it only
@@ -81502,6 +81507,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    publisher" to anyone who finds it. Reported with the remedy; never
   #    auto-removed, because the same directory is where the developer-side
   #    `repro build` publisher keeps a key it DID mean to mint.
+  parsed.progress.beginRow("binary-cache-producer-key")
   block staleProducerKey:
     let credDir = defaultAutoCredentialDir()
     let keyFile = credDir / "producer.key.pem"
@@ -81551,6 +81557,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # that probe has already been paid for here.
   var running = false
   var endpoint = ""
+  parsed.progress.beginRow("daemon-mode")
   block daemonCheck:
     try:
       let status = queryUserDaemonStatus()
@@ -81614,6 +81621,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     contrast ``direnv allow`` or cloning a missing sibling, which are
   #     recoverable. The remedy therefore names the sweep for the operator to
   #     run, and ``--fix`` describes it instead of doing it.
+  parsed.progress.beginRow("lease-reaper")
   block leaseReaperCheck:
     let health = readLeaseReapTickHealth(dlsUser)
     let storeRoot = leaseStoreRootForScope(dlsUser)
@@ -81778,6 +81786,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
 
   # 3. Store health. The content-addressed store root must be present
   #    and readable.
+  parsed.progress.beginRow("store")
   block storeCheck:
     let storeRoot = resolveStoreRoot("")
     var ok = false
@@ -81806,6 +81815,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         fixKind: hfNone))
 
   # 4. direnv — installed, and the workspace .envrc is trusted.
+  parsed.progress.beginRow("direnv")
   block direnvCheck:
     let direnvBin = resolveDirenvBin()
     let envrc = detectDirenvEnvrcState(parsed.workspaceRoot)
@@ -81854,6 +81864,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       fixKind: hfNone))
 
   # 6. Manifest resolution + active project set.
+  parsed.progress.beginRow("manifest")
   block manifestCheck:
     try:
       ctx.resolved = resolveHealthProject(parsed)
@@ -81938,6 +81949,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     `manifest` above read only the checked-out one, for the active
   #     projects only. A migration that landed on one role is invisible
   #     until a workspace tracks the other and enables the affected project.
+  parsed.progress.beginRow("root-role-manifests")
   block rootRoleManifestsCheck:
     let outcomes = checkRootRoleManifests(parsed.workspaceRoot)
     if outcomes.len >= 2:
@@ -81977,6 +81989,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # 7. Dependencies / develop-mode siblings — every declared repo must
   #    be checked out. Missing ones get a clone remedy and are eligible
   #    for safe ``--fix``.
+  parsed.progress.beginRow("siblings")
   block siblingCheck:
     if not ctx.resolvedOk:
       checks.add(HealthCheck(
@@ -81986,7 +81999,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: self & " workspace sync",
         fixKind: hfNone))
     else:
-      for repo in ctx.resolved.repos:
+      for index, repo in ctx.resolved.repos:
+        parsed.progress.beginItem(repo.path, index + 1,
+          ctx.resolved.repos.len)
         let abs = parsed.workspaceRoot / repo.path
         if not dirExists(abs / ".git"):
           ctx.missingSiblings.add(repo)
@@ -82011,6 +82026,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    resolvable (the precondition for clone/fetch). We do NOT require a
   #    live network round-trip in the gatherer — that would make the
   #    doctor itself flaky offline. The remedy still names the auth fix.
+  parsed.progress.beginRow("vcs-host-auth")
   block vcsCheck:
     try:
       ctx.gitIdentity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
@@ -82032,6 +82048,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # Forge redirects are transparent to Git. Ask the forge about the
   # composed URL independently of checkout/pool state; a mismatch remains
   # advisory and never authorizes a doctor to migrate anything.
+  parsed.progress.beginRow("repository-identities")
   block repositoryIdentitiesCheck:
     if not ctx.resolvedOk:
       checks.add(HealthCheck(name: "repository-identities", status: hsWarn,
@@ -82133,7 +82150,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     refuses every body this row counts as current, so this row is not
   #     ``ok`` while 8c reports such a resolution. Computing 8c once and
   #     sharing it keeps the probe from running twice.
+  parsed.progress.beginRow("hook-interpreter")
   let interpreterCheck = hookInterpreterSkewCheck(parsed.workspaceRoot)
+  parsed.progress.beginRow("vcs-hooks")
   block hooksCheck:
     var missing: seq[string]
     var shadowed: seq[string]
@@ -82160,7 +82179,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     # ``managedHookContractsOfThisBuild``): five bodies, not five per repo.
     let expectedContracts = managedHookContractsOfThisBuild()
     var writers: seq[string]
-    for repo in enumerated.repos:
+    for index, repo in enumerated.repos:
+      parsed.progress.beginItem(repo.name, index + 1, enumerated.repos.len)
       if gitTopLevel(repo.repoPath).len == 0:
         continue        # not materialized; the siblings check owns that.
       inc reposInspected
@@ -82483,6 +82503,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #      Warnings, never failures: a push goes through regardless (Tooling
   #      §4.3). What is lost is what a receiving gate will see.
   var policyStalenessMemo: CertificatePolicyStalenessMemo
+  parsed.progress.beginRow("certificate-propagation")
   checks.add(certificatePropagationCheck(parsed.workspaceRoot,
     policyStalenessMemo))
 
@@ -82493,6 +82514,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     writer refused on every commit, because neither looks at what a run
   #     DID. The writer never fails a commit and says so in one stderr line,
   #     so the only durable record is its trace, and this row is what reads it.
+  parsed.progress.beginRow("lock-writer")
   checks.add(lockWriterOutcomeCheck(parsed.workspaceRoot, self))
 
   # 9. Push gateway — PG-16. OBSERVED state, per §7.6.6, replacing a constant.
@@ -82513,6 +82535,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    `required` on an `unwired` repo is visible as the contradiction it is".
   #    That contradiction is also the row's ``fail`` condition — the row must be
   #    CAPABLE of failing, and this is the state it fails on.
+  parsed.progress.beginRow("push-gateway")
   block pushGatewayCheck:
     let obs = observeWorkspaceGateways(parsed.workspaceRoot)
     if obs.repos.len == 0 and not ctx.resolvedOk:
@@ -82668,6 +82691,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     root's. Without a resolved manifest which repositories are siblings is
   #     unknown, so the row is the skipped `warn` (which does not move the exit
   #     status either) rather than an `ok` over a list nobody read.
+  parsed.progress.beginRow("sibling-exact-pins")
   block siblingExactPinsCheck:
     if not ctx.resolvedOk:
       checks.add(skippedForUnresolvedManifest("sibling-exact-pins",
@@ -82682,7 +82706,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         consumers.add(co)
     var findings: seq[SiblingExactPinFinding]
     var unreadable: seq[string]
-    for consumer in consumers:
+    for index, consumer in consumers:
+      parsed.progress.beginItem(relativePath(consumer, ws), index + 1,
+        consumers.len)
       try:
         var pinNotices: seq[string]
         findings.add(siblingExactPinFindingsOf(consumer, ws,
@@ -82755,6 +82781,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     rule for its checked-out branch (`checkedOutPushPolicy`) — and cannot
   #     report a policy a gate would not apply. A manifest that still carries
   #     the retired `[certificates]` table is reported by the manifest row.
+  parsed.progress.beginRow("certificate-policy")
   block certificatePolicyCheck:
     if not ctx.initialized:
       break certificatePolicyCheck
@@ -82788,7 +82815,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     # why none applies) and the policy's ci_trust. A repository with no
     # snapshot has no policy, and the row says so rather than assuming it.
     var gating, enactedOff, malformed, empty, noPolicy: seq[string]
-    for repo in participating:
+    for index, repo in participating:
+      parsed.progress.beginItem(repo.name, index + 1, participating.len)
       let policy = checkedOutPushPolicy(repo.repoPath)
       if not policy.present:
         noPolicy.add(repo.name)
@@ -82856,6 +82884,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "", fixKind: hfNone))
 
   # 12. Workspace projects list and ignore/agents configuration (RA-30).
+  parsed.progress.beginRow("workspace-ergonomics")
   block workspaceProjectsCheck:
     var ok = true
     var details: seq[string] = @[]
@@ -82918,6 +82947,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #      block leaves a tracked path out (the tracked-probe rule), so the
   #      mistake has to be named here. Report-only: un-tracking a file is an
   #      index change in the user's repository, so the remedy is printed.
+  parsed.progress.beginRow("workspace-state-file")
   block stateFileCheck:
     let findings = inspectWorkspaceStateFiles(parsed.workspaceRoot)
     if findings.len == 0:
@@ -82950,6 +82980,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
                self & " health --fix`"
            else: self & " health --fix"),
         fixKind: (if skew: hfNone else: hfMigrateStateFile)))
+  parsed.progress.beginRow("local-settings-file")
   block localSettingsTrackedCheck:
     if not ctx.gitOk:
       break localSettingsTrackedCheck
@@ -82988,12 +83019,13 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     the original incident take a reflog archaeology session to diagnose.
   #
   #     Network cost: ZERO in a healthy workspace. The first pass is the purely
-  #     local ``git branch -r --contains HEAD``; only a repo that pass flags is
+  #     local "is HEAD on a remote-tracking branch" walk; only a repo that pass flags is
   #     fetched, and the fetch can then only turn a warn into an ok. This does
   #     not contradict check 8's "no live round-trip in the gatherer" rule,
   #     which exists so that being offline cannot make a healthy workspace look
   #     broken — an unreachable remote here degrades to a distinct
   #     "cannot confirm" wording, never to a false alarm.
+  parsed.progress.beginRow("unpublished-heads")
   block unpublishedHeadsCheck:
     if not ctx.resolvedOk or not ctx.gitOk:
       checks.add(HealthCheck(
@@ -83007,7 +83039,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       break unpublishedHeadsCheck
     var candidates: seq[ResolvedRepo]
     var inspected = 0
-    for repo in ctx.resolved.repos:
+    for index, repo in ctx.resolved.repos:
+      parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
       let abs = parsed.workspaceRoot / repo.path
       if not dirExists(abs / ".git"):
         continue
@@ -83019,7 +83052,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var offenders: seq[string]
     var unconfirmed: seq[string]
     var remedies: seq[string]
-    for repo in candidates:
+    for index, repo in candidates:
+      # The second pass may fetch, so it is announced as such: the slow
+      # step of this row is a network round-trip, not the local walk above.
+      parsed.progress.beginItem(repo.path & " (fetching to confirm)",
+        index + 1, candidates.len)
       let abs = parsed.workspaceRoot / repo.path
       let verdict = headPublicationOf(ctx.gitIdentity, abs,
         gitRemoteNameFor(repo), allowFetch = true)
@@ -83039,9 +83076,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
             healthBranchAncestry(ctx.gitIdentity, abs, repo, verdict.branch,
               declaredMainlineBranch(ctx.resolved, repo.name))
           else: (disjoint: false, comparison: "", diagnostic: "detached HEAD")
-        let anyRemote = gitRunPlainQuery(ctx.gitIdentity, ["-C", abs,
-          "for-each-ref", "--format=%(refname)", "--contains=HEAD", "refs/remotes/"])
-        if anyRemote.code != 0 or (anyRemote.output.strip().len == 0 and
+        let anyRemote = revisionOnRemoteTrackingRef(ctx.gitIdentity, abs,
+          "HEAD", "")
+        if not anyRemote.ok or (not anyRemote.contained and
             (ancestry.disjoint or ancestry.diagnostic.len > 0)):
           remedies.add("do not push " & repo.path & "; inspect disjoint-local-branches and migrate unique work before retiring old history")
         else:
@@ -83079,13 +83116,16 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # while the checkout's HEAD is published. Published disjoint roots are
   # legitimate imports, so absence from all remote refs is required too.
   # This row only diagnoses; subject matches never authorize deleting work.
+  parsed.progress.beginRow("disjoint-local-branches")
   block disjointBranchesCheck:
     var findings: seq[string]
     var inspected = 0
     if not ctx.resolvedOk or not ctx.gitOk:
       findings.add("unconfirmed: manifest unresolved or no usable git tool")
     else:
-      for repo in ctx.resolved.repos:
+      for index, repo in ctx.resolved.repos:
+        parsed.progress.beginItem(repo.path, index + 1,
+          ctx.resolved.repos.len)
         let abs = parsed.workspaceRoot / repo.path
         if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
           continue
@@ -83101,13 +83141,14 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           inc inspected
           let where = repo.path & " branch '" & branch & "'"
           let branchRef = "refs/heads/" & branch
-          var published = gitRunPlainQuery(ctx.gitIdentity, ["-C", abs,
-            "for-each-ref", "--format=%(refname)", "--contains=" & branchRef,
-            "refs/remotes/"])
-          if published.code != 0:
+          # One history walk per branch, not one per remote-tracking ref
+          # (``git_actions.revisionOnRemoteTrackingRef``).
+          var published = revisionOnRemoteTrackingRef(ctx.gitIdentity, abs,
+            branchRef, "")
+          if not published.ok:
             findings.add(where & ": unconfirmed: cannot probe publication")
             continue
-          if published.output.strip().len > 0: continue
+          if published.contained: continue
           var ancestry = healthBranchAncestry(ctx.gitIdentity, abs, repo, branch,
             declaredMainlineBranch(ctx.resolved, repo.name))
           if ancestry.diagnostic.len > 0:
@@ -83126,13 +83167,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           if fetchDiagnostic.len > 0:
             findings.add(where & ": " & fetchDiagnostic)
             continue
-          published = gitRunPlainQuery(ctx.gitIdentity, ["-C", abs,
-            "for-each-ref", "--format=%(refname)", "--contains=" & branchRef,
-            "refs/remotes/"])
-          if published.code != 0:
+          published = revisionOnRemoteTrackingRef(ctx.gitIdentity, abs,
+            branchRef, "")
+          if not published.ok:
             findings.add(where & ": unconfirmed: cannot probe publication after fetch")
             continue
-          if published.output.strip().len > 0: continue
+          if published.contained: continue
           ancestry = healthBranchAncestry(ctx.gitIdentity, abs, repo, branch,
             declaredMainlineBranch(ctx.resolved, repo.name))
           if ancestry.diagnostic.len > 0:
@@ -83171,6 +83211,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     ``--fix`` removes the stale remote-tracking refs (message A); a
   #     branch of the user's is never touched (message B), so it stays a warn
   #     whose remedy is the per-branch fix the messages print.
+  parsed.progress.beginRow("shared-clone-leaves")
   block sharedCloneLeavesCheck:
     if not ctx.resolvedOk or not ctx.gitOk:
       checks.add(HealthCheck(
@@ -83191,7 +83232,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var broken: seq[string]
     var chains: seq[string]
     var diagnostics: seq[string]
-    for repo in ctx.resolved.repos:
+    for index, repo in ctx.resolved.repos:
+      parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
       let abs = parsed.workspaceRoot / repo.path
       if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
         continue
@@ -83297,6 +83339,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     workspace's, so every pool in the cache is examined; examining one is
   #     a directory listing. Report-only; ``--fix`` sweeps under each pool's
   #     lock, as the refresh, refill and maintenance paths do themselves.
+  parsed.progress.beginRow("shared-clone-pack-temporaries")
   block sharedClonePackTemporariesCheck:
     let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
     var pools = 0
@@ -83339,6 +83382,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # when some participating repository carries a snapshot or names a policy,
   # so a workspace that has adopted none sees no change. A stale snapshot is a
   # warning with the remedy, never a failure: nothing refuses on it.
+  parsed.progress.beginRow("certificate-policy-snapshot")
   block certificatePolicyCheck:
     if not ctx.initialized:
       break certificatePolicyCheck
@@ -83793,7 +83837,25 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
-  let parsed = healthArgsOf(c)
+  var parsed = healthArgsOf(c)
+  # Progress goes to stderr while the rows run (CLI/health.md § "Progress
+  # while it runs"): one status line rewritten in place on a terminal, one
+  # line per row and per checkout otherwise, so a run that is killed still
+  # names the row and the checkout it was in. ``--json`` off a terminal stays
+  # silent: its consumers capture the document, and many merge the streams.
+  let stderrIsTerminal = isatty(stderr)
+  if stderrIsTerminal:
+    parsed.progress = newHealthProgress(
+      proc (text: string) =
+        stderr.write(text)
+        stderr.flushFile(),
+      hpmLive, terminalWidth())
+  elif not parsed.json:
+    parsed.progress = newHealthProgress(
+      proc (text: string) =
+        stderr.write(text)
+        stderr.flushFile(),
+      hpmLines)
   # ``--fix`` lines are written as they happen, never collected and printed
   # after the fixes ran: a fix can clone many repositories, and a plan the
   # operator reads only once the work is done is no plan. ``--json`` keeps
@@ -83806,6 +83868,9 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
   if parsed.fix:
     applyStateFileMigrationFix(parsed.workspaceRoot, emitFix)
   var (checks, ctx) = gatherHealthChecks(parsed)
+  # Before anything else is printed: a live status line still on screen
+  # would otherwise prefix the first line of the plan or the report.
+  parsed.progress.finish()
 
   if parsed.fix and ctx.setAsideFiles > 0:
     # The rows were computed with a malformed workspace file set aside, so the
@@ -83817,6 +83882,7 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
     applyHealthFixes(parsed, checks, ctx, emitFix)
     # Re-diagnose after fixing so the final report reflects the new state.
     (checks, ctx) = gatherHealthChecks(parsed)
+    parsed.progress.finish()
 
   if parsed.json:
     stdout.writeLine(pretty(healthChecksToJson(checks), indent = 2))
@@ -88961,7 +89027,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       continue
     state.isClean = cleanRes.isClean
     # F0.3 — the CHEAP half of the publication question, kept in the local
-    # phase where it belongs: ``git branch -r --contains HEAD`` touches no
+    # phase where it belongs: the remote-tracking containment walk touches no
     # network. A repo that answers "published" here is finished with; only the
     # ones that do not get the network round-trip below. That is what keeps the
     # ordinary, healthy fork exactly as fast and as quiet as it was before this
