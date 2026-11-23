@@ -19,9 +19,18 @@
 ## - the apt hook ``/etc/apt/apt.conf.d/90repro-addon``: a report-only
 ##   ``DPkg::Post-Invoke`` that can never fail or stall a dpkg run, even when
 ##   the binary it names is missing, fails or hangs (``aptHookCommand``).
-##   On a Debian-family base only: an Arch-family base carries no
-##   package-manager hook in generation 0 and nothing under ``/etc/apt``
-##   (``PackageManagerHook``);
+##   On a Debian-family base only: an Arch-family base carries nothing
+##   under ``/etc/apt`` (``PackageManagerHook``);
+## - on an Arch-family base, the ALPM hook
+##   ``/etc/pacman.d/hooks/90-repro-addon.hook`` instead: the same bounded,
+##   report-only command after every pacman transaction (``alpmHook``,
+##   spec §7.8; milestone AR6);
+## - on an Omarchy base, the post-update hook in the ``omarchyAccount``'s
+##   home (``omarchyHookScript``, spec §4.3.2). It is not part of the own
+##   profile: a file in a directory the account owns is written and
+##   removed only by ``omarchy_hook.nim`` (the no-follow writer with the
+##   owner checks), never by the infra drivers, and is ledgered as its own
+##   class (``lcOmarchyHook``);
 ## - ``/etc/profile.d/repro-addon.sh``: the add-on's ``repro`` on ``PATH``
 ##   (appended). The profile DSL's ``addOnToolPath()`` writes a file of its
 ##   own, ``/etc/profile.d/repro-addon-tools.sh`` (``repro_profile``
@@ -69,9 +78,12 @@ type
       ## ``/etc/apt/apt.conf.d/90repro-addon`` (Debian, Ubuntu, Raspberry
       ## Pi OS).
     pmhNone = "none"
-      ## No package-manager hook: an Arch-family base, until its ALPM hook
-      ## exists. Nothing is written under ``/etc/apt``, which Arch does not
-      ## have.
+      ## No package-manager hook. No caller renders it since AR6 (an
+      ## Arch-family base carries the ALPM hook); kept so a test can render
+      ## a generation 0 with neither hook.
+    pmhAlpm = "alpm"
+      ## ``/etc/pacman.d/hooks/90-repro-addon.hook`` (Arch, Omarchy; spec
+      ## §7.8, §13 decision 130). Nothing is written under ``/etc/apt``.
 
   Gen0Inputs* = object
     reproExe*: string           ## the add-on's ``repro`` inside the store
@@ -93,6 +105,12 @@ type
       ## On a btrfs root, where ``/repro``'s subvolume is (spec §5.1):
       ## ``repro.mount`` mounts it by that path, so a root snapshot booted
       ## from the boot menu still finds the store. Empty otherwise.
+    omarchyHome*: string
+      ## On an Omarchy base, the ``omarchyAccount``'s home (from the
+      ## password database): generation 0 then carries the post-update
+      ## hook there (``omarchy_hook.nim``), and the re-assert unit sees
+      ## ``/home`` read-only so it can compare the hook with the ledger
+      ## (``reassertUnit``). "" on every other base.
 
   ReproSubvolumeMount* = object
     ## The ``/repro`` subvolume as a mount names it from any root: the
@@ -346,7 +364,7 @@ const
     ## the host's C compiler) uses nothing it takes away; see
     ## ``PrivilegedSyscallFilter`` for how it is derived.
 
-proc privilegedConfinement*(network: bool): string =
+proc privilegedConfinement*(network: bool; homeReadOnly = false): string =
   ## The CONF-1 floor of the add-on's root units -- the apply unit, and the
   ## re-assert and secrets units, which run "the apply unit's confinement"
   ## (spec §7.7, §9.1). Root, but a bounded capability set
@@ -374,7 +392,10 @@ proc privilegedConfinement*(network: bool): string =
   result = "NoNewPrivileges=yes\n" &
     "CapabilityBoundingSet=" & caps & "\n" &
     protectSystem &
-    "ProtectHome=yes\n" &
+    # ``homeReadOnly``: the re-assert unit of an Omarchy base, which
+    # compares the post-update hook in the account's home with the ledger
+    # (spec §4.3.2, §7.7). It still cannot write there.
+    (if homeReadOnly: "ProtectHome=read-only\n" else: "ProtectHome=yes\n") &
     "PrivateTmp=yes\n" &
     "PrivateDevices=yes\n" &
     "ProtectKernelTunables=yes\n" &
@@ -511,7 +532,7 @@ const NoSwapLine* =
   when mutated("secrets-plaintext-swappable"): "LimitMEMLOCK=infinity\n"
   else: "MemorySwapMax=0\nLimitMEMLOCK=infinity\n"
 
-proc reassertUnit(reproExe: string): string =
+proc reassertUnit(reproExe: string; homeReadOnly = false): string =
   # Boot-time re-assertion (§7.7): finishes or reverts an interrupted
   # switch, checks the current generation and reports ok / drift /
   # degraded. It never re-applies on drift.
@@ -560,7 +581,8 @@ proc reassertUnit(reproExe: string): string =
     "store is missing or unreadable; echo repro-addon reassert: degraded, " &
     "the store is missing or unreadable > " & ReassertReportPath & "; fi'\n" &
   # The apply unit's confinement, and no network (§7.7; threat model G16).
-  privilegedConfinement(network = mutated("reassert-has-network")) &
+  privilegedConfinement(network = mutated("reassert-has-network"),
+                        homeReadOnly = homeReadOnly) &
   NoSwapLine &
   "\n" &
   "[Install]\n" &
@@ -634,14 +656,37 @@ const
   AptHookSetsidTool* = "/usr/bin/setsid"     ## util-linux (Essential)
   AptHookLoggerTool* = "/usr/bin/logger"     ## bsdutils / util-linux
 
-proc aptHookCommand*(reproExe: string;
-                     timeoutSeconds = AptHookTimeoutSeconds;
-                     logPath = AptHookLogPath;
-                     setsidTool = AptHookSetsidTool;
-                     loggerTool = AptHookLoggerTool;
-                     pidDir = "/run"): string =
-  ## The shell command of the ``DPkg::Post-Invoke`` hook (apt runs it with
-  ## ``/bin/sh -c``). Report-only by construction (threat model G19, T39):
+type
+  BoundedHook* = object
+    ## What distinguishes one report-only package-manager hook from another
+    ## (spec §7.8; the apt hook, the ALPM hook, and the root side of the
+    ## Omarchy post-update hook, §4.3.2): everything else -- the session,
+    ## the watchdog, the event log line, ``exit 0`` -- is one command, so a
+    ## fix to the bound reaches every hook at once.
+    verifyFlag*: string     ## ``--after-dpkg`` | ``--after-pacman`` | ...
+    pidName*: string        ## the verification's ``$0``; also its /run file
+    tag*: string            ## the journal identifier
+    label*: string          ## the journal message's prefix
+    withoutTimeout*: bool   ## falsifying mutations only (``mutations.nim``)
+    withoutExit0*: bool
+
+const
+  AptBoundedHook* = BoundedHook(verifyFlag: "--after-dpkg",
+    pidName: "repro-addon-hook", tag: "repro-addon-apt-hook",
+    label: "repro-addon apt hook",
+    withoutTimeout: mutated("apt-hook-without-timeout"),
+    withoutExit0: mutated("apt-hook-without-exit0"))
+
+proc boundedHookCommand*(reproExe: string; hook: BoundedHook;
+                         timeoutSeconds = AptHookTimeoutSeconds;
+                         logPath = AptHookLogPath;
+                         setsidTool = AptHookSetsidTool;
+                         loggerTool = AptHookLoggerTool;
+                         pidDir = "/run"): string =
+  ## The shell command of a report-only package-manager hook (apt runs the
+  ## apt hook's with ``/bin/sh -c``; ALPM runs the ALPM hook's as
+  ## ``/bin/sh -c "..."``). Report-only by construction (threat model G19,
+  ## T39, G43, T45):
   ##
   ## - the verification runs as its own session and process group
   ##   (``setsid``), and the test for its binary runs inside it, so even a
@@ -658,9 +703,12 @@ proc aptHookCommand*(reproExe: string;
   ##   command ends in ``exit 0`` whatever happened.
   ##
   ## It uses no double quote and no backslash: apt.conf(5) strings carry
-  ## neither. Everything but ``reproExe`` is a parameter only for the
-  ## hermetic test, which runs this very command on a build host whose
-  ## tools live elsewhere; generation 0 uses the defaults.
+  ## neither, and an ALPM ``Exec`` carries it inside double quotes, where
+  ## libalpm's word splitting treats a backslash as an escape
+  ## (alpm-hooks(5), "Exec"). Everything but ``reproExe`` and ``hook`` is a
+  ## parameter only for the hermetic test, which runs this very command on
+  ## a build host whose tools live elsewhere; generation 0 uses the
+  ## defaults.
   let t = $timeoutSeconds
   let g = $AptHookKillGraceSeconds
   # The verification's shell records its own pid -- its session's and
@@ -670,13 +718,14 @@ proc aptHookCommand*(reproExe: string;
   # job's exit status the verification's either way).
   # ``$f`` is on ``/run`` (tmpfs, always writable by root): the deadline
   # must not depend on the state directory being writable.
-  let verify = "f=" & pidDir & "/repro-addon-hook.$$; rm -f $f; " &
+  let verify = "f=" & pidDir & "/" & hook.pidName & ".$$; rm -f $f; " &
     setsidTool & " -w /bin/sh -c " &
     "'echo $$ > $2; [ -x $1 ] || exit 127; exec $1 system addon verify " &
-    "--after-dpkg' repro-addon-hook $r $f & p=$!; "
+    hook.verifyFlag & "' " & hook.pidName & " $r $f & p=$!; "
   let watchdog =
-    when mutated("apt-hook-without-timeout"):
-      # FALSIFYING MUTATION: no deadline; a hung verification stalls dpkg.
+    if hook.withoutTimeout:
+      # FALSIFYING MUTATION: no deadline; a hung verification stalls the
+      # package manager.
       "w=0; "
     else:
       # The watchdog acts only while the verification's job (``$p``) is
@@ -689,11 +738,12 @@ proc aptHookCommand*(reproExe: string;
       setsidTool & " -w /bin/sh -c 'sleep $1; kill -0 $3 2>/dev/null || exit 0; " &
         "g=$(cat $2 2>/dev/null); [ -z $g ] && g=$3; kill -TERM -$g; " &
         "sleep " & g & "; kill -0 $3 2>/dev/null || exit 0; kill -KILL -$g' " &
-        "repro-addon-hook-watchdog " & t & " $f $p </dev/null >/dev/null 2>&1 & w=$!; "
+        hook.pidName & "-watchdog " & t & " $f $p </dev/null >/dev/null 2>&1 & w=$!; "
   let ending =
-    when mutated("apt-hook-without-exit0"):
+    if hook.withoutExit0:
       # FALSIFYING MUTATION: the verification's status is the hook's, so a
-      # failing or timed-out verification fails dpkg's caller.
+      # failing or timed-out verification fails the package manager's
+      # caller.
       "exit $c"
     else:
       "exit 0"
@@ -704,9 +754,21 @@ proc aptHookCommand*(reproExe: string;
     "if [ $c != 0 ]; then " &
     "echo $(date -u +%Y-%m-%dT%H:%M:%SZ) $k exit=$c timeout=" & t &
     "s >> $l 2>/dev/null; " &
-    loggerTool & " -t repro-addon-apt-hook -p user.warning " &
-    "repro-addon apt hook: $k exit=$c timeout=" & t & "s " &
+    loggerTool & " -t " & hook.tag & " -p user.warning " &
+    hook.label & ": $k exit=$c timeout=" & t & "s " &
     "</dev/null >/dev/null 2>&1 & fi; " & ending
+
+proc aptHookCommand*(reproExe: string;
+                     timeoutSeconds = AptHookTimeoutSeconds;
+                     logPath = AptHookLogPath;
+                     setsidTool = AptHookSetsidTool;
+                     loggerTool = AptHookLoggerTool;
+                     pidDir = "/run"): string =
+  ## The shell command of the ``DPkg::Post-Invoke`` hook (A10): the bounded
+  ## command above with the apt hook's names. Its bytes are A10's: the apt
+  ## hook of an existing host is not re-rendered.
+  boundedHookCommand(reproExe, AptBoundedHook, timeoutSeconds, logPath,
+                     setsidTool, loggerTool, pidDir)
 
 proc aptHook*(reproExe: string): string =
   ## ``/etc/apt/apt.conf.d/90repro-addon`` (spec §7.8).
@@ -717,6 +779,136 @@ proc aptHook*(reproExe: string): string =
   "// exits 0; a missing, failing or hung verification is recorded in\n" &
   "// " & AptHookLogPath & " and the journal.\n" &
   "DPkg::Post-Invoke { \"" & aptHookCommand(reproExe) & "\"; };\n"
+
+const
+  AlpmHookPath* = "/etc/pacman.d/hooks/90-repro-addon.hook"
+    ## The ALPM hook (spec §7.8; milestone AR6). A hook in
+    ## ``/etc/pacman.d/hooks`` replaces a packaged hook of the same file
+    ## name in ``/usr/share/libalpm/hooks`` (alpm-hooks(5): the first
+    ## ``HookDir`` that has a name wins), so the preflight refuses a base
+    ## where a package ships either path (``AlpmHookPackagedPaths``), and
+    ## the verification reports one that arrives later (``alpm_hook.nim``).
+  AlpmHookPackagedPaths* = ["/usr/share/libalpm/hooks/90-repro-addon.hook",
+                            AlpmHookPath]
+    ## Where a package's hook of the add-on's name would be: pacman's
+    ## default ``HookDir`` and the add-on's own path.
+  AlpmHookLogPath* = "/var/lib/repro/system/addon/alpm-hook.log"
+    ## The ALPM hook's event log, in the apt hook's format
+    ## (``AptHookLogPath``).
+  AlpmBoundedHook* = BoundedHook(verifyFlag: "--after-pacman",
+    pidName: "repro-addon-alpm-hook", tag: "repro-addon-alpm-hook",
+    label: "repro-addon alpm hook",
+    withoutTimeout: mutated("alpm-hook-without-timeout"),
+    withoutExit0: mutated("alpm-hook-without-exit0"))
+  OmarchyHookRel* = ".config/omarchy/hooks/post-update.d/90-repro-addon"
+    ## The Omarchy post-update hook, relative to the ``omarchyAccount``'s
+    ## home (spec §4.3.2): ``omarchy-hook post-update`` runs every file in
+    ## ``post-update.d`` not ending in ``.sample``, with ``bash``, as the
+    ## account that ran ``omarchy update``.
+  OmarchyHookLogPath* = "/var/lib/repro/system/addon/omarchy-hook.log"
+    ## The root side's event log (``verify-missing``, ``-failed``,
+    ## ``-timeout`` and the verification's findings). ``verify-unprivileged``
+    ## cannot be written there -- the account cannot write under
+    ## ``/var/lib/repro`` -- and goes to the account's journal only.
+  OmarchyHookTag* = "repro-addon-omarchy-hook"
+  OmarchyBoundedHook* = BoundedHook(verifyFlag: "--after-base-update",
+    pidName: "repro-addon-omarchy-hook", tag: OmarchyHookTag,
+    label: "repro-addon omarchy hook",
+    withoutTimeout: mutated("omarchy-hook-without-timeout"),
+    withoutExit0: false)
+  OmarchyHookSudoTool* = "/usr/bin/sudo"
+  OmarchyHookTrueTool* = "/usr/bin/true"
+
+proc alpmHookCommand*(reproExe: string): string =
+  ## The ALPM hook's command: the bounded command with the ALPM hook's
+  ## names and log.
+  boundedHookCommand(reproExe, AlpmBoundedHook, logPath = AlpmHookLogPath)
+
+proc alpmHook*(reproExe: string): string =
+  ## ``/etc/pacman.d/hooks/90-repro-addon.hook`` (spec §7.8): after every
+  ## transaction (``When = PostTransaction``, which cannot abort it), for
+  ## every package and operation, the bounded verification. pacman waits
+  ## for a post-transaction hook while it holds its database lock, so the
+  ## bound is what keeps a hung verification from stalling every later
+  ## pacman run and ``omarchy update`` (threat model T45). ``Exec`` is
+  ## split by libalpm into words, a double-quoted run being one word
+  ## (alpm-hooks(5)); the command carries neither a double quote nor a
+  ## backslash (``boundedHookCommand``).
+  let cmd = alpmHookCommand(reproExe)
+  doAssert '"' notin cmd and '\\' notin cmd
+  "# Reprobuild add-on: report-only verification after every pacman\n" &
+  "# transaction. It never fails or stalls pacman: the verification is\n" &
+  "# bounded by a " & $AptHookTimeoutSeconds & " s deadline over its whole " &
+    "process group and the\n" &
+  "# command always exits 0; a missing, failing or hung verification is\n" &
+  "# recorded in " & AlpmHookLogPath & " and the journal.\n" &
+  "[Trigger]\n" &
+  "Operation = Install\n" &
+  "Operation = Upgrade\n" &
+  "Operation = Remove\n" &
+  "Type = Package\n" &
+  "Target = *\n" &
+  "\n" &
+  "[Action]\n" &
+  "Description = Reprobuild add-on: report-only verification of its objects\n" &
+  "When = PostTransaction\n" &
+  "Exec = /bin/sh -c \"" & cmd & "\"\n"
+
+proc omarchyHookPath*(home: string): string =
+  ## ``<home>/.config/omarchy/hooks/post-update.d/90-repro-addon``.
+  home.strip(leading = false, chars = {'/'}) & "/" & OmarchyHookRel
+
+proc omarchyHookScript*(reproExe: string;
+                        timeoutSeconds = AptHookTimeoutSeconds;
+                        logPath = OmarchyHookLogPath;
+                        setsidTool = AptHookSetsidTool;
+                        loggerTool = AptHookLoggerTool;
+                        sudoTool = OmarchyHookSudoTool;
+                        trueTool = OmarchyHookTrueTool): string =
+  ## The post-update hook (spec §4.3.2; §13 decision 95). ``omarchy-hook``
+  ## runs it with ``bash`` as the account, inside ``omarchy update``'s
+  ## ``script(1)`` session, so ``sudo -n`` usually finds the update's
+  ## cached credential.
+  ##
+  ## The bounded command runs on the ROOT side of ``sudo``: a watchdog the
+  ## account ran could not signal the root verification's process group,
+  ## so the whole bounded command -- session, watchdog, event log -- is
+  ## given to a root ``/bin/sh`` on its standard input. ``sudo -n`` never
+  ## prompts; the root side always exits 0 within the deadline plus the
+  ## kill grace. When ``sudo -n`` fails (the probe, or the command itself)
+  ## the hook prints ``verify-unprivileged`` and sends it to the account's
+  ## journal under ``repro-addon-omarchy-hook``; the re-assert unit and the
+  ## next plan report the drift instead (decision 95). Always ``exit 0``.
+  ## The parameters other than ``reproExe`` exist for the hermetic test.
+  let root = boundedHookCommand(reproExe, OmarchyBoundedHook, timeoutSeconds,
+                                logPath, setsidTool, loggerTool)
+  let unprivileged =
+    when mutated("omarchy-hook-no-unprivileged-record"):
+      # FALSIFYING MUTATION: a failed `sudo -n` leaves no record.
+      ""
+    else:
+      "echo 'repro-addon omarchy hook: verify-unprivileged: sudo -n failed " &
+        "(no cached credential); the re-assert unit and the next plan " &
+        "report any drift'\n" &
+      loggerTool & " -t " & OmarchyHookTag & " -p user.warning " &
+        "'repro-addon omarchy hook: verify-unprivileged: sudo -n failed " &
+        "(no cached credential)' </dev/null >/dev/null 2>&1 &\n"
+  "#!/bin/bash\n" &
+  "# Reprobuild add-on: report-only verification after `omarchy update`\n" &
+  "# (written by the add-on as root, mode 0644, and removed by its\n" &
+  "# uninstall; a change to it is drift the next plan reports).\n" &
+  "# It never fails or stalls the update: the verification runs as root\n" &
+  "# through `sudo -n` (never a prompt), bounded by a " &
+    $timeoutSeconds & " s deadline over\n" &
+  "# its whole process group, and this script always exits 0. When\n" &
+  "# `sudo -n` fails it records verify-unprivileged in the journal.\n" &
+  "if " & sudoTool & " -n " & trueTool & " </dev/null >/dev/null 2>&1 &&\n" &
+  "  " & sudoTool & " -n /bin/sh -s <<'REPRO_ADDON_ROOT_EOF'\n" &
+  root & "\n" &
+  "REPRO_ADDON_ROOT_EOF\n" &
+  "then exit 0; fi\n" &
+  unprivileged &
+  "exit 0\n"
 
 proc renderAgentConf*(a: AgentUnitsInputs): string =
   ## ``/etc/repro/agent.conf``: ``key = value`` lines, ``#`` comments.
@@ -1072,12 +1264,14 @@ const AgentApplyMemoryMax* = "512M"
   ## chunks), so none of them grows with the staged or archived bytes.
   ## ``LimitMEMLOCK=infinity`` locks plaintext secrets inside it too.
 
-proc agentApplyUnit*(reproExe: string): string =
+proc agentApplyUnit*(reproExe: string; homeReadOnly = false): string =
   ## ``repro-agent-apply.service`` (spec §9.1): root, but no network of
   ## any kind, a bounded capability set without ``CAP_NET_ADMIN``, and,
   ## because it opens sealed envelopes, plaintext locked in RAM and no
   ## swap (§10.3, decision 25). It reads the fetch unit's staging only
-  ## through descriptors, into its own copy.
+  ## through descriptors, into its own copy. ``homeReadOnly``: on an
+  ## Omarchy base its plans compare the post-update hook in the account's
+  ## home with the ledger, as the re-assert unit does (spec §4.3.2).
   let net = when mutated("agent-apply-has-network"): ""
             else: ResolverSocketsHidden
   "[Unit]\n" &
@@ -1088,7 +1282,8 @@ proc agentApplyUnit*(reproExe: string): string =
   "Type=oneshot\n" &
   "ExecStart=" & reproExe & " system addon agent-apply\n" &
   "TimeoutStartSec=3h\n" &
-  privilegedConfinement(network = mutated("agent-apply-has-network")) &
+  privilegedConfinement(network = mutated("agent-apply-has-network"),
+                        homeReadOnly = homeReadOnly) &
   "MemoryMax=" & AgentApplyMemoryMax & "\n" &
   net & NoSwapLine
 
@@ -1355,12 +1550,16 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
     OwnObject(kind: ookUnit, unit: SecretsUnit, path: unitPath(SecretsUnit),
               content: secretsUnit(inp.reproExe), enabled: true),
     OwnObject(kind: ookUnit, unit: ReassertUnit, path: unitPath(ReassertUnit),
-              content: reassertUnit(inp.reproExe), enabled: true),
+              content: reassertUnit(inp.reproExe,
+                homeReadOnly = inp.omarchyHome.len > 0), enabled: true),
   ]
   case inp.packageManagerHook
   of pmhApt:
     result.add(OwnObject(kind: ookEtcFile, path: AptHookPath,
                          content: aptHook(inp.reproExe)))
+  of pmhAlpm:
+    result.add(OwnObject(kind: ookEtcFile, path: AlpmHookPath,
+                         content: alpmHook(inp.reproExe)))
   of pmhNone:
     discard
   result.add(OwnObject(kind: ookEtcFile, path: ProfileDPath,
@@ -1375,7 +1574,8 @@ proc generation0Objects*(inp: Gen0Inputs): seq[OwnObject] =
       result.add(OwnObject(kind: ookEtcFile, path: AgentHostsPath,
                            content: renderAgentHosts(inp.agent)))
     result.add(OwnObject(kind: ookUnit, unit: AgentApplyUnit,
-      path: unitPath(AgentApplyUnit), content: agentApplyUnit(inp.reproExe),
+      path: unitPath(AgentApplyUnit), content: agentApplyUnit(inp.reproExe,
+        homeReadOnly = inp.omarchyHome.len > 0),
       enabled: false))
     let observed = inp.egress.nft.len > 0
     if observed:

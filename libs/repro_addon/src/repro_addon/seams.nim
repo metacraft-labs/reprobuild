@@ -47,6 +47,11 @@
 ## renamed; renamed, its directory not fsync'd).
 ## A switch that is a revert prefixes its points with ``revert:``, and a
 ## replay (a recovery) with ``replay:``.
+##
+## Not a pause point: ``test-arch-systemd-max-major`` (``seamText``) caps the
+## Arch row of the supported matrix at the systemd major it holds -- the test
+## matrix of AR6's ``e2e_arch_addon_unsupported_major_refuses``
+## (``preflight.archMatrixRefusal``).
 
 import std/os
 when defined(reproAddonTestSeams):

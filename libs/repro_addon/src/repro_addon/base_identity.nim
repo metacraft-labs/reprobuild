@@ -33,7 +33,7 @@
 ## The pure functions take file contents, so the unit tests run them over
 ## captured text; ``observeBaseIdentity`` reads the host.
 
-import std/[algorithm, os, sets, strutils, tables]
+import std/[algorithm, os, posix, sets, strutils, tables]
 
 import repro_dsl_stdlib/packages/apt_closure
 import repro_infra/addon_diagnostics
@@ -469,6 +469,52 @@ proc newOwnerFindings*(l: Ledger; driver: CollisionDriver): seq[string] =
       (if o.conffile: " (conffile)" else: "") &
       (if e.resource.len > 0: " (" & e.resource & ")" else: "") &
       "; the add-on's object there is reported as drift by the next plan")
+
+const PacmanSideFiles* = [".pacnew", ".pacsave"]
+  ## What pacman leaves beside a backup file (pacman(8), "Handling Config
+  ## Files"): ``.pacnew``, the package's new version, when the file on disk
+  ## differs from the packaged one and the package changed it; ``.pacsave``,
+  ## the file as it was, when the package is removed.
+
+proc pacnewFindings*(l: Ledger; driver: CollisionDriver): seq[string] =
+  ## Every ``.pacnew`` or ``.pacsave`` beside a ledger path (spec §4.3.1,
+  ## §7.8; threat model T47, G43), naming the package: for a ``.pacnew``
+  ## the package that owns the path now, for a ``.pacsave`` the one the
+  ## entry's observation named (it has been removed). Reported by the ALPM
+  ## hook, the verification after an Omarchy update and every plan, until it
+  ## is resolved. A ``.pacnew`` beside a taken-over file is the vendor
+  ## changing the file underneath the add-on's copy, as a changed vendor
+  ## unit is on Debian. Never follows a link (``lstat``); empty on a base
+  ## without pacman, where nothing writes these names.
+  when mutated("alpm-hook-ignores-pacnew"):
+    # FALSIFYING MUTATION: the hook and the plans never report them.
+    return @[]
+  for e in l.entries:
+    if e.class notin OwnedPathClasses: continue
+    for suffix in PacmanSideFiles:
+      let side = e.path & suffix
+      var st: Stat
+      if lstat(side.cstring, st) != 0: continue
+      var pkg = ""
+      if suffix == ".pacnew":
+        try: pkg = driver.packageOwner(e.path).package
+        except CatchableError: discard
+      if pkg.len == 0: pkg = packageOfObservation(e.observation)
+      let who = if pkg.len > 0: "package " & pkg else: "a package"
+      let what = if e.collision == "takeOver": "taken-over file "
+                 else: "ledger path "
+      result.add(
+        if suffix == ".pacnew":
+          who & " installed " & side & " beside the add-on's " & what &
+            e.path & (if e.resource.len > 0: " (" & e.resource & ")" else: "") &
+            ": the package's new version (vendor changed underneath); " &
+            "review it, then take the change into the profile or remove " &
+            "the resource, which restores the version pacman's database names"
+        else:
+          who & " was removed and pacman kept " & side & " beside the " &
+            "add-on's " & what & e.path &
+            (if e.resource.len > 0: " (" & e.resource & ")" else: "") &
+            "; removing the resource deletes it when it is the add-on's copy")
 
 proc mergedUsrAliases(p: string): seq[string] =
   ## ``p`` and its merged-``/usr`` spelling: dpkg records a file under the

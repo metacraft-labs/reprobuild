@@ -54,6 +54,7 @@ import ./handback
 import ./host_exec
 import ./addon_secrets
 import ./ledger
+import ./omarchy_hook
 import ./nft_tables
 from ./reassert import guardStateDirs
 import ./mutations
@@ -1013,6 +1014,38 @@ proc runAddonUninstall*(opts: UninstallOptions): UninstallResult =
     else:
       if d != "missing": result.removed.add(n.path)
       result.undone.incl(entryKey(n))
+  # The Omarchy post-update hook (spec §4.3.2; AR6; threat model T48,
+  #    G45): the hook, then a `post-update.d` bootstrap created, only while
+  #    empty -- through the no-follow walk with the owner checks, never by
+  #    path. A link the account planted at the hook's path, a directory on
+  #    the way replaced with a link, or a hook that is no longer the
+  #    add-on's is left in place as drift: nothing outside the home is
+  #    removed. A directory the account put hooks of its own in is left,
+  #    and reported, without making the uninstall incomplete: those hooks
+  #    are the account's.
+  var hookEntries = byClass[lcOmarchyHook]
+  hookEntries.sort(proc(a, b: LedgerEntry): int =
+    cmp(a.kindHint == KindDir, b.kindHint == KindDir))   # files first
+  var hookLeft = false
+  for h in hookEntries:
+    let (removed, left) = removeOmarchyHook(hookObjectOf(h))
+    if removed:
+      result.removed.add(h.path)
+      result.undone.incl(entryKey(h))
+    elif h.kindHint == KindDir and "is not empty" in left:
+      if hookLeft:
+        # What fills it is the hook entry left above (a link the account
+        # put at the hook's path): the directory stays the add-on's to
+        # remove, by the uninstall that resolves the hook.
+        result.drift.add(h.path & ": left until the hook is resolved (" &
+          left & ")")
+      else:
+        # The account's own hooks: the directory is left, theirs now.
+        result.removed.add(h.path & " (left: " & left & ")")
+        result.undone.incl(entryKey(h))
+    else:
+      if h.kindHint != KindDir: hookLeft = true
+      result.drift.add(h.path & ": " & left)
   # 4. /etc files (those a diversion step did not already take), then the
   #    directories the add-on created, deepest first; the kernel values
   #    sysctl fragments set go back to what the ledger recorded before.

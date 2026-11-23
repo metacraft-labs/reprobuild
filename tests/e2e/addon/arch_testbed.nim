@@ -268,6 +268,15 @@ type
     ## guest's content-addressed capture cache, a ``file://`` URL).
     archiveDate*: string
     captureRoot*: string
+    repoServers*: seq[tuple[repo, server: string]]
+      ## Repositories pinned to a server of their own, ahead of the rule
+      ## above: the Omarchy update gate's ``[omarchy]``, served from the
+      ## test bed's derived second version (AR6, ``arch_update_support``).
+    archiveRoot*: string
+      ## With ``archiveDate``: the root the date is under, "" for
+      ## ``ArchArchiveRoot``. The archive-window gates name the test bed's
+      ## caching mirror of the archive instead (``snapshot_mirror``,
+      ## ``archiveMirrorRule``).
 
   PacmanRepo* = object
     name*: string
@@ -280,14 +289,22 @@ type
 proc archiveRule*(date: string): PacmanServerRule =
   PacmanServerRule(archiveDate: date)
 
+proc archiveMirrorRule*(mirrorRoot, date: string): PacmanServerRule =
+  ## Pinned to ``date`` of the Arch Linux Archive as the test bed's mirror
+  ## serves it: ``<mirrorRoot><date>/<repo>/os/<arch>``.
+  PacmanServerRule(archiveDate: date, archiveRoot: mirrorRoot)
+
 proc captureCacheRule*(root: string): PacmanServerRule =
   PacmanServerRule(captureRoot: root)
 
 proc expectedServer*(rule: PacmanServerRule; repo, arch: string): string =
+  for (r, server) in rule.repoServers:
+    if r == repo: return server
   if rule.captureRoot.len > 0:
     rule.captureRoot.strip(leading = false, chars = {'/'}) & "/" & repo
   else:
-    ArchArchiveRoot & rule.archiveDate & "/" & repo & "/os/" & arch
+    (if rule.archiveRoot.len > 0: rule.archiveRoot else: ArchArchiveRoot) &
+      rule.archiveDate & "/" & repo & "/os/" & arch
 
 proc pacmanServerViolations*(repos: seq[PacmanRepo]; rule: PacmanServerRule;
                              arch = "x86_64"): seq[string] =
@@ -361,7 +378,9 @@ proc requirePinnedPacman*(g: Guest; rule: PacmanServerRule) =
     raise newException(TestBedError, "refusing " & g.name & " (" &
       g.base.name & "): its pacman is not pinned: " & v.join("; "))
   g.note("pacman pinned: " & (if rule.captureRoot.len > 0: rule.captureRoot
-                              else: "archive date " & rule.archiveDate))
+                              else: "archive date " & rule.archiveDate &
+                                (if rule.archiveRoot.len > 0:
+                                   " at " & rule.archiveRoot else: "")))
 
 static:
   # The rule's negative and positive controls, on pacman-conf output.
@@ -397,9 +416,10 @@ static:
     except TestBedError: raised = true
     doAssert raised, bad
 
-proc mirrorlistLine*(date: string): string =
-  ## The one ``Server`` line of a guest pinned to ``date``.
-  "Server = " & ArchArchiveRoot & date & "/$repo/os/$arch"
+proc mirrorlistLine*(date: string; root = ArchArchiveRoot): string =
+  ## The one ``Server`` line of a guest pinned to ``date`` (of the archive
+  ## at ``root``: the test bed's mirror for the archive-window gates).
+  "Server = " & root & date & "/$repo/os/$arch"
 
 # ---------------------------------------------------------------------------
 # Building the images.
@@ -441,26 +461,32 @@ proc btrfsRecipe(): string =
   "systemctl disable --now archlinux-keyring-wkd-sync.timer\n" &
   "pacman -Syu --noconfirm\n"
 
-proc oldSystemdRecipe(): string =
-  ## Run as root in a guest booted over a btrfs image. A system moved back
-  ## to an earlier date takes that date's keyring as well: the current
-  ## keyring has disabled keys that signed packages then (``base-3-2`` is
-  ## signed by a key ``archlinux-keyring`` 20260909 disables; measured), so
-  ## the older keyring is installed with the current one's verification,
-  ## the keyring is re-made from it, and only then is everything moved
-  ## back (``-Suu`` allows the downgrade). Packages the earlier date does
-  ## not have are the later splits of packages it does (``gcc-libs`` into
-  ## ``libgcc``, ``libstdc++``, ...; ``libmakepkg-dropins`` out of
-  ## ``pacman``; measured): their database entries are dropped first
+proc moveBackRecipe*(date: string; root = ArchArchiveRoot;
+                     pacmanFlags = ""): string =
+  ## Run as root in a guest booted over a btrfs or ext4 image: move every
+  ## package back to the archive's ``date`` (of the archive at ``root``).
+  ## A system moved back to an earlier date takes that date's keyring as
+  ## well: the current keyring has disabled keys that signed packages then
+  ## (``base-3-2`` is signed by a key ``archlinux-keyring`` 20260909
+  ## disables; measured), so the older keyring is installed with the current
+  ## one's verification, the keyring is re-made from it, and only then is
+  ## everything moved back (``-Suu`` allows the downgrade). Packages the
+  ## earlier date does not have are the later splits of packages it does
+  ## (``gcc-libs`` into ``libgcc``, ``libstdc++``, ...; ``libmakepkg-dropins``
+  ## out of ``pacman``; measured): their database entries are dropped first
   ## (``--dbonly``: the running system keeps its libraries while pacman
   ## runs), and the earlier packages are installed over the files they
-  ## leave untracked.
+  ## leave untracked. The old-systemd image's recipe, and the archive-window
+  ## gates' move to the window's first date (AR6, ``arch_window.nim``), which
+  ## passes ``pacmanFlags`` (``--disable-download-timeout``: its mirror
+  ## answers a file it has not cached yet only once it has fetched it).
+  let f = if pacmanFlags.len > 0: " " & pacmanFlags else: ""
   "set -eu\n" &
   "cloud-init status --wait >/dev/null 2>&1 || true\n" &
-  "printf '%s\\n' " & quoteShell(mirrorlistLine(ArchOldSystemdArchiveDate)) &
+  "printf '%s\\n' " & quoteShell(mirrorlistLine(date, root)) &
     " > /etc/pacman.d/mirrorlist\n" &
-  "pacman -Syy\n" &
-  "pacman -S --noconfirm archlinux-keyring\n" &
+  "pacman -Syy" & f & "\n" &
+  "pacman -S --noconfirm" & f & " archlinux-keyring\n" &
   # The keyring's gpg-agent still serves the directory about to go; stop it
   # through its own socket first, or the new keyring's master key cannot be
   # generated ("agent_genkey failed", measured).
@@ -469,9 +495,14 @@ proc oldSystemdRecipe(): string =
   "pacman-key --init\npacman-key --populate archlinux\n" &
   "foreign=$(pacman -Qmq || true)\n" &
   "[ -z \"$foreign\" ] || pacman -Rdd --dbonly --noconfirm $foreign\n" &
-  "pacman -Suu --noconfirm --overwrite '*'\n" &
+  "pacman -Suu --noconfirm" & f & " --overwrite '*'\n" &
   "[ -z \"$(pacman -Qmq || true)\" ]\n" &
   "pacman -Q systemd pacman glibc\n"
+
+proc oldSystemdRecipe(): string =
+  ## Run as root in a guest booted over a btrfs image: everything moved
+  ## back to ``ArchOldSystemdArchiveDate`` (``moveBackRecipe``).
+  moveBackRecipe(ArchOldSystemdArchiveDate)
 
 proc ext4Recipe(): string =
   ## Run as root in a guest booted over a btrfs image with one empty data

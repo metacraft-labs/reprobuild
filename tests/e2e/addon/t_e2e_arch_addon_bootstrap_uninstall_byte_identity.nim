@@ -14,9 +14,10 @@
 ## Arch components: ``pacman-local`` and, on the btrfs guest,
 ## ``btrfs-subvolumes``, which sees ``/repro`` as its own subvolume.
 ##
-## Generation 0 on Arch carries no package-manager hook (spec §6.2, §13
-## decision 130): the gate also checks that nothing appeared under
-## ``/etc/apt``.
+## Generation 0 on Arch carries the ALPM hook, not the apt hook (spec §6.2,
+## §7.8, §13 decision 130; AR6): the gate also checks that nothing appeared
+## under ``/etc/apt``; the ALPM hook and, on the Omarchy VM, the post-update
+## hook in the account's home are among what the ledger accounts for.
 ##
 ## Baseline: before the first fingerprint the gate runs ``udevadm settle``
 ## and ``systemctl daemon-reload`` in the guest (``settleBaseline``, §12.2,

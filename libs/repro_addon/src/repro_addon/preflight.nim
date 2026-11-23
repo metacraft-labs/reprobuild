@@ -44,7 +44,9 @@ import ./mutations
 import ./store_root
 import ./nft_tables
 import ./omarchy
+import ./omarchy_hook
 import ./pacman_db
+import ./seams
 
 type
   Verdict* = enum
@@ -129,6 +131,9 @@ type
       ## Omarchy bases only: the base layer's ``/etc`` path set (spec
       ## §4.3.2), recorded in the plan with each path's scripts and owners.
     omarchyAccount*: string  ## the profile's, as checked
+    omarchyHome*: string
+      ## The account's home, once the ``omarchy-hook`` check passed: the
+      ## post-update hook goes there (``generation0.Gen0Inputs``).
 
   OsRelease* = Table[string, string]
 
@@ -319,6 +324,32 @@ proc fstabRootOptions*(text: string): string =
 proc pathPresent(path: string): bool =
   var st: Stat
   lstat(path.cstring, st) == 0
+
+proc alpmHookNameProblem*(root = "/"): string =
+  ## "" when generation 0's ALPM hook can take its name on this base (spec
+  ## §7.8; threat model T46, G43): no package ships a hook of that name in
+  ## pacman's ``HookDir``s, and nothing is in ``/usr/share/libalpm/hooks``
+  ## under it -- a file of the add-on's name in ``/etc/pacman.d/hooks``
+  ## would silently disable it (alpm-hooks(5): the first ``HookDir`` that
+  ## has a name wins). The add-on's own path must be absent as well
+  ## (``generation-0-paths``).
+  var owners: Table[string, seq[string]]
+  try:
+    owners = pacmanOwnersOf(AlpmHookPackagedPaths, root)
+  except CatchableError as e:
+    return "the pacman database cannot be read to check the ALPM hook's " &
+      "name: " & e.msg
+  var why: seq[string]
+  for p in AlpmHookPackagedPaths:
+    if p in owners:
+      why.add(p & " is shipped by " & owners[p].join(", "))
+    elif p != AlpmHookPath and pathPresent(root.strip(leading = false,
+                                                      chars = {'/'}) & p):
+      why.add(p & " exists")
+  if why.len == 0: return ""
+  why.join("; ") & ": the add-on's report-only hook " & AlpmHookPath &
+    " would replace a hook of the same name (spec §7.8); remove or rename " &
+    "it first"
 
 proc unitDefinedAnywhere(name: string): string =
   for d in UnitSearchDirs:
@@ -712,12 +743,31 @@ proc isArchFamily*(id, idLike: string): bool =
   id.toLowerAscii() == ArchFamilyId or
     ArchFamilyId in idLike.toLowerAscii().splitWhitespace()
 
+const TestArchMatrixSeam* = "arch-systemd-max-major"
+  ## Seam builds only (``seams.nim``): ``/var/lib/repro/system/addon/
+  ## test-arch-systemd-max-major`` holding a number makes the Arch row admit
+  ## no systemd major above it -- the test matrix of AR6's
+  ## ``e2e_arch_addon_unsupported_major_refuses``, which admits only the
+  ## major the archive window starts with. The product build has no such
+  ## file and no such row.
+
+proc testArchSystemdMaxMajor*(): int =
+  ## The test matrix's highest systemd major, 0 when none (always 0 in the
+  ## product build).
+  let t = seamText("/var/lib/repro/system", TestArchMatrixSeam).strip()
+  if t.len == 0: return 0
+  try: parseInt(t) except ValueError: 0
+
 proc archMatrixRefusal*(systemdMajor: int; pacmanVersion: string): string =
   ## "" when an Arch-family base's systemd and pacman are in the matrix,
   ## else why not. Arch has no ``VERSION_ID`` row: the two majors are it.
   if systemdMajor < ArchMinSystemdMajor:
     return "systemd " & (if systemdMajor > 0: $systemdMajor else: "(unknown)") &
       " is below the Arch matrix's " & $ArchMinSystemdMajor
+  let testMax = testArchSystemdMaxMajor()
+  if testMax > 0 and systemdMajor > testMax:
+    return "systemd " & $systemdMajor & " is above the test matrix's " &
+      $testMax & " (test seam " & TestArchMatrixSeam & ")"
   let pm = pacmanMajor(pacmanVersion)
   if pm notin ArchPacmanMajors:
     return "pacman " & (if pacmanVersion.len > 0: pacmanVersion
@@ -1047,6 +1097,23 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
       else: "Omarchy runs as " & result.omarchyAccount & "; its hook " &
             "directory is " & omarchyHooksDir(accountHome(
               result.omarchyAccount).home))
+    if omarchyBase and why.len == 0:
+      # Generation 0's post-update hook (spec §4.3.2; AR6): bootstrap's
+      # writer must be able to put it in place -- every directory below the
+      # home a real one owned by the account or root and writable by no one
+      # else, nothing at the hook's path. The writer checks it all again.
+      var problem = ""
+      try:
+        let t = omarchyHookTarget(result.omarchyAccount)
+        result.omarchyHome = t.home
+        problem = omarchyHookPathProblem(t)
+        if problem.len > 0: result.omarchyHome = ""
+      except CatchableError as e:
+        problem = e.msg
+      result.add("omarchy-hook", problem.len == 0,
+        if problem.len > 0: diagnosticMessage(adBaseLayerOwned, problem)
+        else: "generation 0 writes the post-update hook " &
+              omarchyHookPath(result.omarchyHome))
 
   result.add("free-space", free >= MinimumFreeBytes,
     if free >= MinimumFreeBytes: "at least 512 MiB free on /"
@@ -1162,7 +1229,8 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
             "snapshot")
   result.gen0Inputs = Gen0Inputs(reproExe: reproExe,
     reproSubvolume: reproSubvolume,
-    packageManagerHook: (if archFamily: pmhNone else: pmhApt),
+    packageManagerHook: (if archFamily: pmhAlpm else: pmhApt),
+    omarchyHome: result.omarchyHome,
     deploySigners: signers,
     cacheUrl: (if anchorsError.len > 0: "" else: inp.cacheUrl),
     cachePublishers: publishers,
@@ -1182,6 +1250,11 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
   result.add("generation-0-paths", taken.len == 0,
     if taken.len == 0: "every path generation 0 writes is absent"
     else: "already present: " & taken.join(", "))
+  if archFamily:
+    let why = alpmHookNameProblem()
+    result.add("alpm-hook-name", why.len == 0,
+      if why.len > 0: why
+      else: "no package ships a hook named " & extractFilename(AlpmHookPath))
 
   result.compatible = true
   for c in result.checks:
@@ -1198,6 +1271,10 @@ proc runPreflight*(inp: PreflightInputs): PreflightReport =
     checksJson.add(%*{"id": c.id, "verdict": $c.verdict, "detail": c.detail})
   var objects = newJArray()
   for p in ownObjectPaths(result.gen0): objects.add(%p)
+  if result.omarchyHome.len > 0:
+    # Not an own-profile object (``omarchy_hook.nim`` writes it), but one
+    # of generation 0's paths the plan binds.
+    objects.add(%omarchyHookPath(result.omarchyHome))
   # The kept files by path AND, for the content-pinned ones, by digest, so
   # a swap between the preflight and the bootstrap changes the digest the
   # operator acknowledged. An agent record is bound by path only: the

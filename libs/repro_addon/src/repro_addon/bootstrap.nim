@@ -52,6 +52,7 @@ import ./host_exec
 import ./ledger
 import ./linux_fs
 import ./mutations
+import ./omarchy_hook
 import ./nft_tables
 import ./preflight
 import ./store_custody
@@ -402,6 +403,26 @@ proc runAddonBootstrap*(opts: BootstrapOptions): BootstrapResult =
   # decision 48): an object with no recorded digest is refused, never
   # reported "unverifiable" as on a host realised before custody.
   markCustody(custodySite(stateDir))
+
+  # 4b. The Omarchy post-update hook (spec §4.3.2; milestone AR6; threat
+  # model T48, G45): in the omarchyAccount's home, written by root through
+  # the no-follow writer with the owner checks, never by the infra drivers
+  # (the account owns the directory). Recorded before generation 0's apply
+  # so the apply's ledger carries it like every bootstrap entry.
+  if plan.gen0Inputs.omarchyHome.len > 0:
+    let t = try: omarchyHookTarget(plan.omarchyAccount)
+            except OmarchyHookError as e:
+              raise newException(AddonBootstrapError, e.msg)
+    if t.home != plan.gen0Inputs.omarchyHome:
+      raise newException(AddonBootstrapError, "the home of " &
+        plan.omarchyAccount & " is " & t.home & ", not the " &
+        plan.gen0Inputs.omarchyHome & " the acknowledged plan saw")
+    let objs = try: writeOmarchyHook(t, omarchyHookScript(prefixes.reproExe))
+               except CatchableError as e:
+                 raise newException(AddonBootstrapError, "the Omarchy " &
+                   "post-update hook was not written: " & e.msg &
+                   "; the writer wrote nothing outside the home")
+    for o in objs: entries.add(toLedgerEntry(o))
 
   # 5. Generation 0, through repro infra apply. The ledger copy exists
   # BEFORE the apply, holding what bootstrap created so far: generation 0

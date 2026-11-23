@@ -11,7 +11,7 @@
 ##   repro system addon evidence-credential-check
 ##   repro system addon uninstall [--keep-store]
 ##   repro system addon verify-discard-record RECORD --key HEX
-##   repro system addon verify [--boot | --after-dpkg]
+##   repro system addon verify [--boot | --after-dpkg | --after-pacman | --after-base-update]
 ##   repro system addon reassert [--boot]
 ##   repro system addon recover
 ##   repro system addon secrets [--boot]
@@ -188,11 +188,16 @@ commands:
       their removal could not be made durable). Exit 1: it does not
       verify. Exit 2: usage (no --key). Runs on any machine; the files may
       be copied off the host.
-  verify [--boot | --after-dpkg]
+  verify [--boot | --after-dpkg | --after-pacman | --after-base-update]
       Compare every ledger object with the host (report only). --after-dpkg
       (the apt hook): also report packages that now own ledger paths and
       changed vendor units, record findings in the journal and the hook's
-      event log, and always exit 0.
+      event log, and always exit 0. --after-pacman (the ALPM hook): the
+      same, and .pacnew/.pacsave beside ledger paths, a packaged hook of the
+      ALPM hook's name, and the base identity re-observed against the
+      supported matrix. --after-base-update (the Omarchy post-update hook):
+      --after-pacman, and the overrideBaseLayer acknowledgements re-checked
+      against the installed Omarchy's scripts.
   reassert [--boot]
       Finish or revert an interrupted switch, check the current generation
       (static tree, store objects, ledger digests) and report ok, drift or
@@ -677,12 +682,19 @@ proc runAddonCli*(args: seq[string]): int =
     of "verify":
       var reportOnly = false
       for a in rest:
-        if a in ["--boot", "--after-dpkg"]: reportOnly = true
+        if a in ["--boot", "--after-dpkg", "--after-pacman",
+                 "--after-base-update"]: reportOnly = true
         else: raise newException(ValueError, "unknown option " & a)
       if "--after-dpkg" in rest:
         # The apt hook (spec §7.8): ledger digests, new package owners of
         # ledger paths, changed vendor units; recorded, always exit 0.
         return runAfterDpkgCli()
+      if "--after-pacman" in rest:
+        # The ALPM hook (spec §7.8; AR6); always exit 0.
+        return runHookCli(hkAlpm)
+      if "--after-base-update" in rest:
+        # The Omarchy post-update hook (spec §4.3.2; AR6); always exit 0.
+        return runHookCli(hkOmarchy)
       if reportOnly:
         # Report-only callers (the boot unit, the apt hook) must never fail
         # whatever invoked them, so nothing here may raise or exit non-zero.

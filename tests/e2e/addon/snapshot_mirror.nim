@@ -28,6 +28,15 @@
 ##   dated copy (``fixtures/meta-release-lts``), since that file has no
 ##   snapshot.
 ##
+## - *the Arch Linux Archive* (AR6, spec §7.9, §13 decision 91): a guest's
+##   pacman names the mirror itself as its server,
+##   ``http://10.0.2.2:<port>/archlinux/repos/<yyyy>/<mm>/<dd>/$repo/os/$arch``
+##   (a path-form request, not a proxy request), and each file comes from
+##   ``https://archive.archlinux.org/repos/<yyyy>/<mm>/<dd>/...``
+##   (https://wiki.archlinux.org/title/Arch_Linux_Archive). The date is in
+##   the path, so the mirror's timestamp plays no part, and every answer is
+##   immutable: a dated snapshot never changes (``archRoute``).
+##
 ## Everything else -- any other host, ``CONNECT`` -- is refused, so a gate
 ## cannot silently depend on a live service. The gate moves ``T`` (and the
 ## guest's clock with it) to simulate time passing: a week of daily
@@ -122,10 +131,34 @@ proc livePin(hostPath: string): string =
   ""
 
 proc immutableByName(rest: string): bool =
-  "/pool/" in "/" & rest or "/by-hash/" in "/" & rest
+  "/pool/" in "/" & rest or "/by-hash/" in "/" & rest or
+    rest.startsWith("archlinux/repos/")
+
+const ArchMirrorPrefix* = "/archlinux/repos/"
+  ## The path under which the mirror serves the Arch Linux Archive.
+
+proc archRoute*(path: string): Route =
+  ## ``/archlinux/repos/<yyyy>/<mm>/<dd>/<repo>/os/<arch>/<file>`` ->
+  ## ``https://archive.archlinux.org/repos/...``, cached by its whole path
+  ## (a dated snapshot never changes). Anything else -- no date, a ``..``,
+  ## a query -- is refused. Pure.
+  if not path.startsWith(ArchMirrorPrefix): return
+  var rest = path[ArchMirrorPrefix.len .. ^1]
+  if '?' in rest or '#' in rest: return
+  let parts = rest.split('/')
+  if parts.len < 7 or ".." in parts or "" in parts[0 .. ^2]: return
+  if parts[0].len != 4 or parts[1].len != 2 or parts[2].len != 2: return
+  for p in parts[0 .. 2]:
+    for c in p:
+      if c notin {'0'..'9'}: return
+  if parts[4] != "os": return
+  Route(ok: true, upstream: "https://archive.archlinux.org/repos/" & rest,
+        cacheKey: "archlinux/repos/" & rest)
 
 proc route*(url, stamp: string): Route =
-  ## Map an absolute request URL to its snapshot. Pure.
+  ## Map a request URL to its snapshot: an absolute (proxy-form) URL, or a
+  ## path the mirror serves itself (``archRoute``). Pure.
+  if url.startsWith(ArchMirrorPrefix): return archRoute(url)
   if not url.startsWith("http://"): return
   let noScheme = url["http://".len .. ^1]
   let slash = noScheme.find('/')
@@ -360,3 +393,19 @@ proc stop*(m: SnapshotMirror) =
   for _ in m.workers: gConns.send(-1)
   for t in m.workers: joinThread(t[])
   gConns.close()
+
+block archRouteSelfCheck:
+  # A dated archive path maps to the archive and is cached by its path;
+  # anything else is refused.
+  let r = archRoute("/archlinux/repos/2026/09/20/core/os/x86_64/core.db")
+  doAssert r.ok and r.upstream ==
+    "https://archive.archlinux.org/repos/2026/09/20/core/os/x86_64/core.db"
+  doAssert r.cacheKey == "archlinux/repos/2026/09/20/core/os/x86_64/core.db"
+  doAssert route("/archlinux/repos/2026/09/20/extra/os/x86_64/x.pkg.tar.zst",
+                 "20261028T000000Z").ok
+  for bad in ["/archlinux/repos/last/core/os/x86_64/core.db",
+              "/archlinux/repos/2026/09/20/core/os/../../x",
+              "/archlinux/repos/2026/09/20/core/os/x86_64/core.db?x=1",
+              "/archlinux/repos/2026/09/20/core/x86_64/core.db",
+              "/other/2026/09/20/core/os/x86_64/core.db"]:
+    doAssert not route(bad, "20261028T000000Z").ok, bad

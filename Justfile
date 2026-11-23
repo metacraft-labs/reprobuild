@@ -115,6 +115,31 @@ e2e_arch_addon_collision_matrix:
 e2e_arch_addon_takeover_survives_package_upgrade:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_takeover_survives_package_upgrade
 
+# AR6: pacman -Syu through the pinned 14-date Arch Linux Archive window under
+# a running add-on (arch_window.nim), and a systemd major outside a test
+# matrix (the seam build) refusing the next apply.
+e2e_arch_addon_archive_window_replay:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_archive_window_replay
+
+e2e_arch_addon_unsupported_major_refuses:
+    REPRO_ADDON_TEST_SEAMS=1 REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_unsupported_major_refuses
+
+# AR6: the ALPM hook's reports (.pacnew, .pacsave, a package over a ledger
+# path, a packaged hook of its name) and its bound (failing, hanging and
+# missing verification).
+e2e_arch_addon_alpm_hook_reports:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_alpm_hook_reports
+
+# AR6: AR1's byte-identity sequence on the Omarchy VM with the post-update
+# hook in generation 0, and the no-follow controls at bootstrap and uninstall.
+e2e_omarchy_addon_hook_uninstall:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_hook_uninstall
+
+# AR6: omarchy update to the test bed's second Omarchy version with a fixture
+# migration; the post-update hook's report, and an expired sudo credential.
+e2e_omarchy_addon_post_update_hook_reports:
+    REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-omarchy-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_omarchy_addon_post_update_hook_reports
+
 e2e_arch_addon_removal_respects_ledger:
     REPRO_ADDON_BASES="${REPRO_ADDON_BASES:-arch-btrfs-amd64,arch-ext4-amd64}" bash ./scripts/run_addon_gate.sh t_e2e_arch_addon_removal_respects_ledger
 

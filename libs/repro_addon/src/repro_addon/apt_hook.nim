@@ -17,6 +17,25 @@
 ##   file's digest differs from the one the current generation recorded in
 ##   its base identity (``base_identity.nim``).
 ##
+## The ALPM hook (``verify --after-pacman``, Arch; milestone AR6) runs the
+## same three and adds, by spec §7.8 and §4.3.1:
+##
+## - **a ``.pacnew`` or ``.pacsave`` beside a ledger path**, naming the
+##   package (``base_identity.pacnewFindings``);
+## - **a packaged hook under the ALPM hook's name**, which the add-on's
+##   file in ``/etc/pacman.d/hooks`` silently disables (threat model T46);
+## - **the base identity re-observed** (spec §7.9: every ``pacman -Syu`` is
+##   a small release upgrade): what changed since the current generation's
+##   record is a note, and a base the supported matrix no longer admits (a
+##   systemd or pacman major outside it) is a finding -- the next apply
+##   refuses with ``EAddOnUnsupportedBase``.
+##
+## The Omarchy post-update hook (``verify --after-base-update``, spec
+## §4.3.2) runs the pacman verification and adds the ``overrideBaseLayer``
+## re-check against the new Omarchy version's path set: an acknowledgement
+## that acknowledges nothing now, and a declared path the new scripts name
+## that no acknowledgement covers, each naming the script.
+##
 ## Each finding goes to stdout (apt prints it), to the journal (``logger``,
 ## identifier ``repro-addon-apt-hook``) and to the hook's event log
 ## (``generation0.AptHookLogPath``), which the next plan and the deploy
@@ -25,9 +44,11 @@
 ## wrapper exits 0 anyway, but a verification that fails is recorded as
 ## ``verify-failed`` rather than as what it found.
 
-import std/[os, posix, strutils, times]
+import std/[os, posix, strutils, tables, times]
 
 import repro_infra/state_dir
+
+import repro_infra/profile
 
 import ./addon_apply
 import ./base_identity
@@ -37,6 +58,8 @@ import ./generation0
 import ./host_exec
 import ./ledger
 import ./mutations
+import ./omarchy
+import ./pacman_db
 import ./verify
 
 type
@@ -78,6 +101,140 @@ proc runAfterDpkgVerify*(stateDir = DefaultStateDir;
     for f in vendorUnitFindings(readGenerationBase(
         generationDir(stateDir, current))):
       result.findings.add(f)
+  if result.findings.len > 0 and result.status == "ok":
+    result.status = "drift"
+
+type
+  HookKind* = enum
+    ## Which report-only hook a verification runs for (spec §7.8, §4.3.2).
+    hkApt = "apt"
+    hkAlpm = "alpm"
+    hkOmarchy = "omarchy"
+
+proc hookLogPath*(k: HookKind): string =
+  case k
+  of hkApt: AptHookLogPath
+  of hkAlpm: AlpmHookLogPath
+  of hkOmarchy: OmarchyHookLogPath
+
+proc hookTag*(k: HookKind): string =
+  case k
+  of hkApt: AptBoundedHook.tag
+  of hkAlpm: AlpmBoundedHook.tag
+  of hkOmarchy: OmarchyBoundedHook.tag
+
+proc hookLabel*(k: HookKind): string =
+  case k
+  of hkApt: AptBoundedHook.label
+  of hkAlpm: AlpmBoundedHook.label
+  of hkOmarchy: OmarchyBoundedHook.label
+
+proc alpmHookShadowFindings*(root = "/"): seq[string] =
+  ## A hook of the ALPM hook's name in pacman's default ``HookDir``, shipped
+  ## by a package (or left there) after bootstrap: the add-on's file in
+  ## ``/etc/pacman.d/hooks`` replaces it, silently disabling it (spec §7.8;
+  ## threat model T46). Also a package that ships the add-on's own path.
+  var owners: Table[string, seq[string]]
+  try:
+    owners = pacmanOwnersOf(AlpmHookPackagedPaths, root)
+  except CatchableError as e:
+    return @["cannot read the pacman database to check the ALPM hook's " &
+      "name: " & e.msg]
+  let packaged = AlpmHookPackagedPaths[0]
+  if packaged in owners:
+    result.add("package " & owners[packaged].join(", ") & " ships " &
+      packaged & ", which the add-on's " & AlpmHookPath & " silently " &
+      "disables (the first HookDir with a name wins); rename or remove one")
+  elif fileExists(root.strip(leading = false, chars = {'/'}) & packaged) or
+      symlinkExists(root.strip(leading = false, chars = {'/'}) & packaged):
+    result.add(packaged & " exists, and the add-on's " & AlpmHookPath &
+      " silently disables it (the first HookDir with a name wins)")
+  if AlpmHookPath in owners:
+    result.add("package " & owners[AlpmHookPath].join(", ") & " now owns " &
+      AlpmHookPath & ", the add-on's ALPM hook")
+
+proc baseReobservation*(stateDir: string; driver: CollisionDriver):
+    tuple[notes, findings: seq[string]] =
+  ## The base identity read again (spec §7.9; AR6): what changed since the
+  ## current generation's record (notes), and a matrix refusal (a finding).
+  ## Read-only.
+  let l = readLedger(ledgerCopyPath(stateDir))
+  let now = observeBaseIdentity(l, @[], driver)
+  let current = readCurrentGenerationId(stateDir)
+  if current.len > 0:
+    let recorded = readGenerationBase(generationDir(stateDir, current))
+    for c in baseIdentityChanges(recorded, now):
+      result.notes.add("base identity: " & c)
+  let why = matrixRefusal(now)
+  if why.len > 0:
+    result.findings.add("the base is outside the supported matrix now (" &
+      describeBase(now) & "): " & why & "; the next apply refuses with " &
+      "EAddOnUnsupportedBase")
+  else:
+    result.notes.add("base identity re-observed: " & describeBase(now) &
+      ", accepted by the supported matrix")
+
+proc runAfterPacmanVerify*(stateDir = DefaultStateDir;
+                           driver: CollisionDriver = nil): AfterDpkgReport =
+  ## The ALPM hook's verification (spec §7.8; AR6). Read-only.
+  let d = if driver != nil: driver else: detectCollisionDriver()
+  result = runAfterDpkgVerify(stateDir, d)
+  if result.status == "degraded": return
+  let l = readLedger(ledgerCopyPath(stateDir))
+  for f in pacnewFindings(l, d): result.findings.add(f)
+  for f in alpmHookShadowFindings(): result.findings.add(f)
+  try:
+    let b = baseReobservation(stateDir, d)
+    result.notes.add(b.notes)
+    result.findings.add(b.findings)
+  except CatchableError as e:
+    result.findings.add("cannot re-observe the base identity: " & e.msg)
+  if result.findings.len > 0 and result.status == "ok":
+    result.status = "drift"
+
+proc overrideRecheckFindings*(stateDir: string; root = "/"): seq[string] =
+  ## The ``overrideBaseLayer`` re-check after an Omarchy update (spec
+  ## §4.3.2; AR6): the stored operator profile against the path set of the
+  ## Omarchy version now installed. An acknowledgement that acknowledges
+  ## nothing any more (the new scripts no longer name its path) and a
+  ## declaration the new scripts name without one (the next plan refuses
+  ## it with ``EAddOnBaseLayerOwned``) are findings, each naming the
+  ## script. Read-only.
+  when mutated("omarchy-override-not-rechecked"):
+    # FALSIFYING MUTATION: the re-check is skipped.
+    return @[]
+  let p = userProfilePath(stateDir)
+  if not fileExists(p): return
+  var user: SystemProfile
+  try: user = parseStoredUserProfile(readFile(p), stateDir)
+  except CatchableError as e:
+    return @["cannot read the stored operator profile for the " &
+      "overrideBaseLayer re-check: " & e.msg]
+  let set = readOmarchyPathSet(root)
+  let ok = omarchyPathSetCheck(set)
+  if not ok.ok:
+    return @["the Omarchy path set cannot be read after the update: " &
+      ok.detail]
+  let ver = pacmanInstalledVersion(OmarchyPackage, root)
+  let c = baseLayerCheck(set, user)
+  for o in c.overrides:
+    let f = o.split('\t')
+    if f.len == 3 and f[2].startsWith("acknowledges nothing"):
+      result.add("overrideBaseLayer on " & f[0] & " (" & f[1] & ") " &
+        "acknowledges nothing now: the scripts of Omarchy " & ver &
+        " no longer name it; remove the acknowledgement")
+  for r in c.refusals:
+    result.add("Omarchy " & ver & " now names a path the profile declares " &
+      "without an acknowledgement: " & r & "; the next plan refuses it " &
+      "with EAddOnBaseLayerOwned")
+
+proc runAfterBaseUpdateVerify*(stateDir = DefaultStateDir;
+                               driver: CollisionDriver = nil): AfterDpkgReport =
+  ## The Omarchy post-update hook's verification (spec §4.3.2; AR6): the
+  ## pacman verification, then the ``overrideBaseLayer`` re-check.
+  result = runAfterPacmanVerify(stateDir, driver)
+  if result.status == "degraded": return
+  for f in overrideRecheckFindings(stateDir): result.findings.add(f)
   if result.findings.len > 0 and result.status == "ok":
     result.status = "drift"
 
@@ -141,18 +298,50 @@ proc appendEventLog*(path: string; lines: openArray[string];
   except CatchableError:
     discard
 
-proc runAfterDpkgCli*(stateDir = DefaultStateDir;
-                      logPath = AptHookLogPath;
-                      site = defaultSite(DefaultStateDir);
-                      dpkgLog = "/var/log/dpkg.log"): int =
-  ## The hook's entry point: report, record (event log first, then the
+proc omarchyAttributions*(r: var AfterDpkgReport; root = "/") =
+  ## After an Omarchy update, each ``changed:`` finding whose path the
+  ## installed Omarchy's scripts name gets those scripts appended: the
+  ## migration that wrote it (spec §4.3.2: drift "with the migration
+  ## named"). Best effort; a path set that cannot be read adds nothing.
+  var set: OmarchyPathSet
+  try: set = readOmarchyPathSet(root)
+  except CatchableError: return
+  for f in r.findings.mitems:
+    if not f.startsWith("changed: "): continue
+    let words = f.splitWhitespace()
+    if words.len < 3: continue
+    let path = words[2].strip(leading = false, chars = {':'})
+    var scripts: seq[string]
+    for e in fileIntersections(set, path):
+      for sc in e.scripts:
+        if sc notin scripts: scripts.add(sc)
+    if scripts.len > 0:
+      f.add(" (named by Omarchy " & scripts.join(", ") & ")")
+
+proc runHookCli*(kind: HookKind; stateDir = DefaultStateDir;
+                 logPath = "";
+                 site = defaultSite(DefaultStateDir);
+                 dpkgLog = "/var/log/dpkg.log"): int =
+  ## A hook's entry point: report, record (event log first, then the
   ## journal), exit 0.
+  let log = if logPath.len > 0: logPath else: hookLogPath(kind)
+  let tag = hookTag(kind)
+  let label = hookLabel(kind)
   var r: AfterDpkgReport
   try:
-    r = runAfterDpkgVerify(stateDir)
+    r = case kind
+        of hkApt: runAfterDpkgVerify(stateDir)
+        of hkAlpm: runAfterPacmanVerify(stateDir)
+        of hkOmarchy:
+          (var x = runAfterBaseUpdateVerify(stateDir); omarchyAttributions(x); x)
   except CatchableError as e:
     r = AfterDpkgReport(status: "degraded", findings: @[e.msg])
-  stdout.write(renderAfterDpkg(r))
+  stdout.write(label & ": " & r.status & "\n")
+  for f in r.findings: stdout.write("  " & f & "\n")
+  # The notes (the base identity re-observed) are the pacman and Omarchy
+  # hooks'; the apt hook's output is A10's.
+  if kind != hkApt:
+    for n in r.notes: stdout.write("  note: " & n & "\n")
   # The evidence record (spec §7.8, §10.4; DET-AO-6): every run leaves one,
   # naming the dpkg run it followed, so the off-host check can tell a hook
   # that ran clean from one that never ran (DET-AO-8). A clean run's goes
@@ -160,31 +349,45 @@ proc runAfterDpkgCli*(stateDir = DefaultStateDir;
   try:
     var site = site
     site.stateDir = stateDir
-    let fields = @[("status", r.status), ("count", $r.findings.len),
-                   ("dpkgLastRun", dpkgLastRun(dpkgLog)),
+    var fields = @[("status", r.status), ("count", $r.findings.len),
                    ("message", r.findings.join("; "))]
+    if kind == hkApt:
+      fields.insert(("dpkgLastRun", dpkgLastRun(dpkgLog)), 2)
+    else:
+      fields.add(("hook", $kind))
     discard recordEvidence(EvidenceEvent(detector: edAptHook,
       category: ecAudit, trigger: "hook-run", fields: fields, attest: true,
       offHostOnly: true), site)
     if r.status != "ok":
       discard recordEvidence(EvidenceEvent(detector: edAptHook,
         category: ecDetection, trigger: "hook-finding",
-        kind: "apt-hook-" & r.status, fields: fields, attest: true), site)
+        kind: $kind & "-hook-" & r.status, fields: fields, attest: true), site)
   except CatchableError as e:
-    stderr.write("repro-addon apt hook: cannot write its evidence record: " &
+    stderr.write(label & ": cannot write its evidence record: " &
       e.msg & "\n")
   if r.status == "ok":
-    journal("info", ["repro-addon apt hook: ok"])
+    var jl = @[label & ": ok"]
+    if kind != hkApt:
+      for n in r.notes: jl.add(label & ": " & n)
+    journal("info", jl, tag = tag)
     return 0
   var lines = @[r.status & " " & $r.findings.len & " finding(s)"]
-  var jl = @["repro-addon apt hook: " & r.status & ", " & $r.findings.len &
+  var jl = @[label & ": " & r.status & ", " & $r.findings.len &
              " finding(s)"]
   for f in r.findings:
     lines.add("finding " & f)
-    jl.add("repro-addon apt hook: " & f)
-  appendEventLog(logPath, lines)
-  journal("warning", jl)
+    jl.add(label & ": " & f)
+  appendEventLog(log, lines)
+  journal("warning", jl, tag = tag)
   0
+
+proc runAfterDpkgCli*(stateDir = DefaultStateDir;
+                      logPath = AptHookLogPath;
+                      site = defaultSite(DefaultStateDir);
+                      dpkgLog = "/var/log/dpkg.log"): int =
+  ## The apt hook's entry point (A10): ``runHookCli`` for ``hkApt``. Its
+  ## output, records and journal lines are A10's.
+  runHookCli(hkApt, stateDir, logPath, site, dpkgLog)
 
 # ---------------------------------------------------------------------------
 # The deploy agent's view: the hook's events since its previous tick.

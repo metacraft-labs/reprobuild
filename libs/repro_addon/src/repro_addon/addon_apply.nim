@@ -4395,6 +4395,20 @@ proc applyGenerationUnrecorded(opts: AddonApplyOptions): AddonApplyResult =
       if e.resource in declared: stillDeclared.entries.add(e)
     for why in newOwnerFindings(stillDeclared, driver):
       result.drift.add(why)
+    # A `.pacnew` or `.pacsave` beside a ledger path (spec §4.3.1, §7.8;
+    # AR6): what the ALPM hook reported, every plan reports too.
+    for why in pacnewFindings(stillDeclared, driver):
+      result.drift.add(why)
+  # The Omarchy post-update hook (spec §4.3.2; AR6): the account owns its
+  # directory and can delete or replace the hook, which is drift every plan
+  # reports (observed without following a link, owner-checked).
+  for e in previous.entries:
+    if e.class == lcOmarchyHook:
+      let d = observeDrift(e)
+      if d.len > 0:
+        result.drift.add("the Omarchy post-update hook " & e.path & ": " & d &
+          "; the add-on does not rewrite it (the account's directory): " &
+          "put it back, or uninstall and bootstrap again")
   let newDriver: DriverFactory = proc(): CollisionDriver = driver
   var dropIns = initHashSet[string]()
   var userResources = reshape(user, dropIns)

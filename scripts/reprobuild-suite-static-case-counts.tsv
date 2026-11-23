@@ -34,6 +34,7 @@ libs/repro_addon/tests/t_addon_agent_refuses_a_pin_not_for_addon.nim	nim	4
 libs/repro_addon/tests/t_addon_agent_repin.nim	nim	3
 libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
+libs/repro_addon/tests/t_addon_alpm_and_omarchy_hooks.nim	nim	24
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_arch_base.nim	nim	30
 libs/repro_addon/tests/t_addon_arch_takeover.nim	nim	32
@@ -1306,7 +1307,9 @@ tests/e2e/addon/t_e2e_addon_validator_never_double_signs.nim	nim	1
 tests/e2e/addon/t_e2e_addon_write_time_recheck.nim	nim	1
 tests/e2e/addon/t_e2e_addon_writes_never_follow_symlinks.nim	nim	1
 tests/e2e/addon/t_e2e_addon_zero_touch_image_synthesis_boots_converged.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_alpm_hook_reports.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_apt_closure_refused.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_archive_window_replay.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_bootstrap_uninstall_byte_identity.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_collision_matrix.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_no_base_layer_on_plain_arch.nim	nim	1
@@ -1317,12 +1320,15 @@ tests/e2e/addon/t_e2e_arch_addon_store_placement_by_root_fs.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_takeover_restore_rechecked.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_takeover_survives_package_upgrade.nim	nim	1
 tests/e2e/addon/t_e2e_arch_addon_uninstall_refuses_pending_switch.nim	nim	1
+tests/e2e/addon/t_e2e_arch_addon_unsupported_major_refuses.nim	nim	1
 tests/e2e/addon/t_e2e_arch_testbed_is_pinned.nim	nim	1
 tests/e2e/addon/t_e2e_omarchy_addon_base_layer_refusal.nim	nim	1
+tests/e2e/addon/t_e2e_omarchy_addon_hook_uninstall.nim	nim	1
 tests/e2e/addon/t_e2e_omarchy_addon_network_guard_disarm_conditions.nim	nim	1
 tests/e2e/addon/t_e2e_omarchy_addon_network_guard_reverts_lost_address.nim	nim	1
 tests/e2e/addon/t_e2e_omarchy_addon_network_link_adds_only.nim	nim	1
 tests/e2e/addon/t_e2e_omarchy_addon_network_refuses_lan_duplicate.nim	nim	1
+tests/e2e/addon/t_e2e_omarchy_addon_post_update_hook_reports.nim	nim	1
 tests/e2e/addon/t_e2e_omarchy_addon_root_snapshot_rollback.nim	nim	1
 tests/e2e/addon/t_system_profile_host_selection.nim	nim	0
 tests/e2e/addon/t_validator_safety_checks.nim	nim	11

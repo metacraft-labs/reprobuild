@@ -268,6 +268,31 @@
 ## ``hook-ignores-vendor-units``              the apt hook does not compare
 ##                                            vendor units with the
 ##                                            generation's record
+## ``alpm-hook-without-timeout``              the ALPM hook runs the
+##                                            verification with no
+##                                            deadline, so a hung one
+##                                            stalls pacman (AR6)
+## ``alpm-hook-without-exit0``                the ALPM hook exits with the
+##                                            verification's status
+## ``alpm-hook-ignores-pacnew``               the pacman verification does
+##                                            not report a ``.pacnew`` or
+##                                            ``.pacsave`` beside a ledger
+##                                            path
+## ``omarchy-hook-without-timeout``           the Omarchy hook's root side
+##                                            runs the verification with no
+##                                            deadline
+## ``omarchy-hook-no-unprivileged-record``    the Omarchy hook records
+##                                            nothing when ``sudo -n``
+##                                            fails
+## ``omarchy-hook-writer-follows-links``      the Omarchy hook is written
+##                                            and removed by path, following
+##                                            links, without the owner
+##                                            checks (and the preflight does
+##                                            not walk its directories)
+## ``omarchy-override-not-rechecked``         the verification after an
+##                                            Omarchy update does not
+##                                            re-check ``overrideBaseLayer``
+##                                            acknowledgements
 ## ``apt-closure-unrecorded``                 the apt closure realiser
 ##                                            renames its prefixes into the
 ##                                            store with no receipt or index
@@ -1771,7 +1796,16 @@ const
                           "guard-ignores-default-route",
                           "guard-trusts-syslog-identifier",
                           "guard-confirm-any-session",
-                          "guard-accepts-own-address"]
+                          "guard-accepts-own-address",
+                          # Living under pacman and Omarchy updates (AR6;
+                          # generation0.nim, alpm_hook.nim, omarchy_hook.nim).
+                          "alpm-hook-without-timeout",
+                          "alpm-hook-without-exit0",
+                          "alpm-hook-ignores-pacnew",
+                          "omarchy-hook-without-timeout",
+                          "omarchy-hook-no-unprivileged-record",
+                          "omarchy-hook-writer-follows-links",
+                          "omarchy-override-not-rechecked"]
 
 when AddonMutation.len > 0 and AddonMutation notin KnownAddonMutations and
     AddonMutation notin KnownAgentMutations:

@@ -32,6 +32,7 @@ import ./fingerprint
 import ./host_exec
 import ./mutations
 import ./nft_tables
+import ./omarchy_hook
 
 type
   LedgerClass* = enum
@@ -123,6 +124,15 @@ type
       ## (decision 128): every apply, recovery and revert verifies it
       ## against the store's current add-on binary and repairs it. Removed
       ## with ``/var/lib/repro`` by uninstall.
+    lcOmarchyHook = "omarchyHook"
+      ## Generation 0's Omarchy post-update hook in the ``omarchyAccount``'s
+      ## home (spec §4.3.2; AR6): ``unit`` names the account, ``kindHint``
+      ## is ``file`` (the hook: root-owned, ``mode`` 0644, ``sha256``) or
+      ## ``dir`` (a ``post-update.d`` bootstrap created, owned by the
+      ## account). Written, observed and removed only through
+      ## ``omarchy_hook.nim`` (no link followed, every component below the
+      ## home owner-checked), never by the infra drivers. Drift when it
+      ## differs; removed by uninstall, the directory only while empty.
 
   LedgerEntry* = object
     class*: LedgerClass
@@ -311,6 +321,17 @@ proc readLiveSysctl*(key: string): string =
   ## host's (spec §7.2 step 6, threat model G35). "" when unreadable.
   readHostSysctl(key)
 
+proc hookObjectOf*(e: LedgerEntry): OmarchyHookObject =
+  ## The ``omarchy_hook`` view of an ``lcOmarchyHook`` entry.
+  OmarchyHookObject(path: e.path, account: e.unit, kindHint: e.kindHint,
+                    sha256: e.sha256, mode: e.mode, owner: e.owner)
+
+proc toLedgerEntry*(o: OmarchyHookObject): LedgerEntry =
+  ## The ledger entry of an object ``omarchy_hook.writeOmarchyHook`` wrote.
+  LedgerEntry(class: lcOmarchyHook, path: o.path, unit: o.account,
+              kindHint: o.kindHint, sha256: o.sha256, mode: o.mode,
+              owner: o.owner)
+
 proc observeDrift*(e: LedgerEntry): string =
   ## "" when the object is exactly as the ledger recorded it, otherwise a
   ## one-line description of the difference. Used before every removal and
@@ -358,6 +379,8 @@ proc observeDrift*(e: LedgerEntry): string =
       return "content changed (sha256 " & digest[0 ..< 12] & ", ledger " &
              e.sha256[0 ..< min(12, e.sha256.len)] & ")"
     ""
+  of lcOmarchyHook:
+    observeOmarchyHook(hookObjectOf(e))
   of lcKey:
     if not fileExists(e.path) or symlinkExists(e.path):
       return "missing (or no longer a regular file)"
@@ -591,6 +614,12 @@ proc expectedRecords*(l: Ledger): seq[ExpectedRecord] =
     of lcAccount:
       result.add(ExpectedRecord(component: fcAccounts, key: e.path,
         value: e.value, baseValue: e.replaced))
+    of lcOmarchyHook:
+      # ``omarchy-hooks`` records every inode under the account's hook
+      # directory as ``etcEntryValue`` does (spec §12.2).
+      result.add(ExpectedRecord(component: fcOmarchyHooks, key: e.path,
+        value: (if e.kindHint == KindDir: "d " & e.mode & " " & e.owner
+                else: "f " & e.mode & " " & e.owner & " sha256:" & e.sha256)))
       for f in AccountDatabaseFiles:
         result.add(ExpectedRecord(component: fcEtc, key: f, value: "*",
                                   anyChange: true))
