@@ -78,9 +78,17 @@
 ## credential; an apt closure realised from the ``.deb`` cache; a package
 ## conffile diverted; a system account, tmpfiles and sysctl fragments --
 ## seven generations (past the retention policy's five), a generation that
-## fails its confirm and is reverted by the apply unit, a switch killed
+## fails its confirm (a health check that cannot pass, given to a unit the
+## host already runs, beside a new ``.target`` the switch installs and the
+## revert removes) and is reverted by the apply unit, a switch killed
 ## after step 4 (seam build) and recovered by the re-assert unit, and the
-## boot secrets and re-assert units run again.
+## boot secrets and re-assert units run again. The profile's two fixture
+## units run the base's own binaries under the fixture floor waiver, and an
+## agent apply never adds a whole-floor waiver to a new unit (spec §10.1,
+## *An agent apply never weakens the floor*; threat model C102): an
+## operator's apply deploys both first, with a placeholder command, no
+## credential and no closure, so the agent's ticks still materialise the
+## secret and realise the closure.
 ##
 ## Falsifying mutation (``REPRO_ADDON_MUTATION=privileged-filter-without-mount-chown``):
 ## the root units' filter without the traced ``@mount`` and ``@chown``;
@@ -436,6 +444,19 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
     "linux.sysctl {\n  key = \"vm.swappiness\"\n  value = \"33\"\n}\n"
   proc gen(n: int): string =
     common & canonicalFile("/etc/repro/a9-trace", "gen " & $n & "\n")
+  # The waived units' first deployment, an operator's (header): the same
+  # waiver and account, nothing the apply unit's work below needs.
+  let operatorUnits = "addOn {\n  managedEtcPrefixes = []\n" &
+    "  confirmTimeout = 15\n}\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver &
+      "  name = \"a9-trace.service\"\n  content = \"[Service]\n" &
+      "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target\n\"\n}\n" &
+    "systemd.systemUnit {\n" & FixtureFloorWaiver &
+      "  name = \"a9-closure.service\"\n  content = \"[Service]\n" &
+      "Type=oneshot\nExecStart=/usr/bin/true\n\"\n  enabled = false\n}\n"
+  if not g.operatorDeploysWaived(repro, "a9-operator", operatorUnits, step):
+    return
+  g.recordTimerBaseline()
   # Attribution (header): which process was in which unit, sampled from
   # here to the end of the work; and a foreign unit that logs its own
   # calls the whole time.
@@ -459,12 +480,19 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
   # Generations past the retention policy's five: the apply releases the
   # store roots of those it drops (§5.2).
   for n in 2 .. 7: tick(uint64(n), gen(n))
-  # A confirm failure: a unit whose health check cannot pass; the apply
-  # unit reverts to the previous generation and the agent quarantines it.
-  let failing = gen(8) & "systemd.systemUnit {\n" & FixtureFloorWaiver &
-    "  name = \"a9-fails.service\"\n  content = \"[Service]\n" &
-    "ExecStart=/bin/sleep infinity\n\n[Install]\nWantedBy=multi-user.target" &
-    "\n\"\n  healthCheck = \"tcp:127.0.0.1:18997\"\n}\n"
+  # A confirm failure: a health check that cannot pass, given to the unit
+  # the host already runs (a new waived unit would be refused before any
+  # switch: header); the apply unit reverts to the previous generation and
+  # the agent quarantines it. The generation also adds a target, which runs
+  # no command and so is outside the floor: the apply unit still installs,
+  # enables and starts a new unit, and the revert removes it.
+  const TraceCreds = "  credentials = [\"tok\"]\n}\n"
+  doAssert gen(8).count(TraceCreds) == 1
+  let failing = gen(8).replace(TraceCreds, "  credentials = [\"tok\"]\n" &
+    "  healthCheck = \"tcp:127.0.0.1:18997\"\n}\n") &
+    "systemd.systemUnit {\n  name = \"a9-fails.target\"\n  content = " &
+    "\"[Unit]\nDescription=A9 trace target\n\n[Install]\n" &
+    "WantedBy=multi-user.target\n\"\n}\n"
   let tf = runTick(8, failing)
   step("tick 8 fails its confirm and is reverted", tf.outcome == "aoRolledBack",
        $tf & "\n" & tf.applyLog)
