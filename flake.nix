@@ -3046,8 +3046,10 @@
             # nothing in reprobuild runs it. Linux only, because the
             # `LD_LIBRARY_PATH` channel is: dyld does not consult it for a
             # system binary, and macOS's own `ssh-keygen` is fine there.
-            # `scripts/check_dev_shell_env.sh` lists `ssh-keygen` among the
-            # programs it checks, so dropping this line fails `just lint`.
+            # `ssh-keygen` is in `DEV_SHELL_SUBPROCESS_TOOLS`
+            # (`scripts/lib/dev_shell_overrides.sh`), so on a host whose own
+            # `ssh-keygen` cannot take this shell's libraries, dropping this
+            # line fails the one-glibc check in `just lint`.
             ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
               (pkgs.runCommand "dev-shell-ssh-keygen-${pkgs.openssh.version}" { } ''
                 mkdir -p "$out/bin"

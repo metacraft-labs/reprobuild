@@ -1349,9 +1349,10 @@ dev_shell_loader_glibc_conflicts() {
   while IFS=$'\t' read -r tool binary; do
     [[ -n "$binary" ]] || continue
     host="$(dev_shell_elf_glibc "$binary")"
-    # No nix-store interpreter: a script, a static binary, or a non-nix host.
-    # Nothing here can say anything about it, and saying nothing is the
-    # honest answer rather than a pass or a fail.
+    # No interpreter whose libc can be located: a script, a static binary,
+    # or a loader with no `libc.so.6` beside it (NixOS's stub loader, a musl
+    # host). Nothing here can say anything about it, and saying nothing is
+    # the honest answer rather than a pass or a fail.
     [[ -n "$host" ]] || continue
     if [[ -z "${defined_cache[$host]+set}" ]]; then
       rc=0
