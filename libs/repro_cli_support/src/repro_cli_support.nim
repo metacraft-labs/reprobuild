@@ -32797,13 +32797,13 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
                              committedLock: string;
                              solved: var UnifiedSolution): int
 
-proc runBuildCommand(args: openArray[string]; publicCliPath: string;
-                     forceDirect = false;
-                     daemonHosted = false;
-                     eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil;
-                     graphAugmenter: BuildGraphAugmenter = nil): int =
+proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
+                         forceDirect: bool;
+                         daemonHosted: bool;
+                         eventSink: BuildCommandEventSink;
+                         cancelCheck: BuildCancelCallback;
+                         actionOutcomeSink: BuildActionOutcomeSink;
+                         graphAugmenter: BuildGraphAugmenter): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -33738,6 +33738,29 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     stderr.writeLine("repro build: daemon unavailable; falling back to " &
       "direct mode: " & err.msg)
     return runDirectBuild()
+
+
+proc runBuildCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     daemonHosted = false;
+                     eventSink: BuildCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int =
+  ## `runBuildCommandBody`, then the one-line summary of the provider startup
+  ## failures it met (`providerStartupFailureSummary`). Those stay non-fatal:
+  ## each skips only its own package's registrations, and the build goes on.
+  ## The summary is written however the body ends, so a build that stopped
+  ## for another reason still names them last.
+  resetProviderStartupFailures()
+  try:
+    result = runBuildCommandBody(args, publicCliPath, forceDirect,
+      daemonHosted, eventSink, cancelCheck, actionOutcomeSink, graphAugmenter)
+  finally:
+    let summary = providerStartupFailureSummary()
+    if summary.len > 0:
+      stderr.writeLine(summary)
+    resetProviderStartupFailures()
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
@@ -41599,9 +41622,46 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     let prior = findOverride(overrides, node.name)
     if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path,
         absolutePath(root))) == absTarget:
-      # Already in develop mode at this exact path — idempotent no-op.
+      # Already in develop mode at this exact path — idempotent no-op, unless
+      # ``--reset`` was asked for and the checkout has drifted off the lock.
+      # `--reset` promises "force it to the lock"; an existing develop-mode
+      # checkout used to be reported "no change" at whatever revision it sat
+      # (PLAT-79 on m3: `nim-agents-isonim-viewmodels` left at 4c0f39a with
+      # the lock pinning 6afd343).
+      let devHead =
+        if dirExists(absTarget): gitHeadShaOf(gitBinary, absTarget) else: ""
+      let drifted = devHead != node.coordinates.revision
+      if args.reset and drifted and args.dryRun:
+        outcome.mode = "would-reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
+      if args.reset and drifted:
+        if dirExists(absTarget):
+          removeDir(absTarget)
+        let resetRes =
+          cloneNodeAtLockedRevision(root, absTarget, node, identity,
+            args.intoDir)
+        if not resetRes.ok:
+          outcome.mode = "error"
+          outcome.ok = false
+          outcome.diagnostic = "reset-to-locked-revision failed for " &
+            node.name & " (was at " &
+            (if devHead.len == 0: "non-git-checkout" else: devHead) & "): " &
+            resetRes.diagnostic
+          outcomes.add(outcome)
+          anyFailure = true
+          continue
+        outcome.mode = "reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
       outcome.mode = "idempotent"
       outcome.ok = true
+      if drifted and devHead.len > 0:
+        outcome.diagnostic = "in develop mode at " & devHead &
+          ", not the locked revision " & node.coordinates.revision &
+          " (left as it is; pass --reset to force it to the lock)"
       if node.name in args.only and not isExplicitDevelopOverride(prior.get()) and
           not args.dryRun:
         # The one change an idempotent run makes: ``--only`` named this
@@ -78273,6 +78333,10 @@ when defined(reproGitStdoutReaderTest):
     for head in found.heads:
       result.heads.add((head.oid, head.refName))
 
+  proc verifyLockPinnedProducerSourceForTest*(dep: LockedDep;
+      sourceRoot, consumerRoot: string) =
+    verifyLockPinnedProducerSource(dep, sourceRoot, consumerRoot)
+
 proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
     headOid: string): HashSet[string] =
   ## Branch names that MAY contain ``headOid`` on a remote, read from the
@@ -110887,7 +110951,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineCatalogCommand.generate:
       let r = conf.catalog.generate
       return runCatalogGenerateCommand(r.root, r.sourceSet, r.state,
-        r.generatedAt)
+        r.generatedAt, fullHistory = r.fullHistory)
     of ReproCommandLineCatalogCommand.verify:
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,

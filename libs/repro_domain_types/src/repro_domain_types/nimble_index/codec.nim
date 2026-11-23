@@ -46,6 +46,24 @@
 ## (``nrUnknownSchema``); a snapshot in a shard of a lower schema is refused
 ## as an unknown vocabulary.
 ##
+## A shard in which any package origin is a revival (``revivedAt`` not 0) or
+## any observation lists a reported commit (``reported``) is schema 5
+## (``NimbleShardHistorySchema``, ``ShardW5``): schema 4's records and
+## conditions, whose origins add ``revivedAt`` and whose observations add
+## ``reported``. Schema 5 is chosen by the value before the others, and
+## schema 5 for a shard without either is non-canonical. A reader of
+## schemas 1 to 4 refuses a schema-5 shard (``nrUnknownSchema``).
+##
+## ## Root, name map and events schemas
+##
+## A root whose ``lastFullCheck`` is not 0 is root schema 2 (``RootW2``),
+## which adds ``fullHistory`` and ``lastFullCheck`` after schema 1's fields.
+## A name map with an alias that has a ``candidate`` is name-map schema 2
+## (``NameMapW2``). An events object holding a ``revived`` or
+## ``alias-retargeted`` event is events schema 2, whose layout is schema
+## 1's. Each is chosen by the value, so the other schema is non-canonical
+## for it, and a reader of schema 1 alone refuses it by its schema check.
+##
 ## ## Canonical form
 ##
 ## One value has exactly one encoding, and the decoder accepts only it:
@@ -510,9 +528,16 @@ proc validatePackage*(p: PackageEnvelope; field: string) =
     checkIdent(o.url, field & ".origins[" & $i & "].url", maxLen = MaxTextBytes)
     checkFreeText(o.subdir, field & ".origins[" & $i & "].subdir",
       MaxPathBytes, allowEmpty = true)
-    let k = o.url & "\0" & o.subdir
+    let remote = o.url & "\0" & o.subdir
+    if o.revivedAt != 0 and remote notin seen:
+      # A revival entry stands for an origin recorded before it answering
+      # again with other history: it repeats an earlier entry's remote.
+      refuse(nrInconsistent, field & ".origins[" & $i & "] is a revival " &
+        "of a remote no earlier origin names")
+    let k = remote & "\0" & $o.revivedAt
     if k in seen:
       refuse(nrDuplicate, field & ".origins[" & $i & "] repeats an origin")
+    seen.add remote
     seen.add k
   if int(p.registryOrigin) >= p.origins.len:
     refuse(nrInconsistent, field & ".registryOrigin names origin " &
@@ -563,6 +588,17 @@ proc validateObservation*(o: PackageObservation; field: string) =
         "object id")
     keys.add heldSortKey(h)
   requireStrictlyAscending(keys, field & ".held")
+  if o.origin.revivedAt != 0:
+    refuse(nrInconsistent, field & ".origin: an observation names the " &
+      "remote it read, never a revival entry")
+  if o.reported.len > MaxVersionsPerPackage:
+    refuse(nrBound, field & ".reported has more than " &
+      $MaxVersionsPerPackage & " entries")
+  for i, c in o.reported:
+    if c.len notin [40, 64] or not isLowerHex(c):
+      refuse(nrInvalidText, field & ".reported[" & $i & "] is not a " &
+        "full-width lower-case object id")
+  requireStrictlyAscending(o.reported, field & ".reported")
 
 proc validateShard*(s: NimbleShard) =
   if int(s.shardBits) > MaxShardBits:
@@ -651,6 +687,12 @@ proc validateRoot*(r: NimbleIndexRoot) =
     if o.size == 0 or o.size > uint64(bound):
       refuse(nrBound, "root." & name & ": size " & $o.size &
         " is outside 1.." & $bound)
+  if r.lastFullCheck > r.generatedAt:
+    refuse(nrInconsistent, "root: lastFullCheck " & $r.lastFullCheck &
+      " is after the generation time " & $r.generatedAt)
+  if r.fullHistory and r.lastFullCheck != r.generatedAt:
+    refuse(nrInconsistent, "root: a full-history generation is its own " &
+      "last full check")
 
 proc validateNameMap*(m: NimbleNameMap) =
   if m.entries.len > MaxNames:
@@ -675,6 +717,21 @@ proc validateNameMap*(m: NimbleNameMap) =
     if m.entries[at].name != e.target:
       refuse(nrNonCanonical, "nameMap[" & $i & "]: alias target is not " &
         "spelled as the canonical name")
+  for i, e in m.entries:
+    if e.candidate.len == 0:
+      continue
+    checkIdent(e.candidate, "nameMap[" & $i & "].candidate")
+    if e.target.len == 0:
+      refuse(nrInconsistent, "nameMap[" & $i & "]: only an alias has a " &
+        "candidate target")
+    if nameKey(e.candidate) == nameKey(e.target):
+      refuse(nrInconsistent, "nameMap[" & $i & "]: the candidate is the " &
+        "recorded target")
+    let at = keys.binarySearch(nameKey(e.candidate), cmpBytes)
+    if at < 0 or m.entries[at].target.len > 0 or
+        m.entries[at].name != e.candidate:
+      refuse(nrInconsistent, "nameMap[" & $i & "]: candidate " &
+        e.candidate.escape() & " is not a canonical name of the map")
 
 proc validateEvents*(e: NimbleEvents) =
   if e.events.len > MaxEvents:
@@ -1059,6 +1116,49 @@ proc fromW(w: ObservationW; field: string): PackageObservation =
         tag: wText(h.version.tag)),
       commit: toHexLower(asSeq(h.commit)), firstSeen: h.firstSeen)
 
+proc toW5(p: PackageEnvelope; field: string): PackageW5 =
+  ## ``p`` as a package of shard schema 5.
+  var os: seq[OriginW5]
+  for o in p.origins:
+    os.add OriginW5(url: textL(o.url, WText, field & ".origins"),
+      subdir: textL(o.subdir, WPath, field & ".origins"),
+      vcs: uint8(ord(o.vcs)), revivedAt: o.revivedAt)
+  var vs: seq[VersionRecordW3]
+  for i, v in p.versions:
+    vs.add toW(v, field & ".versions[" & $i & "]", VersionRecordW3)
+  PackageW5(name: textL(p.name, WName, field & ".name"),
+    origins: toL(os, List[OriginW5, MaxOrigins], field & ".origins"),
+    registryOrigin: p.registryOrigin,
+    versions: toL(vs, List[VersionRecordW3, MaxVersionsPerPackage],
+      field & ".versions"))
+
+proc fromW(w: PackageW5; field: string): PackageEnvelope =
+  result.name = wText(w.name)
+  for i, o in w.origins:
+    result.origins.add PackageOrigin(url: wText(o.url), subdir: wText(o.subdir),
+      vcs: enumFrom(o.vcs, OriginVcs, field & ".origins[" & $i & "].vcs"),
+      revivedAt: o.revivedAt)
+  result.registryOrigin = w.registryOrigin
+  for i, v in w.versions:
+    result.versions.add fromW(v, field & ".versions[" & $i & "]")
+
+proc toW5(o: PackageObservation; field: string): ObservationW5 =
+  ## ``o`` as an observation of shard schema 5.
+  let w = toW(o, field)
+  var reported: seq[List[byte, MaxCommitBytes]]
+  for i, c in o.reported:
+    reported.add commitL(c, field & ".reported[" & $i & "]")
+  ObservationW5(name: w.name, origin: w.origin, state: w.state,
+    headRef: w.headRef, head: w.head, tags: w.tags, held: w.held,
+    reported: toL(reported, List[List[byte, MaxCommitBytes],
+      MaxVersionsPerPackage], field & ".reported"))
+
+proc fromW(w: ObservationW5; field: string): PackageObservation =
+  result = fromW(ObservationW(name: w.name, origin: w.origin, state: w.state,
+    headRef: w.headRef, head: w.head, tags: w.tags, held: w.held), field)
+  for c in w.reported:
+    result.reported.add toHexLower(asSeq(c))
+
 proc hasSubmoduleLists*(s: NimbleShard): bool =
   ## Whether any record of ``s`` carries a ``submodules`` list: what makes
   ## a shard schema ``NimbleShardSubmodulesSchema``.
@@ -1112,11 +1212,29 @@ proc hasSnapshots*(s: NimbleShard): bool =
       if h.version.kind == rvkSnapshot: return true
   false
 
+proc hasHistoryFields*(p: PackageEnvelope): bool =
+  ## Whether an origin of ``p`` is a revival entry.
+  for o in p.origins:
+    if o.revivedAt != 0: return true
+  false
+
+proc hasHistoryFields*(s: NimbleShard): bool =
+  ## Whether an origin of ``s`` is a revival entry or an observation lists
+  ## a reported commit: what makes a shard schema
+  ## ``NimbleShardHistorySchema``.
+  for p in s.packages:
+    if p.hasHistoryFields: return true
+  for o in s.observations:
+    if o.reported.len > 0: return true
+  false
+
 proc shardSchemaOf*(s: NimbleShard): uint16 =
-  ## The one schema ``s`` is encoded in (see the module docstring): 4 when
-  ## it holds a snapshot, else 3 when a condition needs it, else 2 when a
-  ## record has submodules, else 1.
-  if s.hasSnapshots: NimbleShardSnapshotsSchema
+  ## The one schema ``s`` is encoded in (see the module docstring): 5 when
+  ## an origin is a revival or an observation lists a reported commit, else
+  ## 4 when it holds a snapshot, else 3 when a condition needs it, else 2
+  ## when a record has submodules, else 1.
+  if s.hasHistoryFields: NimbleShardHistorySchema
+  elif s.hasSnapshots: NimbleShardSnapshotsSchema
   elif s.hasConditionTerms: NimbleShardConditionsSchema
   elif s.hasSubmoduleLists: NimbleShardSubmodulesSchema
   else: NimbleIndexSchemaVersion
@@ -1171,7 +1289,26 @@ proc toW*(s: NimbleShard): ShardW =
     observations: toL(os, List[ObservationW, MaxPackagesPerShard],
       "shard.observations"))
 
-proc fromW[S: ShardW | ShardW2 | ShardW3](w: S): NimbleShard =
+proc toW5*(s: NimbleShard): ShardW5 =
+  ## ``s`` as a schema-5 shard.
+  var ps: seq[PackageW5]
+  for i, p in s.packages:
+    ps.add toW5(p, "shard.packages[" & $i & "]")
+  var al: seq[AliasW]
+  for a in s.aliases:
+    al.add AliasW(alias: textL(a.alias, WName, "shard.aliases"),
+      target: textL(a.target, WName, "shard.aliases"))
+  var os: seq[ObservationW5]
+  for i, o in s.observations:
+    os.add toW5(o, "shard.observations[" & $i & "]")
+  ShardW5(schema: NimbleShardHistorySchema, shardBits: s.shardBits,
+    bucket: s.bucket,
+    packages: toL(ps, List[PackageW5, MaxPackagesPerShard], "shard.packages"),
+    aliases: toL(al, List[AliasW, MaxAliasesPerShard], "shard.aliases"),
+    observations: toL(os, List[ObservationW5, MaxPackagesPerShard],
+      "shard.observations"))
+
+proc fromW[S: ShardW | ShardW2 | ShardW3 | ShardW5](w: S): NimbleShard =
   result.shardBits = w.shardBits
   result.bucket = w.bucket
   for i, p in w.packages:
@@ -1199,6 +1336,17 @@ proc toW*(r: NimbleIndexRoot): RootW =
     nameMap: ObjectRefW(id: r.nameMap.id, size: r.nameMap.size),
     events: ObjectRefW(id: r.events.id, size: r.events.size))
 
+proc toW2*(r: NimbleIndexRoot): RootW2 =
+  ## ``r`` as a root of schema 2.
+  let w = toW(r)
+  RootW2(schema: NimbleRootHistorySchema, generator: w.generator,
+    sourceSet: w.sourceSet, generatedAt: w.generatedAt,
+    previousRoot: w.previousRoot, packageCount: w.packageCount,
+    versionCount: w.versionCount, eventCount: w.eventCount,
+    shardBits: w.shardBits, shards: w.shards, nameMap: w.nameMap,
+    events: w.events, fullHistory: r.fullHistory,
+    lastFullCheck: r.lastFullCheck)
+
 proc fromW(w: RootW): NimbleIndexRoot =
   result.generator = wText(w.generator)
   result.sourceSet = w.sourceSet
@@ -1215,6 +1363,51 @@ proc fromW(w: RootW): NimbleIndexRoot =
   result.nameMap = ObjectRef(id: w.nameMap.id, size: w.nameMap.size)
   result.events = ObjectRef(id: w.events.id, size: w.events.size)
 
+proc fromW(w: RootW2): NimbleIndexRoot =
+  result = fromW(RootW(schema: w.schema, generator: w.generator,
+    sourceSet: w.sourceSet, generatedAt: w.generatedAt,
+    previousRoot: w.previousRoot, packageCount: w.packageCount,
+    versionCount: w.versionCount, eventCount: w.eventCount,
+    shardBits: w.shardBits, shards: w.shards, nameMap: w.nameMap,
+    events: w.events))
+  result.fullHistory = w.fullHistory
+  result.lastFullCheck = w.lastFullCheck
+
+proc rootSchemaOf*(r: NimbleIndexRoot): uint16 =
+  ## The one schema ``r`` is encoded in: 2 when a full history check has
+  ## run (``lastFullCheck`` not 0), else 1.
+  if r.lastFullCheck != 0: NimbleRootHistorySchema
+  else: NimbleIndexSchemaVersion
+
+proc nameMapSchemaOf*(m: NimbleNameMap): uint16 =
+  ## The one schema ``m`` is encoded in: 2 when an alias has a candidate
+  ## target, else 1.
+  for e in m.entries:
+    if e.candidate.len > 0: return NimbleNameMapCandidatesSchema
+  NimbleIndexSchemaVersion
+
+proc eventsSchemaOf*(e: NimbleEvents): uint16 =
+  ## The one schema ``e`` is encoded in: 2 when it holds a `revived` or
+  ## `alias-retargeted` event, else 1.
+  for ev in e.events:
+    if ev.kind in {oeRevived, oeAliasRetargeted}:
+      return NimbleEventsRevivalSchema
+  NimbleIndexSchemaVersion
+
+proc toW2(m: NimbleNameMap): NameMapW2 =
+  var es: seq[NameEntryW2]
+  for e in m.entries:
+    es.add NameEntryW2(name: textL(e.name, WName, "nameMap"),
+      target: textL(e.target, WName, "nameMap"),
+      candidate: textL(e.candidate, WName, "nameMap"))
+  NameMapW2(schema: NimbleNameMapCandidatesSchema,
+    entries: toL(es, List[NameEntryW2, MaxNames], "nameMap"))
+
+proc fromW(w: NameMapW2): NimbleNameMap =
+  for e in w.entries:
+    result.entries.add NameEntry(name: wText(e.name), target: wText(e.target),
+      candidate: wText(e.candidate))
+
 proc toW(m: NimbleNameMap): NameMapW =
   var es: seq[NameEntryW]
   for e in m.entries:
@@ -1227,7 +1420,7 @@ proc fromW(w: NameMapW): NimbleNameMap =
   for e in w.entries:
     result.entries.add NameEntry(name: wText(e.name), target: wText(e.target))
 
-proc toW(e: NimbleEvents): EventsW =
+proc toW(e: NimbleEvents; schema = NimbleIndexSchemaVersion): EventsW =
   var es: seq[EventW]
   for ev in e.events:
     es.add EventW(kind: uint8(ord(ev.kind)),
@@ -1236,7 +1429,7 @@ proc toW(e: NimbleEvents): EventsW =
       before: textL(ev.before, WText, "events.before"),
       after: textL(ev.after, WText, "events.after"),
       observedAt: ev.observedAt)
-  EventsW(schema: NimbleIndexSchemaVersion,
+  EventsW(schema: schema,
     events: toL(es, List[EventW, MaxEvents], "events"))
 
 proc fromW(w: EventsW): NimbleEvents =
@@ -1315,7 +1508,11 @@ proc acceptsSchema*(kind: NimbleObjectKind; schema: uint16): bool =
   schema == NimbleIndexSchemaVersion or
     (kind == nokShard and schema in [NimbleShardSubmodulesSchema,
                                      NimbleShardConditionsSchema,
-                                     NimbleShardSnapshotsSchema])
+                                     NimbleShardSnapshotsSchema,
+                                     NimbleShardHistorySchema]) or
+    (kind == nokRoot and schema == NimbleRootHistorySchema) or
+    (kind == nokNameMap and schema == NimbleNameMapCandidatesSchema) or
+    (kind == nokEvents and schema == NimbleEventsRevivalSchema)
 
 proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind): uint16 =
   ## Everything before the SSZ decode: size bound first, then the header,
@@ -1334,9 +1531,13 @@ proc checkFrame(bytes: openArray[byte]; kind: NimbleObjectKind): uint16 =
   if not acceptsSchema(kind, schema):
     refuse(nrUnknownSchema, $kind & " schema " & $schema & " (this reader " &
       "accepts " & $NimbleIndexSchemaVersion &
-      (if kind == nokShard: ", " & $NimbleShardSubmodulesSchema & ", " &
-         $NimbleShardConditionsSchema & " and " &
-         $NimbleShardSnapshotsSchema else: "") &
+      (case kind
+       of nokShard: ", " & $NimbleShardSubmodulesSchema & ", " &
+         $NimbleShardConditionsSchema & ", " & $NimbleShardSnapshotsSchema &
+         " and " & $NimbleShardHistorySchema
+       of nokRoot: " and " & $NimbleRootHistorySchema
+       of nokNameMap: " and " & $NimbleNameMapCandidatesSchema
+       of nokEvents: " and " & $NimbleEventsRevivalSchema) &
       ")")
   schema
 
@@ -1367,6 +1568,7 @@ proc encodeShard*(s: NimbleShard): seq[byte] =
   ## ``s`` in the one schema its value has (``shardSchemaOf``).
   validateShard(s)
   case shardSchemaOf(s)
+  of NimbleShardHistorySchema: frame(nokShard, SSZ.encode(toW5(s)))
   of NimbleShardSnapshotsSchema:
     frame(nokShard, SSZ.encode(toW3(s, NimbleShardSnapshotsSchema)))
   of NimbleShardConditionsSchema: frame(nokShard, SSZ.encode(toW3(s)))
@@ -1378,7 +1580,10 @@ proc decodeShard*(bytes: openArray[byte]): NimbleShard =
   ## module docstring for the order of the checks.
   let schema = checkFrame(bytes, nokShard)
   vocabularyFailure = ""
-  if schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
+  if schema == NimbleShardHistorySchema:
+    let w = decodeWire(bytes, ShardW5, "shard")
+    result = fromW(w)
+  elif schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
     let w = decodeWire(bytes, ShardW3, "shard")
     result = fromW(w)
   elif schema == NimbleShardSubmodulesSchema:
@@ -1394,7 +1599,8 @@ proc decodeShard*(bytes: openArray[byte]): NimbleShard =
   validateShard(result)
   if schema != shardSchemaOf(result):
     refuse(nrNonCanonical, "shard of schema " & $schema & " holds " &
-      (if result.hasSnapshots: "a snapshot version"
+      (if result.hasHistoryFields: "a revival origin or reported commits"
+       elif result.hasSnapshots: "a snapshot version"
        elif result.hasConditionTerms: "a nim-version or os-family condition"
        elif result.hasSubmoduleLists: "records with submodule lists"
        else: "no snapshot, no record with a submodule list and no " &
@@ -1405,47 +1611,82 @@ proc decodeShard*(bytes: openArray[byte]): NimbleShard =
 
 proc encodeRoot*(r: NimbleIndexRoot): seq[byte] =
   validateRoot(r)
-  frame(nokRoot, SSZ.encode(toW(r)))
+  if rootSchemaOf(r) == NimbleRootHistorySchema:
+    frame(nokRoot, SSZ.encode(toW2(r)))
+  else:
+    if r.fullHistory:
+      refuse(nrInconsistent, "root: a full-history generation records " &
+        "its last full check")
+    frame(nokRoot, SSZ.encode(toW(r)))
 
 proc decodeRoot*(bytes: openArray[byte]): NimbleIndexRoot =
-  discard checkFrame(bytes, nokRoot)
-  let w = decodeWire(bytes, RootW, "root")
+  let schema = checkFrame(bytes, nokRoot)
   vocabularyFailure = ""
-  result = fromW(w)
+  if schema == NimbleRootHistorySchema:
+    let w = decodeWire(bytes, RootW2, "root")
+    result = fromW(w)
+  else:
+    let w = decodeWire(bytes, RootW, "root")
+    result = fromW(w)
   checkVocabulary()
   validateRoot(result)
-  if frame(nokRoot, SSZ.encode(toW(result))) != @bytes:
+  if schema != rootSchemaOf(result):
+    refuse(nrNonCanonical, "root of schema " & $schema & " records " &
+      (if result.lastFullCheck != 0: "a full history check" else:
+        "no full history check") & "; its schema is " &
+      $rootSchemaOf(result))
+  if encodeRoot(result) != @bytes:
     refuse(nrNonCanonical, "root does not re-encode to the same bytes")
 
 proc encodeNameMap*(m: NimbleNameMap): seq[byte] =
   validateNameMap(m)
-  frame(nokNameMap, SSZ.encode(toW(m)))
+  if nameMapSchemaOf(m) == NimbleNameMapCandidatesSchema:
+    frame(nokNameMap, SSZ.encode(toW2(m)))
+  else:
+    frame(nokNameMap, SSZ.encode(toW(m)))
 
 proc decodeNameMap*(bytes: openArray[byte]): NimbleNameMap =
-  discard checkFrame(bytes, nokNameMap)
-  let w = decodeWire(bytes, NameMapW, "name map")
+  let schema = checkFrame(bytes, nokNameMap)
   vocabularyFailure = ""
-  result = fromW(w)
+  if schema == NimbleNameMapCandidatesSchema:
+    let w = decodeWire(bytes, NameMapW2, "name map")
+    result = fromW(w)
+  else:
+    let w = decodeWire(bytes, NameMapW, "name map")
+    result = fromW(w)
   checkVocabulary()
   validateNameMap(result)
-  if frame(nokNameMap, SSZ.encode(toW(result))) != @bytes:
+  if schema != nameMapSchemaOf(result):
+    refuse(nrNonCanonical, "name map of schema " & $schema & " holds " &
+      (if schema == NimbleIndexSchemaVersion: "a candidate target"
+       else: "no candidate target") & "; its schema is " &
+      $nameMapSchemaOf(result))
+  if encodeNameMap(result) != @bytes:
     refuse(nrNonCanonical, "name map does not re-encode to the same bytes")
 
 proc encodeEvents*(e: NimbleEvents): seq[byte] =
   validateEvents(e)
-  frame(nokEvents, SSZ.encode(toW(e)))
+  frame(nokEvents, SSZ.encode(toW(e, eventsSchemaOf(e))))
 
 proc decodeEvents*(bytes: openArray[byte]): NimbleEvents =
-  discard checkFrame(bytes, nokEvents)
+  let schema = checkFrame(bytes, nokEvents)
   let w = decodeWire(bytes, EventsW, "events")
   vocabularyFailure = ""
   result = fromW(w)
   checkVocabulary()
   validateEvents(result)
-  if frame(nokEvents, SSZ.encode(toW(result))) != @bytes:
+  if schema != eventsSchemaOf(result):
+    if schema == NimbleIndexSchemaVersion:
+      # Schema 1's vocabulary has no `revived` or `alias-retargeted`.
+      refuse(nrUnknownVocabulary, "events of schema " & $schema & " hold " &
+        "an event kind only schema " & $NimbleEventsRevivalSchema & " carries")
+    refuse(nrNonCanonical, "events of schema " & $schema & " hold no " &
+      "revived or alias-retargeted event; their schema is " &
+      $eventsSchemaOf(result))
+  if encodeEvents(result) != @bytes:
     refuse(nrNonCanonical, "events do not re-encode to the same bytes")
 
-proc decodePackageAs[P: PackageW | PackageW2 | PackageW3](payload: openArray[byte];
+proc decodePackageAs[P: PackageW | PackageW2 | PackageW3 | PackageW5](payload: openArray[byte];
                                               field: string;
                                               _: typedesc[P]): PackageEnvelope =
   var w: P
@@ -1466,7 +1707,9 @@ proc decodePackageSlice*(payload: openArray[byte]; field: string;
   ## Decode ONE package envelope from its SSZ slice inside a shard of
   ## ``schema`` (the navigator's partial access), with the same validation
   ## and canonical-form check a whole-shard decode applies to it.
-  if schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
+  if schema == NimbleShardHistorySchema:
+    result = decodePackageAs(payload, field, PackageW5)
+  elif schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
     result = decodePackageAs(payload, field, PackageW3)
   elif schema == NimbleShardSubmodulesSchema:
     result = decodePackageAs(payload, field, PackageW2)
@@ -1480,8 +1723,13 @@ proc decodePackageSlice*(payload: openArray[byte]; field: string;
   if shardBucket(nameKey(result.name), int(shardBits)) != bucket:
     refuse(nrWrongShard, field & " " & result.name.escape() & " belongs to " &
       "another shard")
+  if schema < NimbleShardHistorySchema and result.hasHistoryFields:
+    refuse(nrInconsistent, field & " names a revival origin, which only a " &
+      "shard of schema " & $NimbleShardHistorySchema & " carries")
   let again =
-    if schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
+    if schema == NimbleShardHistorySchema:
+      SSZ.encode(toW5(result, field))
+    elif schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
       SSZ.encode(toW(result, field, PackageW3))
     elif schema == NimbleShardSubmodulesSchema:
       SSZ.encode(toW(result, field, PackageW2))

@@ -389,7 +389,6 @@ libs/repro_resources/tests/t_an_in_use_hold_is_per_descriptor_and_never_inherite
 libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim	1
 libs/repro_resources/tests/t_l2_lease_edge.nim	1
 libs/repro_resources/tests/t_l3_reaper.nim	2
-libs/repro_runquota/src/repro_runquota.nim	2
 libs/repro_solver/src/repro_solver/lock_pins.nim	2
 libs/repro_solver/src/repro_solver/materiality.nim	1
 libs/repro_solver/tests/t_explainer_unsat_core_names_violated_edge.nim	1

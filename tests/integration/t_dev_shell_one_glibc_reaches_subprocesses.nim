@@ -54,6 +54,16 @@
 ##   4. INTEGRATION. Drive a GIT-USING test through
 ##      `repro build '.#test#<name>'` — the loop channel B took away.
 ##
+## Two more cases cover `ssh-keygen`, the other program reprobuild runs itself
+## (it signs and verifies test certificates, and the certificate signer mints
+## its keys with it). On an Ubuntu runner the dev shell left
+## `/usr/bin/ssh-keygen` on PATH, channel A handed it the shell's
+## `libcrypto.so.3`, and it died with "version `GLIBC_2.38' not found" while
+## the gate reported one glibc, because the gate neither listed `ssh-keygen`
+## nor looked at programs whose interpreter is outside the nix store. One case
+## is NEGATIVE and synthetic like case 3, in both the nix and the host shape;
+## the other starts the shell's own `ssh-keygen` under both channels.
+##
 ## What is exercised here is real: the real `git` on this shell's PATH, the
 ## real monitor shim, real glibc ELF files out of the nix store read with
 ## `patchelf` / `readelf`, and the real check script driven by `bash`. No
@@ -83,6 +93,7 @@
 import std/[json, os, osproc, strtabs, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 const
   # A git-using test that reproduces channel B: its first act is `git init`.
@@ -184,6 +195,114 @@ proc findIncompatibleGlibcPair(): GlibcPair =
         result.newer = prefixes[j]
         result.missing = missing
         return
+
+
+## --- fabricated check tree ------------------------------------------------
+##
+## Shared by the negative cases below. Each builds a copy of the gate in a
+## scratch tree, a library directory whose shared object names the NEWER glibc
+## of a real incompatible pair (exactly what every entry on this shell's
+## `LD_LIBRARY_PATH` looks like), and a `bin/` that is put first on PATH so the
+## gate resolves the fabricated tools instead of the shell's own.
+
+type FabricatedTree = object
+  tempRoot*: string
+  scratch*: string
+  injectDir*: string
+  fakeBin*: string
+
+proc loaderIn(glibc: string): string =
+  ## The interpreter's basename is architecture-specific
+  ## (`ld-linux-x86-64.so.2`, `ld-linux-aarch64.so.1`, …), so take
+  ## whichever one the glibc actually ships rather than naming one.
+  ## Only its store-path PREFIX is what the check reads, but a path
+  ## that exists keeps the fabricated binary honest.
+  for found in walkFiles(glibc / "lib" / "ld-linux-*.so.*"):
+    return found
+  glibc / "lib" / "ld-linux-x86-64.so.2"
+
+proc fabricateCheckTree(pair: GlibcPair): FabricatedTree =
+  result.tempRoot = createTempDir("repro-dev-shell-glibc-", "")
+  # One level of nesting on purpose. `check_dev_shell_env.sh` resolves
+  # the auto-override arm's siblings as `dirname($REPO_ROOT)/*`, so a
+  # tree placed directly in `$TMPDIR` treats every scratch directory on
+  # the machine as a workspace sibling and reports whichever of them
+  # happens to share a name with a flake input. That is noise from
+  # another check, and noise is how a real finding gets missed.
+  let scratch = result.tempRoot / "workspace" / "repo"
+  result.scratch = scratch
+  createDir(scratch / "scripts" / "lib")
+  copyFile(checkScript(), scratch / "scripts" / "check_dev_shell_env.sh")
+  copyFile(libScript(), scratch / "scripts" / "lib" /
+    "dev_shell_overrides.sh")
+  # Every library the check sources, or it reports a missing file
+  # before it reaches the question this case asks.
+  copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
+    scratch / "scripts" / "lib" / "preloaded_shim_loader.sh")
+  copyFile(repoRoot() / ".envrc", scratch / ".envrc")
+  copyFile(repoRoot() / "flake.nix", scratch / "flake.nix")
+  copyFile(repoRoot() / "scripts" / "dev-shell-pinned-siblings.tsv",
+    scratch / "scripts" / "dev-shell-pinned-siblings.tsv")
+
+  # The injected library: a real shared object whose RUNPATH names the
+  # newer glibc, which is exactly what every entry on this shell's
+  # LD_LIBRARY_PATH looks like.
+  result.injectDir = scratch / "inject"
+  createDir(result.injectDir)
+  let probeLib = result.injectDir / "libf05probe.so"
+  copyFile(pair.newer / "lib" / "libm.so.6", probeLib)
+  setFilePermissions(probeLib, {fpUserRead, fpUserWrite, fpUserExec})
+  discard requireSuccess(shellCommand(@[toolOnPath("patchelf"),
+    "--set-rpath", pair.newer / "lib", probeLib]))
+
+  result.fakeBin = scratch / "bin"
+  createDir(result.fakeBin)
+
+proc subprocessTools(): seq[string] =
+  ## `DEV_SHELL_SUBPROCESS_TOOLS`, read out of the gate's own library so this
+  ## file cannot fall out of step with it.
+  let cmd = "set -u; source " & libScript().quoteShell &
+    "; printf '%s\\n' \"${DEV_SHELL_SUBPROCESS_TOOLS[@]}\""
+  let res = runShell(shellCommand(@[toolOnPath("bash"), "-c", cmd]))
+  doAssert res.code == 0, res.output
+  for line in res.output.splitLines:
+    let trimmed = line.strip()
+    if trimmed.len > 0: result.add(trimmed)
+
+proc makeFakeTool(tree: FabricatedTree; name, interpreter: string) =
+  ## A real dynamic ELF (a copy of `true`) placed first on PATH under `name`,
+  ## running on whatever loader `interpreter` names.
+  let donor = toolOnPath("true")
+  doAssert donor.len > 0, "no `true` on PATH to copy"
+  let target = tree.fakeBin / name
+  if fileExists(target): removeFile(target)
+  copyFile(donor, target)
+  setFilePermissions(target, {fpUserRead, fpUserWrite, fpUserExec})
+  discard requireSuccess(shellCommand(@[toolOnPath("patchelf"),
+    "--set-interpreter", interpreter, target]))
+
+proc plantEveryTool(tree: FabricatedTree; glibc: string) =
+  ## Shadow every program the gate checks with a fabricated one on `glibc`.
+  ## The shell's own `git` and `ssh-keygen` would otherwise be checked too,
+  ## and they run on whatever glibc this shell was built from, which the
+  ## fabricated injection may well conflict with. Each case then moves the
+  ## ONE tool it is about.
+  for tool in subprocessTools():
+    makeFakeTool(tree, tool, loaderIn(glibc))
+
+proc runFabricatedCheck(tree: FabricatedTree): CmdResult =
+  # `REPRO_SYSTEMD_ANALYZE` is cleared because the check also
+  # examines the program it names. Inherited from the dev shell, it
+  # is a real binary on the shell's own glibc, and the fabricated
+  # injection below conflicts with it too, so the POSITIVE polarity
+  # was refused for a program this case never set up. The subjects
+  # here are the fabricated tools on PATH.
+  runWithEnv(@[toolOnPath("bash"),
+      tree.scratch / "scripts" / "check_dev_shell_env.sh"],
+    @[("LD_LIBRARY_PATH", tree.injectDir),
+      ("PATH", tree.fakeBin & $PathSep & getEnv("PATH")),
+      ("REPRO_SYSTEMD_ANALYZE", "")],
+    tree.scratch)
 
 suite "dev shell — one glibc reaches a subprocess":
 
@@ -336,76 +455,13 @@ suite "dev shell — one glibc reaches a subprocess":
           checkpoint("fabricating from real store paths: older=" &
             pair.older & " newer=" & pair.newer & " missing=" &
             pair.missing.join(","))
-          let tempRoot = createTempDir("repro-dev-shell-glibc-", "")
-          defer: removeDirEventually(tempRoot)
-          # One level of nesting on purpose. `check_dev_shell_env.sh` resolves
-          # the auto-override arm's siblings as `dirname($REPO_ROOT)/*`, so a
-          # tree placed directly in `$TMPDIR` treats every scratch directory on
-          # the machine as a workspace sibling and reports whichever of them
-          # happens to share a name with a flake input. That is noise from
-          # another check, and noise is how a real finding gets missed.
-          let scratch = tempRoot / "workspace" / "repo"
-          createDir(scratch / "scripts" / "lib")
-          copyFile(checkScript(), scratch / "scripts" /
-            "check_dev_shell_env.sh")
-          copyFile(libScript(), scratch / "scripts" / "lib" /
-            "dev_shell_overrides.sh")
-          # Every library the check sources, or it reports a missing file
-          # before it reaches the question this case asks.
-          copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
-            scratch / "scripts" / "lib" / "preloaded_shim_loader.sh")
-          copyFile(repoRoot() / ".envrc", scratch / ".envrc")
-          copyFile(repoRoot() / "flake.nix", scratch / "flake.nix")
-          copyFile(repoRoot() / "scripts" / "dev-shell-pinned-siblings.tsv",
-            scratch / "scripts" / "dev-shell-pinned-siblings.tsv")
-
-          # The injected library: a real shared object whose RUNPATH names the
-          # newer glibc, which is exactly what every entry on this shell's
-          # LD_LIBRARY_PATH looks like.
-          let injectDir = scratch / "inject"
-          createDir(injectDir)
-          let probeLib = injectDir / "libf05probe.so"
-          copyFile(pair.newer / "lib" / "libm.so.6", probeLib)
-          setFilePermissions(probeLib, {fpUserRead, fpUserWrite, fpUserExec})
-          discard requireSuccess(shellCommand(@[toolOnPath("patchelf"),
-            "--set-rpath", pair.newer / "lib", probeLib]))
-
-          # The tool: a real dynamic ELF that runs on the OLDER glibc, placed
-          # first on PATH under the name the gate looks for.
-          let fakeBin = scratch / "bin"
-          createDir(fakeBin)
-          let donor = toolOnPath("true")
-          check donor.len > 0
-          proc loaderIn(glibc: string): string =
-            ## The interpreter's basename is architecture-specific
-            ## (`ld-linux-x86-64.so.2`, `ld-linux-aarch64.so.1`, …), so take
-            ## whichever one the glibc actually ships rather than naming one.
-            ## Only its store-path PREFIX is what the check reads, but a path
-            ## that exists keeps the fabricated binary honest.
-            for found in walkFiles(glibc / "lib" / "ld-linux-*.so.*"):
-              return found
-            glibc / "lib" / "ld-linux-x86-64.so.2"
-
+          let tree = fabricateCheckTree(pair)
+          defer: removeDirEventually(tree.tempRoot)
+          plantEveryTool(tree, pair.newer)
+          let injectDir = tree.injectDir
           proc makeFakeGit(interp: string) =
-            copyFile(donor, fakeBin / "git")
-            setFilePermissions(fakeBin / "git",
-              {fpUserRead, fpUserWrite, fpUserExec})
-            discard requireSuccess(shellCommand(@[toolOnPath("patchelf"),
-              "--set-interpreter", loaderIn(interp), fakeBin / "git"]))
-
-          proc runCheck(): CmdResult =
-            # `REPRO_SYSTEMD_ANALYZE` is cleared because the check also
-            # examines the program it names. Inherited from the dev shell, it
-            # is a real binary on the shell's own glibc, and the fabricated
-            # injection below conflicts with it too, so the POSITIVE polarity
-            # was refused for a program this case never set up. The subject
-            # here is the one fabricated tool on PATH.
-            runWithEnv(@[toolOnPath("bash"),
-                scratch / "scripts" / "check_dev_shell_env.sh"],
-              @[("LD_LIBRARY_PATH", injectDir),
-                ("PATH", fakeBin & $PathSep & getEnv("PATH")),
-                ("REPRO_SYSTEMD_ANALYZE", "")],
-              scratch)
+            makeFakeTool(tree, "git", loaderIn(interp))
+          proc runCheck(): CmdResult = runFabricatedCheck(tree)
 
           # NEGATIVE polarity: the tool is on the older glibc.
           makeFakeGit(pair.older)
@@ -432,6 +488,123 @@ suite "dev shell — one glibc reaches a subprocess":
           checkpoint(accepted.output)
           check "one glibc reaches a subprocess" in accepted.output
           check "injects a second glibc" notin accepted.output
+
+  test "the check examines ssh-keygen, also when it is the host's own":
+    ## Reprobuild runs `ssh-keygen` itself: test certificates are signed and
+    ## verified with it, and the certificate signer mints its keys with it.
+    ## On an Ubuntu runner the dev shell left `/usr/bin/ssh-keygen` on PATH,
+    ## `LD_LIBRARY_PATH` handed it the shell's `libcrypto.so.3`, and it died
+    ## with "version `GLIBC_2.38' not found", while `just lint` on the same
+    ## runner reported one glibc. Two things were missing, and each has a
+    ## polarity here:
+    ##
+    ##   * `ssh-keygen` was not among the programs the gate checks;
+    ##   * a program whose interpreter is not in the nix store (every
+    ##     `/usr/bin` program on a host that is not NixOS) was passed over in
+    ##     silence. The host shape is fabricated from real files: the older
+    ##     glibc's loader and `libc.so.6` copied side by side into a directory
+    ##     outside the store, the layout Debian, Ubuntu and Fedora use.
+    when not defined(linux):
+      skip("injection is linux-only; see the first case")
+    else:
+      if not haveElfTools():
+        skip("patchelf, readelf and bash are all required to build and " &
+          "read the fabricated pair")
+      else:
+        let pair = findIncompatibleGlibcPair()
+        if pair.examined > 0 and pair.readable == 0:
+          checkpoint("the gate's extractor read no glibc in /nix/store; " &
+            "see the previous case")
+          fail()
+        elif pair.older.len == 0:
+          skip("no incompatible pair of glibcs in this machine's " &
+            "/nix/store to fabricate from")
+        else:
+          checkpoint("fabricating from real store paths: older=" &
+            pair.older & " newer=" & pair.newer)
+          check "ssh-keygen" in subprocessTools()
+          let tree = fabricateCheckTree(pair)
+          defer: removeDirEventually(tree.tempRoot)
+          plantEveryTool(tree, pair.newer)
+
+          # NEGATIVE, nix shape: ssh-keygen on the older store glibc.
+          makeFakeTool(tree, "ssh-keygen", loaderIn(pair.older))
+          let storeRefused = runFabricatedCheck(tree)
+          checkpoint(storeRefused.output)
+          check storeRefused.code != 0
+          check "injects a second glibc into a program it does not provide" in
+            storeRefused.output
+          check "ssh-keygen" in storeRefused.output
+          check pair.older in storeRefused.output
+          check pair.newer in storeRefused.output
+
+          # NEGATIVE, host shape: the same older glibc, but its loader and
+          # libc live outside the nix store, as on a distribution host.
+          let hostLib = tree.tempRoot / "host-root" / "lib"
+          createDir(hostLib)
+          let hostLoader = hostLib / loaderIn(pair.older).extractFilename
+          copyFile(loaderIn(pair.older), hostLoader)
+          copyFile(pair.older / "lib" / "libc.so.6", hostLib / "libc.so.6")
+          makeFakeTool(tree, "ssh-keygen", hostLoader)
+          let hostRefused = runFabricatedCheck(tree)
+          checkpoint(hostRefused.output)
+          check hostRefused.code != 0
+          check "injects a second glibc into a program it does not provide" in
+            hostRefused.output
+          check "ssh-keygen" in hostRefused.output
+          check (hostLib / "libc.so.6") in hostRefused.output
+          check pair.newer in hostRefused.output
+          for want in pair.missing:
+            check want in hostRefused.output
+
+          # POSITIVE: the dev shell provides ssh-keygen on its own glibc.
+          makeFakeTool(tree, "ssh-keygen", loaderIn(pair.newer))
+          let accepted = runFabricatedCheck(tree)
+          checkpoint(accepted.output)
+          check "one glibc reaches a subprocess" in accepted.output
+          check "injects a second glibc" notin accepted.output
+
+  test "ssh-keygen mints a key under both loader-injection channels":
+    ## The behavioural half of the case above, against the `ssh-keygen` this
+    ## shell actually resolves: the certificate signer's first act is
+    ## `ssh-keygen -t ed25519`, so that is what must start.
+    when not defined(linux):
+      skip("injection is linux-only; see the first case")
+    else:
+      let keygen = toolOnPath("ssh-keygen")
+      if keygen.len == 0:
+        skip("no ssh-keygen on PATH")
+      else:
+        var channels: seq[(string, seq[(string, string)])] = @[]
+        let exported = exportedLoaderPath()
+        if exported.len > 0:
+          channels.add(("LD_LIBRARY_PATH", @[("LD_LIBRARY_PATH", exported)]))
+        else:
+          checkpoint("channel A not exercised — this environment exports no " &
+            "LD_LIBRARY_PATH")
+        if fileExists(shimPath()):
+          channels.add(("LD_PRELOAD monitor shim",
+            @[("LD_PRELOAD", shimPath())]))
+        else:
+          checkpoint("channel B not exercised — " & shimPath() &
+            " is not built")
+        if channels.len == 0:
+          skip("neither loader-injection channel exists in this " &
+            "environment")
+        else:
+          let scratch = createTempDir("repro-dev-shell-keygen-", "")
+          defer: removeDirEventually(scratch)
+          var n = 0
+          for (name, env) in channels:
+            inc n
+            let key = scratch / ("key" & $n)
+            let res = runWithEnv(@[keygen, "-q", "-t", "ed25519", "-N", "",
+              "-C", "probe", "-f", key], env, scratch)
+            checkpoint(name & ": " & keygen & " -> exit " & $res.code &
+              ": " & res.output.strip())
+            check GlibcVersionErrorNeedle notin res.output
+            check res.code == 0
+            check fileExists(key & ".pub")
 
   test "engine: a git-using test runs through repro build .#test#<name>":
     let root = repoRoot()

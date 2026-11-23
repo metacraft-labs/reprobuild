@@ -30,6 +30,41 @@ const ProviderStartupBodyFailurePrefix* =
   ## the provider would report and the engine would drop it -- which is
   ## the failure mode the prefix exists to prevent.
 
+var providerStartupFailuresSeen {.threadvar.}: seq[string]
+  ## The forwarded startup-body failures of the build running on this thread,
+  ## one per line text, for ``providerStartupFailureSummary``. Per thread
+  ## because a build is: the user daemon runs builds on threads of one process.
+
+proc resetProviderStartupFailures*() =
+  providerStartupFailuresSeen = @[]
+
+proc recordProviderStartupFailure*(line: string) =
+  if line notin providerStartupFailuresSeen:
+    providerStartupFailuresSeen.add(line)
+
+proc providerStartupFailurePackages*(): seq[string] =
+  ## The packages whose ``build:`` body failed in a provider's startup pass,
+  ## in first-seen order: the text between the prefix and the first ``:``.
+  for line in providerStartupFailuresSeen:
+    let rest = line[ProviderStartupBodyFailurePrefix.len .. ^1]
+    let colon = rest.find(':')
+    let name = (if colon > 0: rest[0 ..< colon] else: rest).strip()
+    if name.len > 0 and name notin result:
+      result.add(name)
+
+proc providerStartupFailureSummary*(): string =
+  ## One line naming every package whose startup body failed during this
+  ## build, or "" when none did. The failures stay non-fatal (each skips only
+  ## that package's registrations), but they scroll past long before a build
+  ## ends; this is what the operator sees last.
+  let names = providerStartupFailurePackages()
+  if names.len == 0:
+    return ""
+  "repro: " & $names.len & " provider startup failure" &
+    (if names.len == 1: "" else: "s") & " (skipped, the build went on): " &
+    names.join(", ") & "; search the output for \"" &
+    ProviderStartupBodyFailurePrefix.strip() & "\""
+
 proc raiseRuntime(message: string) {.noreturn.} =
   raise newException(ProviderRuntimeError, message)
 
@@ -297,6 +332,7 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   for line in output.splitLines():
     if line.startsWith(ProviderStartupBodyFailurePrefix):
       stderr.writeLine(line)
+      recordProviderStartupFailure(line)
   if not fileExists(extendedPath(responsePath)):
     raiseRuntime("provider did not write a response file")
   readProviderResponseFile(responsePath)
