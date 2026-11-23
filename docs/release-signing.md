@@ -177,7 +177,12 @@ called **before** anything downloaded is unpacked or executed. It:
 5. for each artifact: requires a manifest line (a missing line is a
    rejection, or an attacker just deletes the line), requires exactly
    one such line, compares the digest, and verifies the artifact's own
-   detached `.asc`;
+   detached `.asc`. A manifest line is GNU `sha256sum`'s: the digest, a
+   space, a mode character and the name. Both modes `sha256sum -c`
+   accepts are accepted, text (`<digest>  <name>`) and binary
+   (`<digest> *<name>`, what MSYS2's `sha256sum` writes by default); the
+   name must match exactly, and any other line shape matches nothing.
+   `repro-sign-release.sh` always writes the text form;
 6. refuses to report success having checked zero artifacts.
 
 Per-artifact detached signatures are not redundant with the manifest

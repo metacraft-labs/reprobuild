@@ -20,7 +20,8 @@
 #            (scripts/release/stage_release_completions.sh)
 #
 # and, with -Zip, <OutDir>\reprobuild-<version>-<platform>-<arch>.zip whose one
-# top-level entry is that directory. Prints the package directory, then the
+# top-level entry is that directory (entry names separated by '/', written by
+# scripts/release/write_release_zip.ps1). Prints the package directory, then the
 # zip path when one was made, one per line, as its only output.
 #
 # WHY ONE SCRIPT. These steps were inline in .github/workflows/release.yml.
@@ -132,6 +133,10 @@ if ($Zip) {
   if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
   }
-  Compress-Archive -LiteralPath $pkgDir -DestinationPath $zipPath -Force
+  # Not Compress-Archive: under Windows PowerShell 5.1 it writes entry names
+  # with backslashes, which the ZIP format forbids and unzip-based consumers
+  # (repro-build-packages.sh) cannot unpack. write_release_zip.ps1 builds
+  # every name with '/' on every PowerShell; see its header.
+  & (Join-Path $repoRoot "scripts\release\write_release_zip.ps1") -SourceDir $pkgDir -DestinationPath $zipPath
   Write-Output $zipPath
 }

@@ -183,9 +183,10 @@ proc inferFsTypeForMount(layout: DiskLayout; device: string): string =
 # would mount -- or fail to find -- the wrong root. So the filesystems on
 # the disk being installed onto are named by their UUID: the ReproOS disk
 # initramfs resolves ``root=UUID=`` with BusyBox findfs, and systemd
-# resolves ``UUID=`` in fstab. Not by PARTUUID, which the kernel would
-# resolve by itself: that initramfs always runs, and BusyBox findfs knows
-# only ``LABEL=`` and ``UUID=``.
+# resolves ``UUID=`` in fstab. (That initramfs also resolves
+# ``PARTUUID=``, by reading the partition table itself, because BusyBox
+# findfs knows only ``LABEL=`` and ``UUID=``; the filesystem UUID needs
+# neither the partition table nor that reader.)
 #
 # Only partitions of ``--device`` are looked up: the layout's other device
 # paths may name disks of the BUILD host (a directory target, an image

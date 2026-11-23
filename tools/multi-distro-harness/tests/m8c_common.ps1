@@ -504,7 +504,8 @@ function New-TestArchive {
   if ($code -ne 0) { throw "stage_release_completions.sh failed (exit $code)" }
   $zip = Join-Path $OutDir "$top.zip"
   if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
-  Add-Type -AssemblyName System.IO.Compression.FileSystem
-  [System.IO.Compression.ZipFile]::CreateFromDirectory($root, $zip, [System.IO.Compression.CompressionLevel]::Fastest, $true)
+  # The release's own zip writer, so this archive's entry names are the
+  # release archive's ('/'-separated under Windows PowerShell 5.1 as well).
+  & ([IO.Path]::Combine($RepoRoot, 'scripts', 'release', 'write_release_zip.ps1')) -SourceDir $root -DestinationPath $zip
   return $zip
 }

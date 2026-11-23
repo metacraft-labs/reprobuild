@@ -12,7 +12,9 @@
 #      schema's body shape). Compare against the expected version.
 #   3. Strict-decode the typed record via `Toml.decode`. Convert any
 #      strict-mode parser error into `WorkspaceManifestParseError`, lifting
-#      the offending key into `keyPath`.
+#      the offending key into `keyPath`. Then refuse a non-string value
+#      written for any text key, read from the generic tree of the same text
+#      (the typed decoder reads `false` or `7` into a string field as text).
 #   4. Enforce required-key invariants the strict reader cannot enforce on
 #      its own (status-im/nim-toml-serialization silently default-initialises
 #      missing scalar fields).
@@ -194,6 +196,95 @@ proc firstUnknownKey[T](content: string; RecordType: typedesc[T]):
   var sample: T
   unknownKeyIn(tree, "", sample)
 
+proc tomlValuePhrase(node: TomlValueRef): string =
+  ## What a TOML value IS, for a diagnostic that says what was written
+  ## instead of the type a key wants: "an integer", "`false`", "a table".
+  case node.kind
+  of TomlKind.Int: "an integer"
+  of TomlKind.Float: "a float"
+  of TomlKind.Bool: (if node.boolVal: "`true`" else: "`false`")
+  of TomlKind.DateTime: "a date-time"
+  of TomlKind.Array: "an array"
+  of TomlKind.Tables: "an array of tables"
+  of TomlKind.Table, TomlKind.InlineTable: "a table"
+  of TomlKind.String: "a string"
+
+proc requireStringNode(path, schema, keyPath: string; node: TomlValueRef) =
+  ## Refuse `node` unless it is a TOML string, naming `keyPath`.
+  if node.isNil or node.kind != TomlKind.String:
+    raiseManifestError(path, keyPath, schema, schema,
+      "`" & keyPath & "` must be a string, not " &
+        (if node.isNil: "an empty value" else: tomlValuePhrase(node)))
+
+proc tableArrayRows(node: TomlValueRef): seq[TomlValueRef] =
+  ## The elements of an array value, in either spelling: an inline array
+  ## (`key = [{ … }]`) or `[[key]]` blocks. A top-level `[[key]]` (a lock's
+  ## `[[repo]]`, a variant's `[[override]]`) arrives as blocks; a nested
+  ## `[[table.key]]` header is refused by the pinned typed decoder before
+  ## this check runs, so nested rows arrive inline. Anything else has no
+  ## rows; the typed decoder has already refused a non-array for a sequence
+  ## field.
+  if node.isNil:
+    return
+  case node.kind
+  of TomlKind.Array: result = node.arrayVal
+  of TomlKind.Tables:
+    for t in node.tablesVal:
+      result.add(TomlValueRef(kind: TomlKind.Table, tableVal: t))
+  else: discard
+
+proc checkStringValueTypes[T](path, schema, keyPath: string;
+                              node: TomlValueRef; sample: T) =
+  ## Refuse a TOML value of another type written where `T` holds text, at
+  ## any depth: a `string` or `Option[string]` field, each element of a
+  ## `seq[string]`, and the same inside nested object fields and the rows of
+  ## an array of tables, each at its own key path (`url-prefix.url`,
+  ## `member_repos[0]`, `override[1].revision`, `locking.route[0].backend`).
+  ## `keyPath` is "" for the whole record.
+  ##
+  ## Workspace-Manifests.md §"Common Conventions": a key whose value is text
+  ## takes a TOML string, and nothing else, in every manifest. The pinned typed
+  ## decoder (`nim-toml-serialization`) turns a boolean or a number into text
+  ## when the field it fills is a string, so `url = false` decoded as the
+  ## prefix "false" and `member_repos = [true]` as a member named "true". The
+  ## generic tree keeps the written type, so the check is made against it, as
+  ## the settings reader's `optString` does.
+  ##
+  ## Not descended into: types the typed decoder reads through a custom
+  ## `readValue` (`types.nim`) whose values are checked elsewhere or not at
+  ## all — `Extensions` (preserved and ignored, per the spec),
+  ## `BranchRoleValue` and `CustomRoleTable` (a branch name or `false`:
+  ## `roleValueRejection`, `customRoleTableFromTree`) and
+  ## `ToolProvisioningConfigBody` (validated from the tree by
+  ## `tool_provisioning_config.nim`). Integer and boolean fields are left
+  ## alone: the typed decoder already refuses a mismatched value for them.
+  ## A field is matched by its Nim name, as `unknownKeyIn` matches it; the
+  ## only fields renamed by `serializedFieldName` are of a skipped type.
+  when T is Extensions or T is BranchRoleValue or T is CustomRoleTable or
+      T is ToolProvisioningConfigBody or T is TomlValueRef or
+      T is TomlTableRef:
+    discard
+  elif T is string:
+    requireStringNode(path, schema, keyPath, node)
+  elif T is Option:
+    var inner: typeof(sample.get())
+    checkStringValueTypes(path, schema, keyPath, node, inner)
+  elif T is seq:
+    var element: typeof(sample[0])
+    for i, row in tableArrayRows(node):
+      checkStringValueTypes(path, schema, keyPath & "[" & $i & "]", row,
+        element)
+  elif T is object:
+    if node.isNil or node.kind notin {TomlKind.Table, TomlKind.InlineTable}:
+      return
+    for name, field in fieldPairs(sample):
+      if name in node.tableVal:
+        checkStringValueTypes(path, schema,
+          (if keyPath.len > 0: keyPath & "." & name else: name),
+          node.tableVal[name], field)
+  else:
+    discard
+
 proc decodeStrict[T](path, content, expectedSchema: string;
                      RecordType: typedesc[T]): T =
   ## Strict-mode decode of the typed record. The `TomlUnknownFields` flag is
@@ -204,6 +295,10 @@ proc decodeStrict[T](path, content, expectedSchema: string;
   ## The unknown-field arm is the one failure whose raw parser text points at
   ## the wrong culprit, so it — and nothing else — is restated as tool /
   ## manifest version skew by `schemaSkewMessage`. See that proc for why.
+  ##
+  ## A typed decode that succeeds is then checked against the generic tree of
+  ## the same text (`checkStringValueTypes`), because the typed decoder reads
+  ## a boolean or a number written for a string field as text.
   try:
     result = Toml.decode(content, RecordType)
   except TomlError as e:
@@ -230,6 +325,8 @@ proc decodeStrict[T](path, content, expectedSchema: string;
   except CatchableError as e:
     let inner = if e.msg.len > 0: e.msg else: fallbackTomlMessage(content)
     raiseManifestError(path, "", expectedSchema, expectedSchema, inner)
+  checkStringValueTypes(path, expectedSchema, "",
+    decodeTree(path, content, expectedSchema), result)
 
 template requireNonEmpty(path, expectedSchema, keyPath, value: untyped) =
   ## status-im/nim-toml-serialization silently fills a missing scalar with
@@ -782,19 +879,6 @@ proc roleValueRejection*(value: BranchRoleValue): string =
     return branchNameRejection(value.branch)
   ""
 
-proc tomlValuePhrase(node: TomlValueRef): string =
-  ## What a TOML value IS, for a diagnostic that says what was written
-  ## instead of the type a key wants: "an integer", "`false`", "a table".
-  case node.kind
-  of TomlKind.Int: "an integer"
-  of TomlKind.Float: "a float"
-  of TomlKind.Bool: (if node.boolVal: "`true`" else: "`false`")
-  of TomlKind.DateTime: "a date-time"
-  of TomlKind.Array: "an array"
-  of TomlKind.Tables: "an array of tables"
-  of TomlKind.Table, TomlKind.InlineTable: "a table"
-  of TomlKind.String: "a string"
-
 proc mainlineValueRejection*(node: TomlValueRef;
                              remedy = "write the branch name"): string =
   ## Why the TOML value written for a `mainline` key is unusable because of
@@ -845,64 +929,6 @@ proc customRoleTableFromTree*(path, schema, keyPath: string;
         valueRejection)
     result.add((name, value))
 
-proc requireStringNode(path, schema, keyPath: string; node: TomlValueRef) =
-  ## Refuse `node` unless it is a TOML string, naming `keyPath`.
-  if node.isNil or node.kind != TomlKind.String:
-    raiseManifestError(path, keyPath, schema, schema,
-      "`" & keyPath & "` must be a string, not " &
-        (if node.isNil: "an empty value" else: tomlValuePhrase(node)))
-
-proc tableArrayRows(node: TomlValueRef): seq[TomlValueRef] =
-  ## The elements of an array value, in either spelling: an inline array
-  ## (`key = [{ … }]`) or `[[key]]` blocks. The pinned typed decoder refuses
-  ## a nested `[[repo.<key>]]` header before this check runs, so today only
-  ## the inline spelling reaches it; the block spelling is handled so the
-  ## check stays whole if the decoder learns it. Anything else has no rows;
-  ## the typed decoder has already refused a non-array for a sequence field.
-  if node.isNil:
-    return
-  case node.kind
-  of TomlKind.Array: result = node.arrayVal
-  of TomlKind.Tables:
-    for t in node.tablesVal:
-      result.add(TomlValueRef(kind: TomlKind.Table, tableVal: t))
-  else: discard
-
-proc checkStringValueTypes[T: object](path, schema, keyPath: string;
-                                      node: TomlValueRef; record: T) =
-  ## Refuse a TOML value of another type written for any string-typed field
-  ## of `T` (`string`, `Option[string]`, `seq[string]`), and recurse into
-  ## `seq` fields of object type, each at its own key path.
-  ##
-  ## Workspace-Manifests.md §"`repos/<repo>.toml`": a string key takes only a
-  ## TOML string. The pinned typed decoder (`nim-toml-serialization`) turns a
-  ## boolean or a number into text when the field it fills is a string, so
-  ## `revision = false` decoded as the revision "false" and `profile = 7` as
-  ## the profile named "7". The generic tree keeps the written type, so the
-  ## check is made against it, as the settings reader's `optString` does.
-  ##
-  ## Fields of any other type are left to their own checks: the role keys
-  ## and `branch-roles` (`roleValueRejection`, `customRoleTableFromTree`),
-  ## `mainline` (`mainlineValueRejection`, whose message explains why it
-  ## cannot be `false`), and the integer and boolean hints, which the typed
-  ## decoder already refuses a mismatched value for.
-  if node.isNil or node.kind notin {TomlKind.Table, TomlKind.InlineTable}:
-    return
-  for name, field in fieldPairs(record):
-    if name in node.tableVal:
-      let value = node.tableVal[name]
-      let fieldPath = keyPath & "." & name
-      when field is string or field is Option[string]:
-        requireStringNode(path, schema, fieldPath, value)
-      elif field is seq[string]:
-        for i, item in tableArrayRows(value):
-          requireStringNode(path, schema, fieldPath & "[" & $i & "]", item)
-      elif field is seq:
-        when typeof(field[0]) is object:
-          for i, row in tableArrayRows(value):
-            checkStringValueTypes(path, schema, fieldPath & "[" & $i & "]",
-              row, default(typeof(field[0])))
-
 proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
   ## The `[repo]` checks the typed decoder cannot make (Branch-Roles §3.1,
   ## §3.6), run against the generic tree of the same text:
@@ -910,9 +936,11 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
   ## * any `[repo.<sub-table>]` the schema does not define is refused, which
   ##   the typed decoder would otherwise drop without a word;
   ## * `branch-roles` is read from the tree (both spellings), and every role
-  ##   value is checked;
-  ## * every string key holds a TOML string (`checkStringValueTypes`), which
-  ##   the typed decoder would otherwise coerce a boolean or number into.
+  ##   value is checked.
+  ##
+  ## That every string key holds a TOML string is checked for every manifest
+  ## by `decodeStrict`, and the TYPE of `mainline` before the typed decode
+  ## (`readRepoFragmentFromContent`).
   let tree = decodeTree(path, content, schema)
   let repoNode =
     if "repo" in tree.tableVal: tree.tableVal["repo"] else: nil
@@ -927,12 +955,6 @@ proc checkRepoRoles(path, content, schema: string; fragment: var RepoFragment) =
     if k notin known:
       raiseManifestError(path, "repo." & k, schema, schema,
         schemaSkewMessage(path, k, "RepoBody"))
-  if "mainline" in repoKeys:
-    let rejection = mainlineValueRejection(repoNode.tableVal["mainline"],
-      "write the branch name, or remove the key so that a profile supplies it")
-    if rejection.len > 0:
-      raiseManifestError(path, "repo.mainline", schema, schema, rejection)
-  checkStringValueTypes(path, schema, "repo", repoNode, RepoBody())
   if fragment.repo.mainline.isSome:
     let rejection = branchNameRejection(fragment.repo.mainline.get())
     if rejection.len > 0:
@@ -966,17 +988,27 @@ proc readRepoFragmentFromContent*(content, path: string): RepoFragment =
       retiredRepoFragmentSchemaMessage())
   validateSchema(path, content, schemaRepoFragmentV2)
   let schema = schemaRepoFragmentV2
-  # The mainline's retired key would otherwise fail the strict decode below
-  # as a bare unknown key; refusing it first lets the diagnostic name
-  # `mainline`.
+  # Two `mainline` checks run on the generic tree before the strict decode.
+  # The mainline's retired key would otherwise fail it as a bare unknown key;
+  # refusing it first lets the diagnostic name `mainline`. A non-string
+  # `mainline` would otherwise be refused by `decodeStrict`'s generic
+  # "must be a string"; `mainlineValueRejection` says instead why `false`,
+  # which every other role accepts, cannot be the mainline.
   block:
     let tree = decodeTree(path, content, schema)
     if "repo" in tree.tableVal:
       let repoNode = tree.tableVal["repo"]
-      if repoNode.kind in {TomlKind.Table, TomlKind.InlineTable} and
-          retiredRepoBranchKey in repoNode.tableVal:
-        raiseManifestError(path, "repo." & retiredRepoBranchKey, schema,
-          schema, retiredRepoBranchKeyMessage())
+      if repoNode.kind in {TomlKind.Table, TomlKind.InlineTable}:
+        if retiredRepoBranchKey in repoNode.tableVal:
+          raiseManifestError(path, "repo." & retiredRepoBranchKey, schema,
+            schema, retiredRepoBranchKeyMessage())
+        if "mainline" in repoNode.tableVal:
+          let rejection = mainlineValueRejection(
+            repoNode.tableVal["mainline"], "write the branch name, or " &
+              "remove the key so that a profile supplies it")
+          if rejection.len > 0:
+            raiseManifestError(path, "repo.mainline", schema, schema,
+              rejection)
   # The typed decoder refuses the header spelling `[repo.branch-roles]` of a
   # sub-table of a typed record, so that table is blanked for the typed pass
   # and decoded from the generic tree by `checkRepoRoles`.
