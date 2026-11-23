@@ -7945,6 +7945,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_infra_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_interface_artifacts/tests/t_a_slow_compile_that_progresses_is_not_killed.nim",
+    binary: "build/test-bin/t_a_slow_compile_that_progresses_is_not_killed",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_interface_artifacts_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_interface_artifacts/tests/t_an_envelope_newer_than_the_engine_names_both_versions.nim",
     binary: "build/test-bin/t_an_envelope_newer_than_the_engine_names_both_versions",
     defines: @[],
