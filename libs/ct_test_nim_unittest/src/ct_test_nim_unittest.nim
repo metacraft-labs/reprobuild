@@ -315,6 +315,18 @@ proc build*(tool: BuildNimUnittest;
     actionCachePolicy = actionCachePolicy,
     extraEnv = extraEnv)
 
+  # The nimcache is nim's private derived state. Every file in it is written
+  # by this edge, from inputs in its key, and nothing else reads it, so it is
+  # declared as a directory the engine removes before the edge runs. Without
+  # that declaration the monitor records each generated ``.c`` and ``.o`` as an
+  # output the edge does not own, and a certificate's untracked-input rule
+  # judges the edge's own read-back of those files as an untracked read.
+  # ``removeBeforeRun`` is the declaration the certificate exempts (Test-
+  # Certificates.md, "What is not an untracked read": a file under an output
+  # the engine removes before such an action runs); the flag is the ``nimcache``
+  # argument of the call, so the directory named here is the one nim writes.
+  appendRegisteredActionRemoveBeforeRun(result.action.id, call, ["nimcache"])
+
   # Match the standard nim.c wrapper: Nim invokes its native C backend by
   # bare name. A package-level uses declaration alone is scoped away unless
   # the selected compile action references it. Keep the backend in the normal
