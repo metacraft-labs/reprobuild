@@ -127,26 +127,58 @@ repro build --tool-provisioning=path --tool-provisioning-for=ruby-sdk=tarball
 ```
 
 Here every tool comes from your `PATH` except `ruby-sdk`, which is realized
-from its release archive. The same override can be written in three other
+from its release archive. The same override can be written in four other
 places, listed from the strongest to the weakest:
 
 - `REPRO_TOOL_PROVISIONING_OVERRIDES=ruby-sdk=tarball` (several are separated
   by commas). This is how `repro exec` and `repro shell` receive an override:
   they take no option for it;
 - a `[tool-provisioning.overrides]` table in `repro-workspace.local.toml`
-  (this checkout only), then in the committed `repro-workspace.toml` (every
-  checkout of the workspace), then in your own
-  `~/.config/reprobuild/config.toml`:
+  (this checkout only), then in the project's committed
+  `repro-tool-provisioning.toml` (every checkout of the project), then in the
+  committed `repro-workspace.toml` (every checkout of the workspace), then in
+  your own `~/.config/reprobuild/config.toml`:
 
   ```toml
   [tool-provisioning.overrides]
   ruby-sdk = "tarball"
   ```
 
+An override that only holds on some machines goes in a table named for the
+platform: `<os>` is `linux`, `macos` or `windows`, and `<cpu>-<os>` adds
+`x86_64` or `aarch64`. Within one file the `<cpu>-<os>` table wins over the
+`<os>` table, which wins over the plain one, and a table for another platform
+is ignored:
+
+```toml
+[tool-provisioning.overrides]
+zstd-dev = "nix"
+
+[tool-provisioning.overrides.windows]
+zstd-dev = "tarball"
+```
+
+A project repository that is built on its own as well as inside a workspace
+commits its overrides in `repro-tool-provisioning.toml` next to its
+`repro.nim`. The file holds a `schema` line and the override tables, nothing
+else, and unlike `repro-workspace.toml` it does not make the directory a
+workspace root, so the workspace's own settings still apply inside it:
+
+```toml title="repro-tool-provisioning.toml"
+schema = "reprobuild.project.tool-provisioning.v1"
+
+[tool-provisioning.overrides.linux]
+zstd-dev = "nix"
+
+[tool-provisioning.overrides.windows]
+zstd-dev = "tarball"
+```
+
 `--tool-provisioning-for` is the strongest of all. Any of them beats the
 command's `--tool-provisioning`, `REPRO_TOOL_PROVISIONING` and the project's
-`defaultToolProvisioning`, for that package only. A recipe cannot carry an
-override: where a tool comes from is the machine's choice, not the project's.
+`defaultToolProvisioning`, for that package only. A recipe (`repro.nim`)
+cannot carry an override: it names the tools a project uses, never where they
+come from.
 
 An overridden tool comes only from the mode you named. If its package
 declares no realization in that mode for your machine, the command stops
