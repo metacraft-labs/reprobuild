@@ -181,8 +181,18 @@ when isNixSupported:
       result[name] = value
     result["HOME"] = scenario.home
     result["RUNQUOTA_SOCKET"] = scenario.socket
-    for name in ["RUNQUOTA_MEASUREMENT", "RUNQUOTA_SESSION",
-                 "RUNQUOTA_ENDPOINT_SCOPE"]:
+    # ``RUNQUOTA_ENDPOINT_SCOPE`` IS CARRIED, NOT REMOVED. The endpoint is
+    # the test's own: ``runquotaRendezvousDir`` selected the ``private``
+    # scope in this process before the daemons were started with this
+    # environment, and every ``repro`` child talks to those daemons, so it
+    # must judge the endpoint under the same policy. Removing the variable
+    # put the children on the host scope, which on a host with a
+    # ``runquota`` account refuses the test's own directory -- the daemons
+    # bound and the clients reported ``daemon_unreachable``. The two
+    # variables below are removed so an enclosing run's measurement and
+    # session do not leak in; a state that wants pressure reports sets
+    # ``RUNQUOTA_MEASUREMENT`` itself, and no state uses a session.
+    for name in ["RUNQUOTA_MEASUREMENT", "RUNQUOTA_SESSION"]:
       if result.hasKey(name):
         result.del(name)
     if scenario.pressureReports:
@@ -315,10 +325,34 @@ when isNixSupported:
 suite "repro stats and repro pressure report the store state":
   when isNixSupported:
     test "unprovisioned, unreachable, capture-off, empty and ready are told apart":
+      # A HOST WITH A ``runquota`` ACCOUNT AND GROUP, EMULATED. That is
+      # where the host endpoint scope demands another account's uid and
+      # mode ``0750``, and refuses a directory the test user owns; on a
+      # host without the account it degrades to the invoking uid and
+      # accepts it, so a client on the wrong scope goes unnoticed there.
+      # Emulating the account (a uid that is not ours) and the group (our
+      # own gid, so the group check itself can pass) makes every host the
+      # one where the scope matters. Any inherited scope is dropped first,
+      # so ``runquotaRendezvousDir`` selects ``private`` for this test's
+      # own endpoint, the daemons inherit it, and ``envFor`` hands it to
+      # every ``repro`` child.
+      const endpointKeys = ["RUNQUOTA_ENDPOINT_SCOPE",
+        "RUNQUOTA_ENDPOINT_OWNER_UID", "RUNQUOTA_ENDPOINT_GROUP"]
+      var savedEndpointEnv: seq[(string, bool, string)] = @[]
+      for key in endpointKeys:
+        savedEndpointEnv.add((key, existsEnv(key), getEnv(key)))
+      defer:
+        for (key, had, value) in savedEndpointEnv:
+          if had: putEnv(key, value)
+          else: delEnv(key)
+      delEnv("RUNQUOTA_ENDPOINT_SCOPE")
+      putEnv("RUNQUOTA_ENDPOINT_OWNER_UID", $(int64(getuid()) + 1))
+      putEnv("RUNQUOTA_ENDPOINT_GROUP", $getgid())
       let tempRoot = createTempDir("repro-store-state", "")
       let socketRoot = getTempDir() / ("rq-sst-" & $getCurrentProcessId())
       createDir(socketRoot)
       let rendezvous = runquotaRendezvousDir(socketRoot)
+      check getEnv("RUNQUOTA_ENDPOINT_SCOPE") == "private"
       let home = tempRoot / "home"
       createDir(home)
       let projectRoot = tempRoot / "project"
