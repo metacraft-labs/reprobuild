@@ -66,10 +66,20 @@ def src_lock_text(root: Path, rev: str, git: str) -> tuple[str, str]:
         # in a full clone would make it shallow, which a lint must not do.
         shallow = subprocess.run([git, '-C', str(root), 'rev-parse', '--is-shallow-repository'],
                                  capture_output=True, text=True).stdout.strip() == 'true'
-        subprocess.run([git, '-C', str(root), 'fetch', '--quiet',
-                        *(['--depth', '1'] if shallow else []), 'origin', rev],
-                       capture_output=True, text=True)
+        fetched = subprocess.run([git, '-C', str(root), 'fetch', '--quiet',
+                                  *(['--depth', '1'] if shallow else []), 'origin', rev],
+                                 capture_output=True, text=True)
         shown = show()
+        if shown.returncode != 0 and fetched.returncode != 0:
+            # The commit is absent and could not be fetched. `git show` then
+            # says only "path 'flake.lock' exists on disk, but not in <rev>",
+            # which reads as a commit without a lock; the fetch's own error
+            # (no network, refused credentials, unknown commit) is the reason.
+            # Every line: the server's own reason (`remote: Duplicate header:
+            # "Authorization"`) precedes git's `fatal:` summary of it.
+            lines = [l.strip() for l in fetched.stderr.splitlines() if l.strip()]
+            return '', ('fetching it failed: ' +
+                        ('; '.join(lines) or f'git fetch exited {fetched.returncode}'))
     if shown.returncode != 0:
         return '', (shown.stderr.strip().splitlines() or ['git show failed'])[-1]
     return shown.stdout, ''

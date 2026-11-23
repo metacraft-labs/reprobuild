@@ -2457,6 +2457,10 @@ proc parsePackageDef(name: NimNode; body: NimNode;
         error("runtimeLibrary os must be one of " &
           "any|windows|linux|macos|darwin; got '" & osText & "'", stmt)
       result.runtimeLibraries.add(lib)
+    elif calleeName(stmt).normalize == "pinned":
+      # Collected below, once ``resolvedUses`` is routed: whether an entry
+      # repeats a ``uses:`` selector is decided against the evaluated list.
+      discard
     elif calleeName(stmt).normalize == "usesimportpath":
       if stmt.len != 2:
         error("usesImportPath expects exactly one string literal", stmt)
@@ -2502,6 +2506,49 @@ proc parsePackageDef(name: NimNode; body: NimNode;
       result.runtimeDeps.add(entry)
     else:
       result.toolUses.add(entry)
+  # ``pinned:`` — lock-pinned siblings that are cloned, not built against
+  # (Unified-Locking-And-Hooks.md §14.2 item 4). Deliberately parsed apart
+  # from the dependency blocks above: an entry is a repository NAME, never a
+  # ``uses:`` selector, so it must not reach ``toolUses`` (which would import
+  # the sibling's recipe into this compile and fold it into lock generation,
+  # the cost this block exists to avoid).
+  for stmt in body:
+    if calleeName(stmt).normalize != "pinned":
+      continue
+    if stmt.kind notin {nnkCall, nnkCommand} or stmt.len < 2:
+      error("pinned expects a block of sibling repository names, e.g. " &
+        "`pinned:` followed by indented string literals", stmt)
+    var entries: seq[NimNode] = @[]
+    for i in 1 ..< stmt.len:
+      if stmt[i].kind == nnkStmtList:
+        for entry in stmt[i]:
+          entries.add(entry)
+      else:
+        entries.add(stmt[i])
+    if entries.len == 0:
+      error("pinned: names no sibling; list at least one repository name " &
+        "or remove the block", stmt)
+    for entry in entries:
+      if not entry.isStrLit:
+        error("pinned: an entry must be a string literal naming a " &
+          "repository (the lock records it by that name, so the macro " &
+          "has to read it at compile time)", entry)
+      let sibling = entry.strVal
+      let problem = pinnedSiblingNameProblem(sibling)
+      if problem.len > 0:
+        error("pinned: " & problem, entry)
+      if sibling in result.pinnedSiblings:
+        error("pinned: '" & sibling & "' is listed twice in package '" &
+          result.packageName & "'", entry)
+      for used in result.toolUses & result.nativeBuildDeps &
+          result.runtimeDeps:
+        if used.packageSelector == sibling:
+          error("pinned: '" & sibling & "' is also a `uses:` dependency of " &
+            "package '" & result.packageName & "'. A `uses:` already pins " &
+            "its sibling in repro.lock, so declare it once: keep the " &
+            "`uses:` if the build reads it, otherwise keep only `pinned:`",
+            entry)
+      result.pinnedSiblings.add(sibling)
   lintArmsAgainstDeclaredPlatforms(body, result)
   # DSL-port M9.R.15p.0.1 — after all user-declared deps are
   # collected, auto-inject the Qt6Gui transitive ``find_dependency``
@@ -2842,6 +2889,11 @@ proc packageLiteral(pkg: PackageDef): string =
     if pathIndex > 0:
       result.add(", ")
     result.add(escForCode(path))
+  result.add("], pinnedSiblings: @[")
+  for pinnedIndex, sibling in pkg.pinnedSiblings:
+    if pinnedIndex > 0:
+      result.add(", ")
+    result.add(escForCode(sibling))
   result.add("], publicSignatureDependencies: @[], sourceFile: " & escForCode(
       pkg.sourceFile) &
     ", sourceLine: " & $pkg.sourceLine &

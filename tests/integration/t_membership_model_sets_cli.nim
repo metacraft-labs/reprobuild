@@ -44,6 +44,10 @@
 ##      key move together, so a consumer keyed on the schema breaks loudly on
 ##      the shape change rather than reading a `sets` payload as the old
 ##      `projects` one.
+##  10. A definition verb's commit contains ONLY the manifest paths the verb
+##      wrote or deleted. Whatever else the operator had staged in the
+##      manifest repo stays staged and out of that commit, for `add` and
+##      `remove` alike, so it is never published under the verb's message.
 ##
 ## No mocks: the manifest edits are read back through the real strict readers
 ## and the real resolver, and the commits land in a real git repo.
@@ -51,6 +55,7 @@
 import std/[json, options, os, osproc, strutils, tempfiles, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 import repro_workspace_manifests
 
 proc q(value: string): string = quoteShell(value)
@@ -447,3 +452,76 @@ suite "membership model — `repro ws sets` authoring":
         "--project=beta"])
       check aliasJson.code == 0
       check parseJson(aliasJson.output)["set"].getStr() == "beta"
+
+  test "t_definition_verbs_commit_only_their_own_paths":
+    ## Regression: `commitAndPushManifest` staged its own paths and then ran
+    ## `git commit` with no pathspec, which commits the WHOLE index. An
+    ## unrelated edit the operator had staged went into "Add repo-set b" and
+    ## was pushed under that message.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("no `git` on PATH: the fixture is a real git manifest repo")
+    else:
+      let fx = setupFixture(gitBin, "only-own-paths")
+      defer: removeDir(fx.scratch)
+      let git = q(gitBin) & " -C " & q(fx.workspaceRoot)
+
+      proc lines(text: string): seq[string] =
+        for line in text.splitLines():
+          if line.strip().len > 0: result.add(line.strip())
+
+      proc headPaths(): seq[string] =
+        lines(requireGit(git & " show --name-only --format= HEAD"))
+
+      proc stagedPaths(): seq[string] =
+        lines(requireGit(git & " diff --cached --name-only"))
+
+      # An operator's half-finished edit, staged but not committed.
+      let alphaFile = fx.workspaceRoot / "projects" / "alpha.toml"
+      writeFile(alphaFile, readFile(alphaFile) &
+        "\n# half-finished operator edit\n")
+      discard requireGit(git & " add -- projects/alpha.toml")
+      let stagedBefore = requireGit(git & " diff --cached")
+      check stagedPaths() == @["projects/alpha.toml"]
+
+      # ---- add ---------------------------------------------------------
+      let added = runRepro(fx, ["ws", "sets", "add", "b",
+        "-m", "A set with a description."])
+      if added.code != 0:
+        checkpoint("output: " & added.output)
+      check added.code == 0
+      check requireGit(git & " log -1 --format=%s").strip()
+        .startsWith("Add repo-set b")
+      check headPaths() == @["repo-sets/b.md", "repo-sets/b.toml"]
+      # The unrelated edit is still staged, byte for byte, and still on disk.
+      check stagedPaths() == @["projects/alpha.toml"]
+      check requireGit(git & " diff --cached") == stagedBefore
+      check readFile(alphaFile).contains("half-finished operator edit")
+
+      # ---- remove: the verb's paths are DELETIONS here, which a
+      # pathspec-limited commit has to carry as well. -------------------
+      let removed = runRepro(fx, ["ws", "sets", "remove", "b"])
+      if removed.code != 0:
+        checkpoint("output: " & removed.output)
+      check removed.code == 0
+      check requireGit(git & " log -1 --format=%s").strip()
+        .startsWith("Remove repo-set b")
+      check headPaths() == @["repo-sets/b.md", "repo-sets/b.toml"]
+      check requireGit(git & " ls-tree -r --name-only HEAD").find("repo-sets/") < 0
+      check stagedPaths() == @["projects/alpha.toml"]
+      check requireGit(git & " diff --cached") == stagedBefore
+
+      # ---- repos add: edits a TRACKED set file and writes new ones -----
+      check runRepro(fx, ["ws", "sets", "add", "c"]).code == 0
+      let repoAdded = runRepro(fx, ["ws", "repos", "add", "lib-o",
+        "--set=c", "--remote=https://git.example.invalid/acme/lib-o",
+        "--branch=dev", "-m", "Lib O."])
+      if repoAdded.code != 0:
+        checkpoint("output: " & repoAdded.output)
+      check repoAdded.code == 0
+      let repoCommit = headPaths()
+      check "projects/alpha.toml" notin repoCommit
+      check "repo-sets/c.toml" in repoCommit
+      check "repos/lib-o.toml" in repoCommit
+      check stagedPaths() == @["projects/alpha.toml"]
+      check requireGit(git & " diff --cached") == stagedBefore

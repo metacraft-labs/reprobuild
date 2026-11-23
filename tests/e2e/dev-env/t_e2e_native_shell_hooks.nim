@@ -1,6 +1,6 @@
 from repro_core/process_streams import drainStream
-import std/[json, os, osproc, sequtils, strtabs, streams, strutils, tempfiles,
-    unittest]
+import std/[hashes, json, os, osproc, sequtils, strtabs, streams, strutils,
+    tempfiles, unittest]
 import repro_core/process_env
 
 import repro_core/cli_images
@@ -232,11 +232,103 @@ proc holds(verdict: var bool; condition: bool; what: string) =
     checkpoint("FAILED: " & what)
     verdict = false
 
+proc nativeStatsDecision(statsPath, label: string): string =
+  ## What decided whether each edge of one activation re-ran, from the
+  ## statistics file the native hook wrote (`--dev-env-stats`): per action its
+  ## status, the cache decision, why the lookup missed, why no record was
+  ## published, and the evidence diagnostics (an entropy refusal, a monitor
+  ## gap). A failed warm check prints this, so a run on a host the suite
+  ## cannot reproduce (Windows) says which input or refusal made the edge
+  ## re-run instead of only that it did.
+  result = "decision of " & label & " (" & statsPath & "):"
+  if not fileExists(statsPath):
+    return result & " no statistics file was written"
+  let stats =
+    try: parseJson(readFile(statsPath))
+    except CatchableError as err:
+      return result & " unreadable: " & err.msg
+  if stats.hasKey("stats"):
+    result.add("\n  stats: " & $stats["stats"])
+  for key in ["providerCompileAction", "introspectionAction",
+              "shellRenderAction"]:
+    if not stats.hasKey(key) or stats[key].kind != JObject:
+      result.add("\n  " & key & ": absent")
+      continue
+    let a = stats[key]
+    proc field(name: string): string =
+      if a.hasKey(name): $a[name] else: "-"
+    result.add("\n  " & key & ": status=" & field("status") &
+      " launched=" & field("launched") &
+      " cacheDecision=" & field("cacheDecision") &
+      "\n    cacheMissReason=" & field("cacheMissReason") &
+      "\n    cachePublishSkipReason=" & field("cachePublishSkipReason") &
+      "\n    reason=" & field("reason"))
+    if a.hasKey("evidence") and a["evidence"].kind == JObject:
+      let e = a["evidence"]
+      for channel in ["declaredInputs", "monitorReads", "monitorProbes"]:
+        if e.hasKey(channel) and e[channel].kind == JArray:
+          result.add("\n    " & channel & ": " & $e[channel].len & " path(s)")
+      if e.hasKey("diagnostics") and e["diagnostics"].kind == JArray:
+        for d in e["diagnostics"]:
+          result.add("\n    diagnostic: " & d.getStr())
+
+proc redactedKeyInput(line: string): string =
+  ## One line of a determinism-probe `.inputs` record, safe to print. Paths
+  ## and content digests are printed as they are; an environment line
+  ## (`NAME=<present>:<value>`, the engine's spelling) keeps its name and
+  ## presence but shows the value only as its length and hash. The test
+  ## environment inherits the invoking host's, so a keyed variable could hold
+  ## a credential; the hash still shows which variable moved between two
+  ## records, which is all the comparison needs.
+  let eq = line.find('=')
+  if eq <= 0 or line[0] notin IdentStartChars or
+      not line[0 ..< eq].allCharsInSet(IdentChars):
+    return line
+  let colon = line.find(':', eq + 1)
+  if colon < 0 or line[eq + 1 ..< colon] notin ["true", "false"]:
+    return line
+  let value = line[colon + 1 .. ^1]
+  line[0 .. colon] & "<" & $value.len & " chars, hash " &
+    toHex(hash(value).int64) & ">"
+
+proc determinismProbeReport(projectRoot: string): string =
+  ## The engine's determinism-probe records under the project's dev-env
+  ## state. One is written only for an action refused publication solely
+  ## for unblessed entropy (`determinismProbeAdmits`): its first line is the
+  ## verdict (`candidate`, `verified`, `nondeterministic`), and its
+  ## `.inputs` sibling lists what the key was made of, so two records for one
+  ## action name the input that moved between two runs. Environment values
+  ## are redacted (`redactedKeyInput`).
+  result = "determinism-probe records under " & projectRoot / ".repro" & ":"
+  var found = false
+  if dirExists(projectRoot / ".repro"):
+    for path in walkDirRec(projectRoot / ".repro"):
+      if path.parentDir.extractFilename != "determinism-probe":
+        continue
+      found = true
+      let text =
+        try: readFile(path)
+        except CatchableError as err: "<unreadable: " & err.msg & ">"
+      if path.endsWith(".inputs"):
+        result.add("\n  " & path & " (key inputs):")
+        for line in text.splitLines():
+          if line.len > 0:
+            result.add("\n    " & redactedKeyInput(line))
+      else:
+        let verdict = text.splitLines()[0]
+        result.add("\n  " & path & ": " & verdict)
+  if not found:
+    result.add(" none")
+
 proc requireNativeStats(statsPath: string): bool =
   ## The native hook's statistics of a warm activation: no provider
   ## introspection and no shell rendering launched, both served from the
-  ## cache, the artifact not rewritten. True when all of that held.
+  ## cache, the artifact not rewritten. True when all of that held; when it
+  ## did not, the activation's decisions (`nativeStatsDecision`) are printed.
   result = true
+  defer:
+    if not result:
+      checkpoint(nativeStatsDecision(statsPath, "the warm activation"))
   let stats = parseJson(readFile(statsPath))
   result.holds(stats["command"].getStr() == "hooks shell-native",
     statsPath & ": command is " & stats["command"].getStr())
@@ -898,33 +990,51 @@ when isNixSupported or defined(windows):
           discard requireRepro(c, @["hooks", "ensure", "--shell", "powershell"])
           let env = c.envFor()
           let statsPath = c.tempRoot / "powershell-native-stats.json"
+          # The first entry's statistics go to a file of their own, so a
+          # failed warm check can print both activations' decisions.
+          let coldStats = c.tempRoot / "powershell-native-cold-stats.json"
           env["REPRO_NATIVE_SHELL_STATS"] = statsPath
-          let script =
-            "cd " & psQuote(c.projectA) & "; " &
-            "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
-            "cd " & psQuote(parentDir(c.projectA)) & "; " &
-            "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
-            # Back into project A: a warm activation, the one whose
-            # statistics `requireNativeStats` checks (as the bash probe's A2).
-            "cd " & psQuote(c.projectA) & "; " &
-            "Write-Output \"A2:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
-          let res = runProgram(pwsh, @["-NoLogo", "-Command", script],
-            c.tempRoot, env)
+          proc probe(firstStats, warmStats: string): string =
+            # The hook reads REPRO_NATIVE_SHELL_STATS when it runs, so each
+            # `cd` writes to the file set just before it.
+            "$env:REPRO_NATIVE_SHELL_STATS = " & psQuote(firstStats) & "; " &
+              "cd " & psQuote(c.projectA) & "; " &
+              "Write-Output \"A:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
+              "cd " & psQuote(parentDir(c.projectA)) & "; " &
+              "Write-Output \"OUT:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\"; " &
+              # Back into project A: a warm activation, the one whose
+              # statistics `requireNativeStats` checks (as the bash probe's
+              # A2).
+              "$env:REPRO_NATIVE_SHELL_STATS = " & psQuote(warmStats) & "; " &
+              "cd " & psQuote(c.projectA) & "; " &
+              "Write-Output \"A2:$env:AUX_VALUE|$env:FIXTURE_MODE|$env:REPRO_DEV_ENV_PROJECT_ROOT\""
+          let res = runProgram(pwsh, @["-NoLogo", "-Command",
+            probe(coldStats, statsPath)], c.tempRoot, env)
           check res.exitCode == 0
           requireShellValue(res.output, "A:",
             "A:alpha|one|" & c.projectA)
           requireShellValue(res.output, "OUT:", "OUT:||")
           requireShellValue(res.output, "A2:",
             "A2:alpha|one|" & c.projectA)
-          check requireNativeStats(statsPath)
+          let warm = requireNativeStats(statsPath)
+          if not warm:
+            # The warm activation's own decisions are printed by
+            # `requireNativeStats`; beside them, the first activation's and
+            # the engine's determinism-probe records, which together say
+            # whether the first run was refused publication (and why) or the
+            # second run's key differed (and in which input).
+            checkpoint(nativeStatsDecision(coldStats,
+              "the first activation"))
+            checkpoint(determinismProbeReport(c.projectA))
+          check warm
           # DIRENV_DIR alone (no RC that direnv reports loaded and allowed)
           # does not stand the hook down: it activates as before.
           let aloneStats = c.tempRoot / "powershell-direnv-dir-alone-stats.json"
           let aloneEnv = c.envFor()
           aloneEnv["REPRO_NATIVE_SHELL_STATS"] = aloneStats
           aloneEnv["DIRENV_DIR"] = "-" & c.projectA
-          let alone = runProgram(pwsh, @["-NoLogo", "-Command", script],
-            c.tempRoot, aloneEnv)
+          let alone = runProgram(pwsh, @["-NoLogo", "-Command",
+            probe(aloneStats, aloneStats)], c.tempRoot, aloneEnv)
           checkpoint(alone.output)
           check alone.exitCode == 0
           requireShellValue(alone.output, "A:", "A:alpha|one|" & c.projectA)

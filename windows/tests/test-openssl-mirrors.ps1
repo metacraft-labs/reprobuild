@@ -4,12 +4,33 @@
 # Only Get-OpenSslArchiveUrls is substituted for provisioning controls, to select
 # that origin. Ensure-OpenSsl, the downloader, SHA256, tar extraction and metadata
 # are the production implementations. No success adapter replaces any of them.
-# A small real tar contains layout fixtures, not executable DLLs; this does not
-# qualify OpenSSL's ABI or native Windows loading. The live test separately
+# A small real tar contains layout fixtures. Its DLLs are minimal PE/COFF
+# headers (no code, no imports) of the x64 machine, because the production
+# closure audit refuses a file that is not a PE image of the leg's machine; they
+# do not qualify OpenSSL's ABI or native Windows loading. The live test separately
 # fetches the exact pinned .pkg.tar.zst from the official HTTPS mirrors.
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot '../toolchain-utils.ps1')
+
+function New-FixtureDllBytes {
+  ## The smallest PE32+ image the closure audit accepts: an MZ header whose
+  ## e_lfanew (0x3c) points at a "PE\0\0" signature, the x64 machine
+  ## (0x8664, https://learn.microsoft.com/windows/win32/debug/pe-format#machine-types),
+  ## no sections, a PE32+ optional header magic (0x20B) and an empty import
+  ## directory, so Get-PeMachine and Get-PeImportNames both read it. The
+  ## relative path follows the headers so each fixture file has its own bytes.
+  param([Parameter(Mandatory = $true)][string]$Relative)
+  $bytes = New-Object byte[] 512
+  $bytes[0] = 0x4D; $bytes[1] = 0x5A
+  [BitConverter]::GetBytes([int]0x40).CopyTo($bytes, 0x3c)
+  [BitConverter]::GetBytes([uint32]0x4550).CopyTo($bytes, 0x40)
+  [BitConverter]::GetBytes([uint16]0x8664).CopyTo($bytes, 0x44)
+  [BitConverter]::GetBytes([uint16]0x20B).CopyTo($bytes, 0x40 + 24)
+  $tag = [Text.Encoding]::ASCII.GetBytes("fixture $Relative")
+  [Array]::Copy($tag, 0, $bytes, 0x1a0, $tag.Length)
+  return ,$bytes
+}
 . (Join-Path $PSScriptRoot '../ensure-openssl.ps1')
 
 function Require([bool]$Condition, [string]$Message) {
@@ -55,7 +76,11 @@ try {
                          'bin/libcrypto-3-x64.dll')) {
     $file = Join-Path $payload "ucrt64/$relative"
     New-Item -ItemType Directory -Force -Path (Split-Path -Parent $file) | Out-Null
-    [IO.File]::WriteAllText($file, "fixture $relative")
+    if ($relative -like '*.dll') {
+      [IO.File]::WriteAllBytes($file, (New-FixtureDllBytes -Relative $relative))
+    } else {
+      [IO.File]::WriteAllText($file, "fixture $relative")
+    }
   }
   $archive = Join-Path $work 'fixture.tar'
   & $tar -cf $archive -C $payload ucrt64
@@ -259,7 +284,12 @@ try {
   $root = Join-Path $work 'fresh'
   $installed = Ensure-OpenSsl -Root $root -Arch x64 -Toolchain $pins
   foreach ($relative in @('lib/libssl.dll.a', 'lib/libcrypto.dll.a', 'include/openssl/ssl.h', 'bin/libssl-3-x64.dll', 'bin/libcrypto-3-x64.dll')) {
-    Require ([IO.File]::ReadAllText((Join-Path $installed $relative)) -eq "fixture $relative") "Installed bytes differ: $relative"
+    if ($relative -like '*.dll') {
+      $same = [Linq.Enumerable]::SequenceEqual([byte[]][IO.File]::ReadAllBytes((Join-Path $installed $relative)), [byte[]](New-FixtureDllBytes -Relative $relative))
+    } else {
+      $same = [IO.File]::ReadAllText((Join-Path $installed $relative)) -eq "fixture $relative"
+    }
+    Require $same "Installed bytes differ: $relative"
   }
   $metadata = Read-KeyValueFile -Path (Join-Path $installed 'openssl.install.meta')
   Require ($metadata.openssl_archive_sha256 -eq $sha.ToLowerInvariant()) 'Install metadata did not retain the verified hash.'

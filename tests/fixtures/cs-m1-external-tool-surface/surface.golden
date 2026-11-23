@@ -1070,15 +1070,17 @@ package "strip"
       param name="stripAll" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-s" required=false src=repro_dsl_stdlib/packages/binutils.nim
       param name="stripDebug" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-S" required=false src=repro_dsl_stdlib/packages/binutils.nim
       param name="stripUnneeded" nimType="bool" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="--strip-unneeded" required=false src=repro_dsl_stdlib/packages/binutils.nim
-      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=false src=repro_dsl_stdlib/packages/binutils.nim
+      param name="output" nimType="string" kind=cpkFlag role=carOutput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="-o" required=true src=repro_dsl_stdlib/packages/binutils.nim
+      param name="keepSymbols" nimType="seq[string]" kind=cpkFlag role=carOrdinary format=cafSeparate placement=capAfterSubcommand repeated=true position=0 alias="-K" required=false src=repro_dsl_stdlib/packages/binutils.nim
       param name="input" nimType="string" kind=cpkPositional role=carInput format=cafSeparate placement=capAfterSubcommand repeated=false position=0 alias="" required=true src=repro_dsl_stdlib/packages/binutils.nim
-    argv=["/tool/stripBin", "-s", "-S", "--strip-unneeded", "-o", "output-v", "input-v"]
+    argv=["/tool/stripBin", "-s", "-S", "--strip-unneeded", "-o", "output-v", "-K", "keepSymbols-a", "-K", "keepSymbols-b", "input-v"]
   interface executable "stripBin" binary="stripBin"
     interface command name="" entry="strip.stripBin.call"
       interface param name="stripAll" nimType="bool" kind=ipkFlag position=0 alias="-s" required=false
       interface param name="stripDebug" nimType="bool" kind=ipkFlag position=0 alias="-S" required=false
       interface param name="stripUnneeded" nimType="bool" kind=ipkFlag position=0 alias="--strip-unneeded" required=false
-      interface param name="output" nimType="string" kind=ipkFlag position=0 alias="-o" required=false
+      interface param name="output" nimType="string" kind=ipkFlag position=0 alias="-o" required=true
+      interface param name="keepSymbols" nimType="seq[string]" kind=ipkFlag position=0 alias="-K" required=false
       interface param name="input" nimType="string" kind=ipkPositional position=0 alias="" required=true
 package "stylus"
   executable "stylus" binary="stylus" src=repro_dsl_stdlib/packages/stylus.nim

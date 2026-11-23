@@ -270,7 +270,10 @@ function New-FixtureZip {
   Set-Content -LiteralPath (Join-Path $d 'lib\reprofixture.dll') -Value "fixture-lib-$Ver" -NoNewline
   $zip = Join-Path $WorkRoot "pkgs-$Ver\$top.zip"
   New-Item -ItemType Directory -Path (Split-Path -Parent $zip) -Force | Out-Null
-  Compress-Archive -Path $d -DestinationPath $zip -Force
+  if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip -Force }
+  # The release's own zip writer: Compress-Archive under Windows PowerShell
+  # 5.1 writes backslash entry names, which the release archive no longer has.
+  & (Join-Path $RepoRoot 'scripts\release\write_release_zip.ps1') -SourceDir $d -DestinationPath $zip
   return $zip
 }
 $Zip1 = New-FixtureZip -Ver $V1
