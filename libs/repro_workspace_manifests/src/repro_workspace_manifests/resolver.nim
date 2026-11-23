@@ -1156,6 +1156,29 @@ proc resolveFragment(ctx: FragmentContext; fragmentRel: string;
     if fragment.repo.remotes.len > 0:
       for entry in fragment.repo.remotes:
         resolvedRemotes.add(resolveBinding(entry))
+      # The scalar `repo.remote` is the PRIMARY even when no binding in
+      # `remotes` carries its name: then the list holds only EXTRA remotes
+      # (an `upstream` the fork tracks), and the primary is composed from the
+      # `[[remote]]` table exactly as for a fragment with no list. Taking
+      # `remotes[0]` instead cloned a fork such as `zgui` from its upstream
+      # (`zortax/zgui`), where the fork's branches do not exist.
+      if fragmentRemote.len > 0:
+        var named = false
+        var originTaken = false
+        for r in resolvedRemotes:
+          if r.localName == fragmentRemote: named = true
+          if r.localName == "origin": originTaken = true
+        if not named:
+          if fragmentRemote notin ctx.remotes:
+            raiseManifestError(ownerFile, keyPath, ownerSchema, ownerSchema,
+              "fragment '" & reference & "' references unknown remote '" &
+                fragmentRemote & "' (not declared in " & ctx.ownerLabel &
+                "'s [[remote]] table)")
+          resolvedRemotes.insert(ResolvedRemote(
+            localName: (if originTaken: fragmentRemote else: "origin"),
+            projectRemote: fragmentRemote,
+            fetchUrl: getFetchUrl(ctx.remotes[fragmentRemote],
+              fragment.repo.name)), 0)
       let primaryName =
         if fragmentRemote.len > 0: fragmentRemote
         else: resolvedRemotes[0].localName

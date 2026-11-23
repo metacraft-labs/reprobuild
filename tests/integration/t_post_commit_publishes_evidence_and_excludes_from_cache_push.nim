@@ -135,7 +135,10 @@ suite "HL-6 — post-commit publishes evidence and excludes from cache push":
       skip()
     else:
       let scratch = createTempDir("hl6-postcommit-evidence-", "")
-      defer: removeDir(scratch)
+      # The detached cache pushes this test fires may still be writing in
+      # `clones-cache/` when the body ends; a plain `removeDir` then lost that
+      # race on a loaded CI host with "No such file or directory".
+      defer: removeDirEventually(scratch)
       let reproBin = absolutePath(reproBinary)
 
       # ---- upstreams + seeds ------------------------------------------
