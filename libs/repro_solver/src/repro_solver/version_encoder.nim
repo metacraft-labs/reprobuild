@@ -74,12 +74,24 @@ import std/[algorithm, options, strutils, tables, sets]
 
 import variant_encoder
 import version_constraints
+import nimble_versions
 
 # ---------------------------------------------------------------------------
 # Public data model
 # ---------------------------------------------------------------------------
 
 type
+  VersionScheme* = enum
+    ## How a package's candidate versions are ordered and which of them a
+    ## range admits. ``vsSemver`` (the default) is ``version_constraints``'
+    ## three-component semver reading, for every package that does not say
+    ## otherwise. ``vsNimble`` is Nimble's order over any number of
+    ## components (``nimble_versions``), for the packages of a Nimble catalog
+    ## (`nimble:` packages, NPC-AREQ6). The scheme is the DEPENDED-ON
+    ## package's: a range is read in the scheme of the package it constrains.
+    vsSemver = "semver"
+    vsNimble = "nimble"
+
   DependencyDecl* = object
     ## One declared dependency edge from a package onto another. The
     ## ``name`` is the depended-on package name; ``range`` is the raw
@@ -201,6 +213,11 @@ type
       ## published version, and "the first model clingo finds" is not an
       ## answer anyone asked for. Ignored under any other preference, which
       ## already orders every package.
+    versionScheme*: VersionScheme
+      ## How this package's versions are ordered and which of them a range
+      ## on it admits (``VersionScheme``). ``vsSemver`` for every package
+      ## declared before Nimble's N-component versions, which therefore
+      ## encode byte-for-byte as before.
 
   VersionPreference* = enum
     ## Named-Lock-Files NLF-M6 (§5.5) — the *version-selection rule* a solve
@@ -315,14 +332,18 @@ const ExactVersionRangePrefix* = "#"
   ## such a string; it parses as no semver version, so no ordinary range
   ## admits it, and only a requirement that names it selects it.
 
-proc rangeAdmits*(rangeText, version: string): bool =
+proc rangeAdmits*(rangeText, version: string;
+                  scheme = vsSemver): bool =
   ## Does the dependency range ``rangeText`` admit candidate ``version``?
   ## An exact pseudo-version range (``#...``) admits the candidate spelled
-  ## the same; any other range is a semver range, and a candidate or range
-  ## that does not parse is admitted by nothing (the encoder's historical
-  ## rule, kept).
+  ## the same; any other range is read in ``scheme``: a semver range, or
+  ## under ``vsNimble`` a range in Nimble's order (``nimble_versions``). A
+  ## candidate or range that does not parse is admitted by nothing (the
+  ## encoder's historical rule, kept).
   if rangeText.startsWith(ExactVersionRangePrefix):
     return version == rangeText
+  if scheme == vsNimble:
+    return nimbleRangeAdmits(rangeText, version)
   let rng = try: parseSemverRange(rangeText)
             except ESemverParse: return false
   let parsed = try: parseSemver(version)
@@ -411,8 +432,10 @@ proc groundVersionInRange*(packages: openArray[PackageDecl]): string =
   ## an explicit range still observe ``version_in_range`` facts to
   ## introspect against.
   var pkgVersions: Table[string, seq[string]]
+  var pkgScheme: Table[string, VersionScheme]
   for p in packages:
     pkgVersions[p.name] = p.versions
+    pkgScheme[p.name] = p.versionScheme
 
   var lines: seq[string] = @[]
   # Collect every (depended-on package, range string) pair. We dedupe
@@ -432,7 +455,7 @@ proc groundVersionInRange*(packages: openArray[PackageDecl]): string =
         # missing ``package_version`` atom.
         continue
       for v in pkgVersions[d.name]:
-        if rangeAdmits(d.range, v):
+        if rangeAdmits(d.range, v, pkgScheme[d.name]):
           lines.add("version_in_range(\"" & aspQuote(d.name) & "\", \"" &
                     aspQuote(v) & "\", \"" & aspQuote(d.range) & "\").")
   lines.join("\n")
@@ -735,11 +758,21 @@ proc encodeVersionRanks*(packages: openArray[PackageDecl];
     if p.pinned: continue
     if onlyPreferNewest and not p.preferNewest: continue
     var sorted = p.versions
-    sorted.sort(proc(a, b: string): int =
-      try:
-        cmpSemver(parseSemver(a), parseSemver(b))
-      except ESemverParse:
-        cmp(a, b))
+    if p.versionScheme == vsNimble:
+      # Nimble's order (any number of components). A candidate that is not
+      # a numeric version (a `#` pseudo-version) falls back to its text, as
+      # in the semver order below.
+      sorted.sort(proc(a, b: string): int =
+        try:
+          cmpNimbleText(a, b)
+        except ESemverParse:
+          cmp(a, b))
+    else:
+      sorted.sort(proc(a, b: string): int =
+        try:
+          cmpSemver(parseSemver(a), parseSemver(b))
+        except ESemverParse:
+          cmp(a, b))
     for i, v in sorted:
       lines.add("version_rank(\"" & aspQuote(p.name) & "\", \"" &
                 aspQuote(v) & "\", " & $i & ").")

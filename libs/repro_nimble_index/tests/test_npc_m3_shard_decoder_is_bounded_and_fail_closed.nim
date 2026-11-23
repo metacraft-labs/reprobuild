@@ -115,7 +115,7 @@ suite "NPC-M3: the shard and root decoders are bounded and fail closed":
     # and schema 4 since NPC-M10 (snapshot versions); the first schema no
     # reader of this build knows is the next.
     var s2 = shard
-    s2[12] = byte(NimbleShardSnapshotsSchema + 1)
+    s2[12] = byte(NimbleShardHistorySchema + 1)
     check refusal(proc () = discard decodeShard(s2)) == $nrUnknownSchema
     var kind = shard
     kind[6] = 0xff
@@ -295,7 +295,7 @@ suite "NPC-M3: the shard and root decoders are bounded and fail closed":
     check nav.findPackage("RICH") == 1
     check nav.decodePackageAt(1) == decodeShard(shard).packages[1]
     var s2 = shard
-    s2[12] = byte(NimbleShardSnapshotsSchema + 1)
+    s2[12] = byte(NimbleShardHistorySchema + 1)
     check refusal(proc () = discard navigateShard(viewOf(s2))) ==
       $nrUnknownSchema
     for n in 0 ..< shard.len:
