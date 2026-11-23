@@ -440,10 +440,20 @@ proc readRecordBytes*(nimbleBytes, fileName: string): seq[byte] =
   var facts = VersionFacts(tag: "read", commit: ReadPlaceholderCommit,
     nimbleFile: some(IndexObjectId(blake3.digest(nimbleBytes))))
   let rec = recordFromNimbleFile(f, facts)
-  let shard = NimbleShard(shardBits: 0, bucket: 0, packages: @[
-    PackageEnvelope(name: "read", origins: @[PackageOrigin(
-      url: "https://read.invalid/", vcs: ovGit)], versions: @[rec])])
-  encodeShard(shard)
+  proc framed(r: VersionRecord): seq[byte] =
+    encodeShard(NimbleShard(shardBits: 0, bucket: 0, packages: @[
+      PackageEnvelope(name: "read", origins: @[PackageOrigin(
+        url: "https://read.invalid/", vcs: ovGit)], versions: @[r])]))
+  try:
+    framed(rec)
+  except NimbleIndexError:
+    # A `.nimble` can say more than a record holds (more requirements,
+    # binaries or foreign dependencies than the format's bounds). Its
+    # version is then unreadable, as for anything else the reader cannot
+    # represent; the edge does not fail, so the generation goes on.
+    framed(VersionRecord(version: rec.version, commit: rec.commit,
+      nimbleFile: rec.nimbleFile, readerClass: rrcUnreadable,
+      resolutionClass: rrcUnreadable, flags: {flUnreadable}))
 
 proc decodeReadRecord*(bytes: openArray[byte]): VersionRecord =
   let s = decodeShard(bytes)
@@ -1250,6 +1260,13 @@ proc generate*(config: GeneratorConfig): GenerationResult =
             prev.head.len > 0 and refs.head != prev.head and
             sameOrigin(prev.origin, recordableOrigin(t.origin)):
           reason.add " head " & prev.head
+        elif refs.state == anOk and prev.state != osAnswering and
+            k in run.previousEnvelopes and
+            run.previousEnvelopes[k].versions.len > 0 and
+            sameOrigin(prev.origin, recordableOrigin(t.origin)):
+          # Answering again after an observation that did not answer: the
+          # history says whether the recorded commits are still there.
+          reason.add " revived"
       if reason.len == 0 or historyAsked.getOrDefault(k) == reason: continue
       historyAsked[k] = reason
       changed = true
