@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3241,
+    "nimTestBinaries": 3242,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 849,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3299
+    "testEntries": 3300
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1857,7 +1857,7 @@
     "classificationCounts": {
       "graph-fixture": 29,
       "integration": 1825,
-      "platform/destructive": 204,
+      "platform/destructive": 205,
       "pure unit": 849,
       "unclassified": 392
     },
@@ -2079,9 +2079,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3241,
+    "nimTestBinaryCount": 3242,
     "pythonTestFileCount": 58,
-    "testEntryCount": 3299
+    "testEntryCount": 3300
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -46940,7 +46940,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_completion_emits_shell_script.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47355,6 +47355,25 @@
       "source": "tests/integration/t_cs_m6_workspace_command_lines.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_cs_m8e_macos_shell_placements",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_cs_m8e_macos_shell_placements.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -69135,7 +69154,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 21,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
