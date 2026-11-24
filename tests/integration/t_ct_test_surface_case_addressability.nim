@@ -63,16 +63,16 @@
 ## healthy-looking summary that this repository has twice had to retract.
 ##
 ## Reviewers: ``$CT_TEST`` is the supported way to measure a specific build.
-## The dev shell's ``ct-test`` is built from the ``codetracer-src`` flake
-## input, which the workspace ``.envrc`` auto-overrides to a ``../codetracer``
-## sibling when one exists — so on a workspace host it is whatever that
+## The dev shell's ``ct-test`` is built from the CodeTracer pin unless the
+## ``codetracer-src`` flake input overrides it, which the workspace ``.envrc``
+## does for a ``../codetracer`` sibling when one exists — so on a workspace host it is whatever that
 ## sibling happens to be, which is not necessarily the pinned revision. The
 ## checked-in artifact records which binary produced its numbers.
 ##
 ## Surface prerequisite, and how it is now met: the checked-in ledger requires
 ## a ``ct-test`` that reads a Nim import clause as a statement rather than as a
 ## line. That fix is CodeTracer ``632fdceed``, it is an ancestor of CodeTracer's
-## ``dev``, and ``flake.lock`` pins ``codetracer-src`` at it — so the surface
+## ``dev``, and the CodeTracer pin (``pins/codetracer.json``) contains it — so the surface
 ## the dev shell builds for itself carries it and this test needs no ``$CT_TEST``
 ## override to pass.
 ##

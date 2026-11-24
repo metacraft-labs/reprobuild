@@ -149,19 +149,18 @@ if grep -Fq "+ pre-commit-check.shellHook" flake.nix; then
 fi
 
 # CodeTracer's canonical native target imports span_stream. The trace-format
-# pin and every Nix execution surface must therefore agree on one immutable
+# source and every Nix execution surface must therefore agree on one immutable
 # source root. Exact counts make removal of any one surface fail this quick
 # repository check instead of surfacing after a minute-long CodeTracer compile.
-trace_format_rev="31be9a10007c007af429951616c13bc275587c76"
-require_contains flake.nix "github:metacraft-labs/codetracer-trace-format-nim/${trace_format_rev}"
-# The bootstrap modules follow this Repro flake, so its former nested Repro
-# release (and duplicate trace-format node) is absent. The remaining node
-# records the same immutable revision in both `locked` and `original`.
-# t_flake_lock_has_no_competing_reprobuild_pin also checks the parsed graph
-# so a differently pinned extra trace-format node cannot evade this count.
-# Whether this is the RIGHT revision -- the one the pinned CodeTracer's
-# repro.lock names -- is the flake check `ct-trace-format-pin-coherence`.
-require_count flake.lock "\"rev\": \"${trace_format_rev}\"" 2
+#
+# The source is not written down here or in flake.nix: it is the revision the
+# pinned CodeTracer's repro.lock names, derived in nix/codetracer-pin.nix
+# (`ctTraceFormatSrc`). flake.lock must therefore lock no trace-format node at
+# all -- t_flake_lock_has_no_competing_reprobuild_pin checks the parsed graph --
+# and the flake check `ct-trace-format-pin-coherence` holds the hand-written CI
+# copy (.github/sibling-repos) to the derivation.
+require_count flake.lock '"repo": "codetracer-trace-format-nim"' 0
+require_count flake.nix 'codetracerPin = import ./nix/codetracer-pin.nix metacraft-github-actions.pins;' 1
 require_contains "${package_nix}" 'requiredModule = "${sourceRoot}/codetracer_trace_writer/span_stream.nim";'
 # ONE definition of the guarded source root, in the derivation, read back by
 # the flake through passthru -- so the dev shell and the packaged-runtime
@@ -172,7 +171,7 @@ require_count "${package_nix}" 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTrac
 require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC = codeTracerTraceFormatNimSrc;' 1
 require_count "${package_nix}" '--set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \' 1
 require_count flake.nix 'CODETRACER_TRACE_FORMAT_NIM_SRC|${codeTracerTraceFormatNimSrc}' 1
-require_count flake.nix '                                      ${ct-trace-format-src} \' 1
+require_count flake.nix '                                      ${ctTraceFormatSrc} \' 1
 
 # The incremental-test seam (``ct_incremental_adapter.nim``), for the same
 # reason and with one extra requirement the trace-format case does not have.
@@ -199,14 +198,15 @@ require_count "${package_nix}" 'export CODETRACER_SRC=' 0
 require_count "${package_nix}" 'CODETRACER_SRC = "' 0
 require_count "${package_nix}" '--set-default CODETRACER_SRC ' 0
 require_count "${package_nix}" 'CODETRACER_SRC|' 0
-require_count flake.nix 'export CODETRACER_PINNED_SRC=${codetracer-src}/src' 1
-require_count flake.nix 'CODETRACER_PINNED_SRC = "${codetracer-src}/src";' 1
-# In the derivation the flake input is an ARGUMENT (`codetracerSrc`), because a
-# nixpkgs consumer has no flake inputs; the spelling differs, the pin does not.
+require_count flake.nix 'export CODETRACER_PINNED_SRC=${codetracerSrc}/src' 1
+require_count flake.nix 'CODETRACER_PINNED_SRC = "${codetracerSrc}/src";' 1
+# In the derivation the source is an ARGUMENT (`codetracerSrc`, the same
+# spelling as the flake's resolved source), because a nixpkgs consumer has no
+# flake inputs.
 require_count "${package_nix}" 'CODETRACER_PINNED_SRC = "${codetracerSrc}/src";' 1
 require_count "${package_nix}" '--set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \' 1
-require_count flake.nix 'CODETRACER_PINNED_SRC|${codetracer-src}/src' 1
-require_count flake.nix '                                      ${codetracer-src} \' 1
+require_count flake.nix 'CODETRACER_PINNED_SRC|${codetracerSrc}/src' 1
+require_count flake.nix '                                      ${codetracerSrc} \' 1
 require_contains config.nims 'getEnv("CODETRACER_SRC")'
 require_contains config.nims 'getEnv("CODETRACER_PINNED_SRC")'
 

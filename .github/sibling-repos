@@ -14,15 +14,22 @@
 # (src/ct_test/incremental) and the trace-format-nim CTFS reader it imports,
 # reached through ct_incremental_adapter (the engine-free seam). One-way
 # dependency: reprobuild -> codetracer.
-codetracer=dev
-# Pinned to the revision flake.lock's `ct-trace-format-src` names, not to a
-# branch: the repository develops on `agents` and reaches `dev` only through a
-# promotion, so `=dev` lagged by 131 commits and then jumped by 52 when one
-# landed. The ct build re-detaches this clone to the revision codetracer's own
-# repro.lock names (scripts/reconcile_locked_siblings.sh); this entry is what
-# every other job sees. scripts/check_sibling_lock_pins.py holds it equal to
-# flake.lock. Move it together with `ct-trace-format-src`.
-codetracer-trace-format-nim=31be9a10007c007af429951616c13bc275587c76
+#
+# CodeTracer is cloned at the organisation's CodeTracer pin
+# (pins/codetracer.json in metacraft-github-actions, which flake.nix reads),
+# not at a branch: a branch tip is a CodeTracer no pin names, and it moved this
+# repository's CI under commits that changed nothing here. trace-format-nim is
+# cloned at the revision that CodeTracer revision's repro.lock names, the one
+# the flake derives for it. clone-siblings cannot read a pin, so both are
+# written out, and two gates fail when either differs from the pin: `just lint`
+# (scripts/check_sibling_lock_pins.py, which evaluates the flake) and the flake
+# check `ct-trace-format-pin-coherence` (CI's Nix Build job). Move them when
+# `nix flake update metacraft-github-actions` moves the pin. The ct build still
+# re-detaches the trace-format clone to the revision codetracer's own
+# repro.lock names (scripts/reconcile_locked_siblings.sh), which is the same
+# revision.
+codetracer=a7cddd8bce554f5d73a7636e2bad15605b71963c
+codetracer-trace-format-nim=4c67a4507b1fe64752f71f287e62e8c4a3953b61
 
 # The two siblings CodeTracer's own build REQUIRES, as opposed to the ones its
 # Nim `--path` merely prefers. `scripts/build-once.sh` refuses to start without
