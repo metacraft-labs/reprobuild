@@ -570,6 +570,146 @@ proc canonicalRemoteIdentity*(url: string): string =
     segments.add(raw)
   authority & "/" & segments.join("/")
 
+proc isLocalRemoteSpelling(url: string): bool =
+  ## ``true`` for a remote that names a directory on this machine: a
+  ## ``file:`` URL, an absolute or relative path, a Windows drive path or a
+  ## UNC path. Git reads such a spelling as a path even when it contains a
+  ## colon later on (https://git-scm.com/docs/git-clone#_git_urls: the
+  ## scp-like form applies "only if there are no slashes before the first
+  ## colon").
+  let lower = url.toLowerAscii
+  if lower.startsWith("file:") or url.startsWith("/") or
+      url.startsWith("./") or url.startsWith("../") or url.startsWith("~") or
+      url.startsWith("\\") or url == "." or url == "..":
+    return true
+  if url.len >= 2 and url[0] in {'a'..'z', 'A'..'Z'} and url[1] == ':':
+    return true  # ``C:`` / ``C:/…`` / ``C:\…``: a drive, never a host
+  if "://" in url:
+    return false
+  let colon = url.find(':')
+  if colon < 0:
+    return true  # no scheme and no host: a relative path
+  let slash = url.find({'/', '\\'})
+  slash >= 0 and slash < colon
+
+proc canonicalLockFetchUrl*(url: string): string =
+  ## The URL a committed ``repro.lock`` ``deps`` entry records for the
+  ## repository whose remote is spelled ``url``.
+  ##
+  ## A lock entry's bytes may depend only on the repository and the commit it
+  ## pins, so the transport a local clone happens to use must not reach it:
+  ##
+  ##   * a network remote becomes ``https://<host>/<path>``. SSH spellings
+  ##     (``ssh://``, ``git+ssh://``, ``ssh+git://``, scp-like
+  ##     ``[user@]host:path``) and ``git://`` change scheme and lose their
+  ##     port, which names an SSH or git-daemon endpoint, not an HTTPS one;
+  ##   * ``http``/``https`` (and any other ``scheme://``) keep their scheme
+  ##     and a non-default port;
+  ##   * userinfo, a query and a fragment are always dropped, so a credential
+  ##     configured in a remote never reaches a committed file;
+  ##   * the host is lower-cased; empty path segments, a trailing ``/`` and a
+  ##     trailing ``.git`` are dropped; the path's case is kept.
+  ##
+  ## For a well-formed network URL every fold here except one is a fold
+  ## ``canonicalRemoteIdentity`` already makes, so two URLs this maps together
+  ## were already the same repository to every identity check. The exception
+  ## is the port of an SSH or ``git://`` remote: ``ssh://h:2222/o/r`` has
+  ## identity ``h:2222/o/r`` and is recorded as ``https://h/o/r``, because
+  ## the SSH port says nothing about where HTTPS is served.
+  ##
+  ## The URL is parsed here rather than through ``decomposeRemoteUrl`` because
+  ## what reaches a committed file must be safe for EVERY spelling, not merely
+  ## deterministic: userinfo ends at the LAST ``@`` of the authority (a
+  ## credential with an unencoded ``@``, ``?`` or ``#`` must not leave a tail
+  ## behind), a bracketed IPv6 host keeps its colons, a port that is not all
+  ## digits is not a port, and an authority that yields no host makes the
+  ## result empty, which the lock writer refuses with the entry named, rather
+  ## than echoing a remote that may carry a credential.
+  ##
+  ## A LOCAL remote (``isLocalRemoteSpelling``) is returned as spelled,
+  ## trimmed: it names a directory on the writing machine, where a ``.git``
+  ## suffix is part of the directory's name, and no rewriting would make it
+  ## fetchable elsewhere. An empty or blank ``url`` stays empty.
+  let trimmed = url.strip()
+  if trimmed.len == 0 or isLocalRemoteSpelling(trimmed):
+    return trimmed
+  var scheme = ""
+  var authority = ""
+  var path = ""
+  let sep = trimmed.find("://")
+  if sep > 0:
+    # ``scheme://[userinfo@]host[:port][/path][?query][#fragment]``. The
+    # authority runs to the first ``/``; its userinfo to the last ``@`` in it.
+    scheme = trimmed[0 ..< sep].toLowerAscii
+    let rest = trimmed[sep + 3 .. ^1]
+    let slash = rest.find('/')
+    authority = if slash < 0: rest else: rest[0 ..< slash]
+    path = if slash < 0: "" else: rest[slash + 1 .. ^1]
+    let at = authority.rfind('@')
+    if at >= 0: authority = authority[at + 1 .. ^1]
+    # A query or fragment is transport material (a signed URL's token, a
+    # branch hint), never part of the repository, wherever it starts.
+    let authorityCut = authority.find({'?', '#'})
+    if authorityCut >= 0:
+      authority.setLen(authorityCut)
+      path = ""
+    let pathCut = path.find({'?', '#'})
+    if pathCut >= 0: path.setLen(pathCut)
+  else:
+    # scp-like ``[user@]host:path`` or ``[user@][v6addr]:path``. No slash
+    # precedes the separating colon (``isLocalRemoteSpelling`` sent those
+    # away), so the user part ends at the last ``@`` before that colon.
+    var colon = -1
+    let bracket = trimmed.find('[')
+    if bracket >= 0 and (bracket == 0 or trimmed[bracket - 1] == '@') and
+        trimmed.find(':') > bracket:
+      let close = trimmed.find(']', bracket)
+      if close > 0 and close + 1 < trimmed.len and trimmed[close + 1] == ':':
+        colon = close + 1
+    if colon < 0: colon = trimmed.find(':')
+    if colon <= 0: return ""
+    authority = trimmed[0 ..< colon]
+    let at = authority.rfind('@')
+    if at >= 0: authority = authority[at + 1 .. ^1]
+    path = trimmed[colon + 1 .. ^1]
+  # Split ``host[:port]``; a bracketed IPv6 host keeps its colons.
+  var host = authority
+  var port = ""
+  if host.startsWith("["):
+    let close = host.find(']')
+    if close < 0: return ""
+    if close + 1 < host.len:
+      if host[close + 1] != ':': return ""
+      port = host[close + 2 .. ^1]
+    host = host[0 .. close]
+  else:
+    let colon = host.find(':')
+    if colon >= 0:
+      port = host[colon + 1 .. ^1]
+      host = host[0 ..< colon]
+  if host.len == 0 or host == "[]": return ""
+  if not port.allCharsInSet(Digits): port = ""
+  let outScheme =
+    case scheme
+    of "", "ssh", "git+ssh", "ssh+git", "git": "https"
+    else: scheme
+  result = outScheme & "://" & host.toLowerAscii
+  if outScheme == scheme and port.len > 0 and
+      port != defaultPortForScheme(scheme):
+    result.add(":")
+    result.add(port)
+  var segments: seq[string]
+  for raw in path.split('/'):
+    if raw.len > 0: segments.add(raw)
+  # A trailing ``.git`` is the bare-repository suffix of the same repository
+  # (``normalizeFetchUrl``); drop it, and a segment it empties, as there.
+  if segments.len > 0 and segments[^1].toLowerAscii.endsWith(".git"):
+    segments[^1].setLen(segments[^1].len - 4)
+    if segments[^1].len == 0: segments.setLen(segments.len - 1)
+  if segments.len > 0:
+    result.add("/")
+    result.add(segments.join("/"))
+
 proc identityDigestHex(identity: string): string =
   ## FNV-1a 64 over a canonical identity, as 16 lowercase hex digits. Used
   ## ONLY to name a disambiguated cache directory.
