@@ -6682,7 +6682,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    group: "t_group_libs_repro_dsl_stdlib_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_packaging_content_addressed.nim",
@@ -7224,6 +7224,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "suite-scope statement runs at every start-up: for tool in WorkspaceFloor:"),
+  TestSpec(
+    source: "libs/repro_dsl_stdlib/tests/t_zig_cross_monitor_shim_needs_only_libc.nim",
+    binary: "build/test-bin/t_zig_cross_monitor_shim_needs_only_libc",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_dsl_stdlib_tests_g02",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_dsl_stdlib/tests/t_zig_cross_shared_library_exports.nim",
     binary: "build/test-bin/t_zig_cross_shared_library_exports",

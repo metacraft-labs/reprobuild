@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3234,
+    "nimTestBinaries": 3235,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3290
+    "testEntries": 3291
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,7 +1855,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1821,
+      "integration": 1822,
       "platform/destructive": 203,
       "pure unit": 847,
       "unclassified": 390
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3234,
+    "nimTestBinaryCount": 3235,
     "pythonTestFileCount": 56,
-    "testEntryCount": 3290
+    "testEntryCount": 3291
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20715,6 +20715,27 @@
       "owner": "libs/repro_dsl_stdlib",
       "requiresReproBinary": false,
       "source": "libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_zig_cross_monitor_shim_needs_only_libc",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_zig_cross_monitor_shim_needs_only_libc.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -47850,7 +47871,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dev_shell_override_guards.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
