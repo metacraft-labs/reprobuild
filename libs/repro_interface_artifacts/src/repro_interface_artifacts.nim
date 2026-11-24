@@ -1,6 +1,8 @@
 from repro_core/process_streams import drainStream
 import std/[algorithm, json, options, os, osproc, sequtils, sets, streams,
             strtabs, strutils, tables, tempfiles, times]
+when defined(windows):
+  import std/monotimes
 
 when defined(windows):
   type
@@ -53,6 +55,7 @@ when defined(windows):
   const
     WinStartfUseStdHandles = 0x00000100'u32
     WinCreateAlways = 2'u32
+    WinOpenExisting = 3'u32
     WinFileShareRead = 1'u32
     WinFileShareWrite = 2'u32
     WinWaitInfinite = 0xFFFFFFFF'u32
@@ -77,6 +80,9 @@ when defined(windows):
 
   proc winGetExitCodeProcess(hProcess: ProviderLockHandle; lpExitCode: ptr ProviderLockDword): int32
     {.stdcall, dynlib: "kernel32", importc: "GetExitCodeProcess".}
+
+  proc winGetFileSizeEx(hFile: ProviderLockHandle; lpFileSize: ptr int64): int32
+    {.stdcall, dynlib: "kernel32", importc: "GetFileSizeEx".}
 else:
   import std/posix
 
@@ -98,6 +104,10 @@ import repro_core/process_env
 import repro_core/git_separated
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
+when defined(windows):
+  # Only the Windows wait in `runCommand` has a bounded wait to decide; the
+  # POSIX arm waits on the child directly.
+  import repro_interface_artifacts/compile_watchdog
 import repro_interface_artifacts/closure_manifest
 export closure_manifest
 import repro_interface_artifacts/gem_closure_manifest
@@ -922,9 +932,10 @@ type
     output*: string
     killedByCaller*: bool
       ## `runCommand` itself killed the child's process tree (the Windows
-      ## compile timeout). Its `exitCode` then reads as an ordinary failure,
-      ## but the child did not end on its own: whatever it was writing may be
-      ## half written (`runNimcacheCompilerCommandHeld`).
+      ## compile watchdog: a stalled sink or the overall ceiling). Its
+      ## `exitCode` then reads as an ordinary failure, but the child did not
+      ## end on its own: whatever it was writing may be half written
+      ## (`runNimcacheCompilerCommandHeld`).
 
   ProviderCompileEdge* = object
     actionSpec*: ActionSpec
@@ -5022,10 +5033,20 @@ proc runCommand*(command: openArray[string];
       creationFlags = 0x00000400'u32
     let created = winCreateProcessW(nil, pCmd, nil, nil, 1,
       ProviderLockDword(creationFlags), pEnv, pCwd, addr si, addr pi)
+    # Progress is read through a SECOND handle to the sink: read-only and
+    # NOT inheritable. The inheritable write handle is closed at once, as
+    # before; kept open for the whole wait, every child that a concurrent
+    # `runCommand` on another thread spawns meanwhile would inherit it too,
+    # hold this sink open, and make its removal below fail.
+    let probeHandle = providerLockCreateFileW(sinkW, ProviderLockGenericRead,
+      WinFileShareRead or WinFileShareWrite, nil, WinOpenExisting,
+      ProviderLockFileAttributeNormal, nil)
     discard providerLockCloseHandle(sinkHandle)
 
     if created == 0:
       let err = providerLockGetLastError()
+      if probeHandle != ProviderLockInvalidHandle and probeHandle != nil:
+        discard providerLockCloseHandle(probeHandle)
       try:
         removeFile(extendedPath(sinkPath))
       except CatchableError:
@@ -5034,35 +5055,60 @@ proc runCommand*(command: openArray[string];
 
     # Bounded wait. A wedged `nim c` -- whose gcc children can deadlock on
     # Windows and hold the runner for HOURS (observed on the 0.1.4 release:
-    # a 4h+ hang on the full-closure interface extract) -- must fail fast with
-    # whatever it wrote to the sink, never hang.
-    # REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS overrides the default cap; a
-    # value <= 0 restores the unbounded wait. On timeout the WHOLE process
-    # tree (nim.exe -> gcc.exe) is killed with `taskkill /T`, so no orphaned
-    # compiler keeps the slot busy, and the partial sink is still read -- so
-    # with `--listCmd` the LAST command in it is the sub-command that wedged.
-    var timeoutSecs = 1800
-    block:
-      let raw = getEnv("REPRO_INTERFACE_COMPILE_TIMEOUT_SECONDS").strip()
-      if raw.len > 0:
-        try:
-          timeoutSecs = parseInt(raw)
-        except ValueError:
-          timeoutSecs = 1800
-    var timedOut = false
-    if timeoutSecs <= 0:
+    # a 4h+ hang on the full-closure interface extract) -- must fail with
+    # whatever it wrote to the sink, never hang. Wedged is decided by LACK OF
+    # PROGRESS, not total time: `compile_watchdog` has why a fixed total
+    # killed slow-but-working compiles, the two limits, their defaults and
+    # their environment overrides (both `<= 0` restores the unbounded wait).
+    #
+    # Progress is the sink's length read through `probeHandle`.
+    # `GetFileSizeEx` on an open handle reports the file's current length; a
+    # size read through the path can come from the directory entry, which
+    # NTFS does not update while a writer holds the file open. Without a
+    # probe there is no progress signal, so the stall limit is dropped rather
+    # than left to kill a working compile, and only the ceiling remains.
+    # https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfilesizeex
+    #
+    # On a verdict the WHOLE process tree (nim.exe -> gcc.exe) is killed with
+    # `taskkill /T`, so no orphaned compiler keeps the slot busy, and the
+    # partial sink is still read -- so with `--listCmd` the LAST command in
+    # it is the sub-command that wedged.
+    proc sinkSize(): int64 =
+      var size: int64 = 0
+      if probeHandle == ProviderLockInvalidHandle or probeHandle == nil or
+          winGetFileSizeEx(probeHandle, addr size) == 0:
+        -1'i64
+      else:
+        size
+    proc monoSeconds(): float =
+      float(getMonoTime().ticks) / 1e9
+    var policy = compileWatchdogPolicy(getEnv(CompileCeilingEnv),
+      getEnv(CompileStallEnv))
+    if probeHandle == ProviderLockInvalidHandle or probeHandle == nil:
+      policy.stallSeconds = 0
+    var killMessage = ""
+    if policy.isUnbounded:
       discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
     else:
-      # WAIT_TIMEOUT is 0x102; WAIT_OBJECT_0 (0) means the process exited.
-      let waitResult = winWaitForSingleObject(pi.hProcess,
-        ProviderLockDword(min(timeoutSecs, high(int32) div 1000) * 1000))
-      if waitResult == ProviderLockDword(0x102):
-        timedOut = true
-        # No shell redirection: execCmd does not route through a shell that
-        # interprets `>`, so a `> nul` reaches taskkill as a literal argument
-        # and the kill silently no-ops. Its status lines go to the log.
-        discard execCmd("taskkill /F /T /PID " & $pi.dwProcessId)
-        discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+      var watchdog = startCompileWatchdog(policy, monoSeconds(), sinkSize())
+      while true:
+        # WAIT_TIMEOUT is 0x102; WAIT_OBJECT_0 (0) means the process exited.
+        let waitResult = winWaitForSingleObject(pi.hProcess,
+          ProviderLockDword(CompileWatchdogPollMilliseconds))
+        if waitResult != ProviderLockDword(0x102):
+          break
+        let now = monoSeconds()
+        let verdict = watchdog.observe(now, sinkSize())
+        if verdict != cwvKeepWaiting:
+          killMessage = watchdog.verdictMessage(verdict, now)
+          # No shell redirection: execCmd does not route through a shell that
+          # interprets `>`, so a `> nul` reaches taskkill as a literal argument
+          # and the kill silently no-ops. Its status lines go to the log.
+          discard execCmd("taskkill /F /T /PID " & $pi.dwProcessId)
+          discard winWaitForSingleObject(pi.hProcess, WinWaitInfinite)
+          break
+    if probeHandle != ProviderLockInvalidHandle and probeHandle != nil:
+      discard providerLockCloseHandle(probeHandle)
     var rawExitCode: ProviderLockDword = 0
     discard winGetExitCodeProcess(pi.hProcess, addr rawExitCode)
     discard providerLockCloseHandle(pi.hThread)
@@ -5079,16 +5125,13 @@ proc runCommand*(command: openArray[string];
         removeFile(extendedPath(sinkPath))
       except CatchableError:
         discard
-    if timedOut:
+    if killMessage.len > 0:
       exitCode = 124
-      output = "runCommand: TIMED OUT after " & $timeoutSecs &
-        "s and killed the nim/gcc process tree. Partial sink output follows; " &
-        "with --listCmd the LAST command shown is the one that wedged.\n" &
-        output
+      output = killMessage & "\n" & output
     result = ProviderCompileExecutionResult(
       exitCode: exitCode,
       output: output,
-      killedByCaller: timedOut)
+      killedByCaller: killMessage.len > 0)
   else:
     var process: Process
     withSpawnWorkingDir:

@@ -692,6 +692,7 @@ libs/repro_infra/tests/t_smoke_repro_infra.nim	nim	231
 libs/repro_infra/tests/t_system_generations_distinct_within_one_second.nim	nim	4
 libs/repro_infra/tests/t_system_profile_addon_fields.nim	nim	7
 libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim	nim	5
+libs/repro_interface_artifacts/tests/t_a_slow_compile_that_progresses_is_not_killed.nim	nim	13
 libs/repro_interface_artifacts/tests/t_an_envelope_newer_than_the_engine_names_both_versions.nim	nim	4
 libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim	nim	12
 libs/repro_interface_artifacts/tests/t_consumer_compile_paths_carry_clispec.nim	nim	2
@@ -1942,7 +1943,7 @@ tests/integration/t_attestation_module_census.nim	nim	9
 tests/integration/t_attestation_report.nim	nim	3
 tests/integration/t_attested_image_manifest.nim	nim	4
 tests/integration/t_authenticated_inference_binding_mutations.nim	nim	26
-tests/integration/t_auto_runquota_shared_per_user_daemon.nim	nim	8
+tests/integration/t_auto_runquota_shared_per_user_daemon.nim	nim	9
 tests/integration/t_auto_runquota_uses_private_endpoint_policy.nim	nim	23
 tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim	nim	3
 tests/integration/t_autotools_configure_cache.nim	nim	1
@@ -1974,7 +1975,7 @@ tests/integration/t_bootstrap_default_nim_matches_declared_version.nim	nim	1
 tests/integration/t_bootstrap_guard_names_the_host_artefact.nim	nim	13
 tests/integration/t_branch_fork_clones_root_submodules.nim	nim	1
 tests/integration/t_branch_fork_inherits_project_set.nim	nim	3
-tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	16
+tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim	nim	22
 tests/integration/t_branch_from_mainlines.nim	nim	10
 tests/integration/t_branch_matching_first_rule_wins_upstream_and_detached.nim	nim	1
 tests/integration/t_branch_unpublished_source_head.nim	nim	5
@@ -2393,6 +2394,7 @@ tests/integration/t_lock_update_node_failure_withholds_only_the_certificate.nim	
 tests/integration/t_lock_update_node_refreshes_the_flake_lock_through_repro_test.nim	nim	1
 tests/integration/t_lock_update_node_refusal_withholds_only_the_certificate.nim	nim	1
 tests/integration/t_lock_update_rewrites_exact_pin_in_both_recipes.nim	nim	13
+tests/integration/t_lock_url_spelling_does_not_depend_on_the_writing_clone.nim	nim	1
 tests/integration/t_lock_validate_root_provenance_survives_commit.nim	nim	13
 tests/integration/t_locked_catalog_materialized_and_consulted.nim	nim	3
 tests/integration/t_locked_deps_populated_uniformly_from_lockfile_manifest_and_db.nim	nim	1
@@ -2529,6 +2531,7 @@ tests/integration/t_pre_push_protocol_v2_policy_regressions.nim	nim	5
 tests/integration/t_pre_push_protocol_v2_ref_validation.nim	nim	3
 tests/integration/t_pre_push_public_only_writes_no_manifest_lock.nim	nim	1
 tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim	nim	1
+tests/integration/t_pre_push_publishes_verified_range_drafts.nim	nim	6
 tests/integration/t_pre_push_refuses_on_unreachable_team_backend.nim	nim	1
 tests/integration/t_pre_push_refuses_stale_committed_sibling_pin.nim	nim	1
 tests/integration/t_pre_push_refuses_when_lock_publish_fails.nim	nim	1
@@ -3292,14 +3295,15 @@ tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	22
+tests/unit/test_release_native_packages.py	python	25
 tests/unit/test_release_pipeline_identity.py	python	11
-tests/unit/test_release_plan_matrix.py	python	16
+tests/unit/test_release_plan_matrix.py	python	30
+tests/unit/test_release_signed_installers.py	python	31
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12
 tests/unit/test_release_tag_names_build.py	python	11
 tests/unit/test_reprobuild_suite_inventory.py	python	117
-tests/unit/test_sibling_lock_pins.py	python	10
+tests/unit/test_sibling_lock_pins.py	python	16
 tests/unit/test_source_revision.py	python	18
 tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_test_group_fallback.py	python	6

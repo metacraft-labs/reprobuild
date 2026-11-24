@@ -11,6 +11,16 @@
     # Follow this flake itself so consumers retain one Reprobuild pin while
     # the module and Nixpkgs revisions remain independently pinned.
     nixos-modules.inputs.reprobuild.follows = "";
+    # microvm.nix, reached through this module input, locks `spectrum` from
+    # spectrum-os.org. microvm reads it only in its `cloud-hypervisor-graphics`
+    # overlay, which nothing here evaluates. While that host is down, every
+    # consumer that fetches all locked inputs (`nix flake archive`) fails.
+    # devops-modules drops the input from its own `microvm` and from its pin
+    # of this flake for that reason, and its
+    # `scripts/ci/check_flake_lock_sources.py` denies the host. A consumer
+    # that reaches this flake through `builtins.getFlake` uses this lock as is
+    # and cannot override the input, so it is dropped here too.
+    nixos-modules.inputs.microvm.inputs.spectrum.follows = "";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
@@ -694,127 +704,51 @@
     # by nothing in CI or the Justfile. Adding a source input that no
     # derivation consumes costs every downstream lock a node -- see the gate
     # in ``tests/unit`` that walks this file's lock.
+    # ── CodeTracer: read from the organisation's single CodeTracer pin ──────
+    # The pin set (metacraft-pm how-to-distribute-new-reprobuild-versions-
+    # internally.md, "one pin set in the CI actions repository"). Its flake has
+    # no inputs and one output, `pins`; this flake reads `pins.codetracer`
+    # (`pins/codetracer.json`) and keeps no CodeTracer revision of its own.
+    # Moving CodeTracer here is `nix flake update metacraft-github-actions`
+    # after the pin moved there, plus the `.github/sibling-repos` entries that
+    # `checks.<system>.ct-trace-format-pin-coherence` holds to it.
+    metacraft-github-actions = {
+      url = "github:metacraft-labs/metacraft-github-actions/dev";
+    };
+    # The OVERRIDE SLOT for the CodeTracer source, not a pin. CodeTracer owns
+    # ``ct-test`` (``src/ct_test/``, built as ``ctTestTools`` below) and the
+    # process seam ``src/ct_incremental_adapter.nim`` that ``config.nims`` puts
+    # on Nim's ``--path``; both are built from the CodeTracer source that
+    # ``codetracerSrc`` in ``outputs`` resolves, which is:
+    #
+    #   * by default, the pinned revision: ``builtins.fetchTree`` by the pin's
+    #     rev and narHash (nix/codetracer-pin.nix). Source only -- CodeTracer's
+    #     own flake is never evaluated, because it drags in the Electron,
+    #     frontend and db-backend toolchains, none of which ``ct-test`` needs;
+    #   * when this input is overridden, the override:
+    #     ``--override-input codetracer-src path:../codetracer``, which the
+    #     ``.envrc`` auto-override (NIX_FLAKE_OVERRIDE_AUTO, ``-src`` suffix)
+    #     emits whenever a ``../codetracer`` sibling exists. Overriding a source
+    #     input to a path copies the whole working tree into the store (6.1 GiB
+    #     measured for a working checkout, against tens of MB for the pin).
+    #
+    # A flake input's url cannot be computed from another input, so the slot
+    # ``follows`` the pin set: that costs no lock node and names no revision,
+    # and ``outputs`` reads "this input is still the pin set" as "not
+    # overridden".
+    #
+    # The trace-format source CodeTracer is compiled with is not an input
+    # either: it is the revision the CodeTracer source's own ``repro.lock``
+    # names for codetracer-trace-format-nim, derived at evaluation time (see
+    # nix/codetracer-pin.nix and ``ct-trace-format-pin-coherence``).
+    #
+    # The pinned source is exported as ``CODETRACER_PINNED_SRC``. THE NAME IS
+    # DELIBERATELY NOT ``CODETRACER_SRC``: that variable is a user override,
+    # and ``config.nims`` reads it first, a ``../codetracer`` sibling second
+    # and this pin only third, so a developer editing the seam sees the edit
+    # immediately and an unset variable still means unset.
     codetracer-src = {
-      # CodeTracer owns the cross-language test driver ``ct-test``
-      # (``src/ct_test/ct_test.nim``): TestCatalog v1 discovery over the
-      # provider registry plus the partitioned parallel runner, declared as
-      # the ``ct-test`` target in codetracer's ``repro.nim``. ``ctTestTools``
-      # below builds that binary from this input and the dev shell puts it on
-      # PATH, exactly as ``runquotaTools`` does for ``runquota-src`` — so the
-      # shipped tool tracks a pinned/overridable source instead of whatever
-      # someone hand-compiled into a sibling checkout.
-      #
-      # Pinned to an exact revision, like ``ct-trace-format-src`` below, and
-      # moved together with it: the incremental-test seam this input supplies
-      # is compiled against that trace-format source, so the two must name a
-      # CodeTracer revision built against the same trace-format revision. A
-      # branch ref would let either side move alone. "The same" is exact:
-      # ``ct-trace-format-src`` is the revision THIS input's ``repro.lock``
-      # names for codetracer-trace-format-nim, and the
-      # ``ct-trace-format-pin-coherence`` check below refuses any other pair
-      # when it is evaluated (``nix flake check``, or ``nix build
-      # .#checks.<system>.ct-trace-format-pin-coherence``). Nothing else
-      # evaluates it, so run it whenever either input moves. Before that check
-      # the pairing was kept by hand only, and drifted (reprobuild-pm issue
-      # 2026-10-04).
-      #
-      # ``flake = false`` — we want the source tree only. CodeTracer's own
-      # flake drags in the Electron/frontend/db-backend toolchain, none of
-      # which ``ct-test`` needs (see the explicit dependency paths in
-      # ctTestTools). The ``.envrc`` auto-override
-      # (NIX_FLAKE_OVERRIDE_AUTO + the ``-src`` suffix convention) names this
-      # input for a ``../codetracer`` sibling when one exists. Be aware of what
-      # that costs before leaning on it: overriding a source input to a plain
-      # path copies the whole directory into the store, and a working
-      # CodeTracer checkout is several gigabytes. An override-free shell builds
-      # the pin, which is the cheap and reproducible default — and cheap is
-      # meant literally. Measured at the current pin: 25 MB on disk, 47 MiB of
-      # store closure with no dependencies, against 6.1 GiB for the override
-      # copy. The gigabytes belong to the override, not to the input.
-      #
-      # CodeTracer also owns ``src/ct_incremental_adapter.nim``, the process
-      # seam ``config.nims`` puts on Nim's ``--path``, and this input is what
-      # every build here offers as the DEFAULT source for it, exported as
-      # ``CODETRACER_PINNED_SRC`` from the dev shell, the lint hook, the
-      # packaged build and the installed-runtime wrapper defaults.
-      #
-      # THE NAME IS DELIBERATELY NOT ``CODETRACER_SRC``. That variable is a
-      # user override and has to stay one: ``config.nims`` reads it first, a
-      # detected ``../codetracer`` sibling second, and this pin only third, so
-      # that a developer editing the seam in a workspace checkout sees the edit
-      # immediately and an unset variable still means unset. Exporting the pin
-      # as ``CODETRACER_SRC`` would put it permanently ahead of both.
-      #
-      # At f8781d4b5 (CTC-3i, `ct-test` ships beside `ct`) CodeTracer's
-      # ``repro.lock`` builds against trace-format 7b8b587c, so
-      # ``ct-trace-format-src`` moves to that revision in the same step.
-      #
-      # At 17c111fb2 (2026-10-13, the published `agents` tip; f8781d4b5 is an
-      # ancestor and ``src/ct_incremental_adapter.nim`` is unchanged) the
-      # ``repro.lock`` names trace-format 808ffdb4, so ``ct-trace-format-src``
-      # moves again with it.
-      #
-      # At 222a4a009 (2026-10-14, the published `agents` tip; 17c111fb2 is an
-      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
-      # ``src/ct_incremental_adapter.nim`` are unchanged and the ``repro.lock``
-      # still names trace-format 808ffdb4, so ``ct-trace-format-src`` stays.
-      # 7662d329 carries replay-option forwarding and its regression test;
-      # the incremental adapter and trace-format resolution are unchanged.
-      # 47eda1fd adds native recording navigation; ct-test and the incremental
-      # adapter are unchanged. Align the pin with the published workspace.
-      # At 272a09ad5 (2026-10-15, the published `agents` tip; 47eda1fd is an
-      # ancestor) ``repro.nim``, ``config.nims``, ``src/Tuprules.tup`` and
-      # ``src/ct_incremental_adapter.nim`` are unchanged; the ``repro.lock``
-      # now names trace-format 5b32588b, so ``ct-trace-format-src`` moves
-      # with it.
-      #
-      # At 23d5af70f (2026-10-15, the published `agents` tip; 272a09ad5 is an
-      # ancestor) ``config.nims``, ``src/Tuprules.tup``, ``src/ct_test/ct_test.nim``
-      # and ``src/ct_incremental_adapter.nim`` are unchanged. ``repro.nim`` does
-      # change -- it declares the Zstandard headers through the new ``zstd-dev``
-      # selector -- and that revision's ``repro.lock`` names trace-format d8cd2ed5,
-      # so ``ct-trace-format-src`` moves to it in the same step.
-      #
-      # At 6b6d05a08 (2026-10-15, the published `agents` tip; 23d5af70f is its
-      # parent) only ``flake.lock`` and ``repro.lock`` change, and the latter
-      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays.
-      #
-      # At 2097ae648 (2026-10-16, the published `agents` tip; 6b6d05a08 is an
-      # ancestor) ``src/ct_test/`` and ``src/ct_incremental_adapter.nim`` are
-      # unchanged; ``repro.nim``, ``config.nims`` and ``src/Tuprules.tup`` each
-      # add the vendored ``libs/nim-regex/src`` search path (a new submodule,
-      # absent from this submodule-less input and unused by ``ct-test``; the
-      # ``addPathIfDir`` form skips it). Its ``repro.lock``
-      # still names trace-format d8cd2ed5, so ``ct-trace-format-src`` stays
-      # (``checks.<system>.ct-trace-format-pin-coherence`` confirms it).
-      #
-      # At f1745b89e (2026-10-17, the published `agents` tip; 2097ae648 is an
-      # ancestor) ``src/ct_test/``, ``src/ct_incremental_adapter.nim``,
-      # ``config.nims`` and ``src/Tuprules.tup`` are unchanged. ``repro.nim``
-      # does change: it declares ``dsymutil`` for the macOS debug-info pass,
-      # the sub-tool ``nim c`` shells out to by bare name after the link, so
-      # the hermetic native edge needs it declared the way ``clang`` is. That
-      # declaration resolves against the ``dsymutil`` selector this very
-      # revision of reprobuild adds. Its ``repro.lock`` names trace-format
-      # b4794ba6, so ``ct-trace-format-src`` moves with it in the same step
-      # (``checks.<system>.ct-trace-format-pin-coherence`` confirms the pair).
-      #
-      # At 008950fa9 (2026-10-28, the published `agents` tip; f1745b89e is an
-      # ancestor) ``config.nims`` and ``src/ct_incremental_adapter.nim`` are
-      # unchanged. ``src/Tuprules.tup`` only exports ``TMPDIR`` to its rules.
-      # ``repro.nim`` adds a ``uses: "image_diff >=0"`` entry, stages the
-      # macOS app for the DMG with a process action instead of
-      # ``fs.preserveTree``, and adds two lint gates over the CI workflows'
-      # sibling pins; the ``ct-test`` target is unchanged. ``src/ct_test/``
-      # changes in its own sources only, with no new import outside it:
-      # certificate content ids, local-store publishing that keeps a relayed
-      # signature, a ``test run --events <path>`` option that writes the
-      # per-test events, and release-gate and run-orchestration additions. Its
-      # ``repro.lock`` names trace-format 31be9a10, the revision that compiles
-      # under ``nimPreviewSlimSystem``, so ``ct-trace-format-src`` moves with
-      # it in the same step (``checks.<system>.ct-trace-format-pin-coherence``
-      # confirms the pair).
-      url = "github:metacraft-labs/codetracer/008950fa91fdd68a44f77f9c454eff5b7bf139fa";
+      follows = "metacraft-github-actions";
       flake = false;
     };
 
@@ -1019,42 +953,9 @@
       url = "github:nim-lang/csources_v3/eeab3ac46e93f10efda8e58c4db02b9438319d71";
       flake = false;
     };
-    ct-trace-format-src = {
-      # Moves only with ``codetracer-src``, to exactly the revision that
-      # CodeTracer revision's ``repro.lock`` names; the
-      # ``ct-trace-format-pin-coherence`` check fails on any other revision
-      # when it is evaluated (see ``codetracer-src`` above). The history below
-      # records each such move.
-      #
-      # CodeTracer 632fdceed imports codetracer_trace_writer/span_stream. Keep
-      # this past the span-stream writer, cumulative-index, and encoder fixes;
-      # the older c2f3dfc3 pin does not contain that module at all.
-      # Moved with ``codetracer-src`` to 7b8b587c, the revision CodeTracer
-      # f8781d4b5's ``repro.lock`` names (051efd22 is an ancestor; adds the
-      # --mm:none/refc build and the GC-safe reader entry points).
-      # Moved with ``codetracer-src`` to 808ffdb4, the revision CodeTracer
-      # 17c111fb2's ``repro.lock`` names (7b8b587c is an ancestor; adds the ten
-      # exact I/O event kinds of trace format version 7 and a step count that
-      # counts step records only).
-      # Moved with ``codetracer-src`` to 5b32588b, the revision CodeTracer
-      # 272a09ad5's ``repro.lock`` names (808ffdb4 is an ancestor; refuses a
-      # container that carries only some of the interning tables).
-      # Moved with ``codetracer-src`` to d8cd2ed5, the revision CodeTracer
-      # 23d5af70f's ``repro.lock`` names (5b32588b is an ancestor; extends the
-      # partial-interning-table refusal to every container writer and reads a
-      # MaxRootEntries of 0 as the auto-filled root in every reader).
-      # Moved with ``codetracer-src`` to b4794ba6, the revision CodeTracer
-      # f1745b89e's ``repro.lock`` names (d8cd2ed5 is an ancestor; fails the
-      # writer when a write fails in the final flush or close, and retries the
-      # managed finalize with a timeout sized to the upload).
-      # Moved with ``codetracer-src`` to 31be9a10, the revision CodeTracer
-      # 008950fa9's ``repro.lock`` names (b4794ba6 is an ancestor; every library
-      # module now compiles under ``nimPreviewSlimSystem``, which the fork's
-      # koch needs to build nifler, and the guarded imports change nothing
-      # outside slim-system).
-      url = "github:metacraft-labs/codetracer-trace-format-nim/31be9a10007c007af429951616c13bc275587c76";
-      flake = false;
-    };
+    # The codetracer-trace-format-nim source the Nim fork vendors and the
+    # CodeTracer sources compile with is not an input: it is derived from the
+    # CodeTracer source's own ``repro.lock`` (see ``codetracer-src`` above).
     nim-stew-src = {
       url = "github:status-im/nim-stew/83eb1157963b7f49351dbdd858355fa990bbe23c";
       flake = false;
@@ -1140,7 +1041,7 @@
       nim-confutils-src,
       nim-fork-src,
       nim-csources-src,
-      ct-trace-format-src,
+      metacraft-github-actions,
       nim-stew-src,
       nim-results-src,
       nim-checksums-src,
@@ -1151,6 +1052,20 @@
       ...
     }:
     let
+      # The CodeTracer source and the trace-format source it compiles with.
+      # See ``codetracer-src`` in ``inputs`` and nix/codetracer-pin.nix: the
+      # pinned revision unless ``codetracer-src`` is overridden (it then no
+      # longer is the pin set it ``follows``), and in both cases the
+      # trace-format revision that CodeTracer source's ``repro.lock`` names.
+      codetracerPin = import ./nix/codetracer-pin.nix metacraft-github-actions.pins;
+      codetracerOverridden = codetracer-src.outPath != metacraft-github-actions.outPath;
+      codetracerSrc = if codetracerOverridden then codetracer-src else codetracerPin.codetracer;
+      ctTraceFormatSrc =
+        if codetracerOverridden then
+          codetracerPin.traceFormatOf codetracer-src
+        else
+          codetracerPin.traceFormat;
+
       # The Nix helper library (milestone GM5; docs/users/content/reference/nix-library.md),
       # exported as `lib` and tested by the `lib-*` checks below.
       # System-independent: the IFD derivation of `readIntent` is built for
@@ -1301,7 +1216,12 @@
           nimFork = pkgs.callPackage ./nix/pkgs/by-name/re/reprobuild/nim-fork.nix {
             forkSrc = nim-fork-src;
             csourcesSrc = nim-csources-src;
-            traceFormatSrc = ct-trace-format-src;
+            # The PINNED trace-format source, even when ``codetracer-src`` is
+            # overridden: the compiler vendors it, and following an override
+            # would rebuild the compiler whenever a ``../codetracer`` sibling's
+            # repro.lock names another trace-format revision. The override
+            # governs the CodeTracer sources compiled below, not the toolchain.
+            traceFormatSrc = codetracerPin.traceFormat;
             stewSrc = nim-stew-src;
             resultsSrc = nim-results-src;
             checksumsSrc = nim-checksums-src;
@@ -1358,11 +1278,12 @@
           # keeps the store path, which is stable per pin.
           siblingCheckoutSources =
             let
-              row = var: name: sub: {
+              rowOf = source: var: name: sub: {
                 inherit var name sub;
-                rev = inputs.${name}.rev or "";
-                dirtyRev = inputs.${name}.dirtyRev or "";
+                rev = source.rev or "";
+                dirtyRev = source.dirtyRev or "";
               };
+              row = var: name: rowOf inputs.${name} var name;
             in
             [
               (row "IO_MON_SRC" "io-mon-src" "/src")
@@ -1376,7 +1297,10 @@
               (row "REPRO_CT_TEST_RUNNER_SRC" "reprobuild-ct-test-runner-src" "")
               (row "REPRO_TEST_ADAPTERS_SRC" "reprobuild-test-adapters-src" "/src")
               (row "TEST_CERTIFICATES_TOOLS_SRC" "test-certificates-tools-src" "/src")
-              (row "CODETRACER_PINNED_SRC" "codetracer-src" "/src")
+              # Not the input's own rev: un-overridden, ``codetracer-src`` is
+              # the pin set it follows. ``codetracerSrc`` is the pinned tree or
+              # the override, whichever the shell was built from.
+              (rowOf codetracerSrc "CODETRACER_PINNED_SRC" "codetracer-src" "/src")
             ];
           siblingCheckoutSourcesHook = ''
             _repro_sib_top="$(${pkgs.git}/bin/git rev-parse --show-toplevel 2>/dev/null || true)"
@@ -1436,8 +1360,9 @@
           # states no opinion about runquota's dependencies, now or next time.
           runquotaTools = runquota-src.packages.${system}.default;
           # Build CodeTracer's standalone cross-language test driver ``ct-test``
-          # from the ``codetracer-src`` input and put it on the dev-shell PATH.
-          # Same shape and same motivation as ``runquotaTools`` above: the tool
+          # from ``codetracerSrc`` (the CodeTracer pin, or the ``codetracer-src``
+          # override) and put it on the dev-shell PATH. Same shape and same
+          # motivation as ``runquotaTools`` above: the tool
           # tracks a pinned, overridable source rather than a hand-built binary
           # in someone's sibling checkout, so
           # ``--override-input codetracer-src path:../codetracer`` (which the
@@ -1457,7 +1382,7 @@
           ctTestTools = pkgs.stdenv.mkDerivation {
             pname = "ct-test";
             version = "0.1.0";
-            src = codetracer-src;
+            src = codetracerSrc;
             strictDeps = true;
             dontConfigure = true;
             nativeBuildInputs = [
@@ -1477,7 +1402,7 @@
             # with ``IO_MON_SRC`` absent this derivation died on
             # ``src/ct_test/incremental/io_mon_capture.nim(83, 14) Error:
             # cannot open file: io_mon/depfile`` (measured 2026-11-03 against
-            # ``codetracer-src`` 008950fa91), and the named file exists in
+            # CodeTracer 008950fa91), and the named file exists in
             # every candidate io-mon revision — so the error points at the one
             # thing that was never wrong. The rule that keeps this from
             # recurring is to mirror the owning repo's seeding
@@ -1485,7 +1410,7 @@
             # buildPhase) rather than to add variables one compile error at a
             # time.
             IO_MON_SRC = "${io-mon-src}/src";
-            CODETRACER_TRACE_FORMAT_NIM_SRC = "${ct-trace-format-src}/src";
+            CODETRACER_TRACE_FORMAT_NIM_SRC = "${ctTraceFormatSrc}/src";
             NIM_STACKABLE_HOOKS_SRC = "${nim-stackable-hooks-src}/src";
             TEST_CERTIFICATES_TOOLS_SRC = "${test-certificates-tools-src}/src";
             # The compile is spelled out here rather than delegated to a script
@@ -1621,7 +1546,7 @@
                 export CONFUTILS_SRC=${nim-confutils-src}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_LINUX_UAPI_INCLUDE=${pkgs.linuxHeaders}/include"}
                 ${pkgs.lib.optionalString pkgs.stdenv.isLinux "export REPRO_SYSTEMD_ANALYZE=${pkgs.systemd}/bin/systemd-analyze"}
-                export CODETRACER_PINNED_SRC=${codetracer-src}/src
+                export CODETRACER_PINNED_SRC=${codetracerSrc}/src
                 export REPRO_CT_TEST_RUNNER_SRC=${reprobuild-ct-test-runner-src}
                 export REPRO_TEST_ADAPTERS_SRC=${reprobuild-test-adapters-src}/src
                 export TEST_CERTIFICATES_TOOLS_SRC=${test-certificates-tools-src}/src
@@ -1739,14 +1664,14 @@
                   inputs.stackable-hooks-macos-tools.packages.${system}.default
                 else
                   null;
-              ctTraceFormatSrc = ct-trace-format-src;
+              inherit ctTraceFormatSrc;
               ioMonSrc = io-mon-src;
               shmGsetSrc = nim-shm-gset-src;
               shmQueueSrc = nim-shm-queue-src;
               cliSpecSrc = nim-cli-spec-src;
               entrypointsSrc = nim-entrypoints-src;
               confutilsSrc = nim-confutils-src;
-              codetracerSrc = codetracer-src;
+              inherit codetracerSrc;
               ctTestRunnerSrc = reprobuild-ct-test-runner-src;
               testAdaptersSrc = reprobuild-test-adapters-src;
               testCertificatesToolsSrc = test-certificates-tools-src;
@@ -1912,7 +1837,7 @@
                 CLI_SPEC_SRC|${nim-cli-spec-src}/src
                 ENTRYPOINTS_SRC|${nim-entrypoints-src}/src
                 CONFUTILS_SRC|${nim-confutils-src}
-                CODETRACER_PINNED_SRC|${codetracer-src}/src
+                CODETRACER_PINNED_SRC|${codetracerSrc}/src
                 REPRO_CT_TEST_RUNNER_SRC|${reprobuild-ct-test-runner-src}
                 REPRO_TEST_ADAPTERS_SRC|${reprobuild-test-adapters-src}/src
                 TEST_CERTIFICATES_TOOLS_SRC|${test-certificates-tools-src}/src
@@ -2137,14 +2062,14 @@
                                       ${nimcrypto-src} \
                                       ${bearssl-src} \
                                       ${nim-stackable-hooks-src} \
-                                      ${ct-trace-format-src} \
+                                      ${ctTraceFormatSrc} \
                                       ${io-mon-src} \
                                       ${nim-shm-gset-src} \
                                       ${nim-shm-queue-src} \
                                       ${nim-cli-spec-src} \
                                       ${nim-entrypoints-src} \
                                       ${nim-confutils-src} \
-                                      ${codetracer-src} \
+                                      ${codetracerSrc} \
                                       ${reprobuild-ct-test-runner-src} \
                                       ${reprobuild-test-adapters-src} \
                                       ${test-certificates-tools-src} \
@@ -2500,6 +2425,43 @@
                 # other entry. An input in neither lock is still an error.
                 treeLock = builtins.fromJSON (builtins.readFile ./flake.lock);
                 treeRootInputs = treeLock.nodes.${treeLock.root}.inputs;
+                # CodeTracer and its trace-format source are read from the pin
+                # set (nix/codetracer-pin.nix), not locked by name. A `src`
+                # commit whose lock still has `codetracer-src` /
+                # `ct-trace-format-src` NODES is held to them as before; a
+                # later one, to the pin set ITS lock names: CodeTracer at that
+                # pin's rev and narHash, the trace-format source at the
+                # revision that CodeTracer's repro.lock names (rev only:
+                # repro.lock records no NAR hash).
+                derivedInputs = sourceInputs."pin-derived";
+                hasSrcNode = input: builtins.isString (rootInputs.${input} or null);
+                isDerived = input: builtins.elem input derivedInputs && !(hasSrcNode input);
+                srcCodetracerPin =
+                  let
+                    pinSet =
+                      if hasSrcNode "metacraft-github-actions" then
+                        lockedOf "metacraft-github-actions"
+                      else
+                        throw "reprobuild nixpkgs-package-src-sync: the `src` commit ${defaultSrc.rev}'s flake.lock locks neither `codetracer-src` nor `metacraft-github-actions`, so nothing says which CodeTracer its package.nix defaults snapshot";
+                    pinTree = builtins.fetchTree {
+                      inherit (pinSet)
+                        type
+                        owner
+                        repo
+                        rev
+                        narHash
+                        ;
+                    };
+                  in
+                  import ./nix/codetracer-pin.nix {
+                    codetracer = builtins.fromJSON (builtins.readFile "${pinTree}/pins/codetracer.json");
+                  };
+                derivedLocked =
+                  input:
+                  if input == "codetracer-src" then
+                    { inherit (srcCodetracerPin.pin) rev narHash; }
+                  else
+                    { inherit (srcCodetracerPin.traceFormatEntryOf srcCodetracerPin.codetracer) rev; };
                 pendingInputs = args:
                   builtins.filter (input: !(rootInputs ? ${input}) && treeRootInputs ? ${input}) (
                     builtins.attrValues args
@@ -2530,12 +2492,25 @@
                       let
                         src = sources.${arg};
                         inSrcLock = rootInputs ? ${input};
-                        lockName = if inSrcLock then "the `src` commit's flake.lock" else "this tree's flake.lock (`${input}` postdates the `src` commit)";
-                        locked = if inSrcLock then lockedOf input else treeLock.nodes.${treeRootInputs.${input}}.locked;
+                        derived = isDerived input;
+                        lockName =
+                          if derived then
+                            "the CodeTracer pin the `src` commit's flake.lock locks"
+                          else if inSrcLock then
+                            "the `src` commit's flake.lock"
+                          else
+                            "this tree's flake.lock (`${input}` postdates the `src` commit)";
+                        locked =
+                          if derived then
+                            derivedLocked input
+                          else if inSrcLock then
+                            lockedOf input
+                          else
+                            treeLock.nodes.${treeRootInputs.${input}}.locked;
                       in
                       if !(sources ? ${arg}) then
                         [ "${file}: `${arg}` is not in passthru.sources" ]
-                      else if !inSrcLock && !(treeRootInputs ? ${input}) then
+                      else if !derived && !inSrcLock && !(treeRootInputs ? ${input}) then
                         [
                           "${file}: `${arg}`: neither the `src` commit's flake.lock nor this tree's has an input `${input}`"
                         ]
@@ -2577,67 +2552,73 @@
                 )
               else
                 throw "reprobuild nixpkgs-package-src-sync: package.nix defaults are not the snapshot of their `src` commit ${defaultSrc.rev}:\n${builtins.concatStringsSep "\n" found}";
-            # The two CodeTracer-family inputs are one dependency, pinned
-            # twice. `codetracer-src` is a CodeTracer revision; that
-            # revision's own `repro.lock` names the codetracer-trace-format-nim
-            # revision it was solved -- and therefore compiled -- against.
-            # `ct-trace-format-src` is what this flake actually hands the
-            # CodeTracer sources it builds (the incremental adapter, `ct-test`,
-            # the CodeTracer e2e fixture) and vendors into the Nim fork. So
-            # the project policy recorded on both inputs above is: the
-            # trace-format pin moves with `codetracer-src`, to exactly the
-            # revision that CodeTracer revision's `repro.lock` names.
-            #
-            # That is reprobuild-pm `spec/Cross-Repo-Source-Consumption.md`
-            # §6 "Corrected lock semantics": "the executable's solve -- its
-            # `repro.lock` -- governs the complete transitive pinned
-            # solution." The consumer is CodeTracer, so ITS lock decides the
-            # trace-format revision; a second, independently moved pin here
-            # is a different solution, and one in which the pinned consumer
-            # need not compile. It did not, once: codetracer 704bf164 called
-            # a reader routine the then-pinned trace-format bc7c5d2 lacked
+            # CodeTracer and the codetracer-trace-format-nim source it compiles
+            # with are one dependency. The CodeTracer revision comes from the
+            # organisation's pin (pins/codetracer.json in
+            # metacraft-github-actions); the trace-format revision is the one
+            # that CodeTracer revision's own `repro.lock` names, because the
+            # executable's solve governs its transitive pinned solution
+            # (reprobuild-pm `spec/Cross-Repo-Source-Consumption.md` §6). It
+            # used to be a second, hand-moved flake input, and drifted
             # (reprobuild-pm issue 2026-10-04 "reprobuild pins a trace-format
-            # older than its own CodeTracer pin calls"). Before this check
-            # the policy was kept by hand, and had drifted.
+            # older than its own CodeTracer pin calls"); it is now derived in
+            # nix/codetracer-pin.nix, so within this flake the pair cannot
+            # disagree. This check asserts that construction (a CodeTracer
+            # tree with no `repro.lock`, or not exactly one trace-format entry,
+            # fails evaluation rather than falling back to anything), and
+            # holds the one remaining hand-written copy of the pair to it:
+            # `.github/sibling-repos`, which clones `../codetracer` and
+            # `../codetracer-trace-format-nim` for CI. The clone action has no
+            # way to read the pin, so those two entries name the revisions
+            # explicitly and this check fails when either differs from the pin.
             #
-            # It compares the inputs AS PASSED to this evaluation, not
-            # ./flake.lock's text, so an `--override-input` of either one is
-            # checked too. A source with no `rev` (a `path:` override of a
-            # working tree) cannot be shown to be the named revision and
-            # fails rather than passes. A `repro.lock` with no
-            # codetracer-trace-format-nim entry fails as well: a check that
-            # passes because there is nothing to compare is vacuous. Decided
-            # at evaluation time, like `nixpkgs-package-src-sync`, so it
-            # builds nothing and runs for every system.
+            # They are compared with the PIN, not with an override of
+            # `codetracer-src`: CI never overrides. Decided at evaluation time,
+            # like `nixpkgs-package-src-sync`, so it builds nothing and runs for
+            # every system; `nix flake check` or
+            # `nix build .#checks.<system>.ct-trace-format-pin-coherence`.
             ct-trace-format-pin-coherence =
               let
                 fail = msg: throw "reprobuild ct-trace-format-pin-coherence: ${msg}";
-                ctLockPath = "${codetracer-src}/repro.lock";
-                ctRev = codetracer-src.rev or "<no rev: not a locked revision>";
-                # repro.lock is TOML (schema reprobuild.solved-graph-lock.v3, or v2);
-                # the source deps sit in the `[lock]` table's `deps` array.
-                ctLock = builtins.fromTOML (builtins.readFile ctLockPath);
-                named = builtins.filter (dep: (dep.name or null) == "codetracer-trace-format-nim") (
-                  ctLock.lock.deps or [ ]
+                pin = codetracerPin.pin;
+                pinnedTraceFormat = codetracerPin.traceFormatEntryOf codetracerPin.codetracer;
+                usedTraceFormat = codetracerPin.traceFormatEntryOf codetracerSrc;
+                # `.github/sibling-repos` entries, comments and blanks dropped.
+                siblingEntries = builtins.filter (entry: entry != "") (
+                  map (
+                    line:
+                    let
+                      m = builtins.match "[[:space:]]*([^#[:space:]]*).*" line;
+                    in
+                    if m == null then "" else builtins.head m
+                  ) (pkgs.lib.splitString "\n" (builtins.readFile ./.github/sibling-repos))
                 );
-                wanted = (builtins.head named).revision or null;
-                pinned = ct-trace-format-src.rev or null;
+                siblingRef =
+                  name:
+                  let
+                    hits = builtins.filter (pkgs.lib.hasPrefix "${name}=") siblingEntries;
+                  in
+                  if builtins.length hits != 1 then
+                    fail ".github/sibling-repos has ${toString (builtins.length hits)} `${name}=<revision>` entries, expected exactly 1"
+                  else
+                    pkgs.lib.removePrefix "${name}=" (builtins.head hits);
+                ciCodetracer = siblingRef "codetracer";
+                ciTraceFormat = siblingRef "codetracer-trace-format-nim";
               in
-              if !(builtins.pathExists ctLockPath) then
-                fail "codetracer-src (${ctRev}) has no repro.lock, so the trace-format revision it was built against is unknown"
-              else if builtins.length named != 1 then
-                fail "codetracer-src (${ctRev}) repro.lock has ${toString (builtins.length named)} `deps` entries named codetracer-trace-format-nim, expected exactly 1"
-              else if wanted == null then
-                fail "codetracer-src (${ctRev}) repro.lock's codetracer-trace-format-nim entry has no `revision`"
-              else if pinned == null then
-                fail "ct-trace-format-src has no `rev` (overridden by a path?), so it cannot be shown to be ${wanted}, the revision codetracer-src (${ctRev}) repro.lock names"
-              else if pinned != wanted then
-                fail "ct-trace-format-src is pinned at ${pinned}, but codetracer-src (${ctRev}) was built against codetracer-trace-format-nim ${wanted} (its repro.lock). Move ct-trace-format-src in flake.nix to ${wanted} -- the revision the pinned CodeTracer's repro.lock names -- and refresh flake.lock; or move codetracer-src to a CodeTracer revision whose repro.lock names ${pinned}."
+              if (ctTraceFormatSrc.rev or null) != usedTraceFormat.rev then
+                fail "the trace-format source is ${toString (ctTraceFormatSrc.rev or "<no rev>")}, but the CodeTracer source's repro.lock names ${usedTraceFormat.rev}"
+              else if !codetracerOverridden && (codetracerSrc.rev or null) != pin.rev then
+                fail "the CodeTracer source is ${toString (codetracerSrc.rev or "<no rev>")}, but pins/codetracer.json names ${pin.rev}"
+              else if ciCodetracer != pin.rev then
+                fail ".github/sibling-repos clones CodeTracer at `${ciCodetracer}`, but pins/codetracer.json names ${pin.rev}. Set `codetracer=${pin.rev}` there (and `codetracer-trace-format-nim=${pinnedTraceFormat.rev}`, the revision that CodeTracer revision's repro.lock names)."
+              else if ciTraceFormat != pinnedTraceFormat.rev then
+                fail ".github/sibling-repos clones codetracer-trace-format-nim at `${ciTraceFormat}`, but CodeTracer ${pin.rev} (pins/codetracer.json) was built against ${pinnedTraceFormat.rev} (its repro.lock). Set `codetracer-trace-format-nim=${pinnedTraceFormat.rev}` there."
               else
                 pkgs.writeText "reprobuild-ct-trace-format-pin-coherence" (
                   builtins.toJSON {
-                    codetracer = ctRev;
-                    trace-format = pinned;
+                    codetracer = pin.rev;
+                    trace-format = pinnedTraceFormat.rev;
+                    codetracer-overridden = codetracerOverridden;
                   }
                 );
             packaged-runtime-compile = packagedRuntimeCompileCheck;
@@ -2918,7 +2899,7 @@
             # `packages`: on PATH its binutils and `cc` would shadow the host
             # toolchain's.
             REPRO_WINDOWS_CC = "${pkgs.pkgsCross.mingwW64.stdenv.cc}/bin/${pkgs.pkgsCross.mingwW64.stdenv.cc.targetPrefix}gcc";
-            CODETRACER_PINNED_SRC = "${codetracer-src}/src";
+            CODETRACER_PINNED_SRC = "${codetracerSrc}/src";
             REPRO_CT_TEST_RUNNER_SRC = reprobuild-ct-test-runner-src;
             REPRO_TEST_ADAPTERS_SRC = "${reprobuild-test-adapters-src}/src";
             TEST_CERTIFICATES_TOOLS_SRC = "${test-certificates-tools-src}/src";
@@ -3000,10 +2981,10 @@
               # without a hand build. Nothing in reprobuild's own build or test
               # path consumes it yet; wiring it into scripts/run_tests.sh is a
               # separate, later step. One thing to know before relying on it:
-              # it is whatever ``codetracer-src`` is pinned to, not whatever is
+              # it is whatever CodeTracer is pinned to, not whatever is
               # in a sibling checkout. Changes made in a local codetracer tree
               # reach this binary only once they are pushed and the pin is
-              # bumped (or the input is overridden for the session).
+              # bumped (or ``codetracer-src`` is overridden for the session).
               #
               # ``test run`` is safe at any ``--threads`` value on this pin. An
               # earlier pin aborted during teardown once a run used 21 or more

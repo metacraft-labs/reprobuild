@@ -110,20 +110,31 @@ $Tmp = Join-Path $Work 'tmp'
 $Neutral = Join-Path $Work 'cwd'
 New-Item -ItemType Directory -Force -Path $Tmp, $Neutral | Out-Null
 
-# The rows of one table of an MSI database, each a string array.
+# The rows of one table of an MSI database, each a string array. A binary
+# stream column (type 'v'/'V' in View.ColumnInfo(1),
+# https://learn.microsoft.com/windows/win32/msi/view-columninfo and
+# https://learn.microsoft.com/windows/win32/msi/column-definition-format) is
+# read as its length in bytes, Record.DataSize
+# (https://learn.microsoft.com/windows/win32/msi/record-datasize): the
+# object refuses Record.StringData on a stream ("StringData,Field"), which is
+# what the Binary table's Data column is.
 function Get-MsiRows {
   param([string]$Msi, [string]$Table)
   $installer = New-Object -ComObject WindowsInstaller.Installer
   $db = $installer.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $installer, @($Msi, 0))
   $view = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @("SELECT * FROM ``$Table``"))
   $view.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $view, $null) | Out-Null
-  $cols = $view.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $view, @(0))
+  $cols = $view.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $view, @(1))
   $n = $cols.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $cols, $null)
+  $types = @(foreach ($k in 1..$n) { $cols.GetType().InvokeMember('StringData', 'GetProperty', $null, $cols, @($k)) })
   $rows = @()
   while ($true) {
     $rec = $view.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $view, $null)
     if ($null -eq $rec) { break }
-    $row = @(foreach ($k in 1..$n) { $rec.GetType().InvokeMember('StringData', 'GetProperty', $null, $rec, @($k)) })
+    $row = @(foreach ($k in 1..$n) {
+        $prop = if ($types[$k - 1] -cmatch '^[vV]') { 'DataSize' } else { 'StringData' }
+        [string]$rec.GetType().InvokeMember($prop, 'GetProperty', $null, $rec, @($k))
+      })
     $rows += , $row
   }
   $view.GetType().InvokeMember('Close', 'InvokeMethod', $null, $view, $null) | Out-Null
@@ -160,7 +171,8 @@ function Get-MsiContents {
   foreach ($r in (Get-MsiRows $Msi 'CustomAction')) { $actions[$r[0]] = @([int]$r[1], $r[2], $r[3]) }
   $sequence = @{}
   foreach ($r in (Get-MsiRows $Msi 'InstallExecuteSequence')) { $sequence[$r[0]] = @($r[1], [int]$r[2]) }
-  $binaries = @(foreach ($r in (Get-MsiRows $Msi 'Binary')) { $r[0] })
+  # Binary names whose stream is not empty.
+  $binaries = @(foreach ($r in (Get-MsiRows $Msi 'Binary')) { if ([long]$r[1] -gt 0) { $r[0] } })
   $script = Get-ChildItem -LiteralPath $image -Recurse -File -Filter 'repro.ps1' |
     Where-Object { $_.FullName -match '[\\/]Reprobuild[\\/]share[\\/]repro[\\/]completions[\\/]repro\.ps1$' } | Select-Object -First 1
   return [pscustomobject]@{ Files = $files; Actions = $actions; Sequence = $sequence; Binaries = $binaries; Script = $script }
@@ -174,7 +186,7 @@ function Assert-MsiCompletion {
   if ($null -eq $Contents.Script) { throw 'the administrative image holds no Reprobuild\share\repro\completions\repro.ps1' }
   $bytes = [IO.File]::ReadAllBytes($Contents.Script.FullName)
   if ([Convert]::ToBase64String($bytes) -ne [Convert]::ToBase64String($ArchiveScript)) { throw 'the installed repro.ps1 differs from the archive''s' }
-  if ($Contents.Binaries -notcontains 'WixCA') { throw 'the package carries no WixCA binary (WixUtilExtension) for its quiet-exec actions' }
+  if ($Contents.Binaries -notcontains 'WixCA') { throw 'the package carries no non-empty WixCA binary (WixUtilExtension) for its quiet-exec actions' }
   foreach ($a in $CustomActions.Keys) {
     if (-not $Contents.Actions.ContainsKey($a)) { throw "no custom action $a" }
     $row = $Contents.Actions[$a]
