@@ -609,6 +609,7 @@ libs/repro_dsl_stdlib/tests/t_unsatisfiable_lock_reports_conflict.nim	nim	6
 libs/repro_dsl_stdlib/tests/t_windows_monitor_artifacts.nim	nim	9
 libs/repro_dsl_stdlib/tests/t_with_lock_file_block_scope.nim	nim	8
 libs/repro_dsl_stdlib/tests/t_workspace_floor_windows_tarball_arms.nim	nim	2
+libs/repro_dsl_stdlib/tests/t_zig_cross_monitor_shim_needs_only_libc.nim	nim	2
 libs/repro_dsl_stdlib/tests/t_zig_cross_shared_library_exports.nim	nim	18
 libs/repro_dsl_stdlib/tests/t_zstd_dev_windows_link_channel.nim	nim	2
 libs/repro_dsl_stdlib/tests/test_m69_package_macro.nim	nim	4
@@ -622,6 +623,7 @@ libs/repro_elevation/tests/t_sandbox_m1_fhssandbox_driver.nim	nim	37
 libs/repro_elevation/tests/t_smoke_repro_elevation.nim	nim	402
 libs/repro_elevation/tests/t_windows_service_recovery_digest.nim	nim	7
 libs/repro_fs_facts/tests/t_fs_facts_conformance.nim	nim	35
+libs/repro_hcr_linkgraph/tests/t_linkgraph_compiles_from_its_package_manifest_alone.nim	nim	2
 libs/repro_home_apply/tests/t_adapter_chain.nim	nim	13
 libs/repro_home_apply/tests/t_app_bundle_records_route.nim	nim	12
 libs/repro_home_apply/tests/t_archive_conformance_shared.nim	nim	3
@@ -1242,6 +1244,7 @@ libs/repro_test_support/tests/t_remove_dir_eventually_classifies_the_windows_lon
 libs/repro_test_support/tests/t_scoped_env_restores_in_any_order.nim	nim	4
 libs/repro_test_support/tests/t_test_owned_runquotad_binds_on_hosts_with_a_runquota_account.nim	nim	4
 libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim	nim	1
+libs/repro_tool_profiles/tests/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc.nim	nim	3
 libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim	nim	4
 libs/repro_tool_profiles/tests/t_a_tool_probe_writes_no_state_outside_its_scratch.nim	nim	3
 libs/repro_tool_profiles/tests/t_bootstrap_cc_override_is_honoured_and_scoped.nim	nim	5
@@ -2096,7 +2099,7 @@ tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
 tests/integration/t_dev_env_allow.nim	nim	1
 tests/integration/t_dev_env_artifact.nim	nim	3
 tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	7
-tests/integration/t_dev_shell_override_guards.nim	nim	24
+tests/integration/t_dev_shell_override_guards.nim	nim	25
 tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim	nim	1
 tests/integration/t_develop_all_clones_into_a_second_placement_root.nim	nim	1
 tests/integration/t_develop_all_ignores_an_unpublished_advisory_lock_ref.nim	nim	1
@@ -3253,6 +3256,7 @@ tests/unit/test_ci_nix_builder_logs.py	python	9
 tests/unit/test_ci_reconcile_lock_credentials.py	python	25
 tests/unit/test_ci_suite_coverage.py	python	19
 tests/unit/test_ci_test_budget.py	python	26
+tests/unit/test_clingo_windows_arm64_producer.py	python	18
 tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_cmake_prereq_sdk.py	python	11
 tests/unit/test_continuous_benchmarking_policy.py	python	7

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3233,
+    "nimTestBinaries": 3236,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 164,
-    "testEntries": 3289
+    "testEntries": 3293
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,8 +1855,8 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1820,
-      "platform/destructive": 203,
+      "integration": 1823,
+      "platform/destructive": 204,
       "pure unit": 847,
       "unclassified": 390
     },
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3233,
-    "pythonTestFileCount": 56,
-    "testEntryCount": 3289
+    "nimTestBinaryCount": 3236,
+    "pythonTestFileCount": 57,
+    "testEntryCount": 3293
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -20741,6 +20741,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_zig_cross_monitor_shim_needs_only_libc",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_dsl_stdlib",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_zig_cross_monitor_shim_needs_only_libc.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_zig_cross_shared_library_exports",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -20976,6 +20997,23 @@
       "source": "libs/repro_fs_facts/tests/t_fs_facts_conformance.nim",
       "sourceSuiteCount": 10,
       "staticCaseCount": 35,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_linkgraph_compiles_from_its_package_manifest_alone",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_hcr_linkgraph",
+      "requiresReproBinary": false,
+      "source": "libs/repro_hcr_linkgraph/tests/t_linkgraph_compiles_from_its_package_manifest_alone.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -32607,6 +32645,26 @@
       "source": "libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -47833,7 +47891,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dev_shell_override_guards.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68563,6 +68621,21 @@
       "source": "tests/unit/test_ci_test_budget.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 26,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_clingo_windows_arm64_producer.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

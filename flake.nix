@@ -2241,11 +2241,16 @@
           # pin, not a per-entry one.
           #
           # Pins mirror `repro.nim`'s Windows fixture constants where nixpkgs
-          # carries the pinned line: Zig 0.13 (pre-1.0; the M44 fixtures were
-          # audited against it), the .NET 8.0 SDK band, JDK 21, Gradle 8,
+          # carries the pinned line: the .NET 8.0 SDK band, JDK 21, Gradle 8,
           # FPC 3.2.2 and Swift 5.10.1 (the nixpkgs defaults happen to be
           # those exact versions). Go is the exception: nixpkgs has removed
-          # the end-of-life 1.23 line, so it is nixpkgs' current Go.
+          # the end-of-life 1.23 line, so it is nixpkgs' current Go. Zig is
+          # the other: 0.14, where the Windows fixtures pin 0.13. This zig is
+          # also the one `repro.nim` declares (`zig >=0.14 <0.15`) and links
+          # the monitor shim with under a zig target, and zig 0.13 binds the
+          # pthread symbols the shim calls to `libpthread.so.0`, so a shim it
+          # links needs that library (`repro.nim`'s zig entry says why that
+          # matters).
           #
           # ONE bin directory, and a curated one, rather than the packages
           # themselves. GNAT and gfortran are cc-wrappers whose `bin/` also
@@ -2278,7 +2283,7 @@
                   pkgs.gfortran
                   pkgs.fpc
                   pkgs.ldc
-                  pkgs.zig_0_13
+                  pkgs.zig_0_14
                   pkgs.meson
                   pkgs.crystal
                   pkgs.shards

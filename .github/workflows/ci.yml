@@ -73,11 +73,53 @@ jobs:
       # 400), so every git fetch the lint gates make from this checkout
       # failed: the attribution-base fetch below (silently) and
       # check_package_nix_pending_sources' fetch of package.nix's `src`
-      # commit (the gate went red). This job pushes nothing, and the
-      # installation token is the one credential its gates need.
+      # commit (the gate went red). This job pushes nothing; the next step
+      # gives this repository's own fetches their one credential.
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+      # Exactly one Authorization header for fetches of THIS repository, and
+      # one that lives as long as the job.
+      #
+      # Without this step the only credential is setup-dev-env's, the App
+      # installation token minted below. It is frozen into GIT_CONFIG_* when
+      # setup-dev-env runs and expires an hour after it was minted, but this
+      # job runs longer than that: check_package_nix_pending_sources fetches
+      # package.nix's `src` commit late in `just lint` (72 minutes after the
+      # mint in run 45287470538). GitHub answers an expired token with 401,
+      # and git, not allowed to prompt, reports `could not read Username`.
+      # That token is not even minted for this repository (it is not in the
+      # `repositories:` list); a fresh one was accepted only because the
+      # repository is public.
+      #
+      # The job token is this repository's own credential and is valid until
+      # the job ends. It is scoped to the exact origin URL, so git sends it
+      # instead of setup-dev-env's owner-wide header, not beside it: for a
+      # multi-valued `http.<url>.extraHeader`, a key whose URL matches less
+      # specifically than one already read is skipped, and repo-local config
+      # is read before GIT_CONFIG_*. git matches URL paths at `/`
+      # boundaries, so sibling repositories (`reprobuild-packages`, ...)
+      # still get setup-dev-env's header.
+      #
+      # The header lives in a 0600 file under $RUNNER_TEMP, which the runner
+      # deletes after the job, and .git/config only includes it. The
+      # workspace outlives the job on self-hosted runners; an include of a
+      # missing file is ignored, so the next job sees neither the spent
+      # token nor a second header. `--replace-all` with a value pattern
+      # rewrites only this step's own include line.
+      - name: Authenticate this repository's own fetches with the job token
+        env:
+          JOB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          origin="$(git remote get-url origin)"
+          auth_file="${RUNNER_TEMP}/lint-origin-auth.gitconfig"
+          (
+            umask 077
+            header="AUTHORIZATION: basic $(printf 'x-access-token:%s' "$JOB_TOKEN" | base64 | tr -d '\n')"
+            git config --file "$auth_file" --replace-all "http.${origin}.extraHeader" "$header"
+          )
+          git config --local --replace-all include.path "$auth_file" '/lint-origin-auth\.gitconfig$'
       # Mint a GitHub App installation token via the CI Token Provider
       # app.  GitHub free plan restricts org-level secrets with
       # visibility ALL from being readable inside private repos, so we
