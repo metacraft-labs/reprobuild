@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3223,
+    "nimTestBinaries": 3224,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 846,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3276
+    "testEntries": 3278
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,10 +1855,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1812,
+      "integration": 1813,
       "platform/destructive": 203,
       "pure unit": 846,
-      "unclassified": 386
+      "unclassified": 387
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3223,
-    "pythonTestFileCount": 53,
-    "testEntryCount": 3276
+    "nimTestBinaryCount": 3224,
+    "pythonTestFileCount": 54,
+    "testEntryCount": 3278
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -44820,6 +44820,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_auto_started_runquotad_does_not_hold_its_install_bin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_daemon_core",
+        "repro_runquota",
+        "repro_store_daemon",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_autotools_configure_cache",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -68911,6 +68932,21 @@
       "source": "tests/unit/test_test_group_fallback.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `subprocess`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_test_parallelism_grant.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
