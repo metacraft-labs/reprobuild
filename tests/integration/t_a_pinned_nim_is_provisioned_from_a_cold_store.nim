@@ -3,6 +3,11 @@
 ## a reprobuild with an EMPTY store provisions it from the official release
 ## archive and compiles the project's provider with it.
 ##
+## SINCE 2026-11-24 (operator decision) recipe compilation requires Nim 2.2.10
+## or newer, so the build step below is a REFUSAL case: the lock's 2.2.8 pin is
+## rejected before anything is provisioned. The steps 2 and 3 text that follows
+## describes the behaviour this file used to check.
+##
 ## Reprobuild-specs Distribution-And-Packaging.milestones.org, M5. The user's
 ## direction (2026-10-01): a pinned Nim of any released version is provisioned
 ## automatically, as a regular package, with the bootstrap's hard-failure
@@ -215,7 +220,15 @@ suite "a pinned Nim is provisioned from a cold store and compiles the provider":
       check dep.archive.sha256 == expected.sha256
       check dep.archive.build == expected.build
 
-  test "a build with an empty store provisions it and compiles with it":
+  test "a build is refused: the pinned Nim is below the recipe-compiler floor":
+    # 2026-11-24 (operator decision): recipe compilation requires Nim 2.2.10
+    # or newer, so a lock that pins an older release is refused before
+    # anything is provisioned. This case used to realize the pinned 2.2.8 from
+    # its archive and compile the provider with it; that is no longer allowed,
+    # and no released Nim newer than the floor differs from the bootstrap's own
+    # (2.2.10), so end-to-end provisioning of a NON-bootstrap pin has no real
+    # release to run against. The mechanism itself stays covered with fixture
+    # archives by `t_a_pinned_nim_archive_is_verified_against_the_lock`.
     when Expected.url.len == 0:
       skip("no expected nim " & PinnedNim & " archive is recorded here for " &
         HostPlatform)
@@ -229,32 +242,20 @@ suite "a pinned Nim is provisioned from a cold store and compiles the provider":
       let pin = projectPinsFor(project).providerNim
       require pin.state == spsPinned
       let prefix = selfPrefixAbsolutePath(store, pin)
-      let exe = pinnedExecutableIn(providerNimPin(), prefix)
       let archive = store / "tool-store" / "downloads" /
         (expected.sha256 & ".archive")
-      # Cold: nothing provides this Nim yet, and its archive was never
-      # downloaded into this store.
       check not dirExists(prefix)
       check not fileExists(archive)
       let r = runEngine(project, store, cache, @["build", "--no-runquota",
         "--daemon=off"])
       checkpoint("rc=" & $r.code & "\n" & r.output)
-      check r.code == 0
-      check r.output.contains("realizing the pinned provider compiler nim " &
-        PinnedNim & " from " & expected.url)
-      check r.output.contains("provider compiler " & exe)
-      check not r.output.contains("provider compiled with Nim")
-      check fileExists(exe)
-      check fileExists(prefix / "lib" / "system.nim")
-      # The archive that was realized is the one the lock pins, by digest.
-      check fileExists(archive)
-      if fileExists(archive):
-        check fileSha256Hex(archive) == expected.sha256
-      # And it is the pinned version.
-      if fileExists(exe):
-        let v = uncontrolledExecCmdEx(quoteShell(exe) & " --version")
-        checkpoint(v.output)
-        check v.output.startsWith("Nim Compiler Version " & PinnedNim)
+      check r.code != 0
+      check r.output.contains("requires Nim 2.2.10 or newer")
+      check r.output.contains("Nim " & PinnedNim)
+      # Refused up front: nothing was downloaded or installed for it.
+      check not r.output.contains("realizing the pinned provider compiler")
+      check not dirExists(prefix)
+      check not fileExists(archive)
 
   test "control: without the pin the same recipe is refused by its guard":
     when Expected.url.len == 0:
