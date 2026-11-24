@@ -108739,6 +108739,26 @@ type
     memberSets: seq[string]
     memberRepos: seq[string]
 
+proc manifestCheckoutRefusal(identity: GitToolIdentity;
+                             manifestRoot: string): string =
+  ## Asked by every definition verb (`sets`/`projects` `add`/`remove`,
+  ## `repos add`/`remove`) before it writes or deletes anything: the empty
+  ## string when ``manifestRoot`` is itself a git checkout, otherwise the
+  ## refusal diagnostic. A definition verb writes, commits and pushes, and
+  ## the commit is part of the verb rather than a follow-up to it: one that
+  ## cannot commit must refuse with the tree untouched rather than leave
+  ## uncommitted manifest edits behind (which the next verb's commit would not
+  ## stage) and report a definition no other workspace can see.
+  ## `commitAndPushManifest` keeps the same check as a backstop for a caller
+  ## that reaches it without asking first.
+  let discovery = discoverGitWorktree(identity, manifestRoot)
+  if discovery.ok:
+    return ""
+  "manifest repo root '" & manifestRoot &
+    "' is not a git checkout; refusing to change manifest definitions, " &
+    "nothing was written" &
+    (if discovery.diagnostic.len > 0: ": " & discovery.diagnostic else: "")
+
 proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
@@ -109554,6 +109574,13 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
         return 1
       seed.memberSets = loaded.member_sets
       seed.memberRepos = loaded.member_repos
+    # The last check before the first write: a definition that cannot be
+    # committed is not made, so the tree is left as it was, the index is not
+    # regenerated, and no "defined" line follows.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine(verb & " add: " & name & " — " & noCheckout)
+      return 1
     createDir(manifestRoot / addDir)
     let fileRel = addDir & "/" & name & ".toml"
     let fileAbs = manifestRoot / addDir / (name & ".toml")
@@ -109674,6 +109701,12 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
     except CatchableError as exc:
       stderr.writeLine(verb & " remove: warning: cannot read " & target.abs &
         " (" & exc.msg & "); removing it without an orphan report")
+    # The last check before the first deletion, for the same reason as `add`:
+    # a removal that cannot be committed must not happen on disk.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine(verb & " remove: " & name & " — " & noCheckout)
+      return 1
     var paths = @[target.rel]
     removeFile(target.abs)
     let docRel = target.rel.changeFileExt("md")
@@ -110107,6 +110140,15 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       stderr.writeLine("  Nothing was written.")
       return 2
 
+    # Before the remote probe and the first write (the url-prefix minting
+    # below): without a manifest checkout to commit to, nothing is written at
+    # all, and the refusal costs no network round trip.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine("repro workspace repos add: " & repo & " — " &
+        noCheckout)
+      return 1
+
     # `--mainline` and `--revision` are each validated against the remote, for
     # the same reason: a manifest naming a branch or a pin that does not exist
     # authors fine and fails at sync time on everyone else's machine. Both are
@@ -110242,6 +110284,13 @@ proc runWorkspaceReposCommand*(c: ReproCommandLineWorkspaceRepos): int =
       stdout.writeLine("repro workspace repos remove: no repo-set or " &
         "project declares " & fragmentRel & "; nothing to do")
       return 0
+    # Before the first membership edge is dropped: a removal that cannot be
+    # committed must not happen on disk.
+    let noCheckout = manifestCheckoutRefusal(identity, manifestRoot)
+    if noCheckout.len > 0:
+      stderr.writeLine("repro workspace repos remove: " & repo & " — " &
+        noCheckout)
+      return 1
     var paths: seq[string]
     var droppedFrom: seq[string]
     for project in projects:
