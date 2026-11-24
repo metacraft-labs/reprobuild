@@ -18629,7 +18629,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_distributed_worker"
+        "repro_distributed_worker",
+        "repro_test_support"
       ],
       "owner": "libs/repro_distributed_worker",
       "requiresReproBinary": false,
@@ -47402,7 +47403,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_daemon_peer_cache_survives_cli_exit.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
