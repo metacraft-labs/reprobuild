@@ -345,7 +345,7 @@ type
       ## build host's load, which a gate's fingerprint comparison read as a
       ## change the add-on did not make.
     notedTaints*: seq[string]
-      ## The kernel taint values whose warnings ``noteKernelTaint`` logged.
+      ## The kernel taint values whose warnings ``accountKernelTaint`` logged.
     dataDisks*: seq[string]
       ## Extra writable disks attached after the boot disk (``/dev/vdb``,
       ## ...), each a ``DataDisk`` the gate owns: destroying the guest does
@@ -874,23 +874,71 @@ proc accountedFingerprint*(g: Guest; repro, fingerprint: string): string =
       "account: " & a.problems.join("; "))
   withoutOwnedSnapshots(fingerprint, a.owned)
 
-proc noteKernelTaint*(g: Guest; fingerprint: string) =
-  ## A fingerprint that records a tainted kernel (``kernel.tainted`` not 0)
-  ## puts the kernel's log into the guest's log, once per taint value: the
-  ## console runs quiet, so this is the only record of what warned
-  ## (measured 2026-11-17: TAINT_WARN on arch-ext4-amd64, its cause lost
-  ## with the guest).
-  for line in fingerprint.splitLines():
-    if line.startsWith("sysctl\tkernel.tainted\t"):
-      let v = line.split('\t')[^1]
-      if v != "0" and v notin g.notedTaints:
-        g.notedTaints.add(v)
-        g.note("kernel.tainted = " & v & "; the kernel's warnings:\n" &
-          g.exec("dmesg --notime 2>/dev/null | grep -A40 -E 'cut here|WARNING:|Tainted:' | head -200").stdout)
+const
+  TaintWarn* = "512"
+    ## ``kernel.tainted`` with only TAINT_WARN (bit 9) set: the kernel hit a
+    ## ``WARN()``; see
+    ## https://docs.kernel.org/admin-guide/tainted-kernels.html
+  KernelReportPattern* = "WARNING:|BUG:|Oops|general protection fault|" &
+    "Kernel panic|watchdog: BUG|rcu_sched self-detected"
+    ## The ``dmesg`` lines that report a kernel problem of any kind.
+  DisplayVblankWarnSite* = "drm_atomic_helper_wait_for_vblanks"
+    ## The function whose ``WARN`` a timed-out vblank wait raises.
+
+proc isDisplayVblankOnlyTaint*(taint, kernelReports: string): bool =
+  ## Whether a taint is nothing but the emulated display's vblank timeout:
+  ## ``taint`` is exactly TAINT_WARN, ``kernelReports`` (the ``dmesg`` lines
+  ## matching ``KernelReportPattern``) holds at least one ``WARNING:`` and
+  ## every line in it is a ``WARNING:`` raised in
+  ## ``DisplayVblankWarnSite``. No report at all (a ring buffer that
+  ## rotated it away) is false: the taint then stays unexplained.
+  ##
+  ## The Omarchy guest keeps its emulated display (its desktop session is
+  ## part of the base, unlike the plain Arch guests', ``Guest.noDisplay``),
+  ## and its ``bochs-drm`` raises ``[CRTC:..] vblank wait timed out`` when
+  ## the build host is loaded: measured 2026-11-24 (AR6, reprobuild
+  ## ``daa0b43196``) after one of ``hard_reset_at_every_step``'s resets on
+  ## ``omarchy-amd64``. The display is not the add-on's, and a hard reset
+  ## does not clear a taint the next boot happens to raise.
+  if taint.strip() != TaintWarn: return false
+  var warnings = 0
+  for line in kernelReports.splitLines():
+    let l = line.strip()
+    if l.len == 0: continue
+    if not (l.startsWith("WARNING:") and DisplayVblankWarnSite in l):
+      return false
+    inc warnings
+  warnings > 0
+
+proc accountKernelTaint*(g: Guest; fingerprint: string): string =
+  ## ``fingerprint`` with a tainted kernel (``kernel.tainted`` not 0)
+  ## accounted for. The kernel's log goes into the guest's log, once per
+  ## taint value: the console runs quiet, so this is the only record of
+  ## what warned (measured 2026-11-17: TAINT_WARN on arch-ext4-amd64, its
+  ## cause lost with the guest). A taint that is only the emulated
+  ## display's vblank timeout (``isDisplayVblankOnlyTaint``) is recorded as
+  ## 0, with a note saying so; any other taint stays in the fingerprint, so
+  ## a comparison sees it.
+  var lines = fingerprint.splitLines()
+  for idx, line in lines:
+    if not line.startsWith("sysctl\tkernel.tainted\t"): continue
+    let v = line.split('\t')[^1]
+    if v == "0": continue
+    if v notin g.notedTaints:
+      g.notedTaints.add(v)
+      g.note("kernel.tainted = " & v & "; the kernel's warnings:\n" &
+        g.exec("dmesg --notime 2>/dev/null | grep -A40 -E 'cut here|WARNING:|Tainted:' | head -200").stdout)
+    let reports = g.exec("dmesg --notime 2>/dev/null | grep -E " &
+      quoteShell(KernelReportPattern) & "; true").stdout
+    if isDisplayVblankOnlyTaint(v, reports):
+      g.note("kernel.tainted = " & v & " accounted as 0: every kernel " &
+        "report is the emulated display's vblank timeout (" &
+        DisplayVblankWarnSite & ")")
+      lines[idx] = line[0 ..< line.len - v.len] & "0"
+  lines.join("\n")
 
 proc takeFingerprint*(g: Guest; repro: string): string =
-  let fp = g.run(repro & " system addon fingerprint")
-  g.noteKernelTaint(fp)
+  let fp = g.accountKernelTaint(g.run(repro & " system addon fingerprint"))
   g.accountedFingerprint(repro, fp)
 
 proc gostiHead*(): string

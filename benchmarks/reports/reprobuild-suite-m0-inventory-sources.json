@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 35,
-    "nimTestBinaries": 2808,
+    "nimTestBinaries": 2809,
     "pureUnitConsolidationGroups": 82,
     "pureUnitTests": 761,
     "staticallyDetectedRuntimeCompilerFlowTests": 140,
-    "testEntries": 2852
+    "testEntries": 2853
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1616,7 +1616,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 22,
-      "integration": 1549,
+      "integration": 1550,
       "platform/destructive": 184,
       "pure unit": 761,
       "unclassified": 336
@@ -1833,9 +1833,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 2808,
+    "nimTestBinaryCount": 2809,
     "pythonTestFileCount": 44,
-    "testEntryCount": 2852
+    "testEntryCount": 2853
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -30741,6 +30741,21 @@
       "source": "tests/e2e/addon/t_addon_registry_mode_round_trip.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 0,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_addon_testbed_kernel_taint_accounting",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "tests/e2e",
+      "requiresReproBinary": false,
+      "source": "tests/e2e/addon/t_addon_testbed_kernel_taint_accounting.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
