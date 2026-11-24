@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3241,
+    "nimTestBinaries": 3246,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 849,
+    "pureUnitTests": 851,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3299
+    "testEntries": 3304
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -269,7 +269,7 @@
       "targetOs": "soAny"
     },
     {
-      "count": 7,
+      "count": 8,
       "defines": [],
       "dependencyShape": [
         "repro_core"
@@ -280,6 +280,7 @@
         "libs/repro_core/tests/t_installed_prefix_anchors.nim",
         "libs/repro_core/tests/t_nix_store_references_scan.nim",
         "libs/repro_core/tests/t_normalized_path_folds_absolute_dotdot.nim",
+        "libs/repro_core/tests/t_recipe_compiler_requirement.nim",
         "libs/repro_core/tests/t_recipe_source_names_cost_once_per_compile.nim",
         "libs/repro_core/tests/t_sibling_pin_lookup_reads_flake_lock.nim",
         "libs/repro_core/tests/t_target_object_check.nim"
@@ -1856,9 +1857,9 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1824,
+      "integration": 1827,
       "platform/destructive": 205,
-      "pure unit": 849,
+      "pure unit": 851,
       "unclassified": 392
     },
     "graphOwnedTestArtifacts": [
@@ -2079,9 +2080,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3241,
+    "nimTestBinaryCount": 3246,
     "pythonTestFileCount": 58,
-    "testEntryCount": 3299
+    "testEntryCount": 3304
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -17841,6 +17842,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_recipe_compiler_requirement",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core"
+      ],
+      "owner": "libs/repro_core",
+      "requiresReproBinary": false,
+      "source": "libs/repro_core/tests/t_recipe_compiler_requirement.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_recipe_source_names_cost_once_per_compile",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -19009,6 +19027,27 @@
       "source": "libs/repro_dsl_stdlib/tests/t_catalog_nim_fork_pin_matches_flake.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_catalog_nim_nix_arm_is_the_recipe_compiler_release",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_dsl_stdlib",
+        "repro_home_apply",
+        "repro_interface_artifacts",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_dsl_stdlib",
+      "requiresReproBinary": false,
+      "source": "libs/repro_dsl_stdlib/tests/t_catalog_nim_nix_arm_is_the_recipe_compiler_release.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51781,6 +51820,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_interface_extraction_sibling_shim_name_does_not_grow_with_the_action_cache_root",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_interface_extraction_sibling_shim_name_does_not_grow_with_the_action_cache_root.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_interface_extraction_sibling_shims_are_location_free",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -51792,6 +51848,23 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_interface_extraction_sibling_shims_are_location_free.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_interface_extraction_succeeds_for_a_deep_recipe_path",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_interface_extraction_succeeds_for_a_deep_recipe_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
@@ -56509,6 +56582,23 @@
       "source": "tests/integration/t_recipe_compile_per_computation_dirs.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_recipe_compile_requires_nim_2_2_10",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_project_dsl"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_recipe_compile_requires_nim_2_2_10.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
