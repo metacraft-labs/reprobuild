@@ -74,7 +74,7 @@ from repro_project_dsl/completion_files import
   CompletionFilesProducerName, producerArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
-  SettingsFileName
+  SettingsFileName, ignoringConfiguredSettingsFile
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
 # the module-private ``markRunningImageAsReproCli``: no ordinary import can
 # name the setter, so no embedded caller can grant itself the mark. See
@@ -72620,7 +72620,7 @@ proc rootDeclaresARoleBranch(settings: WorkspaceSettings): bool =
     for (_, value) in decls.custom:
       if value.kind == brvBranch: return true
 
-proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+proc gatewayRoleBranchesOfRecordedRoot(cfg: GatewayConfig):
     tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
   ## The branches a declared role names for the repository this gateway
   ## publishes, resolved from the workspace its config names the way the
@@ -72648,15 +72648,7 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
   if cfg.repoIsWorkspaceRoot:
     try:
       let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
-      if settingsPath.len == 0 or not fileExists(settingsPath):
-        # ``REPRO_WORKSPACE_CONFIG`` naming a file that does not exist reads
-        # as "no settings file" everywhere else. Here that would let a
-        # variable inherited from the pushing shell switch the refusal off.
-        let named = getEnv(workspace_root.WorkspaceConfigEnvVar)
-        if named.len > 0:
-          return (ok: false, branches: @[], why: workspace_root.WorkspaceConfigEnvVar &
-            " names '" & named & "', which does not exist, so the settings " &
-            "of '" & cfg.workspaceRoot & "' could not be read")
+      if settingsPath.len == 0:
         return (ok: true, branches: @[], why: "")
       let settings = readWorkspaceSettings(settingsPath)
       try:
@@ -72690,6 +72682,19 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     tried.add("'" & cfg.repo & "' is not a member of " & candidate.label)
   (ok: false, branches: @[], why: "in '" & cfg.workspaceRoot & "', " &
     tried.join("; "))
+
+proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+    tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
+  ## ``gatewayRoleBranchesOfRecordedRoot`` with ``REPRO_WORKSPACE_CONFIG``
+  ## ignored (Push-Gateway-Wiring-And-Policy §5.3). The gateway's config
+  ## records the workspace whose settings and manifests govern it; the hook
+  ## runs in the pushing shell's environment, in the gateway's bare
+  ## repository, so a variable inherited from that shell would otherwise
+  ## replace the recorded root's settings with whatever file it names (one
+  ## that declares no role switches the refusal off), and a relative value
+  ## would be read against the bare repository.
+  ignoringConfiguredSettingsFile:
+    return gatewayRoleBranchesOfRecordedRoot(cfg)
 
 proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
                              updates: seq[GatewayRefUpdate];

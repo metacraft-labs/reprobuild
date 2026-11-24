@@ -58,8 +58,19 @@
 ##     declared", whether the role is given in ``[workspace]`` or in the
 ##     default profile; a settings file that declares nothing still
 ##     publishes. A ``REPRO_WORKSPACE_CONFIG`` inherited from the pushing
-##     shell that names a missing file refuses too: it must not read as "no
-##     settings file" and switch the mainline refusal off.
+##     shell that names a missing file does not read as "no settings file":
+##     the root's mainline is still refused.
+##   - ``workspace_root_roles_ignore_an_inherited_settings_variable`` and
+##     ``member_roles_ignore_an_inherited_settings_variable`` -- the gateway
+##     reads the roles of the workspace its config records, not of the file
+##     a ``REPRO_WORKSPACE_CONFIG`` inherited from the pushing shell names.
+##     A variable naming another settings file that declares no mainline
+##     (for the root) or a profile without the member's role (for a member)
+##     must not switch the refusal off; a relative value (which the hook
+##     would read against the gateway's bare repository) and one naming a
+##     directory must not refuse an ordinary forced push. Recorded as
+##     reprobuild-pm
+##     ``issues/2026-11-20-the-gateway-reads-the-root-s-roles-from-whatever-file-an-inherited-repro-workspace-config-names.md``.
 ##   - ``upstream_without_atomic_push_is_forwarded_non_atomically`` -- an
 ##     upstream that does not advertise ``atomic`` still receives the push,
 ##     and the gateway says the forward was not atomic.
@@ -659,9 +670,110 @@ suite "push gateway root roles that do not resolve":
       checkpoint("forced push of the mainline, settings named away: " &
         e.output)
       check e.code != 0
-      check "REPRO_WORKSPACE_CONFIG names" in e.output
-      check "which does not exist" in e.output
+      check "mainline-history-rewrite: a forced update of the shared " &
+        "mainline 'feature'" in e.output
       check tip(fx, fx.upstream, "refs/heads/feature") == published
+
+suite "push gateway roles ignore an inherited REPRO_WORKSPACE_CONFIG":
+
+  test "workspace_root_roles_ignore_an_inherited_settings_variable":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      # The root's settings declare ``mainline = "main"`` (``setup``).
+      let fx = setup(gitBin, "c13", rootRepo = true)
+      defer: removeDir(fx.scratch)
+      # Another workspace's settings file, one that declares nothing.
+      let decoyDir = fx.scratch / "decoy"
+      createDir(decoyDir)
+      let decoy = decoyDir / "repro-workspace.toml"
+      writeFile(decoy, "schema = \"reprobuild.workspace.settings.v1\"\n")
+      discard gitC(fx, fx.upstream, "symbolic-ref HEAD refs/heads/elsewhere")
+      let first = commit(fx, fx.clone, "root-main-1")
+      discard commit(fx, fx.clone, "root-main-2")
+      check pushThroughGateway(fx, "main").code == 0
+      let mainTip = tip(fx, fx.upstream, "refs/heads/main")
+      discard gitC(fx, fx.clone, "reset -q --hard " & first)
+      discard commit(fx, fx.clone, "root-main-rewritten")
+      let p = pushThroughGatewayWith(fx, @[(name: "REPRO_WORKSPACE_CONFIG",
+        value: decoy)], "--force", "main")
+      checkpoint("forced push of the root's main, settings named away: " &
+        p.output)
+      check p.code != 0
+      check "mainline-history-rewrite: a forced update of the shared " &
+        "mainline 'main'" in p.output
+      check tip(fx, fx.upstream, "refs/heads/main") == mainTip
+      check tip(fx, fx.gateway, "refs/heads/main") == mainTip
+      let d = pushThroughGatewayWith(fx, @[(name: "REPRO_WORKSPACE_CONFIG",
+        value: decoy)], ":main")
+      checkpoint("deletion of the root's main, settings named away: " &
+        d.output)
+      check d.code != 0
+      check "mainline-history-rewrite: a deletion of the shared mainline " &
+        "'main'" in d.output
+      check tip(fx, fx.upstream, "refs/heads/main") == mainTip
+      # A relative value means a file beside the developer's shell; the hook
+      # runs in the gateway's bare repository. And a value naming a
+      # directory. Neither may refuse a forced push of a branch no role of
+      # the recorded root names.
+      let before = publishFeature(fx)
+      discard rewriteFeature(fx)
+      let rel = pushThroughGatewayWith(fx, @[(name: "REPRO_WORKSPACE_CONFIG",
+        value: "repro-workspace.toml")], "--force", "feature")
+      checkpoint("forced push of feature, relative variable: " & rel.output)
+      check rel.code == 0
+      let rewritten = tip(fx, fx.clone, "refs/heads/feature")
+      check rewritten != before
+      check tip(fx, fx.upstream, "refs/heads/feature") == rewritten
+      discard gitC(fx, fx.clone, "commit -q --amend -m squashed-again")
+      let dir = pushThroughGatewayWith(fx, @[(name: "REPRO_WORKSPACE_CONFIG",
+        value: decoyDir)], "--force", "feature")
+      checkpoint("forced push of feature, variable names a directory: " &
+        dir.output)
+      check dir.code == 0
+      check tip(fx, fx.upstream, "refs/heads/feature") ==
+        tip(fx, fx.clone, "refs/heads/feature")
+
+  test "member_roles_ignore_an_inherited_settings_variable":
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH")
+    else:
+      let fx = setup(gitBin, "c14")
+      defer: removeDir(fx.scratch)
+      # ``app`` takes role ``stable`` = ``release`` from the profile the
+      # workspace's settings file declares (Workspace-Branch-Roles §3).
+      writeFile(fx.workspace / "repro-workspace.toml",
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\nmainline = \"main\"\n\n" &
+        "[profiles.product]\nmainline = \"main\"\nstable = \"release\"\n")
+      writeFile(fx.workspace / "repos" / "app.toml",
+        "schema = \"reprobuild.workspace.repo.v2\"\n\n" &
+        "[repo]\nname = \"app\"\npath = \"app\"\nremote = \"app-origin\"\n" &
+        "profile = \"product\"\nmainline = \"main\"\n")
+      # Another workspace's settings: the same profile, without ``stable``.
+      let decoy = fx.scratch / "decoy.toml"
+      writeFile(decoy,
+        "schema = \"reprobuild.workspace.settings.v1\"\n\n" &
+        "[workspace]\nmainline = \"main\"\n\n" &
+        "[profiles.product]\nmainline = \"main\"\n")
+      discard gitC(fx, fx.clone, "checkout -q -b release")
+      let first = commit(fx, fx.clone, "release-1")
+      discard commit(fx, fx.clone, "release-2")
+      check pushThroughGateway(fx, "release").code == 0
+      let releaseTip = tip(fx, fx.upstream, "refs/heads/release")
+      discard gitC(fx, fx.clone, "reset -q --hard " & first)
+      discard commit(fx, fx.clone, "release-rewritten")
+      let p = pushThroughGatewayWith(fx, @[(name: "REPRO_WORKSPACE_CONFIG",
+        value: decoy)], "--force", "release")
+      checkpoint("forced push of app's release, settings named away: " &
+        p.output)
+      check p.code != 0
+      check "mainline-history-rewrite: a forced update of the shared " &
+        "branch 'release' (role `stable`)" in p.output
+      check tip(fx, fx.upstream, "refs/heads/release") == releaseTip
+      check tip(fx, fx.gateway, "refs/heads/release") == releaseTip
 
 suite "push gateway forward to an upstream without atomic push":
 

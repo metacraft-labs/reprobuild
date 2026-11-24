@@ -38835,5 +38835,6 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_source_revision.py",
   "tests/unit/test_suite_drift_attribution.py",
   "tests/unit/test_test_group_fallback.py",
+  "tests/unit/test_test_parallelism_grant.py",
   "tests/unit/test_wrapper_default_provenance.py"
 ]
