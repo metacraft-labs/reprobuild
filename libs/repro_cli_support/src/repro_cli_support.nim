@@ -57308,6 +57308,12 @@ type
     # the legacy whole-workspace refusal (explicit ``repro workspace lock``
     # and post-commit keep that behavior).
     dirtyScopeNames: HashSet[string]
+    sweepKeepRelPaths: seq[string]
+      ## Records the caller is about to publish, which this write's orphan
+      ## sweep must leave in place whatever it finds (the pre-push gate's range
+      ## drafts). Never needed for correctness — each is keyed at an ancestor
+      ## of a checked-out HEAD, so it is reachable — but it makes "the gate
+      ## never sweeps a record it anchors" a property of the call.
     dirtyScopeIsExplicit: bool
       ## ``dirtyScopeNames`` was DECIDED by the caller, so an empty set means
       ## "no repo is in scope" rather than "no scope was supplied".
@@ -58295,6 +58301,8 @@ proc executeWorkspaceLock(args: WorkspaceLockArgs;
     var justWritten: seq[string]
     if lockRelForTracking.len > 0:
       justWritten.add(lockRelForTracking)
+    for rel in args.sweepKeepRelPaths:
+      justWritten.add(rel)
     let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
       observedRoots, keepRelPaths = justWritten)
     report.sweptDrafts = sweep.swept
@@ -60784,6 +60792,271 @@ proc withheldLockRecordLine(item: WithheldLockRecord;
     "local draft. Publish the commit with `git -C " &
     remedyPathWord(item.checkout) & " push`, then re-run `" & workspaceLockCommand(workspaceRoot) & "`."
 
+# ---- A push also publishes the verified drafts below its tip ---------------
+#
+# push-hook-publication-protocol.md §"A push also publishes the verified drafts
+# of the commits below its tip" and Invariant 13. ``post-commit`` files a draft
+# for EVERY commit, and the gate anchors the record of the pushed tip. A push
+# that carries several commits publishes source for all of them, so their
+# drafts are this operation's to anchor too — provided each one is FIT to
+# publish. Before this, only the tip's record was published: the other drafts
+# were never published (nothing anchored them) and never swept (a remote
+# branch reaches their commits, so they are not orphans), and the commits they
+# describe stayed published with no record sibling resolution could read.
+#
+# Candidates are every untracked draft of the pushed repo whose commit is a
+# PROPER ANCESTOR of the pushed tip — not only the drafts of this push's
+# range. After the push every ancestor of the tip is on a remote, so the rule
+# also covers drafts an earlier push left behind: those written before this
+# rule existed, and those an earlier push held back because they failed
+# verification. That is the retry path; nothing else ever examines them again.
+#
+# The gate never WRITES a record for a range commit: it cannot know which
+# sibling revisions that commit was developed against, and recomputing them
+# from today's HEADs would publish a false record that immutability then keeps
+# forever. A range commit with no draft gets no record.
+
+type
+  HeldRangeDraft = object
+    ## A range draft that failed publication verification. It stays a draft,
+    ## exactly as it is, and the next push of the same repo examines it again.
+    relPath: string
+    reason: string ## a clause completing "it ..."
+
+  RangeDraftExamination = object
+    anchored: seq[ExpectedLockRecord]
+      ## Drafts that passed verification, bound to their exact coordinates.
+      ## They join the record-store publication unchanged, byte for byte.
+    held: seq[HeldRangeDraft]
+    diagnostics: seq[string]
+      ## Probes that FAILED. Each left every draft it concerned unexamined,
+      ## and so unpublished: doubt keeps a draft a draft.
+
+proc rangeDraftHeldLine(item: HeldRangeDraft; pushedRepo: string): string =
+  ## The gate-output line for a held range draft. It names the record and the
+  ## reason, and says what happens to it, so the operator can tell a draft the
+  ## gate examined and kept back from one nothing looked at.
+  "range draft '" & item.relPath & "' stays a draft and is not published: " &
+    "it " & item.reason & "; the next push of '" & pushedRepo &
+    "' examines it again"
+
+proc verifyRangeDraft(identity: GitToolIdentity; abs, relPath, project,
+    pushedRepo, keySha: string;
+    pinCheckouts: Table[string, LockPinCheckout];
+    pinVerdicts: var Table[string, string]):
+    tuple[ok: bool; record: ExpectedLockRecord; reason: string] =
+  ## Publication verification of one range draft (§"A push also publishes the
+  ## verified drafts …", rule 3). ``reason`` completes "it …" when not ``ok``.
+  ##
+  ## ``pinVerdicts`` caches ``pinnedRevisionEvidence`` per (repo, revision)
+  ## across every draft of one push (rule 6: each pinned sibling revision is
+  ## probed once per push, whatever the number of drafts that pin it).
+  var body: string
+  try:
+    body = readFile(extendedPath(abs))
+  except CatchableError as err:
+    return (false, ExpectedLockRecord(), "could not be read (" & err.msg & ")")
+  var lock: Lock
+  try:
+    # The full ``reprobuild.workspace.lock.v1`` reader, deliberately without
+    # the minimal routed-record fallback the publisher also accepts: a range
+    # draft is a ``post-commit`` draft of the record store, and anything else
+    # under that key is not something this rule may publish on its own.
+    lock = readLock(abs)
+  except CatchableError as err:
+    return (false, ExpectedLockRecord(),
+      "does not parse as a workspace lock (" & firstOutputLine(err.msg) & ")")
+  if lock.lock.project != project:
+    return (false, ExpectedLockRecord(), "names project '" &
+      lock.lock.project & "', not '" & project & "'")
+  var selfFound = false
+  for entry in lock.repo:
+    if entry.name == pushedRepo:
+      if entry.revision.toLowerAscii() != keySha.toLowerAscii():
+        return (false, ExpectedLockRecord(), "pins " & pushedRepo & " @ " &
+          entry.revision & ", not the commit it is keyed at (" & keySha & ")")
+      selfFound = true
+      continue
+    if entry.revision.len == 0:
+      return (false, ExpectedLockRecord(), "pins " & entry.name &
+        " at no revision")
+    if entry.name notin pinCheckouts:
+      return (false, ExpectedLockRecord(), "pins " & entry.name & " @ " &
+        entry.revision & ", a repo with no checkout in this workspace to " &
+        "check it against")
+    let cacheKey = entry.name & "\0" & entry.revision.toLowerAscii()
+    if cacheKey notin pinVerdicts:
+      let located = pinCheckouts[entry.name]
+      pinVerdicts[cacheKey] = pinnedRevisionEvidence(identity,
+        located.checkout, entry.revision, located.gitRemote)
+    let evidence = pinVerdicts[cacheKey]
+    if evidence.len > 0:
+      return (false, ExpectedLockRecord(), "pins " & entry.name & " @ " &
+        entry.revision & ", which " & evidence)
+  if not selfFound:
+    # A record that does not pin its own key commit cannot be bound to an
+    # exact coordinate, and the publisher's own verification would refuse it
+    # (``verifyLockRecordPath``: "lock trigger identity does not match its
+    # path"). Holding it here keeps that refusal from failing the push.
+    return (false, ExpectedLockRecord(), "has no entry for " & pushedRepo &
+      ", so it cannot be bound to the commit it is keyed at")
+  let bound = expectedLockRecordFromBody(relPath, body)
+  if bound.isNone:
+    return (false, ExpectedLockRecord(),
+      "cannot be bound to an exact repository coordinate")
+  (true, bound.get(), "")
+
+proc examineRangeDrafts(identity: GitToolIdentity;
+    recordStoreRoot, project, pushedRepo, pushedRoot, tipSha: string;
+    pinCheckouts: Table[string, LockPinCheckout]): RangeDraftExamination =
+  ## The range drafts of one push: every UNTRACKED canonical draft under
+  ## ``locks/<project>/<pushedRepo>/`` whose commit is a proper ancestor of
+  ## ``tipSha`` in ``pushedRoot``, split into those that pass publication
+  ## verification (``anchored``) and those that do not (``held``).
+  ##
+  ## ``pinCheckouts`` maps a declared repo NAME to the checkout its pinned
+  ## revisions are checked in and the git remote that scopes the check.
+  ##
+  ## Bounded (rule 6): only drafts already on disk under the pushed repo's
+  ## directory are examined, listed as the store's untracked files, so the
+  ## published records beside them are never read; each costs one ancestry
+  ## probe. Never raises: a failed probe is reported and leaves the drafts it
+  ## concerned unpublished.
+  if recordStoreRoot.len == 0 or pushedRoot.len == 0 or tipSha.len == 0:
+    return
+  let dirRel = lockRecordSubtreeRelPath(project, pushedRepo)
+  try:
+    if not dirExists(extendedPath(recordStoreRoot /
+        dirRel.replace('/', DirSep))):
+      return
+    # The store must be its OWN checkout, for the reason the sweep gives:
+    # otherwise git's upward discovery answers "untracked" from whatever
+    # repository encloses the directory.
+    if not discoverGitWorktree(identity, recordStoreRoot).ok:
+      return
+    # ``--others`` WITHOUT ``--exclude-standard``, as the publisher and the
+    # sweep enumerate: an operator may ignore the whole manifest layer.
+    let listing = gitRunPlainQuery(identity,
+      ["-C", recordStoreRoot, "ls-files", "-z", "--others", "--", dirRel])
+    if listing.code != 0:
+      result.diagnostics.add("could not list the drafts of '" & pushedRepo &
+        "' in '" & recordStoreRoot & "'; none was examined: " &
+        listing.diagnostic)
+      return
+    var pinVerdicts = initTable[string, string]()
+    for rel in nulSeparatedPaths(listing.output):
+      let parsed = parseLockRecordRelPath(rel)
+      if not parsed.ok or parsed.project != project or
+          parsed.repo != pushedRepo:
+        continue
+      if not isFullObjectIdText(parsed.sha): continue
+      if parsed.sha.toLowerAscii() == tipSha.toLowerAscii(): continue
+      let abs = recordStoreRoot / parsed.relPath.replace('/', DirSep)
+      if not fileExists(extendedPath(abs)): continue
+      # One ancestry probe per draft. Exit 1 is "not an ancestor": a commit on
+      # another branch, or one no ref reaches (the orphan sweep's business).
+      # Anything else — a commit this checkout does not have, a failed probe —
+      # is not positive evidence either, so the draft is simply not a
+      # candidate this time and stays as it is.
+      let ancestry = gitRunPlain(identity, ["-C", pushedRoot, "merge-base",
+        "--is-ancestor", parsed.sha, tipSha])
+      if ancestry.code != 0: continue
+      let verdict = verifyRangeDraft(identity, abs, parsed.relPath, project,
+        pushedRepo, parsed.sha, pinCheckouts, pinVerdicts)
+      if verdict.ok:
+        result.anchored.add(verdict.record)
+      else:
+        result.held.add(HeldRangeDraft(relPath: parsed.relPath,
+          reason: verdict.reason))
+  except CatchableError as err:
+    # Best-effort by construction, like the sweep: a range draft that could
+    # not be examined stays a draft, and the tip's publication is unaffected.
+    result.anchored.setLen(0)
+    result.diagnostics.add("range draft examination failed; no range " &
+      "draft is published by this push: " & err.msg)
+
+type
+  RangeDraftScreen = object
+    publish: seq[ExpectedLockRecord]
+      ## Drafts to publish with the tip: their key is absent upstream, or
+      ## holds the identical bytes (then their publication is a no-op).
+    lines: seq[string]
+      ## One operator-facing line per draft that is NOT published, and why.
+
+proc screenRangeDraftsAgainstUpstream(identity: GitToolIdentity;
+    recordStoreRoot: string; drafts: openArray[ExpectedLockRecord]):
+    RangeDraftScreen =
+  ## Invariant 14 for range drafts (§"A push also publishes the verified
+  ## drafts …", rule 4), checked against the FRESHLY FETCHED upstream before
+  ## anything is staged.
+  ##
+  ## A key the upstream already holds is immutable. For the tip that is a
+  ## refusal, and stays one (``publishedLockKeyCollision``). For a range draft
+  ## it must not fail the push: the published record stands, the draft is
+  ## dropped from this publication, and the operator is told. Identical bytes
+  ## are a no-op and are published with the rest (the replay onto the fetched
+  ## tip then drops them as already applied).
+  ##
+  ## A draft at a key published with DIFFERENT bytes is also removed from the
+  ## store's working tree. It can never be published — its key is taken — and
+  ## the store checkout has to hold the published record at that path as soon
+  ## as it catches up with its upstream: an untracked file there stops that
+  ## catch-up (``git`` refuses to overwrite an untracked file, even one with
+  ## identical bytes), which is the replay this very publication performs. The
+  ## line printed for it names both blob ids, so what the draft said is not
+  ## lost without trace.
+  ##
+  ## When the upstream cannot be resolved or fetched, no range draft is
+  ## published this time; each stays a draft for the next push, and the tip's
+  ## publication reports the backend failure itself.
+  if drafts.len == 0: return
+  let upstream = resolveLockUpstream(identity, recordStoreRoot)
+  if not upstream.ok:
+    # No upstream: the tip's publication is a benign "not publishable" skip,
+    # and there is nothing to compare the drafts with either.
+    return
+  let fetched = fetchImmutableLockTip(identity, recordStoreRoot,
+    upstream.target)
+  if not fetched.ok:
+    result.lines.add("range drafts of this push are not published this " &
+      "time (" & fetched.diagnostic & "); they stay drafts and the next " &
+      "push examines them again")
+    return
+  for item in drafts:
+    let remoteBlob = gitRunPlainQuery(identity, ["-C", recordStoreRoot,
+      "rev-parse", "--verify", "--quiet", fetched.oid & ":" & item.relPath])
+    if remoteBlob.code != 0 or remoteBlob.output.strip().len == 0:
+      result.publish.add(item)
+      continue
+    let abs = recordStoreRoot / item.relPath.replace('/', DirSep)
+    # The blob the draft WOULD be staged as: ``hash-object`` with the path
+    # applies the store's own clean filters, exactly as ``git add`` does.
+    let localBlob = gitRunPlainQuery(identity, ["-C", recordStoreRoot,
+      "hash-object", "--path=" & item.relPath, abs])
+    if localBlob.code != 0 or localBlob.output.strip().len == 0:
+      result.lines.add("range draft '" & item.relPath & "' is not " &
+        "published: its key is already published on " &
+        upstream.target.display & " and the draft could not be compared " &
+        "with it (" & localBlob.diagnostic & "); it stays a draft")
+      continue
+    let published = remoteBlob.output.strip().toLowerAscii()
+    let drafted = localBlob.output.strip().toLowerAscii()
+    if published == drafted:
+      result.publish.add(item)
+      continue
+    var removal = ""
+    try:
+      removeFile(extendedPath(abs))
+    except CatchableError as err:
+      removal = "; the draft could not be removed (" & err.msg &
+        "), so this store cannot take the published record until it is"
+    result.lines.add("range draft '" & item.relPath & "' is not " &
+      "published: a DIFFERENT record is already published at that key on " &
+      upstream.target.display & " (published blob " & published &
+      ", draft blob " & drafted & "). Published records are immutable, so " &
+      "the published one stands and the draft is withdrawn from this store" &
+      removal)
+
 proc runWorkspaceLockCommand*(c: ReproCommandLineWorkspaceLock): int =
   ## ``repro workspace lock [<project>] [--workspace-root=PATH]
   ## [--record-store-root=PATH] [--sha=SHA] [--trigger-repo=NAME]
@@ -60938,9 +61211,20 @@ type
       ## store but are absent from its last-known upstream.
     strandedRecords*: int
       ## M19b — of ``pendingRecords``, how many are anchored to a trigger
-      ## commit that is ALREADY published in the trigger repo. Each one is
-      ## proof that a push went out without its lock: publication is broken,
-      ## not merely pending. Any non-zero value is loud.
+      ## commit that is ALREADY published in the trigger repo with NO
+      ## published record of the repo at that commit or at any commit between
+      ## it and the repo's upstream. Each one is proof that a push went out and
+      ## published nothing at or above it: publication is not running, not
+      ## merely pending. Any non-zero value is loud.
+    heldRecords*: int
+      ## Of ``pendingRecords``, how many are anchored to an already-pushed
+      ## commit that lies BELOW a published record: drafts the push that
+      ## published that record examined and kept back (or an older build left
+      ## behind). The next push of the repo examines them again. Quiet.
+    backlogTruncated*: bool
+      ## The backlog scan stopped at its bound, so ``pendingRecords``,
+      ## ``strandedRecords`` and ``heldRecords`` are lower bounds (the log
+      ## line marks each with ``+``).
 
 proc postCommitPublicationTag(state: PostCommitPublication): string =
   case state
@@ -60967,6 +61251,8 @@ proc toJsonNode*(report: PostCommitReport): JsonNode =
   result["publication"] = %report.publication
   result["pendingRecords"] = %report.pendingRecords
   result["strandedRecords"] = %report.strandedRecords
+  result["heldRecords"] = %report.heldRecords
+  result["backlogTruncated"] = %report.backlogTruncated
 
 proc mainWorktreeRootFor(startPath: string; gitBin = ""): string =
   ## HL-1 (§4.3) — the MAIN worktree's root for a path inside a LINKED git
@@ -62138,18 +62424,28 @@ proc refreshEvidenceOnlyRepoAtPostCommit(workspaceRoot, currentRepoAbs: string):
 # strictly stronger than the claim the old ``ok wrote <path>`` made, which was
 # none at all.
 #
-# It also counts the store's BACKLOG for the trigger repo, and within that the
-# STRANDED records: pending records whose trigger commit is already published
-# in the trigger repo. A stranded record is not "publication has not happened
-# yet" — it is "a push went out and left its lock behind", i.e. proof that the
-# publication path is broken. That distinction is what separates the designed
-# steady state (quiet) from the two-week starvation (loud), without inventing
-# an arbitrary backlog threshold.
+# It also counts the store's BACKLOG for the trigger repo: its unpublished
+# records. Of those whose commit the trigger repo's upstream already reaches,
+# it tells two kinds apart (push-hook-publication-protocol.md §"The
+# post-commit publication probe tells a held draft from a starved push"):
+#
+# * STRANDED — no published record of the repo is keyed at that commit or at
+#   any commit between it and the upstream. A push went out and published
+#   nothing at or above it: proof that the publication path is not running.
+#   This is what separates the designed steady state (quiet) from the
+#   two-week starvation (loud), without an arbitrary backlog threshold.
+# * HELD — the commit lies below a published record. The push that published
+#   that record also examined this draft and kept it back (it pins a sibling
+#   revision no remote has yet, say), or an older build left it behind. The
+#   next push of the repo examines it again; it is not evidence of a broken
+#   publisher, and it is reported as what it is.
 
 const PostCommitBacklogScanLimit = 256
-  ## Bound on how many backlog records the probe inspects. A post-commit hook
-  ## may not turn into an unbounded git-call loop on a store with years of
-  ## history; the counts saturate at this bound and the diagnostic says so.
+  ## Bound on how many UNPUBLISHED records the probe inspects. A post-commit
+  ## hook may not turn into an unbounded git-call loop on a store with years
+  ## of history. The bound applies to the drafts, never to the published
+  ## records beside them, which are read in one listing; when it truncates the
+  ## scan, every count the probe reports is a lower bound and says so.
 
 type
   PostCommitPublicationProbe = object
@@ -62157,7 +62453,9 @@ type
     detail: string       ## Why the store is/is not publishable, when relevant.
     pending: int
     stranded: int
-    saturated: bool
+    held: int
+    saturated: bool      ## The scan stopped at the bound: every count is a
+                         ## lower bound.
 
 proc lockStoreUpstreamRef(identity: GitToolIdentity; storeRoot: string): string =
   ## The store's upstream tracking ref (``origin/main``), or "" when the store
@@ -62175,6 +62473,55 @@ proc pathIsInGitTree(identity: GitToolIdentity; repoRoot, treeish,
   gitRunPlain(identity,
     ["-C", repoRoot, "cat-file", "-e",
      treeish & ":" & relPath.replace('\\', '/')]).code == 0
+
+proc recordShaOf(fileName: string): string =
+  ## The full object id a canonical record file is keyed at, lower-cased, or
+  ## "" for anything else in the directory (a README, a legacy record).
+  if not fileName.endsWith(lockRecordExt): return ""
+  let stem = fileName[0 ..< fileName.len - lockRecordExt.len]
+  if not isFullObjectIdText(stem): return ""
+  stem.toLowerAscii()
+
+proc commitsWithPublishedRecordAbove(identity: GitToolIdentity;
+    repoRoot, upstream: string; drafts: openArray[string];
+    published: HashSet[string]): tuple[ok: bool; held: HashSet[string]] =
+  ## Of ``drafts`` (commits the trigger repo's ``upstream`` reaches), the ones
+  ## below a commit keyed in ``published`` that ``upstream`` also reaches —
+  ## i.e. with a published record between them and the upstream.
+  ##
+  ## ONE history walk, not one per draft. It covers exactly the commits
+  ## ``upstream`` reaches that are not ancestors of the drafts' common base,
+  ## so every draft and every commit between a draft and the upstream is in
+  ## it. Walked children-first (``--topo-order``), so a commit's flag "a
+  ## published record is at or above one of my children" is final by the time
+  ## the commit itself is read.
+  result.held = initHashSet[string]()
+  if drafts.len == 0: return (true, result.held)
+  let base = gitRunPlainQuery(identity,
+    @["-C", repoRoot, "merge-base", "--octopus"] & @drafts)
+  if base.code != 0 or base.output.strip().len == 0: return (false, result.held)
+  let baseSha = base.output.strip().splitLines()[0].strip()
+  let parents = gitRunPlainQuery(identity,
+    ["-C", repoRoot, "rev-list", "--parents", "-n", "1", baseSha])
+  if parents.code != 0: return (false, result.held)
+  var args = @["-C", repoRoot, "rev-list", "--topo-order", "--parents",
+    upstream]
+  for parent in parents.output.strip().splitWhitespace()[1 .. ^1]:
+    args.add("^" & parent)
+  let walk = gitRunPlainQuery(identity, args)
+  if walk.code != 0: return (false, result.held)
+  let wanted = drafts.toHashSet()
+  var aboveChild = initHashSet[string]()
+  for line in walk.output.splitLines():
+    let fields = line.strip().toLowerAscii().splitWhitespace()
+    if fields.len == 0: continue
+    let commit = fields[0]
+    if commit in wanted and commit in aboveChild:
+      result.held.incl(commit)
+    if commit in published or commit in aboveChild:
+      for parent in fields[1 .. ^1]:
+        aboveChild.incl(parent)
+  (true, result.held)
 
 proc probePostCommitPublication(identity: GitToolIdentity;
                                 storeRoot, lockFilePath, triggerRepoRoot: string):
@@ -62227,33 +62574,75 @@ proc probePostCommitPublication(identity: GitToolIdentity;
     else: pcpPending
   result.detail = "upstream " & upstream
 
-  # Backlog + stranded counts, scoped to the trigger repo's own lock directory
+  # Backlog, scoped to the trigger repo's own lock directory
   # (``locks/<project>/<repo>/``) — the directory this run just wrote into, and
   # the only one whose trigger SHAs we can resolve against a checkout we hold.
   let recordDir = parentDir(lockFilePath)
   if not dirExists(recordDir): return
   let dirRel = relativePath(recordDir, storeRoot).replace('\\', '/')
-  var scanned = 0
-  for entry in walkDir(recordDir):
-    if entry.kind notin {pcFile, pcLinkToFile}: continue
-    let base = extractFilename(entry.path)
-    if not base.endsWith(".toml"): continue
-    if scanned >= PostCommitBacklogScanLimit:
-      result.saturated = true
-      break
-    inc scanned
-    if pathIsInGitTree(identity, storeRoot, upstream, dirRel & "/" & base):
-      continue
-    inc result.pending
-    # Stranded: the commit this record is anchored to is ALREADY published in
-    # the trigger repo, so the push that carried it did not carry the lock.
-    if triggerRepoRoot.len == 0: continue
-    let sha = base[0 ..< base.len - ".toml".len]
-    if sha.len < 7: continue
+
+  # What the upstream already carries: one listing of the directory's tree,
+  # however many records it holds. A directory the upstream does not have yet
+  # is an empty set, not a failure.
+  var published = initHashSet[string]()
+  if pathIsInGitTree(identity, storeRoot, upstream, dirRel):
+    let tree = gitRunPlainQuery(identity, ["-C", storeRoot, "ls-tree", "-z",
+      "--name-only", upstream & ":" & dirRel])
+    if tree.code != 0:
+      result.detail.add("; backlog not counted: " & tree.diagnostic)
+      return
+    for name in nulSeparatedPaths(tree.output):
+      let sha = recordShaOf(name)
+      if sha.len > 0: published.incl(sha)
+
+  # The unpublished records: the untracked drafts, plus records committed
+  # locally that the upstream does not carry (a publication commit a failed
+  # push retained). Both are listed by git, so the published records beside
+  # them never consume the scan bound.
+  var unpublished: seq[string]
+  var seen = initHashSet[string]()
+  let untracked = gitRunPlainQuery(identity, ["-C", storeRoot, "ls-files",
+    "-z", "--others", "--", dirRel & "/"])
+  let ahead = gitRunPlainQuery(identity, ["-C", storeRoot, "diff", "-z",
+    "--name-only", "--no-renames", "--diff-filter=A", upstream, "HEAD", "--",
+    dirRel & "/"])
+  if untracked.code != 0 or ahead.code != 0:
+    result.detail.add("; backlog not counted: " &
+      (if untracked.code != 0: untracked.diagnostic else: ahead.diagnostic))
+    return
+  for rel in nulSeparatedPaths(untracked.output) &
+      nulSeparatedPaths(ahead.output):
+    if rel.rsplit('/', maxsplit = 1)[0] != dirRel: continue
+    let sha = recordShaOf(rel.rsplit('/', maxsplit = 1)[^1])
+    if sha.len == 0 or sha in published or sha in seen: continue
+    seen.incl(sha)
+    unpublished.add(sha)
+  if unpublished.len > PostCommitBacklogScanLimit:
+    result.saturated = true
+    unpublished.setLen(PostCommitBacklogScanLimit)
+  result.pending = unpublished.len
+
+  # Of those, the ones whose commit is ALREADY published in the trigger repo.
+  if triggerRepoRoot.len == 0: return
+  var pushed: seq[string]
+  for sha in unpublished:
     if gitRunPlain(identity,
         ["-C", triggerRepoRoot, "merge-base", "--is-ancestor", sha,
          "@{u}"]).code == 0:
-      inc result.stranded
+      pushed.add(sha)
+  if pushed.len == 0: return
+  let above = commitsWithPublishedRecordAbove(identity, triggerRepoRoot,
+    "@{u}", pushed, published)
+  if not above.ok:
+    # Without the walk nothing shows a published record above them, so each
+    # reads as stranded: a probe that cannot tell must not go quiet.
+    result.stranded = pushed.len
+    result.detail.add("; could not tell held drafts from stranded ones, " &
+      "so every already-pushed one is counted as stranded")
+    return
+  for sha in pushed:
+    if sha in above.held: inc result.held
+    else: inc result.stranded
 
 # ---- A pin never moves backward silently ----------------------------------
 #
@@ -63201,18 +63590,27 @@ proc runPostCommitLockCommand*(currentRepo: string): int =
     report.publication = postCommitPublicationTag(probe.state)
     report.pendingRecords = probe.pending
     report.strandedRecords = probe.stranded
+    report.heldRecords = probe.held
+    report.backlogTruncated = probe.saturated
 
-    let backlog =
-      if probe.pending > 0:
-        "; " & $probe.pending & (if probe.saturated: "+" else: "") &
-          " unpublished record(s) for '" & outcome.report.triggerRepo &
-          "' in the store" &
-          (if probe.stranded > 0:
-            ", " & $probe.stranded &
-              " of them anchored to ALREADY-PUSHED commits — publication " &
-              "is not merely pending, it is not running"
-          else: "")
-      else: ""
+    # A truncated scan makes EVERY count a lower bound, so every count says
+    # so — not only the pending one.
+    let bound = if probe.saturated: "+" else: ""
+    var backlog = ""
+    if probe.pending > 0:
+      backlog = "; " & $probe.pending & bound &
+        " unpublished record(s) for '" & outcome.report.triggerRepo &
+        "' in the store"
+      if probe.stranded > 0:
+        backlog.add(", " & $probe.stranded & bound &
+          " of them anchored to ALREADY-PUSHED commits with no published " &
+          "record at or above them — publication is not merely pending, " &
+          "it is not running")
+      if probe.held > 0:
+        backlog.add((if probe.stranded > 0: "; " else: ", ") &
+          $probe.held & bound & " held below a published record of an " &
+          "already-pushed commit, waiting for the next push to verify " &
+          "and publish them")
     case probe.state
     of pcpPublished:
       # The only success tag: the record is demonstrably in the store's
@@ -66871,6 +67269,12 @@ type
       ## names, so a sibling that moved during the run is a state no
       ## certificate could describe.
     expectedManifestRecords: seq[ExpectedLockRecord]
+    rangeDraftRecords: seq[ExpectedLockRecord]
+      ## The drafts below the pushed tip that passed publication verification
+      ## (``examineRangeDrafts``). Published with the tip, to the record-store
+      ## backend only, and kept apart from ``expectedManifestRecords`` so that
+      ## neither the lock-missing check nor the routed per-backend publication
+      ## treats them as the tip's obligation.
     deferredPublishWrites: seq[DeferredParticipationWrite]
     exitCode*: int
 
@@ -75105,6 +75509,9 @@ proc absentLockedSiblingsOutsideWorkspace(repoRoot: string):
     if not isGitCheckoutDir(depAbs):
       result.add((name: d.name, path: depAbs))
 
+proc manifestPublicationEnabled(workspaceRoot: string): bool
+  ## Forward declaration; defined beside the gate's publication step.
+
 proc executeCheckPrePush(parsed: CheckArgs;
     publicationMembers: seq[HookPublicationMember] = @[];
     publicationWorkspace = ""): CheckReport =
@@ -76674,6 +77081,47 @@ proc executeCheckPrePush(parsed: CheckArgs;
       result.exitCode = 0
       finalizePoliciesAndParticipation()
       return
+  # INVARIANT 13 — the range drafts (push-hook-publication-protocol.md §"A push
+  # also publishes the verified drafts of the commits below its tip"). Besides
+  # the record of its tip, a push anchors each existing draft of the pushed
+  # repo whose commit the tip reaches, if that draft passes publication
+  # verification. Examined here, where the observed checkouts are at hand,
+  # and only when this push will publish to the record store at all: a
+  # certificate issuance publishes nothing, and neither does a workspace that
+  # has not opted into publication, so neither has drafts to report on.
+  if currentRepoName.len > 0 and not parsed.issuingForCurrentHead and
+      manifestPublicationEnabled(parsed.workspaceRoot):
+    var tipSha = ""
+    var tipRoot = ""
+    for obs in observations:
+      if obs.name == currentRepoName and obs.hasGit and obs.headSha.len > 0:
+        tipSha = obs.headSha
+        tipRoot = obs.absPath
+        break
+    if tipSha.len > 0:
+      # Where each pinned repo's revision is checked: a checkout this gate
+      # observed, with the remote its own publication stage scoped to;
+      # otherwise the declared repo's checkout in this workspace, with its
+      # declared remote (``pinnedRevisionEvidence`` widens to every
+      # remote-tracking ref when that remote is not configured there).
+      var pinCheckouts = initTable[string, LockPinCheckout]()
+      for repo in resolved.repos:
+        pinCheckouts[repo.name] = LockPinCheckout(
+          checkout: parsed.workspaceRoot / repo.path.replace('/', DirSep),
+          gitRemote: gitRemoteNameFor(repo))
+      for obs in observations:
+        if obs.hasGit:
+          pinCheckouts[obs.name] = LockPinCheckout(checkout: obs.absPath,
+            gitRemote: obs.remoteName)
+      let examined = examineRangeDrafts(identity, recordStoreRoot,
+        resolved.projectName, currentRepoName, tipRoot, tipSha, pinCheckouts)
+      result.rangeDraftRecords = examined.anchored
+      for item in examined.held:
+        result.notices.add(rangeDraftHeldLine(item, currentRepoName))
+      for diag in examined.diagnostics:
+        result.notices.add("range drafts: " & diag)
+      for item in examined.anchored:
+        lockArgs.sweepKeepRelPaths.add(item.relPath)
   # RA-1: resolve the latest lock via Git history over the per-repo lock
   # subtree (no shared index). MO-3: this gate read is routed through the
   # ``LockStore`` interface — the git-checkout backend delegates to the
@@ -76966,6 +77414,8 @@ proc executeCheckPrePush(parsed: CheckArgs;
       var anchored: seq[string]
       for expectedRecord in result.expectedManifestRecords:
         anchored.add(expectedRecord.relPath)
+      for rangeRecord in result.rangeDraftRecords:
+        anchored.add(rangeRecord.relPath)
       let sweep = sweepOrphanedLockDrafts(identity, recordStoreRoot,
         observedRoots, keepRelPaths = anchored)
       for item in sweep.swept:
@@ -77662,7 +78112,17 @@ proc runCheckCommand*(parsed: CheckArgs; hookRemoteName = "";
         # on.
         let publishStore =
           newGitCheckoutLockStore(identity, report.recordStoreRoot)
-        publishStore.pendingExpected = report.expectedManifestRecords
+        # The range drafts join the tip's publication, after a check against
+        # the freshly fetched upstream that no key among them is already
+        # published (``screenRangeDraftsAgainstUpstream``): a draft can
+        # never change a published record, and must not fail the push over
+        # one either. The tip keeps its own strict rule.
+        let rangeScreen = screenRangeDraftsAgainstUpstream(identity,
+          report.recordStoreRoot, report.rangeDraftRecords)
+        for line in rangeScreen.lines:
+          stderr.writeLine("repro check: " & line)
+        publishStore.pendingExpected =
+          report.expectedManifestRecords & rangeScreen.publish
         let storePub = publishStore.publishPending()
         let pub = LockPublishResult(
          outcome: lockPublishFromStorePut(storePub.outcome),

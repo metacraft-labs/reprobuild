@@ -26698,7 +26698,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g07",
+    group: "t_group_tests_integration_g06",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_hook_whose_config_is_gone_is_reported.nim",
@@ -27466,7 +27466,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g08",
+    group: "t_group_tests_integration_g07",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_integration_variant_conditional_uses_static_value.nim",
@@ -28138,7 +28138,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g09",
+    group: "t_group_tests_integration_g08",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_lock_file_only_workspace_fully_described_from_lock_not_head.nim",
@@ -28786,7 +28786,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g10",
+    group: "t_group_tests_integration_g09",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_manifest_copyfile_linkfile_materialized_after_sync.nim",
@@ -29578,7 +29578,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g11",
+    group: "t_group_tests_integration_g10",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_platform_refusal_surfaces_through_realize_and_plan.nim",
@@ -30135,6 +30135,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/t_pre_push_publishes_only_when_publish_locks_opted_in.nim",
     binary: "build/test-bin/t_pre_push_publishes_only_when_publish_locks_opted_in",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g11",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/t_pre_push_publishes_verified_range_drafts.nim",
+    binary: "build/test-bin/t_pre_push_publishes_verified_range_drafts",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: false,
