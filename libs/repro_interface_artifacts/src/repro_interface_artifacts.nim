@@ -5139,31 +5139,39 @@ var checkedRecipeCompilers = initTable[string, bool]()
   ## Compiler identities (path, size, mtime) already judged against the recipe
   ## compiler floor, so the `--version` probe runs once per compiler binary.
 
-proc requireRecipeCompilerFloor(path, origin: string) =
-  ## Refuse a compiler older than `RecipeCompilerMinimumVersion` (the operator
+proc recipeCompilerFloorRefusal(path, origin: string): string =
+  ## "" when `path` may compile a recipe, otherwise the refusal text for a
+  ## compiler older than `RecipeCompilerMinimumVersion` (the operator
   ## decision of 2026-11-24, `repro_core/recipe_compiler_requirement`), with
   ## the requirement and its source named. Only a compiler that PRINTS a
   ## version below the floor is refused: a path that is not a Nim compiler
   ## (a test stub) says nothing to judge, and the compile that runs it fails
-  ## on its own terms. Judged once per compiler binary and process.
+  ## on its own terms. Judged once per compiler binary and process, and only
+  ## an accepted verdict is remembered.
   if path.len == 0:
-    return
+    return ""
   var identity = path
   try:
     let info = getFileInfo(extendedPath(path))
     identity.add("|" & $info.size & "|" & $info.lastWriteTime.toUnix())
   except CatchableError, OSError:
-    return
+    return ""
   if identity in checkedRecipeCompilers:
-    return
+    return ""
   var version = ""
   try:
     version = parseNimCompilerVersionOutput(
       runCommand(@[path, "--version"]).output)
   except CatchableError:
-    return
-  requireRecipeCompilerVersion(version, origin & " " & path & ", which is")
-  checkedRecipeCompilers[identity] = true
+    return ""
+  result = recipeCompilerRefusal(version, origin & " " & path & ", which is")
+  if result.len == 0:
+    checkedRecipeCompilers[identity] = true
+
+proc requireRecipeCompilerFloor(path, origin: string) =
+  let refusal = recipeCompilerFloorRefusal(path, origin)
+  if refusal.len > 0:
+    raise newException(RecipeCompilerTooOldError, refusal)
 
 proc nimCompilerPath(): string =
   ## The Nim compiler for a recipe compile.
@@ -5211,15 +5219,22 @@ proc nimCompilerPath(): string =
     if fileExists(extendedPath(candidate)):
       candidates.addUnique(candidate)
   candidates.addUnique("nim")
+  # A `nim` below the recipe-compiler floor is SKIPPED, not fatal: a newer one
+  # later on PATH is used. Only when no candidate is acceptable is the first
+  # refusal raised, so the message names what was found.
+  var firstRefusal = ""
   for candidate in candidates:
-    if candidate.startsWith("/nix/store/"):
-      requireRecipeCompilerFloor(candidate, "the `nim` found on PATH is")
+    if candidate.startsWith("/nix/store/") or looksLikeNimCompiler(candidate):
+      let refusal = recipeCompilerFloorRefusal(candidate,
+        "the `nim` found on PATH is")
+      if refusal.len > 0:
+        if firstRefusal.len == 0:
+          firstRefusal = refusal
+        continue
       cachedNimCompilerPath = candidate
       return candidate
-    if looksLikeNimCompiler(candidate):
-      requireRecipeCompilerFloor(candidate, "the `nim` found on PATH is")
-      cachedNimCompilerPath = candidate
-      return candidate
+  if firstRefusal.len > 0:
+    raise newException(RecipeCompilerTooOldError, firstRefusal)
   cachedNimCompilerPath = "nim"
   cachedNimCompilerPath
 
@@ -9883,9 +9898,13 @@ proc recipeConfigSearchPathFlags*(modulePath: string; cwd = ""): seq[string] =
   ## They are withdrawn from the child's environment only
   ## (``runCommand``'s ``withoutEnv``), never from this process's.
   requireTrustedRecipeConfiguration(modulePath)
+  # Resolved BEFORE the `try`: a compiler below the recipe-compiler floor
+  # raises `RecipeCompilerTooOldError`, which the `except` below would turn
+  # into an empty answer with no message.
+  let dumpCompiler = nimCompilerPath()
   let execution =
     try:
-      runCommand(@[nimCompilerPath(), "dump", "--dump.format:json",
+      runCommand(@[dumpCompiler, "dump", "--dump.format:json",
         "--hints:off", "--warnings:off", absolutePath(modulePath)],
         cwd = cwd, raiseOnFailure = false,
         withoutEnv = seededSourcePackageEnvironmentNames())

@@ -43,7 +43,11 @@ import repro_selfhost
 import repro_tool_profiles
 import repro_cli_support/project_pins
 
-const PinnedVersion = "2.2.8"
+const PinnedVersion = "2.2.12"
+  ## A label for the fixture archive built below, not a download. It must be
+  ## at or above the recipe-compiler floor (2.2.10, operator decision of
+  ## 2026-11-24), which `realizePinnedProviderNim` enforces, and must differ
+  ## from the bootstrap's own release.
 
 proc hostTar(): string =
   when defined(windows):
