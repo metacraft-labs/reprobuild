@@ -15,6 +15,13 @@
     "proves the fleet, not the toolchain; get the platform green in ci.yml",
     "first, then add it here. Prove, then gate.",
     "",
+    "`candidates` holds legs that are being proved. They are never built by a",
+    "tag and never part of the asset set. Dispatch release.yml from a branch",
+    "with `platforms: <platform>-<arch>` to run exactly the release leg a row",
+    "describes, on its own runner, publishing nothing; when that run is green,",
+    "move the row, unchanged, into `platforms`. A `platforms` filter on a tag",
+    "is refused, so a release is still all of `platforms` or nothing.",
+    "",
     "Removing a leg is a deliberate, reviewed act: it narrows what the release",
     "promises. Consumers on a dropped platform then fall back to the",
     "setup-reprobuild source build with a loud warning, instead of downloading",
@@ -59,6 +66,30 @@
       "platform": "windows",
       "arch": "x86_64",
       "archive_ext": "zip"
+    }
+  ],
+  "candidates": [
+    {
+      "$comment": [
+        "Native, on Tart Ubuntu guests on m3 with Docker. `[self-hosted, linux,",
+        "arm64]` is matched only by the central GARM pool's runners (the m3",
+        "scale set is targeted by its name, `eph-linux-arm64`, alone), whose",
+        "guests are being raised from 4 CPUs / 20 GiB RAM / 50 GB disk to",
+        "8 CPUs / 32 GiB / 100 GB so this leg fits inside its job cap.",
+        "Native rather than cross-compiled so the leg runs the same steps as",
+        "linux-x86_64 -- bootstrap, `.#release`, relocation, the multi-distro",
+        "Docker sweep and the dev-exec smoke -- on the architecture it ships.",
+        "No native package is built from it yet (`packages` names only",
+        "linux-x86_64), so the leg's package steps are skipped.",
+        "Promote it when release.yml dispatched with `platforms: linux-aarch64`",
+        "has gone green; see `$deliberately-absent.linux-aarch64` for the history."
+      ],
+      "os-name": "linux",
+      "runner": ["self-hosted", "linux", "arm64"],
+      "env-flavor": "nix",
+      "platform": "linux",
+      "arch": "aarch64",
+      "archive_ext": "tar.gz"
     }
   ],
   "packages": [
@@ -135,7 +166,17 @@
       "declared system is not a proven build.",
       "",
       "Add the row when a real aarch64-linux build of reprobuild goes green --",
-      "the cheap way is an aarch64-linux leg in ci.yml first. Prove, then gate."
+      "the cheap way is an aarch64-linux leg in ci.yml first. Prove, then gate.",
+      "",
+      "Update 2026-11-24: the row is now in `candidates`, to be proved by",
+      "dispatching release.yml with `platforms: linux-aarch64` (the release leg",
+      "itself, not a stand-in). Two of the blockers above have moved since:",
+      "io-mon b1c32599 makes the Linux preload shim compile for aarch64 (pinned",
+      "in flake.lock), and the guests grew from 4 GiB to 20 GiB of RAM (the",
+      "engine compile was OOM-killed, exit 137, at the old size in consumers'",
+      "source-build fallback), with a further raise to 8 CPUs / 32 GiB /",
+      "100 GB for this leg under way. No green build is on record yet, so this",
+      "entry stands until the row is promoted."
     ],
     "darwin-x86_64": [
       "No runner exists and none is planned. metacraft-dev-guidelines",

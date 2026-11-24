@@ -993,8 +993,18 @@
     # resumes a short write at the written offset (upstream bb85d2dda5,
     # e2b2142a49; reprobuild-pm issue
     # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
+    #
+    # Advanced from fde9384c to 85f8e3c2: `nimpretty`'s layouter keeps a
+    # rejoined line break's indentation, lays a statement block opened inside
+    # an expression right of the lines that open it, and treats a line led by
+    # a closing bracket or following a comment as expression continuation,
+    # so `just format` accepts the CLI-support module, which it refused with
+    # "invalid indentation" before, and is idempotent on it.
+    # Riding along: a closure environment is no longer moved while still
+    # live (upstream #26256, with a test), and a macro expansion's sourcemap
+    # maps each statement to its own line.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=85f8e3c25545558cc753d6e0b56ec35c787a4405";
       flake = false;
     };
     nim-csources-src = {
