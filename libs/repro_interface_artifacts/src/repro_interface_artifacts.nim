@@ -104,7 +104,10 @@ import repro_core/process_env
 import repro_core/git_separated
 export file_lock.ReproFileLock
 import repro_interface_artifacts/compiler_args_transport
-import repro_interface_artifacts/compile_watchdog
+when defined(windows):
+  # Only the Windows wait in `runCommand` has a bounded wait to decide; the
+  # POSIX arm waits on the child directly.
+  import repro_interface_artifacts/compile_watchdog
 import repro_interface_artifacts/closure_manifest
 export closure_manifest
 import repro_interface_artifacts/gem_closure_manifest
