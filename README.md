@@ -96,7 +96,8 @@ its `bin/` on your `PATH`:
 ```bash
 # Linux x86_64 — adjust the version and platform to taste
 VERSION=0.2.25
-PLATFORM=linux-x86_64   # or darwin-aarch64; Windows ships a .zip
+PLATFORM=linux-x86_64   # or darwin-aarch64, or linux-aarch64 (releases after
+                        # v0.2.35); Windows ships a .zip
 curl -fsSLO "https://github.com/metacraft-labs/reprobuild/releases/download/v${VERSION}/reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 tar -xzf "reprobuild-${VERSION}-${PLATFORM}.tar.gz"
 export PATH="${PWD}/reprobuild-${VERSION}-${PLATFORM}/bin:${PATH}"

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3246,
+    "nimTestBinaries": 3248,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 851,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3304
+    "testEntries": 3306
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1857,7 +1857,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1827,
+      "integration": 1829,
       "platform/destructive": 205,
       "pure unit": 851,
       "unclassified": 392
@@ -2080,9 +2080,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3246,
+    "nimTestBinaryCount": 3248,
     "pythonTestFileCount": 58,
-    "testEntryCount": 3304
+    "testEntryCount": 3306
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -45075,7 +45075,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -45636,7 +45636,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_branch_forks_new_workspace_on_feature_branch.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 22,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55648,6 +55648,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_pre_push_publishes_verified_range_drafts",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_pre_push_publishes_verified_range_drafts.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_pre_push_refuses_on_unreachable_team_backend",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -59590,7 +59608,24 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_submodule_borrowing_from_partial_pool_keeps_its_files.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_spi_submodule_left_out_files_through_the_cli",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_spi_submodule_left_out_files_through_the_cli.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -69257,7 +69292,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_plan_matrix.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

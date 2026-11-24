@@ -21,7 +21,12 @@
 ##   * a stale socket left by a killed daemon is replaced;
 ##   * a directory owned by another uid, or with a wrong mode it cannot fix,
 ##     is refused;
-##   * the error of a daemon that exits before listening carries its log.
+##   * the error of a daemon that exits before listening carries its log;
+##   * a daemon that refuses this client's ``Hello`` fails the invocation at
+##     once, quoting the refusal, and does not advise stopping it. It used to
+##     be read as a daemon that does not answer: the invocation waited out the
+##     120 s readiness ceiling and then advised stopping a healthy shared
+##     daemon.
 ##
 ## WHAT THIS RUNS. The real ``repro`` CLI (``REPROBUILD_REPRO``, default
 ## ``build/bin/repro``) running ``repro exec <tiny project> -- <this binary>
@@ -46,23 +51,48 @@
 ## exits before it listens", which a real daemon cannot be made to be with
 ## output of a chosen size.
 ##
+## THE ONE FIXTURE THAT IS A DAEMON STAND-IN. The refusal case runs this test
+## binary as ``--refusing-runquotad <socket>``: it takes the endpoint's
+## lifetime lock and listens there, through runquota's own
+## ``acquireLifetimeLock`` and ``bindEndpoint``, and answers every ``Hello``
+## with an RQSP ``Error`` frame framed exactly as ``runquotad``'s
+## ``sendError`` frames one (``encodeProtocolError``, ``rqError`` with
+## ``FrameFlagResponse or FrameFlagError``). A real ``runquotad`` refuses a
+## ``Hello`` only for reasons ``repro`` cannot be made to give from here: the
+## observed one needs the client in a user namespace whose map the daemon
+## reads as its own, which a test cannot arrange portably, and the others (an
+## incompatible protocol major, a declared uid other than the peer's, an owner
+## hash collision) are fixed by the client library. The launcher under test
+## sees only the lock and the frame, and both are the daemon's.
+##
 ## FALSIFIABILITY. Against reprobuild ``b50a8c9d6`` (the per-invocation
 ## daemon) the probe sees no ``RUNQUOTA_SOCKET`` at all (``repro exec``
 ## restored the caller's), no lifetime lock is held after ``repro`` exits, the
 ## endpoint directory override is ignored so no directory is refused, and the
-## startup error names no ``runquotad.log``.
+## startup error names no ``runquotad.log``. Against ``de783508f``, whose
+## adopt loop read a refused ``Hello`` as a daemon that does not answer, the
+## refusal case fails after the 120 s readiness ceiling: the error is the
+## "neither answered nor exited" one, advises ``runquota daemon stop`` and
+## quotes nothing the daemon said.
 ##
 ## LINUX ONLY for the pid comparisons: ``/proc/locks`` is the reader, and
 ## ``/proc/self/fd`` is the directory whose mode its owner cannot change.
 
-import std/[os, osproc, strtabs, strutils, tempfiles, unittest]
+import std/[monotimes, os, osproc, strtabs, strutils, tempfiles, times, unittest]
 
 import repro_test_support
 import repro_test_support/per_user_runquota
 import repro_test_support/reasoned_skip
 import runquota_client
+import runquota_core
+import runquota_ipc except connectDefault
+import runquota_protocol
 
-const ProbeFlag = "--probe-shared-runquota"
+const
+  ProbeFlag = "--probe-shared-runquota"
+  RefusingDaemonFlag = "--refusing-runquotad"
+  RefusalText = "client claims another user namespace, but its peer " &
+    "credentials name the client itself, in the daemon's"
 
 when defined(posix):
   if paramCount() == 1 and paramStr(1) == ProbeFlag:
@@ -83,6 +113,29 @@ when defined(posix):
     echo "probe-pid=" & (if socket.len > 0: $lifetimeLockHolderPid(socket)
                          else: "0")
     quit(0)
+  if paramCount() == 2 and paramStr(1) == RefusingDaemonFlag:
+    # A daemon that is alive -- it holds the lifetime lock and listens -- and
+    # refuses every client at `Hello`, as `runquotad`'s `handleHello` does.
+    # Runs until the case terminates it.
+    let socket = paramStr(2)
+    ensureUserEndpointDir(socket.parentDir)
+    let lifetimeLock = acquireLifetimeLock(socket)
+    doAssert lifetimeLock >= 0
+    var listener = bindEndpoint(unixEndpoint(socket))
+    while true:
+      var connection = acceptConnection(listener)
+      var frame: RqspFrame
+      try:
+        if connection.receiveFrame(frame):
+          let payload = encodeProtocolError(ProtocolErrorMessage(
+            diagnostic: diagnostic(diagDenied, RefusalText,
+              "namespace tokens describe the client")))
+          connection.sendFrame(encodeFrame(rqError,
+            FrameFlagResponse or FrameFlagError, frame.header.requestId,
+            payload))
+      except CatchableError:
+        discard
+      connection.close()
 
 proc repoRoot(): string =
   currentSourcePath().parentDir.parentDir.parentDir
@@ -351,6 +404,50 @@ when defined(linux):
         check "cannot be set to 0700" in run.output
         check "RUNQUOTA_USER_ENDPOINT_DIR" in run.output
         check "probe-socket=" notin run.output
+
+    test "a daemon that refuses this client fails at once, quoting the refusal":
+      let fixture = newFixture()
+      defer: dispose(fixture, [])
+      var daemonEnv = newStringTable(modeCaseSensitive)
+      for k, v in fixture.env: daemonEnv[k] = v
+      daemonEnv["RUNQUOTA_ENDPOINT_SCOPE"] = "private"
+      let refusing = startProcess(getAppFilename(),
+        args = [RefusingDaemonFlag, fixture.socket], env = daemonEnv,
+        options = {poParentStreams})
+      defer:
+        if refusing.running: refusing.terminate()
+        discard refusing.waitForExit()
+        refusing.close()
+      var waited = 0
+      while not (lifetimeLockHeld(fixture.socket) and
+          socketPresent(fixture.socket)) and waited < 30_000:
+        require refusing.running
+        sleep(20)
+        waited += 20
+      require lifetimeLockHeld(fixture.socket)
+      require socketPresent(fixture.socket)
+      let started = getMonoTime()
+      let run = runExec(fixture, "refused")
+      let elapsed = getMonoTime() - started
+      checkpoint("exit=" & $run.exitCode & " after " & $elapsed & "\n" &
+        run.output)
+      check run.exitCode != 0
+      # The daemon's own words reach the operator, with the endpoint.
+      check RefusalText in run.output
+      check fixture.socket in run.output
+      check "refused" in run.output
+      # Not the "does not answer" case: no wait to the readiness ceiling, and
+      # no advice to stop a daemon that is serving its other clients.
+      check "neither answered nor exited" notin run.output
+      check "runquota daemon stop" notin run.output
+      # AT ONCE: well inside the 120 s ceiling the refusal used to wait out,
+      # so a launcher that waited and only then quoted the daemon fails here.
+      # The margin covers the dev-env preparation `repro exec` does first.
+      check elapsed < initDuration(seconds = 60)
+      check "probe-socket=" notin run.output
+      # The refusing daemon is untouched.
+      check refusing.running
+      check lifetimeLockHolderPid(fixture.socket) == refusing.processID
 
     test "the error of a daemon that exits before listening carries its log":
       let fixture = newFixture()
