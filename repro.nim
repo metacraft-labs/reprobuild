@@ -72,14 +72,25 @@ package reprobuild:
     # declares the wrapper edge's `sh` and coreutils
     # (Reprobuild-Standard-Library.md, `cross_zig`).
     #
-    # The range admits 0.14 as well as 0.13. This entry is part of every
-    # consumer's solve, not only of reprobuild's own cross build: a recipe
-    # that `uses:` reprobuild solves one zig for its whole closure, and
-    # codetracer-launcher, which such a recipe (codetracer) also uses,
-    # requires `zig >=0.14 <0.15`. A `<0.14` cap left the two with no common
-    # version and made that solve unsatisfiable. The stdlib zig package
-    # carries 0.14.1 on every platform it carries 0.13.0.
-    "zig >=0.13 <0.15"
+    # The floor is 0.14, not 0.13: this zig links the monitor shim under a
+    # zig target, and zig 0.13 binds `pthread_mutex_lock` and ten other
+    # symbols the shim calls to `libpthread.so.0` (it hands the linker its
+    # glibc stubs in a fixed order, libpthread's ahead of libc's, and both
+    # define them for glibc 2.34+), so a 0.13-linked shim NEEDS
+    # `libpthread.so.0`, which no link flag removes. zig 0.14 binds them to
+    # `libc.so.6`, and the shim needs only libc and the loader. That is
+    # required of every build of the Linux shim: it is preloaded into every
+    # monitored process, and a program that finds its C runtime through
+    # DT_RUNPATH cannot resolve a further C-runtime library for it
+    # (`libs/repro_dsl_stdlib/tests/t_zig_cross_monitor_shim_needs_only_libc.nim`).
+    #
+    # This entry is part of every consumer's solve, not only of reprobuild's
+    # own cross build: a recipe that `uses:` reprobuild solves one zig for
+    # its whole closure, and codetracer-launcher, which such a recipe
+    # (codetracer) also uses, requires `zig >=0.14 <0.15`, so the two agree.
+    # The stdlib zig package carries 0.14.1 on every platform it carries
+    # 0.13.0.
+    "zig >=0.14 <0.15"
     # Toolchain floor — mirrors flake.nix's nativeBuildInputs. These
     # are the PATH-resolvable binaries the reprobuild build needs;
     # they're sufficient for the path-mode tool resolver to succeed
