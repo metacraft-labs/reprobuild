@@ -3,15 +3,19 @@
 `plan`'s step "Derive matrix and expected asset set" reads
 .github/release-platforms.json and decides two things that must agree: which
 legs `build-release` runs, and which assets `publish-release` demands before it
-makes a release visible. A leg that is being proved (a `candidates` row, such
-as linux-aarch64) must be buildable through that same job without ever joining
-the asset set of a tag, because the release is all-or-nothing: a promised leg
-that has never built blocks every release.
+makes a release visible. A leg that is being proved (a `candidates` row)
+must be buildable through that same job without ever joining the asset set of
+a tag, because the release is all-or-nothing: a promised leg that has never
+built blocks every release. linux-aarch64 was proved that way and promoted on
+2026-11-24, so the checked-in `candidates` is empty; the candidate mechanism is
+exercised here with a synthetic row (`SYNTHETIC_CANDIDATE`) added to a copy of
+the real file.
 
 These tests run the step's `script:` -- the text checked in to
 release-pipeline.yml, unchanged -- under node, the way `actions/github-script`
 runs it, against a checkout holding the real release-platforms.json (and, for
-the promotion case, a copy with the candidate moved into `platforms`). The
+the candidate cases, a copy carrying the synthetic candidate, in `candidates`
+or moved unchanged into `platforms`). The
 step's `env:` line for the filter is asserted to be the one the workflow
 passes, then set directly.
 
@@ -75,15 +79,50 @@ def _archive(p):
     return f"reprobuild-{VERSION}-{_leg(p)}.{p['archive_ext']}"
 
 
+def _released_row(leg):
+    return next(p for p in _released_spec()["platforms"] if _leg(p) == leg)
+
+
+# A leg no runner serves, shaped exactly like a real `platforms` row. It only
+# ever exists in a temporary copy of release-platforms.json, so the candidate
+# path of the plan script stays tested while the checked-in `candidates` is
+# empty. riscv64 is used because the real file declares it nowhere (the
+# unknown-leg test relies on that too).
+SYNTHETIC_CANDIDATE = {
+    "os-name": "linux",
+    "runner": ["self-hosted", "linux", "riscv64"],
+    "env-flavor": "nix",
+    "platform": "linux",
+    "arch": "riscv64",
+    "archive_ext": "tar.gz",
+}
+
+
+def _spec_with_candidate():
+    spec = _released_spec()
+    spec["candidates"] = list(spec.get("candidates", [])) + [dict(SYNTHETIC_CANDIDATE)]
+    return spec
+
+
 class CandidateDeclarationTests(unittest.TestCase):
     """The checked-in declaration, read as data."""
 
     BUILD_KEYS = {"os-name", "runner", "env-flavor", "platform", "arch", "archive_ext"}
 
-    def test_linux_aarch64_is_a_candidate_not_a_released_platform(self):
+    def test_linux_aarch64_is_a_released_platform_not_a_candidate(self):
+        """Promoted 2026-11-24 after proving run 45380792531 went green."""
         spec = _released_spec()
-        self.assertIn("linux-aarch64", {_leg(p) for p in spec["candidates"]})
-        self.assertNotIn("linux-aarch64", {_leg(p) for p in spec["platforms"]})
+        self.assertIn("linux-aarch64", {_leg(p) for p in spec["platforms"]})
+        self.assertNotIn("linux-aarch64", {_leg(p) for p in spec["candidates"]})
+
+    def test_candidates_key_is_kept_as_a_list(self):
+        """Empty when nothing is being proved, but present: the plan script
+        and this file both read it, and the next leg is added there."""
+        self.assertIsInstance(_released_spec()["candidates"], list)
+
+    def test_released_platforms_carry_every_key_the_build_job_reads(self):
+        for row in _released_spec()["platforms"]:
+            self.assertLessEqual(self.BUILD_KEYS, set(row), row)
 
     def test_candidates_carry_every_key_the_build_job_reads(self):
         """A candidate is promoted by moving it unchanged, so it must already be
@@ -92,7 +131,7 @@ class CandidateDeclarationTests(unittest.TestCase):
             self.assertLessEqual(self.BUILD_KEYS, set(row), row)
 
     def test_linux_aarch64_runs_natively_on_linux_arm64(self):
-        row = next(p for p in _released_spec()["candidates"] if _leg(p) == "linux-aarch64")
+        row = _released_row("linux-aarch64")
         self.assertEqual(row["os-name"], "linux")
         self.assertEqual(row["env-flavor"], "nix")
         self.assertEqual(row["archive_ext"], "tar.gz")
@@ -169,7 +208,14 @@ class PlanScriptTests(unittest.TestCase):
         self.assertEqual([_leg(p) for p in matrix], [_leg(p) for p in spec["platforms"]])
         for p in spec["platforms"]:
             self.assertIn(_archive(p), assets)
-        self.assertFalse([a for a in assets if "aarch64" in a and "linux" in a], assets)
+        self.assertIn(f"reprobuild-{VERSION}-linux-aarch64.tar.gz", assets)
+
+    def test_tag_never_builds_a_candidate(self):
+        self.write_spec(_spec_with_candidate())
+        matrix, assets = self.assert_ok(self.plan(ref=f"refs/tags/v{VERSION}"))
+        self.assertEqual([_leg(p) for p in matrix],
+                         [_leg(p) for p in _released_spec()["platforms"]])
+        self.assertNotIn(_archive(SYNTHETIC_CANDIDATE), assets)
 
     def test_tag_marks_only_the_package_source_leg(self):
         r = self.plan(ref=f"refs/tags/v{VERSION}")
@@ -189,6 +235,19 @@ class PlanScriptTests(unittest.TestCase):
     # -- a proving run --------------------------------------------------------
 
     def test_proving_run_builds_only_the_candidate_and_publishes_nothing_else(self):
+        self.write_spec(_spec_with_candidate())
+        r = self.plan(ref="refs/heads/agents", platforms="linux-riscv64")
+        matrix, assets = self.assert_ok(r)
+        self.assertEqual([_leg(p) for p in matrix], ["linux-riscv64"])
+        self.assertEqual(assets, [_archive(SYNTHETIC_CANDIDATE)])
+        self.assertIs(matrix[0]["native-packages"], False)
+        self.assertEqual(r["outputs"]["packages"], "")
+        self.assertEqual(r["outputs"].get("addon-runner", ""), "")
+        self.assertEqual(r["outputs"]["full-release"], "false")
+
+    def test_proving_run_of_linux_aarch64_builds_no_package(self):
+        """The promoted leg still has no package made from it, so a filtered
+        run of it alone builds its archive and nothing else."""
         r = self.plan(ref="refs/heads/agents", platforms="linux-aarch64")
         matrix, assets = self.assert_ok(r)
         self.assertEqual([_leg(p) for p in matrix], ["linux-aarch64"])
@@ -219,16 +278,16 @@ class PlanScriptTests(unittest.TestCase):
     # -- promotion ------------------------------------------------------------
 
     def test_promoting_the_candidate_unchanged_adds_it_to_the_release(self):
-        spec = _released_spec()
-        row = next(p for p in spec["candidates"] if _leg(p) == "linux-aarch64")
+        spec = _spec_with_candidate()
+        row = next(p for p in spec["candidates"] if _leg(p) == "linux-riscv64")
         spec["platforms"].append(row)
         spec["candidates"] = [p for p in spec["candidates"] if p is not row]
         self.write_spec(spec)
         matrix, assets = self.assert_ok(self.plan(ref=f"refs/tags/v{VERSION}"))
-        self.assertIn("linux-aarch64", [_leg(p) for p in matrix])
-        self.assertIn(f"reprobuild-{VERSION}-linux-aarch64.tar.gz", assets)
-        aarch64 = next(p for p in matrix if _leg(p) == "linux-aarch64")
-        self.assertIs(aarch64["native-packages"], False)
+        self.assertIn("linux-riscv64", [_leg(p) for p in matrix])
+        self.assertIn(_archive(SYNTHETIC_CANDIDATE), assets)
+        promoted = next(p for p in matrix if _leg(p) == "linux-riscv64")
+        self.assertIs(promoted["native-packages"], False)
 
 
 if __name__ == "__main__":
