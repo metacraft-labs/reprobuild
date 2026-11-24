@@ -5845,6 +5845,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker isMainModule"),
   TestSpec(
+    source: "libs/repro_distributed_worker/tests/t_declared_output_read_refuses_a_hard_linked_file.nim",
+    binary: "build/test-bin/t_declared_output_read_refuses_a_hard_linked_file",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_distributed_worker_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_distributed_worker/tests/t_lease_floor_probe_matches_what_a_lease_maps.nim",
     binary: "build/test-bin/t_lease_floor_probe_matches_what_a_lease_maps",
     defines: @[],

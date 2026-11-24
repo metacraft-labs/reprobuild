@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3223,
+    "nimTestBinaries": 3224,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 845,
+    "pureUnitTests": 846,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3278
+    "testEntries": 3279
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1857,7 +1857,7 @@
       "graph-fixture": 29,
       "integration": 1813,
       "platform/destructive": 203,
-      "pure unit": 845,
+      "pure unit": 846,
       "unclassified": 388
     },
     "graphOwnedTestArtifacts": [
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3223,
+    "nimTestBinaryCount": 3224,
     "pythonTestFileCount": 55,
-    "testEntryCount": 3278
+    "testEntryCount": 3279
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18619,6 +18619,23 @@
       "source": "libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_declared_output_read_refuses_a_hard_linked_file",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_distributed_worker"
+      ],
+      "owner": "libs/repro_distributed_worker",
+      "requiresReproBinary": false,
+      "source": "libs/repro_distributed_worker/tests/t_declared_output_read_refuses_a_hard_linked_file.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
