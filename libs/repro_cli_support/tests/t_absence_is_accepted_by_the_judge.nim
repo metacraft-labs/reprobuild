@@ -7,6 +7,9 @@
 import std/[os, sets, unittest]
 
 import repro_cli_support
+# The untracked-inputs mode enum (cuiReadSet, cuiStrict) is declared in the
+# manifests package, which repro_cli_support does not re-export.
+import repro_workspace_manifests
 
 const Root = "judge-absence-repo"
 
