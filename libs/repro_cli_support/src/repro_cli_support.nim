@@ -46982,10 +46982,17 @@ proc pathIsCwdOrAncestor*(candidate, fromDir: string): bool =
 
 proc cloneOrgRootRepo(identity: GitToolIdentity;
                       url, destination: string; independentObjects = false):
-    tuple[ok: bool; diagnostic: string] =
+    tuple[ok: bool; diagnostic: string; cloned: bool] =
   ## Clone the org root workspace repo at ``url`` into ``destination`` (a
   ## fresh named directory). Best-effort; returns a structured failure so
   ## the caller can report a clear error instead of crashing.
+  ##
+  ## ``cloned`` says whether ``git clone`` itself succeeded, which ``ok`` alone
+  ## does not: a clone that succeeded can still fail the step after it, and
+  ## then the work tree at ``destination`` is this call's. ``git clone``
+  ## refuses a non-empty destination and removes its own work tree when it
+  ## fails, so ``cloned`` is what tells a caller whether the tree there was
+  ## made by this call.
   ##
   ## ``--recurse-submodules`` because the root repo's submodules are part of
   ## the workspace, not of some repo inside it. Reprobuild treats a develop-mode
@@ -47005,7 +47012,7 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
   let res = execCmdEx(cmd, options = {poStdErrToStdOut, poUsePath},
     env = scrubbedGitRepositoryEnv())
   if res.exitCode != 0:
-    return (ok: false, diagnostic: res.output.strip())  # git-merged-text: clone's reason is on stderr
+    return (ok: false, diagnostic: res.output.strip(), cloned: false)  # git-merged-text: clone's reason is on stderr
   if independentObjects:
     # Git does not propagate the parent's --no-local into submodule clones.
     # A local submodule source can borrow too. Copy borrowed objects before
@@ -47014,8 +47021,9 @@ proc cloneOrgRootRepo(identity: GitToolIdentity;
     let owned = gitRunPlain(identity, ["-C", destination, "submodule", "foreach",
       "--quiet", "--recursive", ownSubmoduleObjects])
     if owned.code != 0:
-      return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output)
-  (ok: true, diagnostic: "")
+      return (ok: false, diagnostic: "could not make root submodules independent: " & owned.output,
+              cloned: true)
+  (ok: true, diagnostic: "", cloned: true)
 
 proc runWorkspaceInitFromUrl*(c: ReproCommandLineWorkspaceInit;
                               env: proc(name: string): string = sysEnv): int =
@@ -86985,6 +86993,23 @@ type
       ## inherited from the source, or the ``--projects`` override. Reported so
       ## a fork's membership is auditable without diffing two workspace.toml
       ## files after the fact.
+    destination*: string
+      ## Fork form only: the destination path the fork was asked to
+      ## materialize (the same path as ``workspaceRoot``), named on its own so
+      ## a reader of a FAILED fork knows which directory the next two fields
+      ## are about.
+    destinationState*: string
+      ## Fork form only: what a run that did not succeed left at
+      ## ``destination``. ``removed`` — this run created the destination,
+      ## created no branch anywhere, and removed what it materialized;
+      ## ``kept`` — something is left there (it pre-existed or was occupied
+      ## when the root clone ran, or the branch was created somewhere);
+      ## ``remove_failed``
+      ## — this run tried to remove what it created and could not. Empty on
+      ## success and on a refusal that never touched the destination.
+    destinationRemedy*: string
+      ## Fork form only: the command that removes what is left at the
+      ## destination after a failed run. Empty when nothing is left there.
 
 proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
   case outcome
@@ -86993,6 +87018,15 @@ proc branchOutcomeTag(outcome: BranchRepoOutcome): string =
   of broDirtyRefused: "dirty_refused"
   of broCollisionRefused: "collision_refused"
   of broActionFailed: "action_failed"
+
+proc branchOutcomeCreatedBranch*(outcome: string): bool =
+  ## Whether a per-repo outcome means the branch now EXISTS in that repo. One
+  ## definition for the two decisions that hinge on it: how a failure summary
+  ## is worded (a partial advance is not a refusal), and whether a failed fork
+  ## may remove what it materialized (only when no repo reached the branch).
+  outcome in ["branched", "branched_with_changes",
+              "branched_from_declared_baseline", "branched_from_mainline",
+              branchOutcomeTag(broCreated)]
 
 proc toJsonNode*(report: BranchReport): JsonNode =
   result = newJObject()
@@ -87036,6 +87070,10 @@ proc toJsonNode*(report: BranchReport): JsonNode =
     for name in report.projects:
       projects.add(%name)
     result["projects"] = projects
+    result["destination"] = %report.destination
+    result["destinationState"] = %report.destinationState
+    if report.destinationRemedy.len > 0:
+      result["destinationRemedy"] = %report.destinationRemedy
 
 proc renderBranchTextLines*(report: BranchReport): seq[string] =
   if report.form == "show":
@@ -87099,31 +87137,57 @@ proc renderBranchTextLines*(report: BranchReport): seq[string] =
     var blockers: seq[string]
     var created: seq[string]
     for entry in report.repos:
-      if entry.outcome in ["branched", "branched_with_changes",
-                           "branched_from_declared_baseline",
-                           "branched_from_mainline",
-                           branchOutcomeTag(broCreated)]:
+      if branchOutcomeCreatedBranch(entry.outcome):
         created.add(entry.path)
       elif entry.outcome != "ready" and
           entry.outcome != branchOutcomeTag(broAlreadyAtHead):
         blockers.add(entry.path & "=" & entry.outcome)
+    # The fork form also says what is at the destination, from
+    # ``destinationState`` rather than from a guess: a fork that created no
+    # branch removes what it materialized, and telling the operator to "re-run
+    # to finish" a tree that is gone sends them looking for it.
+    let forkDest = remedyProsePath(report.destination)
+    let removal =
+      if report.destinationRemedy.len > 0:
+        ", or remove it with `" & report.destinationRemedy & "`"
+      else: ""
     var summary =
       if created.len > 0:
         "workspace branch: INCOMPLETE — '" & report.branch &
           "' was created in " & $created.len & " repo(s) and the partial " &
-          "workspace is left in place; re-run the same command to finish it"
-      elif report.exitCode != 2:
-        # A clone can fail after materializing the root and other members,
-        # before the branch pass creates any feature branches. Exit 1 also
-        # covers probe failures, so do not infer whether a target exists.
-        "workspace branch: INCOMPLETE — no branch '" & report.branch &
-          "' was created in any repo; any partial workspace at " &
-          report.workspaceRoot & " is left in place; re-run the same " &
-          "command to finish it"
-      else:
+          "workspace" &
+          (if report.destination.len > 0: " at " & forkDest else: "") &
+          " is left in place; re-run the same command to finish it" & removal
+      elif report.exitCode == 2:
         "workspace branch: ABORTED — no branch '" & report.branch &
           "' was created in any repo (nothing had been created when the " &
           "first blocker was found)"
+      elif report.destinationState == "removed":
+        # A clone can fail after materializing the root and other members,
+        # before the branch pass creates any branch. Everything there was a
+        # clone of something that exists elsewhere, so the run removed it.
+        "workspace branch: FAILED — no branch '" & report.branch &
+          "' was created in any repo; this run's materialization at " &
+          forkDest & " was removed and nothing is left there"
+      elif report.destinationState == "kept":
+        "workspace branch: INCOMPLETE — no branch '" & report.branch &
+          "' was created in any repo; the partial workspace at " & forkDest &
+          " (there before this run) is left in place; re-run the same " &
+          "command to finish it" & removal
+      elif report.destinationState == "remove_failed":
+        "workspace branch: FAILED — no branch '" & report.branch &
+          "' was created in any repo, and what this run materialized at " &
+          forkDest & " could not be removed; remove it with `" &
+          report.destinationRemedy & "`"
+      elif report.destination.len > 0:
+        # A fork that failed before it materialized anything (an exit-1 probe
+        # failure in the pre-flight).
+        "workspace branch: FAILED — no branch '" & report.branch &
+          "' was created in any repo, and nothing was materialized at " &
+          forkDest
+      else:
+        "workspace branch: INCOMPLETE — no branch '" & report.branch &
+          "' was created in any repo"
     if blockers.len > 0:
       summary.add("; " & $blockers.len & " repo(s) blocked: " &
         blockers.join(", "))
@@ -87778,11 +87842,16 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport
 
 proc branchReportRoot(report: BranchReport): string =
   # M27: in the fork form ``workspaceRoot`` is the NEW workspace, which is
-  # where the report belongs. But a fork refused BEFORE materializing (a bad
-  # destination, a remote-branch collision) must not conjure that directory
-  # into existence just to drop a report in it — fall back to the source.
+  # where a SUCCESSFUL fork's report belongs. A fork that did not succeed
+  # reports to the SOURCE workspace, where the command was run: a refusal
+  # must not conjure the destination into existence just to drop a report in
+  # it, a fork that created no branch has removed its destination, and one
+  # whose partial tree is kept must not have that tree mistaken for a
+  # workspace — a report inside it was what made later runs treat a leftover
+  # as a fork under way.
   result = report.workspaceRoot
-  if report.sourceWorkspaceRoot.len > 0 and not dirExists(result / ".git"):
+  if report.sourceWorkspaceRoot.len > 0 and
+      (report.exitCode != 0 or not dirExists(result / ".git")):
     result = report.sourceWorkspaceRoot
 
 proc writeBranchReport(report: BranchReport; destination: string) =
@@ -87846,7 +87915,10 @@ proc runBranchCommand*[T](c: T; verb = "repro branch";
   # The read-only ``show`` form answers a question and must not write anything —
   # the same rule that made the report opt-in. Only the forms that MOVE the
   # workspace refresh the cache, and they leave every repo on the new branch.
-  if report.form != "show" and report.repos.len > 0:
+  # A failed fork describes neither workspace — the source was not moved and
+  # the destination is not a workspace on the branch — so it refreshes none.
+  if report.form != "show" and report.repos.len > 0 and
+      (report.form != "fork" or report.exitCode == 0):
     var branches: seq[string]
     for _ in report.repos:
       branches.add(report.recordedBranch)
@@ -90542,6 +90614,133 @@ proc roleBranchLabel(r: Option[ResolvedRole]; branch: string): string =
   if r.isSome: "branch '" & branch & "' (role " & roleChainText(r.get()) & ")"
   else: "branch '" & branch & "'"
 
+type
+  ForkDestinationKind = enum
+    ## What was at a fork's destination when the command started. Recorded
+    ## before anything is materialized, because it is the first half of the
+    ## evidence of what the run itself created (the second half is whether
+    ## its own root clone succeeded): once the root is cloned, a directory the
+    ## operator made and one the run made look the same.
+    fdkAbsent        ## nothing there: the run creates it (and maybe parents)
+    fdkEmptyDir      ## an empty directory the operator made
+    fdkPreexisting   ## a directory with content: a fork of this workspace
+                     ## already under way (the destination guard refuses any
+                     ## other non-empty directory)
+    fdkOther         ## a file, or a link to nothing: not a directory the run
+                     ## can materialize into, and never the run's to remove
+
+  ForkDestination = object
+    kind: ForkDestinationKind
+    createdParents: seq[string]
+      ## ``fdkAbsent`` only: the missing ancestors of the destination, nearest
+      ## first. The root clone creates them the way ``mkdir -p`` does, so a
+      ## run that removes its destination tries to remove them too — each
+      ## only while it is still empty.
+
+proc observeForkDestination(forkPath: string): ForkDestination =
+  ## Classify ``forkPath`` as it is NOW. Links are not followed when asking
+  ## whether something is there, so a dangling link counts as occupied rather
+  ## than as a path the run would create (and later remove).
+  if dirExists(forkPath):
+    result.kind =
+      if toSeq(walkDir(forkPath)).len == 0: fdkEmptyDir else: fdkPreexisting
+    return
+  if fileExists(forkPath) or symlinkExists(forkPath):
+    result.kind = fdkOther
+    return
+  result.kind = fdkAbsent
+  var child = forkPath
+  var parent = parentDir(forkPath)
+  while parent.len > 0 and parent != child and
+      not dirExists(parent) and not fileExists(parent) and
+      not symlinkExists(parent):
+    result.createdParents.add(parent)
+    child = parent
+    parent = parentDir(parent)
+
+proc settleForkDestination(report: var BranchReport; dest: ForkDestination;
+                           materialized, rootCloned, succeeded,
+                           mayHaveBranches: bool) =
+  ## Decide what a fork that did not succeed leaves at its destination, act on
+  ## it, and record it in ``report`` (see ``BranchReport.destinationState``).
+  ##
+  ## The destination is removed only when ALL of these hold:
+  ##
+  ## * no repo reached the branch. Until the branch pass creates one,
+  ##   everything there is a clone of something that exists elsewhere, so
+  ##   removing it costs a re-clone and loses nothing. Left behind, it was a
+  ##   directory the summary said nothing about, and the next run took it for
+  ##   a fork under way and wrote its own reports into it. Once a branch
+  ##   exists the no-rollback contract applies and the tree is the operator's
+  ##   to resume.
+  ## * it was absent or empty when the run started. A destination that
+  ##   already held content is never removed, whatever the outcome; an empty
+  ##   directory the operator made is emptied and kept.
+  ## * this run's own root clone into it succeeded (``rootCloned``). The
+  ##   observation above is not enough on its own: the path can be occupied
+  ##   by the time the clone runs (a concurrent fork to the same path, or a
+  ##   spelling such as ``missing/../existing`` that does not resolve until
+  ##   the clone creates ``missing``). ``git clone`` refuses a non-empty
+  ##   directory, so a clone that succeeded is proof the tree is this run's;
+  ##   one that failed has already removed its own work tree.
+  ##
+  ## Nothing here follows a link: a link inside the tree is unlinked, never
+  ## the directory it points at. A created parent is removed only while it is
+  ## empty, so nothing that appeared beside the destination is touched.
+  if succeeded or not materialized:
+    # Success, or a run that stopped before it touched the destination.
+    return
+  let branchCreated = mayHaveBranches or
+    report.repos.anyIt(branchOutcomeCreatedBranch(it.outcome))
+  let owned = rootCloned and dest.kind in {fdkAbsent, fdkEmptyDir}
+  if branchCreated or not owned:
+    if dest.kind == fdkOther:
+      return
+    if not branchCreated and not rootCloned and
+        dest.kind in {fdkAbsent, fdkEmptyDir}:
+      # The root clone failed, and ``git clone`` removes the work tree it was
+      # making when it fails. Only the parents it created for that work tree
+      # can still be the run's, and they are removed only while empty.
+      if dest.kind == fdkAbsent:
+        for parent in dest.createdParents:
+          if not removeEmptyDirNoFollow(parent):
+            break
+      let leftNothing =
+        if dest.kind == fdkAbsent: not dirExists(report.destination)
+        else: dirExists(report.destination) and
+          toSeq(walkDir(report.destination)).len == 0
+      if leftNothing:
+        report.destinationState = "removed"
+      # Otherwise what is there now is not this run's and was not there to
+      # resume when it started: it is neither reported as a partial fork nor
+      # offered for removal, since the run never touched it.
+      return
+    if dirExists(report.destination):
+      report.destinationState = "kept"
+      report.destinationRemedy = "rm -rf " &
+        remedyPathWord(report.destination)
+    return
+  try:
+    case dest.kind
+    of fdkAbsent:
+      removePathNoFollow(report.destination)
+      for parent in dest.createdParents:
+        if not removeEmptyDirNoFollow(parent):
+          break
+    of fdkEmptyDir:
+      for _, child in walkDir(report.destination):
+        removePathNoFollow(child)
+    of fdkPreexisting, fdkOther:
+      discard
+    report.destinationState = "removed"
+  except CatchableError as err:
+    report.destinationState = "remove_failed"
+    report.destinationRemedy = "rm -rf " & remedyPathWord(report.destination)
+    report.repos.add(BranchRepoEntry(
+      outcome: "destination_remove_failed",
+      diagnostic: "no branch was created, but removing what this run " &
+        "materialized at '" & report.destination & "' failed: " & err.msg))
+
 proc executeBranchFork(parsed: BranchArgs): BranchReport =
   ## M27 / WV-6 — ``repro branch <path>`` (a.k.a. ``repro workspace new``):
   ## materialize a NEW workspace at ``parsed.forkPath`` on a branch named after
@@ -90595,6 +90794,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
   result.role = parsed.fromRole.role
   result.sourceWorkspaceRoot = parsed.workspaceRoot
   result.workspaceRoot = parsed.forkPath
+  result.destination = parsed.forkPath
   result.includeChanges = parsed.includeChanges
 
   # ---- membership of the NEW workspace -----------------------------------
@@ -90685,6 +90885,22 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
           "(no `origin` matching '" & rootOrigin & "'); choose a different " &
           "path or remove it first"))
       return
+
+  # ---- what this run owns at the destination -----------------------------
+  # Recorded now, before anything is materialized (see
+  # ``settleForkDestination``). The deferred settlement also runs when the
+  # run is cut short by an exception, so a raise after the root clone cannot
+  # leave an unreported tree behind either; ``succeeded`` is set only at the
+  # final success point for that reason, rather than read from ``exitCode``,
+  # which is 0 by default until something sets it.
+  let destination = observeForkDestination(parsed.forkPath)
+  var materializationStarted = false
+  var rootCloned = false
+  var mayHaveBranches = false
+  var succeeded = false
+  defer:
+    settleForkDestination(result, destination, materializationStarted,
+      rootCloned, succeeded, mayHaveBranches)
 
   # ---- observation pass over the SOURCE workspace ------------------------
   type
@@ -91295,9 +91511,11 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
 
   # ---- materialize the new workspace ------------------------------------
   # Resuming (see the destination guard) means the root clone is already there.
+  materializationStarted = true
   if not resuming and not dirExists(parsed.forkPath / ".git"):
     let rootClone = cloneOrgRootRepo(identity, rootOrigin, parsed.forkPath,
       independentObjects = parsed.cloneObjects notin ["", "shared"])
+    rootCloned = rootClone.cloned
     if not rootClone.ok:
       result.exitCode = 1
       result.repos.add(BranchRepoEntry(
@@ -91343,19 +91561,35 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
     initArgs.additionalProjects = forkProjects[1 .. ^1]
   initArgs.toolProvisioning = parsed.toolProvisioning
   initArgs.cloneObjects = parsed.cloneObjects
-  let initOutcome = executeWorkspaceInit(initArgs)
+  var initOutcome: WorkspaceInitOutcome
+  try:
+    initOutcome = executeWorkspaceInit(initArgs)
+  except CatchableError as err:
+    # Init reports clone failures as outcomes, but it can also raise (an
+    # unreadable manifest in the freshly cloned root, a filesystem error).
+    # Unhandled, that produced no report at all; reported, it is one more way
+    # for materialization to fail before any branch exists.
+    result.exitCode = 1
+    result.repos.add(BranchRepoEntry(
+      outcome: "init_failed",
+      diagnostic: "materializing the member repos of '" & parsed.forkPath &
+        "' failed before any branch was created: " & err.msg))
+    return
   for entry in initOutcome.report.cloned:
     clonedPaths.incl(entry.path)
   if initOutcome.cloneFailures > 0:
-    # Partial materialization is LEFT IN PLACE (no rollback): re-running the
-    # identical command clones only what is still missing.
+    # No branch exists yet, so what was materialized is not left as a
+    # resumable fork: ``settleForkDestination`` removes it when this run
+    # created it and keeps it when it was already there, and the summary says
+    # which. The per-repo errors are the `workspace init: clone failed for …`
+    # lines init printed, so they are not repeated here.
     result.exitCode = 1
     result.repos.add(BranchRepoEntry(
       outcome: "clone_failed",
       diagnostic: $initOutcome.cloneFailures & " repo clone(s) failed while " &
-        "materializing '" & parsed.forkPath & "'; the partial workspace is " &
-        "left in place — re-run the same command to finish it (see " &
-        "init-report.json there for the per-repo detail)"))
+        "materializing '" & parsed.forkPath & "' (each is printed above as " &
+        "`workspace init: clone failed for …`); no branch had been created " &
+        "yet"))
     return
 
   # For a repo absent from the SOURCE, target init is the authority for its
@@ -91579,6 +91813,10 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       actionRepoIndex[actionId] = idx
 
   var outcomeById = initTable[string, ActionResult]()
+  # From here a branch may exist in some repo before the outcomes below are
+  # recorded, so a raise in between must not be read as "no branch created".
+  # Settled again from the recorded outcomes once they are all in.
+  mayHaveBranches = actions.len > 0
   if actions.len > 0:
     let cacheRoot = parsed.forkPath / ".repro" / "workspace" / "engine-cache"
     var config = defaultBuildEngineConfig(cacheRoot)
@@ -91727,6 +91965,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
             entry.outcome = "branched_with_changes"
       result.repos.add(entry)
 
+  mayHaveBranches = result.repos.anyIt(branchOutcomeCreatedBranch(it.outcome))
   if failures > 0 or rootFailed:
     result.exitCode = 1
     return
@@ -91777,6 +92016,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
         "' failed: " & err.msg))
     return
   result.exitCode = 0
+  succeeded = true
 
 ## ----------------------------------------------------------------------------
 ## CI-Sharding M2 — ``repro test`` shard runner.
