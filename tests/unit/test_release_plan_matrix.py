@@ -148,9 +148,12 @@ class PlanScriptTests(unittest.TestCase):
     def write_spec(self, spec):
         (self.checkout / ".github" / "release-platforms.json").write_text(json.dumps(spec))
 
-    def plan(self, *, ref, platforms=""):
+    def plan(self, *, ref, platforms="", pkg_signing="false", msi_signing="false"):
+        # The signing flags default to what a repository without the
+        # production signing secrets passes ("false").
         env = dict(os.environ, FIXTURE_JSON=json.dumps({"ref": ref}),
-                   SCRIPT_PATH=str(self.script_path), PLATFORM_FILTER=platforms)
+                   SCRIPT_PATH=str(self.script_path), PLATFORM_FILTER=platforms,
+                   PKG_SIGNING_CONFIGURED=pkg_signing, MSI_SIGNING_CONFIGURED=msi_signing)
         proc = subprocess.run([NODE, str(self.harness_path)], cwd=self.checkout, env=env,
                               capture_output=True, text=True, check=False)
         self.assertEqual(proc.returncode, 0, proc.stderr)
@@ -229,6 +232,104 @@ class PlanScriptTests(unittest.TestCase):
         self.assertIn(f"reprobuild-{VERSION}-linux-aarch64.tar.gz", assets)
         aarch64 = next(p for p in matrix if _leg(p) == "linux-aarch64")
         self.assertIs(aarch64["native-packages"], False)
+
+    # -- signed installers (requirement: no stand-in-signed asset joins) -----
+    #
+    # The .pkg and the MSI are signed with stand-in certificates until the
+    # production signing secrets are configured, and a stand-in-signed asset
+    # must never join a release. So `plan` refuses a `packages` entry for
+    # either while the step's flag for its secrets is not "true". The flags
+    # are the step's PKG_SIGNING_CONFIGURED / MSI_SIGNING_CONFIGURED, computed
+    # by the workflow from the secrets' presence (asserted below); here they
+    # are set directly, as the runner would.
+
+    SIGNED = {"pkg": ("darwin-aarch64", "reprobuild-{version}-darwin-aarch64.pkg"),
+              "msi": ("windows-x86_64", "reprobuild-{version}-windows-x86_64.msi")}
+
+    def spec_listing(self, ecosystem):
+        spec = _released_spec()
+        frm, asset = self.SIGNED[ecosystem]
+        spec["packages"].append({"ecosystem": ecosystem, "from": frm, "asset": asset})
+        self.write_spec(spec)
+        return asset.replace("{version}", VERSION), frm
+
+    def test_cs_m8e_the_checked_in_declaration_lists_no_signed_installer(self):
+        self.assertFalse([p for p in _released_spec()["packages"] if p["ecosystem"] in self.SIGNED])
+
+    def test_cs_m8e_a_signed_installer_is_refused_while_its_production_secrets_are_missing(self):
+        for ecosystem in self.SIGNED:
+            for ref in (f"refs/tags/v{VERSION}", "refs/heads/agents"):
+                with self.subTest(ecosystem=ecosystem, ref=ref):
+                    asset, _ = self.spec_listing(ecosystem)
+                    r = self.plan(ref=ref)
+                    self.assertIsNotNone(r["failed"], r)
+                    self.assertIn(f"lists {asset} ({ecosystem})", r["failed"])
+                    self.assertIn("stand-in", r["failed"])
+                    self.assertNotIn("matrix", r["outputs"])
+
+    def test_cs_m8e_the_other_installers_secrets_do_not_admit_it(self):
+        """Control: the MSI's secrets do not admit the .pkg, and vice versa."""
+        self.spec_listing("pkg")
+        self.assertIsNotNone(self.plan(ref=f"refs/tags/v{VERSION}", msi_signing="true")["failed"])
+        self.spec_listing("msi")
+        self.assertIsNotNone(self.plan(ref=f"refs/tags/v{VERSION}", pkg_signing="true")["failed"])
+
+    def test_cs_m8e_a_signed_installer_with_its_secrets_joins_the_release_from_its_leg(self):
+        for ecosystem in self.SIGNED:
+            with self.subTest(ecosystem=ecosystem):
+                asset, frm = self.spec_listing(ecosystem)
+                flags = {"pkg_signing": "true"} if ecosystem == "pkg" else {"msi_signing": "true"}
+                matrix, assets = self.assert_ok(self.plan(ref=f"refs/tags/v{VERSION}", **flags))
+                self.assertIn(asset, assets)
+                for row in matrix:
+                    self.assertEqual(row["signed-installer"], asset if _leg(row) == frm else "", row)
+                    # The .deb/.rpm steps are not run for a signed installer.
+                    if _leg(row) == frm:
+                        self.assertIs(row["native-packages"], False, row)
+
+    def test_cs_m8e_without_a_listed_installer_no_leg_has_one(self):
+        matrix, _ = self.assert_ok(self.plan(ref=f"refs/tags/v{VERSION}"))
+        self.assertEqual({row["signed-installer"] for row in matrix}, {""})
+
+
+class SignedInstallerWiringTests(unittest.TestCase):
+    """The workflow text that the plan cases above and the signing tests in
+    test_release_signed_installers.py rely on."""
+
+    def setUp(self):
+        self.text = PIPELINE_YML.read_text(encoding="utf-8")
+
+    def test_cs_m8e_plan_reads_the_presence_of_the_signing_secrets(self):
+        step = _identity._plan_step(STEP)
+        self.assertIn("          PKG_SIGNING_CONFIGURED: ${{ secrets.REPRO_PKG_SIGNING_P12_BASE64 != '' && "
+                      "secrets.REPRO_PKG_SIGNING_P12_PASSWORD != '' && secrets.REPRO_NOTARY_API_KEY_P8 != '' && "
+                      "secrets.REPRO_NOTARY_API_KEY_ID != '' && secrets.REPRO_NOTARY_API_ISSUER_ID != '' }}\n", step)
+        self.assertIn("          MSI_SIGNING_CONFIGURED: ${{ secrets.REPRO_AUTHENTICODE_PFX_BASE64 != '' && "
+                      "secrets.REPRO_AUTHENTICODE_PFX_PASSWORD != '' }}\n", step)
+
+    def test_cs_m8e_the_installer_steps_run_on_a_tag_only_when_listed(self):
+        guard = "(!startsWith(github.ref, 'refs/tags/') || matrix.signed-installer != '')"
+        for name in ("Build, sign and notarize the macOS installer package",
+                     "Provision WiX v3 and signtool (Windows installer)",
+                     "Build and sign the Windows installer (MSI)"):
+            m = re.search(rf"- name: {re.escape(name)}\n        if: (.*)\n", self.text)
+            self.assertIsNotNone(m, name)
+            self.assertIn(guard, m.group(1), name)
+
+    def test_cs_m8e_the_installer_steps_mark_a_tag_as_publishing(self):
+        line = "          REPRO_RELEASE_PUBLISHING: ${{ startsWith(github.ref, 'refs/tags/') && '1' || '0' }}\n"
+        self.assertEqual(self.text.count(line), 2)
+
+    def test_cs_m8e_the_publish_job_refuses_stand_in_assets_before_uploading(self):
+        job = self.text[self.text.index("\n  publish-release:"):]
+        refuse = job.index("run: sh scripts/release/refuse_stand_in_signed_assets.sh staging")
+        self.assertLess(job.index("- name: Assert the complete, expected asset set is present"), refuse)
+        self.assertLess(refuse, job.index("- name: Sign SHA256SUMS and artifacts"))
+        self.assertLess(refuse, job.index("- name: Upload assets to a draft release"))
+
+    def test_cs_m8e_a_proving_runs_installer_is_never_a_release_artifact(self):
+        self.assertIn("name: proving-installer-${{ matrix.platform }}-${{ matrix.arch }}", self.text)
+        self.assertIn("          pattern: release-*\n", self.text)
 
 
 if __name__ == "__main__":
