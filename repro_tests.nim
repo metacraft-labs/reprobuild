@@ -4150,7 +4150,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_libs_repro_cli_support_tests_g02",
+    group: "t_group_libs_repro_cli_support_tests_g01",
     singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_lock_list_without_a_build_block.nim",
@@ -4296,6 +4296,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     selfInterposes: false,
     group: "",
     singleReason: "program-wide pragma {.define"),
+  TestSpec(
+    source: "libs/repro_cli_support/tests/t_materialized_restore_stages_under_a_private_name.nim",
+    binary: "build/test-bin/t_materialized_restore_stages_under_a_private_name",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_cli_support_tests_g02",
+    singleReason: ""),
   TestSpec(
     source: "libs/repro_cli_support/tests/t_nimble_index_catalog_import.nim",
     binary: "build/test-bin/t_nimble_index_catalog_import",

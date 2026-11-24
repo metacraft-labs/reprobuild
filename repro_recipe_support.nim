@@ -414,7 +414,8 @@ const
         ("libs/repro_binary_cache_client/tests/t_portable_memo_cache.nim", @[Base]),
         ("libs/repro_binary_cache_client/tests/t_portable_memo_refuses_timestamp_records.nim", @[Base]),
         ("libs/repro_binary_cache_client/tests/t_r1_client_trust.nim", @[Base]),
-        ("libs/repro_binary_cache_client/tests/test_publish_in_process.nim", @[Base])]:
+        ("libs/repro_binary_cache_client/tests/test_publish_in_process.nim", @[Base]),
+        ("libs/repro_cli_support/tests/t_materialized_restore_stages_under_a_private_name.nim", @[Base])]:
       rows.add TestGraphArtifacts(source: source, artifacts: artifacts)
     rows
 
