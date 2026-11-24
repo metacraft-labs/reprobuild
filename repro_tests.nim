@@ -32665,6 +32665,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_spi_submodule_borrowing_from_partial_pool_keeps_its_files.nim",
+    binary: "build/test-bin/t_spi_submodule_borrowing_from_partial_pool_keeps_its_files",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "self-spawn marker getAppFilename"),
+  TestSpec(
     source: "tests/integration/t_ssl_edges_carry_openssl_link_path.nim",
     binary: "build/test-bin/t_ssl_edges_carry_openssl_link_path",
     defines: @[],

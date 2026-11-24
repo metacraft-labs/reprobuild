@@ -54409,6 +54409,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
       if args.cloneObjects in ["", "shared"] and hasGitEntry(repoPath):
         reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
           cacheRoot))
+      # Its submodules borrow on their own account, and need the chain
+      # before the submodule update that follows a fast-forward can read
+      # what their pool only promises; files an earlier checkout left out
+      # are written back (§4.1).
+      # A submodule borrows whatever it was cloned to borrow, whatever this
+      # run's clone-object policy is, so ``none`` still inspects the host's
+      # cache.
+      if hasGitEntry(repoPath):
+        reports.add(checkSubmoduleLeaves(identity.binaryPath, repoPath,
+          lcmRepair,
+          if cacheRoot.len > 0: cacheRoot
+          else: defaultCacheRoot(args.workspaceRoot)))
     emitLeafReports(reports)
 
   var sharedBareRefreshAction = initTable[string, string]()
@@ -79354,16 +79366,56 @@ proc populateSubmodules(identity: GitToolIdentity;
     if key.len == 0:
       return "submodule '" & path & "' of " & clone & " has no entry in " &
         ".gitmodules"
+    # The new submodule borrows ``src``'s objects (``--reference``), and
+    # through ``src``'s alternates those of any partial pool ``src`` reaches,
+    # directly or through a leaf. git checks the submodule out in the same
+    # command that clones it, so the refetch chain (Shared-Clone-Pool-
+    # Integrity §3.4, "Submodules") is given to that command as ``-c``
+    # settings, which git passes on to the submodule's clone and checkout,
+    # and is written into the submodule once it exists. Without it git cannot
+    # read a blob the pool only promises and fails the checkout with every
+    # such file left out.
+    let pools = partialPoolsReachedBy(identity.binaryPath, src)
+    var chainArgs: seq[string]
+    if pools.len > 0:
+      let chain = poolChainConfigArgs(pools[0])
+      if chain.diagnostic.len > 0:
+        return "could not give submodule '" & path & "' the refetch chain " &
+          "to the shared cache " & pools[0] & ": " & chain.diagnostic
+      chainArgs = chain.args
     # Two git command lines (git's argv, not a comparison of repro's).
     let gitCommands = [@["-C", clone, "config", key & ".url", src],
-        @["-C", clone, "-c", "protocol.file.allow=always", "submodule",
-          "--quiet", "update", "--init", "--reference", src, "--", path]]
+        @["-C", clone, "-c", "protocol.file.allow=always"] & chainArgs &
+          @["submodule", "--quiet", "update", "--init", "--reference", src,
+            "--", path]]
     for argv in gitCommands:
       let res = gitRunPlainQuery(identity, argv)
       if res.code != 0:
         return "could not populate submodule '" & path & "' from " & src &
           ": git " & argv.join(" ") & " failed (" & $res.code & "): " &
           res.diagnostic
+    if pools.len > 0:
+      let persisted = ensureLeafPoolConfig(identity.binaryPath, clone / path,
+        pools[0])
+      if persisted.len > 0:
+        return "could not give submodule '" & path & "' of " & clone &
+          " the refetch chain to the shared cache " & pools[0] & ": " &
+          persisted
+    # As for the member above: a file git could not read is left out.
+    let missing = gitRunPlainQuery(identity, ["-C", clone / path, "ls-files",
+      "--deleted"])
+    if missing.code != 0:
+      return "git ls-files --deleted failed in " & (clone / path) & ": " &
+        missing.diagnostic
+    if missing.output.strip().len > 0:
+      var listed = ""
+      for line in missing.output.strip().splitLines():
+        listed.add("\n  " & line)
+      return "the checkout of submodule '" & path & "' from " & src &
+        " is incomplete: git could not read the content of these tracked " &
+        "files and left them out:" & listed & "\nRun 'repro health' in the " &
+        "workspace to check " & src & "'s refetch chain to its shared " &
+        "cache, then retry"
     let nested = populateSubmodules(identity, clone / path, src)
     if nested.len > 0:
       return nested
@@ -80802,7 +80854,8 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
         continue
       sharedCloneFindings.add(%*{"leaf": lr.leaf, "pool": lr.pool,
         "kind": $f.kind, "ref": f.refName, "object": f.objectId,
-        "removed": f.removed, "message": f.message})
+        "removed": f.removed, "paths": f.paths, "restored": f.restored,
+        "message": f.message})
   result["sharedCloneFindings"] = sharedCloneFindings
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
@@ -81251,6 +81304,12 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       defaultCacheRoot(args.workspaceRoot))
     if leafReport.pool.len > 0:
       report.leafReports.add(leafReport)
+    # The same for the checkout's submodules, which borrow on their own
+    # account (§4.1), and the files a failed checkout left out in them.
+    for subReport in checkSubmoduleLeaves(identity.binaryPath, repoAbsPath,
+        if args.fix: lcmRepair else: lcmReport,
+        defaultCacheRoot(args.workspaceRoot)):
+      report.leafReports.add(subReport)
 
     if not entry.isClean:
       entry.checkoutState = "dirty"
@@ -81564,6 +81623,12 @@ type
     gitOk: bool
     leafReports: seq[LeafCheckReport]
       ## ``shared-clone-leaves``: the detector's report-only pass.
+    submoduleReports: seq[LeafCheckReport]
+      ## ``shared-clone-leaves``: the same pass over the participating
+      ## repos' submodules (``checkSubmoduleLeaves``).
+    submoduleParents: seq[string]
+      ## The participating checkouts whose submodules borrow from a pool;
+      ## ``--fix`` re-runs ``checkSubmoduleLeaves`` in each.
     poolMissing: seq[tuple[leaf, fetchUrl, message: string]]
       ## ``shared-clone-leaves``: checkouts whose alternates name a shared
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
@@ -84136,6 +84201,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var stale: seq[string]
     var broken: seq[string]
     var chains: seq[string]
+    var lostFiles: seq[string]
     var diagnostics: seq[string]
     for index, repo in ctx.resolved.repos:
       parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
@@ -84143,6 +84209,32 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
         continue
       inc total
+      # Shared-Clone-Pool-Integrity §4.1: a submodule borrows on its own
+      # account, directly from a pool or through a leaf of one, whether or
+      # not the superproject borrows at all. Report-only here, like the
+      # checkout's own pass below; ``--fix`` restores the files a failed
+      # checkout left out.
+      let subReports = checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, abs,
+        lcmReport, cacheRoot)
+      if subReports.len > 0:
+        ctx.submoduleParents.add(abs)
+      for sr in subReports:
+        ctx.submoduleReports.add(sr)
+        let shown = relativePath(sr.leaf, parsed.workspaceRoot)
+        if sr.diagnostic.len > 0:
+          diagnostics.add(shown & ": " & sr.diagnostic)
+        for f in sr.findings:
+          case f.kind
+          of lfkRefetchChainMissing:
+            chains.add(shown)
+          of lfkWorkTreeFilesLost:
+            lostFiles.add(shown & " (" & $f.paths.len & ")")
+          of lfkStaleRemoteRef:
+            stale.add(shown & " " & f.refName)
+          of lfkLocalTipMissing, lfkLocalHistoryMissing:
+            broken.add(shown & " " & f.refName)
+          else:
+            discard
       var poolDeleted = false
       try:
         let entries = alternateObjectDirs(abs)
@@ -84196,6 +84288,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         else:
           discard
     if stale.len == 0 and broken.len == 0 and chains.len == 0 and
+        lostFiles.len == 0 and
         diagnostics.len == 0 and foreignPools.len == 0 and
         missingPools.len == 0:
       checks.add(HealthCheck(
@@ -84215,9 +84308,15 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if chains.len > 0:
         detail.add($chains.len & " checkout(s) lacked a working refetch chain " &
           "to a partial shared clone: " & chains.join(", "))
+      if lostFiles.len > 0:
+        detail.add($lostFiles.len & " checkout(s) are missing tracked files " &
+          "that git could not read from a partial shared clone and left " &
+          "out (count in parentheses; the messages below list them): " &
+          lostFiles.join(", "))
       if diagnostics.len > 0:
         detail.add(diagnostics.join("; "))
       let canRepair = stale.len > 0 or chains.len > 0 or
+        lostFiles.len > 0 or
         diagnostics.len > 0 or missingPools.len > 0
       if stale.len > 0:
         detail.add($stale.len & " stale remote-tracking ref(s) whose " &
@@ -84658,6 +84757,21 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+      for parent in ctx.submoduleParents:
+        for sr in checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, parent,
+            lcmRepair, defaultCacheRoot(parsed.workspaceRoot)):
+          for f in sr.findings:
+            if f.kind == lfkStaleRemoteRef and f.removed:
+              emit("fix: removed " & f.refName & " in " & sr.leaf)
+              stderr.writeLine(f.message)
+            elif f.kind == lfkWorkTreeFilesLost:
+              if f.restored.len > 0:
+                emit("fix: restored " & $f.restored.len & " file(s) git " &
+                  "had left out in " & sr.leaf & ": " & f.restored.join(", "))
+              if f.restored.len < f.paths.len:
+                emit("fix: could NOT restore " &
+                  $(f.paths.len - f.restored.len) & " file(s) in " & sr.leaf)
+                stderr.writeLine(f.message)
     of hfSharedClonePackTemporaries:
       for pool in ctx.packTemporaryPools:
         emit("fix: removing abandoned git pack temporaries in " & pool)
@@ -84796,7 +84910,7 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
       stdout.writeLine(line)
   # The shared-clone detector's messages (report-only here): what is wrong
   # in each checkout, in words, with the exact commands that fix it.
-  emitLeafReports(ctx.leafReports)
+  emitLeafReports(ctx.leafReports & ctx.submoduleReports)
   if ctx.poolMissing.len > 0:
     stdout.flushFile()
     for missing in ctx.poolMissing:
