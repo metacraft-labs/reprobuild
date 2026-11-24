@@ -307,6 +307,8 @@ libs/repro_cli_support/tests/t_a_failing_producer_fetch_reports_why.nim	nim	1
 libs/repro_cli_support/tests/t_a_lock_rewrite_that_does_not_parse_is_refused.nim	nim	6
 libs/repro_cli_support/tests/t_a_pinned_nim_archive_is_verified_against_the_lock.nim	nim	4
 libs/repro_cli_support/tests/t_a_producer_fetch_ignores_the_callers_loader_path.nim	nim	1
+libs/repro_cli_support/tests/t_absence_is_accepted_by_the_judge.nim	nim	2
+libs/repro_cli_support/tests/t_absence_observations.nim	nim	6
 libs/repro_cli_support/tests/t_action_cache_root_resolution.nim	nim	3
 libs/repro_cli_support/tests/t_addon_platform_dispatch.nim	nim	7
 libs/repro_cli_support/tests/t_anywhere_plan_digest_covers_what_it_applies.nim	nim	6
@@ -2046,7 +2048,7 @@ tests/integration/t_committed_lock_records_develop_set_siblings.nim	nim	3
 tests/integration/t_committed_lock_records_no_materialization_path.nim	nim	3
 tests/integration/t_compiler_args_transport.nim	nim	6
 tests/integration/t_compiler_scratch_isolation.nim	nim	7
-tests/integration/t_completion_emits_shell_script.nim	nim	3
+tests/integration/t_completion_emits_shell_script.nim	nim	4
 tests/integration/t_concurrent_lock_publishes_retry_without_user_visible_failure.nim	nim	1
 tests/integration/t_concurrent_publish_disjoint_per_backend.nim	nim	1
 tests/integration/t_concurrent_repro_exec_in_one_project_share_the_dev_env_edge.nim	nim	1
@@ -2070,6 +2072,7 @@ tests/integration/t_cs_m6_round8c_mounted_command_lines.nim	nim	12
 tests/integration/t_cs_m6_stores_and_daemons_command_lines.nim	nim	3
 tests/integration/t_cs_m6_usage_errors_and_coloured_help.nim	nim	5
 tests/integration/t_cs_m6_workspace_command_lines.nim	nim	5
+tests/integration/t_cs_m8e_macos_shell_placements.nim	nim	4
 tests/integration/t_ct_test_surface_case_addressability.nim	nim	6
 tests/integration/t_cvm_evidence_emulator_all_protocol_paths.nim	nim	9
 tests/integration/t_d1_buildnimunittest_resolves_in_path_mode.nim	nim	2
@@ -2329,6 +2332,7 @@ tests/integration/t_just_test_via_ct_test_runner.nim	nim	1
 tests/integration/t_key_difference_explanation_names_the_cause.nim	nim	1
 tests/integration/t_l3_build_block_public_interface_tagged_in_provider_mode.nim	nim	4
 tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim	nim	9
+tests/integration/t_later_added_file_breaks_an_old_certificate.nim	nim	1
 tests/integration/t_leaked_instance_is_reaped.nim	nim	52
 tests/integration/t_lease_reap_destroys_an_unlinked_type_over_a_session.nim	nim	1
 tests/integration/t_lease_reap_session_transport_is_reachable_from_production.nim	nim	4
@@ -3286,7 +3290,7 @@ tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	21
+tests/unit/test_release_native_packages.py	python	22
 tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_plan_matrix.py	python	16
 tests/unit/test_release_smoke_dev_exec.py	python	21

@@ -27458,6 +27458,7 @@ proc completionHookRequestOf(parsed: ParsedHooksCommand):
     pathEnv: getEnv("PATH"),
     user: getEnv("USER"),
     windows: defined(windows),
+    macos: defined(macosx),
     # Windows `--system` puts the script under this installation: the
     # directory above the `bin\` this binary runs from (an MSI's
     # `%ProgramFiles%\Reprobuild`, whose script the package installed).
@@ -93147,6 +93148,14 @@ proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
           continue
         if dirExists(canonicalReadPath(path)):
           continue
+        # An absence observation (Test-Certificates.md, "Absence observations"):
+        # a path absent on disk at test time was looked up, not read, and a path
+        # absent from the certified tree stays pinned by the content id. A later
+        # creation of a tracked file changes the content; an untracked file that
+        # appears later is read by the next run and refused there.
+        if not (fileExists(absolutePath(path)) or
+            symlinkExists(absolutePath(path))):
+          continue
         if isExemptOutputRead(path, readSet, asEntry):
           continue
         seen.incl(relative)
@@ -109026,7 +109035,8 @@ proc runCompletionCommand*(shellName: string): int =
   ## ``repro __complete <shell> <words...>`` and prints what comes back, so
   ## completion always offers what the installed binary's description
   ## declares, dynamic values included. ``shellName`` is one of the values
-  ## the description allows.
+  ## the description allows; ``pwsh`` (PowerShell 7's executable name) is a
+  ## synonym of ``powershell`` and prints the same script.
   var shell: CliShell
   if not cliParseShell(shellName, shell):
     # The description's closed value set rejects any other name before this
