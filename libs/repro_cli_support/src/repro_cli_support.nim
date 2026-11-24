@@ -31473,7 +31473,16 @@ proc committedLockRepoFacts(repoRoot: string):
     tuple[headSha, branch, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
   ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
-  ## the canonical fetch URL (empty when the repo has NO remote at all).
+  ## the fetch URL (empty when the repo has NO remote at all).
+  ##
+  ## ``originUrl`` is the remote AS THIS CLONE SPELLS IT (SSH or HTTPS, with
+  ## any userinfo it was configured with), which is what a local fetch should
+  ## use. It is never written to a committed lock as is: every lock writer
+  ## records ``canonicalLockFetchUrl(originUrl)`` instead, because a lock
+  ## entry must not depend on the transport the writer's clone uses or carry
+  ## its credentials: an SSH clone would otherwise write a URL anonymous
+  ## consumers cannot fetch, and an HTTPS remote with userinfo would commit
+  ## its token.
   ##
   ## ``branch`` is the local name and is right for local decisions (a trunk
   ## to sync). It is never written to a committed lock, and neither is any
@@ -31806,7 +31815,8 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -31852,7 +31862,8 @@ proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
     name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
-    coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+    coordinates: Coordinates(kind: ckVcs,
+      url: canonicalLockFetchUrl(facts.originUrl),
       revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
     version: "", visibility: "public", participation: "",
@@ -31925,7 +31936,8 @@ proc catalogLockedDep*(catalogRoot, root: string;
       else: ReprobuildPackagesRepositoryName
     return some(LockedDep(
       name: name, path: defaultLockedDepCheckoutPath(name),
-      coordinates: Coordinates(kind: ckVcs, url: marker.url,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(marker.url),
         revision: marker.revision),
       integrity: gitObjectMultihash(
         (if marker.revision.len == 64: "sha256" else: "sha1"),
@@ -31958,7 +31970,8 @@ proc catalogLockedDep*(catalogRoot, root: string;
     return some(LockedDep(
       name: depName,
       path: depPath,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32424,7 +32437,8 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
       name: d.name, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32549,7 +32563,8 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       continue
     siblingDeps.add(LockedDep(
       name: depName, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32636,13 +32651,23 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if name notin rootDepends: rootDepends.add(name)
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
-    coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
+    coordinates: Coordinates(kind: ckVcs,
+      url: canonicalLockFetchUrl(rootFacts.originUrl),
       revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
     depends: rootDepends, tags: @[]))
   for d in siblingDeps:
-    result.add(d)
+    var entry = d
+    # Observed entries are already canonical. A pin carried forward from the
+    # existing lock (its sibling not checked out here, or a cached producer
+    # checkout) keeps the URL an older writer recorded, which may be the
+    # writer's SSH spelling or carry userinfo: write it in the one form every
+    # machine writes (Unified-Locking-And-Hooks.md §14.2, "The `url` a pin
+    # records"). This moves no pin.
+    if entry.coordinates.kind == ckVcs:
+      entry.coordinates.url = canonicalLockFetchUrl(entry.coordinates.url)
+    result.add(entry)
 
 proc checkoutTrunk(facts: tuple[headSha, branch, originUrl: string]): string =
   ## The default workspace branch of a committed-lock-only workspace: the
