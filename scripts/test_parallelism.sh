@@ -121,6 +121,44 @@ reprobuild_available_memory_mb() {
   printf '\n'
 }
 
+# Free disk in MiB on the filesystem holding $1 (default: the current
+# directory), or empty when it cannot be measured.
+#
+# `df -Pk` (POSIX output, 1 KiB blocks) is portable across Linux and macOS.
+# The build phase writes only below the repository, so that is the filesystem
+# whose headroom matters; a pool shared with other runners is still measured
+# correctly because df reports the pool's free space, not a quota.
+reprobuild_available_disk_mb() {
+  local path="${1:-.}" kb
+  kb="$(df -Pk "${path}" 2>/dev/null | awk 'NR==2 { print $4; exit }' || true)"
+  if [[ "${kb}" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "$((kb / 1024))"
+    return 0
+  fi
+  printf '\n'
+}
+
+# Refuse, naming the cause, when the build phase cannot fit on the disk.
+#   $1 path on the filesystem the build writes to
+#   $2 MiB the phase needs
+# Returns 0 when there is room or the free space cannot be measured (an
+# unverifiable host is not refused: the guard must never invent a failure).
+# Returns 1 with one explanatory line on stderr otherwise. Without it a full
+# disk surfaces ~25 minutes in as "the engine never reached its post-mortem".
+reprobuild_require_free_disk() {
+  local path="$1" need_mb="$2" free_mb
+  free_mb="$(reprobuild_available_disk_mb "${path}")"
+  if [[ -z "${free_mb}" ]]; then
+    return 0
+  fi
+  if (( free_mb < need_mb )); then
+    printf 'error: only %s MiB free on the disk holding %s, but the build phase needs at least %s MiB. Free space (expire stale CI GC roots, remove old snapshots) or lower REPROBUILD_TEST_MIN_FREE_DISK_MB if you know better.\n' \
+      "${free_mb}" "${path}" "${need_mb}" >&2
+    return 1
+  fi
+  return 0
+}
+
 # The conservative core-only ladder: the behaviour every host had before the
 # budget existed. Retained verbatim for CI and for hosts whose memory cannot
 # be measured, so neither can be made worse by this file.

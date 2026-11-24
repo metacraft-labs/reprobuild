@@ -952,6 +952,119 @@ dev_shell_pin_relation() {
   fi
 }
 
+# Succeed when revision `$2` of the repository at `$1` has a regular file
+# named `flake.nix` at the root of its tree. The answer comes from the tree
+# entry (`ls-tree` prints `<mode> <type> <oid><TAB><path>`), so it needs the
+# commit and its root tree but not the blob, which a partial clone may lack
+# (see dev_shell_unflakeable_pin_state).
+dev_shell_tree_has_flake_nix() {
+  local dir="$1" rev="$2" entry
+  entry="$(dev_shell_git -C "$dir" ls-tree "$rev" -- flake.nix 2>/dev/null)" ||
+    return 1
+  [[ "$entry" == *" blob "*$'\t'"flake.nix" ]]
+}
+
+# Explain an `unflakeable` finding: the sibling directory has no `flake.nix`,
+# but WHY? Two very different repositories present identically on disk:
+#
+#   * one that has no `flake.nix` at all — the plugin can never override it,
+#     and the remedy is to add one or to declare the pin;
+#   * one whose `flake.nix` exists at the revision `flake.lock` pins, while
+#     the checkout simply predates the commit that added it. Adding a
+#     `flake.nix` there would duplicate a file the repository already has, and
+#     declaring the pin would excuse a stale checkout. The remedy is to bring
+#     the checkout up to its pin.
+#
+# The second case used to be reported as the first: a `nim-shm-queue`
+# checkout seven commits behind its pin `8dff4ad` failed the pre-commit
+# `just lint` with "add a flake.nix to that repository", and neither remedy it
+# named was right.
+#
+# Prints `state<TAB>pin<TAB>behind` on one line, where `state` is
+#
+#   no-pin       flake.lock gives no revision for the input (no lock, a
+#                `follows`, a `path:` input, or the input is not in the lock),
+#                so the pin cannot be consulted — report the finding as before
+#   not-git      the sibling is not a git checkout whose HEAD can be read
+#   unfetched    the pinned revision is not an object in the sibling, so
+#                whether it has a `flake.nix` cannot be told offline
+#   pin-unflaked the pinned revision has no `flake.nix` either: the repository
+#                genuinely is not a flake at its pin
+#   behind       the pin has a `flake.nix` and HEAD is an ancestor of the pin:
+#                fast-forwarding to the pin is the whole remedy
+#   diverged     the pin has a `flake.nix` and HEAD is NOT an ancestor of it:
+#                the checkout carries its own commits and lacks the pin's
+#   worktree-deleted  HEAD's own tree has a `flake.nix`; only the working tree
+#                lacks it
+#   removed-since-pin HEAD contains the pin, so a commit after the pin removed
+#                the `flake.nix` the pin has
+#
+# `behind` carries the number of pin commits HEAD lacks (0 for other states).
+#
+# It reads the committed lock and the sibling's object database. Whether a
+# revision has a `flake.nix` is answered from its TREE (`ls-tree`), never by
+# reading the blob: workspace checkouts are partial clones (`blob:none`) of a
+# promisor pool, so the pin's `flake.nix` blob is routinely absent locally.
+# `cat-file -e <rev>:flake.nix` on such a checkout lazy-fetches the blob, and
+# with the pool unreachable it fails — which would classify the pin as
+# `pin-unflaked` and print "add a flake.nix", the very misreport this function
+# exists to prevent. Commit presence is tested with `cat-file -e`, as in
+# `dev_shell_pin_relation`; in a promisor checkout git may lazily fetch a
+# missing commit to answer that, exactly as it does there.
+dev_shell_unflakeable_pin_state() {
+  local lock="$1" input="$2" sibling="$3"
+  local pin="" l_input l_rev
+  if [[ -f "$lock" ]]; then
+    while IFS=$'\t' read -r l_input l_rev; do
+      [[ "$l_input" == "$input" ]] || continue
+      pin="$l_rev"
+      break
+    done < <(dev_shell_flake_lock_pins "$lock")
+  fi
+  if [[ -z "$pin" || "$pin" == "-" || "$pin" == "follows" ]]; then
+    printf 'no-pin\t-\t0\n'
+    return 0
+  fi
+  local head
+  if [[ ! -e "$sibling/.git" ]] ||
+    ! head="$(dev_shell_git -C "$sibling" rev-parse --verify -q 'HEAD^{commit}' 2>/dev/null)"; then
+    printf 'not-git\t%s\t0\n' "$pin"
+    return 0
+  fi
+  if ! dev_shell_git -C "$sibling" cat-file -e "$pin^{commit}" 2>/dev/null; then
+    printf 'unfetched\t%s\t0\n' "$pin"
+    return 0
+  fi
+  # Only the root of the tree counts: a flake.nix the repository keeps in a
+  # subdirectory is not one the plugin would read either.
+  if ! dev_shell_tree_has_flake_nix "$sibling" "$pin"; then
+    printf 'pin-unflaked\t%s\t0\n' "$pin"
+    return 0
+  fi
+  # The pin has one. Before blaming the checkout's distance from the pin, rule
+  # out the two shapes where distance is not the cause: HEAD's own tree has a
+  # flake.nix (so it was deleted in the working tree), or HEAD already contains
+  # the pin (so the checkout's own commits removed it). "Fast-forward to the
+  # pin" would be wrong for both.
+  if dev_shell_tree_has_flake_nix "$sibling" "$head"; then
+    printf 'worktree-deleted\t%s\t0\n' "$pin"
+    return 0
+  fi
+  local behind
+  behind="$(dev_shell_git -C "$sibling" rev-list --count "$head..$pin" 2>/dev/null)" ||
+    behind=""
+  if [[ "$behind" == "0" ]]; then
+    printf 'removed-since-pin\t%s\t0\n' "$pin"
+    return 0
+  fi
+  [[ -n "$behind" ]] || behind=0
+  if dev_shell_git -C "$sibling" merge-base --is-ancestor "$head" "$pin" 2>/dev/null; then
+    printf 'behind\t%s\t%s\n' "$pin" "$behind"
+  else
+    printf 'diverged\t%s\t%s\n' "$pin" "$behind"
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # The §3.2 ambient drift report, at shell entry
 # ---------------------------------------------------------------------------

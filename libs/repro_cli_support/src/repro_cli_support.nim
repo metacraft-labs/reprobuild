@@ -443,6 +443,11 @@ import repro_binary_cache_client/caches_config as bcCachesConfig
 # standalone ``repro-binary-cache-client`` binary); ``repro cache`` runs
 # them from its configuration (``repro_cli_support/cache_cli``).
 import repro_binary_cache_client/cli_dispatch as bcCliDispatch
+# The single no-copy move every binary-cache substitute makes into its final
+# place, shared with ``extractPrefixInto``.
+from repro_binary_cache_client/in_process import renameIntoPlace
+# Removal that never follows a link, shared with the engine's scratch trees.
+import repro_core/tree_removal
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -4746,10 +4751,82 @@ proc materializedCachePrefix(action: BuildAction): string =
   action.cwd / raw
 
 proc removeMaterializedPath(path: string) =
-  if dirExists(path):
-    removeDir(path)
-  elif fileExists(path) or symlinkExists(path):
-    removeFile(path)
+  ## Remove what is AT ``path`` and nothing it points at. ``dirExists``
+  ## follows a symbolic link, so a helper that tested it first passed a link
+  ## to a directory to ``removeDir`` and emptied the directory it pointed
+  ## at. ``removePathNoFollow`` tests for a link first, and on Windows also
+  ## removes a directory link or junction as the link.
+  removePathNoFollow(path)
+
+proc restoreMaterializedPrefix(key, prefix: string):
+    tuple[ok: bool, error: string] =
+  ## Substitute the binary-cache entry ``key`` into ``prefix``, replacing
+  ## whatever is there, with the same guarantees ``repro cache substitute``
+  ## gives:
+  ##
+  ## * Everything is staged inside ONE directory with a random name, created
+  ##   beside ``prefix`` with mkdir semantics that fail when the name exists
+  ##   (``createTempDir``). Nobody else can have planted anything inside it,
+  ##   so nothing this proc removes is a path it did not create or move
+  ##   there itself. An earlier version staged at the predictable
+  ##   ``<prefix>.repro-cache-substitute-<pid>`` and began by removing it,
+  ##   which emptied the directory a link planted at that name pointed at.
+  ## * The previous ``prefix`` and the restored tree are each moved by one
+  ##   ``rename(2)`` (``renameIntoPlace``), never by a copy: the previous
+  ##   prefix is moved INTO the staging directory first, so a link at
+  ##   ``prefix`` is moved as the link and its target is never touched.
+  ## * On every failure the previous prefix is put back, and the staging
+  ##   directory is removed. If the previous prefix cannot be put back, the
+  ##   staging directory is kept, so it is not deleted, and the error names
+  ##   where it is.
+  let prefixAbs = absolutePath(prefix)
+  var stagingRoot = ""
+  var keepStaging = false
+  try:
+    createDir(parentDir(prefixAbs))
+    stagingRoot = createTempDir(".repro-cache-substitute-", "",
+      parentDir(prefixAbs))
+  except CatchableError as e:
+    return (false, "cannot create a staging directory beside " & prefix &
+      ": " & e.msg)
+  try:
+    # ``cacheSubstitute`` stages and renames into ``staged`` itself; the
+    # name is inside the private directory, so it is absent, as it requires.
+    let staged = stagingRoot / "prefix"
+    let rc = bcCliDispatch.cacheSubstitute(key, staged)
+    if rc != 0:
+      return (false, "trusted binary-cache miss for " & key)
+    let displaced = stagingRoot / "displaced"
+    let hadPrevious = symlinkExists(prefixAbs) or fileExists(prefixAbs) or
+      dirExists(prefixAbs)
+    if hadPrevious:
+      renameIntoPlace(prefixAbs, displaced)
+    try:
+      renameIntoPlace(staged, prefixAbs)
+    except IOError as e:
+      if hadPrevious:
+        try:
+          renameIntoPlace(displaced, prefixAbs)
+        except IOError as back:
+          keepStaging = true
+          return (false, "cannot move the restored prefix into place: " &
+            e.msg & "; the previous prefix could not be put back (" &
+            back.msg & ") and is kept at " & displaced)
+      return (false, "cannot move the restored prefix into place: " & e.msg)
+    return (true, "")
+  except CatchableError as e:
+    return (false, "materialized binary-cache restore of " & key &
+      " failed: " & e.msg)
+  finally:
+    # Only paths this proc created or moved here are inside, and
+    # ``removeTreeNoFollow`` unlinks a link it meets rather than following
+    # it, so a displaced link prefix goes and its target stays.
+    try:
+      if not keepStaging:
+        removeTreeNoFollow(stagingRoot)
+    except CatchableError as e:
+      stderr.writeLine("materialized binary-cache restore: cannot remove " &
+        "the staging directory " & stagingRoot & ": " & e.msg)
 
 proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
     BuildRunResult =
@@ -4777,14 +4854,8 @@ proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
       item.stderr = "materialized binary-cache prefix is empty"
       result.results.add(item)
       continue
-    let staged = prefix & ".repro-cache-substitute-" &
-      $getCurrentProcessId()
-    removeMaterializedPath(staged)
-    createDir(parentDir(staged))
-    let rc = bcCliDispatch.cacheSubstitute(key, staged)
-    if rc == 0:
-      removeMaterializedPath(prefix)
-      moveDir(staged, prefix)
+    let restored = restoreMaterializedPrefix(key, prefix)
+    if restored.ok:
       let relocation = relocateRestoredInstallMirror(prefix,
         findExe("patchelf"),
         proc (executable: string; args: seq[string]):
@@ -4804,8 +4875,7 @@ proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
       item.cacheDecision = cdHit
       item.reason = "materialized-binary-cache-substituted key=" & key
     else:
-      removeMaterializedPath(staged)
-      item.stderr = "trusted binary-cache miss for " & key
+      item.stderr = restored.error
     result.results.add(item)
   if result.results.len == 0:
     result.results.add(ActionResult(
