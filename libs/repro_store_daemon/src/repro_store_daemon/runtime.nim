@@ -9,6 +9,8 @@ import ./protocol
 # `repro store serve`'s command line is declared in repro's description;
 # only its spellings are read here, at compile time.
 from repro_cli_support/cli_description import reproLongFlags
+from repro_daemon_core/detached_working_directory import
+  detachedDaemonWorkingDirectory
 
 
 when defined(posix):
@@ -536,8 +538,22 @@ proc waitForDevStatus(endpoint, expectedRoot: string; timeoutMs = 60000):
   raise newException(StoreDaemonRuntimeError,
     "timed out waiting for dev store daemon at " & endpoint)
 
-proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
+proc anchoredDevDaemonConfig(config: DevDaemonConfig): DevDaemonConfig =
+  ## ``config`` with a relative store root, or a relative POSIX socket path,
+  ## made absolute against OUR working directory -- the directory the caller
+  ## typed it in. The daemon does not run there (see ``startDevDaemon``), so
+  ## a path it resolved itself would name a different directory. A Windows
+  ## endpoint is a pipe name, not a file, and is passed through.
+  result = config
+  if result.storeRoot.len > 0 and not isAbsolute(result.storeRoot):
+    result.storeRoot = normalizedPath(absolutePath(result.storeRoot))
+  when defined(posix):
+    if result.endpoint.len > 0 and not isAbsolute(result.endpoint):
+      result.endpoint = normalizedPath(absolutePath(result.endpoint))
+
+proc startDevDaemon*(publicCliPath: string; requested: DevDaemonConfig):
     StoreDaemonStatus =
+  let config = anchoredDevDaemonConfig(requested)
   let existing = queryDevStatus(config.endpoint)
   if existing.running:
     if os.normalizedPath(existing.storeRoot) ==
@@ -548,14 +564,32 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
   # Executable-Consolidation M3: the store daemon IS the `repro` image, run as
   # `repro store serve …`. Self-spawn `repro` rather than locating the
   # standalone `reprostored` binary.
-  let exe = publicCliPath
+  #
+  # THE WORKING DIRECTORY is neither ours nor its image's
+  # (`detachedDaemonWorkingDirectory`): the daemon outlives us, so ours would
+  # stay pinned for its whole life, and the image is `repro` in the install's
+  # `bin`, which on Windows an upgrade must be able to rename aside while the
+  # daemon lives (the same defect the auto-started `runquotad` had). Every
+  # path it is handed is therefore absolute (`anchoredDevDaemonConfig`), and
+  # so is the image, which `execv` would otherwise resolve after the `chdir`.
+  var image = publicCliPath
+  if not isAbsolute(image):
+    let found = findExe(image)
+    image = if found.len > 0: found else: absolutePath(image)
+  let workingDir = detachedDaemonWorkingDirectory(image)
   when defined(posix):
+    # Prepared before the fork: the child may only make async-signal-safe
+    # calls, and allocating is not one.
+    let argv = allocCStringArray(@[image] & storeServeArgs(config))
+    defer: deallocCStringArray(argv)
+    let workingDirC = workingDir.cstring
     let pid = fork()
     if pid < 0:
       raise newException(StoreDaemonRuntimeError,
         "failed to fork dev store daemon")
     if pid == 0:
       discard setsid()
+      discard posix.chdir(workingDirC)
       let devNull = posix.open(cstring("/dev/null"), O_RDWR)
       if devNull >= 0:
         discard dup2(devNull, 0)
@@ -563,9 +597,8 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
         discard dup2(devNull, 2)
       for fd in 3.cint .. 255.cint:
         discard posix.close(fd)
-      let argv = allocCStringArray(@[exe] & storeServeArgs(config))
-      discard execv(cstring(exe), argv)
-      quit(127)
+      discard execv(cstring(image), argv)
+      exitnow(127)
   else:
     # NOT `osproc.startProcess`: on Windows it creates the child with
     # `bInheritHandles = TRUE` and no handle list, so this daemon -- which
@@ -573,19 +606,15 @@ proc startDevDaemon*(publicCliPath: string; config: DevDaemonConfig):
     # handle we have, including the pipe our caller reads our output from,
     # and that caller would never see an end of file. `spawnWithOwnStdio`
     # gives it NUL stdio and nothing else, the Windows form of the POSIX arm
-    # above, and starts it outside our working directory.
+    # above.
     var env: seq[(string, string)] = @[]
     for key, value in envPairs():
       if cmpIgnoreCase(key, "REPROSTORED_ENDPOINT") != 0:
         env.add((key, value))
     env.add(("REPROSTORED_ENDPOINT", config.endpoint))
-    var image = exe
-    if not isAbsolute(image):
-      let found = findExe(image)
-      image = if found.len > 0: found else: absolutePath(image)
     discard spawnWithOwnStdio(image, storeServeArgs(config),
       env, inheritEnvironment = false, logPath = "",
-      workingDir = parentDir(image))
+      workingDir = workingDir)
   waitForDevStatus(config.endpoint, config.storeRoot)
 
 proc stopDevDaemon*(endpoint = defaultDevEndpoint()) =

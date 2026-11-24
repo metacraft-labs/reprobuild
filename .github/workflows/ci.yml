@@ -971,6 +971,18 @@ jobs:
           # This prerequisite must exercise this job's freshly built engine;
           # a pre-existing host daemon can carry another source/runtime closure.
           REPRO_DAEMON: 'off'
+          # The siblings sit at CodeTracer's lock for THIS build (the
+          # reconcile step above leaves them there on purpose: `ct` is built
+          # against codetracer/repro.lock, and `just test` re-detaches them to
+          # reprobuild's lock afterwards). Those revisions are in general
+          # behind the ones reprobuild/repro.lock pins, and the engine refuses
+          # a stale sibling unless told otherwise ("no acceptable source for
+          # SHM_QUEUE_SRC ... the sibling ... is not at or ahead of the
+          # revision this repository pins"). Saying so here is the documented
+          # opt-in (`REPRO_SIBLING_POLICY=sibling`: compile against the
+          # checkout as it is), scoped to this one step, instead of pinning a
+          # second set of trees only to satisfy the guard.
+          REPRO_SIBLING_POLICY: sibling
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
