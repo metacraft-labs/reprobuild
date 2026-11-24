@@ -8,6 +8,7 @@ import blake3
 import ./client
 import ./daemon_lock_probe
 import ./daemon_log
+import ./detached_working_directory
 # `repro daemon`'s command line is declared in repro's description; only its
 # spellings are read here, at compile time. The thin client links this
 # module and must not link the generated parser.
@@ -504,7 +505,7 @@ proc withAnchoredDaemonPaths(config: UserDaemonConfig): UserDaemonConfig =
     anchoredToCurrentDir(config.previousStagedGenerationDir)
   result.leaseStoreRoot = anchoredToCurrentDir(config.leaseStoreRoot)
 
-proc daemonWorkingDirectory(config: UserDaemonConfig): string =
+proc daemonWorkingDirectory(exe: string; config: UserDaemonConfig): string =
   ## The directory a daemon that ``repro`` starts on a caller's behalf runs
   ## in: its STATE DIRECTORY, never the caller's working directory.
   ##
@@ -535,7 +536,13 @@ proc daemonWorkingDirectory(config: UserDaemonConfig): string =
   ## ``spawnWithOwnStdio`` and POSIX's ``launchWithFork``. The systemd and
   ## launchd launches never did; their manager starts the unit in its own
   ## default directory.
-  config.stateDir
+  ##
+  ## NOR THE DIRECTORY ITS IMAGE IS IN. The rule is shared with every other
+  ## detached daemon `repro` starts (`detached_working_directory`): a state
+  ## directory configured inside the image's directory (an install's
+  ## `bin\`) would keep that directory from being renamed aside by an
+  ## upgrade on Windows, so it falls back to the neutral directory there.
+  detachedDaemonWorkingDirectory(exe, config.stateDir)
 
 proc companionFullCliPath(imagePath: string): string =
   ## After the single-`repro` consolidation there is no separate `repro-full`
@@ -3061,7 +3068,7 @@ proc performDevSelfRestart(config: UserDaemonConfig;
     let pid = spawnWithOwnStdio(staged.imagePath,
       daemonProcessArgs(nextConfig), [], inheritEnvironment = true,
       logPath = "",
-      workingDir = daemonWorkingDirectory(nextConfig))
+      workingDir = daemonWorkingDirectory(staged.imagePath, nextConfig))
     logLine(config.logPath, "dev restart launched backend=windows-handle-list " &
       "pid=" & $pid)
   logLine(config.logPath, "dev restart old process exiting runId=" & runId)
@@ -3809,7 +3816,7 @@ proc launchWithFork(exe: string; config: UserDaemonConfig) =
     let exeCString = cstring(exe)
     # Prepared before the fork: the child may only make async-signal-safe
     # calls, and ``chdir`` is one, allocating a C string is not.
-    let workingDir = daemonWorkingDirectory(config)
+    let workingDir = daemonWorkingDirectory(exe, config)
     let workingDirCString = cstring(workingDir)
     let pid = fork()
     if pid < 0:
@@ -4041,7 +4048,7 @@ proc startUserDaemon*(publicCliPath: string;
     let pid = spawnWithOwnStdio(exe, daemonProcessArgs(launchConfig),
       envPairsForChild, inheritEnvironment = false,
       logPath = "",
-      workingDir = daemonWorkingDirectory(launchConfig))
+      workingDir = daemonWorkingDirectory(exe, launchConfig))
     logLine(launchConfig.logPath,
       "launch requested backend=windows-handle-list pid=" & $pid)
   waitForUserDaemonStatus(launchConfig.endpoint)

@@ -200,14 +200,35 @@ reprobuild_default_test_build_parallelism() {
   reprobuild_worker_budget "$@"
 }
 
-# EXECUTION phase: worker count for the test runner.
+# The width RunQuota granted this process, or empty when it holds no lease.
+# ``runquota run`` exports it as RUNQUOTA_RUN_WIDTH to the command it launches
+# (libs/repro_runquota: GrantedWidthEnvVar), so a suite started under a lease
+# sees its grant here. Anything that is not a positive integer is "no grant":
+# a stale or hand-typed value must not zero the worker count.
+reprobuild_granted_width() {
+  local w="${RUNQUOTA_RUN_WIDTH:-}"
+  if [[ "${w}" =~ ^[0-9]+$ ]] && (( w >= 1 )); then
+    printf '%s\n' "${w}"
+  else
+    printf '\n'
+  fi
+}
+
+# EXECUTION phase: the worker count before the lease grant is applied. This
+# is the host-derived number, capped at the measured best (see below). The
+# nested-build split is computed from THIS number, never from the grant
+# clamped one, so a small grant lowers the test workers without handing the
+# freed share to each nested build (which would raise ``threads * nested``
+# past the budget's division).
 #
 # Capped at eight because eight is the largest full-suite execution ever
-# measured (1183/1183). Above it there is no evidence, and the runner's own
-# notes record false failures at sixteen workers from CPU starvation — the
-# defect fixed in "Decide a test is hung from lack of progress, not from
-# silence". Raising this cap is a measurement, not an edit.
-reprobuild_default_test_threads() {
+# measured (1183/1183, and the best of the ~11,260-case runs: see EVIDENCE).
+# Above it there is no evidence, and the runner's own notes record false
+# failures at sixteen workers from CPU starvation -- the defect fixed in
+# "Decide a test is hung from lack of progress, not from silence". Raising
+# this cap is a measurement, not an edit. A re-measure at other widths is
+# optional later work.
+_reprobuild_host_test_threads() {
   local budget
   budget="$(reprobuild_worker_budget "$@")"
   local threads=$((budget / REPROBUILD_NESTED_BUILD_WORKERS))
@@ -220,13 +241,32 @@ reprobuild_default_test_threads() {
   printf '%s\n' "${threads}"
 }
 
+# EXECUTION phase: worker count for the test runner,
+# ``min(measured best, host-derived, RunQuota grant)``.
+#
+# The measured eight stays the ceiling and the host-derived number stays the
+# default; the grant only lowers it, so a suite running under a ``runquota
+# run`` lease never uses more test workers than the lease holds, and with a
+# grant of eight or more nothing changes. No lease (no RUNQUOTA_RUN_WIDTH)
+# leaves the result exactly as before. An explicit REPROBUILD_TEST_THREADS
+# still wins over this default in scripts/run_tests.sh.
+reprobuild_default_test_threads() {
+  local threads grant
+  threads="$(_reprobuild_host_test_threads "$@")"
+  grant="$(reprobuild_granted_width)"
+  if [[ -n "${grant}" ]] && (( grant < threads )); then
+    threads="${grant}"
+  fi
+  printf '%s\n' "${threads}"
+}
+
 # EXECUTION phase: the build parallelism each nested ``repro build`` inside a
 # test process gets. ``threads * nested <= budget`` holds for every input,
 # which is the whole point of deriving both from one number.
 reprobuild_default_nested_build_parallelism() {
   local budget threads
   budget="$(reprobuild_worker_budget "$@")"
-  threads="$(reprobuild_default_test_threads "$@")"
+  threads="$(_reprobuild_host_test_threads "$@")"
   local nested=$((budget / threads))
   if (( nested < 1 )); then
     nested=1
