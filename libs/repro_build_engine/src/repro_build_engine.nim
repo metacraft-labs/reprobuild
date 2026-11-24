@@ -99,6 +99,7 @@ else:
 import repro_core
 import repro_core/relocation
 import repro_core/tree_removal
+import repro_core/case_folding
 import repro_core/canonical_work_dir
 import repro_core/source_root
 import repro_core/arg_files
@@ -4407,39 +4408,85 @@ proc splitLastEntry(path: string): tuple[parent, name: string] =
   (parent: (if slash == 0: "/" else: path[0 ..< slash]),
    name: path[slash + 1 .. ^1])
 
+proc spellingsCanNameOneEntry(a, b: string): bool =
+  ## A cheap necessary condition for `isSameEntryOnDisk(a, b)`, so the
+  ## cross-action checks, which compare every removal with every declared
+  ## output, ask the filesystem only about pairs that can be one entry.
+  ## Both parents are resolved to their physical directories, so two
+  ## spellings reach one entry only by folding case or normalization. ASCII
+  ## has no normalization variants: two ASCII spellings that differ other
+  ## than in letter case are two entries. Windows is left to the full check,
+  ## whose short (8.3) names are aliases of another kind.
+  when defined(windows):
+    true
+  else:
+    for ch in a:
+      if ord(ch) >= 0x80:
+        return true
+    for ch in b:
+      if ord(ch) >= 0x80:
+        return true
+    cmpIgnoreCase(a, b) == 0
+
 proc isSameEntryOnDisk(a, b: string): bool =
-  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers)
-  ## name ONE directory entry on disk, whatever their spellings.
+  ## Whether the locations `a` and `b` (both `outputRemovalLocation` answers,
+  ## with equally many components) name ONE directory entry on disk, or
+  ## will once they are created, whatever their spellings.
   ##
   ## A removal location's parent is resolved through the filesystem, which
   ## answers in the on-disk spelling, but its last component is kept as the
   ## output spells it. On a filesystem that folds case (macOS's default APFS,
   ## Windows, a Linux `casefold` directory) or normalization, `<d>/WORK` and
   ## `<d>/work` are then one entry with two spellings, and only the
-  ## filesystem can say so. It is asked by identity: the device and file id
-  ## of the entry itself (`lstat`, a final link not followed, because the
-  ## removal takes the link and not its target).
+  ## filesystem can say so. When both exist it is asked by identity: the
+  ## device and file id of the entry itself (`lstat`, a final link not
+  ## followed, because the removal takes the link and not its target).
   ##
   ## A directory has exactly one entry, so equal identities settle it. A
   ## non-directory may have several (hard links): two entries of one parent
   ## that share a file id are the same entry only when the parent does not
   ## list both names, i.e. one of them is merely another spelling of the
   ## other. Removing one hard link leaves the other, so it must not count.
-  ## A location that does not exist names nothing to remove: `false`.
+  ##
+  ## An entry that does not exist yet has no identity, and on a fresh build
+  ## that is every output and every input another action produces. Two such
+  ## locations are one entry when their parents are one directory (asked the
+  ## same way, recursively) and their names are equal as that directory will
+  ## compare them: folded when the directory that will hold them, the
+  ## nearest existing ancestor whose attribute a new directory inherits,
+  ## folds case (`directoryFoldsCase`), exactly otherwise. When only one of
+  ## the two exists they are two entries: the filesystem resolved one name
+  ## and not the other. Build-Engine-And-Scheduler.md §"A declared output is
+  ## an obligation".
   if a == b:
     return true
+  if not spellingsCanNameOneEntry(a, b):
+    return false
   var infoA, infoB: FileInfo
+  var hasA, hasB = true
   try:
     infoA = getFileInfo(a, followSymlink = false)
+  except OSError:
+    hasA = false
+  try:
     infoB = getFileInfo(b, followSymlink = false)
   except OSError:
-    return false
+    hasB = false
+  let (parentA, nameA) = splitLastEntry(a)
+  let (parentB, nameB) = splitLastEntry(b)
+  if not (hasA and hasB):
+    if hasA or hasB or parentA.len == 0 or parentB.len == 0 or
+        not isSameEntryOnDisk(parentA, parentB):
+      return false
+    if nameA == nameB:
+      return true
+    let holder = nearestExistingDirectory(parentA)
+    return holder.len > 0 and directoryFoldsCase(holder) and
+      foldName(nameA) == foldName(nameB)
   if infoA.id != infoB.id:
     return false
   if infoA.kind == pcDir:
     return true
-  let (parentA, nameA) = splitLastEntry(a)
-  let (parentB, nameB) = splitLastEntry(b)
   if parentA.len == 0 or parentB.len == 0 or
       not isSameEntryOnDisk(parentA, parentB):
     return false
@@ -4459,6 +4506,12 @@ proc isSameEntryOnDisk(a, b: string): bool =
     # entry is unknown, and the safe answer for a removal check is "one".
     return true
   not (listedA and listedB)
+
+proc isSameLocation(a, b: string): bool =
+  ## Whether the `outputRemovalLocation` answers `a` and `b` name one entry
+  ## (`isSameEntryOnDisk`), the entries' existence aside.
+  a.len > 0 and b.len > 0 and a.count('/') == b.count('/') and
+    isSameEntryOnDisk(a, b)
 
 proc entryAtDepthOf(path, like: string): string =
   ## The ancestor-or-self of `path` with as many components as `like`, or ""
@@ -5108,8 +5161,8 @@ proc validateGraph(g: BuildGraph) =
           " for " & action.id)
       indexRoot(raw, optional = true)
       for required in action.outputs:
-        if outputRemovalLocation(action.cwd, raw) ==
-            outputRemovalLocation(action.cwd, required):
+        if isSameLocation(removalRoot,
+            outputRemovalLocation(action.cwd, required)):
           raiseEngine("optional output is also an obligatory output: " & raw &
             " for " & action.id)
       for input in action.inputs:
@@ -5173,7 +5226,7 @@ proc validateGraph(g: BuildGraph) =
         for removal in removalRoots:
           if removal.actionId == action.id:
             continue
-          if key == removal.root or key.startsWith(removal.root & "/"):
+          if removalTakesEntry(removal.root, key):
             raiseEngine("'" & raw & "', an output of '" & action.id &
               "', lies in '" & removal.raw & "', which '" & removal.actionId &
               "' removes before it runs: an opaque output directory belongs " &
@@ -5189,7 +5242,16 @@ proc validateGraph(g: BuildGraph) =
       if (declaredIndex[i].ordinary or declaredIndex[j].ordinary) and
           not (declaredIndex[i].optional or declaredIndex[j].optional):
         continue
-      if not writeRootsOverlap(declaredIndex[i].root, declaredIndex[j].root):
+      # An optional candidate is REMOVED before its action runs, so it is
+      # judged by the entry on disk, as the removal checks are
+      # (`removalTakesEntry`): another spelling of one entry, existing or
+      # not yet created, overlaps it too.
+      let rootI = declaredIndex[i].root
+      let rootJ = declaredIndex[j].root
+      if not writeRootsOverlap(rootI, rootJ) and
+          not ((declaredIndex[i].optional or declaredIndex[j].optional) and
+               (removalTakesEntry(rootI, rootJ) or
+                removalTakesEntry(rootJ, rootI))):
         continue
       # Overlap exists — check for a dep chain in either direction.
       # If found, treat as sequential (legitimate configure→compile→

@@ -25,7 +25,7 @@ import std/[os, strutils, unittest]
 
 import repro_tests
 
-from repro_test_support import nimSourceCodeOnly
+from repro_test_support import nimSourceCodeOnly, reprobuildRecipeText
 
 const RepoRootMarker = "repro.nim"
 
@@ -114,8 +114,11 @@ suite "Project-DSL-Composition M6 smoke":
   test "repro.nim no longer includes repro.tests.nim":
     # The pre-M6 ``include "repro.tests.nim"`` line is what the
     # composition campaign exists to eliminate. Catch a reversion.
+    # Read the recipe as the engine compiles it: ``repro.nim`` with the
+    # file it includes for the engine's compiles spliced in, which is where
+    # its ``import repro_tests`` lives.
     let repoRoot = findRepoRoot()
-    let content = readFile(repoRoot / "repro.nim")
+    let content = reprobuildRecipeText(repoRoot)
     check "include \"repro.tests.nim\"" notin content
     check "include \"repro_tests.nim\"" notin content
     check "import repro_tests" in content

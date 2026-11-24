@@ -1,0 +1,9 @@
+schema = "reprobuild.solved-graph-lock.v3"
+
+[lock]
+platform = "amd64-linux"
+optimal = false
+inputs_digest = "fnv1a64:d7f1e5febd495a30"
+variants = []
+packages = [{ name = "app", version = "1.0.0", source = "app", selection = "selected" }, { name = "lib", version = "1.0.0", source = "lib", selection = "selected" }, { name = "util", version = "0.3.1", source = "util", selection = "selected" }]
+deps = [{ name = "project", self = "true", coord_kind = "vcs", url = "", revision = "", integrity = "blake3:352b5f5194d7ab4ba3c6c79e84036e824e9148624e689b900d72425a516b2764", version = "", visibility = "public", participation = "", depends = "", tags = "" }]

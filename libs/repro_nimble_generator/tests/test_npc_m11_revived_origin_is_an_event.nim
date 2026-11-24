@@ -86,7 +86,10 @@ suite "NPC-M11: a gone origin that comes back with other history is an event":
     checkpoint kinds(g3).join("\n")
     check ("tag-moved victim v1.0.0 " & c1 & " -> " & j1) in kinds(g3)
     check ("history-rewritten victim v1.0.0 " & c1 & " -> ") in kinds(g3)
-    check g3.events.len == 2
+    # NPC-M15 (operator decision PA-1): the revival itself is an event
+    # beside these two.
+    check ("revived victim  gone -> " & f.url("nim/victim.git")) in kinds(g3)
+    check g3.events.len == 3
     for e in g3.events: check e.observedAt == T1 + 2 * Day
     var old = 0
     for v in g3.built.envelopeOf("victim").versions:

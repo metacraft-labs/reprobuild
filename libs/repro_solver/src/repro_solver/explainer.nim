@@ -619,8 +619,10 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
 
   # ---- Phase 4: emit package universe + dependency edges (guarded).
   var pkgVersions: Table[string, seq[string]]
+  var pkgScheme: Table[string, VersionScheme]
   for p in packages:
     pkgVersions[p.name] = p.versions
+    pkgScheme[p.name] = p.versionScheme
     sections.add("package(\"" & aspQuoteE(p.name) & "\").")
     if not p.onDemand:
       # NPC-M6: an on-demand package is activated by the rules below, as in
@@ -651,7 +653,7 @@ proc encodeWithAssumptions*(variants: openArray[VariantDecl];
       seenRange.incl(key)
       if d.name notin pkgVersions: continue
       for ver in pkgVersions[d.name]:
-        if rangeAdmits(d.range, ver):
+        if rangeAdmits(d.range, ver, pkgScheme[d.name]):
           sections.add("version_in_range(\"" & aspQuoteE(d.name) &
                        "\", \"" & aspQuoteE(ver) & "\", \"" &
                        aspQuoteE(d.range) & "\").")

@@ -12,10 +12,13 @@
 ##   a failed resolution (NPC-M6).
 ## * `from_reader` -- a version record from the static `.nimble` reader's
 ##   output and the facts of one commit.
+## * `layout` -- a record's layout and binary fields on one platform, its
+##   conditional entries applied (the only way a consumer reads them).
 ##
 ## The objects themselves (types, bounded codec, navigator, text view) are
 ## `repro_domain_types/nimble_index`.
 
-import repro_nimble_index/[reader, solver_input, builder, from_reader, resolution]
+import repro_nimble_index/[reader, solver_input, builder, from_reader, resolution,
+  layout]
 
-export reader, solver_input, builder, from_reader, resolution
+export reader, solver_input, builder, from_reader, resolution, layout

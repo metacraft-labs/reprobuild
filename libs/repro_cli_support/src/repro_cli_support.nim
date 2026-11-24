@@ -74,7 +74,7 @@ from repro_project_dsl/completion_files import
   CompletionFilesProducerName, producerArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
-  SettingsFileName
+  SettingsFileName, ignoringConfiguredSettingsFile
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
 # the module-private ``markRunningImageAsReproCli``: no ordinary import can
 # name the setter, so no embedded caller can grant itself the mark. See
@@ -28769,8 +28769,8 @@ when not defined(windows):
         restoreRunQuotaEnvironment(previous)
 
 when defined(windows):
-  proc spawnDetachedRunQuotaDaemon(runquotad: string;
-                                   args: seq[string]): owned(Process) =
+  proc spawnDetachedRunQuotaDaemon*(runquotad: string;
+                                    args: seq[string]): owned(Process) =
     ## Starts the per-user `runquotad` so that it holds NONE of this
     ## invocation's handles: stdin, stdout and stderr are `NUL`, no other
     ## handle crosses the spawn, and it does not run in our working directory.
@@ -28797,9 +28797,21 @@ when defined(windows):
     ## Its output goes to `NUL`, as it effectively did before: nothing read
     ## the pipes `startProcess` made for it.
     ##
-    ## THE WORKING DIRECTORY is the daemon binary's own directory, which its
-    ## running image already pins. Starting it in ours would keep the caller's
-    ## directory undeletable for the daemon's whole life.
+    ## THE WORKING DIRECTORY is neither ours nor the daemon binary's own
+    ## (`detachedDaemonWorkingDirectory`, the Windows system directory).
+    ## Starting it in ours kept the caller's directory undeletable for the
+    ## daemon's whole life. Starting it in its own `bin\`, as this did until
+    ## 2026-11-22, kept the installer from renaming `bin\` aside: a running
+    ## image does not pin its directory (the loader opens it with
+    ## `FILE_SHARE_DELETE`), but a current directory does, so every in-place
+    ## bundle upgrade -- which renames the old `bin\` aside and leaves the
+    ## old daemon running from it, because killing it would end the leases it
+    ## holds -- failed while such a daemon lived.
+    ##
+    ## Exported for `tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim`,
+    ## which starts a daemon through it on a private pipe: the auto-start
+    ## itself (`startAutoRunQuotaWindows`) reaches the host-wide pipe, and
+    ## driving it would ask the host's own daemon to retire.
     ##
     ## A `Process` is still returned, built around the handle the spawn
     ## returned, because the readiness wait and the failure path below watch
@@ -28811,7 +28823,8 @@ when defined(windows):
       let found = findExe(exe)
       exe = if found.len > 0: found else: absolutePath(exe)
     let child = spawnWithOwnStdioKeepingHandle(exe, args, env = [],
-      inheritEnvironment = true, logPath = "", workingDir = parentDir(exe))
+      inheritEnvironment = true, logPath = "",
+      workingDir = detachedDaemonWorkingDirectory(exe))
     privateAccess(Process)
     result = Process(fProcessHandle: child.processHandle,
       fThreadHandle: Handle(0), id: Handle(child.pid),
@@ -32797,13 +32810,13 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
                              committedLock: string;
                              solved: var UnifiedSolution): int
 
-proc runBuildCommand(args: openArray[string]; publicCliPath: string;
-                     forceDirect = false;
-                     daemonHosted = false;
-                     eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil;
-                     graphAugmenter: BuildGraphAugmenter = nil): int =
+proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
+                         forceDirect: bool;
+                         daemonHosted: bool;
+                         eventSink: BuildCommandEventSink;
+                         cancelCheck: BuildCancelCallback;
+                         actionOutcomeSink: BuildActionOutcomeSink;
+                         graphAugmenter: BuildGraphAugmenter): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -33738,6 +33751,29 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
     stderr.writeLine("repro build: daemon unavailable; falling back to " &
       "direct mode: " & err.msg)
     return runDirectBuild()
+
+
+proc runBuildCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     daemonHosted = false;
+                     eventSink: BuildCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int =
+  ## `runBuildCommandBody`, then the one-line summary of the provider startup
+  ## failures it met (`providerStartupFailureSummary`). Those stay non-fatal:
+  ## each skips only its own package's registrations, and the build goes on.
+  ## The summary is written however the body ends, so a build that stopped
+  ## for another reason still names them last.
+  resetProviderStartupFailures()
+  try:
+    result = runBuildCommandBody(args, publicCliPath, forceDirect,
+      daemonHosted, eventSink, cancelCheck, actionOutcomeSink, graphAugmenter)
+  finally:
+    let summary = providerStartupFailureSummary()
+    if summary.len > 0:
+      stderr.writeLine(summary)
+    resetProviderStartupFailures()
 
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
@@ -41599,9 +41635,46 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     let prior = findOverride(overrides, node.name)
     if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path,
         absolutePath(root))) == absTarget:
-      # Already in develop mode at this exact path — idempotent no-op.
+      # Already in develop mode at this exact path — idempotent no-op, unless
+      # ``--reset`` was asked for and the checkout has drifted off the lock.
+      # `--reset` promises "force it to the lock"; an existing develop-mode
+      # checkout used to be reported "no change" at whatever revision it sat
+      # (PLAT-79 on m3: `nim-agents-isonim-viewmodels` left at 4c0f39a with
+      # the lock pinning 6afd343).
+      let devHead =
+        if dirExists(absTarget): gitHeadShaOf(gitBinary, absTarget) else: ""
+      let drifted = devHead != node.coordinates.revision
+      if args.reset and drifted and args.dryRun:
+        outcome.mode = "would-reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
+      if args.reset and drifted:
+        if dirExists(absTarget):
+          removeDir(absTarget)
+        let resetRes =
+          cloneNodeAtLockedRevision(root, absTarget, node, identity,
+            args.intoDir)
+        if not resetRes.ok:
+          outcome.mode = "error"
+          outcome.ok = false
+          outcome.diagnostic = "reset-to-locked-revision failed for " &
+            node.name & " (was at " &
+            (if devHead.len == 0: "non-git-checkout" else: devHead) & "): " &
+            resetRes.diagnostic
+          outcomes.add(outcome)
+          anyFailure = true
+          continue
+        outcome.mode = "reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
       outcome.mode = "idempotent"
       outcome.ok = true
+      if drifted and devHead.len > 0:
+        outcome.diagnostic = "in develop mode at " & devHead &
+          ", not the locked revision " & node.coordinates.revision &
+          " (left as it is; pass --reset to force it to the lock)"
       if node.name in args.only and not isExplicitDevelopOverride(prior.get()) and
           not args.dryRun:
         # The one change an idempotent run makes: ``--only`` named this
@@ -72547,7 +72620,7 @@ proc rootDeclaresARoleBranch(settings: WorkspaceSettings): bool =
     for (_, value) in decls.custom:
       if value.kind == brvBranch: return true
 
-proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+proc gatewayRoleBranchesOfRecordedRoot(cfg: GatewayConfig):
     tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
   ## The branches a declared role names for the repository this gateway
   ## publishes, resolved from the workspace its config names the way the
@@ -72575,15 +72648,7 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
   if cfg.repoIsWorkspaceRoot:
     try:
       let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
-      if settingsPath.len == 0 or not fileExists(settingsPath):
-        # ``REPRO_WORKSPACE_CONFIG`` naming a file that does not exist reads
-        # as "no settings file" everywhere else. Here that would let a
-        # variable inherited from the pushing shell switch the refusal off.
-        let named = getEnv(workspace_root.WorkspaceConfigEnvVar)
-        if named.len > 0:
-          return (ok: false, branches: @[], why: workspace_root.WorkspaceConfigEnvVar &
-            " names '" & named & "', which does not exist, so the settings " &
-            "of '" & cfg.workspaceRoot & "' could not be read")
+      if settingsPath.len == 0:
         return (ok: true, branches: @[], why: "")
       let settings = readWorkspaceSettings(settingsPath)
       try:
@@ -72617,6 +72682,19 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     tried.add("'" & cfg.repo & "' is not a member of " & candidate.label)
   (ok: false, branches: @[], why: "in '" & cfg.workspaceRoot & "', " &
     tried.join("; "))
+
+proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+    tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
+  ## ``gatewayRoleBranchesOfRecordedRoot`` with ``REPRO_WORKSPACE_CONFIG``
+  ## ignored (Push-Gateway-Wiring-And-Policy §5.3). The gateway's config
+  ## records the workspace whose settings and manifests govern it; the hook
+  ## runs in the pushing shell's environment, in the gateway's bare
+  ## repository, so a variable inherited from that shell would otherwise
+  ## replace the recorded root's settings with whatever file it names (one
+  ## that declares no role switches the refusal off), and a relative value
+  ## would be read against the bare repository.
+  ignoringConfiguredSettingsFile:
+    return gatewayRoleBranchesOfRecordedRoot(cfg)
 
 proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
                              updates: seq[GatewayRefUpdate];
@@ -78273,6 +78351,10 @@ when defined(reproGitStdoutReaderTest):
     for head in found.heads:
       result.heads.add((head.oid, head.refName))
 
+  proc verifyLockPinnedProducerSourceForTest*(dep: LockedDep;
+      sourceRoot, consumerRoot: string) =
+    verifyLockPinnedProducerSource(dep, sourceRoot, consumerRoot)
+
 proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
     headOid: string): HashSet[string] =
   ## Branch names that MAY contain ``headOid`` on a remote, read from the
@@ -80837,7 +80919,38 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result["summary"] = summary
   result["exitCode"] = %report.exitCode
 
-proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
+proc isRoutineStatusEntry*(entry: WorkspaceStatusRepoEntry;
+    activeBranch: string): bool =
+  ## Whether ``entry`` is a *routine clean* repository, the kind the default
+  ## text output of ``repro workspace status`` omits from its per-repo
+  ## listing (spec/CLI/workspace.md §"`repro workspace status`", the
+  ## exceptional information policy). Every condition the page names must
+  ## hold: a clean working tree with no modified or untracked files, at lock
+  ## or no lock recorded, no stashes, no ahead/behind divergence, no unmerged
+  ## branches, and on the active workspace branch.
+  ##
+  ## A repository with a diagnostic is never routine: something about it
+  ## could not be observed, and an omitted line would hide that. When the
+  ## workspace has an active branch, a checkout on another branch or with a
+  ## detached HEAD (empty ``branch``) is off it; when the workspace has none,
+  ## the branch condition cannot be failed.
+  entry.checkoutState == "clean" and
+    entry.lockState in ["at-lock", "no-lock-recorded"] and
+    entry.modifiedCount == 0 and entry.untrackedCount == 0 and
+    entry.stashCount == 0 and
+    entry.aheadCount == 0 and entry.behindCount == 0 and
+    entry.unmergedBranches.len == 0 and
+    entry.diagnostic.len == 0 and
+    (activeBranch.len == 0 or entry.branch == activeBranch)
+
+proc renderStatusTextLines*(report: WorkspaceStatusReport;
+    verbose = false): seq[string] =
+  ## The text form of ``repro workspace status``. By default routine clean
+  ## repositories (``isRoutineStatusEntry``) are left out of the per-repo
+  ## listing and tallied after the summary; when every repository is routine
+  ## the footer says the workspace is all clean. ``verbose`` (``--verbose`` /
+  ## ``-v``) lists every repository. The summary line is the same in both
+  ## modes and always counts every repository.
   result.add("workspace status: project=" & report.project &
     " branch=" & (if report.activeBranch.len > 0:
                     report.activeBranch
@@ -80849,7 +80962,15 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
   for entry in report.manifestLayers:
     result.add("workspace status: manifest-layer " & entry.provenance &
       " status=" & entry.status)
+  var omitted = 0
+  var routine = 0
   for entry in report.repos:
+    let isRoutine = isRoutineStatusEntry(entry, report.activeBranch)
+    if isRoutine:
+      inc routine
+      if not verbose:
+        inc omitted
+        continue
     var line = "workspace status: " & entry.path & " " &
       entry.checkoutState
     if entry.branch.len > 0:
@@ -80878,6 +80999,12 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
     " drifted=" & $report.summary.drifted &
     " atLock=" & $report.summary.atLock &
     " noLockRecorded=" & $report.summary.noLockRecorded)
+  if report.repos.len > 0 and routine == report.repos.len:
+    result.add("workspace status: all clean (" & $report.repos.len &
+      " repo(s))")
+  elif omitted > 0:
+    result.add("workspace status: " & $omitted &
+      " routine clean repo(s) not listed (--verbose lists them)")
 
 type
   WorkspaceStatusArgs = object
@@ -80893,6 +81020,9 @@ type
     fix: bool
       ## Shared-Clone-Pool-Integrity §4.2: remove stale remote-tracking refs
       ## the shared-clone detector finds, instead of only reporting them.
+    verbose: bool
+      ## ``--verbose`` / ``-v``: list routine clean repos in the text output
+      ## too. ``--json`` and the report always carry every repo.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
@@ -80909,6 +81039,7 @@ proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
   result.unmerged = c.unmerged
   result.fileDetails = c.fileDetails
   result.fix = c.fix
+  result.verbose = c.verbose
   result.report = reportSpecOf(c)
   result.projectName = c.project
   if not (result.stashes or result.files or result.aheadBehind or result.unmerged):
@@ -81217,7 +81348,7 @@ proc writeWorkspaceStatusReport(report: WorkspaceStatusReport;
 
 proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   ## ``repro workspace status [<project>] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json] [--verbose|-v]``.
   ##
   ## Exit codes (per M12 design — read-only command):
   ##   - 0 — status gathered (with whatever drift the live workspace
@@ -81232,7 +81363,7 @@ proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
-    for line in renderStatusTextLines(report):
+    for line in renderStatusTextLines(report, parsed.verbose):
       stdout.writeLine(line)
     emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
       report.project, report.repos)
@@ -110838,7 +110969,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineCatalogCommand.generate:
       let r = conf.catalog.generate
       return runCatalogGenerateCommand(r.root, r.sourceSet, r.state,
-        r.generatedAt)
+        r.generatedAt, fullHistory = r.fullHistory)
     of ReproCommandLineCatalogCommand.verify:
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,

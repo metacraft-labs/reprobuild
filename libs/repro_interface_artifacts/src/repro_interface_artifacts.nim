@@ -90,6 +90,8 @@ else:
 import cbor
 import repro_core
 import repro_core/file_lock
+from repro_core/durable_replace import replaceFileDurably,
+  syncDirectoryDurably, syncExistingFileDurably
 import repro_core/workspace_siblings
 import repro_core/variant_assignments
 when defined(posix):
@@ -925,6 +927,12 @@ type
   ProviderCompileExecutionResult* = object
     exitCode*: int
     output*: string
+    killedByCaller*: bool
+      ## `runCommand` itself killed the child's process tree (the Windows
+      ## compile watchdog: a stalled sink or the overall ceiling). Its
+      ## `exitCode` then reads as an ordinary failure, but the child did not
+      ## end on its own: whatever it was writing may be half written
+      ## (`runNimcacheCompilerCommandHeld`).
 
   ProviderCompileEdge* = object
     actionSpec*: ActionSpec
@@ -5119,7 +5127,8 @@ proc runCommand*(command: openArray[string];
       output = killMessage & "\n" & output
     result = ProviderCompileExecutionResult(
       exitCode: exitCode,
-      output: output)
+      output: output,
+      killedByCaller: killMessage.len > 0)
   else:
     var process: Process
     withSpawnWorkingDir:
@@ -9022,16 +9031,204 @@ proc releaseExclusiveFileLock*(lock: var ReproFileLock) =
   ## Release a lock taken by ``acquireExclusiveFileLock``. Idempotent.
   releaseProviderNimcacheLock(lock)
 
+# ---------------------------------------------------------------------
+# A nimcache a compile was interrupted in.
+#
+# The rule is Tool-Owned-Caches.md §"Interrupted Use". It was written after
+# a host crash during an extraction compile left five zero-byte objects in a
+# slot of the extraction's pool. The lock that guards a nimcache
+# (`acquireProviderNimcacheLock`, or a slot of the extraction's pool) keeps a
+# SECOND compile out of it; it does nothing about the first one stopping half
+# way. Nim's nimcache is written in place -- the C compiler opens each object
+# and fills it -- and Nim decides whether to rebuild an object from its C
+# source, not from the object. So an object the compile was writing when it
+# was interrupted (the compiler was killed, the engine running it died, the
+# host went down, or a file system with delayed allocation lost data a
+# finished compile had not flushed) is kept by every later compile whose C
+# source has not changed, and linked: `undefined reference to 'main'`. In
+# the shared extraction pool that failed every extraction on the host
+# through that slot until someone deleted the files by hand.
+#
+# The guard brackets every use with a mark beside the directory:
+#
+#   * on entry, a marked directory -- or one holding a zero-byte object,
+#     which no complete compile writes, left by an engine that predates the
+#     mark -- is discarded before the compiler runs (a cold compile);
+#   * the mark is written and made durable before the compiler starts;
+#   * it is cleared only after a use that ended in order: the compiler
+#     exited on its own, with any status, and what it wrote has been flushed
+#     with the directory entries that name it. A compiler that died of a
+#     signal or a fault, one the engine killed, and a use whose end the
+#     engine did not see (an exception escaped the launch) keep the mark.
+#
+# The mark is a SIBLING of the directory (`<nimcache>.in-use`), not a file
+# inside it: a discard renames the directory aside, and the mark must name
+# the directory's state, not travel with its contents.
+
+const NimcacheInUseMarkerSuffix = ".in-use"
+  ## `nimcacheInUseMarkerPath`.
+
+const NimcacheDiscardedInfix = ".discarded-"
+  ## A discarded nimcache is renamed to `<nimcache>.discarded-<unique>` and
+  ## then removed; a removal that failed leaves that name for the next
+  ## discard of the same directory to sweep.
+
+const NimcacheWriteTimeSlack = initDuration(seconds = 2)
+  ## How far before the mark a file's modification time may read and still
+  ## count as written by this use. File systems with coarse timestamps round
+  ## a write's time down (FAT's is two seconds), so a file written just after
+  ## the mark can carry a time just before it.
+
+proc nimcacheDirectoryName(nimcache: string): string =
+  ## `nimcache` without a trailing separator, so the sibling names below sit
+  ## beside the directory and not inside it.
+  result = nimcache
+  while result.len > 1 and result[^1] in {DirSep, AltSep}:
+    result.setLen(result.len - 1)
+
+proc nimcacheInUseMarkerPath*(nimcache: string): string =
+  ## The mark a compile into `nimcache` holds while it runs: present on entry
+  ## means an earlier use did not end in order, so the directory is
+  ## discarded before it is used (see the block comment above).
+  nimcacheDirectoryName(nimcache) & NimcacheInUseMarkerSuffix
+
+proc zeroByteNimcacheObject(nimcache: string): string =
+  ## The first zero-byte object file in `nimcache`, or "". Nim lays every
+  ## module's C file and object out flat in the nimcache's top level
+  ## (`@m<main>.nim.c.o`, `@psystem.nim.c.o`, ...), so the top level is
+  ## where an interrupted C compile leaves one. `.obj` is the MSVC spelling.
+  for kind, path in walkDir(extendedPath(nimcache)):
+    if kind != pcFile:
+      continue
+    if not (path.endsWith(".o") or path.endsWith(".obj")):
+      continue
+    try:
+      if getFileSize(path) == 0:
+        return path
+    except OSError:
+      # A file that vanished or cannot be read is not evidence either way;
+      # the compiler will meet it on its own terms.
+      discard
+
+proc writeNimcacheNotice(notice: string) =
+  ## Written to stderr, the channel this module's other compile notices use
+  ## (`hostCCompilerPath`).
+  try:
+    stderr.writeLine(notice)
+    flushFile(stderr)
+  except IOError, OSError:
+    discard
+
+proc noteNimcacheDiscard(nimcache, reason: string) =
+  ## A discard turns a warm compile cold, so say why: a slow build right
+  ## after a crash should not be a mystery.
+  writeNimcacheNotice("repro: note: discarding the compiler cache " &
+    nimcache & ": " & reason & "; this compile starts cold.")
+
+proc discardNimcache(nimcache, reason: string) =
+  ## Rename `nimcache` aside and remove it. The rename is what matters and
+  ## must succeed (it raises otherwise): once it has, the compile that
+  ## follows starts from an empty directory whatever the removal does. The
+  ## removal is best effort -- a file another process still holds open on
+  ## Windows can keep it from completing -- and its leftovers, and those of
+  ## earlier discards, are swept by the next discard of this directory. The
+  ## caller holds the directory exclusively, so nothing else is using any
+  ## of them.
+  let dir = nimcacheDirectoryName(nimcache)
+  noteNimcacheDiscard(dir, reason)
+  let now = getTime()
+  let aside = dir & NimcacheDiscardedInfix & $getCurrentProcessId() & "-" &
+    $now.toUnix() & "-" & $now.nanosecond
+  moveDir(extendedPath(dir), extendedPath(aside))
+  let (parent, name) = splitPath(dir)
+  let prefix = name & NimcacheDiscardedInfix
+  for kind, path in walkDir(extendedPath(if parent.len > 0: parent else: ".")):
+    if kind == pcDir and extractFilename(path).startsWith(prefix):
+      try:
+        removeDir(path)
+      except OSError:
+        discard
+
+proc discardInterruptedNimcache(nimcache: string) =
+  ## Rule 4 of §"Interrupted Use": discard, before the compiler runs, a
+  ## directory an earlier use did not finish with, or one holding an object
+  ## no complete write produces. A missing directory is a cold cache, and
+  ## fine as it is.
+  if not dirExists(extendedPath(nimcache)):
+    return
+  if fileExists(extendedPath(nimcacheInUseMarkerPath(nimcache))):
+    discardNimcache(nimcache, "an earlier compile in it did not finish " &
+      "(it was interrupted, or the process running it died), so what it " &
+      "holds may be half written")
+    return
+  let empty = zeroByteNimcacheObject(nimcache)
+  if empty.len > 0:
+    discardNimcache(nimcache, "it holds a zero-byte object file, " &
+      extractFilename(empty) & ", which no complete compile writes")
+
+proc markNimcacheInUse(nimcache: string) =
+  ## Rule 1: the mark exists, durably, before the compiler's first write.
+  ## `replaceFileDurably` syncs the file and then its directory, so a crash
+  ## at any later instant finds it. The directory holding the nimcache is the
+  ## lock's (or the slot's) and exists, but a caller that names a fresh one
+  ## gets it created.
+  let marker = nimcacheInUseMarkerPath(nimcache)
+  createDir(extendedPath(parentDir(marker)))
+  replaceFileDurably(marker, "pid " & $getCurrentProcessId() & "\n")
+
+proc settleNimcacheUse(nimcache: string; useStart: times.Time): bool =
+  ## Rule 2: flush what this use wrote, then clear the mark. Returns false,
+  ## keeping the mark, when anything could not be flushed -- the next use
+  ## then starts cold, which costs time; clearing the mark over data that
+  ## may not be on disk could cost a wrong link.
+  ##
+  ## "What this use wrote" is every regular file whose modification time is
+  ## not older than the mark (less `NimcacheWriteTimeSlack`): a warm compile
+  ## rewrites a handful of files among hundreds, and flushing only those
+  ## keeps the guard from costing what the warm cache saves. The directories
+  ## holding them are synced too, and the nimcache itself always, for the
+  ## entries Nim renamed or removed.
+  let since = useStart - NimcacheWriteTimeSlack
+  var dirs = initHashSet[string]()
+  if dirExists(extendedPath(nimcache)):
+    dirs.incl(extendedPath(nimcache))
+    for path in walkDirRec(extendedPath(nimcache), yieldFilter = {pcFile}):
+      var written = false
+      try:
+        written = getLastModificationTime(path) >= since
+      except OSError:
+        # Removed under us by nothing we know of; it is not ours to vouch for.
+        continue
+      if written:
+        if not syncExistingFileDurably(path):
+          return false
+        dirs.incl(parentDir(path))
+  for dir in dirs:
+    syncDirectoryDurably(dir)
+  let marker = nimcacheInUseMarkerPath(nimcache)
+  try:
+    removeFile(extendedPath(marker))
+  except OSError:
+    return false
+  syncDirectoryDurably(parentDir(marker))
+  true
+
 proc runLogicalCompilerCommand(command, physical: openArray[string];
-    cwd: string; withEnv: openArray[(string, string)] = []):
+    cwd: string; priorNote: var string;
+    withEnv: openArray[(string, string)] = [];
+    beforeRetry: proc () {.closure.} = nil):
     ProviderCompileExecutionResult =
   ## Launch `physical` (the logical `command` itself, or its argument-file
-  ## transport), retrying once on an abnormal compiler termination. Failures
-  ## are reported against the logical `command`.
+  ## transport), retrying once on an abnormal compiler termination, and
+  ## return the FINAL attempt's result whatever its status: the caller reads
+  ## how the compile ended before it raises (`runNimcacheCompilerCommandHeld`
+  ## clears its in-use mark only after an ordinary exit). `priorNote` is set
+  ## when a retry happened, for the caller's diagnostic, which names the
+  ## logical `command`. `beforeRetry` runs between the attempts.
+  priorNote = ""
   result = runCommand(physical, cwd = cwd, raiseOnFailure = false,
     withEnv = withEnv)
-  var priorNote = ""
-  if compilerCrashIsRetryable(result.exitCode):
+  if compilerCrashIsRetryable(result.exitCode) and not result.killedByCaller:
     # The compiler died instead of answering, so this run produced no
     # verdict about the recipe -- retrying is not papering over a compile
     # error, it is asking the question that never got answered.
@@ -9051,18 +9248,21 @@ proc runLogicalCompilerCommand(command, physical: openArray[string];
     priorNote = "note: a first attempt terminated abnormally (" &
       firstCrash & ") and was retried once; the output below is the " &
       "SECOND attempt's.\n"
+    if beforeRetry != nil:
+      beforeRetry()
     result = runCommand(physical, cwd = cwd, raiseOnFailure = false,
       withEnv = withEnv)
-  if result.exitCode != 0:
-    raise commandFailure(command, result, priorNote)
 
-proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = "";
+proc runNimcacheCompilerCommandHeld*(command: openArray[string]; cwd = "";
     withEnv: openArray[(string, string)] = []):
     ProviderCompileExecutionResult =
   ## Execute a compiler command whose nimcache the CALLER already holds
   ## exclusively (`runSharedNimcacheCompilerCommand` takes the directory's
   ## lock itself; the interface extraction holds a slot lock instead, see
-  ## `acquireInterfaceNimcacheSlot`).
+  ## `acquireInterfaceNimcacheSlot`). Raises `OSError` when the compile does
+  ## not succeed. Exported for the test that pins the interrupted-use guard
+  ## below (`t_interface_nimcache_survives_an_interrupted_compile`); the
+  ## caller's exclusive hold is a precondition this proc cannot check.
   ##
   ## `command` is the LOGICAL compiler argv; callers have already formed every
   ## cache identity from it. When launching it directly would exceed the
@@ -9072,8 +9272,16 @@ proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = "";
   ## retry, and removed afterwards (codetracer-pm
   ## `spec/Nim-Compiler-Argument-Files.md`). Diagnostics keep naming the
   ## logical argv.
+  ##
+  ## The nimcache (`--nimcache:`) is guarded against an interrupted use, per
+  ## Tool-Owned-Caches.md §"Interrupted Use" (see the
+  ## block comment above `nimcacheInUseMarkerPath`). This is the one place
+  ## both of the spec's named caches pass through -- the provider compile's
+  ## position-keyed nimcache and every slot of the extraction's pool -- so the
+  ## guard is here and not in either caller.
   if command.len == 0:
     raise newException(OSError, "a compiler command needs a compiler")
+  let nimcache = providerNimcachePath(command)
   var physical = @command
   var argsFile = ""
   if compilerArgvExceedsPlatformLimit(command):
@@ -9083,10 +9291,48 @@ proc runNimcacheCompilerCommandHeld(command: openArray[string]; cwd = "";
         "its argument file: " & command[0])
     argsFile = stageCompilerArgsFile(cwd, command[1 .. ^1])
     physical = physicalCompilerCommand(command[0], argsFile)
+  var execution: ProviderCompileExecutionResult
+  var priorNote = ""
+  var endedInOrder = false
+  var useStart: times.Time
   try:
-    result = runLogicalCompilerCommand(command, physical, cwd, withEnv)
+    discardInterruptedNimcache(nimcache)
+    useStart = getTime()
+    markNimcacheInUse(nimcache)
+    # Between a crashed first attempt and its retry the mark stays: that use
+    # did not end in order. The retry deliberately reuses the warm directory
+    # (`runLogicalCompilerCommand`), but not one holding an object no
+    # complete write produces -- that much of rule 4 is cheap to apply here.
+    let checkBeforeRetry = proc () =
+      let empty = zeroByteNimcacheObject(nimcache)
+      if empty.len > 0:
+        discardNimcache(nimcache, "the compile that crashed in it left a " &
+          "zero-byte object file, " & extractFilename(empty))
+    # Any exception from here on leaves `endedInOrder` false and the mark in
+    # place. Some of them mean nothing ran (the compiler could not be
+    # started), but `runCommand` does not say which, and an engine that did
+    # not see the end of the use cannot vouch for it (rule 3). The price of
+    # being wrong this way is one cold compile.
+    execution = runLogicalCompilerCommand(command, physical, cwd, priorNote,
+      withEnv, checkBeforeRetry)
+    endedInOrder = abnormalTerminationName(execution.exitCode).len == 0 and
+      not execution.killedByCaller
   finally:
     removeStagedCompilerArgsFile(argsFile)
+  if endedInOrder:
+    var settled = false
+    try:
+      settled = settleNimcacheUse(nimcache, useStart)
+    except CatchableError:
+      settled = false
+    if not settled:
+      writeNimcacheNotice("repro: warning: what this compile wrote to " &
+        "the compiler cache " & nimcache & " could not be flushed to disk; " &
+        "the cache stays marked in use, so the next compile in it starts " &
+        "cold.")
+  if execution.exitCode != 0:
+    raise commandFailure(command, execution, priorNote)
+  execution
 
 proc runSharedNimcacheCompilerCommand(command: openArray[string]; cwd = "";
     withEnv: openArray[(string, string)] = []):
@@ -10431,6 +10677,14 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
       if launch.script.len > 0:
         err.msg.add("\n(the compile's SDK search-path reassertion is in " &
           searchPathScript & ")")
+      # The pool is shared by every extraction on the host with this
+      # configuration, so a failure that comes from its contents rather than
+      # from the recipe -- objects a crashed compile left half written, which
+      # failed every later link through that slot -- must be traceable to the
+      # directory, not only to the recipe.
+      if not perBinary:
+        err.msg.add("\n(the compile used the shared nimcache " & nimcache &
+          ")")
       raise
   finally:
     if not perBinary:

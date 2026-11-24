@@ -1,0 +1,12 @@
+1.2	1.2.0.0	false	true	false
+0.6.0.3	0.6.0.3.0	false	true	false
+0.6.0.3	0.6.0.3.1	true	false	false
+0.7.0.8.0	0.6.0.3.1	false	false	true
+1.10	1.9.9.9	false	false	true
+0.6.0.3.0	0.6.0.3.1	true	false	false
+0.6.0.4	0.6.0.3.1	false	false	true
+0.7.0	0.7.0.8.0	true	false	false
+1.0	1.0.0.0.0.0.0.1	true	false	false
+2	1.99.99.99.99	false	false	true
+1.2.3	1.2.3	false	true	false
+0.0.0.1	0.0.0	false	false	true
