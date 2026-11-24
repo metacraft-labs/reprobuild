@@ -734,16 +734,41 @@ powershell_encoded_command() {
 # 1, so msi_table can refuse it rather than read an empty table.
 MSI_TABLE_PS="$(cat <<'MSI_TABLE_PS_EOF'
 $ErrorActionPreference = 'Stop'
+# A column whose type is a binary stream cannot be read as a string: the
+# Binary table's Data column (where WixUtilExtension puts the WixCA DLL) made
+# Record.StringData throw "StringData,Field". So each column's type is read
+# from View.ColumnInfo(msiColumnInfoTypes = 1)
+# (https://learn.microsoft.com/windows/win32/msi/view-columninfo), whose
+# letter 'v' (or 'V', nullable) marks a binary stream
+# (https://learn.microsoft.com/windows/win32/msi/column-definition-format),
+# and a stream cell is written as its length in bytes, Record.DataSize
+# (https://learn.microsoft.com/windows/win32/msi/record-datasize); every
+# other cell is Record.StringData
+# (https://learn.microsoft.com/windows/win32/msi/record-stringdata).
+function Get-ComProperty($Object, [string]$Name, [object[]]$Arguments) {
+  return $Object.GetType().InvokeMember($Name, 'GetProperty', $null, $Object, $Arguments)
+}
+function Test-MsiStreamColumn([string]$Type) {
+  return $Type -cmatch '^[vV]'
+}
+function Get-MsiCell($Record, [int]$Field, [string]$Type) {
+  if (Test-MsiStreamColumn $Type) {
+    return [string](Get-ComProperty $Record 'DataSize' @($Field))
+  }
+  return [string](Get-ComProperty $Record 'StringData' @($Field))
+}
+# main: everything below runs against the Windows Installer COM object.
 try {
   $i = New-Object -ComObject WindowsInstaller.Installer
   $db = $i.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $i, @($env:REPRO_MSI_DB, 0))
   $q = 'SELECT * FROM `' + $env:REPRO_MSI_TABLE + '`'
   $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($q))
   $v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null) | Out-Null
-  $cols = $v.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $v, @(0))
+  $cols = Get-ComProperty $v 'ColumnInfo' @(1)
   $n = $cols.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $cols, $null)
+  $types = @(foreach ($k in 1..$n) { Get-ComProperty $cols 'StringData' @($k) })
   while ($r = $v.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $v, $null)) {
-    $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember('StringData', 'GetProperty', $null, $r, @($k)) }
+    $f = foreach ($k in 1..$n) { Get-MsiCell $r $k $types[$k - 1] }
     [Console]::Out.WriteLine(($f -join [char]9))
   }
 } catch {
@@ -759,8 +784,23 @@ MSI_TABLE_PS_EOF
 msi_table() {
   if command -v msiinfo >/dev/null 2>&1; then
     # From the stage: exporting a table with a binary column (Binary)
-    # writes each stream to <table>/<row> under the working directory.
-    ( cd "$stage" && msiinfo export "$1" "$2" ) | tr -d '\r' | tail -n +4
+    # writes each stream to <table>/<cell> under the working directory, and
+    # the cell names that file. The export's second line holds the column
+    # types; a stream column ('v'/'V') is reported as the stream's length in
+    # bytes, as the Windows reader below reports it, so both readers yield
+    # the same rows.
+    ( cd "$stage" && msiinfo export "$1" "$2" ) | tr -d '\r' > "$stage/msi-export.raw"
+    awk -F '\t' -v OFS='\t' -v dir="$stage/$2" '
+      NR == 2 { for (k = 1; k <= NF; k++) stream[k] = ($k ~ /^[vV]/); next }
+      NR <= 3 { next }
+      {
+        for (k = 1; k <= NF; k++) if (stream[k]) {
+          f = dir "/" $k; sz = ""
+          if ((getline _l < f) >= 0) { close(f); cmd = "wc -c < \"" f "\""; cmd | getline sz; close(cmd) }
+          gsub(/[^0-9]/, "", sz); $k = (sz == "" ? 0 : sz)
+        }
+        print
+      }' "$stage/msi-export.raw"
   elif command -v powershell.exe >/dev/null 2>&1; then
     _m="$1"
     command -v cygpath >/dev/null 2>&1 && _m="$(cygpath -w "$1")"
@@ -863,9 +903,11 @@ build_msi() {
     grep -q -- "^$_want" "$stage/msi-ca.tsv" \
       || die "the package $_msi has no custom action matching '$_want'"
   done
+  # Each row: name, the stream's length in bytes (msi_table reads a stream
+  # column as its length). The WixCA DLL must be there and not empty.
   msi_table "$_msi" Binary > "$stage/msi-binary.tsv"
-  grep -q "^WixCA${_tab}" "$stage/msi-binary.tsv" \
-    || die "the package $_msi carries no WixCA binary for its quiet-exec actions"
+  awk -F '\t' '$1 == "WixCA" && $2 ~ /^[0-9]+$/ && $2 > 0 { ok = 1 } END { exit !ok }' "$stage/msi-binary.tsv" \
+    || die "the package $_msi carries no non-empty WixCA binary for its quiet-exec actions"
   log "built $_msi"
 }
 
