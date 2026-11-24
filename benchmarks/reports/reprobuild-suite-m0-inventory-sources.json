@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3224,
+    "nimTestBinaries": 3230,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 846,
+    "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3279
+    "testEntries": 3285
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,10 +1855,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1813,
+      "integration": 1817,
       "platform/destructive": 203,
-      "pure unit": 846,
-      "unclassified": 388
+      "pure unit": 847,
+      "unclassified": 389
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3224,
+    "nimTestBinaryCount": 3230,
     "pythonTestFileCount": 55,
-    "testEntryCount": 3279
+    "testEntryCount": 3285
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -14867,6 +14867,44 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_rqe_cg4a_rustc_reads_stay_in_roots",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_rustc_reads_stay_in_roots.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_rqe_cg4a_store_crate_outputs_pass_d4_scan",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [
+        "ssl"
+      ],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "libs/repro_cargo_fetch",
+      "requiresReproBinary": true,
+      "source": "libs/repro_cargo_fetch/tests/test_rqe_cg4a_store_crate_outputs_pass_d4_scan.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_rqe_cg2_cargo_gc",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -22561,6 +22599,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_one_root_per_package_in_a_recipe_compile",
+      "class": "unclassified",
+      "classificationReason": "mutates the process environment",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_one_root_per_package_in_a_recipe_compile.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_pinned_siblings_codec",
       "class": "pure unit",
       "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
@@ -29610,6 +29665,24 @@
       "source": "libs/repro_project_dsl/tests/t_engine_path_expression_uses_flag_value.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_engine_recipe_skew",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_project_dsl"
+      ],
+      "owner": "libs/repro_project_dsl",
+      "requiresReproBinary": false,
+      "source": "libs/repro_project_dsl/tests/t_engine_recipe_skew.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44550,6 +44623,24 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_an_engine_older_than_a_sibling_recipe_names_the_skew",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_an_engine_older_than_a_sibling_recipe_names_the_skew.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_an_input_develop_mode_does_not_substitute_is_not_compared",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -59191,6 +59282,25 @@
       "source": "tests/integration/t_spi_pool_retains_registered_leaf_objects.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 46,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_spi_submodule_borrowing_from_partial_pool_keeps_its_files",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_build_engine",
+        "repro_cli_support",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_spi_submodule_borrowing_from_partial_pool_keeps_its_files.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 5,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
