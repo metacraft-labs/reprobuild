@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 845,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3275
+    "testEntries": 3276
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1858,7 +1858,7 @@
       "integration": 1812,
       "platform/destructive": 203,
       "pure unit": 845,
-      "unclassified": 386
+      "unclassified": 387
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2079,8 +2079,8 @@
       }
     ],
     "nimTestBinaryCount": 3222,
-    "pythonTestFileCount": 53,
-    "testEntryCount": 3275
+    "pythonTestFileCount": 54,
+    "testEntryCount": 3276
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -68894,6 +68894,21 @@
       "source": "tests/unit/test_test_group_fallback.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_verify_release_needs_no_agent.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

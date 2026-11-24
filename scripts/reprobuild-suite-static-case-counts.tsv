@@ -3279,6 +3279,7 @@ tests/unit/test_sibling_lock_pins.py	python	10
 tests/unit/test_source_revision.py	python	18
 tests/unit/test_suite_drift_attribution.py	python	12
 tests/unit/test_test_group_fallback.py	python	6
+tests/unit/test_verify_release_needs_no_agent.py	python	3
 tests/unit/test_wrapper_default_provenance.py	python	3
 tools/catalog-harvester/tests/test_gh_releases_source.nim	nim	26
 tools/catalog-harvester/tests/test_harvester_app_name_validation.nim	nim	11
