@@ -127,9 +127,37 @@ proc retiredSettingsFileIn*(dir: string): string =
     return retired
   ""
 
+var configuredSettingsFileIgnored {.threadvar.}: bool
+  ## Set only inside ``ignoringConfiguredSettingsFile``.
+
+template ignoringConfiguredSettingsFile*(body: untyped) =
+  ## Run ``body`` as if ``REPRO_WORKSPACE_CONFIG`` were unset: every reading
+  ## that goes through ``configuredSettingsFile`` (settings discovery, root
+  ## discovery, the settings-marked-root test) falls back to the files under
+  ## the directory it is given.
+  ##
+  ## For a caller whose workspace is decided by something other than the
+  ## environment it inherited. The push gateway's ``pre-receive`` hook is
+  ## one: its config records ``workspace_root``, while the hook runs in the
+  ## PUSHING shell's environment, with the gateway's bare repository as its
+  ## working directory. A variable meant for that shell (a test fixture,
+  ## another workspace's settings, a relative path) would otherwise decide
+  ## which roles the gateway enforces (Push-Gateway-Wiring-And-Policy §5.3).
+  ## The flag is per thread and restored on exit, so a nested use and an
+  ## exception both leave the caller's reading as it was.
+  let previousIgnored = configuredSettingsFileIgnored
+  configuredSettingsFileIgnored = true
+  try:
+    body
+  finally:
+    configuredSettingsFileIgnored = previousIgnored
+
 proc configuredSettingsFile*(): tuple[set: bool; path: string] =
   ## ``REPRO_WORKSPACE_CONFIG``: whether it is set (non-empty), and the
   ## absolute path it names when that file exists ("" when it does not).
+  ## Reads as unset inside ``ignoringConfiguredSettingsFile``.
+  if configuredSettingsFileIgnored:
+    return (false, "")
   let value = getEnv(WorkspaceConfigEnvVar)
   if value.len == 0:
     return (false, "")

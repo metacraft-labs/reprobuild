@@ -444,10 +444,17 @@ type
     bytes*: seq[byte]
     reason*: string
 
+proc hardLinkedOutputReason(rel: string; links: int64): string =
+  "declared output " & rel & " has " & $links & " hard links: the daemon " &
+    "never reads a file that may also be named outside the lease (a lease " &
+    "can link a file it cannot open)"
+
 proc readDeclaredOutput*(worktree, rel: string): OutputRead =
   ## Reads a declared output WITHOUT following a symlink anywhere on its
   ## path: every parent must be a real directory, the file itself is opened
-  ## `O_NOFOLLOW` and must be a regular file of at most `MaxOutputBytes`.
+  ## `O_NOFOLLOW` and must be a regular file of at most `MaxOutputBytes`
+  ## with a single hard link (a second link may alias a file outside the
+  ## lease; a tool that hard-links its own outputs must copy them instead).
   ## Absent is not an error (`present = false`); anything else that is not
   ## a regular file is refused with a reason. Runs after the lease ended
   ## (on Linux every lease process died with its pid namespace).
@@ -473,6 +480,13 @@ proc readDeclaredOutput*(worktree, rel: string): OutputRead =
     if fstat(fd, fst) != 0 or not S_ISREG(fst.st_mode):
       return OutputRead(present: true, reason: "declared output " & rel &
         " changed type while it was opened")
+    # A second hard link means the name may alias a file the lease never
+    # wrote and could not open itself (it only had to be able to `link(2)`
+    # it, which needs no read access). Judged on the descriptor the read
+    # uses, so nothing can swap the file between this check and the read.
+    if int64(fst.st_nlink) > 1:
+      return OutputRead(present: true, reason: hardLinkedOutputReason(rel,
+        int64(fst.st_nlink)))
     if int64(fst.st_size) > MaxOutputBytes:
       return OutputRead(present: true, reason: "declared output " & rel &
         " exceeds " & $MaxOutputBytes & " bytes")
@@ -505,6 +519,9 @@ proc readDeclaredOutput*(worktree, rel: string): OutputRead =
     if info.kind != pcFile:
       return OutputRead(present: true, reason: "declared output " & rel &
         " is not a regular file")
+    if info.linkCount > 1:
+      return OutputRead(present: true, reason: hardLinkedOutputReason(rel,
+        int64(info.linkCount)))
     if info.size > MaxOutputBytes:
       return OutputRead(present: true, reason: "declared output " & rel &
         " exceeds " & $MaxOutputBytes & " bytes")

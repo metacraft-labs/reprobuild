@@ -1247,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795333081,
-        "narHash": "sha256-GBhlVuIlrIxZu8o9qRDtlT4EWpzcZVqceEy0llMuqHo=",
+        "lastModified": 1795474122,
+        "narHash": "sha256-aiIUljMFLYTTGeuXbBDSNunqBgB5u/siGdgwjf3fnfU=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "b1c32599f9cd671b150f68de2b21bdc9ae0c42be",
+        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "b1c32599f9cd671b150f68de2b21bdc9ae0c42be",
+        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
         "type": "github"
       }
     },
@@ -1400,17 +1400,17 @@
     "nim-fork-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795029545,
-        "narHash": "sha256-r/7ArSTULsB+ikroJkNXKFv3ksNzzA4Sv8YFAigS49E=",
+        "lastModified": 1795500052,
+        "narHash": "sha256-CGAQZCbPbNX+nvuMBebKxnAZ7BJllIkqnjPjahr4kbQ=",
         "ref": "codetracer",
-        "rev": "fde9384cf07fd4662804fb041569e773cbad8bc9",
-        "revCount": 23185,
+        "rev": "85f8e3c25545558cc753d6e0b56ec35c787a4405",
+        "revCount": 23189,
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       },
       "original": {
         "ref": "codetracer",
-        "rev": "fde9384cf07fd4662804fb041569e773cbad8bc9",
+        "rev": "85f8e3c25545558cc753d6e0b56ec35c787a4405",
         "type": "git",
         "url": "https://github.com/metacraft-labs/nim"
       }
@@ -2673,11 +2673,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795429727,
-        "narHash": "sha256-jhOaXCoc9NbSzELJqklgix6a8rwdlpooZnIq4D1gAzY=",
+        "lastModified": 1795477267,
+        "narHash": "sha256-pnXOeqPILm9uFJWx1di6PpxuryiMY2QFxydpwT/oirM=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "b63c6c17ffd9f046baa70a62cbeb067c3a0a2745",
+        "rev": "8bc40ad96bdac28334ce5c5d65a3947a20a7a9fd",
         "type": "github"
       },
       "original": {

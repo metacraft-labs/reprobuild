@@ -61,7 +61,11 @@
 ## directory would keep it undeletable for its whole life (reprobuild-specs
 ## issue 2026-10-14, "auto-started repro-daemon holds its starter's working
 ## directory on Windows"). The caller therefore names the directory the child
-## starts in, and it must be one the child owns.
+## starts in. For a long-lived child it comes from
+## `detached_working_directory.detachedDaemonWorkingDirectory`, which also
+## keeps it out of the child's own image directory: Windows refuses to RENAME
+## a directory that is some process's current directory too, and a daemon
+## running in an install's `bin\` blocked every in-place upgrade.
 
 when defined(windows):
   import std/[algorithm, os, strutils, winlean]

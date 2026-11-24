@@ -403,7 +403,15 @@
       # linux-arm64 source build stopped at "undeclared identifier:
       # 'SiteTableView'". The range also keeps a late inline scan on the
       # startup scan's instruction boundaries (c4ab263).
-      url = "github:metacraft-labs/io-mon/b1c32599f9cd671b150f68de2b21bdc9ae0c42be";
+      # Bumped b1c32599 -> 13659436 (2026-11-24, io-mon `agents`): every
+      # compile of the Linux shim links with `--as-needed` ahead of Nim's
+      # `-lm -lrt -ldl -pthread`, and with `-static-libgcc`, from io-mon's
+      # `linux_preload.nim.cfg` (e40577a), so the shim this repo's
+      # `reprobuild.test_fixtures.monitor_shim` edge links needs only
+      # `libc.so.6` and the loader, as io-mon's builder's does. The range
+      # also records each path-resolution observation once per process
+      # (3d3077a).
+      url = "github:metacraft-labs/io-mon/1365943692eedfb0699ce90e59c4602d90317561";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -985,8 +993,18 @@
     # resumes a short write at the written offset (upstream bb85d2dda5,
     # e2b2142a49; reprobuild-pm issue
     # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
+    #
+    # Advanced from fde9384c to 85f8e3c2: `nimpretty`'s layouter keeps a
+    # rejoined line break's indentation, lays a statement block opened inside
+    # an expression right of the lines that open it, and treats a line led by
+    # a closing bracket or following a comment as expression continuation,
+    # so `just format` accepts the CLI-support module, which it refused with
+    # "invalid indentation" before, and is idempotent on it.
+    # Riding along: a closure environment is no longer moved while still
+    # live (upstream #26256, with a test), and a macro expansion's sourcemap
+    # maps each statement to its own line.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=85f8e3c25545558cc753d6e0b56ec35c787a4405";
       flake = false;
     };
     nim-csources-src = {
@@ -2814,6 +2832,20 @@
             # why that does not work): it is for the shell to PROVIDE the
             # programs it does this to, so they come from the same nixpkgs.
             # `scripts/check_dev_shell_env.sh` holds that invariant.
+            #
+            # ITS SCOPE IS THE PROGRAMS REPROBUILD ITSELF RUNS
+            # (`DEV_SHELL_SUBPROCESS_TOOLS` in `scripts/lib/dev_shell_overrides.sh`,
+            # plus `$REPRO_SYSTEMD_ANALYZE`), and for those `just lint` refuses.
+            # The variable reaches every other program started here too: on a
+            # host whose libc is older than this nixpkgs' glibc, a host program
+            # that links one of these sonames (ssh / scp / openssl
+            # via libcrypto, zstd via libzstd, systemctl via libsystemd-shared)
+            # loads this shell's copy and dies before `main`. The shell cannot
+            # provide every program a contributor might start, so for those
+            # `just lint` WARNS instead, naming each broken program on PATH,
+            # the library that breaks it and the remedy (`env -u
+            # LD_LIBRARY_PATH <program>`, or provide it here if reprobuild
+            # starts it).
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
               [
                 pkgs.clingo
