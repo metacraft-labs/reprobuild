@@ -85,7 +85,7 @@ const
     ## Explicit override: an absolute or relative path to a binary that
     ## implements ``test discover`` / ``test run``. Checked first so a
     ## reviewer can point this module at a specific build (for example one
-    ## built from the pinned ``codetracer-src`` revision rather than from a
+    ## built from the pinned CodeTracer revision rather than from a
     ## sibling checkout) without touching ``PATH``.
 
   CtTestSurfaceCandidates* = ["ct-test", "ct"]
