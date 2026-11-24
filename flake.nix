@@ -11,6 +11,16 @@
     # Follow this flake itself so consumers retain one Reprobuild pin while
     # the module and Nixpkgs revisions remain independently pinned.
     nixos-modules.inputs.reprobuild.follows = "";
+    # microvm.nix, reached through this module input, locks `spectrum` from
+    # spectrum-os.org. microvm reads it only in its `cloud-hypervisor-graphics`
+    # overlay, which nothing here evaluates. While that host is down, every
+    # consumer that fetches all locked inputs (`nix flake archive`) fails.
+    # devops-modules drops the input from its own `microvm` and from its pin
+    # of this flake for that reason, and its
+    # `scripts/ci/check_flake_lock_sources.py` denies the host. A consumer
+    # that reaches this flake through `builtins.getFlake` uses this lock as is
+    # and cannot override the input, so it is dropped here too.
+    nixos-modules.inputs.microvm.inputs.spectrum.follows = "";
     nixpkgs.follows = "nixos-modules/nixpkgs-unstable";
     flake-parts.follows = "nixos-modules/flake-parts";
     git-hooks.follows = "nixos-modules/git-hooks-nix";
