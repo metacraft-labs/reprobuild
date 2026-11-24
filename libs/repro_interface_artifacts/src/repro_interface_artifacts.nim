@@ -8005,6 +8005,17 @@ proc nixLibDirIn*(storeRoot, namePattern: string;
 proc nixLibDir(namePattern: string; dylibNames: openArray[string]): string =
   nixLibDirIn("/nix/store", namePattern, dylibNames)
 
+proc engineIdentityDefines*(): seq[string] =
+  ## The engine's identity, handed to every recipe compile it runs so that a
+  ## diagnostic the DSL raises at macro-expansion time can name the build
+  ## that ran it: the image path (`publicCliImagePath`, the path that
+  ## re-enters this engine) and its source revision. The DSL reads them as
+  ## `reproEngineImage` / `reproEngineRevision` and uses them only in the
+  ## skew refusal (Cross-Repo-Source-Consumption.md §9.2a). They are argv,
+  ## so they key the compile like any other define.
+  @["--define:reproEngineImage=" & publicCliImagePath(),
+    "--define:reproEngineRevision=" & ReprobuildSourceRevision]
+
 proc reproPackagePaths(workDir: string;
     configurationRoots: openArray[string] = []): SiblingPackagePaths =
   ## Replay the third-party / sibling-repo package ``--path`` switches that
@@ -10428,7 +10439,7 @@ proc extractInterfaceFromModuleBody(modulePath, artifactPath,
     # the consumer, and every dependency resolved against the wrong
     # workspace.
     consumerRootDefine,
-  ] & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
+  ] & engineIdentityDefines() & (if getEnv("REPRO_DSLDEPS_DEBUG").len > 0:
          @["--define:reproDslDepsDebug"] else: @[])
   # The `--nimcache:` argument is filled in once the command is complete: its
   # key folds in every compile option (defines, producer paths), so two
@@ -11597,6 +11608,7 @@ proc providerCompileCommand*(modulePath, outputBinaryPath: string;
     # vregs ICEs and unbounded nested compiler bursts. Hosts with a validated
     # toolchain can opt into bounded concurrency through the environment.
     "--define:reproProviderMode",
+  ] & engineIdentityDefines() & @[
     # A recipe-relative compile names the module by its file name and runs
     # in its directory; its search path is then that directory, `.`.
     "--path:" & (if parentDir(modulePath).len > 0: parentDir(modulePath)

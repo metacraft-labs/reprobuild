@@ -110,12 +110,28 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-gpg_q() { "$GPG" --batch --no-tty --quiet --keyid-format long "$@"; }
+# No gpg-agent. This script only imports PUBLIC keys and checks
+# signatures, which gpg does without an agent; left to itself gpg would
+# still start one for every --import. The agent binds its sockets in the
+# per-user runtime directory (/run/user/<uid>) when there is one and in
+# GNUPGHOME otherwise -- on Windows (Git for Windows' MSYS2 gpg) and for an
+# account without a login session -- and a socket path longer than
+# sun_path's 107 characters makes the agent exit 2 ("socket name ... is
+# too long"; https://man7.org/linux/man-pages/man7/unix.7.html). gpg then
+# fails the import although the key was imported, and a TMPDIR as deep as
+# %TEMP%\<dir>\tmp is enough. --no-autostart keeps gpg from starting one
+# (https://www.gnupg.org/documentation/manuals/gnupg/GPG-Configuration-Options.html).
+gpg_q() { "$GPG" --batch --no-tty --no-autostart --quiet --keyid-format long "$@"; }
 
 imported=0
 import_one() {
   f="$1"
-  if gpg_q --import "$f" >"$GNUPGHOME/import.log" 2>&1; then
+  # Whether a key was imported is read from gpg's IMPORT_OK status line
+  # (doc/DETAILS in the GnuPG sources), not from its exit code: without an
+  # agent gpg may still exit 2 for "can't connect to the gpg-agent" after
+  # importing the key, which says nothing about the key.
+  gpg_q --status-file "$GNUPGHOME/import.status" --import "$f" >"$GNUPGHOME/import.log" 2>&1 || true
+  if grep -q '^\[GNUPG:\] IMPORT_OK ' "$GNUPGHOME/import.status" 2>/dev/null; then
     imported=$((imported + 1))
   else
     # gpg's own reason, and which gpg gave it: without them a refusal here
@@ -143,14 +159,14 @@ fi
 [ "$imported" -gt 0 ] \
   || rv_fail "no OpenPGP keys imported from $keyring; there is nothing to verify against"
 
-key_count="$("$GPG" --batch --with-colons --list-keys 2>/dev/null | grep -c '^pub:' || true)"
+key_count="$("$GPG" --batch --no-autostart --with-colons --list-keys 2>/dev/null | grep -c '^pub:' || true)"
 [ "$key_count" -gt 0 ] \
   || rv_fail "keyring $keyring imported but holds zero public keys"
 rv_log "trust anchor: $key_count key(s) from $keyring"
 
 # ── 2. Test keys must be declared. ───────────────────────────────────
 
-if "$GPG" --batch --with-colons --list-keys 2>/dev/null \
+if "$GPG" --batch --no-autostart --with-colons --list-keys 2>/dev/null \
      | awk -F: '$1=="uid" {print $10}' | grep -qF "$RV_TEST_KEY_MARKER"; then
   if [ "$allow_test_key" -ne 1 ]; then
     rv_fail "the keyring contains a key marked '$RV_TEST_KEY_MARKER' and --allow-test-key was not given. A test key never verifies a release."
@@ -171,7 +187,7 @@ fi
 
 status_file="$GNUPGHOME/status.txt"
 set +e
-"$GPG" --batch --no-tty --keyid-format long \
+"$GPG" --batch --no-tty --no-autostart --keyid-format long \
   --status-file "$status_file" \
   --verify "$dir/$RV_SUMS_SIG" "$dir/$RV_SUMS" >"$GNUPGHOME/verify.log" 2>&1
 verify_rc=$?
@@ -268,7 +284,7 @@ for a in $artifacts; do
   # 4c. and its own detached signature must verify.
   if [ -f "$dir/$a.asc" ]; then
     set +e
-    "$GPG" --batch --no-tty --keyid-format long \
+    "$GPG" --batch --no-tty --no-autostart --keyid-format long \
       --status-file "$GNUPGHOME/status-$n_checked.txt" \
       --verify "$dir/$a.asc" "$dir/$a" >"$GNUPGHOME/verify-$n_checked.log" 2>&1
     rc=$?
