@@ -403,7 +403,15 @@
       # linux-arm64 source build stopped at "undeclared identifier:
       # 'SiteTableView'". The range also keeps a late inline scan on the
       # startup scan's instruction boundaries (c4ab263).
-      url = "github:metacraft-labs/io-mon/b1c32599f9cd671b150f68de2b21bdc9ae0c42be";
+      # Bumped b1c32599 -> 13659436 (2026-11-24, io-mon `agents`): every
+      # compile of the Linux shim links with `--as-needed` ahead of Nim's
+      # `-lm -lrt -ldl -pthread`, and with `-static-libgcc`, from io-mon's
+      # `linux_preload.nim.cfg` (e40577a), so the shim this repo's
+      # `reprobuild.test_fixtures.monitor_shim` edge links needs only
+      # `libc.so.6` and the loader, as io-mon's builder's does. The range
+      # also records each path-resolution observation once per process
+      # (3d3077a).
+      url = "github:metacraft-labs/io-mon/1365943692eedfb0699ce90e59c4602d90317561";
       flake = false;
     };
     nim-shm-gset-src = {

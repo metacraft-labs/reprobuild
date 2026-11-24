@@ -55454,7 +55454,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
