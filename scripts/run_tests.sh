@@ -550,9 +550,17 @@ if [[ -z "${REPROBUILD_MAX_PARALLELISM:-}" ]]; then
       "${available_cores}" "${available_mem_mb}"
   )"
 fi
-printf 'Building apps + test-helpers + test-builds via repro (%s cores, %s MiB available, REPROBUILD_MAX_PARALLELISM=%s)\n' \
+# The build phase consumes roughly 0.8 GB/min (measured on a CI runner:
+# 46 G free at start, 22 G after 31 min) and needs at least ~30 GiB of its own
+# headroom. Check it now: a full disk otherwise shows up half an hour later as
+# a killed engine with no failure report.
+available_disk_mb="$(reprobuild_available_disk_mb build)"
+min_free_disk_mb="${REPROBUILD_TEST_MIN_FREE_DISK_MB:-30720}"
+printf 'Building apps + test-helpers + test-builds via repro (%s cores, %s MiB memory available, %s MiB disk free (need %s), REPROBUILD_MAX_PARALLELISM=%s)\n' \
   "${available_cores}" "${available_mem_mb:-unknown}" \
+  "${available_disk_mb:-unknown}" "${min_free_disk_mb}" \
   "${REPROBUILD_MAX_PARALLELISM}" >&2
+reprobuild_require_free_disk build "${min_free_disk_mb}" || exit 1
 # A cold action cache has to compile every test binary from scratch. This
 # ceiling has now been raised twice by the same observation, because the graph
 # keeps growing and the backstop does not: 90m cut a cold run at 969/1168, and

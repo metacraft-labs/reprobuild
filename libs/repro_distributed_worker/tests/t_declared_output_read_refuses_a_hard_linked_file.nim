@@ -20,7 +20,6 @@
 import std/[os, strutils, tempfiles, unittest]
 
 import repro_test_support/reasoned_skip
-
 import repro_distributed_worker/receiver
 
 when defined(posix):
@@ -56,4 +55,4 @@ when defined(posix):
 else:
   suite "a declared output with another hard link is not read":
     test "hard link to a file outside the worktree is refused":
-      skip("needs POSIX link(2) and fstat link counts; this host is not POSIX")
+      skip("not a POSIX host; link(2) hard links are what this case drives")

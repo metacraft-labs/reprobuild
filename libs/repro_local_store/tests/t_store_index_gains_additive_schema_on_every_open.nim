@@ -1,5 +1,6 @@
 ## A store index gains the ADDITIVE schema (the last-use columns, the cached
-## prefix size, the published tree digest, `cas_use`, `adapter_installs`) on
+## prefix size, the published tree digest, `cas_use`, `adapter_installs`,
+## `prefix_references`) on
 ## every open, by introspection, and never through `user_version`.
 ##
 ## Spec: reprobuild-pm `spec/CLI/store/gc.md` §Budget Mode and
@@ -88,7 +89,7 @@ CREATE TABLE IF NOT EXISTS gc_audit (
     "adapter, receipt_digest, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
 
   AdditivePrefixColumns = ["last_used_at", "size_bytes", "content_digest"]
-  AdditiveTables = ["cas_use", "adapter_installs"]
+  AdditiveTables = ["cas_use", "adapter_installs", "prefix_references"]
 
 var fixtureSeq = 0
 

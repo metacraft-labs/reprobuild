@@ -993,8 +993,18 @@
     # resumes a short write at the written offset (upstream bb85d2dda5,
     # e2b2142a49; reprobuild-pm issue
     # 2026-11-15-pinned-nim-fork-lacks-upstream-net-send-fixes-...).
+    #
+    # Advanced from fde9384c to 85f8e3c2: `nimpretty`'s layouter keeps a
+    # rejoined line break's indentation, lays a statement block opened inside
+    # an expression right of the lines that open it, and treats a line led by
+    # a closing bracket or following a comment as expression continuation,
+    # so `just format` accepts the CLI-support module, which it refused with
+    # "invalid indentation" before, and is idempotent on it.
+    # Riding along: a closure environment is no longer moved while still
+    # live (upstream #26256, with a test), and a macro expansion's sourcemap
+    # maps each statement to its own line.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=fde9384cf07fd4662804fb041569e773cbad8bc9";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=85f8e3c25545558cc753d6e0b56ec35c787a4405";
       flake = false;
     };
     nim-csources-src = {
@@ -2231,11 +2241,16 @@
           # pin, not a per-entry one.
           #
           # Pins mirror `repro.nim`'s Windows fixture constants where nixpkgs
-          # carries the pinned line: Zig 0.13 (pre-1.0; the M44 fixtures were
-          # audited against it), the .NET 8.0 SDK band, JDK 21, Gradle 8,
+          # carries the pinned line: the .NET 8.0 SDK band, JDK 21, Gradle 8,
           # FPC 3.2.2 and Swift 5.10.1 (the nixpkgs defaults happen to be
           # those exact versions). Go is the exception: nixpkgs has removed
-          # the end-of-life 1.23 line, so it is nixpkgs' current Go.
+          # the end-of-life 1.23 line, so it is nixpkgs' current Go. Zig is
+          # the other: 0.14, where the Windows fixtures pin 0.13. This zig is
+          # also the one `repro.nim` declares (`zig >=0.14 <0.15`) and links
+          # the monitor shim with under a zig target, and zig 0.13 binds the
+          # pthread symbols the shim calls to `libpthread.so.0`, so a shim it
+          # links needs that library (`repro.nim`'s zig entry says why that
+          # matters).
           #
           # ONE bin directory, and a curated one, rather than the packages
           # themselves. GNAT and gfortran are cc-wrappers whose `bin/` also
@@ -2268,7 +2283,7 @@
                   pkgs.gfortran
                   pkgs.fpc
                   pkgs.ldc
-                  pkgs.zig_0_13
+                  pkgs.zig_0_14
                   pkgs.meson
                   pkgs.crystal
                   pkgs.shards
