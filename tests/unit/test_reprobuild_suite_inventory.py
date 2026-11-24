@@ -806,8 +806,9 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
         The gate now also checks the tracked entry-set artifact, so its inputs
         are here too, and they are inputs rather than decoration:
 
-          * `repro.nim` -- `parse_graph_owned_artifacts` reads the test-helper
-            and test-fixture edges out of it. Without it the scan reports zero
+          * `repro.nim` and the `repro_recipe_support.nim` it includes --
+            `parse_graph_owned_artifacts` reads the test-helper and
+            test-fixture edges out of them. Without them the scan reports zero
             graph-owned artifacts and disagrees with the artifact by all of
             them.
           * every `libs/<name>` DIRECTORY -- `project_module_prefixes` reads
@@ -836,6 +837,7 @@ class SuiteCaseCountPushGateTests(unittest.TestCase):
         wanted = [
             Path("repro_tests.nim"),
             Path("repro.nim"),
+            Path("repro_recipe_support.nim"),
             Path("scripts/reprobuild_suite_inventory.py"),
             self.GATE_SCRIPT,
             inventory.STATIC_CASE_COUNTS_PATH,
@@ -3037,7 +3039,7 @@ test "incomplete name" and:
         # The former cache daemon, unavailable-boot-id seam and legacy peers
         # were removed together by e42ef05b22. Their replacements use their own
         # binaries as subprocess peers and require no separate helper actions.
-        repro_graph = (REPO_ROOT / "repro.nim").read_text(encoding="utf-8")
+        repro_graph = inventory.read_recipe_text(REPO_ROOT)
         for source in (
             "tests/integration/t_cache_daemon_drains_dedups_persists_and_warms_from_disk.nim",
             "tests/integration/t_shm_index_boot_id_unavailable_fails_closed.nim",
@@ -4216,7 +4218,7 @@ test "incomplete name" and:
         # provider remains both produced and a typed dependency of the test.
         rp3_source = "tests/integration/t_rp3_bind_deps_and_sharing.nim"
         self.assertNotIn(rp3_source, by_source)
-        graph = (REPO_ROOT / "repro.nim").read_text(encoding="utf-8")
+        graph = inventory.read_recipe_text(REPO_ROOT)
         references = re.search(
             r'TestGraphArtifacts\(\s*source:\s*"' + re.escape(rp3_source)
             + r'",\s*artifacts:\s*@\[(.*?)\]\)', graph, re.S

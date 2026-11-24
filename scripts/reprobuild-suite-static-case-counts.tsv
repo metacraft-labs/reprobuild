@@ -2087,7 +2087,7 @@ tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	nim	9
 tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
 tests/integration/t_dev_env_allow.nim	nim	1
 tests/integration/t_dev_env_artifact.nim	nim	3
-tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	4
+tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	6
 tests/integration/t_dev_shell_override_guards.nim	nim	24
 tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim	nim	1
 tests/integration/t_develop_all_clones_into_a_second_placement_root.nim	nim	1
@@ -2950,6 +2950,7 @@ tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
 tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
+tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim	nim	2
 tests/integration/test_cs_m14_shim_answers_tests_entry.nim	nim	2
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	3

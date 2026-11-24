@@ -1111,8 +1111,13 @@ dev_shell_report_override_drift() {
 # that is what is compared. A check keyed on store paths would have shouted
 # about three healthy tools and taught everyone to ignore it.
 #
-# SCOPE: the programs reprobuild itself spawns to reach a remote — `git` and
-# the `git-remote-*` helpers it execs. `ssh` is deliberately NOT in the list:
+# SCOPE: the programs reprobuild itself spawns — `git` and the `git-remote-*`
+# helpers it execs to reach a remote, and `ssh-keygen`, which signs and
+# verifies test certificates and mints the certificate signer's keys. A host
+# `ssh-keygen` links `libcrypto.so.3`, which `LD_LIBRARY_PATH` resolves to the
+# shell's OpenSSL: on an Ubuntu runner (glibc 2.35) `/usr/bin/ssh-keygen` died
+# with "version `GLIBC_2.38' not found (required by .../libcrypto.so.3)" and
+# no certificate could be signed. `ssh` is deliberately NOT in the list:
 # every remote this workspace declares is `https://`, git's ssh transport is
 # not on reprobuild's path to them, and the system `ssh` measured here
 # satisfies both channels anyway. If that ever changes the remedy is the same
@@ -1130,6 +1135,7 @@ dev_shell_report_override_drift() {
 # The programs the dev shell must be able to hand its own loader state to.
 DEV_SHELL_SUBPROCESS_TOOLS=(
   git
+  ssh-keygen
 )
 
 # glibc satellite libraries: the ones that are separate `.so` files carrying
@@ -1154,14 +1160,33 @@ _dev_shell_glibc_prefixes() {
     sort -u
 }
 
-# The glibc an executable will actually run on: the store path of its
-# PT_INTERP. Prints nothing when the file is not an ELF with a nix-store
-# interpreter (a script, a static binary, a non-nix host).
+# The glibc an executable will actually run on. For a nix-store PT_INTERP it is
+# that glibc's store path. For a host interpreter (`/lib64/ld-linux-x86-64.so.2`
+# on Debian, Ubuntu or Fedora) it is the `libc.so.6` installed beside the
+# interpreter the link resolves to, which is where those distributions keep the
+# pair. Prints nothing when the file is not a dynamic ELF, or when no libc sits
+# beside its interpreter (NixOS's `/lib64` stub loader), because nothing can be
+# said about it then.
+#
+# The host arm is not optional. A runner that is not NixOS runs its own
+# `/usr/bin` programs on its own glibc, and those are the programs a dev shell
+# leaves on PATH when it does not provide them. Without this arm the check said
+# nothing about them, and an Ubuntu runner's `ssh-keygen` loaded this shell's
+# OpenSSL and died while `just lint` reported one glibc.
 dev_shell_elf_glibc() {
-  local file="$1" interp
+  local file="$1" interp resolved libc
   [[ -f "$file" ]] || return 0
   interp="$(patchelf --print-interpreter "$file" 2>/dev/null)" || return 0
-  _dev_shell_glibc_prefixes "$interp"
+  [[ -n "$interp" ]] || return 0
+  if [[ "$interp" == /nix/store/* ]]; then
+    _dev_shell_glibc_prefixes "$interp"
+    return 0
+  fi
+  resolved="$(readlink -f "$interp" 2>/dev/null)" || return 0
+  [[ -n "$resolved" ]] || return 0
+  libc="$(dirname "$resolved")/libc.so.6"
+  [[ -f "$libc" ]] || return 0
+  printf '%s\n' "$libc"
 }
 
 # The glibc(s) a library directory would drag in: the store paths its shared
@@ -1188,8 +1213,12 @@ dev_shell_libdir_glibc() {
 # reads exactly like "this libc defines nothing", i.e. a conflict against every
 # injected glibc. Hence also the non-zero return below: a caller must be able
 # to tell "nothing defined" from "nothing parsed".
+#
+# The argument is a glibc store prefix, or a host `libc.so.6` itself as
+# `dev_shell_elf_glibc` reports one for a program outside the nix store.
 dev_shell_glibc_defined_versions() {
-  local prefix="$1" libc="$1/lib/libc.so.6" out
+  local libc="$1/lib/libc.so.6" out
+  [[ -f "$1" ]] && libc="$1"
   [[ -f "$libc" ]] || return 0
   out="$(readelf -V "$libc" 2>/dev/null |
     sed -n "/Version definition/,/^\$/p" |
@@ -1320,9 +1349,10 @@ dev_shell_loader_glibc_conflicts() {
   while IFS=$'\t' read -r tool binary; do
     [[ -n "$binary" ]] || continue
     host="$(dev_shell_elf_glibc "$binary")"
-    # No nix-store interpreter: a script, a static binary, or a non-nix host.
-    # Nothing here can say anything about it, and saying nothing is the
-    # honest answer rather than a pass or a fail.
+    # No interpreter whose libc can be located: a script, a static binary,
+    # or a loader with no `libc.so.6` beside it (NixOS's stub loader, a musl
+    # host). Nothing here can say anything about it, and saying nothing is
+    # the honest answer rather than a pass or a fail.
     [[ -n "$host" ]] || continue
     if [[ -z "${defined_cache[$host]+set}" ]]; then
       rc=0

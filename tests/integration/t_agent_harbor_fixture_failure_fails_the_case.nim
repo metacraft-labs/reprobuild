@@ -211,8 +211,7 @@ suite "the subject list":
     # Listed twice, here and in ``repro.nim``, because a build-edge id is
     # content-derived and only ``repro.nim`` can collect it. A subject missing
     # THERE runs against whatever binary is on disk.
-    let project = nimSourceCommentsBlanked(
-      readFile(ReprobuildRepoRoot / "repro.nim"))
+    let project = nimSourceCommentsBlanked(reprobuildRecipeText())
     let at = project.find("AgentHarborFixtureFailureGateSubjects* =")
     check at >= 0
     let tail = project[max(at, 0) .. ^1]

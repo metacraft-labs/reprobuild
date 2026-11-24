@@ -41622,9 +41622,46 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     let prior = findOverride(overrides, node.name)
     if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path,
         absolutePath(root))) == absTarget:
-      # Already in develop mode at this exact path — idempotent no-op.
+      # Already in develop mode at this exact path — idempotent no-op, unless
+      # ``--reset`` was asked for and the checkout has drifted off the lock.
+      # `--reset` promises "force it to the lock"; an existing develop-mode
+      # checkout used to be reported "no change" at whatever revision it sat
+      # (PLAT-79 on m3: `nim-agents-isonim-viewmodels` left at 4c0f39a with
+      # the lock pinning 6afd343).
+      let devHead =
+        if dirExists(absTarget): gitHeadShaOf(gitBinary, absTarget) else: ""
+      let drifted = devHead != node.coordinates.revision
+      if args.reset and drifted and args.dryRun:
+        outcome.mode = "would-reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
+      if args.reset and drifted:
+        if dirExists(absTarget):
+          removeDir(absTarget)
+        let resetRes =
+          cloneNodeAtLockedRevision(root, absTarget, node, identity,
+            args.intoDir)
+        if not resetRes.ok:
+          outcome.mode = "error"
+          outcome.ok = false
+          outcome.diagnostic = "reset-to-locked-revision failed for " &
+            node.name & " (was at " &
+            (if devHead.len == 0: "non-git-checkout" else: devHead) & "): " &
+            resetRes.diagnostic
+          outcomes.add(outcome)
+          anyFailure = true
+          continue
+        outcome.mode = "reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
       outcome.mode = "idempotent"
       outcome.ok = true
+      if drifted and devHead.len > 0:
+        outcome.diagnostic = "in develop mode at " & devHead &
+          ", not the locked revision " & node.coordinates.revision &
+          " (left as it is; pass --reset to force it to the lock)"
       if node.name in args.only and not isExplicitDevelopOverride(prior.get()) and
           not args.dryRun:
         # The one change an idempotent run makes: ``--only`` named this

@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3221,
+    "nimTestBinaries": 3222,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 845,
-    "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3274
+    "staticallyDetectedRuntimeCompilerFlowTests": 162,
+    "testEntries": 3275
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,7 +1855,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1811,
+      "integration": 1812,
       "platform/destructive": 203,
       "pure unit": 845,
       "unclassified": 386
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3221,
+    "nimTestBinaryCount": 3222,
     "pythonTestFileCount": 53,
-    "testEntryCount": 3274
+    "testEntryCount": 3275
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -9137,7 +9137,7 @@
           "executedVariables": [
             "args"
           ],
-          "line": 144,
+          "line": 128,
           "path": "tests/integration/test_cs_m12_thin_import_cost.nim",
           "patterns": [
             "nim-argv"
@@ -9146,6 +9146,26 @@
         }
       ],
       "source": "tests/integration/test_cs_m12_thin_import_cost.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args"
+          ],
+          "line": 76,
+          "path": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var args = if compile: @[\"nim\", \"c\"] else: @[\"nim\", \"check\"]"
+        }
+      ],
+      "source": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim"
     },
     {
       "class": "graph-fixture",
@@ -47591,7 +47611,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 4,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -63049,6 +63069,25 @@
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/test_cs_m14_reprobuild_repro_nim_imports_thin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
