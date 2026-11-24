@@ -70,11 +70,13 @@ import repro_core/variant_assignments
 from ct_test_nim_unittest/tests_fragment import PerTestRequest,
   PerTestCompile, TestsFragmentProducerName, producerListArgv,
   producerCheckArgv
+from repro_project_dsl/engine_recipe_skew import parseEngineRecipeSkew,
+  engineRecipeSkewRemedy
 from repro_project_dsl/completion_files import
   CompletionFilesProducerName, producerArgv
 import repro_core/tool_input_check_policies
 from repro_core/workspace_root import firstMembershipManifestPath,
-  SettingsFileName
+  SettingsFileName, ignoringConfiguredSettingsFile
 # The self-spawn image guard. `{.all.}` is how `runThinApp` (below) reaches
 # the module-private ``markRunningImageAsReproCli``: no ordinary import can
 # name the setter, so no embedded caller can grant itself the mark. See
@@ -441,6 +443,11 @@ import repro_binary_cache_client/caches_config as bcCachesConfig
 # standalone ``repro-binary-cache-client`` binary); ``repro cache`` runs
 # them from its configuration (``repro_cli_support/cache_cli``).
 import repro_binary_cache_client/cli_dispatch as bcCliDispatch
+# The single no-copy move every binary-cache substitute makes into its final
+# place, shared with ``extractPrefixInto``.
+from repro_binary_cache_client/in_process import renameIntoPlace
+# Removal that never follows a link, shared with the engine's scratch trees.
+import repro_core/tree_removal
 
 export home.runHomeCommand, home.setPackageCatalogLookup,
        home.PackageCatalogLookup, home.CatalogEnvVar,
@@ -4744,10 +4751,82 @@ proc materializedCachePrefix(action: BuildAction): string =
   action.cwd / raw
 
 proc removeMaterializedPath(path: string) =
-  if dirExists(path):
-    removeDir(path)
-  elif fileExists(path) or symlinkExists(path):
-    removeFile(path)
+  ## Remove what is AT ``path`` and nothing it points at. ``dirExists``
+  ## follows a symbolic link, so a helper that tested it first passed a link
+  ## to a directory to ``removeDir`` and emptied the directory it pointed
+  ## at. ``removePathNoFollow`` tests for a link first, and on Windows also
+  ## removes a directory link or junction as the link.
+  removePathNoFollow(path)
+
+proc restoreMaterializedPrefix(key, prefix: string):
+    tuple[ok: bool, error: string] =
+  ## Substitute the binary-cache entry ``key`` into ``prefix``, replacing
+  ## whatever is there, with the same guarantees ``repro cache substitute``
+  ## gives:
+  ##
+  ## * Everything is staged inside ONE directory with a random name, created
+  ##   beside ``prefix`` with mkdir semantics that fail when the name exists
+  ##   (``createTempDir``). Nobody else can have planted anything inside it,
+  ##   so nothing this proc removes is a path it did not create or move
+  ##   there itself. An earlier version staged at the predictable
+  ##   ``<prefix>.repro-cache-substitute-<pid>`` and began by removing it,
+  ##   which emptied the directory a link planted at that name pointed at.
+  ## * The previous ``prefix`` and the restored tree are each moved by one
+  ##   ``rename(2)`` (``renameIntoPlace``), never by a copy: the previous
+  ##   prefix is moved INTO the staging directory first, so a link at
+  ##   ``prefix`` is moved as the link and its target is never touched.
+  ## * On every failure the previous prefix is put back, and the staging
+  ##   directory is removed. If the previous prefix cannot be put back, the
+  ##   staging directory is kept, so it is not deleted, and the error names
+  ##   where it is.
+  let prefixAbs = absolutePath(prefix)
+  var stagingRoot = ""
+  var keepStaging = false
+  try:
+    createDir(parentDir(prefixAbs))
+    stagingRoot = createTempDir(".repro-cache-substitute-", "",
+      parentDir(prefixAbs))
+  except CatchableError as e:
+    return (false, "cannot create a staging directory beside " & prefix &
+      ": " & e.msg)
+  try:
+    # ``cacheSubstitute`` stages and renames into ``staged`` itself; the
+    # name is inside the private directory, so it is absent, as it requires.
+    let staged = stagingRoot / "prefix"
+    let rc = bcCliDispatch.cacheSubstitute(key, staged)
+    if rc != 0:
+      return (false, "trusted binary-cache miss for " & key)
+    let displaced = stagingRoot / "displaced"
+    let hadPrevious = symlinkExists(prefixAbs) or fileExists(prefixAbs) or
+      dirExists(prefixAbs)
+    if hadPrevious:
+      renameIntoPlace(prefixAbs, displaced)
+    try:
+      renameIntoPlace(staged, prefixAbs)
+    except IOError as e:
+      if hadPrevious:
+        try:
+          renameIntoPlace(displaced, prefixAbs)
+        except IOError as back:
+          keepStaging = true
+          return (false, "cannot move the restored prefix into place: " &
+            e.msg & "; the previous prefix could not be put back (" &
+            back.msg & ") and is kept at " & displaced)
+      return (false, "cannot move the restored prefix into place: " & e.msg)
+    return (true, "")
+  except CatchableError as e:
+    return (false, "materialized binary-cache restore of " & key &
+      " failed: " & e.msg)
+  finally:
+    # Only paths this proc created or moved here are inside, and
+    # ``removeTreeNoFollow`` unlinks a link it meets rather than following
+    # it, so a displaced link prefix goes and its target stays.
+    try:
+      if not keepStaging:
+        removeTreeNoFollow(stagingRoot)
+    except CatchableError as e:
+      stderr.writeLine("materialized binary-cache restore: cannot remove " &
+        "the staging directory " & stagingRoot & ": " & e.msg)
 
 proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
     BuildRunResult =
@@ -4775,14 +4854,8 @@ proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
       item.stderr = "materialized binary-cache prefix is empty"
       result.results.add(item)
       continue
-    let staged = prefix & ".repro-cache-substitute-" &
-      $getCurrentProcessId()
-    removeMaterializedPath(staged)
-    createDir(parentDir(staged))
-    let rc = bcCliDispatch.cacheSubstitute(key, staged)
-    if rc == 0:
-      removeMaterializedPath(prefix)
-      moveDir(staged, prefix)
+    let restored = restoreMaterializedPrefix(key, prefix)
+    if restored.ok:
       let relocation = relocateRestoredInstallMirror(prefix,
         findExe("patchelf"),
         proc (executable: string; args: seq[string]):
@@ -4802,8 +4875,7 @@ proc substituteMaterializedBinaryCacheEntries*(g: BuildGraph):
       item.cacheDecision = cdHit
       item.reason = "materialized-binary-cache-substituted key=" & key
     else:
-      removeMaterializedPath(staged)
-      item.stderr = "trusted binary-cache miss for " & key
+      item.stderr = restored.error
     result.results.add(item)
   if result.results.len == 0:
     result.results.add(ActionResult(
@@ -28769,8 +28841,8 @@ when not defined(windows):
         restoreRunQuotaEnvironment(previous)
 
 when defined(windows):
-  proc spawnDetachedRunQuotaDaemon(runquotad: string;
-                                   args: seq[string]): owned(Process) =
+  proc spawnDetachedRunQuotaDaemon*(runquotad: string;
+                                    args: seq[string]): owned(Process) =
     ## Starts the per-user `runquotad` so that it holds NONE of this
     ## invocation's handles: stdin, stdout and stderr are `NUL`, no other
     ## handle crosses the spawn, and it does not run in our working directory.
@@ -28797,9 +28869,21 @@ when defined(windows):
     ## Its output goes to `NUL`, as it effectively did before: nothing read
     ## the pipes `startProcess` made for it.
     ##
-    ## THE WORKING DIRECTORY is the daemon binary's own directory, which its
-    ## running image already pins. Starting it in ours would keep the caller's
-    ## directory undeletable for the daemon's whole life.
+    ## THE WORKING DIRECTORY is neither ours nor the daemon binary's own
+    ## (`detachedDaemonWorkingDirectory`, the Windows system directory).
+    ## Starting it in ours kept the caller's directory undeletable for the
+    ## daemon's whole life. Starting it in its own `bin\`, as this did until
+    ## 2026-11-22, kept the installer from renaming `bin\` aside: a running
+    ## image does not pin its directory (the loader opens it with
+    ## `FILE_SHARE_DELETE`), but a current directory does, so every in-place
+    ## bundle upgrade -- which renames the old `bin\` aside and leaves the
+    ## old daemon running from it, because killing it would end the leases it
+    ## holds -- failed while such a daemon lived.
+    ##
+    ## Exported for `tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim`,
+    ## which starts a daemon through it on a private pipe: the auto-start
+    ## itself (`startAutoRunQuotaWindows`) reaches the host-wide pipe, and
+    ## driving it would ask the host's own daemon to retire.
     ##
     ## A `Process` is still returned, built around the handle the spawn
     ## returned, because the readiness wait and the failure path below watch
@@ -28811,7 +28895,8 @@ when defined(windows):
       let found = findExe(exe)
       exe = if found.len > 0: found else: absolutePath(exe)
     let child = spawnWithOwnStdioKeepingHandle(exe, args, env = [],
-      inheritEnvironment = true, logPath = "", workingDir = parentDir(exe))
+      inheritEnvironment = true, logPath = "",
+      workingDir = detachedDaemonWorkingDirectory(exe))
     privateAccess(Process)
     result = Process(fProcessHandle: child.processHandle,
       fThreadHandle: Handle(0), id: Handle(child.pid),
@@ -54446,6 +54531,18 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
       if args.cloneObjects in ["", "shared"] and hasGitEntry(repoPath):
         reports.add(checkLeaf(identity.binaryPath, repoPath, lcmRepair,
           cacheRoot))
+      # Its submodules borrow on their own account, and need the chain
+      # before the submodule update that follows a fast-forward can read
+      # what their pool only promises; files an earlier checkout left out
+      # are written back (§4.1).
+      # A submodule borrows whatever it was cloned to borrow, whatever this
+      # run's clone-object policy is, so ``none`` still inspects the host's
+      # cache.
+      if hasGitEntry(repoPath):
+        reports.add(checkSubmoduleLeaves(identity.binaryPath, repoPath,
+          lcmRepair,
+          if cacheRoot.len > 0: cacheRoot
+          else: defaultCacheRoot(args.workspaceRoot)))
     emitLeafReports(reports)
 
   var sharedBareRefreshAction = initTable[string, string]()
@@ -72607,7 +72704,7 @@ proc rootDeclaresARoleBranch(settings: WorkspaceSettings): bool =
     for (_, value) in decls.custom:
       if value.kind == brvBranch: return true
 
-proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+proc gatewayRoleBranchesOfRecordedRoot(cfg: GatewayConfig):
     tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
   ## The branches a declared role names for the repository this gateway
   ## publishes, resolved from the workspace its config names the way the
@@ -72635,15 +72732,7 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
   if cfg.repoIsWorkspaceRoot:
     try:
       let settingsPath = findWorkspaceSettingsPath(cfg.workspaceRoot)
-      if settingsPath.len == 0 or not fileExists(settingsPath):
-        # ``REPRO_WORKSPACE_CONFIG`` naming a file that does not exist reads
-        # as "no settings file" everywhere else. Here that would let a
-        # variable inherited from the pushing shell switch the refusal off.
-        let named = getEnv(workspace_root.WorkspaceConfigEnvVar)
-        if named.len > 0:
-          return (ok: false, branches: @[], why: workspace_root.WorkspaceConfigEnvVar &
-            " names '" & named & "', which does not exist, so the settings " &
-            "of '" & cfg.workspaceRoot & "' could not be read")
+      if settingsPath.len == 0:
         return (ok: true, branches: @[], why: "")
       let settings = readWorkspaceSettings(settingsPath)
       try:
@@ -72677,6 +72766,19 @@ proc gatewayRoleBranchesFor(cfg: GatewayConfig):
     tried.add("'" & cfg.repo & "' is not a member of " & candidate.label)
   (ok: false, branches: @[], why: "in '" & cfg.workspaceRoot & "', " &
     tried.join("; "))
+
+proc gatewayRoleBranchesFor(cfg: GatewayConfig):
+    tuple[ok: bool; branches: seq[tuple[role, branch: string]]; why: string] =
+  ## ``gatewayRoleBranchesOfRecordedRoot`` with ``REPRO_WORKSPACE_CONFIG``
+  ## ignored (Push-Gateway-Wiring-And-Policy §5.3). The gateway's config
+  ## records the workspace whose settings and manifests govern it; the hook
+  ## runs in the pushing shell's environment, in the gateway's bare
+  ## repository, so a variable inherited from that shell would otherwise
+  ## replace the recorded root's settings with whatever file it names (one
+  ## that declares no role switches the refusal off), and a relative value
+  ## would be read against the bare repository.
+  ignoringConfiguredSettingsFile:
+    return gatewayRoleBranchesOfRecordedRoot(cfg)
 
 proc gatewayClassifyUpdates*(gitBin, gatewayBareDir: string;
                              updates: seq[GatewayRefUpdate];
@@ -79391,16 +79493,56 @@ proc populateSubmodules(identity: GitToolIdentity;
     if key.len == 0:
       return "submodule '" & path & "' of " & clone & " has no entry in " &
         ".gitmodules"
+    # The new submodule borrows ``src``'s objects (``--reference``), and
+    # through ``src``'s alternates those of any partial pool ``src`` reaches,
+    # directly or through a leaf. git checks the submodule out in the same
+    # command that clones it, so the refetch chain (Shared-Clone-Pool-
+    # Integrity §3.4, "Submodules") is given to that command as ``-c``
+    # settings, which git passes on to the submodule's clone and checkout,
+    # and is written into the submodule once it exists. Without it git cannot
+    # read a blob the pool only promises and fails the checkout with every
+    # such file left out.
+    let pools = partialPoolsReachedBy(identity.binaryPath, src)
+    var chainArgs: seq[string]
+    if pools.len > 0:
+      let chain = poolChainConfigArgs(pools[0])
+      if chain.diagnostic.len > 0:
+        return "could not give submodule '" & path & "' the refetch chain " &
+          "to the shared cache " & pools[0] & ": " & chain.diagnostic
+      chainArgs = chain.args
     # Two git command lines (git's argv, not a comparison of repro's).
     let gitCommands = [@["-C", clone, "config", key & ".url", src],
-        @["-C", clone, "-c", "protocol.file.allow=always", "submodule",
-          "--quiet", "update", "--init", "--reference", src, "--", path]]
+        @["-C", clone, "-c", "protocol.file.allow=always"] & chainArgs &
+          @["submodule", "--quiet", "update", "--init", "--reference", src,
+            "--", path]]
     for argv in gitCommands:
       let res = gitRunPlainQuery(identity, argv)
       if res.code != 0:
         return "could not populate submodule '" & path & "' from " & src &
           ": git " & argv.join(" ") & " failed (" & $res.code & "): " &
           res.diagnostic
+    if pools.len > 0:
+      let persisted = ensureLeafPoolConfig(identity.binaryPath, clone / path,
+        pools[0])
+      if persisted.len > 0:
+        return "could not give submodule '" & path & "' of " & clone &
+          " the refetch chain to the shared cache " & pools[0] & ": " &
+          persisted
+    # As for the member above: a file git could not read is left out.
+    let missing = gitRunPlainQuery(identity, ["-C", clone / path, "ls-files",
+      "--deleted"])
+    if missing.code != 0:
+      return "git ls-files --deleted failed in " & (clone / path) & ": " &
+        missing.diagnostic
+    if missing.output.strip().len > 0:
+      var listed = ""
+      for line in missing.output.strip().splitLines():
+        listed.add("\n  " & line)
+      return "the checkout of submodule '" & path & "' from " & src &
+        " is incomplete: git could not read the content of these tracked " &
+        "files and left them out:" & listed & "\nRun 'repro health' in the " &
+        "workspace to check " & src & "'s refetch chain to its shared " &
+        "cache, then retry"
     let nested = populateSubmodules(identity, clone / path, src)
     if nested.len > 0:
       return nested
@@ -80839,7 +80981,8 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
         continue
       sharedCloneFindings.add(%*{"leaf": lr.leaf, "pool": lr.pool,
         "kind": $f.kind, "ref": f.refName, "object": f.objectId,
-        "removed": f.removed, "message": f.message})
+        "removed": f.removed, "paths": f.paths, "restored": f.restored,
+        "message": f.message})
   result["sharedCloneFindings"] = sharedCloneFindings
   result["project"] = %report.project
   result["workspaceRoot"] = %report.workspaceRoot
@@ -81288,6 +81431,12 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       defaultCacheRoot(args.workspaceRoot))
     if leafReport.pool.len > 0:
       report.leafReports.add(leafReport)
+    # The same for the checkout's submodules, which borrow on their own
+    # account (§4.1), and the files a failed checkout left out in them.
+    for subReport in checkSubmoduleLeaves(identity.binaryPath, repoAbsPath,
+        if args.fix: lcmRepair else: lcmReport,
+        defaultCacheRoot(args.workspaceRoot)):
+      report.leafReports.add(subReport)
 
     if not entry.isClean:
       entry.checkoutState = "dirty"
@@ -81601,6 +81750,12 @@ type
     gitOk: bool
     leafReports: seq[LeafCheckReport]
       ## ``shared-clone-leaves``: the detector's report-only pass.
+    submoduleReports: seq[LeafCheckReport]
+      ## ``shared-clone-leaves``: the same pass over the participating
+      ## repos' submodules (``checkSubmoduleLeaves``).
+    submoduleParents: seq[string]
+      ## The participating checkouts whose submodules borrow from a pool;
+      ## ``--fix`` re-runs ``checkSubmoduleLeaves`` in each.
     poolMissing: seq[tuple[leaf, fetchUrl, message: string]]
       ## ``shared-clone-leaves``: checkouts whose alternates name a shared
       ## cache that no longer exists (Shared-Clone-Pool-Integrity §4.5),
@@ -84173,6 +84328,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var stale: seq[string]
     var broken: seq[string]
     var chains: seq[string]
+    var lostFiles: seq[string]
     var diagnostics: seq[string]
     for index, repo in ctx.resolved.repos:
       parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
@@ -84180,6 +84336,32 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
         continue
       inc total
+      # Shared-Clone-Pool-Integrity §4.1: a submodule borrows on its own
+      # account, directly from a pool or through a leaf of one, whether or
+      # not the superproject borrows at all. Report-only here, like the
+      # checkout's own pass below; ``--fix`` restores the files a failed
+      # checkout left out.
+      let subReports = checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, abs,
+        lcmReport, cacheRoot)
+      if subReports.len > 0:
+        ctx.submoduleParents.add(abs)
+      for sr in subReports:
+        ctx.submoduleReports.add(sr)
+        let shown = relativePath(sr.leaf, parsed.workspaceRoot)
+        if sr.diagnostic.len > 0:
+          diagnostics.add(shown & ": " & sr.diagnostic)
+        for f in sr.findings:
+          case f.kind
+          of lfkRefetchChainMissing:
+            chains.add(shown)
+          of lfkWorkTreeFilesLost:
+            lostFiles.add(shown & " (" & $f.paths.len & ")")
+          of lfkStaleRemoteRef:
+            stale.add(shown & " " & f.refName)
+          of lfkLocalTipMissing, lfkLocalHistoryMissing:
+            broken.add(shown & " " & f.refName)
+          else:
+            discard
       var poolDeleted = false
       try:
         let entries = alternateObjectDirs(abs)
@@ -84233,6 +84415,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         else:
           discard
     if stale.len == 0 and broken.len == 0 and chains.len == 0 and
+        lostFiles.len == 0 and
         diagnostics.len == 0 and foreignPools.len == 0 and
         missingPools.len == 0:
       checks.add(HealthCheck(
@@ -84252,9 +84435,15 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if chains.len > 0:
         detail.add($chains.len & " checkout(s) lacked a working refetch chain " &
           "to a partial shared clone: " & chains.join(", "))
+      if lostFiles.len > 0:
+        detail.add($lostFiles.len & " checkout(s) are missing tracked files " &
+          "that git could not read from a partial shared clone and left " &
+          "out (count in parentheses; the messages below list them): " &
+          lostFiles.join(", "))
       if diagnostics.len > 0:
         detail.add(diagnostics.join("; "))
       let canRepair = stale.len > 0 or chains.len > 0 or
+        lostFiles.len > 0 or
         diagnostics.len > 0 or missingPools.len > 0
       if stale.len > 0:
         detail.add($stale.len & " stale remote-tracking ref(s) whose " &
@@ -84695,6 +84884,21 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+      for parent in ctx.submoduleParents:
+        for sr in checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, parent,
+            lcmRepair, defaultCacheRoot(parsed.workspaceRoot)):
+          for f in sr.findings:
+            if f.kind == lfkStaleRemoteRef and f.removed:
+              emit("fix: removed " & f.refName & " in " & sr.leaf)
+              stderr.writeLine(f.message)
+            elif f.kind == lfkWorkTreeFilesLost:
+              if f.restored.len > 0:
+                emit("fix: restored " & $f.restored.len & " file(s) git " &
+                  "had left out in " & sr.leaf & ": " & f.restored.join(", "))
+              if f.restored.len < f.paths.len:
+                emit("fix: could NOT restore " &
+                  $(f.paths.len - f.restored.len) & " file(s) in " & sr.leaf)
+                stderr.writeLine(f.message)
     of hfSharedClonePackTemporaries:
       for pool in ctx.packTemporaryPools:
         emit("fix: removing abandoned git pack temporaries in " & pool)
@@ -84833,7 +85037,7 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
       stdout.writeLine(line)
   # The shared-clone detector's messages (report-only here): what is wrong
   # in each checkout, in words, with the exact commands that fix it.
-  emitLeafReports(ctx.leafReports)
+  emitLeafReports(ctx.leafReports & ctx.submoduleReports)
   if ctx.poolMissing.len > 0:
     stdout.flushFile()
     for missing in ctx.poolMissing:
@@ -98676,6 +98880,27 @@ proc verifyCommittedLockDependencySet*(repoRoot: string;
     return
   if not derived.ok:
     result.unverified = true
+    # Cross-Repo-Source-Consumption.md §9.2a: the recipe compile refused a
+    # sibling reprobuild recipe newer than this engine's DSL. Running
+    # `repro lock refresh` would run this same engine and fail the same way,
+    # so the refusal names the skew and the build to run instead. Told apart
+    # by the record the refusal carries (`parseEngineRecipeSkew`), never by
+    # compiler wording.
+    let recipeSkew = parseEngineRecipeSkew(derived.diagnostic)
+    if recipeSkew.found:
+      result.evidence = "the dependency set " & root /
+        CanonicalProjectFileName & " derives could not be computed: " &
+        "this repro is older than the sibling recipe the recipe imports — " &
+        "reprobuild " & recipeSkew.skew.engineVersion & " (" &
+        (if recipeSkew.skew.enginePath.len > 0: recipeSkew.skew.enginePath
+         else: "engine path unknown") & ", revision " &
+        (if recipeSkew.skew.engineRevision.len > 0: recipeSkew.skew.engineRevision
+         else: "unknown") & ") cannot compile " & recipeSkew.skew.siblingRoot /
+        "repro.nim" & ", which is reprobuild " & recipeSkew.skew.siblingVersion &
+        " (revision " & (if recipeSkew.skew.siblingRevision.len > 0:
+          recipeSkew.skew.siblingRevision else: "unknown") & ")"
+      result.remediation = engineRecipeSkewRemedy(recipeSkew.skew)
+      return
     # §13.5 (amended 2026-11-22): an engine older than the envelope the
     # recipe's SDK writes is not an unreadable recipe. It is told apart —
     # its own property, both versions, and a remedy that can work — because

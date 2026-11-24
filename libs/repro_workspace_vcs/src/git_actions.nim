@@ -54,7 +54,8 @@ import git_fast_forward
 from shared_clones import prepareSharedBare, sharedBareFetchArgs,
   checkRegisteredLeaves, messages, registerLeafWithPool,
   withCacheEntryVcsLock, withCheckoutVcsLock, isTransientGitLockContention,
-  leafFetchNeedsPromisor
+  leafFetchNeedsPromisor, checkSubmoduleLeaves, defaultCacheRoot,
+  LeafCheckMode
 
 export GitToolIdentity, EGitToolUnresolved, ensureGitToolResolvable,
   resolveGitTool, digestHex, ToolProvisioningMode
@@ -1756,7 +1757,27 @@ proc executeMergeFf(payload: GitVcsPayload;
   # effort — a submodule-update failure must NOT fail the fast-forward itself
   # (the superproject IS fast-forwarded), mirroring how ``git pull`` treats
   # submodule recursion.
+  #
+  # A submodule that borrows from a partial shared pool, directly or through
+  # a leaf of it, reads the new commit's trees through its alternates but can
+  # fetch a blob the pool only promises only through a promisor remote of its
+  # own. Without one git's checkout leaves those files out of the work tree
+  # (Shared-Clone-Pool-Integrity §3.4, "Submodules"), so each populated
+  # submodule gets the refetch chain first. Only pools under the host's
+  # shared-clone cache are configured, as the detector only ever writes into
+  # pools reprobuild owns; the cache root is resolved from this checkout's
+  # path, as ``defaultCacheRoot`` resolves it for the workspace (the
+  # payload does not carry it). Report mode: nothing in the work tree is
+  # written here; restoring files an earlier checkout left out is the
+  # detector's repair (sync, ``repro health --fix``).
   if fileExists(target / ".gitmodules"):
+    # ``defaultCacheRoot`` reads the process environment through a closure,
+    # which the effect system cannot prove GC-safe; it touches no GC'd global.
+    var cacheRoot = ""
+    {.cast(gcsafe).}:
+      cacheRoot = defaultCacheRoot(target)
+    discard checkSubmoduleLeaves(payload.binaryPath, target, lcmReport,
+      cacheRoot)
     discard runGit(payload,
       ["-C", target, "submodule", "update", "--recursive"])
   let headRes = resolveHeadSha(payload, target)
