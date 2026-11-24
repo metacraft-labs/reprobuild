@@ -32809,6 +32809,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_spi_submodule_left_out_files_through_the_cli.nim",
+    binary: "build/test-bin/t_spi_submodule_left_out_files_through_the_cli",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "module-level statement runs at every start-up: let originalReproOverride = getEnv(\"REPROBUILD_REPRO\")"),
+  TestSpec(
     source: "tests/integration/t_ssl_edges_carry_openssl_link_path.nim",
     binary: "build/test-bin/t_ssl_edges_carry_openssl_link_path",
     defines: @[],
