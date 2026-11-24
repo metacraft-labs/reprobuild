@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3244,
+    "nimTestBinaries": 3245,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 849,
+    "pureUnitTests": 850,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3302
+    "testEntries": 3303
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -491,13 +491,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 6,
+      "count": 7,
       "defines": [],
       "dependencyShape": [
         "repro_interface_artifacts"
       ],
       "owner": "libs/repro_interface_artifacts",
       "sources": [
+        "libs/repro_interface_artifacts/tests/t_a_slow_compile_that_progresses_is_not_killed.nim",
         "libs/repro_interface_artifacts/tests/t_compiler_crash_is_not_a_compile_error.nim",
         "libs/repro_interface_artifacts/tests/t_contribution_records.nim",
         "libs/repro_interface_artifacts/tests/t_nix_lib_dir_selects_host_target_arch.nim",
@@ -1858,7 +1859,7 @@
       "graph-fixture": 29,
       "integration": 1827,
       "platform/destructive": 205,
-      "pure unit": 849,
+      "pure unit": 850,
       "unclassified": 392
     },
     "graphOwnedTestArtifacts": [
@@ -2079,9 +2080,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3244,
+    "nimTestBinaryCount": 3245,
     "pythonTestFileCount": 58,
-    "testEntryCount": 3302
+    "testEntryCount": 3303
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -22328,6 +22329,23 @@
       "source": "libs/repro_infra/tests/t_two_applies_with_different_state_dirs_never_overlap.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 5,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_slow_compile_that_progresses_is_not_killed",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_interface_artifacts"
+      ],
+      "owner": "libs/repro_interface_artifacts",
+      "requiresReproBinary": false,
+      "source": "libs/repro_interface_artifacts/tests/t_a_slow_compile_that_progresses_is_not_killed.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
