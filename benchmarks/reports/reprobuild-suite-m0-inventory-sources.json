@@ -18667,7 +18667,8 @@
       "defines": [],
       "language": "nim",
       "localDependencyShape": [
-        "repro_distributed_worker"
+        "repro_distributed_worker",
+        "repro_test_support"
       ],
       "owner": "libs/repro_distributed_worker",
       "requiresReproBinary": false,
