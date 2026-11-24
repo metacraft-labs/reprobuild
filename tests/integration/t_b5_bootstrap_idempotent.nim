@@ -105,14 +105,15 @@ proc setTimeAgo(path: string; secondsAgo: int) =
   setLastModificationTime(path, getTime() + initDuration(seconds = -secondsAgo))
 
 const StubBuildApps = """#!/usr/bin/env bash
-# Stub for the fixture only: records that the build ran and stages the two
+# Stub for the fixture only: records that the build ran and stages the three
 # host artefacts the guard requires, in place of a multi-minute real build.
 set -eu
 echo build >> build-apps-invocations
 mkdir -p build/bin
 cp seed-image build/bin/repro$1
 cp seed-image build/bin/reprobuild$1
-chmod +x build/bin/repro$1 build/bin/reprobuild$1
+cp seed-image build/bin/reprobuild-helper$1
+chmod +x build/bin/repro$1 build/bin/reprobuild$1 build/bin/reprobuild-helper$1
 """
 
 proc newBootstrapFixture(repoRoot: string): string =

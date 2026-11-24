@@ -66,7 +66,8 @@ proc newScenario(install = true): Scenario =
   if install:
     let tree = result.root / "img"
     createDir(tree / "bin")
-    for name in [selfExecutableName(), reprobuildEngineExeName()]:
+    for name in [selfExecutableName(), reprobuildEngineExeName(),
+                 reprobuildHelperExeName()]:
       writeFile(tree / "bin" / name, "image " & name & "\n")
     discard installSelfImage(result.store, Pinned, Platform, tree)
   createDir(result.root / "boot")

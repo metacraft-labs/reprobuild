@@ -881,7 +881,17 @@ when defined(posix):
     ## `setsid`/`setpgid` and so left the group.
     var children: Table[int, seq[int]]
     let (text, code) = uncontrolledExecCmdEx("/bin/ps -A -o pid= -o ppid=")
-    if code != 0: return @[]
+    # `newSeq[Pid]()`, never `@[]`, for an empty `seq[Pid]` (here and in
+    # `killProcessTree`). Under ORC, Nim (2.2.8 upstream and the dev shell's
+    # fork alike) types an empty `@[]` through a cache that does not tell
+    # two `int32` aliases with different C names apart: once any module in
+    # the build has made an empty `seq[cint]` from `@[]` (repro_core's
+    # `descriptor_inheritance` does), the `@[]` here is emitted as that
+    # `seq[cint]` and assigned to the `seq[Pid]` result. gcc 14+ rejects that
+    # assignment (`-Wincompatible-pointer-types` is an error), so this module
+    # stops compiling in any binary that reaches these procs. `newSeq` is
+    # instantiated with the element type written out and is not affected.
+    if code != 0: return newSeq[Pid]()
     for line in text.splitLines:
       let f = line.splitWhitespace
       if f.len != 2: continue
@@ -904,7 +914,7 @@ when defined(posix):
     ## follows are gone. They are SIGSTOPped as they are found (and the walk
     ## repeated until nothing new appears) so none can fork its way out of the
     ## snapshot while it is taken; SIGKILL ends a stopped process.
-    var victims: seq[Pid] = @[]
+    var victims = newSeq[Pid]()  # not `@[]`: see `descendantsOf`
     for _ in 0 ..< 16:
       var fresh = false
       for d in descendantsOf(p.pid):

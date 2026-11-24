@@ -1245,6 +1245,8 @@ proc workspaceSubcommands(syncWs, pullWs, switchWs, branchWs: NimNode): NimNode
       boolFlag unmerged is bool, help = "Report unmerged branches"
       boolFlag fileDetails is bool, help = "List each changed file"
       boolFlag fix is bool, help = "Repair what can be repaired safely"
+      boolFlag verbose is bool, short = 'v',
+        help = "List routine clean repos too"
       `statusReport`
       pos project is string, required = false,
         help = "The project (default: the workspace's)"
@@ -3607,15 +3609,15 @@ proc reproCommandLineDescription*(): NimNode {.compileTime.} =
           help = "Remove from Scoop the packages the rollback drops"
         pos generation is string, required = false,
           help = "The generation to roll back to"
-      subcmd "gc", help = "Delete store prefixes no live generation " &
-          "references":
+      subcmd "gc", help = "Drop the generations outside the keep " &
+          "window, then collect the store prefixes no root holds":
         boolFlag dryRun is bool,
-          help = "Print the candidates and their footprint; delete nothing"
+          help = "Print what would be dropped and collected; change nothing"
         boolFlag force is bool, short = 'y',
           help = "Skip the confirmation prompt"
         flag keepGenerations is Option[int],
-          help = "Keep the N most recent generations' prefixes (N >= 1, " &
-            "default 2; the active generation is always kept)"
+          help = "Keep the N most recent generations (N >= 1, default 2; " &
+            "the active generation is always kept)"
         flag store is string, env = "REPRO_STORE_ROOT",
           help = "The store root (default: the platform's)"
       subcmd "set", help = "Set a managed configurable in the profile's " &

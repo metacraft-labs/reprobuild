@@ -23,7 +23,9 @@
 ##    root flake whose dev shell carries the C toolchain and git; beta's
 ##    recipe imports a module of the root's checkout with `dslDeps:`, which
 ##    its interface extraction resolves through the engine at compile time
-##    (a `staticExec`, which must start no shell either). The root
+##    (a `staticExec`, which must start no shell either). alpha's produce
+##    edge depends on a C compile with the root shell's `cc`, which reads
+##    TMPDIR (see THE TEMPORARY DIRECTORY below). The root
 ##    shell's environment is captured once with `repro bundle create`
 ##    (Nix half only), and every build on both machines runs in it with the
 ##    same minimal environment (`env -i`, the same HOME, TMPDIR and roots).
@@ -61,6 +63,16 @@
 ## default, and the captured environment then holds the exporter's
 ## (`nix print-dev-env` appends the invoking PATH). A session image's PATH
 ## is not the publisher's either, so the gate does not equalise it.
+##
+## THE TEMPORARY DIRECTORY. Most compilers read TMPDIR (or TMP, TEMP,
+## TEMPDIR), and the monitor records what an action reads, so a producer that
+## does is a hit only where the captured shell leaves those variables as the
+## activating shell set them. `nix print-dev-env` ends by pointing them at a
+## fresh `/tmp/nix-shell.XXXXXX` on every activation; a capture that kept
+## those lines would make the C compile miss in the container
+## (`input metadata changed: TEMP`) while the copy edges, which read none of
+## them, still hit. The compile edge is held to the same rule as every other
+## action, and the negative control must launch it too, so it is not vacuous.
 ##
 ## `REPRO_BUNDLE_E2E_KEEP=1` keeps the scratch directory (bundles, the
 ## published repository, the reports and each container's `.repro` state)
@@ -290,7 +302,7 @@ suite "a bundle restores on a plain machine without rebuilding":
       let nixpkgs = sh("nix eval --raw --inputs-from " &
         quoteShell(ReprobuildRoot) & " nixpkgs#path").strip()
 
-      writeWorkspace(m.ws, dslExport = true)
+      writeWorkspace(m.ws, dslExport = true, tempReadingProducer = true)
       writeRootFlake(m.ws, nixpkgs)
       let r = quoteShell(m.repro / "bin" / "repro")
       let roots = " --workspace-root=" & quoteShell(m.ws) & " --store-root=" &
@@ -314,11 +326,15 @@ suite "a bundle restores on a plain machine without rebuilding":
         let log = sh(buildCommand(m, repo, report))
         checkpoint("host build of " & repo & ":\n" & log)
         let run = parseJson(readFile(report))
-        var launched = false
+        var launched, compiled = false
         for a in run["actions"]:
           if a["id"].getStr() == produceEdge(repo) and
               a{"launched"}.getBool(): launched = true
+          if a["id"].getStr() == compileEdge(repo) and
+              a{"launched"}.getBool(): compiled = true
         require launched
+        # The temp-directory-reading producer ran on the exporter.
+        require compiled == (repo == TempReadingRepo)
         hostSums[repo] = sh("sha256sum " &
           quoteShell(m.ws / repo / outputRel(repo)) & " | cut -d' ' -f1").strip()
 
@@ -381,16 +397,18 @@ suite "a bundle restores on a plain machine without rebuilding":
         # Restored: every action of the build is a hit that did not launch.
         let restored = parseJson(readFile(results / ("report-pair-" & repo &
           ".json")))
-        var sawProduce = false
+        var sawProduce, sawCompile = false
         for a in restored["actions"]:
           let id = a["id"].getStr()
           checkpoint("restored " & repo & ": " & id & " launched=" &
             $a{"launched"}.getBool() & " cache=" & a{"cacheDecision"}.getStr() &
             " miss=" & a{"cacheMissReason"}.getStr())
           if id == produceEdge(repo): sawProduce = true
+          if id == compileEdge(repo): sawCompile = true
           check not a{"launched"}.getBool()
           check a{"cacheDecision"}.getStr() == "cdHit"
         check sawProduce
+        check sawCompile == (repo == TempReadingRepo)
         # The engine's own edges for the project (the provider compile and
         # the interface extraction): the bundle carries their records too,
         # and they are hits that did not launch, like every other action.
@@ -409,10 +427,13 @@ suite "a bundle restores on a plain machine without rebuilding":
         # Negative control: without the native half, the producer runs.
         let control = parseJson(readFile(results / ("report-pair-control-" &
           repo & ".json")))
-        var controlLaunched = false
+        var controlLaunched, controlCompiled = false
         for a in control["actions"]:
           if a["id"].getStr() == produceEdge(repo) and
               a{"launched"}.getBool(): controlLaunched = true
+          if a["id"].getStr() == compileEdge(repo) and
+              a{"launched"}.getBool(): controlCompiled = true
         check controlLaunched
+        check controlCompiled == (repo == TempReadingRepo)
         check readFile(results / ("sum-pair-control-" & repo)).strip() ==
           hostSums[repo]

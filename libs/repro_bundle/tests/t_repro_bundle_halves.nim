@@ -1149,6 +1149,57 @@ suite "bundles are fetched over https only":
       check "refusing" in log
       check variable in log
 
+  test "latest is resolved only over an https:// or file:// remote":
+    # `repro bundle restore github:OWNER/REPO/BUNDLE` resolves `latest` to a
+    # commit with `git ls-remote`, and that commit picks the bundle. Over a
+    # plain remote anyone on the path could answer with an older commit and
+    # roll the restore back. Port 9 (discard) on loopback: a remote that was
+    # not refused fails on its own, but with "cannot reach". restore.sh is
+    # not involved: it downloads by an explicit @COMMIT.
+    let top = createTempDir("repro-bundle-http-remote-", "")
+    defer: removeDir(top)
+    putEnv("REPRO_BUNDLE_GITHUB_RAW", "file://" & top / "nowhere")
+    putEnv("REPRO_BUNDLE_GITHUB_API", "file://" & top / "nowhere")
+    defer:
+      delEnv("REPRO_BUNDLE_GITHUB_REMOTE")
+      delEnv("REPRO_BUNDLE_GITHUB_RAW")
+      delEnv("REPRO_BUNDLE_GITHUB_API")
+    for remote in ["http://127.0.0.1:9", "HTTP://127.0.0.1:9",
+                   "git://127.0.0.1:9", "ssh://127.0.0.1:9"]:
+      putEnv("REPRO_BUNDLE_GITHUB_REMOTE", remote)
+      var refused = ""
+      try: discard restoreBundle(RestoreOptions(
+        source: "github:acme/bundles/demo", workspaceDir: top / "ws"))
+      except CatchableError as e: refused = e.msg
+      checkpoint "restoreBundle said: " & refused
+      check "refusing REPRO_BUNDLE_GITHUB_REMOTE" in refused
+      check "https://" in refused
+      check not dirExists(top / "ws")
+
+    # An https:// remote that git itself turns into http:// (an insteadOf
+    # rewrite here; a redirect takes the same protocol check) is still not
+    # read, even where git's own config allows http per protocol, which
+    # would outrank a bare protocol.allow=never. The config reaches git the
+    # way any inherited config would, through GIT_CONFIG_COUNT.
+    putEnv("REPRO_BUNDLE_GITHUB_REMOTE", "https://github.com")
+    putEnv("GIT_CONFIG_COUNT", "2")
+    putEnv("GIT_CONFIG_KEY_0", "url.http://127.0.0.1:9/.insteadOf")
+    putEnv("GIT_CONFIG_VALUE_0", "https://github.com/")
+    putEnv("GIT_CONFIG_KEY_1", "protocol.http.allow")
+    putEnv("GIT_CONFIG_VALUE_1", "always")
+    putEnv("GIT_ALLOW_PROTOCOL", "http:https:file")
+    defer:
+      for v in ["GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0",
+                "GIT_CONFIG_KEY_1", "GIT_CONFIG_VALUE_1", "GIT_ALLOW_PROTOCOL"]:
+        delEnv(v)
+    var rewritten = ""
+    try: discard restoreBundle(RestoreOptions(
+      source: "github:acme/bundles/demo", workspaceDir: top / "ws"))
+    except CatchableError as e: rewritten = e.msg
+    checkpoint "restoreBundle said: " & rewritten
+    check "transport 'http' not allowed" in rewritten
+    check not dirExists(top / "ws")
+
 # Workspace-Bundles.md §7 step 2: every download carries `--proto
 # =https,file --proto-redir =https`, so an https:// server, or whoever holds
 # its certificate, cannot send a transfer on to plain http://, which anyone

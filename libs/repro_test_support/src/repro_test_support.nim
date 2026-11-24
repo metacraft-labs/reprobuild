@@ -599,13 +599,36 @@ proc testScratchSlug*(): string =
 
 proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
   ## Nim's OSError does not expose the failing errno portably. Keep this
-  ## deliberately narrow: retry only the ENOTEMPTY-shaped cleanup race the
-  ## full suite has observed, and re-raise every other cleanup failure.
+  ## deliberately narrow: retry only the two cleanup races the full suite has
+  ## observed, and re-raise every other cleanup failure.
+  ##
+  ## - ENOTEMPTY: a background writer added an entry after the walk listed
+  ##   the directory.
+  ## - ENOENT: a background writer removed an entry after the walk listed it
+  ##   (a detached post-commit cache push renaming its pack temporaries away,
+  ##   in `t_post_commit_publishes_evidence_and_excludes_from_cache_push`), so
+  ##   removing that entry fails although the tree is going away anyway.
   let msg = e.msg.toLowerAscii()
-  msg.contains("directory not empty") or msg.contains("directory is not empty")
+  msg.contains("directory not empty") or
+    msg.contains("directory is not empty") or
+    msg.contains("no such file or directory")
+
+const WindowsErrorPathNotFound* = 3'i32
+  ## ERROR_PATH_NOT_FOUND, https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
+
+proc isWindowsPathNotFound*(errorCode: int32; message: string): bool =
+  ## True for the Windows failure that `RemoveDirectory`/`FindFirstFileW` report
+  ## when a path inside the tree is longer than `MAX_PATH` and was not given the
+  ## `\\?\` prefix: "The system cannot find the path specified". It is the
+  ## second face of the long-path problem `removeDirEventually` documents (the
+  ## first is ENOTEMPTY), and no amount of waiting clears it either. The code is
+  ## compared first because the message is localised.
+  errorCode == WindowsErrorPathNotFound or
+    message.toLowerAscii().contains("cannot find the path specified")
 
 proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
-  ## Remove a test scratch directory, tolerating only transient ENOTEMPTY.
+  ## Remove a test scratch directory, tolerating only transient ENOTEMPTY and
+  ## ENOENT (an entry a background writer added or removed mid-walk).
   ##
   ## Some production paths briefly leave background filesystem activity in
   ## `.repro` / `.git` trees after all test assertions have passed. A plain
@@ -634,11 +657,22 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
       removeDir(path)
       return
     except OSError as e:
-      if not isTransientDirectoryNotEmpty(e):
+      # ERROR_PATH_NOT_FOUND on a tree that still exists is the over-MAX_PATH
+      # symptom: waiting cannot clear it, so go straight to the extended-length
+      # form below instead of re-raising (a Windows runner without
+      # LongPathsEnabled failed t_compiler_args_transport's teardown this way,
+      # on nim 2.2.10's dist/nimble/tests tree, after every assertion passed).
+      let longPathSymptom = when defined(windows):
+          isWindowsPathNotFound(e.errorCode, e.msg) and dirExists(path)
+        else:
+          false
+      if not longPathSymptom and not isTransientDirectoryNotEmpty(e):
         raise
       if not dirExists(path):
         return
       last = e
+      if longPathSymptom:
+        break
       if attempt + 1 < attempts:
         sleep(sleepMs)
   # Waiting did not help: try the long-path form before giving up. Kept as an

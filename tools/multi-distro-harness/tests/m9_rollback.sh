@@ -34,15 +34,15 @@
 #      equals "m9-profile-A" again. Verify history's `[active]`
 #      marker is back on A.
 #   7. `repro home gc --dry-run --keep-generations 1`. Verify the
-#      command exits zero and reports "no orphaned prefixes".
+#      command exits zero, would drop exactly B's generation (A is
+#      active again after the rollback, and the active generation is
+#      always kept), and lists no prefix to collect.
 #      Rationale: the M9 fixtures declare a single `fs.userFile`
 #      resource with no package realization; there are NO content-
-#      addressed prefixes for the gc engine to reclaim. Asserting
-#      the "store is clean" outcome is the correct M9 gate for a
-#      package-free profile — it confirms the engine runs against
-#      the right state-dir + store-root + that it correctly
-#      computes the empty live-prefix set across the kept
-#      generations.
+#      addressed prefixes for store GC to collect. The dropped id
+#      confirms the gc runs against the state-dir the apply pipeline
+#      wrote to; the empty prefix list confirms it runs against the
+#      right store-root.
 #   8. `repro store gc`. Verify exit zero + that profile A's
 #      generation digest is still listed in `repro store roots`
 #      (it MUST be — it is the active generation).
@@ -380,18 +380,25 @@ if [ "${rc}" -ne 0 ]; then
   cat "${home_gc_log}" >&2
   exit 1
 fi
-if ! grep -q 'no orphaned prefixes' "${home_gc_log}"; then
-  echo "m9_rollback: FAIL - home gc did not report 'no orphaned prefixes'" >&2
-  echo "  the M9 fixtures declare a single fs.userFile resource with NO" >&2
-  echo "  package realization; the M10 gc engine's live-prefix set is" >&2
-  echo "  empty and there is nothing to reclaim. The expected outcome" >&2
-  echo "  on this gate is 'store is clean'; any other outcome means the" >&2
-  echo "  gc engine ran against a different state-dir / store-root than" >&2
-  echo "  the apply pipeline wrote to." >&2
+if ! grep -q "would drop 1 generation(s): ${ID_B}\$" "${home_gc_log}"; then
+  echo "m9_rollback: FAIL - home gc dry-run did not propose dropping" >&2
+  echo "  exactly B's generation (${ID_B}). With --keep-generations 1" >&2
+  echo "  and A active after the rollback, B is the one generation" >&2
+  echo "  retention drops; any other answer means the gc ran against a" >&2
+  echo "  different state-dir than the apply pipeline wrote to." >&2
   cat "${home_gc_log}" >&2
   exit 1
 fi
-echo "  ok: home gc reports 'no orphaned prefixes — store is clean'"
+if ! grep -q ' 0 prefix(es) no root would hold' "${home_gc_log}"; then
+  echo "m9_rollback: FAIL - home gc dry-run listed prefixes to collect" >&2
+  echo "  the M9 fixtures declare a single fs.userFile resource with NO" >&2
+  echo "  package realization, so store GC has nothing to collect; any" >&2
+  echo "  prefix listed means the gc ran against a different store-root" >&2
+  echo "  than the apply pipeline wrote to." >&2
+  cat "${home_gc_log}" >&2
+  exit 1
+fi
+echo "  ok: home gc dry-run would drop B (${ID_B}) and collect no prefix"
 
 # ----------------------------------------------------------------------
 # Step 8: store gc + store roots. Both generations are profile roots
