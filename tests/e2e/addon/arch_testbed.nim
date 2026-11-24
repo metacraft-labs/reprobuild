@@ -97,9 +97,11 @@
 ## *Base preparation* (the Arch counterpart of the Debian test bed's apt adjustments; made
 ## when the image is built, so part of the base, not of anything a gate
 ## measures): the mirror list is replaced by the archive date's single
-## ``Server`` line; ``archlinux-keyring-wkd-sync.timer`` is disabled (weekly,
-## it refreshes ``/etc/pacman.d/gnupg`` from the network, which would change
-## the ``etc`` fingerprint under a running gate); the package cache is
+## ``Server`` line; ``systemctl disable archlinux-keyring-wkd-sync.timer``
+## is run, which has no effect: archlinux-keyring enables that timer
+## statically (``/usr/lib/systemd/system/timers.target.wants``), so every
+## guest masks it instead before its baseline (``stopKeyringRefresh``,
+## AR6; the recipe line is kept so the images are not rebuilt); the package cache is
 ## emptied; cloud-init's instance state and the build key are removed, so
 ## every guest is a first boot of its own instance. The machine id and the
 ## pacman keyring made by the build's first boot are kept: resetting the
@@ -1219,26 +1221,35 @@ proc newOmarchyGuest*(diskGiB = OmarchyImageGiB; cpus = 4;
   ## image. ``prepareArchGuest`` (or ``prepareOmarchyGuest``) after the boot.
   newOmarchyGuestOver(omarchyGoldenImage(), diskGiB, cpus, memoryMB)
 
+proc stopKeyringRefresh(g: Guest) =
+  ## Mask and stop ``archlinux-keyring-wkd-sync.timer``, with whatever it
+  ## started, before any baseline; a sync that already ran is part of the
+  ## baseline, and so is the mask's ``/etc/systemd/system`` link.
+  ##
+  ## The weekly timer rewrites ``/etc/pacman.d/gnupg`` from the network,
+  ## which a running gate's ``etc`` fingerprint sees. archlinux-keyring
+  ## enables it statically (a ``timers.target.wants`` link in
+  ## ``/usr/lib``), so ``systemctl disable`` leaves it enabled; it is
+  ## ``Persistent``, so once a guest's image is a week past its last sync
+  ## (the images' 2026-11-13, Omarchy's capture 2026-11-14) it fires after
+  ## every boot, at a random delay. A gate's fingerprint then gained
+  ## ``/etc/pacman.d/gnupg/crls.d``, ``dirmngr@etc-pacman.d-gnupg.service``
+  ## and ``network-online.target`` mid-gate (measured 2026-11-24, AR6, on
+  ## the Omarchy and the arch-ext4 guests). A mask also holds across the
+  ## gates' reboots, which a runtime stop does not.
+  discard g.run("systemctl mask --now archlinux-keyring-wkd-sync.timer " &
+    ">/dev/null; systemctl stop archlinux-keyring-wkd-sync.service " &
+    "'dirmngr@etc-pacman.d-gnupg.service'; " &
+    "[ \"$(systemctl is-enabled archlinux-keyring-wkd-sync.timer)\" = masked ]",
+    timeoutSec = 300)
+
 proc prepareOmarchyGuest*(g: Guest) =
-  ## Boot settled, ``archlinux-keyring-wkd-sync.timer`` stopped (below),
+  ## Boot settled, the keyring refresh masked (``stopKeyringRefresh``),
   ## then the pin check: refuses (raises) a guest whose pacman names any
   ## server other than the capture cache.
-  ##
-  ## The Arch images disable that weekly timer when they are built: it
-  ## rewrites ``/etc/pacman.d/gnupg`` from the network, which a running
-  ## gate's ``etc`` fingerprint sees. The Omarchy image kept it, and once
-  ## it was a week past the capture (2026-11-21) it fired at a random time
-  ## after every boot, so an Omarchy gate's fingerprint gained
-  ## ``/etc/pacman.d/gnupg/crls.d``, ``dirmngr@etc-pacman.d-gnupg.service``
-  ## and ``network-online.target`` mid-gate (measured 2026-11-24, AR6). It
-  ## is stopped here, before any baseline, with whatever it started; a sync
-  ## that already ran is part of the baseline.
   discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",
                  timeoutSec = 600)
-  discard g.exec("systemctl disable --now archlinux-keyring-wkd-sync.timer " &
-    ">/dev/null 2>&1; systemctl stop archlinux-keyring-wkd-sync.service " &
-    "'dirmngr@etc-pacman.d-gnupg.service' >/dev/null 2>&1; true",
-    timeoutSec = 300)
+  g.stopKeyringRefresh()
   g.requirePinnedPacman(omarchyCaptureRule())
 
 proc omarchyBuildId*(g: Guest): string =
@@ -1407,7 +1418,8 @@ proc useArchiveMirror*(g: Guest; date: string) =
   g.requirePinnedPacman(archiveMirrorRule(root, date))
 
 proc prepareArchGuest*(g: Guest; viaMirror = true) =
-  ## First-boot completion, then the pin check: refuses (raises) a guest
+  ## First-boot completion, the keyring refresh masked
+  ## (``stopKeyringRefresh``), then the pin check: refuses (raises) a guest
   ## whose pacman names anything but its archive date (an Omarchy guest:
   ## anything but the capture cache, ``prepareOmarchyGuest``). Then, unless
   ## ``viaMirror`` is false (the pinning gate, which measures the image's
@@ -1420,6 +1432,7 @@ proc prepareArchGuest*(g: Guest; viaMirror = true) =
                  timeoutSec = 600)
   discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",
                  timeoutSec = 600)
+  g.stopKeyringRefresh()
   g.requirePinnedPacman(archiveRule(archiveDateOf(g.base)))
   if viaMirror:
     g.useArchiveMirror(archiveDateOf(g.base))
