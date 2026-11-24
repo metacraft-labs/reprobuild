@@ -401,9 +401,12 @@ proc stop*(m: SnapshotMirror) =
   except CatchableError: discard
   joinThread(m.acceptThread)
   gListen.close()
+  # The workers are told to stop but not waited for: one serving a guest
+  # or fetching from an archive can take minutes, and a gate that stopped
+  # the mirror on its way out once stayed alive for 17 hours, spinning,
+  # after writing its record (2026-11-23). Nothing they hold needs to be
+  # flushed: a cached file is published by rename, a partial one never.
   for _ in m.workers: gConns.send(-1)
-  for t in m.workers: joinThread(t[])
-  gConns.close()
 
 block archRouteSelfCheck:
   # A dated archive path maps to the archive and is cached by its path;

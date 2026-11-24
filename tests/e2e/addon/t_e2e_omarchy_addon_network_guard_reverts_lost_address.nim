@@ -823,9 +823,15 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
       # by the owner's watch depending on the host's load, and a missed one
       # left the owner to revert at its deadline ("armed, its timer gone")
       # instead (measured twice in the AR6 regression runs, 2026-11-23).
-      discard b.mux("ip link set " & nb.oob & " down", 60)
-      discard b.waitPaused("revert:step-4", 120)
-      discard b.mux("ip link set " & nb.oob & " up", 60)
+      # The out-of-band link is also the one the harness's SSH rides on, so
+      # the guest itself holds it down and brings it back -- once the owner
+      # has paused at its failure-path revert, or after 120 s -- detached
+      # from the session that started it.
+      discard b.mux("nohup setsid sh -c 'sleep 1; ip link set " & nb.oob &
+        " down; for i in $(seq 1 120); do test -e " & Ctl &
+        "/test-paused-at-revert:step-4 && break; sleep 1; done; ip link set " &
+        nb.oob & " up' </dev/null >/dev/null 2>&1 &", 60)
+      discard b.waitPaused("revert:step-4", 240)
       let loaded = b.mux("systemctl list-units --plain --no-legend " &
         "'repro-addon-guard-" & att & "-*.timer'").stdout.strip()
       b.killedOwner(unit)
