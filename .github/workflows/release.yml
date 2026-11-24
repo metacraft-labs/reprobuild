@@ -8,6 +8,16 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+    inputs:
+      # A proving run of selected legs (release-pipeline.yml's `platforms`
+      # input): `<platform>-<arch>` names, possibly of a `candidates` row of
+      # .github/release-platforms.json. Empty builds every released platform.
+      # Refused on a tag; dispatched from a branch it publishes nothing.
+      platforms:
+        description: "Proving run: build only these legs (e.g. linux-aarch64); empty = all"
+        type: string
+        required: false
+        default: ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The release's TRIGGER. Its jobs, and the account of the release's shape, are
@@ -66,6 +76,8 @@ jobs:
       id-token: write
       actions: read
     uses: metacraft-labs/reprobuild/.github/workflows/release-pipeline.yml@agents
+    with:
+      platforms: ${{ inputs.platforms || '' }}
     secrets: inherit
 
   general:
@@ -75,4 +87,6 @@ jobs:
       id-token: write
       actions: read
     uses: ./.github/workflows/release-pipeline.yml
+    with:
+      platforms: ${{ inputs.platforms || '' }}
     secrets: inherit
