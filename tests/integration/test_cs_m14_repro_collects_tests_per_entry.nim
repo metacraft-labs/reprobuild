@@ -152,7 +152,9 @@ proc projectWith(producer = ""; betaBody = BetaBody;
     .replace("__ENTRYPOINTS_SRC__", entrypoints)
     .replace("__NATIVE_BACKEND__", backend)
     .replace("__TESTS_FRAGMENT_PRODUCER__", producer)
-    .replace("__PER_TEST_BINARIES__", $perTestBinaries))
+    # An identifier, unlike the other placeholders: it stands where an
+    # expression goes, and the fixture must parse (see its header).
+    .replace("perTestBinariesPlaceholder", $perTestBinaries))
   result.writeSource(betaBody, aboveMain = aboveMain)
 
 proc reproTest(p: Project; label: string):
