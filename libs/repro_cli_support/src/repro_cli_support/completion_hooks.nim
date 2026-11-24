@@ -41,6 +41,18 @@
 ##   MSIX install, or a user who is not an administrator) is reported
 ##   `refused-unwritable`, as on the other platforms, and its per-user block
 ##   is left as it is.
+## * **macOS.** `--system` puts Fish's script in fish's configuration
+##   directory, `/etc/fish/completions`, as on Linux (clispec
+##   `cpfMacosLocal`). Per user, Bash's block (written only where
+##   bash-completion is not installed) goes in `~/.bashrc` and in the login
+##   file, `~/.bash_profile`, because Terminal.app starts login shells,
+##   which never read `~/.bashrc` on their own. When `~/.bash_profile` is
+##   absent and `~/.bash_login` or `~/.profile` exists, the login block goes
+##   in the first of those instead (the one a login Bash reads), so that no
+##   `~/.bash_profile` is created to hide them. Both blocks are clispec's
+##   run-once text, so a login file that sources `~/.bashrc` loads the
+##   script once. `macos` selects these rules, so a test can drive them on
+##   any host.
 ##
 ## The blocks go through the one managed-block writer
 ## (`repro_home_resources/drivers/managed_block`), with ids
@@ -134,6 +146,9 @@ type
     pathEnv*: string      ## the `PATH` shells are detected on
     user*: string         ## the user name, for `/etc/profiles/per-user`
     windows*: bool
+    macos*: bool
+      ## macOS's rules (see the module documentation): the request of a
+      ## `repro` built for macOS sets it; a test may set it anywhere.
     installPrefix*: string
       ## Windows: the installation `--system` puts the script under (the
       ## directory above the running binary's `bin\`), before `systemRoot`
@@ -236,25 +251,30 @@ proc printEntries*(entries: openArray[CompletionHookEntry]) =
 # Where things are.
 # ---------------------------------------------------------------------------
 
-proc hostFamilies(): seq[(CliPlatformFamily, string)] =
+proc hostFamilies(req: CompletionHookRequest):
+    seq[(CliPlatformFamily, string)] =
   ## Where this platform's native packages put completion files, as
   ## (family, prefix): what "registered once" consults besides the
   ## `--system` location.
-  when defined(macosx):
-    @[(cpfMacosPkg, ""), (cpfHomebrew, "/opt/homebrew"),
+  if req.macos:
+    return @[(cpfMacosPkg, ""), (cpfHomebrew, "/opt/homebrew"),
       (cpfHomebrew, "/usr/local")]
-  elif defined(freebsd):
+  when defined(freebsd):
     @[(cpfFreeBsd, "")]
   elif defined(openbsd) or defined(netbsd):
     @[(cpfOpenBsd, ""), (cpfOpenBsd, "/usr/pkg")]
   else:
     @[(cpfDebian, ""), (cpfRpm, "")]
 
-# The `--system` family: the local administrator's area. On Linux, Fish's
-# script goes in fish's configuration directory (`/etc/fish/completions`)
-# instead of `/usr/local/share`, which fish searches only when
-# `XDG_DATA_DIRS` names it (clispec `cpfLinuxLocal`).
-const localFamily = (when defined(linux): cpfLinuxLocal else: cpfLocal)
+proc localFamily(req: CompletionHookRequest): CliPlatformFamily =
+  ## The `--system` family: the local administrator's area. On Linux and
+  ## macOS, Fish's script goes in fish's configuration directory
+  ## (`/etc/fish/completions`) instead of `/usr/local/share`, which fish
+  ## searches only when `XDG_DATA_DIRS` names it (clispec `cpfLinuxLocal`
+  ## and `cpfMacosLocal`); the BSDs keep `cpfLocal`.
+  if req.macos: cpfMacosLocal
+  elif defined(linux): cpfLinuxLocal
+  else: cpfLocal
 
 proc localSystemTargets(req: CompletionHookRequest; shell: CliShell;
                         psHome = ""): seq[CliCompletionTarget] =
@@ -267,8 +287,9 @@ proc localSystemTargets(req: CompletionHookRequest; shell: CliShell;
       return @[]
     return cliSystemCompletionTargets(shell, req.program, cpfWindows,
       rooted(req.systemRoot, req.installPrefix), psHome)
-  cliSystemCompletionTargets(shell, req.program, localFamily,
-    rooted(req.systemRoot, cliDefaultPrefix(localFamily)), psHome,
+  let family = localFamily(req)
+  cliSystemCompletionTargets(shell, req.program, family,
+    rooted(req.systemRoot, cliDefaultPrefix(family)), psHome,
     sysconfDir = rooted(req.systemRoot, "/etc"))
 
 proc systemRegistrationPaths(req: CompletionHookRequest;
@@ -277,7 +298,7 @@ proc systemRegistrationPaths(req: CompletionHookRequest;
   ## registration, under the test root.
   if req.windows:
     return @[]
-  var families = @[(localFamily, "")] & hostFamilies()
+  var families = @[(localFamily(req), "")] & hostFamilies(req)
   # Nix: the system profiles' `share/` (NixOS, nix-darwin, Home Manager's
   # per-user profile under /etc/profiles).
   for prefix in ["/run/current-system/sw", "/nix/var/nix/profiles/default"]:
@@ -485,6 +506,21 @@ proc removeBlockTarget(req: CompletionHookRequest; shell: CliShell;
     result.outcome = coFailed
     result.detail = err.msg
 
+proc blockFile(t: CliCompletionTarget): string =
+  ## The file a block target is written to: its `path`, unless that does
+  ## not exist and one of the files the shell reads in its place does (a
+  ## login Bash reads `~/.bash_login` or `~/.profile` when there is no
+  ## `~/.bash_profile`). Then the first of those, because creating `path`
+  ## would make the shell stop reading it. Only per-user targets have
+  ## alternatives, so no test root applies.
+  if t.alternatives.len == 0 or fileExists(extendedPath(t.path)) or
+      symlinkExists(extendedPath(t.path)):
+    return t.path
+  for alt in t.alternatives:
+    if fileExists(extendedPath(alt)) or symlinkExists(extendedPath(alt)):
+      return alt
+  t.path
+
 # ---------------------------------------------------------------------------
 # The targets of one shell.
 # ---------------------------------------------------------------------------
@@ -538,7 +574,7 @@ proc wantedTargets(req: CompletionHookRequest; found: ShellFound):
   case req.scope
   of csUser:
     for t in cliUserCompletionTargets(found.shell, req.program, req.env,
-        req.windows):
+        req.windows, req.macos):
       if t.kind == ctkProfileBlock:
         if t.onlyWithoutLoader and bashCompletionInstalled(req):
           continue
@@ -622,8 +658,9 @@ proc ensureCompletionHooks*(req: CompletionHookRequest):
         # A block loading a file that was not written would load another
         # tool's script, or nothing.
         if fileOk:
-          result.add ensureBlock(req, found.shell, t.path,
-            cliProfileBlockBody(found.shell, req.program, t.script))
+          result.add ensureBlock(req, found.shell, blockFile(t),
+            cliProfileBlockBody(found.shell, req.program, t.script,
+              t.runOnce))
 
 proc uninstallCompletionHooks*(req: CompletionHookRequest):
     seq[CompletionHookEntry] =
@@ -635,7 +672,7 @@ proc uninstallCompletionHooks*(req: CompletionHookRequest):
     case req.scope
     of csUser:
       targets = cliUserCompletionTargets(shell, req.program, req.env,
-        req.windows)
+        req.windows, req.macos)
     of csSystem:
       if shell != cshPowerShell:
         targets = localSystemTargets(req, shell)
@@ -654,4 +691,11 @@ proc uninstallCompletionHooks*(req: CompletionHookRequest):
     for t in targets:
       case t.kind
       of ctkFile: result.add removeFileTarget(req, shell, t.path)
-      of ctkProfileBlock: result.add removeBlockTarget(req, shell, t.path)
+      of ctkProfileBlock:
+        # The block may be in any of the files the shell reads in place of
+        # the target's (macOS's login file): take it out of each.
+        result.add removeBlockTarget(req, shell, t.path)
+        for alt in t.alternatives:
+          let e = removeBlockTarget(req, shell, alt)
+          if e.outcome != coAbsent:
+            result.add e

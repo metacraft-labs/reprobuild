@@ -1864,6 +1864,8 @@ package reprobuild:
       let bumpVersionTest = source == "tests/unit/test_bump_version.py"
       let ciLockCredentialsTest =
         source == "tests/unit/test_ci_reconcile_lock_credentials.py"
+      let downstreamRecorderPinsTest =
+        source == "tests/unit/test_downstream_recorder_sibling_pins.py"
       let releaseSmokeTest =
         source == "tests/unit/test_release_smoke_dev_exec.py"
       let releaseTagTest =
@@ -1897,6 +1899,15 @@ package reprobuild:
           # contract cases read.
           @["scripts/ci_lock_source_credentials.py",
             ".github/workflows/ci.yml"]
+        elif downstreamRecorderPinsTest:
+          # The script under test; the workflow whose step it runs; the two
+          # scripts that step also runs; and the module it imports the
+          # workflow reader from.
+          @["scripts/recorder_build_siblings_lock.sh",
+            ".github/workflows/downstream-tests.yml",
+            "scripts/reconcile_locked_siblings.sh",
+            "scripts/ci_lock_source_credentials.py",
+            "tests/unit/test_ci_reconcile_lock_credentials.py"]
         elif releaseSmokeTest:
           @["scripts/release/smoke_release_dev_exec.sh",
             "scripts/release/with_windows_archive_runquota.ps1",
@@ -1959,6 +1970,10 @@ package reprobuild:
       # for the loopback-forge cases.
       if ciLockCredentialsTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["git"])
+      # Real bash runs the workflow step and the script; real git provides
+      # the sibling checkouts the step reconciles.
+      if downstreamRecorderPinsTest:
+        appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
       # Real git and bash: a bare repository as the remote, `git ls-remote`
       # against it, and the workflow steps' `run:` lines under bash.
       if releaseTagTest:
