@@ -101,6 +101,7 @@ package dryRunRunQuotaProbe:
 
   uses:
     "sh"
+    "mkdir"
 
   build:
     let greet = shell(

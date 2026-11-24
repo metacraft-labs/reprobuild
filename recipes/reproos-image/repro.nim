@@ -256,6 +256,33 @@ package reproosImage:
     # semantic slot.
     "sh"
     "bash"
+    # The programs this package's shell action and the scripts it runs
+    # invoke. A shell edge runs on a hermetic PATH made only of its
+    # package's declared tools, so each one must be named here
+    # (Hermetic-Builds-And-Path-Independence.md §"Shell edges declare
+    # their package's tools").
+    # Only the tools neither runtimeDeps (appended to the build action
+    # below) nor buildDeps already name. They come from
+    # build-reproos-image.sh and the reproos-iso scripts it runs
+    # (stage-de-rootfs.sh, build-base-rootfs.sh, normalize-source-runtime.sh,
+    # build-initramfs.sh). Commands inside its "$SUDO" bash -c blocks run
+    # under sudo's own PATH and are not listed.
+    "chown"
+    "comm"
+    "cpio"
+    "cut"
+    "depmod"
+    "find"
+    "gzip"
+    "head"
+    "ln"
+    "mktemp"
+    "patchelf"
+    "readlink"
+    "sort"
+    "stat"
+    "tr"
+    "wc"
 
   buildDeps:
     "sway"

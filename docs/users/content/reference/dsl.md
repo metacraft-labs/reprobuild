@@ -401,6 +401,13 @@ function for declaring inputs. A tool that reports its inputs in a dependency
 file takes `dependencyPolicy = makeDepfilePolicy(depfile = "<path>")`, whose
 path may be a glob pattern.
 
+A `shell` action can run any program, so it uses the tools its package lists
+in `uses:` and `nativeBuildDeps:`. Its `PATH` holds only the directories of
+those tools, not the `PATH` of the shell that started the build. A program
+the command runs must be in one of those lists, including utilities such as
+`mkdir` or `cp` when the tools come from Nix, whose package directories hold
+only that package's programs.
+
 The core language also has a `shell(command, id, deps, outputs, cwd)` form,
 without a return value. It records a step of a package that is built from
 fetched sources, where `$out`, `$fetch` and `$extracted` in `command` name the
