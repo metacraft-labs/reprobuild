@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 845,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3274
+    "testEntries": 3275
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1858,7 +1858,7 @@
       "integration": 1812,
       "platform/destructive": 203,
       "pure unit": 845,
-      "unclassified": 385
+      "unclassified": 386
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2079,8 +2079,8 @@
       }
     ],
     "nimTestBinaryCount": 3222,
-    "pythonTestFileCount": 52,
-    "testEntryCount": 3274
+    "pythonTestFileCount": 53,
+    "testEntryCount": 3275
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -49687,7 +49687,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68495,6 +68495,21 @@
     {
       "binary": "",
       "class": "unclassified",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_install_ps1_verifier_handoff.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
       "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
@@ -68743,7 +68758,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -320,7 +320,8 @@ try {
 
   $isoPath = @((Join-Path $dir 'bin'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot, (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'))
   $pw = $powershells | Where-Object { $_[0] -eq 'PowerShell 7' } | Select-Object -First 1
-  if ($pw) { $isoPath += (Split-Path -Parent $pw[1]) }
+  # PowerShell 7's own directory, not Scoop's shims (Get-PowerShellDirectory).
+  if ($pw) { $isoPath += (Get-PowerShellDirectory -PowerShell $pw[1]) }
   $isoEnv = New-IsolatedEnvironment -HomeDir $H -TempDir $Tmp -PathDirs $isoPath
   New-Item -ItemType Directory -Force -Path $H, ([IO.Path]::Combine($H, 'AppData', 'Local')), ([IO.Path]::Combine($H, 'AppData', 'Roaming')), ([IO.Path]::Combine($H, 'Documents')) | Out-Null
   if (-not (Assert-DocumentsInScratch -PowerShells $powershells -Environment $isoEnv -Scratch $Work -WorkingDirectory $Neutral)) {
