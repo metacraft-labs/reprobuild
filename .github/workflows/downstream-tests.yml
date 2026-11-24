@@ -134,12 +134,20 @@ jobs:
       # The recorder builds against four siblings that must agree with it and
       # with each other, and their `dev` tips do not (hcr-lanes.yml measured
       # this for the same build). Put those four at the revisions the
-      # recorder's own committed repro.lock names. Only these four: every
-      # other sibling stays where .github/sibling-repos puts it, so this
-      # checkout's `just bootstrap` compiles against the revisions the rest of
-      # this repository's CI uses. Never `reprobuild` itself: the recorder's
-      # lock pins one, and the checkout under test must stay at this commit.
-      - name: Put the recorder's build siblings at the recorder's locked revisions
+      # recorder's own CI builds them at: the `siblings:` list of its
+      # nix-linux-tests job, which runs this same `test-reprobuild-claims`.
+      # A bare name there means the revision the recorder's repro.lock
+      # records, and `name=<sha>` pins a sibling that lock does not record.
+      # The backend is one of those: the recorder's repro.nim does not model
+      # the `build-license-ffi` step that builds inside it, so its lock cannot
+      # name it. scripts/recorder_build_siblings_lock.sh resolves both forms
+      # and refuses a sibling pinned by neither.
+      # Only these four: every other sibling stays where
+      # .github/sibling-repos puts it, so this checkout's `just bootstrap`
+      # compiles against the revisions the rest of this repository's CI uses.
+      # Never `reprobuild` itself: the recorder's lock pins one, and the
+      # checkout under test must stay at this commit.
+      - name: Put the recorder's build siblings at the revisions its CI pins
         env:
           GIT_CONFIG_NOSYSTEM: '1'
           GIT_TERMINAL_PROMPT: '0'
@@ -152,24 +160,20 @@ jobs:
           set -euo pipefail
           repro_root="${{ github.workspace }}"
           siblings_root="$(cd "$repro_root/.." && pwd)"
-          recorder_lock="$siblings_root/codetracer-native-recorder/repro.lock"
-          test -f "$recorder_lock" || { echo "no recorder lock at $recorder_lock" >&2; exit 1; }
-          names='codetracer-trace-format-nim|codetracer-trace-format|codetracer-native-backend|codetracer-visual-replay'
-          for name in ${names//|/ }; do
+          names='codetracer-trace-format-nim codetracer-trace-format codetracer-native-backend codetracer-visual-replay'
+          for name in $names; do
             test -d "$siblings_root/$name/.git" \
               || { echo "the $name sibling is not checked out at $siblings_root/$name" >&2; exit 1; }
           done
           work="$(mktemp -d "$RUNNER_TEMP/recorder-siblings.XXXXXX")"
           trap 'rm -rf "${work:?}"' EXIT
-          # The four entries, as brace groups, in the lock's own syntax.
-          { grep '^schema = ' "$recorder_lock"
-            printf '[lock]\ndeps = ['
-            grep -o '{[^{}]*}' "$recorder_lock" | grep 'coord_kind' \
-              | grep -E "name = \"($names)\"" \
-              | paste -sd, -
-            printf ']\n'; } > "$work/recorder.lock"
-          count="$(grep -o '{[^{}]*}' "$work/recorder.lock" | wc -l)"
-          [ "$count" -eq 4 ] || { echo "the recorder's lock names $count of the 4 build siblings" >&2; exit 1; }
+          # One entry per sibling, in the lock's own syntax; the script fails
+          # rather than leave one out.
+          # shellcheck disable=SC2086 # $names is a list of plain words
+          bash scripts/recorder_build_siblings_lock.sh \
+            "$siblings_root/codetracer-native-recorder" \
+            .github/workflows/linux-tests.yml nix-linux-tests \
+            "$work/recorder.lock" $names
           dev-exec python3 scripts/ci_lock_source_credentials.py gitconfig \
             --lock "$work/recorder.lock" --owner metacraft-labs \
             --out "$work/gitconfig" --emit-actions-mask

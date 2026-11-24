@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3294
+    "testEntries": 3295
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1858,7 +1858,7 @@
       "integration": 1823,
       "platform/destructive": 204,
       "pure unit": 847,
-      "unclassified": 391
+      "unclassified": 392
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2079,8 +2079,8 @@
       }
     ],
     "nimTestBinaryCount": 3237,
-    "pythonTestFileCount": 57,
-    "testEntryCount": 3294
+    "pythonTestFileCount": 58,
+    "testEntryCount": 3295
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -68721,6 +68721,21 @@
       "source": "tests/unit/test_dev_shell_hook_scope.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_downstream_recorder_sibling_pins.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
