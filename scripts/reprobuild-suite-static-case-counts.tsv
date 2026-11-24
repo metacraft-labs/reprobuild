@@ -2575,6 +2575,7 @@ tests/integration/t_recipe_compile_per_computation_dirs.nim	nim	1
 tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim	nim	5
 tests/integration/t_recipe_imports_a_module_of_a_declared_package_by_name.nim	nim	1
 tests/integration/t_recipe_lock_consistency_refuses.nim	nim	4
+tests/integration/t_reconcile_restores_explicit_sibling_pins.nim	nim	4
 tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim	nim	4
 tests/integration/t_record_store_preconditions_run_inside_the_lock_update_node.nim	nim	1
 tests/integration/t_records_url_locates_the_lock_record_store.nim	nim	6
