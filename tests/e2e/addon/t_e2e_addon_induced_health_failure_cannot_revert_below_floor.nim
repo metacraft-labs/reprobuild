@@ -1,6 +1,12 @@
 ## Gate ``e2e_addon_induced_health_failure_cannot_revert_below_floor``
 ## (milestone A8; spec §7.5, threat model G31, T36).
 ##
+## An operator's apply deploys the fixture service first (``v0``): it runs
+## the base's own ``sh`` and ``python3`` under the fixture floor waiver, and
+## an agent apply never adds a whole-floor waiver to a new unit (spec §10.1,
+## *An agent apply never weakens the floor*; threat model C102). The agent
+## applies every later generation of it, from sequence 1 on.
+##
 ## Generation 2 is applied from a manifest carrying rollback floor 2; an
 ## external fixture (``/run/a8-fail-<version>``, which the service's start
 ## command reads) makes its health check fail during ``confirmTimeout``. The host
@@ -47,6 +53,10 @@ proc unitVersion(g: Guest): string =
 
 proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
           producer: var Producer) =
+  if not g.operatorDeploysWaived(repro, "a8-floor-operator", profile("v0"),
+                                 step):
+    return
+  g.recordTimerBaseline()
   discard producer.publish(PublishSpec(sequence: 1, profileText: profile("v1")))
   let t1 = g.tickUnits()
   step("generation 1 (sequence 1) applies", t1.outcome == "aoApplied", $t1 & t1.applyLog)

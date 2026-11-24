@@ -2415,13 +2415,13 @@ proc materializeRemoteLaunchers(store: Store; stateDir, generationId: string;
       let scriptPath = binDir / command.commandName
       let scriptBody = generatePosixLauncherScript(plan,
         when defined(macosx): "DYLD_LIBRARY_PATH" else: "LD_LIBRARY_PATH")
-      writeFile(extendedPath(scriptPath), scriptBody)
+      # A content-addressed id may name a generation that is already
+      # committed: replace by rename, never write in place.
       try:
-        setFilePermissions(extendedPath(scriptPath), {fpUserExec, fpUserWrite,
-          fpUserRead, fpGroupExec, fpGroupRead, fpOthersExec, fpOthersRead})
-      except OSError as err:
-        raiseRemoteActivation("could not set launcher permissions for " &
-          scriptPath & ": " & err.msg)
+        replaceLauncherFile(scriptPath, scriptBody, LauncherScriptMode)
+      except CatchableError as err:
+        raiseRemoteActivation("could not write launcher " & scriptPath &
+          ": " & err.msg)
       inc result
 
 proc runHomeRemoteActivate[T](c: T): int =
@@ -3109,10 +3109,11 @@ proc renderGcCandidate(c: GcCandidate): string =
     c.absolutePath & junctionTag
 
 proc runHomeGcCommand(c: ReproCommandLineHomeGc): int =
-  ## `repro home gc` — orphan-prefix reclaim driver. Reads the M83
-  ## generation registry, walks the M56 store, identifies orphaned
-  ## prefixes, prints a footprint summary, and (unless --dry-run)
-  ## deletes them via the junction-aware-remove helper.
+  ## `repro home gc` — generation retention plus store GC. Drops the
+  ## generations outside the keep window with their `profile` roots,
+  ## then lets store GC collect what no root holds (`runHomeGc`); a
+  ## prefix any other root holds is never touched. Prints a footprint
+  ## summary first, and with --dry-run stops there.
   ##
   ## EXPLICIT operator command only — never auto-runs. Per the M10
   ## spec, the gc never deletes the active generation under any
@@ -3137,32 +3138,44 @@ proc runHomeGcCommand(c: ReproCommandLineHomeGc): int =
       $report.keptGenerationIds.len & " keep-N=" & $opts.keepGenerations
     case report.outcome
     of goNoCandidates:
-      echo "repro home gc: no orphaned prefixes — store is clean."
+      echo "repro home gc: no generation to drop and no unreferenced " &
+        "prefix — store is clean."
       return 0
     of goSkippedDryRun:
+      echo "repro home gc: dry-run — would drop " &
+        $report.droppedGenerationIds.len & " generation(s)" &
+        (if report.droppedGenerationIds.len > 0:
+          ": " & report.droppedGenerationIds.join(", ") else: "")
       echo "repro home gc: dry-run — " & $report.candidates.len &
-        " orphaned prefix(es), " & humanBytes(report.candidateBytes) &
-        " reclaimable:"
+        " prefix(es) no root would hold, " &
+        humanBytes(report.candidateBytes) & " reclaimable:"
       for c in report.candidates:
         echo renderGcCandidate(c)
       echo "repro home gc: pass --force to delete (or rerun without " &
         "--dry-run for the y/N prompt)."
       return 0
     of goSkippedCancelled:
-      echo "repro home gc: cancelled by operator — no prefixes deleted."
+      echo "repro home gc: cancelled by operator — nothing removed."
       return 0
     of goDeleted:
-      echo "repro home gc: deleted=" & $report.deletedCount &
+      echo "repro home gc: dropped-generations=" &
+        $report.droppedGenerationIds.len &
+        " collected=" & $report.deletedCount &
         " failed=" & $report.failedCount &
         " reclaimed=" & humanBytes(report.reclaimedBytes)
       if report.failures.len > 0:
         for f in report.failures:
-          stderr.writeLine("repro home gc: FAILED to delete " &
+          stderr.writeLine("repro home gc: FAILED to remove " &
             f.absolutePath & ": " & f.error)
         return 1
       return 0
   except EStateDirInvalid as e:
     stderr.writeLine("repro home gc: " & e.msg)
+    return 1
+  except EApplyBusy as e:
+    stderr.writeLine("repro home gc: another apply is in progress (lock " &
+      e.lockPath & " held; waited " & $e.waitedSeconds & "s); nothing " &
+      "was removed. Retry when it has finished.")
     return 1
   except EPointerCorrupt as e:
     stderr.writeLine("repro home gc: corrupt pointer at " & e.pointerPath &

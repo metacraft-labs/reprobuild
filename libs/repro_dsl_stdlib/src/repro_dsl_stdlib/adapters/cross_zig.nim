@@ -57,8 +57,10 @@
 ## adapter's, carries `--target` and the zig environment on its own, so
 ## `repro build --target=armv7-unknown-linux-musleabihf <recipe>` is the
 ## whole of a cross build's authoring. The `cFlags` of the record are zig's
-## driver arguments for the target, which is what a C-building recipe
-## (`packages/source/openssl`) hands its own configure script as `CC`.
+## driver arguments for the target. A C-building recipe that hands its own
+## configure script a `CC` hands it `zigCrossCc`, the `cc` wrapper, not
+## `zig cc` with those arguments: a configure-driven `-shared` link must get
+## the wrapper's compiler-rt map on a 32-bit ARM row.
 
 import std/[os, strutils, tables]
 
@@ -201,7 +203,7 @@ proc zigDriverArgs(t: ZigCrossTarget): string =
   zigDriverArgSeq(t).join(" ")
 
 const ZigCcUbsanTrapArg* = "-fsanitize-trap=undefined"
-  ## What the `cc` / `c++` wrappers and `zigCrossCc` add after the driver
+  ## What the `cc` / `c++` wrappers (and so `zigCrossCc`) add after the driver
   ## arguments: undefined-behaviour checks trap instead of calling a runtime.
   ## That is what zig 0.13 always did. zig 0.14, given a C source and a link
   ## in one invocation at its debug default (no `-O`, or `-O0`), links its
@@ -391,14 +393,68 @@ proc zigCrossCompilerRtNamedNode*(t: ZigCrossTarget): string =
     return ""
   ZigCrossCompilerRtMarker & "\nZIG_COMPILER_RT_LOCAL " & map
 
-proc zigCrossCc*(t: ZigCrossTarget): string =
-  ## `zig cc` with the target's driver arguments, as ONE string: the form
-  ## a configure script takes in `CC` (make expands `$(CC)` through the
-  ## shell, so the arguments ride along). The wrappers exist for cargo,
-  ## whose `CC_<triple>` must name a single program. `ZigCcUbsanTrapArg`
-  ## keeps zig 0.14's UBSan runtime out of a one-step link, as in the
-  ## wrappers.
-  "zig cc " & zigDriverArgs(t) & " " & ZigCcUbsanTrapArg
+proc zigCrossCc*(wrapperDir: string): string =
+  ## The `CC` a configure script is handed for a zig target: the `cc`
+  ## wrapper in `wrapperDir` (`zigCrossWrapperDir`, written by
+  ## `emitZigCrossWrappersAction`, which the caller orders after), quoted
+  ## for the shell that expands `$(CC)`.
+  ##
+  ## It is the wrapper, not `zig cc` and the driver arguments, because a
+  ## configure-driven build links its shared libraries with `$(CC) -shared`,
+  ## and on a 32-bit ARM row only the wrapper makes zig's compiler-rt local
+  ## in such a link (`zigCrossCompilerRtMap`). The bare driver exported it:
+  ## 385 symbols under zig 0.13.0, 411 under zig 0.14.1, for a one-function
+  ## library (measured 2026-11-17, `t_zig_cross_shared_library_exports`).
+  ## The wrapper also carries the driver arguments and `ZigCcUbsanTrapArg`.
+  quoteShell(wrapperDir / "cc")
+
+proc zigCrossOwnVersionScript*(args: openArray[string]): string =
+  ## The version script a link's own arguments name, or "" when they name
+  ## none: the spellings the `cc` / `c++` wrappers read. Any other argument
+  ## that mentions a version script is refused, as the wrappers refuse it.
+  var next = false
+  for a in args:
+    if next:
+      next = false
+      result = (if a.startsWith("-Wl,"): a[4 .. ^1] else: a)
+      # The wrappers still read the argument below, as their `case` does.
+    if a.startsWith("-Wl,--version-script=") or
+        a.startsWith("-Wl,-version-script="):
+      result = a[a.find('=') + 1 .. ^1]
+    elif a.startsWith("-Wl,--version-script,") or
+        a.startsWith("-Wl,-version-script,"):
+      result = a[a.find("-script,") + len("-script,") .. ^1]
+    elif a in ["-Wl,--version-script", "-Wl,-version-script"]:
+      next = true
+    elif "version-script" in a:
+      raise newException(ValueError, "cross_zig: this shared-library " &
+        "link names a version script in a form that cannot be read (" & a &
+        "); spell it -Wl,--version-script=<file>")
+
+proc zigCrossVersionScriptCovers*(text: string): bool =
+  ## Whether a recipe's own version script already makes zig's compiler-rt
+  ## local: it carries `ZigCrossCompilerRtMarker` (the output of
+  ## `emitZigCrossVersionScriptAction`), or a `local:` section holds the
+  ## wildcard `*;`. The test the `cc` / `c++` wrappers apply to such a
+  ## script at link time (`CompilerRtWrapperTemplate`, `covers`).
+  var inLocal = false
+  for raw in text.splitLines():
+    var l = raw
+    if ZigCrossCompilerRtMarker in l:
+      return true
+    let localAt = l.find("local:")
+    if localAt >= 0:
+      inLocal = true
+      l = " " & l[localAt + len("local:") .. ^1]
+    elif "global:" in l:
+      inLocal = false
+    if inLocal:
+      if l.startsWith("*;"):
+        return true
+      for i in 1 ..< l.len - 1:
+        if l[i] == '*' and l[i + 1] == ';' and l[i - 1] in Whitespace + {':'}:
+          return true
+  false
 
 proc crossZigTarget*(rustTriple: string): CrossTarget =
   ## The `CrossTarget` record for a listed triple. Refuses an unlisted one

@@ -466,12 +466,16 @@ proc needsSslDefine(path: string): bool =
   ##     over real HTTPS, by the fetch's own TLS client.
   ##   * The registry crate fetch's tests: mirrors and the origin are read
   ##     over real HTTPS through the same client.
+  ##   * The CLI's Nimble catalog tests (`test_npc_*`): their fixtures serve
+  ##     origins and mirrors over the same HTTPS listener, and the server side
+  ##     of it compiles only with `ssl` defined.
   path.endsWith("/t_repro_binary_cache_https_publish_authz.nim") or
     path.endsWith("/t_repro_https_cache_end_to_end.nim") or
     path.endsWith("/t_cache_reads_are_bounded.nim") or
     path.contains("libs/repro_nimble_generator/tests/") or
     path.contains("libs/repro_nimble_fetch/tests/") or
-    path.contains("libs/repro_cargo_fetch/tests/")
+    path.contains("libs/repro_cargo_fetch/tests/") or
+    path.contains("libs/repro_cli_support/tests/test_npc_")
 
 proc needsSoftwareRootTestTrustDefine(path: string): bool =
   ## Five attestation gates are compiled with
@@ -1108,7 +1112,12 @@ const
 
   ReferenceScanRoots = ["tests", "libs", "tools", "scripts", "apps", "recipes",
     ".github"]
-  ReferenceScanRootFiles = ["repro.nim", "Justfile", "config.nims"]
+  ReferenceScanRootFiles = ["repro.nim", "repro_recipe_support.nim",
+    "Justfile", "config.nims"]
+    ## ``repro_recipe_support.nim`` is the part of the recipe ``repro.nim``
+    ## includes for the engine's compiles; it is the recipe's text as much
+    ## as ``repro.nim`` is, so it is scanned, and excluded, alike.
+  RecipeFiles = ["repro.nim", "repro_recipe_support.nim"]
   ReferenceScanExts = [".nim", ".nims", ".py", ".sh", ".ps1", ".yml",
     ".yaml", ".toml", ".txt"]
 
@@ -1165,10 +1174,11 @@ proc scanReferencedStems(repoRoot: string; stems: HashSet[string]):
     # the inventory's tests name stems as DATA about sources, never as
     # binaries to run, and would keep ~50 sources single for nothing.
     let ext = rel.splitFile.ext
-    # ``repro.nim`` is excluded: every test it names is either handled per
-    # source above (and asserted there) or only gains typed inputs, which a
-    # group's execute edge takes the union of.
-    if rel != "repro.nim" and
+    # The recipe (``repro.nim`` and the file it includes) is excluded: every
+    # test it names is either handled per source above (and asserted there)
+    # or only gains typed inputs, which a group's execute edge takes the
+    # union of.
+    if rel notin RecipeFiles and
         (ext in [".nim", ".nims", ".sh", ".yml", ".yaml"] or rel == "Justfile"):
       let own = rel.splitFile.name
       var at = text.find('"')

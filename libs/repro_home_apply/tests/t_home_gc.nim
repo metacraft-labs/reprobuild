@@ -1,6 +1,6 @@
 ## M10 — ``repro home gc`` engine tests.
 ##
-## Three hermetic test areas:
+## Four hermetic test areas:
 ##
 ##   1. The keep-set / orphan diff against a synthetic generation
 ##      registry + sandbox store. (Covers the spec's
@@ -18,13 +18,20 @@
 ##      the top-N by activation timestamp (spec: "the
 ##      ``--keep-generations`` flag must always preserve at least 1
 ##      (the active one)").
+##
+##   4. Every store root is honoured: a prefix that a `workspace`,
+##      `session` or `pin` root, or another state directory's generation,
+##      holds survives with its index row and its holds; the generations
+##      gc does not keep leave with their own `profile` roots, so the next
+##      apply does not hold them again; and a dry-run writes nothing.
 
-import std/[os, sets, strutils, times, unittest]
+import std/[algorithm, os, sets, strutils, times, unittest]
 from repro_core/paths import extendedPath
 
 import blake3
 import repro_home_apply/gc
 import repro_home_apply/junction_aware_remove
+import repro_home_apply/partial_recovery
 import repro_home_generations
 import repro_local_store
 from repro_test_support import testCaseScratchSlug
@@ -192,8 +199,8 @@ suite "M10 — repro home gc engine":
 
   test "test_m10_gc_force_deletes_orphans_keeps_live":
     ## Same fixture; this time --force runs the real delete. Orphan
-    ## prefixes are GONE, live prefixes are intact, the M83 registry
-    ## is NOT mutated.
+    ## prefixes are GONE, live prefixes are intact, and only the
+    ## generation outside the keep window leaves the registry.
     let stateDir = FixtureRoot / "scenario-force/state"
     let storeRoot = FixtureRoot / "scenario-force/store"
     resetDir(stateDir)
@@ -212,8 +219,8 @@ suite "M10 — repro home gc engine":
       @[p2.digest, p3.digest], setActive = true)
     store.close()
 
-    # Snapshot the registry generation count BEFORE gc so we can
-    # assert no registry mutation post-gc.
+    # Snapshot the registry BEFORE gc so we can assert exactly which
+    # generation retention removed.
     let preGens = enumerateGenerations(stateDir)
     check preGens.len == 3
 
@@ -236,11 +243,15 @@ suite "M10 — repro home gc engine":
     check (not dirExists(extendedPath(p4.absPath)))
     check (not dirExists(extendedPath(p5.absPath)))
 
-    # Registry is UNTOUCHED — exact same 3 generations + same ids.
+    # Retention drops the oldest generation (its prefixes are gone, so it
+    # is no longer a rollback target) and keeps the two newest as they
+    # were.
+    check report.droppedGenerationIds == @[preGens[0].generationId]
     let postGens = enumerateGenerations(stateDir)
-    check postGens.len == 3
-    for i in 0 ..< 3:
-      check postGens[i].generationId == preGens[i].generationId
+    check postGens.len == 2
+    if postGens.len == 2:
+      for i in 0 ..< 2:
+        check postGens[i].generationId == preGens[i + 1].generationId
 
   test "test_m10_gc_respects_keep_generations_threshold":
     ## Prefix orphaned for EXACTLY 1 generation. Default
@@ -369,6 +380,19 @@ suite "M10 — repro home gc engine":
     check report.deletedCount >= 1
     check (not dirExists(extendedPath(orphan.absPath)))
 
+    # Store GC only moved the tree to `gc/pending-deletion/`; it unlinks
+    # it once the grace has elapsed. Sweep with no grace so the tree, and
+    # the junction in it, is really unlinked before the target is checked
+    # -- otherwise nothing above has walked the junction at all.
+    block:
+      var swept = openStore(storeRoot)
+      defer: swept.close()
+      check swept.sweepPendingDeletion(graceSeconds = 0).len >= 1
+      var pendingLeft = 0
+      for _ in walkDir(swept.gcPendingRoot):
+        inc pendingLeft
+      check pendingLeft == 0
+
     # THE CRITICAL ASSERT: the user-data target survives,
     # byte-identical to the pre-gc snapshot.
     check dirExists(extendedPath(userData))
@@ -432,3 +456,176 @@ suite "M10 — repro home gc engine":
     check r.outcome == goNoCandidates
     check r.candidates.len == 0
     check r.candidateBytes == 0
+
+# ---------------------------------------------------------------------------
+# Roots other than this state directory's kept generations.
+#
+# Local-Content-Addressed-Store.md §"Roots and GC": a prefix that any root
+# holds is live. `repro home gc` applies its retention to the calling state
+# directory only, so a prefix that a `workspace`, `session` or `pin` root
+# holds, or that a generation of another state directory using the same
+# store names, must survive it with its index row and its holds.
+# ---------------------------------------------------------------------------
+
+proc indexed(store: Store; id: PrefixIdBytes): bool =
+  store.lookupPrefix(id).found
+
+proc rootIds(store: Store): HashSet[string] =
+  for row in store.listRoots():
+    result.incl(row.rootId)
+
+suite "repro home gc honours every store root":
+
+  test "test_home_gc_keeps_prefixes_that_other_roots_hold":
+    ## One store, two state directories. `one` keeps its active
+    ## generation (`--keep-generations 1`) and drops an older one; `two`
+    ## holds the older one's generation id as well (ids are
+    ## content-addressed). Prefixes held only by a workspace lock, a dev
+    ## shell, a pin, or by `two`'s generation must survive `one`'s gc.
+    let base = FixtureRoot / "scenario-other-roots"
+    let stateDir = base / "one"
+    let otherStateDir = base / "two"
+    let storeRoot = base / "store"
+    resetDir(stateDir)
+    resetDir(otherStateDir)
+    resetDir(storeRoot)
+    var store = openStore(storeRoot)
+    let live = seedPrefix(store, "live", "1.0", "roots-live", 64)
+    let dropped = seedPrefix(store, "dropped", "1.0", "roots-dropped", 512)
+    let shared = seedPrefix(store, "shared", "1.0", "roots-shared", 64)
+    let ws = seedPrefix(store, "ws", "1.0", "roots-ws", 64)
+    let sess = seedPrefix(store, "sess", "1.0", "roots-sess", 64)
+    let pin = seedPrefix(store, "pin", "1.0", "roots-pin", 64)
+    let other = seedPrefix(store, "other", "1.0", "roots-other", 64)
+    store.registerRoot("workspace:/src/project", rkWorkspace)
+    store.attachPrefixToRoot("workspace:/src/project", ws.id)
+    store.attachPrefixToRoot("workspace:/src/project", shared.id)
+    store.registerRoot("session:dev-shell-1", rkSession)
+    store.attachPrefixToRoot("session:dev-shell-1", sess.id)
+    store.registerRoot("pin:keep-me", rkPin)
+    store.attachPrefixToRoot("pin:keep-me", pin.id)
+    # The older generation of `one`, and the same generation in `two`.
+    let oldId = seedGeneration(stateDir, store, "old", 1700000000'i64,
+      @[dropped.digest, shared.digest, other.digest])
+    check seedGeneration(otherStateDir, store, "old", 1700000000'i64,
+      @[other.digest], setActive = true) == oldId
+    let activeId = seedGeneration(stateDir, store, "new", 1700001000'i64,
+      @[live.digest], setActive = true)
+    store.close()
+
+    let preview = runHomeGc(GcOptions(dryRun: true, keepGenerations: 1,
+      storeRoot: storeRoot, stateDir: stateDir))
+    check preview.outcome == goSkippedDryRun
+    check preview.keptGenerationIds == @[activeId]
+    var previewed: seq[string]
+    for c in preview.candidates:
+      previewed.add(c.absolutePath)
+    check previewed == @[dropped.absPath]
+
+    let report = runHomeGc(GcOptions(autoConfirm: true, keepGenerations: 1,
+      storeRoot: storeRoot, stateDir: stateDir))
+    check report.outcome == goDeleted
+    check report.failedCount == 0
+    check report.deletedCount == 1
+
+    store = openStore(storeRoot)
+    defer: store.close()
+    # What only the dropped generation held is collected: its directory
+    # and its index row both go.
+    check (not dirExists(extendedPath(dropped.absPath)))
+    check (not store.indexed(dropped.id))
+    # Everything another root holds is still there, on disk and in the
+    # index, and still held.
+    for p in [live, shared, ws, sess, pin, other]:
+      check dirExists(extendedPath(p.absPath))
+      check store.indexed(p.id)
+    check shared.id in store.prefixesHeldByRoot("workspace:/src/project")
+    check ws.id in store.prefixesHeldByRoot("workspace:/src/project")
+    check store.prefixesHeldByRoot("session:dev-shell-1") == @[sess.id]
+    check store.prefixesHeldByRoot("pin:keep-me") == @[pin.id]
+    check store.prefixesHeldByRoot(profileRootId(otherStateDir, oldId)) ==
+      @[other.id]
+
+  test "test_home_gc_retires_the_generations_it_does_not_keep":
+    ## The generations gc does not keep go with their `profile` roots, so
+    ## nothing re-registers what gc released: the next apply's
+    ## `ensureGenerationRoots` finds no directory for them.
+    let base = FixtureRoot / "scenario-retire"
+    let stateDir = base / "state"
+    let storeRoot = base / "store"
+    resetDir(stateDir)
+    resetDir(storeRoot)
+    var store = openStore(storeRoot)
+    let pOld = seedPrefix(store, "old", "1.0", "retire-old", 64)
+    let pMid = seedPrefix(store, "mid", "1.0", "retire-mid", 64)
+    let pNew = seedPrefix(store, "new", "1.0", "retire-new", 64)
+    let oldId = seedGeneration(stateDir, store, "old", 1700000000'i64,
+      @[pOld.digest])
+    let midId = seedGeneration(stateDir, store, "mid", 1700001000'i64,
+      @[pMid.digest])
+    let newId = seedGeneration(stateDir, store, "new", 1700002000'i64,
+      @[pNew.digest], setActive = true)
+    store.close()
+
+    let report = runHomeGc(GcOptions(autoConfirm: true, keepGenerations: 2,
+      storeRoot: storeRoot, stateDir: stateDir))
+    check report.outcome == goDeleted
+    check report.droppedGenerationIds == @[oldId]
+
+    var ids: seq[string]
+    for r in enumerateGenerations(stateDir):
+      ids.add(r.generationId)
+    check ids == @[midId, newId]
+    check (not dirExists(extendedPath(generationDir(stateDir, oldId))))
+    store = openStore(storeRoot)
+    defer: store.close()
+    check profileRootId(stateDir, oldId) notin store.rootIds()
+    check profileRootId(stateDir, midId) in store.rootIds()
+    check profileRootId(stateDir, newId) in store.rootIds()
+    check ensureGenerationRoots(stateDir, store).len == 0
+    check profileRootId(stateDir, oldId) notin store.rootIds()
+    check (not store.indexed(pOld.id))
+    check store.indexed(pMid.id) and store.indexed(pNew.id)
+
+  test "test_home_gc_dry_run_changes_nothing":
+    ## A dry-run that would drop a generation and collect a prefix writes
+    ## nothing: no generation moves, no root is created or deleted, no
+    ## `.aborted/` or `store-root-key` appears, and every prefix stays.
+    proc stateTree(dir: string): seq[string] =
+      for path in walkDirRec(dir, yieldFilter = {pcFile, pcDir,
+          pcLinkToFile, pcLinkToDir}, relative = true):
+        result.add(path)
+      result.sort()
+    let base = FixtureRoot / "scenario-dry-run"
+    let stateDir = base / "state"
+    let storeRoot = base / "store"
+    resetDir(stateDir)
+    resetDir(storeRoot)
+    var store = openStore(storeRoot)
+    let pOld = seedPrefix(store, "old", "1.0", "dry-old", 64)
+    let pNew = seedPrefix(store, "new", "1.0", "dry-new", 64)
+    let oldId = seedGeneration(stateDir, store, "old", 1700000000'i64,
+      @[pOld.digest])
+    discard seedGeneration(stateDir, store, "new", 1700001000'i64,
+      @[pNew.digest], setActive = true)
+    # The state directory loses its key: a real run would create one, a
+    # dry-run must not.
+    removeFile(extendedPath(storeRootKeyPath(stateDir)))
+    let rootsBefore = store.rootIds()
+    store.close()
+    let treeBefore = stateTree(stateDir)
+
+    let report = runHomeGc(GcOptions(dryRun: true, keepGenerations: 1,
+      storeRoot: storeRoot, stateDir: stateDir))
+    check report.outcome == goSkippedDryRun
+    check report.droppedGenerationIds == @[oldId]
+
+    check stateTree(stateDir) == treeBefore
+    check (not fileExists(extendedPath(storeRootKeyPath(stateDir))))
+    check (not dirExists(extendedPath(abortedDir(stateDir))))
+    store = openStore(storeRoot)
+    defer: store.close()
+    check store.rootIds() == rootsBefore
+    check store.indexed(pOld.id) and store.indexed(pNew.id)
+    check dirExists(extendedPath(pOld.absPath))
+    check dirExists(extendedPath(pNew.absPath))

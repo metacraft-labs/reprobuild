@@ -257,46 +257,61 @@ proc formatFish(plan: ExportPlan): string =
       result.add("set -gx " & op.markerName & " " &
         fishQuote(op.markerValue) & "\n")
 
+proc nuonRecord*(fields: openArray[(string, string)]): string =
+  ## One Nushell record literal, ``{key: 'value', ...}``, every value a
+  ## string. Keys are fixed identifiers chosen by the emitters, never data.
+  result = "{"
+  for i, (key, value) in fields:
+    if i > 0:
+      result.add(", ")
+    result.add(key & ": " & nuQuote(value))
+  result.add("}")
+
+proc nuonList*(records: seq[string]): string =
+  ## The Nushell list literal the nushell hook reads with ``from nuon``;
+  ## one record per line, ``[]`` when there is nothing to apply.
+  if records.len == 0:
+    return "[]\n"
+  result = "[\n"
+  for record in records:
+    result.add("  " & record & "\n")
+  result.add("]\n")
+
 proc formatNushell(plan: ExportPlan): string =
-  ## Nushell wraps the whole activation in ``load-env { ... }`` so the
-  ## emitted script can be piped through ``source`` and the variables
-  ## land in the caller's scope. PATH ops use the ``path add``
-  ## builtin (nu 0.84+); unsupported scalars use ``hide-env``.
-  var setBlock = ""
-  var trailer = ""
+  ## Nushell cannot evaluate a string as code at run time (``source`` and
+  ## ``eval``-style commands are parse-time only), so unlike the other
+  ## shells the activation is DATA, not a script: a NUON list of operation
+  ## records, in plan order, which the hook (``renderNushellHook``) reads
+  ## with ``from nuon`` and applies in its own scope. Record shapes:
+  ##   ``{op: 'set', name, value}``
+  ##   ``{op: 'unset', name}``
+  ##   ``{op: 'prepend' | 'append', name, segment, separator}``
+  ##   ``{op: 'warn', message}``
+  ## PATH-like variables are joined by the hook, which knows whether the
+  ## shell holds them as a list (the nushell default) or a string.
+  var records: seq[string] = @[]
   for op in plan:
     case op.kind
     of opSet:
       requireEnvName(op.name)
-      setBlock.add("  " & op.name & ": " & nuQuote(op.value) & "\n")
+      records.add(nuonRecord({"op": "set", "name": op.name,
+        "value": op.value}))
     of opMarker:
       requireEnvName(op.markerName)
-      setBlock.add("  " & op.markerName & ": " &
-        nuQuote(op.markerValue) & "\n")
+      records.add(nuonRecord({"op": "set", "name": op.markerName,
+        "value": op.markerValue}))
     of opUnset:
       requireEnvName(op.unsetName)
-      trailer.add("hide-env " & op.unsetName & "\n")
+      records.add(nuonRecord({"op": "unset", "name": op.unsetName}))
     of opPrependPath:
       requireEnvName(op.pathName)
-      if op.pathName == "PATH":
-        trailer.add("path add " & nuQuote(op.segment) & "\n")
-      else:
-        trailer.add("$env." & op.pathName & " = " & nuQuote(op.segment) &
-          " + " & nuQuote(op.separator) & " + ($env." & op.pathName &
-          "? | default '')\n")
+      records.add(nuonRecord({"op": "prepend", "name": op.pathName,
+        "segment": op.segment, "separator": op.separator}))
     of opAppendPath:
       requireEnvName(op.pathName)
-      if op.pathName == "PATH":
-        trailer.add("path add --append " & nuQuote(op.segment) & "\n")
-      else:
-        trailer.add("$env." & op.pathName & " = ($env." & op.pathName &
-          "? | default '') + " & nuQuote(op.separator) & " + " &
-          nuQuote(op.segment) & "\n")
-  if setBlock.len > 0:
-    result.add("load-env {\n")
-    result.add(setBlock)
-    result.add("}\n")
-  result.add(trailer)
+      records.add(nuonRecord({"op": "append", "name": op.pathName,
+        "segment": op.segment, "separator": op.separator}))
+  nuonList(records)
 
 proc formatPwsh(plan: ExportPlan): string =
   result = ""
@@ -388,6 +403,6 @@ proc emitFastPathNoOpScript*(shell: ShellKind): string =
   of skFish:
     "# repro shell hook: no-op (cache key unchanged)\n"
   of skNushell:
-    "# repro shell hook: no-op (cache key unchanged)\n"
+    "[]\n"  # an empty NUON operation list; see ``formatNushell``
   of skPwsh:
     "# repro shell hook: no-op (cache key unchanged)\n"

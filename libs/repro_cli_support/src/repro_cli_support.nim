@@ -30,6 +30,7 @@ import repro_core
 import repro_cli_support/workspace_restore
 import repro_cli_support/force_push_records
 import repro_cli_support/repository_identities
+import repro_cli_support/health_progress
 import repro_cli_support/store_bundle_cli
 import repro_cli_support/store_copy_cli
 import repro_cli_support/bundle_cli
@@ -1129,6 +1130,47 @@ proc mode1WorkspaceCandidate(base: string): string =
       return dir
   ""
 
+proc testCollectionOfPath*(selector: string): string =
+  ## The selector ``repro test`` (and ``repro certify``) hands its plan and
+  ## build for ``selector``: a fragment-less path that anchors a project
+  ## selects that project's ``test`` collection (``repro test [args]`` is
+  ## ``repro build test [args]``, so the path says WHICH project's ``test``
+  ## runs). ``repro build ./sub`` selects ``sub``'s graph minus its ``test``
+  ## collection, and handing ``./sub`` through unchanged made an unsharded
+  ## ``repro test ./sub`` run no test and exit 0 -- a CI step that was green
+  ## without testing anything -- while the sharded run refused the same
+  ## selection as naming no test command.
+  ##
+  ## A path anchors a project when it is an existing directory or names a
+  ## project file (``<dir>/repro.nim``, ``<dir>/reprobuild.nim``). A
+  ## directory is anchored on its project FILE, as ``bareNameAnchor``
+  ## anchors a bare name: ``<dir>#test`` is the legacy ``<dir>#<module>``
+  ## form whenever ``<dir>/test.nim`` exists, and would build that module.
+  ## A directory with no project file is anchored on the ``repro.nim`` it
+  ## would hold, so a Mode-1 workspace still resolves through
+  ## ``mode1WorkspaceCandidate`` and anything else reports the missing
+  ## project file. Every other selector is returned unchanged: a name, a
+  ## selector that already carries a ``#<fragment>``, a module file, a
+  ## dotted action id, or a path that does not exist (the build reports it).
+  ## ``ProjectFileAmbiguousError`` propagates, as it does from
+  ## ``parseBuildTarget``.
+  if classifyBuildSelector(selector).kind != bskPath or
+      selector.find('#') >= 0:
+    return selector
+  if dirExists(extendedPath(selector)):
+    let match = resolveProjectFile(selector)
+    let fileName =
+      if match.fileName.len > 0: match.fileName else: CanonicalProjectFileName
+    return (selector / fileName) & "#" & TestCollectionSelector
+  if extractFilename(selector) in ProjectFileNames:
+    return selector & "#" & TestCollectionSelector
+  selector
+
+proc testCollectionSelectors*(selectors: openArray[string]): seq[string] =
+  ## ``testCollectionOfPath`` of each of ``selectors``, in order.
+  for selector in selectors:
+    result.add(testCollectionOfPath(selector))
+
 proc parseAndResolveSelectors*(positionalSelectors: openArray[string];
                                command: string;
                                currentDir = ""): ResolvedPositionalSelectors =
@@ -2112,17 +2154,27 @@ proc cmakeRegenerationBuildAction(meta: CmakeRegenerationMetadata;
   let hasGlobVerification = meta.cmakeRegenerationHasGlobVerification()
   # Written by the renderer from the helper's declaration (`repro internal
   # cmake-regenerate`), so the child parses back exactly these values.
-  let argv = @[publicCliPath] & reproArgvOf(["internal", "cmake-regenerate"], [
+  # Run by the graph helper image beside the engine (`repro_core/
+  # cli_images`, ``ReprobuildHelperName``), never by the engine itself, so
+  # this process loads no OpenSSL. ``--public-cli`` still names the ENGINE:
+  # CMake may call back into it (``repro build --prepare-only``), and that
+  # call needs every verb.
+  let helperCliPath =
+    requireGraphHelperImage(publicCliPath, "__repro_cmake_regenerate")
+  let argv = @[helperCliPath] & reproArgvOf(["internal", "cmake-regenerate"], [
     ("metadata", @[meta.metadataFile]),
     ("publicCli", @[publicCliPath]),
     ("depfile", @[depfilePath])])
+  var inputs = cmakeRegenerationInputs(meta, publicCliPath)
+  if helperCliPath.len > 0 and fileExists(extendedPath(helperCliPath)):
+    inputs.addUniquePath(helperCliPath)
   action("__repro_cmake_regenerate", argv,
     # Named-Lock-Files §7.2. CMake regeneration re-runs the generator over
     # recorded metadata; no solved package instance reaches it. See
     # `lockIdentityOutsideSolvedGraph`.
     governingLockIdentity = lockIdentityOutsideSolvedGraph(),
     cwd = meta.binaryDir,
-    inputs = cmakeRegenerationInputs(meta, publicCliPath),
+    inputs = inputs,
     outputs = cmakeRegenerationOutputs(meta),
     commandStatsId = "repro cmake regeneration edge",
     cacheable = not hasGlobVerification,
@@ -7362,6 +7414,12 @@ type
     brpkLoweredGraphCache
       ## The lowered graph was read back from the lowered-graph cache and no
       ## provider ran at all.
+    brpkNotReached
+      ## No provider ran, because an edge that prepares the build failed
+      ## first: the provider compile, the interface extraction or the CMake
+      ## regeneration (CLI/build.md, "A preparation edge that fails"). The
+      ## report then records that edge, under the member for its stage, and
+      ## an empty ``actions``.
 
   BuildReportProviderContext* = object
     ## The provider half of a full build report: what produced the graph the
@@ -7390,6 +7448,23 @@ type
         ## ``buildReportJson``.
     of brpkLoweredGraphCache:
       loweredGraphCachePath*: string
+    of brpkNotReached:
+      notReachedStage*: string
+        ## ``provider-compile``, ``interface-extraction`` or
+        ## ``cmake-regeneration``: the edge whose failure ended the build.
+      notReachedProviderCompile*: BuildRunResult
+        ## The failed provider-compile edge's run, for the
+        ## ``provider-compile`` stage; empty for the other two, whose edges
+        ## have members of their own (``interfaceExtractActions``,
+        ## ``cmakeRegenerationActions``).
+
+proc notReachedReportContext*(stage: string;
+                               providerCompileResult = BuildRunResult()):
+    BuildReportProviderContext =
+  ## Context for a build that a failed preparation edge ended before any
+  ## provider ran (``brpkNotReached``).
+  BuildReportProviderContext(kind: brpkNotReached, route: "not-reached",
+    notReachedStage: stage, notReachedProviderCompile: providerCompileResult)
 
 proc compiledProviderReportContext*(provider: ProviderCompileArtifact;
                                     providerCompileResult: BuildRunResult;
@@ -7676,6 +7751,14 @@ proc emitBuildReport(sink: var BuildReportSink;
       "path": context.loweredGraphCachePath,
       "keyAvailable": false
     })
+    sink.member("providerInvocations", %0)
+  of brpkNotReached:
+    # No provider ran: say which preparation edge stopped the build, and
+    # write no provider identity rather than an empty one.
+    sink.member("providerNotReached", %*{"stage": context.notReachedStage})
+    sink.arrayMember("providerCompileActions"):
+      for item in context.notReachedProviderCompile.results:
+        sink.element(actionResultJson(item))
     sink.member("providerInvocations", %0)
   # The interface-extraction edges this invocation ran, and their trace (see
   # ``interfaceExtractActionJson``).
@@ -8771,6 +8854,9 @@ proc providerSnapshotInputsFresh(snapshot: ProviderGraphSnapshot): bool =
           return false
       of gevDirectoryEnumeration:
         if directoryMemberNames(input.identity) != input.directoryMembers:
+          return false
+      of gevHostFact:
+        if hostFactDigest(input.identity) != input.digest:
           return false
       of gevProviderSource:
         # Governed by ``providerSnapshotBinaryFresh``, which every caller
@@ -10223,6 +10309,19 @@ proc internalReproHelperCliPath(publicCliPath: string): string =
 when defined(reproImageIdentityTest):
   proc internalReproHelperCliPathForTest*(publicCliPath = ""): string =
     internalReproHelperCliPath(publicCliPath)
+
+proc graphHelperCliPath(publicCliPath: string; edge: string): string =
+  ## The image the build graph runs its helper commands with: the graph
+  ## helper image (``reprobuild-helper``) beside the engine that
+  ## ``internalReproHelperCliPath`` names, or "" when that names none (the
+  ## caller's existing "no engine image" state, unchanged).
+  ##
+  ## Raises ``GraphHelperImageMissingError`` naming the expected path when
+  ## the engine is there and its helper is not. Never answers with the
+  ## engine instead: an engine process in the action's tree is the start-up
+  ## entropy read the helper image exists to remove (see
+  ## `repro_core/cli_images`, ``ReprobuildHelperName``).
+  requireGraphHelperImage(internalReproHelperCliPath(publicCliPath), edge)
 
 proc siblingTryCompileProviderPath(publicCliPath: string): string =
   ## Pre-built Tier 2a direct provider binary, normally shipped next to
@@ -12512,11 +12611,13 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
   ## and served a stale interface with a green build. The engine's decision
   ## comes from the monitored read set, which does see those files.
   discard ensureLockPinnedCatalog(modulePath, consumerRoot)
-  let helperCliPath = internalReproHelperCliPath(publicCliPath)
-  if helperCliPath.len == 0 or not cliPathExists(helperCliPath):
+  let engineCliPath = internalReproHelperCliPath(publicCliPath)
+  if engineCliPath.len == 0 or not cliPathExists(engineCliPath):
     # No engine-executable image to spawn back into. Embedded callers and
     # the bootstrap path land here; they get the pre-existing in-process
-    # extraction, which is the same code the helper runs.
+    # extraction, which is the same code the helper runs. (This is about a
+    # missing ENGINE. A present engine whose graph helper image is missing
+    # is refused below, never served from here.)
     result = extractInterfaceFromModule(modulePath, artifactPath, stubPath,
       workDir, scratchDir, requireStub, resourceModule, extraPaths,
       consumerRoot)
@@ -12527,6 +12628,10 @@ proc extractInterfaceEdge(modulePath, artifactPath, stubPath: string;
     writeInterfaceArtifactProvenance(artifactPath, modulePath,
       resourceModule = resourceModule, extraPaths = extraPaths)
     return
+  # The edge runs the graph helper image beside that engine; a missing one
+  # raises here, naming the path.
+  let helperCliPath =
+    requireGraphHelperImage(engineCliPath, "__repro_interface_extract")
 
   # Hermetic-Builds-And-Path-Independence.md §"Engine-internal recipe
   # compiles" (owner decision 2026-10-09): the extraction runs IN the
@@ -13304,17 +13409,6 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     except CatchableError:
       discard
 
-  template persistingExtractionFailure(body: untyped): untyped =
-    ## An interface-extraction edge fails in an engine pass of its own, so
-    ## none of the build results below ever sees it. Its failure report is
-    ## written here, from the run the error carries, before the error goes
-    ## on to end the build.
-    try:
-      body
-    except InterfaceExtractionEdgeFailure as failure:
-      persistFailureReport(failure.run, failure.actions)
-      raise
-
   proc userTargetSelectors(): seq[string] =
     ## The selectors the USER named on this invocation (the ``#action``
     ## fragment and any extra name-shaped positionals), in order, without
@@ -13370,6 +13464,49 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
     finishStat(buildStats, statsEnabled, "repro report write", reportStart)
     buildResult.stats = buildStats
     writtenBuildReportPath = reportPath
+
+  # The CMake regeneration edge's run, once it has run: the reports of a
+  # preparation edge that fails after it still record it.
+  var reportedCmakeRegeneration: BuildRunResult
+
+  proc persistPreparationFailure(stage: string; run: BuildRunResult;
+                                 actions: openArray[BuildAction]) =
+    ## CLI/build.md, "A preparation edge that fails". The provider compile,
+    ## the interface extraction and the CMake regeneration each run in an
+    ## engine pass of their own, before the build's graph exists, so when one
+    ## fails -- its command failed, or a RunQuota static-capacity deadlock
+    ## stopped it -- its own run is the only result there is. Write the
+    ## failure report from it and, when asked, the full report with
+    ## ``providerRoute: not-reached``, before the error ends the build. A
+    ## report that cannot be written must not replace that error.
+    persistFailureReport(run, actions)
+    var empty = BuildRunResult()
+    try:
+      if stage == "cmake-regeneration":
+        persistFullReport(notReachedReportContext(stage), run, empty,
+          none(seq[TargetResolutionRecord]))
+      elif stage == "provider-compile":
+        persistFullReport(notReachedReportContext(stage, run),
+          reportedCmakeRegeneration, empty, none(seq[TargetResolutionRecord]))
+      else:
+        persistFullReport(notReachedReportContext(stage),
+          reportedCmakeRegeneration, empty, none(seq[TargetResolutionRecord]))
+    except CatchableError:
+      return
+    if writtenBuildReportPath.len > 0:
+      logSummary("buildReport: " & writtenBuildReportPath)
+
+  template persistingExtractionFailure(body: untyped): untyped =
+    ## An interface-extraction edge fails in an engine pass of its own, so
+    ## none of the build results below ever sees it. Its reports are written
+    ## here, from the run the error carries, before the error goes on to end
+    ## the build.
+    try:
+      body
+    except InterfaceExtractionEdgeFailure as failure:
+      persistPreparationFailure("interface-extraction", failure.run,
+        failure.actions)
+      raise
 
   proc usesRunQuotaBypass(runResult: BuildRunResult): bool =
     for item in runResult.results:
@@ -13963,13 +14100,23 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
         eventSink("diagnostic", item.stdout, "{\"stream\":\"stdout\"}")
       elif logMode != blmQuiet and item.stdout.len > 0:
         stdout.write(item.stdout)
+        # End the line the edge's output left open, so the status line
+        # printed next starts on its own line (``buildFailureReport:`` was
+        # read back glued to a deadlock diagnostic, which has no newline).
+        if not item.stdout.endsWith('\n'):
+          stdout.write('\n')
         stdout.flushFile()
       if eventSink != nil and logMode != blmQuiet and item.stderr.len > 0:
         eventSink("diagnostic", item.stderr, "{\"stream\":\"stderr\"}")
       elif logMode != blmQuiet and item.stderr.len > 0:
         stderr.write(item.stderr)
+        if not item.stderr.endsWith('\n'):
+          stderr.write('\n')
         stderr.flushFile()
+    reportedCmakeRegeneration = cmakeRegenerationResult
     if cmakeRegenerationResult.hasFailedActions():
+      persistPreparationFailure("cmake-regeneration",
+        cmakeRegenerationResult, [cmakeRegenerationAction])
       raise newException(OSError,
         "CMake regeneration edge failed: " &
           providerCompileFailure(cmakeRegenerationResult))
@@ -14681,11 +14828,16 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
                 skipCacheHitEvidence = mcCacheEvidence notin measureSet,
                 statsEnabled = statsEnabled,
                 cancelCheck = cancelCheck)
-          except CatchableError:
+          except CatchableError as err:
+            # Carry the cause. Without it the build said only that the
+            # interface "could not be loaded", and the compile error behind
+            # it (a recipe import the search path could not open, say) was
+            # left in a failure report nobody was pointed at.
             raise newException(OSError,
               "cross-repo producer \"" & selector & "\" at " &
               producerRootAbs & "'s interface could not be loaded to bind " &
-              "the declared executable / library to its output.")
+              "the declared executable / library to its output:\n" &
+              err.msg, err)
         if producerArtifact.projectInterface.runtimeToolUses.len > 0:
           var runtimeArtifact = producerArtifact
           runtimeArtifact.projectInterface.toolUses =
@@ -15156,7 +15308,7 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
       progressRenderer.renderPhase("running provider compile")
       providerCompileResult = runProviderCompileEdge(providerPlan,
         modulePath, interfacePath, providerArtifactPath,
-        internalReproHelperCliPath(publicCliPath), compileWorkDir,
+        graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
         compileScratchDir, result.projectRoot, providerCompileConfig)
       buildStats.mergeStats(providerCompileResult.stats)
       warnRunQuotaBypassIfUsed(providerCompileResult,
@@ -15173,6 +15325,10 @@ proc executeBuildTarget(target: string; mode: ToolProvisioningMode;
           (if item.reason.len > 0: " reason=" & item.reason else: "") &
           providerCompileInvocationSummary())
       if providerCompileResult.hasFailedActions():
+        # The edge's action is built inside ``runProviderCompileEdge``, so
+        # the failure report carries its result without the declaration.
+        persistPreparationFailure("provider-compile", providerCompileResult,
+          newSeq[BuildAction]())
         raise newException(OSError, providerCompileFailureWithLog(providerCompileResult,
           providerArtifactPath))
       if not fileExists(extendedPath(providerArtifactPath)):
@@ -19040,8 +19196,10 @@ proc emitDirectoryNotAllowedScript(shell: ShellKind; path: string): string =
     result = "echo \"" & msg.replace("\"", "\\\"") & "\" >&2\n"
     result.add("set -gx __REPRO_WARNED \"" & path.replace("\"", "\\\"") & "\"\n")
   of skNushell:
-    result = "print -e \"" & msg.replace("\"", "\\\"") & "\"\n"
-    result.add("$env.__REPRO_WARNED = \"" & path.replace("\"", "\\\"") & "\"\n")
+    # NUON operation list, like every nushell activation; see formatNushell.
+    result = nuonList(@[
+      nuonRecord({"op": "warn", "message": msg}),
+      nuonRecord({"op": "set", "name": "__REPRO_WARNED", "value": path})])
   of skPwsh:
     result = "[Console]::Error.WriteLine(\"" & msg.replace("\"", "\\\"") & "\")\n"
     result.add("$env:__REPRO_WARNED = '" & path.replace("'", "''") & "'\n")
@@ -19050,8 +19208,18 @@ proc emitWarnedResetScript(shell: ShellKind): string =
   case shell
   of skBash, skZsh: "unset __REPRO_WARNED\n"
   of skFish: "set -e __REPRO_WARNED\n"
-  of skNushell: "hide-env __REPRO_WARNED\n"
+  of skNushell: ""  # nushell's reset is an operation; see activationScriptFor
   of skPwsh: "Remove-Item Env:__REPRO_WARNED -ErrorAction SilentlyContinue\n"
+
+proc activationScriptFor(shell: ShellKind; plan: ExportPlan): string =
+  ## The bytes ``dev-env export`` prints for ``plan`` and the rollback
+  ## manifest seals: the warned-marker reset, then the plan. Nushell's form
+  ## is one data list, so its reset is an operation inside that list rather
+  ## than a prefix that would make two lists.
+  if shell == skNushell:
+    return formatExportPlan(
+      @[ExportOp(kind: opUnset, unsetName: "__REPRO_WARNED")] & plan, shell)
+  emitWarnedResetScript(shell) & formatExportPlan(plan, shell)
 
 proc runReproAllowCommand(directory: string): int =
   ## ``repro allow [<directory>]``: trust the directory (the current one when
@@ -19336,8 +19504,7 @@ proc runDevEnvExportCommand(conf: ReproCommandLineDevEnvExport;
   # next cd-out.
   plan.appendReproActiveManifestMarker(manifestPath)
   plan.appendReproAppliedMarker(fingerprint)
-  let activationScript =
-    emitWarnedResetScript(parsed.shell) & formatExportPlan(plan, parsed.shell)
+  let activationScript = activationScriptFor(parsed.shell, plan)
 
   # M75 — write the rollback manifest alongside the RBDE artifact.
   let preEnv =
@@ -19442,8 +19609,7 @@ proc runDevEnvDeactivateCommand(conf: ReproCommandLineDevEnvDeactivate):
   rederivedPlan.appendReproActiveManifestMarker(parsed.manifestPath)
   rederivedPlan.appendReproAppliedMarker(manifest.artifact)
   let rederivedScript =
-    emitWarnedResetScript(manifest.activationShell) &
-    formatExportPlan(rederivedPlan, manifest.activationShell)
+    activationScriptFor(manifest.activationShell, rederivedPlan)
   let rederivedHash = computeActivationScriptHash(rederivedScript)
   if rederivedHash != manifest.activationScriptHash:
     stderr.writeLine("repro dev-env deactivate: tamper detected — " &
@@ -23075,6 +23241,191 @@ proc chainedHookStartFinding(repoName, hooksDir, hookName: string):
     discard
   ("", false)
 
+const
+  GitClientHookNames* = ["applypatch-msg", "pre-applypatch",
+    "post-applypatch", "pre-commit", "pre-merge-commit", "prepare-commit-msg",
+    "commit-msg", "post-commit", "pre-rebase", "post-checkout", "post-merge",
+    "pre-push", "post-rewrite", "reference-transaction", "push-to-checkout",
+    "pre-auto-gc", "post-index-change"]
+    ## Every client-side hook name Git runs from a hooks directory
+    ## (https://git-scm.com/docs/githooks). The pre-commit framework and prek
+    ## can install a shim under any of them (``--hook-type``), so the
+    ## ``hook-configs`` sweep reads each slot, not only the managed ones.
+  PrekDiscoveredConfigNames = ["prek.toml", ".pre-commit-config.yaml",
+    ".pre-commit-config.yml"]
+    ## The files prek looks for when its shim names no ``--config``. Its
+    ## refusal reads "No `prek.toml` or `.pre-commit-config.yaml` found in the
+    ## current directory or parent directories" (prek 0.3.11), but the search
+    ## stops at the repository's top level: with the file only in a directory
+    ## ABOVE the repository, a commit is still refused (measured with prek
+    ## 0.3.11, 2026-11-22). A hook runs in the worktree's top level, so that
+    ## directory is the only one that counts. The ``.yml`` spelling is
+    ## included so that a repository using it is never reported; a missed
+    ## report is cheaper than a false one, which would tell an operator to
+    ## delete a working hook.
+
+type GeneratedShimMissingConfig* = object
+  ## A generated pre-commit or prek shim whose configuration file is absent,
+  ## so the tool it ``exec``s refuses every fire of that hook
+  ## (``generatedShimMissingConfig``).
+  tool*: string     ## ``pre-commit`` or ``prek``
+  config*: string   ## the configuration file it needs, absolute; for a prek
+                    ## shim that names none, the worktree's ``prek.toml`` /
+                    ## ``.pre-commit-config.yaml`` it would discover
+
+proc generatedShimMissingConfig*(body, worktreeTop: string):
+    Option[GeneratedShimMissingConfig] =
+  ## Whether ``body`` is a shim the pre-commit framework or prek generated
+  ## (``# File generated by pre-commit:`` / ``# File generated by prek:``)
+  ## whose configuration file does not exist in ``worktreeTop``, the directory
+  ## Git runs hooks in. Both tools then refuse: pre-commit prints "No
+  ## .pre-commit-config.yaml file was found", prek "config file not found",
+  ## and the hook exits non-zero on every fire until the body is deleted or
+  ## the file restored. This is what a dev shell leaves behind when it
+  ## installed the shim while the repository still had the file, and nothing
+  ## removed it after a commit deleted the file.
+  ##
+  ## Read statically and conservatively, so that a body which works is never
+  ## reported:
+  ##
+  ## * a body carrying ``--skip-on-missing-config`` (what both installers
+  ##   write for ``install --allow-missing-config``) skips instead of
+  ##   refusing, and is not reported;
+  ## * the configuration is the ``--config=`` value on a non-comment line,
+  ##   bare or double-quoted, resolved against ``worktreeTop`` when relative.
+  ##   A value holding an expansion (``$``, a backtick, a backslash) is not
+  ##   read, and the body is not reported;
+  ## * a pre-commit shim without ``--config=`` uses pre-commit's default,
+  ##   ``.pre-commit-config.yaml``;
+  ## * a prek shim without ``--config=`` discovers its configuration, so it is
+  ##   reported only when none of ``PrekDiscoveredConfigNames`` exists in
+  ##   ``worktreeTop``.
+  ##
+  ## ``$PRE_COMMIT_ALLOW_NO_CONFIG`` / ``$PREK_ALLOW_NO_CONFIG`` silence the
+  ## refusal for one invocation. They are a property of the caller's
+  ## environment, not of the repository, so they do not change the answer.
+  var tool = ""
+  var config = ""
+  var configNamed = false
+  for line in body.split('\n'):
+    let trimmed = line.strip()
+    if trimmed.startsWith("# File generated by pre-commit:"):
+      tool = "pre-commit"
+      continue
+    if trimmed.startsWith("# File generated by prek:"):
+      tool = "prek"
+      continue
+    if trimmed.startsWith("#"):
+      continue
+    if trimmed.contains("--skip-on-missing-config"):
+      return none(GeneratedShimMissingConfig)
+    let at = trimmed.find("--config=")
+    if at >= 0 and not configNamed:
+      var value = trimmed[at + "--config=".len .. ^1]
+      if value.startsWith("\""):
+        let close = value.find('"', 1)
+        if close < 0:
+          return none(GeneratedShimMissingConfig)
+        value = value[1 ..< close]
+      else:
+        var stop = 0
+        while stop < value.len and value[stop] notin Whitespace + {')', ';'}:
+          inc stop
+        value = value[0 ..< stop]
+      if value.len == 0 or value.contains({'$', '`', '\\', '\''}):
+        return none(GeneratedShimMissingConfig)
+      config = value
+      configNamed = true
+  if tool.len == 0 or worktreeTop.len == 0:
+    return none(GeneratedShimMissingConfig)
+  if not configNamed:
+    if tool == "pre-commit":
+      config = ".pre-commit-config.yaml"
+    else:
+      for name in PrekDiscoveredConfigNames:
+        if fileExists(extendedPath(worktreeTop / name)):
+          return none(GeneratedShimMissingConfig)
+      return some(GeneratedShimMissingConfig(tool: tool,
+        config: worktreeTop / ".pre-commit-config.yaml"))
+  let resolved =
+    if config.isAbsolute: os.normalizedPath(config)
+    else: os.normalizedPath(worktreeTop / config)
+  if fileExists(extendedPath(resolved)):
+    return none(GeneratedShimMissingConfig)
+  some(GeneratedShimMissingConfig(tool: tool, config: resolved))
+
+proc describeShimMissingConfig(file: string;
+    found: GeneratedShimMissingConfig): string =
+  ## The one wording ``repro health`` and ``hooks ensure`` share for a
+  ## ``generatedShimMissingConfig`` finding.
+  file & " is a " & found.tool & " shim whose configuration " & found.config &
+    " does not exist, so " & found.tool & " refuses every fire of that hook"
+
+proc shimMissingConfigAt(path, worktreeTop: string):
+    Option[GeneratedShimMissingConfig] =
+  ## ``generatedShimMissingConfig`` for the executable file at ``path``;
+  ## none for a file that is absent, not executable (Git and the dispatcher
+  ## run neither) or unreadable.
+  try:
+    if not fileExists(extendedPath(path)):
+      return none(GeneratedShimMissingConfig)
+    when not defined(windows):
+      if getFilePermissions(extendedPath(path)) *
+          {fpUserExec, fpGroupExec, fpOthersExec} == {}:
+        return none(GeneratedShimMissingConfig)
+    generatedShimMissingConfig(readFile(extendedPath(path)), worktreeTop)
+  except CatchableError:
+    none(GeneratedShimMissingConfig)
+
+proc hookConfigFindings(repoName, worktreeTop, hooksDir: string;
+    managedHookNames: openArray[string]): seq[string] =
+  ## ``repro health``'s ``hook-configs`` findings for one repository: every
+  ## generated pre-commit or prek shim that RUNS and whose configuration is
+  ## gone (``generatedShimMissingConfig``).
+  ##
+  ## Two places run a body. Git runs the one in each hook slot that is not a
+  ## dispatcher, for every client hook name (``GitClientHookNames``), with or
+  ## without Reprobuild. A dispatcher at the slot runs the
+  ## ``<hook>.repro-local`` it chained, for the managed hook names. A
+  ## dispatcher displaced to ``<hook>.legacy`` skips a ``.repro-local`` that
+  ## is a generated shim (safeguard 4 of ``vcsDispatcherContent``), so such a
+  ## body is not reported: the shim in the slot, which does run, is.
+  for hookName in GitClientHookNames:
+    let slot = hookPath(hooksDir, hookName)
+    if isReprobuildVcsHook(slot, hookName):
+      continue
+    let found = shimMissingConfigAt(slot, worktreeTop)
+    if found.isSome:
+      result.add(repoName & "/" & hookName & " (" &
+        describeShimMissingConfig(slot, found.get) & ")")
+  for hookName in managedHookNames:
+    if not isReprobuildVcsHook(hookPath(hooksDir, hookName), hookName):
+      continue
+    let found = shimMissingConfigAt(localHookPath(hooksDir, hookName),
+      worktreeTop)
+    if found.isSome:
+      result.add(repoName & "/" & hookName & " (" & describeShimMissingConfig(
+        hookName & ".repro-local", found.get) & ", and the dispatcher " &
+        "runs it first)")
+
+proc chainedShimMissingConfigNotice*(repoLabel, worktreeTop, hooksDir,
+    hookName: string): string =
+  ## The line ``hooks ensure`` prints when the ``<hook>.repro-local`` it just
+  ## chained is a shim whose configuration is gone, or ``""``. ``ensure``
+  ## keeps the body: on a branch that still has the file it is the
+  ## repository's check, and the file can come back with a checkout. But
+  ## chaining it carries its refusal into every fire of the dispatcher, so it
+  ## says so, with both repairs.
+  let local = localHookPath(hooksDir, hookName)
+  let found = shimMissingConfigAt(local, worktreeTop)
+  if found.isNone:
+    return ""
+  "repro hooks: " & repoLabel & "/" & hookName & ": chained " &
+    describeShimMissingConfig(local, found.get) & ", so every " & hookName &
+    " through the dispatcher fails in it. Delete " & local &
+    " if nothing installs that check any more, or restore " &
+    found.get.config & " (or reinstall the shim with --allow-missing-config)"
+
 const PreCommitProtectedStashPrefix* =
   "reprobuild pre-commit: unstaged work protected while hooks ran"
   ## The message every stash entry the ``pre-commit`` dispatcher records
@@ -24714,6 +25065,9 @@ proc describeReproBuild*(build: ReproBuildIdentity): string =
     if build.version.len > 0: " (" & build.version & ")"
     else: " (version unknown; it did not answer --version)")
 
+proc thisBuildInstallingPath*(): string
+  ## Forward declaration; defined below with its rationale.
+
 proc probeHookContractServicing*(reproPath, contract: string):
     tuple[servicing: HookContractServicing; exitCode: int] =
   ## Ask the build at ``reproPath`` the generated body's own question.
@@ -24728,7 +25082,10 @@ proc probeHookContractServicing*(reproPath, contract: string):
     return (hcsUnresolved, -1)
   var isSelf = false
   try:
-    isSelf = sameFile(reproPath, getAppFilename())
+    # The wrapper ``thisBuildInstallingPath`` bakes for a Nix build execs
+    # this very image, so it is answered in process like the image itself.
+    isSelf = sameFile(reproPath, getAppFilename()) or
+      (reproPath.len > 0 and reproPath == thisBuildInstallingPath())
   except CatchableError:
     isSelf = false
   if isSelf:
@@ -24763,6 +25120,22 @@ proc executableFile(path: string): bool =
   else:
     result = true
 
+const MaxWrapperScriptBytes = 1 shl 20
+  ## makeWrapper scripts are a few kilobytes (reprobuild's carries about 30
+  ## ``--set-default`` lines, ~11 KB). Anything larger is not one, and is not
+  ## read into memory to find out.
+
+proc wrapperExecsImage(wrapper, image: string): bool =
+  ## True when the script at ``wrapper`` names ``image`` by its absolute path,
+  ## as makeWrapper's generated ``exec -a "$0" "<image>" "$@"`` line does.
+  ## False for anything unreadable or too large to be a wrapper script.
+  try:
+    if getFileSize(wrapper) > MaxWrapperScriptBytes:
+      return false
+    result = ("\"" & image & "\"") in readFile(wrapper)
+  except CatchableError:
+    result = false
+
 proc thisBuildInstallingPath*(): string =
   ## The installing-build path THIS build bakes into the bodies it writes
   ## (``ManagedHookSite.installingBuild``), and therefore step 2 of the
@@ -24773,11 +25146,29 @@ proc thisBuildInstallingPath*(): string =
   ## CLI. An embedded caller (a test binary linking the engine) gets "": a hook
   ## that executed it would re-run the test binary with a verb it does not
   ## implement (see ``ManagedHookSite.installingBuild``).
+  ##
+  ## A Nix-packaged build is the exception to "that image": its image is the
+  ## makeWrapper HIDDEN image (``$out/bin/.reprobuild-wrapped``), and what
+  ## installed the hook is the wrapper script in front of it
+  ## (``$out/bin/reprobuild``), so the wrapper is baked instead. The hidden
+  ## image run on its own has none of the wrapper's variables. A hook runs in
+  ## whatever environment ``git`` has, so the gate it starts would compile
+  ## recipes without ``REPROBUILD_SOURCE_ROOT``, against the sibling reprobuild
+  ## checkout when there is one and against nothing when there is not: on a
+  ## cache miss the pre-push gate then refused every push, with ``cannot open
+  ## file: repro_interface_artifacts`` (no sibling) or ``unsupported interface
+  ## envelope version`` (a sibling newer than the build). The wrapper is taken
+  ## only when it names this image, so an unrelated file that happens to sit
+  ## at the public name is never baked.
   let path =
     try: publicCliImagePath()
     except CatchableError: ""
   if path.len == 0 or not spawnableWithInternalVerb(path):
     return ""
+  let wrapper = makeWrapperPublicPath(path)
+  if wrapper.len > 0 and executableFile(wrapper) and
+      wrapperExecsImage(wrapper, path):
+    return wrapper
   path
 
 proc resolveManagedHookInterpreter*(repoRoot, installingBuild: string):
@@ -24933,10 +25324,16 @@ proc vcsManagedHookContent(hookName, repoRoot: string;
   ## installing into two repos of two workspaces bakes two different
   ## directories, and a repo that moves between workspaces counts as drift and
   ## is re-anchored, exactly as the author path is.
+  ##
+  ## ``authorBin`` names the same file as ``installingBuild`` whenever there is
+  ## one: the refusal prints it as ``REPROBUILD_REPRO=<authorBin> git push``,
+  ## and under Nix the hidden image it would otherwise name runs the gate
+  ## without the wrapper's variables (see ``thisBuildInstallingPath``).
+  let installing = thisBuildInstallingPath()
   vcsManagedHookBody(hookName, managedHookContract(hookName),
     ManagedHookSite(
-      authorBin: publicCliImagePath(),
-      installingBuild: thisBuildInstallingPath(),
+      authorBin: (if installing.len > 0: installing else: publicCliImagePath()),
+      installingBuild: installing,
       refusalRecordDir: guard.refusalRecordDir(repoRoot)))
 
 type
@@ -25605,6 +26002,11 @@ proc selfHealManagedHooks*(repoRoot: string): seq[string] =
   for hookName in applicableVcsHookNames(top):
     try:
       let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, top)
+      if outcome in {vheoChainedUserHook, vheoReclaimedShadowed}:
+        let notice = chainedShimMissingConfigNotice(lastPathPart(top), top,
+          hooksDir, hookName)
+        if notice.len > 0:
+          result.add(notice)
       case outcome
       of vheoAlreadyUpToDate, vheoChainedUserHook:
         discard
@@ -25972,6 +26374,14 @@ proc ensureRepoVcsHooks(repoName, repoPath: string;
     let outcome = ensureVcsHookDetailed(hooksDir, hookName, guard, repoPath,
       reAnchor)
     let tag = vcsHookOutcomeTag(outcome)
+    if outcome in {vheoChainedUserHook, vheoReclaimedShadowed}:
+      # Chaining keeps the body (CLI/hooks.md §"Reclaiming the slot"); a shim
+      # whose configuration is gone then refuses every fire of the
+      # dispatcher, so that is said here and not left to the next commit.
+      let notice = chainedShimMissingConfigNotice(repoName,
+        gitTopLevel(repoPath), hooksDir, hookName)
+      if notice.len > 0:
+        stderr.writeLine(notice)
     if outcome == vheoRewroteContractlessBody:
       # Deliverable 2's distinct state, said out loud and not only counted.
       # An operator who sees this knows a non-speaking build writes here and
@@ -26158,6 +26568,12 @@ proc runVcsHooksCommand(action: HookActionKind;
         continue
       if outcome != vheoAlreadyUpToDate:
         changed = true
+      if outcome in {vheoChainedUserHook, vheoReclaimedShadowed}:
+        let top = gitTopLevel(resolveHooksTarget(targetPath))
+        let notice = chainedShimMissingConfigNotice(lastPathPart(top), top,
+          hooksDir, hookName)
+        if notice.len > 0:
+          stderr.writeLine(notice)
       if outcome == vheoRewroteContractlessBody:
         contractless.add(hookName)
   of hakUninstall:
@@ -31801,11 +32217,18 @@ type UsesEdge* = tuple[owner, selector: string]
   ## One ``uses:`` declaration: the directory of the recipe that makes it
   ## (absolute) and the selector it names.
 
+type PinnedSiblingError* = object of CatchableError
+  ## A ``pinned:`` name (Unified-Locking-And-Hooks.md §14.2 item 4) that
+  ## ``lockedDepsForWorkspace`` cannot turn into a pin: no checkout of it where
+  ## the workspace places it, and no pin for it in the committed lock to carry
+  ## forward. Its own type so a lock-writing door can refuse by name.
+
 proc lockedDepsForWorkspace*(workspaceRoot: string;
                             usesSelectors: seq[string] = @[];
                             sourceRecipeRoots: seq[string] = @[];
                             catalogRoots: seq[string] = @[];
-                            usesEdges: seq[UsesEdge] = @[]):
+                            usesEdges: seq[UsesEdge] = @[];
+                            pinnedSiblings: seq[string] = @[]):
                             seq[LockedDep] =
   ## MO-8 — observe the workspace's participating repos and produce a
   ## ``LockedDep`` per dependency, each with checkout COORDINATES (vcs
@@ -31850,6 +32273,17 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
   ## (``repro develop --direct``; Unified-Locking-And-Hooks.md §14.2). With no
   ## edges to go on (a ``repro.solver`` sidecar, which names no producer), the
   ## root ``depends`` names every sibling, as it always did.
+  ##
+  ## ``pinnedSiblings`` (the root recipe's ``pinned:`` names, §14.2 item 4)
+  ## are siblings the lock must pin that the recipe does not use. Each is
+  ## recorded as an ordinary ``deps`` entry and a DIRECT dependency of the root,
+  ## observed from the checkout the workspace places it at
+  ## (``lockedDepCheckoutPath``: develop override, membership, beneath the
+  ## lock's directory, ``../<name>`` — the one rule every lock reader uses), or
+  ## carried forward from the committed lock when it is not checked out. Its
+  ## recipe is never read and its own dependencies never enter the set; a name
+  ## a ``uses:`` edge (or a nested checkout) already records is recorded once,
+  ## by that route. A name neither route can place raises ``PinnedSiblingError``.
   result = @[]
   let root = absolutePath(workspaceRoot)
   # Every ``path`` below — observed here, or derived for an entry of the
@@ -31937,6 +32371,64 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     # Only a checkout that is present was observed; a pin carried forward
     # for an absent one has no observation behind its derived location.
     if isGitCheckoutDir(key): observedCheckouts.add(key)
+  # ``pinned:`` — see the doc comment. After the ``uses:`` fold so that a
+  # name a ``uses:`` edge already placed is left to that edge (no duplicate).
+  var pinnedEntries: seq[string] = @[]
+  if pinnedSiblings.len > 0:
+    var placer = lockedDepLocator(root, pathBase)
+    for name in pinnedSiblings:
+      if name in pinnedEntries: continue
+      # The macro refuses a malformed name at the author's line, but this list
+      # also arrives from a decoded interface artifact (possibly cached or
+      # written by another tool). A name is joined onto a directory below, so
+      # a separator or `..` must not get that far.
+      let problem = pinnedSiblingNameProblem(name)
+      if problem.len > 0:
+        raise newException(PinnedSiblingError, "`pinned:` in " &
+          (root / CanonicalProjectFileName) & ": " & problem)
+      if name in seenNames:
+        pinnedEntries.add(name)
+        continue
+      let rel = placer.lockedDepCheckoutPath(name)
+      let depAbs = os.normalizedPath(absolutePath(rel, pathBase))
+      if isGitCheckoutDir(depAbs):
+        # The recipe's own checkout is not a sibling of itself.
+        if isRootCheckout(depAbs): continue
+        let dep = lockedDepFromCheckout(name, depAbs, pathBase)
+        if dep.coordinates.revision.len == 0:
+          raise newException(PinnedSiblingError, "`pinned:` names '" & name &
+            "' in " & (root / CanonicalProjectFileName) & ", but the " &
+            "checkout at " & depAbs & " has no commit to pin; commit in it " &
+            "(or check out the revision to pin) and run the command again")
+        if observedKey(dep.path) in observedCheckouts: continue
+        siblingDeps.add(dep)
+        seenNames.add(name)
+        observedCheckouts.add(observedKey(dep.path))
+        pinnedEntries.add(name)
+        continue
+      # Not checked out here: keep the pin the committed lock already
+      # carries, as a ``uses:`` sibling that is absent does.
+      var carried = false
+      for d in existingDeps:
+        if d.name == name and d.coordinates.kind == ckVcs and
+            d.coordinates.revision.len > 0 and not isSelfLockedDep(d):
+          var kept = d
+          kept.path = rel
+          kept.depends = @[]
+          siblingDeps.add(kept)
+          seenNames.add(name)
+          pinnedEntries.add(name)
+          carried = true
+          break
+      if not carried:
+        raise newException(PinnedSiblingError, "`pinned:` names '" & name &
+          "' in " & (root / CanonicalProjectFileName) & ", but there is no " &
+          "checkout of it at " & depAbs & " (the workspace places a " &
+          "sibling by a develop override, its membership, then " &
+          "`../" & name & "`) and the committed " & CommittedLockFileName &
+          " carries no pin for it, so there is no revision to record. " &
+          "Check it out (`repro sync`, or `repro ws enable` the project " &
+          "that declares it) and run the command again")
   # A federated source catalog is itself a reproducibility input. Recipe paths
   # live below that repository, so normalize each one to its enclosing Git
   # worktree and lock the repository once rather than recording hundreds of
@@ -32055,6 +32547,10 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       d.depends = siblingEdges.getOrDefault(d.name, @[])
       if d.name notin rootDepends and d.name notin reached:
         rootDepends.add(d.name)
+  # A pin is the ROOT's own statement: a direct dependency even when another
+  # sibling's recipe also uses it.
+  for name in pinnedEntries:
+    if name notin rootDepends: rootDepends.add(name)
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
     coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
@@ -32303,13 +32799,13 @@ proc applyStrategyHiddenLock(projectDir: string; strategy: LockStrategy;
                              committedLock: string;
                              solved: var UnifiedSolution): int
 
-proc runBuildCommand(args: openArray[string]; publicCliPath: string;
-                     forceDirect = false;
-                     daemonHosted = false;
-                     eventSink: BuildCommandEventSink = nil;
-                     cancelCheck: BuildCancelCallback = nil;
-                     actionOutcomeSink: BuildActionOutcomeSink = nil;
-                     graphAugmenter: BuildGraphAugmenter = nil): int =
+proc runBuildCommandBody(args: openArray[string]; publicCliPath: string;
+                         forceDirect: bool;
+                         daemonHosted: bool;
+                         eventSink: BuildCommandEventSink;
+                         cancelCheck: BuildCancelCallback;
+                         actionOutcomeSink: BuildActionOutcomeSink;
+                         graphAugmenter: BuildGraphAugmenter): int =
   let originalArgs = @args
   # Named-Lock-Files NLF-M5 §5.4 — `--strategy <s>`. Absent, `strategyGiven`
   # stays false and the lock-consumption block below is byte-unchanged.
@@ -33245,6 +33741,29 @@ proc runBuildCommand(args: openArray[string]; publicCliPath: string;
       "direct mode: " & err.msg)
     return runDirectBuild()
 
+
+proc runBuildCommand(args: openArray[string]; publicCliPath: string;
+                     forceDirect = false;
+                     daemonHosted = false;
+                     eventSink: BuildCommandEventSink = nil;
+                     cancelCheck: BuildCancelCallback = nil;
+                     actionOutcomeSink: BuildActionOutcomeSink = nil;
+                     graphAugmenter: BuildGraphAugmenter = nil): int =
+  ## `runBuildCommandBody`, then the one-line summary of the provider startup
+  ## failures it met (`providerStartupFailureSummary`). Those stay non-fatal:
+  ## each skips only its own package's registrations, and the build goes on.
+  ## The summary is written however the body ends, so a build that stopped
+  ## for another reason still names them last.
+  resetProviderStartupFailures()
+  try:
+    result = runBuildCommandBody(args, publicCliPath, forceDirect,
+      daemonHosted, eventSink, cancelCheck, actionOutcomeSink, graphAugmenter)
+  finally:
+    let summary = providerStartupFailureSummary()
+    if summary.len > 0:
+      stderr.writeLine(summary)
+    resetProviderStartupFailures()
+
 proc parseGraphOutputFormat(value: string; allowDot: bool): GraphOutputFormat =
   case value.normalize()
   of "text":
@@ -33830,7 +34349,7 @@ proc prepareBuildGraphInspection(target: string; mode: ToolProvisioningMode;
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
     let providerCompileResult = runProviderCompileEdge(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
       compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
@@ -34060,7 +34579,7 @@ proc refreshRecipeProviderSnapshot(target: string;
     wireFilesystemRoots(providerCompileConfig, projectRoot, outDir)
     let providerCompileResult = runProviderCompileEdge(providerPlan,
       modulePath, interfacePath, providerArtifactPath,
-      internalReproHelperCliPath(publicCliPath), compileWorkDir,
+      graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir,
       compileScratchDir, projectRoot, providerCompileConfig)
     # This pass logs nothing of its own, and it is the pass that most
     # often does the actual compiling. Record it so the ONE line that IS
@@ -41105,9 +41624,46 @@ proc executeDevelopAll(args: DevelopAllArgs): DevelopAllResult =
     let prior = findOverride(overrides, node.name)
     if prior.isSome and os.normalizedPath(absolutePath(prior.get().local_path,
         absolutePath(root))) == absTarget:
-      # Already in develop mode at this exact path — idempotent no-op.
+      # Already in develop mode at this exact path — idempotent no-op, unless
+      # ``--reset`` was asked for and the checkout has drifted off the lock.
+      # `--reset` promises "force it to the lock"; an existing develop-mode
+      # checkout used to be reported "no change" at whatever revision it sat
+      # (PLAT-79 on m3: `nim-agents-isonim-viewmodels` left at 4c0f39a with
+      # the lock pinning 6afd343).
+      let devHead =
+        if dirExists(absTarget): gitHeadShaOf(gitBinary, absTarget) else: ""
+      let drifted = devHead != node.coordinates.revision
+      if args.reset and drifted and args.dryRun:
+        outcome.mode = "would-reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
+      if args.reset and drifted:
+        if dirExists(absTarget):
+          removeDir(absTarget)
+        let resetRes =
+          cloneNodeAtLockedRevision(root, absTarget, node, identity,
+            args.intoDir)
+        if not resetRes.ok:
+          outcome.mode = "error"
+          outcome.ok = false
+          outcome.diagnostic = "reset-to-locked-revision failed for " &
+            node.name & " (was at " &
+            (if devHead.len == 0: "non-git-checkout" else: devHead) & "): " &
+            resetRes.diagnostic
+          outcomes.add(outcome)
+          anyFailure = true
+          continue
+        outcome.mode = "reset"
+        outcome.ok = true
+        outcomes.add(outcome)
+        continue
       outcome.mode = "idempotent"
       outcome.ok = true
+      if drifted and devHead.len > 0:
+        outcome.diagnostic = "in develop mode at " & devHead &
+          ", not the locked revision " & node.coordinates.revision &
+          " (left as it is; pass --reset to force it to the lock)"
       if node.name in args.only and not isExplicitDevelopOverride(prior.get()) and
           not args.dryRun:
         # The one change an idempotent run makes: ``--only`` named this
@@ -60132,15 +60688,15 @@ proc pinnedRevisionEvidence(identity: GitToolIdentity;
         if raw.strip() == gitRemote:
           scope = gitRemote
           break
-  let pattern =
-    if scope.len > 0: "refs/remotes/" & scope & "/"
-    else: "refs/remotes/"
-  let contains = gitRunPlainQuery(identity, ["-C", checkout, "for-each-ref",
-    "--format=%(refname)", "--contains", revision, pattern])
-  if contains.code != 0:
-    return "could not be checked (git for-each-ref --contains failed: " &
+  # One history walk, never a per-ref ``--contains`` sweep: on a reference
+  # tree with thousands of remote-tracking refs the sweep does not finish
+  # (``git_actions.revisionOnRemoteTrackingRef`` has the measurements).
+  let contains = revisionOnRemoteTrackingRef(identity, checkout, revision,
+    scope)
+  if not contains.ok:
+    return "could not be checked (" &
       firstOutputLine(contains.diagnostic) & ")"
-  if contains.output.strip().len > 0:
+  if contains.contained:
     return ""
   if scope.len > 0:
     "is on no '" & scope & "/*' remote-tracking branch"
@@ -61142,12 +61698,32 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
   ## cache-push hook context. Mirrors the manifest-vs-compositional dispatch of
   ## the pre-push gate; returns ``@[]`` on any resolution failure so the caller
   ## (always best-effort) can silently no-op.
+  ##
+  ## The result is the repo set of the WHOLE active project set
+  ## (``[workspace] projects``), not just the primary project: a commit in a
+  ## repo that only a non-primary active project declares must still match, or
+  ## the eager cache push, the evidence refresh and the sibling-ignore block
+  ## silently skip it. Same extension the hook installer
+  ## (``enumerateParticipatingReposStrict``) applies; a single-project
+  ## workspace is returned unchanged.
+  ##
+  ## If the extension itself fails (an active project that no longer resolves,
+  ## an unreadable state file), the PRIMARY project's repos are returned, which
+  ## is exactly what this proc returned before it learned about project sets.
+  ## A hook is best-effort, so one broken member must not blank the repo set
+  ## of every healthy one (that would also empty the sibling-ignore block).
+  proc withActiveSet(primary: ResolvedProject): seq[ResolvedRepo] =
+    try:
+      extendWithActiveProjectSet(workspaceRoot, primary).repos
+    except CatchableError:
+      primary.repos
   try:
     let unrecordedProject =
       if hasWorkspaceStateFile(workspaceRoot): ""
       else: detectWorkspaceProjectName(workspaceRoot)
     if isCompositionalWorkspaceToml(workspaceRoot, unrecordedProject):
-      return composeWorkspaceLayers(workspaceRoot, unrecordedProject).repos
+      return withActiveSet(
+        composeWorkspaceLayers(workspaceRoot, unrecordedProject))
     else:
       let projectName = detectWorkspaceProjectName(workspaceRoot)
       if projectName.len == 0:
@@ -61156,9 +61732,9 @@ proc resolveWorkspaceReposForHook(workspaceRoot: string): seq[ResolvedRepo] =
       let projectFile = manifestsRoot / "projects" / (projectName & ".toml")
       let variantFile = manifestsRoot / "variants" / (projectName & ".toml")
       if fileExists(projectFile):
-        return resolveProject(projectFile).repos
+        return withActiveSet(resolveProject(projectFile))
       elif fileExists(variantFile):
-        return resolveVariant(variantFile).repos
+        return withActiveSet(resolveVariant(variantFile))
       else:
         return @[]
   except CatchableError:
@@ -61232,10 +61808,15 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     let repoAbs = absolutePath(repoRoot)
     let workspaceRoot = resolvePostCommitWorkspaceRoot(repoAbs, "")
     if workspaceRoot.len == 0:
-      return 0
+      return 0 # no workspace to log into
     let repos = resolveWorkspaceReposForHook(workspaceRoot)
     let matched = findRepoByWorkspacePath(workspaceRoot, repos, repoAbs)
     if matched.isNone:
+      # Say so: this return used to be silent, which made a repo outside the
+      # resolved project set indistinguishable from a working push.
+      appendPostCommitLog(workspaceRoot,
+        "repro cache-push: skipped: " & repoAbs & " is not a repo of the " &
+        "workspace's active projects (" & $repos.len & " repos resolved)")
       return 0
     # HL-6 (§7.2): evidence-only / source-secret repos are EXCLUDED from the
     # eager cache push. Propagating the just-committed branch's objects to
@@ -61249,6 +61830,8 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     # the sync/init clone path — NOT the bare remote base (`fetchUrl`).
     let fetchUrl = cloneUrlFor(matched.get())
     if fetchUrl.len == 0:
+      appendPostCommitLog(workspaceRoot,
+        "repro cache-push: skipped: " & repoAbs & " resolves no clone URL")
       return 0
     let cacheRoot = defaultCacheRoot(workspaceRoot)
     # Absolutized here because ``pushCacheRef`` will only push to an absolute
@@ -61263,6 +61846,9 @@ proc runCachePushCommand*(repoRoot, workspaceName: string): int =
     # No shared bare on disk → nothing to push into. Common before the
     # first ``init``/``shared-clones rewire`` wires the cache.
     if not dirExists(bare / "objects"):
+      appendPostCommitLog(workspaceRoot,
+        "repro cache-push: skipped: no shared bare at " & bare &
+        " (run `repro workspace shared-clones rewire`)")
       return 0
     let gitBin = findExe("git")
     if gitBin.len == 0:
@@ -64463,6 +65049,30 @@ proc verifyCommittedLockSiblingPins*(repoRoot: string;
   result.summary = "the committed repro.lock does not pin the sibling " &
     "revisions this repo is being pushed against: " & result.evidence
 
+const
+  CommitTimeFlakeLockFileName* = "flake.lock"
+    ## The `flake.lock` the §13.6 commit-time refresh writes, at the root of
+    ## the repository whose `flake.nix` it is.
+  CommitTimeManagedLockFiles* = [CommittedLockFileName,
+                                 CommitTimeFlakeLockFileName]
+    ## Every file the commit-time lock writers may rewrite, relative to the
+    ## repository root: the §13.3 `repro.lock` re-pin (and the policy
+    ## snapshot it carries) and the §13.6 `flake.lock` refresh. THE one
+    ## definition: the writers derive their paths from it
+    ## (``commitTimeManagedLockPath``), and the certificate gates read it to
+    ## recognise content that differs from certified content only in what
+    ## those writers manage (``findLockOnlyCertifiedNeighbours``). A writer
+    ## added to ``applyCommitTimeLockWriters`` (the Pre-Commit-Check-Sets
+    ## PCS-5 block, once built) adds its file here, or the gates will not
+    ## recognise its rewrite.
+
+proc commitTimeManagedLockPath*(repoRoot, managed: string): string =
+  ## The absolute path of one of ``CommitTimeManagedLockFiles`` in
+  ## ``repoRoot``.
+  doAssert managed in CommitTimeManagedLockFiles, managed &
+    " is not a commit-time managed lock"
+  repoRoot / managed
+
 type
   CommitTimeWriterSite* = enum
     ## Who applies the commit-time lock writers (Unified-Locking-And-Hooks
@@ -64525,10 +65135,11 @@ proc appendCommitTimeWriterLog(site: CommitTimeWriterSite;
       line)
 
 proc commitTimeHasFlakeLock(repoRoot: string): bool =
-  fileExists(repoRoot / "flake.nix") and fileExists(repoRoot / "flake.lock")
+  fileExists(repoRoot / "flake.nix") and fileExists(
+    commitTimeManagedLockPath(repoRoot, CommitTimeFlakeLockFileName))
 
 proc commitTimeHasReproLock(repoRoot: string): bool =
-  fileExists(repoRoot / CommittedLockFileName)
+  fileExists(commitTimeManagedLockPath(repoRoot, CommittedLockFileName))
 
 proc committedLockRepinFailure(plan: CommittedLockRepinPlan): string =
   ## The re-pin could not even be planned: the lock is unreadable or carries
@@ -65424,8 +66035,10 @@ proc stageCurrentUnstagedLocks(workspaceRoot, repoRoot, timestamp: string;
   ## staged. Never raises.
   let label = commitTimeWriterLabel(ctwsLockUpdateNode)
   var locks: seq[string]
-  if hasReproLock: locks.add(committedLockPath(repoRoot))
-  if hasFlake: locks.add(repoRoot / "flake.lock")
+  if hasReproLock:
+    locks.add(commitTimeManagedLockPath(repoRoot, CommittedLockFileName))
+  if hasFlake:
+    locks.add(commitTimeManagedLockPath(repoRoot, CommitTimeFlakeLockFileName))
   var written: seq[string]
   for w in outcome.written:
     written.add(os.normalizedPath(absolutePath(w)))
@@ -69665,6 +70278,203 @@ proc unmetRemedies*(v: ReprobuildCoverageVerdict): seq[string] =
     if line notin result: result.add(line)
 
 # ============================================================================
+# HL-10 (push half) — certified content that differs only in managed locks.
+#
+# A content-bound certificate stops covering content the moment a lock is
+# rewritten after the tests ran: a sibling moved and the commit-time refresh
+# re-pinned, or someone ran `repro lock refresh` / `repro lock update` after
+# testing. The verdict is right — that content was never tested — but "no
+# certificate found" alone sends the developer looking for a test failure.
+# When the store holds certified content that differs from the judged content
+# ONLY in the files the commit-time lock writers manage
+# (``CommitTimeManagedLockFiles``), the gates name it, with the lock files
+# that differ, so the cause is visible (Test-Certificates.md §"Gate
+# integration — push requirement", Unified-Locking-And-Hooks.md §13.7.3
+# item 4).
+#
+# The tested lock is recorded nowhere a push can read, so the search goes by
+# tree entries: the store's content directories in the judged content's
+# algorithm ARE tree ids, and a tree the repository has can be compared with
+# the judged tree by ``git diff-tree`` without a checkout. A certifying run
+# leaves its tree in the object database (the content id is computed by
+# ``git write-tree`` over a temporary index), which is what makes the
+# certified-but-never-committed tree comparable at all.
+# ============================================================================
+
+const
+  LockOnlyNeighbourScanLimit* = 64
+    ## How many of the store's content directories (both roots together,
+    ## newest first) the search considers. The store is pruned to its newest
+    ## ``DefaultStoreRetention`` (20) by default, so the bound rarely bites;
+    ## it keeps a never-pruned store from making the gate slow.
+  LockOnlyNeighboursNamed* = 3
+    ## How many neighbours a diagnostic names, newest first.
+
+type
+  LockOnlyNeighbour* = object
+    ## Certified content that differs from the judged content only in managed
+    ## lock files.
+    contentId*: string
+    differing*: seq[string]
+      ## The managed lock files that differ, repository-relative.
+    bases*: seq[string]
+      ## The ``base`` commits its signed reprobuild certificates record: the
+      ## commit checked out when the tests ran (informational, Standard
+      ## §3.2.3).
+    coversAll*: bool
+      ## Its trusted certificates cover the whole requirement, so the judged
+      ## content would have been covered but for the lock difference.
+
+  LockOnlyNeighbourSearch* = object
+    neighbours*: seq[LockOnlyNeighbour]
+      ## Newest first, at most ``LockOnlyNeighboursNamed``.
+    considered*: int
+      ## Content directories examined (after the bound).
+    truncated*: bool
+      ## More directories existed than ``LockOnlyNeighbourScanLimit``.
+    problems*: seq[string]
+      ## Why the search could not look everywhere. Never a claim: a search
+      ## with problems simply names fewer neighbours.
+
+proc isManagedLockOnlyDifference*(differing: openArray[string]): bool =
+  ## ``differing`` is non-empty and every path in it is a commit-time managed
+  ## lock file (``CommitTimeManagedLockFiles``).
+  differing.len > 0 and
+    differing.allIt(it in CommitTimeManagedLockFiles)
+
+proc searchLockOnlyCertifiedNeighbours(state: CertificateState;
+    requires: seq[PolicyRequirement]; keys: RegisteredKeyStoreLoad;
+    lockSource: ReprobuildLockSource; roots: CertificateStoreRoots;
+    limit: int): LockOnlyNeighbourSearch =
+  ## ``findLockOnlyCertifiedNeighbours`` without its exception guard.
+  if state == nil or state.repository.len == 0:
+    return
+  # A content id that cannot be computed was already reported by the gate's
+  # own lookup of the same state: nothing to compare with, nothing to add.
+  let (ids, _, _) = localStoreContentIds(state)
+  if ids.len == 0:
+    return
+  let judged = parseContentId(ids[0])
+  if judged.form != cifWellFormed or
+      not judged.algorithmName.startsWith("git-tree-"):
+    # Only a `git-tree-*` digest names a tree that git can compare.
+    return
+  var byDigest = initTable[string, Time]()
+  for (label, root) in [("user", roots.user), ("system", roots.system)]:
+    if root.len == 0:
+      continue
+    let listing = listStoreAlgorithmDir(root, judged.algorithmName)
+    for p in listing.problems:
+      result.problems.add("the " & label & " root: " & p)
+    for entry in listing.entries:
+      if entry.digest == judged.digest:
+        continue
+      if entry.digest notin byDigest or byDigest[entry.digest] < entry.modified:
+        byDigest[entry.digest] = entry.modified
+  var newest: seq[tuple[digest: string; modified: Time]]
+  for digest, modified in byDigest:
+    newest.add((digest, modified))
+  newest.sort(proc(a, b: tuple[digest: string; modified: Time]): int =
+    result = cmp(b.modified, a.modified)
+    if result == 0: result = cmp(a.digest, b.digest))
+  if newest.len > limit:
+    result.truncated = true
+    newest.setLen(limit)
+  result.considered = newest.len
+  if newest.len == 0:
+    return
+  var digests: seq[string]
+  for n in newest: digests.add(n.digest)
+  let compared = compareTreesByEntries(state.repository, judged.digest,
+    digests, state.git)
+  if not compared.ok:
+    result.problems.add("certified content could not be compared with " &
+      describeState(state) & ": " & compared.failure)
+    return
+  let neighbourLock =
+    if lockSource.kind == rlsCommittedLock: committedLockSource()
+    else: pendingLockRecordSource()
+  var required: seq[string]
+  for r in requires:
+    if r.certificate notin required: required.add(r.certificate)
+  for c in compared.compared:
+    if result.neighbours.len >= LockOnlyNeighboursNamed:
+      break
+    if not c.present or not isManagedLockOnlyDifference(c.differing):
+      continue
+    let neighbourState = commitUnderEvaluation(state.repository, c.tree,
+      state.repo)
+    let lookup = findCertificatesInLocalStore(neighbourState, roots)
+    if lookup.found.len == 0:
+      continue
+    let verdict = evaluateRequirementCoverage(lookup.found, neighbourState,
+      requires, keys, neighbourLock)
+    var trusted = false
+    for covered in verdict.coveredByPlatform:
+      if covered.targets.anyIt(it in required):
+        trusted = true
+    if not trusted:
+      continue
+    var neighbour = LockOnlyNeighbour(
+      contentId: judged.algorithmName & ":" & c.tree,
+      differing: c.differing, coversAll: verdict.outcome == voCovered)
+    for f in lookup.found:
+      if f.read.status == crsOk and f.read.cert.isSigned and
+          f.read.cert.framework == reprobuildFrameworkId and
+          f.read.cert.vcs.base.len > 0 and
+          f.read.cert.vcs.base notin neighbour.bases:
+        neighbour.bases.add(f.read.cert.vcs.base)
+    result.neighbours.add(neighbour)
+
+proc findLockOnlyCertifiedNeighbours*(state: CertificateState;
+    requires: seq[PolicyRequirement]; keys: RegisteredKeyStoreLoad;
+    lockSource: ReprobuildLockSource;
+    roots = nativeCertificateStoreRoots();
+    limit = LockOnlyNeighbourScanLimit): LockOnlyNeighbourSearch =
+  ## The certified content in the local store (both roots) whose tree differs
+  ## from ``state``'s only in commit-time managed lock files, and whose
+  ## trusted certificates cover at least one name of ``requires``.
+  ##
+  ## Bounded: one listing per root of ``v1/<algorithm>/``, the ``limit``
+  ## newest directories, two git processes for all of them
+  ## (``compareTreesByEntries``), and the store lookup plus the gate's own
+  ## verifier only for a tree whose difference is lock-only. Each neighbour
+  ## is judged against ITS content with the same evaluator the gate uses; the
+  ## lock step reads the neighbour's own ``repro.lock`` for a committed-lock
+  ## project, and is not applied for a record-store project, whose record is
+  ## keyed by a commit the neighbour's tree may never have had (its lock is
+  ## not content, D8). Never raises, and never changes a verdict.
+  ##
+  ## The comparison makes no network operation, in a partial clone either
+  ## (``compareTreesByEntries`` disables lazy fetches), so it has no time
+  ## budget to respect: the pre-push hook's ``TEST_CERTIFICATES_HOOK_TIMEOUT``
+  ## bounds certificate PROPAGATION's network operations (Tooling §4.3), not
+  ## this local search.
+  try:
+    result = searchLockOnlyCertifiedNeighbours(state, requires, keys,
+      lockSource, roots, limit)
+  except CatchableError as err:
+    # A diagnostic must not turn a refusal into a crash: report and name
+    # nothing.
+    result = LockOnlyNeighbourSearch(problems: @["the search for certified " &
+      "content differing only in managed lock files failed: " & err.msg])
+
+proc describeLockOnlyNeighbour*(n: LockOnlyNeighbour;
+                                judged: string): string =
+  ## One line naming a neighbour for a diagnostic about ``judged`` ("the
+  ## pushed tree", "the content being committed").
+  var bases: seq[string]
+  for b in n.bases: bases.add(b[0 ..< min(12, b.len)])
+  "certified content " & n.contentId &
+    (if bases.len > 0: " (tested on top of commit " & bases.join(", ") & ")"
+     else: "") &
+    " differs from " & judged & " only in " & n.differing.join(", ") &
+    (if n.coversAll: "" else: " (its certificates cover part of the " &
+      "requirement)") &
+    ": the lock changed after the tests ran (a re-pin or refresh made " &
+    "after testing)"
+
+# ============================================================================
 # TC-2: certificate TRANSPORT — git notes, the push-time carrier.
 # TC-8c: keyed by the TREE the certificate's content id names, on the shared
 # notes ref.
@@ -70228,8 +71038,24 @@ proc certificateGate(report: var CheckReport;
       # In required mode a clean pass adds no failure — the gate keeps
       # whatever exit code stage 5 set (0 on success).
     of voNotCovered:
-      let detail = describeCoverageVerdict(verdict) & searched
-      let remedies = unmetRemedies(verdict)
+      # HL-10: name certified content that differs from the pushed tree
+      # only in managed lock files — the lock changed after the tests ran.
+      # A cause, never a verdict: the push is judged exactly as before.
+      let neighbours = findLockOnlyCertifiedNeighbours(evaluated,
+        requirement.requires, keys, lockSource)
+      for problem in neighbours.problems:
+        report.notices.add("certificate store: " & problem)
+      var causes: seq[string]
+      for n in neighbours.neighbours:
+        causes.add(describeLockOnlyNeighbour(n, "the pushed tree"))
+      let cause =
+        if causes.len > 0: "; cause: " & causes.join("; ") else: ""
+      let detail = describeCoverageVerdict(verdict) & searched & cause
+      var remedies = unmetRemedies(verdict)
+      if causes.len > 0:
+        remedies.insert("test the content you push, refreshed lock " &
+          "included: run 'repro certify' (or 'repro test') on it, then " &
+          "commit and push again", 0)
       if requirement.mode == cgmAdvisory:
         report.notices.add("certificate advisory: coverage INCOMPLETE — " &
           detail & " (" & applied & "; " & remedies.join("; ") &
@@ -70498,6 +71324,7 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
   var lookup: LocalStoreLookup
   var verdict: ReprobuildCoverageVerdict
   var repinned: seq[string]
+  var neighbours: LockOnlyNeighbourSearch
   try:
     lookup = findCertificatesInLocalStore(state)
     # D8: a project whose lock lives in an out-of-tree record store has no
@@ -70523,6 +71350,12 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
         if staged.status == cfsPresent and
             content_id.sha256Hex(staged.bytes) == note.digest:
           repinned.add(note.path)
+    if verdict.outcome == voNotCovered:
+      # HL-10: the same search the push gate runs. It names the certified
+      # content whatever rewrote the lock after testing — this commit's
+      # refresh (also named by the re-pin note above) or anything earlier.
+      neighbours = findLockOnlyCertifiedNeighbours(state,
+        requirement.requires, keys, lockSource)
   finally:
     if hadIndexEnv: putEnv("GIT_INDEX_FILE", savedIndexEnv)
     else: delEnv("GIT_INDEX_FILE")
@@ -70570,6 +71403,11 @@ proc runPreCommitCertificateGate*(repoRoot: string; displaced: bool): int =
       stderr.writeLine(prefix & "cause: this commit's lock refresh re-pinned " &
         "and staged " & repinned.join(", ") & ", so the content being " &
         "committed is not the content the tests ran on")
+    for problem in neighbours.problems:
+      stderr.writeLine(prefix & "certificate store: " & problem)
+    for n in neighbours.neighbours:
+      stderr.writeLine(prefix & "cause: " &
+        describeLockOnlyNeighbour(n, "the content being committed"))
     for remedy in unmetRemedies(verdict):
       stderr.writeLine(prefix & "unmet: " & remedy)
     stderr.writeLine(prefix & "remedy: run 'repro certify' on exactly what " &
@@ -74014,8 +74852,9 @@ type
     ## F0.3 — the answer to "is this checkout's HEAD published?", with the two
     ## cases the bare predicate cannot tell apart kept SEPARATE.
     ##
-    ## ``git branch -r --contains HEAD`` answers "is HEAD on a remote-tracking
-    ## branch **that this checkout has fetched**". Two very different states
+    ## The local predicate (``git_actions.remoteBranchContainsHead``) answers
+    ## "is HEAD on a remote-tracking branch **that this checkout has
+    ## fetched**". Two very different states
     ## come back as the same "no":
     ##
     ##   * the commit exists on a remote nobody has fetched here (a stale
@@ -74181,8 +75020,9 @@ proc roleHistoryRewriteFailure(declared: tuple[role, branch: string];
       declaredFor & ", and this update is not a fast-forward: it would make " &
       discarded & " unreachable there, including " & remoteOldOid)
 
-proc verifyCommittedLockDependencySet*(repoRoot: string):
-    tuple[examined, stale, unverified: bool;
+proc verifyCommittedLockDependencySet*(repoRoot: string;
+    workspaceRoot = ""):
+    tuple[examined, stale, unverified, engineOlderThanEnvelope: bool;
           evidence, remediation: string]
   ## Forward declaration; defined beside ``unreachedDevelopSiblings``, whose
   ## solve-completeness rule it shares with ``repro lock refresh``.
@@ -75622,13 +76462,16 @@ proc executeCheckPrePush(parsed: CheckArgs;
     # Not asked when stage 0a has already refused for an absent sibling
     # outside a workspace: the derivation could not run truthfully, and its
     # compile is exactly what that refusal exists to spare.
-    var depSet: tuple[examined, stale, unverified: bool;
+    var depSet: tuple[examined, stale, unverified,
+                      engineOlderThanEnvelope: bool;
                       evidence, remediation: string]
     if not needsWorkspace:
       try:
-        depSet = verifyCommittedLockDependencySet(parsed.currentRepo)
+        depSet = verifyCommittedLockDependencySet(parsed.currentRepo,
+          parsed.workspaceRoot)
       except CatchableError as err:
         depSet = (examined: true, stale: false, unverified: true,
+          engineOlderThanEnvelope: false,
           evidence: "the dependency set could not be verified: " & err.msg,
           remediation: "investigate the failure (" & err.msg &
             "), then re-push")
@@ -75637,6 +76480,10 @@ proc executeCheckPrePush(parsed: CheckArgs;
         repo: currentRepoPath,
         property:
           if depSet.stale: "committed_lock_dependency_set_stale"
+          # §13.5 (amended 2026-11-22): its own property, so the refusal is
+          # recognisable — the anchor cannot trail an envelope bump unnoticed.
+          elif depSet.engineOlderThanEnvelope:
+            "gate_engine_older_than_interface_envelope"
           else: "committed_lock_dependency_set_unverified",
         remediation: depSet.remediation,
         evidence: depSet.evidence,
@@ -77487,6 +78334,10 @@ when defined(reproGitStdoutReaderTest):
     result.ok = found.ok
     for head in found.heads:
       result.heads.add((head.oid, head.refName))
+
+  proc verifyLockPinnedProducerSourceForTest*(dep: LockedDep;
+      sourceRoot, consumerRoot: string) =
+    verifyLockPinnedProducerSource(dep, sourceRoot, consumerRoot)
 
 proc remoteTrackingContainmentHints(identity: GitToolIdentity; repoRoot,
     headOid: string): HashSet[string] =
@@ -80052,7 +80903,38 @@ proc toJsonNode*(report: WorkspaceStatusReport): JsonNode =
   result["summary"] = summary
   result["exitCode"] = %report.exitCode
 
-proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
+proc isRoutineStatusEntry*(entry: WorkspaceStatusRepoEntry;
+    activeBranch: string): bool =
+  ## Whether ``entry`` is a *routine clean* repository, the kind the default
+  ## text output of ``repro workspace status`` omits from its per-repo
+  ## listing (spec/CLI/workspace.md §"`repro workspace status`", the
+  ## exceptional information policy). Every condition the page names must
+  ## hold: a clean working tree with no modified or untracked files, at lock
+  ## or no lock recorded, no stashes, no ahead/behind divergence, no unmerged
+  ## branches, and on the active workspace branch.
+  ##
+  ## A repository with a diagnostic is never routine: something about it
+  ## could not be observed, and an omitted line would hide that. When the
+  ## workspace has an active branch, a checkout on another branch or with a
+  ## detached HEAD (empty ``branch``) is off it; when the workspace has none,
+  ## the branch condition cannot be failed.
+  entry.checkoutState == "clean" and
+    entry.lockState in ["at-lock", "no-lock-recorded"] and
+    entry.modifiedCount == 0 and entry.untrackedCount == 0 and
+    entry.stashCount == 0 and
+    entry.aheadCount == 0 and entry.behindCount == 0 and
+    entry.unmergedBranches.len == 0 and
+    entry.diagnostic.len == 0 and
+    (activeBranch.len == 0 or entry.branch == activeBranch)
+
+proc renderStatusTextLines*(report: WorkspaceStatusReport;
+    verbose = false): seq[string] =
+  ## The text form of ``repro workspace status``. By default routine clean
+  ## repositories (``isRoutineStatusEntry``) are left out of the per-repo
+  ## listing and tallied after the summary; when every repository is routine
+  ## the footer says the workspace is all clean. ``verbose`` (``--verbose`` /
+  ## ``-v``) lists every repository. The summary line is the same in both
+  ## modes and always counts every repository.
   result.add("workspace status: project=" & report.project &
     " branch=" & (if report.activeBranch.len > 0:
                     report.activeBranch
@@ -80064,7 +80946,15 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
   for entry in report.manifestLayers:
     result.add("workspace status: manifest-layer " & entry.provenance &
       " status=" & entry.status)
+  var omitted = 0
+  var routine = 0
   for entry in report.repos:
+    let isRoutine = isRoutineStatusEntry(entry, report.activeBranch)
+    if isRoutine:
+      inc routine
+      if not verbose:
+        inc omitted
+        continue
     var line = "workspace status: " & entry.path & " " &
       entry.checkoutState
     if entry.branch.len > 0:
@@ -80093,6 +80983,12 @@ proc renderStatusTextLines*(report: WorkspaceStatusReport): seq[string] =
     " drifted=" & $report.summary.drifted &
     " atLock=" & $report.summary.atLock &
     " noLockRecorded=" & $report.summary.noLockRecorded)
+  if report.repos.len > 0 and routine == report.repos.len:
+    result.add("workspace status: all clean (" & $report.repos.len &
+      " repo(s))")
+  elif omitted > 0:
+    result.add("workspace status: " & $omitted &
+      " routine clean repo(s) not listed (--verbose lists them)")
 
 type
   WorkspaceStatusArgs = object
@@ -80108,6 +81004,9 @@ type
     fix: bool
       ## Shared-Clone-Pool-Integrity §4.2: remove stale remote-tracking refs
       ## the shared-clone detector finds, instead of only reporting them.
+    verbose: bool
+      ## ``--verbose`` / ``-v``: list routine clean repos in the text output
+      ## too. ``--json`` and the report always carry every repo.
     report: ReportSpec    ## Opt-in ``--write-report[=PATH]`` artifact.
 
 proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
@@ -80124,6 +81023,7 @@ proc workspaceStatusArgsOf(c: ReproCommandLineWorkspaceStatus):
   result.unmerged = c.unmerged
   result.fileDetails = c.fileDetails
   result.fix = c.fix
+  result.verbose = c.verbose
   result.report = reportSpecOf(c)
   result.projectName = c.project
   if not (result.stashes or result.files or result.aheadBehind or result.unmerged):
@@ -80432,7 +81332,7 @@ proc writeWorkspaceStatusReport(report: WorkspaceStatusReport;
 
 proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   ## ``repro workspace status [<project>] [--workspace-root=PATH]
-  ## [--tool-provisioning=path|nix|tarball|scoop] [--json]``.
+  ## [--tool-provisioning=path|nix|tarball|scoop] [--json] [--verbose|-v]``.
   ##
   ## Exit codes (per M12 design — read-only command):
   ##   - 0 — status gathered (with whatever drift the live workspace
@@ -80447,7 +81347,7 @@ proc runWorkspaceStatusCommand*(c: ReproCommandLineWorkspaceStatus): int =
   if parsed.json:
     stdout.writeLine(pretty(report.toJsonNode(), indent = 2))
   else:
-    for line in renderStatusTextLines(report):
+    for line in renderStatusTextLines(report, parsed.verbose):
       stdout.writeLine(line)
     emitLockCoherenceAdvisory(parsed.toolProvisioning, report.workspaceRoot,
       report.project, report.repos)
@@ -80681,6 +81581,9 @@ type
     json: bool
     fix: bool
     verbose: bool
+    progress: HealthProgress
+      ## Where the gatherer announces each row and each checkout it reaches
+      ## (``health_progress``); ``nil`` is silent.
 
   HealthContext = object
     ## Resolved facts the gatherer shares across checks so it only
@@ -81504,6 +82407,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    publisher" to anyone who finds it. Reported with the remedy; never
   #    auto-removed, because the same directory is where the developer-side
   #    `repro build` publisher keeps a key it DID mean to mint.
+  parsed.progress.beginRow("binary-cache-producer-key")
   block staleProducerKey:
     let credDir = defaultAutoCredentialDir()
     let keyFile = credDir / "producer.key.pem"
@@ -81553,6 +82457,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # that probe has already been paid for here.
   var running = false
   var endpoint = ""
+  parsed.progress.beginRow("daemon-mode")
   block daemonCheck:
     try:
       let status = queryUserDaemonStatus()
@@ -81616,6 +82521,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     contrast ``direnv allow`` or cloning a missing sibling, which are
   #     recoverable. The remedy therefore names the sweep for the operator to
   #     run, and ``--fix`` describes it instead of doing it.
+  parsed.progress.beginRow("lease-reaper")
   block leaseReaperCheck:
     let health = readLeaseReapTickHealth(dlsUser)
     let storeRoot = leaseStoreRootForScope(dlsUser)
@@ -81780,6 +82686,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
 
   # 3. Store health. The content-addressed store root must be present
   #    and readable.
+  parsed.progress.beginRow("store")
   block storeCheck:
     let storeRoot = resolveStoreRoot("")
     var ok = false
@@ -81808,6 +82715,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         fixKind: hfNone))
 
   # 4. direnv — installed, and the workspace .envrc is trusted.
+  parsed.progress.beginRow("direnv")
   block direnvCheck:
     let direnvBin = resolveDirenvBin()
     let envrc = detectDirenvEnvrcState(parsed.workspaceRoot)
@@ -81856,6 +82764,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       fixKind: hfNone))
 
   # 6. Manifest resolution + active project set.
+  parsed.progress.beginRow("manifest")
   block manifestCheck:
     try:
       ctx.resolved = resolveHealthProject(parsed)
@@ -81940,6 +82849,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     `manifest` above read only the checked-out one, for the active
   #     projects only. A migration that landed on one role is invisible
   #     until a workspace tracks the other and enables the affected project.
+  parsed.progress.beginRow("root-role-manifests")
   block rootRoleManifestsCheck:
     let outcomes = checkRootRoleManifests(parsed.workspaceRoot)
     if outcomes.len >= 2:
@@ -81979,6 +82889,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # 7. Dependencies / develop-mode siblings — every declared repo must
   #    be checked out. Missing ones get a clone remedy and are eligible
   #    for safe ``--fix``.
+  parsed.progress.beginRow("siblings")
   block siblingCheck:
     if not ctx.resolvedOk:
       checks.add(HealthCheck(
@@ -81988,7 +82899,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: self & " workspace sync",
         fixKind: hfNone))
     else:
-      for repo in ctx.resolved.repos:
+      for index, repo in ctx.resolved.repos:
+        parsed.progress.beginItem(repo.path, index + 1,
+          ctx.resolved.repos.len)
         let abs = parsed.workspaceRoot / repo.path
         if not dirExists(abs / ".git"):
           ctx.missingSiblings.add(repo)
@@ -82013,6 +82926,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    resolvable (the precondition for clone/fetch). We do NOT require a
   #    live network round-trip in the gatherer — that would make the
   #    doctor itself flaky offline. The remedy still names the auth fix.
+  parsed.progress.beginRow("vcs-host-auth")
   block vcsCheck:
     try:
       ctx.gitIdentity = ensureGitToolResolvable(tpmPathOnly, getEnv("PATH"))
@@ -82034,6 +82948,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # Forge redirects are transparent to Git. Ask the forge about the
   # composed URL independently of checkout/pool state; a mismatch remains
   # advisory and never authorizes a doctor to migrate anything.
+  parsed.progress.beginRow("repository-identities")
   block repositoryIdentitiesCheck:
     if not ctx.resolvedOk:
       checks.add(HealthCheck(name: "repository-identities", status: hsWarn,
@@ -82135,7 +83050,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     refuses every body this row counts as current, so this row is not
   #     ``ok`` while 8c reports such a resolution. Computing 8c once and
   #     sharing it keeps the probe from running twice.
+  parsed.progress.beginRow("hook-interpreter")
   let interpreterCheck = hookInterpreterSkewCheck(parsed.workspaceRoot)
+  parsed.progress.beginRow("vcs-hooks")
   block hooksCheck:
     var missing: seq[string]
     var shadowed: seq[string]
@@ -82145,6 +83062,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     # the managed hooks and reported in their own ``chained-hooks`` row.
     var unstartable: seq[string]
     var possiblyUnstartable: seq[string]
+    # Generated pre-commit / prek shims whose configuration file is gone, in a
+    # slot or chained: each refuses every fire. Their own ``hook-configs`` row.
+    var deadConfigShims: seq[string]
     var okCount = 0
     var reposInspected = 0
     let enumerated = enumerateParticipatingRepos(parsed.workspaceRoot)
@@ -82157,12 +83077,15 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         ctx.manifestRemedy))
       checks.add(skippedForUnresolvedManifest("chained-hooks",
         ctx.manifestRemedy))
+      checks.add(skippedForUnresolvedManifest("hook-configs",
+        ctx.manifestRemedy))
       break hooksCheck
     # Rendered ONCE for the whole sweep (see
     # ``managedHookContractsOfThisBuild``): five bodies, not five per repo.
     let expectedContracts = managedHookContractsOfThisBuild()
     var writers: seq[string]
-    for repo in enumerated.repos:
+    for index, repo in enumerated.repos:
+      parsed.progress.beginItem(repo.name, index + 1, enumerated.repos.len)
       if gitTopLevel(repo.repoPath).len == 0:
         continue        # not materialized; the siblings check owns that.
       inc reposInspected
@@ -82173,6 +83096,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       if pathEntry.len > 0:
         pathUnsafe.add(pathEntry)
       let hooksDir = gitHooksDir(repo.repoPath)
+      deadConfigShims.add(hookConfigFindings(repo.name,
+        gitTopLevel(repo.repoPath), hooksDir,
+        applicableVcsHookNames(repo.repoPath)))
       for hookName in applicableVcsHookNames(repo.repoPath):
         let standard = hookPath(hooksDir, hookName)
         let managed = managedHookPath(hooksDir, hookName)
@@ -82265,6 +83191,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # or push in this very repo.
       if target.len > 0:
         let targetHooksDir = gitHooksDir(target)
+        deadConfigShims.add(hookConfigFindings(lastPathPart(target), target,
+          targetHooksDir, applicableVcsHookNames(target)))
         for hookName in applicableVcsHookNames(target):
           let chained = chainedHookStartFinding(lastPathPart(target),
             targetHooksDir, hookName)
@@ -82467,6 +83395,40 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
               "chained <hook>.repro-local names"
           else: "every chained <hook>.repro-local names programs that exist"),
         remedy: "", fixKind: hfNone))
+    # Generated pre-commit / prek shims that run and whose configuration file
+    # the repository no longer has. Each refuses every fire of its hook (a
+    # commit, for ``pre-commit``), and in a repository with no dispatcher it
+    # is also the only hook there, which makes the repository look hooked.
+    # A ``fail``. Not ``--fix``-able: which repair applies — delete the body,
+    # or restore the file — is the operator's call, and the file can come
+    # back with a checkout of a branch that still has it.
+    if deadConfigShims.len > 0:
+      proc hookConfigsDetailFor(full: bool): string =
+        $deadConfigShims.len & " generated pre-commit/prek hook(s) name a " &
+          "configuration file that does not exist, so that hook REFUSES " &
+          "every fire (every commit, for pre-commit): " &
+          (if full: deadConfigShims.join(", ")
+           else: formatFindingList(deadConfigShims, parsed.verbose))
+      let fullHookConfigsDetail = hookConfigsDetailFor(full = true)
+      let hookConfigsDetail = hookConfigsDetailFor(full = false)
+      checks.add(HealthCheck(
+        name: "hook-configs",
+        status: hsFail,
+        detail: hookConfigsDetail,
+        fullDetail: if hookConfigsDetail != fullHookConfigsDetail:
+            fullHookConfigsDetail
+          else: "",
+        remedy: "delete each named hook body that nothing installs any more " &
+          "(for a slot, 'pre-commit uninstall' / 'prek uninstall' does it), " &
+          "or restore the configuration file it names",
+        fixKind: hfNone))
+    else:
+      checks.add(HealthCheck(
+        name: "hook-configs",
+        status: hsOk,
+        detail: "every generated pre-commit/prek hook that runs finds its " &
+          "configuration file",
+        remedy: "", fixKind: hfNone))
 
   # 8c. PG-14 — WHICH `repro` services those hooks, and whether the answer is
   #     the same in every shell one can fire in.
@@ -82485,6 +83447,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #      Warnings, never failures: a push goes through regardless (Tooling
   #      §4.3). What is lost is what a receiving gate will see.
   var policyStalenessMemo: CertificatePolicyStalenessMemo
+  parsed.progress.beginRow("certificate-propagation")
   checks.add(certificatePropagationCheck(parsed.workspaceRoot,
     policyStalenessMemo))
 
@@ -82495,6 +83458,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     writer refused on every commit, because neither looks at what a run
   #     DID. The writer never fails a commit and says so in one stderr line,
   #     so the only durable record is its trace, and this row is what reads it.
+  parsed.progress.beginRow("lock-writer")
   checks.add(lockWriterOutcomeCheck(parsed.workspaceRoot, self))
 
   # 9. Push gateway — PG-16. OBSERVED state, per §7.6.6, replacing a constant.
@@ -82515,6 +83479,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #    `required` on an `unwired` repo is visible as the contradiction it is".
   #    That contradiction is also the row's ``fail`` condition — the row must be
   #    CAPABLE of failing, and this is the state it fails on.
+  parsed.progress.beginRow("push-gateway")
   block pushGatewayCheck:
     let obs = observeWorkspaceGateways(parsed.workspaceRoot)
     if obs.repos.len == 0 and not ctx.resolvedOk:
@@ -82670,6 +83635,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     root's. Without a resolved manifest which repositories are siblings is
   #     unknown, so the row is the skipped `warn` (which does not move the exit
   #     status either) rather than an `ok` over a list nobody read.
+  parsed.progress.beginRow("sibling-exact-pins")
   block siblingExactPinsCheck:
     if not ctx.resolvedOk:
       checks.add(skippedForUnresolvedManifest("sibling-exact-pins",
@@ -82684,7 +83650,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         consumers.add(co)
     var findings: seq[SiblingExactPinFinding]
     var unreadable: seq[string]
-    for consumer in consumers:
+    for index, consumer in consumers:
+      parsed.progress.beginItem(relativePath(consumer, ws), index + 1,
+        consumers.len)
       try:
         var pinNotices: seq[string]
         findings.add(siblingExactPinFindingsOf(consumer, ws,
@@ -82757,6 +83725,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     rule for its checked-out branch (`checkedOutPushPolicy`) — and cannot
   #     report a policy a gate would not apply. A manifest that still carries
   #     the retired `[certificates]` table is reported by the manifest row.
+  parsed.progress.beginRow("certificate-policy")
   block certificatePolicyCheck:
     if not ctx.initialized:
       break certificatePolicyCheck
@@ -82790,7 +83759,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     # why none applies) and the policy's ci_trust. A repository with no
     # snapshot has no policy, and the row says so rather than assuming it.
     var gating, enactedOff, malformed, empty, noPolicy: seq[string]
-    for repo in participating:
+    for index, repo in participating:
+      parsed.progress.beginItem(repo.name, index + 1, participating.len)
       let policy = checkedOutPushPolicy(repo.repoPath)
       if not policy.present:
         noPolicy.add(repo.name)
@@ -82858,6 +83828,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
         remedy: "", fixKind: hfNone))
 
   # 12. Workspace projects list and ignore/agents configuration (RA-30).
+  parsed.progress.beginRow("workspace-ergonomics")
   block workspaceProjectsCheck:
     var ok = true
     var details: seq[string] = @[]
@@ -82920,6 +83891,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #      block leaves a tracked path out (the tracked-probe rule), so the
   #      mistake has to be named here. Report-only: un-tracking a file is an
   #      index change in the user's repository, so the remedy is printed.
+  parsed.progress.beginRow("workspace-state-file")
   block stateFileCheck:
     let findings = inspectWorkspaceStateFiles(parsed.workspaceRoot)
     if findings.len == 0:
@@ -82952,6 +83924,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
                self & " health --fix`"
            else: self & " health --fix"),
         fixKind: (if skew: hfNone else: hfMigrateStateFile)))
+  parsed.progress.beginRow("local-settings-file")
   block localSettingsTrackedCheck:
     if not ctx.gitOk:
       break localSettingsTrackedCheck
@@ -82990,12 +83963,13 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     the original incident take a reflog archaeology session to diagnose.
   #
   #     Network cost: ZERO in a healthy workspace. The first pass is the purely
-  #     local ``git branch -r --contains HEAD``; only a repo that pass flags is
+  #     local "is HEAD on a remote-tracking branch" walk; only a repo that pass flags is
   #     fetched, and the fetch can then only turn a warn into an ok. This does
   #     not contradict check 8's "no live round-trip in the gatherer" rule,
   #     which exists so that being offline cannot make a healthy workspace look
   #     broken — an unreachable remote here degrades to a distinct
   #     "cannot confirm" wording, never to a false alarm.
+  parsed.progress.beginRow("unpublished-heads")
   block unpublishedHeadsCheck:
     if not ctx.resolvedOk or not ctx.gitOk:
       checks.add(HealthCheck(
@@ -83009,7 +83983,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       break unpublishedHeadsCheck
     var candidates: seq[ResolvedRepo]
     var inspected = 0
-    for repo in ctx.resolved.repos:
+    for index, repo in ctx.resolved.repos:
+      parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
       let abs = parsed.workspaceRoot / repo.path
       if not dirExists(abs / ".git"):
         continue
@@ -83021,7 +83996,11 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var offenders: seq[string]
     var unconfirmed: seq[string]
     var remedies: seq[string]
-    for repo in candidates:
+    for index, repo in candidates:
+      # The second pass may fetch, so it is announced as such: the slow
+      # step of this row is a network round-trip, not the local walk above.
+      parsed.progress.beginItem(repo.path & " (fetching to confirm)",
+        index + 1, candidates.len)
       let abs = parsed.workspaceRoot / repo.path
       let verdict = headPublicationOf(ctx.gitIdentity, abs,
         gitRemoteNameFor(repo), allowFetch = true)
@@ -83041,9 +84020,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
             healthBranchAncestry(ctx.gitIdentity, abs, repo, verdict.branch,
               declaredMainlineBranch(ctx.resolved, repo.name))
           else: (disjoint: false, comparison: "", diagnostic: "detached HEAD")
-        let anyRemote = gitRunPlainQuery(ctx.gitIdentity, ["-C", abs,
-          "for-each-ref", "--format=%(refname)", "--contains=HEAD", "refs/remotes/"])
-        if anyRemote.code != 0 or (anyRemote.output.strip().len == 0 and
+        let anyRemote = revisionOnRemoteTrackingRef(ctx.gitIdentity, abs,
+          "HEAD", "")
+        if not anyRemote.ok or (not anyRemote.contained and
             (ancestry.disjoint or ancestry.diagnostic.len > 0)):
           remedies.add("do not push " & repo.path & "; inspect disjoint-local-branches and migrate unique work before retiring old history")
         else:
@@ -83081,13 +84060,16 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # while the checkout's HEAD is published. Published disjoint roots are
   # legitimate imports, so absence from all remote refs is required too.
   # This row only diagnoses; subject matches never authorize deleting work.
+  parsed.progress.beginRow("disjoint-local-branches")
   block disjointBranchesCheck:
     var findings: seq[string]
     var inspected = 0
     if not ctx.resolvedOk or not ctx.gitOk:
       findings.add("unconfirmed: manifest unresolved or no usable git tool")
     else:
-      for repo in ctx.resolved.repos:
+      for index, repo in ctx.resolved.repos:
+        parsed.progress.beginItem(repo.path, index + 1,
+          ctx.resolved.repos.len)
         let abs = parsed.workspaceRoot / repo.path
         if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
           continue
@@ -83103,13 +84085,14 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           inc inspected
           let where = repo.path & " branch '" & branch & "'"
           let branchRef = "refs/heads/" & branch
-          var published = gitRunPlainQuery(ctx.gitIdentity, ["-C", abs,
-            "for-each-ref", "--format=%(refname)", "--contains=" & branchRef,
-            "refs/remotes/"])
-          if published.code != 0:
+          # One history walk per branch, not one per remote-tracking ref
+          # (``git_actions.revisionOnRemoteTrackingRef``).
+          var published = revisionOnRemoteTrackingRef(ctx.gitIdentity, abs,
+            branchRef, "")
+          if not published.ok:
             findings.add(where & ": unconfirmed: cannot probe publication")
             continue
-          if published.output.strip().len > 0: continue
+          if published.contained: continue
           var ancestry = healthBranchAncestry(ctx.gitIdentity, abs, repo, branch,
             declaredMainlineBranch(ctx.resolved, repo.name))
           if ancestry.diagnostic.len > 0:
@@ -83128,13 +84111,12 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
           if fetchDiagnostic.len > 0:
             findings.add(where & ": " & fetchDiagnostic)
             continue
-          published = gitRunPlainQuery(ctx.gitIdentity, ["-C", abs,
-            "for-each-ref", "--format=%(refname)", "--contains=" & branchRef,
-            "refs/remotes/"])
-          if published.code != 0:
+          published = revisionOnRemoteTrackingRef(ctx.gitIdentity, abs,
+            branchRef, "")
+          if not published.ok:
             findings.add(where & ": unconfirmed: cannot probe publication after fetch")
             continue
-          if published.output.strip().len > 0: continue
+          if published.contained: continue
           ancestry = healthBranchAncestry(ctx.gitIdentity, abs, repo, branch,
             declaredMainlineBranch(ctx.resolved, repo.name))
           if ancestry.diagnostic.len > 0:
@@ -83173,6 +84155,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     ``--fix`` removes the stale remote-tracking refs (message A); a
   #     branch of the user's is never touched (message B), so it stays a warn
   #     whose remedy is the per-branch fix the messages print.
+  parsed.progress.beginRow("shared-clone-leaves")
   block sharedCloneLeavesCheck:
     if not ctx.resolvedOk or not ctx.gitOk:
       checks.add(HealthCheck(
@@ -83193,7 +84176,8 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var broken: seq[string]
     var chains: seq[string]
     var diagnostics: seq[string]
-    for repo in ctx.resolved.repos:
+    for index, repo in ctx.resolved.repos:
+      parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
       let abs = parsed.workspaceRoot / repo.path
       if not dirExists(abs / ".git") and not fileExists(abs / ".git"):
         continue
@@ -83299,6 +84283,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   #     workspace's, so every pool in the cache is examined; examining one is
   #     a directory listing. Report-only; ``--fix`` sweeps under each pool's
   #     lock, as the refresh, refill and maintenance paths do themselves.
+  parsed.progress.beginRow("shared-clone-pack-temporaries")
   block sharedClonePackTemporariesCheck:
     let cacheRoot = defaultCacheRoot(parsed.workspaceRoot)
     var pools = 0
@@ -83341,6 +84326,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
   # when some participating repository carries a snapshot or names a policy,
   # so a workspace that has adopted none sees no change. A stale snapshot is a
   # warning with the remedy, never a failure: nothing refuses on it.
+  parsed.progress.beginRow("certificate-policy-snapshot")
   block certificatePolicyCheck:
     if not ctx.initialized:
       break certificatePolicyCheck
@@ -83795,7 +84781,25 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
   ## Diagnose every layer and pair each failure with the exact remedy
   ## command. Exit non-zero (1) if any check is ``fail`` so CI / agents
   ## can gate on a healthy environment.
-  let parsed = healthArgsOf(c)
+  var parsed = healthArgsOf(c)
+  # Progress goes to stderr while the rows run (CLI/health.md § "Progress
+  # while it runs"): one status line rewritten in place on a terminal, one
+  # line per row and per checkout otherwise, so a run that is killed still
+  # names the row and the checkout it was in. ``--json`` off a terminal stays
+  # silent: its consumers capture the document, and many merge the streams.
+  let stderrIsTerminal = isatty(stderr)
+  if stderrIsTerminal:
+    parsed.progress = newHealthProgress(
+      proc (text: string) =
+        stderr.write(text)
+        stderr.flushFile(),
+      hpmLive, terminalWidth())
+  elif not parsed.json:
+    parsed.progress = newHealthProgress(
+      proc (text: string) =
+        stderr.write(text)
+        stderr.flushFile(),
+      hpmLines)
   # ``--fix`` lines are written as they happen, never collected and printed
   # after the fixes ran: a fix can clone many repositories, and a plan the
   # operator reads only once the work is done is no plan. ``--json`` keeps
@@ -83808,6 +84812,9 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
   if parsed.fix:
     applyStateFileMigrationFix(parsed.workspaceRoot, emitFix)
   var (checks, ctx) = gatherHealthChecks(parsed)
+  # Before anything else is printed: a live status line still on screen
+  # would otherwise prefix the first line of the plan or the report.
+  parsed.progress.finish()
 
   if parsed.fix and ctx.setAsideFiles > 0:
     # The rows were computed with a malformed workspace file set aside, so the
@@ -83819,6 +84826,7 @@ proc runHealthCommand*(c: ReproCommandLineHealth): int =
     applyHealthFixes(parsed, checks, ctx, emitFix)
     # Re-diagnose after fixing so the final report reflects the new state.
     (checks, ctx) = gatherHealthChecks(parsed)
+    parsed.progress.finish()
 
   if parsed.json:
     stdout.writeLine(pretty(healthChecksToJson(checks), indent = 2))
@@ -88963,7 +89971,7 @@ proc executeBranchFork(parsed: BranchArgs): BranchReport =
       continue
     state.isClean = cleanRes.isClean
     # F0.3 — the CHEAP half of the publication question, kept in the local
-    # phase where it belongs: ``git branch -r --contains HEAD`` touches no
+    # phase where it belongs: the remote-tracking containment walk touches no
     # network. A repo that answers "published" here is finished with; only the
     # ones that do not get the network round-trip below. That is what keeps the
     # ordinary, healthy fork exactly as fast and as quiet as it was before this
@@ -91649,15 +92657,35 @@ proc canonicalReadPath(path: string): string =
   except OSError:
     result = os.normalizedPath(absolutePath(path))
 
-proc repositoryRelativePath(root, path: string): string =
-  ## ``path`` relative to ``root`` with ``/`` separators, or "" when it is not
-  ## inside the repository.
+proc placedReadPath(path: string): string =
+  ## Where ``path`` sits: the ancestors of the entry are resolved and the
+  ## entry itself is not. A read of a symbolic link is a read of the link,
+  ## and the content binds (or fails to bind) the link, so where it points
+  ## neither places it inside the repository nor inside an output tree
+  ## (Monitor-Hook-Shim §"Both sides in one resolution"; the engine's own
+  ## ``isRemovedOutputTreePath`` places a link entry the same way).
+  let absolute = os.normalizedPath(absolutePath(path))
+  let (dir, name) = splitPath(absolute)
+  if name.len == 0 or not symlinkExists(absolute):
+    return canonicalReadPath(path)
+  try:
+    result = expandFilename(dir) / name
+  except OSError:
+    result = absolute
+
+proc relativeToRoot(root, full: string): string =
+  ## ``full`` (already placed) relative to ``root`` with ``/`` separators,
+  ## or "" when it is not inside the repository.
   let base = canonicalReadPath(root)
-  let full = canonicalReadPath(path)
   if full.len <= base.len + 1 or not full.startsWith(base) or
       full[base.len] notin {DirSep, AltSep}:
     return ""
   full[base.len + 1 .. ^1].replace(DirSep, '/')
+
+proc repositoryRelativePath(root, path: string): string =
+  ## ``path`` relative to ``root`` with ``/`` separators, or "" when it is not
+  ## inside the repository. A link is placed as the entry (``placedReadPath``).
+  relativeToRoot(root, placedReadPath(path))
 
 proc isTrackedOrInsideTracked(relative: string;
     tracked: HashSet[string]): bool =
@@ -91675,15 +92703,18 @@ proc isTrackedOrInsideTracked(relative: string;
     path = path[0 ..< slash]
   false
 
-proc isExemptOutputRead(path: string; readSet: CapturedReadSet): bool =
+proc isExemptOutputRead(path: string; readSet: CapturedReadSet;
+    asEntry = true): bool =
   ## ``path`` (absolute) is a declared output of an action in the certified
   ## closure, or lies in an output directory the engine empties before one
   ## runs. Exact match for files, as the engine's own self-write filter
   ## (``selfWrittenOutputKeys``) uses: lying NEXT TO an output, or in the
   ## directory outputs go to, does not make a file an output.
-  let full = canonicalReadPath(path)
+  ## ``asEntry`` places a link as the entry; false resolves it to its target.
+  let full = if asEntry: placedReadPath(path) else: canonicalReadPath(path)
   for output in readSet.exemptOutputs:
-    if canonicalReadPath(output) == full:
+    if (if asEntry: placedReadPath(output) else: canonicalReadPath(output)) ==
+        full:
       return true
   for tree in readSet.exemptOutputTrees:
     let root = canonicalReadPath(tree)
@@ -91741,19 +92772,27 @@ proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
   var seen = initHashSet[string]()
   if readSet.captured:
     for path in readSet.paths:
-      let relative = repositoryRelativePath(repositoryRoot, path)
-      if relative.len == 0 or seen.contains(relative):
-        continue
-      if relative == ".git" or relative.startsWith(".git/"):
-        continue
-      if isTrackedOrInsideTracked(relative, trackedPaths):
-        continue
-      if dirExists(canonicalReadPath(path)):
-        continue
-      if isExemptOutputRead(path, readSet):
-        continue
-      seen.incl(relative)
-      result.offending.add(relative)
+      # The entry first: a link is judged as itself, wherever it points.
+      var entries = @[(relative: repositoryRelativePath(repositoryRoot, path),
+        asEntry: true)]
+      # A link's target is read too, and the content binds the link, not
+      # what it leads to, so the target is judged as well.
+      if symlinkExists(absolutePath(path)):
+        entries.add((relative: relativeToRoot(repositoryRoot,
+          canonicalReadPath(path)), asEntry: false))
+      for (relative, asEntry) in entries:
+        if relative.len == 0 or seen.contains(relative):
+          continue
+        if relative == ".git" or relative.startsWith(".git/"):
+          continue
+        if isTrackedOrInsideTracked(relative, trackedPaths):
+          continue
+        if dirExists(canonicalReadPath(path)):
+          continue
+        if isExemptOutputRead(path, readSet, asEntry):
+          continue
+        seen.incl(relative)
+        result.offending.add(relative)
   result.read = result.offending
   result.read.sort(system.cmp[string])
   if mode == cuiStrict:
@@ -93387,9 +94426,12 @@ proc issueForCertificateNode(pre: IssuancePreconditions; name: string;
 proc plainTestBuild(opts: ReproTestShardOpts; selectors: seq[string];
                     publicCliPath: string): int =
   ## ``repro build`` of ``selectors`` (``test`` when none) with no issuance.
+  ## A fragment-less project path selects that project's ``test``
+  ## collection (``testCollectionOfPath``).
   withCallerVariants(opts):
     result = runBuildCommand(testBuildArgs(opts,
-      if selectors.len == 0: @[TestCollectionSelector] else: selectors),
+      if selectors.len == 0: @[TestCollectionSelector]
+      else: testCollectionSelectors(selectors)),
       publicCliPath)
 
 proc selectorSpelling(name: string; spellings: openArray[string]): string =
@@ -93741,7 +94783,10 @@ proc prepareCertifyingPlan(opts: ReproTestShardOpts; mode: ToolProvisioningMode;
   ## TC-8e, step 1: the plan, from the stored graph, as ``repro certificates
   ## plan`` reads it. Runs nothing but the provider's graph evaluation.
   let workRoot = opts.workRoot
-  result.selectors = opts.selectors
+  # A fragment-less project path selects that project's ``test`` collection
+  # (``testCollectionOfPath``), for the plan, the sharded partition and the
+  # build alike.
+  result.selectors = testCollectionSelectors(opts.selectors)
   try:
     # ``--no-runquota`` reaches the plan's own edges too, not only the build.
     # So does ``REPROBUILD_NO_RUNQUOTA``, the documented full-bypass switch
@@ -96237,6 +97282,13 @@ type CompiledProviderSolverInputs = object
   text: string
   toolUses: seq[InterfaceToolUse]
   usesSelectors: seq[string]
+  pinnedSiblings: seq[string]
+    ## The root recipe's ``pinned:`` repository names: siblings the lock
+    ## records as plain ``deps`` entries and whose recipes are NOT read.
+    ## Filled only for the recipe the refresh started from — a pin a
+    ## ``uses:``-reached sibling declares is that sibling's own CI need, not
+    ## a dependency of this repo, so ``foldProviderSolverInputs`` never
+    ## carries it (Unified-Locking-And-Hooks.md §14.2 item 4).
   defaultToolProvisioning: string
   sourceRecipeRoots: seq[string]
   catalogRoots: seq[string]
@@ -96424,7 +97476,8 @@ proc tryLoadDurableSolverProviderArtifacts(
       # The edge the build ran: recipe-relative where it could be
       # (`runProviderCompileEdge`), whose record is keyed by the recipe-relative
       # plan, not by the caller's.
-      let helperCliPath = internalReproHelperCliPath(publicCliPath)
+      let helperCliPath =
+        graphHelperCliPath(publicCliPath, ProviderCompileActionId)
       let relocated = planRecipeRelativeProviderCompile(plan, modulePath,
         helperCliPath, compileWorkDir, projectRootForModule(modulePath))
       proc locationBoundAction(): BuildAction =
@@ -96603,6 +97656,15 @@ proc solverInputsFromCompiledProvider(projectDir: string;
     # skip the (more expensive) provider compile otherwise so a plain recipe
     # falls straight back to the sidecar without paying for it.
     if requireSolverBinding and artifact.projectInterface.toolUses.len == 0:
+      # A recipe whose only declaration is ``pinned:`` has nothing to solve
+      # but still has a dependency set: its pinned siblings. Answer the empty
+      # solve for them now, without compiling the provider — the provider is
+      # for the solve, and a pin contributes none (§14.2 item 4).
+      if allowEmptySolve and artifact.projectInterface.pinnedSiblings.len > 0:
+        return some(CompiledProviderSolverInputs(
+          pinnedSiblings: artifact.projectInterface.pinnedSiblings,
+          defaultToolProvisioning:
+            artifact.projectInterface.defaultToolProvisioning))
       return result
     # FUP-M — capture the recipe's declared ``uses:`` producer selectors so
     # ``lockedDepsForWorkspace`` can fold each sibling PRODUCER edge into the
@@ -96618,6 +97680,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       emptySolve = some(CompiledProviderSolverInputs(
         toolUses: artifact.projectInterface.toolUses,
         usesSelectors: usesSelectors,
+        pinnedSiblings: artifact.projectInterface.pinnedSiblings,
         defaultToolProvisioning:
           artifact.projectInterface.defaultToolProvisioning))
       result = emptySolve
@@ -96635,7 +97698,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
           if projectDir.len > 0: absolutePath(projectDir) else: getCurrentDir()
         let compiled = runProviderCompileEdge(plan,
           modulePath, interfacePath, providerArtifactPath,
-          internalReproHelperCliPath(publicCliPath), compileWorkDir, scratchDir,
+          graphHelperCliPath(publicCliPath, ProviderCompileActionId), compileWorkDir, scratchDir,
           providerRoot, BuildEngineConfig(
           cacheRoot: cacheRoot,
           actionCacheRoot: currentActionCacheRoot(),
@@ -96710,6 +97773,7 @@ proc solverInputsFromCompiledProvider(projectDir: string;
       declarationSites: sites,
       toolUses: artifact.projectInterface.toolUses,
       usesSelectors: usesSelectors,
+      pinnedSiblings: artifact.projectInterface.pinnedSiblings,
       defaultToolProvisioning:
         artifact.projectInterface.defaultToolProvisioning))
   except CatchableError as e:
@@ -96909,11 +97973,93 @@ proc foldProviderSolverInputs(projectDir: string;
   aggregate.text = solver_variants.renderSolverInputsFixture(
     aggregate.variants, aggregate.packages)
 
+type EngineEnvelopeSkew = object
+  ## The engine running a recipe read is OLDER than the interface envelope
+  ## the recipe's SDK writes (Unified-Locking-And-Hooks.md §13.5, "An engine
+  ## older than the interface envelope", amended 2026-11-22).
+  found: bool
+  written: int        ## the version the SDK writes
+  readable: int       ## the newest version this engine reads
+  sdkRoot: string     ## the reprobuild tree the recipe compiled against
+  engine: string      ## this engine, as the hooks would name it
+
+proc engineEnvelopeSkewOf(failure, projectDir: string): EngineEnvelopeSkew =
+  ## Is ``failure`` (a recipe read of ``projectDir`` that did not complete)
+  ## the decode of an envelope newer than this engine? Recognised only from
+  ## the refusal ``unsupportedInterfaceEnvelopeMessage`` writes, and only when
+  ## the SDK the recipe compiled against declares that very version (or
+  ## declares none this reader can see): a garbled envelope that merely
+  ## carries a large number is a malformed artifact, not a newer engine's.
+  let skew = interfaceEnvelopeSkewIn(failure)
+  if not skew.found: return
+  let sdkRoot =
+    try: recipeSdkRoot(absolutePath(projectDir))
+    except CatchableError: ""
+  let declared = sdkWrittenInterfaceEnvelopeVersion(sdkRoot)
+  if declared > 0 and declared != skew.written: return
+  EngineEnvelopeSkew(found: true, written: skew.written,
+    readable: skew.readable, sdkRoot: sdkRoot,
+    engine:
+      try: publicCliImagePath()
+      except CatchableError: getAppFilename())
+
+proc engineBuiltFromSdkCommand(sdkRoot: string): string =
+  ## A shell word that evaluates to a `repro` built from ``sdkRoot``, runnable
+  ## from any directory: the flake's default package when the tree is a
+  ## flake (the route the distribution spec uses before any pin moves). ""
+  ## when there is no flake to build it from.
+  if sdkRoot.len == 0 or not fileExists(extendedPath(sdkRoot / "flake.nix")):
+    return ""
+  "\"$(nix build --no-link --print-out-paths " &
+    quoteShellPosix(sdkRoot & "#default") & ")/bin/repro\""
+
+proc engineEnvelopeSkewSentence(skew: EngineEnvelopeSkew): string =
+  ## What happened, naming both versions, the engine and the SDK.
+  "the engine reading the recipe (" & skew.engine & ") reads interface " &
+    "envelopes up to version " & $skew.readable & ", but the reprobuild " &
+    "tree the recipe compiles against (" &
+    (if skew.sdkRoot.len > 0: skew.sdkRoot else: "unknown") &
+    ") writes version " & $skew.written & ": this engine is OLDER than " &
+    "that tree's interface envelope, so it cannot read a recipe compiled " &
+    "against it. The recipe itself is not at fault"
+
+proc engineEnvelopeSkewRemedy(skew: EngineEnvelopeSkew;
+    verbArgs: string): string =
+  ## The remedy, runnable where printed: run ``verbArgs`` (a `repro` verb and
+  ## its arguments) with an engine built from the SDK tree. Without a flake
+  ## to build from, the tree's own build is named instead.
+  let built = engineBuiltFromSdkCommand(skew.sdkRoot)
+  if built.len > 0:
+    "build an engine from that tree and run it: `" & built & " " & verbArgs &
+      "`"
+  elif skew.sdkRoot.len > 0:
+    "build `repro` from " & remedyProsePath(skew.sdkRoot) & " (its " &
+      "CONTRIBUTING.md: `just build` in its development shell) and run `" &
+      remedyPathWord(skew.sdkRoot / "build" / "bin" / "repro") & " " &
+      verbArgs & "`"
+  else:
+    "run `repro " & verbArgs & "` with a build of reprobuild that reads " &
+      "interface envelope version " & $skew.written
+
 proc unreadableRecipeLockRefusal(recipe, failure: string): string =
   ## Why a refresh refuses to write: the recipe's solve could not be read,
   ## so no lock written now would carry its packages or producer pins.
-  "could not read the solve of " & recipe & ", so a lock written now " &
-    "would record none of its packages or the workspace producers its " &
+  ##
+  ## When the read failed because this engine is older than the envelope
+  ## the recipe's SDK writes, that is said FIRST, with the remedy: no edit
+  ## to the recipe can clear it, and a reader told only "could not read the
+  ## solve" looks at the recipe.
+  let dir =
+    if dirExists(extendedPath(recipe)): recipe else: recipe.parentDir
+  let skew = engineEnvelopeSkewOf(failure, dir)
+  let lead =
+    if skew.found:
+      engineEnvelopeSkewSentence(skew) & "; " &
+        engineEnvelopeSkewRemedy(skew, "lock refresh " &
+          remedyPathWord(absolutePath(dir))) & ". "
+    else: ""
+  lead & "could not read the solve of " & recipe & ", so a lock written " &
+    "now would record none of its packages or the workspace producers its " &
     "uses resolve from; refusing to write one (the committed lock is " &
     "left as it is): " & failure
 
@@ -96922,9 +98068,11 @@ type RefreshSolverInputs = tuple[
     packages: seq[PackageDecl]; text: string; source: string;
     usesSelectors: seq[string]; sourceRecipeRoots: seq[string];
     catalogRoots: seq[string]; unreachedSelectors: seq[UnreachedUsesSelector];
-    rootDeclarationSites: Table[string, string]; usesEdges: seq[UsesEdge]]
+    rootDeclarationSites: Table[string, string]; usesEdges: seq[UsesEdge];
+    pinnedSiblings: seq[string]]
   ## What ``resolveRefreshSolverInputs`` answers. Named once because
-  ## ``repro lock validate`` declares a variable of it.
+  ## ``repro lock validate`` declares a variable of it. ``pinnedSiblings`` is
+  ## the root recipe's ``pinned:`` names (``CompiledProviderSolverInputs``).
 
 proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
     RefreshSolverInputs =
@@ -96966,17 +98114,20 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         # so the two agree on the inputs digest of an empty solve.
         return (true, @[], @[], "", "recipe-without-solve",
           p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-          p.unreachedSelectors, p.declarationSites, p.usesEdges)
+          p.unreachedSelectors, p.declarationSites, p.usesEdges,
+          p.pinnedSiblings)
       return (true, p.variants, p.packages, p.text, "provider",
         p.usesSelectors, p.sourceRecipeRoots, p.catalogRoots,
-        p.unreachedSelectors, p.declarationSites, p.usesEdges)
+        p.unreachedSelectors, p.declarationSites, p.usesEdges,
+        p.pinnedSiblings)
   let inputsP =
     if inputsOverride.len > 0: absolutePath(inputsOverride)
     else: solverInputsPath(projectDir)
   if fileExists(extendedPath(inputsP)):
     let loaded = loadSolverInputsFile(inputsP)
     return (true, loaded.variants, loaded.packages, loaded.text, "sidecar",
-      @[], @[], @[], @[], initTable[string, string](), newSeq[UsesEdge]())
+      @[], @[], @[], @[], initTable[string, string](), newSeq[UsesEdge](),
+      newSeq[string]())
   # A recipe that declares nothing to solve (a dev-env-only `repro.nim`) still
   # has a develop set, and its committed lock is where that set's revisions
   # are recorded (Unified-Locking-And-Hooks.md §14.2). Its solve is the empty
@@ -96997,12 +98148,12 @@ proc resolveRefreshSolverInputs(projectDir, inputsOverride: string):
         raise newException(IOError, unreadableRecipeLockRefusal(
           recipe, probeFailure))
       return (true, @[], @[], "", "recipe-without-solve", @[], @[], @[], @[],
-        initTable[string, string](), newSeq[UsesEdge]())
+        initTable[string, string](), newSeq[UsesEdge](), newSeq[string]())
   if probeFailure.len > 0:
     stderr.writeLine("repro lock refresh: could not read the tool uses of " &
       "the recipe in " & projectDir & ": " & probeFailure)
   return (false, @[], @[], "", "", @[], @[], @[], @[],
-    initTable[string, string](), newSeq[UsesEdge]())
+    initTable[string, string](), newSeq[UsesEdge](), newSeq[string]())
 
 proc buildLockGenerationRequest(projectDir, inputsOverride,
                                 platformOverride: string;
@@ -97036,6 +98187,16 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
       "`-adjacent recipe, a `" & SolverInputsFileName &
       "` sidecar, or pass --inputs <file>)")
     return 1
+  # A ``pinned:`` name no checkout or committed pin can place is refused here,
+  # named, like any other lock-generation error (§14.2 item 4).
+  let extraDeps =
+    try:
+      lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
+        resolved.sourceRecipeRoots, resolved.catalogRoots, resolved.usesEdges,
+        resolved.pinnedSiblings)
+    except PinnedSiblingError as e:
+      stderr.writeLine("repro lock " & verb & ": " & e.msg)
+      return 1
   # MO-11 — overlay each package's DECLARED source provenance (the
   # solver-inputs ``source:`` directive) onto the decls handed to the
   # generation path, which re-attaches it to the solved-graph ``source`` field
@@ -97050,8 +98211,7 @@ proc buildLockGenerationRequest(projectDir, inputsOverride,
     endpoints: gen.registries,
     workDir: getTempDir() /
       ("repro-lock-generation-" & $getCurrentProcessId() & "-" & verb),
-    extraDeps: lockedDepsForWorkspace(projectDir, resolved.usesSelectors,
-      resolved.sourceRecipeRoots, resolved.catalogRoots, resolved.usesEdges),
+    extraDeps: extraDeps,
     entryPoint: entryPoint)
   unreached = resolved.unreachedSelectors
   rootSites = resolved.rootDeclarationSites
@@ -97446,15 +98606,17 @@ proc recipeDependencySet(projectDir: string): RecipeDependencySet =
       result.diagnostic = lines.join("; ")
       return
     for d in lockedDepsForWorkspace(root, inputs.usesSelectors,
-        inputs.sourceRecipeRoots, inputs.catalogRoots, inputs.usesEdges):
+        inputs.sourceRecipeRoots, inputs.catalogRoots, inputs.usesEdges,
+        inputs.pinnedSiblings):
       if isSelfLockedDep(d) or d.coordinates.kind != ckVcs: continue
       result.deps.add(d)
     result.ok = true
   except CatchableError as err:
     result.diagnostic = err.msg
 
-proc verifyCommittedLockDependencySet*(repoRoot: string):
-    tuple[examined, stale, unverified: bool;
+proc verifyCommittedLockDependencySet*(repoRoot: string;
+    workspaceRoot = ""):
+    tuple[examined, stale, unverified, engineOlderThanEnvelope: bool;
           evidence, remediation: string] =
   ## Unified-Locking-And-Hooks.md §13.5 / §14.9 — does the committed
   ## ``repro.lock`` at ``repoRoot`` carry exactly the dependencies its
@@ -97511,7 +98673,8 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
       root & " has no repro.nim (nor repro.solver) that declares any " &
       "dependency [missing= extra=" & pinned.join(",") & "]"
     result.remediation = "declare each dependency in " & root /
-      CanonicalProjectFileName & " (`uses:`), then " & refresh
+      CanonicalProjectFileName & " (`uses:`, or `pinned:` for a sibling " &
+      "that is only cloned), then " & refresh
     return
   if not derived.ok:
     result.unverified = true
@@ -97521,20 +98684,44 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
     # so the refusal names the skew and the build to run instead. Told apart
     # by the record the refusal carries (`parseEngineRecipeSkew`), never by
     # compiler wording.
-    let skew = parseEngineRecipeSkew(derived.diagnostic)
-    if skew.found:
+    let recipeSkew = parseEngineRecipeSkew(derived.diagnostic)
+    if recipeSkew.found:
       result.evidence = "the dependency set " & root /
         CanonicalProjectFileName & " derives could not be computed: " &
         "this repro is older than the sibling recipe the recipe imports — " &
-        "reprobuild " & skew.skew.engineVersion & " (" &
-        (if skew.skew.enginePath.len > 0: skew.skew.enginePath
+        "reprobuild " & recipeSkew.skew.engineVersion & " (" &
+        (if recipeSkew.skew.enginePath.len > 0: recipeSkew.skew.enginePath
          else: "engine path unknown") & ", revision " &
-        (if skew.skew.engineRevision.len > 0: skew.skew.engineRevision
-         else: "unknown") & ") cannot compile " & skew.skew.siblingRoot /
-        "repro.nim" & ", which is reprobuild " & skew.skew.siblingVersion &
-        " (revision " & (if skew.skew.siblingRevision.len > 0:
-          skew.skew.siblingRevision else: "unknown") & ")"
-      result.remediation = engineRecipeSkewRemedy(skew.skew)
+        (if recipeSkew.skew.engineRevision.len > 0: recipeSkew.skew.engineRevision
+         else: "unknown") & ") cannot compile " & recipeSkew.skew.siblingRoot /
+        "repro.nim" & ", which is reprobuild " & recipeSkew.skew.siblingVersion &
+        " (revision " & (if recipeSkew.skew.siblingRevision.len > 0:
+          recipeSkew.skew.siblingRevision else: "unknown") & ")"
+      result.remediation = engineRecipeSkewRemedy(recipeSkew.skew)
+      return
+    # §13.5 (amended 2026-11-22): an engine older than the envelope the
+    # recipe's SDK writes is not an unreadable recipe. It is told apart —
+    # its own property, both versions, and a remedy that can work — because
+    # "make the recipe readable" sent the operator to a recipe that was
+    # readable, and `repro lock refresh` with the same engine fails the same
+    # way. The gate's engine is the hooks' anchor (CLI/hooks.md,
+    # "Re-anchoring is explicit"), so the remedy moves the anchor.
+    let skew = engineEnvelopeSkewOf(derived.diagnostic, root)
+    if skew.found:
+      result.engineOlderThanEnvelope = true
+      let anchorRoot =
+        if workspaceRoot.len > 0: workspaceRoot
+        else:
+          let enclosing = enclosingWorkspaceRoot(root)
+          if enclosing.len > 0: enclosing else: root
+      result.evidence = engineEnvelopeSkewSentence(skew) &
+        " [envelope-written=" & $skew.written & " envelope-readable=" &
+        $skew.readable & " sdk=" & skew.sdkRoot & "]: " & derived.diagnostic
+      result.remediation = "this gate cannot verify " & root /
+        CanonicalProjectFileName & " until the hooks run an engine that " &
+        "reads envelope " & $skew.written & "; move their anchor: " &
+        engineEnvelopeSkewRemedy(skew, "hooks ensure --vcs --re-anchor " &
+          remedyPathWord(anchorRoot)) & ", then re-push"
       return
     result.evidence = "the dependency set " & root / CanonicalProjectFileName &
       " derives could not be computed: " & derived.diagnostic
@@ -97563,7 +98750,7 @@ proc verifyCommittedLockDependencySet*(repoRoot: string):
     " extra=" & extra.join(",") & "]"
   result.remediation = refresh & " (a lock records only the dependencies " &
     "repro.nim derives; a dependency it needs is declared there, with " &
-    "`uses:`)"
+    "`uses:`, or with `pinned:` for a sibling that is only cloned)"
 
 type
   RefreshPinGate = object
@@ -98486,6 +99673,8 @@ proc runLockGenerationVerb(r: LockVerbInputs; verb: string;
       if applied.refusals.len > 0:
         raise newException(NimbleLockError, "the solved Nimble closure " &
           "cannot be locked:\n  " & applied.refusals.join("\n  "))
+      for move in applied.moves:
+        stderr.writeLine("repro lock " & verb & ": " & move)
       applied.document
   let writeTo = if writeByDefault or gen.write: lockP else: ""
   var removals = SiblingRemovalReport(droppedPins: newJArray(),
@@ -104687,7 +105876,7 @@ proc executeFlakeLockRefresh(flakeRoot, workspaceRoot, currentRepo: string;
   ## both or neither, so that one repository resolved by both locks is never
   ## moved in one of them only (Unified-Locking-And-Hooks.md §16.3 H3).
   result.tag = "unknown"
-  result.lockPath = flakeRoot / "flake.lock"
+  result.lockPath = flakeRoot / CommitTimeFlakeLockFileName
 
   # (0) Nothing to refresh without BOTH halves. A repo with a flake but no lock
   # pins nothing; a repo with a lock but no flake declares no inputs. Both are
@@ -106359,7 +107548,7 @@ proc refreshFlakeLockAtCommit*(workspaceRoot, currentRepo: string;
   ## empty result and a failure must not look alike.
   if workspaceRoot.len == 0 or currentRepo.len == 0: return
   let flakeRoot = absolutePath(currentRepo)
-  let lockPath = flakeRoot / "flake.lock"
+  let lockPath = flakeRoot / CommitTimeFlakeLockFileName
   result.lockPath = lockPath
   if not fileExists(flakeRoot / "flake.nix") or not fileExists(lockPath):
     return
@@ -106665,6 +107854,100 @@ proc flakeDeferredCycleNotice(row: FlakeOverrideStateRow; selfName,
     " sibling=" & row.siblingRev & " relation=ahead ahead=" & $row.aheadBy &
     " unpublished=true deferred=mutual-pin]"
 
+# A shared checkout another participating repo pins (Unified-Locking-And-
+# Hooks.md §13.6, amended 2026-11-22). A workspace has ONE checkout of a
+# sibling, and two repos may pin it at two revisions on purpose (two repos
+# pinning one shared modules repo 9 commits apart). Compared with that
+# one checkout, whichever of the two pushed second was refused, and the only
+# way through was to move the checkout between the pushes — which changes what
+# every other push from the workspace is judged against. So a row whose
+# sibling HEAD is the revision another participating repo's COMMITTED lock
+# records for that same sibling is a notice, not a refusal: the checkout is at
+# an equally valid pin, and the verdict no longer depends on push order.
+
+type FlakeCheckoutHolder = object
+  ## The participating repo whose committed lock pins a sibling at the
+  ## revision its shared checkout is at.
+  repo: string        ## its declared name
+  dir: string         ## its checkout
+  lockFiles: seq[string]
+    ## the committed lock(s) that record the revision (`flake.lock`,
+    ## `repro.lock`), for the notice
+
+proc flakeCheckoutHolder(row: FlakeOverrideStateRow;
+    selfRoot, workspaceRoot: string; repos: seq[ResolvedRepo];
+    identity: GitToolIdentity): FlakeCheckoutHolder =
+  ## The other participating repo whose committed lock pins ``row.repo`` at
+  ## ``row.siblingRev``, or an empty holder when none does.
+  ##
+  ## "Pins" is ``committedLockRevisionsOf``, the one rule for "the tested lock
+  ## pins this peer": its `repro.lock` entry for the sibling, or a
+  ## `flake.lock` root input bound to the sibling's checkout by identity. A
+  ## revision another repo records for a DIFFERENT entry does not count.
+  ##
+  ## Not granted, so the row keeps refusing exactly as before:
+  ##   * a sibling HEAD that is not published: another repo's lock naming it
+  ##     would itself be a lock nobody can reproduce;
+  ##   * a lock (or the `flake.nix` its binding reads) with uncommitted
+  ##     changes: an edit in a working tree is not a pin anybody holds;
+  ##   * the pushed repo itself, and the sibling itself.
+  ## A sibling at a third revision, pinned by nobody, is refused as before.
+  let rev = row.siblingRev.toLowerAscii()
+  if rev.len == 0 or row.path.len == 0 or workspaceRoot.len == 0:
+    return
+  if flakeClassifyPublication(identity, row.path, row.siblingRev).unpublished:
+    return
+  for r in repos:
+    if r.name.len == 0 or r.name == row.repo or r.path.len == 0:
+      continue
+    let dir = os.normalizedPath(absolutePath(workspaceRoot / r.path))
+    if cmpPaths(dir, selfRoot) == 0 or not dirExists(extendedPath(dir)):
+      continue
+    # Cheap first: a lock whose text never mentions the revision cannot pin
+    # it, and this loop visits every participating repo.
+    var mentioning: seq[string]
+    for name in [CommittedLockFileName, "flake.lock"]:
+      let path = dir / name
+      if fileExists(extendedPath(path)):
+        try:
+          if readFile(extendedPath(path)).toLowerAscii().contains(rev):
+            mentioning.add(name)
+        except CatchableError:
+          discard  # unreadable: not shown to pin anything
+    if mentioning.len == 0:
+      continue
+    # Committed: the lock files (and `flake.nix`, which binds the flake's
+    # inputs to checkouts) carry no uncommitted change.
+    let status = gitRunPlainQuery(identity, ["-C", dir, "status",
+      "--porcelain", "--untracked-files=no", "--", CommittedLockFileName,
+      "flake.lock", "flake.nix"])
+    if status.code != 0 or status.output.strip().len > 0:
+      continue
+    let pinned = committedLockRevisionsOf(dir, workspaceRoot, repos, row.repo)
+    # A positive answer only: ``ok = false`` speaks about what may be MISSING
+    # from ``revs``, never about a revision a readable lock did record.
+    if rev in pinned.revs:
+      return FlakeCheckoutHolder(repo: r.name, dir: dir, lockFiles: mentioning)
+
+proc flakeCheckoutHeldNotice(row: FlakeOverrideStateRow;
+    holder: FlakeCheckoutHolder; selfName: string): string =
+  ## The notice for a row a shared checkout's other pin holds. It names both
+  ## pins and the repo that holds the checkout's, so an operator who did NOT
+  ## mean the two repos to differ can see it and act.
+  let self = if selfName.len > 0: "'" & selfName & "'" else: "this repo"
+  "flake.lock pin NOT refused — the shared checkout is at another " &
+    "participating repo's pin: " & flakeRowSentence(row) & ". '" &
+    holder.repo & "' pins '" & row.repo & "' at " & shortRev(row.siblingRev) &
+    " in its committed " & holder.lockFiles.join(" and ") & " (" &
+    holder.dir & "), and " & self & " pins it at " & shortRev(row.pinnedRev) &
+    "; the workspace has one checkout of '" & row.repo & "', so it can sit " &
+    "at only one of the two, and each is a revision a committed lock " &
+    "names. If the two repos are meant to agree, re-pin one " &
+    "of them [input=" & row.input & " repo=" & row.repo & " pinned=" &
+    row.pinnedRev & " sibling=" & row.siblingRev & " relation=" &
+    flakePinRelationTag(row.relation) & " pinnedBy=" & holder.repo &
+    " deferred=shared-checkout]"
+
 proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     identity: GitToolIdentity;
     toolProvisioning: ToolProvisioningMode): FlakeGateVerdict =
@@ -106861,6 +108144,17 @@ proc verifyFlakeLockAgainstSiblings(repoRoot, workspaceRoot: string;
     if flakeRowIsDeferredCycle(cycle, row, identity):
       result.notices.add(flakeDeferredCycleNotice(row, cycle.selfName,
         declaredRevs.getOrDefault(row.input, ""), flakeRoot, workspaceRoot))
+    else:
+      refused.add(row)
+  offenders = refused
+  # §13.6 (amended 2026-11-22) — and the rows whose shared checkout sits at
+  # another participating repo's committed pin (``flakeCheckoutHolder``).
+  refused = @[]
+  for row in offenders:
+    let holder = flakeCheckoutHolder(row, flakeRoot, wsRoot, memberRepos,
+      identity)
+    if holder.repo.len > 0:
+      result.notices.add(flakeCheckoutHeldNotice(row, holder, cycle.selfName))
     else:
       refused.add(row)
   offenders = refused
@@ -107472,8 +108766,9 @@ proc commitAndPushManifest(identity: GitToolIdentity;
                            gitBin, manifestRoot, message: string;
                            paths: openArray[string]): tuple[
     code: int; diagnostic: string] =
-  ## Stage ``paths``, commit with ``message``, and push ``HEAD`` to the
-  ## manifest repo's upstream when one is configured. Best-effort push: the
+  ## Stage ``paths``, commit those paths and nothing else with ``message``
+  ## (other staged changes stay staged and out of the commit), and push
+  ## ``HEAD`` to the manifest repo's upstream when one is configured. Best-effort push: the
   ## commit always lands locally; a missing upstream is reported, not fatal.
   ##
   ## The stage below is deliberately NOT forced: these are operator-AUTHORED
@@ -107499,7 +108794,19 @@ proc commitAndPushManifest(identity: GitToolIdentity;
     let st = gitOutput(gitBin, manifestRoot, ["add", "--", p])
     if st.code != 0:
       return (code: st.code, diagnostic: "git add failed: " & st.output)
-  let ci = gitOutput(gitBin, manifestRoot, ["commit", "-m", message])
+  # The commit is limited to ``paths`` with ``--only`` and a pathspec. Staging
+  # them is not enough: a bare ``git commit`` records the WHOLE index, so an
+  # edit the operator had already staged in the manifest repo (or what an
+  # earlier verb staged before its commit failed) would be committed and
+  # pushed under this verb's message. ``--only`` commits the listed paths
+  # alone and leaves every other staged change staged and untouched
+  # (https://git-scm.com/docs/git-commit#Documentation/git-commit.txt---only).
+  # Deletions are covered: the ``git add`` above staged them, and a pathspec
+  # naming a removed tracked file commits the removal.
+  var commitArgs = @["commit", "-m", message, "--only", "--"]
+  for p in paths:
+    commitArgs.add(p)
+  let ci = gitOutput(gitBin, manifestRoot, commitArgs)
   if ci.code != 0:
     return (code: ci.code, diagnostic: "git commit failed: " & ci.output)
   # Resolve the upstream from @{u}; push only when configured.
@@ -108303,9 +109610,9 @@ proc runWorkspaceSetsCommand(req: WorkspaceSetsRequest;
       name & (if desc.len > 0: " (" & desc & ")" else: "") &
       (if templateName.len > 0: " from template " & templateName else: "")
     let res = commitAndPushManifest(identity, gitBin, manifestRoot, msg, paths)
-    # AFTER the commit, never before: `commitAndPushManifest` stages exactly
-    # the `paths` it was handed and commits without `-a`, and the index is
-    # gitignored besides — but regenerating on the far side of the commit is
+    # AFTER the commit, never before: `commitAndPushManifest` commits exactly
+    # the `paths` it was handed (`git commit --only -- <paths>`), and the
+    # index is gitignored besides — but regenerating on the far side of the commit is
     # what makes that a property of the ORDER rather than of two other files
     # staying the way they are today.
     #
@@ -109667,7 +110974,7 @@ proc runReproCommandLine(programName: string; args: seq[string];
     of ReproCommandLineCatalogCommand.generate:
       let r = conf.catalog.generate
       return runCatalogGenerateCommand(r.root, r.sourceSet, r.state,
-        r.generatedAt)
+        r.generatedAt, fullHistory = r.fullHistory)
     of ReproCommandLineCatalogCommand.verify:
       let r = conf.catalog.verify
       return runCatalogVerifyCommand(r.index, r.sourceSet, r.previous,
@@ -110204,6 +111511,12 @@ proc runThinAppDispatch(programName: string): int =
       args[0] == BrokerModeFlag:
     return runPrivilegedBrokerMode(args)
   if programName == "repro":
+    if args.len > 0 and args[0] in ["test", "build"]:
+      # Both run the RunQuota auto-start twice (dev-env preparation, then the
+      # build's session); one hold must cover both, or a retiring daemon this
+      # command adopted exits in between (`withInvocationRunQuotaHold`).
+      withInvocationRunQuotaHold:
+        return runReproCommandLine(programName, args, publicCliPath)
     return runReproCommandLine(programName, args, publicCliPath)
   # Every role of this image is a command of repro's command line (the
   # daemon is `repro daemon serve`, the store daemon `repro store serve`),
@@ -110244,6 +111557,102 @@ proc runThinApp*(programName: string): int =
     # nearest engine is the one whose protocol its children speak.
     putEnv("REPRO_INVOKING_CLI", stablePublicCliPath())
   result = runThinAppDispatch(programName)
+  flushStagedFailureReport(result)
+
+const GraphHelperRoles* = [
+    "compile-provider", "extract-interface", "compile-profile",
+    "probe-profile-platforms", "dev-env-introspect", "render-dev-env-shell",
+    "cmake-regenerate"]
+  ## The helper commands the BUILD GRAPH runs inside its own actions, and
+  ## so the only commands the graph helper image (``reprobuild-helper``,
+  ## `apps/reprobuild-helper`) answers. Each is spelt ``internal <role>``
+  ## or ``__repro-<role>``.
+  ##
+  ## Left out on purpose: the roles that are not a process INSIDE an
+  ## action's monitored tree. ``internal io monitor`` and
+  ## ``internal runquota-helper`` wrap the monitored command from outside
+  ## (the monitor injects into its child, not into itself), the shell-hook
+  ## roles (``direnv-activate``, ``native-shell-activate``) are run by a
+  ## user's shell, and the dev-session roles are long-lived services. They
+  ## stay in the engine.
+
+proc selectsGraphHelperRole*(args: openArray[string]): bool =
+  ## Whether ``args`` (without the image) start with one of
+  ## ``GraphHelperRoles``, in either spelling.
+  if args.len >= 2 and args[0] == "internal":
+    return args[1] in GraphHelperRoles
+  if args.len >= 1 and args[0].startsWith("__repro-"):
+    return args[0]["__repro-".len .. ^1] in GraphHelperRoles
+  false
+
+proc graphHelperEngineImage(): string =
+  ## The engine whose helper this image is, as the engine itself would name
+  ## its own image (``publicCliImagePath()`` run in the engine):
+  ## ``REPRO_PUBLIC_CLI_PATH`` when it names a file (a portable Linux
+  ## archive's launcher exports it naming the engine's launcher), else the
+  ## engine beside this image: makeWrapper's hidden image first (a Nix
+  ## package runs the engine as ``bin/.reprobuild-wrapped``), then
+  ## ``reprobuild``, then the engine's legacy name ``repro`` (a bootstrap tree
+  ## compiles the engine straight to ``bin/repro`` and has no thin client;
+  ## see ``ReproLegacyEngineName``). "" when there is none.
+  let configured = configuredPublicCliPath()
+  if configured.len > 0:
+    return configured
+  let dir = parentDir(absolutePath(getAppFilename()))
+  for name in [MakeWrapperHiddenPrefix & ReprobuildEngineName &
+                 MakeWrapperHiddenSuffix,
+               reprobuildEngineExeName(), reproLegacyEngineExeName()]:
+    let candidate = dir / name
+    if fileExists(extendedPath(candidate)):
+      return os.normalizedPath(candidate)
+  ""
+
+proc runGraphHelperApp*(): int =
+  ## The entry of the graph helper image (`apps/reprobuild-helper`): run one
+  ## of ``GraphHelperRoles`` exactly as the engine would, and refuse
+  ## anything else.
+  ##
+  ## THE SAME DISPATCH, A DIFFERENT IMAGE. The role is parsed by the same
+  ## generated parser and run by the same code as in the engine; the image
+  ## differs only in what it links (no ``-d:ssl``, so no OpenSSL to load and
+  ## no start-up entropy draw on Windows). So this entry reproduces what the
+  ## engine's entry does for these roles and nothing more:
+  ##
+  ##   * the ENGINE stays the public CLI. Whatever the role starts or bakes
+  ##     in (a nested self-spawn, ``-d:reproBin`` in an interface compile,
+  ##     the ``REPRO_INVOKING_CLI`` a provider calls back through) names the
+  ##     engine that scheduled the edge, as it did when the engine ran the
+  ##     role itself. ``REPRO_PUBLIC_CLI_PATH`` is set to it when unset
+  ##     (the portable launcher's ``:=``), and ``REPRO_INVOKING_CLI`` is
+  ##     overwritten with it (``runThinApp``'s rule).
+  ##   * no project pins: the roles are exempt in the engine too
+  ##     (``exemptFromPins``), since the image that scheduled them already
+  ##     decided.
+  ##   * no "this image is repro" mark: nothing here self-spawns this
+  ##     image, and with the engine as the public CLI nothing needs to.
+  ##
+  ## A missing engine is refused, loudly, rather than guessed: the roles'
+  ## results depend on which engine they name.
+  let args = commandLineParams()
+  if not selectsGraphHelperRole(args):
+    stderr.writeLine(ReprobuildHelperName & ": runs only the build " &
+      "graph's helper commands (internal " & GraphHelperRoles.join(", ") &
+      ", or their __repro-<role> spellings); got " &
+      (if args.len == 0: "no arguments" else: quoteShellCommand(args)) &
+      ". Run " & ReproThinClientName & " (or " & ReprobuildEngineName &
+      ") for everything else.")
+    return 2
+  let engine = graphHelperEngineImage()
+  if engine.len == 0:
+    stderr.writeLine(ReprobuildHelperName & ": no " & ReprobuildEngineName &
+      " engine beside " & os.normalizedPath(getAppFilename()) &
+      " and REPRO_PUBLIC_CLI_PATH is not set; the helper commands name the " &
+      "engine that scheduled them, so this image is installed beside it")
+    return 2
+  if getEnv(PublicCliPathEnvVar).len == 0:
+    putEnv(PublicCliPathEnvVar, engine)
+  putEnv("REPRO_INVOKING_CLI", engine)
+  result = runThinAppDispatch(ReproThinClientName)
   flushStagedFailureReport(result)
 
 when defined(reproSourceRevalidationTest):

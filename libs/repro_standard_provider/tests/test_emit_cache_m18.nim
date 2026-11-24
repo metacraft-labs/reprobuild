@@ -162,6 +162,11 @@ suite "nim convention M18 — emit-cache short-circuits nim c --compileOnly":
       # Wipe the entry's scratch so the test is hermetic.
       if dirExists(scratchEntry):
         removeDir(scratchEntry)
+      # The first emit of a fresh copy is never stored: its Phase 1 run
+      # reads paths that changed moments before and that no earlier run
+      # recorded (Nim.md §"Cross-module ordering"). The second records their
+      # state before its run and is stored; the third must reuse it.
+      discard conv.emitFragment(projectRoot, request)
       discard conv.emitFragment(projectRoot, request)
       check fileExists(manifestPath)
       let firstMtime = getLastModificationTime(manifestPath)
@@ -197,6 +202,11 @@ suite "nim convention M18 — emit-cache short-circuits nim c --compileOnly":
       let manifestPath = nimcacheDir / (FixtureEntry & ".json")
       if dirExists(scratchEntry):
         removeDir(scratchEntry)
+      # The first emit of a fresh copy is never stored: its Phase 1 run
+      # reads paths that changed moments before and that no earlier run
+      # recorded (Nim.md §"Cross-module ordering"). The second records their
+      # state before its run and is stored; the third must reuse it.
+      discard conv.emitFragment(projectRoot, request)
       discard conv.emitFragment(projectRoot, request)
       check fileExists(manifestPath)
       let firstMtime = getLastModificationTime(manifestPath)

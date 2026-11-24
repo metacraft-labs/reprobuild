@@ -190,7 +190,7 @@ suite "M5 — ProjectManifest round-trip":
       check "future_key_from_a_newer_repro" in e.msg
     check raised
 
-  test "a wrong value type keeps the parser's own diagnostic":
+  test "a wrong value type is named, not told as version skew":
     let path = writeFixture(dir, "project-wrong-value-type.toml",
                             wrongValueTypeToml)
     var raised = false
@@ -199,8 +199,11 @@ suite "M5 — ProjectManifest round-trip":
     except WorkspaceManifestParseError as e:
       raised = true
       # Not an unknown field, so no skew story: the manifest is the problem.
-      check e.keyPath.len == 0
+      # The parser refuses the value without a message, so the reader names
+      # the key, the type it takes and what was written.
+      check e.keyPath == "includes"
+      check "`includes` must be an array, not a string" in e.innerMessage
       check "older than the workspace manifests" notin e.innerMessage
       check "direnv reload" notin e.innerMessage
-      check e.innerMessage.len > 0
+      check "no message" notin e.innerMessage
     check raised

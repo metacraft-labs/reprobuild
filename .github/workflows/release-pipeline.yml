@@ -973,16 +973,26 @@ jobs:
       # Checksum at the point of production. The publish job RE-computes this
       # from the downloaded artifact and compares, which is what makes the
       # artifact round-trip itself verified rather than assumed.
+      #
+      # The line is GNU sha256sum's TEXT form, `<digest>  <name>`, on every
+      # leg. The Windows leg's MSYS2 sha256sum defaults to binary mode and
+      # wrote `<digest> *<name>`, so the concatenated SHA256SUMS mixed the two
+      # forms. The digest is read from stdin in binary mode (byte-exact, no
+      # name escaping) and the line assembled here, as
+      # scripts/release-signing/lib-signing.sh does for the signed manifest.
       - name: Compute checksum
         shell: bash
         run: |
           set -euo pipefail
           asset="${{ env.ASSET_NAME }}"
           if command -v sha256sum >/dev/null 2>&1; then
-            sha256sum "${asset}" > "${asset}.sha256"
+            digest="$(sha256sum -b < "${asset}")"
           else
-            shasum -a 256 "${asset}" > "${asset}.sha256"
+            digest="$(shasum -a 256 -b < "${asset}")"
           fi
+          digest="${digest%% *}"
+          [[ "${digest}" =~ ^[0-9a-f]{64}$ ]] || { echo "::error::no sha256 digest for ${asset}: ${digest}"; exit 1; }
+          printf '%s  %s\n' "${digest}" "${asset}" > "${asset}.sha256"
           cat "${asset}.sha256"
 
       # The musl-static add-on binaries are NOT built here: the

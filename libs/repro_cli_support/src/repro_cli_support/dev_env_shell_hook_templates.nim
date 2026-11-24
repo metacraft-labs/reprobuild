@@ -336,45 +336,131 @@ proc reproExprNu(reproBin: string): string =
   else:
     nuSingleQuote(reproBin)
 
+const nushellHookBody = """
+# Apply a NUON operation list (what `repro dev-env export|deactivate nushell`
+# prints, see formatNushell) to the current scope. Nushell cannot evaluate a
+# string as code at run time, so the commands emit data and this does the
+# applying.
+def --env __repro_apply [ops: list] {
+  for op in $ops {
+    let name = ($op.name? | default '')
+    match $op.op {
+      'set' => { load-env { ($name): $op.value } }
+      'unset' => { hide-env --ignore-errors $name }
+      'warn' => { print -e $op.message }
+      'prepend' | 'append' => {
+        let held = ($env | columns | any {|c| $c == $name })
+        let current = (if $held { $env | get $name } else { null })
+        let joined = if $current == null {
+          [$op.segment]
+        } else if (($current | describe) | str starts-with 'list') {
+          if $op.op == 'prepend' { $current | prepend $op.segment } else { $current | append $op.segment }
+        } else if ($current | into string | is-empty) {
+          $op.segment
+        } else if $op.op == 'prepend' {
+          $op.segment + $op.separator + ($current | into string)
+        } else {
+          ($current | into string) + $op.separator + $op.segment
+        }
+        # A variable the shell does not hold is created as a plain string
+        # (a one-element list would not survive a child process unless it is
+        # one of the variables nushell converts, PATH).
+        let value = if $current == null and $name != 'PATH' and $name != 'Path' { $op.segment } else { $joined }
+        load-env { ($name): $value }
+      }
+      _ => {}
+    }
+  }
+}
+
+# `from nuon` yields nothing for empty output (a command that has nothing to
+# say, such as an already-warned untrusted directory) and a non-list for
+# anything that is not an operation list; neither may reach `__repro_apply`,
+# whose `list` parameter would reject it and abort the hook.
+def __repro_parse_ops [text: string] {
+  let parsed = (try { $text | from nuon } catch { [] })
+  # A list of records is typed `table<...>`, not `list<...>`.
+  if (($parsed | describe) =~ '^(list|table)') { $parsed } else { [] }
+}
+
+# The shell's environment as NUL-terminated NAME=VALUE records, the format
+# `--pre-activation-env` reads (rollback needs the SHELL's values, not the
+# spawned repro's).
+def __repro_write_pre_env [path: string] {
+  $env
+  | transpose name value
+  | where {|r| let t = ($r.value | describe); $t in ['string', 'int', 'float', 'bool'] or ($t | str starts-with 'list') }
+  | each {|r|
+      let v = if (($r.value | describe) | str starts-with 'list') {
+        $r.value | each {|x| $x | into string } | str join (char esep)
+      } else {
+        $r.value | into string
+      }
+      $r.name + '=' + $v + (char nul)
+    }
+  | str join ''
+  | save --force --raw $path
+}
+
+def --env __repro_shell_hook [] {
+  mut candidate = ''
+  mut walk = ($env.PWD | default '')
+  let home_dir = ($env.HOME? | default ($env.USERPROFILE? | default ''))
+  while ($walk | is-not-empty) and ($walk != '/') {
+    if (($walk + '/reprobuild.nim') | path exists) or (($walk + '/repro.nim') | path exists) or (($walk + '/.repro/dev-env.lock') | path exists) {
+      $candidate = $walk
+      break
+    }
+    if $walk == $home_dir { break }
+    let parent = ($walk | path dirname)
+    if $parent == $walk { break }
+    $walk = $parent
+  }
+  let current = ($env.__REPRO_PROJECT_ROOT? | default '')
+  if ($current | is-not-empty) and ($current != $candidate) {
+    let manifest = ($env.__REPRO_ACTIVE_MANIFEST? | default '')
+    # Hide the hook's own variables BEFORE applying the rollback: nushell
+    # re-merges a called ``def --env``'s scope into the caller, which
+    # resurrects a variable the caller hid after the call returned.
+    hide-env --ignore-errors __REPRO_PROJECT_ROOT
+    hide-env --ignore-errors __REPRO_APPLIED
+    hide-env --ignore-errors __REPRO_ACTIVE_MANIFEST
+    if ($manifest | is-not-empty) {
+      let r = (do { @@REPRO@@ dev-env deactivate $manifest --shell=nushell } | complete)
+      if ($r.stderr | is-not-empty) { print -e ($r.stderr | str trim --right) }
+      let ops = (__repro_parse_ops $r.stdout)
+      __repro_apply $ops
+    }
+  }
+  if ($candidate | is-not-empty) and ($candidate != ($env.__REPRO_PROJECT_ROOT? | default '')) {
+    let root = $candidate
+    let pre_env = (($env.TMPDIR? | default ($env.TEMP? | default '/tmp')) | path join $"repro-pre-env.(random uuid)")
+    __repro_write_pre_env $pre_env
+    # stderr is replayed, not swallowed: diagnostics from the dev-env edge
+    # must reach the user's terminal.
+    let r = (do { @@REPRO@@ dev-env export nushell --project-root $root --pre-activation-env $pre_env } | complete)
+    rm --force $pre_env
+    if ($r.stderr | is-not-empty) { print -e ($r.stderr | str trim --right) }
+    if $r.exit_code == 0 {
+      let ops = (__repro_parse_ops $r.stdout)
+      __repro_apply $ops
+      if ($env.__REPRO_APPLIED? | is-not-empty) {
+        $env.__REPRO_PROJECT_ROOT = $candidate
+      }
+    }
+  }
+}
+"""
+
 proc renderNushellHook*(reproBin: string): string =
   ## nushell hook: ``env_change.PWD`` (chpwd) + ``pre_prompt`` (precmd).
-  ## Nushell evaluates per-prompt closures; the activation script is
-  ## captured into the current scope via ``load-env`` / ``$env.X = ...``
-  ## (the M74 nushell formatter already emits this form).
-  let reproExpr = reproExprNu(reproBin)
+  ## Nushell cannot evaluate a string as code at run time, so the export and
+  ## deactivate commands print a NUON list of operations (``formatNushell``)
+  ## and the hook parses it with ``from nuon`` and applies it in the current
+  ## scope (``def --env``). The shell's environment goes to
+  ## ``--pre-activation-env`` as for every other shell.
+  let reproExpr = "^" & reproExprNu(reproBin)
   result = "# repro shell hook (nushell) — installed via `repro shell hook nu | save -f ~/.repro-hook.nu; source ~/.repro-hook.nu`\n"
-  result.add("def --env __repro_shell_hook [] {\n")
-  result.add("  mut candidate = ''\n")
-  result.add("  mut walk = ($env.PWD | default '')\n")
-  result.add("  let home_dir = ($env.HOME? | default ($env.USERPROFILE? | default ''))\n")
-  result.add("  while ($walk | is-not-empty) and ($walk != '/') {\n")
-  result.add("    if (($walk + '/reprobuild.nim') | path exists) or (($walk + '/repro.nim') | path exists) or (($walk + '/.repro/dev-env.lock') | path exists) {\n")
-  result.add("      $candidate = $walk\n")
-  result.add("      break\n")
-  result.add("    }\n")
-  result.add("    if $walk == $home_dir { break }\n")
-  result.add("    let parent = ($walk | path dirname)\n")
-  result.add("    if $parent == $walk { break }\n")
-  result.add("    $walk = $parent\n")
-  result.add("  }\n")
-  result.add("  let current = ($env.__REPRO_PROJECT_ROOT? | default '')\n")
-  result.add("  if ($current | is-not-empty) and ($current != $candidate) {\n")
-  result.add("    let manifest = ($env.__REPRO_ACTIVE_MANIFEST? | default '')\n")
-  result.add("    if ($manifest | is-not-empty) {\n")
-  result.add("      try { " & reproExpr &
-    " dev-env deactivate $manifest --shell=nushell | from nuon | load-env } catch {}\n")
-  result.add("    }\n")
-  result.add("    hide-env __REPRO_PROJECT_ROOT\n")
-  result.add("    hide-env __REPRO_APPLIED\n")
-  result.add("    hide-env __REPRO_ACTIVE_MANIFEST\n")
-  result.add("  }\n")
-  result.add("  if ($candidate | is-not-empty) and ($candidate != ($env.__REPRO_PROJECT_ROOT? | default '')) {\n")
-  result.add("    try { " & reproExpr &
-    " dev-env export nushell --project-root $candidate | str trim } catch {}\n")
-  result.add("    if ($env.__REPRO_APPLIED? | is-not-empty) {\n")
-  result.add("      $env.__REPRO_PROJECT_ROOT = $candidate\n")
-  result.add("    }\n")
-  result.add("  }\n")
-  result.add("}\n")
+  result.add(nushellHookBody.replace("@@REPRO@@", reproExpr))
   result.add("$env.config = ($env.config | upsert hooks.env_change.PWD [{|before, after| __repro_shell_hook }])\n")
   result.add("$env.config = ($env.config | upsert hooks.pre_prompt [{|| __repro_shell_hook }])\n")

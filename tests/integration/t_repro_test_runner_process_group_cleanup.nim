@@ -190,6 +190,11 @@ if params.len == 0 and
   createDir(root / "source")
   let sourceExe = root / "source" / "repro"
   copyFileWithPermissions(engine, sourceExe)
+  # The engine's graph helper image goes beside the copy: the daemon's builds
+  # run their provider-compile and interface-extraction edges with the
+  # `reprobuild-helper` next to the engine image, and refuse without it.
+  copyFileWithPermissions(parentDir(engine) / "reprobuild-helper".addFileExt(ExeExt),
+    root / "source" / "reprobuild-helper".addFileExt(ExeExt))
   when defined(macosx):
     # Give the first source image a different, still-valid ad-hoc signature.
     # Replacing it with the original signed image below changes the digest

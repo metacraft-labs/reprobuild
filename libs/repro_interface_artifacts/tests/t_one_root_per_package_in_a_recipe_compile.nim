@@ -11,19 +11,18 @@
 ## copies. The scratch reproduction of 2026-11-22 (engine 0.2.29) showed the
 ## same pair for `repro_test_adapters`, `shm_queue`, `shm_gset` and `clispec`.
 ##
-## The two copies come from two layers of the command that resolve the same
+## The two copies came from two layers of the command that resolved the same
 ## package differently when the compile's work directory is a reprobuild tree
 ## (the cross-repo producer path compiles against the engine's own staged
-## source, `reprobuildLibraryWorkDir`): `reproLibPathFlags` resolves it through
-## `bootstrapSiblingPackagePathFlags`, which ranks the consumer workspace's
-## sibling above the root the engine seeded into `$CLI_SPEC_SRC`, while
-## `reproPackagePathFlags`' in-tree list takes `$CLI_SPEC_SRC` first, seeded
-## or not.
+## source, `reprobuildLibraryWorkDir`): one ranked the consumer workspace's
+## sibling above the root the engine seeded into `$CLI_SPEC_SRC`, the other
+## took `$CLI_SPEC_SRC` first, seeded or not. Both layers now take the one
+## sibling-first resolver (`bootstrapSiblingPackagePathFlags`), so each
+## package gets exactly one root.
 ##
 ## Fixture (real directory trees carrying the marker modules the resolvers
 ## probe, and the real command assembly, `providerCompileCommand`, which
-## shares the path layers and `keepOneRootPerPackage` with the interface
-## extraction):
+## shares its path layers with the interface extraction):
 ##
 ##   <tmp>/store/sdk                  the engine's staged reprobuild source
 ##   <tmp>/store/clispec/src          the engine's staged nim-cli-spec,

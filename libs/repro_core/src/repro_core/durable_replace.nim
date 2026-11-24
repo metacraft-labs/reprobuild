@@ -91,6 +91,32 @@ proc syncDirectoryDurably*(dir: string) =
     discard syncFd(fd)
     discard posix.close(fd)
 
+proc syncExistingFileDurably*(path: string): bool =
+  ## Flush a file that another process wrote to stable storage (`F_FULLFSYNC`
+  ## on macOS, `fsync` elsewhere on POSIX, `FlushFileBuffers` on Windows),
+  ## without changing it. Returns false when the file cannot be opened or
+  ## the flush fails. For a caller that must know a tool's output survives a
+  ## crash before it records that the tool finished (Tool-Owned-Caches.md
+  ## §"Interrupted Use"). The directory entry
+  ## naming the file is made durable separately, by `syncDirectoryDurably`.
+  when defined(windows):
+    # FlushFileBuffers needs a handle with write access
+    # (https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers);
+    # opening an existing file for update neither truncates nor touches it.
+    var f: File
+    if not open(f, extendedPath(path), fmReadWriteExisting):
+      return false
+    try:
+      result = flushFileBuffers(Handle(getOsFileHandle(f))) != 0
+    finally:
+      f.close()
+  else:
+    let fd = posix.open(cstring(extendedPath(path)), posix.O_RDONLY)
+    if fd < 0:
+      return false
+    result = syncFd(fd)
+    discard posix.close(fd)
+
 proc writeSyncedFile(path: string; data: pointer; len: int) =
   ## Create ``path`` (a fresh temporary file), write the ``len`` bytes at
   ## ``data``, flush and sync it. Raises on any failure.
@@ -127,11 +153,19 @@ proc renameOver(src, dest: string) =
       raiseOSError(osLastError(), "rename '" & src & "' -> '" & dest & "'")
 
 proc replaceFileDurablyImpl(dest: string; data: pointer; len: int;
-                            tmpPath: string; keepMode: bool) =
+                            tmpPath: string; keepMode: bool;
+                            mode: set[FilePermission]) =
   let tmp = if tmpPath.len > 0: tmpPath else: durableTempPath(dest)
   try:
     writeSyncedFile(tmp, data, len)
-    if keepMode and fileExists(extendedPath(dest)):
+    if mode != {}:
+      # Set before the rename, so the file is never visible under ``dest``
+      # without the mode it is meant to have (an executable launcher that
+      # is briefly not executable). POSIX only: on Windows the permission
+      # set maps to the read-only attribute alone.
+      when not defined(windows):
+        setFilePermissions(extendedPath(tmp), mode)
+    elif keepMode and fileExists(extendedPath(dest)):
       # The rename installs the temporary file's inode, whose mode came from
       # the umask; a file the user made private (or executable) keeps its
       # mode only if it is copied onto the new inode before it goes live.
@@ -145,7 +179,7 @@ proc replaceFileDurablyImpl(dest: string; data: pointer; len: int;
   syncDirectoryDurably(parentDir(dest))
 
 proc replaceFileDurably*(dest, content: string; tmpPath = "";
-                         keepMode = false) =
+                         keepMode = false; mode: set[FilePermission] = {}) =
   ## Replace (or create) the file ``dest`` with ``content`` atomically and
   ## durably; see the module documentation. ``dest``'s directory must exist.
   ## Raises `IOError` / `OSError` on failure, leaving ``dest`` unchanged.
@@ -157,14 +191,21 @@ proc replaceFileDurably*(dest, content: string; tmpPath = "";
   ##
   ## ``keepMode`` gives the new file the permission bits of the file it
   ## replaces (when there is one), for a file a user owns and edits too.
+  ##
+  ## ``mode``, when not empty, is the permission set the new file gets
+  ## before it is renamed into place; it takes precedence over
+  ## ``keepMode``, which it disables. A generated executable passes it. On
+  ## Windows, where the set would map only to the read-only attribute, it
+  ## is ignored.
   let data = if content.len > 0: unsafeAddr content[0] else: nil
-  replaceFileDurablyImpl(dest, data, content.len, tmpPath, keepMode)
+  replaceFileDurablyImpl(dest, data, content.len, tmpPath, keepMode, mode)
 
 proc replaceFileDurably*(dest: string; content: openArray[byte];
-                         tmpPath = ""; keepMode = false) =
+                         tmpPath = ""; keepMode = false;
+                         mode: set[FilePermission] = {}) =
   ## `replaceFileDurably` for binary content.
   let data = if content.len > 0: unsafeAddr content[0] else: nil
-  replaceFileDurablyImpl(dest, data, content.len, tmpPath, keepMode)
+  replaceFileDurablyImpl(dest, data, content.len, tmpPath, keepMode, mode)
 
 const DefaultStaleDurableTempAge* = initDuration(hours = 1)
   ## A live write holds its temporary file for one small write, a sync and a

@@ -81,6 +81,7 @@ type
     all*: ArmTally          ## every run the arm started
     measured*: ArmTally     ## only the runs started inside the conditions
     maxLoadPerCpu*: float   ## the highest reading among the runs started
+    minLoadPerCpu*: float   ## the lowest reading among the runs started
 
   Check* = object
     message*: string
@@ -148,6 +149,11 @@ proc add*(arm: var ArmResult; run: ArmRun) =
   arm.all.add(run, index)
   if run.loadPerCpu > arm.maxLoadPerCpu:
     arm.maxLoadPerCpu = run.loadPerCpu
+  # `index == 0` rather than a sentinel: a default-constructed ArmResult has
+  # minLoadPerCpu 0.0, which would read as "an attempt started on an idle
+  # host" for every arm that never started one.
+  if index == 0 or run.loadPerCpu < arm.minLoadPerCpu:
+    arm.minLoadPerCpu = run.loadPerCpu
   if inConditions(run.loadPerCpu):
     arm.measured.add(run, index)
 
@@ -318,14 +324,19 @@ proc conditionsReason(arms: openArray[ArmResult]; runs: int;
   if samples.len == 0:
     parts.add("sample: never started")
   elif not inConditions(samples[^1].loadPerCpu):
+    var lowest = samples[0].loadPerCpu
+    for attempt in samples:
+      if attempt.loadPerCpu < lowest: lowest = attempt.loadPerCpu
     parts.add("sample: no run started at load/CPU <= " & $MaxLoadPerCpu &
-      " in " & $samples.len & " attempts (last " &
+      " in " & $samples.len & " attempts (lowest " &
+      formatFloat(lowest, ffDecimal, 2) & ", last " &
       formatFloat(samples[^1].loadPerCpu, ffDecimal, 2) & ")")
   for arm in arms:
     if not arm.complete(runs):
       parts.add(arm.mode & ": " & $arm.measured.runs & "/" & $runs &
         " runs started at load/CPU <= " & $MaxLoadPerCpu & " in " &
-        $arm.all.runs & " attempts (highest " &
+        $arm.all.runs & " attempts (lowest " &
+        formatFloat(arm.minLoadPerCpu, ffDecimal, 2) & ", highest " &
         formatFloat(arm.maxLoadPerCpu, ffDecimal, 2) & ")")
   parts.join("; ")
 

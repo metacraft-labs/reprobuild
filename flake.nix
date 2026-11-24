@@ -403,7 +403,15 @@
       # linux-arm64 source build stopped at "undeclared identifier:
       # 'SiteTableView'". The range also keeps a late inline scan on the
       # startup scan's instruction boundaries (c4ab263).
-      url = "github:metacraft-labs/io-mon/b1c32599f9cd671b150f68de2b21bdc9ae0c42be";
+      # Bumped b1c32599 -> 13659436 (2026-11-24, io-mon `agents`): every
+      # compile of the Linux shim links with `--as-needed` ahead of Nim's
+      # `-lm -lrt -ldl -pthread`, and with `-static-libgcc`, from io-mon's
+      # `linux_preload.nim.cfg` (e40577a), so the shim this repo's
+      # `reprobuild.test_fixtures.monitor_shim` edge links needs only
+      # `libc.so.6` and the loader, as io-mon's builder's does. The range
+      # also records each path-resolution observation once per process
+      # (3d3077a).
+      url = "github:metacraft-labs/io-mon/1365943692eedfb0699ce90e59c4602d90317561";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -438,7 +446,11 @@
       # the shard inserts target, `insertShardIndex` names it, and an insert
       # into a drained target counts a growth failure and grows past it.
       # flattenChain bounds its range by `insertShardIndex`.
-      url = "github:metacraft-labs/nim-shm-gset/fc0c74478d945161574a9fc49389c8fd65f09d2e";
+      # Bumped fc0c744 -> 803a4fa (2026-11-22, `agents`): a reader handle
+      # remembers a shard index it found retired and no longer stats it on
+      # every walk, so a lookup by an engine that attached after a flatten
+      # performs no syscall once warm.
+      url = "github:metacraft-labs/nim-shm-gset/803a4faa23f985ad9697437603436f2f784072be";
       flake = false;
     };
     nim-shm-queue-src = {
@@ -1085,7 +1097,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/1004b4bf991df19e086ae28360c2306702c5798f";
+      url = "github:metacraft-labs/reprobuild-brew-packages/a243977cddfba2bd66b075cc1186493f9baa2434";
       flake = false;
     };
   };
@@ -1842,9 +1854,18 @@
                                     # hidden target. Enumerate rather than hard-code the current
                                     # binaries so newly installed helpers (including scripts)
                                     # cannot bypass the packaged defaults.
+                                    #
+                                    # The one exception is the engine's graph helper image,
+                                    # which only the engine runs (as the argv of its own
+                                    # helper actions, where it ran its unwrapped image
+                                    # before) and which package.nix leaves unwrapped on
+                                    # purpose: it must be there, executable, and NOT wrapped.
                                     wrapperCount=0
+                                    test -x ${reprobuild}/bin/reprobuild-helper
+                                    test ! -e ${reprobuild}/bin/.reprobuild-helper-wrapped
                                     for wrapper in ${reprobuild}/bin/*; do
                                       name=$(basename "$wrapper")
+                                      test "$name" = reprobuild-helper && continue
                                       hidden=${reprobuild}/bin/.$name-wrapped
                                       if test ! -x "$wrapper"; then
                                         echo "unexpected non-executable bin artifact: $wrapper" >&2
@@ -2631,7 +2652,12 @@
             # (nix/tests/lib-reference.nix). The build fails listing each
             # difference; `nix eval --raw .#checks.<system>.lib-reference.render`
             # prints the options region to paste. A control run against the
-            # page with one option deleted must fail too.
+            # page with one option deleted must fail too. Each option's
+            # description must also meet the user-page style rules a pattern
+            # can decide (no `--` or `->` in prose, no "Reprobuild"
+            # mid-sentence, no undefined "IFD", identifiers in code spans,
+            # sentences of at most 30 words); a probe per rule must be
+            # rejected and a set of acceptable sentences accepted.
             lib-reference =
               let
                 result = import ./nix/tests/lib-reference.nix {
@@ -2658,7 +2684,8 @@
                   ++ pkgs.lib.optional (result.controlFailures == [ ])
                     "the control (the page without option ${result.controlOption}) passed, so the check proves nothing"
                   ++ pkgs.lib.optional (reprobuildLib ? resolveRealizationSource && result.sourceControlFailures == [ ])
-                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing";
+                    "the realization-source control (the packages bullet without attribute) passed, so that comparison proves nothing"
+                  ++ map (p: "the description style check got its probe wrong: ${p}") result.styleControlPasses;
               in
               pkgs.runCommand "reprobuild-lib-reference"
                 {
@@ -2667,7 +2694,7 @@
                 }
                 ''
                   if [ -n "$problems" ]; then
-                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library:" >&2
+                    echo "reprobuild lib-reference: docs/users/content/reference/nix-library.md does not match the library, or an option description breaks the user-page style:" >&2
                     printf '%s\n' "$problems" | sed 's/^/  - /' >&2
                     exit 1
                   fi
@@ -2795,6 +2822,20 @@
             # why that does not work): it is for the shell to PROVIDE the
             # programs it does this to, so they come from the same nixpkgs.
             # `scripts/check_dev_shell_env.sh` holds that invariant.
+            #
+            # ITS SCOPE IS THE PROGRAMS REPROBUILD ITSELF RUNS
+            # (`DEV_SHELL_SUBPROCESS_TOOLS` in `scripts/lib/dev_shell_overrides.sh`,
+            # plus `$REPRO_SYSTEMD_ANALYZE`), and for those `just lint` refuses.
+            # The variable reaches every other program started here too: on a
+            # host whose libc is older than this nixpkgs' glibc, a host program
+            # that links one of these sonames (ssh / scp / openssl
+            # via libcrypto, zstd via libzstd, systemctl via libsystemd-shared)
+            # loads this shell's copy and dies before `main`. The shell cannot
+            # provide every program a contributor might start, so for those
+            # `just lint` WARNS instead, naming each broken program on PATH,
+            # the library that breaks it and the remedy (`env -u
+            # LD_LIBRARY_PATH <program>`, or provide it here if reprobuild
+            # starts it).
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
               [
                 pkgs.clingo
@@ -3008,6 +3049,36 @@
               # `could not load: libcrypto.so(...)` the moment openssl leaves
               # the path), and it would not touch the LD_PRELOAD channel at all.
               pkgs.git
+            ]
+            # `ssh-keygen`, from this flake's nixpkgs, for the same reason as
+            # `pkgs.git` above: reprobuild runs it itself. Test certificates
+            # are signed and verified with `ssh-keygen -Y sign` /
+            # `ssh-keygen -Y verify`, and the certificate signer mints its
+            # per-worker signing CA and one-issuance keys with it, all
+            # resolved on PATH. A host `ssh-keygen` links `libcrypto.so.3`, and
+            # `LD_LIBRARY_PATH` above hands it this shell's OpenSSL instead of
+            # the host's. Measured on an Ubuntu CI runner (glibc 2.35):
+            # `/usr/bin/ssh-keygen` died before `main` with "version
+            # `GLIBC_2.38' not found (required by .../openssl-3.6.1/lib/
+            # libcrypto.so.3)", so the signer could mint no CA and every
+            # certificate-signing test failed.
+            #
+            # Only `ssh-keygen`, not all of `pkgs.openssh`: `ssh` on PATH would
+            # shadow the contributor's own client and its configuration, and
+            # nothing in reprobuild runs it. Linux only, because the
+            # `LD_LIBRARY_PATH` channel is: dyld does not consult it for a
+            # system binary, and macOS's own `ssh-keygen` is fine there.
+            # `ssh-keygen` is in `DEV_SHELL_SUBPROCESS_TOOLS`
+            # (`scripts/lib/dev_shell_overrides.sh`), so on a host whose own
+            # `ssh-keygen` cannot take this shell's libraries, dropping this
+            # line fails the one-glibc check in `just lint`.
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              (pkgs.runCommand "dev-shell-ssh-keygen-${pkgs.openssh.version}" { } ''
+                mkdir -p "$out/bin"
+                ln -s ${pkgs.openssh}/bin/ssh-keygen "$out/bin/ssh-keygen"
+              '')
+            ]
+            ++ [
               pkgs.libsodium
               pkgs.boost
               pkgs.libgit2
@@ -3117,6 +3188,10 @@
               pkgs.tree-sitter
               pkgs.zsh
               pkgs.fish
+              # The Nushell hook gate
+              # (tests/e2e/dev-env/t_e2e_shell_hook_nushell_activates.nim)
+              # runs the hook in a real nu.
+              pkgs.nushell
             ]
             # libbpf for the CodeTracer `ct` build: CodeTracer's
             # native monitor under src/ct/bpf_monitor_native.nim and

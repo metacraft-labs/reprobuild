@@ -7,7 +7,7 @@
 #
 # Produces <OutDir>\reprobuild-<version>-<platform>-<arch>\ holding
 #
-#   bin\     build\bin\* (repro.exe, reprobuild.exe, the other images and the
+#   bin\     build\bin\* (repro.exe, reprobuild.exe, reprobuild-helper.exe, the other images and the
 #            runtime DLLs windows\stage-release-dlls.ps1 stages beside them),
 #            plus runquotad.exe and runquota.exe, built by
 #            scripts/release/stage_release_runquota.sh
@@ -20,7 +20,8 @@
 #            (scripts/release/stage_release_completions.sh)
 #
 # and, with -Zip, <OutDir>\reprobuild-<version>-<platform>-<arch>.zip whose one
-# top-level entry is that directory. Prints the package directory, then the
+# top-level entry is that directory (entry names separated by '/', written by
+# scripts/release/write_release_zip.ps1). Prints the package directory, then the
 # zip path when one was made, one per line, as its only output.
 #
 # WHY ONE SCRIPT. These steps were inline in .github/workflows/release.yml.
@@ -53,7 +54,11 @@ if (-not (Test-Path -LiteralPath (Join-Path $repoRoot "reprobuild.nimble")) -or
     -not (Test-Path -LiteralPath (Join-Path $repoRoot "libs\repro_project_dsl\src\repro_project_dsl.nim"))) {
   throw "package_windows_release: run from the reprobuild checkout root (cwd is $repoRoot)"
 }
-foreach ($required in @("build\bin\repro.exe", "build\bin\reprobuild.exe")) {
+# The graph helper image is required beside the engine: the engine runs the
+# build graph's own helper commands with it and refuses to run them itself
+# when it is missing (an engine process in an action loads OpenSSL, which
+# reads entropy at start-up on Windows).
+foreach ($required in @("build\bin\repro.exe", "build\bin\reprobuild.exe", "build\bin\reprobuild-helper.exe")) {
   if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $required))) {
     throw "package_windows_release: $required is missing; build first (bash ./scripts/build_apps.sh)"
   }
@@ -132,6 +137,10 @@ if ($Zip) {
   if (Test-Path -LiteralPath $zipPath) {
     Remove-Item -LiteralPath $zipPath -Force
   }
-  Compress-Archive -LiteralPath $pkgDir -DestinationPath $zipPath -Force
+  # Not Compress-Archive: under Windows PowerShell 5.1 it writes entry names
+  # with backslashes, which the ZIP format forbids and unzip-based consumers
+  # (repro-build-packages.sh) cannot unpack. write_release_zip.ps1 builds
+  # every name with '/' on every PowerShell; see its header.
+  & (Join-Path $repoRoot "scripts\release\write_release_zip.ps1") -SourceDir $pkgDir -DestinationPath $zipPath
   Write-Output $zipPath
 }

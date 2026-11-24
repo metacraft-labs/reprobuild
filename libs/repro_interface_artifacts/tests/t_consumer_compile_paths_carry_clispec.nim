@@ -40,7 +40,17 @@ suite "consumer compile paths carry clispec":
     writeFile(cliSpec / "clispec.nim", "")
     let saved = getEnv("CLI_SPEC_SRC")
     putEnv("CLI_SPEC_SRC", cliSpec)
-    defer: putEnv("CLI_SPEC_SRC", saved)
+    # clispec is sibling-first (Unified-Locking-And-Hooks.md §13.5, "The
+    # sources a recipe compile reads", amended 2026-11-22): a sibling checkout
+    # at or ahead of the SDK's pin outranks the variable, as in `config.nims`.
+    # `REPRO_SIBLING_POLICY=pin` asks for the named tree whatever siblings the
+    # host workspace carries.
+    let savedPolicy = getEnv("REPRO_SIBLING_POLICY")
+    putEnv("REPRO_SIBLING_POLICY", "pin")
+    defer:
+      putEnv("CLI_SPEC_SRC", saved)
+      if savedPolicy.len > 0: putEnv("REPRO_SIBLING_POLICY", savedPolicy)
+      else: delEnv("REPRO_SIBLING_POLICY")
     let flags = consumerCompilePathFlags(root / "work")
     check cliSpec in pathsWithMarker(flags, "clispec.nim")
 

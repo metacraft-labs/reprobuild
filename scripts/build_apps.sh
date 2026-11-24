@@ -765,7 +765,11 @@ while read -r name path extra_flags; do
     # produces an engine whose dlopen resolves only inside this dev shell and
     # fails on the user's machine, which is the same defect the
     # `runtime_passl_for_libraries` failure above refuses to ship.
-    reprobuild)
+    #
+    # The graph helper image (`reprobuild-helper`) runs the engine's own
+    # helper commands from the same sources, so it links the same dlopen
+    # sites and needs the same search path.
+    reprobuild|reprobuild-helper)
       runtime_passl=(${repro_runtime_passl[@]+"${repro_runtime_passl[@]}"})
       ;;
   esac

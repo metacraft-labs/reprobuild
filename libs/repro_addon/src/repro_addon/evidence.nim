@@ -273,8 +273,16 @@ proc dpkgLastRun*(path: string): string =
     discard
 
 proc outboxEntries*(outbox = EvidenceOutboxPath): seq[string] =
-  ## The outbox, oldest first.
-  if not dirExists(outbox): return
-  for kind, p in walkDir(outbox):
-    if kind == pcFile and p.endsWith(".evr"): result.add(p)
+  ## The outbox, oldest first: its regular ``.evr`` entries, listed through
+  ## descriptors that follow no link (``listDelegatedEntries``), so the
+  ## outbox's owner (the shipping unit's dynamic user, §13 decision 181)
+  ## cannot make a root reader list another directory.
+  when mutated("outbox-listed-by-path"):
+    # FALSIFYING BUILD: listed by path, through a link the owner planted.
+    if not dirExists(outbox): return
+    for kind, p in walkDir(outbox):
+      if kind == pcFile and p.endsWith(".evr"): result.add(p)
+  else:
+    for e in listDelegatedEntries(outbox):
+      if e.regular and e.name.endsWith(".evr"): result.add(outbox / e.name)
   result.sort()

@@ -25,9 +25,8 @@
 ##      reuses entries an earlier build published does not matter and is not
 ##      asserted; what matters is that entries exist afterwards.
 ##
-##   2. Bump the mtime of ``live_endpoint_helper.nim`` and re-run. Under the
-##      default ``ffpTimestamp`` action-cache policy a new mtime IS a changed
-##      input, so the report must then show
+##   2. Rewrite ``live_endpoint_helper.nim`` with DIFFERENT bytes and re-run.
+##      The report must then show
 ##
 ##        * ``reprobuild.test_helpers.live_endpoint_helper`` — ``cdMiss``,
 ##          ``launched``, ``asSucceeded``, ``exit=0``: a real miss caused by a
@@ -36,9 +35,23 @@
 ##          launched: the invalidation is confined to the edge whose input
 ##          moved, with no spurious rebuilds.
 ##
-## Only the file's mtime is touched; its bytes are left alone, and
-## ``scripts/bootstrap_guard.sh`` excludes ``tests/`` from the freshness scan
-## that decides whether ``just bootstrap`` relinks the apps.
+## WHY THE BYTES, NOT THE MTIME. This case used to bump only the mtime, on the
+## premise that ``ffpTimestamp`` governs these edges. It does not: ``nim.c``
+## names its C backend (``gcc``; ``clang`` on macOS) in the edge's tool-identity
+## references, the standard library declares ``inputCheckPolicy hybrid`` for
+## that compiler, and an edge that states no policy takes its tools' declared
+## one (``lowerGraphAction`` in ``libs/repro_cli_support``, reading
+## ``libs/repro_core/src/repro_core/tool_input_check_policies.nim``). Under
+## ``hybrid`` an input whose metadata moved but whose content did not is
+## answered from the cache — ``cdHybridCutoff``, ``outputs-present`` — which
+## is exactly what the engine reported. Only a content change is a changed
+## input under every policy, so only a content change proves the property.
+##
+## The change is a trailing Nim comment carrying a per-run nonce, so the
+## rewritten source can never match a record a previous (interrupted) run of
+## this case published. The original bytes are put back on every exit path,
+## and ``scripts/bootstrap_guard.sh`` excludes ``tests/`` from the freshness
+## scan that decides whether ``just bootstrap`` relinks the apps.
 
 import std/[json, os, osproc, sequtils, strtabs, strutils, tempfiles, times,
   unittest]
@@ -122,11 +135,25 @@ proc runBuildHelpers(reproBin, repoRoot, reportPath: string):
   ]
   runWithRunquotaOnPath(args.join(" "), repoRoot)
 
-proc touchFile(path: string) =
-  ## Bump the mtime so the engine's recorded input fingerprint no longer
-  ## matches. ``ffpTimestamp`` is the default action-cache policy, so this is a
-  ## changed input; the file's bytes are untouched.
-  setLastModificationTime(path, getTime())
+proc rewriteWithNewContent(path: string): string =
+  ## Append a Nim comment carrying a per-run nonce to ``path`` and return the
+  ## file's original bytes, for the caller to restore. Changing the CONTENT is
+  ## the point: the helper edges are ``hybrid`` (see the module header), so a
+  ## metadata-only change is answered by hybrid cutoff and would not re-run
+  ## the edge. The nonce (wall clock in nanoseconds plus the pid) keeps the
+  ## new bytes distinct from any earlier run's, so no published record can
+  ## match them and the miss asserted below is caused by this edit alone.
+  result = readFile(path)
+  let now = getTime()
+  let nonce = $now.toUnix() & "." & $now.nanosecond & "-" &
+    $getCurrentProcessId()
+  var edited = result
+  if edited.len > 0 and not edited.endsWith("\n"):
+    edited.add('\n')
+  edited.add("# t_b2_helper_invalidation content change " & nonce & "\n")
+  writeFile(path, edited)
+  doAssert readFile(path) != result,
+    "rewriting " & path & " did not change its bytes"
 
 suite "Bootstrap-And-Self-Build B2: helper invalidation":
 
@@ -158,8 +185,11 @@ suite "Bootstrap-And-Self-Build B2: helper invalidation":
       check firstExit == 0
 
       if firstExit == 0:
-        touchFile(touchedAbs)
-        checkpoint("touched: " & touchedAbs)
+        let originalSource = rewriteWithNewContent(touchedAbs)
+        # Put the original bytes back however this block is left, so the
+        # checkout is never left carrying the edit.
+        defer: writeFile(touchedAbs, originalSource)
+        checkpoint("rewrote with new content: " & touchedAbs)
 
         let (output, exitCode) =
           runBuildHelpers(reproBin, repoRoot, reportPath)

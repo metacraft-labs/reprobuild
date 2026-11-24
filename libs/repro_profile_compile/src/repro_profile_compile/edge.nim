@@ -68,6 +68,8 @@ from repro_core/paths import extendedPath
 import blake3
 import repro_core
 from repro_core/source_root import resolveReprobuildSourceRoot
+from repro_core/cli_images import requireGraphHelperImage,
+  GraphHelperImageMissingError
 import repro_core/file_lock
 from repro_core/scratch_env import ScratchLocationEnvNames
 import repro_hash
@@ -212,6 +214,18 @@ type
 proc raiseProfileCompile(message: string) {.noreturn.} =
   raise newException(ProfileCompileError, message)
 
+proc profileHelperImage(publicCliPath, edge: string): string =
+  ## The image the profile edges run their helper command with: the graph
+  ## helper image beside the engine at ``publicCliPath`` (`repro_core/
+  ## cli_images`), never the engine itself, whose OpenSSL start-up reads
+  ## entropy on Windows and would keep the edge from being cached. A missing
+  ## helper beside a present engine is a ``ProfileCompileError`` naming the
+  ## path.
+  try:
+    requireGraphHelperImage(publicCliPath, edge)
+  except GraphHelperImageMissingError as err:
+    raiseProfileCompile(err.msg)
+
 const MissingPublicCliPathReason* =
   " (the `repro` image that runs this compile's actions under " &
   "`internal io monitor`). An embedded caller -- a binary that links this " &
@@ -338,7 +352,7 @@ proc profileCompileKey*(absProfile: string): string =
   ## short component on every filesystem.
   blake3.toHex(blake3.digest(absolutePath(absProfile).replace('\\', '/')))
 
-proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
+proc profileCompileWeakFingerprint*(nimExe, helperImage,
                                     binaryPath: string;
                                     cCompiler = ""): ContentDigest =
   ## The compile edge's weak fingerprint — the one part of its action key
@@ -363,7 +377,7 @@ proc profileCompileWeakFingerprint*(nimExe, publicCliPath,
     "repro.profile.compile.v3\n" &
     "compiler=" & nimExe & "\n" &
     "c-compiler=" & cCompiler & "\n" &
-    "helper=" & publicCliPath & "\n" &
+    "helper=" & helperImage & "\n" &
     "output=" & binaryPath & "\n")
 
 proc profileRunWeakFingerprint*(intentPath: string): ContentDigest =
@@ -450,7 +464,7 @@ const ProfileCompileEnvPassthrough* =
   ## variables above.
 
 proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
-                                publicCliPath, workDir, repoRoot: string;
+                                helperImage, workDir, repoRoot: string;
                                 weak: ContentDigest;
                                 verbose = false;
                                 declaredInputs: seq[string] = @[]): BuildAction =
@@ -495,7 +509,7 @@ proc profileCompileBuildAction*(profileRoot, binaryPath, nimcacheDir,
   # The helper's command line in the words the CLI's generated parser reads
   # back to these values: each value attached to its declared flag.
   var argv = @[
-    publicCliPath,
+    helperImage,
     "internal", "compile-profile",
     CompileProfileFlags.profile & "=" & profileRoot,
     CompileProfileFlags.binary & "=" & binaryPath,
@@ -847,9 +861,11 @@ proc compileProfileToRbpi*(profileRoot: string;
       if fileExists(extendedPath(path)):
         removeFile(extendedPath(path))
 
+  let compileHelper =
+    profileHelperImage(opts.publicCliPath, ProfileCompileActionId)
   let compileAction = profileCompileBuildAction(absProfile, binaryPath,
-    nimcacheDir, opts.publicCliPath, opts.workDir, repoRoot,
-    profileCompileWeakFingerprint(nimExe, opts.publicCliPath, binaryPath,
+    nimcacheDir, compileHelper, opts.workDir, repoRoot,
+    profileCompileWeakFingerprint(nimExe, compileHelper, binaryPath,
       cCompiler),
     opts.verbose, opts.declaredInputs)
   let runAction = profileRunBuildAction(absProfile, binaryPath, intentPath,
@@ -969,7 +985,7 @@ proc cachedPlatformProbeScratch*(stateDir, profileKey: string): string =
   ## excluded from the edge's recorded inputs like the compile's nimcache.
   profileCacheDir(stateDir) / "platform-probe" / profileKey
 
-proc profilePlatformProbeWeakFingerprint*(nimExe, publicCliPath,
+proc profilePlatformProbeWeakFingerprint*(nimExe, helperImage,
                                           outPath: string): ContentDigest =
   ## Declared identity only, as for `profileCompileWeakFingerprint`: which
   ## compiler and helper, where the output lands, which document version
@@ -977,13 +993,13 @@ proc profilePlatformProbeWeakFingerprint*(nimExe, publicCliPath,
   weakFingerprintFromText(
     "repro.profile.platform-probe.v1\n" &
     "compiler=" & nimExe & "\n" &
-    "helper=" & publicCliPath & "\n" &
+    "helper=" & helperImage & "\n" &
     "output=" & outPath & "\n" &
     "probe-version=" & $ProfilePlatformProbeVersion & "\n" &
     "platforms=" & targetSystemNames().join(",") & "\n")
 
 proc profilePlatformProbeBuildAction*(absProfile, outPath, scratch,
-                                      publicCliPath, workDir,
+                                      helperImage, workDir,
                                       repoRoot: string;
                                       weak: ContentDigest): BuildAction =
   ## Build the platform-probe edge's `BuildAction`: the internal
@@ -994,7 +1010,7 @@ proc profilePlatformProbeBuildAction*(absProfile, outPath, scratch,
   ## and runs one `nim check` per target platform, so a save that changes no
   ## byte must not re-run it either.
   let argv = @[
-    publicCliPath,
+    helperImage,
     "internal", "probe-profile-platforms",
     ProbeProfilePlatformsFlags.profile & "=" & absProfile,
     ProbeProfilePlatformsFlags.`out` & "=" & outPath,
@@ -1077,10 +1093,12 @@ proc probeProfilePlatforms*(profileRoot: string;
       raiseProfileCompile(err.msg)
   if opts.forceRebuild and fileExists(extendedPath(outPath)):
     removeFile(extendedPath(outPath))
-  let weak = profilePlatformProbeWeakFingerprint(nimExe, opts.publicCliPath,
+  let probeHelper =
+    profileHelperImage(opts.publicCliPath, ProfilePlatformProbeActionId)
+  let weak = profilePlatformProbeWeakFingerprint(nimExe, probeHelper,
     outPath)
   let buildAction = profilePlatformProbeBuildAction(absProfile, outPath,
-    scratch, opts.publicCliPath, opts.workDir, repoRoot, weak)
+    scratch, probeHelper, opts.workDir, repoRoot, weak)
   let config = profileCompileEngineConfig(opts.stateDir, opts.publicCliPath)
   let runResult = runBuild(graph(@[buildAction]), config)
   if runResult.hasFailedActions():

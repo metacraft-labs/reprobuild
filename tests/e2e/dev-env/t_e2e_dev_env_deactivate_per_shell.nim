@@ -73,26 +73,21 @@ suite "e2e_dev_env_deactivate_per_shell":
       "Remove-Item Env:FIXTURE_MODE -ErrorAction SilentlyContinue\n"
     check deact == expected
 
-  test "nushell_deactivation_groups_load_env_with_trailing_hides":
+  test "nushell_deactivation_is_a_nuon_operation_list_in_reverse_order":
     let plan = syntheticPlanWithMarkers()
     let script = formatExportPlan(plan, skNushell)
     let manifest = buildRollbackManifest(plan, preEnvWithFixture(),
       "deadbeef", script, skNushell)
     let deact = formatDeactivate(manifest, skNushell)
-    # Reverse order: markers first (-> hide-env), then PATH
-    # (was_set=true -> goes into load-env block), then FIXTURE_MODE
-    # (was_set=false -> hide-env trailer).
-    # load-env { PATH: '/usr/bin:/bin' }
-    # hide-env __REPRO_APPLIED
-    # hide-env __REPRO_ACTIVE_MANIFEST
-    # hide-env FIXTURE_MODE
+    # Reverse order: markers (unset), then PATH (was set: restored), then
+    # FIXTURE_MODE (was not set: unset).
     let expected =
-      "load-env {\n" &
-      "  PATH: '/usr/bin:/bin'\n" &
-      "}\n" &
-      "hide-env __REPRO_APPLIED\n" &
-      "hide-env __REPRO_ACTIVE_MANIFEST\n" &
-      "hide-env FIXTURE_MODE\n"
+      "[\n" &
+      "  {op: 'unset', name: '__REPRO_APPLIED'}\n" &
+      "  {op: 'unset', name: '__REPRO_ACTIVE_MANIFEST'}\n" &
+      "  {op: 'set', name: 'PATH', value: '/usr/bin:/bin'}\n" &
+      "  {op: 'unset', name: 'FIXTURE_MODE'}\n" &
+      "]\n"
     check deact == expected
 
   test "zsh_deactivation_matches_bash_byte_for_byte":

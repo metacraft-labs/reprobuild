@@ -182,9 +182,13 @@ Realizing every activity in the reference profile costs about 4 GB:
 - the rest (just / gh / php / composer / ruby / elixir / erlang): ~500 MB
 
 The M56 content-addressed store de-duplicates across generations, so
-re-applying the same profile costs nothing on disk. A future
-`repro home gc` will reclaim unused generations; until it lands, the
-prefix directories are stable and inspectable under your store root.
+re-applying the same profile costs nothing on disk. `repro home gc`
+drops the generations older than its keep window (the two newest by
+default, and always the active one) and then removes the prefixes that
+nothing holds any more. A prefix that a workspace, a running dev shell,
+a pin or another home state directory still uses is kept. Until you run
+it, the prefix directories are stable and inspectable under your store
+root.
 
 ## Co-existence with `env.ps1`
 

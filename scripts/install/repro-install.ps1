@@ -396,7 +396,9 @@ function Find-Verifier {
     if (-not (Test-Path -LiteralPath $env:REPRO_VERIFY_SCRIPT)) {
       Die "REPRO_VERIFY_SCRIPT=$($env:REPRO_VERIFY_SCRIPT) does not exist"
     }
-    return $env:REPRO_VERIFY_SCRIPT
+    # Absolute: the verifier is started from the work directory, where a
+    # name relative to the caller's directory would not resolve.
+    return (Resolve-Path -LiteralPath $env:REPRO_VERIFY_SCRIPT).Path
   }
   $here = Split-Path -Parent $PSCommandPath
   foreach ($c in @(
@@ -446,13 +448,33 @@ unverified archive.
 "@
     }
     $verifier = Find-Verifier
-    $vargs = @($verifier, '--keyring', $anchor, '--dir', $work, '--artifact', $asset)
+    # The keyring and the download directory are handed over RELATIVE to the
+    # verifier's working directory, which is $work: `--keyring <file name>`
+    # and `--dir .`. The shell and the gpg it finds are POSIX programs (Git
+    # for Windows' MSYS2 ones, or another port), and they do not all read a
+    # Windows path the same way: MSYS2 converts some arguments and not others
+    # (https://www.msys2.org/docs/filesystem-paths/), and gpg resolves a path
+    # it does not recognise as absolute against its working directory. A
+    # relative name with no drive and no separator means the same file to
+    # every one of them. The keyring is always directly in $work
+    # (Install-TrustAnchor).
+    if ((Split-Path -Parent $anchor) -ne $work) {
+      Die "internal error: the trust anchor $anchor is not in the work directory $work"
+    }
+    $vargs = @($verifier, '--keyring', (Split-Path -Leaf $anchor), '--dir', '.', '--artifact', $asset)
     if ($env:REPRO_ALLOW_TEST_KEY -eq '1') { $vargs += '--allow-test-key' }
 
-    Write-Log "verifying $asset with $verifier BEFORE extracting"
+    Write-Log "verifying $asset with $verifier under $sh, in $work, BEFORE extracting"
     if ($DryRun) { Write-Log 'DRY-RUN would verify and extract'; return }
-    & $sh @vargs
-    if ($LASTEXITCODE -ne 0) { Die 'signature verification failed; refusing to install' }
+    # A native program starts in PowerShell's current location.
+    Push-Location -LiteralPath $work
+    try {
+      & $sh @vargs
+      $verifyCode = $LASTEXITCODE
+    } finally {
+      Pop-Location
+    }
+    if ($verifyCode -ne 0) { Die 'signature verification failed; refusing to install' }
     Write-Log 'signature verification passed'
 
     $dest = Get-ArchivePrefix

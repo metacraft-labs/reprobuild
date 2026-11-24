@@ -216,8 +216,10 @@ suite "Nimble index objects":
     proc byTag(cs: seq[NimbleCandidate]; tag: string): NimbleCandidate =
       cs.filterIt(it.record.version.tag == tag)[0]
     let linux = candidatesOf(found.package, LinuxAmd64)
-    check linux.byTag("v0.7.0.8.0").exclusions.mapIt(it.kind) ==
-      @[exVersionShape]
+    # A fourth or later non-zero component is a version like any other
+    # (NPC-AREQ6), spelled with every component.
+    check linux.byTag("v0.7.0.8.0").offered
+    check linux.byTag("v0.7.0.8.0").version == "0.7.0.8.0"
     check linux.byTag("v0.6.0.0").version == "0.6.0"
     check linux.byTag("v0.6.0.0").offered
     check linux.byTag("v0.5.0").offered
@@ -226,8 +228,6 @@ suite "Nimble index objects":
     check windows.byTag("v0.5.0").exclusions.mapIt(it.kind) ==
       @[exPlatformLimited]
     check "linux-amd64" in windows.byTag("v0.5.0").exclusions[0].detail
-    check "v0.7.0.8.0 has 5 components" in
-      linux.byTag("v0.7.0.8.0").exclusions[0].detail
 
   test "a requirement on a name the index does not hold stays a dependency":
     let pkg = package("needy", @[record("needy", "1.0.0",

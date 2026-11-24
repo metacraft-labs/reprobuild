@@ -37,9 +37,10 @@
 ## the environment or the host into an output. `repro catalog verify`
 ## repeats a generation from the same inputs and compares the roots.
 
-import std/[algorithm, options, os, sets, strutils, tables]
+import std/[algorithm, net, options, os, sets, strutils, tables, times]
 
 import blake3
+import nimcrypto/sha2
 
 import repro_build_engine
 import repro_lock/identity
@@ -53,6 +54,7 @@ import repro_nimble_fetch/mirror
 import ./assemble
 import ./edge_objects
 import ./egress
+import ./fetch_work
 import ./origin_git
 import ./registry
 import ./source_set
@@ -60,20 +62,32 @@ import ./source_tree
 import ./submodules
 
 const
-  GeneratorIdentity* = "reprobuild-nimble-generator/1"
+  GeneratorIdentity* = "reprobuild-nimble-generator/2"
+    ## /2: `revived` and `alias-retargeted` events, the full history check
     ## The root's `generator`: the generator's own version, never the host's
     ## tools, so two operators with different git builds agree.
-  ReaderIdentity = "repro_nimble_reader/2"
-    ## in the `read` edge's key: the reader's version. Version 2 reads the
-    ## Nim-version comparisons and `defined(posix|unix|bsd)` into the
-    ## closed condition set (NPC-AREQ7, A3), so a version-1 reading of a
-    ## file that uses them (needs-override) is read again
+  ReaderIdentity = "repro_nimble_reader/4"
+    ## in the `read` edge's key: the reader's version and its options.
+    ## Version 2 reads the Nim-version comparisons and
+    ## `defined(posix|unix|bsd)` into the closed condition set (NPC-AREQ7,
+    ## A3), so a version-1 reading of a file that uses them (needs-override)
+    ## is read again. Version 3 reads a `.nimble` in the old INI format as
+    ## data (`admitIniFormat`), as Nimble reads it with `parsecfg` before
+    ## trying NimScript, so a version-2 reading of one (needs-probe) is read
+    ## again. Version 4 reads a requirement naming a version with a non-zero
+    ## fourth or later component (`secp256k1 >= 0.6.0.3.1`, NPC-AREQ6), so a
+    ## version-3 reading of one (needs-override) is read again
+  GeneratorReaderOptions* = ReaderOptions(admitIniFormat: true)
+    ## The static reader's options for the `read` edge (NPC-AREQ8 step 1)
   SourceEdgeVersion = "source/2"
     ## in the `source` edge's key: version 2 also outputs a gitlinked tree's
     ## entries and blobs, which a version-1 output on this host lacks
   SubmoduleEdgeVersion = "submodule/1"
   ComposerIdentity = "source-compose/1"
   MaxGenerationIterations = 64
+  DefaultFetchParallelism* = 16
+    ## fetch edges a generation runs at once when its configuration does not
+    ## say: each is one git process mostly waiting on the network
 
 type
   EdgeFamily* = enum
@@ -90,6 +104,25 @@ type
   NetworkObserver* = proc(family: EdgeFamily; url: string) {.gcsafe.}
     ## Called with every URL a fetch edge hands to the transport, before the
     ## egress policy runs on it. Tests use it to show what was attempted.
+
+  WorkerOutputTap* = proc(family: EdgeFamily; subject, outPath: string)
+    {.gcsafe.}
+    ## Called with every fetch edge's output file after its wave, before the
+    ## publisher admits it. Tests use it to hand the publisher what a
+    ## compromised worker would write; a generation never sets it.
+
+  HistoryMode* = enum
+    ## Which `history-rewritten` rule a generation runs (NPC-AREQ4).
+    hmScheduled = "scheduled"
+      ## the full check when the last one is at least the source set's
+      ## `history_check_days` old by the generation time (or none has run,
+      ## or the generation has no previous one), the per-generation rule
+      ## otherwise
+    hmFull = "full"
+      ## the full check (`repro catalog generate --full-history`)
+    hmPerGeneration = "per-generation"
+      ## the per-generation rule only (an independent regeneration of a
+      ## generation that did not run the full check)
 
   GeneratorConfig* = object
     sourceSet*: SourceSet
@@ -114,6 +147,21 @@ type
     mirrorAccess*: Option[EgressPolicy]
       ## how HTTPS mirrors are reached (resolver, trust anchors, limits);
       ## none: the host's defaults
+    fetchParallelism*: int
+      ## the most fetch edges (`refs`, `refs history`, `source`,
+      ## `submodule`) run at once, each on a worker thread of the engine's
+      ## concurrent dispatch; 1 runs them one at a time, 0 is
+      ## ``DefaultFetchParallelism``. Not part of any output: the edges'
+      ## outputs and their order of capture are the same at any value
+    workerOutputTap*: WorkerOutputTap
+    publishHold*: string
+      ## a hold file the independent regeneration writes (``regeneration``):
+      ## while it names the root this generation builds on, the generation
+      ## is not published. "" checks none
+    historyMode*: HistoryMode
+      ## the full history check by the source set's schedule (the default),
+      ## or forced one way: on demand, or by a repeat of a generation whose
+      ## root says which mode it ran
 
   Execution* = object
     family*: EdgeFamily
@@ -124,15 +172,63 @@ type
     family*: EdgeFamily
     refusal*: EgressRefusal
 
+  WorkerOutputRefusal* = object
+    ## A fetch edge's output the publisher refused (threat model G36,
+    ## FLOW-2): an unknown header or record, a field over its limit or of the
+    ## wrong shape, a truncated object, or bytes that are not what the
+    ## object says. The publisher used none of it: the edge's answer is a
+    ## failure naming the refusal.
+    package*: string
+    family*: EdgeFamily
+    subject*: string
+    output*: string   ## BLAKE3 (hex) of the refused bytes
+    reason*: string
+
+  OutsideLink* = object
+    ## A symbolic link of a fetched tree that points outside it (threat
+    ## model G4): stored as a link, never followed, and the version is
+    ## `unreadable`. Kept for capture.
+    package*: string
+    commit*: string
+    tree*: string    ## the source object's digest
+    origin*: string  ## the URL the bytes came from
+    path*: string
+    target*: string
+
+  WaveTiming* = object
+    ## How long one wave of the generation took (wall time), for the
+    ## operator; never part of an output.
+    family*: EdgeFamily
+    edges*: int     ## the wave's edges, cache hits included
+    seconds*: float
+
+  SkippedEntry* = object
+    ## A registry entry the generation did not index, and why (NPC-AREQ3:
+    ## a name `nimble:<name>` cannot spell, a style-insensitive collision,
+    ## an entry without a URL, ...).
+    registry*: string ## the registry's remote
+    entry*: string    ## the entry's name, or its index when it has none
+    reason*: string
+
   GenerationResult* = object
     built*: BuiltIndex
+    skipped*: seq[SkippedEntry]
+      ## the registry entries not indexed, in registry order
     executed*: seq[Execution]
       ## every edge whose executor ran this generation (a cache hit is not in
       ## it), in execution order
     refusals*: seq[CapturedRefusal]
+    workerRefusals*: seq[WorkerOutputRefusal]
+      ## the worker outputs the publisher refused, in admission order
+    outsideLinks*: seq[OutsideLink]
+      ## every link out of its tree in the sources this generation read,
+      ## by origin and commit
     diagnostics*: seq[string]
     events*: seq[OriginEvent]
     actions*: seq[BuildAction] ## every edge of the generation
+    waves*: seq[WaveTiming]    ## every wave, in order
+    fullHistory*: bool
+      ## the generation ran the full history check (NPC-AREQ4)
 
   GeneratorError* = object of CatchableError
 
@@ -186,7 +282,21 @@ type
     readPath: Table[string, string]     ## nimble hash -> read output
     sightings: Table[string, seq[Sighting]]
     expansions: Table[string, Expansion]
-    aliasTarget: Table[string, string]  ## alias name key -> canonical name
+    aliasTarget: Table[string, string]
+      ## alias name key -> the canonical name it resolves to: its recorded
+      ## target (NPC-AREQ3)
+    previousAliases: Table[string, PackageAlias]
+      ## alias name key -> the alias as the previous generation recorded it
+    previousCandidates: Table[string, string]
+      ## alias name key -> the candidate target the previous generation's
+      ## name map kept for it
+    aliasCandidate: Table[string, string]
+      ## alias name key -> the canonical name the registry points the alias
+      ## at now, when that is not its recorded target
+    aliasEvents: Table[string, OriginEvent]
+      ## alias name key -> its `alias-retargeted` event of this generation
+    previousLastFullCheck: uint64
+    fullHistory: bool
     carried: HashSet[string]
       ## name keys the previous generation has and this one did not visit
       ## (outside the roots' closure): copied unchanged
@@ -196,8 +306,31 @@ type
       ## worker output file -> the hash the publisher's cache key names; the
       ## publisher reads a worker's output only through ``readObject``
     previousRoot: Option[IndexObjectId]
+    prepareFailures: Table[string, string]
+      ## action id -> why its fetch edge could not be planned
+    admitted: Table[string, string]
+      ## worker output file -> the failed answer the publisher reads in its
+      ## place, for an output it refused (``admitWorkerOutput``)
+    workerRefusals: seq[WorkerOutputRefusal]
+    preparedRefusals: Table[string, CapturedRefusal]
+      ## output path -> the refusal a fetch edge met while it was prepared
+      ## for a worker, captured when the edge is settled
+    waves: seq[WaveTiming]
 
 proc hex(s: string): string = toHexLower(blake3.digest(s))
+
+const PublishHoldHeader* = "reprobuild.nimble-publish-hold.v1"
+
+proc heldRoot*(path: string): string =
+  ## The root a publish-hold file names (`regeneration.holdPublish`), "*"
+  ## for one that cannot be read (it holds every root), or "" when there is
+  ## no hold.
+  if path.len == 0 or not fileExists(path): return ""
+  let lines = readFile(path).splitLines()
+  if lines.len < 2 or lines[0] != PublishHoldHeader or
+      not lines[1].startsWith("root "):
+    return "*"
+  lines[1][5 .. ^1]
 
 proc fail(msg: string) {.noreturn.} =
   raise newException(GeneratorError, msg)
@@ -255,118 +388,79 @@ proc execRegistry(run: Run; job: Job; outPath: string) =
     fail("registry " & job.url & " has no packages.json at " & job.commit)
   writeFile(outPath, r.stdoutText)
 
-proc execRefs(run: Run; job: Job; outPath: string) =
-  var answer: RefsAnswer
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
-  try:
-    let v = run.vet(job)
-    let (ok, ls, failure) = lsRemote(run.git, v, scratch, run.cfg.policy.limits)
-    if ok:
-      answer = RefsAnswer(state: anOk, headRef: ls.headRef, head: ls.head,
-        tags: ls.tags)
-    else:
-      answer = RefsAnswer(state: anFailed, detail: failure)
-  except EgressError as e:
-    run.capture(job, e)
-    answer = RefsAnswer(state: anRefused, refusal: $e.refusal.kind,
-      detail: e.refusal.detail)
-  writeFile(outPath, encodeRefs(answer))
+proc fetchKindOf(family: EdgeFamily): FetchKind =
+  case family
+  of efRefs: fkRefs
+  of efHistory: fkHistory
+  of efSource: fkSource
+  of efSubmodule: fkSubmodule
+  else: raise newException(GeneratorError, $family & " is not a fetch edge")
 
-proc execHistory(run: Run; job: Job; outPath: string) =
-  var answer: HistoryAnswer
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
-  try:
-    let v = run.vet(job)
-    let h = fetchHistory(run.git, v, scratch, run.cfg.policy.limits)
-    if h.ok:
-      answer = HistoryAnswer(state: anOk, branchCommits: h.branchCommits,
-        allCommits: h.allCommits)
-    else:
-      answer = HistoryAnswer(state: anFailed, detail: h.failure)
-  except EgressError as e:
-    run.capture(job, e)
-    answer = HistoryAnswer(state: anRefused, refusal: $e.refusal.kind,
-      detail: e.refusal.detail)
-  writeFile(outPath, encodeHistory(answer))
+const ConcurrentFamilies = {efRefs, efHistory, efSource, efSubmodule}
+  ## the fetch edges the engine may run on worker threads: each vets one
+  ## origin and runs one git operation against it (``fetch_work``)
 
-proc execSource(run: Run; job: Job; outPath: string) =
-  var answer = SourceAnswer(commit: job.commit)
-  var nimbleBytes = ""
-  var archive = ""
-  var blobs = ""
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
+proc planFetch(run: Run; job: Job; outPath: string; concurrent: bool;
+               observe = true): Option[FetchPlan] =
+  ## The scheduler's half of a fetch edge. Inline (``concurrent`` false) the
+  ## egress policy vets the origin here. For a worker, the policy's resolver
+  ## and dialer -- closures, which stay on this thread -- answer for the
+  ## origin's own host, and the worker vets the origin from those answers
+  ## (``fetch_work``). A refusal met here has its answer written, and there
+  ## is nothing left to run. Inline it is captured at once; for a worker it
+  ## is held until ``finishEdge`` settles the edge, so the captured
+  ## refusals come in the order the edges are settled, which is the order
+  ## an inline run executes them in, whichever thread met each one.
+  let kind = fetchKindOf(job.family)
+  var plan = FetchPlan(kind: kind, url: job.url, subdir: job.subdir,
+    commit: job.commit, git: run.git, limits: run.cfg.policy.limits,
+    scratch: run.cfg.stateDir / "scratch" / hex(job.subject),
+    outPath: outPath)
   try:
-    let v = run.vet(job)
-    let limits = run.cfg.policy.limits
-    let (ok, repo, failure) = fetchCommit(run.git, v, scratch, job.commit,
-      limits)
-    if not ok:
-      answer.state = anFailed
-      answer.detail = failure
-    else:
-      let tree = readTree(run.git, repo, job.commit, job.subdir, limits)
-      let (facts, arch, nb) = sourceFacts(tree)
-      answer.state = anOk
-      answer.facts = facts
-      archive = arch
-      nimbleBytes = nb
-      if tree.hasGitlinks:
-        # The source object is composed from this tree and its submodules'
-        # (`execCompose`), so the tree itself is handed on.
-        answer.entries = tree.entries
-        answer.hasGitmodules = tree.hasGitmodules
-        blobs = encodeBlobs(tree.blobs, tree.gitmodules, tree.hasGitmodules)
+    if not concurrent:
+      plan.vetted = (if observe: run.vet(job)
+                     else: vetOrigin(run.cfg.policy, job.url))
+      plan.prevetted = true
+      return some(plan)
+    if observe and run.cfg.observer != nil:
+      {.cast(gcsafe).}: run.cfg.observer(job.family, job.url)
+    if job.vcs == ovHg:
+      refuse(erScheme, job.url, "Mercurial origins are not fetched by this " &
+        "generator")
+    let u = parseOriginUrl(job.url)
+    let policy = run.cfg.policy
+    plan.systemResolver = policy.resolver == nil
+    plan.identityDialer = policy.dialer == nil
+    var addrs: seq[IpAddress]
+    if isIpAddress(u.host): addrs = @[parseIpAddress(u.host)]
+    elif policy.resolver != nil:
+      addrs = policy.resolver(u.host)
+      plan.hosts.add (u.host, addrs)
+    if policy.dialer != nil:
+      for a in addrs: plan.dials.add (a, policy.dialer(a))
+    some(plan)
   except EgressError as e:
-    run.capture(job, e)
-    answer.state = anRefused
-    answer.refusal = $e.refusal.kind
-    answer.detail = e.refusal.detail
-  except IOError as e:
-    answer.state = anFailed
-    answer.detail = e.msg
-  writeFile(outPath, encodeSource(answer))
-  writeFile(outPath & ".nimble", nimbleBytes)
-  writeFile(outPath & ".tar", archive)
-  writeFile(outPath & ".blobs", blobs)
+    if concurrent:
+      run.preparedRefusals[outPath] = CapturedRefusal(package: job.package,
+        family: job.family, refusal: e.refusal)
+    else:
+      run.capture(job, e)
+    writeRefused(kind, job.url, job.commit, outPath, e.refusal)
+    none(FetchPlan)
 
-proc execSubmodule(run: Run; job: Job; outPath: string) =
-  ## The `submodule <url>@<commit>` edge: exactly that commit, depth 1, into
-  ## private scratch, after the URL passed the egress policy; the whole tree
-  ## read from objects.
-  var answer = SubmoduleAnswer(url: job.url, commit: job.commit)
-  var blobs = ""
-  let scratch = run.scratchFor(hex(job.subject))
-  defer: removeDir(scratch)
-  try:
-    let v = run.vet(job)
-    let limits = run.cfg.policy.limits
-    let (ok, repo, failure) = fetchCommit(run.git, v, scratch, job.commit,
-      limits)
-    if not ok:
-      answer.state = anFailed
-      answer.detail = failure
-      answer.failure = $fetchFailureOf(failure)
-    else:
-      let tree = readTree(run.git, repo, job.commit, "", limits)
-      answer.state = anOk
-      answer.entries = tree.entries
-      answer.hasGitmodules = tree.hasGitmodules
-      blobs = encodeBlobs(tree.blobs, tree.gitmodules, tree.hasGitmodules)
-  except EgressError as e:
-    run.capture(job, e)
-    answer.state = anRefused
-    answer.refusal = $e.refusal.kind
-    answer.detail = e.refusal.detail
-    answer.failure = $sfEgress
-  except IOError as e:
-    answer.state = anFailed
-    answer.detail = e.msg
-    answer.failure = $sfNoAnswer
-  writeFile(outPath, encodeSubmodule(answer))
-  writeFile(outPath & ".blobs", blobs)
+proc settleFetch(run: Run; job: Job; r: FetchWorkResult) =
+  ## The scheduler's half after the work: a refusal the transfer met (a
+  ## limit) goes to the capture log.
+  if r.refused:
+    run.refusals.add CapturedRefusal(package: job.package, family: job.family,
+      refusal: r.refusal)
+
+proc execFetch(run: Run; job: Job; outPath: string; observe = true) =
+  ## A fetch edge run inline: the origin vetted here, then the same work as
+  ## on a worker thread.
+  let plan = run.planFetch(job, outPath, concurrent = false, observe)
+  if plan.isSome:
+    run.settleFetch(job, runFetchPlan(plan.get))
 
 # ---------------------------------------------------------------------------
 # The pure executors (publisher)
@@ -378,14 +472,24 @@ proc readRecordBytes*(nimbleBytes, fileName: string): seq[byte] =
   ## The `read` edge: the record the static reader reads from a `.nimble`,
   ## encoded with the index codec as the one record of a placeholder shard
   ## (its version, commit and digests are the publisher's to fill).
-  let f = readNimbleSource(nimbleBytes, fileName)
+  let f = readNimbleSource(nimbleBytes, fileName, GeneratorReaderOptions)
   var facts = VersionFacts(tag: "read", commit: ReadPlaceholderCommit,
     nimbleFile: some(IndexObjectId(blake3.digest(nimbleBytes))))
   let rec = recordFromNimbleFile(f, facts)
-  let shard = NimbleShard(shardBits: 0, bucket: 0, packages: @[
-    PackageEnvelope(name: "read", origins: @[PackageOrigin(
-      url: "https://read.invalid/", vcs: ovGit)], versions: @[rec])])
-  encodeShard(shard)
+  proc framed(r: VersionRecord): seq[byte] =
+    encodeShard(NimbleShard(shardBits: 0, bucket: 0, packages: @[
+      PackageEnvelope(name: "read", origins: @[PackageOrigin(
+        url: "https://read.invalid/", vcs: ovGit)], versions: @[r])]))
+  try:
+    framed(rec)
+  except NimbleIndexError:
+    # A `.nimble` can say more than a record holds (more requirements,
+    # binaries or foreign dependencies than the format's bounds). Its
+    # version is then unreadable, as for anything else the reader cannot
+    # represent; the edge does not fail, so the generation goes on.
+    framed(VersionRecord(version: rec.version, commit: rec.commit,
+      nimbleFile: rec.nimbleFile, readerClass: rrcUnreadable,
+      resolutionClass: rrcUnreadable, flags: {flUnreadable}))
 
 proc decodeReadRecord*(bytes: openArray[byte]): VersionRecord =
   let s = decodeShard(bytes)
@@ -405,11 +509,16 @@ proc recordableOrigin*(o: PackageOrigin): PackageOrigin =
         result.add c
   PackageOrigin(url: pct(o.url), subdir: pct(o.subdir), vcs: o.vcs)
 
+proc workerText(run: Run; path: string): string =
+  ## A fetch edge's output as the publisher admitted it: the file, or for
+  ## an output it refused the failed answer it reads in its place.
+  if path in run.admitted: run.admitted[path] else: readFile(path)
+
 proc readObject(run: Run; path: string): string =
   ## A worker's output, read by the publisher: refused unless it is the
   ## object the shard's cache key names (threat model § 3.2: the publisher
   ## consumes content-addressed outputs).
-  result = readFile(path)
+  result = run.workerText(path)
   if path in run.objectHashes and hex(result) != run.objectHashes[path]:
     raise newException(EdgeObjectError, path & " is not the object the " &
       "shard edge was keyed on")
@@ -513,13 +622,28 @@ proc sortedEvents*(events: seq[OriginEvent]): seq[OriginEvent] =
   result.sort(proc (a, b: OriginEvent): int =
     cmp(eventSortKey(a), eventSortKey(b)))
 
+proc skippedReport*(r: GenerationResult): seq[string] =
+  ## One line per registry entry the generation did not index, naming it and
+  ## the reason: what `repro catalog generate` prints.
+  for s in r.skipped:
+    result.add "skipped: registry entry " & s.entry.escape() & " of " &
+      s.registry & ": " & s.reason
+
 proc resolveName(run: Run; name: string): string =
   let k = nameKey(name)
   if k in run.targets: run.targets[k].name
   else: run.aliasTarget.getOrDefault(k, "")
 
+proc candidateOf(run: Run; name: string): string =
+  ## The package the registry points the alias ``name`` at now when that is
+  ## not its recorded target: indexed too, as a separate candidate.
+  let k = nameKey(name)
+  if k in run.targets: ""
+  else: run.aliasCandidate.getOrDefault(k, "")
+
 proc params(run: Run): GenerationParams =
   GenerationParams(generatedAt: run.cfg.generatedAt,
+    fullHistory: run.fullHistory,
     cooldownSeconds: uint64(run.cfg.sourceSet.policy.cooldownDays) * 86400,
     expansions: run.expansions,
     resolveName: proc(name: string): string {.gcsafe.} =
@@ -542,6 +666,9 @@ proc execShard(run: Run; job: Job; outPath: string) =
       if o.envelope.isSome: packages.add o.envelope.get
       observations.add o.observation
       events.add o.events
+  for a in job.shardAliases:
+    if nameKey(a.alias) in run.aliasEvents:
+      events.add run.aliasEvents[nameKey(a.alias)]
   writeFile(outPath, toStr(buildShard(run.shardBits, job.shardBucket,
     packages, job.shardAliases, observations)))
   writeFile(outPath & ".events", toStr(encodeEvents(NimbleEvents(
@@ -556,7 +683,10 @@ proc execRoot(run: Run; job: Job; outPath: string) =
   let built = buildRootFromShards(IndexBuildInput(generator: GeneratorIdentity,
     sourceSet: sourceSetIdentity(run.cfg.sourceSet),
     generatedAt: run.cfg.generatedAt, previousRoot: run.previousRoot,
-    events: events), run.shardBits, shards)
+    events: events, aliasCandidates: run.aliasCandidate,
+    fullHistory: run.fullHistory,
+    lastFullCheck: (if run.fullHistory: run.cfg.generatedAt
+                    else: run.previousLastFullCheck)), run.shardBits, shards)
   writeFile(outPath, toStr(built.rootBytes))
   writeFile(outPath & ".names", toStr(built.objectTable()[built.root.nameMap.id]))
   writeFile(outPath & ".events", toStr(built.objectTable()[built.root.events.id]))
@@ -576,10 +706,7 @@ proc execute(run: Run; action: BuildAction): ActionResult =
   try:
     case job.family
     of efRegistry: run.execRegistry(job, outPath)
-    of efRefs: run.execRefs(job, outPath)
-    of efHistory: run.execHistory(job, outPath)
-    of efSource: run.execSource(job, outPath)
-    of efSubmodule: run.execSubmodule(job, outPath)
+    of efRefs, efHistory, efSource, efSubmodule: run.execFetch(job, outPath)
     of efCompose: run.execCompose(job, outPath)
     of efRead:
       writeFile(outPath, toStr(readRecordBytes(readFile(job.inputs[0]),
@@ -625,6 +752,152 @@ proc pureAction(run: Run; job: Job; key: string; inputs: seq[string];
     weakFingerprint = weakFingerprintFromText(fingerprint),
     text = $job.family & " " & job.subject)
 
+proc prepareEdge(run: Run; action: BuildAction): BuiltinWorkItem =
+  ## The scheduler's half of a fetch edge under concurrent dispatch: vet the
+  ## origin and hand the rest to a worker as a ``FetchPlan``'s text. Any
+  ## other edge (the registry) is left whole to ``finishEdge``.
+  if action.id notin run.jobs:
+    return
+  let job = run.jobs[action.id]
+  if job.family notin ConcurrentFamilies:
+    return
+  let outPath = action.outputs[0]
+  try:
+    createDir(parentDir(outPath))
+    run.executed.add Execution(family: job.family, subject: job.subject)
+    let plan = run.planFetch(job, outPath, concurrent = true)
+    if plan.isSome:
+      result = BuiltinWorkItem(work: fetchWork, input: encodePlan(plan.get))
+  except CatchableError as e:
+    run.prepareFailures[action.id] = $job.family & " " & job.subject & ": " &
+      e.msg
+
+proc finishEdge(run: Run; action: BuildAction; dispatched: bool;
+                outcome: BuiltinWorkOutcome): ActionResult =
+  ## The scheduler's half after a worker ran the plan, or the whole edge
+  ## when ``prepareEdge`` left it (``dispatched`` false and no plan).
+  result = ActionResult(id: action.id, status: asSucceeded, exitCode: 0,
+    launched: true)
+  let job = run.jobs.getOrDefault(action.id)
+  if action.id notin run.jobs or job.family notin ConcurrentFamilies:
+    return run.execute(action)
+  if action.id in run.prepareFailures:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = run.prepareFailures[action.id]
+    return
+  if not dispatched:
+    # Refused by the egress policy while it was prepared: answered then,
+    # captured now.
+    var held: CapturedRefusal
+    if run.preparedRefusals.pop(action.outputs[0], held):
+      run.refusals.add held
+    return
+  if not outcome.ok:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = $job.family & " " & job.subject & ": " & outcome.error
+    return
+  try:
+    let r = decodeResult(outcome.output)
+    if r.needsScheduler:
+      # The vetting met a host only the policy's own resolver or dialer can
+      # answer (a redirect under a test policy): it resumes here, on this
+      # thread, from where the worker stopped, and the edge's git work runs
+      # inline. No discovery request is repeated.
+      let outPath = action.outputs[0]
+      var plan = FetchPlan(kind: fetchKindOf(job.family), url: job.url,
+        subdir: job.subdir, commit: job.commit, git: run.git,
+        limits: run.cfg.policy.limits, prevetted: true,
+        scratch: run.cfg.stateDir / "scratch" / hex(job.subject),
+        outPath: outPath)
+      var progress = r.resume
+      try:
+        plan.vetted = vetOriginFrom(run.cfg.policy, job.url, progress)
+      except EgressError as e:
+        run.capture(job, e)
+        writeRefused(plan.kind, job.url, job.commit, outPath, e.refusal)
+        return
+      run.settleFetch(job, runFetchPlan(plan))
+    else:
+      run.settleFetch(job, r)
+  except CatchableError as e:
+    result.status = asFailed
+    result.exitCode = 1
+    result.stderr = $job.family & " " & job.subject & ": " & e.msg
+
+const MaxRefusalReasonBytes = 1024
+
+proc admitWorkerOutput(run: Run; action: BuildAction) =
+  ## The publisher's admission of one fetch edge's output (threat model
+  ## G36, FLOW-2): the object is decoded against its kind's closed
+  ## vocabulary and field limits (``edge_objects``), a source or submodule
+  ## object must answer for the commit it was asked about, and a `source`
+  ## edge that ran this generation must have written the archive its
+  ## object describes. An output that fails any of it is refused: the
+  ## refusal is kept for capture, and the publisher reads a failed answer
+  ## in its place, so nothing of it reaches a shard.
+  if action.id notin run.jobs: return
+  let job = run.jobs[action.id]
+  if job.family notin ConcurrentFamilies: return
+  let outPath = action.outputs[0]
+  if not fileExists(outPath): return
+  if run.cfg.workerOutputTap != nil:
+    {.cast(gcsafe).}: run.cfg.workerOutputTap(job.family, job.subject, outPath)
+  let text = readFile(outPath)
+  var reason = ""
+  try:
+    case job.family
+    of efRefs: discard decodeRefs(text)
+    of efHistory: discard decodeHistory(text)
+    of efSource:
+      let a = decodeSource(text)
+      if a.commit != job.commit:
+        reason = "the object answers for commit " & a.commit.escape() &
+          ", not " & job.commit
+      var t = FetchedTree()
+      if fileExists(outPath & ".blobs"):
+        decodeBlobs(readFile(outPath & ".blobs"), t)
+      var ran = false
+      for e in run.executed:
+        if e.family == efSource and e.subject == job.subject: ran = true
+      if reason.len == 0 and a.state == anOk and ran:
+        let archive = readFile(outPath & ".tar")
+        if int64(archive.len) != a.facts.archiveSize or
+            toLowerAscii($sha256.digest(archive)) != a.facts.archiveSha256:
+          reason = "the archive is not the one the object describes"
+    of efSubmodule:
+      let a = decodeSubmodule(text)
+      if a.commit != job.commit:
+        reason = "the object answers for commit " & a.commit.escape() &
+          ", not " & job.commit
+      var t = FetchedTree()
+      if fileExists(outPath & ".blobs"):
+        decodeBlobs(readFile(outPath & ".blobs"), t)
+    else: discard
+  except EdgeObjectError, ValueError, IOError:
+    reason = getCurrentExceptionMsg()
+  if reason.len == 0: return
+  if reason.len > MaxRefusalReasonBytes:
+    reason = reason[0 ..< MaxRefusalReasonBytes]
+  run.workerRefusals.add WorkerOutputRefusal(package: job.package,
+    family: job.family, subject: job.subject, output: hex(text),
+    reason: reason)
+  let detail = "the publisher refused the worker's output: " & reason
+  run.admitted[outPath] =
+    case job.family
+    of efRefs: encodeRefs(RefsAnswer(state: anFailed, detail: detail))
+    of efHistory: encodeHistory(HistoryAnswer(state: anFailed,
+      detail: detail))
+    of efSource: encodeSource(SourceAnswer(state: anFailed,
+      commit: job.commit, detail: detail))
+    else: encodeSubmodule(SubmoduleAnswer(state: anFailed, url: job.url,
+      commit: job.commit, failure: $sfNoAnswer, detail: detail))
+
+proc fetchParallelism(run: Run): int =
+  if run.cfg.fetchParallelism > 0: run.cfg.fetchParallelism
+  else: DefaultFetchParallelism
+
 proc runWave(run: Run; actions: seq[BuildAction]; all: var seq[BuildAction]) =
   if actions.len == 0: return
   all.add actions
@@ -635,21 +908,37 @@ proc runWave(run: Run; actions: seq[BuildAction]; all: var seq[BuildAction]) =
   registerMetadataFetchExecutor(proc(action: BuildAction): ActionResult
       {.gcsafe.} =
     {.cast(gcsafe).}: run.execute(action))
+  registerConcurrentMetadataFetchExecutor(ConcurrentBuiltinExecutor(
+    prepare: proc(action: BuildAction): BuiltinWorkItem {.gcsafe.} =
+      {.cast(gcsafe).}: run.prepareEdge(action),
+    finish: proc(action: BuildAction; dispatched: bool;
+                 outcome: BuiltinWorkOutcome): ActionResult {.gcsafe.} =
+      {.cast(gcsafe).}: run.finishEdge(action, dispatched, outcome)))
   registerCatalogIndexExecutor(proc(action: BuildAction): ActionResult
       {.gcsafe.} =
     {.cast(gcsafe).}: run.execute(action))
+  let started = epochTime()
   try:
     var cfg = defaultBuildEngineConfig(run.cfg.stateDir / "engine-cache")
-    cfg.maxParallelism = 1
+    # The fetch edges of a wave are independent and wait on the network:
+    # the engine runs up to this many on worker threads. The pure edges
+    # have no concurrent executor and still run one at a time.
+    cfg.maxParallelism = uint32(run.fetchParallelism)
     cfg.bypassRunQuota = true
     cfg.deferLocalOutputBlobs = false
     let outcome = runBuild(g, cfg)
     for res in outcome.results:
       if res.status == asFailed:
         fail("generator edge " & res.id & " failed: " & res.stderr)
+    for a in actions: run.admitWorkerOutput(a)
   finally:
     clearMetadataFetchExecutor()
+    clearConcurrentMetadataFetchExecutor()
     clearCatalogIndexExecutor()
+    var family = efRoot
+    if actions[0].id in run.jobs: family = run.jobs[actions[0].id].family
+    run.waves.add WaveTiming(family: family, edges: actions.len,
+      seconds: epochTime() - started)
 
 proc keyOf(parts: varargs[string]): string =
   var s = ""
@@ -686,7 +975,7 @@ proc composeSources(run: Run; all: var seq[BuildAction]; limitsKey: string;
   keys.sort()
   for sk in keys:
     if sk in run.rawSourcePath: continue
-    let src = decodeSource(readFile(run.sourcePath[sk]))
+    let src = decodeSource(run.workerText(run.sourcePath[sk]))
     if src.state == anOk and src.facts.gitlinks.len > 0:
       pending.add sk
   if pending.len == 0: return
@@ -757,7 +1046,7 @@ proc composeSources(run: Run; all: var seq[BuildAction]; limitsKey: string;
         inputs.add p & ".blobs"
         subs.add (k, p)
     for path in inputs:
-      run.objectHashes[path] = hex(readFile(path))
+      run.objectHashes[path] = hex(run.workerText(path))
       fp.add path.extractFilename() & " " & run.objectHashes[path]
     for (k, _) in subs: fp.add "uses " & k
     let key = keyOf(fp.join("\n"))
@@ -782,9 +1071,15 @@ proc loadPrevious(run: Run) =
   var idx = openIndex(src, rootId)
   run.previousRoot = some(rootId)
   var stale: seq[string]
+  run.previousLastFullCheck = idx.root.lastFullCheck
+  for e in idx.loadNameMap().entries:
+    if e.candidate.len > 0:
+      run.previousCandidates[nameKey(e.name)] = e.candidate
   for r in idx.root.shards:
     let s = idx.loadShard(r.bucket)
     if s.isNone: continue
+    for a in s.get.aliases:
+      run.previousAliases[nameKey(a.alias)] = a
     for p in s.get.packages:
       run.previousEnvelopes[nameKey(p.name)] = p
       for v in p.versions:
@@ -832,9 +1127,20 @@ proc publishSources(run: Run; built: BuiltIndex) =
   keys.sort()
   for k in keys:
     let path = run.sourcePath[k]
-    let src = decodeSource(readFile(path))
+    let src = decodeSource(run.workerText(path))
     if src.state != anOk: continue
     let archive = readFile(path & ".tar")
+    # Each archive is checked against the object that describes it before
+    # it is stored: one a worker altered after its object was admitted (a
+    # cache hit of an earlier generation is not re-admitted) is refused,
+    # and nothing is published. What was stored before it is only archives
+    # that are what their objects say.
+    if int64(archive.len) != src.facts.archiveSize or
+        toLowerAscii($sha256.digest(archive)) != src.facts.archiveSha256:
+      fail("the generation is not published: the archive of " &
+        $efSource & " " & k & " is not the one its object describes " &
+        "(size " & $archive.len & ", the object's " &
+        $src.facts.archiveSize & ")")
     for m in mirrors:
       if m.kind == mkDirectory:
         m.putObject(sourceObjectPath(src.facts.treeDigest), archive)
@@ -909,10 +1215,11 @@ proc generate*(config: GeneratorConfig): GenerationResult =
 
   var aliases: seq[RegistryAlias]
   var aliasTarget = initTable[string, string]()
-  for f in regFiles:
+  for ri, f in regFiles:
     let reg = parseRegistry(readFile(f))
     for (n, why) in reg.skipped:
-      result.diagnostics.add "registry entry " & n.escape() & " skipped: " & why
+      result.skipped.add SkippedEntry(registry: ss.registries[ri].remote,
+        entry: n, reason: why)
     for p in reg.packages:
       let k = nameKey(p.name)
       if k in run.targets:
@@ -935,9 +1242,28 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       run.targets[k].origin = PackageOrigin(url: o.origin, subdir: o.subdir,
         vcs: ovGit)
       run.targets[k].pinnedCommit = o.commit
-  for a in aliases:
+  # NPC-AREQ3: an alias keeps the target it was first recorded with. When
+  # the registry points it at another package, that package is a separate
+  # candidate (kept in the name map) and the change is an
+  # `alias-retargeted` event, reported at the generation that first sees it.
+  for a in aliases.mitems:
+    let ak = nameKey(a.alias)
+    let now = if nameKey(a.target) in run.targets:
+                run.targets[nameKey(a.target)].name
+              else: a.target
+    if ak in run.previousAliases:
+      let recorded = run.previousAliases[ak].target
+      if nameKey(recorded) != nameKey(now):
+        run.aliasCandidate[ak] = now
+        if nameKey(run.previousCandidates.getOrDefault(ak)) != nameKey(now):
+          run.aliasEvents[ak] = OriginEvent(kind: oeAliasRetargeted,
+            package: a.alias, before: recorded, after: now,
+            observedAt: config.generatedAt)
+        a.target = recorded
     if nameKey(a.target) in run.targets:
-      aliasTarget[nameKey(a.alias)] = run.targets[nameKey(a.target)].name
+      aliasTarget[ak] = run.targets[nameKey(a.target)].name
+    elif nameKey(a.target) in run.previousEnvelopes:
+      aliasTarget[ak] = run.previousEnvelopes[nameKey(a.target)].name
   run.aliasTarget = aliasTarget
   let resolve = proc(name: string): string = run.resolveName(name)
   for k, env in run.previousEnvelopes:
@@ -947,6 +1273,20 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         origin: env.origins[env.registryOrigin])
   if run.shardBits < 0:
     run.shardBits = defaultShardBits(run.targets.len)
+  # NPC-AREQ4: the full history check runs every `history_check_days` days
+  # and on demand. A generation with no previous one has no recorded commit
+  # to check, so it is a full check at no cost: the schedule starts there.
+  # An index whose roots record no full check (from before the check
+  # existed) is due at its next generation.
+  run.fullHistory =
+    case config.historyMode
+    of hmFull: true
+    of hmPerGeneration: false
+    of hmScheduled:
+      run.previousRoot.isNone or ss.policy.historyCheckDays == 0 or
+        run.previousLastFullCheck == 0 or
+        config.generatedAt >= run.previousLastFullCheck +
+          uint64(ss.policy.historyCheckDays) * 86400
 
   # ---- the closure: refs, history, source, read -------------------------
   var trackKeys = initHashSet[string]()
@@ -957,6 +1297,8 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       let n = resolve(r)
       if n.len == 0: fail("root " & r & " is not a package of the source set")
       frontier.add n
+      let c = run.candidateOf(r)
+      if c.len > 0: frontier.add c
   else:
     for k, t in run.targets: frontier.add t.name
   var inClosure = initHashSet[string]()
@@ -1004,11 +1346,23 @@ proc generate*(config: GeneratorConfig): GenerationResult =
       if abbrs.len > 0: reason = "expand " & abbrs.join(",")
       if k in run.previousObservations:
         let prev = run.previousObservations[k]
-        let refs = decodeRefs(readFile(run.refsPath[k]))
+        let refs = decodeRefs(run.workerText(run.refsPath[k]))
         if refs.state == anOk and prev.state == osAnswering and
             prev.head.len > 0 and refs.head != prev.head and
             sameOrigin(prev.origin, recordableOrigin(t.origin)):
           reason.add " head " & prev.head
+        elif refs.state == anOk and prev.state != osAnswering and
+            k in run.previousEnvelopes and
+            run.previousEnvelopes[k].versions.len > 0 and
+            sameOrigin(prev.origin, recordableOrigin(t.origin)):
+          # Answering again after an observation that did not answer: the
+          # history says whether the recorded commits are still there.
+          reason.add " revived"
+      if run.fullHistory and k in run.previousEnvelopes and
+          run.previousEnvelopes[k].versions.len > 0 and
+          decodeRefs(run.workerText(run.refsPath[k])).state == anOk:
+        # The full check: every origin with recorded commits.
+        reason.add " full"
       if reason.len == 0 or historyAsked.getOrDefault(k) == reason: continue
       historyAsked[k] = reason
       changed = true
@@ -1026,7 +1380,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         if xk in run.expansions: continue
         var x = Expansion(kind: exUnavailable)
         if k in run.historyPath:
-          let h = decodeHistory(readFile(run.historyPath[k]))
+          let h = decodeHistory(run.workerText(run.historyPath[k]))
           if h.state == anOk:
             var matches: seq[string]
             for c in h.allCommits:
@@ -1044,12 +1398,14 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     for k in keysSorted:
       let t = run.targets[k]
       if not t.listed or k notin run.refsPath: continue
-      let refs = decodeRefs(readFile(run.refsPath[k]))
+      let refs = decodeRefs(run.workerText(run.refsPath[k]))
       var requested: seq[string]
       for c in commitRequests.getOrDefault(k): requested.add c
       requested.sort()
+      let tagged = k in run.previousEnvelopes and
+        hasTagRecord(run.previousEnvelopes[k].versions)
       let sightings = sightingsOf(t.name, refs, k in trackKeys,
-        t.pinnedCommit, requested)
+        t.pinnedCommit, requested, tagged)
       run.sightings[k] = sightings
       var recorded = initHashSet[string]()
       if k in run.previousEnvelopes:
@@ -1088,7 +1444,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     sourceKeys.sort()
     for sk in sourceKeys:
       let path = run.sourcePath[sk]
-      let src = decodeSource(readFile(path))
+      let src = decodeSource(run.workerText(path))
       if src.state != anOk or src.facts.nimble != nlFound: continue
       let nb = readFile(path & ".nimble")
       let h = hex(nb)
@@ -1122,6 +1478,9 @@ proc generate*(config: GeneratorConfig): GenerationResult =
           let tk = nameKey(n)
           if ss.roots.len > 0 and tk notin inClosure:
             frontier.add n
+          let c = run.candidateOf(e.target)
+          if ss.roots.len > 0 and c.len > 0 and nameKey(c) notin inClosure:
+            frontier.add c
           if e.versionKind == rvCommit:
             if e.constraint.len in [40, 64]:
               if e.constraint notin commitRequests.getOrDefault(tk):
@@ -1211,6 +1570,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     var inputs: seq[string]
     var fp = @["shard", $b, $run.shardBits,
       (if b in timeSensitive: $config.generatedAt else: "-"),
+      "full-history " & $run.fullHistory,
       $ss.policy.cooldownDays, expansionsText.join(";"), canonicalText(ss)]
     var members = buckets[b]
     members.sort(proc (x, y: string): int = cmp(nameKey(x), nameKey(y)))
@@ -1231,7 +1591,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
         for path in [run.refsPath.getOrDefault(k), run.historyPath.getOrDefault(k)]:
           if path.len > 0:
             inputs.add path
-            run.objectHashes[path] = hex(readFile(path))
+            run.objectHashes[path] = hex(run.workerText(path))
             fp.add run.objectHashes[path]
         let ok = originKey(t.origin.url, t.origin.subdir)
         for s in run.sightings.getOrDefault(k):
@@ -1240,7 +1600,7 @@ proc generate*(config: GeneratorConfig): GenerationResult =
           if sk in run.sourcePath:
             let sp = run.sourcePath[sk]
             inputs.add sp
-            run.objectHashes[sp] = hex(readFile(sp))
+            run.objectHashes[sp] = hex(run.workerText(sp))
             fp.add run.objectHashes[sp]
             let nb = readFile(sp & ".nimble")
             if nb.len > 0 and hex(nb) in run.readPath:
@@ -1251,7 +1611,12 @@ proc generate*(config: GeneratorConfig): GenerationResult =
     var al = bucketAliases.getOrDefault(b)
     al.sort(proc (x, y: PackageAlias): int = cmp(nameKey(x.alias),
       nameKey(y.alias)))
-    for a in al: fp.add "alias " & a.alias & " " & a.target
+    for a in al:
+      fp.add "alias " & a.alias & " " & a.target
+      if nameKey(a.alias) in run.aliasEvents:
+        # The event's time: the shard's events depend on it.
+        fp.add "alias-retargeted " & $config.generatedAt & " " &
+          run.aliasEvents[nameKey(a.alias)].after
     var uniq: seq[string]
     for i in inputs:
       if i notin uniq: uniq.add i
@@ -1265,8 +1630,12 @@ proc generate*(config: GeneratorConfig): GenerationResult =
   run.runWave(shardWave, all)
 
   var rootInputs: seq[string]
+  var candidatesText: seq[string]
+  for k, c in run.aliasCandidate: candidatesText.add k & "=" & c
+  candidatesText.sort()
   var rootFp = @["root", $run.shardBits, $config.generatedAt, GeneratorIdentity,
-    $sourceSetIdentity(ss),
+    $sourceSetIdentity(ss), "full-history " & $run.fullHistory & " " &
+    $run.previousLastFullCheck, "candidates " & candidatesText.join(","),
     (if run.previousRoot.isSome: $run.previousRoot.get else: "-")]
   for (s, e) in run.shardOutputs:
     rootInputs.add s
@@ -1290,11 +1659,40 @@ proc generate*(config: GeneratorConfig): GenerationResult =
   result.built = BuiltIndex(rootId: indexObjectId(rootBytes),
     root: decodeRoot(rootBytes), rootBytes: rootBytes, objects: objects)
   if config.outputDir.len > 0:
+    let held = heldRoot(config.publishHold)
+    if held.len > 0 and (held == "*" or (run.previousRoot.isSome and
+        held == $run.previousRoot.get)):
+      fail("the generation is not published: the independent regeneration " &
+        "holds publishing on top of root " & held & " (" &
+        config.publishHold & "); an operator investigates and removes the " &
+        "hold")
     run.publishSources(result.built)
     writeIndexDir(result.built, config.outputDir)
   result.executed = run.executed
   result.refusals = run.refusals
+  result.workerRefusals = run.workerRefusals
+  var sourceKeys: seq[string]
+  for sk in run.sourcePath.keys: sourceKeys.add sk
+  sourceKeys.sort()
+  for sk in sourceKeys:
+    if sk notin run.sourceJobs: continue
+    let job = run.sourceJobs[sk]
+    let src = decodeSource(run.workerText(run.sourcePath[sk]))
+    if src.state != anOk: continue
+    for l in src.facts.links:
+      if l.verdict == lvOutside:
+        result.outsideLinks.add OutsideLink(package: job.package,
+          commit: job.commit, tree: src.facts.treeDigest, origin: job.url,
+          path: l.path, target: l.target)
+  for k in run.aliasEvents.keys:
+    var placed = false
+    for b, al in bucketAliases:
+      for a in al:
+        if nameKey(a.alias) == k: placed = true
+    if placed: result.events.add run.aliasEvents[k]
   result.actions = all
+  result.waves = run.waves
+  result.fullHistory = run.fullHistory
   result.events = sortedEvents(result.events)
 
 # ---------------------------------------------------------------------------

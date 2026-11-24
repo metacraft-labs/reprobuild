@@ -638,7 +638,7 @@ def main() -> int:
     parser.add_argument(
         "roots",
         nargs="*",
-        default=["libs", "apps", "tools", "repro.nim"],
+        default=["libs", "apps", "tools", "repro.nim", "repro_recipe_support.nim"],
         help="directories/files to scan (default: the first-party production tree)",
     )
     parser.add_argument(

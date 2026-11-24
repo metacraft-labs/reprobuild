@@ -218,7 +218,10 @@ class SingleDerivationTests(unittest.TestCase):
     def test_repro_nim_does_not_read_the_revision_at_evaluation(self):
         # A `getEnv` at recipe evaluation is snapshotted by the provider and
         # served stale to later builds (idiomatic-reprobuild.md §4.4).
-        text = (ROOT / "repro.nim").read_text(encoding="utf-8")
+        # The recipe is `repro.nim` and the engine-only part it includes.
+        text = "".join(
+            (ROOT / name).read_text(encoding="utf-8")
+            for name in ("repro.nim", "repro_recipe_support.nim"))
         self.assertFalse('getEnv("REPROBUILD_SOURCE_REVISION")' in text,
                          "repro.nim reads the revision at recipe evaluation")
         self.assertTrue("scripts/source_revision.sh --nim-module" in text,

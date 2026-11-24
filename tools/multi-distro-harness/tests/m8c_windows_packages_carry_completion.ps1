@@ -66,9 +66,10 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'm8c_common.ps1')
 
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../..')).Path
-$Version = '0.2.29'
+# The version of this checkout's build, the name of the archive made from
+# it; a real release archive names its own version.
+$Version = Get-ReproVersion -RepoRoot $RepoRoot
 $Arch = 'x86_64'
-# A real release archive names its own version.
 if ($Archive) {
   $m = [regex]::Match((Split-Path -Leaf $Archive), '^reprobuild-(.+)-windows-(x86_64|aarch64)\.zip$')
   if (-not $m.Success) { throw "-Archive must be a reprobuild-<version>-windows-<arch>.zip, not $Archive" }
@@ -258,9 +259,9 @@ try {
     $env:REPRO_MSI_TOOLSET = 'wix3'
     $env:REPRO_WIX3_BIN = ConvertTo-ScriptPath $Wix3Bin
     try {
-      & $bash ./scripts/release/repro-build-packages.sh --version $Version --tarball (ConvertTo-ScriptPath $zip) `
-        --out (ConvertTo-ScriptPath $out) --ecosystem msi --platform windows --asset-arch $Arch 2>&1 | Out-Host
-      $code = $LASTEXITCODE
+      $code = (Invoke-NativeCommand -FilePath $bash -ArgumentList @('./scripts/release/repro-build-packages.sh', '--version', $Version,
+          '--tarball', (ConvertTo-ScriptPath $zip), '--out', (ConvertTo-ScriptPath $out), '--ecosystem', 'msi',
+          '--platform', 'windows', '--asset-arch', $Arch)).Code
     } finally {
       Remove-Item Env:\REPRO_MSI_TOOLSET, Env:\REPRO_WIX3_BIN -ErrorAction SilentlyContinue
     }
@@ -284,11 +285,17 @@ try {
         [IO.File]::WriteAllText($mw, $mutant)
         $src = Join-Path $Work 'msi-src'
         [System.IO.Compression.ZipFile]::ExtractToDirectory($zip, $src)
-        & (Join-Path $Wix3Bin 'candle.exe') -nologo -arch x64 "-dSourceDir=$src" -out (Join-Path $Work 'mutant.wixobj') $mw | Out-Host
-        & (Join-Path $Wix3Bin 'light.exe') -nologo -sval -out (Join-Path $Work 'mutant.msi') (Join-Path $Work 'mutant.wixobj') | Out-Host
-        $rejected = $false
-        try { Assert-MsiCompletion (Get-MsiContents -Msi (Join-Path $Work 'mutant.msi') -Tag 'mutant') $archiveScript } catch { $rejected = $true; Write-Host "control rejected: $($_.Exception.Message)" }
-        Assert-True $rejected 'MSI control: the package without the completion entry fails the assertion'
+        $candle = Invoke-NativeCommand -FilePath (Join-Path $Wix3Bin 'candle.exe') -ArgumentList @('-nologo', '-arch', 'x64', "-dSourceDir=$src", '-out', (Join-Path $Work 'mutant.wixobj'), $mw)
+        $light = if ($candle.Code -eq 0) { Invoke-NativeCommand -FilePath (Join-Path $Wix3Bin 'light.exe') -ArgumentList @('-nologo', '-sval', '-out', (Join-Path $Work 'mutant.msi'), (Join-Path $Work 'mutant.wixobj')) } else { $null }
+        if ($candle.Code -ne 0 -or $light.Code -ne 0) {
+          # A control package that was never built would be "rejected" for
+          # the wrong reason.
+          Fail "MSI control: the package without the completion entry did not build (candle exit $($candle.Code), light exit $(if ($light) { $light.Code } else { 'not run' }))"
+        } else {
+          $rejected = $false
+          try { Assert-MsiCompletion (Get-MsiContents -Msi (Join-Path $Work 'mutant.msi') -Tag 'mutant') $archiveScript } catch { $rejected = $true; Write-Host "control rejected: $($_.Exception.Message)" }
+          Assert-True $rejected 'MSI control: the package without the completion entry fails the assertion'
+        }
       }
     } else {
       Fail "MSI: no $msi"
@@ -301,9 +308,10 @@ try {
   $pk = Join-Path $Work 'scoop-assets'
   New-Item -ItemType Directory -Force -Path $pk | Out-Null
   Copy-Item -LiteralPath $zip -Destination (Join-Path $pk "$Top.zip")
-  & $bash ./scripts/release/repro-publish-repos.sh --version $Version --packages (ConvertTo-ScriptPath $pk) --ecosystem scoop `
-    --repo-root (ConvertTo-ScriptPath (Join-Path $Work 'bucket')) --target none --scoop-downloads-base https://downloads.example 2>&1 | Out-Host
-  Assert-Equal $LASTEXITCODE 0 'Scoop: repro-publish-repos.sh --ecosystem scoop exited 0'
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @('./scripts/release/repro-publish-repos.sh', '--version', $Version,
+      '--packages', (ConvertTo-ScriptPath $pk), '--ecosystem', 'scoop', '--repo-root', (ConvertTo-ScriptPath (Join-Path $Work 'bucket')),
+      '--target', 'none', '--scoop-downloads-base', 'https://downloads.example')
+  Assert-Equal $r.Code 0 'Scoop: repro-publish-repos.sh --ecosystem scoop exited 0'
   $manifestPath = [IO.Path]::Combine($Work, 'bucket', 'scoop', 'bucket', 'reprobuild.json')
   $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
   Assert-Equal $manifest.extract_dir $Top 'Scoop: extract_dir is the archive''s top directory'
@@ -312,7 +320,8 @@ try {
 
   $isoPath = @((Join-Path $dir 'bin'), (Join-Path $env:SystemRoot 'System32'), $env:SystemRoot, (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'))
   $pw = $powershells | Where-Object { $_[0] -eq 'PowerShell 7' } | Select-Object -First 1
-  if ($pw) { $isoPath += (Split-Path -Parent $pw[1]) }
+  # PowerShell 7's own directory, not Scoop's shims (Get-PowerShellDirectory).
+  if ($pw) { $isoPath += (Get-PowerShellDirectory -PowerShell $pw[1]) }
   $isoEnv = New-IsolatedEnvironment -HomeDir $H -TempDir $Tmp -PathDirs $isoPath
   New-Item -ItemType Directory -Force -Path $H, ([IO.Path]::Combine($H, 'AppData', 'Local')), ([IO.Path]::Combine($H, 'AppData', 'Roaming')), ([IO.Path]::Combine($H, 'Documents')) | Out-Null
   if (-not (Assert-DocumentsInScratch -PowerShells $powershells -Environment $isoEnv -Scratch $Work -WorkingDirectory $Neutral)) {

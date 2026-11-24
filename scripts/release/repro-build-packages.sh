@@ -121,6 +121,17 @@ payload="$stage/$topdir"
 nbin="$(find "$payload/bin" -type f 2>/dev/null | wc -l | tr -d ' ')"
 [ "$nbin" -gt 0 ] || die "$topdir/bin contains no files; refusing to build an empty package"
 log "payload: $nbin file(s) in bin/"
+# An engine without its graph helper image is a broken release, not a smaller
+# one: the engine runs the build graph's own helper commands with
+# bin/reprobuild-helper and refuses to run them itself when it is missing (an
+# engine process inside an action loads OpenSSL, which reads entropy at
+# start-up on Windows). Refuse it here rather than ship it.
+for _engine in reprobuild reprobuild.exe; do
+  [ -e "$payload/bin/$_engine" ] || continue
+  case "$_engine" in *.exe) _helper=reprobuild-helper.exe ;; *) _helper=reprobuild-helper ;; esac
+  [ -f "$payload/bin/$_helper" ] \
+    || die "$topdir/bin has $_engine but no $_helper (the graph helper image the engine runs beside itself); refusing to package it"
+done
 
 # ---------------------------------------------------------------------
 # The installed filesystem tree, shared by every ecosystem
@@ -171,9 +182,10 @@ stage_tree() {
   for _c in "$payload/bin"/*; do
     _n="$(basename "$_c")"
     # Public commands only: not the dot-prefixed `.X.real` binaries the
-    # launchers exec, not data files that live beside them, and not
-    # runquota's commands (above).
-    case "$_n" in .*|*.json|runquotad|runquota) continue ;; esac
+    # launchers exec, not data files that live beside them, not runquota's
+    # commands (above), and not the engine's graph helper image, which only
+    # the engine runs (from beside itself, never through PATH).
+    case "$_n" in .*|*.json|runquotad|runquota|reprobuild-helper) continue ;; esac
     [ -f "$_c" ] && [ -x "$_c" ] || continue
     # shellcheck disable=SC2059 # the format is assembled from fixed text
     printf "#!/bin/sh\n${_runquotad_line}exec /$_pfx/lib/reprobuild/bin/%s \"\$@\"\n" "$_n" > "$_t/$_pfx/bin/$_n"
@@ -644,7 +656,67 @@ write_msi_wxs() {
     }'
 }
 
+# powershell_encoded_command <script>: <script> as PowerShell's
+# -EncodedCommand wants it, the base64 of its UTF-16LE bytes
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_powershell_exe,
+# -EncodedCommand).
+#
+# WHY -EncodedCommand rather than `-Command '<script>'` or `-File`. The
+# base64 alphabet holds no character that the MSYS runtime's argument
+# quoting or the callee's command-line splitter treats specially, so the
+# script reaches powershell.exe byte for byte whatever it contains; and
+# unlike `-File` it is not subject to the host's execution policy, which a
+# group policy can set beyond the reach of `-ExecutionPolicy Bypass`
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_execution_policies).
+# It does not make a broken script work: the script text must parse as
+# PowerShell on its own (see MSI_TABLE_PS).
+powershell_encoded_command() {
+  command -v iconv >/dev/null 2>&1 || die 'iconv is not available; cannot encode a PowerShell command'
+  command -v base64 >/dev/null 2>&1 || die 'base64 is not available; cannot encode a PowerShell command'
+  printf '%s' "$1" | iconv -f UTF-8 -t UTF-16LE | base64 | tr -d '\r\n'
+}
+
+# The table reader handed to powershell.exe. Kept as data, never spliced into
+# a command line, and written as a quoted here-document so the shell changes
+# nothing in it.
+#
+# PowerShell quoting, which this text must respect
+# (https://learn.microsoft.com/powershell/module/microsoft.powershell.core/about/about_quoting_rules):
+# inside a DOUBLE-quoted string a backtick is the escape character, so
+# "`" is an escaped quote and never closes the string; inside a
+# SINGLE-quoted string a backtick is an ordinary character. The SQL query
+# quotes the table name in backticks (Windows Installer SQL,
+# https://learn.microsoft.com/windows/win32/msi/sql-syntax), so its pieces
+# are single-quoted. The earlier "SELECT * FROM `" + ... + "`" did not
+# parse at all ("Unexpected token '`"'"), every table read back empty, and a
+# correct MSI was refused as not installing bin/repro.exe.
+#
+# A failure inside the script is written to stderr as plain text and exits
+# 1, so msi_table can refuse it rather than read an empty table.
+MSI_TABLE_PS="$(cat <<'MSI_TABLE_PS_EOF'
+$ErrorActionPreference = 'Stop'
+try {
+  $i = New-Object -ComObject WindowsInstaller.Installer
+  $db = $i.GetType().InvokeMember('OpenDatabase', 'InvokeMethod', $null, $i, @($env:REPRO_MSI_DB, 0))
+  $q = 'SELECT * FROM `' + $env:REPRO_MSI_TABLE + '`'
+  $v = $db.GetType().InvokeMember('OpenView', 'InvokeMethod', $null, $db, @($q))
+  $v.GetType().InvokeMember('Execute', 'InvokeMethod', $null, $v, $null) | Out-Null
+  $cols = $v.GetType().InvokeMember('ColumnInfo', 'GetProperty', $null, $v, @(0))
+  $n = $cols.GetType().InvokeMember('FieldCount', 'GetProperty', $null, $cols, $null)
+  while ($r = $v.GetType().InvokeMember('Fetch', 'InvokeMethod', $null, $v, $null)) {
+    $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember('StringData', 'GetProperty', $null, $r, @($k)) }
+    [Console]::Out.WriteLine(($f -join [char]9))
+  }
+} catch {
+  [Console]::Error.WriteLine('reading MSI table ' + $env:REPRO_MSI_TABLE + ' failed: ' + $_.Exception.Message)
+  exit 1
+}
+MSI_TABLE_PS_EOF
+)"
+
 # msi_table <msi> <table>: the table's rows, tab-separated, no header.
+# Refuses (dies) when the reader fails, so an unreadable table is never
+# mistaken for an empty one.
 msi_table() {
   if command -v msiinfo >/dev/null 2>&1; then
     msiinfo export "$1" "$2" | tr -d '\r' | tail -n +4
@@ -653,17 +725,15 @@ msi_table() {
     command -v cygpath >/dev/null 2>&1 && _m="$(cygpath -w "$1")"
     # The Windows Installer database API (WindowsInstaller.Installer):
     # https://learn.microsoft.com/windows/win32/msi/installer-opendatabase
-    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive -Command '
-      $i = New-Object -ComObject WindowsInstaller.Installer
-      $db = $i.GetType().InvokeMember("OpenDatabase", "InvokeMethod", $null, $i, @($env:REPRO_MSI_DB, 0))
-      $v = $db.GetType().InvokeMember("OpenView", "InvokeMethod", $null, $db, @("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"))
-      $v.GetType().InvokeMember("Execute", "InvokeMethod", $null, $v, $null) | Out-Null
-      $cols = $v.GetType().InvokeMember("ColumnInfo", "GetProperty", $null, $v, @(0))
-      $n = $cols.GetType().InvokeMember("FieldCount", "GetProperty", $null, $cols, $null)
-      while ($r = $v.GetType().InvokeMember("Fetch", "InvokeMethod", $null, $v, $null)) {
-        $f = foreach ($k in 1..$n) { $r.GetType().InvokeMember("StringData", "GetProperty", $null, $r, @($k)) }
-        [Console]::Out.WriteLine(($f -join "`t"))
-      }' | tr -d '\r'
+    # The database and table travel in the environment, the script as
+    # -EncodedCommand: no value is quoted into a command line.
+    _enc="$(powershell_encoded_command "$MSI_TABLE_PS")" || exit 1
+    _rc=0
+    REPRO_MSI_DB="$_m" REPRO_MSI_TABLE="$2" powershell.exe -NoProfile -NonInteractive \
+      -EncodedCommand "$_enc" > "$stage/msi-table.raw" || _rc=$?
+    [ "$_rc" -eq 0 ] ||
+      die "cannot read the $2 table of $1 back: powershell.exe exited $_rc (its stderr is above)"
+    tr -d '\r' < "$stage/msi-table.raw"
   else
     die 'cannot read the MSI back: neither msiinfo (msitools) nor the Windows Installer API (powershell.exe) is available'
   fi

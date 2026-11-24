@@ -36,6 +36,19 @@ What it needs:
   * Windows PowerShell 5.1 and PowerShell 7 (pwsh on PATH). A missing one is
     reported NOT RUN.
 
+Before the legs, two checks of the signed manifest: SHA256SUMS is GNU
+sha256sum's text form (`<digest>  <name>`) even under MSYS2, whose sha256sum
+writes the binary form by default, and repro-verify-release.sh accepts the
+binary form (`<digest> *<name>`) too.
+
+Then the installer's hand-off to the verifier: with a stand-in verifier
+(REPRO_VERIFY_SCRIPT) that records its arguments and refuses, the installer
+names the keyring and the download directory relative to the verifier's
+working directory (`--keyring <file>`, `--dir .`), the names reach the
+downloaded files, and the refusal stops the install. The POSIX shell and gpg
+that run the verifier on Windows do not all read a Windows path the same
+way; a relative name means the same file to all of them.
+
 Legs:
   1  The archive install: the archive's share\ is installed, the user's
      completion script and one block in each PowerShell's CurrentUserAllHosts
@@ -66,9 +79,10 @@ $ErrorActionPreference = 'Stop'
 $RepoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '../../..')).Path
 $InstallPs1 = [IO.Path]::Combine($RepoRoot, 'scripts', 'install', 'repro-install.ps1')
 $SignDir = [IO.Path]::Combine($RepoRoot, 'scripts', 'release-signing')
-$Version = '0.2.29'
+# The version of this checkout's build, the name of the archive made from
+# it; a real release archive names its own version.
+$Version = Get-ReproVersion -RepoRoot $RepoRoot
 $Arch = 'x86_64'
-# A real release archive names its own version.
 if ($Archive) {
   $m = [regex]::Match((Split-Path -Leaf $Archive), '^reprobuild-(.+)-windows-(x86_64|aarch64)\.zip$')
   if (-not $m.Success) { throw "-Archive must be a reprobuild-<version>-windows-<arch>.zip, not $Archive" }
@@ -114,13 +128,15 @@ try {
   foreach ($l in $realBefore) { Write-Host "real-profile: before $l" }
 
   # The PATH of every isolated process: the scratch prefix's bin, the system
-  # directories, and the directory of bash (sh, gpg, and on Linux the rest of
-  # the userland).
+  # directories, PowerShell 7's own directory (not the directory it was found
+  # in, which on a Scoop machine is Scoop's shims directory: see
+  # Get-PowerShellDirectory), and the directory of bash (sh, gpg, and on
+  # Linux the rest of the userland).
   $sys = @()
   if ($script:M8cOnWindows) {
     $sys = @((Join-Path $env:SystemRoot 'System32'), $env:SystemRoot, (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'))
     $pw = $powershells | Where-Object { $_[0] -eq 'PowerShell 7' } | Select-Object -First 1
-    if ($pw) { $sys += (Split-Path -Parent $pw[1]) }
+    if ($pw) { $sys += (Get-PowerShellDirectory -PowerShell $pw[1]) }
   } else {
     # This host's PATH without any directory that holds a `repro`, so the
     # only repro a probe can reach is the one under test.
@@ -132,10 +148,12 @@ try {
   $shim = Join-Path $Work 'shim'
   if (-not $script:M8cOnWindows) {
     New-Item -ItemType Directory -Force -Path $shim | Out-Null
-    & ln -sf (Join-Path $Prefix 'bin/repro.exe') (Join-Path $shim 'repro')
+    $r = Invoke-NativeCommand -FilePath 'ln' -ArgumentList @('-sf', (Join-Path $Prefix 'bin/repro.exe'), (Join-Path $shim 'repro'))
+    if ($r.Code -ne 0) { throw "ln -sf failed (exit $($r.Code))" }
   }
   $isoPath = @((Join-Path $Prefix 'bin'), $shim) + $sys + @($shDir)
   $isoEnv = New-IsolatedEnvironment -HomeDir $H -TempDir $Tmp -PathDirs $isoPath
+  Write-Host "isolated PATH: $($isoEnv['PATH'])"
 
   Write-Step 'the release archive, signed with a throwaway key, served over local HTTP'
   $dl = [IO.Path]::Combine($Www, 'downloads', "v$Version")
@@ -149,20 +167,41 @@ try {
     Copy-Item -LiteralPath $zip -Destination (Join-Path $dl $Asset)
   }
   $gnupg = Join-Path $Work 'gnupg'
-  $fpr = (& $bash (ConvertTo-ScriptPath (Join-Path $SignDir 'make-test-key.sh')) --home (ConvertTo-ScriptPath $gnupg) | Select-Object -Last 1)
-  if (-not $fpr) { throw 'make-test-key.sh printed no fingerprint' }
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @((ConvertTo-ScriptPath (Join-Path $SignDir 'make-test-key.sh')), '--home', (ConvertTo-ScriptPath $gnupg)) -Quiet
+  $fpr = @($r.Output) | Select-Object -Last 1
+  if ($r.Code -ne 0 -or -not $fpr) { throw "make-test-key.sh printed no fingerprint (exit $($r.Code))" }
   $env:GNUPGHOME = ConvertTo-ScriptPath $gnupg
   $env:REPRO_SIGNING_ALLOW_TEST_KEY = '1'
   try {
-    & $bash (ConvertTo-ScriptPath (Join-Path $SignDir 'repro-sign-release.sh')) --dir (ConvertTo-ScriptPath $dl) --key $fpr | Out-Host
-    if ($LASTEXITCODE -ne 0) { throw "repro-sign-release.sh failed (exit $LASTEXITCODE)" }
-    & $bash -c "gpg --homedir '$(ConvertTo-ScriptPath $gnupg)' --armor --export '$fpr' > '$(ConvertTo-ScriptPath (Join-Path (Join-Path $Www 'keys') $KeyringFile))'"
-    if ($LASTEXITCODE -ne 0) { throw 'gpg --export failed' }
+    $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @((ConvertTo-ScriptPath (Join-Path $SignDir 'repro-sign-release.sh')), '--dir', (ConvertTo-ScriptPath $dl), '--key', $fpr)
+    if ($r.Code -ne 0) { throw "repro-sign-release.sh failed (exit $($r.Code))" }
+    $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @('-c', "gpg --homedir '$(ConvertTo-ScriptPath $gnupg)' --armor --export '$fpr' > '$(ConvertTo-ScriptPath (Join-Path (Join-Path $Www 'keys') $KeyringFile))'")
+    if ($r.Code -ne 0) { throw "gpg --export failed (exit $($r.Code))" }
   } finally {
     Remove-Item Env:\GNUPGHOME, Env:\REPRO_SIGNING_ALLOW_TEST_KEY -ErrorAction SilentlyContinue
   }
   $anchorSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path (Join-Path $Www 'keys') $KeyringFile)).Hash.ToLowerInvariant()
   Pass "archive $Asset and its signatures are under $dl"
+
+  # The manifest's line format. repro-sign-release.sh writes GNU sha256sum's
+  # text form, `<digest>  <name>`, on every host -- including under MSYS2,
+  # whose sha256sum writes the binary form `<digest> *<name>` by default -- so
+  # a manifest signed on Windows is byte-identical to one signed on Linux.
+  $assetSha = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $dl $Asset)).Hash.ToLowerInvariant()
+  $sumsText = [IO.File]::ReadAllText((Join-Path $dl 'SHA256SUMS'))
+  Assert-True ($sumsText -ceq "$assetSha  $Asset`n") "SHA256SUMS is GNU sha256sum's text form '<sha256>  $Asset' (got '$($sumsText.TrimEnd())')"
+
+  # And the verifier accepts the binary form, which releases signed or
+  # concatenated on Windows carry: the same archive and detached signature
+  # beside a manifest `<digest> *<name>`, signed with the same key.
+  $binForm = Join-Path $Work 'binary-form'
+  New-Item -ItemType Directory -Force -Path $binForm | Out-Null
+  foreach ($f in @($Asset, "$Asset.asc")) { Copy-Item -LiteralPath (Join-Path $dl $f) -Destination (Join-Path $binForm $f) }
+  [IO.File]::WriteAllText((Join-Path $binForm 'SHA256SUMS'), "$assetSha *$Asset`n", (New-Object System.Text.ASCIIEncoding))
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @('-c', "gpg --batch --yes --homedir '$(ConvertTo-ScriptPath $gnupg)' --local-user '$fpr' --armor --detach-sign --output '$(ConvertTo-ScriptPath (Join-Path $binForm 'SHA256SUMS.asc'))' '$(ConvertTo-ScriptPath (Join-Path $binForm 'SHA256SUMS'))'")
+  if ($r.Code -ne 0) { throw "gpg --detach-sign of the binary-form manifest failed (exit $($r.Code))" }
+  $r = Invoke-NativeCommand -FilePath $bash -ArgumentList @((ConvertTo-ScriptPath (Join-Path $SignDir 'repro-verify-release.sh')), '--keyring', (ConvertTo-ScriptPath (Join-Path (Join-Path $Www 'keys') $KeyringFile)), '--dir', (ConvertTo-ScriptPath $binForm), '--artifact', $Asset, '--allow-test-key')
+  Assert-Equal $r.Code 0 "repro-verify-release.sh accepts the binary-form line '<sha256> *$Asset'"
   $base = "http://localhost:$Port"
   if (Wait-Url -Url "$base/" -Seconds 1) { throw "$base answers before this run started its server" }
   $server = Start-FileServer -Root $Www -Port $Port -Work $Work
@@ -203,6 +242,55 @@ try {
   }
   # One script, one block per profile.
   $registered = 1 + $loc.Profiles.Count
+
+  # ===================================================================
+  Write-Step 'the installer hands the verifier names relative to its working directory'
+  # ===================================================================
+  # The verifier is a POSIX script, run by a POSIX shell and gpg that do not
+  # all read a Windows path the same way. The installer therefore runs it in
+  # its work directory and names the keyring and the download directory
+  # relative to it (`--keyring <file>`, `--dir .`). A stand-in verifier
+  # records what it was handed and whether those names reach the files, then
+  # refuses, so nothing is installed. Every other leg runs the real verifier.
+  $handoffLog = Join-Path $Work 'verifier-handoff.txt'
+  $standIn = Join-Path $Work 'verifier-standin.sh'
+  [IO.File]::WriteAllText($standIn, (@(
+        '#!/bin/sh'
+        'log="$M8C_HANDOFF_LOG"'
+        'keyring=""; dir=""'
+        'while [ $# -gt 0 ]; do'
+        '  case "$1" in'
+        '    --keyring) keyring="$2"; shift 2 ;;'
+        '    --dir) dir="$2"; shift 2 ;;'
+        '    *) shift ;;'
+        '  esac'
+        'done'
+        'printf ''keyring=%s\n'' "$keyring" > "$log"'
+        'printf ''dir=%s\n'' "$dir" >> "$log"'
+        'if [ -f "$keyring" ] && grep -q ''BEGIN PGP PUBLIC KEY BLOCK'' "$keyring"; then echo keyring-readable=yes >> "$log"; else echo keyring-readable=no >> "$log"; fi'
+        'if [ -f "$dir/SHA256SUMS" ] && [ -f "$dir/SHA256SUMS.asc" ]; then echo dir-readable=yes >> "$log"; else echo dir-readable=no >> "$log"; fi'
+        'exit 1') -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  if (-not $script:M8cOnWindows) {
+    $null = Invoke-NativeCommand -FilePath 'chmod' -ArgumentList @('+x', $standIn)
+  }
+  Reset-Home
+  $handoffEnv = $installEnv.Clone()
+  $handoffEnv['REPRO_VERIFY_SCRIPT'] = $standIn
+  $handoffEnv['M8C_HANDOFF_LOG'] = ConvertTo-ScriptPath $handoffLog
+  $r = Invoke-Installer -Extra @('-Method', 'tarball', '-Version', $Version, '-Prefix', $Prefix) -Environment $handoffEnv
+  Assert-True ($r.Code -ne 0) 'handoff: the stand-in verifier''s refusal stops the install'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $Prefix 'bin'))) 'handoff: nothing was installed'
+  $handoff = @{}
+  if (Test-Path -LiteralPath $handoffLog) {
+    foreach ($l in [IO.File]::ReadAllLines($handoffLog)) {
+      $i = $l.IndexOf('=')
+      if ($i -gt 0) { $handoff[$l.Substring(0, $i)] = $l.Substring($i + 1) }
+    }
+  }
+  Assert-Equal $handoff['keyring'] $KeyringFile 'handoff: --keyring is the keyring''s file name, relative to the verifier''s working directory'
+  Assert-Equal $handoff['dir'] '.' 'handoff: --dir is the verifier''s working directory'
+  Assert-Equal $handoff['keyring-readable'] 'yes' 'handoff: the keyring name reaches the downloaded keyring'
+  Assert-Equal $handoff['dir-readable'] 'yes' 'handoff: the directory name reaches SHA256SUMS and its signature'
 
   # ===================================================================
   Write-Step 'leg 1: the archive install registers completion for this user'
@@ -274,7 +362,7 @@ try {
   Stop-FileServer $server
   # The gpg-agent the throwaway key's home started, by that home only.
   if ($bash -and (Test-Path -LiteralPath (Join-Path $Work 'gnupg'))) {
-    & $bash -c "gpgconf --homedir '$(ConvertTo-ScriptPath (Join-Path $Work 'gnupg'))' --kill all" 2>$null
+    $null = Invoke-NativeCommand -FilePath $bash -ArgumentList @('-c', "gpgconf --homedir '$(ConvertTo-ScriptPath (Join-Path $Work 'gnupg'))' --kill all") -Quiet
   }
 }
 exit $exit

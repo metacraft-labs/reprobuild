@@ -37,8 +37,10 @@ type
     shardBits*: uint8
     bucket*: uint32
     schema*: uint16
-      ## ``NimbleIndexSchemaVersion``, ``NimbleShardSubmodulesSchema`` or
-      ## ``NimbleShardConditionsSchema``: which wire type the packages are
+      ## ``NimbleIndexSchemaVersion``, ``NimbleShardSubmodulesSchema``,
+      ## ``NimbleShardConditionsSchema``, ``NimbleShardSnapshotsSchema``
+      ## or ``NimbleShardHistorySchema``
+      ## (schema 3's layout): which wire type the packages are
       ## (their fixed parts agree)
 
   RootNavigator* = object
@@ -155,7 +157,12 @@ proc navigateShard*(v: ByteView): ShardNavigator =
   let payload = checkFrameView(v, nokShard, schema)
   result.whole = v
   result.schema = schema
-  if schema == NimbleShardConditionsSchema:
+  if schema == NimbleShardHistorySchema:
+    result.shardBits = fixedField(payload, ShardW5, "shardBits", "shard").data[0]
+    let b = fixedField(payload, ShardW5, "bucket", "shard")
+    result.bucket = uint32(u32At(b, 0, "shard.bucket"))
+    result.packages = varField(payload, ShardW5, "packages", "shard")
+  elif schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
     result.shardBits = fixedField(payload, ShardW3, "shardBits", "shard").data[0]
     let b = fixedField(payload, ShardW3, "bucket", "shard")
     result.bucket = uint32(u32At(b, 0, "shard.bucket"))
@@ -185,7 +192,10 @@ proc packageRegion(n: ShardNavigator; i: int): ByteView =
 proc packageNameAt*(n: ShardNavigator; i: int): string =
   ## The canonical name of package ``i``, reading only its name field.
   let name =
-    if n.schema == NimbleShardConditionsSchema:
+    if n.schema == NimbleShardHistorySchema:
+      varField(packageRegion(n, i), PackageW5, "name",
+        "shard.packages[" & $i & "]")
+    elif n.schema in [NimbleShardConditionsSchema, NimbleShardSnapshotsSchema]:
       varField(packageRegion(n, i), PackageW3, "name",
         "shard.packages[" & $i & "]")
     elif n.schema == NimbleShardSubmodulesSchema:
@@ -230,10 +240,16 @@ proc navigateRoot*(v: ByteView): RootNavigator =
   var schema = 0'u16
   let payload = checkFrameView(v, nokRoot, schema)
   result.whole = v
-  result.shardBits = fixedField(payload, RootW, "shardBits", "root").data[0]
+  if schema == NimbleRootHistorySchema:
+    result.shardBits = fixedField(payload, RootW2, "shardBits", "root").data[0]
+  else:
+    result.shardBits = fixedField(payload, RootW, "shardBits", "root").data[0]
   if int(result.shardBits) > MaxShardBits:
     refuse(nrBound, "root: shardBits " & $result.shardBits)
-  result.shards = varField(payload, RootW, "shards", "root")
+  if schema == NimbleRootHistorySchema:
+    result.shards = varField(payload, RootW2, "shards", "root")
+  else:
+    result.shards = varField(payload, RootW, "shards", "root")
   const elem = fixedPortionSize(ShardRefW)
   if result.shards.len mod elem != 0:
     refuse(nrMalformed, "root.shards is not a whole number of entries")

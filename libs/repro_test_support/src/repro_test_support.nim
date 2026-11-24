@@ -599,13 +599,36 @@ proc testScratchSlug*(): string =
 
 proc isTransientDirectoryNotEmpty(e: ref OSError): bool =
   ## Nim's OSError does not expose the failing errno portably. Keep this
-  ## deliberately narrow: retry only the ENOTEMPTY-shaped cleanup race the
-  ## full suite has observed, and re-raise every other cleanup failure.
+  ## deliberately narrow: retry only the two cleanup races the full suite has
+  ## observed, and re-raise every other cleanup failure.
+  ##
+  ## - ENOTEMPTY: a background writer added an entry after the walk listed
+  ##   the directory.
+  ## - ENOENT: a background writer removed an entry after the walk listed it
+  ##   (a detached post-commit cache push renaming its pack temporaries away,
+  ##   in `t_post_commit_publishes_evidence_and_excludes_from_cache_push`), so
+  ##   removing that entry fails although the tree is going away anyway.
   let msg = e.msg.toLowerAscii()
-  msg.contains("directory not empty") or msg.contains("directory is not empty")
+  msg.contains("directory not empty") or
+    msg.contains("directory is not empty") or
+    msg.contains("no such file or directory")
+
+const WindowsErrorPathNotFound* = 3'i32
+  ## ERROR_PATH_NOT_FOUND, https://learn.microsoft.com/windows/win32/debug/system-error-codes--0-499-
+
+proc isWindowsPathNotFound*(errorCode: int32; message: string): bool =
+  ## True for the Windows failure that `RemoveDirectory`/`FindFirstFileW` report
+  ## when a path inside the tree is longer than `MAX_PATH` and was not given the
+  ## `\\?\` prefix: "The system cannot find the path specified". It is the
+  ## second face of the long-path problem `removeDirEventually` documents (the
+  ## first is ENOTEMPTY), and no amount of waiting clears it either. The code is
+  ## compared first because the message is localised.
+  errorCode == WindowsErrorPathNotFound or
+    message.toLowerAscii().contains("cannot find the path specified")
 
 proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
-  ## Remove a test scratch directory, tolerating only transient ENOTEMPTY.
+  ## Remove a test scratch directory, tolerating only transient ENOTEMPTY and
+  ## ENOENT (an entry a background writer added or removed mid-walk).
   ##
   ## Some production paths briefly leave background filesystem activity in
   ## `.repro` / `.git` trees after all test assertions have passed. A plain
@@ -634,11 +657,22 @@ proc removeDirEventually*(path: string; attempts = 25; sleepMs = 40) =
       removeDir(path)
       return
     except OSError as e:
-      if not isTransientDirectoryNotEmpty(e):
+      # ERROR_PATH_NOT_FOUND on a tree that still exists is the over-MAX_PATH
+      # symptom: waiting cannot clear it, so go straight to the extended-length
+      # form below instead of re-raising (a Windows runner without
+      # LongPathsEnabled failed t_compiler_args_transport's teardown this way,
+      # on nim 2.2.10's dist/nimble/tests tree, after every assertion passed).
+      let longPathSymptom = when defined(windows):
+          isWindowsPathNotFound(e.errorCode, e.msg) and dirExists(path)
+        else:
+          false
+      if not longPathSymptom and not isTransientDirectoryNotEmpty(e):
         raise
       if not dirExists(path):
         return
       last = e
+      if longPathSymptom:
+        break
       if attempt + 1 < attempts:
         sleep(sleepMs)
   # Waiting did not help: try the long-path form before giving up. Kept as an
@@ -895,6 +929,44 @@ const ReprobuildRepoRoot* =
   ## directories, with the source given both relatively and absolutely), so
   ## this is the repository that CONTAINS this file — never the directory the
   ## test process happened to be launched from.
+
+proc reprobuildRecipeText*(root = ReprobuildRepoRoot): string =
+  ## The checkout's ``repro.nim`` as the engine's compiles read it: each
+  ## ``include "<file>"`` line replaced by the text of that file. The recipe
+  ## keeps its engine-only part (its imports, tables and helper procedures)
+  ## in ``repro_recipe_support.nim``, which it includes under a mode guard so
+  ## that a program importing ``repro.nim`` compiles none of it; a test that
+  ## audits the recipe's text reads both files through this.
+  const Head = "include \""
+  for line in readFile(root / "repro.nim").splitLines(keepEol = true):
+    let stripped = line.strip()
+    if stripped.len > Head.len and stripped.startsWith(Head) and
+        stripped.endsWith("\""):
+      let included = readFile(root / stripped[Head.len ..< stripped.len - 1])
+      result.add(included)
+      if included.len > 0 and not included.endsWith("\n"):
+        result.add("\n")
+    else:
+      result.add(line)
+
+proc nimProcessedModules*(output: string): seq[string] =
+  ## The files a ``nim`` run names in its ``Processing`` hints, each once, in
+  ## the order first named. Run the compiler with ``--hint:all:off
+  ## --hint:Processing:on --processing:filenames``: every imported or
+  ## included file, Nim's library too, is then named by its full path, warm
+  ## nimcache or cold, as ``Hint: >> <importer>: import: <path>
+  ## [Processing]`` (or ``include:``).
+  const Suffix = " [Processing]"
+  for line in output.splitLines:
+    if not line.endsWith(Suffix):
+      continue
+    for marker in [": import: ", ": include: "]:
+      let at = line.find(marker)
+      if at >= 0:
+        let path = line[at + marker.len ..< line.len - Suffix.len]
+        if path notin result:
+          result.add(path)
+        break
 
 const ReproEvalModeFlag* = "--define:reproEvalMode"
   ## The flag that gives a test's own out-of-tree compile of DSL code the full

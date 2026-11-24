@@ -606,13 +606,17 @@ when defined(windows):
       sleep(2)
 
 proc runGit(session: var Session; cwd: string; args: openArray[string];
-            indexFile = ""; input = ""): GitReply =
+            indexFile = ""; input = "";
+            env: openArray[(string, string)] = []): GitReply =
   ## Run ``git -c <config>... <args>`` in ``cwd``. The inherited environment
   ## is kept (inside a commit's hook, ``GIT_INDEX_FILE`` IS the index being
-  ## committed), and ``indexFile`` overrides it for one command.
+  ## committed), and ``indexFile`` overrides it for one command, as does each
+  ## pair of ``env``.
   var overrides: seq[(string, string)]
   if indexFile.len > 0:
     overrides.add ("GIT_INDEX_FILE", indexFile)
+  for pair in env:
+    overrides.add pair
   var gitArgs: seq[string]
   for setting in CommandConfiguration:
     gitArgs.add ["-c", setting]
@@ -668,9 +672,10 @@ type
     failure: string
 
 proc step(session: var Session; cwd: string; args: openArray[string];
-          indexFile = ""; input = ""): GitStep =
+          indexFile = ""; input = "";
+          env: openArray[(string, string)] = []): GitStep =
   ## ``runGit``, with every way it can fail turned into a sentence.
-  let reply = session.runGit(cwd, args, indexFile, input)
+  let reply = session.runGit(cwd, args, indexFile, input, env)
   let shown = "`git " & args.join(" ") & "`"
   if not reply.launched:
     return GitStep(failure: "could not run " & shown & " with `" &
@@ -1231,6 +1236,143 @@ proc readContentFile*(repository, path: string; state: ContentState;
         return ContentFile(status: cfsFailed, reason: blob.failure)
       return ContentFile(status: cfsPresent, bytes: blob.stdout)
     ContentFile(status: cfsAbsent)
+  finally:
+    closeSession(session)
+
+# ---------------------------------------------------------------------------
+# Comparing trees by their entries
+# ---------------------------------------------------------------------------
+
+type
+  TreeEntryComparison* = object
+    ## One candidate tree compared with a reference tree.
+    tree*: string
+      ## The candidate, as it was given.
+    present*: bool
+      ## The candidate names a tree object in the repository. A candidate that
+      ## is not a well-formed object name, is absent, or is not a tree is not
+      ## present, and is never compared.
+    differing*: seq[string]
+      ## The repository-relative paths whose entries differ between the
+      ## reference tree and the candidate, recursively (``git diff-tree -r``):
+      ## a file present in one and not the other, or with another object or
+      ## mode. Empty for a present candidate that IS the reference tree.
+
+  TreeEntryComparisons* = object
+    ok*: bool
+      ## ``false`` when a git command could not be run or its output could
+      ## not be read; ``failure`` says why and ``compared`` is empty.
+    failure*: string
+    compared*: seq[TreeEntryComparison]
+      ## One per candidate, in the order given.
+
+proc isObjectName(text: string): bool =
+  ## A full SHA-1 or SHA-256 object name in lower-case hex.
+  (text.len == 40 or text.len == 64) and
+    text.allIt(it in {'0'..'9', 'a'..'f'})
+
+const NoLazyFetch = [("GIT_NO_LAZY_FETCH", "1"), ("GIT_ALLOW_PROTOCOL", "")]
+  ## A partial clone would otherwise try to FETCH every object it lacks, and
+  ## a candidate that belongs to another repository is exactly such an
+  ## object: the local store is per user, so most of its trees are absent
+  ## from any one repository. The comparison must stay a local question,
+  ## with no network operation and so no time budget to respect.
+  ##
+  ## ``GIT_NO_LAZY_FETCH`` stops the lazy fetch in a git that honours it
+  ## (measured by test-certificates-tools: 2.42.2 and later do, 2.38.5 does
+  ## not). An older git still starts the fetch, so ``GIT_ALLOW_PROTOCOL``,
+  ## set and empty, allows no transport at all to that fetch (it overrides
+  ## ``protocol.*.allow`` configuration and is inherited by the child
+  ## ``git fetch``): the fetch fails at once, before connecting, and the
+  ## absent object is reported ``missing``. See GIT_NO_LAZY_FETCH and
+  ## GIT_ALLOW_PROTOCOL in https://git-scm.com/docs/git
+
+proc compareTreesByEntries*(repository, tree: string;
+                            candidates: openArray[string];
+                            git = defaultContentIdGit()):
+    TreeEntryComparisons =
+  ## Which of ``candidates`` name a tree in ``repository``, and which paths
+  ## each of those differs from ``tree`` in. Two git processes whatever the
+  ## number of candidates — ``cat-file --batch-check`` for presence, then one
+  ## ``diff-tree --stdin`` over every present pair — and nothing is checked
+  ## out: the trees are compared by their entries, so a subtree with the same
+  ## object id on both sides costs nothing. Writes nothing.
+  ##
+  ## This is how a gate asks "is there certified content that differs from
+  ## this content only in these files?" without materialising either side
+  ## (Test-Certificates.md §"Gate integration — push requirement").
+  result.ok = true
+  if not tree.isObjectName:
+    return TreeEntryComparisons(failure: "`" & tree &
+      "` is not a full object name")
+  for candidate in candidates:
+    result.compared.add(TreeEntryComparison(tree: candidate))
+  var queried: seq[int]
+  var batch = ""
+  for i, candidate in candidates:
+    if candidate.isObjectName and candidate != tree:
+      queried.add(i)
+      batch.add(candidate & "\n")
+    elif candidate == tree:
+      result.compared[i].present = true
+  if queried.len == 0:
+    return
+  var (opened, session, failure) = openSession(git)
+  if not opened:
+    return TreeEntryComparisons(failure: failure)
+  try:
+    let presence = session.step(repository,
+      ["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+      input = batch, env = NoLazyFetch)
+    if not presence.ok:
+      return TreeEntryComparisons(failure: presence.failure)
+    # One line per input line, in order: `<oid> <type>`, or `<oid> missing`
+    # (`ambiguous` cannot occur for a full object name).
+    let lines = presence.stdout.splitLines().filterIt(it.len > 0)
+    if lines.len != queried.len:
+      return TreeEntryComparisons(failure: "`git cat-file --batch-check` " &
+        "answered " & $lines.len & " lines for " & $queried.len & " objects")
+    var pairs: seq[int]
+    var stdinPairs = ""
+    for k, i in queried:
+      let fields = lines[k].split(' ')
+      if fields.len != 2 or fields[0] != candidates[i]:
+        return TreeEntryComparisons(failure: "`git cat-file --batch-check` " &
+          "answered `" & lines[k] & "` for " & candidates[i])
+      if fields[1] == "tree":
+        result.compared[i].present = true
+        pairs.add(i)
+        stdinPairs.add(tree & " " & candidates[i] & "\n")
+    if pairs.len == 0:
+      return
+    let diffed = session.step(repository,
+      ["diff-tree", "--stdin", "-r", "-z", "--name-only", "--no-renames"],
+      input = stdinPairs, env = NoLazyFetch)
+    if not diffed.ok:
+      return TreeEntryComparisons(failure: diffed.failure)
+    # For each input pair git prints the pair back as a header line ending in
+    # LF, then every differing path NUL-terminated (`-z`). The headers are
+    # known in advance, so the output is read against them rather than
+    # guessed at: a path is everything up to its NUL.
+    let output = diffed.stdout
+    var at = 0
+    for n, i in pairs:
+      let header = tree & " " & candidates[i] & "\n"
+      if not output.continuesWith(header, at):
+        return TreeEntryComparisons(failure: "`git diff-tree --stdin` " &
+          "output does not continue with the header for " & candidates[i])
+      at += header.len
+      let next =
+        if n + 1 < pairs.len: tree & " " & candidates[pairs[n + 1]] & "\n"
+        else: ""
+      while at < output.len and
+          (next.len == 0 or not output.continuesWith(next, at)):
+        let nul = output.find('\0', at)
+        if nul < 0:
+          return TreeEntryComparisons(failure: "`git diff-tree --stdin` " &
+            "output ends inside a path")
+        result.compared[i].differing.add(output[at ..< nul])
+        at = nul + 1
   finally:
     closeSession(session)
 

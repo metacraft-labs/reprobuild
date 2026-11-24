@@ -185,7 +185,11 @@ proc killInstallerTree(root: Pid) =
   ## listed, so none can start another in between, and all are then killed;
   ## a child is listed before its parent dies, while it is still a child.
   var pending = @[root]
-  var stopped: seq[Pid] = @[]
+  # `newSeq[Pid]()`, not `@[]`: under ORC Nim may emit an empty `@[]` as
+  # the `seq[cint]` another module instantiated (both are `int32` aliases),
+  # which gcc 14+ refuses to assign to a `seq[Pid]`. See `descendantsOf` in
+  # repro_distributed_worker/lease.nim.
+  var stopped = newSeq[Pid]()
   while pending.len > 0:
     let pid = pending.pop()
     if pid in stopped:

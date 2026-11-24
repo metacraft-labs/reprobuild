@@ -17,7 +17,7 @@ proc strip*(opts: StripOptions): BuildActionDef =
       "to \"gcc\" or \"clang\"")
 
 proc strip*(input: BuildActionDef;
-            target = "";
+            target: string;
             keepSymbols: seq[string] = @[]): BuildActionDef =
   strip(StripOptions(
     input: input,

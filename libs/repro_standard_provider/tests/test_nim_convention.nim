@@ -1462,6 +1462,18 @@ proc anyArgvCarries(argvs: seq[seq[string]]; token: string): bool =
         return true
   false
 
+proc primeEmitCache(conv: LanguageConvention; scratch: string;
+                    request: ProviderGraphRequest) =
+  ## The first emit of a fresh project is never stored for reuse: its run
+  ## reads paths that changed moments before (the scratch project, the
+  ## ``.repro/build`` directories the convention has just created) and that
+  ## no earlier run stamped, so a change time from a coarse clock cannot
+  ## show the run read their current state (Nim.md §"Cross-module
+  ## ordering"). It records what the run read, and the next emit stamps
+  ## those paths before its run and stores its result. A test that needs a
+  ## stored result calls this first.
+  discard conv.emitFragment(scratch, request)
+
 suite "nim convention emit cache: project config files":
 
   test "editing a project config file re-runs Phase 1 and reaches Phase 2":
@@ -1549,6 +1561,7 @@ suite "nim convention emit cache: project config files":
     if not conv.recognize(scratch, request):
       skip("nim is not on PATH; the convention cannot emit")
     else:
+      primeEmitCache(conv, scratch, request)
       discard conv.emitFragment(scratch, request)
       let sidecar = scratch
       var before = ""
@@ -1626,6 +1639,16 @@ proc manifestWriteTimes(scratch, member: string): seq[string] =
   for f in nimcacheFiles(scratch, member & ".json"):
     result.add(f & "@" & $getLastModificationTime(f))
 
+proc emitStored(conv: LanguageConvention; scratch: string;
+                request: ProviderGraphRequest): GraphFragment =
+  ## Emit until the result is stored for reuse, and require that it was: a
+  ## test of what makes a stored manifest stale must start from one, or the
+  ## next emit re-runs Phase 1 for want of a sidecar whatever the change.
+  primeEmitCache(conv, scratch, request)
+  result = conv.emitFragment(scratch, request)
+  require nimcacheFiles(scratch,
+    "nim-c-compileonly.repro-emit-fingerprint").len == 1
+
 suite "nim convention emit cache: inputs Nim reports reading":
 
   test "editing a file that config.nims includes re-runs Phase 1":
@@ -1643,7 +1666,7 @@ suite "nim convention emit cache: inputs Nim reports reading":
     if not conv.recognize(scratch, request):
       skip("nim is not on PATH; the convention cannot emit")
     else:
-      let fragment1 = conv.emitFragment(scratch, request)
+      let fragment1 = emitStored(conv, scratch, request)
       check anyArgvCarries(phase2Argvs(fragment1), "REPRO_DEP_SENTINEL_ONE")
       # The included file is a declared input of the recorded Phase 1
       # action: Nim lists it in ``depfiles``.
@@ -1677,7 +1700,7 @@ suite "nim convention emit cache: inputs Nim reports reading":
     if not conv.recognize(scratch, request):
       skip("nim is not on PATH; the convention cannot emit")
     else:
-      let fragment1 = conv.emitFragment(scratch, request)
+      let fragment1 = emitStored(conv, scratch, request)
       check anyArgvCarries(phase2Argvs(fragment1),
         "REPRO_LAYOUTB_SENTINEL_ONE")
       let phase1 = actionByPrefix(fragment1, "nim-c-compileonly-")
@@ -1714,7 +1737,7 @@ suite "nim convention emit cache: inputs Nim reports reading":
     if not conv.recognize(scratch, request):
       skip("nim is not on PATH; the convention cannot emit")
     else:
-      let fragment1 = conv.emitFragment(scratch, request)
+      let fragment1 = emitStored(conv, scratch, request)
       check anyArgvCarries(phase2Argvs(fragment1),
         "REPRO_PATHDEP_SENTINEL_ONE")
       let phase1 = actionByPrefix(fragment1, "nim-c-compileonly-")
@@ -1745,6 +1768,7 @@ suite "nim convention emit cache: inputs Nim reports reading":
     if not conv.recognize(scratch, request):
       skip("nim is not on PATH; the convention cannot emit")
     else:
+      primeEmitCache(conv, scratch, request)
       discard conv.emitFragment(scratch, request)
       let before = manifestWriteTimes(scratch, "dep_reuse")
       require before.len == 1
@@ -1766,7 +1790,12 @@ suite "nim convention emit cache: inputs Nim reports reading":
     if not conv.recognize(scratch, request):
       skip("nim is not on PATH; the convention cannot emit")
     else:
+      # The result must be stored, or the next emit re-runs Phase 1 for want
+      # of a sidecar and the empty ``depfiles`` decides nothing.
+      primeEmitCache(conv, scratch, request)
       discard conv.emitFragment(scratch, request)
+      require nimcacheFiles(scratch,
+        "nim-c-compileonly.repro-emit-fingerprint").len == 1
       let manifests = nimcacheFiles(scratch, "dep_empty.json")
       require manifests.len == 1
       let manifestPath = manifests[0]
@@ -1844,3 +1873,284 @@ suite "nim convention emit cache: inputs Nim reports reading":
           check spelling notin resolved
           resolved.add(spelling)
         check declaresInput(phase1[0], real / "src" / "other.nim")
+
+# ---------------------------------------------------------------------------
+# Emit-cache reuse is checked against what the io monitor saw Phase 1 read.
+#
+# Nim's ``depfiles`` lists the modules, config files and ``staticRead``
+# payloads it read. It does not list a compile-time read Nim does not
+# register (an environment variable, a ``readFile``, the output of
+# ``staticExec``), nor a file Nim looked for and did not find, which it would
+# choose in a module lookup once it exists. And it hashes config files and
+# ``staticRead`` payloads only after the compile, so an edit made while Phase
+# 1 runs is recorded with the new hash against a manifest compiled from the
+# old content. Each of these let a cached manifest be reused after a change,
+# and Phase 2 then ran stale compile commands. The eager Phase 1 run is
+# therefore monitored, and its manifest is reused only while every read it
+# observed would read the same, and only if nothing it read changed while it
+# ran (Nim.md §"Cross-module ordering").
+#
+# Adversarial origin: a review of the emit cache, which showed with Nim
+# 2.2.12 that a ``getEnv``, ``readFile`` or ``staticExec`` result reaches the
+# C flags while ``depfiles`` lists only the module that made the read.
+# No mocks: each scratch project goes through the real convention, the real
+# ``nim`` on PATH and the real io monitor.
+# ---------------------------------------------------------------------------
+
+suite "nim convention emit cache: reads Nim does not register":
+
+  test "an environment variable config.nims reads re-runs Phase 1":
+    let scratch = getTempDir() / "test_nim_convention_env_read"
+    writeDepProbeProject(scratch, "envRead", "env_read")
+    defer:
+      removeDir(scratch)
+      delEnv("REPRO_NIM_EMIT_PROBE")
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "env_read.nim", "echo \"env read\"\n")
+    writeFile(scratch / "src" / "config.nims",
+      "switch(\"passC\", \"-DREPRO_ENV_SENTINEL_\" & " &
+      "getEnv(\"REPRO_NIM_EMIT_PROBE\") & \"=1\")\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      putEnv("REPRO_NIM_EMIT_PROBE", "ONE")
+      let fragment1 = emitStored(conv, scratch, request)
+      let first = phase2Argvs(fragment1)
+      check anyArgvCarries(first, "REPRO_ENV_SENTINEL_ONE")
+      # The read is an evaluation input too, so a change re-invokes the
+      # convention rather than serving the stored graph.
+      var sawEnvInput = false
+      for input in fragment1.evaluationInputs:
+        if input.kind == gevHostFact and
+            input.identity == "env:REPRO_NIM_EMIT_PROBE":
+          sawEnvInput = true
+          check input.digest == hostFactDigest(input.identity)
+      check sawEnvInput
+      # The sidecar holds the key as text; a variable may hold a secret, so
+      # the key carries a digest of its value, never the value itself.
+      let sidecars = nimcacheFiles(scratch,
+        "nim-c-compileonly.repro-emit-fingerprint")
+      require sidecars.len == 1
+      let sidecarText = readFile(sidecars[0])
+      check "env:REPRO_NIM_EMIT_PROBE=" in sidecarText
+      check "REPRO_NIM_EMIT_PROBE=set:ONE" notin sidecarText
+      check "=ONE" notin sidecarText
+      putEnv("REPRO_NIM_EMIT_PROBE", "TWO")
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after changing REPRO_NIM_EMIT_PROBE: " &
+        $second
+      check anyArgvCarries(second, "REPRO_ENV_SENTINEL_TWO")
+      check not anyArgvCarries(second, "REPRO_ENV_SENTINEL_ONE")
+
+  test "a module created earlier on the search path re-runs Phase 1":
+    # Nim searches a ``path`` added later before one added earlier, so a
+    # ``helper.nim`` created in ``late/`` shadows the one in ``early/``. Before
+    # it exists, Nim only probed for it.
+    let scratch = getTempDir() / "test_nim_convention_shadowing_module"
+    writeDepProbeProject(scratch, "shadowing", "shadowing")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    createDir(scratch / "early")
+    createDir(scratch / "late")
+    writeFile(scratch / "src" / "shadowing.nim",
+      "import helper\necho helperValue()\n")
+    writeFile(scratch / "src" / "config.nims",
+      "switch(\"path\", thisDir() & \"/../early\")\n" &
+      "switch(\"path\", thisDir() & \"/../late\")\n")
+    writeFile(scratch / "early" / "helper.nim",
+      "{.passC: \"-DREPRO_SHADOW_SENTINEL_EARLY=1\".}\n" &
+      "proc helperValue*(): int = 1\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let first = phase2Argvs(emitStored(conv, scratch, request))
+      check anyArgvCarries(first, "REPRO_SHADOW_SENTINEL_EARLY")
+      let manifests = nimcacheFiles(scratch, "shadowing.json")
+      require manifests.len == 1
+      let before = readFile(manifests[0])
+      writeFile(scratch / "late" / "helper.nim",
+        "{.passC: \"-DREPRO_SHADOW_SENTINEL_LATE=1\".}\n" &
+        "proc helperValue*(): int = 2\n")
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after creating late/helper.nim: " & $second
+      check readFile(manifests[0]) != before
+      check anyArgvCarries(second, "REPRO_SHADOW_SENTINEL_LATE")
+      check not anyArgvCarries(second, "REPRO_SHADOW_SENTINEL_EARLY")
+
+  test "a file read with readFile or staticExec re-runs Phase 1":
+    let scratch = getTempDir() / "test_nim_convention_unregistered_file"
+    writeDepProbeProject(scratch, "unregisteredFile", "unregistered_file")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "unregistered_file.nim",
+      "import std/os\n" &
+      "{.passC: \"-DREPRO_RF_SENTINEL_\" & " &
+      "static(readFile(currentSourcePath().parentDir / \"rf.txt\")) & " &
+      "\"=1\".}\n" &
+      "{.passC: \"-DREPRO_SE_SENTINEL_\" & " &
+      "staticExec(\"cat se.txt\") & \"=1\".}\n" &
+      "echo \"unregistered\"\n")
+    writeFile(scratch / "src" / "rf.txt", "ONE")
+    writeFile(scratch / "src" / "se.txt", "ONE")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      let first = phase2Argvs(emitStored(conv, scratch, request))
+      check anyArgvCarries(first, "REPRO_RF_SENTINEL_ONE")
+      check anyArgvCarries(first, "REPRO_SE_SENTINEL_ONE")
+      writeFile(scratch / "src" / "rf.txt", "TWO")
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing src/rf.txt: " & $second
+      check anyArgvCarries(second, "REPRO_RF_SENTINEL_TWO")
+      # rf.txt was stamped before that run, so its result was stored, and
+      # the edit below is tested against a stored manifest too.
+      require nimcacheFiles(scratch,
+        "nim-c-compileonly.repro-emit-fingerprint").len == 1
+      writeFile(scratch / "src" / "se.txt", "TWO")
+      let third = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after editing src/se.txt: " & $third
+      check anyArgvCarries(third, "REPRO_SE_SENTINEL_TWO")
+      check not anyArgvCarries(third, "REPRO_SE_SENTINEL_ONE")
+
+  test "a file edited while Phase 1 runs does not make its manifest reusable":
+    # The module reads ``flag.txt`` with ``staticRead``, which Nim records in
+    # ``depfiles``, and then rewrites it during the same compile. Nim hashes
+    # a ``staticRead`` payload only when it writes the manifest, so the
+    # recorded hash is that of the new content while the C flags were taken
+    # from the old. This is the edit an operator makes while Phase 1 runs,
+    # made deterministic by letting the compile make it.
+    let scratch = getTempDir() / "test_nim_convention_edit_during_run"
+    writeDepProbeProject(scratch, "editDuringRun", "edit_during_run")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    let reader =
+      "const flag = staticRead(\"flag.txt\")\n" &
+      "{.passC: \"-DREPRO_RACE_SENTINEL_\" & flag & \"=1\".}\n" &
+      "echo flag\n"
+    writeFile(scratch / "src" / "edit_during_run.nim", reader)
+    writeFile(scratch / "src" / "flag.txt", "ONE")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      # Start from a stored manifest, so that a manifest stored by the run
+      # below is the only thing that could make the last emit reuse it.
+      check anyArgvCarries(phase2Argvs(emitStored(conv, scratch, request)),
+        "REPRO_RACE_SENTINEL_ONE")
+      writeFile(scratch / "src" / "edit_during_run.nim", reader &
+        "static:\n" &
+        "  discard staticExec(\"printf TWO > flag.txt\")\n")
+      let first = phase2Argvs(conv.emitFragment(scratch, request))
+      check anyArgvCarries(first, "REPRO_RACE_SENTINEL_ONE")
+      require readFile(scratch / "src" / "flag.txt") == "TWO"
+      check nimcacheFiles(scratch,
+        "nim-c-compileonly.repro-emit-fingerprint").len == 0
+      let second = phase2Argvs(conv.emitFragment(scratch, request))
+      checkpoint "phase-2 argv after the compile rewrote src/flag.txt: " &
+        $second
+      check anyArgvCarries(second, "REPRO_RACE_SENTINEL_TWO")
+      check not anyArgvCarries(second, "REPRO_RACE_SENTINEL_ONE")
+
+  test "what Phase 1 read becomes the fragment's evaluation inputs":
+    # The engine re-invokes the convention only when an evaluation input of
+    # its fragment changes (Project-Provider-Graph-Protocol.md §"Evaluation
+    # Inputs"), so the reads that key the emit cache must be reported there
+    # too: a module outside ``src/``, a lookup that found nothing, and
+    # Nim's scan of a module's ancestors for ``*.nimble``, which is scoped
+    # to the entries that match.
+    let scratch = getTempDir() / "test_nim_convention_evaluation_inputs"
+    writeDepProbeProject(scratch, "evalInputs", "eval_inputs")
+    defer:
+      removeDir(scratch)
+    createDir(scratch / "src")
+    createDir(scratch / "vendor")
+    writeFile(scratch / "src" / "eval_inputs.nim",
+      "import vendored\necho vendoredValue()\n")
+    writeFile(scratch / "src" / "config.nims",
+      "switch(\"path\", thisDir() & \"/../vendor\")\n")
+    writeFile(scratch / "vendor" / "vendored.nim",
+      "proc vendoredValue*(): int = 1\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      proc checkInputs(fragment: GraphFragment; stored: bool) =
+        var sawVendored = false
+        var sawAbsentProbe = false
+        var sawScopedScan = false
+        var sawUnobserved = false
+        for input in fragment.evaluationInputs:
+          if input.kind == gevFileRead:
+            if input.digest == UnobservedEvaluationDigest:
+              sawUnobserved = true
+            elif input.digest == "missing":
+              if input.identity.endsWith(DirSep & "vendored.nim"):
+                # Nim looked for the module beside the entry before it
+                # searched ``vendor/``.
+                sawAbsentProbe = true
+            elif input.identity.endsWith("vendored.nim") and
+                sameFile(input.identity, scratch / "vendor" / "vendored.nim"):
+              sawVendored = true
+          elif input.kind == gevDirectoryEnumeration and
+              input.identity.endsWith("\0*.nimble"):
+            sawScopedScan = true
+        check sawVendored
+        check sawAbsentProbe
+        check sawScopedScan
+        check sawUnobserved == not stored
+      # The first emit cannot be stored: it reads paths no earlier run
+      # stamped. Its fragment says so, and is produced again on every
+      # refresh until an emit is stored.
+      checkInputs(conv.emitFragment(scratch, request), stored = false)
+      let stored = conv.emitFragment(scratch, request)
+      require nimcacheFiles(scratch,
+        "nim-c-compileonly.repro-emit-fingerprint").len == 1
+      checkInputs(stored, stored = true)
+      # A reused manifest reports the same reads.
+      checkInputs(conv.emitFragment(scratch, request), stored = true)
+
+  test "without a monitor Phase 1 runs on every emit and is never stored":
+    # Nim.md §"Cross-module ordering": when the monitor cannot be started,
+    # what Phase 1 read is unknown, so its manifest is used for this
+    # evaluation only. ``REPRO_MONITOR_SHIM_LIB`` naming no file is a
+    # monitor that cannot be started: io-mon refuses to fall back to
+    # another shim.
+    let scratch = getTempDir() / "test_nim_convention_no_monitor"
+    writeDepProbeProject(scratch, "noMonitor", "no_monitor")
+    let savedShim = getEnv("REPRO_MONITOR_SHIM_LIB")
+    let hadShim = existsEnv("REPRO_MONITOR_SHIM_LIB")
+    defer:
+      removeDir(scratch)
+      if hadShim: putEnv("REPRO_MONITOR_SHIM_LIB", savedShim)
+      else: delEnv("REPRO_MONITOR_SHIM_LIB")
+    createDir(scratch / "src")
+    writeFile(scratch / "src" / "no_monitor.nim", "echo \"no monitor\"\n")
+    let conv = nim_convention.nimConvention()
+    let request = dummyRequest(scratch)
+    if not conv.recognize(scratch, request):
+      skip("nim is not on PATH; the convention cannot emit")
+    else:
+      putEnv("REPRO_MONITOR_SHIM_LIB", scratch / "no-such-shim.so")
+      for round in 1 .. 3:
+        let fragment = conv.emitFragment(scratch, request)
+        checkpoint "round " & $round
+        check phase2Argvs(fragment).len >= 1
+        check nimcacheFiles(scratch,
+          "nim-c-compileonly.repro-emit-fingerprint").len == 0
+        var sawUnobserved = false
+        for input in fragment.evaluationInputs:
+          if input.kind == gevFileRead and
+              input.digest == UnobservedEvaluationDigest:
+            sawUnobserved = true
+        check sawUnobserved

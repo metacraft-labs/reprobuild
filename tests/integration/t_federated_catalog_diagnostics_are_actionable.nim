@@ -413,7 +413,7 @@ the published catalogs that would explain this field by field could not be read 
   golden["crafted-garbage"] = """
 repro lock refresh --provisioning: re-selection refused; {lock} was not written:
   the catalogs to re-select from could not be obtained: catalog "fed-catalog-a" ({remoteA}) at {rev_crafted-garbage} cannot be composed:
-      published artifact published-interfaces/fedCatalogA.rbsz is not a readable interface artifact: unsupported interface envelope version
+      published artifact published-interfaces/fedCatalogA.rbsz is not a readable interface artifact: unsupported interface envelope version 25120 (this engine reads interface envelope versions 1 through {envelope})
       fix: pin a revision of "fed-catalog-a" that publishes valid interface artifacts (the `commit` or `ref` of its [[import]] in repro-catalogs.toml), or have its publisher regenerate and commit `published-interfaces/`
       (the [[import]] of "fed-catalog-a" is at {decl}:8)"""
   golden["crafted-forged"] = """
@@ -614,6 +614,9 @@ suite "federated catalog diagnostics are actionable":
   # The goldens were observed on amd64-windows; the platform pair is the
   # host's, so it is a placeholder like every other run-specific value.
   base["host"] = Host
+  # The decode refusal names the newest envelope this build reads; the
+  # garbage blob's header bytes (" b") read as version 25120.
+  base["envelope"] = $interfaceEnvelopeVersion()
   base["fp"] = fp
   base["fp2"] = fp2
   base["remoteP"] = w.packages.remote

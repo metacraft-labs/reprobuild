@@ -1299,7 +1299,71 @@ def parse_repro_tests(root: Path) -> tuple[list[TestSpec], list[TestSpec]]:
                     language="python",
                 )
             )
+    refuse_repeated_test_rows(nim_specs, py_specs)
     return nim_specs, py_specs
+
+
+REPRO_TESTS_REGENERATE_COMMAND = "nim r scripts/generate_test_edges.nim"
+
+
+def refuse_repeated_test_rows(nim_specs: list[TestSpec],
+                              py_specs: list[TestSpec]) -> None:
+    """Refuse a `repro_tests.nim` that lists a test source, or a binary, twice.
+
+    `repro.nim` registers one compile edge per `TestSpec` row, and that edge's
+    id is a hash of its command line (`defaultToolActionId`). Two rows with the
+    same source, binary and defines therefore make two edges with ONE id, and
+    every `repro` command that loads the recipe then stops with nothing more
+    than `duplicate graph node id: project:action:nim-c-<hash>`, which names
+    neither the row nor the file. That is how v0.2.34's release build failed:
+    a commit added the `t_launcher_rematerialize_replaces_atomically` row
+    twice, the generator would never have written it that way, and nothing
+    between the commit and the release read the table for repeats.
+
+    Two rows with the same binary and different sources are the same defect
+    one step later: two edges that declare one output.
+
+    The table is generated (`scripts/generate_test_edges.nim` emits one row per
+    discovered source), so a repeat is a hand edit or a text merge, never a
+    regeneration. This is the rule `inventory_source_projection` and
+    `parse_static_case_counts` already apply to the artifacts derived from this
+    table, applied to the table itself; every gate reads it through
+    `parse_repro_tests`, so `just lint` refuses the commit that introduces one.
+    """
+    problems: list[str] = []
+
+    def repeats(values: list[str]) -> list[str]:
+        seen: set[str] = set()
+        repeated: list[str] = []
+        for value in values:
+            if value in seen and value not in repeated:
+                repeated.append(value)
+            seen.add(value)
+        return repeated
+
+    for source in repeats([spec.source for spec in nim_specs]):
+        problems.append(f"test source {source!r} has more than one TestSpec row")
+    for binary in repeats([spec.binary for spec in nim_specs]):
+        sources = sorted({spec.source for spec in nim_specs
+                          if spec.binary == binary})
+        if len(sources) < 2:
+            continue  # one source repeated: already reported above
+        problems.append(f"binary {binary!r} is written by more than one row "
+                        f"(sources: {', '.join(sources)})")
+    for source in repeats([spec.source for spec in py_specs]):
+        problems.append(f"Python test {source!r} is listed more than once in "
+                        "pythonTestPaths")
+    if problems:
+        raise SystemExit(
+            "parse_repro_tests: repro_tests.nim repeats a row:\n  " +
+            "\n  ".join(problems) +
+            "\nEach row becomes a build edge whose id is derived from its "
+            "command line, so a repeated row is a duplicate graph node and "
+            "every repro command that loads repro.nim fails; two rows that "
+            "write one binary are two edges declaring one output. The table is "
+            "generated; a repeat comes from a hand edit or a text merge. "
+            f"Regenerate it: {REPRO_TESTS_REGENERATE_COMMAND}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1916,6 +1980,29 @@ def read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+RECIPE_INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"\s*$')
+
+
+def read_recipe_text(root: Path) -> str:
+    """The root ``repro.nim`` as the engine's compiles read it.
+
+    Each ``include "<file>"`` line is replaced by the text of that file:
+    ``repro.nim`` keeps its engine-only part (the test-artifact tables among
+    it) in ``repro_recipe_support.nim``, which it includes under a mode guard.
+    """
+    parts = []
+    for line in read_text(root / "repro.nim").splitlines(keepends=True):
+        match = RECIPE_INCLUDE_RE.match(line)
+        if not match:
+            parts.append(line)
+            continue
+        included = read_text(root / match.group(1))
+        if included and not included.endswith("\n"):
+            included += "\n"
+        parts.append(included)
+    return "".join(parts)
 
 
 def load_slow_review_document(root: Path) -> dict[str, Any]:
@@ -4982,7 +5069,7 @@ def local_dependency_shape(spec: TestSpec, text: str) -> list[str]:
 
 
 def parse_graph_owned_artifacts(root: Path) -> list[dict[str, str]]:
-    text = read_text(root / "repro.nim")
+    text = read_recipe_text(root)
     artifacts: list[dict[str, str]] = []
     block_re = re.compile(r"nim\.c\(\s*(.*?)\)\)", re.S)
     for block in block_re.finditer(text):

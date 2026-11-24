@@ -393,6 +393,27 @@ when defined(linux):
     discard cleanupLease(spec)
     quit(0)
 
+# The process-tree kill case below needs a descendant that leaves the
+# wrapper's process group. This binary is that descendant: started with
+# `SetsidChildEnv` naming a file, it calls setsid(2), writes its pid to the
+# file (so the file appearing proves the setsid already happened), and
+# sleeps. It used to be `/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); ...'`,
+# which exists on an FHS host only: NixOS has no /usr/bin/perl, so the
+# descendant never started and the case could not pass there. Reusing this
+# binary needs nothing the host may lack.
+const SetsidChildEnv = "REPRO_LEASE_SETSID_CHILD"
+
+when defined(posix):
+  if getEnv(SetsidChildEnv).len > 0:
+    let pidFile = getEnv(SetsidChildEnv)
+    if posix.setsid() < 0: quit(1)
+    # Written whole, then renamed: the parent polls for the file and must
+    # never read a partial pid.
+    writeFile(pidFile & ".tmp", $getCurrentProcessId())
+    moveFile(pidFile & ".tmp", pidFile)
+    sleep(301_000)
+    quit(0)
+
 suite "Distributed-Execution M7: execution-lease confinement, layer by layer":
 
   test "t_execution_lease_confinement_layer_by_layer":
@@ -1305,21 +1326,42 @@ int main(void) {
     let fake = base / "sandbox-exec"
     writeFile(fake, "#!/bin/sh\nshift 2\nexec \"$@\"\n")
     setFilePermissions(fake, {fpUserRead, fpUserWrite, fpUserExec})
-    let action = "sleep 300 & echo $! > " & (base / "plain") & "; " &
-      "/usr/bin/perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"301\"' & " &
-      "echo $! > " & (base / "escaped") & "; wait"
+    ## The action's tools are resolved the way the rest of this file does
+    ## (`coreToolDir()` on its PATH): the shell's built-in default PATH has
+    ## no `sleep` on NixOS. The escaping descendant is this binary in its
+    ## setsid child mode (`SetsidChildEnv`), not perl.
+    let action = "sleep 300 & echo $! > " & quoteShell(base / "plain") &
+      "; " & SetsidChildEnv & "=" & quoteShell(base / "escaped") & " " &
+      quoteShell(getAppFilename()) & " & wait"
+    let env = newStringTable(modeCaseSensitive)
+    env["PATH"] = coreToolDir() & ":/usr/bin:/bin"
     var child = startSeatbeltWrapper("/bin/sh", fake, base / "unused.sb",
-      base / "out", base / "err", @["/bin/sh", "-c", action], base,
-      newStringTable(modeCaseSensitive))
+      base / "out", base / "err", @["/bin/sh", "-c", action], base, env)
     var pids: seq[Pid]
     for name in ["plain", "escaped"]:
       for _ in 0 ..< 200:
         if fileExists(base / name) and readFile(base / name).strip.len > 0:
           break
         sleep(25)
+      # The action's stderr names the reason a child never started (a tool
+      # missing from PATH, as on NixOS before this case resolved its tools).
+      checkpoint "action stderr: " & (if fileExists(base / "err"):
+        readFile(base / "err") else: "<none>")
+      if not fileExists(base / name):
+        # Fail this case only (`require` would quit the whole binary) and
+        # leave nothing of the action running.
+        check fileExists(base / name)
+        killProcessTree(child)
+        discard child.waitForExit()
+        return
       pids.add(Pid(parseInt(readFile(base / name).strip)))
-    sleep(200)   # let perl finish its setsid + exec
     for pid in pids: check posix.kill(pid, 0) == 0
+    # The premise: the escaped descendant really left the wrapper's process
+    # group (it leads its own session), so killing the group cannot be what
+    # ends it; the plain child is still in the group.
+    check posix.getsid(pids[1]) == pids[1]
+    check posix.getpgid(pids[1]) != child.pid
+    check posix.getpgid(pids[0]) == child.pid
     killProcessTree(child)
     discard child.waitForExit()
     for pid in pids:

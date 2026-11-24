@@ -8,6 +8,7 @@ import repro_core/portable_release_launch
 import repro_hash
 import repro_provider_runtime/codec
 import repro_provider_runtime/types
+import repro_local_store/pattern_scoped_enumeration
 
 type
   InvocationPlan = object
@@ -28,6 +29,41 @@ const ProviderStartupBodyFailurePrefix* =
   ## ``runProviderProtocol``). Two spellings of it would fail silently --
   ## the provider would report and the engine would drop it -- which is
   ## the failure mode the prefix exists to prevent.
+
+var providerStartupFailuresSeen {.threadvar.}: seq[string]
+  ## The forwarded startup-body failures of the build running on this thread,
+  ## one per line text, for ``providerStartupFailureSummary``. Per thread
+  ## because a build is: the user daemon runs builds on threads of one process.
+
+proc resetProviderStartupFailures*() =
+  providerStartupFailuresSeen = @[]
+
+proc recordProviderStartupFailure*(line: string) =
+  if line notin providerStartupFailuresSeen:
+    providerStartupFailuresSeen.add(line)
+
+proc providerStartupFailurePackages*(): seq[string] =
+  ## The packages whose ``build:`` body failed in a provider's startup pass,
+  ## in first-seen order: the text between the prefix and the first ``:``.
+  for line in providerStartupFailuresSeen:
+    let rest = line[ProviderStartupBodyFailurePrefix.len .. ^1]
+    let colon = rest.find(':')
+    let name = (if colon > 0: rest[0 ..< colon] else: rest).strip()
+    if name.len > 0 and name notin result:
+      result.add(name)
+
+proc providerStartupFailureSummary*(): string =
+  ## One line naming every package whose startup body failed during this
+  ## build, or "" when none did. The failures stay non-fatal (each skips only
+  ## that package's registrations), but they scroll past long before a build
+  ## ends; this is what the operator sees last.
+  let names = providerStartupFailurePackages()
+  if names.len == 0:
+    return ""
+  "repro: " & $names.len & " provider startup failure" &
+    (if names.len == 1: "" else: "s") & " (skipped, the build went on): " &
+    names.join(", ") & "; search the output for \"" &
+    ProviderStartupBodyFailurePrefix.strip() & "\""
 
 proc raiseRuntime(message: string) {.noreturn.} =
   raise newException(ProviderRuntimeError, message)
@@ -296,6 +332,7 @@ proc runProviderProtocol*(config: ProviderExecutionConfig;
   for line in output.splitLines():
     if line.startsWith(ProviderStartupBodyFailurePrefix):
       stderr.writeLine(line)
+      recordProviderStartupFailure(line)
   if not fileExists(extendedPath(responsePath)):
     raiseRuntime("provider did not write a response file")
   readProviderResponseFile(responsePath)
@@ -567,11 +604,21 @@ proc fileContentDigest*(path: string): string =
   digestHex(toBytes(readFile(extendedPath(path))))
 
 proc directoryMemberNames*(path: string): seq[string] =
-  if not dirExists(extendedPath(path)):
+  ## The sorted names of the entries of the directory ``path`` names, or none
+  ## when it is not a directory. A pattern-scoped name
+  ## (``repro_local_store/pattern_scoped_enumeration``: a directory, a NUL
+  ## and a glob component, as the io monitor reports a scan such as Nim's
+  ## search for ``<dir>/*.nimble``) lists only the entries that match the
+  ## component, so an evaluation input recorded from such a scan changes
+  ## only when a matching entry appears or goes.
+  let (dir, pattern) = splitPatternScopedEnumeration(path)
+  if not dirExists(extendedPath(dir)):
     return @[]
-  for kind, child in walkDir(extendedPath(path)):
+  for kind, child in walkDir(extendedPath(dir)):
     if kind in {pcFile, pcDir, pcLinkToFile, pcLinkToDir}:
-      result.add(splitPath(child).tail)
+      let name = splitPath(child).tail
+      if pattern.len == 0 or globComponentMatches(pattern, name):
+        result.add(name)
   result.sort()
 
 proc directoryMembersDigest(members: openArray[string]): string =
@@ -583,6 +630,16 @@ proc directoryMembersDigest(members: openArray[string]): string =
 proc fileReadInput*(path: string): GraphEvaluationInput =
   GraphEvaluationInput(kind: gevFileRead, identity: path,
     digest: fileContentDigest(path))
+
+proc recordedFileReadInput*(path, digest: string): GraphEvaluationInput =
+  ## A file-read evaluation input whose digest the caller took when it
+  ## decided what the graph was derived from (``fileContentDigest`` of the
+  ## content the graph reflects), rather than now. A producer that checks a
+  ## tool's reads for stability and then registers them must report the
+  ## digests it checked: re-reading the file at registration would record an
+  ## edit made in between against a graph derived from the old content, and
+  ## that graph would then be reused after the edit.
+  GraphEvaluationInput(kind: gevFileRead, identity: path, digest: digest)
 
 const UnobservedEvaluationDigest* = "unobserved"
   ## The digest of an evaluation input whose content the producer could NOT
@@ -600,6 +657,40 @@ proc unobservedEvaluationInput*(identity: string): GraphEvaluationInput =
   ## observed, for the reader of the snapshot.
   GraphEvaluationInput(kind: gevFileRead, identity: identity,
     digest: UnobservedEvaluationDigest)
+
+const EnvironmentHostFactPrefix* = "env:"
+  ## Identity prefix of a host fact that is an environment variable:
+  ## ``env:<NAME>`` (Project-Provider-Graph-Protocol.md §"Evaluation
+  ## Inputs").
+
+proc environmentValueDigest(name: string): string =
+  ## A digest of ``name``'s value in this process's environment, or
+  ## ``unset``. The value itself is not stored: an environment variable may
+  ## hold a secret, and a snapshot is not a place for one.
+  if existsEnv(name):
+    digestHex(toBytes("set:" & getEnv(name)))
+  else:
+    "unset"
+
+proc environmentInput*(name: string): GraphEvaluationInput =
+  ## An evaluation input for a graph shaped by the environment variable
+  ## ``name``, as a tool the provider ran at evaluation time read it. The
+  ## engine spawns the provider with its own environment, so it re-checks
+  ## the input against its own value of ``name`` (``hostFactDigest``).
+  GraphEvaluationInput(kind: gevHostFact,
+    identity: EnvironmentHostFactPrefix & name,
+    digest: environmentValueDigest(name))
+
+proc hostFactDigest*(identity: string): string =
+  ## The current digest of the host fact ``identity``, to compare with the
+  ## one a fragment recorded. An identity this build cannot evaluate yields
+  ## ``""``, which no recorded digest equals, so the fragment that recorded
+  ## it is produced again rather than reused on a fact nobody checked.
+  if identity.startsWith(EnvironmentHostFactPrefix) and
+      identity.len > EnvironmentHostFactPrefix.len:
+    environmentValueDigest(identity[EnvironmentHostFactPrefix.len .. ^1])
+  else:
+    ""
 
 proc providerSourceInput*(providerArtifactId, binaryDigest: string):
     GraphEvaluationInput =
@@ -689,6 +780,22 @@ proc directoryEnumerationInput*(path, memberEntryPointId,
     memberEntryPointBodyHash: memberEntryPointBodyHash,
     memberArgumentRoot: if memberArgumentRoot.len > 0: memberArgumentRoot else: path,
     memberNamespace: memberNamespace)
+
+proc recordedDirectoryEnumerationInput*(path: string;
+                                        members: seq[string]):
+    GraphEvaluationInput =
+  ## A directory-enumeration evaluation input with the member names the
+  ## caller listed when it decided what the graph was derived from, for the
+  ## reason ``recordedFileReadInput`` gives. ``path`` may be a pattern-scoped
+  ## name (``directoryMemberNames``).
+  var sorted = members
+  sorted.sort()
+  GraphEvaluationInput(
+    kind: gevDirectoryEnumeration,
+    identity: path,
+    digest: directoryMembersDigest(sorted),
+    directoryMembers: sorted,
+    memberArgumentRoot: path)
 
 proc emptyProviderGraphSnapshot*(providerArtifactId: string;
                                  manifest: ProviderManifest):
@@ -1113,6 +1220,9 @@ proc detectEvaluationInputChanges(manifest: ProviderManifest;
       of gevDirectoryEnumeration:
         # Membership changes are handled by ``handleDirectoryChanges``.
         discard
+      of gevHostFact:
+        if hostFactDigest(input.identity) != input.digest:
+          changed = true
       of gevProviderSource:
         # Not re-checked per fragment: ``refreshProviderGraph`` reaches this
         # pass only for a snapshot ``providerSnapshotBinaryFresh`` accepted,

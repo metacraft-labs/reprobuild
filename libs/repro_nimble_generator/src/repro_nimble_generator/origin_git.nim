@@ -22,8 +22,20 @@
 ## Trees are read from git objects (`ls-tree`, `cat-file`), never from a
 ## checkout: nothing is materialized, so a symbolic link in a package can
 ## never be followed (threat model G4).
+##
+## Runs may happen on several threads at once (the engine's concurrent
+## dispatch of fetch edges). A child must not inherit another thread's pipe
+## ends: it would hold them open, and a reader waiting for end of file would
+## wait for that unrelated child. Stock Nim's `osproc` (2.2) creates a
+## child's pipes inheritable, so a child started on one thread while another
+## thread's pipes exist inherits them; the Nim this tree is pinned to
+## creates them close-on-exec atomically (`pipe2`), but this module does not
+## rely on it. Every start happens under ``spawnLock``, and before the lock
+## is released this process's ends are marked close-on-exec: a child started
+## later, under the lock, inherits none of them, on either toolchain.
 
-import std/[algorithm, os, osproc, streams, strtabs, strutils, tables, times]
+import std/[algorithm, locks, os, osproc, streams, strtabs, strutils, tables,
+            times]
 when defined(posix):
   import std/posix
 
@@ -79,6 +91,29 @@ const
     "-c", "core.hooksPath=/dev/null", "-c", "init.defaultBranch=main",
     "-c", "advice.detachedHead=false", "-c", "core.fsmonitor=false"]
 
+var spawnLock: Lock
+initLock(spawnLock)
+
+template withSpawnLock*(body: untyped) =
+  ## Start a child process under the lock every git run of this module
+  ## starts its child under (see the module docstring). A caller that starts
+  ## children on another thread of the same process -- a test's local
+  ## server -- uses it too, and marks its own pipe ends close-on-exec before
+  ## leaving it, so neither inherits the other's pipes.
+  acquire(spawnLock)
+  try:
+    body
+  finally:
+    release(spawnLock)
+
+proc markCloseOnExec*(fds: openArray[cint]) =
+  ## Set close-on-exec on each descriptor (POSIX; nothing elsewhere).
+  when defined(posix):
+    for fd in fds:
+      let flags = fcntl(fd, F_GETFD)
+      if flags >= 0:
+        discard fcntl(fd, F_SETFD, flags or FD_CLOEXEC)
+
 proc gitEnvironment*(g: OriginGit; home: string): StringTableRef =
   ## The child's whole environment. Nothing of this process's is passed.
   result = newStringTable(modeCaseSensitive)
@@ -116,8 +151,13 @@ proc runBounded*(g: OriginGit; args: seq[string]; cwd, home: string;
     createDir(home)
     var full = @BaseConfig
     for a in args: full.add a
-    let p = uncontrolledStartProcess(g.gitBin, workingDir = cwd, args = full,
-      env = gitEnvironment(g, home), options = {})
+    let env = gitEnvironment(g, home)
+    var p: Process
+    withSpawnLock:
+      p = uncontrolledStartProcess(g.gitBin, workingDir = cwd, args = full,
+        env = env, options = {})
+      markCloseOnExec([cint(p.outputHandle), cint(p.errorHandle),
+        cint(p.inputHandle)])
     var killed = false
     var refusal: EgressRefusal
     var refused = false
@@ -413,24 +453,69 @@ proc fetchHistory*(g: OriginGit; v: VettedOrigin; scratch: string;
                    limits: EgressLimits): tuple[ok: bool;
                      branchCommits, allCommits: seq[string]; failure: string] =
   ## The commits of every branch and tag of the origin (commits only; trees
-  ## and blobs are filtered out where the origin supports it).
-  let repo = scratch / "history.git"
+  ## and blobs are filtered out where the origin supports it, and the
+  ## commits' root trees are fetched too when a tag names a tree). Both
+  ## attempts together stay within one fetch's limits.
   createDir(scratch)
-  let init = runBounded(g, @["init", "--bare", "-q", repo], scratch,
-    scratch / "home", limits)
-  if init.code != 0:
-    return (false, @[], @[], "git init failed")
-  var args = @["--git-dir=" & repo]
-  args.add networkArgs(v, limits)
-  args.add ["fetch", "--no-tags", "--no-write-fetch-head", "--filter=tree:0",
-    "--no-auto-maintenance", baseUrl(v.final),
-    "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
-  let r = runBounded(g, args, scratch, scratch / "home", limits,
-    url = baseUrl(v.final), watchDir = repo)
+  let started = epochTime()
+  proc fetchInto(repo, filter: string; limits: EgressLimits): GitRun =
+    let init = runBounded(g, @["init", "--bare", "-q", repo], scratch,
+      scratch / "home", limits)
+    if init.code != 0:
+      return GitRun(code: init.code, stderrText: "git init failed")
+    var args = @["--git-dir=" & repo]
+    args.add networkArgs(v, limits)
+    args.add ["fetch", "--no-tags", "--no-write-fetch-head",
+      "--filter=" & filter, "--no-auto-maintenance", baseUrl(v.final),
+      "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"]
+    runBounded(g, args, scratch, scratch / "home", limits,
+      url = baseUrl(v.final), watchDir = repo)
+  var repo = scratch / "history.git"
+  var r = fetchInto(repo, "tree:0", limits)
+  if r.code != 0:
+    # A tag may name a tree. `tree:0` filters every tree out, that tree too,
+    # and git then refuses the fetch as incomplete; an origin could use
+    # that to keep its rewritten history from being looked at. `tree:1`
+    # also brings each commit's root tree (never a blob or a subtree),
+    # which is all such a tag needs. A fresh repository: the objects the
+    # failed fetch left would be offered as already held, and the tree
+    # behind an annotated tag never sent. The retry gets what the first
+    # attempt left of the byte and time limits, so an origin that fails
+    # the first fetch on purpose cannot double what it may send.
+    var rest = limits
+    rest.maxBytes = max(1'i64, limits.maxBytes - treeBytes(repo))
+    rest.wallSeconds = max(1, limits.wallSeconds -
+      int(epochTime() - started))
+    repo = scratch / "history-trees.git"
+    r = fetchInto(repo, "tree:1", rest)
   if r.code != 0:
     return (false, @[], @[], r.stderrText.strip().splitLines().join(" | "))
-  let br = localGit(g, repo, ["rev-list", "--branches"], limits)
-  let al = localGit(g, repo, ["rev-list", "--all"], limits)
+  # The walks start from the commits the refs peel to. A ref that peels to
+  # no commit (a tag at a tree or a blob) is not a tip: handed to
+  # `rev-list` as a ref it would fail the whole walk.
+  proc commitTips(pattern: string): tuple[ok: bool; tips: string] =
+    let refs = localGit(g, repo, ["for-each-ref", "--format=%(objectname)",
+      pattern], limits)
+    if refs.code != 0: return (false, "")
+    var ask = ""
+    for l in refs.stdoutText.splitLines():
+      if isHexId(l): ask.add l & "^{commit}\n"
+    if ask.len == 0: return (true, "")
+    let peeled = localGit(g, repo, ["cat-file",
+      "--batch-check=%(objectname) %(objecttype)"], limits, input = ask)
+    if peeled.code != 0: return (false, "")
+    result.ok = true
+    for l in peeled.stdoutText.splitLines():
+      let parts = l.split(' ')
+      if parts.len == 2 and parts[1] == "commit" and isHexId(parts[0]):
+        result.tips.add parts[0] & "\n"
+  proc walk(pattern: string): GitRun =
+    let (ok, tips) = commitTips(pattern)
+    if not ok: return GitRun(code: 1)
+    if tips.len == 0: return GitRun(code: 0)
+    localGit(g, repo, ["rev-list", "--stdin"], limits, input = tips)
+  let br = walk("refs/heads/")
+  let al = walk("refs/")
   if br.code != 0 or al.code != 0:
     return (false, @[], @[], "rev-list failed")
   for l in br.stdoutText.splitLines():
