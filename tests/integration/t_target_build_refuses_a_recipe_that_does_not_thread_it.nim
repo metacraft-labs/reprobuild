@@ -56,10 +56,25 @@
 ## edge) the stage copy succeeds and writes an x86-64
 ## `hello@armv7-…/hello`.
 ##
-## Skip rule: `sh`, `cc` or `make` missing on PATH, or `build/bin/repro`
-## unbuilt -- except in a gate run (`REPROBUILD_GATE_RUN=1`, exported by
-## `scripts/run_tests.sh`, which builds `build/bin/repro` first), where any
-## of them FAILS the case instead of skipping it.
+## Path-mode tools. Every recipe here builds with `--tool-provisioning=path`,
+## which takes each tool from `PATH` and from nothing else (CLI/build.md,
+## `--tool-provisioning`). Declaring `zig` adds `install-file` -- the stdlib's
+## GNU coreutils, whose `bin/install` it names -- to `nativeBuildDeps:` for
+## the cross wrapper edge (Reprobuild-Standard-Library.md, `cross_zig`), and
+## no host has an executable called `install-file`. So `runBuild` provides
+## it as a path-mode tool is provided: an `install-file.repro-tool-profile`
+## sidecar on `PATH` naming the host's `install`, whose directory carries the
+## `rm`, `mkdir` and `chmod` the edge runs. Without it every case whose build
+## reaches the wrapper edge (the autotools and `nim.c` cases, and every
+## `--publish` run) is refused at tool resolution -- "install-file requested
+## by uses "install-file" was not found in PATH" -- before it reaches what it
+## grades.
+##
+## Skip rule: `sh`, `cc`, `make` or `install` missing on PATH, or
+## `build/bin/repro` unbuilt -- except in a gate run
+## (`REPROBUILD_GATE_RUN=1`, exported by `scripts/run_tests.sh`, which
+## builds `build/bin/repro` first), where any of them FAILS the case instead
+## of skipping it.
 
 import std/[algorithm, monotimes, net, os, osproc, strtabs, strutils,
   tempfiles, unittest]
@@ -230,6 +245,23 @@ proc isHostElf(path: string): bool =
   fileExists(path) and readFile(path).startsWith("\x7fELF") and
     not isElf(path, EmArm)
 
+const PathToolsDir = "path-tools"
+  ## Under each case's root: the `PATH` directory holding the sidecars of the
+  ## tools `runBuild` provides (see "Path-mode tools" at the top).
+
+proc providePathTools(root: string): string =
+  ## Writes the `install-file` sidecar under ``root`` and returns its
+  ## directory, to be put on `PATH`. The sidecar format is the one the
+  ## path-mode resolver reads (`findToolProfileSidecarOnPath` in
+  ## repro_tool_profiles): the tool is the file `resolvedExecutablePath`
+  ## names, and no `install-file` executable needs to exist. The host's
+  ## `install` is checked by `unmetPrecondition` before any case runs.
+  result = root / PathToolsDir
+  createDir(result)
+  writeFile(result / "install-file.repro-tool-profile",
+    "reprobuild-tool-profile-v1\nresolvedExecutablePath=" &
+    findExe("install") & "\n")
+
 proc runBuild(root, project: string; args: seq[string];
               extraEnv: openArray[(string, string)] = []):
     tuple[code: int, output: string] =
@@ -242,8 +274,10 @@ proc runBuild(root, project: string; args: seq[string];
   env.del("REPRO_VARIANTS")
   for (k, v) in extraEnv: env[k] = v
   # The mirror action's object check runs `repro-install-mirror-publish`,
-  # built beside `repro`.
-  env["PATH"] = reproBinary.parentDir & PathSep & getEnv("PATH")
+  # built beside `repro`. The path tools follow it, ahead of the inherited
+  # `PATH`, so they are what path mode resolves.
+  env["PATH"] = reproBinary.parentDir & PathSep & providePathTools(root) &
+    PathSep & getEnv("PATH")
   let log = root / ("build-" & $getMonoTime().ticks & ".log")
   let argv = @[reproBinary, "build", "--daemon=off", "--progress=quiet",
     "--log=actions"] & args
@@ -259,7 +293,8 @@ proc unmetPrecondition(extraTools: openArray[string] = []): string =
   ## (`REPROBUILD_GATE_RUN=1`, exported by `scripts/run_tests.sh`) FAILS on
   ## any of these instead of skipping, so a gate never passes by skipping.
   if not fileExists(reproBinary): return reproBinary & " is not built"
-  for tool in @["sh", "cc", "make"] & @extraTools:
+  # `install` backs the `install-file` sidecar `runBuild` provides.
+  for tool in @["sh", "cc", "make", "install"] & @extraTools:
     if findExe(tool).len == 0: return tool & " is not on PATH"
   ""
 

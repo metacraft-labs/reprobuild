@@ -15,8 +15,13 @@
 ##   macOS), which the compile edge names as a tool it uses;
 ## * `__TESTS_FRAGMENT_PRODUCER__`: empty, so the listing edge runs the
 ##   `repro-tests-fragment` beside the engine, or another producer.
-## * `__PER_TEST_BINARIES__`: `false` for one binary for every test (the
-##   default), `true` for one binary per test.
+## * `perTestBinariesPlaceholder`: `false` for one binary for every test
+##   (the default), `true` for one binary per test.
+##
+## That placeholder stands where an expression goes, so it is spelt as an
+## identifier rather than `__LIKE_THE_OTHERS__`: a leading `_` is no valid
+## Nim token, and this file is in `just format`'s file set, which refuses a
+## source the compiler's parser rejects.
 
 import repro_project_dsl
 import ct_test_nim_unittest
@@ -41,5 +46,5 @@ package cs_m14_tests_per_entry:
     let perTest = suite.testBinary.runPerTest(
       actionId = "cs_m14.tests",
       producer = TestsFragmentProducer,
-      perTestBinaries = __PER_TEST_BINARIES__)
+      perTestBinaries = perTestBinariesPlaceholder)
     discard collect("test", [perTest])

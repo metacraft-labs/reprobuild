@@ -2248,6 +2248,12 @@ const
     ## Marker so the below-2.42 condition is reported once per pool (§3.6).
   DroppedRefsLogFileName* = "dropped-refs.log"
     ## ``<leaf git dir>/repro/dropped-refs.log``: one line per removed ref.
+  LeftOutFilesFileName* = "left-out-files"
+    ## ``<git dir>/repro/left-out-files``: the tracked files a failed checkout
+    ## left out, recorded by the detector before it installs the refetch
+    ## chain (§4.1 "Files a checkout left out"). NUL-terminated records of
+    ## ``<blob id> SP <path>``. The record is what keeps the evidence once a
+    ## lazy read through the chain has fetched those blobs.
   RetentionHookMinGit* = (major: 2, minor: 42)
     ## First git release that runs ``gc.recentObjectsHook``.
   LeafPoolRemoteName* = "repro-pool"
@@ -4447,8 +4453,215 @@ proc appendDroppedRefLog(logPath, refName, id, pool: string): bool =
   except IOError, OSError, ValueError:
     false
 
+type
+  LeftOutFile* = tuple[path, blobId: string]
+    ## A tracked file git's checkout left out, with the blob its index entry
+    ## names.
+
+proc leftOutLedgerPath*(gitBin, worktree: string): string =
+  ## ``<git dir>/repro/left-out-files`` of ``worktree``, or "" when its git
+  ## dir cannot be resolved. The git dir, not the common dir: the index the
+  ## records are checked against is per work tree.
+  let dirs = gitDirOf(gitBin, worktree)
+  if dirs.gitDir.len == 0:
+    return ""
+  dirs.gitDir / PoolReproDirName / LeftOutFilesFileName
+
+proc readLeftOutLedger(ledger: string): seq[LeftOutFile] =
+  ## The records of ``ledger``; none when it is absent or unreadable. A
+  ## malformed record is skipped: it can only make a path NOT qualify.
+  if ledger.len == 0 or not fileExists(ledger):
+    return
+  var text = ""
+  try:
+    text = readFile(ledger)
+  except IOError, OSError:
+    return
+  for rec in text.split('\0'):
+    let sp = rec.find(' ')
+    if sp <= 0 or sp == rec.high:
+      continue
+    result.add((path: rec[sp + 1 .. ^1], blobId: rec[0 ..< sp]))
+
+proc writeLeftOutLedger(ledger: string; entries: seq[LeftOutFile]): string =
+  ## Replace ``ledger`` with exactly ``entries`` (removing it when there are
+  ## none), atomically: a temporary file in the same directory renamed over
+  ## it, so a reader sees the old record or the new one. Returns "" or a
+  ## diagnostic.
+  if ledger.len == 0:
+    return "could not resolve the git dir to record the left-out files in"
+  try:
+    if entries.len == 0:
+      if fileExists(ledger): removeFile(ledger)
+      return ""
+    createDir(ledger.parentDir)
+    var text = ""
+    for e in entries:
+      text.add(e.blobId & " " & e.path & "\0")
+    let tmp = ledger & ".tmp-" & $getCurrentProcessId()
+    writeFile(tmp, text)
+    moveFile(tmp, ledger)
+  except IOError, OSError:
+    return "could not record the left-out files in " & ledger & ": " &
+      getCurrentExceptionMsg()
+
+proc neverWrittenIndexEntries(gitBin, worktree: string): HashSet[string] =
+  ## The paths whose index entry carries no stat data at all: ``ctime`` and
+  ## ``mtime`` both ``0:0`` in ``git ls-files --debug``.
+  ##
+  ## git fills an entry's stat data from the file it has just written (see
+  ## ``fill_stat_cache_info`` in git's ``read-cache.c``), so an entry a
+  ## checkout could not write keeps the zeros it was created with, and an
+  ## entry git has written since (the user's ``git checkout -- <path>``, or
+  ## the repair) does not. Measured with git 2.54.0: a file left out by a
+  ## checkout that could not read its blob lists ``ctime: 0:0`` and
+  ## ``mtime: 0:0``; after ``git checkout -- <path>`` it lists the time the
+  ## file was written, and keeps it after the file is deleted.
+  ##
+  ## ``--debug -z`` prints ``<path> NUL`` followed by five LF-terminated
+  ## lines (``ctime``, ``mtime``, ``dev``/``ino``, ``uid``/``gid``,
+  ## ``size``/``flags``), with the next path right after the fifth LF. Output
+  ## that does not parse ends the listing: a path not listed is one whose
+  ## record is not trusted, which only ever makes it NOT qualify.
+  let res = runGitEnv(gitBin, ["-C", worktree, "ls-files", "--debug", "-z"],
+    lazyFetch = false)
+  if res.code != 0:
+    return
+  let parts = res.output.split('\0')
+  if parts.len < 2:
+    return
+  var path = parts[0]
+  for i in 1 .. parts.high:
+    let part = parts[i]
+    var pos = 0
+    var lines = 0
+    while lines < 5:
+      let lf = part.find('\n', pos)
+      if lf < 0:
+        break
+      pos = lf + 1
+      inc lines
+    if lines < 5:
+      break
+    let stat = part[0 ..< pos].splitLines()
+    if stat.len >= 2 and stat[0].strip() == "ctime: 0:0" and
+        stat[1].strip() == "mtime: 0:0":
+      result.incl(path)
+    path = part[pos .. ^1]
+
+proc leftOutFiles*(gitBin, worktree: string): seq[LeftOutFile] =
+  ## The tracked files of ``worktree`` that git's checkout left out because
+  ## it could not read their content (§4.1 "Files a checkout left out").
+  ##
+  ## A path qualifies only when ALL of these hold: it is absent from the work
+  ## tree (``ls-files --deleted``, which skips skip-worktree entries); its
+  ## index entry is a stage-0 file or symlink (not a gitlink, not a
+  ## conflict); the index records for it exactly what ``HEAD`` does, so the
+  ## absence is not part of a change being staged; and EITHER its blob is
+  ## PHYSICALLY absent from the repository's whole object database, probed
+  ## with lazy fetching off, OR an earlier pass recorded the same path with
+  ## the same blob in ``<git dir>/repro/left-out-files`` (``leftOutLedgerPath``)
+  ## and git has not written the file since (``neverWrittenIndexEntries``).
+  ##
+  ## A checkout writes a file only after reading its blob, so a blob that was
+  ## never in the repository is a file that was never written: its absence
+  ## is git's failed checkout, not a deletion of the user's. A file the user
+  ## deleted was written, so its blob is here, and it is never listed
+  ## (SPI-AREQ-4). The record carries that evidence past a lazy read that
+  ## fetched the blob after the chain was installed. It names the blob, so a
+  ## later checkout that wrote a different version of the file does not
+  ## match it; and the stat data of the index entry shows whether git wrote
+  ## the file after the record was made, so one the user wrote back with
+  ## git and then deleted is the user's deletion, not git's.
+  ##
+  ## Pure: nothing is written here, and every probe runs with lazy fetching
+  ## off. Any probe that fails answers "nothing lost".
+  let deleted = runGitEnv(gitBin, ["-C", worktree, "ls-files", "-z",
+    "--deleted"], lazyFetch = false)
+  if deleted.code != 0:
+    return
+  var gone = initHashSet[string]()
+  for p in deleted.output.split('\0'):
+    if p.len > 0:
+      gone.incl(p)
+  if gone.len == 0:
+    return
+  let changed = runGitEnv(gitBin, ["-C", worktree, "diff-index", "--cached",
+    "-z", "--name-only", "HEAD", "--"], lazyFetch = false)
+  if changed.code != 0:
+    return                               # unborn HEAD, unreadable tree
+  var staged = initHashSet[string]()
+  for p in changed.output.split('\0'):
+    if p.len > 0: staged.incl(p)
+  let index = runGitEnv(gitBin, ["-C", worktree, "ls-files", "--stage",
+    "-z"], lazyFetch = false)
+  if index.code != 0:
+    return
+  var candidates: seq[LeftOutFile]
+  for entry in index.output.split('\0'):
+    let tab = entry.find('\t')
+    if tab < 0:
+      continue
+    let fields = entry[0 ..< tab].splitWhitespace()
+    let path = entry[tab + 1 .. ^1]
+    if fields.len != 3 or fields[2] != "0":
+      continue
+    if fields[0] notin ["100644", "100755", "120000"]:
+      continue
+    if path in gone and path notin staged:
+      candidates.add((path: path, blobId: fields[1]))
+  if candidates.len == 0:
+    return
+  var recorded = initHashSet[LeftOutFile]()
+  for r in readLeftOutLedger(leftOutLedgerPath(gitBin, worktree)):
+    recorded.incl(r)
+  # Only a candidate the record names needs the stat data; the listing reads
+  # the whole index, so it runs only when there is one.
+  var unwritten = initHashSet[string]()
+  for c in candidates:
+    if c in recorded:
+      unwritten = neverWrittenIndexEntries(gitBin, worktree)
+      break
+  var ids: seq[string]
+  var seenIds = initHashSet[string]()
+  for c in candidates:
+    if not seenIds.containsOrIncl(c.blobId): ids.add(c.blobId)
+  let missing = toHashSet(batchPresence(gitBin, worktree, ids))
+  for c in candidates:
+    if c.blobId in missing or (c in recorded and c.path in unwritten):
+      result.add(c)
+
+proc lostWorkTreeFiles*(gitBin, worktree: string): seq[string] =
+  ## The paths of ``leftOutFiles``.
+  for e in leftOutFiles(gitBin, worktree):
+    result.add(e.path)
+
+proc recordLeftOutFilesOfSubmodule(gitBin, leaf: string):
+    tuple[lost: int; failure: string] =
+  ## Before the refetch chain is installed in ``leaf``: when ``leaf`` is a
+  ## submodule (it has a superproject), record the files its checkout left
+  ## out (``leftOutFiles``) under its git dir, as the submodule pass does
+  ## (``checkSubmoduleLeaves``). A participating repository may itself be a
+  ## populated submodule of another participating repository, and its own
+  ## leaf pass can come first; without this, the chain it installs would let
+  ## a read fetch those blobs before the superproject's submodule pass
+  ## records them. A repository that is no submodule is left alone: the
+  ## submodule pass never reads its record. Returns the number of files
+  ## recorded and "" or the diagnostic of a failed write.
+  let superproject = runGitEnv(gitBin, ["-C", leaf, "rev-parse",
+    "--show-superproject-working-tree"], lazyFetch = false)
+  if superproject.code != 0 or superproject.output.strip().len == 0:
+    return
+  let entries = leftOutFiles(gitBin, leaf)
+  let ledger = leftOutLedgerPath(gitBin, leaf)
+  if entries.len == 0 and (ledger.len == 0 or not fileExists(ledger)):
+    return
+  result.lost = entries.len
+  result.failure = writeLeftOutLedger(ledger, entries)
+
 proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
-                cacheRoot = ""; pool = ""): LeafCheckReport =
+                cacheRoot = ""; pool = "";
+                recordLeftOut = true): LeafCheckReport =
   ## The detector (§4.1) for one leaf, with self-registration (§4.3).
   ##
   ## Registration and the §3.4/§3.5 config are written in EVERY mode: they
@@ -4456,6 +4669,12 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
   ## that the detector has seen but not registered would be exactly the
   ## unprotected borrower §3.2 exists to prevent. ``mode`` governs the one
   ## destructive step, removing a stale remote-tracking ref.
+  ##
+  ## When the chain is missing and ``leaf`` is a submodule, the files its
+  ## checkout left out are recorded first (``recordLeftOutFilesOfSubmodule``,
+  ## §4.1 "The record of left-out files"); a report pass that cannot write
+  ## that record does not install the chain. ``recordLeftOut = false`` is for
+  ## a caller that has just recorded them itself.
   withCheckoutVcsLock(leaf,
       (block: return LeafCheckReport(leaf: leaf, pool: pool,
         diagnostic: "could not lock checkout: " & leaf))):
@@ -4502,10 +4721,25 @@ proc checkLeaf*(gitBin, leaf: string; mode: LeafCheckMode;
     # tip exists: missing blobs are healed on subsequent reads, not by an
     # expensive eager walk of every tree.
     result.registered = registerBorrower(thePool, leaf)
+    if missingChain and recordLeftOut:
+      let recorded = recordLeftOutFilesOfSubmodule(gitBin, leaf)
+      if recorded.failure.len > 0:
+        result.diagnostic = recorded.failure
+        if recorded.lost > 0 and mode == lcmReport:
+          # The chain would let a read erase the only evidence there is.
+          result.diagnostic.add("; the refetch chain was not installed, " &
+            "so the files git left out stay detectable. Repair with: " &
+            "repro health --fix")
+          result.findings.add(LeafFinding(kind: lfkRefetchChainMissing,
+            message: "repro: " & displayPath(leaf) &
+              ": missing or incorrect refetch chain to partial shared clone " &
+              displayPath(thePool) & ". Not installed: " & result.diagnostic))
+          return
     let configured = ensureCheckedLeafPoolConfig(gitBin, leaf, thePool)
     result.configured = configured.len == 0
     if configured.len > 0:
-      result.diagnostic = configured
+      if result.diagnostic.len > 0: result.diagnostic.add("; ")
+      result.diagnostic.add(configured)
     if missingChain:
       result.findings.add(LeafFinding(kind: lfkRefetchChainMissing,
         message: "repro: " & displayPath(leaf) &
@@ -4711,34 +4945,118 @@ proc poolChainConfigArgs*(pool: string): tuple[args: seq[string];
     result.args.add(key & "=" & value)
   result.diagnostic = failed.join("; ")
 
+proc holdsSubmoduleGitDirs(dir: string): bool =
+  ## Whether the git dir of the work tree ``dir`` has a ``modules/``
+  ## directory, read from the file system alone.
+  ##
+  ## ``git submodule update`` (and ``git submodule add``, and ``clone
+  ## --recurse-submodules``) clones every submodule it populates into
+  ## ``<git dir>/modules/<name>`` and leaves a ``.git`` file in the
+  ## submodule's work tree; a linked work tree's submodules go under its own
+  ## per-work-tree git dir. A repository that never had a submodule
+  ## populated by git has no ``modules/``.
+  var gitDir = dir / ".git"
+  try:
+    if fileExists(gitDir):
+      let text = readFile(gitDir).strip()
+      if not text.startsWith("gitdir:"):
+        return false
+      let target = text["gitdir:".len .. ^1].strip()
+      gitDir = if target.isAbsolute: target
+               else: absolutePath(target, absolutePath(dir))
+    elif not dirExists(gitDir):
+      return false
+  except IOError, OSError:
+    return false
+  dirExists(gitDir / "modules")
+
+proc gitlinksIn(output: string; only: seq[string] = @[]): seq[string] =
+  ## The paths of the gitlinks (mode ``160000``) in ``ls-files --stage -z``
+  ## ``output``, restricted to ``only`` when it is not empty.
+  for entry in output.split('\0'):
+    if not entry.startsWith("160000 "):
+      continue
+    let tab = entry.find('\t')
+    if tab < 0:
+      continue
+    let path = entry[tab + 1 .. ^1]
+    if (only.len == 0 or path in only) and path notin result:
+      result.add(path)
+
+proc declaredGitlinks(gitBin, dir: string): seq[string] =
+  ## The paths of ``dir``'s gitlinks (index entries of mode ``160000``) that
+  ## ``git submodule update`` can have populated, relative to ``dir``.
+  ##
+  ## With a ``.gitmodules`` in the work tree, those are the gitlinks it
+  ## declares: ``git submodule update`` maps a gitlink to its submodule's
+  ## name and URL through that file and refuses one without an entry ("no
+  ## submodule mapping found in .gitmodules"). The index is then listed only
+  ## for the declared paths, so a large tree's ``ls-files --stage`` (tens of
+  ## MB on ``llvm-project``) is never read whole.
+  ##
+  ## Without one, ``git submodule update`` still populates submodules: it
+  ## reads ``.gitmodules`` from the index, or from ``HEAD``, when the work
+  ## tree lacks it (deleted, excluded by a sparse checkout, or itself a file
+  ## a failed checkout left out). Measured with git 2.54.0: after ``rm
+  ## .gitmodules``, and in a non-cone sparse checkout excluding it, ``git
+  ## submodule update --init`` populated the submodule. Such a checkout's
+  ## submodules are found by listing every gitlink, but only when its git
+  ## dir holds submodule repositories (``holdsSubmoduleGitDirs``), which
+  ## costs no git command at all in a repository without submodules.
+  if not fileExists(dir / ".gitmodules"):
+    if not holdsSubmoduleGitDirs(dir):
+      return
+    let staged = runGitEnv(gitBin, ["-C", dir, "ls-files", "--stage", "-z"],
+      lazyFetch = false)
+    if staged.code != 0:
+      return
+    return gitlinksIn(staged.output)
+  let declared = runGitEnv(gitBin, ["-C", dir, "config", "--file",
+    ".gitmodules", "-z", "--get-regexp", "^submodule\\..*\\.path$"],
+    lazyFetch = false)
+  # ``--get-regexp`` exits 1 when nothing matches: no submodule declared.
+  if declared.code != 0:
+    return
+  var paths: seq[string]
+  for rec in declared.output.split('\0'):
+    # ``-z`` prints ``<key> LF <value> NUL``.
+    let lf = rec.find('\n')
+    if lf < 0 or lf == rec.high:
+      continue
+    let path = rec[lf + 1 .. ^1]
+    if path notin paths:
+      paths.add(path)
+  if paths.len == 0:
+    return
+  # Literal pathspecs: a declared path is a name, never a pattern.
+  var args = @["--literal-pathspecs", "-C", dir, "ls-files", "--stage", "-z",
+    "--"]
+  args.add(paths)
+  let staged = runGitEnv(gitBin, args, lazyFetch = false)
+  if staged.code != 0:
+    return
+  gitlinksIn(staged.output, paths)
+
 proc submoduleCheckouts*(gitBin, checkout: string): seq[string] =
   ## The work trees of ``checkout``'s populated submodules, nested ones
   ## included, each before the submodules inside it.
   ##
   ## Read from git's own record of them, the gitlinks (mode ``160000``) in
-  ## the index, rather than from ``.git/modules``: that finds a submodule
-  ## whose repository is absorbed into the superproject's git dir and one
-  ## that keeps its own ``.git`` directory alike, and a module git dir whose
-  ## work tree was removed is not one to inspect. A gitlink path is kept only
-  ## when it is a repository of its own (``leafRepositoryRefusal``): an
-  ## unpopulated submodule's empty directory, or a broken ``.git`` stub,
-  ## would otherwise be answered for by the superproject.
+  ## the index that ``.gitmodules`` declares (``declaredGitlinks``), rather
+  ## than from ``.git/modules``: that finds a submodule whose repository is
+  ## absorbed into the superproject's git dir and one that keeps its own
+  ## ``.git`` directory alike, and a module git dir whose work tree was
+  ## removed is not one to inspect. A gitlink path is kept only when it is a
+  ## repository of its own (``leafRepositoryRefusal``): an unpopulated
+  ## submodule's empty directory, or a broken ``.git`` stub, would otherwise
+  ## be answered for by the superproject.
   var pending = @[checkout]
   var depth = 0
   while pending.len > 0 and depth < 16:
     var next: seq[string]
     for dir in pending:
-      let staged = runGitEnv(gitBin, ["-C", dir, "ls-files", "--stage", "-z"],
-        lazyFetch = false)
-      if staged.code != 0:
-        continue
-      for entry in staged.output.split('\0'):
-        if not entry.startsWith("160000 "):
-          continue
-        let tab = entry.find('\t')
-        if tab < 0:
-          continue
-        let sub = dir / entry[tab + 1 .. ^1]
+      for path in declaredGitlinks(gitBin, dir):
+        let sub = dir / path
         if not (dirExists(sub / ".git") or fileExists(sub / ".git")):
           continue
         if leafRepositoryRefusal(gitBin, sub).len > 0:
@@ -4748,68 +5066,6 @@ proc submoduleCheckouts*(gitBin, checkout: string): seq[string] =
           next.add(sub)
     pending = next
     inc depth
-
-proc lostWorkTreeFiles*(gitBin, worktree: string): seq[string] =
-  ## The tracked files of ``worktree`` that git's checkout left out because
-  ## it could not read their content (§4.1 "Files a checkout left out").
-  ##
-  ## A path qualifies only when ALL of these hold: it is absent from the work
-  ## tree (``ls-files --deleted``, which skips skip-worktree entries); its
-  ## index entry is a stage-0 file or symlink (not a gitlink, not a
-  ## conflict); the index records for it exactly what ``HEAD`` does, so the
-  ## absence is not part of a change being staged; and its blob is
-  ## PHYSICALLY absent from the repository's whole object database, probed
-  ## with lazy fetching off. A checkout writes a file only after reading its
-  ## blob, so a blob that was never in the repository is a file that was
-  ## never written: its absence is git's failed checkout, not a deletion of
-  ## the user's. A file the user deleted was written, so its blob is here,
-  ## and it is never listed (SPI-AREQ-4).
-  ##
-  ## Call it before anything could fetch those blobs. Every probe here runs
-  ## with lazy fetching off. Any probe that fails answers "nothing lost".
-  let deleted = runGitEnv(gitBin, ["-C", worktree, "ls-files", "-z",
-    "--deleted"], lazyFetch = false)
-  if deleted.code != 0:
-    return
-  var gone: seq[string]
-  for p in deleted.output.split('\0'):
-    if p.len > 0 and p notin gone:
-      gone.add(p)
-  if gone.len == 0:
-    return
-  let changed = runGitEnv(gitBin, ["-C", worktree, "diff-index", "--cached",
-    "-z", "--name-only", "HEAD", "--"], lazyFetch = false)
-  if changed.code != 0:
-    return                               # unborn HEAD, unreadable tree
-  var staged: seq[string]
-  for p in changed.output.split('\0'):
-    if p.len > 0: staged.add(p)
-  let index = runGitEnv(gitBin, ["-C", worktree, "ls-files", "--stage",
-    "-z"], lazyFetch = false)
-  if index.code != 0:
-    return
-  var candidates: seq[(string, string)]
-  for entry in index.output.split('\0'):
-    let tab = entry.find('\t')
-    if tab < 0:
-      continue
-    let fields = entry[0 ..< tab].splitWhitespace()
-    let path = entry[tab + 1 .. ^1]
-    if fields.len != 3 or fields[2] != "0":
-      continue
-    if fields[0] notin ["100644", "100755", "120000"]:
-      continue
-    if path in gone and path notin staged:
-      candidates.add((path, fields[1]))
-  if candidates.len == 0:
-    return
-  var ids: seq[string]
-  for (_, id) in candidates:
-    if id notin ids: ids.add(id)
-  let missing = batchPresence(gitBin, worktree, ids)
-  for (path, id) in candidates:
-    if id in missing:
-      result.add(path)
 
 proc restoreLostFiles(gitBin, worktree: string;
                       paths: seq[string]): seq[string] =
@@ -4842,8 +5098,8 @@ proc messageWorkTreeFilesLost(worktree, pool: string;
     "This repository borrows objects from the partial shared clone " &
     displayPath(pool) & ", which only promises file contents, and it had no " &
     "way to fetch them. You did not delete these files and nothing of yours " &
-    "is lost: their content was never in this repository. Do not commit " &
-    "their deletion.\n"
+    "is lost: their content was not in this repository when git checked " &
+    "them out. Do not commit their deletion.\n"
   var remaining: seq[string]
   for p in paths:
     if p notin restored: remaining.add(p)
@@ -4858,7 +5114,9 @@ proc messageWorkTreeFilesLost(worktree, pool: string;
     result.add("Restore them with: repro health --fix")
 
 proc checkSubmoduleLeaves*(gitBin, checkout: string; mode: LeafCheckMode;
-                           cacheRoot = ""): seq[LeafCheckReport] {.gcsafe.} =
+                           cacheRoot: string;
+                           seen: var HashSet[string]):
+                           seq[LeafCheckReport] {.gcsafe.} =
   ## The detector (§4.1) for the submodules of ``checkout``, whether or not
   ## ``checkout`` itself borrows from a pool.
   ##
@@ -4868,13 +5126,31 @@ proc checkSubmoduleLeaves*(gitBin, checkout: string; mode: LeafCheckMode;
   ## cloned with ``--reference`` naming a leaf of the pool) is a repository
   ## one level removed (§3.4): it gets the chain naming that pool and is not
   ## registered. Either way, the files git's checkout left out while the
-  ## submodule could not fetch (``lostWorkTreeFiles``) are reported, and in
-  ## ``lcmRepair`` written back through the chain. They are found BEFORE the
-  ## chain is installed, so no read can fetch a blob first and hide them.
+  ## submodule could not fetch (``leftOutFiles``) are reported, and in
+  ## ``lcmRepair`` written back through the chain. They are found and
+  ## recorded under the submodule's git dir (``leftOutLedgerPath``) BEFORE
+  ## the chain is installed: a later read through the chain fetches their
+  ## blobs, and the record is then the only evidence that git, not the user,
+  ## left them out. A report pass that cannot write the record does not
+  ## install the chain in that submodule.
   ##
   ## ``cacheRoot`` restricts both kinds to pools under it, as for
   ## ``checkLeaf``. Reports come one per submodule that borrows at all.
+  ##
+  ## ``seen`` holds the normalized work trees an earlier call in the same
+  ## pass already inspected, and gains this call's. A caller that runs this
+  ## over every participating checkout shares one set across them, so a
+  ## repository that is a submodule of more than one of them (a submodule of
+  ## a participating repo that is itself a populated submodule of another)
+  ## is inspected once, with the submodule detection the first visit gives
+  ## it. A ``checkout`` that is itself in ``seen`` was reached as a
+  ## submodule, and ``submoduleCheckouts`` then already walked its own
+  ## submodules, so nothing below it is listed again.
+  if normalizedPath(absolutePath(checkout)) in seen:
+    return
   for sub in submoduleCheckouts(gitBin, checkout):
+    if seen.containsOrIncl(normalizedPath(absolutePath(sub))):
+      continue
     var direct: seq[string]
     try:
       direct = poolsOfLeaf(sub, cacheRoot)
@@ -4883,11 +5159,36 @@ proc checkSubmoduleLeaves*(gitBin, checkout: string; mode: LeafCheckMode;
     let reached = partialPoolsReachedBy(gitBin, sub, cacheRoot)
     if direct.len == 0 and reached.len == 0:
       continue
-    let lost = if reached.len > 0: lostWorkTreeFiles(gitBin, sub)
-               else: @[]
+    let lostEntries = if reached.len > 0: leftOutFiles(gitBin, sub)
+                      else: @[]
+    var lost: seq[string]
+    for e in lostEntries: lost.add(e.path)
+    # Record them BEFORE the chain is installed. Once it is, any read of
+    # their blobs fetches them and the blob-absence evidence is gone; the
+    # record keeps it until a repair writes the files back. Rewriting it
+    # with exactly the current set also drops the paths that no longer
+    # qualify (restored, staged, or superseded by a later checkout).
+    let ledger = if reached.len > 0: leftOutLedgerPath(gitBin, sub) else: ""
+    var recordFailure = ""
+    if reached.len > 0 and (lostEntries.len > 0 or fileExists(ledger)):
+      recordFailure = writeLeftOutLedger(ledger, lostEntries)
     var report: LeafCheckReport
+    if recordFailure.len > 0 and lostEntries.len > 0 and mode == lcmReport:
+      # The evidence could not be kept, so the chain is not installed: a
+      # read through it would erase the only evidence there is (§4.2).
+      report.leaf = sub
+      report.pool = (if direct.len > 0: direct[0] else: reached[0])
+      report.diagnostic = recordFailure & "; the refetch chain was not " &
+        "installed, so the files git left out stay detectable. Repair with: " &
+        "repro health --fix"
+      report.findings.add(LeafFinding(kind: lfkWorkTreeFilesLost,
+        paths: lost, message: messageWorkTreeFilesLost(sub, report.pool,
+          lost, @[], attempted = false)))
+      result.add(report)
+      continue
     if direct.len > 0:
-      report = checkLeaf(gitBin, sub, mode, cacheRoot)
+      # Recorded just above; the leaf pass need not list them again.
+      report = checkLeaf(gitBin, sub, mode, cacheRoot, recordLeftOut = false)
     else:
       let pool = reached[0]
       report.leaf = sub
@@ -4907,6 +5208,9 @@ proc checkSubmoduleLeaves*(gitBin, checkout: string; mode: LeafCheckMode;
               "repository it borrows from). " &
               (if report.configured: "Installed on touch; missing blobs can now be fetched on read."
                else: configured & ". Repair with: repro health --fix")))
+    if recordFailure.len > 0:
+      if report.diagnostic.len > 0: report.diagnostic.add("; ")
+      report.diagnostic.add(recordFailure)
     if lost.len > 0:
       var restored: seq[string]
       var attempted = false
@@ -4917,12 +5221,28 @@ proc checkSubmoduleLeaves*(gitBin, checkout: string; mode: LeafCheckMode;
               report.diagnostic.add("could not lock checkout: " & sub))):
           attempted = true
           restored = restoreLostFiles(gitBin, sub, lost)
+          # A restored file is the user's from now on: drop its record, so a
+          # later deletion of it is never undone.
+          var remaining: seq[LeftOutFile]
+          for e in lostEntries:
+            if e.path notin restored: remaining.add(e)
+          let rewritten = writeLeftOutLedger(ledger, remaining)
+          if rewritten.len > 0:
+            if report.diagnostic.len > 0: report.diagnostic.add("; ")
+            report.diagnostic.add(rewritten)
       report.findings.add(LeafFinding(kind: lfkWorkTreeFilesLost,
         paths: lost, restored: restored,
         message: messageWorkTreeFilesLost(sub,
           (if report.pool.len > 0: report.pool else: reached[0]),
           lost, restored, attempted)))
     result.add(report)
+
+proc checkSubmoduleLeaves*(gitBin, checkout: string; mode: LeafCheckMode;
+                           cacheRoot = ""): seq[LeafCheckReport] {.gcsafe.} =
+  ## ``checkSubmoduleLeaves`` for one checkout on its own, sharing nothing
+  ## with any other call.
+  var seen = initHashSet[string]()
+  checkSubmoduleLeaves(gitBin, checkout, mode, cacheRoot, seen)
 
 # -- migration (§5) -----------------------------------------------------------
 
@@ -4940,6 +5260,7 @@ type
     leaves*: seq[LeafCheckReport]
       ## The detector's report for every leaf that was migrated.
     diagnostics*: seq[string]
+
 
 proc listPools*(cacheRoot: string): seq[string] =
   ## Every shared bare under ``cacheRoot``: a ``*.git`` directory holding
