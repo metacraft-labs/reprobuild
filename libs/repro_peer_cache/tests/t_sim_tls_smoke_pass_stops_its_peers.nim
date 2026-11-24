@@ -1,7 +1,7 @@
 ## The peer-cache simulator's TLS smoke pass (``sim.runTlsHandshakeSmokePass``,
 ## the demonstration driver's ``--tls-enabled=true`` path) settles and
 ## stops its peers, under every Nim the ``uses:`` range admits: the Nim
-## 2.2.4 lane (``scripts/run_nim224_lane.sh``) builds and runs it
+## Nim floor lane (``scripts/run_nim_floor_lane.sh``) builds and runs it
 ## (reprobuild-pm issue 2026-11-08-nim224-lane-reports-green-for-an-
 ## unknown-suite-and-does-not-hold-the-simulator).
 ##

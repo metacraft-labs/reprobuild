@@ -69035,9 +69035,9 @@
       "localDependencyShape": [],
       "owner": "tests/unit",
       "requiresReproBinary": false,
-      "source": "tests/unit/test_nim224_lane_selection.py",
+      "source": "tests/unit/test_nim_floor_lane_selection.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

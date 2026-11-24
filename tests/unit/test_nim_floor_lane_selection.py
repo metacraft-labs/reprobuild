@@ -1,12 +1,12 @@
-"""The Nim 2.2.4 lane refuses a suite name that names none of its suites,
+"""The Nim floor lane refuses a suite name that names none of its suites,
 and an empty selection, instead of running nothing and reporting green
 (reprobuild-pm issue 2026-11-08-nim224-lane-reports-green-for-an-unknown-
 suite-and-does-not-hold-the-simulator).
 
-The real script runs with ``NIM224_LANE_SELECT_ONLY=1``, which stops it
+The real script runs with ``NIM_FLOOR_LANE_SELECT_ONLY=1``, which stops it
 after the selection, before it resolves Nim or builds anything.
 
-Falsifier: ``NIM224_LANE_MUTATION=unknown-suite-runs-nothing`` (the
+Falsifier: ``NIM_FLOOR_LANE_MUTATION=unknown-suite-runs-nothing`` (the
 selection as before round 5) turns the three refusal cases red; run them
 with ``A11_LANE_FALSIFIER=1``. The empty-selection case needs no such
 variable to reach its refusal (round 6).
@@ -18,13 +18,13 @@ import subprocess
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-LANE = os.path.join(ROOT, "scripts", "run_nim224_lane.sh")
+LANE = os.path.join(ROOT, "scripts", "run_nim_floor_lane.sh")
 
 
 def lane(*args):
-    env = dict(os.environ, NIM224_LANE_SELECT_ONLY="1")
+    env = dict(os.environ, NIM_FLOOR_LANE_SELECT_ONLY="1")
     if os.environ.get("A11_LANE_FALSIFIER") == "1":
-        env["NIM224_LANE_MUTATION"] = "unknown-suite-runs-nothing"
+        env["NIM_FLOOR_LANE_MUTATION"] = "unknown-suite-runs-nothing"
     return subprocess.run(["bash", LANE, *args], cwd=ROOT, env=env,
                           capture_output=True, text=True)
 
@@ -64,6 +64,40 @@ class LaneSelection(unittest.TestCase):
         # The engine's signer suite links repro_cli_support (reprobuild-pm
         # issue 2026-11-07-repro-cli-support-does-not-build-under-nim-2-2-4).
         self.assertIn("selected: t_worker_signing_certificates_are_time_bound", selected)
+
+class LaneCompiler(unittest.TestCase):
+    """The lane builds with the Nim floor, from the snapshot the engine's own
+    Linux bootstrap uses, and the two cannot drift apart."""
+
+    def _read(self, *parts):
+        with open(os.path.join(ROOT, *parts), encoding="utf-8") as handle:
+            return handle.read()
+
+    def test_the_lane_nixpkgs_snapshot_is_the_bootstraps(self):
+        import re
+        script = self._read("scripts", "run_nim_floor_lane.sh")
+        profiles = self._read("libs", "repro_tool_profiles", "src",
+                              "repro_tool_profiles.nim")
+        lane_rev = re.search(r'floor_nixpkgs="github:NixOS/nixpkgs/([0-9a-f]{40})"',
+                             script)
+        boot_rev = re.search(r'BootstrapNimNixpkgsRev\* = "([0-9a-f]{40})"',
+                             profiles)
+        self.assertIsNotNone(lane_rev, "the lane names no nixpkgs snapshot")
+        self.assertIsNotNone(boot_rev, "BootstrapNimNixpkgsRev not found")
+        self.assertEqual(lane_rev.group(1), boot_rev.group(1))
+
+    def test_the_lane_expects_the_recipe_compiler_floor(self):
+        import re
+        script = self._read("scripts", "run_nim_floor_lane.sh")
+        floor = self._read("libs", "repro_core", "src", "repro_core",
+                           "recipe_compiler_requirement.nim")
+        lane_version = re.search(r'^expected="([0-9.]+)"$', script, re.M)
+        floor_version = re.search(
+            r'RecipeCompilerMinimumVersion\* = "([0-9.]+)"', floor)
+        self.assertIsNotNone(lane_version)
+        self.assertIsNotNone(floor_version)
+        self.assertEqual(lane_version.group(1), floor_version.group(1))
+
 
 
 if __name__ == "__main__":
