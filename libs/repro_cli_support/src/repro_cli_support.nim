@@ -93134,6 +93134,14 @@ proc judgeUntrackedInputs*(mode: CertificateUntrackedInputs;
           continue
         if dirExists(canonicalReadPath(path)):
           continue
+        # An absence observation (Test-Certificates.md, "Absence observations"):
+        # a path absent on disk at test time was looked up, not read, and a path
+        # absent from the certified tree stays pinned by the content id. A later
+        # creation of a tracked file changes the content; an untracked file that
+        # appears later is read by the next run and refused there.
+        if not (fileExists(absolutePath(path)) or
+            symlinkExists(absolutePath(path))):
+          continue
         if isExemptOutputRead(path, readSet, asEntry):
           continue
         seen.incl(relative)
