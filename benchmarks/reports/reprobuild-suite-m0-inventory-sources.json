@@ -5,7 +5,7 @@
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3291
+    "testEntries": 3292
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1856,7 +1856,7 @@
     "classificationCounts": {
       "graph-fixture": 29,
       "integration": 1822,
-      "platform/destructive": 203,
+      "platform/destructive": 204,
       "pure unit": 847,
       "unclassified": 390
     },
@@ -2079,8 +2079,8 @@
       }
     ],
     "nimTestBinaryCount": 3235,
-    "pythonTestFileCount": 56,
-    "testEntryCount": 3291
+    "pythonTestFileCount": 57,
+    "testEntryCount": 3292
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -68584,6 +68584,21 @@
       "source": "tests/unit/test_ci_test_budget.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 26,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_clingo_windows_arm64_producer.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 18,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

@@ -1856,6 +1856,8 @@ package reprobuild:
         source == "tests/unit/test_release_tag_names_build.py"
       let releaseCachePushTest =
         source == "tests/unit/test_release_cache_push.py"
+      let clingoProducerTest =
+        source == "tests/unit/test_clingo_windows_arm64_producer.py"
       let releaseIdentityTest =
         source == "tests/unit/test_release_pipeline_identity.py"
       let confinementSystemdAnalyzeTest =
@@ -1895,6 +1897,15 @@ package reprobuild:
           # It copies the guard into the runner clone it builds.
           @["scripts/release/assert_tag_names_commit.sh",
             ".github/workflows/release-pipeline.yml"]
+        elif clingoProducerTest:
+          # The two admit-job guards it runs, the workflow whose steps it runs
+          # and whose trigger it checks, the release trigger it must stay
+          # disjoint from, and the pins the version guard reads.
+          @["scripts/release/assert_producer_tag.sh",
+            "scripts/release/assert_commit_on_branch.sh",
+            ".github/workflows/clingo-windows-arm64.yml",
+            ".github/workflows/release.yml",
+            "windows/toolchain-versions.env"]
         elif releaseCachePushTest:
           # The retry script, and the workflow whose `publish-nix-cache` job
           # shape the test checks and whose push step's `run:` block it runs.
@@ -1938,6 +1949,12 @@ package reprobuild:
       # against it, and the workflow steps' `run:` lines under bash.
       if releaseTagTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["bash", "git"])
+      # Real git and bash again, plus the branch guard's `mktemp` and `rm`
+      # and the version step's `sed`; POSIX only, like the admit job.
+      when not defined(windows):
+        if clingoProducerTest:
+          appendRegisteredActionToolIdentityRefs(pyExecute.id,
+            ["bash", "git", "mktemp", "rm", "sed"])
       # node runs the guard step's `actions/github-script` body.
       if releaseIdentityTest:
         appendRegisteredActionToolIdentityRefs(pyExecute.id, ["node"])

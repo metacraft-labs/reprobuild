@@ -3255,6 +3255,7 @@ tests/unit/test_ci_nix_builder_logs.py	python	9
 tests/unit/test_ci_reconcile_lock_credentials.py	python	25
 tests/unit/test_ci_suite_coverage.py	python	19
 tests/unit/test_ci_test_budget.py	python	26
+tests/unit/test_clingo_windows_arm64_producer.py	python	18
 tests/unit/test_cmake_generator_competitiveness_bench.py	python	18
 tests/unit/test_cmake_prereq_sdk.py	python	11
 tests/unit/test_continuous_benchmarking_policy.py	python	7
