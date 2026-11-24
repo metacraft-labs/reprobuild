@@ -97,13 +97,19 @@ proc expectedFalsifier(mut: string; b: BaseImage): Falsifier =
     "fails: the transaction succeeds and the log records verify-failed"]
   case mut
   of "alpm-hook-without-timeout":
+    # The mutated build writes a hook without the watchdog, so its bytes
+    # differ from what this (unmutated) gate renders for comparison.
+    let hookStep = "generation 0 carries the ALPM hook, as generation 0 renders it"
+    var mustRun: seq[string]
+    for c in common:
+      if c != hookStep: mustRun.add(c)
     Falsifier(
       required: @["hangs: the transaction finishes within the watchdog's bound plus 5 s"],
-      mayBeRed: @["hangs: the hook's log records verify-timeout",
+      mayBeRed: @[hookStep, "hangs: the hook's log records verify-timeout",
                   "hangs: nothing of the hung process group is left",
                   "store deleted: the transaction succeeds, the hook records verify-missing",
                   "store deleted: the re-assert unit reports degraded"],
-      mustRunGreen: common)
+      mustRunGreen: mustRun)
   of "alpm-hook-ignores-pacnew":
     Falsifier(
       required: @["pacnew: the hook names repro-fx-up and up.conf.pacnew",

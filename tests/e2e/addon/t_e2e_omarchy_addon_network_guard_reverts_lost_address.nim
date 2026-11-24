@@ -129,6 +129,11 @@ proc reverted(b: Bed; c, reasonHas: string; undo: proc() = nil) =
          rb.len == b.rbA + 1 and fresh.len == 1 and
          (reasonHas.len == 0 or reasonHas in fresh[0]),
          "new: " & fresh.join("\n") & "\nall:\n" & rb.join("\n"))
+  # The actor finishing the revert may still be at it (its last steps take
+  # longer on a loaded host: a check made at once found the marker at
+  # `9-commit`, measured 2026-11-24): wait for the marker, bounded, before
+  # the checks below.
+  discard b.waitNoMarker(300)
   # The actor that completes a revert stops the attempt's timers last,
   # after the marker is gone: a moment later.
   discard b.mux("for i in $(seq 1 30); do systemctl list-units --all --plain " &
@@ -818,19 +823,24 @@ proc runBase(base: BaseImage; record: JsonNode): seq[string] =
                     " >/dev/null 2>&1 && exit 0; sleep 1; done")
       discard b.mux("systemctl stop 'repro-addon-guard-" & att & "-*'")
       b.pause("revert:step-4")
-      # The outage lasts until the owner has seen it and started its
-      # failure-path revert: a flap of a few seconds was sampled or missed
-      # by the owner's watch depending on the host's load, and a missed one
-      # left the owner to revert at its deadline ("armed, its timer gone")
-      # instead (measured twice in the AR6 regression runs, 2026-11-23).
-      # The out-of-band link is also the one the harness's SSH rides on, so
-      # the guest itself holds it down and brings it back -- once the owner
-      # has paused at its failure-path revert, or after 120 s -- detached
-      # from the session that started it.
-      discard b.mux("nohup setsid sh -c 'sleep 1; ip link set " & nb.oob &
-        " down; for i in $(seq 1 120); do test -e " & Ctl &
-        "/test-paused-at-revert:step-4 && break; sleep 1; done; ip link set " &
-        nb.oob & " up' </dev/null >/dev/null 2>&1 &", 60)
+      # The owner must see the outage and start its failure-path revert: a
+      # single flap of a few seconds was sampled or missed by the owner's
+      # watch depending on the host's load, and a missed one left the owner
+      # to revert at its deadline ("armed, its timer gone") instead
+      # (measured twice in the AR6 regression runs, 2026-11-23). Holding the
+      # link down instead let NetworkManager deactivate its connection and
+      # re-activate it with another route metric (100 -> 102), a residue of
+      # the harness's own change that every later comparison then saw
+      # (measured 2026-11-24). So the guest flaps the link -- three seconds
+      # down, shorter than the outage NetworkManager rides through, one up --
+      # until the owner has paused at its revert, at most 40 times. The
+      # link is also the one the harness's SSH rides on, so the guest runs
+      # the loop itself, detached from the session that started it.
+      discard b.mux("nohup setsid sh -c 'sleep 1; for i in $(seq 1 40); do " &
+        "ip link set " & nb.oob & " down; sleep 3; ip link set " & nb.oob &
+        " up; test -e " & Ctl & "/test-paused-at-revert:step-4 && break; " &
+        "sleep 1; done; ip link set " & nb.oob & " up' </dev/null " &
+        ">/dev/null 2>&1 &", 60)
       discard b.waitPaused("revert:step-4", 240)
       let loaded = b.mux("systemctl list-units --plain --no-legend " &
         "'repro-addon-guard-" & att & "-*.timer'").stdout.strip()

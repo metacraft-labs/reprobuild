@@ -1220,10 +1220,25 @@ proc newOmarchyGuest*(diskGiB = OmarchyImageGiB; cpus = 4;
   newOmarchyGuestOver(omarchyGoldenImage(), diskGiB, cpus, memoryMB)
 
 proc prepareOmarchyGuest*(g: Guest) =
-  ## Boot settled, then the pin check: refuses (raises) a guest whose
-  ## pacman names any server other than the capture cache.
+  ## Boot settled, ``archlinux-keyring-wkd-sync.timer`` stopped (below),
+  ## then the pin check: refuses (raises) a guest whose pacman names any
+  ## server other than the capture cache.
+  ##
+  ## The Arch images disable that weekly timer when they are built: it
+  ## rewrites ``/etc/pacman.d/gnupg`` from the network, which a running
+  ## gate's ``etc`` fingerprint sees. The Omarchy image kept it, and once
+  ## it was a week past the capture (2026-11-21) it fired at a random time
+  ## after every boot, so an Omarchy gate's fingerprint gained
+  ## ``/etc/pacman.d/gnupg/crls.d``, ``dirmngr@etc-pacman.d-gnupg.service``
+  ## and ``network-online.target`` mid-gate (measured 2026-11-24, AR6). It
+  ## is stopped here, before any baseline, with whatever it started; a sync
+  ## that already ran is part of the baseline.
   discard g.exec("systemctl is-system-running --wait >/dev/null 2>&1; true",
                  timeoutSec = 600)
+  discard g.exec("systemctl disable --now archlinux-keyring-wkd-sync.timer " &
+    ">/dev/null 2>&1; systemctl stop archlinux-keyring-wkd-sync.service " &
+    "'dirmngr@etc-pacman.d-gnupg.service' >/dev/null 2>&1; true",
+    timeoutSec = 300)
   g.requirePinnedPacman(omarchyCaptureRule())
 
 proc omarchyBuildId*(g: Guest): string =
