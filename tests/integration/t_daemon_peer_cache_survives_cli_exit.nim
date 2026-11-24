@@ -60,6 +60,11 @@ import repro_local_store
 import repro_peer_cache
 
 const
+  BuildTimeoutMs = 600_000
+    ## Bound on one build through a daemon: half the suite's 1200 s per-test
+    ## limit. A cold recipe compile takes about two minutes on a loaded host,
+    ## so this leaves room for a slow host and still fails the case, with the
+    ## diagnosis printed, long before the suite would kill it blind.
   ActionId = "m0-peer-cache-artifact"
   InputText = "artifact input from the producer checkout\n"
 
@@ -214,12 +219,75 @@ proc startDaemon(node: var DaemonNode; peerCacheSpec: string) =
   raise newException(IOError, "daemon " & node.name &
     " did not start its peer cache")
 
+proc processTable(): seq[tuple[pid, ppid: int; line: string]] =
+  ## Every process on the host as (pid, parent pid, `ps` line). POSIX only;
+  ## empty where `ps` is absent.
+  when defined(windows):
+    discard
+  else:
+    let (output, code) = execCmdEx("ps -eo pid=,ppid=,stat=,time=,args=")
+    if code != 0:
+      return
+    for line in output.splitLines():
+      let fields = line.strip().splitWhitespace()
+      if fields.len < 2:
+        continue
+      try:
+        result.add((parseInt(fields[0]), parseInt(fields[1]), line.strip()))
+      except ValueError:
+        discard
+
+proc descendantsOf(table: seq[tuple[pid, ppid: int; line: string]];
+                   roots: seq[int]): seq[tuple[pid: int; line: string]] =
+  ## Transitive children of `roots`: the io monitors a build worker starts
+  ## and the recipe compiles under those.
+  var frontier = roots
+  while frontier.len > 0:
+    let parent = frontier.pop()
+    for entry in table:
+      if entry.ppid == parent:
+        result.add((entry.pid, entry.line))
+        frontier.add(entry.pid)
+
+proc daemonFamily(node: DaemonNode): seq[tuple[pid: int; line: string]] =
+  ## Everything the daemon started that still runs, for the stall report. A
+  ## build worker is NOT a child of the daemon: `spawnDetachedDaemonWorker` double-forks, so the
+  ## worker is reparented to init. It is still a fork of the daemon, though,
+  ## and keeps its argv, which names this node's private endpoint -- so the
+  ## family is the daemon, every process carrying the endpoint, and the
+  ## descendants of those.
+  if node.process.isNil:
+    return
+  let table = processTable()
+  let own = node.process.processID
+  var roots = @[own]
+  for entry in table:
+    if entry.pid != own and node.endpoint in entry.line:
+      roots.add(entry.pid)
+      result.add((entry.pid, entry.line))
+  result.add(descendantsOf(table, roots))
+
+proc processTree(node: DaemonNode): string =
+  if node.process.isNil:
+    return "(daemon " & node.name & " not running)"
+  result = "daemon " & node.name & " pid " & $node.process.processID & "\n"
+  for member in daemonFamily(node):
+    result.add("  " & member.line & "\n")
+
+proc stallReport(node: DaemonNode): string =
+  ## What a stalled build needs to be diagnosed: the daemon's log and the
+  ## process tree under it (a worker waiting on a lock or lease, a recipe
+  ## compile that never ends). Printed BEFORE the daemon is stopped, as the
+  ## tree is gone afterwards.
+  "daemon " & node.name & " log:\n" & node.daemonLog() &
+    "\nprocess tree:\n" & node.processTree()
+
 proc stopDaemon(node: var DaemonNode) =
   if node.process.isNil:
     return
   discard runShell(shellCommand(@[publicReproBin(), "daemon", "stop",
     "--endpoint", node.endpoint, "--state-dir", node.stateDir,
-    "--log", node.logPath], nodeEnv(node)), repoRoot())
+    "--log", node.logPath], nodeEnv(node)), repoRoot(), timeoutMs = 60_000)
   let deadline = epochTime() + 20.0
   while node.process.running and epochTime() < deadline:
     sleep(50)
@@ -230,7 +298,10 @@ proc stopDaemon(node: var DaemonNode) =
   node.process = nil
   try: removeFile(node.endpoint) except OSError: discard
 
-proc buildThroughDaemon(node: DaemonNode; projectRoot: string): CmdResult =
+proc buildThroughDaemon(node: DaemonNode; projectRoot: string;
+                        timeoutMs = BuildTimeoutMs): CmdResult =
+  ## The CLI is bounded: if the daemon's worker stalls, the case fails
+  ## (`runShellTimedOutCode`) instead of waiting for the suite to kill it.
   runShell(shellCommand(@[
     publicReproBin(), "build", projectRoot,
     "--daemon=require",
@@ -239,7 +310,7 @@ proc buildThroughDaemon(node: DaemonNode; projectRoot: string): CmdResult =
     "--progress=quiet",
     "--log=summary",
     "--write-report"
-  ], nodeEnv(node)), repoRoot())
+  ], nodeEnv(node)), repoRoot(), timeoutMs)
 
 proc valueAfter(output, prefix: string): string =
   for line in output.splitLines:
@@ -307,7 +378,7 @@ proc runDaemonRoundTrip(): bool =
   let producer = buildThroughDaemon(nodeA, wsA)
   checkpoint("producer build:\n" & producer.output)
   if producer.code != 0:
-    checkpoint("daemon A log:\n" & nodeA.daemonLog())
+    checkpoint(stallReport(nodeA))
   ensure producer.code == 0
   check readFile(wsA / "build" / "artifact.txt") == InputText
   let producerAction = actionReport(producer.output)
@@ -338,7 +409,8 @@ proc runDaemonRoundTrip(): bool =
   let consumer = buildThroughDaemon(nodeB, wsB)
   checkpoint("consumer build:\n" & consumer.output)
   if consumer.code != 0:
-    checkpoint("daemon B log:\n" & nodeB.daemonLog())
+    checkpoint(stallReport(nodeB))
+    checkpoint(stallReport(nodeA))
   ensure consumer.code == 0
   check readFile(wsB / "build" / "artifact.txt") == InputText
   let consumerAction = actionReport(consumer.output)
@@ -370,3 +442,32 @@ suite "Distributed-Execution M0: daemon-hosted peer cache":
 
   test "t_daemon_peer_cache_survives_cli_exit":
     check runDaemonRoundTrip()
+
+  test "a build through a stalled daemon fails the case with a diagnosis":
+    # The regression of the hang this file once suffered: the CLI waited on
+    # the daemon socket with no bound, so a stalled worker cost the suite's
+    # whole timeout and left no log. A bound far below a cold recipe compile
+    # makes the build stall for real (no mock: the same daemon, worker and
+    # compile), and the case must fail fast carrying the daemon's evidence.
+    let base = createTempDir("repro-m0-daemon-stall-", "")
+    var node = newNode(base, "a")
+    # The peer cache refuses to start without a trust anchor; the second
+    # node exists only to give the first one an anchor to load.
+    let other = newNode(base, "b")
+    let ws = base / "ws-a"
+    writeProject(ws)
+    mutualTrust([node.pki, other.pki])
+    defer:
+      stopDaemon(node)
+      removeDir(base)
+    startDaemon(node, "lan://127.0.0.0/8?multicast=0&tls=1")
+    let started = epochTime()
+    let stalled = buildThroughDaemon(node, ws, timeoutMs = 1_500)
+    check stalled.code == runShellTimedOutCode
+    check epochTime() - started < 60.0
+    # What the failing case prints: the daemon's log and its process tree.
+    let report = stallReport(node)
+    check report.contains("daemon a log:")
+    check report.contains("build request accepted")
+    check report.contains("process tree:")
+    check report.contains("pid " & $node.process.processID)

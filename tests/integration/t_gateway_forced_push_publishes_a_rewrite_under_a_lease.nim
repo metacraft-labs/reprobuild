@@ -68,11 +68,7 @@
 ##     (for the root) or a profile without the member's role (for a member)
 ##     must not switch the refusal off; a relative value (which the hook
 ##     would read against the gateway's bare repository) and one naming a
-##     directory must not refuse an ordinary forced push. The variable
-##     reaches the hook only because the gateway inherits the pushing
-##     shell's environment, so it describes that shell, not the workspace
-##     the gateway serves; honouring it would let any pusher choose which
-##     settings decide whether the push is refused.
+##     directory must not refuse an ordinary forced push.
 ##   - ``upstream_without_atomic_push_is_forwarded_non_atomically`` -- an
 ##     upstream that does not advertise ``atomic`` still receives the push,
 ##     and the gateway says the forward was not atomic.

@@ -4427,6 +4427,39 @@ proc gemBuildToolUses(pkg: PackageDef): seq[PackageUseDef] =
         result.add(PackageUseDef(rawConstraint: selector,
           packageSelector: selector, executableName: selector))
 
+const
+  reproEngineImage* {.strdefine.} = ""
+    ## The engine image running this recipe compile, handed in by the engine
+    ## (`engineIdentityDefines` in `repro_interface_artifacts`); empty for a
+    ## plain `nim c` of a recipe. Only diagnostics read it.
+  reproEngineRevision* {.strdefine.} = ""
+    ## That image's source revision (`ReprobuildSourceRevision`); empty when
+    ## the engine does not know it or did not say.
+
+proc refuseProducerNewerThanThisDsl(selector, consumerSourceFile: string) =
+  ## Cross-Repo-Source-Consumption.md §9.2a: a workspace producer that is a
+  ## reprobuild source tree newer than the DSL compiling this recipe is
+  ## refused HERE, before its include is emitted, so the sibling's recipe is
+  ## never compiled against a DSL that lacks what it calls. Checked against
+  ## this compile's own DSL tree (`DslSourceRoot` / `DslVersion`), so a
+  ## compile whose DSL is that sibling is not refused. The message ends with
+  ## the record line the engine reads back (`parseEngineRecipeSkew`).
+  let location = workspaceProducerLocation(selector, consumerSourceFile)
+  if location.modulePath.len == 0:
+    return
+  let found = detectEngineRecipeSkew(DslSourceRoot, DslVersion,
+    location.modulePath.parentDir)
+  if not found.skewed:
+    return
+  var skew = found.skew
+  skew.engineRevision = reproEngineRevision
+  skew.enginePath = (if reproEngineImage.len > 0: reproEngineImage
+                     else: reproBin)
+  skew.selector = selector
+  skew.consumerRecipe = consumerSourceFile
+  skew.workspaceRoot = location.workspaceRoot
+  error(engineOlderThanSiblingRecipeMessage(skew))
+
 proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
   # `uses:` AND `nativeBuildDeps:` import a package's typed command surface;
   # `runtimeDeps:` imports its marker alone (Provisioning-Contributions.md
@@ -4570,6 +4603,8 @@ proc usesImportCode(pkg: PackageDef; consumerSourceFile = ""): string =
         if not catalogSeen:
           producerModules.add((catalogAlias, selector, catalogModule & ".nim"))
       continue
+    # Before either branch below reaches the producer's recipe.
+    refuseProducerNewerThanThisDsl(selector, consumerSourceFile)
     if workspaceProducerDeclaresResourceType(selector, consumerSourceFile):
       # RP5a: resource producer — DO NOT import its module (driver closure).
       # Route to the accessor-emission branch; skip the module-import path.

@@ -20,7 +20,11 @@
 ##      recently used first, over three kinds of object:
 ##        * a prefix no root holds — last use is the index's `last_used_at`
 ##          (`touchPrefix`, recorded when realize finds it present), else its
-##          creation;
+##          creation. A prefix another indexed prefix references
+##          (`recordPrefixReference`) becomes a candidate only once the last
+##          prefix referencing it has been evicted, as a CAS blob does once
+##          the last entry referring to it goes: evicting it first would
+##          leave the referrer pointing at a prefix that is gone;
 ##        * an action-cache entry — last use is the newest of its `.rec`'s
 ##          write time and the recorded use of the blobs it restores, because
 ##          a cache hit materializes those blobs and `touchCasBlob` records
@@ -42,7 +46,7 @@
 ## budget but never touched, so the report can say the budget is unreachable.
 ##
 ## Prefixes go through `gcPrefix`, which refuses one a root has started
-## holding since the measurement; action-cache entries and blobs are removed
+## holding, or a prefix has started referencing, since the measurement; action-cache entries and blobs are removed
 ## directly. An action-cache entry or a blob that a concurrent writer is
 ## reusing has its use recorded first, and the blob is re-checked just before
 ## it is unlinked, so the window in which a build can lose a blob it is
@@ -98,7 +102,8 @@ type
     freedBytes*: int64
     evicted*: seq[BudgetEviction]
     refusedPrefixes*: int
-      ## Prefixes `gcPrefix` refused because a root held them by then.
+      ## Prefixes `gcPrefix` refused because a root held them, or a prefix
+      ## referenced them, by then.
     unreachable*: bool
       ## Over budget after the run: everything left is held, inside the keep
       ## window, or (without `evictCas`) CAS.
@@ -266,8 +271,19 @@ proc budgetGc*(storeRoot: string; policy: BudgetGcPolicy): BudgetGcReport =
     let cutoff = now - policy.keepRecentSeconds
     var heap = initHeapQueue[Candidate]()
     var order = 0
+    # What each prefix references, by index into `prefixes`, so evicting a
+    # referrer can release what it kept (see the module comment).
+    var prefixIndex = initTable[PrefixIdBytes, int]()
     for i, p in prefixes:
-      if not p.held:
+      prefixIndex[p.row.prefixId] = i
+    var referencesOf = newSeq[seq[int]](prefixes.len)
+    for (referrer, referenced) in s.listPrefixReferences():
+      let a = prefixIndex.getOrDefault(referrer, -1)
+      let b = prefixIndex.getOrDefault(referenced, -1)
+      if a >= 0 and b >= 0:
+        referencesOf[a].add(b)
+    for i, p in prefixes:
+      if not p.held and p.referrers == 0:
         heap.push(Candidate(lastUsed: p.lastUsedUnix, order: order,
           kind: bokPrefix, index: i))
         inc order
@@ -298,6 +314,12 @@ proc budgetGc*(storeRoot: string; policy: BudgetGcPolicy): BudgetGcReport =
         result.freedBytes += p.sizeBytes
         result.evicted.add(BudgetEviction(kind: bokPrefix,
           id: p.row.realizedPath, bytes: p.sizeBytes, lastUsedUnix: c.lastUsed))
+        for j in referencesOf[c.index]:
+          dec prefixes[j].referrers
+          if prefixes[j].referrers == 0 and not prefixes[j].held:
+            heap.push(Candidate(lastUsed: prefixes[j].lastUsedUnix,
+              order: order, kind: bokPrefix, index: j))
+            inc order
       of bokActionEntry:
         let e = entries[c.index]
         if not policy.dryRun and not removeCacheEntry(e):

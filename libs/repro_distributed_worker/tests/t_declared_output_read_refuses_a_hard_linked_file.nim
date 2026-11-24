@@ -19,6 +19,7 @@
 
 import std/[os, strutils, tempfiles, unittest]
 
+import repro_test_support/reasoned_skip
 import repro_distributed_worker/receiver
 
 when defined(posix):
@@ -52,9 +53,6 @@ when defined(posix):
       check alone.ok
       check alone.bytes.len == "daemon-only bytes".len
 else:
-  import repro_test_support/reasoned_skip
-
   suite "a declared output with another hard link is not read":
     test "hard link to a file outside the worktree is refused":
-      skip("needs POSIX link(2) and an fstat link count; this target " &
-        "has neither")
+      skip("not a POSIX host; link(2) hard links are what this case drives")

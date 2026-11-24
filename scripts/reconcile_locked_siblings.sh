@@ -16,7 +16,16 @@
 #
 # Usage:
 #   reconcile_locked_siblings.sh <lock> <siblings-root> <exclude-name> \
-#       --fetch-only | --detach
+#       --fetch-only | --detach [<sibling-repos-file>]
+#
+# <sibling-repos-file> (normally .github/sibling-repos) names siblings the
+# lock does not list, at a revision of their own: its `name=<40-hex>` lines.
+# CodeTracer's lock can move such a sibling (nim-shm-gset, say) to an older
+# revision for the ct build, and reprobuild's lock, which does not list it,
+# would never move it back, so the suite's recipe compile ran against a
+# checkout without symbols reprobuild's source uses (`attempting to call
+# undeclared routine: 'insertShardIndex'`). Pass it for the reprobuild
+# lock's passes. A name the lock does list keeps the lock's revision.
 #
 # <exclude-name> is skipped by name: the repository under test is itself an
 # entry in these locks, at a different revision, and its checkout must stay
@@ -24,14 +33,15 @@
 # and are skipped for the same reason.
 set -euo pipefail
 
-if [ "$#" -ne 4 ]; then
-  echo "usage: $0 <lock> <siblings-root> <exclude-name> --fetch-only|--detach" >&2
+if [ "$#" -ne 4 ] && [ "$#" -ne 5 ]; then
+  echo "usage: $0 <lock> <siblings-root> <exclude-name> --fetch-only|--detach [<sibling-repos-file>]" >&2
   exit 2
 fi
 lock="$1"
 siblings_root="$2"
 exclude="$3"
 mode="$4"
+explicit_file="${5:-}"
 
 case "$mode" in
   --fetch-only|--detach) ;;
@@ -39,6 +49,10 @@ case "$mode" in
 esac
 if [ ! -f "$lock" ]; then
   echo "$0: no lock at $lock" >&2
+  exit 1
+fi
+if [ -n "$explicit_file" ] && [ ! -f "$explicit_file" ]; then
+  echo "$0: no sibling-repos file at $explicit_file" >&2
   exit 1
 fi
 
@@ -55,30 +69,30 @@ grep -o '{[^{}]*}' "$lock" \
 
 seen=0
 acted=0
-while IFS= read -r entry; do
-  name="$(printf '%s' "$entry" | sed -n 's/.*[^-]name = "\([^"]*\)".*/\1/p')"
-  revision="$(printf '%s' "$entry" \
-    | sed -n 's/.*revision = "\([0-9a-f]\{40\}\)".*/\1/p')"
-  if [ -z "$name" ] || [ -z "$revision" ]; then continue; fi
-  if [ "$name" = "$exclude" ]; then continue; fi
+handled=" "
+
+# One sibling at one revision: in --fetch-only bring the object in, in
+# --detach put the checkout there. Counts into `seen` and `acted`.
+reconcile_one() {
+  local name="$1" revision="$2" source="$3" directory head
   directory="$siblings_root/$name"
-  if [ ! -d "$directory/.git" ]; then continue; fi
+  if [ ! -d "$directory/.git" ]; then return 0; fi
   seen=$((seen + 1))
   if [ "$mode" = "--fetch-only" ]; then
     if git -C "$directory" cat-file -e "$revision^{commit}" 2>/dev/null; then
-      continue
+      return 0
     fi
     echo "reconcile: fetching $name for $revision"
     git -C "$directory" fetch --quiet origin "$revision" \
       || git -C "$directory" fetch --quiet origin \
            '+refs/heads/*:refs/remotes/origin/*'
     acted=$((acted + 1))
-    continue
+    return 0
   fi
   if [ "$(git -C "$directory" rev-parse HEAD)" = "$revision" ]; then
-    continue
+    return 0
   fi
-  echo "reconcile: $name -> locked $revision"
+  echo "reconcile: $name -> $source $revision"
   if ! git -C "$directory" cat-file -e "$revision^{commit}" 2>/dev/null; then
     # Only reachable when --fetch-only did not run, or ran without the
     # credentials the clone needs; say which rather than failing on `checkout`.
@@ -89,12 +103,37 @@ while IFS= read -r entry; do
   git -C "$directory" checkout --quiet --detach "$revision"
   head="$(git -C "$directory" rev-parse HEAD)"
   if [ "$head" != "$revision" ]; then
-    echo "reconcile: $name is at $head, not the locked $revision" >&2
+    echo "reconcile: $name is at $head, not the $source $revision" >&2
     exit 1
   fi
   echo "reconcile: $name at $head"
   acted=$((acted + 1))
+}
+
+while IFS= read -r entry; do
+  name="$(printf '%s' "$entry" | sed -n 's/.*[^-]name = "\([^"]*\)".*/\1/p')"
+  revision="$(printf '%s' "$entry" \
+    | sed -n 's/.*revision = "\([0-9a-f]\{40\}\)".*/\1/p')"
+  if [ -z "$name" ] || [ -z "$revision" ]; then continue; fi
+  if [ "$name" = "$exclude" ]; then continue; fi
+  handled="$handled$name "
+  reconcile_one "$name" "$revision" locked
 done < "$entries"
+
+# The explicit pins of the sibling-repos file, for names the lock did not
+# name. `name=<40-hex>` lines only: a bare name means "the lock's revision",
+# and `name=<branch>` is not a revision to detach to.
+if [ -n "$explicit_file" ]; then
+  while IFS= read -r line; do
+    name="$(printf '%s' "$line" | sed -n 's/^\([A-Za-z0-9_.-][A-Za-z0-9_.-]*\)=\([0-9a-f]\{40\}\)[[:space:]]*$/\1/p')"
+    revision="$(printf '%s' "$line" | sed -n 's/^\([A-Za-z0-9_.-][A-Za-z0-9_.-]*\)=\([0-9a-f]\{40\}\)[[:space:]]*$/\2/p')"
+    if [ -z "$name" ] || [ -z "$revision" ]; then continue; fi
+    if [ "$name" = "$exclude" ]; then continue; fi
+    case "$handled" in *" $name "*) continue ;; esac
+    handled="$handled$name "
+    reconcile_one "$name" "$revision" "explicit"
+  done < "$explicit_file"
+fi
 
 echo "reconcile: $(basename "$lock") in $(dirname "$lock" | xargs basename):" \
   "$seen sibling(s) present, $acted acted on ($mode)"

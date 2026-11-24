@@ -4707,6 +4707,38 @@ test "incomplete name" and:
                 f"expected a positive MiB figure on {sys.platform}, got {output!r}",
             )
 
+    def _run_parallelism_helper(self, script):
+        helper = REPO_ROOT / "scripts" / "test_parallelism.sh"
+        return subprocess.run(
+            ["bash", "-c", 'source "$1"; ' + script, "disk-test", str(helper)],
+            text=True,
+            capture_output=True,
+        )
+
+    def test_free_disk_guard_refuses_with_the_cause(self):
+        # A full runner disk used to surface 25 minutes into the build as a
+        # killed engine. The guard must refuse up front, naming free and
+        # needed space, and must pass when there is room.
+        probe = self._run_parallelism_helper(
+            "reprobuild_available_disk_mb /"
+        )
+        self.assertTrue(probe.stdout.strip().isdigit(), probe.stdout)
+        refused = self._run_parallelism_helper(
+            "reprobuild_require_free_disk / 999999999999"
+        )
+        self.assertEqual(refused.returncode, 1, refused.stderr)
+        self.assertIn("MiB free", refused.stderr)
+        self.assertIn("needs at least 999999999999 MiB", refused.stderr)
+        ok = self._run_parallelism_helper("reprobuild_require_free_disk / 1")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+
+    def test_run_tests_sh_checks_disk_and_reports_it_in_the_banner(self):
+        text = (REPO_ROOT / "scripts" / "run_tests.sh").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("reprobuild_require_free_disk", text)
+        self.assertIn("MiB disk free", text)
+
     def test_run_tests_sh_passes_host_capacity_into_both_phases(self):
         # The policy is worthless if the caller does not use it. Assert the
         # wiring rather than only the pure function: run_tests.sh must feed
