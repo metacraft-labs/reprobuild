@@ -2,7 +2,9 @@
 # Integration boundary: real fork formatter/parser and real files. The wrapper
 # below injects formatter corruption only; verification always calls the real
 # compiler-backed AST checker. This proves the script protects dirty sources
-# independently of the layouter repair and its own final check.
+# independently of the layouter repair and its own final check. Its `drift`
+# kind keeps the meaning but is not a fixed point (the real formatter is one
+# now, so no real input can show that the script refuses such output).
 set -euo pipefail
 repo="$(cd "$(dirname "$0")/../.." && pwd)"
 real="$(command -v nimpretty)"
@@ -43,6 +45,14 @@ case "$1" in
     case "$target" in --out:*) target=${target#--out:} ;; esac
     if [ "${CORRUPT_KIND:-semantic}" = parse ]; then
       printf 'let = (\n' >"$target"
+    elif [ "$CORRUPT_KIND" = drift ]; then
+      # Meaning-preserving but never a fixed point: each pass adds a
+      # comment, as the fork's layouter once moved comments and changed
+      # indentation widths on every pass over its own output.
+      src=$2
+      if [ "$src" = "$target" ]; then cp "$src" "$target.in"; src=$target.in; fi
+      { cat "$src"; printf '# drift\n'; } >"$target"
+      rm -f "$target.in"
     else
       printf 'let orvalue = 1\n' >"$target"
     fi
@@ -54,15 +64,20 @@ export REAL_NIMPRETTY="$real"
 export PATH="$scratch/bin:$PATH"
 printf 'let value = 1 # user edits\n' >"$scratch/tree/apps/input.nim"
 cp "$scratch/tree/apps/input.nim" "$scratch/original"
-for corrupt_kind in semantic parse; do
+for corrupt_kind in semantic parse drift; do
   export CORRUPT_KIND="$corrupt_kind"
   for mode in write check; do
     args=()
     [ "$mode" = write ] || args=(--check)
     if bash "$scratch/tree/scripts/format_sources.sh" "${args[@]}" >"$scratch/log" 2>&1; then
-      echo "FAIL: $mode accepted semantic corruption" >&2; exit 1
+      echo "FAIL: $mode accepted $corrupt_kind corruption" >&2; exit 1
     fi
     grep -q 'apps/input.nim' "$scratch/log"
+    # Check mode also exits nonzero for a file that merely would change, so
+    # require the fixed-point refusal by name.
+    if [ "$corrupt_kind" = drift ]; then
+      grep -q 'not a fixed point' "$scratch/log"
+    fi
     cmp "$scratch/original" "$scratch/tree/apps/input.nim"
   done
 done

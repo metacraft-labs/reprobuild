@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3236,
+    "nimTestBinaries": 3241,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 847,
+    "pureUnitTests": 849,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3292
+    "testEntries": 3299
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -171,13 +171,14 @@
       "targetOs": "soAny"
     },
     {
-      "count": 11,
+      "count": 12,
       "defines": [],
       "dependencyShape": [
         "repro_cli_support"
       ],
       "owner": "libs/repro_cli_support",
       "sources": [
+        "libs/repro_cli_support/tests/t_absence_observations.nim",
         "libs/repro_cli_support/tests/t_anywhere_plan_digest_covers_what_it_applies.nim",
         "libs/repro_cli_support/tests/t_dep_prefix_names_the_library_prefix.nim",
         "libs/repro_cli_support/tests/t_direnv_stand_down.nim",
@@ -1855,10 +1856,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1823,
-      "platform/destructive": 203,
-      "pure unit": 847,
-      "unclassified": 390
+      "integration": 1825,
+      "platform/destructive": 204,
+      "pure unit": 849,
+      "unclassified": 392
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2078,9 +2079,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3236,
-    "pythonTestFileCount": 56,
-    "testEntryCount": 3292
+    "nimTestBinaryCount": 3241,
+    "pythonTestFileCount": 58,
+    "testEntryCount": 3299
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -15147,6 +15148,41 @@
       "source": "libs/repro_cli_support/tests/t_a_producer_fetch_ignores_the_callers_loader_path.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_absence_is_accepted_by_the_judge",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_workspace_manifests"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_absence_is_accepted_by_the_judge.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_absence_observations",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "libs/repro_cli_support",
+      "requiresReproBinary": false,
+      "source": "libs/repro_cli_support/tests/t_absence_observations.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -33083,6 +33119,21 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_lock_fetch_url_is_canonical",
+      "class": "unclassified",
+      "classificationReason": "imports `shared_clones`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [],
+      "owner": "libs/repro_workspace_vcs",
+      "requiresReproBinary": false,
+      "source": "libs/repro_workspace_vcs/tests/t_lock_fetch_url_is_canonical.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 8,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths",
       "class": "integration",
       "classificationReason": "subprocess or repro CLI invocation in test body",
@@ -44180,6 +44231,23 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_a_siblings_clone_transport_does_not_change_its_lock_entry",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_a_siblings_clone_transport_does_not_change_its_lock_entry.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_a_test_that_reads_an_ignored_file_is_not_certified",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -46356,7 +46424,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_chained_hook_that_cannot_start_names_its_cause.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 1,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -51949,6 +52017,23 @@
       "source": "tests/integration/t_l7_repro_up_converges_on_one_shared_instance.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_later_added_file_breaks_an_old_certificate",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_later_added_file_breaks_an_old_certificate.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 1,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68607,6 +68692,21 @@
     },
     {
       "binary": "",
+      "class": "platform/destructive",
+      "classificationReason": "platform path, target OS, VM, privileged, or host mutation signal",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_clingo_windows_arm64_producer.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 18,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
       "class": "unclassified",
       "classificationReason": "imports `importlib.util`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
@@ -68692,6 +68792,21 @@
       "source": "tests/unit/test_dev_shell_hook_scope.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `__future__`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_downstream_recorder_sibling_pins.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 13,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
