@@ -933,7 +933,7 @@ jobs:
               --fetch-only
             bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
               "$repro_root/repro.lock" "$siblings_root" "$repro_name" \
-              --fetch-only )
+              --fetch-only "$repro_root/.github/sibling-repos" )
           # The ct build runs next, so leave them at CodeTracer's revisions.
           bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
             "$ct_root/repro.lock" "$siblings_root" "$repro_name" --detach
@@ -1142,9 +1142,13 @@ jobs:
           # the job limit fire before a step's own. Needs no network: both
           # revision sets were fetched while the credential config was in
           # scope, and the suite step runs with GIT_CONFIG_GLOBAL=/dev/null.
+          # The sibling-repos file is passed so that a sibling reprobuild's lock
+          # does not list, but that file pins explicitly (nim-shm-gset), returns
+          # to that pin after the ct build moved it to CodeTracer's revision.
           bash "$repro_root/scripts/reconcile_locked_siblings.sh" \
             "$repro_root/repro.lock" "$(cd "$repro_root/.." && pwd)" \
-            "$(basename "$repro_root")" --detach
+            "$(basename "$repro_root")" --detach \
+            "$repro_root/.github/sibling-repos"
 
       - name: Refresh installation token for tests
         timeout-minutes: 15

@@ -30817,6 +30817,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_reconcile_restores_explicit_sibling_pins.nim",
+    binary: "build/test-bin/t_reconcile_restores_explicit_sibling_pins",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g02",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_record_store_checkout_declares_the_route_without_migration_warning.nim",
     binary: "build/test-bin/t_record_store_checkout_declares_the_route_without_migration_warning",
     defines: @[],
