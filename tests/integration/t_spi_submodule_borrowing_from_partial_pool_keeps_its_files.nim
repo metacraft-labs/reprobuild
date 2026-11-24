@@ -30,6 +30,28 @@
 ##   - ``submodule_borrowing_through_a_leaf_gets_its_files_back`` — the same
 ##     through a sibling leaf of the pool (nested alternates), which is not
 ##     registered with the pool.
+##   - ``report_pass_keeps_left_out_files_restorable_after_a_lazy_read`` —
+##     a report-only pass installs the chain; a later lazy read fetches the
+##     left-out files' blobs, so their absence no longer meets the
+##     blob-absence criterion. The next pass still names them (from the
+##     record the first pass wrote under the submodule's git dir) and the
+##     repair writes every one back; a file deleted after that stays deleted.
+##   - ``file_git_wrote_back_after_the_report_is_the_users`` — after the
+##     report pass, the user writes one left-out file back with ``git
+##     checkout -- <path>`` (through the chain) and then deletes it. It is
+##     still recorded with the same blob, but git has written it since, so
+##     its deletion is the user's: the repair restores the other files and
+##     leaves that one deleted (SPI-AREQ-4).
+##   - ``submodule_is_found_without_a_work_tree_gitmodules`` — with the
+##     superproject's ``.gitmodules`` deleted from its work tree, which ``git
+##     submodule update`` still populates submodules from (it reads the
+##     index), the report pass still finds the submodule and names its files.
+##   - ``leaf_pass_of_the_submodule_first_keeps_the_record`` — the submodule
+##     is checked as a leaf of its own (as a participating repository that is
+##     also a populated submodule of another is) before the superproject's
+##     submodule pass. That leaf pass installs the chain; a lazy read then
+##     fetches the blobs; the submodule pass still names every left-out file
+##     and the repair writes them back.
 ##   - ``later_submodule_update_checks_out_every_file`` — after the repair,
 ##     moving the superproject to ``next`` and running a plain ``git
 ##     submodule update`` checks out ``c2`` with every file: the blobs come
@@ -309,6 +331,151 @@ suite "a submodule borrowing from a blobless pool keeps its files":
       doAssert wired.ok and wired.diagnostic.len == 0, wired.diagnostic
       f.initSubmoduleReferencing(leaf)
       f.repairsSubmoduleFiles(registered = false)
+
+  test "report_pass_keeps_left_out_files_restorable_after_a_lazy_read":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-submodule-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      f.initSubmoduleReferencing(f.pool)
+      let sub = f.super / "sub"
+      when declared(checkSubmoduleLeaves):
+        # A report-only pass (``repro health``, ``repro workspace status``,
+        # the sync fast-forward) names the files and installs the chain.
+        let reported = checkSubmoduleLeaves(f.gitBin, f.super, lcmReport,
+          f.cache)
+        check lostFindingCount(reported) == C1Files.len
+        # Any later git command that reads the blobs, as ``git diff`` or an
+        # editor integration does, now fetches them through that chain.
+        for name in C1Files:
+          let read = run(sub, true, "cat-file", "-p", ":" & name)
+          checkpoint(read.output)
+          check read.code == 0
+          check has(sub, must(sub, "rev-parse", ":" & name))
+        for name in C1Files:
+          check not fileExists(sub / name)
+        # The evidence survives the fetch: the next pass still names every
+        # file git left out, and the repair writes each one back.
+        let again = checkSubmoduleLeaves(f.gitBin, f.super, lcmReport,
+          f.cache)
+        check lostFindingCount(again) == C1Files.len
+        let repaired = checkSubmoduleLeaves(f.gitBin, f.super, lcmRepair,
+          f.cache)
+        for r in repaired:
+          checkpoint(r.diagnostic)
+          check r.diagnostic.len == 0
+        checkAllFiles(sub, "c1", C1Files)
+        check gitIn(sub, "status", "--porcelain").output == ""
+        # Once written back the files are the user's: one deleted now stays
+        # deleted.
+        removeFile(sub / "s2")
+        let after = checkSubmoduleLeaves(f.gitBin, f.super, lcmRepair, f.cache)
+        check lostFindingCount(after) == 0
+        check not fileExists(sub / "s2")
+      else:
+        fail()
+
+  test "file_git_wrote_back_after_the_report_is_the_users":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-submodule-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      f.initSubmoduleReferencing(f.pool)
+      let sub = f.super / "sub"
+      when declared(checkSubmoduleLeaves):
+        let reported = checkSubmoduleLeaves(f.gitBin, f.super, lcmReport,
+          f.cache)
+        check lostFindingCount(reported) == C1Files.len
+        # The user writes s2 back with git, through the chain the report pass
+        # installed, and then deletes it: a deletion of the user's own.
+        let restored = run(sub, true, "checkout", "--", "s2")
+        checkpoint(restored.output)
+        check restored.code == 0
+        check readFile(sub / "s2") == body("s2", "c1")
+        removeFile(sub / "s2")
+        let again = checkSubmoduleLeaves(f.gitBin, f.super, lcmReport,
+          f.cache)
+        check lostFindingCount(again) == C1Files.len - 1
+        let repaired = checkSubmoduleLeaves(f.gitBin, f.super, lcmRepair,
+          f.cache)
+        for r in repaired:
+          checkpoint(r.diagnostic)
+          check r.diagnostic.len == 0
+        checkAllFiles(sub, "c1", ["s1", "s3"])
+        check not fileExists(sub / "s2")
+        check gitIn(sub, "status", "--porcelain").output == "D s2"
+      else:
+        fail()
+
+  test "submodule_is_found_without_a_work_tree_gitmodules":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-submodule-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      f.initSubmoduleReferencing(f.pool)
+      let sub = f.super / "sub"
+      removeFile(f.super / ".gitmodules")
+      when declared(checkSubmoduleLeaves):
+        check submoduleCheckouts(f.gitBin, f.super) == @[sub]
+        let reported = checkSubmoduleLeaves(f.gitBin, f.super, lcmReport,
+          f.cache)
+        check reported.len == 1
+        check lostFindingCount(reported) == C1Files.len
+        let repaired = checkSubmoduleLeaves(f.gitBin, f.super, lcmRepair,
+          f.cache)
+        for r in repaired:
+          checkpoint(r.diagnostic)
+          check r.diagnostic.len == 0
+        checkAllFiles(sub, "c1", C1Files)
+      else:
+        fail()
+
+  test "leaf_pass_of_the_submodule_first_keeps_the_record":
+    if findExe("git").len == 0:
+      skip("needs git on PATH")
+    else:
+      let root = createTempDir("repro-spi-submodule-", "")
+      defer:
+        tearDown()
+        removeDir(root)
+      let f = setUp(root)
+      f.initSubmoduleReferencing(f.pool)
+      let sub = f.super / "sub"
+      when declared(checkSubmoduleLeaves):
+        # The submodule's own leaf pass, report-only, installs the chain.
+        let leafReport = checkLeaf(f.gitBin, sub, lcmReport, f.cache)
+        checkpoint(leafReport.diagnostic)
+        check leafReport.pool == f.pool
+        check leafReport.configured
+        for name in C1Files:
+          let read = run(sub, true, "cat-file", "-p", ":" & name)
+          checkpoint(read.output)
+          check read.code == 0
+          check has(sub, must(sub, "rev-parse", ":" & name))
+        let reported = checkSubmoduleLeaves(f.gitBin, f.super, lcmReport,
+          f.cache)
+        check lostFindingCount(reported) == C1Files.len
+        let repaired = checkSubmoduleLeaves(f.gitBin, f.super, lcmRepair,
+          f.cache)
+        for r in repaired:
+          checkpoint(r.diagnostic)
+          check r.diagnostic.len == 0
+        checkAllFiles(sub, "c1", C1Files)
+        check gitIn(sub, "status", "--porcelain").output == ""
+      else:
+        fail()
 
   test "later_submodule_update_checks_out_every_file":
     if findExe("git").len == 0:

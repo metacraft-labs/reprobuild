@@ -54683,6 +54683,10 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
   # again, for every registered leaf, once the refresh has moved the pool.
   block sharedCloneLeaves:
     var reports: seq[LeafCheckReport]
+    # One set for the whole pass: a repository that is a submodule of more
+    # than one participating checkout is inspected once (``seen`` of
+    # ``checkSubmoduleLeaves``).
+    var submodulesSeen = initHashSet[string]()
     for repo in resolved.repos:
       let repoPath = args.workspaceRoot / repo.path
       if args.cloneObjects in ["", "shared"] and hasGitEntry(repoPath):
@@ -54699,7 +54703,7 @@ proc executeWorkspaceSync(args: WorkspaceSyncArgs;
         reports.add(checkSubmoduleLeaves(identity.binaryPath, repoPath,
           lcmRepair,
           if cacheRoot.len > 0: cacheRoot
-          else: defaultCacheRoot(args.workspaceRoot)))
+          else: defaultCacheRoot(args.workspaceRoot), submodulesSeen))
     emitLeafReports(reports)
 
   var sharedBareRefreshAction = initTable[string, string]()
@@ -81481,6 +81485,9 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
       recordStoreRoot / latestLock.lockRelPath.replace('/', DirSep)
     else: ""
 
+  # One set for the whole pass: a repository that is a submodule of more than
+  # one participating checkout is inspected and reported once.
+  var submodulesSeen = initHashSet[string]()
   for repo in resolved.repos:
     let repoAbsPath = args.workspaceRoot / repo.path
     var entry: WorkspaceStatusRepoEntry
@@ -81592,7 +81599,7 @@ proc executeWorkspaceStatus(args: WorkspaceStatusArgs): WorkspaceStatusReport =
     # account (§4.1), and the files a failed checkout left out in them.
     for subReport in checkSubmoduleLeaves(identity.binaryPath, repoAbsPath,
         if args.fix: lcmRepair else: lcmReport,
-        defaultCacheRoot(args.workspaceRoot)):
+        defaultCacheRoot(args.workspaceRoot), submodulesSeen):
       report.leafReports.add(subReport)
 
     if not entry.isClean:
@@ -84487,6 +84494,9 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
     var chains: seq[string]
     var lostFiles: seq[string]
     var diagnostics: seq[string]
+    # One set for the whole pass, so a repository that is a submodule of more
+    # than one participating checkout is counted and reported once.
+    var submodulesSeen = initHashSet[string]()
     for index, repo in ctx.resolved.repos:
       parsed.progress.beginItem(repo.path, index + 1, ctx.resolved.repos.len)
       let abs = parsed.workspaceRoot / repo.path
@@ -84499,7 +84509,7 @@ proc gatherHealthChecksOverSettings(parsed: HealthArgs):
       # checkout's own pass below; ``--fix`` restores the files a failed
       # checkout left out.
       let subReports = checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, abs,
-        lcmReport, cacheRoot)
+        lcmReport, cacheRoot, submodulesSeen)
       if subReports.len > 0:
         ctx.submoduleParents.add(abs)
       for sr in subReports:
@@ -85041,9 +85051,11 @@ proc applyHealthFixes(parsed: HealthArgs; checks: seq[HealthCheck];
           if f.kind == lfkStaleRemoteRef and f.removed:
             emit("fix: removed " & f.refName & " in " & lr.leaf)
             stderr.writeLine(f.message)
+      var repairedSubmodules = initHashSet[string]()
       for parent in ctx.submoduleParents:
         for sr in checkSubmoduleLeaves(ctx.gitIdentity.binaryPath, parent,
-            lcmRepair, defaultCacheRoot(parsed.workspaceRoot)):
+            lcmRepair, defaultCacheRoot(parsed.workspaceRoot),
+            repairedSubmodules):
           for f in sr.findings:
             if f.kind == lfkStaleRemoteRef and f.removed:
               emit("fix: removed " & f.refName & " in " & sr.leaf)

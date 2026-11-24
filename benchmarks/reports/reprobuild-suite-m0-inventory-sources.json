@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3241,
+    "nimTestBinaries": 3242,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 849,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3299
+    "testEntries": 3300
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1856,7 +1856,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1824,
+      "integration": 1825,
       "platform/destructive": 205,
       "pure unit": 849,
       "unclassified": 392
@@ -2079,9 +2079,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3241,
+    "nimTestBinaryCount": 3242,
     "pythonTestFileCount": 58,
-    "testEntryCount": 3299
+    "testEntryCount": 3300
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -59500,7 +59500,24 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_spi_submodule_borrowing_from_partial_pool_keeps_its_files.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 9,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_spi_submodule_left_out_files_through_the_cli",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": true,
+      "source": "tests/integration/t_spi_submodule_left_out_files_through_the_cli.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
