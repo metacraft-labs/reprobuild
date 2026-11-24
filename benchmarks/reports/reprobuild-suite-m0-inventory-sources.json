@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3222,
+    "nimTestBinaries": 3223,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 845,
-    "staticallyDetectedRuntimeCompilerFlowTests": 161,
-    "testEntries": 3274
+    "staticallyDetectedRuntimeCompilerFlowTests": 163,
+    "testEntries": 3276
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,10 +1855,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1812,
+      "integration": 1813,
       "platform/destructive": 203,
       "pure unit": 845,
-      "unclassified": 385
+      "unclassified": 386
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3222,
-    "pythonTestFileCount": 52,
-    "testEntryCount": 3274
+    "nimTestBinaryCount": 3223,
+    "pythonTestFileCount": 53,
+    "testEntryCount": 3276
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5916,6 +5916,38 @@
       "matches": [
         {
           "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cmd",
+            "donor",
+            "donorSrc",
+            "fetchArgs",
+            "git",
+            "originUrl",
+            "pair",
+            "probeLib",
+            "reportPath",
+            "reproBin",
+            "root",
+            "scratch",
+            "target"
+          ],
+          "line": 730,
+          "path": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "@[toolOnPath(\"cc\"), \"-o\", donor, donorSrc]))"
+        }
+      ],
+      "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
           "callableReachable": true,
           "commandVariableExecuted": false,
           "directExecutionLine": false,
@@ -9137,7 +9169,7 @@
           "executedVariables": [
             "args"
           ],
-          "line": 144,
+          "line": 128,
           "path": "tests/integration/test_cs_m12_thin_import_cost.nim",
           "patterns": [
             "nim-argv"
@@ -9146,6 +9178,26 @@
         }
       ],
       "source": "tests/integration/test_cs_m12_thin_import_cost.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "args",
+          "commandVariableExecuted": true,
+          "directExecutionLine": false,
+          "executedVariables": [
+            "args"
+          ],
+          "line": 76,
+          "path": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim",
+          "patterns": [
+            "nim-argv"
+          ],
+          "snippet": "var args = if compile: @[\"nim\", \"c\"] else: @[\"nim\", \"check\"]"
+        }
+      ],
+      "source": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim"
     },
     {
       "class": "graph-fixture",
@@ -47591,8 +47643,8 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -49635,7 +49687,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -55402,7 +55454,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 5,
+      "staticCaseCount": 6,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -63071,6 +63123,25 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/test_cs_m14_reprobuild_repro_nim_imports_thin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_core",
+        "repro_interface_artifacts",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": true,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/test_cs_m14_shim_answers_tests_entry",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -68443,6 +68514,21 @@
     {
       "binary": "",
       "class": "unclassified",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_install_ps1_verifier_handoff.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
       "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
@@ -68691,7 +68777,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

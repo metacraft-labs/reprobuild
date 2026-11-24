@@ -41,6 +41,14 @@ sha256sum's text form (`<digest>  <name>`) even under MSYS2, whose sha256sum
 writes the binary form by default, and repro-verify-release.sh accepts the
 binary form (`<digest> *<name>`) too.
 
+Then the installer's hand-off to the verifier: with a stand-in verifier
+(REPRO_VERIFY_SCRIPT) that records its arguments and refuses, the installer
+names the keyring and the download directory relative to the verifier's
+working directory (`--keyring <file>`, `--dir .`), the names reach the
+downloaded files, and the refusal stops the install. The POSIX shell and gpg
+that run the verifier on Windows do not all read a Windows path the same
+way; a relative name means the same file to all of them.
+
 Legs:
   1  The archive install: the archive's share\ is installed, the user's
      completion script and one block in each PowerShell's CurrentUserAllHosts
@@ -120,13 +128,15 @@ try {
   foreach ($l in $realBefore) { Write-Host "real-profile: before $l" }
 
   # The PATH of every isolated process: the scratch prefix's bin, the system
-  # directories, and the directory of bash (sh, gpg, and on Linux the rest of
-  # the userland).
+  # directories, PowerShell 7's own directory (not the directory it was found
+  # in, which on a Scoop machine is Scoop's shims directory: see
+  # Get-PowerShellDirectory), and the directory of bash (sh, gpg, and on
+  # Linux the rest of the userland).
   $sys = @()
   if ($script:M8cOnWindows) {
     $sys = @((Join-Path $env:SystemRoot 'System32'), $env:SystemRoot, (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0'))
     $pw = $powershells | Where-Object { $_[0] -eq 'PowerShell 7' } | Select-Object -First 1
-    if ($pw) { $sys += (Split-Path -Parent $pw[1]) }
+    if ($pw) { $sys += (Get-PowerShellDirectory -PowerShell $pw[1]) }
   } else {
     # This host's PATH without any directory that holds a `repro`, so the
     # only repro a probe can reach is the one under test.
@@ -143,6 +153,7 @@ try {
   }
   $isoPath = @((Join-Path $Prefix 'bin'), $shim) + $sys + @($shDir)
   $isoEnv = New-IsolatedEnvironment -HomeDir $H -TempDir $Tmp -PathDirs $isoPath
+  Write-Host "isolated PATH: $($isoEnv['PATH'])"
 
   Write-Step 'the release archive, signed with a throwaway key, served over local HTTP'
   $dl = [IO.Path]::Combine($Www, 'downloads', "v$Version")
@@ -231,6 +242,55 @@ try {
   }
   # One script, one block per profile.
   $registered = 1 + $loc.Profiles.Count
+
+  # ===================================================================
+  Write-Step 'the installer hands the verifier names relative to its working directory'
+  # ===================================================================
+  # The verifier is a POSIX script, run by a POSIX shell and gpg that do not
+  # all read a Windows path the same way. The installer therefore runs it in
+  # its work directory and names the keyring and the download directory
+  # relative to it (`--keyring <file>`, `--dir .`). A stand-in verifier
+  # records what it was handed and whether those names reach the files, then
+  # refuses, so nothing is installed. Every other leg runs the real verifier.
+  $handoffLog = Join-Path $Work 'verifier-handoff.txt'
+  $standIn = Join-Path $Work 'verifier-standin.sh'
+  [IO.File]::WriteAllText($standIn, (@(
+        '#!/bin/sh'
+        'log="$M8C_HANDOFF_LOG"'
+        'keyring=""; dir=""'
+        'while [ $# -gt 0 ]; do'
+        '  case "$1" in'
+        '    --keyring) keyring="$2"; shift 2 ;;'
+        '    --dir) dir="$2"; shift 2 ;;'
+        '    *) shift ;;'
+        '  esac'
+        'done'
+        'printf ''keyring=%s\n'' "$keyring" > "$log"'
+        'printf ''dir=%s\n'' "$dir" >> "$log"'
+        'if [ -f "$keyring" ] && grep -q ''BEGIN PGP PUBLIC KEY BLOCK'' "$keyring"; then echo keyring-readable=yes >> "$log"; else echo keyring-readable=no >> "$log"; fi'
+        'if [ -f "$dir/SHA256SUMS" ] && [ -f "$dir/SHA256SUMS.asc" ]; then echo dir-readable=yes >> "$log"; else echo dir-readable=no >> "$log"; fi'
+        'exit 1') -join "`n") + "`n", (New-Object System.Text.UTF8Encoding($false)))
+  if (-not $script:M8cOnWindows) {
+    $null = Invoke-NativeCommand -FilePath 'chmod' -ArgumentList @('+x', $standIn)
+  }
+  Reset-Home
+  $handoffEnv = $installEnv.Clone()
+  $handoffEnv['REPRO_VERIFY_SCRIPT'] = $standIn
+  $handoffEnv['M8C_HANDOFF_LOG'] = ConvertTo-ScriptPath $handoffLog
+  $r = Invoke-Installer -Extra @('-Method', 'tarball', '-Version', $Version, '-Prefix', $Prefix) -Environment $handoffEnv
+  Assert-True ($r.Code -ne 0) 'handoff: the stand-in verifier''s refusal stops the install'
+  Assert-True (-not (Test-Path -LiteralPath (Join-Path $Prefix 'bin'))) 'handoff: nothing was installed'
+  $handoff = @{}
+  if (Test-Path -LiteralPath $handoffLog) {
+    foreach ($l in [IO.File]::ReadAllLines($handoffLog)) {
+      $i = $l.IndexOf('=')
+      if ($i -gt 0) { $handoff[$l.Substring(0, $i)] = $l.Substring($i + 1) }
+    }
+  }
+  Assert-Equal $handoff['keyring'] $KeyringFile 'handoff: --keyring is the keyring''s file name, relative to the verifier''s working directory'
+  Assert-Equal $handoff['dir'] '.' 'handoff: --dir is the verifier''s working directory'
+  Assert-Equal $handoff['keyring-readable'] 'yes' 'handoff: the keyring name reaches the downloaded keyring'
+  Assert-Equal $handoff['dir-readable'] 'yes' 'handoff: the directory name reaches SHA256SUMS and its signature'
 
   # ===================================================================
   Write-Step 'leg 1: the archive install registers completion for this user'

@@ -2087,7 +2087,7 @@ tests/integration/t_der_nesting_is_bounded_by_the_parent.nim	nim	9
 tests/integration/t_derived_daemon_ipc_trust.nim	nim	10
 tests/integration/t_dev_env_allow.nim	nim	1
 tests/integration/t_dev_env_artifact.nim	nim	3
-tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	6
+tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim	nim	7
 tests/integration/t_dev_shell_override_guards.nim	nim	24
 tests/integration/t_develop_all_clones_deps_at_locked_revisions.nim	nim	1
 tests/integration/t_develop_all_clones_into_a_second_placement_root.nim	nim	1
@@ -2200,7 +2200,7 @@ tests/integration/t_genuine_tier_policy_refuses_emulated_cvm_evidence.nim	nim	9
 tests/integration/t_git_answer_probes_read_stdout_not_warnings.nim	nim	4
 tests/integration/t_git_object_store_lookups_are_not_cache_inputs.nim	nim	10
 tests/integration/t_go_convention_embeds_and_rekeys_on_observed_reads.nim	nim	5
-tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim	nim	3
+tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim	nim	4
 tests/integration/t_graph_helper_image_loads_no_openssl.nim	nim	4
 tests/integration/t_hcr_native_library_prerequisite.nim	nim	6
 tests/integration/t_health_fails_when_the_post_commit_lock_writer_keeps_refusing.nim	nim	7
@@ -2522,7 +2522,7 @@ tests/integration/t_pre_push_warns_and_allows_on_unreachable_personal_backend.ni
 tests/integration/t_pre_push_writes_the_lock_record_it_demands.nim	nim	1
 tests/integration/t_pre_receive_accepts_clean_public_lock_and_stays_blind_to_private_tiers.nim	nim	1
 tests/integration/t_pre_receive_rejects_public_lock_with_private_ref_and_integrity_mismatch.nim	nim	3
-tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim	nim	5
+tests/integration/t_preloaded_monitor_shim_carries_no_runpath.nim	nim	6
 tests/integration/t_preloaded_monitor_shim_is_loader_inert.nim	nim	4
 tests/integration/t_preloaded_monitor_shim_keeps_out_of_the_host_allocator.nim	nim	3
 tests/integration/t_private_repo_participates_via_evidence_without_source_exposure.nim	nim	1
@@ -2951,6 +2951,7 @@ tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
 tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
+tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim	nim	2
 tests/integration/test_cs_m14_shim_answers_tests_entry.nim	nim	2
 tests/integration/test_dev_env_local_flake_root.py	python	3
 tests/integration/test_nix_daemon_cache.py	python	3
@@ -3252,6 +3253,7 @@ tests/unit/test_flake_lock_derived_fields.py	python	11
 tests/unit/test_generated_artifact_merge_policy.py	python	19
 tests/unit/test_graph_owned_test_artifacts.py	python	30
 tests/unit/test_install_nix_paths.py	python	14
+tests/unit/test_install_ps1_verifier_handoff.py	python	2
 tests/unit/test_lint_gate_ordering.py	python	4
 tests/unit/test_nim224_lane_selection.py	python	5
 tests/unit/test_nix_daemon_descriptors.py	python	8
@@ -3268,7 +3270,7 @@ tests/unit/test_readme_documents_only_dispatched_verbs.py	python	5
 tests/unit/test_regenerate_suite_artifacts.py	python	25
 tests/unit/test_release_cache_push.py	python	17
 tests/unit/test_release_git.py	python	6
-tests/unit/test_release_native_packages.py	python	19
+tests/unit/test_release_native_packages.py	python	21
 tests/unit/test_release_pipeline_identity.py	python	11
 tests/unit/test_release_smoke_dev_exec.py	python	21
 tests/unit/test_release_staged_data_files.py	python	12

@@ -7,7 +7,6 @@
 ## command line and imports nothing of reprobuild. What it costs to compile
 ## is what the thin mode is measured against.
 
-import std/os
 import clispec
 
 const DefaultJobs* = 4
@@ -30,7 +29,7 @@ cliProgram(Csm12Prog, "csm12prog", exported = true):
       subTools "sh"
 
 try:
-  let conf = Csm12Prog.load(commandLineParams())
+  let conf = Csm12Prog.load()
   echo "mode=none jobs=", conf.jobs, " greeting=", conf.greeting,
     " color=", conf.color, " verbose=", conf.verbose
 except CliUsageError as e:

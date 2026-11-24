@@ -1982,6 +1982,29 @@ def read_text(path: Path) -> str:
         return ""
 
 
+RECIPE_INCLUDE_RE = re.compile(r'^\s*include\s+"([^"]+)"\s*$')
+
+
+def read_recipe_text(root: Path) -> str:
+    """The root ``repro.nim`` as the engine's compiles read it.
+
+    Each ``include "<file>"`` line is replaced by the text of that file:
+    ``repro.nim`` keeps its engine-only part (the test-artifact tables among
+    it) in ``repro_recipe_support.nim``, which it includes under a mode guard.
+    """
+    parts = []
+    for line in read_text(root / "repro.nim").splitlines(keepends=True):
+        match = RECIPE_INCLUDE_RE.match(line)
+        if not match:
+            parts.append(line)
+            continue
+        included = read_text(root / match.group(1))
+        if included and not included.endswith("\n"):
+            included += "\n"
+        parts.append(included)
+    return "".join(parts)
+
+
 def load_slow_review_document(root: Path) -> dict[str, Any]:
     path = root / DEFAULT_SLOW_REVIEWS
     try:
@@ -5046,7 +5069,7 @@ def local_dependency_shape(spec: TestSpec, text: str) -> list[str]:
 
 
 def parse_graph_owned_artifacts(root: Path) -> list[dict[str, str]]:
-    text = read_text(root / "repro.nim")
+    text = read_recipe_text(root)
     artifacts: list[dict[str, str]] = []
     block_re = re.compile(r"nim\.c\(\s*(.*?)\)\)", re.S)
     for block in block_re.finditer(text):

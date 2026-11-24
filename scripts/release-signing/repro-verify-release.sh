@@ -115,10 +115,15 @@ gpg_q() { "$GPG" --batch --no-tty --quiet --keyid-format long "$@"; }
 imported=0
 import_one() {
   f="$1"
-  if gpg_q --import "$f" >/dev/null 2>&1; then
+  if gpg_q --import "$f" >"$GNUPGHOME/import.log" 2>&1; then
     imported=$((imported + 1))
   else
-    rv_log "warning: could not import key material from $f"
+    # gpg's own reason, and which gpg gave it: without them a refusal here
+    # cannot be told apart from a missing file, an unreadable path form, or a
+    # gpg that cannot use its home directory.
+    rv_log "warning: could not import key material from $f (working directory $(pwd)); $GPG said:"
+    sed 's/^/repro-verify:   /' "$GNUPGHOME/import.log" >&2 || true
+    rv_log "  ($("$GPG" --version 2>&1 | head -n 1); GNUPGHOME=$GNUPGHOME)"
   fi
 }
 
