@@ -403,7 +403,15 @@
       # linux-arm64 source build stopped at "undeclared identifier:
       # 'SiteTableView'". The range also keeps a late inline scan on the
       # startup scan's instruction boundaries (c4ab263).
-      url = "github:metacraft-labs/io-mon/b1c32599f9cd671b150f68de2b21bdc9ae0c42be";
+      # Bumped b1c32599 -> 13659436 (2026-11-24, io-mon `agents`): every
+      # compile of the Linux shim links with `--as-needed` ahead of Nim's
+      # `-lm -lrt -ldl -pthread`, and with `-static-libgcc`, from io-mon's
+      # `linux_preload.nim.cfg` (e40577a), so the shim this repo's
+      # `reprobuild.test_fixtures.monitor_shim` edge links needs only
+      # `libc.so.6` and the loader, as io-mon's builder's does. The range
+      # also records each path-resolution observation once per process
+      # (3d3077a).
+      url = "github:metacraft-labs/io-mon/1365943692eedfb0699ce90e59c4602d90317561";
       flake = false;
     };
     nim-shm-gset-src = {
@@ -1089,7 +1097,7 @@
     # Homebrew record (Provisioning-Contributions.md §"Homebrew bridge
     # records"). Move the pin when the catalog's records change.
     reprobuild-brew-packages-src = {
-      url = "github:metacraft-labs/reprobuild-brew-packages/1004b4bf991df19e086ae28360c2306702c5798f";
+      url = "github:metacraft-labs/reprobuild-brew-packages/a243977cddfba2bd66b075cc1186493f9baa2434";
       flake = false;
     };
   };
@@ -2814,6 +2822,20 @@
             # why that does not work): it is for the shell to PROVIDE the
             # programs it does this to, so they come from the same nixpkgs.
             # `scripts/check_dev_shell_env.sh` holds that invariant.
+            #
+            # ITS SCOPE IS THE PROGRAMS REPROBUILD ITSELF RUNS
+            # (`DEV_SHELL_SUBPROCESS_TOOLS` in `scripts/lib/dev_shell_overrides.sh`,
+            # plus `$REPRO_SYSTEMD_ANALYZE`), and for those `just lint` refuses.
+            # The variable reaches every other program started here too: on a
+            # host whose libc is older than this nixpkgs' glibc, a host program
+            # that links one of these sonames (ssh / scp / openssl
+            # via libcrypto, zstd via libzstd, systemctl via libsystemd-shared)
+            # loads this shell's copy and dies before `main`. The shell cannot
+            # provide every program a contributor might start, so for those
+            # `just lint` WARNS instead, naming each broken program on PATH,
+            # the library that breaks it and the remedy (`env -u
+            # LD_LIBRARY_PATH <program>`, or provide it here if reprobuild
+            # starts it).
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
               [
                 pkgs.clingo
@@ -3027,6 +3049,36 @@
               # `could not load: libcrypto.so(...)` the moment openssl leaves
               # the path), and it would not touch the LD_PRELOAD channel at all.
               pkgs.git
+            ]
+            # `ssh-keygen`, from this flake's nixpkgs, for the same reason as
+            # `pkgs.git` above: reprobuild runs it itself. Test certificates
+            # are signed and verified with `ssh-keygen -Y sign` /
+            # `ssh-keygen -Y verify`, and the certificate signer mints its
+            # per-worker signing CA and one-issuance keys with it, all
+            # resolved on PATH. A host `ssh-keygen` links `libcrypto.so.3`, and
+            # `LD_LIBRARY_PATH` above hands it this shell's OpenSSL instead of
+            # the host's. Measured on an Ubuntu CI runner (glibc 2.35):
+            # `/usr/bin/ssh-keygen` died before `main` with "version
+            # `GLIBC_2.38' not found (required by .../openssl-3.6.1/lib/
+            # libcrypto.so.3)", so the signer could mint no CA and every
+            # certificate-signing test failed.
+            #
+            # Only `ssh-keygen`, not all of `pkgs.openssh`: `ssh` on PATH would
+            # shadow the contributor's own client and its configuration, and
+            # nothing in reprobuild runs it. Linux only, because the
+            # `LD_LIBRARY_PATH` channel is: dyld does not consult it for a
+            # system binary, and macOS's own `ssh-keygen` is fine there.
+            # `ssh-keygen` is in `DEV_SHELL_SUBPROCESS_TOOLS`
+            # (`scripts/lib/dev_shell_overrides.sh`), so on a host whose own
+            # `ssh-keygen` cannot take this shell's libraries, dropping this
+            # line fails the one-glibc check in `just lint`.
+            ++ pkgs.lib.optionals pkgs.stdenv.isLinux [
+              (pkgs.runCommand "dev-shell-ssh-keygen-${pkgs.openssh.version}" { } ''
+                mkdir -p "$out/bin"
+                ln -s ${pkgs.openssh}/bin/ssh-keygen "$out/bin/ssh-keygen"
+              '')
+            ]
+            ++ [
               pkgs.libsodium
               pkgs.boost
               pkgs.libgit2

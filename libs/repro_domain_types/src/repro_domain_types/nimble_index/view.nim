@@ -141,7 +141,8 @@ proc renderShard*(s: NimbleShard): string =
     lines.add "package " & p.name & " registry_origin=" & $p.registryOrigin
     for i, o in p.origins:
       lines.add "  origin[" & $i & "] " & $o.vcs & " " & o.url &
-        (if o.subdir.len > 0: " subdir=" & q(o.subdir) else: "")
+        (if o.subdir.len > 0: " subdir=" & q(o.subdir) else: "") &
+        (if o.revivedAt != 0: " revived_at=" & $o.revivedAt else: "")
     for r in p.versions:
       renderRecord(lines, r, "  ")
   for a in s.aliases:
@@ -159,10 +160,12 @@ proc renderShard*(s: NimbleShard): string =
       lines.add "  held " & $h.version.kind & " " &
         (if h.version.tag.len > 0: h.version.tag else: "-") & " " & h.commit &
         " first_seen=" & $h.firstSeen
+    for c in o.reported:
+      lines.add "  reported " & c
   lines.join("\n")
 
 proc renderRoot*(r: NimbleIndexRoot): string =
-  var lines = @["nimble-index root schema=" & $NimbleIndexSchemaVersion]
+  var lines = @["nimble-index root schema=" & $rootSchemaOf(r)]
   lines.add "generator: " & q(r.generator)
   lines.add "source_set: blake3:" & $r.sourceSet
   lines.add "generated_at: " & $r.generatedAt
@@ -173,21 +176,27 @@ proc renderRoot*(r: NimbleIndexRoot): string =
   lines.add "shard_bits: " & $r.shardBits
   lines.add "name_map: blake3:" & $r.nameMap.id & " size=" & $r.nameMap.size
   lines.add "events: blake3:" & $r.events.id & " size=" & $r.events.size
+  if r.lastFullCheck != 0:
+    lines.add "history_check: " &
+      (if r.fullHistory: "full" else: "per-generation") &
+      " last_full_check=" & $r.lastFullCheck
   for s in r.shards:
     lines.add "shard " & $s.bucket & " blake3:" & $s.id & " size=" & $s.size &
       " packages=" & $s.packages
   lines.join("\n")
 
 proc renderNameMap*(m: NimbleNameMap): string =
-  var lines = @["nimble-index name-map schema=" & $NimbleIndexSchemaVersion &
+  var lines = @["nimble-index name-map schema=" & $nameMapSchemaOf(m) &
     " entries=" & $m.entries.len]
   for e in m.entries:
     lines.add(if e.target.len == 0: "name " & e.name
-              else: "alias " & e.name & " -> " & e.target)
+              else: "alias " & e.name & " -> " & e.target &
+                (if e.candidate.len > 0: " (candidate " & e.candidate & ")"
+                 else: ""))
   lines.join("\n")
 
 proc renderEvents*(e: NimbleEvents): string =
-  var lines = @["nimble-index events schema=" & $NimbleIndexSchemaVersion &
+  var lines = @["nimble-index events schema=" & $eventsSchemaOf(e) &
     " events=" & $e.events.len]
   for ev in e.events:
     lines.add "event " & $ev.kind & " " & ev.package &

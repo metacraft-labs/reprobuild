@@ -906,6 +906,84 @@ case "$(uname -s)" in
           failures=$((failures + 1))
         fi
       fi
+
+      # --- 6b. host programs on PATH that the injection breaks -------------
+      #
+      # Check 6 holds the rule for the programs reprobuild itself runs. The
+      # same LD_LIBRARY_PATH reaches every other program started in this
+      # shell, and on a host whose libc is older than the shell's, a host
+      # program that links one of the injected sonames (ssh / scp / openssl
+      # through libcrypto, zstd through libzstd, systemctl through
+      # libsystemd-shared) dies before main. The shell cannot provide every
+      # program a contributor might start, so this is a WARNING and does not
+      # fail lint; what it must not be is silent, because the failure itself
+      # names a library and a symbol version and nothing that points here.
+      # See "host programs the rule does not cover" in
+      # scripts/lib/dev_shell_overrides.sh.
+      host_broken=()
+      host_unreadable=()
+      host_examined=0
+      while IFS=$'\t' read -r _kind h2 h3 h4 h5 h6 h7 h8 h9; do
+        case "$_kind" in
+          broken) host_broken+=("$h2"$'\t'"$h3"$'\t'"$h4"$'\t'"$h5"$'\t'"$h6"$'\t'"$h7"$'\t'"$h8"$'\t'"$h9") ;;
+          unreadable) host_unreadable+=("$h2") ;;
+          examined) host_examined="$h2" ;;
+        esac
+      done < <(dev_shell_host_programs_broken_by_injection)
+      if [[ ${#host_broken[@]} -eq 0 && ${#host_unreadable[@]} -eq 0 ]]; then
+        printf 'dev-shell: no host program on PATH is broken by LD_LIBRARY_PATH %s\n' \
+          "($host_examined dynamic executable(s) examined)."
+      fi
+      if [[ ${#host_broken[@]} -gt 0 ]]; then
+        # One entry per PROGRAM, with a line per library that sinks it.
+        host_programs=()
+        declare -A host_seen=()
+        for finding in "${host_broken[@]}"; do
+          IFS=$'\t' read -r h2 h3 _ <<<"$finding"
+          [[ -n "${host_seen[$h3]+set}" ]] && continue
+          host_seen["$h3"]=1
+          host_programs+=("$h3")
+        done
+        printf 'WARNING: %d program(s) on PATH cannot start in this dev shell; LD_LIBRARY_PATH gives them a library that needs a newer glibc than the one they run on:\n' \
+          "${#host_programs[@]}" >&2
+        for program in "${host_programs[@]}"; do
+          header=no
+          for finding in "${host_broken[@]}"; do
+            IFS=$'\t' read -r h2 h3 h4 h5 h6 h7 h8 h9 <<<"$finding"
+            [[ "$h3" == "$program" ]] || continue
+            if [[ "$header" == no ]]; then
+              printf '  %s\n      binary:   %s\n      runs on:  %s/libc.so.6\n' \
+                "$h2" "$h3" "$h4" >&2
+              header=yes
+            fi
+            printf '      loads:    %s\n                which needs %s\n                (through %s from LD_LIBRARY_PATH entry %s, built on %s)\n' \
+              "$h5" "$h9" "$h6" "$h7" "$h8" >&2
+          done
+        done
+        # shellcheck disable=SC2016  # backticks quote commands for a reader.
+        printf '%s\n' \
+          '  Each program above aborts before main inside this shell with' \
+          '  "version `GLIBC_…'"'"' not found (required by <library>)". The libraries' \
+          '  are on LD_LIBRARY_PATH for the bare-soname dlopen() calls of the' \
+          '  binaries this repository builds (see flake.nix); these programs are' \
+          '  not among them, so this is a warning and lint still passes.' \
+          '  Remedy: run such a program outside the dev shell, or as' \
+          '  `env -u LD_LIBRARY_PATH <program> …`. If reprobuild, a test or a' \
+          '  script that `just` runs starts it, have the dev shell PROVIDE it' \
+          '  instead: add its package to the devShell'"'"'s `packages` in flake.nix' \
+          '  and the program to DEV_SHELL_SUBPROCESS_TOOLS in' \
+          '  scripts/lib/dev_shell_overrides.sh, where check 6 then guards it.' >&2
+      fi
+      if [[ ${#host_unreadable[@]} -gt 0 ]]; then
+        printf 'WARNING: the host-program scan could not read the symbol-version table of:\n' >&2
+        for finding in "${host_unreadable[@]}"; do
+          printf '  %s\n' "$finding" >&2
+        done
+        printf '%s\n' \
+          '  Programs running on that libc were not judged. If it is a glibc, this' \
+          '  is a bug in dev_shell_libc_defined_versions (scripts/lib/' \
+          '  dev_shell_overrides.sh) against the readelf on this PATH.' >&2
+      fi
     fi
     ;;
   *)

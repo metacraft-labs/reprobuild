@@ -389,14 +389,13 @@ libs/repro_resources/tests/t_an_in_use_hold_is_per_descriptor_and_never_inherite
 libs/repro_resources/tests/t_converge_does_not_attach_to_a_dead_instance.nim	1
 libs/repro_resources/tests/t_l2_lease_edge.nim	1
 libs/repro_resources/tests/t_l3_reaper.nim	2
-libs/repro_runquota/src/repro_runquota.nim	2
 libs/repro_solver/src/repro_solver/lock_pins.nim	2
 libs/repro_solver/src/repro_solver/materiality.nim	1
 libs/repro_solver/tests/t_explainer_unsat_core_names_violated_edge.nim	1
 libs/repro_standard_provider/src/repro_standard_provider/conventions/go.nim	1
 libs/repro_standard_provider/src/repro_standard_provider/conventions/go_embed.nim	1
 libs/repro_standard_provider/src/repro_standard_provider/conventions/nim.nim	2
-libs/repro_standard_provider/src/repro_standard_provider/conventions/rust.nim	3
+libs/repro_standard_provider/src/repro_standard_provider/conventions/rust.nim	2
 libs/repro_standard_provider/tests/test_csharp_dotnet_convention.nim	2
 libs/repro_standard_provider/tests/test_go_convention.nim	1
 libs/repro_standard_provider/tests/test_nim_convention.nim	4
@@ -449,7 +448,7 @@ nix/tests/host-facts-duplicates.nix	2
 nix/tests/repro-portable-host-root/probe-nix-host.sh	1
 recipes/repro-daemon-worker/confinement-threshold	1
 recipes/repro-daemon-worker/systemd-units/repro-daemon-worker.service	1
-repro.nim	7
+repro.nim	5
 scripts/addon_a13_classify.py	2
 scripts/build_addon_static.sh	1
 scripts/build_apps.sh	2
