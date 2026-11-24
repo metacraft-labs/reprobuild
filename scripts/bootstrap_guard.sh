@@ -75,7 +75,7 @@ set -eu
 # also rejected for the same reason — only the two files that are inputs
 # to this build are listed. Anything broader is separate work, and this
 # comment is the record that it was considered and declined.
-BOOTSTRAP_SOURCE_ROOTS="apps libs config.nims flake.nix repro.nim scripts/build_apps.sh scripts/source_paths.sh"
+BOOTSTRAP_SOURCE_ROOTS="apps libs config.nims flake.nix repro.nim repro_recipe_support.nim scripts/build_apps.sh scripts/source_paths.sh"
 
 host_exe_suffix() {
   case "$(uname -s)" in

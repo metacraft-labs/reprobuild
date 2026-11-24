@@ -39,7 +39,11 @@ suite "Bootstrap-And-Self-Build B4: repro test covers Nim + Python in one collec
     let reproNim = repoRoot / "repro.nim"
     check fileExists(reproNim)
 
-    let text = readFile(reproNim)
+    # The recipe's engine-only part (its imports among it) is in the file
+    # ``repro.nim`` includes; appended, the ordering checks below still read
+    # ``repro.nim``'s own positions.
+    let text = readFile(reproNim) &
+      readFile(repoRoot / "repro_recipe_support.nim")
 
     # --- single accumulator, two producer loops ---
 

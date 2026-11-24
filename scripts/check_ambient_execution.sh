@@ -106,7 +106,7 @@ scan() {
   # and ``process_exec`` is the release-once implementation of ``execCmdEx``
   # it delegates to: a mechanism that runs whatever its caller names, whose
   # callers are what the ratchet counts.
-  grep -rlnE "\b(${BANNED})\(" --include=*.nim libs repro.nim apps 2>/dev/null \
+  grep -rlnE "\b(${BANNED})\(" --include=*.nim libs repro.nim repro_recipe_support.nim apps 2>/dev/null \
     | grep -v '/tests/' \
     | grep -v '^libs/repro_core/src/repro_core/ambient_execution\.nim$' \
     | grep -v '^libs/repro_core/src/repro_core/process_exec\.nim$' \
