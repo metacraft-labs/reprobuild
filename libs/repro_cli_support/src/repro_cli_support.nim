@@ -23171,6 +23171,73 @@ local_hook_missing_program() {
   ## likely cause, not a verdict: a body that guards the path keeps working
   ## and is never blamed.
 
+const DeclaredLocalHookShell = """
+local_hook_declared() {
+  # Exit 0 when this repository's pre-commit/prek configuration installs hook
+  # type $1, i.e. lists it in a top-level `default_install_hook_types`, or sets
+  # none and $1 is `pre-commit` (the default). Anything this cannot read,
+  # including no configuration at all, answers no.
+  for LOCAL_HOOK_CONFIG in "$REPO_ROOT/.pre-commit-config.yaml" \
+      "$REPO_ROOT/.pre-commit-config.yml"; do
+    [ -f "$LOCAL_HOOK_CONFIG" ] || continue
+    LOCAL_HOOK_STAGES=$(awk '
+      function strip(s) {
+        gsub(/^[ \t"'"'"']+|[ \t"'"'"']+$/, "", s)
+        return s
+      }
+      in_block {
+        if ($0 ~ /^[ \t]*(#.*)?$/) next
+        if ($0 ~ /^[ \t]*-/) {
+          item = $0
+          sub(/^[ \t]*-/, "", item)
+          sub(/[ \t]+#.*$/, "", item)
+          print strip(item)
+          next
+        }
+        exit
+      }
+      /^default_install_hook_types[ \t]*:/ {
+        found = 1
+        value = $0
+        sub(/^[^:]*:/, "", value)
+        sub(/[ \t]+#.*$/, "", value)
+        value = strip(value)
+        if (value == "") { in_block = 1; next }
+        if (value ~ /^\[.*\]$/) {
+          n = split(substr(value, 2, length(value) - 2), items, ",")
+          for (i = 1; i <= n; i++) print strip(items[i])
+        }
+        exit
+      }
+      END { if (!found) print "pre-commit" }
+    ' "$LOCAL_HOOK_CONFIG" 2>/dev/null) || return 1
+    printf '%s\n' "$LOCAL_HOOK_STAGES" | grep -qx -- "$1"
+    return $?
+  done
+  return 1
+}
+
+"""
+  ## Whether the repository declares the local hook of a stage, for
+  ## ``run_local_hook``: a missing or non-executable ``<hook>.repro-local``
+  ## is a silent "no local hook" only when the repository's hook framework
+  ## does not install that stage. When it does, the file is the repository's
+  ## own checks for that stage, and skipping it without a word let pushes
+  ## through that ran Reprobuild's gate and none of the repository's pre-push
+  ## hooks: a hook installer that chained `pre-commit` and never `pre-push`
+  ## left every push of such a checkout ungated by the repository's own checks.
+  ##
+  ## "Installs" is the framework's own rule: `default_install_hook_types`, or
+  ## `pre-commit` when unset
+  ## (https://pre-commit.com/#top_level-default_install_hook_types; prek reads
+  ## the same key), from `.pre-commit-config.yaml`, else `.pre-commit-config.yml`,
+  ## the order both tools look in. The value is read without a YAML parser,
+  ## since a hook cannot assume one: a flow list on the key's line or a block
+  ## list of `- name` lines under it, the two spellings pre-commit documents.
+  ## A value in any other form, or no configuration, answers no. A refusal is
+  ## only ever made on a positive reading, so an unreadable config costs the
+  ## warning, never a commit.
+
 type ChainedHookMissingProgram* = object
   ## A program a chained hook body names that does not exist.
   program*: string
@@ -23718,6 +23785,13 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   ##      and never skips or refuses it on its own reading, so a body that
   ##      guards or never reaches the line keeps working. See
   ##      ``ChainedHookMissingProgramShell``.
+  ##   7. A missing chained hook is refused when the repository installs that
+  ##      stage. A ``<hook>.repro-local`` that is absent or not executable
+  ##      used to be skipped without a word, whether or not the repository's
+  ##      hook framework installs that stage; when it does, the skip runs
+  ##      Reprobuild's half alone and passes. Now it fails the commit or push
+  ##      and names the fix. Where nothing installs the stage, a missing file
+  ##      is still the silent "no local hook". See ``DeclaredLocalHookShell``.
   result = "#!/usr/bin/env sh\n"
   result.add("# " & VcsDispatcherMarker & "\n")
   result.add("# Dispatches preserved user hooks and Reprobuild-managed " &
@@ -23771,8 +23845,40 @@ proc vcsDispatcherContent(hookName: string; certificatePhase = false): string =
   # (6) A chained body that fails because a program it names is gone says
   # so. See ``ChainedHookMissingProgramShell``.
   result.add(ChainedHookMissingProgramShell)
+  # (7) A missing local hook is silent only when the repository installs
+  # nothing for this stage. See ``DeclaredLocalHookShell``.
+  result.add(DeclaredLocalHookShell)
   result.add("run_local_hook() {\n")
-  result.add("  [ -x \"$LOCAL_HOOK\" ] || return 0\n")
+  result.add("  if [ ! -x \"$LOCAL_HOOK\" ]; then\n")
+  # As `.legacy`, the framework that installs the stage is our caller and
+  # has run its checks: nothing is missing.
+  result.add("    [ \"$RUNNING_AS_LEGACY\" = 0 ] || return 0\n")
+  result.add("    local_hook_declared " & hookName & " || return 0\n")
+  result.add("    if [ -e \"$LOCAL_HOOK\" ]; then\n")
+  result.add("      LOCAL_HOOK_STATE='is not executable'\n")
+  result.add("    else\n")
+  result.add("      LOCAL_HOOK_STATE='does not exist'\n")
+  result.add("    fi\n")
+  result.add("    printf '%s\\n' \"repro hooks: " & hookName & ": " &
+    "$(basename -- \"$LOCAL_HOOK_CONFIG\") installs the " & hookName &
+    " stage, but its chained hook $LOCAL_HOOK $LOCAL_HOOK_STATE, so none of " &
+    "this repository's " & hookName & " hooks would run. Refusing rather " &
+    "than skipping them.\" >&2\n")
+  # One line the operator pastes as it is: prek, from Nix so that no dev
+  # shell is needed, installs the stage's shim (moving the dispatcher to
+  # `.legacy`), and `hooks ensure` puts the dispatcher back with the shim
+  # chained as `.repro-local`. Both paths are single shell words.
+  result.add("    printf '%s\\n' \"repro hooks: fix: \\`cd " &
+    "$(repro_remedy_word \"$REPO_ROOT\") && nix run nixpkgs#prek -- install " &
+    "--hook-type " & hookName & " && " &
+    "$(repro_remedy_word \"$REPRO_REMEDY_CMD\") hooks ensure --vcs " &
+    "$(repro_remedy_word \"$REPO_ROOT\")\\`\" >&2\n")
+  result.add("    if [ -e \"$LOCAL_HOOK\" ]; then\n")
+  result.add("      printf '%s\\n' \"repro hooks: or, if that file is the " &
+    "repository's own hook: \\`chmod +x $(repro_remedy_word \"$LOCAL_HOOK\")\\`\" >&2\n")
+  result.add("    fi\n")
+  result.add("    return 1\n")
+  result.add("  fi\n")
   result.add("  if [ \"$RUNNING_AS_LEGACY\" = 1 ] && grep -Eq " &
     "'^# File generated by (pre-commit|prek):' \"$LOCAL_HOOK\" 2>/dev/null; then\n")
   result.add("    return 0\n")
@@ -31473,7 +31579,16 @@ proc committedLockRepoFacts(repoRoot: string):
     tuple[headSha, branch, originUrl: string] =
   ## Read the repo-local facts the committed-lock-derived model needs: the
   ## current ``HEAD`` SHA, the checked-out branch (empty when detached), and
-  ## the canonical fetch URL (empty when the repo has NO remote at all).
+  ## the fetch URL (empty when the repo has NO remote at all).
+  ##
+  ## ``originUrl`` is the remote AS THIS CLONE SPELLS IT (SSH or HTTPS, with
+  ## any userinfo it was configured with), which is what a local fetch should
+  ## use. It is never written to a committed lock as is: every lock writer
+  ## records ``canonicalLockFetchUrl(originUrl)`` instead, because a lock
+  ## entry must not depend on the transport the writer's clone uses or carry
+  ## its credentials: an SSH clone would otherwise write a URL anonymous
+  ## consumers cannot fetch, and an HTTPS remote with userinfo would commit
+  ## its token.
   ##
   ## ``branch`` is the local name and is right for local decisions (a trunk
   ## to sync). It is never written to a committed lock, and neither is any
@@ -31806,7 +31921,8 @@ proc usesProducerLockedDep(selector, root, pathBase: string;
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     return some(LockedDep(
       name: selector, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -31852,7 +31968,8 @@ proc lockedDepFromCheckout(name, depAbs, pathBase: string): LockedDep =
   let facts = committedLockRepoFacts(depAbs)
   LockedDep(
     name: name, path: relativePath(depAbs, pathBase).replace('\\', '/'),
-    coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+    coordinates: Coordinates(kind: ckVcs,
+      url: canonicalLockFetchUrl(facts.originUrl),
       revision: facts.headSha),
     integrity: computeDepIntegrity(depAbs, facts.headSha),
     version: "", visibility: "public", participation: "",
@@ -31925,7 +32042,8 @@ proc catalogLockedDep*(catalogRoot, root: string;
       else: ReprobuildPackagesRepositoryName
     return some(LockedDep(
       name: name, path: defaultLockedDepCheckoutPath(name),
-      coordinates: Coordinates(kind: ckVcs, url: marker.url,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(marker.url),
         revision: marker.revision),
       integrity: gitObjectMultihash(
         (if marker.revision.len == 64: "sha256" else: "sha1"),
@@ -31958,7 +32076,8 @@ proc catalogLockedDep*(catalogRoot, root: string;
     return some(LockedDep(
       name: depName,
       path: depPath,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32424,7 +32543,8 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     let rel = relativePath(depAbs, pathBase).replace('\\', '/')
     siblingDeps.add(LockedDep(
       name: d.name, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32549,7 +32669,8 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
       continue
     siblingDeps.add(LockedDep(
       name: depName, path: rel,
-      coordinates: Coordinates(kind: ckVcs, url: facts.originUrl,
+      coordinates: Coordinates(kind: ckVcs,
+        url: canonicalLockFetchUrl(facts.originUrl),
         revision: facts.headSha),
       integrity: computeDepIntegrity(depAbs, facts.headSha),
       version: "", visibility: "public", participation: "",
@@ -32636,13 +32757,23 @@ proc lockedDepsForWorkspace*(workspaceRoot: string;
     if name notin rootDepends: rootDepends.add(name)
   result.add(LockedDep(
     name: rootName, path: SelfLockedDepPath,
-    coordinates: Coordinates(kind: ckVcs, url: rootFacts.originUrl,
+    coordinates: Coordinates(kind: ckVcs,
+      url: canonicalLockFetchUrl(rootFacts.originUrl),
       revision: rootFacts.headSha),
     integrity: computeDepIntegrity(root, rootFacts.headSha),
     version: "", visibility: "public", participation: "",
     depends: rootDepends, tags: @[]))
   for d in siblingDeps:
-    result.add(d)
+    var entry = d
+    # Observed entries are already canonical. A pin carried forward from the
+    # existing lock (its sibling not checked out here, or a cached producer
+    # checkout) keeps the URL an older writer recorded, which may be the
+    # writer's SSH spelling or carry userinfo: write it in the one form every
+    # machine writes (Unified-Locking-And-Hooks.md §14.2, "The `url` a pin
+    # records"). This moves no pin.
+    if entry.coordinates.kind == ckVcs:
+      entry.coordinates.url = canonicalLockFetchUrl(entry.coordinates.url)
+    result.add(entry)
 
 proc checkoutTrunk(facts: tuple[headSha, branch, originUrl: string]): string =
   ## The default workspace branch of a committed-lock-only workspace: the
