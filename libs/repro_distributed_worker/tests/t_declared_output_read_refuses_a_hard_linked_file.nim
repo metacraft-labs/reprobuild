@@ -52,6 +52,9 @@ when defined(posix):
       check alone.ok
       check alone.bytes.len == "daemon-only bytes".len
 else:
+  import repro_test_support/reasoned_skip
+
   suite "a declared output with another hard link is not read":
     test "hard link to a file outside the worktree is refused":
-      skip()
+      skip("needs POSIX link(2) and an fstat link count; this target " &
+        "has neither")
