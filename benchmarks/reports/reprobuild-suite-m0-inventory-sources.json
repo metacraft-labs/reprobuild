@@ -69202,7 +69202,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_plan_matrix.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 16,
+      "staticCaseCount": 20,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
