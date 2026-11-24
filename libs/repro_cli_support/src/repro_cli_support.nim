@@ -28769,8 +28769,8 @@ when not defined(windows):
         restoreRunQuotaEnvironment(previous)
 
 when defined(windows):
-  proc spawnDetachedRunQuotaDaemon(runquotad: string;
-                                   args: seq[string]): owned(Process) =
+  proc spawnDetachedRunQuotaDaemon*(runquotad: string;
+                                    args: seq[string]): owned(Process) =
     ## Starts the per-user `runquotad` so that it holds NONE of this
     ## invocation's handles: stdin, stdout and stderr are `NUL`, no other
     ## handle crosses the spawn, and it does not run in our working directory.
@@ -28797,9 +28797,21 @@ when defined(windows):
     ## Its output goes to `NUL`, as it effectively did before: nothing read
     ## the pipes `startProcess` made for it.
     ##
-    ## THE WORKING DIRECTORY is the daemon binary's own directory, which its
-    ## running image already pins. Starting it in ours would keep the caller's
-    ## directory undeletable for the daemon's whole life.
+    ## THE WORKING DIRECTORY is neither ours nor the daemon binary's own
+    ## (`detachedDaemonWorkingDirectory`, the Windows system directory).
+    ## Starting it in ours kept the caller's directory undeletable for the
+    ## daemon's whole life. Starting it in its own `bin\`, as this did until
+    ## 2026-11-22, kept the installer from renaming `bin\` aside: a running
+    ## image does not pin its directory (the loader opens it with
+    ## `FILE_SHARE_DELETE`), but a current directory does, so every in-place
+    ## bundle upgrade -- which renames the old `bin\` aside and leaves the
+    ## old daemon running from it, because killing it would end the leases it
+    ## holds -- failed while such a daemon lived.
+    ##
+    ## Exported for `tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim`,
+    ## which starts a daemon through it on a private pipe: the auto-start
+    ## itself (`startAutoRunQuotaWindows`) reaches the host-wide pipe, and
+    ## driving it would ask the host's own daemon to retire.
     ##
     ## A `Process` is still returned, built around the handle the spawn
     ## returned, because the readiness wait and the failure path below watch
@@ -28811,7 +28823,8 @@ when defined(windows):
       let found = findExe(exe)
       exe = if found.len > 0: found else: absolutePath(exe)
     let child = spawnWithOwnStdioKeepingHandle(exe, args, env = [],
-      inheritEnvironment = true, logPath = "", workingDir = parentDir(exe))
+      inheritEnvironment = true, logPath = "",
+      workingDir = detachedDaemonWorkingDirectory(exe))
     privateAccess(Process)
     result = Process(fProcessHandle: child.processHandle,
       fThreadHandle: Handle(0), id: Handle(child.pid),
