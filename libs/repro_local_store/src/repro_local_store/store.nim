@@ -75,6 +75,10 @@ type
   EStoreIndexCorrupt* = object of StoreError
     ## `PRAGMA quick_check` returned anything other than `ok` at open.
 
+  EPrefixNotIndexed* = object of StoreError
+    ## A prefix an operation names has no row in `index.db`: it was never
+    ## indexed, or the collector has removed it.
+
   ECasMissing* = object of StoreError
     ## A blob the caller asked for is not present in `cas/`.
 
@@ -145,7 +149,12 @@ type
     ## silent success.
     refused*: bool
     holdingRoots*: seq[string]
-      ## Non-empty exactly when `refused`. The roots keeping it alive.
+      ## The roots keeping it alive. `refused` is set when this or
+      ## `referencedBy` is non-empty.
+    referencedBy*: seq[string]
+      ## The store-relative paths of the indexed prefixes that reference it
+      ## (`recordPrefixReference`), which keep it alive as long as they are
+      ## indexed themselves.
     found*: bool
       ## False when the prefix is not indexed at all.
     quarantinedPath*: string
@@ -497,6 +506,22 @@ proc ensureUsageColumns(db: Database) =
           raise
   db.exec("CREATE TABLE IF NOT EXISTS cas_use (" &
     "digest BLOB PRIMARY KEY, last_used_at INTEGER NOT NULL)")
+  # The prefix-to-prefix references (`recordPrefixReference`) are the same
+  # kind of addition. A store without the table answers "no prefix
+  # references another", which is what every prefix realized before it
+  # existed does. An older build's collector does not read the table, so it
+  # can still reap a referenced prefix; that is the limit of an additive
+  # change, and the reason a relocated prefix is checked again for its
+  # runtime prefix whenever it is resolved. Both foreign keys cascade, so a
+  # row never outlives either prefix, whichever build deletes it.
+  db.exec("CREATE TABLE IF NOT EXISTS prefix_references (" &
+    "prefix_id BLOB NOT NULL REFERENCES prefixes(prefix_id) " &
+    "ON DELETE CASCADE, " &
+    "referenced_id BLOB NOT NULL REFERENCES prefixes(prefix_id) " &
+    "ON DELETE CASCADE, " &
+    "PRIMARY KEY (prefix_id, referenced_id))")
+  db.exec("CREATE INDEX IF NOT EXISTS idx_prefix_references__referenced " &
+    "ON prefix_references(referenced_id)")
   # The install-provenance ledger (`adapter_installs`, see
   # `recordAdapterInstall`) is the same kind of addition: an older build
   # never reads it, and a store without it answers "nothing recorded",
@@ -2958,13 +2983,16 @@ type
     lastUsedUnix*: int64   ## recorded last use, else creation
     sizeBytes*: int64      ## cached size, -1 when not yet measured
     held*: bool            ## some root holds it
+    referrers*: int        ## indexed prefixes that reference it
 
 proc prefixUsage*(s: Store): seq[PrefixUsage] =
   var q = s.db.prepare(
     "SELECT prefix_id, package_name, version, realized_path, adapter, " &
     "receipt_digest, created_at, COALESCE(last_used_at, created_at), " &
     "size_bytes, EXISTS (SELECT 1 FROM root_holds_prefix h " &
-    "WHERE h.prefix_id = prefixes.prefix_id) FROM prefixes")
+    "WHERE h.prefix_id = prefixes.prefix_id), " &
+    "(SELECT COUNT(*) FROM prefix_references r " &
+    "WHERE r.referenced_id = prefixes.prefix_id) FROM prefixes")
   defer: q.finalize()
   while q.step() == SqliteRow:
     var u: PrefixUsage
@@ -2980,6 +3008,7 @@ proc prefixUsage*(s: Store): seq[PrefixUsage] =
     u.lastUsedUnix = q.columnInt(7)
     u.sizeBytes = if q.columnIsNull(8): -1'i64 else: q.columnInt(8)
     u.held = q.columnInt(9) != 0
+    u.referrers = int(q.columnInt(10))
     result.add(u)
 
 proc setPrefixSize*(s: var Store; prefixId: PrefixIdBytes; sizeBytes: int64) =
@@ -3032,11 +3061,12 @@ proc expireRoots*(s: var Store; now: int64 = 0): seq[string] =
 # ---------------------------------------------------------------------------
 
 proc deadSet*(s: Store): seq[PrefixRow] =
-  ## Prefixes not currently held by any root.
+  ## Prefixes no root holds and no indexed prefix references.
   var stmt = s.db.prepare(
     "SELECT prefix_id, package_name, version, realized_path, adapter, " &
     "receipt_digest, created_at FROM prefixes WHERE prefix_id NOT IN " &
-    "(SELECT prefix_id FROM root_holds_prefix)")
+    "(SELECT prefix_id FROM root_holds_prefix) AND prefix_id NOT IN " &
+    "(SELECT referenced_id FROM prefix_references)")
   defer: stmt.finalize()
   while stmt.step() == SqliteRow:
     var row: PrefixRow
@@ -3087,6 +3117,121 @@ proc prefixesHeldByRoot*(s: Store; rootId: string): seq[PrefixIdBytes] =
     var id: PrefixIdBytes
     for i in 0 ..< 32: id[i] = blob[i]
     result.add(id)
+
+proc idColumn(stmt: Statement; idx: int): PrefixIdBytes =
+  let blob = stmt.columnBlob(idx)
+  for i in 0 ..< 32: result[i] = blob[i]
+
+# ---------------------------------------------------------------------------
+# References between prefixes
+#
+# A prefix whose files name another prefix by absolute path -- a program
+# relocated onto the loader and C library of a runtime package's prefix,
+# whose PT_INTERP and run path point into that prefix -- cannot run once
+# the other prefix is gone, and nothing in it would show that until it is
+# started. Reachability through roots alone does not see the dependency: a
+# root holds the prefix a profile or a workspace names, not the prefixes its
+# files point at. So the realization records the dependency here, and the
+# collector does not collect a prefix while an indexed prefix references it.
+#
+# The rule is "kept while the referrer is indexed", not "kept while the
+# referrer is held": an unrooted referrer protects its target until the
+# referrer itself is collected, and `gc` then collects the target in a
+# later pass of the same run. That way a size-budgeted eviction, which
+# removes unrooted prefixes one at a time, never leaves a referrer whose
+# target it has already evicted.
+# ---------------------------------------------------------------------------
+
+proc hasPrefixReference*(s: Store; prefixId, referencedId: PrefixIdBytes):
+    bool =
+  ## Whether `prefixId` is recorded as referencing `referencedId`.
+  var q = s.db.prepare("SELECT 1 FROM prefix_references " &
+    "WHERE prefix_id = ? AND referenced_id = ?")
+  defer: q.finalize()
+  q.bindBlob(1, prefixId)
+  q.bindBlob(2, referencedId)
+  q.step() == SqliteRow
+
+proc recordPrefixReference*(s: var Store; prefixId,
+                            referencedId: PrefixIdBytes): bool =
+  ## Record that the files of `prefixId` reference `referencedId`, so the
+  ## collector keeps `referencedId` for as long as `prefixId` is indexed.
+  ## Returns true when this call added the record, false when it was
+  ## already there.
+  ##
+  ## Both prefixes must be indexed. One that is not raises
+  ## `EPrefixNotIndexed`: a reference to a prefix the collector has removed
+  ## cannot keep it, and the caller must treat that as "the prefix is gone"
+  ## (realize it again), never as success. The check and the insert run in
+  ## one write transaction, which `gc` also takes for each collection, so a
+  ## record that commits keeps a prefix the collector has not yet removed.
+  ##
+  ## Reads first and writes only when the record is missing, so a caller
+  ## that records on every resolution takes the write lock once per pair.
+  if prefixId == referencedId:
+    raise newException(ValueError,
+      "recordPrefixReference: a prefix cannot reference itself: " &
+      prefixIdHex(prefixId))
+  if s.hasPrefixReference(prefixId, referencedId):
+    return false
+  s.db.exec("BEGIN IMMEDIATE")
+  var committed = false
+  try:
+    for (id, what) in [(prefixId, "referencing"),
+                       (referencedId, "referenced")]:
+      if not s.lookupPrefix(id).found:
+        raise newException(EPrefixNotIndexed, "recordPrefixReference: the " &
+          what & " prefix " & prefixIdHex(id) & " is not indexed in " &
+          s.root)
+    var ins = s.db.prepare("INSERT OR IGNORE INTO prefix_references" &
+      "(prefix_id, referenced_id) VALUES (?, ?)")
+    ins.bindBlob(1, prefixId)
+    ins.bindBlob(2, referencedId)
+    discard ins.step()
+    ins.finalize()
+    result = s.db.changes() > 0
+    s.db.exec("COMMIT")
+    committed = true
+  finally:
+    if not committed:
+      try: s.db.exec("ROLLBACK") except CatchableError: discard
+
+proc prefixReferrers*(s: Store; referencedId: PrefixIdBytes):
+    seq[PrefixIdBytes] =
+  ## The indexed prefixes that reference `referencedId`, in id order. The
+  ## cascade on `prefixes` deletes a referrer's records with its row, so
+  ## every id returned is indexed.
+  var q = s.db.prepare("SELECT prefix_id FROM prefix_references " &
+    "WHERE referenced_id = ? ORDER BY prefix_id")
+  defer: q.finalize()
+  q.bindBlob(1, referencedId)
+  while q.step() == SqliteRow:
+    result.add(q.idColumn(0))
+
+proc prefixReferences*(s: Store; prefixId: PrefixIdBytes):
+    seq[PrefixIdBytes] =
+  ## The prefixes `prefixId` references, in id order.
+  var q = s.db.prepare("SELECT referenced_id FROM prefix_references " &
+    "WHERE prefix_id = ? ORDER BY referenced_id")
+  defer: q.finalize()
+  q.bindBlob(1, prefixId)
+  while q.step() == SqliteRow:
+    result.add(q.idColumn(0))
+
+proc listPrefixReferences*(s: Store):
+    seq[tuple[prefixId, referencedId: PrefixIdBytes]] =
+  ## Every recorded reference, for a collector that walks them in memory.
+  var q = s.db.prepare("SELECT prefix_id, referenced_id " &
+    "FROM prefix_references ORDER BY prefix_id, referenced_id")
+  defer: q.finalize()
+  while q.step() == SqliteRow:
+    result.add((q.idColumn(0), q.idColumn(1)))
+
+proc referrerPaths(s: Store; referencedId: PrefixIdBytes): seq[string] =
+  ## `prefixReferrers` as store-relative paths, for a refusal to name.
+  for id in s.prefixReferrers(referencedId):
+    let hit = s.lookupPrefix(id)
+    result.add(if hit.found: hit.row.realizedPath else: prefixIdHex(id))
 
 proc appendAudit(s: var Store; action: GcAction; prefixId: PrefixIdBytes;
                  reason: string) =
@@ -3192,11 +3337,18 @@ proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
   var committed = false
   try:
     let holders = s.rootsHolding(prefixId)
-    if holders.len > 0:
+    let referrers = s.referrerPaths(prefixId)
+    if holders.len > 0 or referrers.len > 0:
       result.refused = true
       result.holdingRoots = holders
+      result.referencedBy = referrers
       result.found = true
-      result.reason = "refused: prefix is held by root(s) " & holders.join(", ")
+      var why: seq[string]
+      if holders.len > 0:
+        why.add("held by root(s) " & holders.join(", "))
+      if referrers.len > 0:
+        why.add("referenced by prefix(es) " & referrers.join(", "))
+      result.reason = "refused: prefix is " & why.join(" and ")
       s.appendAudit(gaRefuse, prefixId, result.reason)
       s.db.exec("COMMIT")
       committed = true
@@ -3258,52 +3410,74 @@ proc gcPrefix*(s: var Store; prefixId: PrefixIdBytes;
 proc sweepPendingDeletion*(s: var Store; graceSeconds = DefaultGcGraceSeconds):
     seq[string]
 
+proc collectUnreachable(s: var Store; row: PrefixRow;
+                        report: var GcReport): bool =
+  ## Collect one candidate of the dead set, if it is still unreachable once
+  ## the write lock is held, and return whether it was collected. A root, a
+  ## new reference or another collector may have changed the dead set since
+  ## it was read.
+  var movedTo = ""
+  s.db.exec("BEGIN IMMEDIATE")
+  var committed = false
+  try:
+    let current = s.lookupPrefix(row.prefixId)
+    if not current.found or s.rootsHolding(row.prefixId).len > 0 or
+        s.prefixReferrers(row.prefixId).len > 0:
+      s.db.exec("COMMIT")
+      committed = true
+      return false
+    let absPath = s.absolutePrefixPath(current.row.realizedPath)
+    if dirExists(extendedPath(absPath)):
+      try:
+        movedTo = s.quarantineUnique(absPath)
+      except OSError as err:
+        # The directory exists but cannot be renamed (busy reader, etc).
+        # Defer; the next GC run will retry.
+        s.appendAudit(gaQuarantine, row.prefixId,
+          "quarantine deferred: " & err.msg)
+        s.db.exec("COMMIT")
+        committed = true
+        return false
+    # Delete the prefix row (cascades through root_holds_prefix and
+    # prefix_references).
+    var del = s.db.prepare("DELETE FROM prefixes WHERE prefix_id = ?")
+    del.bindBlob(1, row.prefixId)
+    discard del.step()
+    del.finalize()
+    s.appendAudit(gaQuarantine, row.prefixId,
+      "moved to " & movedTo)
+    s.db.exec("COMMIT")
+    committed = true
+  finally:
+    if not committed:
+      try: s.db.exec("ROLLBACK") except CatchableError: discard
+  report.quarantined.add(row)
+  if movedTo.len > 0:
+    report.quarantinedPaths.add(movedTo)
+  true
+
 proc gc*(s: var Store; graceSeconds = DefaultGcGraceSeconds): GcReport =
   ## Runs the spec's eager GC: dead-set query, move to
   ## `gc/pending-deletion/`, audit row, plus a sweep of the
   ## pending-deletion area for entries older than `graceSeconds`.
+  ##
+  ## Collecting a prefix deletes the references it recorded, which can leave
+  ## a prefix it referenced unreachable, so the dead set is read again after
+  ## every pass that collected something. Each candidate is tried once per
+  ## run: one that was skipped or deferred is not retried by a later pass,
+  ## and every pass that continues has collected a prefix, so the run ends.
   result.graceSeconds = graceSeconds
   result.ranAt = getTime().toUnix
   discard s.expireRoots(result.ranAt)
-  let dead = s.deadSet()
-  for row in dead:
-    var movedTo = ""
-    s.db.exec("BEGIN IMMEDIATE")
-    var committed = false
-    try:
-      # A root or another collector may have changed the initial dead set.
-      let current = s.lookupPrefix(row.prefixId)
-      if not current.found or s.rootsHolding(row.prefixId).len > 0:
-        s.db.exec("COMMIT")
-        committed = true
+  var tried = initHashSet[PrefixIdBytes]()
+  var progressed = true
+  while progressed:
+    progressed = false
+    for row in s.deadSet():
+      if tried.containsOrIncl(row.prefixId):
         continue
-      let absPath = s.absolutePrefixPath(current.row.realizedPath)
-      if dirExists(extendedPath(absPath)):
-        try:
-          movedTo = s.quarantineUnique(absPath)
-        except OSError as err:
-          # The directory exists but cannot be renamed (busy reader, etc).
-          # Defer; the next GC pass will retry.
-          s.appendAudit(gaQuarantine, row.prefixId,
-            "quarantine deferred: " & err.msg)
-          s.db.exec("COMMIT")
-          committed = true
-          continue
-      # Delete the prefix row (cascades through root_holds_prefix).
-      var del = s.db.prepare("DELETE FROM prefixes WHERE prefix_id = ?")
-      del.bindBlob(1, row.prefixId)
-      discard del.step()
-      del.finalize()
-      s.appendAudit(gaQuarantine, row.prefixId,
-        "moved to " & movedTo)
-      s.db.exec("COMMIT")
-      committed = true
-    finally:
-      if not committed:
-        try: s.db.exec("ROLLBACK") except CatchableError: discard
-    result.quarantined.add(row)
-    if movedTo.len > 0:
-      result.quarantinedPaths.add(movedTo)
+      if s.collectUnreachable(row, result):
+        progressed = true
 
   result.reclaimed.add(s.sweepPendingDeletion(graceSeconds))
 

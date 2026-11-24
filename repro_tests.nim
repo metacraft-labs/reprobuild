@@ -14833,6 +14833,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_libs_repro_tool_profiles_tests_g01",
     singleReason: ""),
   TestSpec(
+    source: "libs/repro_tool_profiles/tests/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc.nim",
+    binary: "build/test-bin/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_tool_profiles_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_tool_profiles/tests/t_a_symlinked_declared_executable_is_not_reported_missing.nim",
     binary: "build/test-bin/t_a_symlinked_declared_executable_is_not_reported_missing",
     defines: @[],

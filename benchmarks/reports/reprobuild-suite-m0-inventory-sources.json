@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3233,
+    "nimTestBinaries": 3234,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3289
+    "testEntries": 3290
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,7 +1855,7 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1820,
+      "integration": 1821,
       "platform/destructive": 203,
       "pure unit": 847,
       "unclassified": 390
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3233,
+    "nimTestBinaryCount": 3234,
     "pythonTestFileCount": 56,
-    "testEntryCount": 3289
+    "testEntryCount": 3290
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -32604,6 +32604,26 @@
       "source": "libs/repro_tool_profiles/tests/t_a_declared_alias_is_never_served_from_a_prefix_without_it.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc",
+      "class": "integration",
+      "classificationReason": "subprocess or repro CLI invocation in test body",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_local_store",
+        "repro_project_dsl",
+        "repro_test_support",
+        "repro_tool_profiles"
+      ],
+      "owner": "libs/repro_tool_profiles",
+      "requiresReproBinary": false,
+      "source": "libs/repro_tool_profiles/tests/t_a_relocated_prefix_keeps_its_runtime_prefix_through_store_gc.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
