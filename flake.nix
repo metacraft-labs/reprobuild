@@ -2822,6 +2822,20 @@
             # why that does not work): it is for the shell to PROVIDE the
             # programs it does this to, so they come from the same nixpkgs.
             # `scripts/check_dev_shell_env.sh` holds that invariant.
+            #
+            # ITS SCOPE IS THE PROGRAMS REPROBUILD ITSELF RUNS
+            # (`DEV_SHELL_SUBPROCESS_TOOLS` in `scripts/lib/dev_shell_overrides.sh`,
+            # plus `$REPRO_SYSTEMD_ANALYZE`), and for those `just lint` refuses.
+            # The variable reaches every other program started here too: on a
+            # host whose libc is older than this nixpkgs' glibc, a host program
+            # that links one of these sonames (ssh / scp / openssl
+            # via libcrypto, zstd via libzstd, systemctl via libsystemd-shared)
+            # loads this shell's copy and dies before `main`. The shell cannot
+            # provide every program a contributor might start, so for those
+            # `just lint` WARNS instead, naming each broken program on PATH,
+            # the library that breaks it and the remedy (`env -u
+            # LD_LIBRARY_PATH <program>`, or provide it here if reprobuild
+            # starts it).
             LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (
               [
                 pkgs.clingo

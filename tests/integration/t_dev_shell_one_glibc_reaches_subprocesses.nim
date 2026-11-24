@@ -221,28 +221,40 @@ proc loaderIn(glibc: string): string =
     return found
   glibc / "lib" / "ld-linux-x86-64.so.2"
 
+proc stageCheckTree(tempRoot: string): string =
+  ## A copy of the check and every file it reads, at
+  ## `<tempRoot>/workspace/repo`.
+  ##
+  ## One level of nesting on purpose. `check_dev_shell_env.sh` resolves the
+  ## auto-override arm's siblings as `dirname($REPO_ROOT)/*`, so a tree placed
+  ## directly in `$TMPDIR` treats every scratch directory on the machine as a
+  ## workspace sibling and reports whichever of them happens to share a name
+  ## with a flake input. That is noise from another check, and noise is how a
+  ## real finding gets missed.
+  result = tempRoot / "workspace" / "repo"
+  createDir(result / "scripts" / "lib")
+  copyFile(checkScript(), result / "scripts" / "check_dev_shell_env.sh")
+  copyFile(libScript(), result / "scripts" / "lib" / "dev_shell_overrides.sh")
+  # Every library the check sources, or it reports a missing file before it
+  # reaches the question a case asks.
+  copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
+    result / "scripts" / "lib" / "preloaded_shim_loader.sh")
+  copyFile(repoRoot() / ".envrc", result / ".envrc")
+  copyFile(repoRoot() / "flake.nix", result / "flake.nix")
+  copyFile(repoRoot() / "scripts" / "dev-shell-pinned-siblings.tsv",
+    result / "scripts" / "dev-shell-pinned-siblings.tsv")
+
+proc copyWritable(src, dst: string) =
+  copyFile(src, dst)
+  setFilePermissions(dst, {fpUserRead, fpUserWrite, fpUserExec})
+
+proc patchelfOk(args: seq[string]) =
+  discard requireSuccess(shellCommand(@[toolOnPath("patchelf")] & args))
+
 proc fabricateCheckTree(pair: GlibcPair): FabricatedTree =
   result.tempRoot = createTempDir("repro-dev-shell-glibc-", "")
-  # One level of nesting on purpose. `check_dev_shell_env.sh` resolves
-  # the auto-override arm's siblings as `dirname($REPO_ROOT)/*`, so a
-  # tree placed directly in `$TMPDIR` treats every scratch directory on
-  # the machine as a workspace sibling and reports whichever of them
-  # happens to share a name with a flake input. That is noise from
-  # another check, and noise is how a real finding gets missed.
-  let scratch = result.tempRoot / "workspace" / "repo"
+  let scratch = stageCheckTree(result.tempRoot)
   result.scratch = scratch
-  createDir(scratch / "scripts" / "lib")
-  copyFile(checkScript(), scratch / "scripts" / "check_dev_shell_env.sh")
-  copyFile(libScript(), scratch / "scripts" / "lib" /
-    "dev_shell_overrides.sh")
-  # Every library the check sources, or it reports a missing file
-  # before it reaches the question this case asks.
-  copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
-    scratch / "scripts" / "lib" / "preloaded_shim_loader.sh")
-  copyFile(repoRoot() / ".envrc", scratch / ".envrc")
-  copyFile(repoRoot() / "flake.nix", scratch / "flake.nix")
-  copyFile(repoRoot() / "scripts" / "dev-shell-pinned-siblings.tsv",
-    scratch / "scripts" / "dev-shell-pinned-siblings.tsv")
 
   # The injected library: a real shared object whose RUNPATH names the
   # newer glibc, which is exactly what every entry on this shell's
@@ -605,6 +617,221 @@ suite "dev shell — one glibc reaches a subprocess":
             check GlibcVersionErrorNeedle notin res.output
             check res.code == 0
             check fileExists(key & ".pub")
+
+  test "the check names a host program on PATH that an injected soname breaks":
+    # Check 6 guards the programs reprobuild runs; LD_LIBRARY_PATH reaches
+    # every other program too. On an Ubuntu runner (glibc 2.35)
+    # `/usr/bin/ssh-keygen` died on the shell's libcrypto (`GLIBC_2.38' not
+    # found) before the shell provided its own. `ssh`, `scp`,
+    # `openssl`, `zstd` and `systemctl` (through libsystemd-shared) are exposed
+    # the same way. The rule's scope is the programs reprobuild runs, so for
+    # these the check WARNS: it must name the program, the injected library
+    # and the remedy, and it must not fail lint.
+    #
+    # The subject is fabricated from real store files, as in the case above:
+    #   * `libf05probe.so` — a copy of the OLDER glibc's libm (so the library
+    #     itself needs nothing the older libc lacks), RUNPATH on the NEWER
+    #     glibc, made to NEED the satellites both glibcs ship. Loading it pulls
+    #     in the newer satellites, which is how the shell's libcrypto pulled the
+    #     shell glibc's `libdl.so.2` into `curl`. It is the only thing on
+    #     LD_LIBRARY_PATH.
+    #   * `hostdirect` — a dynamic executable on the OLDER glibc that NEEDs it.
+    #   * `hosttransitive` — the same, reaching it only through a library of
+    #     its own (`libhostmid.so`, found through its RUNPATH), the way
+    #     `systemctl` reaches libcrypto through libsystemd-shared.
+    #   * `hostclean` — on the older glibc, linking nothing injected: the
+    #     control for "links an injected soname".
+    #   * `hostpreloaded` — on the older glibc, NEEDing those satellites itself
+    #     as well as the probe. The loader maps the program's own NEEDED first
+    #     and loads each soname once, so the probe's request for `libdl.so.2`
+    #     gets the older copy and the program STARTS. The control for "charge
+    #     only what the process would load": a closure-based scan flagged ten
+    #     real programs of this shape (`nix`, `openssl`, `pw-cat`, …) that
+    #     start fine.
+    # `hostdirect` is RUN first, under and without the injection, so the case
+    # proves the fabricated program really dies for the reason the issue
+    # states before it asks the check to say so.
+    when not defined(linux):
+      skip("see the first case; injection is linux-only")
+    else:
+      if not haveElfTools() or toolOnPath("cc").len == 0:
+        skip("patchelf, readelf, bash and cc are all " &
+          "required to build, run and read the fabricated programs")
+      else:
+        let pair = findIncompatibleGlibcPair()
+        if pair.examined > 0 and pair.readable == 0:
+          checkpoint("dev_shell_glibc_defined_versions read no version " &
+            "table out of any of the " & $pair.examined & " store glibcs; " &
+            "see the case above")
+          fail()
+        elif pair.older.len == 0:
+          skip("this machine's /nix/store holds no two " &
+            "glibcs where one fails to define a symbol version the other " &
+            "requires, so the conflict cannot be built here out of real files")
+        else:
+          checkpoint("fabricating from real store paths: older=" &
+            pair.older & " newer=" & pair.newer & " missing=" &
+            pair.missing.join(","))
+          let tempRoot = createTempDir("repro-dev-shell-host-", "")
+          defer: removeDirEventually(tempRoot)
+          let scratch = stageCheckTree(tempRoot)
+
+          let injectDir = scratch / "inject"
+          createDir(injectDir)
+          let probeLib = injectDir / "libf05probe.so"
+          copyWritable(pair.older / "lib" / "libm.so.6", probeLib)
+          patchelfOk(@["--set-soname", "libf05probe.so", "--set-rpath",
+            pair.newer / "lib", probeLib])
+          # The satellites both glibcs ship, and what the newer copies of them
+          # need that the older libc lacks: that set, and nothing else, is what
+          # the check must report. Computed with the gate's own extractors.
+          let olderDefined = bashLib("dev_shell_glibc_defined_versions",
+            pair.older)
+          var satellites: seq[string] = @[]
+          var expectedMissing: seq[string] = @[]
+          for satellite in ["libdl.so.2", "librt.so.1", "libpthread.so.0",
+                            "libresolv.so.2", "libanl.so.1", "libutil.so.1"]:
+            if fileExists(pair.newer / "lib" / satellite) and
+                fileExists(pair.older / "lib" / satellite):
+              satellites.add(satellite)
+              patchelfOk(@["--add-needed", satellite, probeLib])
+              for want in bashLib("dev_shell_elf_libc_requirements",
+                                  pair.newer / "lib" / satellite):
+                if want notin olderDefined and want notin expectedMissing:
+                  expectedMissing.add(want)
+          checkpoint("satellites shared by both glibcs: " &
+            satellites.join(",") & "; newer copies need, older libc lacks: " &
+            expectedMissing.join(","))
+          if expectedMissing.len == 0:
+            skip("no satellite both glibcs ship needs a " &
+              "version the older libc lacks, so a program cannot be broken " &
+              "through one here")
+          else:
+
+            let hostLib = scratch / "hostlib"
+            createDir(hostLib)
+            let midLib = hostLib / "libhostmid.so"
+            copyWritable(pair.older / "lib" / "libm.so.6", midLib)
+            patchelfOk(@["--set-soname", "libhostmid.so", "--set-rpath",
+              pair.older / "lib", midLib])
+            patchelfOk(@["--add-needed", "libf05probe.so", midLib])
+
+            let fakeBin = scratch / "bin"
+            createDir(fakeBin)
+            # The donor is compiled here rather than copied from PATH because
+            # these programs are RUN. A coreutils binary NEEDs libgmp / libacl /
+            # libattr, built on the shell's glibc: on the older glibc it dies
+            # whatever this shell injects, and `hostclean` could not be the
+            # control it is. `main` returning 0 needs libc.so.6 and nothing else.
+            let donorSrc = tempRoot / "donor.c"
+            let donor = tempRoot / "donor"
+            writeFile(donorSrc, "int main(void) { return 0; }\n")
+            discard requireSuccess(shellCommand(
+              @[toolOnPath("cc"), "-o", donor, donorSrc]))
+            proc fabricate(name, glibc: string; rpath: string;
+                           extra: seq[string]) =
+              ## RUNPATH is set as well as PT_INTERP: the donor's RUNPATH names
+              ## the glibc it was linked on, and a program whose loader is one
+              ## glibc and whose libc.so.6 is another tests nothing.
+              copyWritable(donor, fakeBin / name)
+              patchelfOk(@["--set-interpreter", loaderIn(glibc),
+                "--set-rpath", rpath] & extra & @[fakeBin / name])
+            proc fabricateAll(glibc: string) =
+              fabricate("hostdirect", glibc, glibc / "lib",
+                @["--add-needed", "libf05probe.so"])
+              fabricate("hosttransitive", glibc,
+                hostLib & ":" & glibc / "lib", @["--add-needed", "libhostmid.so"])
+              fabricate("hostclean", glibc, glibc / "lib", @[])
+              var preloaded: seq[string] = @["--add-needed", "libf05probe.so"]
+              for satellite in satellites:
+                preloaded.add(@["--add-needed", satellite])
+              fabricate("hostpreloaded", glibc, glibc / "lib", preloaded)
+              # Check 6's subjects (every DEV_SHELL_SUBPROCESS_TOOLS entry),
+              # kept on the INJECTED glibc so it accepts and only the
+              # host-program scan has anything to say. The shell's own `git`
+              # and `ssh-keygen` run on whatever glibc this shell was built
+              # from, which the fabricated injection may conflict with.
+              for tool in subprocessTools():
+                fabricate(tool, pair.newer, pair.newer / "lib", @[])
+
+            proc runCheck(): CmdResult =
+              runWithEnv(@[toolOnPath("bash"),
+                  scratch / "scripts" / "check_dev_shell_env.sh"],
+                @[("LD_LIBRARY_PATH", injectDir),
+                  ("PATH", fakeBin & $PathSep & getEnv("PATH")),
+                  ("REPRO_SYSTEMD_ANALYZE", "")],
+                scratch)
+
+            fabricateAll(pair.older)
+
+            # REPRODUCTION: the fabricated host program dies before main under
+            # the injection, naming a glibc symbol version — the issue's
+            # failure — and starts once LD_LIBRARY_PATH no longer reaches it
+            # (it then cannot find libf05probe.so at all, which is a loader
+            # error of a different kind; `hostclean` is the clean start).
+            let died = runWithEnv(@[fakeBin / "hostdirect"],
+              @[("LD_LIBRARY_PATH", injectDir)], scratch)
+            checkpoint("hostdirect under the injection -> exit " &
+              $died.code & ": " & died.output.strip())
+            check died.code != 0
+            check GlibcVersionErrorNeedle in died.output
+            let viaMid = runWithEnv(@[fakeBin / "hosttransitive"],
+              @[("LD_LIBRARY_PATH", injectDir)], scratch)
+            checkpoint("hosttransitive under the injection -> exit " &
+              $viaMid.code & ": " & viaMid.output.strip())
+            check viaMid.code != 0
+            check GlibcVersionErrorNeedle in viaMid.output
+            let clean = runWithEnv(@[fakeBin / "hostclean"],
+              @[("LD_LIBRARY_PATH", injectDir)], scratch)
+            checkpoint("hostclean under the injection -> exit " &
+              $clean.code & ": " & clean.output.strip())
+            check clean.code == 0
+            let preloadedRun = runWithEnv(@[fakeBin / "hostpreloaded"],
+              @[("LD_LIBRARY_PATH", injectDir)], scratch)
+            checkpoint("hostpreloaded under the injection -> exit " &
+              $preloadedRun.code & ": " & preloadedRun.output.strip())
+            check preloadedRun.code == 0
+            check GlibcVersionErrorNeedle notin preloadedRun.output
+
+            # NEGATIVE polarity: both broken programs are named, with the
+            # library, where LD_LIBRARY_PATH resolves it, the libc they run on,
+            # the missing versions and the remedy. As a WARNING: none of this
+            # may count as a lint failure.
+            let warned = runCheck()
+            checkpoint(warned.output)
+            check "2 program(s) on PATH cannot start in this dev shell" in
+              warned.output
+            check (fakeBin / "hostdirect") in warned.output
+            check (fakeBin / "hosttransitive") in warned.output
+            check (fakeBin / "hostclean") notin warned.output
+            check (fakeBin / "hostpreloaded") notin warned.output
+            check "through libf05probe.so from LD_LIBRARY_PATH entry " &
+              injectDir in warned.output
+            # The objects named are the newer satellites, as the loader names
+            # them ("required by …/libdl.so.2"), not the probe, which needs
+            # nothing the older libc lacks.
+            check ("loads:    " & pair.newer / "lib" / "") in warned.output
+            check ("loads:    " & probeLib) notin warned.output
+            check pair.older in warned.output
+            for want in expectedMissing:
+              check want in warned.output
+            check "env -u LD_LIBRARY_PATH" in warned.output
+            check "DEV_SHELL_SUBPROCESS_TOOLS" in warned.output
+            check "FAIL: this dev shell injects a second glibc" notin
+              warned.output
+            check "one glibc reaches a subprocess" in warned.output
+            check "no host program on PATH is broken" notin warned.output
+
+            # POSITIVE polarity, same tree: move only the programs' interpreter
+            # to the injected glibc. Nothing they link changes; the warning must
+            # go, which separates a judgement from a list of everything that
+            # links libcrypto.
+            fabricateAll(pair.newer)
+            let quiet = runCheck()
+            checkpoint(quiet.output)
+            check "cannot start in this dev shell" notin quiet.output
+            check "no host program on PATH is broken by LD_LIBRARY_PATH" in
+              quiet.output
 
   test "engine: a git-using test runs through repro build .#test#<name>":
     let root = repoRoot()

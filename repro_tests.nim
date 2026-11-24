@@ -38796,6 +38796,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_generated_artifact_merge_policy.py",
   "tests/unit/test_graph_owned_test_artifacts.py",
   "tests/unit/test_install_nix_paths.py",
+  "tests/unit/test_install_ps1_verifier_handoff.py",
   "tests/unit/test_lint_gate_ordering.py",
   "tests/unit/test_nim224_lane_selection.py",
   "tests/unit/test_nix_daemon_descriptors.py",
@@ -38822,5 +38823,6 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_source_revision.py",
   "tests/unit/test_suite_drift_attribution.py",
   "tests/unit/test_test_group_fallback.py",
+  "tests/unit/test_test_parallelism_grant.py",
   "tests/unit/test_wrapper_default_provenance.py"
 ]

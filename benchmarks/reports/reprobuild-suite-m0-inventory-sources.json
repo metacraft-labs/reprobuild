@@ -4,8 +4,8 @@
     "nimTestBinaries": 3222,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 845,
-    "staticallyDetectedRuntimeCompilerFlowTests": 162,
-    "testEntries": 3274
+    "staticallyDetectedRuntimeCompilerFlowTests": 163,
+    "testEntries": 3276
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1858,7 +1858,7 @@
       "integration": 1812,
       "platform/destructive": 203,
       "pure unit": 845,
-      "unclassified": 385
+      "unclassified": 387
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2079,8 +2079,8 @@
       }
     ],
     "nimTestBinaryCount": 3222,
-    "pythonTestFileCount": 52,
-    "testEntryCount": 3274
+    "pythonTestFileCount": 54,
+    "testEntryCount": 3276
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -5910,6 +5910,38 @@
         }
       ],
       "source": "tests/integration/t_dev_env_artifact.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cmd",
+            "donor",
+            "donorSrc",
+            "fetchArgs",
+            "git",
+            "originUrl",
+            "pair",
+            "probeLib",
+            "reportPath",
+            "reproBin",
+            "root",
+            "scratch",
+            "target"
+          ],
+          "line": 730,
+          "path": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "@[toolOnPath(\"cc\"), \"-o\", donor, donorSrc]))"
+        }
+      ],
+      "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim"
     },
     {
       "class": "integration",
@@ -47611,8 +47643,8 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
@@ -49406,8 +49438,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_gateway_forced_push_publishes_a_rewrite_under_a_lease.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 17,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -49655,7 +49687,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_graph_helper_draws_no_entropy_at_start_windows.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 3,
+      "staticCaseCount": 4,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68463,6 +68495,21 @@
     {
       "binary": "",
       "class": "unclassified",
+      "classificationReason": "imports `hashlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_install_ps1_verifier_handoff.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 2,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
       "classificationReason": "imports `pathlib`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
       "defines": [],
       "language": "python",
@@ -68711,7 +68758,7 @@
       "requiresReproBinary": false,
       "source": "tests/unit/test_release_native_packages.py",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 19,
+      "staticCaseCount": 21,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68847,6 +68894,21 @@
       "source": "tests/unit/test_test_group_fallback.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `subprocess`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_test_parallelism_grant.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
