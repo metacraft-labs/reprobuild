@@ -60,6 +60,7 @@
 import std/[base64, os, sequtils, strutils, tempfiles, times, unittest]
 
 import repro_test_support
+import repro_test_support/reasoned_skip
 
 proc repoRoot(): string =
   currentSourcePath().parentDir.parentDir.parentDir
@@ -1011,6 +1012,156 @@ suite "dev-shell override guards":
       checkpoint("path: url input, directory present:\n" & pathUrlPresent.output)
       check pathUrlPresent.code != 0
       check pathUrlPresent.output.contains("flake.nix declares no such input")
+
+  test "t_dev_shell_lint_gate_names_the_pin_when_an_unflakeable_sibling_is_behind_it":
+    ## The `unflakeable` finding's remedy has to match its cause.
+    ##
+    ## A sibling directory with no `flake.nix` was always reported as a
+    ## repository that is not a flake — "add a flake.nix to that repository, or
+    ## declare the pin". But a checkout that merely PREDATES the commit adding
+    ## the `flake.nix` its flake.lock pin already has presents identically on
+    ## disk. Observed: a `nim-shm-queue` checkout seven commits behind its pin
+    ## failed the pre-commit `just lint` with that remedy, while the cure was a
+    ## fast-forward, and neither remedy offered was right.
+    ##
+    ## Real git checkouts and the real gate; nothing is stubbed. The lock is a
+    ## hand-written flake.lock in nix's own indentation, which is the format
+    ## `dev_shell_flake_lock_pins` parses.
+    let gitBin = findExe("git")
+    let bash = findExe("bash")
+    if gitBin.len == 0 or bash.len == 0:
+      skip("git or bash not on PATH; this case needs real repositories and the real gate")
+    else:
+      let scratch = createTempDir("repro-devshell-unflaked-pin-", "")
+      defer: removeDirEventually(scratch)
+      let root = scratch / "repo"
+      createDir(root / "scripts" / "lib")
+      copyFile(libPath(), root / "scripts" / "lib" / "dev_shell_overrides.sh")
+      copyFile(repoRoot() / "scripts" / "lib" / "preloaded_shim_loader.sh",
+        root / "scripts" / "lib" / "preloaded_shim_loader.sh")
+      copyFile(checkScript(), root / "scripts" / "check_dev_shell_env.sh")
+      copyFile(repoRoot() / ".envrc", root / ".envrc")
+      writeFile(root / "flake.nix",
+        "{\n  inputs = {\n    nim-widget-src = {\n" &
+        "      url = \"github:metacraft-labs/nim-widget\";\n" &
+        "      flake = false;\n    };\n  };\n" &
+        "  outputs = _: { };\n}\n")
+
+      # The sibling's history: a revision with no flake.nix, then the commit
+      # that adds one. The checkout is left on the first.
+      let sibling = scratch / "nim-widget"
+      seedGitTree(gitBin, sibling, "old\n")
+      proc git(args: varargs[string]): string =
+        let res = runShell(shellCommand(@[gitBin, "-C", sibling] & @args))
+        doAssert res.code == 0, "git " & @args.join(" ") & ":\n" & res.output
+        res.output.strip()
+      discard git("rm", "-q", "flake.nix")
+      discard git("commit", "-q", "-m", "no flake yet")
+      let preFlake = git("rev-parse", "HEAD")
+      writeFile(sibling / "src.txt", "between\n")
+      gitCommitAll(gitBin, sibling, "between")
+      writeFile(sibling / "flake.nix", "{ outputs = _: { }; }\n")
+      gitCommitAll(gitBin, sibling, "add flake.nix")
+      let pin = git("rev-parse", "HEAD")
+      discard git("checkout", "-q", preFlake)
+      require not fileExists(sibling / "flake.nix")
+
+      proc writeLock(rev: string) =
+        writeFile(root / "flake.lock", "{\n  \"nodes\": {\n" &
+          "    \"nim-widget-src\": {\n      \"locked\": {\n" &
+          "        \"rev\": \"" & rev & "\"\n      }\n    },\n" &
+          "    \"root\": {\n      \"inputs\": {\n" &
+          "        \"nim-widget-src\": \"nim-widget-src\"\n      }\n    }\n" &
+          "  },\n  \"root\": \"root\"\n}\n")
+      proc gate(): CmdResult =
+        runShell(hermeticBash(@[bash,
+          root / "scripts" / "check_dev_shell_env.sh"]), cwd = root)
+
+      # 1. THE ISSUE: behind a pin that has a flake.nix. Still a failure —
+      #    the input builds from its pin while the checkout lags — but the
+      #    remedy is the fast-forward, naming the pin and the distance, and
+      #    neither of the two remedies that would be wrong.
+      writeLock(pin)
+      let behind = gate()
+      checkpoint("behind a flaked pin:\n" & behind.output)
+      check behind.code != 0
+      check behind.output.contains("has no flake.nix")
+      check behind.output.contains("2 commit(s) BEHIND that pin")
+      check behind.output.contains("merge --ff-only " & pin)
+      check not behind.output.contains("Remedy: add a flake.nix")
+
+      # 2. Fast-forwarding to the pin — the remedy named above — clears it.
+      discard git("checkout", "-q", pin)
+      let atPin = gate()
+      checkpoint("at the pin:\n" & atPin.output)
+      check atPin.code == 0
+      check atPin.output.contains("0 unreached")
+
+      # 3. Diverged: the checkout has its own commit on top of the pre-flake
+      #    revision. Not a fast-forward, and still not "add a flake.nix".
+      discard git("checkout", "-q", "-b", "local", preFlake)
+      writeFile(sibling / "src.txt", "local work\n")
+      gitCommitAll(gitBin, sibling, "local work")
+      let diverged = gate()
+      checkpoint("diverged from a flaked pin:\n" & diverged.output)
+      check diverged.code != 0
+      check diverged.output.contains("DIVERGED from that pin")
+      check diverged.output.contains("merge or rebase " & pin)
+      check not diverged.output.contains("Remedy: add a flake.nix")
+
+      # 4. The case the original remedy is for: the pin has no flake.nix
+      #    either. Unchanged.
+      writeLock(preFlake)
+      discard git("checkout", "-q", preFlake)
+      let unflaked = gate()
+      checkpoint("pin is not a flake either:\n" & unflaked.output)
+      check unflaked.code != 0
+      check unflaked.output.contains(
+        "Remedy: add a flake.nix to that repository")
+      check not unflaked.output.contains("BEHIND that pin")
+
+      # 5. A pin the checkout has not fetched: the offline check cannot tell,
+      #    so it says so and names the fetch first.
+      writeLock(repeat('1', 40))
+      let unfetched = gate()
+      checkpoint("pin not fetched:\n" & unfetched.output)
+      check unfetched.code != 0
+      check unfetched.output.contains("is not an object in that checkout")
+      check unfetched.output.contains("git -C " & sibling & " fetch")
+
+      # 6. The same "behind" shape in a PARTIAL clone, which is what workspace
+      #    checkouts are (`blob:none` against a promisor pool). The pin's
+      #    commit and trees are local but its flake.nix blob is not, and the
+      #    upstream is gone, so nothing can be fetched. Deciding "does the pin
+      #    have a flake.nix" by reading that blob fails here and reports the
+      #    pin as not a flake, i.e. the original wrong remedy; it has to be
+      #    answered from the pin's tree.
+      let upstream = scratch / "nim-widget-upstream"
+      moveDir(sibling, upstream)
+      discard runShell(shellCommand(@[gitBin, "-C", upstream, "checkout", "-q", pin]))
+      for args in [@["-C", upstream, "config", "uploadpack.allowFilter", "true"],
+                   @["clone", "-q", "--filter=blob:none", "--no-checkout",
+                     "file://" & upstream, sibling],
+                   @["-C", sibling, "checkout", "-q", preFlake]]:
+        let res = runShell(shellCommand(@[gitBin] & args))
+        doAssert res.code == 0, "git " & args.join(" ") & ":\n" & res.output
+      removeDir(upstream)
+      require not fileExists(sibling / "flake.nix")
+      # Positive control: the blob really is absent, so this case tests the
+      # partial-clone path rather than a full clone that happens to pass.
+      let flakeBlob = git("rev-parse", pin & ":flake.nix")
+      let missing = runShell(shellCommand(@[gitBin, "-C", sibling,
+        "rev-list", "--objects", "--missing=print", pin]))
+      checkpoint("objects missing from the partial clone:\n" & missing.output)
+      require missing.code == 0
+      require missing.output.contains("?" & flakeBlob)
+      writeLock(pin)
+      let partial = gate()
+      checkpoint("behind a flaked pin, partial clone:\n" & partial.output)
+      check partial.code != 0
+      check partial.output.contains("2 commit(s) BEHIND that pin")
+      check partial.output.contains("merge --ff-only " & pin)
+      check not partial.output.contains("Remedy: add a flake.nix")
 
   test "t_dev_shell_source_state_ignores_an_ambient_git_environment":
     ## The gate ran from a git hook and manufactured a failure no edit could

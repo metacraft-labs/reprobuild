@@ -315,13 +315,69 @@ else
       refresh flake.lock), or add a row to
       scripts/dev-shell-pinned-siblings.tsv saying why the pin is deliberate."
     else
-      fail "flake input '$input' has a sibling checkout at '$sibling', but that
+      # "No flake.nix in the directory" has more than one cause, and the remedy
+      # has to match the cause: a checkout that merely predates the commit
+      # adding the flake.nix its pin has is cured by a fast-forward, and
+      # "add a flake.nix" would be wrong for it. So the pin is consulted
+      # before a remedy is chosen (dev_shell_unflakeable_pin_state).
+      IFS=$'\t' read -r u_state u_pin u_behind < <(
+        dev_shell_unflakeable_pin_state "$REPO_ROOT/flake.lock" "$input" "$sibling")
+      unflakeable_head="flake input '$input' has a sibling checkout at '$sibling', but that
       directory has no flake.nix, so the flake-overrides plugin will not emit
       an --override-input for it. The input therefore builds from its
       flake.lock pin while the checkout beside it moves, and nothing else in
-      this gate can tell. Remedy: add a flake.nix to that repository, or add
-      a row to scripts/dev-shell-pinned-siblings.tsv saying why the pin is
-      deliberate."
+      this gate can tell."
+      case "$u_state" in
+        behind)
+          fail "$unflakeable_head The repository DOES have a flake.nix at the
+      revision flake.lock pins for this input ($u_pin); the checkout is
+      $u_behind commit(s) BEHIND that pin and simply predates the commit that
+      added it. Remedy: fast-forward the checkout to its pin —
+      'git -C $sibling merge --ff-only $u_pin' (or pull its branch, if that
+      contains the pin) — and re-run. Do not add a flake.nix or a row to
+      scripts/dev-shell-pinned-siblings.tsv: the repository already has one."
+          ;;
+        diverged)
+          fail "$unflakeable_head The repository DOES have a flake.nix at the
+      revision flake.lock pins for this input ($u_pin), but the checkout has
+      DIVERGED from that pin: it lacks $u_behind of the pin's commit(s),
+      including the one that added flake.nix, and carries commits of its own.
+      Remedy: merge or rebase $u_pin into $sibling, and re-run. Do not add a
+      flake.nix or a row to scripts/dev-shell-pinned-siblings.tsv: the
+      repository already has one."
+          ;;
+        worktree-deleted)
+          fail "$unflakeable_head The checkout's own HEAD has a flake.nix, and so
+      does the revision flake.lock pins ($u_pin); only the working tree lacks
+      it. Remedy: 'git -C $sibling restore flake.nix', or commit its removal
+      and then add a row to scripts/dev-shell-pinned-siblings.tsv saying why
+      the pin is deliberate."
+          ;;
+        removed-since-pin)
+          fail "$unflakeable_head The revision flake.lock pins for this input
+      ($u_pin) has a flake.nix, and the checkout contains that pin, so a
+      commit after the pin removed it. Remedy: restore the flake.nix in that
+      repository, or add a row to scripts/dev-shell-pinned-siblings.tsv
+      saying why the pin is deliberate."
+          ;;
+        unfetched)
+          fail "$unflakeable_head The revision flake.lock pins for this input
+      ($u_pin) is not an object in that checkout, so this offline check cannot
+      tell whether the repository has a flake.nix there. Remedy:
+      'git -C $sibling fetch' and re-run; if the pin has a flake.nix, the next
+      run names the fast-forward. Otherwise add a flake.nix to that
+      repository, or add a row to scripts/dev-shell-pinned-siblings.tsv saying
+      why the pin is deliberate."
+          ;;
+        *)
+          # no-pin, not-git, pin-unflaked: the repository is not a flake at its
+          # pin either (or there is no pin to consult), which is the case the
+          # original remedy was written for.
+          fail "$unflakeable_head Remedy: add a flake.nix to that repository,
+      or add a row to scripts/dev-shell-pinned-siblings.tsv saying why the pin
+      is deliberate."
+          ;;
+      esac
     fi
   done
 
