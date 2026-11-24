@@ -5845,6 +5845,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker isMainModule"),
   TestSpec(
+    source: "libs/repro_distributed_worker/tests/t_declared_output_read_refuses_a_hard_linked_file.nim",
+    binary: "build/test-bin/t_declared_output_read_refuses_a_hard_linked_file",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_distributed_worker_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_distributed_worker/tests/t_lease_floor_probe_matches_what_a_lease_maps.nim",
     binary: "build/test-bin/t_lease_floor_probe_matches_what_a_lease_maps",
     defines: @[],
@@ -23113,6 +23125,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "self-spawn marker getAppFilename"),
   TestSpec(
+    source: "tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim",
+    binary: "build/test-bin/t_auto_started_runquotad_does_not_hold_its_install_bin",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "",
+    singleReason: "suite-scope statement runs at every start-up: let repoRoot = getCurrentDir()"),
+  TestSpec(
     source: "tests/integration/t_autotools_configure_cache.nim",
     binary: "build/test-bin/t_autotools_configure_cache",
     defines: @[],
@@ -38859,5 +38883,7 @@ const pythonTestPaths*: seq[string] = @[
   "tests/unit/test_source_revision.py",
   "tests/unit/test_suite_drift_attribution.py",
   "tests/unit/test_test_group_fallback.py",
+  "tests/unit/test_test_parallelism_grant.py",
+  "tests/unit/test_verify_release_needs_no_agent.py",
   "tests/unit/test_wrapper_default_provenance.py"
 ]

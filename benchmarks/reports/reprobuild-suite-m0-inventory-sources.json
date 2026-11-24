@@ -1,11 +1,11 @@
 {
   "observedStructuralFacts": {
     "graphOwnedHelperArtifacts": 36,
-    "nimTestBinaries": 3225,
+    "nimTestBinaries": 3227,
     "pureUnitConsolidationGroups": 96,
-    "pureUnitTests": 846,
+    "pureUnitTests": 847,
     "staticallyDetectedRuntimeCompilerFlowTests": 163,
-    "testEntries": 3278
+    "testEntries": 3282
   },
   "pureUnitConsolidationCandidates": [
     {
@@ -1855,10 +1855,10 @@
   "static": {
     "classificationCounts": {
       "graph-fixture": 29,
-      "integration": 1813,
+      "integration": 1814,
       "platform/destructive": 203,
-      "pure unit": 846,
-      "unclassified": 387
+      "pure unit": 847,
+      "unclassified": 389
     },
     "graphOwnedTestArtifacts": [
       {
@@ -2078,9 +2078,9 @@
         "source": "apps/repro-trampoline/repro_trampoline.nim"
       }
     ],
-    "nimTestBinaryCount": 3225,
-    "pythonTestFileCount": 53,
-    "testEntryCount": 3278
+    "nimTestBinaryCount": 3227,
+    "pythonTestFileCount": 55,
+    "testEntryCount": 3282
   },
   "staticallyDetectedRuntimeCompilerFlows": [
     {
@@ -18619,6 +18619,23 @@
       "source": "libs/repro_deploy_agent/tests/t_repro_https_cache_end_to_end.nim",
       "sourceSuiteCount": 1,
       "staticCaseCount": 1,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "build/test-bin/t_declared_output_read_refuses_a_hard_linked_file",
+      "class": "pure unit",
+      "classificationReason": "no subprocess, network, process-global mutation or unrecognized import",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_distributed_worker"
+      ],
+      "owner": "libs/repro_distributed_worker",
+      "requiresReproBinary": false,
+      "source": "libs/repro_distributed_worker/tests/t_declared_output_read_refuses_a_hard_linked_file.nim",
+      "sourceSuiteCount": 2,
+      "staticCaseCount": 2,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -44856,6 +44873,27 @@
       "targetOs": "soAny"
     },
     {
+      "binary": "build/test-bin/t_auto_started_runquotad_does_not_hold_its_install_bin",
+      "class": "integration",
+      "classificationReason": "e2e/integration path or requires the repro binary",
+      "defines": [],
+      "language": "nim",
+      "localDependencyShape": [
+        "repro_cli_support",
+        "repro_daemon_core",
+        "repro_runquota",
+        "repro_store_daemon",
+        "repro_test_support"
+      ],
+      "owner": "tests/integration",
+      "requiresReproBinary": false,
+      "source": "tests/integration/t_auto_started_runquotad_does_not_hold_its_install_bin.nim",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
       "binary": "build/test-bin/t_autotools_configure_cache",
       "class": "integration",
       "classificationReason": "e2e/integration path or requires the repro binary",
@@ -49491,8 +49529,8 @@
       "owner": "tests/integration",
       "requiresReproBinary": true,
       "source": "tests/integration/t_gateway_forced_push_publishes_a_rewrite_under_a_lease.nim",
-      "sourceSuiteCount": 6,
-      "staticCaseCount": 17,
+      "sourceSuiteCount": 7,
+      "staticCaseCount": 19,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
@@ -68947,6 +68985,36 @@
       "source": "tests/unit/test_test_group_fallback.py",
       "sourceSuiteCount": 1,
       "staticCaseCount": 6,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `subprocess`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_test_parallelism_grant.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": false,
+      "targetOs": "soAny"
+    },
+    {
+      "binary": "",
+      "class": "unclassified",
+      "classificationReason": "imports `shutil`, which this scan does not recognize; refusing to call it pure rather than assuming it is",
+      "defines": [],
+      "language": "python",
+      "localDependencyShape": [],
+      "owner": "tests/unit",
+      "requiresReproBinary": false,
+      "source": "tests/unit/test_verify_release_needs_no_agent.py",
+      "sourceSuiteCount": 1,
+      "staticCaseCount": 3,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
