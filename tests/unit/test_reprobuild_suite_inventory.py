@@ -7568,7 +7568,7 @@ compileProfileBinary()
                 },
                 "darwin": set(),
             },
-            # Linux registers seven cases; every other host registers only the
+            # Linux registers eight cases; every other host registers only the
             # first of them, under the same name, as a skip.
             "tests/integration/t_auto_runquota_shared_per_user_daemon.nim": {
                 "linux": {
@@ -7584,6 +7584,8 @@ compileProfileBinary()
                     "mode the user cannot fix is refused",
                     "the shared per-user runquotad::the error of a daemon that "
                     "exits before listening carries its log",
+                    "the shared per-user runquotad::a daemon that refuses this "
+                    "client fails at once, quoting the refusal",
                 },
                 "darwin": set(),
             },

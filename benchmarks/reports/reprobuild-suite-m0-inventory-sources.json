@@ -44887,7 +44887,7 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_auto_runquota_shared_per_user_daemon.nim",
       "sourceSuiteCount": 2,
-      "staticCaseCount": 8,
+      "staticCaseCount": 9,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },

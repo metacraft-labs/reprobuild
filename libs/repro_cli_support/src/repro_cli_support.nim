@@ -28674,6 +28674,17 @@ when not defined(windows):
     # start arm registers, and that the adopting arm provably does not.
     trustDaemonWeSpawned(result, "runquotad", tdcNoContent)
 
+  proc refusedUserDaemonMessage(socket, refusal: string): string =
+    ## The error for a per-user daemon that refuses this client at `Hello`.
+    ## It names the socket and quotes the daemon, and its remedies leave the
+    ## daemon alone: it is serving every other client of this user.
+    "runquotad at " & socket & " refused this client: " & refusal & ". " &
+      "The daemon is running and serving its other clients; waiting for it " &
+      "or restarting it would not change its answer. Run with a runquotad " &
+      "of your own (start one on a socket of your choosing and name it with " &
+      "`RUNQUOTA_SOCKET=<its socket> RUNQUOTA_ENDPOINT_SCOPE=private`), or " &
+      "without RunQuota (`" & RunQuotaBypassFlag & "`)"
+
   proc adoptOrStartUserRunQuota(runquotad: string): owned(Process) =
     ## THE SHARED PER-USER DAEMON (reprobuild-pm
     ## `spec/RunQuota-Host-Configuration.md`, "The shared per-user daemon
@@ -28710,6 +28721,14 @@ when not defined(windows):
     ## 3. A daemon holds the lock and does not answer: it is shutting down
     ##    (idle exit, retirement), or was started by hand and is not yet
     ##    listening. Wait 50 ms and repeat.
+    ##
+    ## A daemon that answers the `Hello` with a REFUSAL is in none of the
+    ## three: it is alive and serving its other clients, and refuses this
+    ## one. Waiting does not change its answer and stopping it would disrupt
+    ## every other client and not help, so the loop fails at once, quoting
+    ## the daemon's diagnostic (`probeRunQuotaDaemon`, `rdaRefused`). Before
+    ## the probe kept the two apart, a refusal read as case 3: the loop
+    ## waited out the deadline and then advised stopping the daemon.
     let idleSeconds = autoRunQuotaIdleExitSeconds()
     let directory = userEndpointDir()
     ensureUserEndpointDir(directory)
@@ -28734,7 +28753,13 @@ when not defined(windows):
           present = true
         except OSError:
           present = false
-        if present and isRunQuotaDaemonReachable():
+        let probe =
+          if present: probeRunQuotaDaemon()
+          else: RunQuotaDaemonProbe(answer: rdaUnreachable)
+        if probe.answer == rdaRefused:
+          raise newException(OSError, refusedUserDaemonMessage(socket,
+            probe.refusal))
+        if probe.answer == rdaAnswered:
           let report = decideRunQuotaHandover(runquotad)
           if report.note.len > 0:
             stderr.writeLine("repro: note: " & report.note)
