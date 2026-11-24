@@ -469,9 +469,44 @@ suite "w2_activation_surfaces_declare_producer_ops":
     check reasons.contains("BUILD ACTION")
 
   test "activation CLI surfaces return child exit codes":
+    # Every CLI call of the three activation entry points that run a child
+    # (`repro develop <cmd>`, `repro exec` / `repro shell -c`, and the
+    # interactive `repro shell`) must RETURN that entry point's result: the
+    # child's exit status is the CLI's. A call whose result is discarded or
+    # replaced makes `repro exec -- sh -c 'exit 7'` exit 0. Spelled
+    # `return <entry>(` on one line; a `result =` or tail-expression form
+    # is reported, so rewrite it to that spelling rather than widen this.
+    # Reproduced red by changing the `repro exec` call to `discard`.
+    #
+    # The audit names only the callee, never the arguments. It used to look
+    # for whole call lines, and a rename of `repro exec`'s `parsed.command`
+    # to `command` (behaviour unchanged) turned it red although the exit
+    # status was still returned.
+    # For `repro exec` the behaviour itself is exercised end to end by
+    # `tests/e2e/dev-env/t_e2e_repro_exec_shell.nim`,
+    # "e2e_repro_exec_exit_status_and_cwd" (`exit 17` comes back as 17);
+    # `repro develop <cmd>` and the interactive shell have only this audit.
     let root = findRepoRoot()
-    let content = readFile(root / "libs" / "repro_cli_support" / "src" / "repro_cli_support.nim")
-    check content.contains("return runActivatedCommand(artifact, \"\", command, canonicalProjectRoot)")
-    check content.contains("return execActivatedCommand(artifact, edge.artifactPath, parsed.command,")
-    check content.contains("return spawnActivatedShell(artifact, edge.artifactPath, shellPath,")
+    let codeLines = nimSourceCodeOnly(readFile(root / "libs" /
+      "repro_cli_support" / "src" / "repro_cli_support.nim")).splitLines()
+    for entry in ["runActivatedCommand(", "execActivatedCommand(",
+                  "spawnActivatedShell("]:
+      var calls = 0
+      for index, line in codeLines:
+        let at = line.find(entry)
+        if at < 0:
+          continue
+        # A longer identifier ending in the entry point's name is not a call
+        # of it.
+        if at > 0 and (line[at - 1].isAlphaNumeric or line[at - 1] == '_'):
+          continue
+        inc calls
+        if not line.strip().startsWith("return " & entry):
+          checkpoint("repro_cli_support.nim:" & $(index + 1) & " calls " &
+            entry & " without returning its exit status: " & line.strip())
+          fail()
+      # An audit of zero call sites passes vacuously.
+      if calls == 0:
+        checkpoint("no call of " & entry & " found in repro_cli_support.nim")
+        fail()
 
