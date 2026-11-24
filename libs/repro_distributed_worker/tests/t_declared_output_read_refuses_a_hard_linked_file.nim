@@ -19,9 +19,8 @@
 
 import std/[os, strutils, tempfiles, unittest]
 
-import repro_distributed_worker/receiver
-
 import repro_test_support/reasoned_skip
+import repro_distributed_worker/receiver
 
 when defined(posix):
   suite "a declared output with another hard link is not read":
@@ -56,6 +55,4 @@ when defined(posix):
 else:
   suite "a declared output with another hard link is not read":
     test "hard link to a file outside the worktree is refused":
-      skip("platform N/A: the link-count refusal is the POSIX reader's " &
-        "(`fstat` st_nlink); the Windows reader checks file attributes " &
-        "and has no link-count rule to exercise")
+      skip("not a POSIX host; link(2) hard links are what this case drives")
