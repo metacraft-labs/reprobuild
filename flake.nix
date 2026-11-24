@@ -1003,8 +1003,16 @@
     # Riding along: a closure environment is no longer moved while still
     # live (upstream #26256, with a test), and a macro expansion's sourcemap
     # maps each statement to its own line.
+    #
+    # Advanced from 85f8e3c2 to 0d9a9dcf: `nimpretty` (and so `just format`)
+    # accepts every source the compiler's parser accepts, including routine
+    # bodies that are only a doc comment and inline `#[...]#` comments, and
+    # is at a fixed point on its own output, over every Nim source in this
+    # repository. Before it, `just format` refused 24 of them and was not
+    # idempotent on 23 more.
+    # Riding along: nimsuggest runs a NimScript config once.
     nim-fork-src = {
-      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=85f8e3c25545558cc753d6e0b56ec35c787a4405";
+      url = "git+https://github.com/metacraft-labs/nim?ref=codetracer&rev=0d9a9dcf2b88c30a69ede9978481e23d2c89ce87";
       flake = false;
     };
     nim-csources-src = {
