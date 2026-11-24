@@ -47850,7 +47850,7 @@
       "requiresReproBinary": false,
       "source": "tests/integration/t_dev_shell_override_guards.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 24,
+      "staticCaseCount": 25,
       "staticallyDetectedRuntimeCompilerFlow": false,
       "targetOs": "soAny"
     },
