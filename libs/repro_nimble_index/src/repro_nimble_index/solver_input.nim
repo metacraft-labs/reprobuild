@@ -24,6 +24,7 @@ import std/[algorithm, options, sequtils, sets, strutils, tables, times]
 import repro_domain_types/nimble_index
 import repro_nimble_reader/conditions
 import repro_solver/version_constraints
+import repro_solver/nimble_versions
 from repro_solver/version_encoder import DependencyDecl, newDependency,
   rangeAdmits
 
@@ -47,8 +48,9 @@ type
       ## a `gitlinks` record without a `submodules` list (from a generator
       ## before submodule sources)
     exVersionShape = "version-shape"
-      ## a fourth or later non-zero component: the solver's versions have
-      ## three
+      ## no longer produced: a tag version of any number of components is
+      ## offered and compared as Nimble compares it (NPC-AREQ6). Kept so the
+      ## reason's spelling stays reserved
     exLabel = "label"
       ## a tag that is not a version: reachable by exact commit only
     exPseudoVersion = "pseudo-version"
@@ -79,6 +81,11 @@ type
     exSnapshotSuperseded = "snapshot-superseded"
       ## a snapshot of a package that has a newer one: only the newest
       ## snapshot is offered (NPC-AREQ31 item 5)
+    exRevivedOrigin = "revived-origin"
+      ## a record first seen after the package's origin was revived -- it
+      ## answered again holding none of the recorded commits (NPC-AREQ4
+      ## `revived`) -- which the project has not accepted: a revival is
+      ## reviewed like a repoint (NPC-AREQ16, threat model G41)
 
   Exclusion* = object
     kind*: ExclusionKind
@@ -143,6 +150,15 @@ type
       ## the requirement chain a diagnostic prints; ``solverInput``'s
       ## ``roots`` names are enough to compute the closure
 
+  AliasCandidate* = object
+    ## An alias the closure resolved whose registry entry now names another
+    ## package than its recorded target (NPC-AREQ3 `alias-retargeted`): the
+    ## solve keeps the recorded target, and the new one is a candidate the
+    ## project accepts explicitly (NPC-AREQ16).
+    alias*: string     ## the alias as the index spells it
+    target*: string    ## the recorded target, which the solve takes
+    candidate*: string ## the registry's new target, not taken
+
   RootRequirement* = object
     requirer*: string ## who states it (the project's package)
     name*: string     ## the Nimble name as written
@@ -165,6 +181,9 @@ type
     reachedBy*: Table[string, seq[ReachedBy]]
       ## nameKey of a name as reached (canonical, missing or a URL's
       ## unlisted name) -> the requirements that reached it, in order
+    aliasCandidates*: seq[AliasCandidate]
+      ## every alias the closure resolved that has a candidate target,
+      ## sorted by alias
 
 proc offered*(c: NimbleCandidate): bool = c.exclusions.len == 0
 
@@ -202,21 +221,34 @@ proc isNimGateIdentity*(name: string): bool =
   name.endsWith("]") and NimGateMarker in name
 
 proc solverVersion*(v: RecordVersion; text: var string): bool =
-  ## The solver's three-component version text for a tag version: missing
-  ## components are 0, as Nimble compares them; trailing zero components
-  ## beyond the third are dropped. False for any other shape.
+  ## The solver version text of a tag version (NPC-AREQ6, "Versions with
+  ## any number of components"). When every component after the third is
+  ## zero: three components, missing ones 0 (`v1.2` is `1.2.0`, `v1.0.0.0`
+  ## is `1.0.0`), as before Nimble's longer versions were compared. When
+  ## one of them is not: every component of the tag (`v0.7.0.8.0` is
+  ## `0.7.0.8.0`). The solve compares them in Nimble's order
+  ## (``repro_solver/nimble_versions``), so two spellings of one version
+  ## (`0.6.0.3`, `0.6.0.3.0`) are the same version (``equalVersionExclusions``).
+  ## False for any other kind.
   if v.kind != rvkTag or v.components.len == 0:
     return false
+  var long = false
   for i in 3 ..< v.components.len:
     if v.components[i] != 0:
-      return false
+      long = true
   var c = v.components
+  if long:
+    text = nimbleVersionText(c)
+    return true
   while c.len < 3: c.add 0
-  for x in c[0 .. 2]:
-    if x > uint64(high(int32)):
-      return false
   text = $c[0] & "." & $c[1] & "." & $c[2]
   true
+
+proc nimbleVersionOf*(version: string): Option[NimbleVersion] =
+  ## A candidate's solver version in Nimble's order; none for a `#` version
+  ## or a label.
+  try: some(parseNimbleVersion(version))
+  except ESemverParse: none(NimbleVersion)
 
 proc pseudoVersionText*(v: RecordVersion; commit: string): string =
   ## The solver version a pseudo-version record is offered under: spelled
@@ -272,7 +304,11 @@ proc nimVersionValueOf*(text: string): Option[NimVersionValue] =
   if parseNimVersionValue(text, v): some(v) else: none(NimVersionValue)
 
 proc solverRequirement(e: RequirementEntry;
-                       exclusions: var seq[Exclusion]): SolverRequirement =
+                       exclusions: var seq[Exclusion];
+                       toolchain = false): SolverRequirement =
+  ## ``toolchain``: a `nim` range, which constrains the `nim` toolchain
+  ## package and is read as a semver range; any other range constrains a
+  ## `nimble:` package and is read in Nimble's order (NPC-AREQ6).
   result = SolverRequirement(entry: e, features: e.features)
   if e.targetKind == rtPackage:
     result.package = e.target
@@ -280,7 +316,8 @@ proc solverRequirement(e: RequirementEntry;
   of rvAny: discard
   of rvRange:
     try:
-      discard parseSemverRange(e.constraint)
+      if toolchain: discard parseSemverRange(e.constraint)
+      else: discard parseNimbleRange(e.constraint)
       result.range = e.constraint
     except ESemverParse as err:
       exclusions.add Exclusion(kind: exUntranslatable,
@@ -355,12 +392,8 @@ proc candidate*(pkg: PackageEnvelope; r: VersionRecord;
   case r.version.kind
   of rvkTag:
     var t = ""
-    if solverVersion(r.version, t):
-      result.version = t
-    else:
-      result.exclusions.add Exclusion(kind: exVersionShape,
-        detail: "tag " & r.version.tag & " has " & $r.version.components.len &
-          " components; the solver's versions have three")
+    discard solverVersion(r.version, t)
+    result.version = t
   of rvkLabel:
     result.exclusions.add Exclusion(kind: exLabel,
       detail: "tag " & r.version.tag & " is not a version")
@@ -385,7 +418,7 @@ proc candidate*(pkg: PackageEnvelope; r: VersionRecord;
     let t = decideOn(e.condition, p)
     if t != tFalse:
       var ignored: seq[Exclusion]
-      var s = solverRequirement(e, ignored)
+      var s = solverRequirement(e, ignored, toolchain = true)
       if ignored.len > 0:
         result.exclusions.add ignored
       if t == tTrue:
@@ -413,12 +446,24 @@ proc equalVersionExclusions*(cs: var seq[NimbleCandidate]) =
   ##
   ## Only records still offered take part, so an unreadable `1.0.0` beside a
   ## readable `v1.0` leaves `v1.0` offered.
-  var byVersion = initOrderedTable[string, seq[int]]()
+  # Nimble equality (NPC-AREQ6): versions are grouped by Nimble's order, so
+  # trailing zero components never matter (`0.6.0.3` and `0.6.0.3.0` are
+  # one version). Each group is then put back in record order.
+  var tags: seq[(NimbleVersion, int)]
   for i, c in cs:
     if c.offered and c.record.version.kind == rvkTag:
-      byVersion.mgetOrPut(c.version, @[]).add i
-  for v, idx in byVersion:
+      tags.add (c.record.version.components, i)
+  tags.sort(proc (a, b: (NimbleVersion, int)): int = cmpNimble(a[0], b[0]))
+  var groups: seq[seq[int]]
+  for k, t in tags:
+    if k > 0 and cmpNimble(tags[k - 1][0], t[0]) == 0:
+      groups[^1].add t[1]
+    else:
+      groups.add @[t[1]]
+  for g in groups.mitems: g.sort()
+  for idx in groups:
     if idx.len < 2: continue
+    let v = cs[idx[0]].version
     var commits: seq[string]
     for i in idx:
       if cs[i].record.commit notin commits: commits.add cs[i].record.commit
@@ -509,13 +554,36 @@ proc acceptedOrigin*(pkg: PackageEnvelope; options: NimbleSolveOptions): int =
     return -1
   if pkg.origins.len > 0: 0 else: -1
 
+const AcceptingNotImplemented* =
+  "accepting another origin is not implemented yet"
+    ## The remedy every unaccepted origin's exclusion ends with: the
+    ## acceptance path (a `[[policy]]` naming the index, or the project's
+    ## own `[[override]]`, NPC-AREQ16) is not built.
+
 proc candidatesOf*(pkg: PackageEnvelope; p: NimblePlatform;
                    options = NimbleSolveOptions(excludeNewer: -1)):
     seq[NimbleCandidate] =
   let accepted = acceptedOrigin(pkg, options)
   for r in pkg.versions:
     var c = candidate(pkg, r, p, options)
-    if pkg.origins.len > 1 and int(r.origin) != accepted:
+    if pkg.origins.len > 1 and int(r.origin) != accepted and
+        int(r.origin) < pkg.origins.len and
+        pkg.origins[int(r.origin)].revivedAt != 0:
+      let o = pkg.origins[int(r.origin)]
+      c.exclusions.add Exclusion(kind: exRevivedOrigin,
+        detail: "first seen after " & originUrl(o) & " was revived " &
+          formatTime(int64(o.revivedAt)) & " (it answered again holding " &
+          "none of the recorded commits); the project takes " & pkg.name &
+          " from " & (if accepted >= 0: originUrl(pkg.origins[accepted]) &
+                        (if pkg.origins[accepted].revivedAt != 0:
+                           " as revived " &
+                             formatTime(int64(pkg.origins[accepted].revivedAt))
+                         else: " as recorded before the revival")
+                      else: "an origin this index does not record") &
+          ". A revived origin is reviewed like a repoint: the project keeps " &
+          "the origin the lock records (or, with no lock row, the one it had " &
+          "first) until it accepts the new one; " & AcceptingNotImplemented)
+    elif pkg.origins.len > 1 and int(r.origin) != accepted:
       let theirs = if int(r.origin) < pkg.origins.len:
                      originUrl(pkg.origins[int(r.origin)]) else: "?"
       c.exclusions.add Exclusion(kind: exOtherOrigin,
@@ -523,8 +591,8 @@ proc candidatesOf*(pkg: PackageEnvelope; p: NimblePlatform;
           " from " & (if accepted >= 0: originUrl(pkg.origins[accepted])
                       else: "an origin this index does not record") &
           ". A repointed name keeps the origin the lock records (or, with no " &
-          "lock row, the one it had before the repoint); accepting another " &
-          "origin is not implemented yet")
+          "lock row, the one it had before the repoint); " &
+          AcceptingNotImplemented)
     result.add c
   equalVersionExclusions(result)
   snapshotExclusions(result, accepted, pkg.origins.len)
@@ -659,6 +727,8 @@ proc solverInput*(idx: var NimbleIndex; roots: openArray[string];
     ## canonical key -> candidates whose requirements were followed
   var missing = initHashSet[string]()
   var urls = initHashSet[string]()
+  var nameMap: Option[NimbleNameMap]
+  var candidates = initTable[string, AliasCandidate]()
   for r in roots:
     var by = ReachedBy(requirer: "the project", requirement: "nimble:" & r)
     for rr in options.roots:
@@ -698,6 +768,15 @@ proc solverInput*(idx: var NimbleIndex; roots: openArray[string];
       continue
     let canon = found.package.name
     let ck = nameKey(canon)
+    if found.alias.len > 0 and nameKey(found.alias) notin candidates:
+      # NPC-AREQ3: the alias resolves to its recorded target; a candidate
+      # the registry names now is reported, never taken. Only a solve that
+      # meets an alias reads the name map.
+      if nameMap.isNone: nameMap = some(loadNameMap(idx))
+      for e in nameMap.get.entries:
+        if nameKey(e.name) == nameKey(found.alias) and e.candidate.len > 0:
+          candidates[nameKey(found.alias)] = AliasCandidate(
+            alias: e.name, target: e.target, candidate: e.candidate)
     result.canonical[key] = canon
     result.canonical[ck] = canon
     if ck notin byKey:
@@ -748,6 +827,18 @@ proc solverInput*(idx: var NimbleIndex; roots: openArray[string];
   result.missing.sort()
   for u in urls: result.urlTargets.add u
   result.urlTargets.sort()
+  for _, c in candidates: result.aliasCandidates.add c
+  result.aliasCandidates.sort(proc (a, b: AliasCandidate): int =
+    cmp(nameKey(a.alias), nameKey(b.alias)))
+
+proc aliasCandidateNotes*(input: NimbleSolverInput): seq[string] =
+  ## One line per alias the closure resolved that the registry has
+  ## retargeted (NPC-AREQ3, NPC-AREQ16): the solve took the recorded target.
+  for c in input.aliasCandidates:
+    result.add "nimble:" & c.alias & " resolves to nimble:" & c.target &
+      ", the target it was first recorded with; the registry now names " &
+      "nimble:" & c.candidate & " (alias-retargeted), a separate candidate " &
+      "the project accepts explicitly: " & AcceptingNotImplemented
 
 proc packageOf*(input: NimbleSolverInput; name: string): int =
   ## The index in ``input.packages`` of the package ``name`` reached (by

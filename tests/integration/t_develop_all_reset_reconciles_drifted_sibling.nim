@@ -15,6 +15,9 @@
 ##   2. ``repro develop --all --reset`` reconciles the SAME drifted checkout:
 ##      exit 0, reports it "reset", and its HEAD is now the EXACT locked SHA.
 ##   3. The override file records the reconciled node -> local path.
+##   4. Once in develop mode, a drifted checkout is left alone (and the
+##      output names --reset) without --reset, and is reset to the locked SHA
+##      with it.
 ##
 ## Falsifiability: if --reset did not reset, (2)'s exact-SHA assertion fails; if
 ## the default silently overwrote, (1)'s exit-1 fails.
@@ -174,3 +177,23 @@ suite "L1: repro develop --all --reset reconciles a drifted sibling":
       # the raw form was an assertion bug; on POSIX the two coincide.
       check ("local_path = \"" & tomlBasicString(deps / "liba") &
         "\"") in ov
+
+      # ---- (4) In develop mode now, the checkout drifts again (a user's
+      #      `git checkout`, a CI step moving it). Without --reset it is left
+      #      alone; with --reset it goes back to the lock. Before the fix the
+      #      develop-mode entry was reported "no change" even under --reset
+      #      (PLAT-79 on m3: nim-agents-isonim-viewmodels left at 4c0f39a while
+      #      the lock pinned 6afd343).
+      check git(gitBin, deps / "liba", "checkout -q " & tipSha).code == 0
+      let kept = run(repro & " develop --all --into=" & q(deps) &
+        " --tool-provisioning=path", cwd = repo)
+      checkpoint(kept.output)
+      check kept.code == 0
+      check git(gitBin, deps / "liba", "rev-parse HEAD").output.strip() == tipSha
+      check "--reset" in kept.output
+      let resetAgain = run(repro & " develop --all --reset --into=" & q(deps) &
+        " --tool-provisioning=path", cwd = repo)
+      checkpoint(resetAgain.output)
+      check resetAgain.code == 0
+      check git(gitBin, deps / "liba", "rev-parse HEAD").output.strip() ==
+        lockedSha
