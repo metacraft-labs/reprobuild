@@ -4,7 +4,7 @@
     "nimTestBinaries": 3221,
     "pureUnitConsolidationGroups": 96,
     "pureUnitTests": 845,
-    "staticallyDetectedRuntimeCompilerFlowTests": 161,
+    "staticallyDetectedRuntimeCompilerFlowTests": 162,
     "testEntries": 3273
   },
   "pureUnitConsolidationCandidates": [
@@ -5910,6 +5910,38 @@
         }
       ],
       "source": "tests/integration/t_dev_env_artifact.nim"
+    },
+    {
+      "class": "integration",
+      "matches": [
+        {
+          "assignedCommandVariable": "",
+          "commandVariableExecuted": false,
+          "directExecutionLine": true,
+          "executedVariables": [
+            "cmd",
+            "donor",
+            "donorSrc",
+            "fetchArgs",
+            "git",
+            "originUrl",
+            "pair",
+            "probeLib",
+            "reportPath",
+            "reproBin",
+            "root",
+            "scratch",
+            "target"
+          ],
+          "line": 730,
+          "path": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
+          "patterns": [
+            "cc"
+          ],
+          "snippet": "@[toolOnPath(\"cc\"), \"-o\", donor, donorSrc]))"
+        }
+      ],
+      "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim"
     },
     {
       "class": "integration",
@@ -47591,8 +47623,8 @@
       "requiresReproBinary": true,
       "source": "tests/integration/t_dev_shell_one_glibc_reaches_subprocesses.nim",
       "sourceSuiteCount": 1,
-      "staticCaseCount": 6,
-      "staticallyDetectedRuntimeCompilerFlow": false,
+      "staticCaseCount": 7,
+      "staticallyDetectedRuntimeCompilerFlow": true,
       "targetOs": "soAny"
     },
     {
