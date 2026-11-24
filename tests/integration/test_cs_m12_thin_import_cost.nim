@@ -121,22 +121,6 @@ let scratchRoot = getTempDir() /
 type NimRun = tuple[ok: bool; output: string; seconds: float;
                     modules: seq[string]]
 
-proc processedModules(output: string): seq[string] =
-  ## The paths ``--hint:Processing:on --processing:filenames`` names, each
-  ## once: ``Hint: >> <importer>: import: <path> [Processing]`` (or
-  ## ``include:``).
-  const Suffix = " [Processing]"
-  for line in output.splitLines:
-    if not line.endsWith(Suffix):
-      continue
-    for marker in [": import: ", ": include: "]:
-      let at = line.find(marker)
-      if at >= 0:
-        let path = line[at + marker.len ..< line.len - Suffix.len]
-        if path notin result:
-          result.add(path)
-        break
-
 proc nimRun(project, main, modeFlag: string; outDir = ""): NimRun =
   ## ``nim c`` of ``project/<main>`` into ``outDir`` (a fresh nimcache and
   ## the binary), or ``nim check`` of it when ``outDir`` is empty: timed,
@@ -154,7 +138,7 @@ proc nimRun(project, main, modeFlag: string; outDir = ""): NimRun =
   let started = epochTime()
   let (output, code) = execCmdEx(quoteShellCommand(args),
     workingDir = project)
-  (code == 0, output, epochTime() - started, processedModules(output))
+  (code == 0, output, epochTime() - started, nimProcessedModules(output))
 
 proc errorLines(output: string): string =
   for line in output.splitLines:

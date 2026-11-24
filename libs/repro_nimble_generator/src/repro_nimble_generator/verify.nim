@@ -72,7 +72,10 @@ proc compareIndexes*(published, repeated: IndexObjectSource;
   for (f, x, y) in [("generator", a.root.generator, b.root.generator),
                     ("source_set", $a.root.sourceSet, $b.root.sourceSet),
                     ("generated_at", $a.root.generatedAt, $b.root.generatedAt),
-                    ("shard_bits", $a.root.shardBits, $b.root.shardBits)]:
+                    ("shard_bits", $a.root.shardBits, $b.root.shardBits),
+                    ("full_history", $a.root.fullHistory, $b.root.fullHistory),
+                    ("last_full_check", $a.root.lastFullCheck,
+                     $b.root.lastFullCheck)]:
     if x != y: diff("", f, x, y)
   var names = initHashSet[string]()
   for n in a.envelopes.keys: names.incl n
@@ -208,6 +211,9 @@ proc verifyIndex*(indexDir: string; sourceSet: SourceSet;
   var cfg = base
   cfg.sourceSet = sourceSet
   cfg.generatedAt = root.generatedAt
+  # The same history check the published generation ran (its root says
+  # which), so a full-check generation is compared like with like.
+  cfg.historyMode = if root.fullHistory: hmFull else: hmPerGeneration
   cfg.previousIndex = previousIndex
   cfg.stateDir = stateDir
   cfg.outputDir = ""

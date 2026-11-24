@@ -40,6 +40,31 @@ const
     ## schema exactly when it holds a snapshot, so a reader from before
     ## snapshots refuses it as an unknown schema instead of reading a kind
     ## it does not know.
+  NimbleShardHistorySchema* = 5'u16
+    ## The shard schema whose package origins carry ``revivedAt`` (an
+    ## origin entry that stands for a revival, NPC-AREQ4 `revived`) and
+    ## whose observations carry ``reported`` (the recorded commits a
+    ## `history-rewritten` event has named, so a later check does not name
+    ## them again). Its version records are schema 4's. A shard is written
+    ## in this schema exactly when one of its origins is a revival or one
+    ## of its observations lists a reported commit, so a reader from before
+    ## revivals refuses it as an unknown schema instead of offering a
+    ## revived origin's records as the origin's own.
+  NimbleRootHistorySchema* = 2'u16
+    ## The root schema that records the history-check mode of the
+    ## generation (``fullHistory``) and when the last full history check
+    ## ran (``lastFullCheck``, NPC-AREQ4). A root is written in this schema
+    ## exactly when ``lastFullCheck`` is not 0.
+  NimbleNameMapCandidatesSchema* = 2'u16
+    ## The name-map schema whose entries carry ``candidate``: the target
+    ## the registry names now for an alias it has retargeted, kept beside
+    ## the alias's recorded target (NPC-AREQ3). A name map is written in
+    ## this schema exactly when one of its aliases has a candidate.
+  NimbleEventsRevivalSchema* = 2'u16
+    ## The events schema whose event kind may be ``revived`` or
+    ## ``alias-retargeted`` (NPC-AREQ4). Same layout as schema 1; an events
+    ## object is written in this schema exactly when it holds such an event,
+    ## so a reader from before them refuses it by its schema check.
 
   RootTypeId* = 0x1201'u16      ## RBSZ type id of a root object.
   ShardTypeId* = 0x1202'u16     ## RBSZ type id of a shard.
@@ -366,6 +391,13 @@ type
     url*: string
     subdir*: string
     vcs*: OriginVcs
+    revivedAt*: uint64
+      ## 0 for an origin as the registry named it. Otherwise the generation
+      ## time of the `revived` event (NPC-AREQ4) this entry stands for: the
+      ## same remote, answering again with none of the recorded commits.
+      ## The versions first seen after the revival name this entry, so the
+      ## solve tells them apart from the origin's versions before it
+      ## (NPC-AREQ16). Shard schema 5 only.
 
   PackageEnvelope* = object
     ## One package: its canonical name, every origin it has had (in the
@@ -415,6 +447,11 @@ type
     head*: string            ## the commit `HEAD` names; may be empty
     tags*: seq[ObservedTag]  ## strictly ascending by name
     held*: seq[HeldVersion]  ## strictly ascending by ``heldSortKey``
+    reported*: seq[string]
+      ## recorded commits a `history-rewritten` event has named and that no
+      ## later history check found on a branch again, strictly ascending:
+      ## a check does not name them again (NPC-AREQ4, "reported once").
+      ## Shard schema 5 only.
 
   NimbleShard* = object
     shardBits*: uint8
@@ -446,10 +483,21 @@ type
     shards*: seq[ShardRef] ## strictly ascending by bucket; empty buckets absent
     nameMap*: ObjectRef
     events*: ObjectRef
+    fullHistory*: bool
+      ## this generation ran the full history check (NPC-AREQ4): root
+      ## schema 2 only
+    lastFullCheck*: uint64
+      ## the generation time of the last generation that ran the full
+      ## history check, this one included; 0 when none has (root schema 1)
 
   NameEntry* = object
     name*: string
     target*: string ## empty for a canonical name; the canonical name for an alias
+    candidate*: string
+      ## for an alias the registry now points at another package than its
+      ## recorded ``target``: that package, a separate candidate a project
+      ## accepts explicitly (NPC-AREQ3, NPC-AREQ16). Empty otherwise. Name
+      ## map schema 2 only.
 
   NimbleNameMap* = object
     entries*: seq[NameEntry] ## sorted by ``nameKey`` of the name
@@ -460,6 +508,10 @@ type
     oeHistoryRewritten = "history-rewritten"
     oeGone = "gone"
     oeTagRemoved = "tag-removed"
+    oeRevived = "revived"
+      ## events schema 2 only
+    oeAliasRetargeted = "alias-retargeted"
+      ## events schema 2 only
 
   OriginEvent* = object
     kind*: OriginEventKind
