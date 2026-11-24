@@ -12,11 +12,27 @@ mkdir -p "$scratch/tree/"{scripts,apps,libs,tests} "$scratch/bin"
 cp "$repo/scripts/format_sources.sh" "$scratch/tree/scripts/"
 printf '{}\n' >"$scratch/tree/flake.nix"
 cp "$repo/libs/repro_cli_support/src/repro_cli_support.nim" "$scratch/real.nim"
-"$real" --out:"$scratch/formatted.nim" "$scratch/real.nim"
+# The CLI-support monolith is the largest source in the tree and the one the
+# formatter has refused before with "invalid indentation": the layouter
+# rendered a rejoined line break as a blank line with its continuation in
+# column 0, and laid a `proc` body passed inside a call out at the level of
+# the enclosing field. The formatter must accept it, keep its
+# parsed meaning, and be at a fixed point on its own output, or `just format`
+# followed by `just format --check` reports the file again.
+if ! "$real" --out:"$scratch/formatted.nim" "$scratch/real.nim"; then
+  echo "FAIL: formatter refused the CLI-support module" >&2; exit 1
+fi
 if grep -q orstderrPolicy "$scratch/formatted.nim"; then
   echo "FAIL: formatter joined word operator and operand" >&2; exit 1
 fi
 "$real" --checkEquivalent:"$scratch/real.nim" "$scratch/formatted.nim"
+if ! "$real" --out:"$scratch/reformatted.nim" "$scratch/formatted.nim"; then
+  echo "FAIL: formatter refused its own output for the CLI-support module" >&2
+  exit 1
+fi
+if ! cmp "$scratch/formatted.nim" "$scratch/reformatted.nim"; then
+  echo "FAIL: formatting the CLI-support module is not idempotent" >&2; exit 1
+fi
 cat >"$scratch/bin/nimpretty" <<'WRAPPER'
 #!/usr/bin/env bash
 case "$1" in
