@@ -365,6 +365,7 @@ libs/repro_cli_support/tests/t_m5_peer_cache_build_wiring.nim	nim	4
 libs/repro_cli_support/tests/t_m9r41_infra_install_root.nim	nim	22
 libs/repro_cli_support/tests/t_m9r74_resolve_canonical_execroot.nim	nim	11
 libs/repro_cli_support/tests/t_materialized_publication_respects_target_selection.nim	nim	4
+libs/repro_cli_support/tests/t_materialized_restore_stages_under_a_private_name.nim	nim	4
 libs/repro_cli_support/tests/t_nimble_index_catalog_import.nim	nim	5
 libs/repro_cli_support/tests/t_nimble_index_git_source_sizes_before_reading.nim	nim	3
 libs/repro_cli_support/tests/t_partition_history_key_ignores_windows_exe_suffix.nim	nim	2
