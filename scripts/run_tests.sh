@@ -302,6 +302,8 @@ esac
 # TMPDIR: the socket path must fit sun_path.
 # shellcheck source=scripts/lib/runquota_test_endpoint.sh
 . "${repo_root}/scripts/lib/runquota_test_endpoint.sh"
+# shellcheck source=scripts/lib/test_process_memory_limit.sh
+. "${repo_root}/scripts/lib/test_process_memory_limit.sh"
 REPRO_TEST_RUNQUOTA_DIR=""
 case "$(uname -s)" in
   MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -918,10 +920,13 @@ if [[ -n "${ct_test_runner}" && -x "${ct_test_runner}" ]]; then
   # No `--catalog-write`: this is a different program with a different CLI.
   # The inventory below therefore probes for itself on this branch, exactly
   # as it did before the runner learned to publish.
-  timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${ct_test_runner}" run \
-    --bin-dir=build/test-bin \
-    --summary-json=test-logs/parallel-run.json \
-    --results-dir=test-logs/results || nim_phase_status=$?
+  # The subshell scopes the per-process memory limit to the test phase: a
+  # runaway case dies of its own failed allocation, not of the host's OOM killer.
+  ( repro_test_apply_process_data_limit || exit $?
+    exec timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${ct_test_runner}" run \
+      --bin-dir=build/test-bin \
+      --summary-json=test-logs/parallel-run.json \
+      --results-dir=test-logs/results ) || nim_phase_status=$?
 else
   printf 'ct-test-runner not built; falling back to M3 internal runner (overall timeout %s)\n' \
     "${RUNNER_TIMEOUT}" >&2
@@ -934,14 +939,15 @@ else
   # already happened by the time the file is written, and the file is written
   # before the first case executes, so even a runner that later wedges or is
   # cut by RUNNER_TIMEOUT still leaves the inventory a usable catalog.
-  timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
-    --no-build \
-    --threads=${REPROBUILD_TEST_THREADS} \
-    --test-timeout=${TEST_TIMEOUT} \
-    --bin-dir=build/test-bin \
-    --catalog-write="${run_catalog}" \
-    --summary-json=test-logs/parallel-run.json \
-    --results-dir=test-logs/results || nim_phase_status=$?
+  ( repro_test_apply_process_data_limit || exit $?
+    exec timeout --kill-after=30s "${RUNNER_TIMEOUT}" "${runner_bin}" \
+      --no-build \
+      --threads=${REPROBUILD_TEST_THREADS} \
+      --test-timeout=${TEST_TIMEOUT} \
+      --bin-dir=build/test-bin \
+      --catalog-write="${run_catalog}" \
+      --summary-json=test-logs/parallel-run.json \
+      --results-dir=test-logs/results ) || nim_phase_status=$?
 fi
 
 # `.#test-builds` has just completed, so every test binary the checked-in
