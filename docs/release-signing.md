@@ -168,7 +168,13 @@ called **before** anything downloaded is unpacked or executed. It:
 
 1. requires `gpg`/`gpgv` and `sha256sum` — their absence is a rejection;
 2. imports the keyring into a fresh `GNUPGHOME` and asserts at least one
-   public key landed;
+   public key landed, judged by gpg's `IMPORT_OK` status line. It never
+   starts `gpg-agent` (`--no-autostart`): it handles only public keys, and
+   where there is no per-user runtime directory (Git for Windows' gpg, an
+   account without a login session) the agent would put its sockets in
+   `GNUPGHOME`, whose path under a deep `TMPDIR` is longer than a Unix
+   socket name may be, so the agent would fail to start and fail the
+   import with it;
 3. refuses test-marked keys and test-marked bundles unless
    `--allow-test-key`;
 4. verifies `SHA256SUMS.asc` over `SHA256SUMS`, asserting on gpg's

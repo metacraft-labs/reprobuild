@@ -27,7 +27,18 @@
 ##   the registry names (`repointed`), whether it answers (`gone`), the
 ##   commit each recorded tag names (`tag-moved`, `tag-removed`) and, when
 ##   the previous `HEAD` is no longer on any branch, which recorded commits
-##   are no longer reachable from the branches (`history-rewritten`).
+##   are no longer reachable from the branches (`history-rewritten`). A
+##   generation that runs the full history check reports every recorded
+##   commit no branch reaches. Each commit is reported once: the observation
+##   keeps the commits reported (``reported``) until a check finds one on a
+##   branch again.
+## * **Revival** (`revived`). An origin that answers again after an
+##   observation that did not answer (`gone`, `refused`) and holds none of
+##   the recorded commits on any branch or tag is a revival of the remote:
+##   the envelope
+##   gains an origin entry for it (``revivedAt``), and the versions first
+##   seen from then on name that entry, so the solve does not offer them as
+##   the origin's own (NPC-AREQ16).
 
 import std/[algorithm, options, sets, strutils, tables]
 
@@ -81,6 +92,10 @@ type
   GenerationParams* = object
     generatedAt*: uint64
     cooldownSeconds*: uint64
+    fullHistory*: bool
+      ## the full history check runs at this generation (NPC-AREQ4): every
+      ## recorded commit of an origin whose history was fetched that no
+      ## branch reaches is reported, once
     expansions*: Table[string, Expansion]
       ## `<target name key>#<abbreviation>` -> its expansion
     resolveName*: proc(name: string): string {.gcsafe.}
@@ -324,11 +339,12 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
     origins = input.previous.get.origins
     prevRecords = input.previous.get.versions
     prevOriginIndex = int(input.previous.get.registryOrigin)
+  # The last entry of the remote: after a revival, the revival's entry
+  # stands for it.
   var originIndex = -1
   for i, o in origins:
     if sameOrigin(o, input.origin):
       originIndex = i
-      break
   if originIndex < 0:
     origins.add input.origin
     originIndex = origins.high
@@ -368,6 +384,21 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
               else: "no answer"),
       observedAt: now)
 
+  # `history-rewritten` names each recorded commit once (NPC-AREQ4): the
+  # previous observation keeps the commits named before.
+  var prevReported = initHashSet[string]()
+  if prevObs.isSome:
+    for c in prevObs.get.reported: prevReported.incl c
+  var reportedNow: seq[string]
+  proc rewritten(events: var seq[OriginEvent]; r: VersionRecord) =
+    if r.commit in prevReported or r.commit in reportedNow: return
+    reportedNow.add r.commit
+    events.add OriginEvent(kind: oeHistoryRewritten, package: input.name,
+      version: versionLabel(r), before: r.commit, after: "", observedAt: now)
+  var revivedFrom = ""
+    ## the state of the previous observation (`gone`, `refused`) of an origin
+    ## that answers again holding none of the recorded commits
+
   var recordedTags = initOrderedTable[string, string]()
   for r in prevRecords:
     if r.version.kind in {rvkTag, rvkLabel} and int(r.origin) == originIndex:
@@ -396,14 +427,9 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
       let h = input.history.get
       let onBranches = toHashSet(h.branchCommits)
       if prevObs.get.head notin onBranches:
-        var seen = initHashSet[string]()
         for r in prevRecords:
-          if int(r.origin) == originIndex and r.commit notin onBranches and
-              r.commit notin seen:
-            seen.incl r.commit
-            result.events.add OriginEvent(kind: oeHistoryRewritten,
-              package: input.name, version: versionLabel(r),
-              before: r.commit, after: "", observedAt: now)
+          if int(r.origin) == originIndex and r.commit notin onBranches:
+            rewritten(result.events, r)
   elif comparable and obs.state == osAnswering:
     # The origin answers again after an observation that did not answer
     # (gone or refused): that observation lists no tag and no `HEAD`, so
@@ -443,19 +469,55 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
       let onBranches = toHashSet(input.history.get.branchCommits)
       let held = toHashSet(input.history.get.allCommits)
       var mine: seq[VersionRecord]
-      var anyReached = false
+      var anyReached, anyHeld = false
       for r in prevRecords:
         if int(r.origin) == originIndex:
           mine.add r
           if r.commit in onBranches: anyReached = true
+          if r.commit in held: anyHeld = true
       if not anyReached:
-        var seen = initHashSet[string]()
         for r in mine:
-          if r.commit notin seen and r.commit notin held:
-            seen.incl r.commit
-            result.events.add OriginEvent(kind: oeHistoryRewritten,
-              package: input.name, version: versionLabel(r),
-              before: r.commit, after: "", observedAt: now)
+          if r.commit notin held:
+            rewritten(result.events, r)
+      if mine.len > 0 and not anyHeld:
+        # None of the recorded commits on any branch or tag: not the
+        # recorded origin back from an outage, but other history at its
+        # remote (a re-registered name, threat model T8).
+        revivedFrom = $prevObs.get.state
+
+  # The full history check (NPC-AREQ4): every recorded commit of the origin
+  # that no branch reaches, whatever `HEAD` did. Like every event, each is
+  # reported once.
+  if params.fullHistory and obs.state == osAnswering and
+      input.history.isSome and input.history.get.state == anOk:
+    let onBranches = toHashSet(input.history.get.branchCommits)
+    for r in prevRecords:
+      if int(r.origin) == originIndex and r.commit notin onBranches:
+        rewritten(result.events, r)
+
+  if revivedFrom.len > 0:
+    result.events.add OriginEvent(kind: oeRevived, package: input.name,
+      before: revivedFrom, after: originLabel(input.origin), observedAt: now)
+    # The entry repeats the recorded entry's spelling of the remote, which
+    # the codec requires; the registry may spell the same origin otherwise
+    # (`sameOrigin`).
+    var revival = origins[originIndex]
+    revival.revivedAt = now
+    origins.add revival
+    originIndex = origins.high
+
+  # The commits reported so far: carried, less the ones a check found on a
+  # branch again, plus this generation's.
+  if obs.state == osAnswering and input.history.isSome and
+      input.history.get.state == anOk:
+    let onBranches = toHashSet(input.history.get.branchCommits)
+    for c in prevReported:
+      if c notin onBranches: obs.reported.add c
+  else:
+    for c in prevReported: obs.reported.add c
+  for c in reportedNow:
+    if c notin obs.reported: obs.reported.add c
+  obs.reported.sort()
 
   # ---- versions -------------------------------------------------------------
   var records = prevRecords
@@ -554,6 +616,10 @@ proc assemblePackage*(input: PackageInput; params: GenerationParams):
     result.envelope = input.previous
     result.observation = PackageObservation(name: input.name,
       origin: input.origin, state: osRefused)
+    for c in prevReported: result.observation.reported.add c
+    for c in reportedNow:
+      if c notin prevReported: result.observation.reported.add c
+    result.observation.reported.sort()
     if comparable and prevObs.get.state == osAnswering:
       var already = false
       for ev in result.events:

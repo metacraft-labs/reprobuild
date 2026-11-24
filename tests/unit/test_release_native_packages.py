@@ -59,6 +59,11 @@ Scoop manifest with repro-publish-repos.sh. It needs wixl, msiinfo and
 msiextract and is skipped, which counts as not passed, without them:
   nix shell nixpkgs#msitools nixpkgs#python3 -c \
     python3 -m unittest tests.unit.test_release_native_packages
+The MSI read-back cases and the Scoop hooks case also need pwsh: the
+PowerShell text repro-build-packages.sh and repro-publish-repos.sh write from
+bash is handed to pwsh's own parser (Parser::ParseFile), because nothing else
+can say whether it is PowerShell; without pwsh they are skipped, which counts
+as not passed.
 Neither package is installed: installing an MSI changes the machine (Program
 Files, the machine PATH, the all-users PowerShell profiles), and Scoop's
 hooks write the user's profiles. Running them, and building the MSI with WiX v3
@@ -1009,40 +1014,42 @@ class WindowsCompletionTests(PackagerFixture):
 
     # -------------------------------------- the MSI read-back on Windows
     # On Windows there is no msiinfo, and the packager reads the MSI back
-    # through powershell.exe and the Windows Installer API. The script it
-    # hands over holds double quotes (`@("SELECT * FROM `" + ... + "`")`).
-    # Passed as `-Command '<script>'` from bash, it reaches powershell.exe
-    # through a Windows command line, whose splitter takes each `"` as
-    # quoting and drops it: three parser errors, every table empty, and a
-    # correct MSI refused as not installing bin/repro.exe (seen on a real
-    # Windows host).
+    # through powershell.exe and the Windows Installer API, handing it a
+    # script as -EncodedCommand. That script is generated from bash, so
+    # nothing but PowerShell's own parser can say whether it is PowerShell:
+    # a reader whose query was written "SELECT * FROM `" + ... + "`" did not
+    # parse (inside a double-quoted PowerShell string a backtick escapes the
+    # quote), every table read back empty, and a correct MSI was refused as
+    # not installing bin/repro.exe (seen on a real Windows host).
     #
-    # The stand-in below is powershell.exe as the packager sees it: it drops
-    # every `"` from each argument as that splitter does, takes the script
-    # from -Command or decodes it from -EncodedCommand, refuses a script that
-    # lost the quoted table query (PowerShell's parser error), and otherwise
-    # answers the query as the COM object would, from msiinfo. The real
-    # COM object is not used: it exists only on Windows. A stand-in is
-    # justified here because what is under test is the hand-off of the
-    # script across the command line, which the stand-in reproduces, not
-    # the Windows Installer API.
+    # The stand-in below is powershell.exe as the packager sees it: it
+    # decodes the script from -EncodedCommand (or takes it from -Command),
+    # hands the EXACT text to the real PowerShell parser (pwsh's
+    # Parser::ParseFile, which parses as Windows PowerShell does for this
+    # syntax), and on a parse error prints the errors and exits 1, as
+    # powershell.exe does. A script that parses is answered as the COM
+    # object would answer it, from msiinfo. The COM object itself is not
+    # used: it exists only on Windows. A stand-in is justified here because
+    # what is under test is the script text and its hand-off, which reach
+    # the real parser unchanged, not the Windows Installer API.
     POWERSHELL_STANDIN = r"""#!/bin/sh
 log="$STANDIN_LOG"
 script=""
+have_script=0
 while [ $# -gt 0 ]; do
-  arg=$(printf '%s' "$1" | tr -d '"')
   printf 'arg: %s\n' "$1" >> "$log"
-  case "$arg" in
-    -Command) shift; script=$(printf '%s' "$1" | tr -d '"') ;;
-    -EncodedCommand) shift; script=$(printf '%s' "$1" | base64 -d | iconv -f UTF-16LE -t UTF-8) ;;
+  case "$1" in
+    -Command) shift; script="$1"; have_script=1 ;;
+    -EncodedCommand) shift; script=$(printf '%s' "$1" | base64 -d | iconv -f UTF-16LE -t UTF-8); have_script=1 ;;
   esac
   shift
 done
+[ "$have_script" = 1 ] || { echo "stand-in: no script given" >&2; exit 2; }
+n=$(ls "$STANDIN_DIR" | grep -c '^script-' || true)
+file="$STANDIN_DIR/script-$n.ps1"
+printf '%s' "$script" > "$file"
 printf '%s\n----\n' "$script" >> "$STANDIN_SCRIPTS"
-case "$script" in
-  *'@("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`")'*) ;;
-  *) echo "ParserError: Unexpected token in expression or statement." >&2; exit 1 ;;
-esac
+"$STANDIN_PWSH" -NoProfile -NonInteractive -File "$STANDIN_PARSER" "$file" >&2 || exit 1
 "$STANDIN_MSIINFO" export "$REPRO_MSI_DB" "$REPRO_MSI_TABLE" | tail -n +4
 """
 
@@ -1058,6 +1065,10 @@ esac
         exe.write_text(self.POWERSHELL_STANDIN, encoding="utf-8")
         exe.chmod(0o755)
         (standin_dir / "wixl").symlink_to(wixl)
+        scripts_dir = self.work / "standin-scripts"
+        scripts_dir.mkdir()
+        parser = self.work / "parse-check.ps1"
+        parser.write_text(PARSE_CHECK_PS1, encoding="utf-8")
         msitools_dir = str(Path(msiinfo).parent)
         path = [str(standin_dir)] + [d for d in os.environ.get("PATH", "").split(os.pathsep)
                                      if d and d != msitools_dir
@@ -1065,10 +1076,14 @@ esac
         env = dict(os.environ, PATH=os.pathsep.join(path),
                    STANDIN_LOG=str(self.work / "standin.log"),
                    STANDIN_SCRIPTS=str(self.work / "standin-scripts.txt"),
+                   STANDIN_DIR=str(scripts_dir),
+                   STANDIN_PARSER=str(parser),
+                   STANDIN_PWSH=shutil.which("pwsh"),
                    STANDIN_MSIINFO=msiinfo)
         env.pop("REPRO_MSI_TOOLSET", None)
         return env
 
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to parse the reader")
     def test_the_msi_read_back_survives_the_windows_command_line(self):
         env = self.without_msiinfo_env()
         self.assertIsNone(shutil.which("msiinfo", path=env["PATH"]))
@@ -1080,17 +1095,90 @@ esac
             capture_output=True, text=True, check=False, env=env)
         self.assertEqual(0, run.returncode, run.stderr)
         log = (self.work / "standin.log").read_text(encoding="utf-8")
-        # The packager went through powershell.exe, with -EncodedCommand,
-        # and no argument it passed carries a double quote.
+        # The packager went through powershell.exe, with -EncodedCommand.
         self.assertIn("arg: -EncodedCommand", log)
         self.assertNotIn("arg: -Command", log)
-        for line in log.splitlines():
-            self.assertNotIn('"', line, line)
-        # Each read decoded to the exact table reader.
-        scripts = (self.work / "standin-scripts.txt").read_text(encoding="utf-8")
-        self.assertGreaterEqual(scripts.count("----"), 4, scripts)
-        self.assertIn('@("SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`")', scripts)
-        self.assertIn("[Console]::Out.WriteLine(($f -join \"`t\"))", scripts)
+        # Each read handed the parser a script, and every one parsed (the
+        # packager would have refused otherwise; this says so directly).
+        scripts = sorted((self.work / "standin-scripts").glob("script-*.ps1"))
+        self.assertGreaterEqual(len(scripts), 3, "the reader ran fewer than three times")
+        for script in scripts:
+            self.assertEqual([], powershell_parse_errors(script), script.read_text(encoding="utf-8"))
+        text = scripts[0].read_text(encoding="utf-8")
+        self.assertIn("$env:REPRO_MSI_TABLE", text)
+        self.assertIn("SELECT * FROM", text)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to parse the reader")
+    def test_a_reader_that_does_not_parse_is_refused_not_read_as_empty(self):
+        """Control for the case above: the 2026-11 reader text, whose query
+        does not parse, is refused by the real parser through the same
+        stand-in, and the packager stops naming the table instead of
+        reading it as empty."""
+        broken = PACKAGER.read_text(encoding="utf-8").replace(
+            "$q = 'SELECT * FROM `' + $env:REPRO_MSI_TABLE + '`'",
+            '$q = "SELECT * FROM `" + $env:REPRO_MSI_TABLE + "`"')
+        self.assertNotEqual(broken, PACKAGER.read_text(encoding="utf-8"),
+                            "the reader's query line moved; update this control")
+        mutant = self.work / "repro-build-packages-broken.sh"
+        mutant.write_text(broken, encoding="utf-8")
+        env = self.without_msiinfo_env()
+        run = subprocess.run(
+            ["sh", str(mutant), "--version", VERSION,
+             "--tarball", str(self.tarball), "--out", str(self.out),
+             "--ecosystem", "msi", "--platform", self.PLATFORM,
+             "--asset-arch", self.ASSET_ARCH],
+            capture_output=True, text=True, check=False, env=env)
+        self.assertNotEqual(0, run.returncode, run.stderr)
+        self.assertIn("cannot read the Directory table", run.stderr)
+        self.assertIn("Unexpected token", run.stderr)
+        self.assertNotIn("does not install", run.stderr)
+
+    @unittest.skipUnless(shutil.which("pwsh"), "needs pwsh (PowerShell 7) to parse the hooks")
+    def test_the_scoop_hooks_parse_as_powershell(self):
+        """The Scoop manifest's post_install and pre_uninstall are PowerShell
+        written from bash (repro-publish-repos.sh, a here-document inside
+        JSON). Scoop joins each hook's lines and runs them, so each joined
+        hook must parse; the real parser says whether it does."""
+        manifest = self.generate_scoop_manifest()
+        for hook in ("post_install", "pre_uninstall"):
+            with self.subTest(hook=hook):
+                text = "\n".join(manifest[hook])
+                script = self.work / f"scoop-{hook}.ps1"
+                script.write_text(text, encoding="utf-8")
+                self.assertEqual([], powershell_parse_errors(script), text)
+        # Control: the parser does refuse the reader text that broke on
+        # Windows, so an empty error list above is the parser's verdict.
+        bad = self.work / "known-bad.ps1"
+        bad.write_text('$q = @("SELECT * FROM `" + $env:T + "`")', encoding="utf-8")
+        self.assertNotEqual([], powershell_parse_errors(bad))
+
+
+# Parses one file with the real PowerShell parser and prints each error as
+# "<line>:<column>: <message>"; exits with the number of errors.
+PARSE_CHECK_PS1 = r"""param([Parameter(Mandatory)][string]$Path)
+$tokens = $null
+$errors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+foreach ($e in $errors) {
+  [Console]::Out.WriteLine(('{0}:{1}: {2}' -f $e.Extent.StartLineNumber, $e.Extent.StartColumnNumber, $e.Message))
+}
+exit $errors.Count
+"""
+
+
+def powershell_parse_errors(path):
+    """The PowerShell parser's errors for the file at `path`, one string
+    each, from pwsh's Parser::ParseFile; [] when it parses."""
+    with tempfile.TemporaryDirectory() as d:
+        checker = Path(d) / "parse-check.ps1"
+        checker.write_text(PARSE_CHECK_PS1, encoding="utf-8")
+        run = subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-File", str(checker), str(path)],
+            capture_output=True, text=True, check=False)
+    errors = [line for line in run.stdout.splitlines() if line.strip()]
+    if run.returncode != len(errors):
+        raise AssertionError(f"the parse check itself failed (exit {run.returncode}): {run.stderr}")
+    return errors
 
 
 M8C_COMMON_UNIT = REPO_ROOT / "tools" / "multi-distro-harness" / "tests" / "m8c_common_unit.ps1"

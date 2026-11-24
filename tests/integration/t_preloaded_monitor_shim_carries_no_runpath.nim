@@ -2,9 +2,10 @@
 ## its own C runtime runs under the monitor.
 ##
 ## The shim is LD_PRELOADed into processes it did not choose. Its DT_NEEDED is
-## the C runtime (`libc.so.6`, `ld-linux-*.so.*`, and with some links `libm`,
-## `librt`, `libdl`, `libpthread`), and those must resolve through the process
-## that loads it. glibc's loader searches the DT_RPATH of the requesting object
+## the C runtime (`libc.so.6` and `ld-linux-*.so.*`; before io-mon's
+## `linux_preload.nim.cfg` carried `--as-needed`, the engine's link also
+## added `libm`, `librt`, `libdl` and `libpthread`), and those must resolve
+## through the process that loads it. glibc's loader searches the DT_RPATH of the requesting object
 ## and of the objects that loaded it, the executable included, ONLY when the
 ## requesting object has no DT_RUNPATH (ld.so(8),
 ## https://man7.org/linux/man-pages/man8/ld.so.8.html; `_dl_map_object` in
@@ -43,11 +44,24 @@
 ##   4. BUILD PATH: the engine's `reprobuild.test_fixtures.monitor_shim` edge.
 ##      Its lowered argv and environment are read from `repro graph`, and the
 ##      link is run exactly as the engine runs it (the action environment
-##      layered over the engine's own), with the same polarity control.
-##   5. BEHAVIOUR: a real `ar` rewritten onto a C runtime of its own runs
-##      under `repro debug io monitor`, completes, and its reads are
-##      recorded. A negative control proves the subject is what it claims:
-##      the same shim with a runpath added must make it fail to start.
+##      layered over the engine's own), with the same polarity control. The
+##      result must also need nothing of the C runtime but `libc.so.6` and the
+##      loader, as io-mon's builder's shim does.
+##   5. BEHAVIOUR: a real `ar` rewritten onto a C runtime of its own, found
+##      through its DT_RPATH, runs under `repro debug io monitor`, completes,
+##      and its reads are recorded. A negative control proves the subject is
+##      what it claims: the same shim with a runpath added must make it fail
+##      to start.
+##   6. BEHAVIOUR: the same `ar` with its search path as DT_RUNPATH runs
+##      under the shim the engine's edge links (replayed as in case 4). A
+##      program's DT_RUNPATH applies only to its own direct dependencies,
+##      never to a preloaded object's, so here even a runpath-free shim fails
+##      if it needs `libm.so.6`, `librt.so.1`, `libdl.so.2` or
+##      `libpthread.so.0` -- which every link Nim drives adds unless
+##      `--as-needed` precedes them. Before io-mon's `linux_preload.nim.cfg`
+##      carried that link template, the edge's shim needed all four and such
+##      a program exited 127. The negative control adds one such satellite to the edge's shim and must
+##      make the subject fail to start.
 ##
 ## Mocks and fabrications, and why (per the repository policy on justifying
 ## every mock): NO mocks — the compiler, the linker wrapper, the loader, the
@@ -67,7 +81,8 @@
 ##     store defaults and the case would pass over a broken shim.
 ##   * The negative control's shim is a copy of the published one with a
 ##     DT_RUNPATH and one extra C-runtime DT_NEEDED added by `patchelf`: the
-##     shape of the defect, built from the artifact under test. The copy keeps
+##     shape of the defect, built from the artifact under test. Case 6's
+##     adds only the DT_NEEDED, to the edge's own link. The copy keeps
 ##     the file name `librepro_monitor_shim.so`, because the shim recognizes
 ##     its own mapping by that name (a renamed copy patches its own syscall
 ##     sites and dies of SIGTRAP; recorded as a separate defect).
@@ -156,6 +171,156 @@ proc storeHashlessCopy(prefix: string): string =
   ## so the result is still an absolute path of the same shape.
   let slash = prefix.rfind('/')
   result = prefix[0 .. slash] & repeat('x', prefix.len - slash - 1)
+
+proc neededOf(file: string): seq[string] =
+  ## The DT_NEEDED sonames of `file`, in order.
+  for line in dynamicSection(file).splitLines:
+    if "(NEEDED)" in line:
+      let start = line.find('[')
+      let stop = line.rfind(']')
+      if start >= 0 and stop > start:
+        result.add line[start + 1 ..< stop]
+
+proc unusedRuntimeNeeds(file: string): seq[string] =
+  ## Every DT_NEEDED entry of `file` other than `libc.so.6` and the loader:
+  ## the shim uses nothing else, and each further entry is a library every
+  ## monitored program must resolve for it (the module comment says how a
+  ## DT_RUNPATH program cannot).
+  for soname in neededOf(file):
+    if soname != "libc.so.6" and not soname.startsWith("ld-linux"):
+      result.add soname
+
+proc lowerShimEdge(): tuple[action: JsonNode; diagnostic: string] =
+  ## The `reprobuild.test_fixtures.monitor_shim` action as the engine lowers
+  ## it, or nil with the reason.
+  let graphRun = runShellSplit(shellCommand(@[reproBin(), "graph",
+    ".#test-fixtures", "--tool-provisioning=path", "--format=json"]),
+    repoRoot())
+  if graphRun.code == 0:
+    try:
+      for a in parseJson(graphRun.stdout){"actions"}:
+        if a{"id"}.getStr() == "reprobuild.test_fixtures.monitor_shim":
+          result.action = a
+    except CatchableError as err:
+      result.diagnostic = "graph output was not JSON: " & err.msg & "\n"
+  if result.action.isNil:
+    result.diagnostic.add("repro graph exit=" & $graphRun.code & "\n" &
+      graphRun.stderr)
+
+proc loweredEnv(action: JsonNode): seq[(string, string)] =
+  for entry in action{"env"}:
+    let text = entry.getStr()
+    let eq = text.find('=')
+    if eq > 0: result.add((text[0 ..< eq], text[eq + 1 .. ^1]))
+
+proc linkEdge(action: JsonNode; scratch, name: string;
+              env: openArray[(string, string)]):
+    tuple[code: int; output, shim: string] =
+  ## Run the lowered argv the way the engine runs it: the action's
+  ## environment layered over the engine's own, here the test's plus a dev
+  ## shell's NIX_LDFLAGS. Only the output and nimcache move into scratch.
+  let outDir = scratch / name
+  createDir(outDir)
+  var table = newStringTable()
+  for k, v in envPairs(): table[k] = v
+  table["NIX_LDFLAGS"] = devShellLdflags(scratch)
+  for (k, v) in env: table[k] = v
+  var argv: seq[string]
+  for item in action{"argv"}:
+    var arg = item.getStr()
+    if arg.startsWith("--out:"):
+      arg = "--out:" & (outDir / ShimFileName)
+    elif arg.startsWith("--nimcache:"):
+      arg = "--nimcache:" & (outDir / "nimcache")
+    argv.add(arg)
+  let p = startProcess(argv[0], workingDir = action{"cwd"}.getStr(),
+    args = argv[1 .. ^1], env = table,
+    options = {poStdErrToStdOut})
+  let output = drainStream(p.outputStream)
+  let code = p.waitForExit()
+  p.close()
+  (code, output, outDir / ShimFileName)
+
+proc storeAr(): tuple[ar, interp: string] =
+  ## The real `ar` on PATH and its PT_INTERP, or "" for either when there is
+  ## none or the ELF tools are missing.
+  result.ar = tool("ar")
+  if result.ar.len > 0:
+    result.ar = runShell(shellCommand(@["readlink", "-f", result.ar])).output.strip()
+  if result.ar.len > 0 and haveElfTools():
+    result.interp = runShell(shellCommand(@[tool("patchelf"),
+      "--print-interpreter", result.ar])).output.strip()
+
+type ForeignSubject = object
+  subject, loader, fab, archive: string
+
+proc fabricateForeignSubject(scratch, ar, interp: string;
+                             asRunpath: bool): ForeignSubject =
+  ## The real `ar`, rewritten onto a copied C runtime whose loader's default
+  ## directories hold nothing, its search path a DT_RPATH (`asRunpath` false)
+  ## or a DT_RUNPATH (true). See the module comment for why the copied loader
+  ## is patched. Also makes the archive the subject lists.
+  let runtimeLib = interp.parentDir
+  let runtimePrefix = runtimeLib.parentDir
+  result.fab = scratch / "runtime"
+  createDir(result.fab)
+  for soname in CRuntimeSonames:
+    if fileExists(runtimeLib / soname):
+      copyFile(runtimeLib / soname, result.fab / soname)
+  result.loader = result.fab / interp.extractFilename
+  var loaderBytes = readFile(interp)
+  doAssert runtimePrefix in loaderBytes
+  loaderBytes = loaderBytes.replace(runtimePrefix,
+    storeHashlessCopy(runtimePrefix))
+  doAssert runtimePrefix notin loaderBytes
+  writeFile(result.loader, loaderBytes)
+  for f in walkFiles(result.fab / "*"):
+    setFilePermissions(f, {fpUserRead, fpUserWrite, fpUserExec})
+
+  # Its PT_INTERP and search path point at the fabricated runtime first and
+  # its own other libraries after.
+  var rpath = @[result.fab]
+  for entry in runShell(shellCommand(@[tool("patchelf"),
+      "--print-rpath", ar])).output.strip().split(':'):
+    if entry.len > 0 and entry != runtimeLib: rpath.add(entry)
+  result.subject = scratch / "bin" / "ar"
+  createDir(result.subject.parentDir)
+  copyFile(ar, result.subject)
+  setFilePermissions(result.subject, {fpUserRead, fpUserWrite, fpUserExec})
+  let tagFlags =
+    if asRunpath: @["--set-rpath"] else: @["--force-rpath", "--set-rpath"]
+  discard requireSuccess(shellCommand(@[tool("patchelf"),
+    "--set-interpreter", result.loader] & tagFlags &
+    @[rpath.join(":"), result.subject]))
+  let tag = if asRunpath: "(RUNPATH)" else: "(RPATH)"
+  doAssert tag in dynamicSection(result.subject),
+    result.subject & " carries no " & tag & ":\n" &
+    dynamicSection(result.subject)
+
+  writeFile(scratch / "member.txt", "a member\n")
+  result.archive = scratch / "t.a"
+  let made = runShell(shellCommand(@[result.subject, "rc", result.archive,
+    "member.txt"]), scratch)
+  doAssert made.code == 0, "bare `ar rc`: exit " & $made.code & "\n" &
+    made.output
+
+proc runMonitored(subject: ForeignSubject; scratch, shim,
+                  depfile: string): CmdResult =
+  runShell(shellCommand(@[reproBin(), "debug", "io", "monitor",
+    "--depfile=" & depfile, "--", subject.subject, "t", subject.archive],
+    @[("REPRO_MONITOR_SHIM_LIB", shim), ("REPRO_CACHE_DISABLE", "1"),
+      ("REPRO_BINARY_CACHE_URL", "")]), scratch)
+
+proc missingFromSubject(subject: ForeignSubject): string =
+  ## A C-runtime library the fabricated runtime has and the subject does not
+  ## load itself, so a shim that needs it must find it on its own.
+  let subjectNeeds = runShell(shellCommand(@[tool("patchelf"),
+    "--print-needed", subject.subject])).output
+  for candidate in ["libanl.so.1", "libutil.so.1", "libm.so.6",
+                    "librt.so.1"]:
+    if fileExists(subject.fab / candidate) and
+        candidate notin subjectNeeds:
+      return candidate
 
 suite "the preloaded monitor shim carries no DT_RUNPATH":
 
@@ -291,63 +456,21 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
       elif not fileExists(reproBin()):
         skip(reproBin() & " is missing; run `just build`")
       else:
-        let graphRun = runShellSplit(shellCommand(@[reproBin(), "graph",
-          ".#test-fixtures", "--tool-provisioning=path", "--format=json"]),
-          repoRoot())
-        var action: JsonNode = nil
-        if graphRun.code == 0:
-          try:
-            for a in parseJson(graphRun.stdout){"actions"}:
-              if a{"id"}.getStr() == "reprobuild.test_fixtures.monitor_shim":
-                action = a
-          except CatchableError as err:
-            checkpoint("graph output was not JSON: " & err.msg)
-        if action.isNil:
-          checkpoint("repro graph exit=" & $graphRun.code & "\n" &
-            graphRun.stderr)
+        let lowered = lowerShimEdge()
+        if lowered.action.isNil:
+          checkpoint(lowered.diagnostic)
           skip("the engine could not lower .#test-fixtures here, so the " &
             "monitor-shim edge's link cannot be replayed")
         else:
-          var declared: seq[(string, string)]
-          for entry in action{"env"}:
-            let text = entry.getStr()
-            let eq = text.find('=')
-            if eq > 0: declared.add((text[0 ..< eq], text[eq + 1 .. ^1]))
+          let action = lowered.action
+          let declared = loweredEnv(action)
           checkpoint("lowered env: " & $declared)
           check ("NIX_DONT_SET_RPATH", "1") in declared
           check ("NIX_LDFLAGS", "") in declared
 
           let scratch = createTempDir("repro-shim-runpath-edge-", "")
           defer: removeDirEventually(scratch)
-          proc link(name: string; env: openArray[(string, string)]):
-              tuple[code: int; output, shim: string] =
-            ## Run the lowered argv the way the engine runs it: the action's
-            ## environment layered over the engine's own, here the test's
-            ## plus a dev shell's NIX_LDFLAGS. Only the output and nimcache
-            ## move into scratch.
-            let outDir = scratch / name
-            createDir(outDir)
-            var table = newStringTable()
-            for k, v in envPairs(): table[k] = v
-            table["NIX_LDFLAGS"] = devShellLdflags(scratch)
-            for (k, v) in env: table[k] = v
-            var argv: seq[string]
-            for item in action{"argv"}:
-              var arg = item.getStr()
-              if arg.startsWith("--out:"):
-                arg = "--out:" & (outDir / ShimFileName)
-              elif arg.startsWith("--nimcache:"):
-                arg = "--nimcache:" & (outDir / "nimcache")
-              argv.add(arg)
-            let p = startProcess(argv[0], workingDir = action{"cwd"}.getStr(),
-              args = argv[1 .. ^1], env = table,
-              options = {poStdErrToStdOut})
-            let output = drainStream(p.outputStream)
-            let code = p.waitForExit()
-            p.close()
-            (code, output, outDir / ShimFileName)
-
-          let linked = link("as-lowered", declared)
+          let linked = linkEdge(action, scratch, "as-lowered", declared)
           if linked.code != 0:
             checkpoint("link as lowered failed:\n" & linked.output)
           check linked.code == 0
@@ -359,13 +482,21 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
             checkpoint("as lowered: " &
               (if runpath.len == 0: "(none)" else: runpath.join(":")))
             check runpath.len == 0
+            # ...and needs nothing of the C runtime but libc and the loader,
+            # as io-mon's builder's shim does. Nim adds `-lm -lrt -ldl
+            # -pthread` to every link; only `--as-needed` ahead of them, in
+            # the link template io-mon's `linux_preload.nim.cfg` sets, keeps
+            # them out; without it the edge's shim needs `libm`, `librt`,
+            # `libdl` and `libpthread` (case 6 shows what that breaks).
+            checkpoint("as lowered NEEDED: " & neededOf(fixed).join(" "))
+            check unusedRuntimeNeeds(fixed).len == 0
 
           # POLARITY: the lowered environment minus the NIX_LDFLAGS entries,
           # which is what the edge declared before.
           var before: seq[(string, string)]
           for (k, v) in declared:
             if not k.startsWith("NIX_LDFLAGS"): before.add((k, v))
-          let controlLinked = link("control", before)
+          let controlLinked = linkEdge(action, scratch, "control", before)
           if controlLinked.code != 0:
             checkpoint("control link failed:\n" & controlLinked.output)
           check controlLinked.code == 0
@@ -384,14 +515,7 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
     when not defined(linux):
       skip("DT_RUNPATH is an ELF concept; see the first case")
     else:
-      var ar = tool("ar")
-      if ar.len > 0:
-        ar = runShell(shellCommand(@["readlink", "-f", ar])).output.strip()
-      let interp =
-        if ar.len > 0 and haveElfTools():
-          runShell(shellCommand(@[tool("patchelf"), "--print-interpreter",
-            ar])).output.strip()
-        else: ""
+      let (ar, interp) = storeAr()
       if not haveElfTools():
         skip("patchelf, readelf and bash are required")
       elif not fileExists(shimPath()):
@@ -403,69 +527,17 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
           "on PATH (ar=" & ar & ", interpreter=" & interp & "), so no " &
           "loader with empty default directories can be fabricated here")
       else:
-        let runtimeLib = interp.parentDir
-        let runtimePrefix = runtimeLib.parentDir
         let scratch = createTempDir("repro-shim-foreign-loader-", "")
         defer: removeDirEventually(scratch)
-
-        # The foreign C runtime: the loader and the C-runtime libraries,
-        # copied, with the store path compiled into the loader overwritten so
-        # its default directories hold nothing.
-        let fab = scratch / "runtime"
-        createDir(fab)
-        for soname in CRuntimeSonames:
-          if fileExists(runtimeLib / soname):
-            copyFile(runtimeLib / soname, fab / soname)
-        let loader = fab / interp.extractFilename
-        var loaderBytes = readFile(interp)
-        check runtimePrefix in loaderBytes
-        loaderBytes = loaderBytes.replace(runtimePrefix,
-          storeHashlessCopy(runtimePrefix))
-        check runtimePrefix notin loaderBytes
-        writeFile(loader, loaderBytes)
-        for f in walkFiles(fab / "*"):
-          setFilePermissions(f, {fpUserRead, fpUserWrite, fpUserExec})
-
-        # The subject: the real `ar`, its PT_INTERP and DT_RPATH pointing at
-        # the fabricated runtime first and its own other libraries after.
-        var rpath = @[fab]
-        for entry in runShell(shellCommand(@[tool("patchelf"),
-            "--print-rpath", ar])).output.strip().split(':'):
-          if entry.len > 0 and entry != runtimeLib: rpath.add(entry)
-        let subject = scratch / "bin" / "ar"
-        createDir(subject.parentDir)
-        copyFile(ar, subject)
-        setFilePermissions(subject, {fpUserRead, fpUserWrite, fpUserExec})
-        discard requireSuccess(shellCommand(@[tool("patchelf"),
-          "--set-interpreter", loader, "--force-rpath", "--set-rpath",
-          rpath.join(":"), subject]))
-
-        writeFile(scratch / "member.txt", "a member\n")
-        let archive = scratch / "t.a"
-        let made = runShell(shellCommand(@[subject, "rc", archive,
-          "member.txt"]), scratch)
-        checkpoint("bare `ar rc`: exit " & $made.code & "\n" & made.output)
-        require made.code == 0
-
-        proc monitored(shim, depfile: string): CmdResult =
-          runShell(shellCommand(@[reproBin(), "debug", "io", "monitor",
-            "--depfile=" & depfile, "--", subject, "t", archive],
-            @[("REPRO_MONITOR_SHIM_LIB", shim), ("REPRO_CACHE_DISABLE", "1"),
-              ("REPRO_BINARY_CACHE_URL", "")]), scratch)
+        let foreign = fabricateForeignSubject(scratch, ar, interp,
+          asRunpath = false)
 
         # NEGATIVE CONTROL: the published shim plus a DT_RUNPATH, and a
         # C-runtime dependency the subject does not load itself, so the
         # loader has to find it on the shim's search path. If the subject
         # could still start, its loader's defaults find the C runtime and
         # nothing below would say anything.
-        var extra = ""
-        let subjectNeeds = runShell(shellCommand(@[tool("patchelf"),
-          "--print-needed", subject])).output
-        for candidate in ["libanl.so.1", "libutil.so.1", "libm.so.6",
-                          "librt.so.1"]:
-          if extra.len == 0 and fileExists(fab / candidate) and
-              candidate notin subjectNeeds:
-            extra = candidate
+        let extra = missingFromSubject(foreign)
         require extra.len > 0
         let negDir = scratch / "with-runpath"
         let posDir = scratch / "without-runpath"
@@ -479,21 +551,23 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
         discard requireSuccess(shellCommand(@[tool("patchelf"),
           "--set-rpath", scratch / "outputs" / "out" / "lib",
           negDir / ShimFileName]))
-        let refused = monitored(negDir / ShimFileName, scratch / "neg.iomon")
+        let refused = runMonitored(foreign, scratch, negDir / ShimFileName,
+          scratch / "neg.iomon")
         checkpoint("with a runpath: exit " & $refused.code & "\n" &
           refused.output)
         check refused.code != 0
         check MissingLibraryNeedle in refused.output
         check extra in refused.output
         # ...and moving ONLY the runpath makes it start.
-        let accepted = monitored(posDir / ShimFileName, scratch / "pos.iomon")
+        let accepted = runMonitored(foreign, scratch, posDir / ShimFileName,
+          scratch / "pos.iomon")
         checkpoint("same shim, no runpath: exit " & $accepted.code & "\n" &
           accepted.output)
         check accepted.code == 0
 
         # THE CASE: the published shim.
         let depfile = scratch / "evidence.iomon"
-        let run = monitored(shimPath(), depfile)
+        let run = runMonitored(foreign, scratch, shimPath(), depfile)
         checkpoint("published shim: exit " & $run.code & "\n" & run.output)
         check run.code == 0
         check MissingLibraryNeedle notin run.output
@@ -505,12 +579,82 @@ suite "the preloaded monitor shim carries no DT_RUNPATH":
           check inspected.code == 0
           var readArchive, loadedForeignLoader = false
           for line in inspected.output.splitLines:
-            if " file-read " in line and ("path=" & archive & " ") in line:
+            if " file-read " in line and ("path=" & foreign.archive & " ") in line:
               readArchive = true
-            if " library-load " in line and ("path=" & loader & " ") in line:
+            if " library-load " in line and
+                ("path=" & foreign.loader & " ") in line:
               loadedForeignLoader = true
           if not (readArchive and loadedForeignLoader):
             checkpoint("inspect:\n" & inspected.output)
           check readArchive
           check loadedForeignLoader
           check "completeness=mcComplete" in inspected.output
+
+  test "a DT_RUNPATH program on its own C runtime runs under the engine-built shim":
+    # A program's DT_RUNPATH serves only its own direct dependencies, never
+    # a preloaded object's (ld.so(8)), so the shim the engine's edge links
+    # must need nothing of the C runtime that such a program does not load
+    # itself. Current linkers emit DT_RUNPATH, and a toolchain relocated into
+    # a store keeps it. The shim here is the edge's own link, replayed from
+    # `repro graph` as the fourth case replays it: the published shim may
+    # come from io-mon's builder instead, depending on which build ran last.
+    when not defined(linux):
+      skip("DT_RUNPATH is an ELF concept; see the first case")
+    else:
+      let (ar, interp) = storeAr()
+      if not haveElfTools():
+        skip("patchelf, readelf and bash are required")
+      elif not fileExists(reproBin()):
+        skip(reproBin() & " is missing; run `just build`")
+      elif interp.len == 0 or not interp.startsWith("/nix/store/"):
+        skip("no dynamically linked `ar` running on a store C runtime is " &
+          "on PATH (ar=" & ar & ", interpreter=" & interp & "), so no " &
+          "loader with empty default directories can be fabricated here")
+      else:
+        let lowered = lowerShimEdge()
+        if lowered.action.isNil:
+          checkpoint(lowered.diagnostic)
+          skip("the engine could not lower .#test-fixtures here, so the " &
+            "monitor-shim edge's link cannot be replayed")
+        else:
+          let scratch = createTempDir("repro-shim-runpath-subject-", "")
+          defer: removeDirEventually(scratch)
+          let linked = linkEdge(lowered.action, scratch, "edge",
+            loweredEnv(lowered.action))
+          if linked.code != 0:
+            checkpoint("edge link failed:\n" & linked.output)
+          require linked.code == 0
+          let shim = linked.shim
+          checkpoint("edge shim NEEDED: " & neededOf(shim).join(" "))
+          let foreign = fabricateForeignSubject(scratch, ar, interp,
+            asRunpath = true)
+
+          # NEGATIVE CONTROL: the edge's shim with one C-runtime DT_NEEDED
+          # added that the subject does not load itself -- the shape of the
+          # defect. The subject's DT_RUNPATH must NOT serve it, or this case
+          # could not tell a shim with satellites from one without.
+          let extra = missingFromSubject(foreign)
+          require extra.len > 0
+          let negDir = scratch / "with-satellite"
+          createDir(negDir)
+          copyFile(shim, negDir / ShimFileName)
+          setFilePermissions(negDir / ShimFileName,
+            {fpUserRead, fpUserWrite, fpUserExec})
+          discard requireSuccess(shellCommand(@[tool("patchelf"),
+            "--add-needed", extra, negDir / ShimFileName]))
+          let refused = runMonitored(foreign, scratch, negDir / ShimFileName,
+            scratch / "neg.iomon")
+          checkpoint("with " & extra & " added: exit " & $refused.code &
+            "\n" & refused.output)
+          check refused.code != 0
+          check MissingLibraryNeedle in refused.output
+          check extra in refused.output
+
+          # THE CASE: the edge's shim as linked.
+          let depfile = scratch / "evidence.iomon"
+          let run = runMonitored(foreign, scratch, shim, depfile)
+          checkpoint("edge shim: exit " & $run.code & "\n" & run.output)
+          check run.code == 0
+          check MissingLibraryNeedle notin run.output
+          check "member.txt" in run.output
+          check fileExists(depfile)

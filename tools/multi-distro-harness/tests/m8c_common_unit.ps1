@@ -13,6 +13,9 @@ and to native programs at all:
   Get-ReproVersion       the version an archive made from a build tree is
                          named for, from reprobuild.nimble
   Get-PowerShellHome     the $PSHOME a PowerShell reports for itself
+  Get-PowerShellDirectory
+                         the directory holding a PowerShell's own executable
+                         (its $PSHOME), for an isolated PATH
 
   pwsh -NoProfile -File tools/multi-distro-harness/tests/m8c_common_unit.ps1
   powershell -NoProfile -ExecutionPolicy Bypass -File tools\multi-distro-harness\tests\m8c_common_unit.ps1
@@ -153,6 +156,29 @@ try {
     $null = Invoke-NativeCommand -FilePath 'chmod' -ArgumentList @('+x', $notPs)
   }
   Assert-Throws { Get-PowerShellHome -PowerShell $notPs } 'did not report' 'Get-PowerShellHome: a program that reports no $PSHOME'
+
+  Write-Step 'Get-PowerShellDirectory'
+  $pwshCmd = Get-Command pwsh -ErrorAction SilentlyContinue
+  if ($pwshCmd) {
+    $pwDir = Get-PowerShellDirectory -PowerShell $pwshCmd.Source
+    $held = @(@('pwsh.exe', 'pwsh') | Where-Object { Test-Path -LiteralPath (Join-Path $pwDir $_) -PathType Leaf })
+    Assert-True ($held.Count -gt 0) "Get-PowerShellDirectory: $pwDir holds the pwsh executable"
+    Assert-Equal $pwDir (Get-PowerShellHome -PowerShell $pwshCmd.Source) 'Get-PowerShellDirectory: it is the $PSHOME pwsh reports'
+  } else {
+    NotRun 'Get-PowerShellDirectory (pwsh is not on PATH)'
+  }
+  # A program that answers with a directory holding no pwsh is refused.
+  $fakeHome = Join-Path $Work 'fake-pshome'
+  New-Item -ItemType Directory -Force -Path $fakeHome | Out-Null
+  if ($script:M8cOnWindows) {
+    $fakePs = Join-Path $Work 'fake-pwsh.cmd'
+    Set-Content -LiteralPath $fakePs -Value "@echo $fakeHome"
+  } else {
+    $fakePs = Join-Path $Work 'fake-pwsh'
+    Set-Content -LiteralPath $fakePs -Value "#!/bin/sh`necho '$fakeHome'"
+    $null = Invoke-NativeCommand -FilePath 'chmod' -ArgumentList @('+x', $fakePs)
+  }
+  Assert-Throws { Get-PowerShellDirectory -PowerShell $fakePs } 'holds no pwsh executable' 'Get-PowerShellDirectory: a $PSHOME without pwsh is refused'
 
   $exit = Complete-Run -Name 'm8c_common_unit' -Work $Work
 } catch {

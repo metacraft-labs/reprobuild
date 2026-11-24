@@ -226,6 +226,43 @@ type
   ShardW2* = ShardW2T[ConditionNodeW]
   ShardW3* = ShardW2T[ConditionNodeW3]
 
+  OriginW5* = object
+    ## An origin of shard schema 5: schema 1's, then the generation time
+    ## of the revival the entry stands for (0 for none).
+    url*: WText
+    subdir*: WPath
+    vcs*: uint8
+    revivedAt*: uint64
+
+  PackageW5* = object
+    ## A package of shard schema 5: schema 3's, with schema-5 origins.
+    name*: WName
+    origins*: List[OriginW5, MaxOrigins]
+    registryOrigin*: uint16
+    versions*: List[VersionRecordW3, MaxVersionsPerPackage]
+
+  ObservationW5* = object
+    ## An observation of shard schema 5: schema 1's, then the recorded
+    ## commits a `history-rewritten` event has named.
+    name*: WName
+    origin*: OriginW
+    state*: uint8
+    headRef*: WName
+    head*: List[byte, MaxCommitBytes]
+    tags*: List[ObservedTagW, MaxObservedTags]
+    held*: List[HeldW, MaxHeldVersions]
+    reported*: List[List[byte, MaxCommitBytes], MaxVersionsPerPackage]
+
+  ShardW5* = object
+    ## Shard schema 5 (``NimbleShardHistorySchema``): schema 4's records and
+    ## conditions, with schema-5 origins and observations.
+    schema*: uint16
+    shardBits*: uint8
+    bucket*: uint32
+    packages*: List[PackageW5, MaxPackagesPerShard]
+    aliases*: List[AliasW, MaxAliasesPerShard]
+    observations*: List[ObservationW5, MaxPackagesPerShard]
+
   ShardRefW* = object
     bucket*: uint32
     id*: WDigest
@@ -250,6 +287,25 @@ type
     nameMap*: ObjectRefW
     events*: ObjectRefW
 
+  RootW2* = object
+    ## Root schema 2 (``NimbleRootHistorySchema``): schema 1's fields, then
+    ## whether this generation ran the full history check and when the last
+    ## one ran.
+    schema*: uint16
+    generator*: WName
+    sourceSet*: WDigest
+    generatedAt*: uint64
+    previousRoot*: List[WDigest, 1]
+    packageCount*: uint32
+    versionCount*: uint32
+    eventCount*: uint32
+    shardBits*: uint8
+    shards*: List[ShardRefW, MaxShards]
+    nameMap*: ObjectRefW
+    events*: ObjectRefW
+    fullHistory*: bool
+    lastFullCheck*: uint64
+
   NameEntryW* = object
     name*: WName
     target*: WName
@@ -257,6 +313,17 @@ type
   NameMapW* = object
     schema*: uint16
     entries*: List[NameEntryW, MaxNames]
+
+  NameEntryW2* = object
+    ## A name of name-map schema 2: schema 1's, then the candidate target
+    ## of a retargeted alias (empty for none).
+    name*: WName
+    target*: WName
+    candidate*: WName
+
+  NameMapW2* = object
+    schema*: uint16
+    entries*: List[NameEntryW2, MaxNames]
 
   EventW* = object
     kind*: uint8

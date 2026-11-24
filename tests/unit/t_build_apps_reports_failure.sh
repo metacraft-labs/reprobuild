@@ -41,6 +41,9 @@
 #   8. Both entrypoints and the DSL library receive exactly one requested
 #      --parallelBuild value, with unset/empty/0 retaining automatic mode.
 #      This stub observes argv only; it does not claim real C-job containment.
+#   9. On Linux, a failing sandbox-launcher builder (apps/reprobuild-sandbox-
+#      launcher/build.sh) stops the build with a diagnostic naming the launcher
+#      step, and no launcher binary is left at ``build/bin``.
 #
 # The test drives the real ``scripts/build_apps.sh`` inside a throwaway
 # sandbox against a fake ``nim`` and a fake io-mon shim builder, so it pins
@@ -61,6 +64,7 @@ SOURCE_PATHS="${REPO_ROOT}/scripts/source_paths.sh"
 # ships about when a shim is refused.
 PRELOADED_SHIM_LOADER="${REPO_ROOT}/scripts/lib/preloaded_shim_loader.sh"
 DEV_SHELL_OVERRIDES="${REPO_ROOT}/scripts/lib/dev_shell_overrides.sh"
+PACKAGE_BUILD_OPENSSL="${REPO_ROOT}/scripts/lib/package_build_openssl.sh"
 # The non-Windows arm stages the nix daemon helper through this script, so a
 # sandbox without it fails every run with python3's exit 2 before the parts
 # under test are reached. Copied verbatim for the same reason as the others.
@@ -149,13 +153,16 @@ new_sandbox() {
     "${sandbox}/deps/shmqueue" \
     "${sandbox}/deps/clispec" \
     "${sandbox}/deps/confutils" \
+    "${sandbox}/deps/entrypoints" \
     "${sandbox}/io-mon/scripts" \
+    "${sandbox}/apps/reprobuild-sandbox-launcher" \
     "${sandbox}/bin"
 
   cp "${BUILD_APPS}" "${sandbox}/scripts/build_apps.sh"
   cp "${SOURCE_PATHS}" "${sandbox}/scripts/source_paths.sh"
   cp "${PRELOADED_SHIM_LOADER}" "${sandbox}/scripts/lib/preloaded_shim_loader.sh"
   cp "${DEV_SHELL_OVERRIDES}" "${sandbox}/scripts/lib/dev_shell_overrides.sh"
+  cp "${PACKAGE_BUILD_OPENSSL}" "${sandbox}/scripts/lib/package_build_openssl.sh"
   cp "${STAGE_NIX_DAEMON}" "${sandbox}/scripts/stage_nix_daemon.py"
   cp "${SOURCE_REVISION}" "${sandbox}/scripts/source_revision.sh"
 
@@ -174,6 +181,7 @@ ENTRYPOINTS
   echo 'type ShmQueue = int' > "${sandbox}/deps/shmqueue/shm_queue.nim"
   echo 'type CliSpec = int' > "${sandbox}/deps/clispec/clispec.nim"
   echo 'type Confutils = int' > "${sandbox}/deps/confutils/confutils.nim"
+  echo 'type Entrypoints = int' > "${sandbox}/deps/entrypoints/entrypoints.nim"
 
   # Fake io-mon shim builder: produces the staged library under every
   # platform extension so the sandbox does not have to agree with the host
@@ -191,6 +199,32 @@ for ext in dylib so dll; do
 done
 SHIM
   chmod +x "${sandbox}/io-mon/scripts/build_shim.sh"
+
+  # Fake sandbox-launcher builder. build_apps.sh runs
+  # apps/reprobuild-sandbox-launcher/build.sh on Linux and then demands a
+  # fresh build/bin/reprobuild-sandbox-launcher, so the sandbox must stage
+  # the script like every other script the build runs. It honours --out and
+  # can be told to fail (FAKE_LAUNCHER_FAIL=1) to cover the step's own
+  # failure reporting.
+  cat > "${sandbox}/apps/reprobuild-sandbox-launcher/build.sh" <<'LAUNCHER'
+#!/usr/bin/env bash
+set -euo pipefail
+if [ "${FAKE_LAUNCHER_FAIL:-0}" = "1" ]; then
+  echo "fake launcher: error: launcher.c: no such compiler" >&2
+  exit 1
+fi
+out=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --out) out="$2"; shift 2 ;;
+    *) echo "unknown argument: $1" >&2; exit 1 ;;
+  esac
+done
+mkdir -p "$(dirname "${out}")"
+printf '#!/bin/sh\n' > "${out}"
+chmod +x "${out}"
+LAUNCHER
+  chmod +x "${sandbox}/apps/reprobuild-sandbox-launcher/build.sh"
 
   # Fake nim: honours --out:, and can be told to fail, or to "succeed"
   # without writing anything — which is the exact shape the artifact check
@@ -277,6 +311,7 @@ run_build() {
       SHM_QUEUE_SRC="${sandbox}/deps/shmqueue" \
       CLI_SPEC_SRC="${sandbox}/deps/clispec" \
       CONFUTILS_SRC="${sandbox}/deps/confutils" \
+      ENTRYPOINTS_SRC="${sandbox}/deps/entrypoints" \
       NIX_LDFLAGS="" \
       LD_LIBRARY_PATH="" \
       CLINGO_PREFIX="" \
@@ -461,6 +496,22 @@ if grep -q "io-mon" "${sandbox}/run.log"; then
   pass "failing io-mon builder: the diagnostic names io-mon, not reprobuild"
 else
   fail "failing io-mon builder: the diagnostic names io-mon, not reprobuild"
+fi
+
+# The sandbox launcher step (Linux only) reports its own failure: a build.sh
+# that fails stops the build and names the launcher, not some other step.
+if [ "$(uname -s)" = Linux ]; then
+  sandbox="$(new_sandbox launcher_broken)"
+  status="$(run_build "${sandbox}" FAKE_LAUNCHER_FAIL=1)"
+  check "failing launcher builder: exits non-zero" "yes" "$(nonzero "${status}")"
+  check "failing launcher builder: the launcher is not produced" \
+    "no" "$(exists "${sandbox}/build/bin/reprobuild-sandbox-launcher")"
+  if grep -q "reprobuild-sandbox-launcher: apps/reprobuild-sandbox-launcher/build.sh failed" \
+    "${sandbox}/run.log"; then
+    pass "failing launcher builder: the diagnostic names the launcher step"
+  else
+    fail "failing launcher builder: the diagnostic names the launcher step"
+  fi
 fi
 
 # ----------------------------------------------------------------------------

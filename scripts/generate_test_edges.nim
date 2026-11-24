@@ -1112,7 +1112,12 @@ const
 
   ReferenceScanRoots = ["tests", "libs", "tools", "scripts", "apps", "recipes",
     ".github"]
-  ReferenceScanRootFiles = ["repro.nim", "Justfile", "config.nims"]
+  ReferenceScanRootFiles = ["repro.nim", "repro_recipe_support.nim",
+    "Justfile", "config.nims"]
+    ## ``repro_recipe_support.nim`` is the part of the recipe ``repro.nim``
+    ## includes for the engine's compiles; it is the recipe's text as much
+    ## as ``repro.nim`` is, so it is scanned, and excluded, alike.
+  RecipeFiles = ["repro.nim", "repro_recipe_support.nim"]
   ReferenceScanExts = [".nim", ".nims", ".py", ".sh", ".ps1", ".yml",
     ".yaml", ".toml", ".txt"]
 
@@ -1169,10 +1174,11 @@ proc scanReferencedStems(repoRoot: string; stems: HashSet[string]):
     # the inventory's tests name stems as DATA about sources, never as
     # binaries to run, and would keep ~50 sources single for nothing.
     let ext = rel.splitFile.ext
-    # ``repro.nim`` is excluded: every test it names is either handled per
-    # source above (and asserted there) or only gains typed inputs, which a
-    # group's execute edge takes the union of.
-    if rel != "repro.nim" and
+    # The recipe (``repro.nim`` and the file it includes) is excluded: every
+    # test it names is either handled per source above (and asserted there)
+    # or only gains typed inputs, which a group's execute edge takes the
+    # union of.
+    if rel notin RecipeFiles and
         (ext in [".nim", ".nims", ".sh", ".yml", ".yaml"] or rel == "Justfile"):
       let own = rel.splitFile.name
       var at = text.find('"')

@@ -1247,17 +1247,17 @@
     "io-mon-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795333081,
-        "narHash": "sha256-GBhlVuIlrIxZu8o9qRDtlT4EWpzcZVqceEy0llMuqHo=",
+        "lastModified": 1795474122,
+        "narHash": "sha256-aiIUljMFLYTTGeuXbBDSNunqBgB5u/siGdgwjf3fnfU=",
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "b1c32599f9cd671b150f68de2b21bdc9ae0c42be",
+        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "io-mon",
-        "rev": "b1c32599f9cd671b150f68de2b21bdc9ae0c42be",
+        "rev": "1365943692eedfb0699ce90e59c4602d90317561",
         "type": "github"
       }
     },
@@ -2524,17 +2524,17 @@
     "reprobuild-brew-packages-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1795128291,
-        "narHash": "sha256-x95oDvPH7TMXBRkOOdp5LKT5rUY72ZqJmRDCud4thrQ=",
+        "lastModified": 1795474831,
+        "narHash": "sha256-SDcFOvYWw5hLa29fcTEq1+t/BFT/iBNna7yiCJ1qRCo=",
         "owner": "metacraft-labs",
         "repo": "reprobuild-brew-packages",
-        "rev": "1004b4bf991df19e086ae28360c2306702c5798f",
+        "rev": "a243977cddfba2bd66b075cc1186493f9baa2434",
         "type": "github"
       },
       "original": {
         "owner": "metacraft-labs",
         "repo": "reprobuild-brew-packages",
-        "rev": "1004b4bf991df19e086ae28360c2306702c5798f",
+        "rev": "a243977cddfba2bd66b075cc1186493f9baa2434",
         "type": "github"
       }
     },
@@ -2673,11 +2673,11 @@
         "runquota-package-catalog": "runquota-package-catalog"
       },
       "locked": {
-        "lastModified": 1795429727,
-        "narHash": "sha256-jhOaXCoc9NbSzELJqklgix6a8rwdlpooZnIq4D1gAzY=",
+        "lastModified": 1795477267,
+        "narHash": "sha256-pnXOeqPILm9uFJWx1di6PpxuryiMY2QFxydpwT/oirM=",
         "owner": "metacraft-labs",
         "repo": "runquota",
-        "rev": "b63c6c17ffd9f046baa70a62cbeb067c3a0a2745",
+        "rev": "8bc40ad96bdac28334ce5c5d65a3947a20a7a9fd",
         "type": "github"
       },
       "original": {

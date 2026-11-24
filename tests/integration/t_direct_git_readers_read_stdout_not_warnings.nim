@@ -2,7 +2,7 @@
 
 ## A git reader's ANSWER comes from git's stdout alone; git's stderr is a
 ## diagnostic, reported separately (reprobuild-pm
-## ``spec/Testing/Frozen-766-Git-Structured-Output.md``, "Authoritative
+## ``spec/Test-Designs/Frozen-766-Git-Structured-Output.md``, "Authoritative
 ## requirements").
 ##
 ## The readers pinned here did not go through ``gitRunPlainQuery``: each ran
@@ -32,6 +32,11 @@
 ##      the ``git --version`` banner a ``GitToolIdentity`` records.
 ##   3. A query that genuinely fails still surfaces git's message, which
 ##      lives on stderr -- so a fix that simply drops stderr fails here.
+##   4. The cross-repo producer's "source revision mismatch" refusal
+##      (``verifyLockPinnedProducerSource``) names the pinned revision alone
+##      when resolving it made git lazily fetch it from a promisor remote
+##      that ignores the partial-clone filter, a real condition in which git
+##      warns on stderr and still exits 0.
 ##
 ## THE STAND-IN GIT, AND WHY IT IS JUSTIFIED. Property 2 runs the readers
 ## against a tiny ``git`` wrapper script that writes one line to stderr and
@@ -58,6 +63,7 @@ from repro_core/process_streams import drainStream
 import std/[os, osproc, streams, strutils, tempfiles, unittest]
 
 import repro_cli_support
+import repro_lock
 import repro_test_support/reasoned_skip
 import git_tool
 
@@ -238,3 +244,60 @@ suite "direct git readers answer from git's stdout, not its warnings":
       # not with git's message in place of a SHA.
       check revParseForTest(identity, notARepo, "HEAD") == ""
       check gitRemoteOriginUrlForTest(identity, notARepo) == ""
+
+  test "the producer pin refusal names the pin, not a lazy fetch's warning":
+    # Property 4. Real git, real condition, no stand-in: a sibling that is a
+    # blob:none partial clone resolves a pin it lacks by fetching it from its
+    # promisor remote, and a remote that no longer accepts filters makes git
+    # print `warning: filtering not recognized by server, ignoring` while the
+    # resolution still exits 0 with the SHA on stdout. Through the merged
+    # stream the cross-repo producer's "source revision mismatch" refusal
+    # carried that warning inside the revision it said the lock expects.
+    let ambient = findExe("git")
+    if ambient.len == 0:
+      skip("git is not on PATH")
+    else:
+      let scratch = createTempDir("repro-directreader-promisor-", "")
+      defer: removeDir(scratch)
+      let server = scratch / "producer-server"
+      requireSuccess("git init -q -b main " & quoteShell(server))
+      commit(server, "one")
+      requireSuccess("git config uploadpack.allowFilter true", server)
+      requireSuccess("git config uploadpack.allowAnySHA1InWant true", server)
+      let url = "file://" & server
+      # Two identical partial clones: the first proves the condition (the
+      # lazy fetch it triggers would consume it), the second is verified.
+      let probe = scratch / "probe"
+      let sibling = scratch / "producer"
+      for clone in [probe, sibling]:
+        requireSuccess("git clone -q --filter=blob:none " & quoteShell(url) &
+          " " & quoteShell(clone))
+      let head =
+        gitStreams(ambient, sibling, ["rev-parse", "HEAD"]).outText.strip()
+      commit(server, "two")
+      let pin =
+        gitStreams(ambient, server, ["rev-parse", "HEAD"]).outText.strip()
+      requireSuccess("git config uploadpack.allowFilter false", server)
+      let streams = gitStreams(ambient, probe, ["rev-parse", "--verify",
+        "--quiet", "--end-of-options", pin & "^{commit}"])
+      check streams.code == 0
+      check streams.outText.strip() == pin
+      check streams.errText.contains("filtering not recognized")
+
+      let consumer = scratch / "consumer"
+      createDir(consumer)
+      let dep = LockedDep(name: "producer",
+        coordinates: Coordinates(kind: ckVcs, url: url, revision: pin))
+      var refusal = ""
+      try:
+        verifyLockPinnedProducerSourceForTest(dep, sibling, consumer)
+      except OSError as error:
+        refusal = error.msg
+      check refusal.contains("source revision mismatch")
+      # The pin was resolved (lazily fetched), not reported as unresolvable.
+      check refusal.contains("The source checkout must agree with the " &
+        "consumer's pin.")
+      check refusal.contains("expects " & pin & ", actual checkout HEAD is " &
+        head & ". ")
+      check not refusal.contains("filtering")
+      check not refusal.contains("warning")
