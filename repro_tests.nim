@@ -15205,6 +15205,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "",
     singleReason: "its binary is named by tools/test-runner/repro_test_runner.nim"),
   TestSpec(
+    source: "libs/repro_workspace_vcs/tests/t_published_detached_sibling_at_ancestor.nim",
+    binary: "build/test-bin/t_published_detached_sibling_at_ancestor",
+    defines: @[],
+    requiresReproBinary: false,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_libs_repro_workspace_vcs_tests_g01",
+    singleReason: ""),
+  TestSpec(
     source: "libs/repro_workspace_vcs/tests/t_lock_fetch_url_is_canonical.nim",
     binary: "build/test-bin/t_lock_fetch_url_is_canonical",
     defines: @[],
