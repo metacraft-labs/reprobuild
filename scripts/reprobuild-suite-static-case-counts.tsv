@@ -40,7 +40,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	201
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	202
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	7
@@ -795,6 +795,7 @@ libs/repro_local_store/tests/t_win_store_gc_refuses_referenced_entry.nim	nim	9
 libs/repro_local_store/tests/t_win_store_hardlink_cap_falls_back_per_file.nim	nim	7
 libs/repro_local_store/tests/t_write_sequence_never_falls_behind_a_surviving_record.nim	nim	14
 libs/repro_lock/tests/t_a_lock_value_spread_over_lines_reads_whole.nim	nim	7
+libs/repro_lock/tests/t_a_lock_writes_one_dependency_per_line.nim	nim	5
 libs/repro_lock/tests/t_a_store_pin_carries_its_archive_through_the_lock.nim	nim	5
 libs/repro_lock/tests/t_catalog_import_pins.nim	nim	5
 libs/repro_lock/tests/t_lock_identity_feature_change_differs.nim	nim	3
@@ -2986,6 +2987,7 @@ tests/integration/test_cs_m12_editor_checks_repro_nim.nim	nim	4
 tests/integration/test_cs_m12_engine_modes_unchanged.nim	nim	4
 tests/integration/test_cs_m12_program_imports_repro_nim.nim	nim	6
 tests/integration/test_cs_m12_thin_import_cost.nim	nim	5
+tests/integration/test_cs_m14_idiomatic_program.nim	nim	6
 tests/integration/test_cs_m14_package_build_generates_completion_files.nim	nim	4
 tests/integration/test_cs_m14_repro_collects_tests_per_entry.nim	nim	6
 tests/integration/test_cs_m14_reprobuild_repro_nim_imports_thin.nim	nim	2

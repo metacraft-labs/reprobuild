@@ -154,6 +154,11 @@ jobs:
         run: dev-exec just build
       - name: Run the HCR lane
         run: dev-exec just hcr_lane_linux
+      # A shell gate, so the manifest's `t_*hcr*.nim` census does not see it.
+      # Design §6.2 "Deadlock hazards": no claim-map or libc mmap/munmap call
+      # while tier-2 quiescence holds other threads parked.
+      - name: Linux HCR claim map is never called with threads parked
+        run: dev-exec just integration_hcr_linux_claim_map_is_never_called_with_threads_parked
       - name: Upload the per-platform census and gate logs
         if: always()
         uses: actions/upload-artifact@v4
