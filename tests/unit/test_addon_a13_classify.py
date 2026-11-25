@@ -250,9 +250,12 @@ def green(kind, base="debian-13"):
                                            "dropInWritten": False, "held": "",
                                            "ok": True}
             rec["lateEssentialTrigger"] = {"sshdSocketBefore": "not-found",
+                                           "activeBefore": "active",
                                            "exit": 1, "named": True,
-                                           "held": "", "active": "inactive",
+                                           "held": "", "active": "active",
                                            "ok": True}
+            rec["prefixDropInRefused"] = {"exit": 2, "refused": True,
+                                          "written": False, "ok": True}
             rec["orderingCheck"] = "not run: the product engine carries no seam"
         else:
             rec["steps"] = padded([], 37, "a carried unit without default "
@@ -493,12 +496,22 @@ def red_record(kind, base="debian-13"):
                         red("M2: a full apply whose generation resolves a "
                             "recorded trigger starts it before its commit, "
                             "and clears the record")]
+    elif kind == "mutprefixcall":
+        rec = base_record(CONV, base, engine=ENGINE,
+                          engine_mutation="dropin-refusal-before-writes-skipped")
+        rec["prefixDropInRefused"] = {"exit": 0, "refused": False,
+                                      "written": True, "ok": False}
+        rec["steps"] = [ok("bootstrap"),
+                        red("round 15: a drop-in on a dashed prefix keeping an "
+                            "instance that sets Service= is refused before "
+                            "anything is written")]
     elif kind == "mutlateess":
         rec = base_record(CONV, base, engine=ENGINE,
                           engine_mutation="late-essential-report-dropped")
         rec["lateEssentialTrigger"] = {"sshdSocketBefore": "not-found",
+                                       "activeBefore": "active",
                                        "exit": 0, "named": False, "held": "",
-                                       "active": "inactive", "ok": False}
+                                       "active": "active", "ok": False}
         rec["steps"] = [ok("bootstrap"),
                         red("decision 177(c): an essential trigger systemd "
                             "links to a judged unit only at the apply's reload "
@@ -655,7 +668,7 @@ RED_KINDS = ["mutexec", "mutimport", "mutstate", "mutunordered", "tickold",
              "mutdependants", "mutswitchrecord", "mutunjudgedreq",
              "mutfixstart", "mutdepblock", "mutstaleorder", "mutessential",
              "mutrevertstarts", "mutdeadhold", "mutfullfix", "mutbootblock",
-             "mutdeadactive", "mutlateess"]
+             "mutdeadactive", "mutlateess", "mutprefixcall"]
 
 
 class Accepts(unittest.TestCase):
@@ -1213,6 +1226,8 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
                                   ("decision153Unjudged", "targetHeld", True),
                                   ("deadJudgedActive", "ok", False),
                                   ("lateEssentialTrigger", "ok", False),
+                                  ("lateEssentialTrigger", "active", "inactive"),
+                                  ("prefixDropInRefused", "ok", False),
                                   ("essentialHostTrigger", "ok", False),
                                   ("fullApplyFixing", "ok", False)):
             rec = green("conv")
@@ -1252,6 +1267,12 @@ class TheTriggersOfHeldUnits(unittest.TestCase):
         rec = red_record("mutfullfix")
         rec["fullApplyFixing"]["exit"] = 1
         self.assertRejected("mutfullfix-debian-13", rec)
+        rec = red_record("mutprefixcall")
+        rec["prefixDropInRefused"]["written"] = False
+        self.assertRejected("mutprefixcall-debian-13", rec)
+        rec = red_record("mutlateess")
+        rec["lateEssentialTrigger"]["activeBefore"] = "inactive"
+        self.assertRejected("mutlateess-debian-13", rec)
         rec = red_record("mutlateess")
         rec["lateEssentialTrigger"]["sshdSocketBefore"] = "loaded"
         self.assertRejected("mutlateess-debian-13", rec)

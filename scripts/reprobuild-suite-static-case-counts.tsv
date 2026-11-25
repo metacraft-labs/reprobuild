@@ -40,7 +40,7 @@ libs/repro_addon/tests/t_addon_agent_split.nim	nim	25
 libs/repro_addon/tests/t_addon_agent_staging_copy_streams.nim	nim	4
 libs/repro_addon/tests/t_addon_apt_hook_and_base_identity.nim	nim	21
 libs/repro_addon/tests/t_addon_boot_hold_and_gen0_upgrade.nim	nim	23
-libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	183
+libs/repro_addon/tests/t_addon_carried_state_fails_closed.nim	nim	192
 libs/repro_addon/tests/t_addon_collision.nim	nim	38
 libs/repro_addon/tests/t_addon_confinement_probe_never_ships.nim	nim	5
 libs/repro_addon/tests/t_addon_contain_quiesces_before_record.nim	nim	7
@@ -51,6 +51,7 @@ libs/repro_addon/tests/t_addon_diagnostic_names_are_defined_once.nim	nim	4
 libs/repro_addon/tests/t_addon_drill_findings.nim	nim	7
 libs/repro_addon/tests/t_addon_egress_control_proves_the_observer.nim	nim	4
 libs/repro_addon/tests/t_addon_egress_observer.nim	nim	15
+libs/repro_addon/tests/t_addon_egress_round25.nim	nim	9
 libs/repro_addon/tests/t_addon_engine_agent_route.nim	nim	4
 libs/repro_addon/tests/t_addon_engine_agent_tick_records.nim	nim	1
 libs/repro_addon/tests/t_addon_entry_type_checks_on_every_release_architecture.nim	nim	1
@@ -1275,6 +1276,7 @@ libs/repro_tool_profiles/tests/t_zip_extraction_cost_does_not_scale_with_progres
 libs/repro_workspace_snapshot/tests/t_manifest_validation_and_tree_id.nim	nim	4
 libs/repro_workspace_snapshot/tests/t_workspace_snapshot_export_and_materialize.nim	nim	10
 libs/repro_workspace_vcs/tests/t_lock_fetch_url_is_canonical.nim	nim	8
+libs/repro_workspace_vcs/tests/t_published_detached_sibling_at_ancestor.nim	nim	1
 libs/repro_workspace_vcs/tests/t_shared_bare_refresh_advances_refs_and_wiring_compares_paths.nim	nim	3
 libs/repro_workspace_vcs/tests/t_workspace_sibling_ignore_set.nim	nim	4
 recipes/packages/source/adwaita-icon-theme/test_adwaita_icon_theme_source.nim	nim	5
@@ -1878,6 +1880,7 @@ tests/integration/t_a_dirty_sibling_outside_the_closure_does_not_block.nim	nim	1
 tests/integration/t_a_flake_pinned_input_is_not_moved_behind_the_flakes_back.nim	nim	5
 tests/integration/t_a_gate_older_than_the_interface_envelope_says_so.nim	nim	1
 tests/integration/t_a_gate_refusal_over_an_unpublished_sibling_names_the_push_first.nim	nim	1
+tests/integration/t_a_grant_behind_a_denial_in_one_batch_is_not_dropped.nim	nim	1
 tests/integration/t_a_hand_run_gate_judges_the_repo_the_hook_judges.nim	nim	1
 tests/integration/t_a_linked_worktree_sibling_is_reported_and_gated.nim	nim	1
 tests/integration/t_a_lock_pin_named_like_a_tool_is_not_its_producer.nim	nim	1
