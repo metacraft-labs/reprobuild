@@ -98,6 +98,29 @@ package nim:
       extraExecutable = "bin\\nimsuggest.exe",
       extraExecutable = "bin\\vccexe.exe",
       extraExecutable = "bin\\testament.exe"
+    # The same maintenance source (8910b50d) built natively for Windows on
+    # Arm by the metacraft-labs/nim factory with llvm-mingw, tag
+    # `producer/nim-windows-arm64-prefixes/build-1` (run 45596049314), which
+    # qualified `--compilerArgsFile` on it too. The engine's bootstrap Nim
+    # on that cpu (`repro_tool_profiles.BootstrapNimTarballWindowsArm64Url`).
+    tarball url = "https://github.com/metacraft-labs/nim/releases/download/producer/nim-windows-arm64-prefixes/build-1/nim-2.2.10-vccexe-8910b50d-8910b50d2d21-windows-arm64.zip",
+      sha256 = "fc43b26b2bffff4a154f9c974deb509367789a459d18e42bb489e075127acb5e",
+      archiveType = "zip",
+      stripComponents = 1,
+      executablePath = "bin/nim.exe",
+      packageId = "nim@2.2.10",
+      cpu = "aarch64",
+      os = "windows",
+      lockIdentity = "tarball:nim@2.2.10:windows-aarch64:sha256:fc43b26b2bffff4a154f9c974deb509367789a459d18e42bb489e075127acb5e",
+      version = "2.2.10",
+      extraExecutable = "bin\\atlas.exe",
+      extraExecutable = "bin\\nimble.exe",
+      extraExecutable = "bin\\nimgrab.exe",
+      extraExecutable = "bin\\nimgrep.exe",
+      extraExecutable = "bin\\nimpretty.exe",
+      extraExecutable = "bin\\nimsuggest.exe",
+      extraExecutable = "bin\\vccexe.exe",
+      extraExecutable = "bin\\testament.exe"
     tarball url = "https://nim-lang.org/download/nim-2.2.10-linux_x64.tar.xz",
       sha256 = "0a3a38752e97e9d44aa479b3a7b37336dfe0176daf22ee5b5218ad0991ecd211",
       archiveType = "tar.xz",
@@ -383,6 +406,11 @@ package nim:
         # graph edge (the ``test-fixtures`` collection in ``repro.nim``)
         # instead of a per-test runtime ``nim c --app:lib`` shell-out.
         boolFlag appLib is bool, alias = "--app:lib"
+        # ``--app:staticlib`` produces a static archive instead:
+        # ``nim_library`` for a library whose ``api:`` block declares
+        # ``linkKind static`` (From-Source-Build-Recipes.md, the ``api:``
+        # block's ``linkKind`` field).
+        boolFlag appStaticLib is bool, alias = "--app:staticlib"
         # The user's configuration ($XDG_CONFIG_HOME/nim) is no source of
         # the tree: an edge that must not depend on it skips it.
         boolFlag skipUserCfg is bool, alias = "--skipUserCfg"

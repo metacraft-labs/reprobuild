@@ -6740,6 +6740,17 @@ const
     "https://github.com/metacraft-labs/nim/releases/download/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633/nim-2.2.10-vccexe-8910b50d2d21ca1a3e982fe8b8b9bf0d8832e633-windows-x64.zip"
   BootstrapNimTarballSha256 =
     "e6eaf87df71f83629a8877ac496bcd8cdb7755f9e860b982bb0b886e38eac1c3"
+  # windows-aarch64's bootstrap Nim: the same 2.2.10 vccexe maintenance
+  # source, ``8910b50d``, built natively for aarch64 by the
+  # metacraft-labs/nim factory with llvm-mingw and published under the tag
+  # ``producer/nim-windows-arm64-prefixes/build-1`` (run 45596049314). The
+  # factory qualified ``--compilerArgsFile`` on it like on the x64 prefix. The
+  # same archive as ``packages/nim.nim``'s windows/aarch64 row. It is not the
+  # cold start's ``NIM_WIN_ARM64_*`` pin, which is ``NIM_VERSION``'s prefix.
+  BootstrapNimTarballWindowsArm64Url* =
+    "https://github.com/metacraft-labs/nim/releases/download/producer/nim-windows-arm64-prefixes/build-1/nim-2.2.10-vccexe-8910b50d-8910b50d2d21-windows-arm64.zip"
+  BootstrapNimTarballWindowsArm64Sha256* =
+    "fc43b26b2bffff4a154f9c974deb509367789a459d18e42bb489e075127acb5e"
   # macOS: the official darwin archives. Their ``bin/nim`` is a dynamically
   # linked Mach-O (arm64: ad-hoc linker signature, no hardened runtime;
   # x86_64: unsigned), so the monitor shim loads into it like into any other
@@ -6790,25 +6801,56 @@ const
   BootstrapLlvmMingwWindowsArm64TarballSha256* =
     "7d7f8387a8706639b0b47a629d6e23f8b3ef9acce67e9832b8cd4c5bb2816eab"
 
+proc windowsBootstrapNimTarballProvisioning*(cpu: string):
+    seq[InterfaceTarballProvisioning] =
+  ## The bootstrap Nim archive a Windows engine built for ``cpu`` (Nim's
+  ## ``hostCPU``) provisions: the 2.2.10 vccexe maintenance prefix built for
+  ## that cpu. A pure function of ``cpu`` so either answer can be tested on
+  ## any host, like ``windowsBootstrapCToolUse``. A CPU with no prefix pinned
+  ## gets no realization, which acquisition refuses by name -- never another
+  ## CPU's compiler.
+  var record: InterfaceTarballProvisioning
+  case cpu
+  of "amd64":
+    record = InterfaceTarballProvisioning(
+      packageName: "nim",
+      url: BootstrapNimTarballUrl,
+      sha256: BootstrapNimTarballSha256,
+      archiveType: "zip",
+      executablePath: "bin/nim.exe",
+      stripComponents: 1,
+      packageId: BootstrapNimPackageId,
+      lockIdentity: "tarball:" & BootstrapNimPackageId & ":sha256:" &
+        BootstrapNimTarballSha256,
+      cpu: "x86_64",
+      os: "windows")
+  of "arm64":
+    record = InterfaceTarballProvisioning(
+      packageName: "nim",
+      url: BootstrapNimTarballWindowsArm64Url,
+      sha256: BootstrapNimTarballWindowsArm64Sha256,
+      archiveType: "zip",
+      executablePath: "bin/nim.exe",
+      stripComponents: 1,
+      packageId: BootstrapNimPackageId,
+      lockIdentity: "tarball:" & BootstrapNimPackageId &
+        ":windows-aarch64:sha256:" & BootstrapNimTarballWindowsArm64Sha256,
+      cpu: "aarch64",
+      os: "windows")
+  else:
+    return @[]
+  # See the note at the end of ``bootstrapNimToolUse``: acquisition holds the
+  # request to its ``uses`` range, so the record must carry its version.
+  record.detail.version = BootstrapNimVersion
+  @[record]
+
 proc bootstrapNimToolUse*(): InterfaceToolUse =
   result = InterfaceToolUse(
     rawConstraint: "nim >=2.2 <3.0",
     packageSelector: BootstrapNimPackageId,
     executableName: "nim")
   when defined(windows):
-    result.tarballProvisioning = @[
-      InterfaceTarballProvisioning(
-        packageName: "nim",
-        url: BootstrapNimTarballUrl,
-        sha256: BootstrapNimTarballSha256,
-        archiveType: "zip",
-        executablePath: "bin/nim.exe",
-        stripComponents: 1,
-        packageId: BootstrapNimPackageId,
-        lockIdentity: "tarball:" & BootstrapNimPackageId & ":sha256:" &
-          BootstrapNimTarballSha256,
-        cpu: "x86_64",
-        os: "windows")]
+    result.tarballProvisioning = windowsBootstrapNimTarballProvisioning(hostCPU)
   elif defined(macosx):
     result.tarballProvisioning = @[
       InterfaceTarballProvisioning(
