@@ -33586,7 +33586,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g16",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_tdx_launch_vectors.nim",
@@ -34318,7 +34318,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g17",
+    group: "t_group_tests_integration_g16",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_vcs_lock_failure_preserves_action_and_publication_results.nim",
@@ -35038,7 +35038,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g18",
+    group: "t_group_tests_integration_g17",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_workspace_override_shadows_upstream_in_resolver.nim",
@@ -35643,6 +35643,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
   TestSpec(
     source: "tests/integration/test_cs_m14_shim_answers_tests_entry.nim",
     binary: "build/test-bin/test_cs_m14_shim_answers_tests_entry",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: true,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g18",
+    singleReason: ""),
+  TestSpec(
+    source: "tests/integration/test_cs_m8d_generated_packages_add_completion.nim",
+    binary: "build/test-bin/test_cs_m8d_generated_packages_add_completion",
     defines: @[],
     requiresReproBinary: true,
     requiresMonitorShim: true,

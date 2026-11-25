@@ -107,6 +107,17 @@ type
       ## included, and what is published is not the tree that was measured.
       ## Streamed through standard output it draws none (measured with LLVM
       ## 18's llvm-objcopy, 2026-11-05).
+    omitShellCompletion*: bool
+      ## The opt-out from the shell completion files the prefix gets on its
+      ## own: every entry placed under `bin/` whose source is the binary of
+      ## an executable with a `cli:` description that a Nim compile of the
+      ## package builds brings its Bash, Zsh and Fish scripts, generated
+      ## from the description by its completion edge (never by running the
+      ## binary, which a prefix for another machine could not), at
+      ## `share/bash-completion/completions/<name>`,
+      ## `share/zsh/site-functions/_<name>` and
+      ## `share/fish/vendor_completions.d/<name>.fish`, `<name>` being the
+      ## entry's file name. `true` adds none.
 
   InstalledPrefix* = object
     dir*: string
@@ -335,9 +346,48 @@ rm -f "$hits"
   s.add("touch " & q(gateStamp(prefix)))
   s
 
+const PrefixCompletionDirs = [
+  ("bash", "share/bash-completion/completions", ""),
+  ("zsh", "share/zsh/site-functions", "_"),
+  ("fish", "share/fish/vendor_completions.d", "")]
+  ## `(shell, directory under the prefix, file-name prefix)`; the file is
+  ## `<prefix><name><suffix>`, the suffix `.fish` for fish and none else.
+
+proc completionEntries*(spec: InstalledPrefixSpec): seq[PrefixEntry] =
+  ## The completion files `installedPrefix` adds to `spec` (see
+  ## `omitShellCompletion`), as entries. Only the provider builds
+  ## completion edges, so outside it this is empty.
+  if spec.omitShellCompletion:
+    return
+  when defined(reproProviderMode):
+    var dests: seq[string]
+    for e in spec.entries:
+      dests.add(e.dest)
+    for e in spec.entries:
+      let parts = e.dest.split('/')
+      if parts.len != 2 or parts[0] != "bin":
+        continue
+      let set = cliCompletionFilesOf("", e.source, parts[1])
+      if set.program.len == 0:
+        continue
+      for file in set.files:
+        for (shell, dir, lead) in PrefixCompletionDirs:
+          if shell != file.shell:
+            continue
+          let dest = dir & "/" & lead & set.program &
+            (if shell == "fish": ".fish" else: "")
+          if dest in dests:
+            continue
+          dests.add(dest)
+          result.add(PrefixEntry(source: file.path, dest: dest,
+            producer: set.edge.id))
+
 proc installedPrefix*(spec: InstalledPrefixSpec; projectRoot: string):
     InstalledPrefix =
-  ## The assembly and gate edges for `spec` (see the header).
+  ## The assembly and gate edges for `spec` (see the header), with the
+  ## shell completion files of its `cli:` executables (`completionEntries`).
+  var spec = spec
+  spec.entries.add(completionEntries(spec))
   let assemblyTools = @["sh", "cp", "ln", "mkdir", "rm", "chmod", "find",
     "head", "printf", "sed", "readelf", "patchelf", "awk", "sort", "grep",
     "ls", "mktemp", "basename", "mv"]

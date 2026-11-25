@@ -1146,6 +1146,29 @@ type
     executable*: string
     program*: string
 
+  CliCompletionFile* = object
+    ## One shell's completion script of a ``cli:`` executable, as its
+    ## completion edge writes it.
+    shell*: string
+      ## ``bash``, ``zsh``, ``fish`` or ``powershell``.
+    path*: string
+      ## The file, relative to the recipe root.
+    fileName*: string
+      ## Its file name (``<program>.bash``, ``_<program>``,
+      ## ``<program>.fish``, ``<program>.ps1``).
+
+  CliCompletionFileSet* = object
+    ## The completion files of one executable of the package being built,
+    ## as ``cliCompletionFilesOf`` (provider mode) answers for a packaging
+    ## producer: empty (``program == ""``) when the executable has no
+    ## ``cli:`` section or no Nim compile builds it.
+    program*: string
+      ## The name the scripts complete and the files are named after.
+    edge*: BuildActionDef
+      ## The edge that writes the files; a staging step orders after it.
+    files*: seq[CliCompletionFile]
+      ## One per shell, in Bash, Zsh, Fish, PowerShell order.
+
 var cliProgramRegistry: seq[CliProgramRegistration] = @[]
 
 proc registerCliProgram*(packageName, executable, program: string)
