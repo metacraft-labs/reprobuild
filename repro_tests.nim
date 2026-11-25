@@ -31069,6 +31069,18 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     group: "t_group_tests_integration_g12",
     singleReason: ""),
   TestSpec(
+    source: "tests/integration/t_recipe_compile_time_tools_come_from_the_declared_path.nim",
+    binary: "build/test-bin/t_recipe_compile_time_tools_come_from_the_declared_path",
+    defines: @[],
+    requiresReproBinary: true,
+    requiresMonitorShim: false,
+    extraPassC: @[],
+    extraPassL: @[],
+    targetOs: soAny,
+    selfInterposes: false,
+    group: "t_group_tests_integration_g12",
+    singleReason: ""),
+  TestSpec(
     source: "tests/integration/t_recipe_compiles_do_not_record_the_host_shell.nim",
     binary: "build/test-bin/t_recipe_compiles_do_not_record_the_host_shell",
     defines: @[],
@@ -31258,7 +31270,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g12",
+    group: "t_group_tests_integration_g13",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_rename_identity_check_ignores_common_blobs.nim",
@@ -31942,7 +31954,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g13",
+    group: "t_group_tests_integration_g14",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_reproos_uki_through_the_cvm_path.nim",
@@ -32734,7 +32746,7 @@ const reprobuildTestSpecs*: seq[TestSpec] = @[
     extraPassL: @[],
     targetOs: soAny,
     selfInterposes: false,
-    group: "t_group_tests_integration_g14",
+    group: "t_group_tests_integration_g15",
     singleReason: ""),
   TestSpec(
     source: "tests/integration/t_shorthand_equals_to.nim",
