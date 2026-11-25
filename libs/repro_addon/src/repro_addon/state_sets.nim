@@ -552,6 +552,36 @@ proc isEmptyDir(path: string): bool =
   for _ in walkDir(path): return false
   true
 
+proc cRename(a, b: cstring): cint {.importc: "rename", header: "<stdio.h>".}
+  ## C's ``rename(2)``: for a directory it replaces only an empty one.
+
+proc placeStagedTree*(staging, target, path: string) =
+  ## Rename the verified ``staging`` tree onto ``target``. The restore runs
+  ## beside other units at boot (§13 decision 191), so the empty placeholder
+  ## it checked before reading the archive may have been written since:
+  ## that is refused, never removed. ``target`` is checked again just
+  ## before the rename, and the rename itself is ``rename(2)``, which
+  ## replaces only an empty directory and fails on a non-empty one, so a
+  ## file written between the check and the rename refuses too.
+  when mutated("restore-removes-filled-placeholder"):
+    # FALSIFYING MUTATION: the placeholder is removed with whatever a
+    # concurrent unit wrote into it.
+    if dirExists(target): removeDir(target)
+    moveFile(staging, target)
+  else:
+    if symlinkExists(target) or fileExists(target):
+      raise newException(StateSetError, path & " became something other " &
+        "than a directory while it was restored; refusing to replace it")
+    if dirExists(target) and not isEmptyDir(target):
+      raise newException(StateSetError, path & " was written to while it " &
+        "was restored; refusing to replace what is there")
+    if cRename(staging.cstring, target.cstring) != 0:
+      let err = osLastError()
+      if err.int32 in [ENOTEMPTY, EEXIST]:
+        raise newException(StateSetError, path & " was written to while it " &
+          "was restored; refusing to replace what is there")
+      raiseOSError(err, "rename " & staging & " -> " & target)
+
 proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
                       root = "/"): seq[string] =
   ## Restore every carried directory of the manifest in ``dir`` and return
@@ -623,8 +653,7 @@ proc restoreStateSet*(dir: string; alive: AlivenessFn = defaultAliveness();
           raise newException(StateSetError, "the restored tree of " &
             e.path & " has digest " & got & ", not the manifest's " &
             e.digest)
-      if dirExists(target): removeDir(target)   # an empty placeholder
-      moveFile(staging, target)
+      placeStagedTree(staging, target, e.path)
     except CatchableError:
       if dirExists(staging): removeDir(staging)
       raise

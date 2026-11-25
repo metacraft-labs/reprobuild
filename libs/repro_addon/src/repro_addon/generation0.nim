@@ -715,8 +715,9 @@ proc bootHoldScript*(): string =
   # The units to hold conservatively. A failed listing is not "nothing to
   # hold" (A9 review round 21, M4): ``&&`` makes ``ls``'s status the
   # status of the subshell that writes the list, which then takes the
-  # fail-closed path; otherwise the loop's status is 0 (every branch of its
-  # ``case`` ends in a command that succeeds).
+  # fail-closed path, and so does a line of the list that cannot be
+  # written (round 22). The subshell's ``exit 1`` is the script's only
+  # non-zero exit, and it ends the subshell, not the script.
   let conservative =
     when mutated("boot-hold-ls-failure-ignored"):
       # FALSIFYING MUTATION: round 20's loop over the listing's output,
@@ -724,11 +725,22 @@ proc bootHoldScript*(): string =
       "for u in $(/usr/bin/ls -1 " & ConservativeHoldDir & "); do case $u in " &
       essentialActivatorPattern() & ") continue;; " &
       "*.socket|*.timer|*.path) echo $u.d;; esac; done"
-    else:
+    elif mutated("boot-hold-list-write-failure-ignored"):
+      # FALSIFYING MUTATION: round 21's loop, whose status is its last
+      # command's, so a write that failed for an earlier unit is hidden
+      # when the last entry is essential or no activator.
       "us=$(/usr/bin/ls -1 " & ConservativeHoldDir & ") && " &
       "for u in $us; do case $u in " &
       essentialActivatorPattern() & ") continue;; " &
       "*.socket|*.timer|*.path) echo $u.d;; esac; done"
+    else:
+      # ``|| exit 1`` leaves the subshell at the first line it cannot
+      # write (A9 review round 22): its status is then that failure, not
+      # the last entry's.
+      "us=$(/usr/bin/ls -1 " & ConservativeHoldDir & ") && " &
+      "for u in $us; do case $u in " &
+      essentialActivatorPattern() & ") continue;; " &
+      "*.socket|*.timer|*.path) echo $u.d || exit 1;; esac; done"
   let recordAbsent =
     when mutated("boot-hold-record-absent-skips"):
       # FALSIFYING MUTATION: round 19's script -- a pending marker with no

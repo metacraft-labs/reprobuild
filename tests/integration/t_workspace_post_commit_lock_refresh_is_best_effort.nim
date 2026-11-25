@@ -55,8 +55,8 @@
 ## Skip rule: ``git`` missing on PATH (same convention as M9 / M10 /
 ## M11 / M17 / M18).
 
-import std/[algorithm, json, os, osproc, sequtils, strutils, tempfiles,
-  unittest]
+import std/[algorithm, json, options, os, osproc, sequtils, strutils, tempfiles,
+  times, unittest]
 import repro_test_support/reasoned_skip
 
 when defined(posix):
@@ -64,6 +64,7 @@ when defined(posix):
 
 import repro_test_support
 import repro_workspace_manifests
+import repro_cli_support/post_commit_trace
 
 # ---- helpers --------------------------------------------------------------
 
@@ -361,6 +362,58 @@ proc readPostCommitLog(fx: M19Fixture): string =
     return ""
   readFile(logPath)
 
+proc traceTimestampParses(field: string): bool =
+  ## Whether ``field`` is the trace's ISO-8601 timestamp, spelled the way the
+  ## writers spell it (``isoTimestampNow``).
+  try:
+    discard parse(field, "yyyy-MM-dd'T'HH:mm:ss'Z'", utc())
+    true
+  except CatchableError:
+    false
+
+proc checkTraceShape(logBody: string) =
+  ## Every non-empty line of the post-commit trace has the shape the
+  ## ``lock-writer`` row of ``repro health`` reads:
+  ## ``<ISO-8601 timestamp> <tag> <diagnostic>``. Whichever writer appended it
+  ## (the lock writer, the evidence refresh, the detached cache push), a line
+  ## without a leading timestamp and a tag is a defect.
+  for line in logBody.splitLines():
+    if line.len == 0:
+      continue
+    let fields = line.split(' ', maxsplit = 2)
+    checkpoint("trace line: " & line)
+    check fields.len == 3
+    check traceTimestampParses(fields[0])
+
+proc lockWriterLines(logBody: string): seq[string] =
+  ## The trace lines the LOCK WRITER appended: those whose second field is
+  ## one of its outcome tags. The trace also carries other writers' lines —
+  ## notably the eager cache push, which runs in a DETACHED child of the
+  ## hook and so may or may not have appended by the time a case reads the
+  ## file. Counting runs of the writer must not count those.
+  for line in logBody.splitLines():
+    let fields = line.split(' ', maxsplit = 2)
+    if fields.len >= 2 and parsePostCommitOutcomeTag(fields[1]).isSome:
+      result.add(line)
+
+proc checkOnlyCachePushSkipsBesideLockWriter(logBody: string;
+                                             maxSkips: int) =
+  ## The lines that are NOT the lock writer's are the detached cache push's
+  ## ``cache-push-skipped`` lines, at most one per run. Counting only the lock
+  ## writer's lines must not let some third, unexpected line through: before
+  ## the cache push shared the trace, these cases asserted the trace's WHOLE
+  ## line count, and this keeps that strictness for every other writer.
+  var skips = 0
+  for line in logBody.splitLines():
+    let fields = line.split(' ', maxsplit = 2)
+    if line.len == 0 or (fields.len >= 2 and
+        parsePostCommitOutcomeTag(fields[1]).isSome):
+      continue
+    checkpoint("non-lock-writer trace line: " & line)
+    check fields.len >= 2 and fields[1] == PostCommitCachePushSkippedTag
+    inc skips
+  check skips <= maxSkips
+
 proc lockedRevision(recordBody, repoName: string): string =
   ## The ``revision`` carried by ONE named ``[[repo]]`` entry of a
   ## ``reprobuild.workspace.lock.v1`` record, or ``""`` when the record does
@@ -456,13 +509,18 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       check not fileExists(fx.workspaceRoot / ".repro" / "manifests" /
         "locks" / "lib-a" / "index.toml")
 
-      # Log file has exactly one line, and that line states the record was
-      # not published rather than implying it was.
+      # The lock writer appended exactly one line, and that line states the
+      # record was not published rather than implying it was. Lines of the
+      # detached cache push may sit beside it (this fixture has no shared
+      # bare, so that push is skipped), but every line has the trace's shape.
       let logBody = readPostCommitLog(fx)
+      checkpoint("post-commit log body: " & logBody)
       check logBody.contains(" written-local-only ")
       check logBody.contains("NOT published")
       check not logBody.contains(" ok ")
-      check logBody.splitLines().filterIt(it.len > 0).len == 1
+      checkTraceShape(logBody)
+      check lockWriterLines(logBody).len == 1
+      checkOnlyCachePushSkipsBesideLockWriter(logBody, maxSkips = 1)
 
   test "test_m19_post_commit_succeeds_when_workspace_dirty":
     let gitBin = findExe("git")
@@ -686,14 +744,73 @@ suite "M19 — repro hooks dispatch post-commit (best-effort lock)":
       # SECOND run's). Contrast ``post-commit-report.json`` above, which is
       # overwritten. The count is exact because ``commitWithoutHooks`` above
       # keeps the fixture's own commit from adding a third run.
+      #
+      # The count is of the LOCK WRITER's lines. Each run also spawns the
+      # detached cache push, which appends its own ``cache-push-skipped``
+      # line (this fixture has no shared bare) whenever it gets to it; those
+      # are a different writer's, shaped like every other trace line.
       let logBody = readPostCommitLog(fx)
       checkpoint("post-commit log body: " & logBody)
-      let lines = logBody.splitLines().filterIt(it.len > 0)
+      checkTraceShape(logBody)
+      checkOnlyCachePushSkipsBesideLockWriter(logBody, maxSkips = 2)
+      let lines = lockWriterLines(logBody)
       check lines.len == 2
       check lines[0].startsWith(firstTimestamp)
       check lines[^1].startsWith(secondTimestamp)
       for line in lines:
         check line.contains(" written-local-only ")
+
+  test "test_m19_cache_push_skip_is_a_timestamped_tagged_trace_line":
+    ## The eager cache push shares the post-commit trace. When it pushes
+    ## nothing it says so, and it says so in the trace's shape —
+    ## ``<timestamp> cache-push-skipped <diagnostic>`` — under a tag the
+    ## ``lock-writer`` row does not count as an outcome. It used to append
+    ## bare ``repro cache-push: skipped: ...`` text instead, which left an
+    ## untimestamped, untagged line in the trace on every commit.
+    ##
+    ## The push is driven SYNCHRONOUSLY through its own entry point (the argv
+    ## ``spawnAsyncCachePush`` detaches), so the line is on disk when the
+    ## case reads it. ``REPRO_WORKSPACE_CLONES`` points at an empty cache root
+    ## inside the scratch directory, which makes "no shared bare" the
+    ## deterministic outcome rather than one that depends on this host's
+    ## real cache.
+    let gitBin = findExe("git")
+    if gitBin.len == 0:
+      skip("git is not on PATH; this case needs a repository")
+    else:
+      let fx = setupFixture(gitBin, "cachepush")
+      defer: removeDir(fx.scratch)
+      cloneAll(gitBin, fx)
+      seedWorkspaceToml(fx)
+      let clones = fx.scratch / "empty-clones"
+      createDir(clones)
+
+      let res = runShell(shellCommand(@[
+        fx.reproBin, "hooks", "cache-push",
+        "--repo-root=" & (fx.workspaceRoot / "lib-a"),
+        "--workspace-name=workspace",
+      ], env = [("REPRO_WORKSPACE_CLONES", clones)]))
+      if res.code != 0:
+        checkpoint("output: " & res.output)
+      check res.code == 0
+
+      let logBody = readPostCommitLog(fx)
+      checkpoint("post-commit log body: " & logBody)
+      checkTraceShape(logBody)
+      let lines = logBody.splitLines().filterIt(it.len > 0)
+      check lines.len == 1
+      if lines.len == 1:
+        let fields = lines[0].split(' ', maxsplit = 2)
+        check fields.len == 3
+        if fields.len == 3:
+          check traceTimestampParses(fields[0])
+          check fields[1] == PostCommitCachePushSkippedTag
+          check fields[2].startsWith("no shared bare at " & clones)
+          check "repro workspace shared-clones rewire" in fields[2]
+      # Not an outcome: the lock-writer row reads this trace as one with no
+      # post-commit run recorded, exactly as it reads the evidence lines.
+      check lockWriterLines(logBody).len == 0
+      check summarizePostCommitTrace(logBody).outcomeLines == 0
 
 suite "M19b — post-commit reports publication, not just the write":
 

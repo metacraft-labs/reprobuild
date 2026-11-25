@@ -559,17 +559,17 @@ stdenv.mkDerivation (finalAttrs: {
         --set-default NIMCRYPTO_SRC ${nimcryptoSrc} \
         --set-default BEARSSL_SRC ${bearsslSrc} \
         --set-default STACKABLE_HOOKS_SRC ${stackableHooksSrc}/src \
-        --set-default CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
-        --set-default IO_MON_SRC ${ioMonSrc}/src \
-        --set-default SHM_GSET_SRC ${shmGsetSrc}/src \
-        --set-default SHM_QUEUE_SRC ${shmQueueSrc}/src \
+        --set-default REPRO_ENGINE_CODETRACER_TRACE_FORMAT_NIM_SRC ${codeTracerTraceFormatNimSrc} \
+        --set-default REPRO_ENGINE_IO_MON_SRC ${ioMonSrc}/src \
+        --set-default REPRO_ENGINE_SHM_GSET_SRC ${shmGsetSrc}/src \
+        --set-default REPRO_ENGINE_SHM_QUEUE_SRC ${shmQueueSrc}/src \
         --set-default CLI_SPEC_SRC ${cliSpecSrc}/src \
         --set-default ENTRYPOINTS_SRC ${entrypointsSrc}/src \
         --set-default CONFUTILS_SRC ${confutilsSrc} \
         --set-default CODETRACER_PINNED_SRC ${codetracerSrc}/src \
         --set-default REPRO_CT_TEST_RUNNER_SRC ${ctTestRunnerSrc} \
         --set-default REPRO_TEST_ADAPTERS_SRC ${testAdaptersSrc}/src \
-        --set-default TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
+        --set-default REPRO_ENGINE_TEST_CERTIFICATES_TOOLS_SRC ${testCertificatesToolsSrc}/src \
         --set-default REPROBUILD_USE_SYSTEM_HASH_LIBS 1 \
         --set-default REPROBUILD_NIX_DAEMON_BIN "$out/libexec/reprobuild-nix-daemon" \
         --set-default RUNQUOTA_SRC ${runquotaSrc} \
