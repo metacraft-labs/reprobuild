@@ -35,6 +35,10 @@ jobs:
           (Get-CimInstance Win32_ComputerSystem).SystemType
           (Get-CimInstance Win32_OperatingSystem) | Format-List Caption, Version, OSArchitecture
           "commit: $env:GITHUB_SHA"
+          # Redistributables in System32 that the closure audit must not count as Windows.
+          Get-ChildItem (Join-Path $env:SystemRoot 'System32') -File -Filter '*.dll' |
+            Where-Object Name -match '^(?i)(vcruntime|msvcp|concrt|vccorlib)' |
+            ForEach-Object { "System32 redistributable: $($_.Name)  [$($_.VersionInfo.ProductName)]" }
       - name: Windows PowerShell 5.1 gates (syntax, pins, closure audit tests)
         shell: powershell -NoLogo -NoProfile -NonInteractive -ExecutionPolicy RemoteSigned -File {0}
         run: |
