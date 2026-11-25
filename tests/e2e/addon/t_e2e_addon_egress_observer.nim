@@ -39,6 +39,14 @@
 ##    A stop of the observer over a table deleted by hand does not leave
 ##    it failed. The service's state, the fetch timer's and the
 ##    host's tables are left as found.
+## 3f. **A start of ``nftables.service`` while the observer is active**
+##    (§13 decision 187). ``systemctl enable --now nftables`` on a running
+##    observer deletes the table and leaves the observer active. ``verify``,
+##    ``infra plan`` and the egress check leave it missing (read-only), and
+##    the check's ``egress-observer-missing`` reaches the sink; the next
+##    agent apply reloads the observer and the table is back; a flush by
+##    hand, then the boot re-assertion (``repro-addon-reassert.service``
+##    restarted: ``reassert --boot``), likewise.
 ## 4. **Uninstall removes it.** After uninstall the table is gone and the
 ##    fingerprint equals the pre-bootstrap one.
 ##
@@ -54,7 +62,11 @@
 ## ``egress-unit-ignores-host-ruleset`` (the observer unit is not tied to
 ## ``nftables.service``: in 3e the restart, reload and stop steps go red,
 ## and with them the steps after, which then find the observer and the
-## host's tables not as expected).
+## host's tables not as expected);
+## ``read-only-commands-reload-egress`` (verify, plan and the check reload the
+## table: 3f's read-only step red); ``apply-skips-egress-reload`` (3f's
+## apply step red); ``reassert-skips-egress-reload`` (3f's re-assertion step
+## red).
 ##
 ## Seam build (the fetch unit's pause). Opt-in: ``REPRO_ADDON_VM_GATES=1``.
 ##
@@ -306,6 +318,70 @@ proc body(g: Guest; repro: string; step: StepFn; record: JsonNode;
          (g.exec("systemctl is-active nftables.service").stdout.strip() ==
             "active") == nftWasActive,
        tablesBefore & " / " & g.exec("nft list tables").stdout)
+  # 3f. §13 decision 187: a START of nftables.service while the observer is
+  # active (`enable --now`, the usual way an operator adopts it) flushes
+  # the table, and the observer stays active. plan, verify and the check
+  # only report it; an apply, and the boot re-assertion, reload the
+  # observer and the table is back.
+  discard g.exec("systemctl stop repro-agent-fetch.timer")
+  let nftEnabledBefore =
+    g.exec("systemctl is-enabled nftables.service").stdout.strip()
+  if g.exec("systemctl is-active nftables.service").stdout.strip() == "active":
+    discard g.exec("systemctl stop nftables.service")
+  discard g.exec("systemctl start repro-addon-egress.service")
+  step("3f: the observer is active with its table before nftables starts",
+       tableLoaded() and observerState() == "active", observerState())
+  let en = g.exec("systemctl enable --now nftables.service")
+  record["nftablesEnableNow"] = %(en.stdout & en.stderr)
+  step("3f: enable --now nftables.service on a running observer deletes " &
+       "the table, the observer still active",
+       en.exitCode == 0 and not tableLoaded() and observerState() == "active",
+       g.exec("nft list tables").stdout & observerState())
+  let sinceMissing = sink.headSeq()
+  discard g.exec("printf %s " & quoteShell(canonicalFile("/etc/repro/a11-egress",
+    "x\n")) & " > /var/tmp/a11-egress.profile")
+  let ver = g.exec(repro & " system addon verify")
+  let pl = g.exec(repro & " infra plan --profile /var/tmp/a11-egress.profile")
+  discard g.exec("systemctl start repro-addon-egress-check.service")
+  record["readOnly"] = %(ver.stdout & ver.stderr & pl.stdout & pl.stderr)
+  step("3f: verify, plan and the egress check leave the table missing " &
+       "(read-only)", not tableLoaded(),
+       g.exec("nft list tables").stdout & ver.stdout)
+  discard g.exec("systemctl start repro-addon-evidence.service")
+  step("3f: the check's egress-observer-missing reached the sink",
+       sink.waitFor(host, "addon-egress", "egress-observer-missing", 180,
+                    since = sinceMissing),
+       g.exec("journalctl -q -o cat -u repro-addon-egress-check.service | " &
+              "tail -20").stdout)
+  discard producer.publish(PublishSpec(sequence: 2,
+    profileText: canonicalFile("/etc/repro/a11-egress", "y\n")))
+  let t2 = g.tickUnits()
+  step("3f: the next apply reloads the observer and the table is back",
+       t2.outcome == "aoApplied" and tableLoaded() and
+         observerState() == "active",
+       $t2 & " / " & g.exec("nft list tables").stdout)
+  discard g.exec("nft delete table inet repro_addon_egress")
+  step("3f: a flush while the observer is active deletes the table again",
+       not tableLoaded() and observerState() == "active", observerState())
+  let ra = g.exec("systemctl restart repro-addon-reassert.service",
+                  timeoutSec = 600)
+  step("3f: the boot re-assertion reloads the observer and the table is back",
+       ra.exitCode == 0 and tableLoaded() and observerState() == "active",
+       ra.stdout & ra.stderr & g.exec("nft list tables").stdout &
+         g.exec("cat /var/lib/repro/system/addon/reassert-report").stdout)
+  # Back as found: nftables.service's enablement and state, the observer.
+  if nftEnabledBefore != "enabled":
+    discard g.exec("systemctl disable nftables.service")
+  if not nftWasActive:
+    discard g.exec("systemctl stop nftables.service")
+    discard g.exec("systemctl start repro-addon-egress.service")
+  if timerWasActive:
+    discard g.exec("systemctl start repro-agent-fetch.timer")
+  step("3f: nftables.service and the observer are as found",
+       tableLoaded() and observerState() == "active" and
+         (g.exec("systemctl is-active nftables.service").stdout.strip() ==
+            "active") == nftWasActive,
+       observerState() & " / " & g.exec("nft list tables").stdout)
   # 4. Uninstall removes it.
   let un = g.exec(repro & " system addon uninstall", timeoutSec = 1800)
   step("uninstall succeeds", un.exitCode == 0, un.stdout & un.stderr)

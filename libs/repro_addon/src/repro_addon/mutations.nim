@@ -1351,6 +1351,29 @@
 ##                                            the unit, so the re-run leaves the
 ##                                            dynamic user's outbox (decision
 ##                                            181, A11 round 24)
+## ``apply-skips-egress-reload``             an apply leaves a missing egress
+##                                            table missing (decision 187: the
+##                                            table reloaded by the observer)
+## ``reassert-skips-egress-reload``          the boot re-assertion leaves a
+##                                            missing egress table missing
+##                                            (decision 187, the table)
+## ``read-only-commands-reload-egress``      plan, verify and the egress
+##                                            check reload a missing egress
+##                                            table (decision 187, read-only)
+## ``egress-reset-not-in-heartbeat``         the egress check's heartbeat
+##                                            leaves a counter reset out
+##                                            (decision 186, heartbeat)
+## ``egress-check-unlocked``                 two egress checks run on the
+##                                            state at once (decision 186,
+##                                            lock)
+## ``egress-check-dac-override``             the egress check keeps
+##                                            CAP_DAC_OVERRIDE and writes the
+##                                            outbox (decision 188, drop
+##                                            directory)
+## ``egress-drop-follows-links``             the drop harvest reads entries
+##                                            by path, following a planted
+##                                            link (decision 188, drop
+##                                            directory)
 ## ``outbox-listed-by-path``                  the outbox is listed by path,
 ##                                            through a link its dynamic user
 ##                                            planted (decision 181)
@@ -2500,6 +2523,13 @@ const
                           "contain-busy-unknown-is-idle",
                           "contain-resume-reports-already",
                           "uninstall-forgets-ship-state",
+                          "apply-skips-egress-reload",
+                          "reassert-skips-egress-reload",
+                          "read-only-commands-reload-egress",
+                          "egress-reset-not-in-heartbeat",
+                          "egress-check-unlocked",
+                          "egress-check-dac-override",
+                          "egress-drop-follows-links",
                           "outbox-listed-by-path",
                           "confined-output-unescaped",
                           "confined-copy-shared",
