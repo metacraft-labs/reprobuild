@@ -855,25 +855,52 @@ proc remoteBranchContainsHead(payload: GitVcsPayload; repoPath, remote: string;
       diagnostic: "")
   # A checkout materialized by fetching ONE commit by SHA (``git fetch origin
   # <sha>``) has no remote-tracking ref, so the walk above finds none even when
-  # that commit is the tip of a branch on the remote. Ask the remote directly:
-  # HEAD is published when it is exactly the tip of one of the remote's branches.
-  # Only tips are matched, so the check needs no objects beyond HEAD itself.
+  # that commit is the tip of a branch on the remote. Ask the remote directly
+  # (below): HEAD is published when it is a remote branch's tip or an ancestor
+  # of one.
   if localOnly:
     return (ok: true, published: false, scopedRemote: answeredScope,
       diagnostic: "")
+  # A commit is published when it is the tip of a remote branch OR an ancestor
+  # of one. A detached sibling pinned at a commit that the remote branch has
+  # since moved past (the common case for a pinned dependency) is HEAD of no
+  # branch, but it is still reachable from the remote, so it is published.
+  # Tips alone answer "is HEAD exactly a branch tip?", which is the wrong
+  # question for a pinned commit.
+  #
+  # The ancestry test needs the remote tip's objects locally. A tip whose
+  # object is absent is fetched by SHA (a targeted fetch, not a whole-remote
+  # fetch). If the remote cannot be listed at all the answer is unknown, and
+  # that is reported as a probe error, never as "not published".
   let queryRemote = if answeredScope.len > 0: answeredScope else: "origin"
   let head = runGitQuery(payload, ["-C", repoPath, "rev-parse", "HEAD"])
   if head.exitCode == 0:
     let headSha = head.output.strip()
     let tips = runGitQuery(payload,
       ["-C", repoPath, "ls-remote", "--heads", queryRemote])
-    if tips.exitCode == 0:
-      for raw in tips.output.splitLines:
-        # ``ls-remote`` lines are ``<sha>\trefs/heads/<branch>``.
-        let fields = raw.splitWhitespace()
-        if fields.len > 0 and fields[0] == headSha:
-          return (ok: true, published: true, scopedRemote: answeredScope,
-            diagnostic: "")
+    if tips.exitCode != 0:
+      return (ok: false, published: false, scopedRemote: answeredScope,
+        diagnostic: "cannot reach remote '" & queryRemote &
+          "' to check whether HEAD is published: " & tips.output.strip())
+    for raw in tips.output.splitLines:
+      # ``ls-remote`` lines are ``<sha>\trefs/heads/<branch>``.
+      let fields = raw.splitWhitespace()
+      if fields.len == 0:
+        continue
+      let tipSha = fields[0]
+      if tipSha == headSha:
+        return (ok: true, published: true, scopedRemote: answeredScope,
+          diagnostic: "")
+      # Is HEAD an ancestor of this remote tip? Make the tip's object present
+      # first (a targeted fetch of that one commit), then test ancestry.
+      if runGitQuery(payload, ["-C", repoPath, "cat-file", "-e",
+          tipSha & "^{commit}"]).exitCode != 0:
+        discard runGitQuery(payload, ["-C", repoPath, "fetch", "--no-tags",
+          "--quiet", queryRemote, tipSha])
+      if runGitQuery(payload, ["-C", repoPath, "merge-base",
+          "--is-ancestor", headSha, tipSha]).exitCode == 0:
+        return (ok: true, published: true, scopedRemote: answeredScope,
+          diagnostic: "")
   (ok: true, published: false, scopedRemote: answeredScope, diagnostic: "")
 
 proc writeReceipt(receiptPath, content: string) =
