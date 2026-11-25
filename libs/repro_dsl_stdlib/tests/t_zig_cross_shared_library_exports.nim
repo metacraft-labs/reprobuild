@@ -40,8 +40,8 @@
 ##
 ## NO MOCKS: the real zig and the real linker. Without zig 0.13 or 0.14
 ## or nm on PATH the link cases skip with the reason, and fail in a gate run.
-## Run them once per zig the recipes may declare (`zig >=0.13 <0.15`): the
-## dev shell's zig is 0.13; put a zig 0.14 first on PATH for the other.
+## Run them once per zig the `cross_zig` wrappers serve (0.13 and 0.14): the
+## dev shell's zig is 0.14; put a zig 0.13 first on PATH for the other.
 
 import std/[os, osproc, sequtils, sets, strutils, tempfiles, unittest]
 

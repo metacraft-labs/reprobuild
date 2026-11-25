@@ -286,9 +286,10 @@ if repoDirExists(ctTestRunnerAdapterSrc):
 #      workspace checkout takes effect on the very next compile, with no shell
 #      reload and no input re-materialisation. That is the reason this tier
 #      sits above the pin rather than below it.
-#   3. ``$CODETRACER_PINNED_SRC`` — the materialised ``codetracer-src`` flake
-#      input, seeded by the dev shell, the lint hook, the packaged build and
-#      the installed wrappers. Same repository and same file as tier 2, at the
+#   3. ``$CODETRACER_PINNED_SRC`` — the CodeTracer source the flake resolves
+#      (``codetracerSrc``: pins/codetracer.json, or the ``codetracer-src``
+#      override), seeded by the dev shell, the lint hook, the packaged build
+#      and the installed wrappers. Same repository and same file as tier 2, at the
 #      pinned revision instead of the working tree. This is what a checkout
 #      that is NOT sitting beside CodeTracer compiles, and having it is what
 #      stops a directory layout from silently deciding which of two files the
@@ -347,7 +348,7 @@ else:
   # overriding a source input to a local path copies the whole working tree
   # into the store. THAT FIGURE IS ABOUT THE OVERRIDE, NOT ABOUT THE PIN, and
   # the two are two orders of magnitude apart. Measured at the current pin:
-  # the pinned ``codetracer-src`` input is 25 MB on disk / 47 MiB of store
+  # the pinned CodeTracer source is 25 MB on disk / 47 MiB of store
   # closure, with no dependencies. The multi-gigabyte number is real but
   # belongs to the auto-override — a store copy of a working ``../codetracer``,
   # measured at 6.1 GiB — which only a workspace shell realises, and which such

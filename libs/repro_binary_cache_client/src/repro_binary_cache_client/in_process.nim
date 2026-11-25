@@ -666,6 +666,38 @@ proc extractPrefixRaw(archive: openArray[byte]; outDir: string): seq[ExtractedEn
         setFilePermissions(
           directoryModes[i][0], modeFilePermissions(directoryModes[i][1]))
 
+proc renameIntoPlace*(source, dest: string) =
+  ## Move ``source`` to ``dest`` by one ``rename(2)``, or not at all. Raises
+  ## ``IOError`` when the rename fails, leaving both paths as they were.
+  ##
+  ## This is the move every binary-cache substitute makes into its final
+  ## place, so a substitute is either wholly in place or not there at all.
+  ## ``rename(2)`` never follows a link at either path: a link at ``source``
+  ## moves as the link, and a link at ``dest`` is replaced, not written
+  ## through. Nim's ``moveDir``/``moveFile`` fall back to copy-and-remove
+  ## when the rename fails (``EXDEV``, for one), and a copy that fails half
+  ## way leaves exactly the partial tree a substitute must never leave; the
+  ## fallback also writes through whatever is at ``dest``.
+  ## https://pubs.opengroup.org/onlinepubs/9799919799/functions/rename.html
+  when defined(posix):
+    if cRename(source.cstring, dest.cstring) != 0:
+      raise newException(IOError,
+        "cannot move " & source & " to " & dest & ": " &
+        osErrorMsg(osLastError()))
+  else:
+    # Windows has no rename that replaces a directory; the move below is the
+    # behaviour this module has always had there.
+    try:
+      if dirExists(dest):
+        removeDir(dest)
+      if dirExists(source):
+        moveDir(source, dest)
+      else:
+        moveFile(source, dest)
+    except CatchableError as e:
+      raise newException(IOError,
+        "cannot move " & source & " to " & dest & ": " & e.msg)
+
 proc extractPrefixInto*(archive: openArray[byte]; outDir: string) =
   ## Extract into ``outDir`` all or nothing. The archive is extracted into a
   ## fresh staging directory beside ``outDir`` first and renamed into place
@@ -704,18 +736,10 @@ proc extractPrefixInto*(archive: openArray[byte]; outDir: string) =
         "cannot create a staging directory beside " & outDir & ": " & e.msg)
   try:
     extractPrefix(archive, tmp)
-    when defined(posix):
-      # rename(2) replaces an empty directory atomically and never follows
-      # a link at the destination; Nim's moveDir would fall back to copying
-      # when the rename fails, which is exactly the partial state refused here.
-      if cRename(tmp.cstring, outAbs.cstring) != 0:
-        raise newException(IOError,
-          "cannot move the extracted prefix into place at " & outDir & ": " &
-          osErrorMsg(osLastError()))
-    else:
-      if dirExists(outAbs):
-        removeDir(outAbs)
-      moveDir(tmp, outAbs)
+    # rename(2) replaces an empty directory atomically and never follows a
+    # link at the destination; a copy fallback is exactly the partial state
+    # refused here.
+    renameIntoPlace(tmp, outAbs)
   except CatchableError as e:
     try: removeDir(tmp) except CatchableError: discard
     if e of IOError: raise
