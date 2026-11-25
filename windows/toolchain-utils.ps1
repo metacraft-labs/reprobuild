@@ -191,6 +191,26 @@ function Get-PeDelayImportNames {
   return Read-PeImportDirectoryNames -Path $Path -Directory 13
 }
 
+function Get-WindowsReleaseOsDlls {
+  ## The Windows DLLs a release archive may rely on, from
+  ## windows/release-os-dlls.txt: a case-insensitive map of DLL name to the
+  ## reason the release needs it. Lines are "<name> <reason>"; # starts a
+  ## comment. A line without a reason, or a name that is not a DLL, is refused.
+  param([string]$Path = "")
+  if ([string]::IsNullOrEmpty($Path)) { $Path = Join-Path $PSScriptRoot "release-os-dlls.txt" }
+  $map = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($raw in (Get-Content -LiteralPath $Path)) {
+    $line = $raw.Trim()
+    if ($line -eq "" -or $line.StartsWith("#")) { continue }
+    $parts = $line -split '\s+', 2
+    if ($parts[0] -notmatch '^[A-Za-z0-9_]+\.dll$') { throw "${Path}: '$($parts[0])' is not a DLL name" }
+    if ($parts.Count -lt 2 -or [string]::IsNullOrWhiteSpace($parts[1])) { throw "${Path}: $($parts[0]) has no reason" }
+    if ($map.ContainsKey($parts[0])) { throw "${Path}: $($parts[0]) is listed twice" }
+    $map[$parts[0]] = $parts[1].Trim()
+  }
+  return $map
+}
+
 function Assert-WindowsDllClosure {
   ## The release closure audit of the windows-aarch64 leg: every DLL an image
   ## in $BinDir imports, through its import table or its delay-load import
@@ -203,12 +223,22 @@ function Assert-WindowsDllClosure {
   ## every violation. A $BinDir with no image at all is refused: an audit that
   ## checked nothing must not pass.
   ##
-  ## $SystemDir defaults to the host's System32. Tests pass a stand-in.
+  ## An operating-system DLL is one that is part of Windows: named in
+  ## windows/release-os-dlls.txt (or $OsDlls) AND present in $SystemDir.
+  ## Presence alone does not qualify a DLL, because System32 also holds
+  ## redistributables (the Visual C++ runtime) that a clean machine lacks.
+  ##
+  ## $SystemDir defaults to the host's System32 and $OsDlls to the allowlist
+  ## file. Tests pass stand-ins.
   param(
     [Parameter(Mandatory = $true)][string]$BinDir,
     [Parameter(Mandatory = $true)][string]$Arch,
-    [string]$SystemDir = ""
+    [string]$SystemDir = "",
+    [string[]]$OsDlls = $null
   )
+  $osDllNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  if ($null -eq $OsDlls) { $OsDlls = @((Get-WindowsReleaseOsDlls).Keys) }
+  foreach ($n in $OsDlls) { [void]$osDllNames.Add($n) }
   if ([string]::IsNullOrEmpty($SystemDir)) {
     if ([string]::IsNullOrEmpty($env:SystemRoot)) { throw "closure audit: no -SystemDir and no SystemRoot to find System32 in." }
     $SystemDir = Join-Path $env:SystemRoot "System32"
@@ -216,6 +246,13 @@ function Assert-WindowsDllClosure {
   $violations = New-Object System.Collections.Generic.List[string]
   $systemUsed = New-Object 'System.Collections.Generic.SortedSet[string]' ([StringComparer]::OrdinalIgnoreCase)
   $images = @(Get-ChildItem -LiteralPath $BinDir -File | Where-Object { $_.Extension -in @('.exe', '.dll') })
+  # The Windows loader matches DLL names without regard to case; so does the
+  # audit, on any host (Linux pwsh runs it in the tests).
+  $binNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  foreach ($f in @(Get-ChildItem -LiteralPath $BinDir -File)) { [void]$binNames.Add($f.Name) }
+  $systemNames = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+  if (-not (Test-Path -LiteralPath $SystemDir -PathType Container)) { throw "closure audit: the system directory $SystemDir does not exist" }
+  foreach ($f in @(Get-ChildItem -LiteralPath $SystemDir -File)) { [void]$systemNames.Add($f.Name) }
   if ($images.Count -eq 0) { throw "closure audit failed for ${BinDir}: no .exe or .dll image to audit" }
   foreach ($image in $images) {
     try {
@@ -230,10 +267,14 @@ function Assert-WindowsDllClosure {
     foreach ($ref in $refs) {
       $import = $ref.name
       if ($import -match '^(?i)(api|ext)-ms-win-') { continue }
-      $local = Join-Path $BinDir $import
-      if (Test-Path -LiteralPath $local -PathType Leaf) { continue }   # its machine is checked as an image
-      if (Test-Path -LiteralPath (Join-Path $SystemDir $import) -PathType Leaf) {
+      if ($binNames.Contains($import)) { continue }   # its machine is checked as an image
+      $inSystemDir = $systemNames.Contains($import)
+      if ($inSystemDir -and $osDllNames.Contains($import)) {
         [void]$systemUsed.Add($import)
+        continue
+      }
+      if ($inSystemDir) {
+        $violations.Add("$($image.Name) $($ref.verb) $import, which the system directory holds but which is not a Windows component on windows/release-os-dlls.txt (a redistributable ships in bin/; a Windows DLL is added there with its reason)")
         continue
       }
       $violations.Add("$($image.Name) $($ref.verb) $import, which is neither in bin/ nor an operating-system DLL")
